@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: Task 1.4 — Redesign Dashboard tabs (all 6) — DONE
+## Current: Task 1.5 — Global animations + skeleton loaders — DONE (Phase 1 Complete)
 
 ## Branch: build/build-monitor
 
@@ -10,6 +10,7 @@
 - Task 1.2: TopBar underline tabs, StatusBar monospace+dot, ThemePicker dropdown
 - Task 1.3: Sidebar search+skeletons, ConversationCard hover+left-border, Preview chat bubbles
 - Task 1.4: All 6 dashboard tabs redesigned (underline tabs, recharts, tables, collapsible plans)
+- Task 1.5: Reusable Skeleton component, CSS polish (thin scrollbars, glass utility, font smoothing)
 
 ## Next
-- Task 1.5: Add global animations + skeleton loaders (polish pass)
+- Task 2.1: Create build-monitor data service + IPC

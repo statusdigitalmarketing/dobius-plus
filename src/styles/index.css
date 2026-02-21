@@ -4,8 +4,10 @@
   --bg: #0D1117;
   --fg: #E6EDF3;
   --accent: #58A6FF;
+  --accent-muted: #58A6FF22;
   --border: #30363D;
   --surface: #161B22;
+  --surface-hover: #1c2333;
   --dim: #8B949E;
 }
 
@@ -22,25 +24,31 @@ html, body, #root {
   background-color: var(--bg);
   color: var(--fg);
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* Scrollbar styling */
+/* Scrollbar — thin and themed */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--bg);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 4px;
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--dim);
+}
+
+/* Global transitions */
+button {
+  transition: all 150ms ease;
 }
 
 /* macOS traffic light padding */
@@ -50,4 +58,10 @@ html, body, #root {
 
 .no-drag {
   -webkit-app-region: no-drag;
+}
+
+/* Backdrop blur for overlays */
+.glass {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
