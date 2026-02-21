@@ -1,0 +1,23 @@
+appId: com.statusdigital.dobius-plus
+productName: "Dobius+"
+mac:
+  category: public.app-category.developer-tools
+  target: dmg
+  darkModeSupport: true
+dmg:
+  title: "Dobius+"
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+directories:
+  output: dist-electron
+  buildResources: build
+files:
+  - dist/**/*
+  - electron/**/*
+  - node_modules/node-pty/**/*
+  - package.json
