@@ -37,4 +37,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('data:updated', handler);
     return () => ipcRenderer.removeListener('data:updated', handler);
   },
+
+  // Config (persisted to ~/Library/Application Support/Dobius/)
+  configLoad: () => ipcRenderer.invoke('config:load'),
+  configSave: (config) => ipcRenderer.invoke('config:save', config),
+  configGetProject: (projectPath) => ipcRenderer.invoke('config:getProject', projectPath),
+  configSetProject: (projectPath, settings) => ipcRenderer.invoke('config:setProject', projectPath, settings),
+  configGetPinned: () => ipcRenderer.invoke('config:getPinned'),
+  configSetPinned: (sessionIds) => ipcRenderer.invoke('config:setPinned', sessionIds),
 });

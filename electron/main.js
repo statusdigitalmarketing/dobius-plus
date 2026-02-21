@@ -6,6 +6,10 @@ import {
   loadHistory, loadStats, loadSettings, loadPlans, loadSkills,
   loadTranscript, getActiveProcesses, listProjects, watchFiles, stopWatching,
 } from './data-service.js';
+import {
+  loadConfig, saveConfig, getProjectConfig, setProjectConfig,
+  getPinnedSessions, setPinnedSessions,
+} from './config-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,9 +17,15 @@ const __dirname = path.dirname(__filename);
 let mainWindow;
 
 function createWindow() {
+  // Restore saved window bounds
+  const config = loadConfig();
+  const bounds = config.launcherBounds || {};
+
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    width: bounds.width || 1280,
+    height: bounds.height || 860,
+    x: bounds.x,
+    y: bounds.y,
     minWidth: 900,
     minHeight: 600,
     titleBarStyle: 'hiddenInset',
@@ -38,6 +48,17 @@ function createWindow() {
 
   // Start file watchers for this window
   watchFiles(mainWindow.webContents);
+
+  // Save window bounds on move/resize
+  const saveBounds = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const currentConfig = loadConfig();
+      currentConfig.launcherBounds = mainWindow.getBounds();
+      saveConfig(currentConfig);
+    }
+  };
+  mainWindow.on('resize', saveBounds);
+  mainWindow.on('move', saveBounds);
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -73,9 +94,19 @@ function setupDataHandlers() {
   ipcMain.handle('data:listProjects', () => listProjects());
 }
 
+function setupConfigHandlers() {
+  ipcMain.handle('config:load', () => loadConfig());
+  ipcMain.handle('config:save', (_event, config) => saveConfig(config));
+  ipcMain.handle('config:getProject', (_event, projectPath) => getProjectConfig(projectPath));
+  ipcMain.handle('config:setProject', (_event, projectPath, settings) => setProjectConfig(projectPath, settings));
+  ipcMain.handle('config:getPinned', () => getPinnedSessions());
+  ipcMain.handle('config:setPinned', (_event, sessionIds) => setPinnedSessions(sessionIds));
+}
+
 app.whenReady().then(() => {
   setupTerminalHandlers();
   setupDataHandlers();
+  setupConfigHandlers();
   createWindow();
 
   app.on('activate', () => {

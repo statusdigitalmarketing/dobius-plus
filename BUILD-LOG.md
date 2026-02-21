@@ -64,3 +64,11 @@
 - Verification: PASS (attempts: 1)
 - Note: Search, pinned section, preview panel with transcript viewer, resume in terminal button.
 
+## Task 3.3 — Implement config persistence for pins, themes, and window bounds
+- Start: 07:40
+- End: 07:50
+- Duration: 10 min
+- Files changed: electron/config-manager.js, electron/main.js, electron/preload.js, src/components/Project/ProjectView.jsx
+- Verification: PASS (attempts: 1)
+- Note: Config at ~/Library/Application Support/Dobius/config.json. Debounced save. Per-project theme. Pinned sessions array.
+

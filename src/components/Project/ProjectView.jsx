@@ -11,6 +11,7 @@ export default function ProjectView({ projectPath }) {
   const setActiveView = useStore((s) => s.setActiveView);
   const sidebarVisible = useStore((s) => s.sidebarVisible);
   const themeIndex = useStore((s) => s.themeIndex);
+  const setThemeIndex = useStore((s) => s.setThemeIndex);
   const theme = THEMES[themeIndex];
   const setSessions = useStore((s) => s.setSessions);
   const setActiveProcesses = useStore((s) => s.setActiveProcesses);
@@ -27,6 +28,25 @@ export default function ProjectView({ projectPath }) {
     applyTheme(theme);
   }, [theme]);
 
+  // Load config on mount (pinned sessions + theme)
+  useEffect(() => {
+    if (!window.electronAPI?.configGetPinned) return;
+    window.electronAPI.configGetPinned().then(setPinnedIds);
+    if (projectPath) {
+      window.electronAPI.configGetProject(projectPath).then((config) => {
+        if (config && typeof config.themeIndex === 'number') {
+          setThemeIndex(config.themeIndex);
+        }
+      });
+    }
+  }, [projectPath, setThemeIndex]);
+
+  // Save theme to config when it changes
+  useEffect(() => {
+    if (!window.electronAPI?.configSetProject || !projectPath) return;
+    window.electronAPI.configSetProject(projectPath, { themeIndex });
+  }, [themeIndex, projectPath]);
+
   // Load initial data
   useEffect(() => {
     if (!window.electronAPI) return;
@@ -39,7 +59,6 @@ export default function ProjectView({ projectPath }) {
       window.electronAPI.dataGetActiveProcesses().then(setActiveProcesses);
     });
 
-    // Refresh active processes periodically
     const interval = setInterval(() => {
       window.electronAPI.dataGetActiveProcesses().then(setActiveProcesses);
     }, 10000);
@@ -51,16 +70,20 @@ export default function ProjectView({ projectPath }) {
   }, [setSessions, setActiveProcesses]);
 
   const handleTogglePin = useCallback((sessionId) => {
-    setPinnedIds((prev) =>
-      prev.includes(sessionId)
+    setPinnedIds((prev) => {
+      const next = prev.includes(sessionId)
         ? prev.filter((id) => id !== sessionId)
-        : [...prev, sessionId]
-    );
+        : [...prev, sessionId];
+      // Persist to config
+      if (window.electronAPI?.configSetPinned) {
+        window.electronAPI.configSetPinned(next);
+      }
+      return next;
+    });
   }, []);
 
   const handleResumeSession = useCallback((session) => {
     setActiveView('terminal');
-    // Write the resume command to the terminal
     const cmd = `claude --resume ${session.sessionId}\n`;
     const termId = projectPath ? `term-${projectPath}` : 'main';
     if (window.electronAPI) {
@@ -73,7 +96,6 @@ export default function ProjectView({ projectPath }) {
       <TopBar projectName={projectName} />
 
       <div className="flex-1 flex min-h-0">
-        {/* Sidebar */}
         {sidebarVisible && (
           <div
             className="w-70 shrink-0 overflow-hidden"
@@ -90,7 +112,6 @@ export default function ProjectView({ projectPath }) {
           </div>
         )}
 
-        {/* Main content */}
         <div className="flex-1 min-w-0">
           {activeView === 'terminal' ? (
             <TerminalPane
