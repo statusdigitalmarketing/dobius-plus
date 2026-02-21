@@ -45,4 +45,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   configSetProject: (projectPath, settings) => ipcRenderer.invoke('config:setProject', projectPath, settings),
   configGetPinned: () => ipcRenderer.invoke('config:getPinned'),
   configSetPinned: (sessionIds) => ipcRenderer.invoke('config:setPinned', sessionIds),
+
+  // Window management
+  windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),
+  windowGetOpen: () => ipcRenderer.invoke('window:getOpen'),
+  windowClose: (projectPath) => ipcRenderer.invoke('window:close', projectPath),
 });

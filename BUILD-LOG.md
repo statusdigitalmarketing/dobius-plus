@@ -80,3 +80,11 @@
 - Verification: PASS (attempts: 1)
 - Note: 6 tabs (overview, mcp, skills, stats, sessions, plans). useStats hook for parallel data loading. Hour distribution bar chart, 14-day activity, model usage. Sessions sort+filter. Plans expandable.
 
+## Task 4.2 — Implement multi-window support with per-window terminals
+- Start: 08:05
+- End: 08:15
+- Duration: 10 min
+- Files changed: electron/window-manager.js, electron/main.js, electron/preload.js
+- Verification: PASS (attempts: 1)
+- Note: window-manager.js with projectWindows Map, openProjectWindow (focus existing), per-project bounds save, terminal cleanup on close, closeAllProjectWindows on before-quit. IPC: window:openProject, window:getOpen, window:close.
+

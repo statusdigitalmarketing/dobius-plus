@@ -1,6 +1,6 @@
 # Handoff — Dobius+
 
-## Current: Task 4.1 DONE — Moving to Task 4.2
+## Current: Task 4.2 DONE — Moving to Task 4.3
 
 ## What's Done
 - Task 0.1: Pre-flight validation, feature branch, infrastructure files
@@ -13,26 +13,21 @@
 - Task 3.2: Sidebar with search, ConversationCards, Preview panel, Resume button
 - Task 3.3: Config persistence — pins, themes, window bounds in ~/Library/Application Support/Dobius/
 - Task 4.1: 6-tab Dashboard — Overview, MCP Servers, Skills, Stats, Sessions, Plans + useStats hook
+- Task 4.2: Multi-window support — window-manager.js, per-project BrowserWindows, IPC
 
 ## What's Next
-- Task 4.2: Multi-window support (window-manager.js, per-project BrowserWindows)
+- Task 4.3: Implement Launcher window (project grid, open project windows)
 
 ## Blockers
 None
 
 ## Key Decisions
-- Dashboard uses useStats hook for parallel data loading (stats, settings, plans, skills)
-- Sessions tab reuses Zustand store data loaded in ProjectView
-- Plans show metadata on expand (file content loading deferred until readFile IPC exists)
-- Stats shows model usage, 14-day daily activity, 24-hour distribution chart
+- projectWindows Map tracks open project windows
+- Each project window gets its own file watchers and terminal sessions
+- Window bounds saved per-project to config
+- Terminal IDs prefixed with project path for cleanup on close
 
 ## Files Touched Recently
-- src/components/Dashboard/DashboardView.jsx (new)
-- src/components/Dashboard/Overview.jsx (new)
-- src/components/Dashboard/MCPServers.jsx (new)
-- src/components/Dashboard/Skills.jsx (new)
-- src/components/Dashboard/Stats.jsx (new)
-- src/components/Dashboard/Sessions.jsx (new)
-- src/components/Dashboard/Plans.jsx (new)
-- src/hooks/useStats.js (new)
-- src/components/Project/ProjectView.jsx (updated — renders DashboardView)
+- electron/window-manager.js (new)
+- electron/main.js (updated with window IPC + closeAllProjectWindows)
+- electron/preload.js (updated with window IPC)

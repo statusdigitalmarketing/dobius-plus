@@ -10,6 +10,9 @@ import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions,
 } from './config-manager.js';
+import {
+  openProjectWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
+} from './window-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -103,10 +106,25 @@ function setupConfigHandlers() {
   ipcMain.handle('config:setPinned', (_event, sessionIds) => setPinnedSessions(sessionIds));
 }
 
+function setupWindowHandlers() {
+  ipcMain.handle('window:openProject', (_event, projectPath) => {
+    const win = openProjectWindow(projectPath);
+    return { ok: true, id: win.id };
+  });
+
+  ipcMain.handle('window:getOpen', () => getOpenProjects());
+
+  ipcMain.handle('window:close', (_event, projectPath) => {
+    closeProjectWindow(projectPath);
+    return { ok: true };
+  });
+}
+
 app.whenReady().then(() => {
   setupTerminalHandlers();
   setupDataHandlers();
   setupConfigHandlers();
+  setupWindowHandlers();
   createWindow();
 
   app.on('activate', () => {
@@ -115,6 +133,7 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => {
+  closeAllProjectWindows();
   killAll();
   stopWatching();
 });
