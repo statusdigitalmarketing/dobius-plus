@@ -2,7 +2,7 @@ import { BrowserWindow, app } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { killTerminal, getActiveTerminals } from './terminal-manager.js';
-import { watchFiles } from './data-service.js';
+import { watchFiles } from './watcher-service.js';
 import { getProjectConfig, setProjectConfig } from './config-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);

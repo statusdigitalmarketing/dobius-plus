@@ -4,8 +4,9 @@ import { fileURLToPath } from 'url';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadPlans, loadSkills,
-  loadTranscript, readPlanFile, getActiveProcesses, listProjects, watchFiles, stopWatching,
+  loadTranscript, readPlanFile, getActiveProcesses, listProjects,
 } from './data-service.js';
+import { watchFiles, stopWatching } from './watcher-service.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions, flushConfig,

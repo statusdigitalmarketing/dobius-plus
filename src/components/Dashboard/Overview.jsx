@@ -1,12 +1,21 @@
+import { useMemo } from 'react';
 import { useStore } from '../../store/store';
 
 export default function Overview({ stats, settings }) {
   const sessions = useStore((s) => s.sessions);
   const activeProcesses = useStore((s) => s.activeProcesses);
 
-  const totalMessages = stats?.dailyActivity?.reduce((sum, d) => sum + (d.messageCount || 0), 0) || 0;
-  const totalSessions = stats?.dailyActivity?.reduce((sum, d) => sum + (d.sessionCount || 0), 0) || 0;
-  const totalTools = stats?.dailyActivity?.reduce((sum, d) => sum + (d.toolCallCount || 0), 0) || 0;
+  const dailyActivity = stats?.dailyActivity;
+  const { totalMessages, totalSessions, totalTools } = useMemo(() => {
+    if (!dailyActivity) return { totalMessages: 0, totalSessions: 0, totalTools: 0 };
+    let msgs = 0, sess = 0, tools = 0;
+    for (const d of dailyActivity) {
+      msgs += d.messageCount || 0;
+      sess += d.sessionCount || 0;
+      tools += d.toolCallCount || 0;
+    }
+    return { totalMessages: msgs, totalSessions: sess, totalTools: tools };
+  }, [dailyActivity]);
 
   return (
     <div className="p-4 space-y-4">
