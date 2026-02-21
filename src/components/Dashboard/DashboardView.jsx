@@ -32,6 +32,7 @@ const TAB_CONTENT = {
 export default function DashboardView() {
   const dashboardTab = useStore((s) => s.dashboardTab);
   const setDashboardTab = useStore((s) => s.setDashboardTab);
+  const buildComplete = useStore((s) => s.buildComplete);
   const { stats, settings, plans, skills, loading } = useStats();
 
   if (loading) {
@@ -78,6 +79,12 @@ export default function DashboardView() {
             }}
           >
             {tab.label}
+            {tab.id === 'builds' && buildComplete && dashboardTab !== 'builds' && (
+              <span
+                className="absolute top-1.5 right-1 w-1.5 h-1.5 rounded-full"
+                style={{ backgroundColor: 'var(--accent)' }}
+              />
+            )}
             {dashboardTab === tab.id && (
               <span
                 className="absolute bottom-0 left-1/2 -translate-x-1/2 h-0.5 rounded-full"

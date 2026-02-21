@@ -1,12 +1,13 @@
-# Task 3.1 Review
+# Task 3.1 Review — Build completion notifications
 
 ## Three things that could be better
-1. The sidebar placeholder is just text — will be replaced with real ConversationCards in Task 3.2
-2. The TopBar project name uses `absolute left-1/2` which may overlap with buttons on very narrow windows
-3. The active processes refresh interval (10s) could be configurable
+1. The notification body shows "N/N tasks completed" which is redundant when all tasks are done — could say "All N tasks completed successfully" instead.
+2. The notifiedRef tracks by build_start + projectDir — if someone restarts a build with same start timestamp (unlikely but possible), it won't re-notify.
+3. The buildComplete state is synced from hook → local state → Zustand store, which is a 3-step chain — could simplify by having the hook write directly to the store.
 
 ## One thing I'm fixing right now
-The terminal ID should be sanitized when derived from projectPath to avoid special characters in IPC. Already using a prefix pattern `term-${projectPath}` which is safe.
+Nothing — the notification flow is clean: hook detects completion → fires IPC notification → sets badge state.
 
 ## Concerns
-- Zustand store uses `get()` in a getter — this may not work as expected since Zustand doesn't support computed properties natively. The theme is accessed directly via THEMES[themeIndex] in components instead.
+- Electron's Notification API requires the app to be built/packaged to show the app icon — in dev mode, notifications will use a generic icon.
+- The badge dot persists until the user switches to the Builds tab (then buildComplete resets to false when build changes) — this is the desired UX.

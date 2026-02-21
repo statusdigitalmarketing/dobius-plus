@@ -70,3 +70,9 @@
 - Persists monitored dir in app config
 - Bundle: 1034KB → 1047KB
 - Gate: PASS — Phase 2 Complete
+
+### Task 3.1: Build completion notifications
+- Electron Notification API: IPC handler `buildMonitor:notify` in main.js
+- useBuildMonitor hook detects completion, fires notification once per build (notifiedRef dedup)
+- Zustand store: buildComplete state + badge dot on Builds tab
+- Gate: PASS

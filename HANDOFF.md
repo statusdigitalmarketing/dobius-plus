@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: Task 2.5 — BuildMonitorView + 7th dashboard tab — DONE (Phase 2 Complete)
+## Current: Task 3.1 — Build completion notifications — DONE
 
 ## Branch: build/build-monitor
 
@@ -16,6 +16,7 @@
 - Task 2.3: BuildProgressBar (animated progress, phase/task labels, pulsing), BuildTimeline (vertical dot timeline)
 - Task 2.4: BuildHealthGauge (SVG semi-circle, health score), SupervisorStatus (badge, log mini-terminal)
 - Task 2.5: BuildMonitorView (empty+active states, dir picker, handoff preview), wired as "Builds" 7th tab
+- Task 3.1: macOS notifications via Electron Notification API, badge dot on Builds tab, dedup via notifiedRef
 
 ## Next
-- Task 3.1: Build completion notifications
+- Task 3.2: Final theme audit + responsive polish

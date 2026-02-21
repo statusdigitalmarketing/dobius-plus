@@ -58,6 +58,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   buildMonitorLoadHandoff: (projectDir) => ipcRenderer.invoke('buildMonitor:loadHandoff', projectDir),
   buildMonitorDetectActive: () => ipcRenderer.invoke('buildMonitor:detectActive'),
   buildMonitorPickDirectory: () => ipcRenderer.invoke('buildMonitor:pickDirectory'),
+  buildMonitorNotify: (opts) => ipcRenderer.invoke('buildMonitor:notify', opts),
   buildMonitorWatch: (projectDir) => ipcRenderer.invoke('buildMonitor:watch', projectDir),
   buildMonitorUnwatch: (projectDir) => ipcRenderer.invoke('buildMonitor:unwatch', projectDir),
   onBuildMonitorUpdated: (callback) => {

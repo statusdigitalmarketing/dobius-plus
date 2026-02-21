@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useBuildMonitor } from '../../../hooks/useBuildMonitor';
+import { useStore } from '../../../store/store';
 import BuildProgressBar from './BuildProgressBar';
 import BuildTimeline from './BuildTimeline';
 import BuildHealthGauge from './BuildHealthGauge';
@@ -24,7 +25,13 @@ export default function BuildMonitorView() {
     });
   }, []);
 
-  const { progress, handoff, supervisorLog, activeBuilds, loading } = useBuildMonitor(projectDir);
+  const { progress, handoff, supervisorLog, activeBuilds, loading, buildComplete } = useBuildMonitor(projectDir);
+  const setBuildComplete = useStore((s) => s.setBuildComplete);
+
+  // Sync build completion state to store for tab badge
+  useEffect(() => {
+    setBuildComplete(buildComplete);
+  }, [buildComplete, setBuildComplete]);
 
   const handlePickDirectory = useCallback(async () => {
     if (!window.electronAPI) return;

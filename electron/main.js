@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog, Notification } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
@@ -128,6 +128,12 @@ function setupBuildMonitorHandlers() {
     });
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
+  });
+  ipcMain.handle('buildMonitor:notify', (_event, { title, body }) => {
+    if (Notification.isSupported()) {
+      const notification = new Notification({ title, body });
+      notification.show();
+    }
   });
   ipcMain.handle('buildMonitor:watch', (event, projectDir) => {
     watchBuildDir(event.sender, projectDir);
