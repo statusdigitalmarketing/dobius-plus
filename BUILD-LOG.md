@@ -45,3 +45,16 @@
 - 5 IPC handlers in main.js (loadProgress, loadSupervisorLog, loadHandoff, detectActive, pickDirectory)
 - 6 preload API methods for renderer
 - Gate: PASS
+
+### Task 2.2: Build monitor watcher + useBuildMonitor hook
+- New electron/build-monitor-watcher.js (chokidar per-webContents watcher map)
+- watch/unwatch IPC handlers, cleanup on quit
+- New src/hooks/useBuildMonitor.js (follows useSessions/useStats pattern)
+- Preload API: buildMonitorWatch, buildMonitorUnwatch
+- Gate: PASS
+
+### Task 2.3: BuildProgressBar + BuildTimeline
+- BuildProgressBar: animated fill, phase/task labels, pulsing dot when active
+- BuildTimeline: vertical timeline with connected dots, staggered mount, status indicators
+- Both use CSS variables only, framer-motion animations
+- Gate: PASS

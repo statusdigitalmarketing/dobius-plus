@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: Task 2.2 — Build monitor watcher + useBuildMonitor hook — DONE
+## Current: Task 2.3 — BuildProgressBar + BuildTimeline — DONE
 
 ## Branch: build/build-monitor
 
@@ -13,6 +13,7 @@
 - Task 1.5: Reusable Skeleton component, CSS polish (thin scrollbars, glass utility, font smoothing)
 - Task 2.1: build-monitor-service.js (4 functions), IPC handlers in main.js, preload API (6 methods)
 - Task 2.2: build-monitor-watcher.js (chokidar), useBuildMonitor hook, watch/unwatch IPC
+- Task 2.3: BuildProgressBar (animated progress, phase/task labels, pulsing), BuildTimeline (vertical dot timeline)
 
 ## Next
-- Task 2.3: Create BuildProgressBar + BuildTimeline components
+- Task 2.4: Create BuildHealthGauge + SupervisorStatus components
