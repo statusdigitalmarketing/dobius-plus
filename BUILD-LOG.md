@@ -32,3 +32,11 @@
 - Verification: PASS (attempts: 1)
 - Note: Theme update separated from terminal creation to avoid session restart on theme change.
 
+## Task 2.1 — Implement 10-theme system with per-window application
+- Start: 06:57
+- End: 07:07
+- Duration: 10 min
+- Files changed: src/lib/themes.js, src/components/shared/ThemePicker.jsx, src/App.jsx, plans/TASK-2.1.md, plans/TASK-2.1-REVIEW.md
+- Verification: PASS (attempts: 1)
+- Note: 10 themes from themes.sh. lighten() function for bright xterm colors. CSS variables via applyTheme().
+
