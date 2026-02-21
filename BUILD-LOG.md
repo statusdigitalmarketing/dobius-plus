@@ -58,3 +58,8 @@
 - BuildTimeline: vertical timeline with connected dots, staggered mount, status indicators
 - Both use CSS variables only, framer-motion animations
 - Gate: PASS
+
+### Task 2.4: BuildHealthGauge + SupervisorStatus
+- BuildHealthGauge: custom SVG semi-circle gauge, health score (100 - failures*10 - restarts*5)
+- SupervisorStatus: pulsing status badge, metadata grid, mini-terminal (last 5 log lines)
+- Gate: PASS

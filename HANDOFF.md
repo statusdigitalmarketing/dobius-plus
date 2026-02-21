@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: Task 2.3 — BuildProgressBar + BuildTimeline — DONE
+## Current: Task 2.4 — BuildHealthGauge + SupervisorStatus — DONE
 
 ## Branch: build/build-monitor
 
@@ -14,6 +14,7 @@
 - Task 2.1: build-monitor-service.js (4 functions), IPC handlers in main.js, preload API (6 methods)
 - Task 2.2: build-monitor-watcher.js (chokidar), useBuildMonitor hook, watch/unwatch IPC
 - Task 2.3: BuildProgressBar (animated progress, phase/task labels, pulsing), BuildTimeline (vertical dot timeline)
+- Task 2.4: BuildHealthGauge (SVG semi-circle, health score), SupervisorStatus (badge, log mini-terminal)
 
 ## Next
-- Task 2.4: Create BuildHealthGauge + SupervisorStatus components
+- Task 2.5: Create BuildMonitorView + wire as 7th dashboard tab
