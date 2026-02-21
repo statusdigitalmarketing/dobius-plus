@@ -56,3 +56,11 @@
 - Verification: PASS (attempts: 1)
 - Note: Zustand store for global state. TopBar with view toggle + ThemePicker. StatusBar with session count. Fixed broken getter in store.
 
+## Task 3.2 — Implement conversation sidebar with search and preview
+- Start: 07:30
+- End: 07:40
+- Duration: 10 min
+- Files changed: src/components/Project/Sidebar.jsx, src/components/Project/ConversationCard.jsx, src/components/Project/Preview.jsx, src/hooks/useSessions.js, src/lib/time-ago.js, src/components/Project/ProjectView.jsx
+- Verification: PASS (attempts: 1)
+- Note: Search, pinned section, preview panel with transcript viewer, resume in terminal button.
+
