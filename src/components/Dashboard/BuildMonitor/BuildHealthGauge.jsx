@@ -21,8 +21,8 @@ export default function BuildHealthGauge({ progress }) {
   // Color based on score
   const color = useMemo(() => {
     if (score >= 70) return 'var(--accent)';
-    if (score >= 40) return '#E3B341'; // amber — only used in SVG gauge
-    return '#F85149'; // red — only used in SVG gauge
+    if (score >= 40) return 'var(--warning)';
+    return 'var(--danger)';
   }, [score]);
 
   // SVG arc params for semi-circle
@@ -88,13 +88,13 @@ export default function BuildHealthGauge({ progress }) {
       <div className="flex gap-4 mt-2 text-xs">
         <div className="text-center">
           <div style={{ color: 'var(--dim)' }}>Failures</div>
-          <div style={{ color: failures > 0 ? '#F85149' : 'var(--fg)', fontFamily: "'SF Mono', monospace" }}>
+          <div style={{ color: failures > 0 ? 'var(--danger)' : 'var(--fg)', fontFamily: "'SF Mono', monospace" }}>
             {failures}
           </div>
         </div>
         <div className="text-center">
           <div style={{ color: 'var(--dim)' }}>Restarts</div>
-          <div style={{ color: restarts > 0 ? '#E3B341' : 'var(--fg)', fontFamily: "'SF Mono', monospace" }}>
+          <div style={{ color: restarts > 0 ? 'var(--warning)' : 'var(--fg)', fontFamily: "'SF Mono', monospace" }}>
             {restarts}
           </div>
         </div>

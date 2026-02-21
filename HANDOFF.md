@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: Task 3.1 — Build completion notifications — DONE
+## Current: Task 3.2 — Theme audit + responsive polish — DONE (Phase 3 Complete)
 
 ## Branch: build/build-monitor
 
@@ -17,6 +17,7 @@
 - Task 2.4: BuildHealthGauge (SVG semi-circle, health score), SupervisorStatus (badge, log mini-terminal)
 - Task 2.5: BuildMonitorView (empty+active states, dir picker, handoff preview), wired as "Builds" 7th tab
 - Task 3.1: macOS notifications via Electron Notification API, badge dot on Builds tab, dedup via notifiedRef
+- Task 3.2: Added --danger/--warning CSS vars, replaced all hardcoded hex in BuildMonitor, 0 hex in BuildMonitor/
 
 ## Next
-- Task 3.2: Final theme audit + responsive polish
+- Task FINAL.1: Self-review via subagents

@@ -9,7 +9,7 @@ export default function SupervisorStatus({ progress, supervisorLog, activeBuilds
 
   const statusLabel = isFailed ? 'Failed' : isRunning ? 'Running' : 'Idle';
   const statusColor = isFailed
-    ? '#F85149'
+    ? 'var(--danger)'
     : isRunning
       ? 'var(--accent)'
       : 'var(--dim)';

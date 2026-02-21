@@ -9,6 +9,8 @@
   --surface: #161B22;
   --surface-hover: #1c2333;
   --dim: #8B949E;
+  --danger: #F85149;
+  --warning: #D29922;
 }
 
 * {

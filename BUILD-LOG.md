@@ -76,3 +76,9 @@
 - useBuildMonitor hook detects completion, fires notification once per build (notifiedRef dedup)
 - Zustand store: buildComplete state + badge dot on Builds tab
 - Gate: PASS
+
+### Task 3.2: Final theme audit + responsive polish
+- Added --danger (accent4) and --warning (accent3) CSS variables to theme system
+- Replaced all hardcoded hex colors in BuildMonitor components (5 instances → 0)
+- Audited all components: fallback-only hex in Stats.jsx and TerminalPane.jsx (acceptable)
+- Gate: PASS — Phase 3 Complete

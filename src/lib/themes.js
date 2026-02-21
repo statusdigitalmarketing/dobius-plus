@@ -103,6 +103,8 @@ export const THEMES = themes.map((t) => ({
     '--surface': mixColor(t.bg, t.fg, 0.05),
     '--surface-hover': mixColor(t.bg, t.fg, 0.08),
     '--dim': `${t.fg}88`,
+    '--danger': t.accent4,
+    '--warning': t.accent3,
   },
 }));
 
