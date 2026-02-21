@@ -5,6 +5,7 @@ import TopBar from '../shared/TopBar';
 import StatusBar from '../shared/StatusBar';
 import TerminalPane from './TerminalPane';
 import Sidebar from './Sidebar';
+import DashboardView from '../Dashboard/DashboardView';
 
 export default function ProjectView({ projectPath }) {
   const activeView = useStore((s) => s.activeView);
@@ -120,12 +121,7 @@ export default function ProjectView({ projectPath }) {
               theme={theme.xtermTheme}
             />
           ) : (
-            <div
-              className="h-full flex items-center justify-center"
-              style={{ color: 'var(--dim)' }}
-            >
-              Dashboard (coming in Task 4.1)
-            </div>
+            <DashboardView />
           )}
         </div>
       </div>

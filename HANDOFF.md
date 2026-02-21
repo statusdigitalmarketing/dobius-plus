@@ -1,6 +1,6 @@
 # Handoff — Dobius+
 
-## Current: Task 3.3 DONE — Moving to Task 4.1
+## Current: Task 4.1 DONE — Moving to Task 4.2
 
 ## What's Done
 - Task 0.1: Pre-flight validation, feature branch, infrastructure files
@@ -12,21 +12,27 @@
 - Task 3.1: ProjectView layout with TopBar, StatusBar, sidebar area, Zustand store
 - Task 3.2: Sidebar with search, ConversationCards, Preview panel, Resume button
 - Task 3.3: Config persistence — pins, themes, window bounds in ~/Library/Application Support/Dobius/
+- Task 4.1: 6-tab Dashboard — Overview, MCP Servers, Skills, Stats, Sessions, Plans + useStats hook
 
 ## What's Next
-- Task 4.1: Implement 6-tab Dashboard (Overview, MCP, Skills, Stats, Sessions, Plans)
+- Task 4.2: Multi-window support (window-manager.js, per-project BrowserWindows)
 
 ## Blockers
 None
 
 ## Key Decisions
-- Config stored at ~/Library/Application Support/Dobius/config.json (Electron userData)
-- Debounced save (500ms) for window bounds
-- Per-project theme index saved to config
-- Pinned sessions saved to config.pinnedSessions array
+- Dashboard uses useStats hook for parallel data loading (stats, settings, plans, skills)
+- Sessions tab reuses Zustand store data loaded in ProjectView
+- Plans show metadata on expand (file content loading deferred until readFile IPC exists)
+- Stats shows model usage, 14-day daily activity, 24-hour distribution chart
 
 ## Files Touched Recently
-- electron/config-manager.js (new)
-- electron/main.js (updated with config IPC + window bounds save)
-- electron/preload.js (updated with config IPC)
-- src/components/Project/ProjectView.jsx (updated with config load/save)
+- src/components/Dashboard/DashboardView.jsx (new)
+- src/components/Dashboard/Overview.jsx (new)
+- src/components/Dashboard/MCPServers.jsx (new)
+- src/components/Dashboard/Skills.jsx (new)
+- src/components/Dashboard/Stats.jsx (new)
+- src/components/Dashboard/Sessions.jsx (new)
+- src/components/Dashboard/Plans.jsx (new)
+- src/hooks/useStats.js (new)
+- src/components/Project/ProjectView.jsx (updated — renders DashboardView)

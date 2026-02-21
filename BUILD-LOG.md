@@ -72,3 +72,11 @@
 - Verification: PASS (attempts: 1)
 - Note: Config at ~/Library/Application Support/Dobius/config.json. Debounced save. Per-project theme. Pinned sessions array.
 
+## Task 4.1 — Implement 6-tab Dashboard with real data
+- Start: 07:50
+- End: 08:05
+- Duration: 15 min
+- Files changed: src/components/Dashboard/DashboardView.jsx, Overview.jsx, MCPServers.jsx, Skills.jsx, Stats.jsx, Sessions.jsx, Plans.jsx, src/hooks/useStats.js, src/components/Project/ProjectView.jsx
+- Verification: PASS (attempts: 1)
+- Note: 6 tabs (overview, mcp, skills, stats, sessions, plans). useStats hook for parallel data loading. Hour distribution bar chart, 14-day activity, model usage. Sessions sort+filter. Plans expandable.
+
