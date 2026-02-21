@@ -88,3 +88,11 @@
 - Verification: PASS (attempts: 1)
 - Note: window-manager.js with projectWindows Map, openProjectWindow (focus existing), per-project bounds save, terminal cleanup on close, closeAllProjectWindows on before-quit. IPC: window:openProject, window:getOpen, window:close.
 
+## Task 4.3 — Implement Launcher window with project grid
+- Start: 08:15
+- End: 08:25
+- Duration: 10 min
+- Files changed: src/components/Launcher/ProjectList.jsx, src/components/Launcher/ProjectCard.jsx, src/App.jsx
+- Verification: PASS (attempts: 1)
+- Note: Launcher shows project grid with search, session counts, activity time, "Open" badges. App.jsx routes between Launcher (no param) and ProjectView (with project param). Drag region for macOS traffic lights.
+

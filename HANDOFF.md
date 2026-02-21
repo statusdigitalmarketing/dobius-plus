@@ -1,6 +1,6 @@
 # Handoff — Dobius+
 
-## Current: Task 4.2 DONE — Moving to Task 4.3
+## Current: Task 4.3 DONE — Moving to Task 5.1
 
 ## What's Done
 - Task 0.1: Pre-flight validation, feature branch, infrastructure files
@@ -14,20 +14,21 @@
 - Task 3.3: Config persistence — pins, themes, window bounds in ~/Library/Application Support/Dobius/
 - Task 4.1: 6-tab Dashboard — Overview, MCP Servers, Skills, Stats, Sessions, Plans + useStats hook
 - Task 4.2: Multi-window support — window-manager.js, per-project BrowserWindows, IPC
+- Task 4.3: Launcher window — ProjectList grid with search, ProjectCard, App.jsx routing
 
 ## What's Next
-- Task 4.3: Implement Launcher window (project grid, open project windows)
+- Task 5.1: Build, package, and install (electron-builder, DMG, build-and-install.sh)
 
 ## Blockers
 None
 
 ## Key Decisions
-- projectWindows Map tracks open project windows
-- Each project window gets its own file watchers and terminal sessions
-- Window bounds saved per-project to config
-- Terminal IDs prefixed with project path for cleanup on close
+- Launcher is the default window (no project URL param)
+- ProjectView is opened in per-project windows (with project URL param)
+- App.jsx routes based on URL query param presence
+- Launcher has drag region for macOS window dragging
 
 ## Files Touched Recently
-- electron/window-manager.js (new)
-- electron/main.js (updated with window IPC + closeAllProjectWindows)
-- electron/preload.js (updated with window IPC)
+- src/components/Launcher/ProjectList.jsx (new)
+- src/components/Launcher/ProjectCard.jsx (new)
+- src/App.jsx (updated — routes between Launcher and ProjectView)
