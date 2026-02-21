@@ -4,31 +4,57 @@ export default function MCPServers({ settings }) {
 
   return (
     <div className="p-4">
-      <h2 className="text-lg font-semibold mb-3" style={{ color: 'var(--accent)' }}>MCP Servers</h2>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-xs font-medium uppercase tracking-wider" style={{ color: 'var(--dim)' }}>
+          MCP Servers
+        </h3>
+        <span className="text-xs" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
+          {entries.length}
+        </span>
+      </div>
       {entries.length === 0 ? (
-        <div className="text-sm" style={{ color: 'var(--dim)' }}>No MCP servers configured</div>
+        <div className="text-xs" style={{ color: 'var(--dim)' }}>
+          No MCP servers configured in ~/.claude/settings.json
+        </div>
       ) : (
-        <div className="space-y-2">
-          {entries.map(([name, config]) => (
-            <div key={name} className="p-3 rounded" style={{ backgroundColor: 'var(--surface)' }}>
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium" style={{ color: 'var(--fg)' }}>{name}</span>
-                <span className="text-xs px-2 py-0.5 rounded" style={{ backgroundColor: 'var(--bg)', color: 'var(--dim)' }}>
-                  {config.type || 'stdio'}
-                </span>
-              </div>
-              {config.command && (
-                <div className="text-xs mt-1 font-mono" style={{ color: 'var(--dim)' }}>
-                  {config.command} {(config.args || []).join(' ')}
-                </div>
-              )}
-              {config.url && (
-                <div className="text-xs mt-1 font-mono" style={{ color: 'var(--dim)' }}>
-                  {config.url}
-                </div>
-              )}
-            </div>
-          ))}
+        <div
+          className="rounded-lg overflow-hidden"
+          style={{ border: '1px solid var(--border)' }}
+        >
+          <table className="w-full text-xs">
+            <thead>
+              <tr style={{ backgroundColor: 'var(--surface)' }}>
+                <th className="text-left px-3 py-2 font-medium" style={{ color: 'var(--dim)' }}>Name</th>
+                <th className="text-left px-3 py-2 font-medium" style={{ color: 'var(--dim)' }}>Type</th>
+                <th className="text-left px-3 py-2 font-medium" style={{ color: 'var(--dim)' }}>Command / URL</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map(([name, config]) => (
+                <tr
+                  key={name}
+                  className="transition-colors duration-100"
+                  style={{ borderTop: '1px solid var(--border)' }}
+                >
+                  <td className="px-3 py-2 font-medium" style={{ color: 'var(--fg)' }}>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="w-1.5 h-1.5 rounded-full shrink-0"
+                        style={{ backgroundColor: 'var(--accent)' }}
+                      />
+                      {name}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
+                    {config.type || 'stdio'}
+                  </td>
+                  <td className="px-3 py-2 truncate max-w-sm" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
+                    {config.command ? `${config.command} ${(config.args || []).join(' ')}` : config.url || '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

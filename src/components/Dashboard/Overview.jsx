@@ -18,30 +18,53 @@ export default function Overview({ stats, settings }) {
   }, [dailyActivity]);
 
   return (
-    <div className="p-4 space-y-4">
-      <h2 className="text-lg font-semibold" style={{ color: 'var(--accent)' }}>Overview</h2>
-
+    <div className="p-4 space-y-5">
       {/* Quick stats */}
       <div className="grid grid-cols-4 gap-3">
-        <StatCard label="Total Sessions" value={totalSessions.toLocaleString()} />
+        <StatCard label="Sessions" value={totalSessions.toLocaleString()} />
         <StatCard label="Messages" value={totalMessages.toLocaleString()} />
         <StatCard label="Tool Calls" value={totalTools.toLocaleString()} />
-        <StatCard label="Recent Sessions" value={sessions.length} />
+        <StatCard label="Recent" value={sessions.length} />
       </div>
 
       {/* Active processes */}
       <div>
-        <h3 className="text-sm font-medium mb-2" style={{ color: 'var(--fg)' }}>Active Processes</h3>
+        <h3 className="text-xs font-medium mb-2 uppercase tracking-wider" style={{ color: 'var(--dim)' }}>
+          Active Processes
+        </h3>
         {activeProcesses.length === 0 ? (
           <div className="text-xs" style={{ color: 'var(--dim)' }}>No active Claude processes</div>
         ) : (
-          <div className="space-y-1">
-            {activeProcesses.map((p, i) => (
-              <div key={i} className="text-xs p-2 rounded" style={{ backgroundColor: 'var(--surface)' }}>
-                <span style={{ color: '#3FB950' }}>PID {p.pid}</span>
-                <span className="ml-2" style={{ color: 'var(--dim)' }}>{p.command}</span>
-              </div>
-            ))}
+          <div
+            className="rounded overflow-hidden"
+            style={{ border: '1px solid var(--border)' }}
+          >
+            <table className="w-full text-xs">
+              <thead>
+                <tr style={{ backgroundColor: 'var(--surface)' }}>
+                  <th className="text-left px-3 py-1.5 font-medium" style={{ color: 'var(--dim)' }}>PID</th>
+                  <th className="text-left px-3 py-1.5 font-medium" style={{ color: 'var(--dim)' }}>Command</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activeProcesses.map((p, i) => (
+                  <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                    <td
+                      className="px-3 py-1.5"
+                      style={{ color: 'var(--accent)', fontFamily: "'SF Mono', monospace" }}
+                    >
+                      {p.pid}
+                    </td>
+                    <td
+                      className="px-3 py-1.5 truncate max-w-md"
+                      style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}
+                    >
+                      {p.command}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </div>
@@ -49,18 +72,8 @@ export default function Overview({ stats, settings }) {
       {/* MCP + Plugins summary */}
       {settings && (
         <div className="grid grid-cols-2 gap-3">
-          <div className="p-3 rounded" style={{ backgroundColor: 'var(--surface)' }}>
-            <div className="text-xs" style={{ color: 'var(--dim)' }}>MCP Servers</div>
-            <div className="text-lg font-semibold" style={{ color: 'var(--fg)' }}>
-              {Object.keys(settings.mcpServers || {}).length}
-            </div>
-          </div>
-          <div className="p-3 rounded" style={{ backgroundColor: 'var(--surface)' }}>
-            <div className="text-xs" style={{ color: 'var(--dim)' }}>Plugins</div>
-            <div className="text-lg font-semibold" style={{ color: 'var(--fg)' }}>
-              {(settings.enabledPlugins || []).length}
-            </div>
-          </div>
+          <SummaryCard label="MCP Servers" value={Object.keys(settings.mcpServers || {}).length} />
+          <SummaryCard label="Plugins" value={(settings.enabledPlugins || []).length} />
         </div>
       )}
     </div>
@@ -69,9 +82,34 @@ export default function Overview({ stats, settings }) {
 
 function StatCard({ label, value }) {
   return (
-    <div className="p-3 rounded" style={{ backgroundColor: 'var(--surface)' }}>
+    <div
+      className="p-3 rounded-lg"
+      style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
+    >
       <div className="text-xs" style={{ color: 'var(--dim)' }}>{label}</div>
-      <div className="text-xl font-bold mt-1" style={{ color: 'var(--fg)' }}>{value}</div>
+      <div
+        className="text-xl font-bold mt-1"
+        style={{ color: 'var(--fg)', fontFamily: "'SF Mono', monospace" }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function SummaryCard({ label, value }) {
+  return (
+    <div
+      className="p-3 rounded-lg flex items-center justify-between"
+      style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
+    >
+      <span className="text-xs" style={{ color: 'var(--dim)' }}>{label}</span>
+      <span
+        className="text-sm font-semibold"
+        style={{ color: 'var(--fg)', fontFamily: "'SF Mono', monospace" }}
+      >
+        {value}
+      </span>
     </div>
   );
 }
