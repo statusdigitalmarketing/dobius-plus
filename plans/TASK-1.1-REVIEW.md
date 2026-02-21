@@ -1,12 +1,13 @@
-# Task 1.1 Review
+# Task 1.1 Review — Redesign Launcher
 
 ## Three things that could be better
-1. The electron/main.js doesn't have `before-quit` cleanup yet — will add in Task 1.2 when terminal-manager exists
-2. No app icon yet — placeholder needed for Task 5.1
-3. The preload.js uses CommonJS (require) while main.js uses ESM — this is intentional since Electron preload scripts don't support ESM, but worth noting
+1. The skeleton loader in ProjectList uses hardcoded count (6) — could match last-known project count from config.
+2. The search icon SVG is inline — could extract to a shared Icon component if reused elsewhere.
+3. Bundle size jumped from 559KB to 684KB due to framer-motion — acceptable for the animation quality.
 
 ## One thing I'm fixing right now
-Adding explicit `trafficLightPosition` to the BrowserWindow config for better macOS title bar spacing.
+Nothing critical found — the implementation follows all design rules correctly.
 
 ## Concerns
-- node-pty warned about space in path — the project is at "Projects (Code)" which has a space and parens. electron-rebuild succeeded but runtime may behave differently. Will test in Task 1.3.
+- framer-motion's AnimatePresence mode="popLayout" may cause layout recalculation on fast filter changes — monitor performance.
+- The `whileHover` on motion.button only affects scale, not border — CSS transition handles border-color.
