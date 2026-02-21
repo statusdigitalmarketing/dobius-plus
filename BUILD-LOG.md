@@ -24,3 +24,11 @@
 - Verification: PASS (attempts: 1)
 - Note: node-pty session manager with create/write/resize/kill/killAll. IPC handlers in main.js. before-quit cleanup.
 
+## Task 1.3 — Implement TerminalPane with xterm.js + IPC bridge
+- Start: 06:50
+- End: 06:57
+- Duration: 7 min
+- Files changed: src/components/Project/TerminalPane.jsx, src/hooks/useTerminal.js, src/App.jsx, plans/TASK-1.3.md, plans/TASK-1.3-REVIEW.md
+- Verification: PASS (attempts: 1)
+- Note: Theme update separated from terminal creation to avoid session restart on theme change.
+

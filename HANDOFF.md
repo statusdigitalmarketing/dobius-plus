@@ -1,26 +1,26 @@
 # Handoff — Dobius+
 
-## Current: Task 1.2 DONE — Moving to Task 1.3
+## Current: Task 1.3 DONE — Moving to Task 2.1
 
 ## What's Done
 - Task 0.1: Pre-flight validation, feature branch, infrastructure files
-- Task 1.1: Electron + Vite + React scaffold with all deps installed, Vite build passes
-- Task 1.2: terminal-manager.js with node-pty backend, IPC handlers, preload exposure
+- Task 1.1: Electron + Vite + React scaffold with all deps
+- Task 1.2: terminal-manager.js with node-pty backend, IPC handlers
+- Task 1.3: TerminalPane + useTerminal hook — xterm.js connected to node-pty via IPC
 
 ## What's Next
-- Task 1.3: Implement TerminalPane component (xterm.js frontend) — connect xterm.js to node-pty via IPC
+- Task 2.1: Implement themes system — port 10 dark themes from claude-terminal/themes.sh
 
 ## Blockers
 None
 
 ## Key Decisions
-- Feature branch: `build/dobius-plus-v1`
-- Electron ESM for main process, CJS for preload (Electron limitation)
-- terminal:write and terminal:resize use ipcRenderer.send (fire-and-forget) for performance
-- terminal:create uses ipcRenderer.invoke (returns pid)
-- onTerminalData/onTerminalExit return cleanup functions
+- Theme updates handled via separate useEffect (doesn't recreate terminal)
+- xterm.js CSS imported directly in TerminalPane component
+- ResizeObserver with 50ms debounce for terminal fitting
+- Terminal ID "main" for now — will be dynamic in Task 3.1
 
 ## Files Touched Recently
-- electron/terminal-manager.js (new)
-- electron/main.js (updated with IPC handlers + before-quit)
-- electron/preload.js (updated with terminal IPC)
+- src/components/Project/TerminalPane.jsx (new)
+- src/hooks/useTerminal.js (new)
+- src/App.jsx (updated to render TerminalPane)
