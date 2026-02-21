@@ -17,6 +17,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('terminal:data', handler);
     return () => ipcRenderer.removeListener('terminal:data', handler);
   },
+  terminalSaveState: (id, state) => ipcRenderer.invoke('terminal:saveState', id, state),
+  terminalLoadState: (id) => ipcRenderer.invoke('terminal:loadState', id),
+  onTerminalRequestSave: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('terminal:requestSave', handler);
+    return () => ipcRenderer.removeListener('terminal:requestSave', handler);
+  },
   onTerminalExit: (callback) => {
     const handler = (_event, id, exitCode, signal) => callback(id, exitCode, signal);
     ipcRenderer.on('terminal:exit', handler);
@@ -83,6 +90,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = () => callback();
     ipcRenderer.on('menu:toggle-git-panel', handler);
     return () => ipcRenderer.removeListener('menu:toggle-git-panel', handler);
+  },
+
+  // Quit gate
+  onQuitPrompt: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('app:quit-prompt', handler);
+    return () => ipcRenderer.removeListener('app:quit-prompt', handler);
+  },
+  onQuitCancel: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('app:quit-cancel', handler);
+    return () => ipcRenderer.removeListener('app:quit-cancel', handler);
   },
 
   // Git

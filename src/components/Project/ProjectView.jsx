@@ -7,6 +7,7 @@ import TerminalPane from './TerminalPane';
 import Sidebar from './Sidebar';
 import DashboardView from '../Dashboard/DashboardView';
 import GitSidePanel from '../shared/GitSidePanel';
+import QuitOverlay from '../shared/QuitOverlay';
 
 export default function ProjectView({ projectPath }) {
   const activeView = useStore((s) => s.activeView);
@@ -198,6 +199,7 @@ export default function ProjectView({ projectPath }) {
       </div>
 
       <StatusBar />
+      <QuitOverlay />
     </div>
   );
 }

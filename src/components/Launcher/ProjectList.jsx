@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import ProjectCard from './ProjectCard';
+import QuitOverlay from '../shared/QuitOverlay';
 
 export default function ProjectList() {
   const [projects, setProjects] = useState([]);
@@ -166,6 +167,7 @@ export default function ProjectList() {
           </div>
         )}
       </div>
+      <QuitOverlay />
     </div>
   );
 }

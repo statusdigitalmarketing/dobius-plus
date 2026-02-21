@@ -74,6 +74,13 @@ export function openProjectWindow(projectPath) {
   win.on('resize', saveBounds);
   win.on('move', saveBounds);
 
+  // Request terminal state save before close
+  win.on('close', () => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('terminal:requestSave');
+    }
+  });
+
   // Clean up on close
   win.on('closed', () => {
     projectWindows.delete(projectPath);

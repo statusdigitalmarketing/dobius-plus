@@ -28,6 +28,32 @@ const DEFAULT_THEME = {
   brightWhite: '#F0F6FC',
 };
 
+const MAX_SCROLLBACK_LINES = 5000;
+
+/**
+ * Extract scrollback text from xterm.js buffer.
+ * @param {Terminal} term
+ * @returns {{ scrollback: string[], cols: number, rows: number }}
+ */
+function getScrollback(term) {
+  const buffer = term.buffer.active;
+  const lines = [];
+  const totalRows = buffer.length;
+  // Start from beginning, cap at MAX_SCROLLBACK_LINES
+  const start = Math.max(0, totalRows - MAX_SCROLLBACK_LINES);
+  for (let i = start; i < totalRows; i++) {
+    const line = buffer.getLine(i);
+    if (line) {
+      lines.push(line.translateToString(true));
+    }
+  }
+  // Trim trailing empty lines
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+    lines.pop();
+  }
+  return { scrollback: lines, cols: term.cols, rows: term.rows };
+}
+
 /**
  * Hook to manage an xterm.js terminal connected to node-pty via IPC.
  * @param {Object} options
@@ -52,6 +78,16 @@ export function useTerminal({ id, cwd, theme }) {
       } catch (err) {
         console.warn('[useTerminal] fit error:', err.message);
       }
+    }
+  }, [id]);
+
+  // Save current scrollback state to config
+  const saveState = useCallback(() => {
+    if (!termRef.current || !window.electronAPI?.terminalSaveState) return;
+    const state = getScrollback(termRef.current);
+    if (state.scrollback.length > 0) {
+      state.savedAt = Date.now();
+      window.electronAPI.terminalSaveState(id, state);
     }
   }, [id]);
 
@@ -86,6 +122,23 @@ export function useTerminal({ id, cwd, theme }) {
       fit();
     });
 
+    // Restore saved scrollback before creating pty
+    let restorePromise = Promise.resolve();
+    if (window.electronAPI.terminalLoadState) {
+      restorePromise = window.electronAPI.terminalLoadState(id).then((state) => {
+        if (state?.scrollback?.length > 0 && termRef.current) {
+          // Write previous session lines as dim text
+          for (const line of state.scrollback) {
+            termRef.current.write(`\x1b[2m${line}\x1b[0m\r\n`);
+          }
+          // Separator
+          termRef.current.write('\x1b[2m\x1b[38;5;240m── previous session ──\x1b[0m\r\n\r\n');
+        }
+      }).catch(() => {
+        // Ignore restore errors
+      });
+    }
+
     // Forward user input to pty
     const inputDisposable = term.onData((data) => {
       window.electronAPI.terminalWrite(id, data);
@@ -105,8 +158,15 @@ export function useTerminal({ id, cwd, theme }) {
       }
     });
 
-    // Create the pty
-    window.electronAPI.terminalCreate(id, cwd);
+    // Create pty after restore completes
+    restorePromise.then(() => {
+      window.electronAPI.terminalCreate(id, cwd);
+    });
+
+    // Listen for save requests from main process (window close)
+    const removeRequestSave = window.electronAPI.onTerminalRequestSave?.(() => {
+      saveState();
+    });
 
     // ResizeObserver for auto-fitting
     let resizeTimer;
@@ -119,16 +179,19 @@ export function useTerminal({ id, cwd, theme }) {
     return () => {
       clearTimeout(resizeTimer);
       observer.disconnect();
+      // Save state before cleanup
+      saveState();
       inputDisposable.dispose();
       removeDataListener();
       removeExitListener();
+      removeRequestSave?.();
       window.electronAPI.terminalKill(id);
       term.dispose();
       termRef.current = null;
       fitAddonRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, cwd, fit]);
+  }, [id, cwd, fit, saveState]);
 
   // Separate effect: update theme without recreating terminal
   useEffect(() => {

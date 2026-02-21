@@ -96,6 +96,21 @@ function setupTerminalHandlers() {
   ipcMain.on('terminal:kill', (_event, id) => {
     killTerminal(id);
   });
+
+  // Terminal state persistence — save/load scrollback per project
+  ipcMain.handle('terminal:saveState', (_event, id, state) => {
+    // Extract project path from terminal ID (format: "term-/path/to/project")
+    const projectPath = id.startsWith('term-') ? id.slice(5) : null;
+    if (!projectPath) return;
+    setProjectConfig(projectPath, { terminalState: state });
+  });
+
+  ipcMain.handle('terminal:loadState', (_event, id) => {
+    const projectPath = id.startsWith('term-') ? id.slice(5) : null;
+    if (!projectPath) return null;
+    const config = getProjectConfig(projectPath);
+    return config?.terminalState || null;
+  });
 }
 
 function setupDataHandlers() {
@@ -279,12 +294,37 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('before-quit', () => {
-  flushConfig();
-  closeAllProjectWindows();
-  killAll();
-  stopWatching();
-  stopAllBuildWatchers();
+// Hold-to-quit gate: require two Cmd+Q presses within 1 second
+let quitConfirmed = false;
+let quitTimer = null;
+
+app.on('before-quit', (e) => {
+  if (quitConfirmed) {
+    // Second press — actually quit
+    flushConfig();
+    closeAllProjectWindows();
+    killAll();
+    stopWatching();
+    stopAllBuildWatchers();
+    return;
+  }
+
+  e.preventDefault();
+
+  // Show hold-to-quit overlay in all windows
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed()) win.webContents.send('app:quit-prompt');
+  });
+
+  // Allow quit on second press within 1s
+  quitConfirmed = true;
+  clearTimeout(quitTimer);
+  quitTimer = setTimeout(() => {
+    quitConfirmed = false;
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) win.webContents.send('app:quit-cancel');
+    });
+  }, 1000);
 });
 
 app.on('window-all-closed', () => {

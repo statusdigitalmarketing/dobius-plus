@@ -1,6 +1,8 @@
 import pty from 'node-pty';
 import fs from 'fs';
+import path from 'path';
 import os from 'os';
+import { app } from 'electron';
 
 const terminals = new Map();
 
@@ -30,6 +32,19 @@ export function createTerminal(id, cwd, webContents) {
     }
   }
 
+  // Per-project shell history file
+  const extraEnv = {};
+  if (id.startsWith('term-')) {
+    const encodedProject = Buffer.from(safeCwd).toString('base64url');
+    const histDir = path.join(app.getPath('userData'), 'terminal-history', encodedProject);
+    try {
+      fs.mkdirSync(histDir, { recursive: true });
+    } catch {
+      // Ignore — directory may already exist
+    }
+    extraEnv.HISTFILE = path.join(histDir, '.zsh_history');
+  }
+
   const shell = process.env.SHELL || '/bin/zsh';
   const term = pty.spawn(shell, [], {
     name: 'xterm-256color',
@@ -40,6 +55,7 @@ export function createTerminal(id, cwd, webContents) {
       ...process.env,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
+      ...extraEnv,
     },
   });
 
