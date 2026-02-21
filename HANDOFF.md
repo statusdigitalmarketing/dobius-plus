@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: Task 2.4 — BuildHealthGauge + SupervisorStatus — DONE
+## Current: Task 2.5 — BuildMonitorView + 7th dashboard tab — DONE (Phase 2 Complete)
 
 ## Branch: build/build-monitor
 
@@ -15,6 +15,7 @@
 - Task 2.2: build-monitor-watcher.js (chokidar), useBuildMonitor hook, watch/unwatch IPC
 - Task 2.3: BuildProgressBar (animated progress, phase/task labels, pulsing), BuildTimeline (vertical dot timeline)
 - Task 2.4: BuildHealthGauge (SVG semi-circle, health score), SupervisorStatus (badge, log mini-terminal)
+- Task 2.5: BuildMonitorView (empty+active states, dir picker, handoff preview), wired as "Builds" 7th tab
 
 ## Next
-- Task 2.5: Create BuildMonitorView + wire as 7th dashboard tab
+- Task 3.1: Build completion notifications

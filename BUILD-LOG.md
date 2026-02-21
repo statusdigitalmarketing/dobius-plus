@@ -63,3 +63,10 @@
 - BuildHealthGauge: custom SVG semi-circle gauge, health score (100 - failures*10 - restarts*5)
 - SupervisorStatus: pulsing status badge, metadata grid, mini-terminal (last 5 log lines)
 - Gate: PASS
+
+### Task 2.5: BuildMonitorView + 7th dashboard tab
+- BuildMonitorView: empty state (dir picker CTA), active state (all 4 sub-components + handoff preview)
+- Wired as "Builds" 7th tab in DashboardView
+- Persists monitored dir in app config
+- Bundle: 1034KB → 1047KB
+- Gate: PASS — Phase 2 Complete

@@ -7,6 +7,7 @@ import Skills from './Skills';
 import Stats from './Stats';
 import Sessions from './Sessions';
 import Plans from './Plans';
+import BuildMonitorView from './BuildMonitor/BuildMonitorView';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -15,6 +16,7 @@ const TABS = [
   { id: 'stats', label: 'Stats' },
   { id: 'sessions', label: 'Sessions' },
   { id: 'plans', label: 'Plans' },
+  { id: 'builds', label: 'Builds' },
 ];
 
 const TAB_CONTENT = {
@@ -24,6 +26,7 @@ const TAB_CONTENT = {
   stats: (props) => <Stats stats={props.stats} />,
   sessions: () => <Sessions />,
   plans: (props) => <Plans plans={props.plans} />,
+  builds: () => <BuildMonitorView />,
 };
 
 export default function DashboardView() {
