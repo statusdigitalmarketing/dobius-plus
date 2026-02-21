@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataLoadStats: () => ipcRenderer.invoke('data:loadStats'),
   dataLoadSettings: () => ipcRenderer.invoke('data:loadSettings'),
   dataLoadPlans: () => ipcRenderer.invoke('data:loadPlans'),
+  dataReadPlanFile: (planName) => ipcRenderer.invoke('data:readPlanFile', planName),
   dataLoadSkills: () => ipcRenderer.invoke('data:loadSkills'),
   dataLoadTranscript: (sessionId, projectPath) => ipcRenderer.invoke('data:loadTranscript', sessionId, projectPath),
   dataGetActiveProcesses: () => ipcRenderer.invoke('data:getActiveProcesses'),

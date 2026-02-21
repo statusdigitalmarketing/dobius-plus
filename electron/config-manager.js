@@ -64,6 +64,8 @@ export function getProjectConfig(projectPath) {
  * Set per-project config (merge).
  */
 export function setProjectConfig(projectPath, settings) {
+  // Guard against prototype pollution
+  if (['__proto__', 'constructor', 'prototype'].includes(projectPath)) return;
   const config = loadConfig();
   config.projects[projectPath] = {
     ...(config.projects[projectPath] || {}),
@@ -108,11 +110,4 @@ export function flushConfig() {
       }
     }
   }
-}
-
-/**
- * Get the config file path (for debugging).
- */
-export function getConfigPath() {
-  return CONFIG_PATH;
 }

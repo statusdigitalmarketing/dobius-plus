@@ -135,6 +135,22 @@ export function loadPlans() {
 }
 
 /**
+ * Read a plan file's content by name.
+ */
+export function readPlanFile(planName) {
+  try {
+    // Validate planName: only allow alphanumeric, hyphens, underscores, dots, spaces
+    if (!/^[\w\s\-\.]+$/.test(planName)) return '';
+    const filePath = path.join(PLANS_DIR, `${planName}.md`);
+    if (!fs.existsSync(filePath)) return '';
+    return fs.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    console.warn('[data-service] Failed to read plan file:', err.message);
+    return '';
+  }
+}
+
+/**
  * Load installed skills from ~/.claude/skills/
  */
 export function loadSkills() {
@@ -176,6 +192,9 @@ export function loadSkills() {
  */
 export function loadTranscript(sessionId, projectPath) {
   try {
+    // Validate sessionId to prevent path traversal (allow UUID-like format)
+    if (!/^[\w-]+$/.test(sessionId)) return [];
+
     // Encode the project path the same way Claude does
     const encodedProject = projectPath.replace(/\//g, '-').replace(/^-/, '');
     const transcriptDir = path.join(PROJECTS_DIR, encodedProject);
@@ -239,11 +258,12 @@ export function getActiveProcesses() {
       const lines = stdout.trim().split('\n').filter(Boolean);
       resolve(lines.map((line) => {
         const spaceIdx = line.indexOf(' ');
+        if (spaceIdx === -1) return null;
         return {
           pid: line.slice(0, spaceIdx),
           command: line.slice(spaceIdx + 1),
         };
-      }));
+      }).filter(Boolean));
     });
   });
 }

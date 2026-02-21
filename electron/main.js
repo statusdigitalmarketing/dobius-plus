@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadPlans, loadSkills,
-  loadTranscript, getActiveProcesses, listProjects, watchFiles, stopWatching,
+  loadTranscript, readPlanFile, getActiveProcesses, listProjects, watchFiles, stopWatching,
 } from './data-service.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
@@ -91,6 +91,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:loadStats', () => loadStats());
   ipcMain.handle('data:loadSettings', () => loadSettings());
   ipcMain.handle('data:loadPlans', () => loadPlans());
+  ipcMain.handle('data:readPlanFile', (_event, planName) => readPlanFile(planName));
   ipcMain.handle('data:loadSkills', () => loadSkills());
   ipcMain.handle('data:loadTranscript', (_event, sessionId, projectPath) => loadTranscript(sessionId, projectPath));
   ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
