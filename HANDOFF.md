@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: Task 1.5 — Global animations + skeleton loaders — DONE (Phase 1 Complete)
+## Current: Task 2.1 — Build monitor data service + IPC — DONE
 
 ## Branch: build/build-monitor
 
@@ -11,6 +11,7 @@
 - Task 1.3: Sidebar search+skeletons, ConversationCard hover+left-border, Preview chat bubbles
 - Task 1.4: All 6 dashboard tabs redesigned (underline tabs, recharts, tables, collapsible plans)
 - Task 1.5: Reusable Skeleton component, CSS polish (thin scrollbars, glass utility, font smoothing)
+- Task 2.1: build-monitor-service.js (4 functions), IPC handlers in main.js, preload API (6 methods)
 
 ## Next
-- Task 2.1: Create build-monitor data service + IPC
+- Task 2.2: Create build monitor watcher + useBuildMonitor React hook

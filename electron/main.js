@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
@@ -6,6 +6,9 @@ import {
   loadHistory, loadStats, loadSettings, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
 } from './data-service.js';
+import {
+  loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
+} from './build-monitor-service.js';
 import { watchFiles, stopWatching } from './watcher-service.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
@@ -112,6 +115,21 @@ function setupConfigHandlers() {
   ipcMain.handle('config:setPinned', (_event, sessionIds) => setPinnedSessions(sessionIds));
 }
 
+function setupBuildMonitorHandlers() {
+  ipcMain.handle('buildMonitor:loadProgress', (_event, projectDir) => loadBuildProgress(projectDir));
+  ipcMain.handle('buildMonitor:loadSupervisorLog', (_event, projectDir) => loadSupervisorLog(projectDir));
+  ipcMain.handle('buildMonitor:loadHandoff', (_event, projectDir) => loadHandoff(projectDir));
+  ipcMain.handle('buildMonitor:detectActive', () => detectActiveBuilds());
+  ipcMain.handle('buildMonitor:pickDirectory', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory'],
+      title: 'Select project directory to monitor',
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
+}
+
 function setupWindowHandlers() {
   ipcMain.handle('window:openProject', (_event, projectPath) => {
     const win = openProjectWindow(projectPath);
@@ -196,6 +214,7 @@ app.whenReady().then(() => {
   setupDataHandlers();
   setupConfigHandlers();
   setupWindowHandlers();
+  setupBuildMonitorHandlers();
   setupMenu();
   createWindow();
 
