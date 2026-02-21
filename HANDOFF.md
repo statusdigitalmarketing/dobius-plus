@@ -1,6 +1,6 @@
 # Handoff — Dobius+
 
-## Current: Task 4.3 DONE — Moving to Task 5.1
+## Current: Task 5.1 DONE — Moving to Task 5.2
 
 ## What's Done
 - Task 0.1: Pre-flight validation, feature branch, infrastructure files
@@ -15,20 +15,21 @@
 - Task 4.1: 6-tab Dashboard — Overview, MCP Servers, Skills, Stats, Sessions, Plans + useStats hook
 - Task 4.2: Multi-window support — window-manager.js, per-project BrowserWindows, IPC
 - Task 4.3: Launcher window — ProjectList grid with search, ProjectCard, App.jsx routing
+- Task 5.1: Build pipeline — electron-builder, DMG, build-and-install.sh
 
 ## What's Next
-- Task 5.1: Build, package, and install (electron-builder, DMG, build-and-install.sh)
+- Task 5.2: Polish — keyboard shortcuts + error handling
 
 ## Blockers
 None
 
 ## Key Decisions
-- Launcher is the default window (no project URL param)
-- ProjectView is opened in per-project windows (with project URL param)
-- App.jsx routes based on URL query param presence
-- Launcher has drag region for macOS window dragging
+- 512x512 icon minimum required by electron-builder
+- Ad-hoc signing for dev builds (no Apple Developer ID)
+- DMG output to dist-electron/
+- build-and-install.sh handles kill/remove/mount/copy/open cycle
 
 ## Files Touched Recently
-- src/components/Launcher/ProjectList.jsx (new)
-- src/components/Launcher/ProjectCard.jsx (new)
-- src/App.jsx (updated — routes between Launcher and ProjectView)
+- build/icon.png (new — 512x512 placeholder)
+- electron-builder.yml (new)
+- build-and-install.sh (new, executable)

@@ -96,3 +96,11 @@
 - Verification: PASS (attempts: 1)
 - Note: Launcher shows project grid with search, session counts, activity time, "Open" badges. App.jsx routes between Launcher (no param) and ProjectView (with project param). Drag region for macOS traffic lights.
 
+## Task 5.1 — Build pipeline with electron-builder and DMG installer
+- Start: 08:25
+- End: 08:35
+- Duration: 10 min
+- Files changed: build/icon.png, electron-builder.yml, build-and-install.sh
+- Verification: PASS (attempts: 1)
+- Note: 512x512 icon (programmatically generated). electron-builder packages app + node-pty. DMG created: Dobius+-1.0.0-arm64.dmg. build-and-install.sh handles full pipeline. Initial 256x256 icon failed — regenerated at 512x512.
+
