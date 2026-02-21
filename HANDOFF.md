@@ -1,6 +1,6 @@
 # Handoff — Dobius+
 
-## Current: Task 5.2 DONE — Moving to FINAL phase
+## Current: Task FINAL.2 DONE — Ready for merge
 
 ## What's Done
 - Task 0.1: Pre-flight validation, feature branch, infrastructure files
@@ -17,23 +17,23 @@
 - Task 4.3: Launcher window — ProjectList grid with search, ProjectCard, App.jsx routing
 - Task 5.1: Build pipeline — electron-builder, DMG, build-and-install.sh
 - Task 5.2: Polish — keyboard shortcuts (Cmd+T/B/K/N), ErrorBoundary, app menu
+- Task FINAL.1: Self-review via code-reviewer + code-explorer subagents
+- Task FINAL.2: Fixed critical watcher bug, config flush on quit, DMG error check
 
 ## What's Next
-- Task FINAL.1: Self-review via subagents
-- Task FINAL.2: Fix all findings
 - Task FINAL.3: Merge to main
 
 ## Blockers
 None
 
 ## Key Decisions
-- Keyboard shortcuts use CmdOrCtrl for cross-platform support
-- Cmd+K sends 'clear' to terminal rather than using xterm clear
-- Application menu follows macOS conventions (About, Edit, View, Window)
-- ErrorBoundary wraps both Launcher and ProjectView
+- Per-window watcher Map instead of global singleton (fixes multi-window updates)
+- flushConfig() called synchronously in before-quit to prevent data loss
+- URL encoding is consistent: Electron loadFile handles production, encodeURIComponent handles dev
 
 ## Files Touched Recently
-- src/components/shared/ErrorBoundary.jsx (new)
-- electron/main.js (updated with app menu + Cmd+N)
-- src/components/Project/ProjectView.jsx (updated with Cmd+T/B/K shortcuts)
-- src/App.jsx (updated with ErrorBoundary wrapping)
+- electron/data-service.js (fixed: per-window watcher Map)
+- electron/config-manager.js (added: flushConfig export)
+- electron/main.js (added: flushConfig import + call in before-quit)
+- build-and-install.sh (added: DMG existence check)
+- SELF-REVIEW-FINDINGS.md (new)

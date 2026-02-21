@@ -301,18 +301,22 @@ export function listProjects() {
 
 /**
  * Watch key ~/.claude/ files for changes and notify the renderer.
+ * Uses a per-window watcher map so multiple windows all receive updates.
  */
-let watcher = null;
+const watchers = new Map();
 
 export function watchFiles(webContents) {
-  if (watcher) {
-    watcher.close();
+  const wcId = webContents.id;
+
+  // Close existing watcher for this window if any
+  if (watchers.has(wcId)) {
+    watchers.get(wcId).close();
   }
 
   const watchPaths = [HISTORY_PATH, STATS_PATH].filter((p) => fs.existsSync(p));
   if (watchPaths.length === 0) return;
 
-  watcher = watch(watchPaths, {
+  const watcher = watch(watchPaths, {
     persistent: true,
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
@@ -323,11 +327,22 @@ export function watchFiles(webContents) {
       webContents.send('data:updated', changedPath);
     }
   });
+
+  watchers.set(wcId, watcher);
+
+  // Auto-cleanup when webContents is destroyed
+  webContents.once('destroyed', () => {
+    const w = watchers.get(wcId);
+    if (w) {
+      w.close();
+      watchers.delete(wcId);
+    }
+  });
 }
 
 export function stopWatching() {
-  if (watcher) {
+  for (const [, watcher] of watchers) {
     watcher.close();
-    watcher = null;
   }
+  watchers.clear();
 }

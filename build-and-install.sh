@@ -17,7 +17,11 @@ sleep 1
 
 rm -rf "/Applications/Dobius+.app"
 
-DMG=$(ls -t dist-electron/*.dmg | head -1)
+DMG=$(ls -t dist-electron/*.dmg 2>/dev/null | head -1)
+if [ -z "$DMG" ]; then
+  echo "ERROR: No DMG found in dist-electron/"
+  exit 1
+fi
 echo "   Mounting $DMG..."
 hdiutil attach "$DMG" -nobrowse -quiet
 VOLUME=$(ls -d /Volumes/Dobius+* | head -1)

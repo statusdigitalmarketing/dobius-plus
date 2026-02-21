@@ -8,7 +8,7 @@ import {
 } from './data-service.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
-  getPinnedSessions, setPinnedSessions,
+  getPinnedSessions, setPinnedSessions, flushConfig,
 } from './config-manager.js';
 import {
   openProjectWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
@@ -199,6 +199,7 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => {
+  flushConfig();
   closeAllProjectWindows();
   killAll();
   stopWatching();

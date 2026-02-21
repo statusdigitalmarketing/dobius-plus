@@ -90,6 +90,27 @@ export function setPinnedSessions(sessionIds) {
 }
 
 /**
+ * Flush any pending config save immediately (synchronous).
+ * Call this in before-quit to avoid losing recent changes.
+ */
+export function flushConfig() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    if (configCache) {
+      try {
+        if (!fs.existsSync(CONFIG_DIR)) {
+          fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        }
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(configCache, null, 2));
+      } catch (err) {
+        console.warn('[config-manager] Failed to flush config:', err.message);
+      }
+    }
+  }
+}
+
+/**
  * Get the config file path (for debugging).
  */
 export function getConfigPath() {
