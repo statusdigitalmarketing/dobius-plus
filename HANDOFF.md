@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: Task 2.1 — Build monitor data service + IPC — DONE
+## Current: Task 2.2 — Build monitor watcher + useBuildMonitor hook — DONE
 
 ## Branch: build/build-monitor
 
@@ -12,6 +12,7 @@
 - Task 1.4: All 6 dashboard tabs redesigned (underline tabs, recharts, tables, collapsible plans)
 - Task 1.5: Reusable Skeleton component, CSS polish (thin scrollbars, glass utility, font smoothing)
 - Task 2.1: build-monitor-service.js (4 functions), IPC handlers in main.js, preload API (6 methods)
+- Task 2.2: build-monitor-watcher.js (chokidar), useBuildMonitor hook, watch/unwatch IPC
 
 ## Next
-- Task 2.2: Create build monitor watcher + useBuildMonitor React hook
+- Task 2.3: Create BuildProgressBar + BuildTimeline components

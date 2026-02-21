@@ -10,6 +10,7 @@ import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
 } from './build-monitor-service.js';
 import { watchFiles, stopWatching } from './watcher-service.js';
+import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-monitor-watcher.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions, flushConfig,
@@ -128,6 +129,12 @@ function setupBuildMonitorHandlers() {
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
   });
+  ipcMain.handle('buildMonitor:watch', (event, projectDir) => {
+    watchBuildDir(event.sender, projectDir);
+  });
+  ipcMain.handle('buildMonitor:unwatch', (event, projectDir) => {
+    unwatchBuildDir(event.sender, projectDir);
+  });
 }
 
 function setupWindowHandlers() {
@@ -228,6 +235,7 @@ app.on('before-quit', () => {
   closeAllProjectWindows();
   killAll();
   stopWatching();
+  stopAllBuildWatchers();
 });
 
 app.on('window-all-closed', () => {
