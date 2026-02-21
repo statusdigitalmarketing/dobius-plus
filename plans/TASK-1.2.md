@@ -1,22 +1,23 @@
-# Task 1.2: Implement terminal-manager.js (node-pty backend)
+# Task 1.2: Redesign TopBar + StatusBar + ThemePicker
 
-## What I will change
-- Create `electron/terminal-manager.js` — node-pty session manager with create/write/resize/kill/killAll
-- Update `electron/main.js` — add IPC handlers for terminal operations, before-quit cleanup
-- Update `electron/preload.js` — expose terminal IPC methods to renderer
+## What
+- TopBar: draggable region, underline indicator on active tab (not bg swap), truncated project name, theme picker as small swatch circle
+- StatusBar: minimal with monospace counts, green/red connection dot, version in dim
+- ThemePicker: dropdown with color swatch preview, checkmark on selected, smooth open/close
 
-## Why this change is needed
-The terminal backend is the core of Dobius+ — it manages real pseudo-terminal sessions that the xterm.js frontend will connect to in Task 1.3.
+## Files changed
+- `src/components/shared/TopBar.jsx`
+- `src/components/shared/StatusBar.jsx`
+- `src/components/shared/ThemePicker.jsx`
+
+## Design rules
+- Tab buttons: underline indicator on active, not background swap
+- StatusBar: all text in var(--dim), monospace for counts
+- ThemePicker: dropdown, not inline row of dots
 
 ## Verification
-- App launches without crash
-- In devtools console: `window.electronAPI.terminalCreate('test', '/tmp')` succeeds
-- Terminal process spawns (check `ps aux | grep zsh`)
+- `npx vite build` exits 0
 
-## What could go wrong
-- node-pty not properly rebuilt for Electron (runtime crash)
-- IPC channel naming conflicts
-- pty cleanup on window close missing → zombie processes
-
-## Estimated time
-15-20 minutes
+## Risks
+- Dropdown ThemePicker needs click-outside-to-close logic
+- Traffic light padding must be preserved
