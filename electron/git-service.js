@@ -74,12 +74,12 @@ export async function getCommitLog(projectDir, count = 50) {
   const dir = validateDir(projectDir);
   if (!dir) return [];
   try {
-    const sep = '\x00';
+    const sep = '||SEP||';
     const format = ['%H', '%an', '%aI', '%s'].join(sep);
     const stdout = await run('git', ['log', `--max-count=${Math.min(count, 200)}`, `--format=${format}`], dir);
     return stdout.trim().split('\n').filter(Boolean).map((line) => {
-      const [hash, author, date, subject] = line.split(sep);
-      return { hash, author, date, subject };
+      const [hash, author, date, ...rest] = line.split(sep);
+      return { hash, author, date, subject: rest.join(sep) };
     });
   } catch {
     return [];

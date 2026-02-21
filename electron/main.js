@@ -175,10 +175,17 @@ function setupGitHandlers() {
   ipcMain.handle('git:issueDetails', (_event, projectDir, issueNumber) => getIssueDetails(projectDir, issueNumber));
 }
 
+function sendToFocused(channel, ...args) {
+  const win = BrowserWindow.getFocusedWindow();
+  if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
+}
+
 function setupMenu() {
+  app.setName('Dobius+');
+
   const template = [
     {
-      label: app.name,
+      label: 'Dobius+',
       submenu: [
         { role: 'about' },
         { type: 'separator' },
@@ -223,6 +230,23 @@ function setupMenu() {
     {
       label: 'View',
       submenu: [
+        {
+          label: 'Toggle Terminal / Dashboard',
+          accelerator: 'CmdOrCtrl+T',
+          click: () => sendToFocused('menu:toggle-view'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Toggle Sidebar',
+          accelerator: 'CmdOrCtrl+B',
+          click: () => sendToFocused('menu:toggle-sidebar'),
+        },
+        {
+          label: 'Toggle Git Panel',
+          accelerator: 'CmdOrCtrl+G',
+          click: () => sendToFocused('menu:toggle-git-panel'),
+        },
+        { type: 'separator' },
         { role: 'reload' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },

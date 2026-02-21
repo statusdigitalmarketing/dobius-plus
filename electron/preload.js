@@ -68,6 +68,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('buildMonitor:updated', handler);
   },
 
+  // Menu events
+  onMenuToggleView: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('menu:toggle-view', handler);
+    return () => ipcRenderer.removeListener('menu:toggle-view', handler);
+  },
+  onMenuToggleSidebar: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('menu:toggle-sidebar', handler);
+    return () => ipcRenderer.removeListener('menu:toggle-sidebar', handler);
+  },
+  onMenuToggleGitPanel: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('menu:toggle-git-panel', handler);
+    return () => ipcRenderer.removeListener('menu:toggle-git-panel', handler);
+  },
+
   // Git
   gitStatus: (projectDir) => ipcRenderer.invoke('git:status', projectDir),
   gitLog: (projectDir, count) => ipcRenderer.invoke('git:log', projectDir, count),

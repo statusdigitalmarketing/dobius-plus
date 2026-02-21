@@ -44,3 +44,13 @@ npm run electron:build   # Build .app bundle
 - Dev: Vite on localhost:5173, Electron loads URL. Prod: Electron loads `dist/index.html`
 - Config persistence: `~/Library/Application Support/Dobius/config.json`
 - `build-and-install.sh` MUST `rm -rf` old .app before `cp -R` (asar overwrite issue)
+- **NEVER use null bytes (`\x00`) in `execFile` arguments** — Node.js throws `ERR_INVALID_ARG_VALUE`. Use a text separator like `||SEP||` instead (see `git-service.js` commit log format).
+- **Dev process name is "Electron"**, not the app name. Use `tell process "Electron"` in AppleScript during dev; the display name only applies to packaged `.app` builds.
+- **Remote debugging**: `app.commandLine.appendSwitch('remote-debugging-port', '9222')` in main.js enables CDP for Playwright/testing. Remove before shipping.
+- **Git tab needs project context**: `GitView` reads `currentProjectPath` from the Zustand store (set by `ProjectView`). The launcher window has no project path, so Git tab only works in project windows.
+
+## Keyboard Shortcuts (Project Window)
+- `Cmd+T` — toggle Terminal / Dashboard
+- `Cmd+B` — toggle left sidebar
+- `Cmd+G` — toggle Git side panel (terminal view only)
+- `Cmd+K` — clear terminal

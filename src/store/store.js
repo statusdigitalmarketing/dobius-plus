@@ -12,6 +12,7 @@ export const useStore = create((set) => ({
   themeIndex: 0,
 
   // Data
+  currentProjectPath: null,
   sessions: [],
   activeProcesses: [],
   buildComplete: false,
@@ -28,6 +29,7 @@ export const useStore = create((set) => ({
     set({ themeIndex: index % THEMES.length });
   },
 
+  setCurrentProjectPath: (p) => set({ currentProjectPath: p }),
   setSessions: (sessions) => set({ sessions }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),
   setBuildComplete: (val) => set({ buildComplete: val }),

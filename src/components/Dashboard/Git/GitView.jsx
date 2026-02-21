@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useStore } from '../../../store/store';
 import { useGit } from '../../../hooks/useGit';
 import GitStatusBar from './GitStatusBar';
 import CommitLog from './CommitLog';
@@ -15,14 +16,16 @@ const SUB_TABS = [
 ];
 
 export default function GitView() {
+  const currentProjectPath = useStore((s) => s.currentProjectPath);
   const [projectDir, setProjectDir] = useState(null);
   const [subTab, setSubTab] = useState('commits');
   const [selectedHash, setSelectedHash] = useState(null);
   const [configLoaded, setConfigLoaded] = useState(false);
 
-  // Load saved git project dir from config (reuse monitoredBuildDir if available)
+  // Load saved git project dir from config, fall back to current project path
   useEffect(() => {
     if (!window.electronAPI) {
+      setProjectDir(currentProjectPath);
       setConfigLoaded(true);
       return;
     }
@@ -31,10 +34,12 @@ export default function GitView() {
         setProjectDir(config.gitProjectDir);
       } else if (config?.monitoredBuildDir) {
         setProjectDir(config.monitoredBuildDir);
+      } else if (currentProjectPath) {
+        setProjectDir(currentProjectPath);
       }
       setConfigLoaded(true);
     });
-  }, []);
+  }, [currentProjectPath]);
 
   const { status, commits, branches, ghAvailable, pullRequests, issues, loading, refresh, loadDiff } = useGit(projectDir);
 

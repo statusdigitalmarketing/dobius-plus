@@ -16,6 +16,7 @@ export default function ProjectView({ projectPath }) {
   const themeIndex = useStore((s) => s.themeIndex);
   const setThemeIndex = useStore((s) => s.setThemeIndex);
   const toggleGitPanel = useStore((s) => s.toggleGitPanel);
+  const setCurrentProjectPath = useStore((s) => s.setCurrentProjectPath);
   const theme = THEMES[themeIndex];
   const setSessions = useStore((s) => s.setSessions);
   const setActiveProcesses = useStore((s) => s.setActiveProcesses);
@@ -26,6 +27,11 @@ export default function ProjectView({ projectPath }) {
   const projectName = projectPath
     ? projectPath.split('/').filter(Boolean).pop()
     : 'Dobius+';
+
+  // Store current project path for other components (e.g. GitView)
+  useEffect(() => {
+    setCurrentProjectPath(projectPath || null);
+  }, [projectPath, setCurrentProjectPath]);
 
   // Apply theme on mount and change
   useEffect(() => {
@@ -137,6 +143,20 @@ export default function ProjectView({ projectPath }) {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [activeView, setActiveView, toggleSidebar, toggleGitPanel, projectPath]);
+
+  // Menu bar events (View menu items send IPC from main process)
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    const cleanups = [
+      window.electronAPI.onMenuToggleView?.(() => {
+        const current = useStore.getState().activeView;
+        setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
+      }),
+      window.electronAPI.onMenuToggleSidebar?.(() => toggleSidebar()),
+      window.electronAPI.onMenuToggleGitPanel?.(() => toggleGitPanel()),
+    ];
+    return () => cleanups.forEach((fn) => fn?.());
+  }, [setActiveView, toggleSidebar, toggleGitPanel]);
 
   return (
     <div className="h-full w-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>
