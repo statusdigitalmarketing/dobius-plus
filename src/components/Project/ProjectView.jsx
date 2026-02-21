@@ -6,6 +6,7 @@ import StatusBar from '../shared/StatusBar';
 import TerminalPane from './TerminalPane';
 import Sidebar from './Sidebar';
 import DashboardView from '../Dashboard/DashboardView';
+import GitSidePanel from '../shared/GitSidePanel';
 
 export default function ProjectView({ projectPath }) {
   const activeView = useStore((s) => s.activeView);
@@ -14,6 +15,7 @@ export default function ProjectView({ projectPath }) {
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const themeIndex = useStore((s) => s.themeIndex);
   const setThemeIndex = useStore((s) => s.setThemeIndex);
+  const toggleGitPanel = useStore((s) => s.toggleGitPanel);
   const theme = THEMES[themeIndex];
   const setSessions = useStore((s) => s.setSessions);
   const setActiveProcesses = useStore((s) => s.setActiveProcesses);
@@ -95,6 +97,19 @@ export default function ProjectView({ projectPath }) {
     }
   }, [projectPath, setActiveView]);
 
+  const handleCdToProject = useCallback((sessionProject) => {
+    // Validate: must be an absolute path, no shell metacharacters except spaces/parens/hyphens
+    if (!sessionProject || !sessionProject.startsWith('/') || /[;&|`$]/.test(sessionProject)) return;
+    setActiveView('terminal');
+    // Use single quotes to safely handle spaces and parentheses in paths
+    const safePath = sessionProject.replace(/'/g, "'\\''");
+    const cmd = `cd '${safePath}'\n`;
+    const termId = projectPath ? `term-${projectPath}` : 'main';
+    if (window.electronAPI) {
+      window.electronAPI.terminalWrite(termId, cmd);
+    }
+  }, [projectPath, setActiveView]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -107,6 +122,9 @@ export default function ProjectView({ projectPath }) {
       } else if (e.key === 'b') {
         e.preventDefault();
         toggleSidebar();
+      } else if (e.key === 'g') {
+        e.preventDefault();
+        toggleGitPanel();
       } else if (e.key === 'k') {
         e.preventDefault();
         const termId = projectPath ? `term-${projectPath}` : 'main';
@@ -118,7 +136,7 @@ export default function ProjectView({ projectPath }) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeView, setActiveView, toggleSidebar, projectPath]);
+  }, [activeView, setActiveView, toggleSidebar, toggleGitPanel, projectPath]);
 
   return (
     <div className="h-full w-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>
@@ -137,6 +155,7 @@ export default function ProjectView({ projectPath }) {
               pinnedIds={pinnedIds}
               onTogglePin={handleTogglePin}
               onResumeSession={handleResumeSession}
+              onCdToProject={handleCdToProject}
             />
           </div>
         )}
@@ -152,6 +171,10 @@ export default function ProjectView({ projectPath }) {
             <DashboardView />
           )}
         </div>
+
+        {activeView === 'terminal' && (
+          <GitSidePanel projectDir={projectPath} />
+        )}
       </div>
 
       <StatusBar />

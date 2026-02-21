@@ -3,12 +3,16 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
 import {
-  loadHistory, loadStats, loadSettings, loadPlans, loadSkills,
+  loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
 } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
 } from './build-monitor-service.js';
+import {
+  getGitStatus, getCommitLog, getBranches, getCommitDiff,
+  checkGhAvailable, getPullRequests, getIssues, getPrDetails, getIssueDetails,
+} from './git-service.js';
 import { watchFiles, stopWatching } from './watcher-service.js';
 import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-monitor-watcher.js';
 import {
@@ -98,6 +102,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:loadHistory', () => loadHistory());
   ipcMain.handle('data:loadStats', () => loadStats());
   ipcMain.handle('data:loadSettings', () => loadSettings());
+  ipcMain.handle('data:loadBridgeServers', () => loadBridgeServers());
   ipcMain.handle('data:loadPlans', () => loadPlans());
   ipcMain.handle('data:readPlanFile', (_event, planName) => readPlanFile(planName));
   ipcMain.handle('data:loadSkills', () => loadSkills());
@@ -156,6 +161,18 @@ function setupWindowHandlers() {
     closeProjectWindow(projectPath);
     return { ok: true };
   });
+}
+
+function setupGitHandlers() {
+  ipcMain.handle('git:status', (_event, projectDir) => getGitStatus(projectDir));
+  ipcMain.handle('git:log', (_event, projectDir, count) => getCommitLog(projectDir, count));
+  ipcMain.handle('git:branches', (_event, projectDir) => getBranches(projectDir));
+  ipcMain.handle('git:diff', (_event, projectDir, hash) => getCommitDiff(projectDir, hash));
+  ipcMain.handle('git:ghAvailable', () => checkGhAvailable());
+  ipcMain.handle('git:pullRequests', (_event, projectDir) => getPullRequests(projectDir));
+  ipcMain.handle('git:issues', (_event, projectDir) => getIssues(projectDir));
+  ipcMain.handle('git:prDetails', (_event, projectDir, prNumber) => getPrDetails(projectDir, prNumber));
+  ipcMain.handle('git:issueDetails', (_event, projectDir, issueNumber) => getIssueDetails(projectDir, issueNumber));
 }
 
 function setupMenu() {
@@ -229,6 +246,7 @@ app.whenReady().then(() => {
   setupConfigHandlers();
   setupWindowHandlers();
   setupBuildMonitorHandlers();
+  setupGitHandlers();
   setupMenu();
   createWindow();
 

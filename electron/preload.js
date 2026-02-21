@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataLoadHistory: () => ipcRenderer.invoke('data:loadHistory'),
   dataLoadStats: () => ipcRenderer.invoke('data:loadStats'),
   dataLoadSettings: () => ipcRenderer.invoke('data:loadSettings'),
+  dataLoadBridgeServers: () => ipcRenderer.invoke('data:loadBridgeServers'),
   dataLoadPlans: () => ipcRenderer.invoke('data:loadPlans'),
   dataReadPlanFile: (planName) => ipcRenderer.invoke('data:readPlanFile', planName),
   dataLoadSkills: () => ipcRenderer.invoke('data:loadSkills'),
@@ -66,4 +67,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('buildMonitor:updated', handler);
     return () => ipcRenderer.removeListener('buildMonitor:updated', handler);
   },
+
+  // Git
+  gitStatus: (projectDir) => ipcRenderer.invoke('git:status', projectDir),
+  gitLog: (projectDir, count) => ipcRenderer.invoke('git:log', projectDir, count),
+  gitBranches: (projectDir) => ipcRenderer.invoke('git:branches', projectDir),
+  gitDiff: (projectDir, hash) => ipcRenderer.invoke('git:diff', projectDir, hash),
+  gitGhAvailable: () => ipcRenderer.invoke('git:ghAvailable'),
+  gitPullRequests: (projectDir) => ipcRenderer.invoke('git:pullRequests', projectDir),
+  gitIssues: (projectDir) => ipcRenderer.invoke('git:issues', projectDir),
+  gitPrDetails: (projectDir, prNumber) => ipcRenderer.invoke('git:prDetails', projectDir, prNumber),
+  gitIssueDetails: (projectDir, issueNumber) => ipcRenderer.invoke('git:issueDetails', projectDir, issueNumber),
 });

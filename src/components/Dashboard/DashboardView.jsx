@@ -8,6 +8,7 @@ import Stats from './Stats';
 import Sessions from './Sessions';
 import Plans from './Plans';
 import BuildMonitorView from './BuildMonitor/BuildMonitorView';
+import GitView from './Git/GitView';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -17,23 +18,25 @@ const TABS = [
   { id: 'sessions', label: 'Sessions' },
   { id: 'plans', label: 'Plans' },
   { id: 'builds', label: 'Builds' },
+  { id: 'git', label: 'Git' },
 ];
 
 const TAB_CONTENT = {
   overview: (props) => <Overview {...props} />,
-  mcp: (props) => <MCPServers settings={props.settings} />,
+  mcp: (props) => <MCPServers settings={props.settings} bridgeServers={props.bridgeServers} />,
   skills: (props) => <Skills skills={props.skills} />,
   stats: (props) => <Stats stats={props.stats} />,
   sessions: () => <Sessions />,
   plans: (props) => <Plans plans={props.plans} />,
   builds: () => <BuildMonitorView />,
+  git: () => <GitView />,
 };
 
 export default function DashboardView() {
   const dashboardTab = useStore((s) => s.dashboardTab);
   const setDashboardTab = useStore((s) => s.setDashboardTab);
   const buildComplete = useStore((s) => s.buildComplete);
-  const { stats, settings, plans, skills, loading } = useStats();
+  const { stats, settings, bridgeServers, plans, skills, loading } = useStats();
 
   if (loading) {
     return (
@@ -106,7 +109,7 @@ export default function DashboardView() {
             transition={{ duration: 0.15 }}
             className="h-full"
           >
-            {renderTab && renderTab({ stats, settings, plans, skills })}
+            {renderTab && renderTab({ stats, settings, bridgeServers, plans, skills })}
           </motion.div>
         </AnimatePresence>
       </div>

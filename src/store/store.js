@@ -5,6 +5,7 @@ export const useStore = create((set) => ({
   // View state
   activeView: 'terminal', // 'terminal' | 'dashboard'
   sidebarVisible: true,
+  gitPanelVisible: false,
   dashboardTab: 'overview',
 
   // Theme
@@ -18,6 +19,7 @@ export const useStore = create((set) => ({
   // Actions
   setActiveView: (view) => set({ activeView: view }),
   toggleSidebar: () => set((s) => ({ sidebarVisible: !s.sidebarVisible })),
+  toggleGitPanel: () => set((s) => ({ gitPanelVisible: !s.gitPanelVisible })),
   setDashboardTab: (tab) => set({ dashboardTab: tab }),
 
   setThemeIndex: (index) => {
