@@ -16,3 +16,11 @@
 - Verification: PASS (attempts: 1)
 - Note: All deps installed including node-pty with electron-rebuild. Vite build passes.
 
+## Task 1.2 — Implement terminal-manager.js (node-pty backend)
+- Start: 06:42
+- End: 06:50
+- Duration: 8 min
+- Files changed: electron/terminal-manager.js, electron/main.js, electron/preload.js, plans/TASK-1.2.md, plans/TASK-1.2-REVIEW.md
+- Verification: PASS (attempts: 1)
+- Note: node-pty session manager with create/write/resize/kill/killAll. IPC handlers in main.js. before-quit cleanup.
+

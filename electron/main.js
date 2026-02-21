@@ -1,6 +1,7 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,12 +37,35 @@ function createWindow() {
   });
 }
 
+function setupTerminalHandlers() {
+  ipcMain.handle('terminal:create', (event, id, cwd) => {
+    return createTerminal(id, cwd, event.sender);
+  });
+
+  ipcMain.on('terminal:write', (_event, id, data) => {
+    writeTerminal(id, data);
+  });
+
+  ipcMain.on('terminal:resize', (_event, id, cols, rows) => {
+    resizeTerminal(id, cols, rows);
+  });
+
+  ipcMain.on('terminal:kill', (_event, id) => {
+    killTerminal(id);
+  });
+}
+
 app.whenReady().then(() => {
+  setupTerminalHandlers();
   createWindow();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('before-quit', () => {
+  killAll();
 });
 
 app.on('window-all-closed', () => {
