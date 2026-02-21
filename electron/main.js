@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog, Notification } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
@@ -6,7 +6,11 @@ import {
   loadHistory, loadStats, loadSettings, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
 } from './data-service.js';
+import {
+  loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
+} from './build-monitor-service.js';
 import { watchFiles, stopWatching } from './watcher-service.js';
+import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-monitor-watcher.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions, flushConfig,
@@ -112,6 +116,35 @@ function setupConfigHandlers() {
   ipcMain.handle('config:setPinned', (_event, sessionIds) => setPinnedSessions(sessionIds));
 }
 
+function setupBuildMonitorHandlers() {
+  ipcMain.handle('buildMonitor:loadProgress', (_event, projectDir) => loadBuildProgress(projectDir));
+  ipcMain.handle('buildMonitor:loadSupervisorLog', (_event, projectDir) => loadSupervisorLog(projectDir));
+  ipcMain.handle('buildMonitor:loadHandoff', (_event, projectDir) => loadHandoff(projectDir));
+  ipcMain.handle('buildMonitor:detectActive', () => detectActiveBuilds());
+  ipcMain.handle('buildMonitor:pickDirectory', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory'],
+      title: 'Select project directory to monitor',
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
+  ipcMain.handle('buildMonitor:notify', (_event, opts) => {
+    if (!opts || typeof opts !== 'object') return;
+    const title = String(opts.title || 'Dobius+').slice(0, 100);
+    const body = String(opts.body || '').slice(0, 500);
+    if (Notification.isSupported()) {
+      new Notification({ title, body }).show();
+    }
+  });
+  ipcMain.handle('buildMonitor:watch', (event, projectDir) => {
+    watchBuildDir(event.sender, projectDir);
+  });
+  ipcMain.handle('buildMonitor:unwatch', (event, projectDir) => {
+    unwatchBuildDir(event.sender, projectDir);
+  });
+}
+
 function setupWindowHandlers() {
   ipcMain.handle('window:openProject', (_event, projectPath) => {
     const win = openProjectWindow(projectPath);
@@ -196,6 +229,7 @@ app.whenReady().then(() => {
   setupDataHandlers();
   setupConfigHandlers();
   setupWindowHandlers();
+  setupBuildMonitorHandlers();
   setupMenu();
   createWindow();
 
@@ -209,6 +243,7 @@ app.on('before-quit', () => {
   closeAllProjectWindows();
   killAll();
   stopWatching();
+  stopAllBuildWatchers();
 });
 
 app.on('window-all-closed', () => {

@@ -98,9 +98,13 @@ export const THEMES = themes.map((t) => ({
     '--bg': t.bg,
     '--fg': t.fg,
     '--accent': t.accent1,
+    '--accent-muted': `${t.accent1}22`,
     '--border': `${t.fg}22`,
     '--surface': mixColor(t.bg, t.fg, 0.05),
+    '--surface-hover': mixColor(t.bg, t.fg, 0.08),
     '--dim': `${t.fg}88`,
+    '--danger': t.accent4,
+    '--warning': t.accent3,
   },
 }));
 

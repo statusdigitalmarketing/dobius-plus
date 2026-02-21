@@ -1,35 +1,25 @@
-# Handoff — Dobius+ Audit
+# Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: AUDIT COMPLETE — Cycle 2 done, ready for review on branch audit/dobius-plus
+## Current: Task FINAL.2 — Fix self-review findings — DONE
 
-## How to Review
-1. Read AUDIT-FINDINGS.md for full findings with resolutions (Cycle 1 + Cycle 2)
-2. Read REMAINING-ITEMS.md for items needing manual attention
-3. Read PROCESS-NOTES.md for architecture observations
-4. Run: `git diff main...audit/dobius-plus --stat`
-5. If satisfied: `git checkout main && git merge audit/dobius-plus --no-ff`
+## Branch: build/build-monitor
 
-## Stats
-- Cycles: 2
-- Total findings: 22 (2 critical, 8 high, 5 medium, 7 low)
-- Fixed: 14 (2 critical, 8 high, 4 medium)
-- Reviewed (no change needed): 2
-- Skipped (LOW): 7 → REMAINING-ITEMS.md
-- False positives caught: 5
-- Health Score: 100/100
+## Completed
+- Task 0.1: Infrastructure + deps (recharts, framer-motion)
+- Task 1.1: Launcher redesign (D+ logotype, skeleton loaders, staggered animations, left-border active)
+- Task 1.2: TopBar underline tabs, StatusBar monospace+dot, ThemePicker dropdown
+- Task 1.3: Sidebar search+skeletons, ConversationCard hover+left-border, Preview chat bubbles
+- Task 1.4: All 6 dashboard tabs redesigned (underline tabs, recharts, tables, collapsible plans)
+- Task 1.5: Reusable Skeleton component, CSS polish (thin scrollbars, glass utility, font smoothing)
+- Task 2.1: build-monitor-service.js (4 functions), IPC handlers in main.js, preload API (6 methods)
+- Task 2.2: build-monitor-watcher.js (chokidar), useBuildMonitor hook, watch/unwatch IPC
+- Task 2.3: BuildProgressBar (animated progress, phase/task labels, pulsing), BuildTimeline (vertical dot timeline)
+- Task 2.4: BuildHealthGauge (SVG semi-circle, health score), SupervisorStatus (badge, log mini-terminal)
+- Task 2.5: BuildMonitorView (empty+active states, dir picker, handoff preview), wired as "Builds" 7th tab
+- Task 3.1: macOS notifications via Electron Notification API, badge dot on Builds tab, dedup via notifiedRef
+- Task 3.2: Added --danger/--warning CSS vars, replaced all hardcoded hex in BuildMonitor, 0 hex in BuildMonitor/
+- Task FINAL.1: Self-review via 2 subagents (code-reviewer + code-explorer), 9 findings total
+- Task FINAL.2: Fixed 4 findings (path traversal guard, notification validation, 10s polling, store cleanup)
 
-## Cycle 2 Fixes (8-auditor parallel sweep)
-1. **CRITICAL:SECURITY** — SessionId validation before terminal write (ProjectView.jsx)
-2. **CRITICAL:BUG** — Timestamp dedup >= fix (data-service.js)
-3. **HIGH:SECURITY** — CWD validation in createTerminal (terminal-manager.js)
-4. **HIGH:BUILD** — Generated icon.icns for macOS builds
-5. **MEDIUM:PERFORMANCE** — Debounced saveBounds in main.js + window-manager.js
-
-## Output Files
-- AUDIT-FINDINGS.md — Full findings with resolutions
-- AUDIT-REPORT.md — Executive summary
-- REMAINING-ITEMS.md — Items for manual review
-- IMPROVEMENT-LOG.md — What was fixed and why
-- PROCESS-NOTES.md — Architecture observations and suggestions
-
-BUILD COMPLETE
+## Next
+- Task FINAL.3: Merge build/build-monitor to main

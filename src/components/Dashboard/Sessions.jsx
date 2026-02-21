@@ -21,52 +21,74 @@ export default function Sessions() {
     return 0;
   });
 
+  const SortHeader = ({ id, children }) => (
+    <th
+      className="text-left px-3 py-2 font-medium cursor-pointer select-none transition-colors duration-100"
+      style={{ color: sortBy === id ? 'var(--fg)' : 'var(--dim)' }}
+      onClick={() => setSortBy(id)}
+    >
+      {children}
+      {sortBy === id && <span className="ml-1">↓</span>}
+    </th>
+  );
+
   return (
     <div className="p-4 h-full flex flex-col">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-lg font-semibold" style={{ color: 'var(--accent)' }}>Sessions</h2>
+        <h3 className="text-xs font-medium uppercase tracking-wider" style={{ color: 'var(--dim)' }}>
+          Sessions
+        </h3>
         <input
           type="text"
           placeholder="Filter..."
           value={filterText}
           onChange={(e) => setFilterText(e.target.value)}
-          className="px-2 py-1 text-xs rounded outline-none"
-          style={{ backgroundColor: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)' }}
+          className="px-2 py-1 text-xs rounded outline-none transition-all duration-150"
+          style={{
+            backgroundColor: 'var(--surface)',
+            color: 'var(--fg)',
+            border: '1px solid var(--border)',
+          }}
         />
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr style={{ color: 'var(--dim)' }}>
-              <th className="text-left p-2 cursor-pointer" onClick={() => setSortBy('project')}>Project</th>
-              <th className="text-left p-2 cursor-pointer" onClick={() => setSortBy('display')}>Description</th>
-              <th className="text-left p-2 cursor-pointer" onClick={() => setSortBy('timestamp')}>Time</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((s) => (
-              <tr
-                key={s.sessionId}
-                className="hover:opacity-80"
-                style={{ borderBottom: '1px solid var(--border)' }}
-              >
-                <td className="p-2" style={{ color: 'var(--accent)' }}>
-                  {s.project?.split('/').filter(Boolean).pop() || 'Unknown'}
-                </td>
-                <td className="p-2 truncate max-w-xs" style={{ color: 'var(--fg)' }}>
-                  {s.display || 'Untitled'}
-                </td>
-                <td className="p-2 whitespace-nowrap" style={{ color: 'var(--dim)' }}>
-                  {timeAgo(s.timestamp)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {sorted.length === 0 && (
-          <div className="p-4 text-center text-sm" style={{ color: 'var(--dim)' }}>
+        {sorted.length === 0 ? (
+          <div className="p-4 text-center text-xs" style={{ color: 'var(--dim)' }}>
             {filterText ? 'No matching sessions' : 'No sessions found'}
+          </div>
+        ) : (
+          <div className="rounded-lg overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+            <table className="w-full text-xs">
+              <thead>
+                <tr style={{ backgroundColor: 'var(--surface)' }}>
+                  <SortHeader id="project">Project</SortHeader>
+                  <SortHeader id="display">Description</SortHeader>
+                  <SortHeader id="timestamp">Time</SortHeader>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((s) => (
+                  <tr
+                    key={s.sessionId}
+                    className="transition-colors duration-100"
+                    style={{ borderTop: '1px solid var(--border)' }}
+                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--surface-hover)'}
+                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                  >
+                    <td className="px-3 py-2" style={{ color: 'var(--fg)' }}>
+                      {s.project?.split('/').filter(Boolean).pop() || 'Unknown'}
+                    </td>
+                    <td className="px-3 py-2 truncate max-w-xs" style={{ color: 'var(--dim)' }}>
+                      {s.display || 'Untitled'}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
+                      {timeAgo(s.timestamp)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </div>

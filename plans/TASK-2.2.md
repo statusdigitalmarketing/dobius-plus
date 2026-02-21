@@ -1,34 +1,21 @@
-# Task 2.2: Implement data-service.js (file parsing + watchers)
+# Task 2.2: Create build monitor watcher + useBuildMonitor React hook
 
-## What I will change
-- Create `electron/data-service.js` — read all ~/.claude/ files, chokidar watchers
-- Update `electron/main.js` — add IPC handlers for all data methods
-- Update `electron/preload.js` — expose all data IPC methods
+## What
+- Main process: chokidar watcher for claude-progress.json, HANDOFF.md, supervisor.log in monitored dirs
+- IPC: watch/unwatch channels + preload API
+- Renderer: useBuildMonitor hook (loads progress, handoff, supervisor log, active builds; auto-refreshes on file changes)
 
-## Why this change is needed
-The data service is the bridge between Claude Code's local files and the Dobius+ UI. It provides session history, stats, settings, plans, skills, and transcript data — all read-only.
+## Files
+- NEW: electron/build-monitor-watcher.js
+- EDIT: electron/main.js (wire watcher start/stop + new IPC handlers)
+- EDIT: electron/preload.js (add watch/unwatch methods)
+- NEW: src/hooks/useBuildMonitor.js
 
-## Functions to implement
-- loadHistory() — parse ~/.claude/history.jsonl
-- loadStats() — parse ~/.claude/stats-cache.json
-- loadSettings() — parse ~/.claude/settings.json
-- loadPlans() — list ~/.claude/plans/*.md
-- loadSkills() — list ~/.claude/skills/*/
-- loadTranscript(sessionId, projectPath) — read transcript JSONL
-- getActiveProcesses() — ps aux | grep claude
-- listProjects() — scan ~/.claude/projects/
-- watchFiles(webContents) — chokidar on key files
+## Design
+- Follow watcher-service.js pattern (per-webContents watcher map)
+- Follow useSessions.js/useStats.js hook pattern (useState + useEffect + useCallback)
+- Poll interval: none (event-driven via chokidar + IPC)
+- Hook returns: { progress, handoff, supervisorLog, activeBuilds, loading, projectDir, setProjectDir, refresh }
 
 ## Verification
-- App launches
-- In devtools: `await window.electronAPI.dataLoadHistory()` returns sessions array
-- `await window.electronAPI.dataLoadStats()` returns stats object
-- NO writes to ~/.claude/ (grep check)
-
-## What could go wrong
-- JSONL parsing failures on malformed lines
-- Large history files causing slowness
-- chokidar watcher path resolution on macOS
-
-## Estimated time
-25-30 minutes
+- `npx vite build` exits 0

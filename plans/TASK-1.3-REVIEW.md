@@ -1,13 +1,13 @@
-# Task 1.3 Review
+# Task 1.3 Review — Redesign Sidebar + ConversationCard + Preview
 
 ## Three things that could be better
-1. The xterm.js bundle is 529KB — could use dynamic import() for code splitting in a future optimization pass
-2. The ResizeObserver debounce at 50ms may cause brief visual misalignment during resize — acceptable for now
-3. The terminal ID is hardcoded as "main" in App.jsx — will be dynamic when ProjectView is implemented in Task 3.1
+1. ConversationCard uses onMouseEnter/onMouseLeave for hover — could use CSS :hover with a CSS class instead, but inline styles prevent that with CSS variables.
+2. The staggered animation uses 0.03s delay — shorter than the 0.05s on ProjectCard, but OK since sidebar items are smaller.
+3. Preview chat bubbles use maxWidth: '90%' — could look odd with very short messages. Acceptable tradeoff for layout consistency.
 
 ## One thing I'm fixing right now
-Adding explicit bright color definitions to the DEFAULT_THEME in useTerminal.js — already included during implementation.
+Nothing critical found — implementation follows all design rules. No hardcoded hex colors.
 
 ## Concerns
-- xterm.css is imported in the component file — make sure this works with Vite's CSS handling (it should since Vite handles CSS imports natively)
-- The useTerminal hook re-creates the terminal if the theme prop changes — this is intentional for theme switching but means the terminal session restarts. Will need to handle this differently in Task 2.1.
+- The hover effect on ConversationCard (onMouseEnter/Leave) won't work on touch devices — acceptable since this is a desktop app.
+- AnimatePresence on large lists (100+ sessions) may impact performance — useSessions already limits to 100 items.

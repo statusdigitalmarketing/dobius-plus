@@ -1,21 +1,21 @@
-# Task 3.1: Implement ProjectView layout with top bar
+# Task 3.1: Build completion notifications
 
-## What I will change
-- Create `src/components/shared/TopBar.jsx` — project name, Terminal/Dashboard toggle, ThemePicker
-- Create `src/components/shared/StatusBar.jsx` — session count, message count, active PID
-- Create `src/components/Project/ProjectView.jsx` — flexbox layout with TopBar, sidebar area, content, StatusBar
-- Create `src/store/store.js` — Zustand store for activeView, sidebarVisible, theme, sessions, stats
-- Update `src/App.jsx` — render ProjectView
+## What
+- Fire macOS Notification when a build completes (Electron Notification API)
+- Track notified builds in memory to avoid duplicate notifications
+- Add tab badge indicator on "Builds" tab when build completes
 
-## Why
-This creates the main window layout that everything else slots into — terminal and dashboard in the content area, sidebar on the left, status bar at the bottom.
+## Files
+- EDIT: electron/main.js (add notification IPC handler)
+- EDIT: electron/preload.js (expose notification method)
+- EDIT: src/hooks/useBuildMonitor.js (detect completion, trigger notification)
+- EDIT: src/components/Dashboard/DashboardView.jsx (badge on Builds tab)
+
+## Design
+- Notification title: "Dobius+ — Build Complete"
+- Notification body: "N/M tasks completed"
+- Badge: small dot on Builds tab, accent color
+- Track by build_start timestamp + project dir to avoid re-notifying
 
 ## Verification
-- TopBar shows with project name, Terminal/Dashboard buttons, ThemePicker
-- Terminal/Dashboard toggle switches content (show placeholder for Dashboard)
-- StatusBar at bottom
-- Sidebar area visible on left (placeholder)
-- Theme changes apply to all UI chrome
-
-## Estimated time
-20-25 minutes
+- `npx vite build` exits 0

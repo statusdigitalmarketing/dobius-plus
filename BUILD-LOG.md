@@ -1,114 +1,99 @@
-# Dobius+ Build Log
+# Dobius+ Build Log — UI Overhaul + Build Monitor
 
-## Task 0.1 — Pre-Flight Validation + Create Infrastructure
-- Start: 06:27
-- End: 06:32
-- Duration: 5 min
-- Files changed: scripts/verify-task.sh, BUILD-LOG.md, claude-progress.json, HANDOFF.md, plans/TASK-0.1.md, plans/TASK-0.1-REVIEW.md, .test-baseline.txt
-- Verification: PASS (attempts: 1)
-- Note: Fixed grep -P to grep -E for macOS compat in verify-task.sh
+## Build: UI Overhaul + Build Monitor
+**Branch**: build/build-monitor
+**Started**: 2026-02-21 12:00 EST
 
-## Task 1.1 — Scaffold Electron + Vite + React project
-- Start: 06:32
-- End: 06:42
-- Duration: 10 min
-- Files changed: package.json, vite.config.js, index.html, electron/main.js, electron/preload.js, src/main.jsx, src/App.jsx, src/styles/index.css
-- Verification: PASS (attempts: 1)
-- Note: All deps installed including node-pty with electron-rebuild. Vite build passes.
+---
 
-## Task 1.2 — Implement terminal-manager.js (node-pty backend)
-- Start: 06:42
-- End: 06:50
-- Duration: 8 min
-- Files changed: electron/terminal-manager.js, electron/main.js, electron/preload.js, plans/TASK-1.2.md, plans/TASK-1.2-REVIEW.md
-- Verification: PASS (attempts: 1)
-- Note: node-pty session manager with create/write/resize/kill/killAll. IPC handlers in main.js. before-quit cleanup.
+### Task 0.1: Pre-flight validation + create infrastructure
+- Pre-flight checks passed (build OK, 12GB disk free)
+- Installed recharts + framer-motion
+- Created feature branch build/build-monitor
+- Read all 18+ architecture files cover-to-cover
+- Initialized build infrastructure (plans/, BUILD-LOG.md, claude-progress.json, HANDOFF.md)
 
-## Task 1.3 — Implement TerminalPane with xterm.js + IPC bridge
-- Start: 06:50
-- End: 06:57
-- Duration: 7 min
-- Files changed: src/components/Project/TerminalPane.jsx, src/hooks/useTerminal.js, src/App.jsx, plans/TASK-1.3.md, plans/TASK-1.3-REVIEW.md
-- Verification: PASS (attempts: 1)
-- Note: Theme update separated from terminal creation to avoid session restart on theme change.
+### Task 1.1: Redesign Launcher (ProjectList + ProjectCard)
+- framer-motion staggered fade-in, scale hover, left-border active
+- D+ logotype header, search with icon and focus, skeleton loaders
+- Gate: PASS
 
-## Task 2.1 — Implement 10-theme system with per-window application
-- Start: 06:57
-- End: 07:07
-- Duration: 10 min
-- Files changed: src/lib/themes.js, src/components/shared/ThemePicker.jsx, src/App.jsx, plans/TASK-2.1.md, plans/TASK-2.1-REVIEW.md
-- Verification: PASS (attempts: 1)
-- Note: 10 themes from themes.sh. lighten() function for bright xterm colors. CSS variables via applyTheme().
+### Task 1.2: Redesign TopBar + StatusBar + ThemePicker
+- Underline tab indicators, SVG hamburger, truncated project name
+- StatusBar monospace+dot, ThemePicker dropdown with AnimatePresence
+- Gate: PASS
 
-## Task 2.2 — Implement data-service.js with read-only ~/.claude/ parsing
-- Start: 07:07
-- End: 07:20
-- Duration: 13 min
-- Files changed: electron/data-service.js, electron/main.js, electron/preload.js, plans/TASK-2.2.md, plans/TASK-2.2-REVIEW.md
-- Verification: PASS (attempts: 1)
-- Note: 8 data methods (loadHistory, loadStats, loadSettings, loadPlans, loadSkills, loadTranscript, getActiveProcesses, listProjects). Used execFile not execSync. Zero writes to ~/.claude/.
+### Task 1.3: Redesign Sidebar + ConversationCard + Preview
+- Search with icon, skeleton loaders, pinned section, staggered animations
+- 3px left-border selection, chat bubble preview layout
+- Gate: PASS
 
-## Task 3.1 — Implement ProjectView layout with top bar and status bar
-- Start: 07:20
-- End: 07:30
-- Duration: 10 min
-- Files changed: src/store/store.js, src/components/shared/TopBar.jsx, src/components/shared/StatusBar.jsx, src/components/Project/ProjectView.jsx, src/App.jsx
-- Verification: PASS (attempts: 1)
-- Note: Zustand store for global state. TopBar with view toggle + ThemePicker. StatusBar with session count. Fixed broken getter in store.
+### Task 1.4: Redesign Dashboard tabs (all 6)
+- DashboardView underline tabs, AnimatePresence transitions
+- Stats: recharts BarChart, Sessions: sortable table, Plans: collapsible
+- Overview: stat cards, MCPServers: table, Skills: card grid
+- Bundle: 559KB → 1034KB (recharts)
+- Gate: PASS
 
-## Task 3.2 — Implement conversation sidebar with search and preview
-- Start: 07:30
-- End: 07:40
-- Duration: 10 min
-- Files changed: src/components/Project/Sidebar.jsx, src/components/Project/ConversationCard.jsx, src/components/Project/Preview.jsx, src/hooks/useSessions.js, src/lib/time-ago.js, src/components/Project/ProjectView.jsx
-- Verification: PASS (attempts: 1)
-- Note: Search, pinned section, preview panel with transcript viewer, resume in terminal button.
+### Task 1.5: Global animations + skeleton loaders
+- Reusable Skeleton.jsx (SkeletonLine, SkeletonCard, SkeletonTable)
+- Thin 6px scrollbars, font smoothing, glass utility, button transitions
+- Gate: PASS — Phase 1 Complete
 
-## Task 3.3 — Implement config persistence for pins, themes, and window bounds
-- Start: 07:40
-- End: 07:50
-- Duration: 10 min
-- Files changed: electron/config-manager.js, electron/main.js, electron/preload.js, src/components/Project/ProjectView.jsx
-- Verification: PASS (attempts: 1)
-- Note: Config at ~/Library/Application Support/Dobius/config.json. Debounced save. Per-project theme. Pinned sessions array.
+### Task 2.1: Build monitor data service + IPC
+- Created electron/build-monitor-service.js (4 functions)
+- 5 IPC handlers in main.js (loadProgress, loadSupervisorLog, loadHandoff, detectActive, pickDirectory)
+- 6 preload API methods for renderer
+- Gate: PASS
 
-## Task 4.1 — Implement 6-tab Dashboard with real data
-- Start: 07:50
-- End: 08:05
-- Duration: 15 min
-- Files changed: src/components/Dashboard/DashboardView.jsx, Overview.jsx, MCPServers.jsx, Skills.jsx, Stats.jsx, Sessions.jsx, Plans.jsx, src/hooks/useStats.js, src/components/Project/ProjectView.jsx
-- Verification: PASS (attempts: 1)
-- Note: 6 tabs (overview, mcp, skills, stats, sessions, plans). useStats hook for parallel data loading. Hour distribution bar chart, 14-day activity, model usage. Sessions sort+filter. Plans expandable.
+### Task 2.2: Build monitor watcher + useBuildMonitor hook
+- New electron/build-monitor-watcher.js (chokidar per-webContents watcher map)
+- watch/unwatch IPC handlers, cleanup on quit
+- New src/hooks/useBuildMonitor.js (follows useSessions/useStats pattern)
+- Preload API: buildMonitorWatch, buildMonitorUnwatch
+- Gate: PASS
 
-## Task 4.2 — Implement multi-window support with per-window terminals
-- Start: 08:05
-- End: 08:15
-- Duration: 10 min
-- Files changed: electron/window-manager.js, electron/main.js, electron/preload.js
-- Verification: PASS (attempts: 1)
-- Note: window-manager.js with projectWindows Map, openProjectWindow (focus existing), per-project bounds save, terminal cleanup on close, closeAllProjectWindows on before-quit. IPC: window:openProject, window:getOpen, window:close.
+### Task 2.3: BuildProgressBar + BuildTimeline
+- BuildProgressBar: animated fill, phase/task labels, pulsing dot when active
+- BuildTimeline: vertical timeline with connected dots, staggered mount, status indicators
+- Both use CSS variables only, framer-motion animations
+- Gate: PASS
 
-## Task 4.3 — Implement Launcher window with project grid
-- Start: 08:15
-- End: 08:25
-- Duration: 10 min
-- Files changed: src/components/Launcher/ProjectList.jsx, src/components/Launcher/ProjectCard.jsx, src/App.jsx
-- Verification: PASS (attempts: 1)
-- Note: Launcher shows project grid with search, session counts, activity time, "Open" badges. App.jsx routes between Launcher (no param) and ProjectView (with project param). Drag region for macOS traffic lights.
+### Task 2.4: BuildHealthGauge + SupervisorStatus
+- BuildHealthGauge: custom SVG semi-circle gauge, health score (100 - failures*10 - restarts*5)
+- SupervisorStatus: pulsing status badge, metadata grid, mini-terminal (last 5 log lines)
+- Gate: PASS
 
-## Task 5.1 — Build pipeline with electron-builder and DMG installer
-- Start: 08:25
-- End: 08:35
-- Duration: 10 min
-- Files changed: build/icon.png, electron-builder.yml, build-and-install.sh
-- Verification: PASS (attempts: 1)
-- Note: 512x512 icon (programmatically generated). electron-builder packages app + node-pty. DMG created: Dobius+-1.0.0-arm64.dmg. build-and-install.sh handles full pipeline. Initial 256x256 icon failed — regenerated at 512x512.
+### Task 2.5: BuildMonitorView + 7th dashboard tab
+- BuildMonitorView: empty state (dir picker CTA), active state (all 4 sub-components + handoff preview)
+- Wired as "Builds" 7th tab in DashboardView
+- Persists monitored dir in app config
+- Bundle: 1034KB → 1047KB
+- Gate: PASS — Phase 2 Complete
 
-## Task 5.2 — Polish with keyboard shortcuts and error handling
-- Start: 08:35
-- End: 08:45
-- Duration: 10 min
-- Files changed: src/components/shared/ErrorBoundary.jsx, electron/main.js, src/components/Project/ProjectView.jsx, src/App.jsx
-- Verification: PASS (attempts: 1)
-- Note: Cmd+T (toggle view), Cmd+B (toggle sidebar), Cmd+K (clear terminal), Cmd+N (focus launcher). Full macOS app menu. ErrorBoundary wraps all views.
+### Task 3.1: Build completion notifications
+- Electron Notification API: IPC handler `buildMonitor:notify` in main.js
+- useBuildMonitor hook detects completion, fires notification once per build (notifiedRef dedup)
+- Zustand store: buildComplete state + badge dot on Builds tab
+- Gate: PASS
 
+### Task 3.2: Final theme audit + responsive polish
+- Added --danger (accent4) and --warning (accent3) CSS variables to theme system
+- Replaced all hardcoded hex colors in BuildMonitor components (5 instances → 0)
+- Audited all components: fallback-only hex in Stats.jsx and TerminalPane.jsx (acceptable)
+- Gate: PASS — Phase 3 Complete
+
+### Task FINAL.1: Self-review via subagents
+- Launched code-reviewer + code-explorer subagents in parallel
+- Code-reviewer: 2 findings (1 CRITICAL path traversal, 1 HIGH notification validation)
+- Code-explorer: 7 findings (4 actionable, 3 non-issues after analysis)
+- Gate: PASS
+
+### Task FINAL.2: Fix self-review findings
+- CRITICAL: Path traversal guard in build-monitor-service.js (validateProjectDir with path.resolve + normalize check)
+- HIGH: Notification input validation + length limits in main.js
+- MEDIUM: 10s polling interval for detectActiveBuilds in useBuildMonitor.js
+- MEDIUM: Reset buildComplete to false on unmount in BuildMonitorView.jsx
+- Skipped 5 findings (non-issues or intentional simplifications)
+- Bundle: 1047KB (unchanged)
+- Gate: PASS

@@ -1,25 +1,20 @@
 # Task 0.1: Pre-Flight Validation + Create Infrastructure
 
-## What I will change
-- Create feature branch `build/dobius-plus-v1`
-- Create `scripts/verify-task.sh` — gate script for all tasks
-- Create `BUILD-LOG.md` — append-only build log
-- Create `claude-progress.json` — machine-readable state
-- Create `HANDOFF.md` — recovery document
-- Create `plans/` directory
-- Create `.test-baseline.txt`
+## What
+- Validate environment (clean git, build passes, disk space)
+- Install dependencies: recharts, framer-motion
+- Create feature branch: build/build-monitor
+- Initialize build files: BUILD-LOG.md, claude-progress.json, HANDOFF.md
+- Read all 18 key architecture files
 
-## Why this change is needed
-The autonomous build system requires infrastructure files for progress tracking, verification, and crash recovery. Without these, context loss means complete restart.
+## Why
+Infrastructure required for the autonomous build cycle (PLAN → IMPLEMENT → VERIFY → REVIEW → COMMIT → GATE → LOG).
 
 ## Verification
-- On branch `build/dobius-plus-v1`
-- All 6 infrastructure files exist
-- `verify-task.sh` is executable
+- `npx vite build` exits 0
+- On branch `build/build-monitor`
+- All infrastructure files exist
 
-## What could go wrong
-- Branch already exists (would fail checkout)
-- Directory permissions
-
-## Estimated time
-10-15 minutes
+## Risks
+- npm install could fail (mitigated: packages are standard)
+- Prior build artifacts in plans/ directory — keeping them, no conflict

@@ -51,4 +51,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),
   windowGetOpen: () => ipcRenderer.invoke('window:getOpen'),
   windowClose: (projectPath) => ipcRenderer.invoke('window:close', projectPath),
+
+  // Build Monitor
+  buildMonitorLoadProgress: (projectDir) => ipcRenderer.invoke('buildMonitor:loadProgress', projectDir),
+  buildMonitorLoadSupervisorLog: (projectDir) => ipcRenderer.invoke('buildMonitor:loadSupervisorLog', projectDir),
+  buildMonitorLoadHandoff: (projectDir) => ipcRenderer.invoke('buildMonitor:loadHandoff', projectDir),
+  buildMonitorDetectActive: () => ipcRenderer.invoke('buildMonitor:detectActive'),
+  buildMonitorPickDirectory: () => ipcRenderer.invoke('buildMonitor:pickDirectory'),
+  buildMonitorNotify: (opts) => ipcRenderer.invoke('buildMonitor:notify', opts),
+  buildMonitorWatch: (projectDir) => ipcRenderer.invoke('buildMonitor:watch', projectDir),
+  buildMonitorUnwatch: (projectDir) => ipcRenderer.invoke('buildMonitor:unwatch', projectDir),
+  onBuildMonitorUpdated: (callback) => {
+    const handler = (_event, projectDir) => callback(projectDir);
+    ipcRenderer.on('buildMonitor:updated', handler);
+    return () => ipcRenderer.removeListener('buildMonitor:updated', handler);
+  },
 });

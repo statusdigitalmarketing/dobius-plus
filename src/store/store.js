@@ -13,6 +13,7 @@ export const useStore = create((set) => ({
   // Data
   sessions: [],
   activeProcesses: [],
+  buildComplete: false,
 
   // Actions
   setActiveView: (view) => set({ activeView: view }),
@@ -27,4 +28,5 @@ export const useStore = create((set) => ({
 
   setSessions: (sessions) => set({ sessions }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),
+  setBuildComplete: (val) => set({ buildComplete: val }),
 }));

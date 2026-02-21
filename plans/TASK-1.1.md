@@ -1,28 +1,25 @@
-# Task 1.1: Scaffold Electron + Vite + React Project
+# Task 1.1: Redesign Launcher (ProjectList + ProjectCard)
 
-## What I will change
-- `package.json` — full project config with scripts: dev, electron:dev, build, electron:build
-- `vite.config.js` — base: './', React plugin, Tailwind plugin, port 5173
-- `electron/main.js` — single BrowserWindow, dev/prod loading, app lifecycle
-- `electron/preload.js` — minimal contextBridge with platform info
-- `src/main.jsx` — React entry with createRoot
-- `src/App.jsx` — minimal "Dobius+" text
-- `src/styles/index.css` — Tailwind v4 imports
-- `index.html` — Vite entry with root div
+## What
+- Redesign ProjectList.jsx: "D+" logotype header, search with focus states, proper empty state, staggered list animation
+- Redesign ProjectCard.jsx: subtle hover (scale 1.02 + border transition), left-border for active, monospace stats, staggered fade-in with framer-motion
 
-## Why this change is needed
-This is the foundation — Electron shell, Vite bundler, React renderer. Everything builds on this.
+## Files changed
+- `src/components/Launcher/ProjectList.jsx`
+- `src/components/Launcher/ProjectCard.jsx`
+
+## Design rules
+- Accent color ONLY on Open button CTA
+- No gradient backgrounds — flat var(--surface) with var(--border)
+- Left-border indicator for active projects (green)
+- Session count + time ago in monospace var(--dim)
+- Staggered fade-in animation (50ms delay per card)
+- ALL colors from CSS variables
 
 ## Verification
-- `npm run build` succeeds (Vite build)
-- `npm run electron:dev` opens an Electron window showing "Dobius+" text
-- Window uses `titleBarStyle: 'hiddenInset'` and dark background
+- `npx vite build` exits 0
+- No hardcoded hex colors in component JSX (except themes.js)
 
-## What could go wrong
-- node-pty native compilation failure (need electron-rebuild)
-- Tailwind v4 config differences from v3
-- Electron ESM vs CJS issues
-- Version conflicts between packages
-
-## Estimated time
-20-30 minutes (including npm install)
+## Risks
+- framer-motion import may increase bundle size (acceptable)
+- Need to ensure staggered animation doesn't cause layout shifts

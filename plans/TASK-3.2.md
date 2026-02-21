@@ -1,20 +1,16 @@
-# Task 3.2: Implement Conversation Sidebar
+# Task 3.2: Final theme audit + responsive polish
 
-## What I will change
-- Create `src/components/Project/Sidebar.jsx` — scrollable sidebar with search + conversation list
-- Create `src/components/Project/ConversationCard.jsx` — single conversation entry
-- Create `src/components/Project/Preview.jsx` — transcript viewer with resume button
-- Create `src/hooks/useSessions.js` — data loading hook for sessions
-- Create `src/lib/time-ago.js` — format timestamps as relative time
-- Update `src/components/Project/ProjectView.jsx` — integrate Sidebar
+## What
+- Add --danger and --warning CSS variables to theme system
+- Replace hardcoded #F85149 and #E3B341 in BuildMonitor components with CSS vars
+- Audit all new components for: CSS variable usage, hover states, responsive behavior at 900px
+
+## Files
+- EDIT: src/lib/themes.js (add --danger, --warning CSS vars)
+- EDIT: src/components/Dashboard/BuildMonitor/BuildHealthGauge.jsx (replace hardcoded colors)
+- EDIT: src/components/Dashboard/BuildMonitor/SupervisorStatus.jsx (replace hardcoded colors)
+- EDIT: src/styles/index.css (add --danger, --warning to :root fallbacks)
 
 ## Verification
-- Sidebar loads and shows recent conversations
-- Search filters the list
-- Clicking conversation highlights it
-- Preview shows transcript messages
-- Resume in Terminal button works
-- Build passes
-
-## Estimated time
-25-30 minutes
+- `npx vite build` exits 0
+- `grep -rn '#[0-9a-fA-F]' src/components/Dashboard/BuildMonitor/` returns 0 matches

@@ -1,12 +1,13 @@
-# Task 0.1 Review
+# Task 0.1 Review — Build/Build-Monitor
 
 ## Three things that could be better
-1. The verify-task.sh uses `grep -rPc` which requires Perl regex — macOS grep may not support `-P`. Should use `grep -rEc` instead or use `grep -c` with extended regex.
-2. The progress JSON could include a `session_id` field for the current Claude session to aid debugging.
-3. The HANDOFF.md could have a template section for "Architecture Decisions" to document important choices.
+1. The existing plans/ directory has artifacts from the v1 build — could clean them up, but they don't interfere.
+2. Could add a LESSONS-LEARNED.md file proactively, though none exists from prior builds.
+3. The CSS variables in themes.js don't include `--accent-muted` — may need to add this for the premium design.
 
 ## One thing I'm fixing right now
-Fixing the grep -P usage in verify-task.sh — macOS doesn't support Perl regex by default. Switching to -E (extended regex).
+Adding `--accent-muted` to the theme CSS variables in themes.js — needed for the design requirements (subtle accent backgrounds).
 
 ## Concerns
-- The disk is at 97% capacity — may need to monitor during npm install. 16GB free should be enough but worth watching.
+- Disk at 98% capacity (12GB free) — should be sufficient but worth watching during build.
+- The prior BUILD-LOG.md from v1 was overwritten — acceptable since this is a new build.
