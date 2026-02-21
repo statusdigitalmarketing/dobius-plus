@@ -11,6 +11,7 @@ export default function ProjectView({ projectPath }) {
   const activeView = useStore((s) => s.activeView);
   const setActiveView = useStore((s) => s.setActiveView);
   const sidebarVisible = useStore((s) => s.sidebarVisible);
+  const toggleSidebar = useStore((s) => s.toggleSidebar);
   const themeIndex = useStore((s) => s.themeIndex);
   const setThemeIndex = useStore((s) => s.setThemeIndex);
   const theme = THEMES[themeIndex];
@@ -91,6 +92,31 @@ export default function ProjectView({ projectPath }) {
       window.electronAPI.terminalWrite(termId, cmd);
     }
   }, [projectPath, setActiveView]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+
+      if (e.key === 't') {
+        e.preventDefault();
+        setActiveView(activeView === 'terminal' ? 'dashboard' : 'terminal');
+      } else if (e.key === 'b') {
+        e.preventDefault();
+        toggleSidebar();
+      } else if (e.key === 'k') {
+        e.preventDefault();
+        const termId = projectPath ? `term-${projectPath}` : 'main';
+        if (window.electronAPI) {
+          window.electronAPI.terminalWrite(termId, 'clear\n');
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeView, setActiveView, toggleSidebar, projectPath]);
 
   return (
     <div className="h-full w-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>

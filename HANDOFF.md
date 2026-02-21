@@ -1,6 +1,6 @@
 # Handoff — Dobius+
 
-## Current: Task 5.1 DONE — Moving to Task 5.2
+## Current: Task 5.2 DONE — Moving to FINAL phase
 
 ## What's Done
 - Task 0.1: Pre-flight validation, feature branch, infrastructure files
@@ -16,20 +16,24 @@
 - Task 4.2: Multi-window support — window-manager.js, per-project BrowserWindows, IPC
 - Task 4.3: Launcher window — ProjectList grid with search, ProjectCard, App.jsx routing
 - Task 5.1: Build pipeline — electron-builder, DMG, build-and-install.sh
+- Task 5.2: Polish — keyboard shortcuts (Cmd+T/B/K/N), ErrorBoundary, app menu
 
 ## What's Next
-- Task 5.2: Polish — keyboard shortcuts + error handling
+- Task FINAL.1: Self-review via subagents
+- Task FINAL.2: Fix all findings
+- Task FINAL.3: Merge to main
 
 ## Blockers
 None
 
 ## Key Decisions
-- 512x512 icon minimum required by electron-builder
-- Ad-hoc signing for dev builds (no Apple Developer ID)
-- DMG output to dist-electron/
-- build-and-install.sh handles kill/remove/mount/copy/open cycle
+- Keyboard shortcuts use CmdOrCtrl for cross-platform support
+- Cmd+K sends 'clear' to terminal rather than using xterm clear
+- Application menu follows macOS conventions (About, Edit, View, Window)
+- ErrorBoundary wraps both Launcher and ProjectView
 
 ## Files Touched Recently
-- build/icon.png (new — 512x512 placeholder)
-- electron-builder.yml (new)
-- build-and-install.sh (new, executable)
+- src/components/shared/ErrorBoundary.jsx (new)
+- electron/main.js (updated with app menu + Cmd+N)
+- src/components/Project/ProjectView.jsx (updated with Cmd+T/B/K shortcuts)
+- src/App.jsx (updated with ErrorBoundary wrapping)

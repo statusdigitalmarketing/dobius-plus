@@ -104,3 +104,11 @@
 - Verification: PASS (attempts: 1)
 - Note: 512x512 icon (programmatically generated). electron-builder packages app + node-pty. DMG created: Dobius+-1.0.0-arm64.dmg. build-and-install.sh handles full pipeline. Initial 256x256 icon failed — regenerated at 512x512.
 
+## Task 5.2 — Polish with keyboard shortcuts and error handling
+- Start: 08:35
+- End: 08:45
+- Duration: 10 min
+- Files changed: src/components/shared/ErrorBoundary.jsx, electron/main.js, src/components/Project/ProjectView.jsx, src/App.jsx
+- Verification: PASS (attempts: 1)
+- Note: Cmd+T (toggle view), Cmd+B (toggle sidebar), Cmd+K (clear terminal), Cmd+N (focus launcher). Full macOS app menu. ErrorBoundary wraps all views.
+
