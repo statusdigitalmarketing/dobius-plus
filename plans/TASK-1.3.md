@@ -1,25 +1,24 @@
-# Task 1.3: Implement TerminalPane Component (xterm.js frontend)
+# Task 1.3: Redesign Sidebar + ConversationCard + Preview
 
-## What I will change
-- Create `src/components/Project/TerminalPane.jsx` — xterm.js terminal rendered in a div
-- Create `src/hooks/useTerminal.js` — hook encapsulating xterm + IPC bridge
-- Update `src/App.jsx` — render TerminalPane full-screen for testing
+## What
+- Sidebar: search with icon + focus animation, pinned section with separator, thin themed scrollbar
+- ConversationCard: left-border selection (3px accent), hover state with surface-hover bg, staggered animation, pin dot
+- Preview: chat bubble style (user right, assistant left), role labels in small caps dim, timestamp monospace, code block bg
 
-## Why this change is needed
-This connects the xterm.js frontend to the node-pty backend via IPC, giving users a real interactive terminal inside the Electron app.
+## Files changed
+- `src/components/Project/Sidebar.jsx`
+- `src/components/Project/ConversationCard.jsx`
+- `src/components/Project/Preview.jsx`
+
+## Design rules
+- Left-border selection indicator (3px solid accent on selected)
+- No accent-colored role labels — use var(--dim)
+- Resume button is the only accent CTA
+- Staggered list animation on ConversationCards
 
 ## Verification
-- App launches with a full-screen terminal
-- Can type commands (ls, pwd)
-- Terminal renders with colors
-- Resizing the window resizes the terminal
-- Can type `claude --help` to verify CLI works
+- `npx vite build` exits 0
+- No hardcoded hex in components
 
-## What could go wrong
-- xterm.js CSS not loading (terminal invisible)
-- FitAddon producing 0x0 dimensions
-- IPC data encoding issues (binary vs string)
-- ResizeObserver loop causing excessive resize calls
-
-## Estimated time
-20-25 minutes
+## Risks
+- Chat bubble layout may need careful flex/alignment for bidirectional messages

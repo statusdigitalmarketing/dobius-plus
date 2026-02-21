@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: Task 1.2 — Redesign TopBar + StatusBar + ThemePicker — DONE
+## Current: Task 1.3 — Redesign Sidebar + ConversationCard + Preview — DONE
 
 ## Branch: build/build-monitor
 
@@ -16,5 +16,7 @@
 - Task 1.1: Launcher redesign (D+ logotype, skeleton loaders, staggered animations, left-border active indicator)
 - Task 1.2: TopBar underline tabs, StatusBar monospace+dot, ThemePicker dropdown with checkmark
 
+- Task 1.3: Sidebar search icon, skeleton loaders, ConversationCard hover+left-border, Preview chat bubbles
+
 ## Next
-- Task 1.3: Redesign Sidebar + ConversationCard + Preview
+- Task 1.4: Redesign Dashboard tabs (all 6)
