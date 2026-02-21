@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { execFile } from 'child_process';
 import {
-  HISTORY_PATH, STATS_PATH, SETTINGS_PATH, PLANS_DIR, SKILLS_DIR, PROJECTS_DIR,
+  HISTORY_PATH, STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PROJECTS_DIR,
   parseJsonl, timeAgo, pathExists,
 } from './data-utils.js';
 
@@ -47,20 +47,56 @@ export async function loadStats() {
 }
 
 /**
- * Load settings from ~/.claude/settings.json
+ * Load settings from ~/.claude/settings.json + ~/.claude.json (user-scope MCP servers)
  */
 export async function loadSettings() {
+  let hooks = {};
+  let mcpServers = {};
+  let enabledPlugins = [];
+
+  // Read ~/.claude/settings.json
   try {
     const content = await fs.readFile(SETTINGS_PATH, 'utf8');
     const settings = JSON.parse(content);
-    return {
-      hooks: settings.hooks || {},
-      mcpServers: settings.mcpServers || {},
-      enabledPlugins: settings.enabledPlugins || [],
-    };
-  } catch (err) {
-    console.warn('[data-service] Failed to load settings:', err.message);
-    return { hooks: {}, mcpServers: {}, enabledPlugins: [] };
+    hooks = settings.hooks || {};
+    mcpServers = { ...mcpServers, ...(settings.mcpServers || {}) };
+    enabledPlugins = settings.enabledPlugins || [];
+  } catch {
+    void 0;
+  }
+
+  // Read ~/.claude.json (user-scope servers from `claude mcp add -s user`)
+  try {
+    const content = await fs.readFile(CLAUDE_JSON_PATH, 'utf8');
+    const claudeJson = JSON.parse(content);
+    if (claudeJson.mcpServers) {
+      mcpServers = { ...mcpServers, ...claudeJson.mcpServers };
+    }
+    // Also check project-scoped servers
+    if (claudeJson.projects) {
+      for (const proj of Object.values(claudeJson.projects)) {
+        if (proj.mcpServers) {
+          mcpServers = { ...mcpServers, ...proj.mcpServers };
+        }
+      }
+    }
+  } catch {
+    void 0;
+  }
+
+  return { hooks, mcpServers, enabledPlugins };
+}
+
+/**
+ * Load bridge servers from ~/.claude/mcp-bridge.json
+ */
+export async function loadBridgeServers() {
+  try {
+    const content = await fs.readFile(MCP_BRIDGE_CONFIG, 'utf8');
+    const config = JSON.parse(content);
+    return config.servers || {};
+  } catch {
+    return {};
   }
 }
 

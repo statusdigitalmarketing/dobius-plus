@@ -3,9 +3,15 @@ import { motion } from 'framer-motion';
 export default function BuildTimeline({ progress }) {
   if (!progress) return null;
 
-  const completed = progress.tasks_completed || [];
-  const remaining = progress.tasks_remaining || [];
-  const current = progress.current_task;
+  const raw_completed = progress.tasks_completed || [];
+  const raw_remaining = progress.tasks_remaining || [];
+  const raw_current = progress.current_task;
+
+  // Normalize: task entries might be strings or objects with id/name
+  const toLabel = (t) => typeof t === 'string' ? t : (t?.id || t?.name || String(t));
+  const completed = raw_completed.map(toLabel);
+  const remaining = raw_remaining.map(toLabel);
+  const current = raw_current ? toLabel(raw_current) : null;
 
   // Build timeline entries: completed → current → remaining
   const entries = [
@@ -91,7 +97,7 @@ export default function BuildTimeline({ progress }) {
               </span>
               {entry.status === 'active' && progress.task_name && (
                 <span className="text-xs truncate" style={{ color: 'var(--dim)' }}>
-                  {progress.task_name}
+                  {typeof progress.task_name === 'string' ? progress.task_name : String(progress.task_name)}
                 </span>
               )}
               {entry.status === 'completed' && (

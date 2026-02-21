@@ -4,7 +4,7 @@ import { useSessions } from '../../hooks/useSessions';
 import ConversationCard from './ConversationCard';
 import Preview from './Preview';
 
-export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession }) {
+export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, onCdToProject }) {
   const { sessions, loading, search, setSearch } = useSessions();
   const [selectedId, setSelectedId] = useState(null);
   const [previewSession, setPreviewSession] = useState(null);
@@ -12,6 +12,9 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession }
 
   const handleSelect = (session) => {
     setSelectedId(session.sessionId);
+    if (session.project) {
+      onCdToProject?.(session.project);
+    }
   };
 
   const handleDoubleClick = (session) => {

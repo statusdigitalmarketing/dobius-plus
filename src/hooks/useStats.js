@@ -6,6 +6,7 @@ import { useState, useEffect, useCallback } from 'react';
 export function useStats() {
   const [stats, setStats] = useState(null);
   const [settings, setSettings] = useState(null);
+  const [bridgeServers, setBridgeServers] = useState({});
   const [plans, setPlans] = useState([]);
   const [skills, setSkills] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -13,14 +14,16 @@ export function useStats() {
   const loadAll = useCallback(async () => {
     if (!window.electronAPI) return;
     try {
-      const [s, se, p, sk] = await Promise.all([
+      const [s, se, bs, p, sk] = await Promise.all([
         window.electronAPI.dataLoadStats(),
         window.electronAPI.dataLoadSettings(),
+        window.electronAPI.dataLoadBridgeServers(),
         window.electronAPI.dataLoadPlans(),
         window.electronAPI.dataLoadSkills(),
       ]);
       setStats(s);
       setSettings(se);
+      setBridgeServers(bs);
       setPlans(p);
       setSkills(sk);
     } catch (err) {
@@ -39,5 +42,5 @@ export function useStats() {
     return remove;
   }, [loadAll]);
 
-  return { stats, settings, plans, skills, loading, refresh: loadAll };
+  return { stats, settings, bridgeServers, plans, skills, loading, refresh: loadAll };
 }

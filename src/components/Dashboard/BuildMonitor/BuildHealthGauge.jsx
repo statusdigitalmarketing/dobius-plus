@@ -8,7 +8,10 @@ import { motion } from 'framer-motion';
 export default function BuildHealthGauge({ progress }) {
   if (!progress) return null;
 
-  const failures = progress.verification_failures || 0;
+  const rawFailures = progress.verification_failures;
+  const failures = typeof rawFailures === 'number' ? rawFailures
+    : (rawFailures && typeof rawFailures === 'object') ? Object.keys(rawFailures).length
+    : 0;
   const restarts = progress.restart_count || 0;
   const completed = progress.tasks_completed?.length || 0;
   const total = completed + (progress.tasks_remaining?.length || 0);

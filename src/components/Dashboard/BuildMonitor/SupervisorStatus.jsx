@@ -97,7 +97,7 @@ export default function SupervisorStatus({ progress, supervisorLog, activeBuilds
               className="whitespace-pre-wrap break-all"
               style={{ color: 'var(--dim)' }}
             >
-              {line}
+              {typeof line === 'string' ? line : JSON.stringify(line)}
             </div>
           ))}
         </div>

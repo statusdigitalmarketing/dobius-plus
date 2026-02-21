@@ -40,13 +40,13 @@ export default function BuildProgressBar({ progress }) {
           <span style={{ color: 'var(--dim)' }}>
             Task{' '}
             <span style={{ color: 'var(--accent)', fontFamily: "'SF Mono', monospace" }}>
-              {progress.current_task}
+              {typeof progress.current_task === 'string' ? progress.current_task : (progress.current_task?.id || progress.current_task?.name || '')}
             </span>
           </span>
         )}
         {progress.task_name && (
           <span className="truncate" style={{ color: 'var(--dim)' }}>
-            {progress.task_name}
+            {typeof progress.task_name === 'string' ? progress.task_name : String(progress.task_name)}
           </span>
         )}
       </div>
