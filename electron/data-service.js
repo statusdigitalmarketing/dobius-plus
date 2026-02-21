@@ -63,7 +63,7 @@ export function loadHistory() {
   for (const entry of entries) {
     if (entry.sessionId) {
       const existing = bySession.get(entry.sessionId);
-      if (!existing || (entry.timestamp && entry.timestamp > existing.timestamp)) {
+      if (!existing || (entry.timestamp && entry.timestamp >= existing.timestamp)) {
         bySession.set(entry.sessionId, entry);
       }
     }

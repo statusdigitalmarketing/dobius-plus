@@ -70,6 +70,52 @@ _(None found — no data-destroying or crash-on-every-launch bugs)_
   - Fix plan: Same as Plans.jsx HIGH:BUG finding
   - Resolution: Fixed as part of Plans.jsx HIGH:BUG resolution above.
 
+## Cycle 2 (8-auditor parallel sweep)
+
+### CRITICAL
+
+- [x] **CRITICAL:SECURITY** `src/components/Project/ProjectView.jsx:89` — handleResumeSession interpolates sessionId into terminal command without validation; malformed sessionId could inject shell commands
+  - Confidence: HIGH
+  - Disposition: FIX
+  - Fix plan: Validate sessionId matches `[\w-]+` pattern before writing to terminal
+  - Resolution: Added `if (!session.sessionId || !/^[\w-]+$/.test(session.sessionId)) return;` guard.
+
+- [x] **CRITICAL:BUG** `electron/data-service.js:66` — Timestamp dedup uses `>` instead of `>=`; when timestamps are equal, first entry wins instead of last (most recent file position)
+  - Confidence: HIGH
+  - Disposition: FIX
+  - Fix plan: Change `>` to `>=`
+  - Resolution: Changed to `>=` so last-write-wins on equal timestamps.
+
+### HIGH
+
+- [x] **HIGH:SECURITY** `electron/terminal-manager.js:24` — node-pty spawn accepts unvalidated cwd from renderer; arbitrary path could be passed
+  - Confidence: HIGH
+  - Disposition: FIX
+  - Fix plan: Validate cwd exists and is a directory before spawning; fall back to home
+  - Resolution: Added fs.statSync validation with isDirectory() check; invalid paths fall back to os.homedir().
+
+- [x] **HIGH:BUILD** `build/icon.icns` — Missing macOS .icns icon file; electron-builder needs it for .app bundles
+  - Confidence: HIGH
+  - Disposition: FIX
+  - Fix plan: Generate from existing icon.png using iconutil
+  - Resolution: Generated icon.icns (29KB) from icon.png via sips + iconutil pipeline.
+
+### MEDIUM
+
+- [x] **MEDIUM:PERFORMANCE** `electron/main.js:56-64` + `electron/window-manager.js:63-71` — saveBounds fires on every resize/move event (high-frequency during window drag)
+  - Confidence: MEDIUM
+  - Disposition: FIX
+  - Fix plan: Add 300ms debounce before calling loadConfig/saveConfig
+  - Resolution: Added clearTimeout/setTimeout debounce in both files. Combined with saveConfig's own 500ms debounce, bounds save is now double-debounced.
+
+### FALSE POSITIVES (from auditors)
+
+- **build/icon.png missing** — file exists (512x512 RGBA PNG)
+- **build-and-install.sh not executable** — file is mode 755
+- **window-manager.js:28 null access** — getProjectConfig never returns null
+- **useTerminal.js:131 missing fit dependency** — fit is in deps, theme handled by separate effect
+- **Terminal write enables arbitrary command execution** — inherent to terminal apps, not a vulnerability
+
 ### LOW (SKIP → REMAINING-ITEMS.md)
 
 - [ ] **LOW:DX** `electron/data-service.js:1-349` — God file with 349 lines handling 8+ different data loading functions

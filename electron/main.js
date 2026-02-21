@@ -52,13 +52,17 @@ function createWindow() {
   // Start file watchers for this window
   watchFiles(mainWindow.webContents);
 
-  // Save window bounds on move/resize
+  // Save window bounds on move/resize (debounced via saveConfig)
+  let boundsTimer;
   const saveBounds = () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      const currentConfig = loadConfig();
-      currentConfig.launcherBounds = mainWindow.getBounds();
-      saveConfig(currentConfig);
-    }
+    clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const currentConfig = loadConfig();
+        currentConfig.launcherBounds = mainWindow.getBounds();
+        saveConfig(currentConfig);
+      }
+    }, 300);
   };
   mainWindow.on('resize', saveBounds);
   mainWindow.on('move', saveBounds);
