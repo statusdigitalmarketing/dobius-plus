@@ -2,6 +2,10 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
+import {
+  loadHistory, loadStats, loadSettings, loadPlans, loadSkills,
+  loadTranscript, getActiveProcesses, listProjects, watchFiles, stopWatching,
+} from './data-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,6 +36,9 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
   }
 
+  // Start file watchers for this window
+  watchFiles(mainWindow.webContents);
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -55,8 +62,20 @@ function setupTerminalHandlers() {
   });
 }
 
+function setupDataHandlers() {
+  ipcMain.handle('data:loadHistory', () => loadHistory());
+  ipcMain.handle('data:loadStats', () => loadStats());
+  ipcMain.handle('data:loadSettings', () => loadSettings());
+  ipcMain.handle('data:loadPlans', () => loadPlans());
+  ipcMain.handle('data:loadSkills', () => loadSkills());
+  ipcMain.handle('data:loadTranscript', (_event, sessionId, projectPath) => loadTranscript(sessionId, projectPath));
+  ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
+  ipcMain.handle('data:listProjects', () => listProjects());
+}
+
 app.whenReady().then(() => {
   setupTerminalHandlers();
+  setupDataHandlers();
   createWindow();
 
   app.on('activate', () => {
@@ -66,6 +85,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
   killAll();
+  stopWatching();
 });
 
 app.on('window-all-closed', () => {

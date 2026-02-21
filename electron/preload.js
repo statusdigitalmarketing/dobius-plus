@@ -22,4 +22,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('terminal:exit', handler);
     return () => ipcRenderer.removeListener('terminal:exit', handler);
   },
+
+  // Data (read-only ~/.claude/ access)
+  dataLoadHistory: () => ipcRenderer.invoke('data:loadHistory'),
+  dataLoadStats: () => ipcRenderer.invoke('data:loadStats'),
+  dataLoadSettings: () => ipcRenderer.invoke('data:loadSettings'),
+  dataLoadPlans: () => ipcRenderer.invoke('data:loadPlans'),
+  dataLoadSkills: () => ipcRenderer.invoke('data:loadSkills'),
+  dataLoadTranscript: (sessionId, projectPath) => ipcRenderer.invoke('data:loadTranscript', sessionId, projectPath),
+  dataGetActiveProcesses: () => ipcRenderer.invoke('data:getActiveProcesses'),
+  dataListProjects: () => ipcRenderer.invoke('data:listProjects'),
+  onDataUpdated: (callback) => {
+    const handler = (_event, changedPath) => callback(changedPath);
+    ipcRenderer.on('data:updated', handler);
+    return () => ipcRenderer.removeListener('data:updated', handler);
+  },
 });

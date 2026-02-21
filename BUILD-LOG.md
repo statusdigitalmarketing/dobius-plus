@@ -40,3 +40,11 @@
 - Verification: PASS (attempts: 1)
 - Note: 10 themes from themes.sh. lighten() function for bright xterm colors. CSS variables via applyTheme().
 
+## Task 2.2 — Implement data-service.js with read-only ~/.claude/ parsing
+- Start: 07:07
+- End: 07:20
+- Duration: 13 min
+- Files changed: electron/data-service.js, electron/main.js, electron/preload.js, plans/TASK-2.2.md, plans/TASK-2.2-REVIEW.md
+- Verification: PASS (attempts: 1)
+- Note: 8 data methods (loadHistory, loadStats, loadSettings, loadPlans, loadSkills, loadTranscript, getActiveProcesses, listProjects). Used execFile not execSync. Zero writes to ~/.claude/.
+
