@@ -4,14 +4,26 @@ import { execFile } from 'child_process';
 import { pathExists } from './data-utils.js';
 
 /**
+ * Validate and normalize projectDir to prevent path traversal.
+ * Only allows absolute paths that resolve cleanly (no '..' components after normalization).
+ */
+function validateProjectDir(projectDir) {
+  if (!projectDir || typeof projectDir !== 'string') return null;
+  const resolved = path.resolve(projectDir);
+  if (resolved !== path.normalize(projectDir)) return null;
+  return resolved;
+}
+
+/**
  * Load build progress from a project's claude-progress.json.
  * @param {string} projectDir — absolute path to the project directory
  * @returns {object|null}
  */
 export async function loadBuildProgress(projectDir) {
   try {
-    if (!projectDir || typeof projectDir !== 'string') return null;
-    const filePath = path.join(projectDir, 'claude-progress.json');
+    const validDir = validateProjectDir(projectDir);
+    if (!validDir) return null;
+    const filePath = path.join(validDir, 'claude-progress.json');
     if (!(await pathExists(filePath))) return null;
     const content = await fs.readFile(filePath, 'utf8');
     return JSON.parse(content);
@@ -28,8 +40,9 @@ export async function loadBuildProgress(projectDir) {
  */
 export async function loadSupervisorLog(projectDir) {
   try {
-    if (!projectDir || typeof projectDir !== 'string') return [];
-    const filePath = path.join(projectDir, 'scripts', 'supervisor.log');
+    const validDir = validateProjectDir(projectDir);
+    if (!validDir) return [];
+    const filePath = path.join(validDir, 'scripts', 'supervisor.log');
     if (!(await pathExists(filePath))) return [];
     const content = await fs.readFile(filePath, 'utf8');
     const lines = content.trim().split('\n');
@@ -47,8 +60,9 @@ export async function loadSupervisorLog(projectDir) {
  */
 export async function loadHandoff(projectDir) {
   try {
-    if (!projectDir || typeof projectDir !== 'string') return '';
-    const filePath = path.join(projectDir, 'HANDOFF.md');
+    const validDir = validateProjectDir(projectDir);
+    if (!validDir) return '';
+    const filePath = path.join(validDir, 'HANDOFF.md');
     if (!(await pathExists(filePath))) return '';
     return await fs.readFile(filePath, 'utf8');
   } catch (err) {

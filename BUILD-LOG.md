@@ -82,3 +82,18 @@
 - Replaced all hardcoded hex colors in BuildMonitor components (5 instances → 0)
 - Audited all components: fallback-only hex in Stats.jsx and TerminalPane.jsx (acceptable)
 - Gate: PASS — Phase 3 Complete
+
+### Task FINAL.1: Self-review via subagents
+- Launched code-reviewer + code-explorer subagents in parallel
+- Code-reviewer: 2 findings (1 CRITICAL path traversal, 1 HIGH notification validation)
+- Code-explorer: 7 findings (4 actionable, 3 non-issues after analysis)
+- Gate: PASS
+
+### Task FINAL.2: Fix self-review findings
+- CRITICAL: Path traversal guard in build-monitor-service.js (validateProjectDir with path.resolve + normalize check)
+- HIGH: Notification input validation + length limits in main.js
+- MEDIUM: 10s polling interval for detectActiveBuilds in useBuildMonitor.js
+- MEDIUM: Reset buildComplete to false on unmount in BuildMonitorView.jsx
+- Skipped 5 findings (non-issues or intentional simplifications)
+- Bundle: 1047KB (unchanged)
+- Gate: PASS

@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
 
-## Current: Task 3.2 — Theme audit + responsive polish — DONE (Phase 3 Complete)
+## Current: Task FINAL.2 — Fix self-review findings — DONE
 
 ## Branch: build/build-monitor
 
@@ -18,6 +18,8 @@
 - Task 2.5: BuildMonitorView (empty+active states, dir picker, handoff preview), wired as "Builds" 7th tab
 - Task 3.1: macOS notifications via Electron Notification API, badge dot on Builds tab, dedup via notifiedRef
 - Task 3.2: Added --danger/--warning CSS vars, replaced all hardcoded hex in BuildMonitor, 0 hex in BuildMonitor/
+- Task FINAL.1: Self-review via 2 subagents (code-reviewer + code-explorer), 9 findings total
+- Task FINAL.2: Fixed 4 findings (path traversal guard, notification validation, 10s polling, store cleanup)
 
 ## Next
-- Task FINAL.1: Self-review via subagents
+- Task FINAL.3: Merge build/build-monitor to main

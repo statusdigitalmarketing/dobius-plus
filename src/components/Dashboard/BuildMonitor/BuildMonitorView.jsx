@@ -31,6 +31,7 @@ export default function BuildMonitorView() {
   // Sync build completion state to store for tab badge
   useEffect(() => {
     setBuildComplete(buildComplete);
+    return () => setBuildComplete(false);
   }, [buildComplete, setBuildComplete]);
 
   const handlePickDirectory = useCallback(async () => {

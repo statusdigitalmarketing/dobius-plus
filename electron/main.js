@@ -129,10 +129,12 @@ function setupBuildMonitorHandlers() {
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
   });
-  ipcMain.handle('buildMonitor:notify', (_event, { title, body }) => {
+  ipcMain.handle('buildMonitor:notify', (_event, opts) => {
+    if (!opts || typeof opts !== 'object') return;
+    const title = String(opts.title || 'Dobius+').slice(0, 100);
+    const body = String(opts.body || '').slice(0, 500);
     if (Notification.isSupported()) {
-      const notification = new Notification({ title, body });
-      notification.show();
+      new Notification({ title, body }).show();
     }
   });
   ipcMain.handle('buildMonitor:watch', (event, projectDir) => {

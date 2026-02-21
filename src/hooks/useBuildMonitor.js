@@ -74,8 +74,14 @@ export function useBuildMonitor(projectDir) {
       }
     });
 
+    // Poll active builds every 10s (detects process start/stop without file changes)
+    const pollInterval = setInterval(() => {
+      window.electronAPI.buildMonitorDetectActive().then(setActiveBuilds);
+    }, 10_000);
+
     return () => {
       removeListener();
+      clearInterval(pollInterval);
       window.electronAPI.buildMonitorUnwatch(projectDir);
     };
   }, [projectDir, loadAll]);
