@@ -1,4 +1,5 @@
 import pty from 'node-pty';
+import fs from 'fs';
 import os from 'os';
 
 const terminals = new Map();
@@ -16,12 +17,25 @@ export function createTerminal(id, cwd, webContents) {
     killTerminal(id);
   }
 
+  // Validate cwd is an existing directory; fall back to home
+  let safeCwd = os.homedir();
+  if (cwd && typeof cwd === 'string') {
+    try {
+      const stat = fs.statSync(cwd);
+      if (stat.isDirectory()) {
+        safeCwd = cwd;
+      }
+    } catch {
+      // Invalid path — use home directory
+    }
+  }
+
   const shell = process.env.SHELL || '/bin/zsh';
   const term = pty.spawn(shell, [], {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
-    cwd: cwd || os.homedir(),
+    cwd: safeCwd,
     env: {
       ...process.env,
       TERM: 'xterm-256color',

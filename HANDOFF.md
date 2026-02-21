@@ -1,39 +1,35 @@
-# Handoff — Dobius+
+# Handoff — Dobius+ Audit
 
-## Current: Task FINAL.2 DONE — Ready for merge
+## Current: AUDIT COMPLETE — Cycle 2 done, ready for review on branch audit/dobius-plus
 
-## What's Done
-- Task 0.1: Pre-flight validation, feature branch, infrastructure files
-- Task 1.1: Electron + Vite + React scaffold with all deps
-- Task 1.2: terminal-manager.js with node-pty backend, IPC handlers
-- Task 1.3: TerminalPane + useTerminal hook — xterm.js connected to node-pty via IPC
-- Task 2.1: 10 dark themes ported from themes.sh, ThemePicker with color swatches, CSS variables
-- Task 2.2: data-service.js — read-only ~/.claude/ parsing, IPC handlers, chokidar watchers
-- Task 3.1: ProjectView layout with TopBar, StatusBar, sidebar area, Zustand store
-- Task 3.2: Sidebar with search, ConversationCards, Preview panel, Resume button
-- Task 3.3: Config persistence — pins, themes, window bounds in ~/Library/Application Support/Dobius/
-- Task 4.1: 6-tab Dashboard — Overview, MCP Servers, Skills, Stats, Sessions, Plans + useStats hook
-- Task 4.2: Multi-window support — window-manager.js, per-project BrowserWindows, IPC
-- Task 4.3: Launcher window — ProjectList grid with search, ProjectCard, App.jsx routing
-- Task 5.1: Build pipeline — electron-builder, DMG, build-and-install.sh
-- Task 5.2: Polish — keyboard shortcuts (Cmd+T/B/K/N), ErrorBoundary, app menu
-- Task FINAL.1: Self-review via code-reviewer + code-explorer subagents
-- Task FINAL.2: Fixed critical watcher bug, config flush on quit, DMG error check
+## How to Review
+1. Read AUDIT-FINDINGS.md for full findings with resolutions (Cycle 1 + Cycle 2)
+2. Read REMAINING-ITEMS.md for items needing manual attention
+3. Read PROCESS-NOTES.md for architecture observations
+4. Run: `git diff main...audit/dobius-plus --stat`
+5. If satisfied: `git checkout main && git merge audit/dobius-plus --no-ff`
 
-## What's Next
-- Task FINAL.3: Merge to main
+## Stats
+- Cycles: 2
+- Total findings: 22 (2 critical, 8 high, 5 medium, 7 low)
+- Fixed: 14 (2 critical, 8 high, 4 medium)
+- Reviewed (no change needed): 2
+- Skipped (LOW): 7 → REMAINING-ITEMS.md
+- False positives caught: 5
+- Health Score: 100/100
 
-## Blockers
-None
+## Cycle 2 Fixes (8-auditor parallel sweep)
+1. **CRITICAL:SECURITY** — SessionId validation before terminal write (ProjectView.jsx)
+2. **CRITICAL:BUG** — Timestamp dedup >= fix (data-service.js)
+3. **HIGH:SECURITY** — CWD validation in createTerminal (terminal-manager.js)
+4. **HIGH:BUILD** — Generated icon.icns for macOS builds
+5. **MEDIUM:PERFORMANCE** — Debounced saveBounds in main.js + window-manager.js
 
-## Key Decisions
-- Per-window watcher Map instead of global singleton (fixes multi-window updates)
-- flushConfig() called synchronously in before-quit to prevent data loss
-- URL encoding is consistent: Electron loadFile handles production, encodeURIComponent handles dev
+## Output Files
+- AUDIT-FINDINGS.md — Full findings with resolutions
+- AUDIT-REPORT.md — Executive summary
+- REMAINING-ITEMS.md — Items for manual review
+- IMPROVEMENT-LOG.md — What was fixed and why
+- PROCESS-NOTES.md — Architecture observations and suggestions
 
-## Files Touched Recently
-- electron/data-service.js (fixed: per-window watcher Map)
-- electron/config-manager.js (added: flushConfig export)
-- electron/main.js (added: flushConfig import + call in before-quit)
-- build-and-install.sh (added: DMG existence check)
-- SELF-REVIEW-FINDINGS.md (new)
+BUILD COMPLETE

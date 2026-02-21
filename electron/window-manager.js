@@ -2,7 +2,7 @@ import { BrowserWindow, app } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { killTerminal, getActiveTerminals } from './terminal-manager.js';
-import { watchFiles } from './data-service.js';
+import { watchFiles } from './watcher-service.js';
 import { getProjectConfig, setProjectConfig } from './config-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -59,13 +59,17 @@ export function openProjectWindow(projectPath) {
   // Start file watchers for this window
   watchFiles(win.webContents);
 
-  // Save window bounds on move/resize
+  // Save window bounds on move/resize (debounced to reduce I/O)
+  let boundsTimer;
   const saveBounds = () => {
-    if (win && !win.isDestroyed()) {
-      const config = getProjectConfig(projectPath) || {};
-      config.windowBounds = win.getBounds();
-      setProjectConfig(projectPath, config);
-    }
+    clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(() => {
+      if (win && !win.isDestroyed()) {
+        const config = getProjectConfig(projectPath) || {};
+        config.windowBounds = win.getBounds();
+        setProjectConfig(projectPath, config);
+      }
+    }, 300);
   };
   win.on('resize', saveBounds);
   win.on('move', saveBounds);

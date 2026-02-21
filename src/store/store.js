@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { THEMES, applyTheme } from '../lib/themes';
 
-export const useStore = create((set, get) => ({
+export const useStore = create((set) => ({
   // View state
   activeView: 'terminal', // 'terminal' | 'dashboard'
   sidebarVisible: true,
@@ -12,8 +12,6 @@ export const useStore = create((set, get) => ({
 
   // Data
   sessions: [],
-  stats: null,
-  settings: null,
   activeProcesses: [],
 
   // Actions
@@ -28,7 +26,5 @@ export const useStore = create((set, get) => ({
   },
 
   setSessions: (sessions) => set({ sessions }),
-  setStats: (stats) => set({ stats }),
-  setSettings: (settings) => set({ settings }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),
 }));

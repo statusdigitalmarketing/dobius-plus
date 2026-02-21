@@ -126,7 +126,3 @@ export function applyTheme(theme, element = document.documentElement) {
     }
   }
 }
-
-export function getThemeByIndex(index) {
-  return THEMES[index % THEMES.length];
-}

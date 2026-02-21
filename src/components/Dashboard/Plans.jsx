@@ -12,10 +12,8 @@ export default function Plans({ plans }) {
     setExpandedPlan(plan.name);
     if (window.electronAPI) {
       try {
-        const config = await window.electronAPI.configLoad();
-        // Plans are read from ~/.claude/plans/ via data service
-        // We'd need a readFile IPC for content, using the plan path
-        setPlanContent(`Plan: ${plan.name}\nModified: ${plan.modifiedTime}\nPath: ${plan.path}`);
+        const content = await window.electronAPI.dataReadPlanFile(plan.name);
+        setPlanContent(content || 'Plan file is empty');
       } catch {
         setPlanContent('Failed to load plan content');
       }

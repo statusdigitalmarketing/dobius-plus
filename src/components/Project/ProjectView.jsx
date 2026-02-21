@@ -85,6 +85,8 @@ export default function ProjectView({ projectPath }) {
   }, []);
 
   const handleResumeSession = useCallback((session) => {
+    // Validate sessionId to prevent command injection via terminal
+    if (!session.sessionId || !/^[\w-]+$/.test(session.sessionId)) return;
     setActiveView('terminal');
     const cmd = `claude --resume ${session.sessionId}\n`;
     const termId = projectPath ? `term-${projectPath}` : 'main';

@@ -4,8 +4,9 @@ import { fileURLToPath } from 'url';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadPlans, loadSkills,
-  loadTranscript, getActiveProcesses, listProjects, watchFiles, stopWatching,
+  loadTranscript, readPlanFile, getActiveProcesses, listProjects,
 } from './data-service.js';
+import { watchFiles, stopWatching } from './watcher-service.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions, flushConfig,
@@ -52,13 +53,17 @@ function createWindow() {
   // Start file watchers for this window
   watchFiles(mainWindow.webContents);
 
-  // Save window bounds on move/resize
+  // Save window bounds on move/resize (debounced via saveConfig)
+  let boundsTimer;
   const saveBounds = () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      const currentConfig = loadConfig();
-      currentConfig.launcherBounds = mainWindow.getBounds();
-      saveConfig(currentConfig);
-    }
+    clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const currentConfig = loadConfig();
+        currentConfig.launcherBounds = mainWindow.getBounds();
+        saveConfig(currentConfig);
+      }
+    }, 300);
   };
   mainWindow.on('resize', saveBounds);
   mainWindow.on('move', saveBounds);
@@ -91,6 +96,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:loadStats', () => loadStats());
   ipcMain.handle('data:loadSettings', () => loadSettings());
   ipcMain.handle('data:loadPlans', () => loadPlans());
+  ipcMain.handle('data:readPlanFile', (_event, planName) => readPlanFile(planName));
   ipcMain.handle('data:loadSkills', () => loadSkills());
   ipcMain.handle('data:loadTranscript', (_event, sessionId, projectPath) => loadTranscript(sessionId, projectPath));
   ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
