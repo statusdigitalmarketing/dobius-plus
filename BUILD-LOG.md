@@ -48,3 +48,11 @@
 - Verification: PASS (attempts: 1)
 - Note: 8 data methods (loadHistory, loadStats, loadSettings, loadPlans, loadSkills, loadTranscript, getActiveProcesses, listProjects). Used execFile not execSync. Zero writes to ~/.claude/.
 
+## Task 3.1 — Implement ProjectView layout with top bar and status bar
+- Start: 07:20
+- End: 07:30
+- Duration: 10 min
+- Files changed: src/store/store.js, src/components/shared/TopBar.jsx, src/components/shared/StatusBar.jsx, src/components/Project/ProjectView.jsx, src/App.jsx
+- Verification: PASS (attempts: 1)
+- Note: Zustand store for global state. TopBar with view toggle + ThemePicker. StatusBar with session count. Fixed broken getter in store.
+
