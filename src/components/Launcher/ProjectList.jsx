@@ -55,13 +55,20 @@ export default function ProjectList() {
 
   if (loading) {
     return (
-      <div className="h-full flex flex-col p-6 pt-10" style={{ backgroundColor: 'var(--bg)' }}>
-        <div className="drag-region mb-6">
-          <div className="no-drag">
-            <div className="text-2xl font-bold tracking-tight" style={{ color: 'var(--fg)' }}>D+</div>
-          </div>
+      <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>
+        {/* Drag region + title bar */}
+        <div
+          className="drag-region flex items-center justify-center shrink-0"
+          style={{ height: 52, borderBottom: '1px solid var(--border)' }}
+        >
+          <h1
+            className="text-sm font-semibold tracking-widest uppercase no-drag"
+            style={{ color: 'var(--fg)', letterSpacing: '0.15em' }}
+          >
+            Dobius+
+          </h1>
         </div>
-        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="p-6 grid grid-cols-2 lg:grid-cols-3 gap-3">
           {[1, 2, 3, 4, 5, 6].map((i) => (
             <div
               key={i}
@@ -79,26 +86,39 @@ export default function ProjectList() {
   }
 
   return (
-    <div className="h-full flex flex-col p-6 pt-10" style={{ backgroundColor: 'var(--bg)' }}>
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6 drag-region">
-        <div className="no-drag">
-          <h1 className="text-2xl font-bold tracking-tight" style={{ color: 'var(--fg)' }}>
-            D+
-          </h1>
-          <p className="text-xs mt-1" style={{ color: 'var(--dim)' }}>
-            {projects.length} project{projects.length !== 1 ? 's' : ''}
-          </p>
-        </div>
-        <div className="no-drag relative">
+    <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>
+      {/* Title bar — centered, clears traffic lights */}
+      <div
+        className="drag-region flex items-center justify-center shrink-0 relative"
+        style={{ height: 52, borderBottom: '1px solid var(--border)' }}
+      >
+        <h1
+          className="text-sm font-semibold tracking-widest uppercase no-drag"
+          style={{ color: 'var(--fg)', letterSpacing: '0.15em' }}
+        >
+          Dobius+
+        </h1>
+        <span
+          className="absolute right-5 text-xs no-drag"
+          style={{ color: 'var(--dim)' }}
+        >
+          {projects.length} project{projects.length !== 1 ? 's' : ''}
+        </span>
+      </div>
+
+      {/* Search bar */}
+      <div className="px-6 pt-4 pb-3 shrink-0">
+        <div className="relative">
           <svg
-            className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5"
-            style={{ color: searchFocused ? 'var(--fg)' : 'var(--dim)' }}
+            className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+            style={{ color: searchFocused ? 'var(--fg)' : 'var(--dim)', width: 16, height: 16 }}
             fill="none"
             stroke="currentColor"
+            strokeWidth={2}
             viewBox="0 0 24 24"
           >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            <circle cx="11" cy="11" r="8" />
+            <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
           </svg>
           <input
             type="text"
@@ -107,7 +127,7 @@ export default function ProjectList() {
             onChange={(e) => setSearch(e.target.value)}
             onFocus={() => setSearchFocused(true)}
             onBlur={() => setSearchFocused(false)}
-            className="pl-8 pr-3 py-2 text-sm rounded-lg outline-none w-64 transition-all duration-150"
+            className="w-full pl-9 pr-3 py-2 text-sm rounded-lg outline-none transition-all duration-150"
             style={{
               backgroundColor: 'var(--surface)',
               color: 'var(--fg)',
@@ -118,7 +138,7 @@ export default function ProjectList() {
       </div>
 
       {/* Project grid */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto px-6 pb-6">
         {filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-40 gap-2">
             <div className="text-sm" style={{ color: 'var(--dim)' }}>
