@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -603,14 +603,17 @@ app.on('before-quit', (e) => {
   }
 
   if (quitConfirmed && !savedBeforeQuit) {
-    // Phase 2: second Cmd+Q confirmed — flush scrollback then quit
+    // Phase 2: second Cmd+Q confirmed
+    // Send Ctrl+C twice to gracefully end Claude sessions (makes them resumable),
+    // then flush scrollback, then quit.
     e.preventDefault();
-    BrowserWindow.getAllWindows().forEach((win) => {
-      if (!win.isDestroyed()) win.webContents.send('terminal:requestSave');
-    });
     savedBeforeQuit = true;
-    // Give renderers 300ms to flush scrollback via IPC, then quit for real
-    setTimeout(() => app.quit(), 300);
+    gracefulCloseAll().then(() => {
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) win.webContents.send('terminal:requestSave');
+      });
+      setTimeout(() => app.quit(), 300);
+    });
     return;
   }
 

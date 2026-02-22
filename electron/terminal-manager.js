@@ -122,6 +122,26 @@ export function killTerminal(id) {
 }
 
 /**
+ * Gracefully close all terminals by sending Ctrl+C twice (ends Claude sessions
+ * cleanly so they can be resumed), then kill after a delay.
+ * @returns {Promise<void>}
+ */
+export async function gracefulCloseAll() {
+  if (terminals.size === 0) return;
+  // First Ctrl+C
+  for (const [, entry] of terminals) {
+    try { entry.pty.write('\x03'); } catch { void 0; }
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  // Second Ctrl+C
+  for (const [, entry] of terminals) {
+    try { entry.pty.write('\x03'); } catch { void 0; }
+  }
+  await new Promise((r) => setTimeout(r, 500));
+  killAll();
+}
+
+/**
  * Kill all terminals — called on app quit.
  */
 export function killAll() {
