@@ -178,22 +178,19 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     inputRef.current?.focus();
   }, []);
 
-  // Click terminal area → focus command input, but only on simple clicks
-  // (not when user is selecting text for copy/paste)
-  const mouseDownPos = useRef(null);
-  const handleTerminalMouseDown = useCallback((e) => {
-    mouseDownPos.current = { x: e.clientX, y: e.clientY };
-  }, []);
-  const handleTerminalMouseUp = useCallback((e) => {
-    if (!mouseDownPos.current) return;
-    const dx = Math.abs(e.clientX - mouseDownPos.current.x);
-    const dy = Math.abs(e.clientY - mouseDownPos.current.y);
-    // Only focus input if it was a simple click (no drag/selection)
-    if (dx < 5 && dy < 5 && !window.getSelection()?.toString()) {
+  // Single click → command input bar, double click → focus terminal (for interactive prompts)
+  const lastClickTime = useRef(0);
+  const handleTerminalClick = useCallback((e) => {
+    const now = Date.now();
+    if (now - lastClickTime.current < 300) {
+      // Double click → focus terminal
+      containerRef.current?.querySelector('.xterm-helper-textarea')?.focus();
+    } else if (!window.getSelection()?.toString()) {
+      // Single click (no text selected) → focus input bar
       inputRef.current?.focus();
     }
-    mouseDownPos.current = null;
-  }, []);
+    lastClickTime.current = now;
+  }, [containerRef]);
 
   // Auto-resize textarea to fit content
   const handleInputChange = useCallback((e) => {
@@ -280,8 +277,7 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
         ref={containerRef}
         className="flex-1 min-h-0"
         style={{ padding: '4px 0 0 4px' }}
-        onMouseDown={handleTerminalMouseDown}
-        onMouseUp={handleTerminalMouseUp}
+        onClick={handleTerminalClick}
       />
       <div
         style={{
