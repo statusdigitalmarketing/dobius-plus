@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification } from 'electron';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
 import {
@@ -110,6 +111,17 @@ function setupTerminalHandlers() {
     if (!projectPath) return null;
     const config = getProjectConfig(projectPath);
     return config?.terminalState || null;
+  });
+
+  // Save clipboard image data to a temp file, return the file path
+  ipcMain.handle('terminal:saveClipboardImage', (_event, base64Data, mimeType) => {
+    const ext = mimeType === 'image/png' ? '.png' : mimeType === 'image/jpeg' ? '.jpg' : '.png';
+    const timestamp = Date.now();
+    const dir = path.join(app.getPath('temp'), 'dobius-clipboard');
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `clipboard-${timestamp}${ext}`);
+    fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
+    return filePath;
   });
 }
 

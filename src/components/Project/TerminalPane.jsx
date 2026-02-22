@@ -2,6 +2,11 @@ import { useState, useRef, useCallback } from 'react';
 import { useTerminal } from '../../hooks/useTerminal';
 import '@xterm/xterm/css/xterm.css';
 
+/** Escape a file path for safe shell usage (wraps in single quotes). */
+function shellEscape(filePath) {
+  return "'" + filePath.replace(/'/g, "'\\''") + "'";
+}
+
 /**
  * TerminalPane — renders an xterm.js terminal with an editable command input bar.
  * @param {{ id: string, cwd: string, theme?: object, className?: string }} props
@@ -11,6 +16,7 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
   const [input, setInput] = useState('');
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
+  const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef(null);
 
   const sendCommand = useCallback(() => {
@@ -53,6 +59,60 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     }
   };
 
+  const handlePaste = useCallback(async (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const blob = item.getAsFile();
+        if (!blob) return;
+        const arrayBuffer = await blob.arrayBuffer();
+        const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+        const filePath = await window.electronAPI.saveClipboardImage(base64, item.type);
+        if (filePath) {
+          setInput((prev) => {
+            const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+            return prev + (needsSpace ? ' ' : '') + shellEscape(filePath);
+          });
+          setHistoryIndex(-1);
+        }
+        return;
+      }
+    }
+    // Text paste falls through to default behavior
+  }, []);
+
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+
+    const paths = Array.from(files).map((f) => shellEscape(f.path)).join(' ');
+    setInput((prev) => {
+      const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+      return prev + (needsSpace ? ' ' : '') + paths;
+    });
+    setHistoryIndex(-1);
+    inputRef.current?.focus();
+  }, []);
+
   const bg = theme?.background || '#0D1117';
   const fg = theme?.foreground || '#E6EDF3';
   const border = theme?.brightBlack || '#484F58';
@@ -60,8 +120,29 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
   return (
     <div
       className={`w-full h-full flex flex-col ${className}`}
-      style={{ backgroundColor: bg }}
+      style={{ backgroundColor: bg, position: 'relative' }}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
     >
+      {dragOver && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 10,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            border: `2px dashed ${fg}`,
+            borderRadius: 8,
+            pointerEvents: 'none',
+          }}
+        >
+          <span style={{ color: fg, fontSize: 16, fontWeight: 600 }}>Drop files to insert path</span>
+        </div>
+      )}
       <div
         ref={containerRef}
         className="flex-1 min-h-0"
@@ -84,6 +165,7 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
           value={input}
           onChange={(e) => { setInput(e.target.value); setHistoryIndex(-1); }}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder="Type command... (Enter to send, Esc to focus terminal)"
           spellCheck={false}
           autoComplete="off"

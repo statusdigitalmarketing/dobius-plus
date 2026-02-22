@@ -92,6 +92,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('menu:toggle-git-panel', handler);
   },
 
+  // Save clipboard image to temp file, return path
+  saveClipboardImage: (base64Data, mimeType) => ipcRenderer.invoke('terminal:saveClipboardImage', base64Data, mimeType),
+
   // Quit gate
   onQuitPrompt: (callback) => {
     const handler = () => callback();
