@@ -28,7 +28,7 @@ const DEFAULT_THEME = {
   brightWhite: '#F0F6FC',
 };
 
-const MAX_SCROLLBACK_LINES = 5000;
+const MAX_SCROLLBACK_LINES = 1000;
 
 /**
  * Extract scrollback text from xterm.js buffer.

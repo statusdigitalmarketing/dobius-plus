@@ -128,8 +128,10 @@ export async function loadPlans() {
  */
 export async function readPlanFile(planName) {
   try {
-    if (!/^[\w\s\-\.]+$/.test(planName)) return '';
+    if (!/^[\w\s\-]+$/.test(planName)) return '';
     const filePath = path.join(PLANS_DIR, `${planName}.md`);
+    // Ensure resolved path stays within PLANS_DIR (prevent traversal)
+    if (!path.resolve(filePath).startsWith(path.resolve(PLANS_DIR))) return '';
     if (!(await pathExists(filePath))) return '';
     return await fs.readFile(filePath, 'utf8');
   } catch (err) {

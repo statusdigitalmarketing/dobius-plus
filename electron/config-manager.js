@@ -4,6 +4,9 @@ import { app } from 'electron';
 
 const CONFIG_DIR = path.join(app.getPath('userData'));
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
+const CONFIG_TMP = path.join(CONFIG_DIR, 'config.json.tmp');
+
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 const DEFAULT_CONFIG = {
   defaultTheme: 0,
@@ -14,6 +17,14 @@ const DEFAULT_CONFIG = {
 
 let configCache = null;
 let saveTimer = null;
+
+/**
+ * Atomic write — write to tmp then rename (prevents corruption on crash).
+ */
+function atomicWriteSync(filePath, data) {
+  fs.writeFileSync(CONFIG_TMP, data);
+  fs.renameSync(CONFIG_TMP, filePath);
+}
 
 /**
  * Load config from disk or return defaults.
@@ -35,7 +46,7 @@ export function loadConfig() {
 }
 
 /**
- * Save config to disk (debounced 500ms).
+ * Save config to disk (debounced 500ms, atomic write).
  */
 export function saveConfig(config) {
   configCache = config;
@@ -45,7 +56,7 @@ export function saveConfig(config) {
       if (!fs.existsSync(CONFIG_DIR)) {
         fs.mkdirSync(CONFIG_DIR, { recursive: true });
       }
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+      atomicWriteSync(CONFIG_PATH, JSON.stringify(config, null, 2));
     } catch (err) {
       console.warn('[config-manager] Failed to save config:', err.message);
     }
@@ -61,16 +72,20 @@ export function getProjectConfig(projectPath) {
 }
 
 /**
- * Set per-project config (merge).
+ * Set per-project config (merge with prototype pollution guard).
  */
 export function setProjectConfig(projectPath, settings) {
-  // Guard against prototype pollution
-  if (['__proto__', 'constructor', 'prototype'].includes(projectPath)) return;
+  if (UNSAFE_KEYS.has(projectPath)) return;
+  if (!settings || typeof settings !== 'object') return;
   const config = loadConfig();
-  config.projects[projectPath] = {
-    ...(config.projects[projectPath] || {}),
-    ...settings,
-  };
+  const existing = config.projects[projectPath] || {};
+  const sanitized = {};
+  for (const [key, value] of Object.entries(settings)) {
+    if (!UNSAFE_KEYS.has(key)) {
+      sanitized[key] = value;
+    }
+  }
+  config.projects[projectPath] = { ...existing, ...sanitized };
   saveConfig(config);
 }
 
@@ -92,7 +107,7 @@ export function setPinnedSessions(sessionIds) {
 }
 
 /**
- * Flush any pending config save immediately (synchronous).
+ * Flush any pending config save immediately (synchronous, atomic).
  * Call this in before-quit to avoid losing recent changes.
  */
 export function flushConfig() {
@@ -104,7 +119,7 @@ export function flushConfig() {
         if (!fs.existsSync(CONFIG_DIR)) {
           fs.mkdirSync(CONFIG_DIR, { recursive: true });
         }
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify(configCache, null, 2));
+        atomicWriteSync(CONFIG_PATH, JSON.stringify(configCache, null, 2));
       } catch (err) {
         console.warn('[config-manager] Failed to flush config:', err.message);
       }

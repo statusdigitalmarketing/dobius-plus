@@ -114,8 +114,9 @@ function setupTerminalHandlers() {
   });
 
   // Save clipboard image data to a temp file, return the file path
+  const ALLOWED_IMAGE_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
   ipcMain.handle('terminal:saveClipboardImage', (_event, base64Data, mimeType) => {
-    const ext = mimeType === 'image/png' ? '.png' : mimeType === 'image/jpeg' ? '.jpg' : '.png';
+    const ext = ALLOWED_IMAGE_TYPES[mimeType] || '.png';
     const timestamp = Date.now();
     const dir = path.join(app.getPath('temp'), 'dobius-clipboard');
     fs.mkdirSync(dir, { recursive: true });
@@ -162,8 +163,9 @@ function setupBuildMonitorHandlers() {
   });
   ipcMain.handle('buildMonitor:notify', (_event, opts) => {
     if (!opts || typeof opts !== 'object') return;
-    const title = String(opts.title || 'Dobius+').slice(0, 100);
-    const body = String(opts.body || '').slice(0, 500);
+    const sanitize = (str) => String(str).replace(/[\x00-\x1F\x7F]/g, '').trim();
+    const title = sanitize(opts.title || 'Dobius+').slice(0, 100);
+    const body = sanitize(opts.body || '').slice(0, 500);
     if (Notification.isSupported()) {
       new Notification({ title, body }).show();
     }
@@ -291,7 +293,23 @@ function setupMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// Clean clipboard temp files older than 24 hours
+function cleanClipboardTemp() {
+  const dir = path.join(app.getPath('temp'), 'dobius-clipboard');
+  try {
+    if (!fs.existsSync(dir)) return;
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    for (const file of fs.readdirSync(dir)) {
+      const filePath = path.join(dir, file);
+      try {
+        if (fs.statSync(filePath).mtimeMs < cutoff) fs.unlinkSync(filePath);
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
+
 app.whenReady().then(() => {
+  cleanClipboardTemp();
   setupTerminalHandlers();
   setupDataHandlers();
   setupConfigHandlers();
