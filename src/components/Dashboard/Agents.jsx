@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
 
+const MODEL_LABELS = {
+  'claude-opus-4-6': 'Opus',
+  'claude-sonnet-4-5-20250929': 'Sonnet',
+  'claude-haiku-4-5-20251001': 'Haiku',
+};
+
 export default function Agents() {
   const addTab = useStore((s) => s.addTab);
   const renameTab = useStore((s) => s.renameTab);
@@ -108,6 +114,14 @@ export default function Agents() {
                       style={{ fontSize: 9, backgroundColor: 'var(--border)', color: 'var(--dim)' }}
                     >
                       BUILT-IN
+                    </span>
+                  )}
+                  {agent.model && (
+                    <span
+                      className="text-xs px-1.5 py-0.5 rounded"
+                      style={{ fontSize: 9, backgroundColor: 'rgba(88,166,255,0.15)', color: 'var(--accent)' }}
+                    >
+                      {MODEL_LABELS[agent.model] || agent.model}
                     </span>
                   )}
                 </div>

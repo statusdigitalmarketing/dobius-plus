@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
@@ -170,7 +170,7 @@ export default function ClaudeMdEditor() {
 
       {/* Split editor + preview */}
       <div className="flex-1 flex min-h-0">
-        {/* Editor */}
+        {/* Editor with line numbers */}
         <div className="flex-1 flex flex-col min-w-0" style={{ borderRight: '1px solid var(--border)' }}>
           <div
             className="px-3 py-1.5 text-xs shrink-0"
@@ -178,25 +178,28 @@ export default function ClaudeMdEditor() {
           >
             EDITOR
           </div>
-          <textarea
-            ref={textareaRef}
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            spellCheck={false}
-            style={{
-              flex: 1,
-              backgroundColor: 'var(--bg)',
-              color: 'var(--fg)',
-              border: 'none',
-              outline: 'none',
-              padding: '12px 16px',
-              fontFamily: "'SF Mono', 'Fira Code', monospace",
-              fontSize: 12,
-              lineHeight: 1.6,
-              resize: 'none',
-              tabSize: 2,
-            }}
-          />
+          <div className="flex-1 flex min-h-0" style={{ backgroundColor: 'var(--bg)' }}>
+            <LineNumbers content={content} textareaRef={textareaRef} />
+            <textarea
+              ref={textareaRef}
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              spellCheck={false}
+              style={{
+                flex: 1,
+                backgroundColor: 'var(--bg)',
+                color: 'var(--fg)',
+                border: 'none',
+                outline: 'none',
+                padding: '12px 16px 12px 0',
+                fontFamily: "'SF Mono', 'Fira Code', monospace",
+                fontSize: 12,
+                lineHeight: 1.6,
+                resize: 'none',
+                tabSize: 2,
+              }}
+            />
+          </div>
         </div>
 
         {/* Preview */}
@@ -330,6 +333,42 @@ export default function ClaudeMdEditor() {
           border-radius: 4px;
         }
       `}</style>
+    </div>
+  );
+}
+
+function LineNumbers({ content, textareaRef }) {
+  const lineCount = useMemo(() => (content || '').split('\n').length, [content]);
+  const gutterRef = useRef(null);
+
+  // Sync scroll position between textarea and line numbers
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    const gutter = gutterRef.current;
+    if (!textarea || !gutter) return;
+    const handler = () => { gutter.scrollTop = textarea.scrollTop; };
+    textarea.addEventListener('scroll', handler);
+    return () => textarea.removeEventListener('scroll', handler);
+  }, [textareaRef]);
+
+  return (
+    <div
+      ref={gutterRef}
+      style={{
+        padding: '12px 8px 12px 12px',
+        fontFamily: "'SF Mono', 'Fira Code', monospace",
+        fontSize: 12,
+        lineHeight: 1.6,
+        color: 'var(--border)',
+        textAlign: 'right',
+        userSelect: 'none',
+        overflow: 'hidden',
+        minWidth: 36,
+      }}
+    >
+      {Array.from({ length: lineCount }, (_, i) => (
+        <div key={i}>{i + 1}</div>
+      ))}
     </div>
   );
 }

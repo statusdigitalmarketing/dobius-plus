@@ -58,6 +58,33 @@ export const useStore = create((set, get) => ({
     tabCounter: counter,
   }),
 
+  reorderTabs: (fromIndex, toIndex) => set((s) => {
+    const tabs = [...s.terminalTabs];
+    const [moved] = tabs.splice(fromIndex, 1);
+    tabs.splice(toIndex, 0, moved);
+    return { terminalTabs: tabs };
+  }),
+
+  closeOtherTabs: (tabId) => {
+    const state = get();
+    const kept = state.terminalTabs.filter((t) => t.id === tabId);
+    if (kept.length === 0) return;
+    const removed = state.terminalTabs.filter((t) => t.id !== tabId);
+    removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
+    set({ terminalTabs: kept, activeTabId: tabId });
+  },
+
+  closeTabsToRight: (tabId) => {
+    const state = get();
+    const idx = state.terminalTabs.findIndex((t) => t.id === tabId);
+    if (idx === -1) return;
+    const kept = state.terminalTabs.slice(0, idx + 1);
+    const removed = state.terminalTabs.slice(idx + 1);
+    removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
+    const newActive = kept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
+    set({ terminalTabs: kept, activeTabId: newActive });
+  },
+
   // Actions
   setActiveView: (view) => set({ activeView: view }),
   toggleSidebar: () => set((s) => ({ sidebarVisible: !s.sidebarVisible })),

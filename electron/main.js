@@ -143,6 +143,11 @@ function setupTerminalHandlers() {
     return null;
   });
 
+  // Request all terminals to save their scrollback NOW (used by checkpoint save)
+  ipcMain.handle('terminal:requestSaveNow', (event) => {
+    event.sender.send('terminal:requestSave');
+  });
+
   // Save clipboard image data to a temp file, return the file path
   const ALLOWED_IMAGE_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
   const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB

@@ -27,7 +27,10 @@ export default function Checkpoints() {
   const handleSave = useCallback(async () => {
     if (!window.electronAPI?.checkpointSave || !currentProjectPath || !activeTabId) return;
     setSaving(true);
-    // Get scrollback from the active terminal's saved state
+    // Trigger terminal to flush its scrollback to disk, then read it back
+    window.electronAPI.terminalRequestSaveNow?.();
+    // Wait for save to flush (useTerminal saves synchronously on requestSave event)
+    await new Promise((r) => setTimeout(r, 300));
     const state = await window.electronAPI.terminalLoadState(activeTabId);
     const checkpoint = {
       label: `Checkpoint ${checkpoints.length + 1}`,

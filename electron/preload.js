@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   terminalLoadState: (id) => ipcRenderer.invoke('terminal:loadState', id),
   terminalSaveTabs: (projectPath, tabs, counter) => ipcRenderer.invoke('terminal:saveTabs', projectPath, tabs, counter),
   terminalLoadTabs: (projectPath) => ipcRenderer.invoke('terminal:loadTabs', projectPath),
+  terminalRequestSaveNow: () => ipcRenderer.invoke('terminal:requestSaveNow'),
   onTerminalRequestSave: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('terminal:requestSave', handler);
