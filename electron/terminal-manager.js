@@ -45,14 +45,20 @@ export function createTerminal(id, cwd, webContents) {
     extraEnv.HISTFILE = path.join(histDir, '.zsh_history');
   }
 
+  // Electron's process.env.PATH is minimal when launched from Finder/Dock.
+  // Prepend Homebrew paths so tools like zoxide, fzf, brew etc. are available.
+  const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
+  const fullPath = [...extraPaths, process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'].join(':');
+
   const shell = process.env.SHELL || '/bin/zsh';
-  const term = pty.spawn(shell, [], {
+  const term = pty.spawn(shell, ['-l'], {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
     cwd: safeCwd,
     env: {
       ...process.env,
+      PATH: fullPath,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       ...extraEnv,

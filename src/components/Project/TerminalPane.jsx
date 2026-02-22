@@ -86,9 +86,22 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
   const sendCommand = useCallback(() => {
     if (!window.electronAPI) return;
     const trimmed = input.trim();
-    // Always send \r (Enter) to the terminal — even if input is empty,
-    // so interactive prompts (Claude yes/no, etc.) get confirmed
-    window.electronAPI.terminalWrite(id, (trimmed || '') + '\r');
+    const text = trimmed || '';
+    // Send each character individually then \r — Claude Code's TUI reads
+    // in raw mode and may not process bulk writes the same as keystrokes
+    const chars = text.split('');
+    chars.push('\r');
+    let i = 0;
+    const sendNext = () => {
+      if (i < chars.length) {
+        window.electronAPI.terminalWrite(id, chars[i]);
+        i++;
+        if (i < chars.length) {
+          setTimeout(sendNext, 5);
+        }
+      }
+    };
+    sendNext();
     if (trimmed) {
       setHistory((prev) => {
         const next = prev.filter((cmd) => cmd !== trimmed);

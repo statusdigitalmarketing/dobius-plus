@@ -11,7 +11,10 @@ rm -rf dist-electron
 npx electron-builder --mac
 
 echo "3. Installing to /Applications..."
+# Graceful quit — lets the app save terminal scrollback before exiting
 osascript -e 'tell application "Dobius+" to quit' 2>/dev/null || true
+sleep 3
+# Only force-kill if graceful quit didn't work
 pkill -f "Dobius+" 2>/dev/null || true
 sleep 1
 

@@ -1,10 +1,13 @@
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import path from 'path';
+import os from 'os';
 import { execFile } from 'child_process';
 import {
   HISTORY_PATH, STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PROJECTS_DIR,
   parseJsonl, timeAgo, pathExists,
 } from './data-utils.js';
+import { getSettings } from './config-manager.js';
 
 /**
  * Load session history from ~/.claude/history.jsonl
@@ -255,49 +258,86 @@ export function getActiveProcesses() {
  * List all projects from ~/.claude/projects/
  */
 export async function listProjects() {
+  const projectMap = new Map(); // decodedPath → project object
+
+  // 1. Scan ~/.claude/projects/ for projects with Claude sessions
   try {
-    if (!(await pathExists(PROJECTS_DIR))) return [];
-    const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
-    const dirs = dirents.filter((d) => d.isDirectory());
+    if (await pathExists(PROJECTS_DIR)) {
+      const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+      const dirs = dirents.filter((d) => d.isDirectory());
 
-    const projects = await Promise.all(dirs.map(async (d) => {
-      const projectDir = path.join(PROJECTS_DIR, d.name);
-      const decodedPath = '/' + d.name.replace(/-/g, '/');
+      await Promise.all(dirs.map(async (d) => {
+        const projectDir = path.join(PROJECTS_DIR, d.name);
+        const decodedPath = '/' + d.name.replace(/-/g, '/');
 
-      let sessionCount = 0;
-      let latestTimestamp = 0;
-      try {
-        const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
-        sessionCount = files.length;
-        const stats = await Promise.all(
-          files.map((f) => fs.stat(path.join(projectDir, f)))
-        );
-        for (const stat of stats) {
-          if (stat.mtimeMs > latestTimestamp) {
-            latestTimestamp = stat.mtimeMs;
+        let sessionCount = 0;
+        let latestTimestamp = 0;
+        try {
+          const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
+          sessionCount = files.length;
+          const stats = await Promise.all(
+            files.map((f) => fs.stat(path.join(projectDir, f)))
+          );
+          for (const stat of stats) {
+            if (stat.mtimeMs > latestTimestamp) {
+              latestTimestamp = stat.mtimeMs;
+            }
           }
+        } catch {
+          void 0;
         }
-      } catch {
-        void 0;
-      }
 
-      const displayName = decodedPath.split('/').filter(Boolean).pop() || d.name;
-
-      return {
-        encodedPath: d.name,
-        decodedPath,
-        displayName,
-        sessionCount,
-        latestTimestamp,
-        age: latestTimestamp ? timeAgo(latestTimestamp) : 'unknown',
-      };
-    }));
-
-    return projects
-      .filter((p) => p.sessionCount > 0)
-      .sort((a, b) => b.latestTimestamp - a.latestTimestamp);
+        if (sessionCount > 0) {
+          const displayName = decodedPath.split('/').filter(Boolean).pop() || d.name;
+          projectMap.set(decodedPath, {
+            encodedPath: d.name,
+            decodedPath,
+            displayName,
+            sessionCount,
+            latestTimestamp,
+            age: latestTimestamp ? timeAgo(latestTimestamp) : 'unknown',
+          });
+        }
+      }));
+    }
   } catch (err) {
-    console.warn('[data-service] Failed to list projects:', err.message);
-    return [];
+    console.warn('[data-service] Failed to scan Claude projects:', err.message);
   }
+
+  // 2. Scan filesystem projectScanDir for all project folders
+  try {
+    const settings = getSettings();
+    let scanDir = settings.projectScanDir;
+    if (scanDir) {
+      scanDir = scanDir.replace(/^~/, os.homedir());
+      if (await pathExists(scanDir)) {
+        const dirents = await fs.readdir(scanDir, { withFileTypes: true });
+        for (const d of dirents) {
+          if (!d.isDirectory() || d.name.startsWith('.')) continue;
+          const fullPath = path.join(scanDir, d.name);
+          if (projectMap.has(fullPath)) continue; // already found via Claude sessions
+
+          let latestTimestamp = 0;
+          try {
+            const stat = await fs.stat(fullPath);
+            latestTimestamp = stat.mtimeMs;
+          } catch { void 0; }
+
+          projectMap.set(fullPath, {
+            encodedPath: null,
+            decodedPath: fullPath,
+            displayName: d.name,
+            sessionCount: 0,
+            latestTimestamp,
+            age: latestTimestamp ? timeAgo(latestTimestamp) : 'unknown',
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[data-service] Failed to scan project directory:', err.message);
+  }
+
+  return Array.from(projectMap.values())
+    .sort((a, b) => b.latestTimestamp - a.latestTimestamp);
 }
