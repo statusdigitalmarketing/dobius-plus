@@ -17,6 +17,10 @@ sleep 1
 
 rm -rf "/Applications/Dobius+.app"
 
+# Clear Electron caches to prevent stale renders after rebuild
+APPDATA="$HOME/Library/Application Support/dobius-plus"
+rm -rf "$APPDATA/Cache" "$APPDATA/Code Cache" "$APPDATA/GPUCache" "$APPDATA/DawnGraphiteCache" "$APPDATA/DawnWebGPUCache" 2>/dev/null || true
+
 DMG=$(ls -t dist-electron/*.dmg 2>/dev/null | head -1)
 if [ -z "$DMG" ]; then
   echo "ERROR: No DMG found in dist-electron/"

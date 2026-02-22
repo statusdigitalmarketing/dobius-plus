@@ -149,33 +149,52 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     // Text paste falls through to default behavior
   }, []);
 
-  const handleDragOver = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(true);
-  }, []);
+  // Use capture-phase native listeners so drops register even when xterm canvas swallows the event
+  const wrapperRef = useRef(null);
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    let dragCount = 0;
 
-  const handleDragLeave = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-  }, []);
+    const onDragEnter = (e) => {
+      e.preventDefault();
+      dragCount++;
+      if (dragCount === 1) setDragOver(true);
+    };
+    const onDragOver = (e) => { e.preventDefault(); };
+    const onDragLeave = (e) => {
+      e.preventDefault();
+      dragCount--;
+      if (dragCount <= 0) { dragCount = 0; setDragOver(false); }
+    };
+    const onDrop = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCount = 0;
+      setDragOver(false);
 
-  const handleDrop = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
+      const files = e.dataTransfer?.files;
+      if (!files || files.length === 0) return;
 
-    const files = e.dataTransfer?.files;
-    if (!files || files.length === 0) return;
+      const paths = Array.from(files).map((f) => shellEscape(f.path)).join(' ');
+      setInput((prev) => {
+        const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+        return prev + (needsSpace ? ' ' : '') + paths;
+      });
+      setHistoryIndex(-1);
+      inputRef.current?.focus();
+    };
 
-    const paths = Array.from(files).map((f) => shellEscape(f.path)).join(' ');
-    setInput((prev) => {
-      const needsSpace = prev.length > 0 && !prev.endsWith(' ');
-      return prev + (needsSpace ? ' ' : '') + paths;
-    });
-    setHistoryIndex(-1);
-    inputRef.current?.focus();
+    el.addEventListener('dragenter', onDragEnter, true);
+    el.addEventListener('dragover', onDragOver, true);
+    el.addEventListener('dragleave', onDragLeave, true);
+    el.addEventListener('drop', onDrop, true);
+    return () => {
+      el.removeEventListener('dragenter', onDragEnter, true);
+      el.removeEventListener('dragover', onDragOver, true);
+      el.removeEventListener('dragleave', onDragLeave, true);
+      el.removeEventListener('drop', onDrop, true);
+    };
   }, []);
 
   // Single click → command input bar, double click → focus terminal (for interactive prompts)
@@ -207,11 +226,9 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
 
   return (
     <div
+      ref={wrapperRef}
       className={`w-full h-full flex flex-col ${className}`}
       style={{ backgroundColor: bg, position: 'relative' }}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
     >
       {/* Search bar */}
       {searchVisible && (
