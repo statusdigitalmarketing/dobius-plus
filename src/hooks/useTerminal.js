@@ -199,9 +199,10 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
   useEffect(() => {
     if (termRef.current && fontSize) {
       termRef.current.options.fontSize = fontSize;
-      try { fitAddonRef.current?.fit(); } catch {}
+      // Re-fit after font change and notify PTY of new dimensions
+      requestAnimationFrame(() => fit());
     }
-  }, [fontSize]);
+  }, [fontSize, fit]);
 
   return { containerRef, termRef, searchAddonRef };
 }

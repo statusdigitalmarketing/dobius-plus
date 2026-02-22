@@ -84,15 +84,18 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
   }, [searchAddonRef, searchQuery]);
 
   const sendCommand = useCallback(() => {
+    if (!window.electronAPI) return;
     const trimmed = input.trim();
-    if (!trimmed || !window.electronAPI) return;
-    // Send text + carriage return (\r = Enter in terminal)
-    window.electronAPI.terminalWrite(id, trimmed + '\r');
-    setHistory((prev) => {
-      const next = prev.filter((cmd) => cmd !== trimmed);
-      next.push(trimmed);
-      return next.slice(-100);
-    });
+    // Always send \r (Enter) to the terminal — even if input is empty,
+    // so interactive prompts (Claude yes/no, etc.) get confirmed
+    window.electronAPI.terminalWrite(id, (trimmed || '') + '\r');
+    if (trimmed) {
+      setHistory((prev) => {
+        const next = prev.filter((cmd) => cmd !== trimmed);
+        next.push(trimmed);
+        return next.slice(-100);
+      });
+    }
     setInput('');
     setHistoryIndex(-1);
   }, [id, input]);

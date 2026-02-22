@@ -585,10 +585,11 @@ app.whenReady().then(() => {
 // Hold-to-quit gate: require two Cmd+Q presses within 1 second
 let quitConfirmed = false;
 let quitTimer = null;
+let savedBeforeQuit = false;
 
 app.on('before-quit', (e) => {
-  if (quitConfirmed) {
-    // Save open project windows for restore on next launch
+  if (quitConfirmed && savedBeforeQuit) {
+    // Phase 3: scrollback saved, now actually quit
     const openProjects = getOpenProjects();
     const config = loadConfig();
     config.lastOpenProjects = openProjects;
@@ -601,18 +602,29 @@ app.on('before-quit', (e) => {
     return;
   }
 
-  e.preventDefault();
+  if (quitConfirmed && !savedBeforeQuit) {
+    // Phase 2: second Cmd+Q confirmed — flush scrollback then quit
+    e.preventDefault();
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) win.webContents.send('terminal:requestSave');
+    });
+    savedBeforeQuit = true;
+    // Give renderers 300ms to flush scrollback via IPC, then quit for real
+    setTimeout(() => app.quit(), 300);
+    return;
+  }
 
-  // Show hold-to-quit overlay in all windows
+  // Phase 1: first Cmd+Q — show overlay
+  e.preventDefault();
   BrowserWindow.getAllWindows().forEach((win) => {
     if (!win.isDestroyed()) win.webContents.send('app:quit-prompt');
   });
 
-  // Allow quit on second press within 1s
   quitConfirmed = true;
   clearTimeout(quitTimer);
   quitTimer = setTimeout(() => {
     quitConfirmed = false;
+    savedBeforeQuit = false;
     BrowserWindow.getAllWindows().forEach((win) => {
       if (!win.isDestroyed()) win.webContents.send('app:quit-cancel');
     });
