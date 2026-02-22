@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { useStore } from '../../store/store';
 import { useTerminal } from '../../hooks/useTerminal';
 import '@xterm/xterm/css/xterm.css';
 
@@ -165,49 +166,39 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     // Text paste falls through to default behavior
   }, []);
 
-  // Use capture-phase native listeners so drops register even when xterm canvas swallows the event
+  // Listen for file drops relayed by App.jsx via custom event
+  useEffect(() => {
+    const handler = (e) => {
+      // Only the active tab handles the drop
+      if (useStore.getState().activeTabId !== id) return;
+      const paths = e.detail?.paths;
+      if (!paths || paths.length === 0) return;
+      const escaped = paths.map((p) => shellEscape(p)).join(' ');
+      setInput((prev) => {
+        const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+        return prev + (needsSpace ? ' ' : '') + escaped;
+      });
+      setHistoryIndex(-1);
+      inputRef.current?.focus();
+    };
+    window.addEventListener('dobius:drop-files', handler);
+    return () => window.removeEventListener('dobius:drop-files', handler);
+  }, [id]);
+
+  // Visual drag overlay via capture-phase listeners on the wrapper
   const wrapperRef = useRef(null);
   useEffect(() => {
     const el = wrapperRef.current;
     if (!el) return;
     let dragCount = 0;
-
-    const onDragEnter = (e) => {
-      e.preventDefault();
-      dragCount++;
-      if (dragCount === 1) setDragOver(true);
-    };
-    const onDragOver = (e) => { e.preventDefault(); };
-    const onDragLeave = (e) => {
-      e.preventDefault();
-      dragCount--;
-      if (dragCount <= 0) { dragCount = 0; setDragOver(false); }
-    };
-    const onDrop = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      dragCount = 0;
-      setDragOver(false);
-
-      const files = e.dataTransfer?.files;
-      if (!files || files.length === 0) return;
-
-      const paths = Array.from(files).map((f) => shellEscape(f.path)).join(' ');
-      setInput((prev) => {
-        const needsSpace = prev.length > 0 && !prev.endsWith(' ');
-        return prev + (needsSpace ? ' ' : '') + paths;
-      });
-      setHistoryIndex(-1);
-      inputRef.current?.focus();
-    };
-
+    const onDragEnter = (e) => { e.preventDefault(); dragCount++; if (dragCount === 1) setDragOver(true); };
+    const onDragLeave = (e) => { e.preventDefault(); dragCount--; if (dragCount <= 0) { dragCount = 0; setDragOver(false); } };
+    const onDrop = () => { dragCount = 0; setDragOver(false); };
     el.addEventListener('dragenter', onDragEnter, true);
-    el.addEventListener('dragover', onDragOver, true);
     el.addEventListener('dragleave', onDragLeave, true);
     el.addEventListener('drop', onDrop, true);
     return () => {
       el.removeEventListener('dragenter', onDragEnter, true);
-      el.removeEventListener('dragover', onDragOver, true);
       el.removeEventListener('dragleave', onDragLeave, true);
       el.removeEventListener('drop', onDrop, true);
     };

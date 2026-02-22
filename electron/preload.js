@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
@@ -124,6 +124,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('menu:close-tab', handler);
     return () => ipcRenderer.removeListener('menu:close-tab', handler);
   },
+
+  // File path from drag-drop (File.path removed in Electron 32+)
+  getPathForFile: (file) => webUtils.getPathForFile(file),
 
   // Save clipboard image to temp file, return path
   saveClipboardImage: (base64Data, mimeType) => ipcRenderer.invoke('terminal:saveClipboardImage', base64Data, mimeType),

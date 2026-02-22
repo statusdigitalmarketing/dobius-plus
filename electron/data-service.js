@@ -255,56 +255,22 @@ export function getActiveProcesses() {
 }
 
 /**
- * List all projects from ~/.claude/projects/
+ * Encode a filesystem path the same way Claude Code does for ~/.claude/projects/ dir names.
+ * Every non-alphanumeric character (except . and -) becomes a dash.
+ */
+function encodePathLikeClaude(p) {
+  return p.replace(/[^a-zA-Z0-9.\-]/g, '-');
+}
+
+/**
+ * List all projects — merges filesystem scan with Claude session data.
+ * Filesystem paths are canonical; Claude session dirs are matched by encoded name.
  */
 export async function listProjects() {
-  const projectMap = new Map(); // decodedPath → project object
+  const projectMap = new Map(); // realPath → project object
+  const encodedToReal = new Map(); // Claude-encoded name → real filesystem path
 
-  // 1. Scan ~/.claude/projects/ for projects with Claude sessions
-  try {
-    if (await pathExists(PROJECTS_DIR)) {
-      const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
-      const dirs = dirents.filter((d) => d.isDirectory());
-
-      await Promise.all(dirs.map(async (d) => {
-        const projectDir = path.join(PROJECTS_DIR, d.name);
-        const decodedPath = '/' + d.name.replace(/-/g, '/');
-
-        let sessionCount = 0;
-        let latestTimestamp = 0;
-        try {
-          const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
-          sessionCount = files.length;
-          const stats = await Promise.all(
-            files.map((f) => fs.stat(path.join(projectDir, f)))
-          );
-          for (const stat of stats) {
-            if (stat.mtimeMs > latestTimestamp) {
-              latestTimestamp = stat.mtimeMs;
-            }
-          }
-        } catch {
-          void 0;
-        }
-
-        if (sessionCount > 0) {
-          const displayName = decodedPath.split('/').filter(Boolean).pop() || d.name;
-          projectMap.set(decodedPath, {
-            encodedPath: d.name,
-            decodedPath,
-            displayName,
-            sessionCount,
-            latestTimestamp,
-            age: latestTimestamp ? timeAgo(latestTimestamp) : 'unknown',
-          });
-        }
-      }));
-    }
-  } catch (err) {
-    console.warn('[data-service] Failed to scan Claude projects:', err.message);
-  }
-
-  // 2. Scan filesystem projectScanDir for all project folders
+  // 1. Scan filesystem projectScanDir FIRST so we have real paths for matching
   try {
     const settings = getSettings();
     let scanDir = settings.projectScanDir;
@@ -315,7 +281,8 @@ export async function listProjects() {
         for (const d of dirents) {
           if (!d.isDirectory() || d.name.startsWith('.')) continue;
           const fullPath = path.join(scanDir, d.name);
-          if (projectMap.has(fullPath)) continue; // already found via Claude sessions
+          const encoded = encodePathLikeClaude(fullPath);
+          encodedToReal.set(encoded, fullPath);
 
           let latestTimestamp = 0;
           try {
@@ -336,6 +303,65 @@ export async function listProjects() {
     }
   } catch (err) {
     console.warn('[data-service] Failed to scan project directory:', err.message);
+  }
+
+  // 2. Scan ~/.claude/projects/ for session counts, merge into filesystem entries
+  try {
+    if (await pathExists(PROJECTS_DIR)) {
+      const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+      const dirs = dirents.filter((d) => d.isDirectory());
+
+      await Promise.all(dirs.map(async (d) => {
+        const projectDir = path.join(PROJECTS_DIR, d.name);
+
+        let sessionCount = 0;
+        let latestTimestamp = 0;
+        try {
+          const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
+          sessionCount = files.length;
+          const stats = await Promise.all(
+            files.map((f) => fs.stat(path.join(projectDir, f)))
+          );
+          for (const stat of stats) {
+            if (stat.mtimeMs > latestTimestamp) {
+              latestTimestamp = stat.mtimeMs;
+            }
+          }
+        } catch {
+          void 0;
+        }
+
+        if (sessionCount === 0) return;
+
+        // Try to resolve the encoded dir name to a real filesystem path
+        const realPath = encodedToReal.get(d.name);
+
+        if (realPath && projectMap.has(realPath)) {
+          // Merge session data into existing filesystem entry
+          const existing = projectMap.get(realPath);
+          existing.encodedPath = d.name;
+          existing.sessionCount = sessionCount;
+          if (latestTimestamp > existing.latestTimestamp) {
+            existing.latestTimestamp = latestTimestamp;
+            existing.age = timeAgo(latestTimestamp);
+          }
+        } else {
+          // Claude session project not in filesystem scan — use encoded name as-is
+          const fallbackPath = realPath || ('/' + d.name.replace(/-/g, '/'));
+          const displayName = d.name.split('-').filter(Boolean).pop() || d.name;
+          projectMap.set(d.name, {
+            encodedPath: d.name,
+            decodedPath: fallbackPath,
+            displayName,
+            sessionCount,
+            latestTimestamp,
+            age: latestTimestamp ? timeAgo(latestTimestamp) : 'unknown',
+          });
+        }
+      }));
+    }
+  } catch (err) {
+    console.warn('[data-service] Failed to scan Claude projects:', err.message);
   }
 
   return Array.from(projectMap.values())
