@@ -9,6 +9,7 @@ import Sessions from './Sessions';
 import Plans from './Plans';
 import BuildMonitorView from './BuildMonitor/BuildMonitorView';
 import GitView from './Git/GitView';
+import Settings from './Settings';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -19,6 +20,7 @@ const TABS = [
   { id: 'plans', label: 'Plans' },
   { id: 'builds', label: 'Builds' },
   { id: 'git', label: 'Git' },
+  { id: 'settings', label: 'Settings' },
 ];
 
 const TAB_CONTENT = {
@@ -30,6 +32,7 @@ const TAB_CONTENT = {
   plans: (props) => <Plans plans={props.plans} />,
   builds: () => <BuildMonitorView />,
   git: () => <GitView />,
+  settings: () => <Settings />,
 };
 
 export default function DashboardView() {

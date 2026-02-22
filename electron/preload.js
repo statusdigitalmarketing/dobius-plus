@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   configSetProject: (projectPath, settings) => ipcRenderer.invoke('config:setProject', projectPath, settings),
   configGetPinned: () => ipcRenderer.invoke('config:getPinned'),
   configSetPinned: (sessionIds) => ipcRenderer.invoke('config:setPinned', sessionIds),
+  configGetSettings: () => ipcRenderer.invoke('config:getSettings'),
+  configUpdateSettings: (updates) => ipcRenderer.invoke('config:updateSettings', updates),
 
   // Window management
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),
@@ -106,6 +108,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('app:quit-cancel', handler);
     return () => ipcRenderer.removeListener('app:quit-cancel', handler);
   },
+
+  // Shell
+  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
 
   // Git
   gitStatus: (projectDir) => ipcRenderer.invoke('git:status', projectDir),

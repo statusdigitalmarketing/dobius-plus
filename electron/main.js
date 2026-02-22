@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, dialog, Notification } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -18,7 +18,7 @@ import { watchFiles, stopWatching } from './watcher-service.js';
 import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-monitor-watcher.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
-  getPinnedSessions, setPinnedSessions, flushConfig,
+  getPinnedSessions, setPinnedSessions, getSettings, updateSettings, flushConfig,
 } from './config-manager.js';
 import {
   openProjectWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
@@ -115,7 +115,9 @@ function setupTerminalHandlers() {
 
   // Save clipboard image data to a temp file, return the file path
   const ALLOWED_IMAGE_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
+  const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
   ipcMain.handle('terminal:saveClipboardImage', (_event, base64Data, mimeType) => {
+    if (!base64Data || base64Data.length > MAX_IMAGE_SIZE * 1.37) return null; // base64 overhead ~37%
     const ext = ALLOWED_IMAGE_TYPES[mimeType] || '.png';
     const timestamp = Date.now();
     const dir = path.join(app.getPath('temp'), 'dobius-clipboard');
@@ -146,6 +148,8 @@ function setupConfigHandlers() {
   ipcMain.handle('config:setProject', (_event, projectPath, settings) => setProjectConfig(projectPath, settings));
   ipcMain.handle('config:getPinned', () => getPinnedSessions());
   ipcMain.handle('config:setPinned', (_event, sessionIds) => setPinnedSessions(sessionIds));
+  ipcMain.handle('config:getSettings', () => getSettings());
+  ipcMain.handle('config:updateSettings', (_event, updates) => updateSettings(updates));
 }
 
 function setupBuildMonitorHandlers() {
@@ -175,6 +179,15 @@ function setupBuildMonitorHandlers() {
   });
   ipcMain.handle('buildMonitor:unwatch', (event, projectDir) => {
     unwatchBuildDir(event.sender, projectDir);
+  });
+}
+
+function setupShellHandlers() {
+  ipcMain.handle('shell:openExternal', (_event, url) => {
+    // Only allow http/https URLs
+    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+      shell.openExternal(url);
+    }
   });
 }
 
@@ -313,11 +326,25 @@ app.whenReady().then(() => {
   setupTerminalHandlers();
   setupDataHandlers();
   setupConfigHandlers();
+  setupShellHandlers();
   setupWindowHandlers();
   setupBuildMonitorHandlers();
   setupGitHandlers();
   setupMenu();
   createWindow();
+
+  // Restore previously open project windows (Chrome-style tab restore)
+  const config = loadConfig();
+  if (Array.isArray(config.lastOpenProjects) && config.lastOpenProjects.length > 0) {
+    // Small delay to let launcher window finish loading first
+    setTimeout(() => {
+      for (const projectPath of config.lastOpenProjects) {
+        if (typeof projectPath === 'string' && projectPath.startsWith('/') && fs.existsSync(projectPath)) {
+          openProjectWindow(projectPath);
+        }
+      }
+    }, 500);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -330,7 +357,11 @@ let quitTimer = null;
 
 app.on('before-quit', (e) => {
   if (quitConfirmed) {
-    // Second press — actually quit
+    // Save open project windows for restore on next launch
+    const openProjects = getOpenProjects();
+    const config = loadConfig();
+    config.lastOpenProjects = openProjects;
+    saveConfig(config);
     flushConfig();
     closeAllProjectWindows();
     killAll();

@@ -13,6 +13,12 @@ const DEFAULT_CONFIG = {
   projects: {},
   pinnedSessions: [],
   launcherBounds: null,
+  settings: {
+    projectScanDir: '',
+    scrollbackLines: 1000,
+    terminalFontSize: 13,
+    sidebarDefaultOpen: false,
+  },
 };
 
 let configCache = null;
@@ -87,6 +93,29 @@ export function setProjectConfig(projectPath, settings) {
   }
   config.projects[projectPath] = { ...existing, ...sanitized };
   saveConfig(config);
+}
+
+/**
+ * Get global settings.
+ */
+export function getSettings() {
+  const config = loadConfig();
+  return { ...DEFAULT_CONFIG.settings, ...config.settings };
+}
+
+/**
+ * Update global settings (merge).
+ */
+export function updateSettings(updates) {
+  if (!updates || typeof updates !== 'object') return;
+  const config = loadConfig();
+  const sanitized = {};
+  for (const [key, value] of Object.entries(updates)) {
+    if (!UNSAFE_KEYS.has(key)) sanitized[key] = value;
+  }
+  config.settings = { ...DEFAULT_CONFIG.settings, ...config.settings, ...sanitized };
+  saveConfig(config);
+  return config.settings;
 }
 
 /**

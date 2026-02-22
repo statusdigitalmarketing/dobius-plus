@@ -41,7 +41,7 @@ export default function QuitOverlay() {
           border: '1px solid rgba(255, 255, 255, 0.1)',
         }}
       >
-        Hold Cmd+Q to quit
+        Press Cmd+Q again to quit
       </div>
     </div>
   );

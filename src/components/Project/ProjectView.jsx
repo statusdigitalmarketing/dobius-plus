@@ -97,7 +97,7 @@ export default function ProjectView({ projectPath }) {
     // Validate sessionId to prevent command injection via terminal
     if (!session.sessionId || !/^[\w-]+$/.test(session.sessionId)) return;
     setActiveView('terminal');
-    const cmd = `claude --resume ${session.sessionId}\n`;
+    const cmd = `claude --resume ${session.sessionId}\r`;
     const termId = projectPath ? `term-${projectPath}` : 'main';
     if (window.electronAPI) {
       window.electronAPI.terminalWrite(termId, cmd);
@@ -106,11 +106,11 @@ export default function ProjectView({ projectPath }) {
 
   const handleCdToProject = useCallback((sessionProject) => {
     // Validate: must be an absolute path, no shell metacharacters except spaces/parens/hyphens
-    if (!sessionProject || !sessionProject.startsWith('/') || /[;&|`$]/.test(sessionProject)) return;
+    if (!sessionProject || !sessionProject.startsWith('/') || /[;&|`$\x00-\x1F\x7F]/.test(sessionProject)) return;
     setActiveView('terminal');
     // Use single quotes to safely handle spaces and parentheses in paths
     const safePath = sessionProject.replace(/'/g, "'\\''");
-    const cmd = `cd '${safePath}'\n`;
+    const cmd = `cd '${safePath}'\r`;
     const termId = projectPath ? `term-${projectPath}` : 'main';
     if (window.electronAPI) {
       window.electronAPI.terminalWrite(termId, cmd);
@@ -136,7 +136,7 @@ export default function ProjectView({ projectPath }) {
         e.preventDefault();
         const termId = projectPath ? `term-${projectPath}` : 'main';
         if (window.electronAPI) {
-          window.electronAPI.terminalWrite(termId, 'clear\n');
+          window.electronAPI.terminalWrite(termId, 'clear\r');
         }
       }
     };

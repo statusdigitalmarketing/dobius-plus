@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { SearchAddon } from '@xterm/addon-search';
 
 const DEFAULT_THEME = {
   background: '#0D1117',
@@ -33,21 +34,20 @@ const MAX_SCROLLBACK_LINES = 1000;
 /**
  * Extract scrollback text from xterm.js buffer.
  * @param {Terminal} term
+ * @param {number} maxLines
  * @returns {{ scrollback: string[], cols: number, rows: number }}
  */
-function getScrollback(term) {
+function getScrollback(term, maxLines = MAX_SCROLLBACK_LINES) {
   const buffer = term.buffer.active;
   const lines = [];
   const totalRows = buffer.length;
-  // Start from beginning, cap at MAX_SCROLLBACK_LINES
-  const start = Math.max(0, totalRows - MAX_SCROLLBACK_LINES);
+  const start = Math.max(0, totalRows - maxLines);
   for (let i = start; i < totalRows; i++) {
     const line = buffer.getLine(i);
     if (line) {
       lines.push(line.translateToString(true));
     }
   }
-  // Trim trailing empty lines
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
     lines.pop();
   }
@@ -60,12 +60,13 @@ function getScrollback(term) {
  * @param {string} options.id — unique terminal ID
  * @param {string} options.cwd — working directory for the pty
  * @param {Object} [options.theme] — xterm theme object
- * @returns {{ containerRef: React.RefObject, termRef: React.RefObject }}
+ * @returns {{ containerRef: React.RefObject, termRef: React.RefObject, searchAddonRef: React.RefObject }}
  */
-export function useTerminal({ id, cwd, theme }) {
+export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines = MAX_SCROLLBACK_LINES }) {
   const containerRef = useRef(null);
   const termRef = useRef(null);
   const fitAddonRef = useRef(null);
+  const searchAddonRef = useRef(null);
 
   const fit = useCallback(() => {
     if (fitAddonRef.current && termRef.current && containerRef.current) {
@@ -81,24 +82,22 @@ export function useTerminal({ id, cwd, theme }) {
     }
   }, [id]);
 
-  // Save current scrollback state to config
   const saveState = useCallback(() => {
     if (!termRef.current || !window.electronAPI?.terminalSaveState) return;
-    const state = getScrollback(termRef.current);
+    const state = getScrollback(termRef.current, maxScrollbackLines);
     if (state.scrollback.length > 0) {
       state.savedAt = Date.now();
       window.electronAPI.terminalSaveState(id, state);
     }
-  }, [id]);
+  }, [id, maxScrollbackLines]);
 
-  // Main effect: create terminal + pty (only depends on id and cwd)
   useEffect(() => {
     if (!containerRef.current || !window.electronAPI) return;
 
     const term = new Terminal({
       theme: theme || DEFAULT_THEME,
       fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
-      fontSize: 13,
+      fontSize,
       lineHeight: 1.2,
       cursorBlink: true,
       cursorStyle: 'bar',
@@ -107,17 +106,23 @@ export function useTerminal({ id, cwd, theme }) {
     });
 
     const fitAddon = new FitAddon();
-    const webLinksAddon = new WebLinksAddon();
+    const webLinksAddon = new WebLinksAddon((_event, url) => {
+      if (window.electronAPI?.openExternal) {
+        window.electronAPI.openExternal(url);
+      }
+    });
+    const searchAddon = new SearchAddon();
 
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
+    term.loadAddon(searchAddon);
 
     termRef.current = term;
     fitAddonRef.current = fitAddon;
+    searchAddonRef.current = searchAddon;
 
     term.open(containerRef.current);
 
-    // Initial fit after a brief delay to allow layout
     requestAnimationFrame(() => {
       fit();
     });
@@ -127,48 +132,38 @@ export function useTerminal({ id, cwd, theme }) {
     if (window.electronAPI.terminalLoadState) {
       restorePromise = window.electronAPI.terminalLoadState(id).then((state) => {
         if (state?.scrollback?.length > 0 && termRef.current) {
-          // Write previous session lines as dim text
           for (const line of state.scrollback) {
             termRef.current.write(`\x1b[2m${line}\x1b[0m\r\n`);
           }
-          // Separator
           termRef.current.write('\x1b[2m\x1b[38;5;240m── previous session ──\x1b[0m\r\n\r\n');
         }
-      }).catch(() => {
-        // Ignore restore errors
-      });
+      }).catch(() => {});
     }
 
-    // Forward user input to pty
     const inputDisposable = term.onData((data) => {
       window.electronAPI.terminalWrite(id, data);
     });
 
-    // Receive data from pty
     const removeDataListener = window.electronAPI.onTerminalData((termId, data) => {
       if (termId === id && termRef.current) {
         termRef.current.write(data);
       }
     });
 
-    // Handle terminal exit
     const removeExitListener = window.electronAPI.onTerminalExit((termId, exitCode) => {
       if (termId === id && termRef.current) {
         termRef.current.write(`\r\n[Process exited with code ${exitCode}]\r\n`);
       }
     });
 
-    // Create pty after restore completes
     restorePromise.then(() => {
       window.electronAPI.terminalCreate(id, cwd);
     });
 
-    // Listen for save requests from main process (window close)
     const removeRequestSave = window.electronAPI.onTerminalRequestSave?.(() => {
       saveState();
     });
 
-    // ResizeObserver for auto-fitting
     let resizeTimer;
     const observer = new ResizeObserver(() => {
       clearTimeout(resizeTimer);
@@ -179,7 +174,6 @@ export function useTerminal({ id, cwd, theme }) {
     return () => {
       clearTimeout(resizeTimer);
       observer.disconnect();
-      // Save state before cleanup
       saveState();
       inputDisposable.dispose();
       removeDataListener();
@@ -189,6 +183,7 @@ export function useTerminal({ id, cwd, theme }) {
       term.dispose();
       termRef.current = null;
       fitAddonRef.current = null;
+      searchAddonRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, cwd, fit, saveState]);
@@ -200,5 +195,13 @@ export function useTerminal({ id, cwd, theme }) {
     }
   }, [theme]);
 
-  return { containerRef, termRef };
+  // Separate effect: update font size without recreating terminal
+  useEffect(() => {
+    if (termRef.current && fontSize) {
+      termRef.current.options.fontSize = fontSize;
+      try { fitAddonRef.current?.fit(); } catch {}
+    }
+  }, [fontSize]);
+
+  return { containerRef, termRef, searchAddonRef };
 }

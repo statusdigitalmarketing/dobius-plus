@@ -4,7 +4,7 @@ import { THEMES, applyTheme } from '../lib/themes';
 export const useStore = create((set) => ({
   // View state
   activeView: 'terminal', // 'terminal' | 'dashboard'
-  sidebarVisible: true,
+  sidebarVisible: false,
   gitPanelVisible: false,
   dashboardTab: 'overview',
 

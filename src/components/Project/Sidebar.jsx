@@ -10,15 +10,14 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
   const [previewSession, setPreviewSession] = useState(null);
   const [searchFocused, setSearchFocused] = useState(false);
 
-  const handleSelect = (session) => {
-    setSelectedId(session.sessionId);
-    if (session.project) {
-      onCdToProject?.(session.project);
+  const handleClick = (session, e) => {
+    if (e.detail === 2) {
+      // Double-click → resume session
+      onResumeSession?.(session);
+    } else {
+      // Single click → just select
+      setSelectedId(session.sessionId);
     }
-  };
-
-  const handleDoubleClick = (session) => {
-    setPreviewSession(session);
   };
 
   const handleResume = () => {
@@ -42,8 +41,24 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
 
   return (
     <div className="h-full flex flex-col">
+      {/* Header + hint */}
+      <div className="px-3 pt-3 pb-1 shrink-0 flex items-center justify-between">
+        <span
+          className="text-xs font-semibold uppercase tracking-wider"
+          style={{ color: 'var(--fg)', fontSize: '11px', letterSpacing: '0.1em' }}
+        >
+          Sessions
+        </span>
+        <span
+          className="text-xs italic"
+          style={{ color: 'var(--dim)', fontSize: '10px' }}
+        >
+          double-click to resume
+        </span>
+      </div>
+
       {/* Search */}
-      <div className="p-2 shrink-0">
+      <div className="p-2 pt-1 shrink-0">
         <div className="relative">
           <svg
             className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3"
@@ -104,13 +119,12 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       transition={{ delay: i * 0.03 }}
-                      onDoubleClick={() => handleDoubleClick(session)}
                     >
                       <ConversationCard
                         session={session}
                         selected={selectedId === session.sessionId}
                         pinned
-                        onSelect={() => handleSelect(session)}
+                        onSelect={(e) => handleClick(session, e)}
                         onTogglePin={() => onTogglePin?.(session.sessionId)}
                       />
                     </motion.div>
@@ -134,13 +148,12 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   transition={{ delay: i * 0.03 }}
-                  onDoubleClick={() => handleDoubleClick(session)}
                 >
                   <ConversationCard
                     session={session}
                     selected={selectedId === session.sessionId}
                     pinned={false}
-                    onSelect={() => handleSelect(session)}
+                    onSelect={(e) => handleClick(session, e)}
                     onTogglePin={() => onTogglePin?.(session.sessionId)}
                   />
                 </motion.div>

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { useTerminal } from '../../hooks/useTerminal';
 import '@xterm/xterm/css/xterm.css';
 
@@ -12,17 +12,82 @@ function shellEscape(filePath) {
  * @param {{ id: string, cwd: string, theme?: object, className?: string }} props
  */
 export default function TerminalPane({ id, cwd, theme, className = '' }) {
-  const { containerRef } = useTerminal({ id, cwd, theme });
+  const [termFontSize, setTermFontSize] = useState(13);
+  const [scrollbackLines, setScrollbackLines] = useState(1000);
+
+  // Load terminal settings from config
+  useEffect(() => {
+    window.electronAPI?.configGetSettings?.().then((s) => {
+      if (s?.terminalFontSize) setTermFontSize(s.terminalFontSize);
+      if (s?.scrollbackLines) setScrollbackLines(s.scrollbackLines);
+    });
+  }, []);
+
+  const { containerRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, maxScrollbackLines: scrollbackLines });
   const [input, setInput] = useState('');
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [dragOver, setDragOver] = useState(false);
+  const [searchVisible, setSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const inputRef = useRef(null);
+  const searchInputRef = useRef(null);
+
+  // Auto-focus the command input on mount
+  useEffect(() => {
+    setTimeout(() => inputRef.current?.focus(), 100);
+  }, []);
+
+  // Cmd+F to toggle search
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+        e.preventDefault();
+        setSearchVisible((v) => {
+          if (!v) {
+            setTimeout(() => searchInputRef.current?.focus(), 50);
+          } else {
+            searchAddonRef.current?.clearDecorations?.();
+            inputRef.current?.focus();
+          }
+          return !v;
+        });
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [searchAddonRef]);
+
+  const handleSearch = useCallback((query) => {
+    setSearchQuery(query);
+    if (!searchAddonRef.current) return;
+    if (!query) {
+      searchAddonRef.current.clearDecorations?.();
+      return;
+    }
+    searchAddonRef.current.findNext(query, { regex: false, caseSensitive: false, incremental: true });
+  }, [searchAddonRef]);
+
+  const handleSearchKeyDown = useCallback((e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        searchAddonRef.current?.findPrevious?.(searchQuery, { regex: false, caseSensitive: false });
+      } else {
+        searchAddonRef.current?.findNext?.(searchQuery, { regex: false, caseSensitive: false });
+      }
+    } else if (e.key === 'Escape') {
+      setSearchVisible(false);
+      searchAddonRef.current?.clearDecorations?.();
+      inputRef.current?.focus();
+    }
+  }, [searchAddonRef, searchQuery]);
 
   const sendCommand = useCallback(() => {
     const trimmed = input.trim();
     if (!trimmed || !window.electronAPI) return;
-    window.electronAPI.terminalWrite(id, trimmed + '\n');
+    // Send text + carriage return (\r = Enter in terminal)
+    window.electronAPI.terminalWrite(id, trimmed + '\r');
     setHistory((prev) => {
       const next = prev.filter((cmd) => cmd !== trimmed);
       next.push(trimmed);
@@ -113,6 +178,32 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     inputRef.current?.focus();
   }, []);
 
+  // Click terminal area → focus command input, but only on simple clicks
+  // (not when user is selecting text for copy/paste)
+  const mouseDownPos = useRef(null);
+  const handleTerminalMouseDown = useCallback((e) => {
+    mouseDownPos.current = { x: e.clientX, y: e.clientY };
+  }, []);
+  const handleTerminalMouseUp = useCallback((e) => {
+    if (!mouseDownPos.current) return;
+    const dx = Math.abs(e.clientX - mouseDownPos.current.x);
+    const dy = Math.abs(e.clientY - mouseDownPos.current.y);
+    // Only focus input if it was a simple click (no drag/selection)
+    if (dx < 5 && dy < 5 && !window.getSelection()?.toString()) {
+      inputRef.current?.focus();
+    }
+    mouseDownPos.current = null;
+  }, []);
+
+  // Auto-resize textarea to fit content
+  const handleInputChange = useCallback((e) => {
+    setInput(e.target.value);
+    setHistoryIndex(-1);
+    // Auto-resize
+    e.target.style.height = 'auto';
+    e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+  }, []);
+
   const bg = theme?.background || '#0D1117';
   const fg = theme?.foreground || '#E6EDF3';
   const border = theme?.brightBlack || '#484F58';
@@ -125,6 +216,48 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      {/* Search bar */}
+      {searchVisible && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '4px 8px',
+            borderBottom: `1px solid ${border}`,
+            backgroundColor: bg,
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={border} strokeWidth="2">
+            <circle cx="11" cy="11" r="8" />
+            <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
+          </svg>
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            onChange={(e) => handleSearch(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="Search terminal... (Enter next, Shift+Enter prev, Esc close)"
+            spellCheck={false}
+            style={{
+              flex: 1,
+              backgroundColor: 'transparent',
+              color: fg,
+              border: 'none',
+              outline: 'none',
+              fontFamily: "'SF Mono', monospace",
+              fontSize: 12,
+            }}
+          />
+          <button
+            onClick={() => { setSearchVisible(false); searchAddonRef.current?.clearDecorations?.(); inputRef.current?.focus(); }}
+            style={{ color: border, fontSize: 14, background: 'none', border: 'none', cursor: 'pointer', lineHeight: 1 }}
+          >
+            x
+          </button>
+        </div>
+      )}
       {dragOver && (
         <div
           style={{
@@ -147,29 +280,31 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
         ref={containerRef}
         className="flex-1 min-h-0"
         style={{ padding: '4px 0 0 4px' }}
+        onMouseDown={handleTerminalMouseDown}
+        onMouseUp={handleTerminalMouseUp}
       />
       <div
         style={{
           display: 'flex',
-          alignItems: 'center',
+          alignItems: 'flex-end',
           gap: 8,
           padding: '6px 8px',
           borderTop: `1px solid ${border}`,
           backgroundColor: bg,
         }}
       >
-        <span style={{ color: border, fontSize: 13, fontFamily: "'SF Mono', monospace", userSelect: 'none' }}>$</span>
-        <input
+        <span style={{ color: border, fontSize: 13, fontFamily: "'SF Mono', monospace", userSelect: 'none', paddingBottom: 2 }}>$</span>
+        <textarea
           ref={inputRef}
-          type="text"
           value={input}
-          onChange={(e) => { setInput(e.target.value); setHistoryIndex(-1); }}
+          onChange={handleInputChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder="Type command... (Enter to send, Esc to focus terminal)"
           spellCheck={false}
           autoComplete="off"
           autoCorrect="off"
+          rows={1}
           style={{
             flex: 1,
             backgroundColor: 'transparent',
@@ -179,6 +314,9 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
             fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
             fontSize: 13,
             lineHeight: 1.4,
+            resize: 'none',
+            overflow: 'hidden',
+            maxHeight: 120,
           }}
         />
         <button
@@ -195,6 +333,7 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
             cursor: input.trim() ? 'pointer' : 'default',
             opacity: input.trim() ? 1 : 0.4,
             transition: 'all 150ms',
+            marginBottom: 1,
           }}
         >
           Run
