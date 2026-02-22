@@ -3,8 +3,11 @@ import { useStore } from '../../store/store';
 export default function StatusBar() {
   const sessions = useStore((s) => s.sessions);
   const activeProcesses = useStore((s) => s.activeProcesses);
+  const tabs = useStore((s) => s.terminalTabs);
+  const activeTabId = useStore((s) => s.activeTabId);
 
   const hasActive = activeProcesses.length > 0;
+  const activeTab = tabs.find((t) => t.id === activeTabId);
 
   return (
     <div
@@ -25,8 +28,14 @@ export default function StatusBar() {
           />
           {hasActive ? `${activeProcesses.length} active` : 'idle'}
         </span>
+        {tabs.length > 0 && (
+          <span>
+            {tabs.length} tab{tabs.length !== 1 ? 's' : ''}
+            {activeTab ? ` \u00B7 ${activeTab.label}` : ''}
+          </span>
+        )}
       </div>
-      <span>v1.0</span>
+      <span>v2.0</span>
     </div>
   );
 }

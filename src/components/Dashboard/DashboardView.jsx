@@ -9,6 +9,9 @@ import Sessions from './Sessions';
 import Plans from './Plans';
 import BuildMonitorView from './BuildMonitor/BuildMonitorView';
 import GitView from './Git/GitView';
+import Checkpoints from './Checkpoints';
+import Agents from './Agents';
+import ClaudeMdEditor from './ClaudeMdEditor';
 import Settings from './Settings';
 
 const TABS = [
@@ -17,9 +20,12 @@ const TABS = [
   { id: 'skills', label: 'Skills' },
   { id: 'stats', label: 'Stats' },
   { id: 'sessions', label: 'Sessions' },
+  { id: 'checkpoints', label: 'Checkpoints' },
   { id: 'plans', label: 'Plans' },
+  { id: 'agents', label: 'Agents' },
   { id: 'builds', label: 'Builds' },
   { id: 'git', label: 'Git' },
+  { id: 'claudemd', label: 'CLAUDE.md' },
   { id: 'settings', label: 'Settings' },
 ];
 
@@ -29,9 +35,12 @@ const TAB_CONTENT = {
   skills: (props) => <Skills skills={props.skills} />,
   stats: (props) => <Stats stats={props.stats} />,
   sessions: () => <Sessions />,
+  checkpoints: () => <Checkpoints />,
+  agents: () => <Agents />,
   plans: (props) => <Plans plans={props.plans} />,
   builds: () => <BuildMonitorView />,
   git: () => <GitView />,
+  claudemd: () => <ClaudeMdEditor />,
   settings: () => <Settings />,
 };
 

@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll } from './terminal-manager.js';
 import {
@@ -98,19 +99,48 @@ function setupTerminalHandlers() {
     killTerminal(id);
   });
 
-  // Terminal state persistence — save/load scrollback per project
+  // Terminal state persistence — save/load scrollback per tab
   ipcMain.handle('terminal:saveState', (_event, id, state) => {
-    // Extract project path from terminal ID (format: "term-/path/to/project")
-    const projectPath = id.startsWith('term-') ? id.slice(5) : null;
+    // Tab ID format: "term-/path/to/project-N" — extract project path
+    const match = id.match(/^term-(.+)-\d+$/);
+    const projectPath = match ? match[1] : (id.startsWith('term-') ? id.slice(5) : null);
     if (!projectPath) return;
-    setProjectConfig(projectPath, { terminalState: state });
+    const config = getProjectConfig(projectPath);
+    const terminalStates = config?.terminalStates || {};
+    terminalStates[id] = state;
+    setProjectConfig(projectPath, { terminalStates });
   });
 
   ipcMain.handle('terminal:loadState', (_event, id) => {
-    const projectPath = id.startsWith('term-') ? id.slice(5) : null;
+    // Tab ID format: "term-/path/to/project-N" — extract project path
+    const match = id.match(/^term-(.+)-\d+$/);
+    const projectPath = match ? match[1] : (id.startsWith('term-') ? id.slice(5) : null);
     if (!projectPath) return null;
     const config = getProjectConfig(projectPath);
-    return config?.terminalState || null;
+    // Migration: check for old single terminalState
+    if (config?.terminalStates?.[id]) {
+      return config.terminalStates[id];
+    }
+    // Fallback: old single-state format for backward compat
+    if (config?.terminalState && !config.terminalStates) {
+      return config.terminalState;
+    }
+    return null;
+  });
+
+  // Save/load tab metadata per project
+  ipcMain.handle('terminal:saveTabs', (_event, projectPath, tabs, counter) => {
+    if (!projectPath) return;
+    setProjectConfig(projectPath, { tabs, tabCounter: counter });
+  });
+
+  ipcMain.handle('terminal:loadTabs', (_event, projectPath) => {
+    if (!projectPath) return null;
+    const config = getProjectConfig(projectPath);
+    if (config?.tabs?.length > 0) {
+      return { tabs: config.tabs, tabCounter: config.tabCounter || 0 };
+    }
+    return null;
   });
 
   // Save clipboard image data to a temp file, return the file path
@@ -139,6 +169,188 @@ function setupDataHandlers() {
   ipcMain.handle('data:loadTranscript', (_event, sessionId, projectPath) => loadTranscript(sessionId, projectPath));
   ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
   ipcMain.handle('data:listProjects', () => listProjects());
+}
+
+function setupCheckpointHandlers() {
+  ipcMain.handle('checkpoint:save', (_event, projectPath, checkpoint) => {
+    if (!projectPath || !checkpoint) return null;
+    const config = getProjectConfig(projectPath);
+    const checkpoints = Array.isArray(config?.checkpoints) ? config.checkpoints : [];
+    const id = `cp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const entry = {
+      id,
+      label: checkpoint.label || `Checkpoint ${checkpoints.length + 1}`,
+      timestamp: Date.now(),
+      terminalId: checkpoint.terminalId || null,
+      scrollback: Array.isArray(checkpoint.scrollback) ? checkpoint.scrollback.slice(-2000) : [],
+      cols: checkpoint.cols || 80,
+      rows: checkpoint.rows || 24,
+    };
+    checkpoints.push(entry);
+    setProjectConfig(projectPath, { checkpoints });
+    return entry;
+  });
+
+  ipcMain.handle('checkpoint:list', (_event, projectPath) => {
+    if (!projectPath) return [];
+    const config = getProjectConfig(projectPath);
+    return Array.isArray(config?.checkpoints) ? config.checkpoints : [];
+  });
+
+  ipcMain.handle('checkpoint:delete', (_event, projectPath, checkpointId) => {
+    if (!projectPath || !checkpointId) return;
+    const config = getProjectConfig(projectPath);
+    const checkpoints = Array.isArray(config?.checkpoints) ? config.checkpoints : [];
+    setProjectConfig(projectPath, { checkpoints: checkpoints.filter((c) => c.id !== checkpointId) });
+  });
+
+  ipcMain.handle('checkpoint:rename', (_event, projectPath, checkpointId, newLabel) => {
+    if (!projectPath || !checkpointId || !newLabel) return;
+    const config = getProjectConfig(projectPath);
+    const checkpoints = Array.isArray(config?.checkpoints) ? config.checkpoints : [];
+    const cp = checkpoints.find((c) => c.id === checkpointId);
+    if (cp) {
+      cp.label = String(newLabel).slice(0, 100);
+      setProjectConfig(projectPath, { checkpoints });
+    }
+  });
+}
+
+const BUILTIN_AGENTS = [
+  {
+    id: 'builtin-code-reviewer',
+    name: 'Code Reviewer',
+    description: 'Reviews code for bugs, security issues, and best practices',
+    systemPrompt: 'You are a senior code reviewer. Analyze the code for bugs, logic errors, security vulnerabilities, code quality issues, and adherence to best practices. Be specific about line numbers and provide concrete fix suggestions. Focus on high-priority issues first.',
+    builtIn: true,
+  },
+  {
+    id: 'builtin-bug-hunter',
+    name: 'Bug Hunter',
+    description: 'Finds and diagnoses bugs through systematic investigation',
+    systemPrompt: 'You are a bug hunter. Systematically investigate the codebase to find bugs, race conditions, edge cases, and error handling gaps. For each bug found, explain the root cause, impact, and provide a fix. Start by understanding the code flow, then probe for issues.',
+    builtIn: true,
+  },
+  {
+    id: 'builtin-refactor',
+    name: 'Refactor Assistant',
+    description: 'Suggests and implements clean refactoring opportunities',
+    systemPrompt: 'You are a refactoring expert. Identify code that would benefit from refactoring — duplicated logic, long functions, poor naming, missing abstractions, complex conditionals. Suggest specific refactoring patterns (extract method, compose, strategy, etc.) and implement the changes. Keep behavior identical.',
+    builtIn: true,
+  },
+  {
+    id: 'builtin-test-writer',
+    name: 'Test Writer',
+    description: 'Generates comprehensive tests for your code',
+    systemPrompt: 'You are a test writing specialist. Generate comprehensive tests covering happy paths, edge cases, error scenarios, and boundary conditions. Match the testing framework already in use. Focus on testing behavior, not implementation details. Aim for high coverage of critical paths.',
+    builtIn: true,
+  },
+];
+
+function setupAgentHandlers() {
+  ipcMain.handle('agents:getBuiltins', () => BUILTIN_AGENTS);
+
+  ipcMain.handle('agents:list', () => {
+    const settings = getSettings();
+    const custom = Array.isArray(settings.agents) ? settings.agents : [];
+    return [...BUILTIN_AGENTS, ...custom];
+  });
+
+  ipcMain.handle('agents:save', (_event, agent) => {
+    if (!agent || !agent.name || !agent.systemPrompt) return null;
+    const settings = getSettings();
+    const agents = Array.isArray(settings.agents) ? [...settings.agents] : [];
+    const id = agent.id || `agent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const entry = {
+      id,
+      name: String(agent.name).slice(0, 100),
+      description: String(agent.description || '').slice(0, 500),
+      systemPrompt: String(agent.systemPrompt).slice(0, 10000),
+      model: agent.model || null,
+      builtIn: false,
+    };
+    const idx = agents.findIndex((a) => a.id === id);
+    if (idx >= 0) {
+      agents[idx] = entry;
+    } else {
+      agents.push(entry);
+    }
+    updateSettings({ agents });
+    return entry;
+  });
+
+  ipcMain.handle('agents:delete', (_event, agentId) => {
+    if (!agentId) return;
+    const settings = getSettings();
+    const agents = Array.isArray(settings.agents) ? settings.agents : [];
+    updateSettings({ agents: agents.filter((a) => a.id !== agentId) });
+  });
+
+  ipcMain.handle('agents:writeTempPrompt', (_event, text) => {
+    if (!text || typeof text !== 'string') return null;
+    const dir = path.join(app.getPath('temp'), 'dobius-agents');
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `agent-${Date.now()}.txt`);
+    fs.writeFileSync(filePath, text.slice(0, 10000), 'utf8');
+    return filePath;
+  });
+}
+
+function setupFileHandlers() {
+  const MAX_FILE_SIZE = 1024 * 1024; // 1MB
+  const ALLOWED_FILENAME = 'CLAUDE.md';
+  const homedir = os.homedir();
+
+  function isAllowedPath(filePath) {
+    if (!filePath || typeof filePath !== 'string') return false;
+    return path.basename(filePath) === ALLOWED_FILENAME;
+  }
+
+  ipcMain.handle('file:read', (_event, filePath) => {
+    if (!isAllowedPath(filePath)) return { error: 'Only CLAUDE.md files can be read' };
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.size > MAX_FILE_SIZE) return { error: 'File too large (>1MB)' };
+      return { content: fs.readFileSync(filePath, 'utf8') };
+    } catch {
+      return { error: 'File not found' };
+    }
+  });
+
+  ipcMain.handle('file:write', (_event, filePath, content) => {
+    if (!isAllowedPath(filePath)) return { error: 'Only CLAUDE.md files can be written' };
+    if (typeof content !== 'string' || content.length > MAX_FILE_SIZE) return { error: 'Content too large (>1MB)' };
+    try {
+      const dir = path.dirname(filePath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(filePath, content, 'utf8');
+      return { ok: true };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  ipcMain.handle('file:listClaudeMd', (_event, projectPath) => {
+    const files = [];
+    const candidates = [
+      projectPath ? path.join(projectPath, 'CLAUDE.md') : null,
+      projectPath ? path.join(projectPath, '.claude', 'CLAUDE.md') : null,
+      path.join(homedir, '.claude', 'CLAUDE.md'),
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      try {
+        if (fs.existsSync(candidate)) {
+          files.push({ path: candidate, exists: true });
+        } else {
+          files.push({ path: candidate, exists: false });
+        }
+      } catch {
+        files.push({ path: candidate, exists: false });
+      }
+    }
+    return files;
+  });
 }
 
 function setupConfigHandlers() {
@@ -254,6 +466,17 @@ function setupMenu() {
           },
         },
         { type: 'separator' },
+        {
+          label: 'New Tab',
+          accelerator: 'CmdOrCtrl+T',
+          click: () => sendToFocused('menu:new-tab'),
+        },
+        {
+          label: 'Close Tab',
+          accelerator: 'CmdOrCtrl+W',
+          click: () => sendToFocused('menu:close-tab'),
+        },
+        { type: 'separator' },
         { role: 'close' },
       ],
     },
@@ -274,7 +497,7 @@ function setupMenu() {
       submenu: [
         {
           label: 'Toggle Terminal / Dashboard',
-          accelerator: 'CmdOrCtrl+T',
+          accelerator: 'CmdOrCtrl+Shift+T',
           click: () => sendToFocused('menu:toggle-view'),
         },
         { type: 'separator' },
@@ -326,6 +549,9 @@ app.whenReady().then(() => {
   setupTerminalHandlers();
   setupDataHandlers();
   setupConfigHandlers();
+  setupCheckpointHandlers();
+  setupAgentHandlers();
+  setupFileHandlers();
   setupShellHandlers();
   setupWindowHandlers();
   setupBuildMonitorHandlers();

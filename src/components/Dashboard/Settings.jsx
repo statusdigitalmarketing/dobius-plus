@@ -195,11 +195,17 @@ export default function Settings() {
       {/* Keyboard Shortcuts */}
       <Section title="Keyboard Shortcuts">
         <div className="space-y-1.5">
-          <ShortcutRow keys="Cmd+T" action="Toggle Terminal / Dashboard" />
+          <ShortcutRow keys="Cmd+T" action="New Tab" />
+          <ShortcutRow keys="Cmd+W" action="Close Tab" />
+          <ShortcutRow keys="Cmd+1-9" action="Switch to Tab N" />
+          <ShortcutRow keys="Cmd+Shift+[" action="Previous Tab" />
+          <ShortcutRow keys="Cmd+Shift+]" action="Next Tab" />
+          <ShortcutRow keys="Cmd+Shift+T" action="Toggle Terminal / Dashboard" />
           <ShortcutRow keys="Cmd+B" action="Toggle Sidebar" />
           <ShortcutRow keys="Cmd+G" action="Toggle Git Panel" />
           <ShortcutRow keys="Cmd+K" action="Clear Terminal" />
           <ShortcutRow keys="Cmd+F" action="Search Terminal" />
+          <ShortcutRow keys="Cmd+S" action="Save (CLAUDE.md editor)" />
           <ShortcutRow keys="Cmd+Q x2" action="Quit (press twice)" />
           <ShortcutRow keys="Esc" action="Focus Terminal (from input)" />
           <ShortcutRow keys="Enter" action="Send Command (from input)" />

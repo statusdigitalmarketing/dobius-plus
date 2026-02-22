@@ -4,6 +4,7 @@ import { THEMES, applyTheme } from '../../lib/themes';
 import TopBar from '../shared/TopBar';
 import StatusBar from '../shared/StatusBar';
 import TerminalPane from './TerminalPane';
+import TerminalTabBar from './TerminalTabBar';
 import Sidebar from './Sidebar';
 import DashboardView from '../Dashboard/DashboardView';
 import GitSidePanel from '../shared/GitSidePanel';
@@ -22,7 +23,16 @@ export default function ProjectView({ projectPath }) {
   const setSessions = useStore((s) => s.setSessions);
   const setActiveProcesses = useStore((s) => s.setActiveProcesses);
 
+  // Tab state
+  const tabs = useStore((s) => s.terminalTabs);
+  const activeTabId = useStore((s) => s.activeTabId);
+  const addTab = useStore((s) => s.addTab);
+  const removeTab = useStore((s) => s.removeTab);
+  const setActiveTab = useStore((s) => s.setActiveTab);
+  const initTabs = useStore((s) => s.initTabs);
+
   const [pinnedIds, setPinnedIds] = useState([]);
+  const [tabsInitialized, setTabsInitialized] = useState(false);
 
   // Extract project name from path
   const projectName = projectPath
@@ -39,7 +49,7 @@ export default function ProjectView({ projectPath }) {
     applyTheme(theme);
   }, [theme]);
 
-  // Load config on mount (pinned sessions + theme)
+  // Load config on mount (pinned sessions + theme + tabs)
   useEffect(() => {
     if (!window.electronAPI?.configGetPinned) return;
     window.electronAPI.configGetPinned().then(setPinnedIds);
@@ -48,15 +58,37 @@ export default function ProjectView({ projectPath }) {
         if (config && typeof config.themeIndex === 'number') {
           setThemeIndex(config.themeIndex);
         }
+        // Restore saved tabs
+        if (config?.tabs?.length > 0 && config.tabCounter > 0) {
+          initTabs(config.tabs, config.tabCounter);
+        } else {
+          // First open: create initial tab
+          addTab(projectPath);
+        }
+        setTabsInitialized(true);
       });
+    } else {
+      // No project path (launcher) — create a default tab
+      if (tabs.length === 0) {
+        addTab(null);
+      }
+      setTabsInitialized(true);
     }
-  }, [projectPath, setThemeIndex]);
+  }, [projectPath, setThemeIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Save theme to config when it changes
   useEffect(() => {
     if (!window.electronAPI?.configSetProject || !projectPath) return;
     window.electronAPI.configSetProject(projectPath, { themeIndex });
   }, [themeIndex, projectPath]);
+
+  // Save tabs to config whenever they change
+  useEffect(() => {
+    if (!tabsInitialized || !projectPath || !window.electronAPI?.terminalSaveTabs) return;
+    if (tabs.length > 0) {
+      window.electronAPI.terminalSaveTabs(projectPath, tabs, useStore.getState().tabCounter);
+    }
+  }, [tabs, tabsInitialized, projectPath]);
 
   // Load initial data
   useEffect(() => {
@@ -85,7 +117,6 @@ export default function ProjectView({ projectPath }) {
       const next = prev.includes(sessionId)
         ? prev.filter((id) => id !== sessionId)
         : [...prev, sessionId];
-      // Persist to config
       if (window.electronAPI?.configSetPinned) {
         window.electronAPI.configSetPinned(next);
       }
@@ -94,28 +125,25 @@ export default function ProjectView({ projectPath }) {
   }, []);
 
   const handleResumeSession = useCallback((session) => {
-    // Validate sessionId to prevent command injection via terminal
     if (!session.sessionId || !/^[\w-]+$/.test(session.sessionId)) return;
     setActiveView('terminal');
     const cmd = `claude --resume ${session.sessionId}\r`;
-    const termId = projectPath ? `term-${projectPath}` : 'main';
-    if (window.electronAPI) {
+    const termId = useStore.getState().activeTabId;
+    if (window.electronAPI && termId) {
       window.electronAPI.terminalWrite(termId, cmd);
     }
-  }, [projectPath, setActiveView]);
+  }, [setActiveView]);
 
   const handleCdToProject = useCallback((sessionProject) => {
-    // Validate: must be an absolute path, no shell metacharacters except spaces/parens/hyphens
     if (!sessionProject || !sessionProject.startsWith('/') || /[;&|`$\x00-\x1F\x7F]/.test(sessionProject)) return;
     setActiveView('terminal');
-    // Use single quotes to safely handle spaces and parentheses in paths
     const safePath = sessionProject.replace(/'/g, "'\\''");
     const cmd = `cd '${safePath}'\r`;
-    const termId = projectPath ? `term-${projectPath}` : 'main';
-    if (window.electronAPI) {
+    const termId = useStore.getState().activeTabId;
+    if (window.electronAPI && termId) {
       window.electronAPI.terminalWrite(termId, cmd);
     }
-  }, [projectPath, setActiveView]);
+  }, [setActiveView]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -123,9 +151,31 @@ export default function ProjectView({ projectPath }) {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
 
-      if (e.key === 't') {
+      if (e.key === 't' && !e.shiftKey) {
+        // Cmd+T = new tab
         e.preventDefault();
-        setActiveView(activeView === 'terminal' ? 'dashboard' : 'terminal');
+        if (useStore.getState().activeView === 'terminal') {
+          addTab(projectPath);
+        } else {
+          // In dashboard, switch to terminal
+          setActiveView('terminal');
+        }
+      } else if (e.key === 'T' && e.shiftKey) {
+        // Cmd+Shift+T = toggle terminal/dashboard
+        e.preventDefault();
+        const current = useStore.getState().activeView;
+        setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
+      } else if (e.key === 'w' && !e.shiftKey) {
+        // Cmd+W = close tab (don't close window if last tab)
+        e.preventDefault();
+        const state = useStore.getState();
+        if (state.activeView === 'terminal' && state.terminalTabs.length > 1) {
+          const tabId = state.activeTabId;
+          if (tabId && window.electronAPI) {
+            window.electronAPI.terminalKill(tabId);
+          }
+          removeTab(state.activeTabId);
+        }
       } else if (e.key === 'b') {
         e.preventDefault();
         toggleSidebar();
@@ -134,18 +184,39 @@ export default function ProjectView({ projectPath }) {
         toggleGitPanel();
       } else if (e.key === 'k') {
         e.preventDefault();
-        const termId = projectPath ? `term-${projectPath}` : 'main';
-        if (window.electronAPI) {
+        const termId = useStore.getState().activeTabId;
+        if (window.electronAPI && termId) {
           window.electronAPI.terminalWrite(termId, 'clear\r');
+        }
+      } else if (e.key === '[' && e.shiftKey) {
+        // Cmd+Shift+[ = prev tab
+        e.preventDefault();
+        const state = useStore.getState();
+        const idx = state.terminalTabs.findIndex((t) => t.id === state.activeTabId);
+        if (idx > 0) setActiveTab(state.terminalTabs[idx - 1].id);
+      } else if (e.key === ']' && e.shiftKey) {
+        // Cmd+Shift+] = next tab
+        e.preventDefault();
+        const state = useStore.getState();
+        const idx = state.terminalTabs.findIndex((t) => t.id === state.activeTabId);
+        if (idx < state.terminalTabs.length - 1) setActiveTab(state.terminalTabs[idx + 1].id);
+      } else if (e.key >= '1' && e.key <= '9') {
+        // Cmd+1-9 = switch to tab N
+        e.preventDefault();
+        const state = useStore.getState();
+        const tabIdx = parseInt(e.key, 10) - 1;
+        if (tabIdx < state.terminalTabs.length) {
+          setActiveTab(state.terminalTabs[tabIdx].id);
+          if (state.activeView !== 'terminal') setActiveView('terminal');
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeView, setActiveView, toggleSidebar, toggleGitPanel, projectPath]);
+  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel]);
 
-  // Menu bar events (View menu items send IPC from main process)
+  // Menu bar events
   useEffect(() => {
     if (!window.electronAPI) return;
     const cleanups = [
@@ -155,9 +226,23 @@ export default function ProjectView({ projectPath }) {
       }),
       window.electronAPI.onMenuToggleSidebar?.(() => toggleSidebar()),
       window.electronAPI.onMenuToggleGitPanel?.(() => toggleGitPanel()),
+      window.electronAPI.onMenuNewTab?.(() => {
+        addTab(projectPath);
+        setActiveView('terminal');
+      }),
+      window.electronAPI.onMenuCloseTab?.(() => {
+        const state = useStore.getState();
+        if (state.terminalTabs.length > 1) {
+          const tabId = state.activeTabId;
+          if (tabId && window.electronAPI) {
+            window.electronAPI.terminalKill(tabId);
+          }
+          removeTab(state.activeTabId);
+        }
+      }),
     ];
     return () => cleanups.forEach((fn) => fn?.());
-  }, [setActiveView, toggleSidebar, toggleGitPanel]);
+  }, [setActiveView, toggleSidebar, toggleGitPanel, addTab, removeTab, projectPath]);
 
   return (
     <div className="h-full w-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>
@@ -181,16 +266,30 @@ export default function ProjectView({ projectPath }) {
           </div>
         )}
 
-        <div className="flex-1 min-w-0">
-          {activeView === 'terminal' ? (
-            <TerminalPane
-              id={projectPath ? `term-${projectPath}` : 'main'}
-              cwd={projectPath}
-              theme={theme.xtermTheme}
-            />
-          ) : (
-            <DashboardView />
-          )}
+        <div className="flex-1 min-w-0 relative flex flex-col">
+          {/* Terminal view with tab bar */}
+          <div
+            className="flex-1 flex flex-col min-h-0"
+            style={{ display: activeView === 'terminal' ? 'flex' : 'none' }}
+          >
+            <TerminalTabBar />
+            <div className="flex-1 relative min-h-0">
+              {tabsInitialized && tabs.map((tab) => (
+                <div
+                  key={tab.id}
+                  className="absolute inset-0"
+                  style={{ display: tab.id === activeTabId ? 'flex' : 'none' }}
+                >
+                  <TerminalPane
+                    id={tab.id}
+                    cwd={tab.projectPath}
+                    theme={theme.xtermTheme}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+          {activeView !== 'terminal' && <DashboardView />}
         </div>
 
         {activeView === 'terminal' && (

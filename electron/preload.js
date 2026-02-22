@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   terminalSaveState: (id, state) => ipcRenderer.invoke('terminal:saveState', id, state),
   terminalLoadState: (id) => ipcRenderer.invoke('terminal:loadState', id),
+  terminalSaveTabs: (projectPath, tabs, counter) => ipcRenderer.invoke('terminal:saveTabs', projectPath, tabs, counter),
+  terminalLoadTabs: (projectPath) => ipcRenderer.invoke('terminal:loadTabs', projectPath),
   onTerminalRequestSave: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('terminal:requestSave', handler);
@@ -29,6 +31,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('terminal:exit', handler);
     return () => ipcRenderer.removeListener('terminal:exit', handler);
   },
+
+  // Agents
+  agentsGetBuiltins: () => ipcRenderer.invoke('agents:getBuiltins'),
+  agentsList: () => ipcRenderer.invoke('agents:list'),
+  agentsSave: (agent) => ipcRenderer.invoke('agents:save', agent),
+  agentsDelete: (agentId) => ipcRenderer.invoke('agents:delete', agentId),
+  agentsWriteTempPrompt: (text) => ipcRenderer.invoke('agents:writeTempPrompt', text),
+
+  // File (CLAUDE.md editor)
+  fileRead: (filePath) => ipcRenderer.invoke('file:read', filePath),
+  fileWrite: (filePath, content) => ipcRenderer.invoke('file:write', filePath, content),
+  fileListClaudeMd: (projectPath) => ipcRenderer.invoke('file:listClaudeMd', projectPath),
+
+  // Checkpoints
+  checkpointSave: (projectPath, checkpoint) => ipcRenderer.invoke('checkpoint:save', projectPath, checkpoint),
+  checkpointList: (projectPath) => ipcRenderer.invoke('checkpoint:list', projectPath),
+  checkpointDelete: (projectPath, checkpointId) => ipcRenderer.invoke('checkpoint:delete', projectPath, checkpointId),
+  checkpointRename: (projectPath, checkpointId, newLabel) => ipcRenderer.invoke('checkpoint:rename', projectPath, checkpointId, newLabel),
 
   // Data (read-only ~/.claude/ access)
   dataLoadHistory: () => ipcRenderer.invoke('data:loadHistory'),
@@ -92,6 +112,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = () => callback();
     ipcRenderer.on('menu:toggle-git-panel', handler);
     return () => ipcRenderer.removeListener('menu:toggle-git-panel', handler);
+  },
+  onMenuNewTab: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('menu:new-tab', handler);
+    return () => ipcRenderer.removeListener('menu:new-tab', handler);
+  },
+  onMenuCloseTab: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('menu:close-tab', handler);
+    return () => ipcRenderer.removeListener('menu:close-tab', handler);
   },
 
   // Save clipboard image to temp file, return path
