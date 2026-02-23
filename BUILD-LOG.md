@@ -67,3 +67,11 @@
 - Files changed: src/components/Project/ResumeBanner.jsx (NEW), src/components/Project/ProjectView.jsx
 - Verification: PASS (attempts: 1)
 - Notes: Slim banner between tab bar and terminal, 7-day cutoff, 30s auto-dismiss, uses shared resumeSession action
+
+## Task 3.2 — Session count badge on Sessions tab
+- Start: 20:14
+- End: 20:20
+- Duration: 6 min
+- Files changed: src/components/Dashboard/DashboardView.jsx
+- Verification: PASS (attempts: 1)
+- Notes: Added useState/useEffect, loads session count on mount, renders inline (N) next to Sessions tab

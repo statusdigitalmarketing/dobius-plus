@@ -1,16 +1,23 @@
-# Task 3.2: Final theme audit + responsive polish
+# Task 3.2 — Session count badge on Sessions tab
 
-## What
-- Add --danger and --warning CSS variables to theme system
-- Replace hardcoded #F85149 and #E3B341 in BuildMonitor components with CSS vars
-- Audit all new components for: CSS variable usage, hover states, responsive behavior at 900px
+## What will change
+- `src/components/Dashboard/DashboardView.jsx`: Add session count state, load count on mount, display as pill badge next to Sessions tab label
 
-## Files
-- EDIT: src/lib/themes.js (add --danger, --warning CSS vars)
-- EDIT: src/components/Dashboard/BuildMonitor/BuildHealthGauge.jsx (replace hardcoded colors)
-- EDIT: src/components/Dashboard/BuildMonitor/SupervisorStatus.jsx (replace hardcoded colors)
-- EDIT: src/styles/index.css (add --danger, --warning to :root fallbacks)
+## Why
+Users want a quick visual indicator of how many sessions exist without having to click into the Sessions tab.
+
+## Implementation
+1. Add `useState` for sessionCount, load via `dataLoadAllSessions` IPC on mount
+2. In the tab bar render, show `(N)` next to "Sessions" label when count > 0
+3. Style as a small dim pill, similar to the Builds notification dot pattern
 
 ## Verification
 - `npx vite build` exits 0
-- `grep -rn '#[0-9a-fA-F]' src/components/Dashboard/BuildMonitor/` returns 0 matches
+- `grep -c "{ id:" src/components/Dashboard/DashboardView.jsx` returns >= 12
+
+## What could go wrong
+- Must not modify the TABS array structure (gate checks tab count)
+- IPC call failure should be silently handled (count stays 0)
+
+## Estimated time
+8 minutes

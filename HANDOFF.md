@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (Session Manager)
 
-## Current: Task 3.1 — Auto-resume suggestion banner — DONE
+## Current: Task 3.2 — Session count badge on Sessions tab — DONE
 
 ## Branch: build/session-manager
 
@@ -16,9 +16,10 @@
 - Task 2.3: Added inline tag editor with 7-color picker, save/remove/cancel
 - Task 2.4: Added resumeSession action to store + Resume/Open buttons on session cards
 - Task 3.1: Created ResumeBanner.jsx, integrated into ProjectView between tab bar and terminal
+- Task 3.2: Added session count badge next to Sessions tab label in DashboardView
 
 ## What's Next
-- Task 3.2: Session count badge on Sessions tab
+- Task 3.3: Cmd+R keyboard shortcut to resume last session
 
 ## Key Decisions
 - loadAllSessions() scans ~/.claude/projects/ dirs, reads last 5 JSONL entries per session for preview
@@ -26,9 +27,9 @@
 - Fixed race condition: uses collect-then-reduce instead of shared mutable state in Promise.all
 
 ## Files Touched Recently
+- src/components/Dashboard/DashboardView.jsx (session count badge)
 - src/components/Project/ResumeBanner.jsx (NEW)
 - src/components/Project/ProjectView.jsx (added ResumeBanner import + render)
-- src/components/Dashboard/Sessions.jsx (complete rewrite + resume buttons)
 
 ## Blockers
 - None
