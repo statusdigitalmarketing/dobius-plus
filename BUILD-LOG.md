@@ -75,3 +75,11 @@
 - Files changed: src/components/Dashboard/DashboardView.jsx
 - Verification: PASS (attempts: 1)
 - Notes: Added useState/useEffect, loads session count on mount, renders inline (N) next to Sessions tab
+
+## Task 3.3 — Cmd+R keyboard shortcut to resume last session
+- Start: 20:20
+- End: 20:26
+- Duration: 6 min
+- Files changed: src/components/Project/ProjectView.jsx
+- Verification: PASS (attempts: 1)
+- Notes: Added else-if branch for 'r' key in existing keyboard handler, async IPC + resumeSession action
