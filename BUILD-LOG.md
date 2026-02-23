@@ -51,3 +51,11 @@
 - Files changed: src/components/Dashboard/Sessions.jsx
 - Verification: PASS (attempts: 1)
 - Notes: Inline tag editor with 7-color picker, save/remove/cancel, tag badge click to edit
+
+## Task 2.4 — One-click resume from session card
+- Start: 19:58
+- End: 20:06
+- Duration: 8 min
+- Files changed: src/store/store.js, src/components/Dashboard/Sessions.jsx
+- Verification: PASS (attempts: 1)
+- Notes: Added resumeSession action with sessionId regex validation, Resume + Open buttons on cards

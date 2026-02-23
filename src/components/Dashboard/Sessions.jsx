@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useStore } from '../../store/store';
 import { timeAgo } from '../../lib/time-ago';
 
 export default function Sessions() {
@@ -219,9 +220,13 @@ export default function Sessions() {
 const TAG_COLOR_NAMES = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink'];
 
 function SessionCard({ session, tag, onTagsChanged }) {
+  const resumeSession = useStore((s) => s.resumeSession);
+  const currentProjectPath = useStore((s) => s.currentProjectPath);
   const [editing, setEditing] = useState(false);
   const [tagLabel, setTagLabel] = useState(tag?.label || '');
   const [tagColor, setTagColor] = useState(tag?.color || 'blue');
+
+  const isDifferentProject = currentProjectPath && session.projectPath !== currentProjectPath;
 
   const handleSaveTag = async () => {
     if (!tagLabel.trim()) return;
@@ -269,25 +274,17 @@ function SessionCard({ session, tag, onTagsChanged }) {
           </div>
         </div>
 
-        {/* Tag button */}
-        <button
-          onClick={handleTagClick}
-          className="text-xs shrink-0 transition-colors duration-100"
-          style={{
-            padding: '2px 6px',
-            fontFamily: "'SF Mono', monospace",
-            fontSize: 9,
-            color: 'var(--dim)',
-            backgroundColor: 'transparent',
-            border: '1px solid var(--border)',
-            borderRadius: 3,
-            cursor: 'pointer',
-          }}
-          onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--dim)'}
-          onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border)'}
-        >
-          Tag
-        </button>
+        {/* Action buttons */}
+        <div className="flex items-center gap-1 shrink-0">
+          <CardBtn label="Resume" onClick={() => resumeSession(session.sessionId)} accent />
+          {isDifferentProject && (
+            <CardBtn
+              label="Open"
+              onClick={() => window.electronAPI?.windowOpenProject(session.projectPath)}
+            />
+          )}
+          <CardBtn label="Tag" onClick={handleTagClick} />
+        </div>
 
         {/* Session ID */}
         <span
@@ -390,6 +387,39 @@ const TAG_COLORS = {
   purple: '#BC8CFF',
   pink: '#F778BA',
 };
+
+function CardBtn({ label, onClick, accent }) {
+  return (
+    <button
+      onClick={onClick}
+      className="text-xs shrink-0 transition-colors duration-100"
+      style={{
+        padding: '2px 6px',
+        fontFamily: "'SF Mono', monospace",
+        fontSize: 9,
+        color: accent ? 'var(--bg)' : 'var(--dim)',
+        backgroundColor: accent ? 'var(--accent)' : 'transparent',
+        border: accent ? 'none' : '1px solid var(--border)',
+        borderRadius: 3,
+        cursor: 'pointer',
+      }}
+      onMouseEnter={(e) => {
+        if (!accent) {
+          e.currentTarget.style.borderColor = 'var(--dim)';
+          e.currentTarget.style.color = 'var(--fg)';
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!accent) {
+          e.currentTarget.style.borderColor = 'var(--border)';
+          e.currentTarget.style.color = 'var(--dim)';
+        }
+      }}
+    >
+      {label}
+    </button>
+  );
+}
 
 function TagBadge({ label, color }) {
   const bg = TAG_COLORS[color] || TAG_COLORS.blue;

@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (Session Manager)
 
-## Current: Task 2.3 — Tag management on session cards — DONE
+## Current: Task 2.4 — One-click resume from session card — DONE
 
 ## Branch: build/session-manager
 
@@ -14,9 +14,10 @@
 - Task 2.2: Added search input, project filter dropdown, sort toggle (recent/A-Z)
 
 - Task 2.3: Added inline tag editor with 7-color picker, save/remove/cancel
+- Task 2.4: Added resumeSession action to store + Resume/Open buttons on session cards
 
 ## What's Next
-- Task 2.4: One-click resume from session card
+- Task 3.1: Auto-resume suggestion banner on project open
 
 ## Key Decisions
 - loadAllSessions() scans ~/.claude/projects/ dirs, reads last 5 JSONL entries per session for preview
@@ -24,7 +25,8 @@
 - Fixed race condition: uses collect-then-reduce instead of shared mutable state in Promise.all
 
 ## Files Touched Recently
-- src/components/Dashboard/Sessions.jsx (complete rewrite)
+- src/components/Dashboard/Sessions.jsx (complete rewrite + resume buttons)
+- src/store/store.js (resumeSession action)
 - electron/main.js, electron/preload.js
 
 ## Blockers

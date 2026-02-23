@@ -1,18 +1,26 @@
-# Task 2.4: Create BuildHealthGauge + SupervisorStatus components
+# Task 2.4 — One-click resume from session card
 
-## What
-- BuildHealthGauge: semi-circular SVG gauge 0-100, color gradient (red→yellow→green), centered number, failure/restart counts
-- SupervisorStatus: status badge with pulse, restart count, branch info, last 5 log lines in monospace mini-terminal
+## What will change
+- `src/store/store.js`: Add `resumeSession` action
+- `src/components/Dashboard/Sessions.jsx`: Add Resume and Open Project buttons to SessionCard
 
-## Files
-- NEW: src/components/Dashboard/BuildMonitor/BuildHealthGauge.jsx
-- NEW: src/components/Dashboard/BuildMonitor/SupervisorStatus.jsx
+## Why
+Users need to resume a session directly from the Sessions dashboard without manually typing the resume command.
 
-## Design rules
-- All colors from CSS variables (gauge colors via inline SVG)
-- Monospace for all data values
-- Section titles: var(--dim), uppercase, tracking-wider
-- Status dot: green pulse=running, grey=idle, red=failed
+## Implementation
+1. Add `resumeSession(sessionId)` to Zustand store:
+   - Calls `setActiveView('terminal')`
+   - Sends `claude --resume <sessionId>` to active terminal using char-by-char 5ms delay pattern
+2. Add "Resume" button to each session card
+3. Add "Open Project" button that calls `windowOpenProject(session.projectPath)` if different from current project
+4. Use existing `useStore` patterns from Checkpoints.jsx and Agents.jsx
 
 ## Verification
-- `npx vite build` exits 0
+- `npm run build` exits 0
+
+## What could go wrong
+- Session ID validation — must only allow safe chars (alphanumeric + hyphens)
+- If no active terminal tab, the resume command has nowhere to go
+
+## Estimated time
+12 minutes
