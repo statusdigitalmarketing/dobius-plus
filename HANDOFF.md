@@ -1,15 +1,16 @@
 # Handoff — Dobius+ Build (Session Manager)
 
-## Current: Task 1.1 — Add loadAllSessions() to data-service.js — DONE
+## Current: Task 1.2 — Add session tags to config-manager.js — DONE
 
 ## Branch: build/session-manager
 
 ## What's Done
 - Task 0.1: Created feature branch, verify-task.sh, supervisor.sh, progress/handoff files, plans dir
 - Task 1.1: Added loadAllSessions() and getLatestSession() to data-service.js
+- Task 1.2: Added getSessionTags(), setSessionTag(), removeSessionTag() to config-manager.js
 
 ## What's Next
-- Task 1.2: Add session tags to config-manager.js
+- Task 1.3: Wire IPC handlers + preload for sessions + tags
 
 ## Key Decisions
 - loadAllSessions() scans ~/.claude/projects/ dirs, reads last 5 JSONL entries per session for preview
@@ -18,6 +19,7 @@
 
 ## Files Touched Recently
 - electron/data-service.js
+- electron/config-manager.js
 
 ## Blockers
 - None

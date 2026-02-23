@@ -135,6 +135,46 @@ export function setPinnedSessions(sessionIds) {
   saveConfig(config);
 }
 
+// Session tag colors
+const TAG_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink'];
+
+/**
+ * Get all session tags. Returns map of sessionId → { label, color }.
+ */
+export function getSessionTags() {
+  const config = loadConfig();
+  return config.sessionTags || {};
+}
+
+/**
+ * Set or update a session tag.
+ */
+export function setSessionTag(sessionId, label, color) {
+  if (!sessionId || typeof sessionId !== 'string') return;
+  if (UNSAFE_KEYS.has(sessionId)) return;
+  if (!label || typeof label !== 'string') return;
+  const safeLabel = label.slice(0, 50);
+  const safeColor = TAG_COLORS.includes(color) ? color : 'blue';
+  const config = loadConfig();
+  if (!config.sessionTags || typeof config.sessionTags !== 'object') {
+    config.sessionTags = {};
+  }
+  config.sessionTags[sessionId] = { label: safeLabel, color: safeColor };
+  saveConfig(config);
+}
+
+/**
+ * Remove a session tag.
+ */
+export function removeSessionTag(sessionId) {
+  if (!sessionId || typeof sessionId !== 'string') return;
+  const config = loadConfig();
+  if (config.sessionTags) {
+    delete config.sessionTags[sessionId];
+    saveConfig(config);
+  }
+}
+
 /**
  * Flush any pending config save immediately (synchronous, atomic).
  * Call this in before-quit to avoid losing recent changes.
