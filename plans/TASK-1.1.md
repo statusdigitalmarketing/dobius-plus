@@ -1,25 +1,27 @@
-# Task 1.1: Redesign Launcher (ProjectList + ProjectCard)
+# Task 1.1 — Add loadAllSessions() to data-service.js
 
-## What
-- Redesign ProjectList.jsx: "D+" logotype header, search with focus states, proper empty state, staggered list animation
-- Redesign ProjectCard.jsx: subtle hover (scale 1.02 + border transition), left-border for active, monospace stats, staggered fade-in with framer-motion
+## What will change
+- `electron/data-service.js`: Add `loadAllSessions()` function and export it
 
-## Files changed
-- `src/components/Launcher/ProjectList.jsx`
-- `src/components/Launcher/ProjectCard.jsx`
+## Why
+The current `loadHistory()` only returns 100 sessions from `history.jsonl`. The Session Manager needs to scan ALL projects in `~/.claude/projects/`, read individual `.jsonl` session files, extract metadata (first user message, timestamp), and return a comprehensive list grouped by project.
 
-## Design rules
-- Accent color ONLY on Open button CTA
-- No gradient backgrounds — flat var(--surface) with var(--border)
-- Left-border indicator for active projects (green)
-- Session count + time ago in monospace var(--dim)
-- Staggered fade-in animation (50ms delay per card)
-- ALL colors from CSS variables
+## Implementation
+1. Scan `~/.claude/projects/` directories
+2. For each project dir, list all `.jsonl` files (each is a session)
+3. For each session file, read first 5 entries to extract: sessionId (from filename), first user message (preview), latest timestamp
+4. Use `encodePathLikeClaude()` to resolve encoded dir names back to real paths
+5. Return array of `{ sessionId, projectPath, projectName, preview, timestamp, age }`
+6. Limit to 500 most recent, cap preview at 200 chars
 
 ## Verification
-- `npx vite build` exits 0
-- No hardcoded hex colors in component JSX (except themes.js)
+- `npm run build` exits 0
+- Function exists and is exported from data-service.js
 
-## Risks
-- framer-motion import may increase bundle size (acceptable)
-- Need to ensure staggered animation doesn't cause layout shifts
+## What could go wrong
+- Large number of session files could be slow — mitigate by reading only first 5 lines per file
+- Missing/corrupt .jsonl files — handle gracefully with try/catch
+- Encoded path resolution may not match all projects — use same pattern as listProjects()
+
+## Estimated time
+12 minutes

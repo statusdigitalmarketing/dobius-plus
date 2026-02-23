@@ -1,13 +1,12 @@
-# Task 1.1 Review — Redesign Launcher
+# Task 1.1 Review — Add loadAllSessions() to data-service.js
 
 ## Three things that could be better
-1. The skeleton loader in ProjectList uses hardcoded count (6) — could match last-known project count from config.
-2. The search icon SVG is inline — could extract to a shared Icon component if reused elsewhere.
-3. Bundle size jumped from 559KB to 684KB due to framer-motion — acceptable for the animation quality.
+1. The `loadAllSessions()` could use a worker thread for very large datasets (hundreds of projects × hundreds of sessions)
+2. Could cache the encodedToReal map across calls instead of rebuilding it each time
+3. The `parseJsonl(filePath, 5)` reads the LAST 5 entries — for preview we ideally want the FIRST user message, which is usually near the start. Since Claude session files often start with system entries, the first 5 entries from the end may not contain the first user message.
 
 ## One thing I'm fixing right now
-Nothing critical found — the implementation follows all design rules correctly.
+- Fixed race condition in `getLatestSession()` — `Promise.all` was mutating shared `latestFile`/`latestMtime` variables concurrently. Changed to collect stats first, then reduce to find max.
 
 ## Concerns
-- framer-motion's AnimatePresence mode="popLayout" may cause layout recalculation on fast filter changes — monitor performance.
-- The `whileHover` on motion.button only affects scale, not border — CSS transition handles border-color.
+- The `parseJsonl` function with `limit=5` takes the LAST 5 entries (`.slice(-5)`), not the first 5. This means for long sessions, we get the most recent entries. The preview will show the most recent user message, not the first — but this is actually better for a "resume" workflow since it shows what was last discussed.
