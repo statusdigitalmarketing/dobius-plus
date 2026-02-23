@@ -24,7 +24,7 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     });
   }, []);
 
-  const { containerRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, maxScrollbackLines: scrollbackLines });
+  const { containerRef, termRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, maxScrollbackLines: scrollbackLines });
   const [input, setInput] = useState('');
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -34,10 +34,15 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
   const inputRef = useRef(null);
   const searchInputRef = useRef(null);
 
-  // Auto-focus the command input on mount
+  // Auto-focus the command input on mount and when this tab becomes active
+  const activeTabId = useStore((s) => s.activeTabId);
+  const activeView = useStore((s) => s.activeView);
   useEffect(() => {
-    setTimeout(() => inputRef.current?.focus(), 100);
-  }, []);
+    if (activeTabId === id && activeView === 'terminal') {
+      // Use rAF to ensure DOM is ready after display:none→flex switch
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [activeTabId, activeView, id]);
 
   // Cmd+F to toggle search
   useEffect(() => {
@@ -211,12 +216,12 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     if (now - lastClickTime.current < 300) {
       // Double click → focus terminal
       containerRef.current?.querySelector('.xterm-helper-textarea')?.focus();
-    } else if (!window.getSelection()?.toString()) {
-      // Single click (no text selected) → focus input bar
+    } else if (!window.getSelection()?.toString() && !termRef.current?.hasSelection()) {
+      // Single click (no text selected in browser or xterm) → focus input bar
       inputRef.current?.focus();
     }
     lastClickTime.current = now;
-  }, [containerRef]);
+  }, [containerRef, termRef]);
 
   // Auto-resize textarea to fit content
   const handleInputChange = useCallback((e) => {
