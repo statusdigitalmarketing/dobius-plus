@@ -9,6 +9,7 @@ import Sidebar from './Sidebar';
 import DashboardView from '../Dashboard/DashboardView';
 import GitSidePanel from '../shared/GitSidePanel';
 import QuitOverlay from '../shared/QuitOverlay';
+import ResumeBanner from './ResumeBanner';
 
 export default function ProjectView({ projectPath }) {
   const activeView = useStore((s) => s.activeView);
@@ -273,6 +274,7 @@ export default function ProjectView({ projectPath }) {
             style={{ display: activeView === 'terminal' ? 'flex' : 'none' }}
           >
             <TerminalTabBar />
+            <ResumeBanner projectPath={projectPath} />
             <div className="flex-1 relative min-h-0">
               {tabsInitialized && tabs.map((tab) => (
                 <div

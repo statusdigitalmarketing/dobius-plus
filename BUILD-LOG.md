@@ -59,3 +59,11 @@
 - Files changed: src/store/store.js, src/components/Dashboard/Sessions.jsx
 - Verification: PASS (attempts: 1)
 - Notes: Added resumeSession action with sessionId regex validation, Resume + Open buttons on cards
+
+## Task 3.1 — Auto-resume suggestion banner on project open
+- Start: 20:06
+- End: 20:14
+- Duration: 8 min
+- Files changed: src/components/Project/ResumeBanner.jsx (NEW), src/components/Project/ProjectView.jsx
+- Verification: PASS (attempts: 1)
+- Notes: Slim banner between tab bar and terminal, 7-day cutoff, 30s auto-dismiss, uses shared resumeSession action

@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (Session Manager)
 
-## Current: Task 2.4 — One-click resume from session card — DONE
+## Current: Task 3.1 — Auto-resume suggestion banner — DONE
 
 ## Branch: build/session-manager
 
@@ -15,9 +15,10 @@
 
 - Task 2.3: Added inline tag editor with 7-color picker, save/remove/cancel
 - Task 2.4: Added resumeSession action to store + Resume/Open buttons on session cards
+- Task 3.1: Created ResumeBanner.jsx, integrated into ProjectView between tab bar and terminal
 
 ## What's Next
-- Task 3.1: Auto-resume suggestion banner on project open
+- Task 3.2: Session count badge on Sessions tab
 
 ## Key Decisions
 - loadAllSessions() scans ~/.claude/projects/ dirs, reads last 5 JSONL entries per session for preview
@@ -25,9 +26,9 @@
 - Fixed race condition: uses collect-then-reduce instead of shared mutable state in Promise.all
 
 ## Files Touched Recently
+- src/components/Project/ResumeBanner.jsx (NEW)
+- src/components/Project/ProjectView.jsx (added ResumeBanner import + render)
 - src/components/Dashboard/Sessions.jsx (complete rewrite + resume buttons)
-- src/store/store.js (resumeSession action)
-- electron/main.js, electron/preload.js
 
 ## Blockers
 - None
