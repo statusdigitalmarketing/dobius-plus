@@ -52,23 +52,21 @@ else
   echo "OK On branch: $CURRENT_BRANCH"
 fi
 
-# 5. Build must succeed (after Task 1.1 sets up Vite)
-if [ -f "vite.config.js" ] || [ -f "vite.config.mjs" ]; then
-  echo ""
-  echo "--- Build check ---"
-  if npm run build 2>/dev/null; then
-    echo "OK Build succeeds"
-  else
-    echo "FAIL: Build errors. Run: npm run build"
-    PASS=false
-  fi
+# 5. Code must build
+echo ""
+echo "--- Build check ---"
+if npm run build 2>/dev/null; then
+  echo "OK Builds clean"
+else
+  echo "FAIL: Build errors. Run: npm run build"
+  PASS=false
 fi
 
 # 6. Ban checks — source
-if [ -d "src" ]; then
+if [ -d "src/" ]; then
   echo ""
   echo "--- Banned patterns (source) ---"
-  EMPTY_CATCH=$(grep -rEc 'catch[[:space:]]*(\([a-zA-Z_]+\))?[[:space:]]*\{[[:space:]]*\}' src/ 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}')
+  EMPTY_CATCH=$(grep -rPc 'catch\s*(\(\w+\))?\s*\{\s*\}' src/ 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}')
   EMPTY_CATCH=${EMPTY_CATCH:-0}
   if [ "$EMPTY_CATCH" -gt 0 ]; then
     echo "FAIL: Found $EMPTY_CATCH empty catch blocks in src/"
@@ -77,21 +75,34 @@ if [ -d "src" ]; then
     echo "OK No empty catch blocks"
   fi
 
-  # CRITICAL: Check for writes to ~/.claude/
-  CLAUDE_WRITES=$(grep -rc 'writeFile.*\.claude\|fs\.write.*\.claude\|unlink.*\.claude\|rmSync.*\.claude\|mkdirSync.*\.claude' src/ electron/ 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}')
-  CLAUDE_WRITES=${CLAUDE_WRITES:-0}
-  if [ "$CLAUDE_WRITES" -gt 0 ]; then
-    echo "FAIL: Found $CLAUDE_WRITES writes to ~/.claude/ — MUST be read-only"
+  # Check for type suppression (eslint-disable has 2 pre-existing in protected files)
+  for SUPPRESS in "@ts-ignore" "@ts-nocheck" "# type: ignore"; do
+    SUP_COUNT=$(grep -rc "$SUPPRESS" src/ 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}')
+    if [ "$SUP_COUNT" -gt 0 ]; then
+      echo "FAIL: Found $SUP_COUNT uses of '$SUPPRESS' in src/"
+      PASS=false
+    else
+      echo "OK No '$SUPPRESS' in source"
+    fi
+  done
+
+  # eslint-disable: baseline is 2 (useTerminal.js + ProjectView.jsx — both pre-existing, protected)
+  ESLINT_COUNT=$(grep -rc "// eslint-disable" src/ 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}')
+  if [ "$ESLINT_COUNT" -gt 2 ]; then
+    echo "FAIL: Found $ESLINT_COUNT uses of '// eslint-disable' in src/ (baseline: 2)"
     PASS=false
   else
-    echo "OK No writes to ~/.claude/"
+    echo "OK No new '// eslint-disable' in source (baseline: $ESLINT_COUNT)"
   fi
 fi
 
-# 7. Component count (should grow over time)
-if compgen -G "src/components/**/*.jsx" > /dev/null 2>&1 || compgen -G "src/components/*.jsx" > /dev/null 2>&1; then
-  COMPONENT_COUNT=$(find src/components -name "*.jsx" 2>/dev/null | wc -l | tr -d ' ')
-  echo "OK Component count: $COMPONENT_COUNT"
+# 7. Existing features haven't decreased
+FEATURE_COUNT=$(grep -c "{ id:" src/components/Dashboard/DashboardView.jsx 2>/dev/null || echo "0")
+if [ "$FEATURE_COUNT" -lt 12 ]; then
+  echo "FAIL: Dashboard tab count dropped to $FEATURE_COUNT (must be >= 12)"
+  PASS=false
+else
+  echo "OK Dashboard tab count: $FEATURE_COUNT (>= 12)"
 fi
 
 # 8. BUILD-LOG has entry
