@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (Session Manager)
 
-## Current: Task 2.2 — Search, filter, and sort controls — DONE
+## Current: Task 2.3 — Tag management on session cards — DONE
 
 ## Branch: build/session-manager
 
@@ -13,8 +13,10 @@
 
 - Task 2.2: Added search input, project filter dropdown, sort toggle (recent/A-Z)
 
+- Task 2.3: Added inline tag editor with 7-color picker, save/remove/cancel
+
 ## What's Next
-- Task 2.3: Add tag management to session cards
+- Task 2.4: One-click resume from session card
 
 ## Key Decisions
 - loadAllSessions() scans ~/.claude/projects/ dirs, reads last 5 JSONL entries per session for preview

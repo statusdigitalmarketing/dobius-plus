@@ -202,6 +202,7 @@ export default function Sessions() {
                         key={s.sessionId}
                         session={s}
                         tag={tag}
+                        onTagsChanged={loadData}
                       />
                     );
                   })}
@@ -215,37 +216,167 @@ export default function Sessions() {
   );
 }
 
-function SessionCard({ session, tag }) {
+const TAG_COLOR_NAMES = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink'];
+
+function SessionCard({ session, tag, onTagsChanged }) {
+  const [editing, setEditing] = useState(false);
+  const [tagLabel, setTagLabel] = useState(tag?.label || '');
+  const [tagColor, setTagColor] = useState(tag?.color || 'blue');
+
+  const handleSaveTag = async () => {
+    if (!tagLabel.trim()) return;
+    await window.electronAPI?.configSetSessionTag(session.sessionId, tagLabel.trim(), tagColor);
+    setEditing(false);
+    onTagsChanged?.();
+  };
+
+  const handleRemoveTag = async () => {
+    await window.electronAPI?.configRemoveSessionTag(session.sessionId);
+    setEditing(false);
+    setTagLabel('');
+    setTagColor('blue');
+    onTagsChanged?.();
+  };
+
+  const handleTagClick = () => {
+    setTagLabel(tag?.label || '');
+    setTagColor(tag?.color || 'blue');
+    setEditing(true);
+  };
+
   return (
     <div
-      className="flex items-center gap-3 px-3 py-2.5 rounded transition-colors duration-100"
+      className="px-3 py-2.5 rounded transition-colors duration-100"
       style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
       onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--dim)'}
       onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border)'}
     >
-      {/* Preview text */}
-      <div className="flex-1 min-w-0">
-        <div className="text-xs truncate" style={{ color: 'var(--fg)' }}>
-          {session.preview || 'No preview'}
+      <div className="flex items-center gap-3">
+        {/* Preview text */}
+        <div className="flex-1 min-w-0">
+          <div className="text-xs truncate" style={{ color: 'var(--fg)' }}>
+            {session.preview || 'No preview'}
+          </div>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-xs" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace", fontSize: 10 }}>
+              {timeAgo(session.timestamp)}
+            </span>
+            {tag && !editing && (
+              <span onClick={handleTagClick} style={{ cursor: 'pointer' }}>
+                <TagBadge label={tag.label} color={tag.color} />
+              </span>
+            )}
+          </div>
         </div>
-        <div className="flex items-center gap-2 mt-0.5">
-          <span className="text-xs" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace", fontSize: 10 }}>
-            {timeAgo(session.timestamp)}
-          </span>
-          {tag && (
-            <TagBadge label={tag.label} color={tag.color} />
-          )}
-        </div>
+
+        {/* Tag button */}
+        <button
+          onClick={handleTagClick}
+          className="text-xs shrink-0 transition-colors duration-100"
+          style={{
+            padding: '2px 6px',
+            fontFamily: "'SF Mono', monospace",
+            fontSize: 9,
+            color: 'var(--dim)',
+            backgroundColor: 'transparent',
+            border: '1px solid var(--border)',
+            borderRadius: 3,
+            cursor: 'pointer',
+          }}
+          onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--dim)'}
+          onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border)'}
+        >
+          Tag
+        </button>
+
+        {/* Session ID */}
+        <span
+          className="text-xs shrink-0 select-all"
+          style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace", fontSize: 9, opacity: 0.5 }}
+          title={session.sessionId}
+        >
+          {session.sessionId.slice(0, 8)}
+        </span>
       </div>
 
-      {/* Session ID (truncated) */}
-      <span
-        className="text-xs shrink-0 select-all"
-        style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace", fontSize: 9, opacity: 0.5 }}
-        title={session.sessionId}
-      >
-        {session.sessionId.slice(0, 8)}
-      </span>
+      {/* Inline tag editor */}
+      {editing && (
+        <div className="flex items-center gap-2 mt-2 pt-2" style={{ borderTop: '1px solid var(--border)' }}>
+          <input
+            autoFocus
+            type="text"
+            placeholder="Tag label..."
+            value={tagLabel}
+            onChange={(e) => setTagLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleSaveTag();
+              if (e.key === 'Escape') setEditing(false);
+            }}
+            className="flex-1 px-2 py-1 text-xs rounded outline-none"
+            style={{
+              backgroundColor: 'var(--bg)',
+              color: 'var(--fg)',
+              border: '1px solid var(--border)',
+              fontFamily: "'SF Mono', monospace",
+            }}
+          />
+          <div className="flex items-center gap-1">
+            {TAG_COLOR_NAMES.map((c) => (
+              <button
+                key={c}
+                onClick={() => setTagColor(c)}
+                className="rounded-full transition-transform duration-100"
+                style={{
+                  width: 14,
+                  height: 14,
+                  backgroundColor: TAG_COLORS[c],
+                  border: tagColor === c ? '2px solid var(--fg)' : '2px solid transparent',
+                  cursor: 'pointer',
+                  transform: tagColor === c ? 'scale(1.2)' : 'scale(1)',
+                }}
+              />
+            ))}
+          </div>
+          <button
+            onClick={handleSaveTag}
+            disabled={!tagLabel.trim()}
+            className="text-xs px-2 py-1 rounded"
+            style={{
+              backgroundColor: tagLabel.trim() ? 'var(--accent)' : 'var(--border)',
+              color: tagLabel.trim() ? 'var(--bg)' : 'var(--dim)',
+              border: 'none',
+              cursor: tagLabel.trim() ? 'pointer' : 'default',
+              fontFamily: "'SF Mono', monospace",
+              fontSize: 10,
+            }}
+          >
+            Save
+          </button>
+          {tag && (
+            <button
+              onClick={handleRemoveTag}
+              className="text-xs px-2 py-1 rounded"
+              style={{
+                backgroundColor: 'transparent',
+                color: '#F85149',
+                border: '1px solid var(--border)',
+                cursor: 'pointer',
+                fontFamily: "'SF Mono', monospace",
+                fontSize: 10,
+              }}
+            >
+              Remove
+            </button>
+          )}
+          <button
+            onClick={() => setEditing(false)}
+            className="text-xs"
+            style={{ color: 'var(--dim)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12 }}
+          >
+            x
+          </button>
+        </div>
+      )}
     </div>
   );
 }
