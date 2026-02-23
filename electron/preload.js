@@ -62,6 +62,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataLoadTranscript: (sessionId, projectPath) => ipcRenderer.invoke('data:loadTranscript', sessionId, projectPath),
   dataGetActiveProcesses: () => ipcRenderer.invoke('data:getActiveProcesses'),
   dataListProjects: () => ipcRenderer.invoke('data:listProjects'),
+  dataLoadAllSessions: () => ipcRenderer.invoke('data:loadAllSessions'),
+  dataGetLatestSession: (projectPath) => ipcRenderer.invoke('data:getLatestSession', projectPath),
   onDataUpdated: (callback) => {
     const handler = (_event, changedPath) => callback(changedPath);
     ipcRenderer.on('data:updated', handler);
@@ -77,6 +79,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   configSetPinned: (sessionIds) => ipcRenderer.invoke('config:setPinned', sessionIds),
   configGetSettings: () => ipcRenderer.invoke('config:getSettings'),
   configUpdateSettings: (updates) => ipcRenderer.invoke('config:updateSettings', updates),
+  configGetSessionTags: () => ipcRenderer.invoke('config:getSessionTags'),
+  configSetSessionTag: (sessionId, label, color) => ipcRenderer.invoke('config:setSessionTag', sessionId, label, color),
+  configRemoveSessionTag: (sessionId) => ipcRenderer.invoke('config:removeSessionTag', sessionId),
 
   // Window management
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),

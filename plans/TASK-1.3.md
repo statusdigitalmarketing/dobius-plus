@@ -1,24 +1,24 @@
-# Task 1.3: Redesign Sidebar + ConversationCard + Preview
+# Task 1.3 — Wire IPC handlers + preload for sessions + tags
 
-## What
-- Sidebar: search with icon + focus animation, pinned section with separator, thin themed scrollbar
-- ConversationCard: left-border selection (3px accent), hover state with surface-hover bg, staggered animation, pin dot
-- Preview: chat bubble style (user right, assistant left), role labels in small caps dim, timestamp monospace, code block bg
+## What will change
+- `electron/main.js`: Add IPC handlers in setupDataHandlers() and setupConfigHandlers()
+  - `data:loadAllSessions` → loadAllSessions()
+  - `data:getLatestSession` → getLatestSession(projectPath)
+  - `config:getSessionTags` → getSessionTags()
+  - `config:setSessionTag` → setSessionTag(sessionId, label, color)
+  - `config:removeSessionTag` → removeSessionTag(sessionId)
+- `electron/preload.js`: Add corresponding electronAPI methods
 
-## Files changed
-- `src/components/Project/Sidebar.jsx`
-- `src/components/Project/ConversationCard.jsx`
-- `src/components/Project/Preview.jsx`
-
-## Design rules
-- Left-border selection indicator (3px solid accent on selected)
-- No accent-colored role labels — use var(--dim)
-- Resume button is the only accent CTA
-- Staggered list animation on ConversationCards
+## Why
+The renderer needs IPC access to the new data-service and config-manager functions.
 
 ## Verification
-- `npx vite build` exits 0
-- No hardcoded hex in components
+- `npm run build` exits 0
+- All existing IPC still works (dashboard loads, sessions load, config saves)
 
-## Risks
-- Chat bubble layout may need careful flex/alignment for bidirectional messages
+## What could go wrong
+- Import collision if function names overlap — unlikely, names are unique
+- Forgetting to import new functions in main.js
+
+## Estimated time
+8 minutes

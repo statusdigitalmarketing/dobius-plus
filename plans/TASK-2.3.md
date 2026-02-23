@@ -1,19 +1,21 @@
-# Task 2.3: Create BuildProgressBar + BuildTimeline components
+# Task 2.3 — Tag management on session cards
 
-## What
-- BuildProgressBar: animated progress bar with phase/task labels, pulsing when active
-- BuildTimeline: vertical timeline with connected dots for completed/current/remaining tasks
+## What will change
+- `src/components/Dashboard/Sessions.jsx`: Add inline tag editor to SessionCard
 
-## Files
-- NEW: src/components/Dashboard/BuildMonitor/BuildProgressBar.jsx
-- NEW: src/components/Dashboard/BuildMonitor/BuildTimeline.jsx
+## Why
+Users need to label sessions with colored tags for quick identification (e.g., "important", "bug-fix").
 
-## Design rules
-- All colors from CSS variables (no hardcoded hex)
-- framer-motion for animations (progress bar fill, pulsing, staggered timeline dots)
-- Monospace for task IDs and status data
-- Section titles: var(--dim), uppercase, tracking-wider
-- Completed: var(--accent) dot, Current: pulsing yellow/accent, Remaining: var(--dim) dot
+## Implementation
+1. Add "Tag" button to each session card (next to session ID)
+2. Clicking opens inline tag editor: text input + color picker (7 colored circles)
+3. Save calls `configSetSessionTag(sessionId, label, color)` IPC
+4. Remove tag calls `configRemoveSessionTag(sessionId)` IPC
+5. Reload tags from config after save/remove
+6. Tag badge already renders from Task 2.1
 
 ## Verification
-- `npx vite build` exits 0
+- `npm run build` exits 0
+
+## Estimated time
+15 minutes

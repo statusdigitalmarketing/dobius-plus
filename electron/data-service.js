@@ -37,6 +37,165 @@ export async function loadHistory() {
 }
 
 /**
+ * Load ALL sessions across all projects by scanning ~/.claude/projects/.
+ * Returns array of { sessionId, projectPath, projectName, preview, timestamp, age }
+ * sorted by recency, limited to 500.
+ */
+export async function loadAllSessions() {
+  const sessions = [];
+  try {
+    if (!(await pathExists(PROJECTS_DIR))) return [];
+    const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+    const projectDirs = dirents.filter((d) => d.isDirectory());
+
+    // Build encoded→real path map using same logic as listProjects()
+    const encodedToReal = new Map();
+    try {
+      const settings = getSettings();
+      let scanDir = settings.projectScanDir;
+      if (scanDir) {
+        scanDir = scanDir.replace(/^~/, os.homedir());
+        if (await pathExists(scanDir)) {
+          const scanDirents = await fs.readdir(scanDir, { withFileTypes: true });
+          for (const d of scanDirents) {
+            if (!d.isDirectory() || d.name.startsWith('.')) continue;
+            const fullPath = path.join(scanDir, d.name);
+            encodedToReal.set(encodePathLikeClaude(fullPath), fullPath);
+          }
+        }
+      }
+    } catch {
+      void 0;
+    }
+
+    await Promise.all(projectDirs.map(async (dir) => {
+      const projectDir = path.join(PROJECTS_DIR, dir.name);
+      const realPath = encodedToReal.get(dir.name);
+      const projectPath = realPath || ('/' + dir.name.replace(/-/g, '/'));
+      const projectName = realPath
+        ? realPath.split('/').filter(Boolean).pop()
+        : dir.name.split('-').filter(Boolean).pop() || dir.name;
+
+      try {
+        const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
+        await Promise.all(files.map(async (f) => {
+          const sessionId = f.replace('.jsonl', '');
+          const filePath = path.join(projectDir, f);
+          try {
+            const entries = await parseJsonl(filePath, 5);
+            let preview = '';
+            let timestamp = 0;
+
+            for (const entry of entries) {
+              if (entry.timestamp && entry.timestamp > timestamp) {
+                timestamp = entry.timestamp;
+              }
+              if (!preview && (entry.type === 'human' || entry.role === 'user')) {
+                const content = typeof entry.message === 'string'
+                  ? entry.message
+                  : entry.message?.content || entry.content || '';
+                if (content) {
+                  preview = content.slice(0, 200);
+                }
+              }
+            }
+
+            if (!timestamp) {
+              try {
+                const stat = await fs.stat(filePath);
+                timestamp = stat.mtimeMs;
+              } catch {
+                void 0;
+              }
+            }
+
+            sessions.push({
+              sessionId,
+              projectPath,
+              projectName,
+              preview: preview || 'No preview available',
+              timestamp,
+              age: timestamp ? timeAgo(timestamp) : 'unknown',
+            });
+          } catch {
+            void 0;
+          }
+        }));
+      } catch {
+        void 0;
+      }
+    }));
+  } catch (err) {
+    console.warn('[data-service] Failed to load all sessions:', err.message);
+    return [];
+  }
+
+  return sessions
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+    .slice(0, 500);
+}
+
+/**
+ * Get the most recent session for a given project path.
+ * Returns { sessionId, preview, timestamp, age } or null.
+ */
+export async function getLatestSession(projectPath) {
+  try {
+    if (!projectPath || typeof projectPath !== 'string') return null;
+    const encoded = encodePathLikeClaude(projectPath);
+    const projectDir = path.join(PROJECTS_DIR, encoded);
+    if (!(await pathExists(projectDir))) return null;
+
+    const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
+    if (files.length === 0) return null;
+
+    const fileStats = await Promise.all(files.map(async (f) => {
+      try {
+        const stat = await fs.stat(path.join(projectDir, f));
+        return { file: f, mtime: stat.mtimeMs };
+      } catch {
+        return { file: f, mtime: 0 };
+      }
+    }));
+
+    const latest = fileStats.reduce((best, cur) => cur.mtime > best.mtime ? cur : best);
+    if (!latest || latest.mtime === 0) return null;
+    const latestFile = latest.file;
+    const latestMtime = latest.mtime;
+
+    const sessionId = latestFile.replace('.jsonl', '');
+    const filePath = path.join(projectDir, latestFile);
+    const entries = await parseJsonl(filePath, 5);
+
+    let preview = '';
+    let timestamp = latestMtime;
+    for (const entry of entries) {
+      if (entry.timestamp && entry.timestamp > timestamp) {
+        timestamp = entry.timestamp;
+      }
+      if (!preview && (entry.type === 'human' || entry.role === 'user')) {
+        const content = typeof entry.message === 'string'
+          ? entry.message
+          : entry.message?.content || entry.content || '';
+        if (content) {
+          preview = content.slice(0, 200);
+        }
+      }
+    }
+
+    return {
+      sessionId,
+      preview: preview || 'No preview available',
+      timestamp,
+      age: timestamp ? timeAgo(timestamp) : 'unknown',
+    };
+  } catch (err) {
+    console.warn('[data-service] Failed to get latest session:', err.message);
+    return null;
+  }
+}
+
+/**
  * Load stats from ~/.claude/stats-cache.json
  */
 export async function loadStats() {

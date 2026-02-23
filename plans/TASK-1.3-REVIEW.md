@@ -1,13 +1,12 @@
-# Task 1.3 Review — Redesign Sidebar + ConversationCard + Preview
+# Task 1.3 Review — Wire IPC handlers + preload for sessions + tags
 
 ## Three things that could be better
-1. ConversationCard uses onMouseEnter/onMouseLeave for hover — could use CSS :hover with a CSS class instead, but inline styles prevent that with CSS variables.
-2. The staggered animation uses 0.03s delay — shorter than the 0.05s on ProjectCard, but OK since sidebar items are smaller.
-3. Preview chat bubbles use maxWidth: '90%' — could look odd with very short messages. Acceptable tradeoff for layout consistency.
+1. Could add type documentation for the IPC channel signatures
+2. Could batch the loadAllSessions IPC call with a debounce since it scans many files
+3. The preload method names are getting long — could use a namespace pattern
 
 ## One thing I'm fixing right now
-Nothing critical found — implementation follows all design rules. No hardcoded hex colors.
+- Nothing — straightforward IPC wiring matching existing patterns exactly
 
 ## Concerns
-- The hover effect on ConversationCard (onMouseEnter/Leave) won't work on touch devices — acceptable since this is a desktop app.
-- AnimatePresence on large lists (100+ sessions) may impact performance — useSessions already limits to 100 items.
+- None — all 5 new IPC channels follow exact same pattern as existing ones

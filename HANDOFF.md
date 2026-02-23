@@ -1,27 +1,36 @@
-# Handoff — Dobius+ Build (UI Overhaul + Build Monitor)
+# Handoff — Dobius+ Build (Session Manager)
 
-## Current: Task FINAL.3 — Merge to main — DONE (BUILD COMPLETE)
+## Current: Task 3.3 — Cmd+R keyboard shortcut — DONE
 
-## Branch: build/build-monitor
+## Branch: build/session-manager
 
-## Completed
-- Task 0.1: Infrastructure + deps (recharts, framer-motion)
-- Task 1.1: Launcher redesign (D+ logotype, skeleton loaders, staggered animations, left-border active)
-- Task 1.2: TopBar underline tabs, StatusBar monospace+dot, ThemePicker dropdown
-- Task 1.3: Sidebar search+skeletons, ConversationCard hover+left-border, Preview chat bubbles
-- Task 1.4: All 6 dashboard tabs redesigned (underline tabs, recharts, tables, collapsible plans)
-- Task 1.5: Reusable Skeleton component, CSS polish (thin scrollbars, glass utility, font smoothing)
-- Task 2.1: build-monitor-service.js (4 functions), IPC handlers in main.js, preload API (6 methods)
-- Task 2.2: build-monitor-watcher.js (chokidar), useBuildMonitor hook, watch/unwatch IPC
-- Task 2.3: BuildProgressBar (animated progress, phase/task labels, pulsing), BuildTimeline (vertical dot timeline)
-- Task 2.4: BuildHealthGauge (SVG semi-circle, health score), SupervisorStatus (badge, log mini-terminal)
-- Task 2.5: BuildMonitorView (empty+active states, dir picker, handoff preview), wired as "Builds" 7th tab
-- Task 3.1: macOS notifications via Electron Notification API, badge dot on Builds tab, dedup via notifiedRef
-- Task 3.2: Added --danger/--warning CSS vars, replaced all hardcoded hex in BuildMonitor, 0 hex in BuildMonitor/
-- Task FINAL.1: Self-review via 2 subagents (code-reviewer + code-explorer), 9 findings total
-- Task FINAL.2: Fixed 4 findings (path traversal guard, notification validation, 10s polling, store cleanup)
+## What's Done
+- Task 0.1: Created feature branch, verify-task.sh, supervisor.sh, progress/handoff files, plans dir
+- Task 1.1: Added loadAllSessions() and getLatestSession() to data-service.js
+- Task 1.2: Added getSessionTags(), setSessionTag(), removeSessionTag() to config-manager.js
+- Task 1.3: Wired 5 new IPC handlers (loadAllSessions, getLatestSession, getSessionTags, setSessionTag, removeSessionTag) + preload
+- Task 2.1: Rewrote Sessions.jsx — project-grouped card layout, collapsible groups, tag badges, skeleton loader
 
-- Task FINAL.3: Merged build/build-monitor → main (--no-ff, 62 files changed, 2772 insertions)
+- Task 2.2: Added search input, project filter dropdown, sort toggle (recent/A-Z)
 
-## Next
-- BUILD COMPLETE. No remaining tasks.
+- Task 2.3: Added inline tag editor with 7-color picker, save/remove/cancel
+- Task 2.4: Added resumeSession action to store + Resume/Open buttons on session cards
+- Task 3.1: Created ResumeBanner.jsx, integrated into ProjectView between tab bar and terminal
+- Task 3.2: Added session count badge next to Sessions tab label in DashboardView
+- Task 3.3: Added Cmd+R shortcut to resume last session in ProjectView keyboard handler
+
+## What's Next
+- FINAL: Self-review via subagents, fix findings, merge to main
+
+## Key Decisions
+- loadAllSessions() scans ~/.claude/projects/ dirs, reads last 5 JSONL entries per session for preview
+- getLatestSession() finds most recent session file for a project by mtime
+- Fixed race condition: uses collect-then-reduce instead of shared mutable state in Promise.all
+
+## Files Touched Recently
+- src/components/Project/ProjectView.jsx (Cmd+R shortcut + ResumeBanner)
+- src/components/Dashboard/DashboardView.jsx (session count badge)
+- src/components/Project/ResumeBanner.jsx (NEW)
+
+## Blockers
+- None

@@ -1,12 +1,23 @@
-# Task 2.4 Review — BuildHealthGauge + SupervisorStatus
+# Review — Task 2.4: One-click resume from session card
 
-## Three things that could be better
-1. BuildHealthGauge uses hardcoded `#E3B341` (amber) and `#F85149` (red) for gauge colors — these could be CSS variables, but the gauge is specifically a health indicator and these match GitHub's semantic colors.
-2. The health score formula (100 - failures*10 - restarts*5) is simplistic — could weight by severity, but it's intuitive and easy to reason about.
-3. SupervisorStatus mini-terminal uses array index as key — log lines may shift, but since we only show last 5 lines, this is acceptable.
+## Changes
+- `src/store/store.js`: Added `resumeSession(sessionId)` action
+  - Validates sessionId with `/^[\w-]+$/` regex (security: prevents command injection)
+  - Switches to terminal view, sends `claude --resume <id>` char-by-char at 5ms intervals
+  - Matches existing char-by-char pattern from TerminalPane.jsx
+- `src/components/Dashboard/Sessions.jsx`: Added Resume + Open buttons to SessionCard
+  - Resume button (accent styled) calls `resumeSession(sessionId)` via Zustand store
+  - Open button (conditional) appears when session is from a different project
+  - Added `CardBtn` reusable button component with hover effects
+  - `isDifferentProject` check compares `currentProjectPath` from store
 
-## One thing I'm fixing right now
-Nothing — both components are clean presentation components.
+## Security
+- Session ID validated with strict regex before interpolation into command string
+- No shell execution — uses terminalWrite character-by-character
 
-## Concerns
-- The SVG arc math assumes a 140x80 viewport with fixed radius — responsive scaling would need viewBox adjustments, but the gauge is always displayed at a fixed size.
+## Build
+- `npx vite build` passes: 1,311KB bundle
+
+## Risk
+- If no active terminal tab, resume silently does nothing (acceptable UX)
+- Different-project resume types into current terminal — user expected to use "Open" for cross-project

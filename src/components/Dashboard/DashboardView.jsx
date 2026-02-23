@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { useStore } from '../../store/store';
 import { useStats } from '../../hooks/useStats';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -49,6 +50,14 @@ export default function DashboardView() {
   const setDashboardTab = useStore((s) => s.setDashboardTab);
   const buildComplete = useStore((s) => s.buildComplete);
   const { stats, settings, bridgeServers, plans, skills, loading } = useStats();
+  const [sessionCount, setSessionCount] = useState(0);
+
+  useEffect(() => {
+    if (!window.electronAPI?.dataLoadAllSessions) return;
+    window.electronAPI.dataLoadAllSessions().then((sessions) => {
+      setSessionCount(sessions?.length || 0);
+    });
+  }, []);
 
   if (loading) {
     return (
@@ -94,6 +103,18 @@ export default function DashboardView() {
             }}
           >
             {tab.label}
+            {tab.id === 'sessions' && sessionCount > 0 && (
+              <span
+                className="ml-1 text-xs"
+                style={{
+                  color: 'var(--dim)',
+                  fontFamily: "'SF Mono', monospace",
+                  fontSize: 9,
+                }}
+              >
+                ({sessionCount})
+              </span>
+            )}
             {tab.id === 'builds' && buildComplete && dashboardTab !== 'builds' && (
               <span
                 className="absolute top-1.5 right-1 w-1.5 h-1.5 rounded-full"

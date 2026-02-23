@@ -7,6 +7,7 @@ import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, g
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
+  loadAllSessions, getLatestSession,
 } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
@@ -20,6 +21,7 @@ import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-mo
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions, getSettings, updateSettings, flushConfig,
+  getSessionTags, setSessionTag, removeSessionTag,
 } from './config-manager.js';
 import {
   openProjectWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
@@ -174,6 +176,8 @@ function setupDataHandlers() {
   ipcMain.handle('data:loadTranscript', (_event, sessionId, projectPath) => loadTranscript(sessionId, projectPath));
   ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
   ipcMain.handle('data:listProjects', () => listProjects());
+  ipcMain.handle('data:loadAllSessions', () => loadAllSessions());
+  ipcMain.handle('data:getLatestSession', (_event, projectPath) => getLatestSession(projectPath));
 }
 
 function setupCheckpointHandlers() {
@@ -367,6 +371,9 @@ function setupConfigHandlers() {
   ipcMain.handle('config:setPinned', (_event, sessionIds) => setPinnedSessions(sessionIds));
   ipcMain.handle('config:getSettings', () => getSettings());
   ipcMain.handle('config:updateSettings', (_event, updates) => updateSettings(updates));
+  ipcMain.handle('config:getSessionTags', () => getSessionTags());
+  ipcMain.handle('config:setSessionTag', (_event, sessionId, label, color) => setSessionTag(sessionId, label, color));
+  ipcMain.handle('config:removeSessionTag', (_event, sessionId) => removeSessionTag(sessionId));
 }
 
 function setupBuildMonitorHandlers() {

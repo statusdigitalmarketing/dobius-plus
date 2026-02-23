@@ -101,4 +101,26 @@ export const useStore = create((set, get) => ({
   setSessions: (sessions) => set({ sessions }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),
   setBuildComplete: (val) => set({ buildComplete: val }),
+
+  // Resume a Claude session by sending the resume command to the active terminal
+  resumeSession: (sessionId) => {
+    if (!sessionId || sessionId.length > 100 || !/^[\w-]+$/.test(sessionId)) return;
+    set({ activeView: 'terminal' });
+    const termId = get().activeTabId;
+    if (!window.electronAPI || !termId) return;
+    const cmd = `claude --resume ${sessionId}`;
+    const chars = cmd.split('');
+    chars.push('\r');
+    let i = 0;
+    const sendNext = () => {
+      if (i < chars.length) {
+        window.electronAPI.terminalWrite(termId, chars[i]);
+        i++;
+        if (i < chars.length) {
+          setTimeout(sendNext, 5);
+        }
+      }
+    };
+    sendNext();
+  },
 }));

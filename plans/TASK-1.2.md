@@ -1,23 +1,24 @@
-# Task 1.2: Redesign TopBar + StatusBar + ThemePicker
+# Task 1.2 — Add session tags to config-manager.js
 
-## What
-- TopBar: draggable region, underline indicator on active tab (not bg swap), truncated project name, theme picker as small swatch circle
-- StatusBar: minimal with monospace counts, green/red connection dot, version in dim
-- ThemePicker: dropdown with color swatch preview, checkmark on selected, smooth open/close
+## What will change
+- `electron/config-manager.js`: Add `getSessionTags()`, `setSessionTag()`, `removeSessionTag()`
 
-## Files changed
-- `src/components/shared/TopBar.jsx`
-- `src/components/shared/StatusBar.jsx`
-- `src/components/shared/ThemePicker.jsx`
+## Why
+Session tags allow users to label and color-code sessions for quick identification in the session manager. Tags persist via the existing config system.
 
-## Design rules
-- Tab buttons: underline indicator on active, not background swap
-- StatusBar: all text in var(--dim), monospace for counts
-- ThemePicker: dropdown, not inline row of dots
+## Implementation
+- Tags stored as `config.sessionTags` — map of `sessionId → { label, color }`
+- `getSessionTags()` returns the full tags map
+- `setSessionTag(sessionId, label, color)` validates input, sets/updates a tag
+- `removeSessionTag(sessionId)` removes a tag
+- Color validation: must be one of `['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink']`
 
 ## Verification
-- `npx vite build` exits 0
+- `npm run build` exits 0
 
-## Risks
-- Dropdown ThemePicker needs click-outside-to-close logic
-- Traffic light padding must be preserved
+## What could go wrong
+- Prototype pollution with sessionId keys — mitigate with UNSAFE_KEYS check (already in codebase)
+- Large number of tags bloating config — no limit needed for now (realistic usage < 1000)
+
+## Estimated time
+8 minutes

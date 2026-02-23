@@ -1,20 +1,24 @@
-# Task 0.1: Pre-Flight Validation + Create Infrastructure
+# Task 0.1 — Pre-Flight Validation + Create Infrastructure
 
-## What
-- Validate environment (clean git, build passes, disk space)
-- Install dependencies: recharts, framer-motion
-- Create feature branch: build/build-monitor
-- Initialize build files: BUILD-LOG.md, claude-progress.json, HANDOFF.md
-- Read all 18 key architecture files
+## What will change
+- Create `scripts/verify-task.sh` — gate script
+- Create `scripts/crackbot-supervisor.sh` — auto-resume wrapper
+- Create `BUILD-LOG.md` — append-only task log
+- Create `claude-progress.json` — machine-readable state
+- Create `HANDOFF.md` — context recovery file
+- Create `plans/` directory
+- Record `.test-baseline.txt`
 
 ## Why
-Infrastructure required for the autonomous build cycle (PLAN → IMPLEMENT → VERIFY → REVIEW → COMMIT → GATE → LOG).
+These files enable the autonomous build protocol: gate checks after every task, crash recovery via HANDOFF.md, and supervisor auto-resume.
 
 ## Verification
-- `npx vite build` exits 0
-- On branch `build/build-monitor`
+- `npm run build` exits 0
+- On branch `build/session-manager`
 - All infrastructure files exist
 
-## Risks
-- npm install could fail (mitigated: packages are standard)
-- Prior build artifacts in plans/ directory — keeping them, no conflict
+## What could go wrong
+- Very little — these are all new files with no code changes
+
+## Estimated time
+5 minutes

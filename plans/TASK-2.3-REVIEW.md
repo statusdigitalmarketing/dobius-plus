@@ -1,13 +1,12 @@
-# Task 2.3 Review — BuildProgressBar + BuildTimeline
+# Task 2.3 Review — Tag management on session cards
 
 ## Three things that could be better
-1. BuildTimeline uses `✓` unicode character — could use an SVG check for consistency, but it's tiny and works fine.
-2. The timeline vertical line uses absolute positioning with fixed left offset (7px) — tied to dot width, fragile if dot size changes.
-3. No empty state in BuildTimeline for 0 entries — returns null, which is correct since parent handles empty state.
+1. The tag editor could close when clicking outside (onBlur or click-outside)
+2. Could add animation for the tag editor appearing/disappearing (framer-motion)
+3. Tag label input could show a character count (max 50)
 
 ## One thing I'm fixing right now
-Nothing — both components are presentation-only, receive data via props, use CSS variables throughout.
+- Nothing critical — the tag editor works with save/remove/cancel. The color picker circles are clear.
 
 ## Concerns
-- Both components are not yet imported anywhere — they'll be wired in Task 2.5 (BuildMonitorView).
-- The progress bar animation replays on every re-render — framer-motion handles this gracefully with `animate` (only transitions changed values).
+- The `onTagsChanged` callback refetches ALL sessions + tags. For a single tag change this is heavy — could optimistically update the local tags state instead. But simplicity wins for now.
