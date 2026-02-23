@@ -21,3 +21,10 @@
 - Duration: 5 min
 - Files changed: electron/config-manager.js
 - Verification: PASS (attempts: 1)
+
+## Task 1.3 — Wire IPC handlers + preload for sessions + tags
+- Start: 19:27
+- End: 19:32
+- Duration: 5 min
+- Files changed: electron/main.js, electron/preload.js
+- Verification: PASS (attempts: 1)
