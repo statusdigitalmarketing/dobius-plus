@@ -28,3 +28,11 @@
 - Duration: 5 min
 - Files changed: electron/main.js, electron/preload.js
 - Verification: PASS (attempts: 1)
+
+## Task 2.1 — Rewrite Sessions.jsx — project-grouped card layout
+- Start: 19:32
+- End: 19:42
+- Duration: 10 min
+- Files changed: src/components/Dashboard/Sessions.jsx (complete rewrite)
+- Verification: PASS (attempts: 1)
+- Notes: Replaced table with project-grouped collapsible card layout, tag badges, skeleton loader

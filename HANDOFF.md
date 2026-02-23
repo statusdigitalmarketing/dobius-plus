@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (Session Manager)
 
-## Current: Task 1.3 — Wire IPC handlers + preload — DONE
+## Current: Task 2.1 — Rewrite Sessions.jsx — DONE
 
 ## Branch: build/session-manager
 
@@ -9,9 +9,10 @@
 - Task 1.1: Added loadAllSessions() and getLatestSession() to data-service.js
 - Task 1.2: Added getSessionTags(), setSessionTag(), removeSessionTag() to config-manager.js
 - Task 1.3: Wired 5 new IPC handlers (loadAllSessions, getLatestSession, getSessionTags, setSessionTag, removeSessionTag) + preload
+- Task 2.1: Rewrote Sessions.jsx — project-grouped card layout, collapsible groups, tag badges, skeleton loader
 
 ## What's Next
-- Task 2.1: Rewrite Sessions.jsx with project-grouped card layout
+- Task 2.2: Add search, filter, and sort controls to Sessions
 
 ## Key Decisions
 - loadAllSessions() scans ~/.claude/projects/ dirs, reads last 5 JSONL entries per session for preview
@@ -19,9 +20,8 @@
 - Fixed race condition: uses collect-then-reduce instead of shared mutable state in Promise.all
 
 ## Files Touched Recently
-- electron/main.js (IPC handlers)
-- electron/preload.js (electronAPI bridge)
-- electron/data-service.js, electron/config-manager.js
+- src/components/Dashboard/Sessions.jsx (complete rewrite)
+- electron/main.js, electron/preload.js
 
 ## Blockers
 - None
