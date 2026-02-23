@@ -12,11 +12,13 @@ export default function ResumeBanner({ projectPath }) {
 
   useEffect(() => {
     if (!projectPath || !window.electronAPI?.dataGetLatestSession) return;
-    window.electronAPI.dataGetLatestSession(projectPath).then((result) => {
-      if (result && result.timestamp && Date.now() - result.timestamp < SEVEN_DAYS_MS) {
-        setSession(result);
-      }
-    });
+    window.electronAPI.dataGetLatestSession(projectPath)
+      .then((result) => {
+        if (result && result.timestamp && Date.now() - result.timestamp < SEVEN_DAYS_MS) {
+          setSession(result);
+        }
+      })
+      .catch(() => { /* No recent session — banner won't show */ });
   }, [projectPath]);
 
   // Auto-dismiss after 30 seconds

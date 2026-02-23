@@ -13,13 +13,19 @@ export default function Sessions() {
 
   const loadData = useCallback(async () => {
     if (!window.electronAPI?.dataLoadAllSessions) return;
-    const [allSessions, sessionTags] = await Promise.all([
-      window.electronAPI.dataLoadAllSessions(),
-      window.electronAPI.configGetSessionTags?.() || {},
-    ]);
-    setSessions(allSessions || []);
-    setTags(sessionTags || {});
-    setLoading(false);
+    try {
+      const [allSessions, sessionTags] = await Promise.all([
+        window.electronAPI.dataLoadAllSessions(),
+        window.electronAPI.configGetSessionTags?.() || {},
+      ]);
+      setSessions(allSessions || []);
+      setTags(sessionTags || {});
+    } catch {
+      setSessions([]);
+      setTags({});
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -230,17 +236,25 @@ function SessionCard({ session, tag, onTagsChanged }) {
 
   const handleSaveTag = async () => {
     if (!tagLabel.trim()) return;
-    await window.electronAPI?.configSetSessionTag(session.sessionId, tagLabel.trim(), tagColor);
-    setEditing(false);
-    onTagsChanged?.();
+    try {
+      await window.electronAPI?.configSetSessionTag(session.sessionId, tagLabel.trim(), tagColor);
+      setEditing(false);
+      onTagsChanged?.();
+    } catch (_) {
+      // IPC failure — tag not saved, editor stays open for retry
+    }
   };
 
   const handleRemoveTag = async () => {
-    await window.electronAPI?.configRemoveSessionTag(session.sessionId);
-    setEditing(false);
-    setTagLabel('');
-    setTagColor('blue');
-    onTagsChanged?.();
+    try {
+      await window.electronAPI?.configRemoveSessionTag(session.sessionId);
+      setEditing(false);
+      setTagLabel('');
+      setTagColor('blue');
+      onTagsChanged?.();
+    } catch (_) {
+      // IPC failure — tag not removed
+    }
   };
 
   const handleTagClick = () => {

@@ -104,7 +104,7 @@ export const useStore = create((set, get) => ({
 
   // Resume a Claude session by sending the resume command to the active terminal
   resumeSession: (sessionId) => {
-    if (!sessionId || !/^[\w-]+$/.test(sessionId)) return;
+    if (!sessionId || sessionId.length > 100 || !/^[\w-]+$/.test(sessionId)) return;
     set({ activeView: 'terminal' });
     const termId = get().activeTabId;
     if (!window.electronAPI || !termId) return;
