@@ -1,12 +1,12 @@
-# Task 2.2 Review — Build monitor watcher + useBuildMonitor hook
+# Task 2.2 Review — Search, filter, and sort controls
 
 ## Three things that could be better
-1. The watcher watches `claude-progress.json` path even when file doesn't exist yet — chokidar handles this gracefully but could use `depth: 0` on parent dir watching instead.
-2. The hook re-creates the `loadAll` callback when `projectDir` changes — this is correct behavior (new dir = new data) but causes a brief loading flash.
-3. No debounce on rapid file changes — the chokidar `awaitWriteFinish` with 300ms threshold handles this, but multiple files changing in quick succession could cause multiple loads.
+1. Could debounce the search input for better perf with many sessions
+2. The select dropdown styling is limited by browser defaults — could use a custom dropdown component
+3. Could persist the sort preference to config
 
 ## One thing I'm fixing right now
-Nothing — the implementation follows established patterns cleanly.
+- Nothing needed — the implementation is clean and matches existing patterns
 
 ## Concerns
-- The `unwatchBuildDir` in cleanup assumes the previous `projectDir` is captured by the effect closure — this is correct React behavior.
+- The filtering runs on every render — with 500 sessions max this is fine, but for thousands it could be optimized with useMemo

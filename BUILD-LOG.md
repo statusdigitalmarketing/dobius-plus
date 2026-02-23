@@ -36,3 +36,10 @@
 - Files changed: src/components/Dashboard/Sessions.jsx (complete rewrite)
 - Verification: PASS (attempts: 1)
 - Notes: Replaced table with project-grouped collapsible card layout, tag badges, skeleton loader
+
+## Task 2.2 — Search, filter, and sort controls
+- Start: 19:42
+- End: 19:50
+- Duration: 8 min
+- Files changed: src/components/Dashboard/Sessions.jsx
+- Verification: PASS (attempts: 1)

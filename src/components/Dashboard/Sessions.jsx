@@ -6,6 +6,9 @@ export default function Sessions() {
   const [tags, setTags] = useState({});
   const [loading, setLoading] = useState(true);
   const [collapsed, setCollapsed] = useState({});
+  const [searchText, setSearchText] = useState('');
+  const [projectFilter, setProjectFilter] = useState('');
+  const [sortBy, setSortBy] = useState('recent'); // 'recent' | 'alpha'
 
   const loadData = useCallback(async () => {
     if (!window.electronAPI?.dataLoadAllSessions) return;
@@ -22,9 +25,27 @@ export default function Sessions() {
     loadData();
   }, [loadData]);
 
-  // Group sessions by projectName
+  // Filter sessions
+  const searchLower = searchText.toLowerCase();
+  const filtered = sessions.filter((s) => {
+    if (projectFilter && s.projectName !== projectFilter) return false;
+    if (searchText) {
+      const tag = tags[s.sessionId];
+      const matchesSearch =
+        (s.projectName || '').toLowerCase().includes(searchLower) ||
+        (s.preview || '').toLowerCase().includes(searchLower) ||
+        (tag?.label || '').toLowerCase().includes(searchLower);
+      if (!matchesSearch) return false;
+    }
+    return true;
+  });
+
+  // Get all unique project names for the filter dropdown
+  const allProjectNames = [...new Set(sessions.map((s) => s.projectName || 'Unknown'))].sort();
+
+  // Group filtered sessions by projectName
   const groups = {};
-  for (const s of sessions) {
+  for (const s of filtered) {
     const key = s.projectName || 'Unknown';
     if (!groups[key]) {
       groups[key] = { projectName: key, projectPath: s.projectPath, sessions: [], latestTimestamp: 0 };
@@ -35,9 +56,11 @@ export default function Sessions() {
     }
   }
 
-  // Sort groups by most recent session
+  // Sort groups
   const sortedGroups = Object.values(groups).sort(
-    (a, b) => b.latestTimestamp - a.latestTimestamp
+    sortBy === 'alpha'
+      ? (a, b) => a.projectName.localeCompare(b.projectName)
+      : (a, b) => b.latestTimestamp - a.latestTimestamp
   );
 
   // Sort sessions within each group by recency
@@ -49,7 +72,7 @@ export default function Sessions() {
     setCollapsed((prev) => ({ ...prev, [projectName]: !prev[projectName] }));
   };
 
-  const totalSessions = sessions.length;
+  const totalSessions = filtered.length;
   const totalProjects = sortedGroups.length;
 
   if (loading) {
@@ -72,13 +95,61 @@ export default function Sessions() {
   return (
     <div className="p-6 h-full flex flex-col max-w-3xl">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-semibold uppercase tracking-wider" style={{ color: 'var(--fg)', letterSpacing: '0.1em' }}>
           Sessions
         </h2>
         <span className="text-xs" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
           {totalSessions} session{totalSessions !== 1 ? 's' : ''} across {totalProjects} project{totalProjects !== 1 ? 's' : ''}
         </span>
+      </div>
+
+      {/* Controls */}
+      <div className="flex items-center gap-2 mb-4">
+        <input
+          type="text"
+          placeholder="Search sessions..."
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          className="flex-1 px-2.5 py-1.5 text-xs rounded outline-none transition-all duration-150"
+          style={{
+            backgroundColor: 'var(--surface)',
+            color: 'var(--fg)',
+            border: '1px solid var(--border)',
+            fontFamily: "'SF Mono', monospace",
+          }}
+        />
+        <select
+          value={projectFilter}
+          onChange={(e) => setProjectFilter(e.target.value)}
+          className="px-2 py-1.5 text-xs rounded outline-none cursor-pointer"
+          style={{
+            backgroundColor: 'var(--surface)',
+            color: projectFilter ? 'var(--fg)' : 'var(--dim)',
+            border: '1px solid var(--border)',
+            fontFamily: "'SF Mono', monospace",
+            maxWidth: 160,
+          }}
+        >
+          <option value="">All projects</option>
+          {allProjectNames.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+        </select>
+        <button
+          onClick={() => setSortBy((prev) => prev === 'recent' ? 'alpha' : 'recent')}
+          className="px-2 py-1.5 text-xs rounded transition-colors duration-100 shrink-0"
+          style={{
+            backgroundColor: 'var(--surface)',
+            color: 'var(--dim)',
+            border: '1px solid var(--border)',
+            fontFamily: "'SF Mono', monospace",
+            cursor: 'pointer',
+          }}
+          title={sortBy === 'recent' ? 'Sorted by recent' : 'Sorted A-Z'}
+        >
+          {sortBy === 'recent' ? 'Recent' : 'A-Z'}
+        </button>
       </div>
 
       {/* Content */}

@@ -1,6 +1,6 @@
 # Handoff — Dobius+ Build (Session Manager)
 
-## Current: Task 2.1 — Rewrite Sessions.jsx — DONE
+## Current: Task 2.2 — Search, filter, and sort controls — DONE
 
 ## Branch: build/session-manager
 
@@ -11,8 +11,10 @@
 - Task 1.3: Wired 5 new IPC handlers (loadAllSessions, getLatestSession, getSessionTags, setSessionTag, removeSessionTag) + preload
 - Task 2.1: Rewrote Sessions.jsx — project-grouped card layout, collapsible groups, tag badges, skeleton loader
 
+- Task 2.2: Added search input, project filter dropdown, sort toggle (recent/A-Z)
+
 ## What's Next
-- Task 2.2: Add search, filter, and sort controls to Sessions
+- Task 2.3: Add tag management to session cards
 
 ## Key Decisions
 - loadAllSessions() scans ~/.claude/projects/ dirs, reads last 5 JSONL entries per session for preview

@@ -1,21 +1,19 @@
-# Task 2.2: Create build monitor watcher + useBuildMonitor React hook
+# Task 2.2 — Search, filter, and sort controls
 
-## What
-- Main process: chokidar watcher for claude-progress.json, HANDOFF.md, supervisor.log in monitored dirs
-- IPC: watch/unwatch channels + preload API
-- Renderer: useBuildMonitor hook (loads progress, handoff, supervisor log, active builds; auto-refreshes on file changes)
+## What will change
+- `src/components/Dashboard/Sessions.jsx`: Add control bar with search, project filter dropdown, sort toggle
 
-## Files
-- NEW: electron/build-monitor-watcher.js
-- EDIT: electron/main.js (wire watcher start/stop + new IPC handlers)
-- EDIT: electron/preload.js (add watch/unwatch methods)
-- NEW: src/hooks/useBuildMonitor.js
+## Why
+Users need to quickly find sessions across potentially hundreds of entries.
 
-## Design
-- Follow watcher-service.js pattern (per-webContents watcher map)
-- Follow useSessions.js/useStats.js hook pattern (useState + useEffect + useCallback)
-- Poll interval: none (event-driven via chokidar + IPC)
-- Hook returns: { progress, handoff, supervisorLog, activeBuilds, loading, projectDir, setProjectDir, refresh }
+## Implementation
+1. Text search: filters by project name, preview text, and tag label
+2. Project filter: dropdown showing all projects, filtering to one project
+3. Sort: toggle between "Recent first" (default) and "Project A-Z"
+4. Count display already exists from 2.1 — keep it
 
 ## Verification
-- `npx vite build` exits 0
+- `npm run build` exits 0
+
+## Estimated time
+12 minutes
