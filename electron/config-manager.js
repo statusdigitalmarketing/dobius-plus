@@ -175,6 +175,106 @@ export function removeSessionTag(sessionId) {
   }
 }
 
+// --- Agent Memory ---
+
+const MEMORY_DEFAULTS = { context: '', journal: [], experience: [], lastUpdated: 0 };
+const MAX_CONTEXT_LEN = 5000;
+const MAX_JOURNAL = 50;
+const MAX_EXPERIENCE = 20;
+const MAX_EXPERIENCE_LEN = 200;
+
+/**
+ * Get agent memory for a specific agent. Returns default if none exists.
+ */
+export function getAgentMemory(agentId) {
+  if (!agentId || typeof agentId !== 'string' || UNSAFE_KEYS.has(agentId)) {
+    return { ...MEMORY_DEFAULTS, journal: [], experience: [] };
+  }
+  const config = loadConfig();
+  const mem = config.agentMemory?.[agentId];
+  if (!mem || typeof mem !== 'object') {
+    return { ...MEMORY_DEFAULTS, journal: [], experience: [] };
+  }
+  return {
+    context: typeof mem.context === 'string' ? mem.context : '',
+    journal: Array.isArray(mem.journal) ? mem.journal : [],
+    experience: Array.isArray(mem.experience) ? mem.experience : [],
+    lastUpdated: typeof mem.lastUpdated === 'number' ? mem.lastUpdated : 0,
+  };
+}
+
+/**
+ * Set agent memory (full replace with validation).
+ */
+export function setAgentMemory(agentId, memory) {
+  if (!agentId || typeof agentId !== 'string' || UNSAFE_KEYS.has(agentId)) return;
+  if (!memory || typeof memory !== 'object') return;
+  const config = loadConfig();
+  if (!config.agentMemory || typeof config.agentMemory !== 'object') {
+    config.agentMemory = {};
+  }
+  config.agentMemory[agentId] = {
+    context: typeof memory.context === 'string' ? memory.context.slice(0, MAX_CONTEXT_LEN) : '',
+    journal: Array.isArray(memory.journal) ? memory.journal.slice(-MAX_JOURNAL) : [],
+    experience: Array.isArray(memory.experience)
+      ? memory.experience.slice(0, MAX_EXPERIENCE).map((e) => String(e).slice(0, MAX_EXPERIENCE_LEN))
+      : [],
+    lastUpdated: Date.now(),
+  };
+  saveConfig(config);
+}
+
+/**
+ * Append a journal entry for an agent (FIFO, max 50).
+ */
+export function appendJournalEntry(agentId, entry) {
+  if (!agentId || typeof agentId !== 'string' || UNSAFE_KEYS.has(agentId)) return;
+  if (!entry || typeof entry !== 'object') return;
+  const config = loadConfig();
+  if (!config.agentMemory || typeof config.agentMemory !== 'object') {
+    config.agentMemory = {};
+  }
+  if (!config.agentMemory[agentId] || typeof config.agentMemory[agentId] !== 'object') {
+    config.agentMemory[agentId] = { ...MEMORY_DEFAULTS, journal: [], experience: [] };
+  }
+  const mem = config.agentMemory[agentId];
+  if (!Array.isArray(mem.journal)) mem.journal = [];
+  const sanitized = {
+    id: typeof entry.id === 'string' ? entry.id.slice(0, 50) : `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    timestamp: typeof entry.timestamp === 'number' ? entry.timestamp : Date.now(),
+    duration: typeof entry.duration === 'number' ? Math.max(0, entry.duration) : 0,
+    projectPath: typeof entry.projectPath === 'string' ? entry.projectPath.slice(0, 500) : '',
+    exitCode: typeof entry.exitCode === 'number' ? entry.exitCode : null,
+    summary: typeof entry.summary === 'string' ? entry.summary.slice(0, 500) : '',
+    linesOutput: typeof entry.linesOutput === 'number' ? Math.max(0, entry.linesOutput) : 0,
+  };
+  mem.journal.push(sanitized);
+  if (mem.journal.length > MAX_JOURNAL) {
+    mem.journal = mem.journal.slice(-MAX_JOURNAL);
+  }
+  mem.lastUpdated = Date.now();
+  saveConfig(config);
+}
+
+/**
+ * Prune agent memory entries older than maxAgeDays.
+ */
+export function pruneOldMemory(maxAgeDays = 90) {
+  const config = loadConfig();
+  if (!config.agentMemory || typeof config.agentMemory !== 'object') return;
+  const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+  let changed = false;
+  for (const agentId of Object.keys(config.agentMemory)) {
+    if (UNSAFE_KEYS.has(agentId)) continue;
+    const mem = config.agentMemory[agentId];
+    if (!mem || !Array.isArray(mem.journal)) continue;
+    const before = mem.journal.length;
+    mem.journal = mem.journal.filter((e) => (e.timestamp || 0) > cutoff);
+    if (mem.journal.length !== before) changed = true;
+  }
+  if (changed) saveConfig(config);
+}
+
 /**
  * Flush any pending config save immediately (synchronous, atomic).
  * Call this in before-quit to avoid losing recent changes.
