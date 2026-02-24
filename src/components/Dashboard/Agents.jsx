@@ -85,7 +85,43 @@ export default function Agents() {
 
   const handleLaunch = useCallback(async (agent) => {
     if (!window.electronAPI?.agentsWriteTempPrompt) return;
-    const promptPath = await window.electronAPI.agentsWriteTempPrompt(agent.systemPrompt);
+    // Build enhanced prompt with memory injection
+    let prompt = agent.systemPrompt;
+    const mem = agentMemories[agent.id];
+    if (mem && (mem.context || mem.experience?.length > 0 || mem.journal?.length > 0)) {
+      let memorySection = '\n\n---\n## Agent Memory (auto-injected by Dobius+)\n';
+      if (mem.context) {
+        memorySection += `\n### Context\n${mem.context}\n`;
+      }
+      if (mem.experience?.length > 0) {
+        memorySection += '\n### Recent Experience\n';
+        mem.experience.forEach((exp, i) => {
+          memorySection += `${i + 1}. ${exp}\n`;
+        });
+      }
+      if (mem.journal?.length > 0) {
+        const recent = mem.journal.slice(-3).reverse();
+        memorySection += '\n### Last 3 Runs\n';
+        recent.forEach((entry) => {
+          const date = new Date(entry.timestamp).toLocaleDateString();
+          const dur = formatDuration(entry.duration);
+          const status = entry.exitCode === 0 ? 'success' : entry.exitCode != null ? `exit ${entry.exitCode}` : 'unknown';
+          memorySection += `- ${date} | ${dur} | ${status}`;
+          if (entry.projectPath) {
+            const projName = entry.projectPath.split('/').filter(Boolean).pop();
+            memorySection += ` | ${projName}`;
+          }
+          if (entry.summary) memorySection += ` — ${entry.summary}`;
+          memorySection += '\n';
+        });
+      }
+      // Keep total under 10,000 chars — truncate memory section if needed
+      const maxMemory = 10000 - prompt.length - 50;
+      if (maxMemory > 100) {
+        prompt += memorySection.slice(0, maxMemory);
+      }
+    }
+    const promptPath = await window.electronAPI.agentsWriteTempPrompt(prompt);
     if (!promptPath) return;
     const tab = addTab(currentProjectPath);
     renameTab(tab.id, agent.name);
@@ -97,7 +133,7 @@ export default function Agents() {
       const cmd = `claude --system-prompt-file '${safePath}'${modelFlag}\r`;
       window.electronAPI.terminalWrite(tab.id, cmd);
     }, 500);
-  }, [addTab, renameTab, setActiveView, currentProjectPath, registerRunningAgent]);
+  }, [addTab, renameTab, setActiveView, currentProjectPath, registerRunningAgent, agentMemories]);
 
   const handleChat = useCallback((agentId) => {
     const tabId = runningAgents[agentId];

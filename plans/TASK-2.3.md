@@ -1,11 +1,15 @@
-# Task 2.3 — Wire up AgentGrid and launch/chat handlers
+# Task 2.3: Memory Injection into Agent System Prompts on Launch
 
-## What will change
-- Already implemented in Task 2.1's file rewrite.
-- handleLaunch now calls registerRunningAgent(agent.id, tab.id)
-- handleChat switches to agent's tab via setActiveTab + setActiveView('terminal')
-- Agent grid uses responsive auto-fill grid
-- MissionControlSkeleton provides loading state
+## What
+- Modified handleLaunch to build enhanced prompt with memory section
+- Injects context, experience (numbered), and last 3 journal entries
+- Total prompt capped at 10,000 chars
+
+## Why
+Agents should be aware of their accumulated memory on launch for continuity.
 
 ## Verification
-- `npx vite build` exits 0 (already verified)
+- `npx vite build` exits 0
+
+## Risks
+- Long prompts could affect Claude's behavior — mitigated by 10K char limit
