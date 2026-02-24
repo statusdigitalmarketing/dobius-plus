@@ -52,17 +52,10 @@ export default function BoardView() {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const terminalTabs = useStore((s) => s.terminalTabs);
   const boardNotification = useStore((s) => s.boardNotification);
-  const clearBoardNotification = useStore((s) => s.clearBoardNotification);
 
   const runningCount = Object.keys(runningAgents).length;
 
-  // Clear notification badge when Board tab is active
-  useEffect(() => {
-    if (boardNotification) {
-      // We're viewing the Board, so clear the badge
-      clearBoardNotification();
-    }
-  }, []); // Run once on mount — user has navigated to Board
+  // Notification badge clearing is handled by DashboardView (proper deps)
 
   // Auto-dismiss notification banner after 5s
   const [visibleNotification, setVisibleNotification] = useState(null);
@@ -398,13 +391,17 @@ function RecentCompletions() {
       const oneHourAgo = Date.now() - 3600000;
       const runs = [];
       for (const agent of agents) {
-        const mem = await window.electronAPI.agentMemoryGet(agent.id);
-        if (mem?.journal?.length > 0) {
-          for (const entry of mem.journal) {
-            if (entry.timestamp > oneHourAgo) {
-              runs.push({ agentName: agent.name, ...entry });
+        try {
+          const mem = await window.electronAPI.agentMemoryGet(agent.id);
+          if (mem?.journal?.length > 0) {
+            for (const entry of mem.journal) {
+              if (entry.timestamp > oneHourAgo) {
+                runs.push({ agentName: agent.name, ...entry });
+              }
             }
           }
+        } catch (err) {
+          console.error(`[BoardView] Failed to load memory for agent ${agent.id}:`, err);
         }
       }
       runs.sort((a, b) => b.timestamp - a.timestamp);

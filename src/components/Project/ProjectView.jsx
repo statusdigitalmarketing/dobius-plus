@@ -119,7 +119,8 @@ export default function ProjectView({ projectPath }) {
           summary: '',
           linesOutput: 0,
         };
-        window.electronAPI.agentMemoryAppendJournal?.(agentId, entry);
+        window.electronAPI.agentMemoryAppendJournal?.(agentId, entry)
+          .catch((err) => console.error('[ProjectView] Failed to save agent journal:', err));
 
         // Board notification for agent completion
         const agentName = tab?.label || agentId;

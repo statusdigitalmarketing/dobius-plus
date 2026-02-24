@@ -55,9 +55,13 @@ export function useAgentActivity() {
       return null;
     };
 
-    // Resolve agent name from store agents list (falls back to agentId)
+    // Resolve agent name from tab label (set by renameTab on launch)
     const getAgentName = (agentId) => {
-      // Agent names aren't in the zustand store; use agentId as label
+      const tabId = useStore.getState().runningAgents[agentId];
+      if (tabId) {
+        const tab = useStore.getState().terminalTabs.find((t) => t.id === tabId);
+        if (tab?.label) return tab.label;
+      }
       return agentId;
     };
 
@@ -92,9 +96,11 @@ export function useAgentActivity() {
         });
       }
 
-      // Debounced store update
+      // Debounced store update — guard against resurrecting cleared agents
       clearTimeout(debounceTimers.current[agentId]);
       debounceTimers.current[agentId] = setTimeout(() => {
+        // Verify agent is still running before updating
+        if (!useStore.getState().runningAgents[agentId]) return;
         const tab = useStore.getState().terminalTabs.find((t) => t.id === termId);
         useStore.getState().updateAgentActivity(agentId, {
           status: 'working',
