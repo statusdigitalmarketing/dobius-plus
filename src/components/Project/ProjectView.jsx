@@ -91,6 +91,15 @@ export default function ProjectView({ projectPath }) {
     }
   }, [tabs, tabsInitialized, projectPath]);
 
+  // Clean up running agents when a terminal PTY exits
+  useEffect(() => {
+    if (!window.electronAPI?.onTerminalExit) return;
+    const removeExitListener = window.electronAPI.onTerminalExit((termId) => {
+      useStore.getState().unregisterAgentsByTabId(termId);
+    });
+    return removeExitListener;
+  }, []);
+
   // Load initial data
   useEffect(() => {
     if (!window.electronAPI) return;

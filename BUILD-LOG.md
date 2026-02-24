@@ -13,3 +13,10 @@
 - Duration: 3 min
 - Files changed: src/store/store.js
 - Verification: PASS (attempts: 1)
+
+## Task 1.2 — Add terminal exit listener for agent cleanup
+- Start: 21:35
+- End: 21:38
+- Duration: 3 min
+- Files changed: src/components/Project/ProjectView.jsx
+- Verification: PASS (attempts: 1)
