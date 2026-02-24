@@ -22,6 +22,7 @@ import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions, getSettings, updateSettings, flushConfig,
   getSessionTags, setSessionTag, removeSessionTag,
+  getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
 } from './config-manager.js';
 import {
   openProjectWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
@@ -305,6 +306,50 @@ function setupAgentHandlers() {
   });
 }
 
+function setupAgentMemoryHandlers() {
+  ipcMain.handle('agentMemory:get', (_event, agentId) => {
+    if (!agentId || typeof agentId !== 'string' || agentId.length > 200) return null;
+    return getAgentMemory(agentId);
+  });
+
+  ipcMain.handle('agentMemory:setContext', (_event, agentId, context) => {
+    if (!agentId || typeof agentId !== 'string' || agentId.length > 200) return;
+    if (typeof context !== 'string') return;
+    const mem = getAgentMemory(agentId);
+    mem.context = context.slice(0, 5000);
+    setAgentMemory(agentId, mem);
+  });
+
+  ipcMain.handle('agentMemory:appendJournal', (_event, agentId, entry) => {
+    if (!agentId || typeof agentId !== 'string' || agentId.length > 200) return;
+    if (!entry || typeof entry !== 'object') return;
+    appendJournalEntry(agentId, entry);
+  });
+
+  ipcMain.handle('agentMemory:addExperience', (_event, agentId, text) => {
+    if (!agentId || typeof agentId !== 'string' || agentId.length > 200) return;
+    if (!text || typeof text !== 'string') return;
+    const mem = getAgentMemory(agentId);
+    if (mem.experience.length >= 20) return;
+    mem.experience.push(text.slice(0, 200));
+    setAgentMemory(agentId, mem);
+  });
+
+  ipcMain.handle('agentMemory:removeExperience', (_event, agentId, index) => {
+    if (!agentId || typeof agentId !== 'string' || agentId.length > 200) return;
+    if (typeof index !== 'number' || index < 0) return;
+    const mem = getAgentMemory(agentId);
+    if (index >= mem.experience.length) return;
+    mem.experience.splice(index, 1);
+    setAgentMemory(agentId, mem);
+  });
+
+  ipcMain.handle('agentMemory:clear', (_event, agentId) => {
+    if (!agentId || typeof agentId !== 'string' || agentId.length > 200) return;
+    setAgentMemory(agentId, { context: '', journal: [], experience: [] });
+  });
+}
+
 function setupFileHandlers() {
   const MAX_FILE_SIZE = 1024 * 1024; // 1MB
   const ALLOWED_FILENAME = 'CLAUDE.md';
@@ -563,6 +608,7 @@ app.whenReady().then(() => {
   setupConfigHandlers();
   setupCheckpointHandlers();
   setupAgentHandlers();
+  setupAgentMemoryHandlers();
   setupFileHandlers();
   setupShellHandlers();
   setupWindowHandlers();

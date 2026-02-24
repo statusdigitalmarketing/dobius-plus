@@ -1,18 +1,15 @@
-# Task 2.4 — Rename tab label and verify full integration
+# Task 2.4: Memory Management — Clear and Pruning
 
-## What will change
-- `src/components/Dashboard/DashboardView.jsx`: Change `{ id: 'agents', label: 'Agents' }` to `{ id: 'agents', label: 'Mission Control' }`
+## What
+1. Clear Memory button with confirmation (already in Task 2.2 MemoryPanel)
+2. Auto-pruning: appendJournalEntry now calls pruneOldMemory(90) after each append
+3. Memory stat card shows real count of agents with memory (already in Task 2.1)
 
 ## Why
-The tab label should reflect the new name of the component.
+Memory should be self-managing — old entries pruned automatically, clear available manually.
 
 ## Verification
 - `npx vite build` exits 0
-- `grep -c "Mission Control" src/components/Dashboard/DashboardView.jsx` returns 1
-- `grep -c "{ id:" src/components/Dashboard/DashboardView.jsx` returns 12 (unchanged)
 
-## What could go wrong
-- Tab label change might be wider and overflow tab bar on narrow windows
-
-## Estimated time
-5 minutes
+## Risks
+- pruneOldMemory on every append is extra work — negligible since it only iterates agents (small set)

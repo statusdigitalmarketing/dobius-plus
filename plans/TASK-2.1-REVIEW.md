@@ -1,12 +1,9 @@
-# Task 2.1 — Review
+# Task 2.1 Review — Memory Indicators
 
-## Three things that could be better
-1. The StatCard component uses inline motion.div — could be a standalone file, but keeping it local reduces import overhead for a small component
-2. Session count is fetched separately rather than shared with DashboardView — acceptable since they have different lifecycle needs
-3. The "Memory: Synced" stat is static — could eventually reflect actual sync state
+## 3 Improvements
+1. Memory loading uses sequential await loop — acceptable for <20 agents, avoids flooding IPC
+2. Badge color (green) for run count differentiates from model badge (blue)
+3. Memory stat card now shows real data instead of static "Synced"
 
-## One thing I'm fixing now
-Nothing — the structure is clean and follows the Overview.jsx StatCard pattern.
-
-## Concerns
-- None. The StatsBar renders 4 cards matching the existing codebase patterns exactly.
+## 1 Fix
+- No fixes needed

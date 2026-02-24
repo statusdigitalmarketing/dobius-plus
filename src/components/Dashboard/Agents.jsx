@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 
 const ALLOWED_MODELS = ['claude-opus-4-6', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'];
 
@@ -48,6 +48,7 @@ export default function Agents() {
   const [loading, setLoading] = useState(true);
   const [editingAgent, setEditingAgent] = useState(null);
   const [sessionCount, setSessionCount] = useState(0);
+  const [agentMemories, setAgentMemories] = useState({});
 
   const loadAgents = useCallback(async () => {
     if (!window.electronAPI?.agentsList) return;
@@ -56,9 +57,23 @@ export default function Agents() {
     setLoading(false);
   }, []);
 
+  const loadMemories = useCallback(async (agentList) => {
+    if (!window.electronAPI?.agentMemoryGet || !agentList?.length) return;
+    const mems = {};
+    for (const agent of agentList) {
+      const mem = await window.electronAPI.agentMemoryGet(agent.id);
+      if (mem) mems[agent.id] = mem;
+    }
+    setAgentMemories(mems);
+  }, []);
+
   useEffect(() => {
     loadAgents();
   }, [loadAgents]);
+
+  useEffect(() => {
+    if (agents.length > 0) loadMemories(agents);
+  }, [agents, loadMemories]);
 
   // Load session count for stats
   useEffect(() => {
@@ -70,7 +85,43 @@ export default function Agents() {
 
   const handleLaunch = useCallback(async (agent) => {
     if (!window.electronAPI?.agentsWriteTempPrompt) return;
-    const promptPath = await window.electronAPI.agentsWriteTempPrompt(agent.systemPrompt);
+    // Build enhanced prompt with memory injection
+    let prompt = agent.systemPrompt;
+    const mem = agentMemories[agent.id];
+    if (mem && (mem.context || mem.experience?.length > 0 || mem.journal?.length > 0)) {
+      let memorySection = '\n\n---\n## Agent Memory (auto-injected by Dobius+)\n';
+      if (mem.context) {
+        memorySection += `\n### Context\n${mem.context}\n`;
+      }
+      if (mem.experience?.length > 0) {
+        memorySection += '\n### Recent Experience\n';
+        mem.experience.forEach((exp, i) => {
+          memorySection += `${i + 1}. ${exp}\n`;
+        });
+      }
+      if (mem.journal?.length > 0) {
+        const recent = mem.journal.slice(-3).reverse();
+        memorySection += '\n### Last 3 Runs\n';
+        recent.forEach((entry) => {
+          const date = new Date(entry.timestamp).toLocaleDateString();
+          const dur = formatDuration(entry.duration);
+          const status = entry.exitCode === 0 ? 'success' : entry.exitCode != null ? `exit ${entry.exitCode}` : 'unknown';
+          memorySection += `- ${date} | ${dur} | ${status}`;
+          if (entry.projectPath) {
+            const projName = entry.projectPath.split('/').filter(Boolean).pop();
+            memorySection += ` | ${projName}`;
+          }
+          if (entry.summary) memorySection += ` — ${entry.summary}`;
+          memorySection += '\n';
+        });
+      }
+      // Keep total under 10,000 chars — truncate memory section if needed
+      const maxMemory = 10000 - prompt.length - 50;
+      if (maxMemory > 100) {
+        prompt += memorySection.slice(0, maxMemory);
+      }
+    }
+    const promptPath = await window.electronAPI.agentsWriteTempPrompt(prompt);
     if (!promptPath) return;
     const tab = addTab(currentProjectPath);
     renameTab(tab.id, agent.name);
@@ -82,7 +133,7 @@ export default function Agents() {
       const cmd = `claude --system-prompt-file '${safePath}'${modelFlag}\r`;
       window.electronAPI.terminalWrite(tab.id, cmd);
     }, 500);
-  }, [addTab, renameTab, setActiveView, currentProjectPath, registerRunningAgent]);
+  }, [addTab, renameTab, setActiveView, currentProjectPath, registerRunningAgent, agentMemories]);
 
   const handleChat = useCallback((agentId) => {
     const tabId = runningAgents[agentId];
@@ -105,6 +156,9 @@ export default function Agents() {
   }, [loadAgents]);
 
   const runningCount = Object.keys(runningAgents).length;
+  const memoryAgentCount = Object.values(agentMemories).filter(
+    (m) => m.journal?.length > 0 || m.context || m.experience?.length > 0
+  ).length;
 
   if (loading) {
     return <MissionControlSkeleton />;
@@ -117,7 +171,7 @@ export default function Agents() {
         <StatCard index={0} label="Agents" value={agents.length} subtitle={runningCount > 0 ? `${runningCount} running` : 'none running'} accent={runningCount > 0} />
         <StatCard index={1} label="Terminals" value={terminalTabs.length} subtitle="active" />
         <StatCard index={2} label="Sessions" value={sessionCount} subtitle="total" />
-        <StatCard index={3} label="Memory" value="Synced" subtitle="config" accent />
+        <StatCard index={3} label="Memory" value={memoryAgentCount} subtitle={memoryAgentCount === 1 ? 'agent' : 'agents'} accent={memoryAgentCount > 0} />
       </div>
 
       {/* Header */}
@@ -180,10 +234,12 @@ export default function Agents() {
                 key={agent.id}
                 agent={agent}
                 isRunning={isRunning}
+                memory={agentMemories[agent.id]}
                 onLaunch={handleLaunch}
                 onChat={handleChat}
                 onEdit={setEditingAgent}
                 onDelete={handleDelete}
+                onMemoryChange={() => loadMemories(agents)}
               />
             );
           })}
@@ -229,7 +285,12 @@ function Badge({ label, bg, color }) {
 const btnHover = { transition: 'opacity 150ms', };
 const btnHoverStyle = (e, opacity) => { e.currentTarget.style.opacity = opacity; };
 
-function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
+function AgentCard({ agent, isRunning, memory, onLaunch, onChat, onEdit, onDelete, onMemoryChange }) {
+  const [expanded, setExpanded] = useState(false);
+  const journalCount = memory?.journal?.length || 0;
+  const hasContext = !!memory?.context;
+  const hasExperience = memory?.experience?.length > 0;
+
   return (
     <motion.div
       layout
@@ -263,6 +324,23 @@ function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
             bg="rgba(88,166,255,0.15)"
             color="var(--accent)"
           />
+        )}
+        {journalCount > 0 && (
+          <Badge
+            label={`${journalCount} run${journalCount !== 1 ? 's' : ''}`}
+            bg="rgba(63,185,80,0.1)"
+            color="#3FB950"
+          />
+        )}
+        {hasContext && (
+          <span title="Has context notes" style={{ fontSize: 10, color: 'var(--dim)' }}>
+            {'\u{1F4C4}'}
+          </span>
+        )}
+        {hasExperience && (
+          <span title="Has experience" style={{ fontSize: 10, color: 'var(--dim)' }}>
+            {'\u{2B50}'}
+          </span>
         )}
       </div>
 
@@ -318,6 +396,24 @@ function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
             Start
           </button>
         )}
+        <button
+          onClick={() => setExpanded(!expanded)}
+          onMouseEnter={(e) => btnHoverStyle(e, '0.8')}
+          onMouseLeave={(e) => btnHoverStyle(e, '1')}
+          style={{
+            padding: '4px 10px',
+            fontSize: 10,
+            fontFamily: "'SF Mono', monospace",
+            color: expanded ? 'var(--accent)' : 'var(--dim)',
+            backgroundColor: 'transparent',
+            border: `1px solid ${expanded ? 'var(--accent)' : 'var(--border)'}`,
+            borderRadius: 4,
+            cursor: 'pointer',
+            ...btnHover,
+          }}
+        >
+          Memory
+        </button>
         {!agent.builtIn && (
           <>
             <button
@@ -358,6 +454,287 @@ function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
             </button>
           </>
         )}
+      </div>
+
+      {/* Expandable memory panel */}
+      <AnimatePresence>
+        {expanded && (
+          <MemoryPanel
+            agentId={agent.id}
+            memory={memory}
+            onMemoryChange={onMemoryChange}
+          />
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+}
+
+function timeAgo(ts) {
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
+function formatDuration(secs) {
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
+}
+
+function MemoryPanel({ agentId, memory, onMemoryChange }) {
+  const [context, setContext] = useState(memory?.context || '');
+  const [newExp, setNewExp] = useState('');
+  const [clearing, setClearing] = useState(false);
+
+  const handleContextBlur = useCallback(async () => {
+    if (!window.electronAPI?.agentMemorySetContext) return;
+    try {
+      await window.electronAPI.agentMemorySetContext(agentId, context);
+      onMemoryChange?.();
+    } catch (err) {
+      console.error('[AgentMemory] Failed to save context:', err);
+    }
+  }, [agentId, context, onMemoryChange]);
+
+  const handleAddExperience = useCallback(async () => {
+    const text = newExp.trim();
+    if (!text || !window.electronAPI?.agentMemoryAddExperience) return;
+    try {
+      await window.electronAPI.agentMemoryAddExperience(agentId, text);
+      setNewExp('');
+      onMemoryChange?.();
+    } catch (err) {
+      console.error('[AgentMemory] Failed to add experience:', err);
+    }
+  }, [agentId, newExp, onMemoryChange]);
+
+  const handleRemoveExperience = useCallback(async (index) => {
+    if (!window.electronAPI?.agentMemoryRemoveExperience) return;
+    try {
+      await window.electronAPI.agentMemoryRemoveExperience(agentId, index);
+      onMemoryChange?.();
+    } catch (err) {
+      console.error('[AgentMemory] Failed to remove experience:', err);
+    }
+  }, [agentId, onMemoryChange]);
+
+  const handleClear = useCallback(async () => {
+    if (!window.electronAPI?.agentMemoryClear) return;
+    try {
+      await window.electronAPI.agentMemoryClear(agentId);
+      setContext('');
+      setClearing(false);
+      onMemoryChange?.();
+    } catch (err) {
+      console.error('[AgentMemory] Failed to clear memory:', err);
+    }
+  }, [agentId, onMemoryChange]);
+
+  const journal = memory?.journal || [];
+  const experience = memory?.experience || [];
+
+  return (
+    <motion.div
+      initial={{ height: 0, opacity: 0 }}
+      animate={{ height: 'auto', opacity: 1 }}
+      exit={{ height: 0, opacity: 0 }}
+      transition={{ duration: 0.2 }}
+      style={{ overflow: 'hidden' }}
+    >
+      <div
+        className="mt-3 pt-3 space-y-3"
+        style={{ borderTop: '1px solid var(--border)' }}
+      >
+        {/* Context */}
+        <div>
+          <div className="text-xs font-medium mb-1" style={{ color: 'var(--dim)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+            Context
+          </div>
+          <textarea
+            value={context}
+            onChange={(e) => setContext(e.target.value)}
+            onBlur={handleContextBlur}
+            placeholder="Add notes about this agent's role and expertise..."
+            rows={2}
+            maxLength={5000}
+            style={{
+              ...inputStyle,
+              resize: 'vertical',
+              lineHeight: 1.4,
+              fontSize: 10,
+            }}
+          />
+        </div>
+
+        {/* Journal */}
+        <div>
+          <div className="text-xs font-medium mb-1" style={{ color: 'var(--dim)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+            Journal ({journal.length})
+          </div>
+          {journal.length === 0 ? (
+            <div className="text-xs" style={{ color: 'var(--dim)', fontSize: 9, fontStyle: 'italic' }}>
+              No runs recorded yet
+            </div>
+          ) : (
+            <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+              {[...journal].reverse().map((entry) => (
+                <div
+                  key={entry.id}
+                  className="flex items-center gap-2 py-1"
+                  style={{ borderBottom: '1px solid var(--border)', fontSize: 9 }}
+                >
+                  <span style={{ color: entry.exitCode === 0 ? '#3FB950' : entry.exitCode != null ? '#F85149' : 'var(--dim)' }}>
+                    {entry.exitCode === 0 ? '\u2713' : entry.exitCode != null ? '\u2717' : '\u2022'}
+                  </span>
+                  <span style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
+                    {timeAgo(entry.timestamp)}
+                  </span>
+                  <span style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
+                    {formatDuration(entry.duration)}
+                  </span>
+                  {entry.summary && (
+                    <span
+                      style={{
+                        color: 'var(--dim)',
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {entry.summary}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Experience */}
+        <div>
+          <div className="text-xs font-medium mb-1" style={{ color: 'var(--dim)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+            Experience ({experience.length}/20)
+          </div>
+          {experience.map((item, i) => (
+            <div
+              key={i}
+              className="flex items-center gap-1.5 py-0.5"
+              style={{ fontSize: 10 }}
+            >
+              <span style={{ color: 'var(--dim)', flex: 1 }}>{item}</span>
+              <button
+                onClick={() => handleRemoveExperience(i)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#F85149',
+                  cursor: 'pointer',
+                  fontSize: 10,
+                  padding: '0 2px',
+                  opacity: 0.6,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.6'; }}
+              >
+                x
+              </button>
+            </div>
+          ))}
+          {experience.length < 20 && (
+            <div className="flex items-center gap-1 mt-1">
+              <input
+                value={newExp}
+                onChange={(e) => setNewExp(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleAddExperience(); }}
+                placeholder="Add learned pattern..."
+                maxLength={200}
+                style={{ ...inputStyle, fontSize: 10, flex: 1 }}
+              />
+              <button
+                onClick={handleAddExperience}
+                disabled={!newExp.trim()}
+                style={{
+                  padding: '4px 8px',
+                  fontSize: 9,
+                  fontFamily: "'SF Mono', monospace",
+                  color: newExp.trim() ? 'var(--accent)' : 'var(--dim)',
+                  backgroundColor: 'transparent',
+                  border: '1px solid var(--border)',
+                  borderRadius: 4,
+                  cursor: newExp.trim() ? 'pointer' : 'default',
+                }}
+              >
+                +
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Clear button */}
+        <div className="flex justify-end">
+          {clearing ? (
+            <div className="flex items-center gap-1.5">
+              <span style={{ fontSize: 9, color: '#F85149' }}>Clear all memory?</span>
+              <button
+                onClick={handleClear}
+                style={{
+                  padding: '2px 8px',
+                  fontSize: 9,
+                  fontFamily: "'SF Mono', monospace",
+                  color: '#F85149',
+                  backgroundColor: 'rgba(248,81,73,0.1)',
+                  border: '1px solid #F85149',
+                  borderRadius: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                Confirm
+              </button>
+              <button
+                onClick={() => setClearing(false)}
+                style={{
+                  padding: '2px 8px',
+                  fontSize: 9,
+                  fontFamily: "'SF Mono', monospace",
+                  color: 'var(--dim)',
+                  backgroundColor: 'transparent',
+                  border: '1px solid var(--border)',
+                  borderRadius: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setClearing(true)}
+              onMouseEnter={(e) => btnHoverStyle(e, '0.8')}
+              onMouseLeave={(e) => btnHoverStyle(e, '1')}
+              style={{
+                padding: '2px 8px',
+                fontSize: 9,
+                fontFamily: "'SF Mono', monospace",
+                color: 'var(--dim)',
+                backgroundColor: 'transparent',
+                border: '1px solid var(--border)',
+                borderRadius: 4,
+                cursor: 'pointer',
+                ...btnHover,
+              }}
+            >
+              Clear Memory
+            </button>
+          )}
+        </div>
       </div>
     </motion.div>
   );

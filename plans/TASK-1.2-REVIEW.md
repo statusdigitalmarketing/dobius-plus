@@ -1,12 +1,9 @@
-# Task 1.2 — Review
+# Task 1.2 Review — IPC Handlers
 
-## Three things that could be better
-1. Could debounce the unregister call, but PTY exits are infrequent so unnecessary
-2. The empty dependency array means this effect runs once on mount — correct for a global listener
-3. Could log when an agent is unregistered for debugging, but that would add console noise
+## 3 Improvements
+1. All handlers validate agentId type, length (max 200), and existence before processing
+2. Follows existing pattern: setupAgentMemoryHandlers() registered in app.whenReady() chain
+3. addExperience checks array bounds (max 20) before push — prevents unbounded growth
 
-## One thing I'm fixing now
-Nothing — the implementation is clean and minimal.
-
-## Concerns
-- The onTerminalExit listener in ProjectView fires for ALL terminals (not just agent tabs). The unregisterAgentsByTabId call is a no-op for tabs that have no agent registered, so this is safe.
+## 1 Fix
+- No fixes needed — all 6 handlers follow consistent validation pattern

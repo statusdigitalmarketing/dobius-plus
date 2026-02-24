@@ -1,19 +1,18 @@
-# Task 1.1 — Add runningAgents state and actions to Zustand store
+# Task 1.1: Extend Config Schema with Agent Memory Storage
 
-## What will change
-- `src/store/store.js`: Add `runningAgents: {}` state, `registerRunningAgent()` and `unregisterAgentsByTabId()` actions
-- Modify `removeTab`, `closeOtherTabs`, `closeTabsToRight` to also clean up runningAgents
+## What
+Add `agentMemory` top-level config object keyed by agentId. Add helper functions:
+- `getAgentMemory(agentId)` — returns memory or empty default
+- `setAgentMemory(agentId, memory)` — validates + saves with size guards
+- `appendJournalEntry(agentId, entry)` — push + FIFO trim to 50
+- `pruneOldMemory(maxAgeDays)` — remove entries older than N days
 
 ## Why
-The Mission Control UI needs to show which agents are currently running (their Claude process is alive in a terminal tab). This state maps agentId → tabId so we can show status badges and enable "Chat" buttons.
+Agent memory needs persistent storage. Config manager already handles debounced atomic writes — extending it keeps the pattern consistent.
 
 ## Verification
 - `npx vite build` exits 0
-- `grep -c 'runningAgents' src/store/store.js` returns >= 6
+- New functions exported from config-manager.js
 
-## What could go wrong
-- Modifying existing tab removal functions could break tab closing — must preserve existing behavior exactly
-- The filter logic for runningAgents cleanup must match the correct tab IDs
-
-## Estimated time
-10 minutes
+## Risks
+- Config file could grow if memory is not bounded — mitigated by strict size limits
