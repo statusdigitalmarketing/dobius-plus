@@ -22,6 +22,9 @@ export const useStore = create((set, get) => ({
   activeTabId: null,
   tabCounter: 0,
 
+  // Running agents: Map<agentId, tabId>
+  runningAgents: {},
+
   // Tab actions
   addTab: (projectPath) => {
     const state = get();
@@ -43,7 +46,12 @@ export const useStore = create((set, get) => ({
     const newActive = state.activeTabId === tabId
       ? tabs[Math.max(0, state.terminalTabs.findIndex((t) => t.id === tabId) - 1)]?.id || tabs[0]?.id
       : state.activeTabId;
-    set({ terminalTabs: tabs, activeTabId: newActive });
+    // Clean up any running agents associated with this tab
+    const ra = { ...state.runningAgents };
+    for (const key of Object.keys(ra)) {
+      if (ra[key] === tabId) delete ra[key];
+    }
+    set({ terminalTabs: tabs, activeTabId: newActive, runningAgents: ra });
   },
 
   setActiveTab: (tabId) => set({ activeTabId: tabId }),
@@ -71,7 +79,12 @@ export const useStore = create((set, get) => ({
     if (kept.length === 0) return;
     const removed = state.terminalTabs.filter((t) => t.id !== tabId);
     removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
-    set({ terminalTabs: kept, activeTabId: tabId });
+    const removedIds = new Set(removed.map((t) => t.id));
+    const ra = { ...state.runningAgents };
+    for (const key of Object.keys(ra)) {
+      if (removedIds.has(ra[key])) delete ra[key];
+    }
+    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra });
   },
 
   closeTabsToRight: (tabId) => {
@@ -81,8 +94,13 @@ export const useStore = create((set, get) => ({
     const kept = state.terminalTabs.slice(0, idx + 1);
     const removed = state.terminalTabs.slice(idx + 1);
     removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
+    const removedIds = new Set(removed.map((t) => t.id));
+    const ra = { ...state.runningAgents };
+    for (const key of Object.keys(ra)) {
+      if (removedIds.has(ra[key])) delete ra[key];
+    }
     const newActive = kept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
-    set({ terminalTabs: kept, activeTabId: newActive });
+    set({ terminalTabs: kept, activeTabId: newActive, runningAgents: ra });
   },
 
   // Actions
@@ -101,6 +119,19 @@ export const useStore = create((set, get) => ({
   setSessions: (sessions) => set({ sessions }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),
   setBuildComplete: (val) => set({ buildComplete: val }),
+
+  // Running agent tracking
+  registerRunningAgent: (agentId, tabId) => set((s) => ({
+    runningAgents: { ...s.runningAgents, [agentId]: tabId },
+  })),
+
+  unregisterAgentsByTabId: (tabId) => set((s) => {
+    const ra = { ...s.runningAgents };
+    for (const key of Object.keys(ra)) {
+      if (ra[key] === tabId) delete ra[key];
+    }
+    return { runningAgents: ra };
+  }),
 
   // Resume a Claude session by sending the resume command to the active terminal
   resumeSession: (sessionId) => {
