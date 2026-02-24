@@ -254,6 +254,8 @@ export function appendJournalEntry(agentId, entry) {
   }
   mem.lastUpdated = Date.now();
   saveConfig(config);
+  // Auto-prune old entries across all agents
+  pruneOldMemory(90);
 }
 
 /**
