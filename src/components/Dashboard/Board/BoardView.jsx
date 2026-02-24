@@ -13,6 +13,24 @@ function formatElapsed(startTime) {
   return remMins > 0 ? `${hrs}h ${remMins}m` : `${hrs}h`;
 }
 
+function formatDuration(secs) {
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
+}
+
+function timeAgo(ts) {
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
 const STATUS_COLORS = {
   working: '#3FB950',
   idle: '#D29922',
@@ -117,6 +135,9 @@ export default function BoardView() {
         {activityTimeline.length > 0 && (
           <ActivityTimeline entries={activityTimeline} terminalTabs={terminalTabs} />
         )}
+
+        {/* Recent completions from agent memory */}
+        <RecentCompletions />
       </div>
     );
   }
@@ -180,6 +201,7 @@ export default function BoardView() {
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.95 }}
+                whileHover={{ borderColor: 'rgba(88,166,255,0.3)' }}
                 transition={{ delay: i * 0.05, duration: 0.2 }}
                 className="p-4 rounded-lg"
                 style={{
@@ -357,6 +379,73 @@ function ActivityTimeline({ entries, terminalTabs }) {
               >
                 {entry.action}
               </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RecentCompletions() {
+  const [recentRuns, setRecentRuns] = useState([]);
+
+  useEffect(() => {
+    if (!window.electronAPI?.agentsList || !window.electronAPI?.agentMemoryGet) return;
+    (async () => {
+      const agents = await window.electronAPI.agentsList();
+      if (!agents?.length) return;
+      const oneHourAgo = Date.now() - 3600000;
+      const runs = [];
+      for (const agent of agents) {
+        const mem = await window.electronAPI.agentMemoryGet(agent.id);
+        if (mem?.journal?.length > 0) {
+          for (const entry of mem.journal) {
+            if (entry.timestamp > oneHourAgo) {
+              runs.push({ agentName: agent.name, ...entry });
+            }
+          }
+        }
+      }
+      runs.sort((a, b) => b.timestamp - a.timestamp);
+      setRecentRuns(runs.slice(0, 10));
+    })();
+  }, []);
+
+  if (recentRuns.length === 0) return null;
+
+  return (
+    <div className="mt-5">
+      <div className="text-xs font-medium uppercase tracking-wider mb-2" style={{ color: 'var(--dim)', fontSize: 9, letterSpacing: '0.1em' }}>
+        Recent Completions
+      </div>
+      <div className="rounded-lg" style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}>
+        {recentRuns.map((run, i) => {
+          const time = new Date(run.timestamp);
+          const timeStr = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`;
+          const dur = run.duration ? formatDuration(run.duration) : '—';
+          const exitColor = run.exitCode === 0 ? '#3FB950' : run.exitCode != null ? '#F85149' : 'var(--dim)';
+          const exitIcon = run.exitCode === 0 ? '\u2713' : run.exitCode != null ? '\u2717' : '\u2022';
+
+          return (
+            <div
+              key={run.id || i}
+              className="flex items-center gap-3 px-3 py-2"
+              style={{
+                fontSize: 10,
+                fontFamily: "'SF Mono', monospace",
+                borderBottom: i < recentRuns.length - 1 ? '1px solid var(--border)' : 'none',
+              }}
+            >
+              <span style={{ color: exitColor }}>{exitIcon}</span>
+              <span style={{ color: 'var(--fg)' }}>{run.agentName}</span>
+              <span style={{ color: 'var(--dim)' }}>{timeAgo(run.timestamp)}</span>
+              <span style={{ color: 'var(--dim)' }}>{dur}</span>
+              {run.summary && (
+                <span style={{ color: 'var(--dim)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {run.summary}
+                </span>
+              )}
             </div>
           );
         })}
