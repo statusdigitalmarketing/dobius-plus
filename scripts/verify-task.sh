@@ -55,10 +55,10 @@ fi
 # 5. Code must build
 echo ""
 echo "--- Build check ---"
-if npm run build 2>/dev/null; then
+if npx vite build 2>/dev/null; then
   echo "OK Builds clean"
 else
-  echo "FAIL: Build errors. Run: npm run build"
+  echo "FAIL: Build errors. Run: npx vite build"
   PASS=false
 fi
 
@@ -75,8 +75,8 @@ if [ -d "src/" ]; then
     echo "OK No empty catch blocks"
   fi
 
-  # Check for type suppression (eslint-disable has 2 pre-existing in protected files)
-  for SUPPRESS in "@ts-ignore" "@ts-nocheck" "# type: ignore"; do
+  # Check for type suppression
+  for SUPPRESS in "@ts-ignore" "@ts-nocheck" "# type: ignore" "// eslint-disable"; do
     SUP_COUNT=$(grep -rc "$SUPPRESS" src/ 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}')
     if [ "$SUP_COUNT" -gt 0 ]; then
       echo "FAIL: Found $SUP_COUNT uses of '$SUPPRESS' in src/"
@@ -85,24 +85,15 @@ if [ -d "src/" ]; then
       echo "OK No '$SUPPRESS' in source"
     fi
   done
-
-  # eslint-disable: baseline is 2 (useTerminal.js + ProjectView.jsx — both pre-existing, protected)
-  ESLINT_COUNT=$(grep -rc "// eslint-disable" src/ 2>/dev/null | awk -F: '{s+=$NF} END {print s+0}')
-  if [ "$ESLINT_COUNT" -gt 2 ]; then
-    echo "FAIL: Found $ESLINT_COUNT uses of '// eslint-disable' in src/ (baseline: 2)"
-    PASS=false
-  else
-    echo "OK No new '// eslint-disable' in source (baseline: $ESLINT_COUNT)"
-  fi
 fi
 
 # 7. Existing features haven't decreased
 FEATURE_COUNT=$(grep -c "{ id:" src/components/Dashboard/DashboardView.jsx 2>/dev/null || echo "0")
 if [ "$FEATURE_COUNT" -lt 12 ]; then
-  echo "FAIL: Dashboard tab count dropped to $FEATURE_COUNT (must be >= 12)"
+  echo "FAIL: Feature count dropped to $FEATURE_COUNT (must be >= 12)"
   PASS=false
 else
-  echo "OK Dashboard tab count: $FEATURE_COUNT (>= 12)"
+  echo "OK Feature count: $FEATURE_COUNT (>= 12)"
 fi
 
 # 8. BUILD-LOG has entry

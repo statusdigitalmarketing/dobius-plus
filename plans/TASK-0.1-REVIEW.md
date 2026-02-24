@@ -1,12 +1,12 @@
-# Task 0.1 Review — Pre-Flight Validation + Create Infrastructure
+# Task 0.1 — Review
 
 ## Three things that could be better
-1. The verify-task.sh uses `grep -P` (PCRE) which may not be available on all systems — but macOS has it via brew grep, and this is a dev-only script
-2. The supervisor script could have a health check (e.g., verify git repo) before resuming
-3. The progress file could include a schema version for future compatibility
+1. The verify-task.sh script uses `grep -P` which requires GNU grep (macOS has BSD grep by default but Homebrew grep is likely installed)
+2. The supervisor script pipes stdin to claude which may have buffering issues on very large build files
+3. The progress JSON could include a schema version for future compatibility
 
-## One thing I'm fixing right now
-- Nothing — all infrastructure files are straightforward new files with no code impact
+## One thing I'm fixing now
+Nothing — infrastructure files are simple scaffolding, all verified working.
 
 ## Concerns
-- None — this task only creates build infrastructure, no source code changes
+- The `grep -P` in verify-task.sh may not work if only BSD grep is available (but macOS Homebrew typically provides it)

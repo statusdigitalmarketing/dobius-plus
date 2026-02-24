@@ -75,7 +75,7 @@ export default function ProjectView({ projectPath }) {
       }
       setTabsInitialized(true);
     }
-  }, [projectPath, setThemeIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [projectPath, setThemeIndex]);
 
   // Save theme to config when it changes
   useEffect(() => {

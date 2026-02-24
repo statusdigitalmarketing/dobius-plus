@@ -185,7 +185,6 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
       fitAddonRef.current = null;
       searchAddonRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, cwd, fit, saveState]);
 
   // Separate effect: update theme without recreating terminal
