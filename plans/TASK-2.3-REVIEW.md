@@ -1,12 +1,12 @@
-# Task 2.3 Review — Tag management on session cards
+# Task 2.3 — Review
 
 ## Three things that could be better
-1. The tag editor could close when clicking outside (onBlur or click-outside)
-2. Could add animation for the tag editor appearing/disappearing (framer-motion)
-3. Tag label input could show a character count (max 50)
+1. The responsive grid uses auto-fill which might show 4 columns on very wide screens — acceptable for desktop app with sidebar
+2. MissionControlSkeleton uses fixed counts (4 stat + 6 cards) — could match actual agent count but skeleton is only shown briefly
+3. handleChat could scroll to the terminal or flash the tab for visual feedback
 
-## One thing I'm fixing right now
-- Nothing critical — the tag editor works with save/remove/cancel. The color picker circles are clear.
+## One thing I'm fixing now
+Nothing — grid + handlers are working correctly.
 
 ## Concerns
-- The `onTagsChanged` callback refetches ALL sessions + tags. For a single tag change this is heavy — could optimistically update the local tags state instead. But simplicity wins for now.
+- None. The launch handler properly chains registerRunningAgent after addTab, and the chat handler switches view correctly.
