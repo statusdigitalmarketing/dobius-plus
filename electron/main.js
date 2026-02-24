@@ -23,6 +23,7 @@ import {
   getPinnedSessions, setPinnedSessions, getSettings, updateSettings, flushConfig,
   getSessionTags, setSessionTag, removeSessionTag,
   getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
+  getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
 } from './config-manager.js';
 import {
   openProjectWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
@@ -350,6 +351,25 @@ function setupAgentMemoryHandlers() {
   });
 }
 
+function setupOrchestrationHandlers() {
+  ipcMain.handle('orchestration:list', () => getOrchestrationRuns());
+
+  ipcMain.handle('orchestration:get', (_event, runId) => {
+    if (!runId || typeof runId !== 'string' || runId.length > 200) return null;
+    return getOrchestrationRun(runId);
+  });
+
+  ipcMain.handle('orchestration:save', (_event, run) => {
+    if (!run || typeof run !== 'object') return null;
+    return saveOrchestrationRun(run);
+  });
+
+  ipcMain.handle('orchestration:delete', (_event, runId) => {
+    if (!runId || typeof runId !== 'string' || runId.length > 200) return;
+    deleteOrchestrationRun(runId);
+  });
+}
+
 function setupFileHandlers() {
   const MAX_FILE_SIZE = 1024 * 1024; // 1MB
   const ALLOWED_FILENAME = 'CLAUDE.md';
@@ -609,6 +629,7 @@ app.whenReady().then(() => {
   setupCheckpointHandlers();
   setupAgentHandlers();
   setupAgentMemoryHandlers();
+  setupOrchestrationHandlers();
   setupFileHandlers();
   setupShellHandlers();
   setupWindowHandlers();

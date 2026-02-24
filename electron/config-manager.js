@@ -284,6 +284,86 @@ export function pruneOldMemory(maxAgeDays = 90) {
   if (changed) saveConfig(config);
 }
 
+// --- Orchestration Runs ---
+
+const MAX_ORCHESTRATION_RUNS = 20;
+const MAX_SUBTASKS = 5;
+
+/**
+ * Get all orchestration runs (max 20).
+ */
+export function getOrchestrationRuns() {
+  const config = loadConfig();
+  return Array.isArray(config.orchestrationRuns) ? config.orchestrationRuns : [];
+}
+
+/**
+ * Get a single orchestration run by ID.
+ */
+export function getOrchestrationRun(runId) {
+  if (!runId || typeof runId !== 'string') return null;
+  const runs = getOrchestrationRuns();
+  return runs.find((r) => r.id === runId) || null;
+}
+
+/**
+ * Save (create or update) an orchestration run. FIFO at max 20.
+ */
+export function saveOrchestrationRun(run) {
+  if (!run || typeof run !== 'object' || !run.id || typeof run.id !== 'string') return null;
+  if (UNSAFE_KEYS.has(run.id)) return null;
+  const config = loadConfig();
+  if (!Array.isArray(config.orchestrationRuns)) config.orchestrationRuns = [];
+
+  // Validate and sanitize
+  const sanitized = {
+    id: run.id.slice(0, 100),
+    description: typeof run.description === 'string' ? run.description.slice(0, 2000) : '',
+    createdAt: typeof run.createdAt === 'number' ? run.createdAt : Date.now(),
+    status: ['planning', 'running', 'completed', 'failed'].includes(run.status) ? run.status : 'planning',
+    subtasks: Array.isArray(run.subtasks)
+      ? run.subtasks.slice(0, MAX_SUBTASKS).map((st) => ({
+          id: typeof st.id === 'string' ? st.id.slice(0, 50) : '',
+          title: typeof st.title === 'string' ? st.title.slice(0, 200) : '',
+          description: typeof st.description === 'string' ? st.description.slice(0, 2000) : '',
+          agentId: typeof st.agentId === 'string' ? st.agentId.slice(0, 200) : '',
+          tabId: typeof st.tabId === 'string' ? st.tabId : null,
+          status: ['pending', 'running', 'completed', 'failed'].includes(st.status) ? st.status : 'pending',
+          startedAt: typeof st.startedAt === 'number' ? st.startedAt : null,
+          completedAt: typeof st.completedAt === 'number' ? st.completedAt : null,
+          exitCode: typeof st.exitCode === 'number' ? st.exitCode : null,
+          outputSummary: typeof st.outputSummary === 'string' ? st.outputSummary.slice(0, 2000) : null,
+        }))
+      : [],
+    synthesis: typeof run.synthesis === 'string' ? run.synthesis.slice(0, 5000) : null,
+    completedAt: typeof run.completedAt === 'number' ? run.completedAt : null,
+  };
+
+  const idx = config.orchestrationRuns.findIndex((r) => r.id === sanitized.id);
+  if (idx >= 0) {
+    config.orchestrationRuns[idx] = sanitized;
+  } else {
+    config.orchestrationRuns.push(sanitized);
+    // FIFO: remove oldest when exceeding limit
+    while (config.orchestrationRuns.length > MAX_ORCHESTRATION_RUNS) {
+      config.orchestrationRuns.shift();
+    }
+  }
+  saveConfig(config);
+  return sanitized;
+}
+
+/**
+ * Delete an orchestration run by ID.
+ */
+export function deleteOrchestrationRun(runId) {
+  if (!runId || typeof runId !== 'string') return;
+  const config = loadConfig();
+  if (!Array.isArray(config.orchestrationRuns)) return;
+  config.orchestrationRuns = config.orchestrationRuns.filter((r) => r.id !== runId);
+  saveConfig(config);
+}
+
 /**
  * Flush any pending config save immediately (synchronous, atomic).
  * Call this in before-quit to avoid losing recent changes.
