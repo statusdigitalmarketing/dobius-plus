@@ -27,3 +27,17 @@
 - Duration: 4 min
 - Files changed: src/components/Dashboard/Agents.jsx
 - Verification: PASS (attempts: 1)
+
+## Task 2.2 — AgentCard with status indicators
+- Start: 21:42
+- End: 21:43
+- Duration: 1 min (code already implemented in 2.1)
+- Files changed: (documentation only — code in 2.1 commit)
+- Verification: PASS (attempts: 1)
+
+## Task 2.3 — Wire AgentGrid with launch/chat handlers
+- Start: 21:43
+- End: 21:44
+- Duration: 1 min (code already implemented in 2.1)
+- Files changed: (documentation only — code in 2.1 commit)
+- Verification: PASS (attempts: 1)

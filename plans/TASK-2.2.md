@@ -1,19 +1,13 @@
-# Task 2.2 — Search, filter, and sort controls
+# Task 2.2 — Create AgentCard component with status indicators
 
 ## What will change
-- `src/components/Dashboard/Sessions.jsx`: Add control bar with search, project filter dropdown, sort toggle
-
-## Why
-Users need to quickly find sessions across potentially hundreds of entries.
+- Already implemented in Task 2.1's file rewrite. AgentCard, StatusBadge, and Badge components are in Agents.jsx.
 
 ## Implementation
-1. Text search: filters by project name, preview text, and tag label
-2. Project filter: dropdown showing all projects, filtering to one project
-3. Sort: toggle between "Recent first" (default) and "Project A-Z"
-4. Count display already exists from 2.1 — keep it
+- AgentCard: motion.div with layout, initial/animate, name + StatusBadge top row, badges row, description (3-line clamp), action buttons
+- StatusBadge: green dot + RUNNING or gray dot + OFFLINE
+- Badge: small tag with configurable bg/color
+- Actions: Start (offline) / Chat (running) + Edit/Delete for custom agents
 
 ## Verification
-- `npm run build` exits 0
-
-## Estimated time
-12 minutes
+- `npx vite build` exits 0 (already verified)
