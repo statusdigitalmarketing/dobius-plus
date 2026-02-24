@@ -141,33 +141,34 @@ export default function ProjectView({ projectPath }) {
             const current = useStore.getState().activeOrchestration;
             if (!current || current.id !== orch.id) return;
 
-            current.subtasks.forEach((st) => {
-              // Intentionally not using updateSubtaskStatus to avoid extra renders
-            });
+            // Build updated run locally to avoid stale reads after partial updates
+            const updatedSubtasks = current.subtasks.map((st) =>
+              st.id === subtask.id
+                ? {
+                    ...st,
+                    status: (exitCode === 0 || exitCode === null) ? 'completed' : 'failed',
+                    completedAt: Date.now(),
+                    exitCode: typeof exitCode === 'number' ? exitCode : null,
+                    outputSummary,
+                  }
+                : st
+            );
 
-            useStore.getState().updateSubtaskStatus(subtask.id, {
-              status: (exitCode === 0 || exitCode === null) ? 'completed' : 'failed',
-              completedAt: Date.now(),
-              exitCode: typeof exitCode === 'number' ? exitCode : null,
-              outputSummary,
-            });
+            const allDone = updatedSubtasks.every((st) => st.status === 'completed' || st.status === 'failed');
+            const failedCount = updatedSubtasks.filter((st) => st.status === 'failed').length;
 
-            // Check if all subtasks are now done
-            const updated = useStore.getState().activeOrchestration;
-            if (updated && updated.subtasks.every((st) => st.status === 'completed' || st.status === 'failed')) {
-              const failedCount = updated.subtasks.filter((st) => st.status === 'failed').length;
-              const finalRun = {
-                ...updated,
+            const finalRun = {
+              ...current,
+              subtasks: updatedSubtasks,
+              ...(allDone ? {
                 status: failedCount === 0 ? 'completed' : 'failed',
                 completedAt: Date.now(),
-              };
-              useStore.getState().setActiveOrchestration(finalRun);
-              window.electronAPI?.orchestrationSave(finalRun)
-                .catch((err) => console.error('[Orchestrator] Failed to save completed run:', err));
-            } else if (updated) {
-              window.electronAPI?.orchestrationSave(updated)
-                .catch((err) => console.error('[Orchestrator] Failed to save run update:', err));
-            }
+              } : {}),
+            };
+
+            useStore.getState().setActiveOrchestration(finalRun);
+            window.electronAPI?.orchestrationSave(finalRun)
+              .catch((err) => console.error('[Orchestrator] Failed to save run:', err));
           };
 
           // Try to extract output summary from terminal scrollback

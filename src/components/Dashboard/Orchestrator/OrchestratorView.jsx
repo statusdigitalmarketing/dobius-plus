@@ -108,47 +108,63 @@ Respond with ONLY valid JSON (no markdown, no explanation):
       const promptPath = await window.electronAPI.agentsWriteTempPrompt(systemPrompt);
       if (!promptPath) throw new Error('Failed to write decomposition prompt');
 
+      // Write user description to temp file (avoids shell injection via -p flag)
+      const descPath = await window.electronAPI.agentsWriteTempPrompt(description.trim());
+      if (!descPath) throw new Error('Failed to write task description');
+
       // Create a temp tab for decomposition
       const tab = addTab(currentProjectPath);
       const tabId = tab.id;
 
       // Collect output from the temp tab
       let output = '';
-      const removeDataListener = window.electronAPI.onTerminalData((id, data) => {
-        if (id === tabId) output += data;
-      });
+      let removeDataListener = null;
+      let removeExitListener = null;
 
-      // Launch non-interactive claude with -p flag
-      const safePath = promptPath.replace(/'/g, "'\\''");
-      const cmd = `claude -p "${description.replace(/"/g, '\\"').replace(/`/g, '\\`')}" --model claude-haiku-4-5-20251001 --system-prompt-file '${safePath}'\r`;
-
-      // Write command char-by-char with 5ms delay
-      const chars = cmd.split('');
-      for (let i = 0; i < chars.length; i++) {
-        window.electronAPI.terminalWrite(tabId, chars[i]);
-        if (i < chars.length - 1) await new Promise((r) => setTimeout(r, 5));
-      }
-
-      // Wait for completion (poll for terminal exit)
-      const exitCode = await new Promise((resolve) => {
-        const removeExitListener = window.electronAPI.onTerminalExit((id, code) => {
-          if (id === tabId) {
-            removeExitListener();
-            resolve(code);
-          }
+      try {
+        removeDataListener = window.electronAPI.onTerminalData((id, data) => {
+          if (id === tabId) output += data;
         });
-        // Timeout after 60s
-        setTimeout(() => resolve(-1), 60000);
-      });
 
-      removeDataListener();
+        // Launch non-interactive claude — pipe description from file to avoid shell injection
+        const safePromptPath = promptPath.replace(/'/g, "'\\''");
+        const safeDescPath = descPath.replace(/'/g, "'\\''");
+        const cmd = `cat '${safeDescPath}' | claude -p - --model claude-haiku-4-5-20251001 --system-prompt-file '${safePromptPath}'\r`;
 
-      // Clean up temp tab
-      if (window.electronAPI) window.electronAPI.terminalKill(tabId);
-      removeTab(tabId);
+        // Write command char-by-char with 5ms delay
+        const chars = cmd.split('');
+        for (let i = 0; i < chars.length; i++) {
+          window.electronAPI.terminalWrite(tabId, chars[i]);
+          if (i < chars.length - 1) await new Promise((r) => setTimeout(r, 5));
+        }
 
-      if (exitCode !== 0 && exitCode !== null) {
-        throw new Error(`Decomposition agent exited with code ${exitCode}`);
+        // Wait for completion (poll for terminal exit)
+        const exitCode = await new Promise((resolve) => {
+          let resolved = false;
+          removeExitListener = window.electronAPI.onTerminalExit((id, code) => {
+            if (id === tabId && !resolved) {
+              resolved = true;
+              resolve(code);
+            }
+          });
+          // Timeout after 60s
+          setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              resolve(-1);
+            }
+          }, 60000);
+        });
+
+        if (exitCode !== 0 && exitCode !== null) {
+          throw new Error(`Decomposition agent exited with code ${exitCode}`);
+        }
+      } finally {
+        // Always clean up listeners and temp tab
+        removeDataListener?.();
+        removeExitListener?.();
+        if (window.electronAPI) window.electronAPI.terminalKill(tabId);
+        removeTab(tabId);
       }
 
       // Parse JSON from output — find the first { ... } block
@@ -515,9 +531,12 @@ function OrchestrationProgress() {
     // Update subtask status
     updateSubtaskStatus(subtask.id, { tabId: tab.id, status: 'running', startedAt: Date.now() });
 
-    // Save to config
-    const updatedRun = { ...useStore.getState().activeOrchestration };
-    window.electronAPI.orchestrationSave(updatedRun);
+    // Save to config (read fresh state after synchronous Zustand update)
+    const freshRun = useStore.getState().activeOrchestration;
+    if (freshRun) {
+      window.electronAPI.orchestrationSave(freshRun)
+        .catch((err) => console.error('[Orchestrator] Failed to save run:', err));
+    }
 
     // Write claude command char-by-char with 5ms delay
     setTimeout(async () => {

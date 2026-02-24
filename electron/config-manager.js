@@ -326,7 +326,7 @@ export function saveOrchestrationRun(run) {
           id: typeof st.id === 'string' ? st.id.slice(0, 50) : '',
           title: typeof st.title === 'string' ? st.title.slice(0, 200) : '',
           description: typeof st.description === 'string' ? st.description.slice(0, 2000) : '',
-          agentId: typeof st.agentId === 'string' ? st.agentId.slice(0, 200) : '',
+          agentId: (typeof st.agentId === 'string' && st.agentId.length > 0) ? st.agentId.slice(0, 200) : '',
           tabId: typeof st.tabId === 'string' ? st.tabId : null,
           status: ['pending', 'running', 'completed', 'failed'].includes(st.status) ? st.status : 'pending',
           startedAt: typeof st.startedAt === 'number' ? st.startedAt : null,
