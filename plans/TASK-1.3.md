@@ -1,16 +1,7 @@
-# Task 1.3: Expose Memory APIs in Preload + Auto-Capture on Agent Exit
+# Task 1.3: Wire activity monitoring into ProjectView
 
-## What
-1. Add 6 agentMemory API methods in preload.js
-2. Extend onTerminalExit listener in ProjectView to auto-capture journal entries when agent terminals exit
+## Changes
+- `src/components/Project/ProjectView.jsx`: Import and call `useAgentActivity()` at top level
+- Hook sets up single terminal data listener for all running agents
 
-## Why
-- Preload exposes IPC bridge for renderer to access memory
-- Auto-capture provides passive run logging without user action
-
-## Verification
-- `npx vite build` exits 0
-- `grep -c 'agentMemory' electron/preload.js` returns 6
-
-## Risks
-- Journal entry won't have terminal output summary (no scrollback access from exit handler) — acceptable for v1
+## Build: PASS

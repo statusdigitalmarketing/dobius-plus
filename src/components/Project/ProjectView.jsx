@@ -10,6 +10,7 @@ import DashboardView from '../Dashboard/DashboardView';
 import GitSidePanel from '../shared/GitSidePanel';
 import QuitOverlay from '../shared/QuitOverlay';
 import ResumeBanner from './ResumeBanner';
+import { useAgentActivity } from '../../hooks/useAgentActivity';
 
 export default function ProjectView({ projectPath }) {
   const activeView = useStore((s) => s.activeView);
@@ -34,6 +35,9 @@ export default function ProjectView({ projectPath }) {
 
   const [pinnedIds, setPinnedIds] = useState([]);
   const [tabsInitialized, setTabsInitialized] = useState(false);
+
+  // Start agent activity monitoring for all running agents
+  useAgentActivity();
 
   // Extract project name from path
   const projectName = projectPath
