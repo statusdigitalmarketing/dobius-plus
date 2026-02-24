@@ -1,15 +1,11 @@
-# Task 2.1: Add Memory Indicator to AgentCard
+# Task 2.1: Register Board tab in DashboardView
 
-## What
-- Load memory data for all agents in MissionControl component
-- Show memory badges on AgentCard: run count, context icon, experience icon
-- Update Memory stat card to show actual count
+## Changes
+- Added `{ id: 'board', label: 'Board' }` after 'agents' in TABS array (13 total)
+- Imported BoardView component
+- Added `board: () => <BoardView />` to TAB_CONTENT
+- Running agent count badge with green dot when agents running
+- Board notification dot when not on board tab
 
-## Why
-Visual indicators let users see at-a-glance which agents have memory and how much.
-
-## Verification
-- `npx vite build` exits 0
-
-## Risks
-- Loading memories for all agents on mount could be slow with many agents — mitigated by small data size
+## Build: PASS
+## Tab count: 13
