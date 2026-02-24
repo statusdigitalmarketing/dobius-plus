@@ -406,7 +406,35 @@ function HistoryRow({ run, onLoad, onDelete }) {
 
 function OrchestrationProgress() {
   const activeOrchestration = useStore((s) => s.activeOrchestration);
+  const setActiveOrchestration = useStore((s) => s.setActiveOrchestration);
   const clearOrchestration = useStore((s) => s.clearOrchestration);
+  const updateSubtaskStatus = useStore((s) => s.updateSubtaskStatus);
+  const addTab = useStore((s) => s.addTab);
+  const renameTab = useStore((s) => s.renameTab);
+  const registerRunningAgent = useStore((s) => s.registerRunningAgent);
+  const setActiveView = useStore((s) => s.setActiveView);
+  const currentProjectPath = useStore((s) => s.currentProjectPath);
+  const setDashboardTab = useStore((s) => s.setDashboardTab);
+  const [agents, setAgents] = useState([]);
+  const [agentMemories, setAgentMemories] = useState({});
+  const [launching, setLaunching] = useState(false);
+  const [cancelConfirm, setCancelConfirm] = useState(false);
+
+  // Load agents + memories to build system prompts
+  useEffect(() => {
+    if (!window.electronAPI?.agentsList) return;
+    window.electronAPI.agentsList().then((list) => setAgents(list || []));
+  }, []);
+
+  useEffect(() => {
+    if (!window.electronAPI?.agentMemoryGet || agents.length === 0) return;
+    Promise.all(agents.map(async (a) => {
+      const mem = await window.electronAPI.agentMemoryGet(a.id);
+      return [a.id, mem];
+    })).then((entries) => {
+      setAgentMemories(Object.fromEntries(entries.filter(([, m]) => m)));
+    });
+  }, [agents]);
 
   if (!activeOrchestration) return null;
 
@@ -414,12 +442,91 @@ function OrchestrationProgress() {
   const completedCount = subtasks.filter((st) => st.status === 'completed').length;
   const failedCount = subtasks.filter((st) => st.status === 'failed').length;
   const totalCount = subtasks.length;
+  const pendingCount = subtasks.filter((st) => st.status === 'pending').length;
   const allDone = subtasks.every((st) => st.status === 'completed' || st.status === 'failed');
-  const progressPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+  const progressPct = totalCount > 0 ? Math.round(((completedCount + failedCount) / totalCount) * 100) : 0;
+
+  const launchSubtask = async (subtask) => {
+    const agent = agents.find((a) => a.id === subtask.agentId);
+    if (!agent || !window.electronAPI?.agentsWriteTempPrompt) return;
+
+    // Build enhanced system prompt
+    let prompt = agent.systemPrompt;
+    const mem = agentMemories[agent.id];
+    if (mem && (mem.context || mem.experience?.length > 0)) {
+      let memorySection = '\n\n---\n## Agent Memory\n';
+      if (mem.context) memorySection += `\n### Context\n${mem.context}\n`;
+      if (mem.experience?.length > 0) {
+        memorySection += '\n### Experience\n';
+        mem.experience.forEach((exp, i) => { memorySection += `${i + 1}. ${exp}\n`; });
+      }
+      const maxMemory = 10000 - prompt.length - 50;
+      if (maxMemory > 100) prompt += memorySection.slice(0, maxMemory);
+    }
+
+    // Append orchestrator task context
+    prompt += `\n\n---\n## Orchestrated Task\nYou are working as part of an orchestrated team. Your specific assignment:\n\n**${subtask.title}**\n${subtask.description}\n\nOverall goal: ${description}\n`;
+
+    const promptPath = await window.electronAPI.agentsWriteTempPrompt(prompt);
+    if (!promptPath) return;
+
+    const tab = addTab(currentProjectPath);
+    renameTab(tab.id, `[O] ${subtask.title.slice(0, 30)}`);
+    registerRunningAgent(agent.id, tab.id);
+
+    // Update subtask status
+    updateSubtaskStatus(subtask.id, { tabId: tab.id, status: 'running', startedAt: Date.now() });
+
+    // Save to config
+    const updatedRun = { ...useStore.getState().activeOrchestration };
+    window.electronAPI.orchestrationSave(updatedRun);
+
+    // Write claude command char-by-char with 5ms delay
+    setTimeout(async () => {
+      const modelFlag = agent.model && ALLOWED_MODELS.includes(agent.model) ? ` --model ${agent.model}` : '';
+      const safePath = promptPath.replace(/'/g, "'\\''");
+      const cmd = `claude --system-prompt-file '${safePath}'${modelFlag}\r`;
+      const chars = cmd.split('');
+      for (let i = 0; i < chars.length; i++) {
+        window.electronAPI.terminalWrite(tab.id, chars[i]);
+        if (i < chars.length - 1) await new Promise((r) => setTimeout(r, 5));
+      }
+    }, 500);
+  };
+
+  const handleLaunchAll = async () => {
+    setLaunching(true);
+    const pendingSubtasks = subtasks.filter((st) => st.status === 'pending');
+    for (let i = 0; i < pendingSubtasks.length; i++) {
+      await launchSubtask(pendingSubtasks[i]);
+      if (i < pendingSubtasks.length - 1) await new Promise((r) => setTimeout(r, 1000));
+    }
+    setLaunching(false);
+  };
+
+  const handleCancel = () => {
+    // Kill all running subtask tabs
+    const runningSubtasks = subtasks.filter((st) => st.status === 'running' && st.tabId);
+    runningSubtasks.forEach((st) => {
+      if (window.electronAPI) window.electronAPI.terminalKill(st.tabId);
+    });
+    // Update orchestration
+    const updatedRun = {
+      ...activeOrchestration,
+      status: 'failed',
+      subtasks: subtasks.map((st) =>
+        st.status === 'running' ? { ...st, status: 'failed', completedAt: Date.now() } : st
+      ),
+      completedAt: Date.now(),
+    };
+    setActiveOrchestration(updatedRun);
+    window.electronAPI?.orchestrationSave(updatedRun);
+    setCancelConfirm(false);
+  };
 
   return (
     <div className="space-y-4">
-      {/* Task description */}
+      {/* Task description + progress */}
       <motion.div
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
@@ -448,6 +555,96 @@ function OrchestrationProgress() {
             {completedCount}/{totalCount}
           </span>
         </div>
+
+        {/* Action buttons */}
+        <div className="mt-3 flex items-center gap-2">
+          {pendingCount > 0 && (
+            <button
+              onClick={handleLaunchAll}
+              disabled={launching}
+              style={{
+                padding: '5px 14px',
+                fontSize: 10,
+                fontFamily: "'SF Mono', monospace",
+                color: launching ? 'var(--dim)' : 'var(--bg)',
+                backgroundColor: launching ? 'var(--border)' : 'var(--accent)',
+                border: 'none',
+                borderRadius: 4,
+                cursor: launching ? 'default' : 'pointer',
+              }}
+            >
+              {launching ? 'Launching...' : `Launch All (${pendingCount})`}
+            </button>
+          )}
+          {!allDone && !cancelConfirm && (
+            <button
+              onClick={() => setCancelConfirm(true)}
+              style={{
+                padding: '5px 14px',
+                fontSize: 10,
+                fontFamily: "'SF Mono', monospace",
+                color: '#F85149',
+                backgroundColor: 'transparent',
+                border: '1px solid #F85149',
+                borderRadius: 4,
+                cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
+          )}
+          {cancelConfirm && (
+            <>
+              <button
+                onClick={handleCancel}
+                style={{
+                  padding: '5px 14px',
+                  fontSize: 10,
+                  fontFamily: "'SF Mono', monospace",
+                  color: '#F85149',
+                  backgroundColor: 'rgba(248,81,73,0.1)',
+                  border: '1px solid #F85149',
+                  borderRadius: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                Confirm Cancel
+              </button>
+              <button
+                onClick={() => setCancelConfirm(false)}
+                style={{
+                  padding: '5px 14px',
+                  fontSize: 10,
+                  fontFamily: "'SF Mono', monospace",
+                  color: 'var(--dim)',
+                  backgroundColor: 'transparent',
+                  border: '1px solid var(--border)',
+                  borderRadius: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                Keep Running
+              </button>
+            </>
+          )}
+          {subtasks.some((st) => st.status === 'running') && (
+            <button
+              onClick={() => setDashboardTab('board')}
+              style={{
+                padding: '5px 14px',
+                fontSize: 10,
+                fontFamily: "'SF Mono', monospace",
+                color: 'var(--accent)',
+                backgroundColor: 'transparent',
+                border: '1px solid var(--accent)',
+                borderRadius: 4,
+                cursor: 'pointer',
+              }}
+            >
+              View on Board
+            </button>
+          )}
+        </div>
       </motion.div>
 
       {/* Status banner */}
@@ -466,18 +663,27 @@ function OrchestrationProgress() {
           </span>
           <span className="text-xs ml-2" style={{ color: 'var(--dim)', fontSize: 10 }}>
             {completedCount} completed, {failedCount} failed
+            {activeOrchestration.completedAt && activeOrchestration.createdAt && (
+              <> &middot; {formatElapsed(activeOrchestration.completedAt - activeOrchestration.createdAt)}</>
+            )}
           </span>
         </motion.div>
       )}
 
-      {/* Subtask cards (placeholder — will be filled in Task 2.3) */}
+      {/* Subtask cards */}
       <div className="space-y-2">
         {subtasks.map((st, i) => (
-          <SubtaskCard key={st.id} subtask={st} index={i} />
+          <SubtaskCard
+            key={st.id}
+            subtask={st}
+            index={i}
+            agent={agents.find((a) => a.id === st.agentId)}
+            onLaunch={() => launchSubtask(st)}
+          />
         ))}
       </div>
 
-      {/* Actions */}
+      {/* Footer actions */}
       <div className="flex items-center gap-2">
         {allDone && (
           <button
@@ -501,14 +707,21 @@ function OrchestrationProgress() {
   );
 }
 
-function SubtaskCard({ subtask, index }) {
+function formatElapsed(ms) {
+  const secs = Math.round(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
+}
+
+function SubtaskCard({ subtask, index, agent, onLaunch }) {
   const [expanded, setExpanded] = useState(false);
-  const agents = useStore((s) => s.runningAgents);
   const agentActivity = useStore((s) => s.agentActivity);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setActiveView = useStore((s) => s.setActiveView);
 
-  const { id, title, description, agentId, tabId, status, exitCode, outputSummary } = subtask;
+  const { title, description, agentId, tabId, status, exitCode, outputSummary } = subtask;
   const activity = agentId ? agentActivity[agentId] : null;
 
   const statusColor = status === 'completed' ? '#3FB950' : status === 'failed' ? '#F85149' : status === 'running' ? 'var(--accent)' : 'var(--dim)';
@@ -532,6 +745,15 @@ function SubtaskCard({ subtask, index }) {
         <span className="text-xs font-semibold flex-1" style={{ color: 'var(--fg)', fontSize: 11 }}>
           {title}
         </span>
+        {/* Agent badge */}
+        {agent && (
+          <span
+            className="text-xs px-1.5 py-0.5 rounded"
+            style={{ fontSize: 8, backgroundColor: 'rgba(88,166,255,0.1)', color: 'var(--accent)' }}
+          >
+            {agent.name}
+          </span>
+        )}
         {/* Status label */}
         <span className="text-xs" style={{ color: statusColor, fontSize: 9, fontFamily: "'SF Mono', monospace" }}>
           {statusLabel}
@@ -557,6 +779,23 @@ function SubtaskCard({ subtask, index }) {
 
       {/* Actions */}
       <div className="mt-2 flex items-center gap-1.5">
+        {status === 'pending' && (
+          <button
+            onClick={onLaunch}
+            style={{
+              padding: '2px 8px',
+              fontSize: 9,
+              fontFamily: "'SF Mono', monospace",
+              color: 'var(--bg)',
+              backgroundColor: 'var(--accent)',
+              border: 'none',
+              borderRadius: 4,
+              cursor: 'pointer',
+            }}
+          >
+            Launch
+          </button>
+        )}
         {tabId && status === 'running' && (
           <button
             onClick={() => { setActiveTab(tabId); setActiveView('terminal'); }}
