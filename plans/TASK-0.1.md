@@ -1,24 +1,17 @@
-# Task 0.1 — Pre-Flight Validation + Create Infrastructure
+# Task 0.1: Pre-Flight Validation + Create Infrastructure
 
-## What will change
-- Create `scripts/verify-task.sh` — gate script
-- Create `scripts/crackbot-supervisor.sh` — auto-resume wrapper
-- Create `BUILD-LOG.md` — empty build log
-- Create `claude-progress.json` — initial progress state
-- Create `HANDOFF.md` — initial handoff file
-- Create `.test-baseline.txt` — build baseline capture
+## What
+- Validate environment (build passes, 12 tabs, clean branch)
+- Create feature branch `build/agent-memory`
+- Init build tracking files: verify-task.sh (reuse), BUILD-LOG.md, claude-progress.json, HANDOFF.md
 
 ## Why
-These files form the autonomous build infrastructure. Every subsequent task depends on them for verification, progress tracking, and crash recovery.
+Standard autonomous build setup — consistent tracking and verification across all tasks.
 
 ## Verification
 - `npx vite build` exits 0
-- On branch `build/mission-control`
+- On branch `build/agent-memory`
 - All infrastructure files exist
 
-## What could go wrong
-- Git stash might fail if there are conflicts — already handled above
-- Build might fail from pre-existing issues — already verified passes
-
-## Estimated time
-5 minutes
+## Risks
+None — no code changes.
