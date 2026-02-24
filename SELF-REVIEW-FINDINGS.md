@@ -1,20 +1,37 @@
-# Self-Review Findings — Agent Memory Build
+# Self-Review Findings — Board View Build
 
-## Code Review Findings
+**Branch:** `build/board-view`
+**Review Date:** 2026-02-23
+**Reviewers:** code-reviewer + code-explorer subagents
 
-- [x] **MED** `src/components/Project/ProjectView.jsx:100-118` — Race condition: unregisterAgentsByTabId ran after journal append. If terminal:exit fires twice, second call still found agentId. **FIXED**: Moved unregister before journal append.
-- [x] **FALSE** `src/components/Dashboard/Agents.jsx:124-129` — Zombie tab on promptPath failure. **FALSE POSITIVE**: addTab is after the promptPath check. Code is already correct.
-- [x] **MED** `src/components/Dashboard/Agents.jsx:496-522` — No try/catch on IPC memory calls. Silent failure if disk full or permission error. **FIXED**: Added try/catch with console.error to all 4 handlers.
-- [x] **LOW** `electron/config-manager.js:43` — Prototype pollution in agentMemory loaded from disk. Config load didn't sanitize __proto__ keys in nested objects. **FIXED**: Added sanitization of UNSAFE_KEYS in agentMemory, sessionTags, and projects on load.
-- [x] **LOW** `src/components/Dashboard/Agents.jsx:60-66` — Serial memory loading loop. Could use Promise.all for parallel loads. **SKIPPED**: Acceptable for <20 agents.
+## Findings
 
-## Architecture Audit Findings
+### 1. [HIGH] Redundant/buggy BoardView notification clearing
+- **File:** `src/components/Dashboard/Board/BoardView.jsx` lines 60-65
+- **Issue:** Empty dependency array on mount-only effect. DashboardView already handles clearing correctly with proper deps.
+- **Fix:** Remove the redundant effect from BoardView.
+- [x] Fixed
 
-- [x] **LOW** Journal entries have empty summary/linesOutput — known limitation documented in TASK-1.3.md. **SKIPPED**: v1 acceptable.
-- [x] **LOW** Memory reload on every change is O(n) IPC calls — could optimize to single-agent update. **SKIPPED**: Acceptable for <20 agents.
+### 2. [MEDIUM] Missing error handling for agent journal auto-capture
+- **File:** `src/components/Project/ProjectView.jsx` line 122
+- **Issue:** `agentMemoryAppendJournal` uses optional chaining but no `.catch()`.
+- **Fix:** Add try/catch with console.error.
+- [x] Fixed
 
-## Summary
-- Findings: 7 total
-- Fixed: 3 (race condition, IPC error handling, prototype pollution on load)
-- False positive: 1
-- Skipped (LOW): 3
+### 3. [MEDIUM] Missing error handling in RecentCompletions
+- **File:** `src/components/Dashboard/Board/BoardView.jsx` lines 393-412
+- **Issue:** `agentMemoryGet` loop has no try-catch. One failure kills all.
+- **Fix:** Wrap in try-catch per agent.
+- [x] Fixed
+
+### 4. [MEDIUM] Debounce timer can resurrect cleared agentActivity
+- **File:** `src/hooks/useAgentActivity.js` line 95-106
+- **Issue:** If agent exits and unregisters, a pending debounce timer fires and re-adds activity.
+- **Fix:** Check if agent is still running before updating store.
+- [x] Fixed
+
+### 5. [LOW] Timeline agent name shows agentId not friendly name
+- **File:** `src/hooks/useAgentActivity.js` line 59-62
+- **Issue:** `getAgentName()` returns agentId, not the tab label/agent name.
+- **Fix:** Look up tab label from store.
+- [x] Fixed

@@ -1,12 +1,10 @@
 {
-  "current_phase": 3,
-  "current_task": "FINAL.1",
-  "tasks_completed": ["0.1", "1.1", "1.2", "1.3", "2.1", "2.2", "2.3", "2.4"],
-  "tasks_remaining": ["FINAL.1", "FINAL.2", "FINAL.3"],
-  "last_commit": "41df575",
-  "last_updated": "2026-02-23T23:00:00Z",
-  "build_start": "2026-02-23T22:48:00Z",
-  "build_branch": "build/agent-memory",
-  "verification_failures": {},
-  "notes": "All build tasks complete. Moving to self-review."
+  "build": "board-view",
+  "branch": "build/board-view",
+  "startedAt": "2026-02-23T23:04:00-05:00",
+  "currentTask": "0.1",
+  "completedTasks": [],
+  "totalTasks": 13,
+  "phase": "Phase 0 — Setup",
+  "status": "in_progress"
 }

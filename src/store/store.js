@@ -25,6 +25,15 @@ export const useStore = create((set, get) => ({
   // Running agents: Map<agentId, tabId>
   runningAgents: {},
 
+  // Agent activity: Map<agentId, { status, lastActivity, linesProcessed, startTime, currentAction }>
+  agentActivity: {},
+
+  // Activity timeline: chronological feed of agent actions (max 100)
+  activityTimeline: [],
+
+  // Board notification
+  boardNotification: null,
+
   // Tab actions
   addTab: (projectPath) => {
     const state = get();
@@ -127,11 +136,40 @@ export const useStore = create((set, get) => ({
 
   unregisterAgentsByTabId: (tabId) => set((s) => {
     const ra = { ...s.runningAgents };
+    const aa = { ...s.agentActivity };
     for (const key of Object.keys(ra)) {
-      if (ra[key] === tabId) delete ra[key];
+      if (ra[key] === tabId) {
+        delete ra[key];
+        delete aa[key];
+      }
     }
-    return { runningAgents: ra };
+    return { runningAgents: ra, agentActivity: aa };
   }),
+
+  // Agent activity tracking
+  updateAgentActivity: (agentId, activity) => set((s) => ({
+    agentActivity: {
+      ...s.agentActivity,
+      [agentId]: { ...s.agentActivity[agentId], ...activity },
+    },
+  })),
+
+  clearAgentActivity: (agentId) => set((s) => {
+    const aa = { ...s.agentActivity };
+    delete aa[agentId];
+    return { agentActivity: aa };
+  }),
+
+  // Activity timeline (max 100 entries, FIFO)
+  appendActivityTimeline: (entry) => set((s) => {
+    const timeline = [...s.activityTimeline, entry];
+    if (timeline.length > 100) timeline.shift();
+    return { activityTimeline: timeline };
+  }),
+
+  // Board notifications
+  setBoardNotification: (notification) => set({ boardNotification: notification }),
+  clearBoardNotification: () => set({ boardNotification: null }),
 
   // Resume a Claude session by sending the resume command to the active terminal
   resumeSession: (sessionId) => {

@@ -14,6 +14,7 @@ import Checkpoints from './Checkpoints';
 import Agents from './Agents';
 import ClaudeMdEditor from './ClaudeMdEditor';
 import Settings from './Settings';
+import BoardView from './Board/BoardView';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -24,6 +25,7 @@ const TABS = [
   { id: 'checkpoints', label: 'Checkpoints' },
   { id: 'plans', label: 'Plans' },
   { id: 'agents', label: 'Mission Control' },
+  { id: 'board', label: 'Board' },
   { id: 'builds', label: 'Builds' },
   { id: 'git', label: 'Git' },
   { id: 'claudemd', label: 'CLAUDE.md' },
@@ -38,6 +40,7 @@ const TAB_CONTENT = {
   sessions: () => <Sessions />,
   checkpoints: () => <Checkpoints />,
   agents: () => <Agents />,
+  board: () => <BoardView />,
   plans: (props) => <Plans plans={props.plans} />,
   builds: () => <BuildMonitorView />,
   git: () => <GitView />,
@@ -49,8 +52,19 @@ export default function DashboardView() {
   const dashboardTab = useStore((s) => s.dashboardTab);
   const setDashboardTab = useStore((s) => s.setDashboardTab);
   const buildComplete = useStore((s) => s.buildComplete);
+  const runningAgents = useStore((s) => s.runningAgents);
+  const boardNotification = useStore((s) => s.boardNotification);
+  const clearBoardNotification = useStore((s) => s.clearBoardNotification);
   const { stats, settings, bridgeServers, plans, skills, loading } = useStats();
   const [sessionCount, setSessionCount] = useState(0);
+  const runningCount = Object.keys(runningAgents).length;
+
+  // Clear board notification badge when user switches to Board tab
+  useEffect(() => {
+    if (dashboardTab === 'board' && boardNotification) {
+      clearBoardNotification();
+    }
+  }, [dashboardTab, boardNotification, clearBoardNotification]);
 
   useEffect(() => {
     if (!window.electronAPI?.dataLoadAllSessions) return;
@@ -114,6 +128,29 @@ export default function DashboardView() {
               >
                 ({sessionCount})
               </span>
+            )}
+            {tab.id === 'board' && runningCount > 0 && (
+              <span
+                className="ml-1 inline-flex items-center gap-0.5"
+                style={{
+                  fontFamily: "'SF Mono', monospace",
+                  fontSize: 9,
+                }}
+              >
+                <span
+                  className="inline-block w-1.5 h-1.5 rounded-full"
+                  style={{ backgroundColor: '#3FB950' }}
+                />
+                <span style={{ color: '#3FB950' }}>
+                  {runningCount}
+                </span>
+              </span>
+            )}
+            {tab.id === 'board' && boardNotification && dashboardTab !== 'board' && (
+              <span
+                className="absolute top-1.5 right-1 w-1.5 h-1.5 rounded-full"
+                style={{ backgroundColor: '#3FB950' }}
+              />
             )}
             {tab.id === 'builds' && buildComplete && dashboardTab !== 'builds' && (
               <span
