@@ -87,7 +87,7 @@ npm run electron:build   # Build .app bundle
 - `Cmd+1-9` — switch to tab N
 - `Cmd+Shift+[` — previous tab
 - `Cmd+Shift+]` — next tab
-- `Cmd+Shift+T` — toggle Terminal / Dashboard
+- `Cmd+Shift+T` — reopen last closed tab (terminal view) / toggle Terminal↔Dashboard (dashboard view)
 - `Cmd+B` — toggle left sidebar
 - `Cmd+G` — toggle Git side panel (terminal view only)
 - `Cmd+K` — clear terminal

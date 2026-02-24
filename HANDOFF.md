@@ -1,20 +1,24 @@
-# Board View Build — Handoff
+# Orchestrator Build — Handoff
 
 ## Status: IN PROGRESS
 ## Current Task: 0.1 — Pre-flight + Branch
-## Branch: build/board-view
+## Branch: build/orchestrator
 
 ## What's Done
-- Created branch `build/board-view` from main (08c2cb6)
+- Created branch `build/orchestrator` from main (d575ebc)
 - Build infrastructure files created
+- Pre-flight: build passes, branch created
 
 ## What's Next
-- Task 1.1: Create useAgentActivity hook
+- Task 1.1: Orchestration run model, config storage, and IPC
+- Task 1.2: Add orchestration state to Zustand store
 
 ## Key Files
-- `src/hooks/useAgentActivity.js` — (to create) terminal data monitoring hook
-- `src/components/Dashboard/Board/BoardView.jsx` — (to create) Board View UI
-- `src/store/store.js` — agentActivity state additions
-- `src/components/Dashboard/DashboardView.jsx` — Board tab registration
+- `electron/config-manager.js` — orchestration run storage (CRUD)
+- `electron/main.js` — orchestration IPC handlers
+- `electron/preload.js` — orchestration API bridge
+- `src/store/store.js` — activeOrchestration state
+- `src/components/Dashboard/Orchestrator/OrchestratorView.jsx` — main UI
+- `src/components/Dashboard/DashboardView.jsx` — tab registration
 
 ## Build Passes: YES

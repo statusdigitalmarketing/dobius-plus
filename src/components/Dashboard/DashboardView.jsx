@@ -15,6 +15,7 @@ import Agents from './Agents';
 import ClaudeMdEditor from './ClaudeMdEditor';
 import Settings from './Settings';
 import BoardView from './Board/BoardView';
+import OrchestratorView from './Orchestrator/OrchestratorView';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -26,6 +27,7 @@ const TABS = [
   { id: 'plans', label: 'Plans' },
   { id: 'agents', label: 'Mission Control' },
   { id: 'board', label: 'Board' },
+  { id: 'orchestrator', label: 'Orchestrator' },
   { id: 'builds', label: 'Builds' },
   { id: 'git', label: 'Git' },
   { id: 'claudemd', label: 'CLAUDE.md' },
@@ -41,6 +43,7 @@ const TAB_CONTENT = {
   checkpoints: () => <Checkpoints />,
   agents: () => <Agents />,
   board: () => <BoardView />,
+  orchestrator: () => <OrchestratorView />,
   plans: (props) => <Plans plans={props.plans} />,
   builds: () => <BuildMonitorView />,
   git: () => <GitView />,

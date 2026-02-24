@@ -12,6 +12,7 @@ export default function TerminalTabBar() {
   const closeOtherTabs = useStore((s) => s.closeOtherTabs);
   const closeTabsToRight = useStore((s) => s.closeTabsToRight);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
+  const pushClosedTab = useStore((s) => s.pushClosedTab);
 
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
@@ -100,20 +101,43 @@ export default function TerminalTabBar() {
 
   const handleCloseTab = useCallback(async (e, tabId) => {
     e.stopPropagation();
+    // Save tab info + scrollback for Cmd+Shift+T reopen
+    const tab = tabs.find((t) => t.id === tabId);
+    let scrollback = null;
+    if (window.electronAPI?.terminalLoadState) {
+      await window.electronAPI.terminalRequestSaveNow?.();
+      await new Promise((r) => setTimeout(r, 200));
+      const state = await window.electronAPI.terminalLoadState(tabId);
+      scrollback = state?.scrollback || null;
+    }
+    if (tab) {
+      pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback });
+    }
     await autoCheckpoint(tabId);
     if (window.electronAPI) window.electronAPI.terminalKill(tabId);
     removeTab(tabId);
-  }, [removeTab, autoCheckpoint]);
+  }, [removeTab, autoCheckpoint, tabs, pushClosedTab]);
 
   // Middle-click to close (#24)
   const handleMouseDown = useCallback(async (e, tabId) => {
     if (e.button === 1 && tabs.length > 1) {
       e.preventDefault();
+      const tab = tabs.find((t) => t.id === tabId);
+      let scrollback = null;
+      if (window.electronAPI?.terminalLoadState) {
+        await window.electronAPI.terminalRequestSaveNow?.();
+        await new Promise((r) => setTimeout(r, 200));
+        const state = await window.electronAPI.terminalLoadState(tabId);
+        scrollback = state?.scrollback || null;
+      }
+      if (tab) {
+        pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback });
+      }
       await autoCheckpoint(tabId);
       if (window.electronAPI) window.electronAPI.terminalKill(tabId);
       removeTab(tabId);
     }
-  }, [removeTab, tabs.length, autoCheckpoint]);
+  }, [removeTab, tabs, autoCheckpoint, pushClosedTab]);
 
   // Right-click context menu (#25)
   const handleContextMenu = useCallback((e, tabId) => {
@@ -253,11 +277,11 @@ export default function TerminalTabBar() {
                 <span className="truncate">{tab.label}</span>
               )}
 
-              {/* Close button */}
-              {tabs.length > 1 && (
+              {/* Close button — only visible on active tab to prevent accidental closes */}
+              {tabs.length > 1 && isActive && (
                 <span
                   onClick={(e) => handleCloseTab(e, tab.id)}
-                  className="opacity-0 group-hover:opacity-100 ml-1 shrink-0"
+                  className="ml-1 shrink-0"
                   style={{
                     width: 16,
                     height: 16,
@@ -269,10 +293,11 @@ export default function TerminalTabBar() {
                     lineHeight: 1,
                     color: 'var(--dim)',
                     cursor: 'pointer',
-                    transition: 'opacity 100ms',
+                    opacity: 0.6,
+                    transition: 'opacity 100ms, background-color 100ms',
                   }}
-                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--border)'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--border)'; e.currentTarget.style.opacity = '1'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.opacity = '0.6'; }}
                 >
                   x
                 </span>

@@ -48,6 +48,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   agentMemoryRemoveExperience: (agentId, index) => ipcRenderer.invoke('agentMemory:removeExperience', agentId, index),
   agentMemoryClear: (agentId) => ipcRenderer.invoke('agentMemory:clear', agentId),
 
+  // Orchestration
+  orchestrationList: () => ipcRenderer.invoke('orchestration:list'),
+  orchestrationGet: (runId) => ipcRenderer.invoke('orchestration:get', runId),
+  orchestrationSave: (run) => ipcRenderer.invoke('orchestration:save', run),
+  orchestrationDelete: (runId) => ipcRenderer.invoke('orchestration:delete', runId),
+
   // File (CLAUDE.md editor)
   fileRead: (filePath) => ipcRenderer.invoke('file:read', filePath),
   fileWrite: (filePath, content) => ipcRenderer.invoke('file:write', filePath, content),
