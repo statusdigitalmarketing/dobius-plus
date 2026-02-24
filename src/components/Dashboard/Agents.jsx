@@ -10,14 +10,15 @@ const MODEL_LABELS = {
   'claude-haiku-4-5-20251001': 'Haiku',
 };
 
-function StatCard({ label, value, subtitle, accent, index = 0 }) {
+function StatCard({ label, value, subtitle, accent, index = 0, onClick }) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: index * 0.05, duration: 0.2 }}
       className="p-3 rounded-lg"
-      style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
+      onClick={onClick}
+      style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)', cursor: onClick ? 'pointer' : 'default' }}
     >
       <div className="text-xs font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--dim)', fontSize: 9, letterSpacing: '0.1em' }}>
         {label}
@@ -43,6 +44,7 @@ export default function Agents() {
   const terminalTabs = useStore((s) => s.terminalTabs);
   const runningAgents = useStore((s) => s.runningAgents);
   const registerRunningAgent = useStore((s) => s.registerRunningAgent);
+  const setDashboardTab = useStore((s) => s.setDashboardTab);
 
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -168,11 +170,31 @@ export default function Agents() {
     <div className="p-5 space-y-5">
       {/* Stats Bar */}
       <div className="grid grid-cols-4 gap-3">
-        <StatCard index={0} label="Agents" value={agents.length} subtitle={runningCount > 0 ? `${runningCount} running` : 'none running'} accent={runningCount > 0} />
+        <StatCard index={0} label="Agents" value={agents.length} subtitle={runningCount > 0 ? `${runningCount} running` : 'none running'} accent={runningCount > 0} onClick={runningCount > 0 ? () => setDashboardTab('board') : undefined} />
         <StatCard index={1} label="Terminals" value={terminalTabs.length} subtitle="active" />
         <StatCard index={2} label="Sessions" value={sessionCount} subtitle="total" />
         <StatCard index={3} label="Memory" value={memoryAgentCount} subtitle={memoryAgentCount === 1 ? 'agent' : 'agents'} accent={memoryAgentCount > 0} />
       </div>
+
+      {/* View on Board link */}
+      {runningCount > 0 && (
+        <button
+          onClick={() => setDashboardTab('board')}
+          style={{
+            padding: '4px 12px',
+            fontSize: 10,
+            fontFamily: "'SF Mono', monospace",
+            color: 'var(--accent)',
+            backgroundColor: 'transparent',
+            border: '1px solid var(--accent)',
+            borderRadius: 4,
+            cursor: 'pointer',
+            alignSelf: 'flex-start',
+          }}
+        >
+          View on Board →
+        </button>
+      )}
 
       {/* Header */}
       <div className="flex items-center justify-between">

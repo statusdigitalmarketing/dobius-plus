@@ -250,6 +250,22 @@ export default function BoardView() {
                     View
                   </button>
                   <StopButton onStop={() => handleStop(agentId)} />
+                  <button
+                    onClick={() => setDashboardTab('agents')}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: 10,
+                      fontFamily: "'SF Mono', monospace",
+                      color: 'var(--dim)',
+                      backgroundColor: 'transparent',
+                      border: '1px solid var(--border)',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      marginLeft: 'auto',
+                    }}
+                  >
+                    Configure →
+                  </button>
                 </div>
               </motion.div>
             );
