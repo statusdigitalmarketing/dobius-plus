@@ -95,7 +95,7 @@ export default function ProjectView({ projectPath }) {
     }
   }, [tabs, tabsInitialized, projectPath]);
 
-  // Clean up running agents when a terminal PTY exits + auto-capture journal
+  // Clean up running agents when a terminal PTY exits + auto-capture journal + orchestration tracking
   useEffect(() => {
     if (!window.electronAPI?.onTerminalExit) return;
     const removeExitListener = window.electronAPI.onTerminalExit((termId, exitCode) => {
@@ -130,6 +130,60 @@ export default function ProjectView({ projectPath }) {
           exitCode: typeof exitCode === 'number' ? exitCode : null,
           timestamp: Date.now(),
         });
+      }
+
+      // Orchestration: check if this tab belongs to an active orchestration
+      const orch = state.activeOrchestration;
+      if (orch && orch.status === 'running') {
+        const subtask = orch.subtasks.find((st) => st.tabId === termId && st.status === 'running');
+        if (subtask) {
+          const doUpdate = (outputSummary) => {
+            const current = useStore.getState().activeOrchestration;
+            if (!current || current.id !== orch.id) return;
+
+            current.subtasks.forEach((st) => {
+              // Intentionally not using updateSubtaskStatus to avoid extra renders
+            });
+
+            useStore.getState().updateSubtaskStatus(subtask.id, {
+              status: (exitCode === 0 || exitCode === null) ? 'completed' : 'failed',
+              completedAt: Date.now(),
+              exitCode: typeof exitCode === 'number' ? exitCode : null,
+              outputSummary,
+            });
+
+            // Check if all subtasks are now done
+            const updated = useStore.getState().activeOrchestration;
+            if (updated && updated.subtasks.every((st) => st.status === 'completed' || st.status === 'failed')) {
+              const failedCount = updated.subtasks.filter((st) => st.status === 'failed').length;
+              const finalRun = {
+                ...updated,
+                status: failedCount === 0 ? 'completed' : 'failed',
+                completedAt: Date.now(),
+              };
+              useStore.getState().setActiveOrchestration(finalRun);
+              window.electronAPI?.orchestrationSave(finalRun)
+                .catch((err) => console.error('[Orchestrator] Failed to save completed run:', err));
+            } else if (updated) {
+              window.electronAPI?.orchestrationSave(updated)
+                .catch((err) => console.error('[Orchestrator] Failed to save run update:', err));
+            }
+          };
+
+          // Try to extract output summary from terminal scrollback
+          if (window.electronAPI?.terminalLoadState) {
+            window.electronAPI.terminalLoadState(termId).then((saved) => {
+              let summary = null;
+              if (saved?.scrollback) {
+                const stripped = saved.scrollback.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+                summary = stripped.slice(-500).trim();
+              }
+              doUpdate(summary);
+            }).catch(() => doUpdate(null));
+          } else {
+            doUpdate(null);
+          }
+        }
       }
     });
     return () => removeExitListener?.();
