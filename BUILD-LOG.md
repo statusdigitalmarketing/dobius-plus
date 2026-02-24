@@ -1,85 +1,64 @@
-# Build Log — Session Manager
+# Build Log — Mission Control
 
 ## Task 0.1 — Pre-Flight Validation + Create Infrastructure
-- Start: 19:08
-- End: 19:15
-- Duration: 7 min
-- Files changed: scripts/verify-task.sh, scripts/crackbot-supervisor.sh, BUILD-LOG.md, claude-progress.json, HANDOFF.md, plans/TASK-0.1.md, .test-baseline.txt
+- Start: 21:29
+- End: 21:32
+- Duration: 3 min
+- Files changed: scripts/verify-task.sh, scripts/crackbot-supervisor.sh, BUILD-LOG.md, claude-progress.json, HANDOFF.md, .test-baseline.txt, plans/TASK-0.1.md, plans/TASK-0.1-REVIEW.md
 - Verification: PASS (attempts: 1)
 
-## Task 1.1 — Add loadAllSessions() to data-service.js
-- Start: 19:15
-- End: 19:22
-- Duration: 7 min
-- Files changed: electron/data-service.js
-- Verification: PASS (attempts: 1)
-- Notes: Also added getLatestSession(). Fixed race condition in Promise.all stat collection.
-
-## Task 1.2 — Add session tags to config-manager.js
-- Start: 19:22
-- End: 19:27
-- Duration: 5 min
-- Files changed: electron/config-manager.js
+## Task 1.1 — Add runningAgents state and actions to Zustand store
+- Start: 21:32
+- End: 21:35
+- Duration: 3 min
+- Files changed: src/store/store.js
 - Verification: PASS (attempts: 1)
 
-## Task 1.3 — Wire IPC handlers + preload for sessions + tags
-- Start: 19:27
-- End: 19:32
-- Duration: 5 min
-- Files changed: electron/main.js, electron/preload.js
-- Verification: PASS (attempts: 1)
-
-## Task 2.1 — Rewrite Sessions.jsx — project-grouped card layout
-- Start: 19:32
-- End: 19:42
-- Duration: 10 min
-- Files changed: src/components/Dashboard/Sessions.jsx (complete rewrite)
-- Verification: PASS (attempts: 1)
-- Notes: Replaced table with project-grouped collapsible card layout, tag badges, skeleton loader
-
-## Task 2.2 — Search, filter, and sort controls
-- Start: 19:42
-- End: 19:50
-- Duration: 8 min
-- Files changed: src/components/Dashboard/Sessions.jsx
-- Verification: PASS (attempts: 1)
-
-## Task 2.3 — Tag management on session cards
-- Start: 19:50
-- End: 19:58
-- Duration: 8 min
-- Files changed: src/components/Dashboard/Sessions.jsx
-- Verification: PASS (attempts: 1)
-- Notes: Inline tag editor with 7-color picker, save/remove/cancel, tag badge click to edit
-
-## Task 2.4 — One-click resume from session card
-- Start: 19:58
-- End: 20:06
-- Duration: 8 min
-- Files changed: src/store/store.js, src/components/Dashboard/Sessions.jsx
-- Verification: PASS (attempts: 1)
-- Notes: Added resumeSession action with sessionId regex validation, Resume + Open buttons on cards
-
-## Task 3.1 — Auto-resume suggestion banner on project open
-- Start: 20:06
-- End: 20:14
-- Duration: 8 min
-- Files changed: src/components/Project/ResumeBanner.jsx (NEW), src/components/Project/ProjectView.jsx
-- Verification: PASS (attempts: 1)
-- Notes: Slim banner between tab bar and terminal, 7-day cutoff, 30s auto-dismiss, uses shared resumeSession action
-
-## Task 3.2 — Session count badge on Sessions tab
-- Start: 20:14
-- End: 20:20
-- Duration: 6 min
-- Files changed: src/components/Dashboard/DashboardView.jsx
-- Verification: PASS (attempts: 1)
-- Notes: Added useState/useEffect, loads session count on mount, renders inline (N) next to Sessions tab
-
-## Task 3.3 — Cmd+R keyboard shortcut to resume last session
-- Start: 20:20
-- End: 20:26
-- Duration: 6 min
+## Task 1.2 — Add terminal exit listener for agent cleanup
+- Start: 21:35
+- End: 21:38
+- Duration: 3 min
 - Files changed: src/components/Project/ProjectView.jsx
 - Verification: PASS (attempts: 1)
-- Notes: Added else-if branch for 'r' key in existing keyboard handler, async IPC + resumeSession action
+
+## Task 2.1 — MissionControl layout with StatsBar
+- Start: 21:38
+- End: 21:42
+- Duration: 4 min
+- Files changed: src/components/Dashboard/Agents.jsx
+- Verification: PASS (attempts: 1)
+
+## Task 2.2 — AgentCard with status indicators
+- Start: 21:42
+- End: 21:43
+- Duration: 1 min (code already implemented in 2.1)
+- Files changed: (documentation only — code in 2.1 commit)
+- Verification: PASS (attempts: 1)
+
+## Task 2.3 — Wire AgentGrid with launch/chat handlers
+- Start: 21:43
+- End: 21:44
+- Duration: 1 min (code already implemented in 2.1)
+- Files changed: (documentation only — code in 2.1 commit)
+- Verification: PASS (attempts: 1)
+
+## Task 2.4 — Rename Agents tab to Mission Control
+- Start: 21:45
+- End: 21:47
+- Duration: 2 min
+- Files changed: src/components/Dashboard/DashboardView.jsx
+- Verification: PASS (attempts: 1)
+
+## Task 3.1 — Fix Shift+Enter multiline in command input bar
+- Start: 21:47
+- End: 21:52
+- Duration: 5 min
+- Files changed: src/components/Project/TerminalPane.jsx
+- Verification: PASS (attempts: 1)
+
+## Task 3.2 — Visual polish — responsive grid and animations
+- Start: 21:52
+- End: 21:55
+- Duration: 3 min
+- Files changed: src/components/Dashboard/Agents.jsx
+- Verification: PASS (attempts: 1)

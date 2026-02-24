@@ -94,8 +94,10 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     const trimmed = input.trim();
     const text = trimmed || '';
     // Send each character individually then \r — Claude Code's TUI reads
-    // in raw mode and may not process bulk writes the same as keystrokes
-    const chars = text.split('');
+    // in raw mode and may not process bulk writes the same as keystrokes.
+    // Replace \n with \r so multiline input (via Shift+Enter) sends proper
+    // carriage returns that the PTY interprets as Enter keypresses.
+    const chars = text.replace(/\n/g, '\r').split('');
     chars.push('\r');
     let i = 0;
     const sendNext = () => {
@@ -227,10 +229,15 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
   const handleInputChange = useCallback((e) => {
     setInput(e.target.value);
     setHistoryIndex(-1);
-    // Auto-resize
-    e.target.style.height = 'auto';
-    e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
   }, []);
+
+  // Resize textarea whenever input changes (handles Shift+Enter newlines, paste, history nav)
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  }, [input]);
 
   const bg = theme?.background || '#0D1117';
   const fg = theme?.foreground || '#E6EDF3';
@@ -325,7 +332,7 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          placeholder="Type command... (Enter to send, Esc to focus terminal)"
+          placeholder="Type command... (Enter to send, Shift+Enter newline, Esc terminal)"
           spellCheck={false}
           autoComplete="off"
           autoCorrect="off"

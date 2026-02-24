@@ -23,7 +23,7 @@ const TABS = [
   { id: 'sessions', label: 'Sessions' },
   { id: 'checkpoints', label: 'Checkpoints' },
   { id: 'plans', label: 'Plans' },
-  { id: 'agents', label: 'Agents' },
+  { id: 'agents', label: 'Mission Control' },
   { id: 'builds', label: 'Builds' },
   { id: 'git', label: 'Git' },
   { id: 'claudemd', label: 'CLAUDE.md' },

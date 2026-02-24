@@ -1,21 +1,12 @@
-# Review — Task 3.1: Auto-resume suggestion banner on project open
+# Task 3.1 — Review
 
 ## Three things that could be better
-1. The banner doesn't check if Claude is already running in the terminal (the spec mentioned this). In practice, if the user has already started a session, they won't click Resume, and the banner auto-dismisses in 30s — acceptable UX tradeoff.
-2. The 7-day cutoff is hardcoded. Could be a user preference in Settings, but keeping it simple per YAGNI.
-3. Preview text truncation (60 chars) could be smarter (e.g., word boundaries), but `slice(0, 60)` is fine for a one-line banner.
+1. The useEffect for auto-resize fires on every `input` state change including clearing — minor overhead but negligible
+2. The \n→\r replacement in sendCommand is a simple global replace — could use more nuanced handling for mixed content, but for command input this is correct
+3. Could add visual feedback (line count indicator) for multiline input, but that's scope creep
 
-## One thing I'm fixing right now
-Nothing — the implementation is clean. The component handles null returns, has proper timer cleanup, and uses the shared `resumeSession` action.
+## One thing I'm fixing now
+Nothing — the three-part fix (resize via useEffect, \n→\r for PTY, updated placeholder) is complete and clean.
 
 ## Concerns
-- If `dataGetLatestSession` IPC returns null (no sessions), the banner correctly doesn't render
-- The auto-dismiss timer properly cleans up via useEffect return
-- The banner sits between TerminalTabBar and the terminal container — it shrinks to zero height when dismissed (returns null), so no layout shift issues
-
-## Time self-check
-This task completed in about 8 minutes. Self-check:
-- Did read the plan and spec before implementing
-- Did verify the build passes
-- Component handles edge cases (no session, null preview, timer cleanup)
-- Verified it integrates correctly with ProjectView layout
+- The `\n→\r` replacement means each line in multiline input is sent as a separate Enter. For shell commands this is correct (each line executes). For Claude Code's TUI (which reads one input prompt), multiline input with \r would submit each line separately — but this is actually the expected behavior since Shift+Enter in the command bar creates multiple commands to execute sequentially.

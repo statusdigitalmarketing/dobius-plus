@@ -1,27 +1,19 @@
-# Task 1.1 — Add loadAllSessions() to data-service.js
+# Task 1.1 — Add runningAgents state and actions to Zustand store
 
 ## What will change
-- `electron/data-service.js`: Add `loadAllSessions()` function and export it
+- `src/store/store.js`: Add `runningAgents: {}` state, `registerRunningAgent()` and `unregisterAgentsByTabId()` actions
+- Modify `removeTab`, `closeOtherTabs`, `closeTabsToRight` to also clean up runningAgents
 
 ## Why
-The current `loadHistory()` only returns 100 sessions from `history.jsonl`. The Session Manager needs to scan ALL projects in `~/.claude/projects/`, read individual `.jsonl` session files, extract metadata (first user message, timestamp), and return a comprehensive list grouped by project.
-
-## Implementation
-1. Scan `~/.claude/projects/` directories
-2. For each project dir, list all `.jsonl` files (each is a session)
-3. For each session file, read first 5 entries to extract: sessionId (from filename), first user message (preview), latest timestamp
-4. Use `encodePathLikeClaude()` to resolve encoded dir names back to real paths
-5. Return array of `{ sessionId, projectPath, projectName, preview, timestamp, age }`
-6. Limit to 500 most recent, cap preview at 200 chars
+The Mission Control UI needs to show which agents are currently running (their Claude process is alive in a terminal tab). This state maps agentId → tabId so we can show status badges and enable "Chat" buttons.
 
 ## Verification
-- `npm run build` exits 0
-- Function exists and is exported from data-service.js
+- `npx vite build` exits 0
+- `grep -c 'runningAgents' src/store/store.js` returns >= 6
 
 ## What could go wrong
-- Large number of session files could be slow — mitigate by reading only first 5 lines per file
-- Missing/corrupt .jsonl files — handle gracefully with try/catch
-- Encoded path resolution may not match all projects — use same pattern as listProjects()
+- Modifying existing tab removal functions could break tab closing — must preserve existing behavior exactly
+- The filter logic for runningAgents cleanup must match the correct tab IDs
 
 ## Estimated time
-12 minutes
+10 minutes

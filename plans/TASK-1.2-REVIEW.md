@@ -1,12 +1,12 @@
-# Task 1.2 Review — Add session tags to config-manager.js
+# Task 1.2 — Review
 
 ## Three things that could be better
-1. Could add a `TAG_COLORS` export so the UI can reference the same palette
-2. Could add a bulk delete for removing all tags for a project
-3. Could validate sessionId format (e.g. UUID-like) instead of just checking non-empty string
+1. Could debounce the unregister call, but PTY exits are infrequent so unnecessary
+2. The empty dependency array means this effect runs once on mount — correct for a global listener
+3. Could log when an agent is unregistered for debugging, but that would add console noise
 
-## One thing I'm fixing right now
-- Nothing — the implementation is minimal and correct. Uses existing UNSAFE_KEYS guard, validates inputs.
+## One thing I'm fixing now
+Nothing — the implementation is clean and minimal.
 
 ## Concerns
-- None — straightforward CRUD on a config sub-key
+- The onTerminalExit listener in ProjectView fires for ALL terminals (not just agent tabs). The unregisterAgentsByTabId call is a no-op for tabs that have no agent registered, so this is safe.

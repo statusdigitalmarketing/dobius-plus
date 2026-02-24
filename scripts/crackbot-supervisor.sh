@@ -1,6 +1,9 @@
 #!/bin/bash
 # scripts/crackbot-supervisor.sh — Auto-resume wrapper for autonomous builds (v5)
-# Usage: bash scripts/crackbot-supervisor.sh BUILD-session-manager.md [max-retries]
+# Usage: bash scripts/crackbot-supervisor.sh BUILD-mission-control.md [max-retries]
+#
+# Watches the Claude process. If it exits before BUILD_COMPLETE,
+# auto-resumes with --continue. Stops when BUILD_COMPLETE or max retries hit.
 
 set -uo pipefail
 

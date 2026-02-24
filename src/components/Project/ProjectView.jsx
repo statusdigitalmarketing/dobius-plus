@@ -75,7 +75,7 @@ export default function ProjectView({ projectPath }) {
       }
       setTabsInitialized(true);
     }
-  }, [projectPath, setThemeIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [projectPath, setThemeIndex]);
 
   // Save theme to config when it changes
   useEffect(() => {
@@ -90,6 +90,15 @@ export default function ProjectView({ projectPath }) {
       window.electronAPI.terminalSaveTabs(projectPath, tabs, useStore.getState().tabCounter);
     }
   }, [tabs, tabsInitialized, projectPath]);
+
+  // Clean up running agents when a terminal PTY exits
+  useEffect(() => {
+    if (!window.electronAPI?.onTerminalExit) return;
+    const removeExitListener = window.electronAPI.onTerminalExit((termId) => {
+      useStore.getState().unregisterAgentsByTabId(termId);
+    });
+    return () => removeExitListener?.();
+  }, []);
 
   // Load initial data
   useEffect(() => {
