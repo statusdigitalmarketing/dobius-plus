@@ -28,6 +28,7 @@ const STATUS_LABELS = {
 export default function BoardView() {
   const runningAgents = useStore((s) => s.runningAgents);
   const agentActivity = useStore((s) => s.agentActivity);
+  const activityTimeline = useStore((s) => s.activityTimeline);
   const setDashboardTab = useStore((s) => s.setDashboardTab);
   const setActiveView = useStore((s) => s.setActiveView);
   const setActiveTab = useStore((s) => s.setActiveTab);
@@ -92,6 +93,11 @@ export default function BoardView() {
             Go to Mission Control
           </button>
         </div>
+
+        {/* Show timeline even when no agents running */}
+        {activityTimeline.length > 0 && (
+          <ActivityTimeline entries={activityTimeline} terminalTabs={terminalTabs} />
+        )}
       </div>
     );
   }
@@ -204,6 +210,95 @@ export default function BoardView() {
             );
           })}
         </AnimatePresence>
+      </div>
+
+      {/* Activity Timeline */}
+      {activityTimeline.length > 0 && (
+        <ActivityTimeline entries={activityTimeline} terminalTabs={terminalTabs} />
+      )}
+    </div>
+  );
+}
+
+const TYPE_COLORS = {
+  read: '#58A6FF',
+  write: '#3FB950',
+  bash: '#D29922',
+  error: '#F85149',
+  other: 'var(--dim)',
+};
+
+function ActivityTimeline({ entries, terminalTabs }) {
+  const scrollRef = useRef(null);
+  const prevLengthRef = useRef(entries.length);
+
+  // Auto-scroll when new entries arrive
+  useEffect(() => {
+    if (entries.length > prevLengthRef.current && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+    prevLengthRef.current = entries.length;
+  }, [entries.length]);
+
+  // Show at most 50 entries
+  const visible = entries.length > 50 ? entries.slice(-50) : entries;
+  const hidden = entries.length > 50 ? entries.length - 50 : 0;
+
+  return (
+    <div>
+      <div className="text-xs font-medium uppercase tracking-wider mb-2" style={{ color: 'var(--dim)', fontSize: 9, letterSpacing: '0.1em' }}>
+        Activity Timeline ({entries.length})
+      </div>
+      <div
+        ref={scrollRef}
+        className="rounded-lg overflow-y-auto"
+        style={{
+          maxHeight: 300,
+          backgroundColor: 'var(--surface)',
+          border: '1px solid var(--border)',
+        }}
+      >
+        {hidden > 0 && (
+          <div className="px-3 py-1" style={{ fontSize: 9, color: 'var(--dim)', fontStyle: 'italic', borderBottom: '1px solid var(--border)' }}>
+            {hidden} older entries hidden
+          </div>
+        )}
+        {visible.map((entry, i) => {
+          const time = new Date(entry.timestamp);
+          const timeStr = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}:${String(time.getSeconds()).padStart(2, '0')}`;
+          const tab = terminalTabs.find((t) => {
+            // Find tab that matches agentId through runningAgents
+            return t.label === entry.agentName;
+          });
+          const agentLabel = tab?.label || entry.agentName || entry.agentId;
+          const color = TYPE_COLORS[entry.type] || TYPE_COLORS.other;
+
+          return (
+            <div
+              key={`${entry.timestamp}-${i}`}
+              className="flex items-center gap-2 px-3 py-1"
+              style={{
+                fontSize: 10,
+                fontFamily: "'SF Mono', monospace",
+                borderBottom: i < visible.length - 1 ? '1px solid var(--border)' : 'none',
+              }}
+            >
+              <span style={{ color: 'var(--dim)', flexShrink: 0 }}>{timeStr}</span>
+              <span style={{ color: 'var(--accent)', flexShrink: 0 }}>{agentLabel}</span>
+              <span style={{ color }}>—</span>
+              <span
+                style={{
+                  color,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {entry.action}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
