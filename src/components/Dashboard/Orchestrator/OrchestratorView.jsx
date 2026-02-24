@@ -245,8 +245,28 @@ Respond with ONLY valid JSON (no markdown, no explanation):
 
         {/* Agent selector */}
         <div className="mt-3">
-          <div className="text-xs font-medium mb-2" style={{ color: 'var(--dim)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-            Available Agents ({selectedAgents.size}/{agents.length})
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs font-medium" style={{ color: 'var(--dim)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+              Available Agents ({selectedAgents.size}/{agents.length})
+            </span>
+            <button
+              onClick={() => {
+                if (selectedAgents.size === agents.length) setSelectedAgents(new Set());
+                else setSelectedAgents(new Set(agents.map((a) => a.id)));
+              }}
+              style={{
+                padding: '1px 6px',
+                fontSize: 8,
+                fontFamily: "'SF Mono', monospace",
+                color: 'var(--dim)',
+                backgroundColor: 'transparent',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                cursor: 'pointer',
+              }}
+            >
+              {selectedAgents.size === agents.length ? 'None' : 'All'}
+            </button>
           </div>
           <div className="flex flex-wrap gap-1.5">
             {agents.map((agent) => {
@@ -280,8 +300,26 @@ Respond with ONLY valid JSON (no markdown, no explanation):
         </div>
 
         {error && (
-          <div className="mt-3 text-xs px-3 py-1.5 rounded" style={{ backgroundColor: 'rgba(248,81,73,0.1)', color: '#F85149' }}>
-            {error}
+          <div className="mt-3 text-xs px-3 py-2 rounded flex items-center justify-between" style={{ backgroundColor: 'rgba(248,81,73,0.1)', border: '1px solid rgba(248,81,73,0.2)' }}>
+            <span style={{ color: '#F85149' }}>{error}</span>
+            <button
+              onClick={handleDecompose}
+              disabled={!description.trim() || selectedAgents.size === 0}
+              style={{
+                padding: '2px 8px',
+                fontSize: 9,
+                fontFamily: "'SF Mono', monospace",
+                color: '#F85149',
+                backgroundColor: 'transparent',
+                border: '1px solid #F85149',
+                borderRadius: 4,
+                cursor: 'pointer',
+                marginLeft: 8,
+                flexShrink: 0,
+              }}
+            >
+              Retry
+            </button>
           </div>
         )}
 
