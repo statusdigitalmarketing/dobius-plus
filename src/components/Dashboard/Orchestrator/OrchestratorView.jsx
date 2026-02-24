@@ -763,6 +763,11 @@ function SubtaskCard({ subtask, index, agent, onLaunch }) {
             exit {exitCode}
           </span>
         )}
+        {subtask.startedAt && subtask.completedAt && (
+          <span className="text-xs" style={{ color: 'var(--dim)', fontSize: 9, fontFamily: "'SF Mono', monospace" }}>
+            {formatElapsed(subtask.completedAt - subtask.startedAt)}
+          </span>
+        )}
       </div>
 
       {/* Description */}
