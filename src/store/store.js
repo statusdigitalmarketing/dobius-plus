@@ -31,6 +31,9 @@ export const useStore = create((set, get) => ({
   // Activity timeline: chronological feed of agent actions (max 100)
   activityTimeline: [],
 
+  // Recently closed tabs (stack, max 10) for Cmd+Shift+T reopen
+  recentlyClosedTabs: [],
+
   // Board notification
   boardNotification: null,
 
@@ -170,6 +173,29 @@ export const useStore = create((set, get) => ({
   // Board notifications
   setBoardNotification: (notification) => set({ boardNotification: notification }),
   clearBoardNotification: () => set({ boardNotification: null }),
+
+  // Recently closed tabs
+  pushClosedTab: (closedTab) => set((s) => {
+    const stack = [closedTab, ...s.recentlyClosedTabs].slice(0, 10);
+    return { recentlyClosedTabs: stack };
+  }),
+
+  reopenClosedTab: () => {
+    const state = get();
+    if (state.recentlyClosedTabs.length === 0) return null;
+    const [closed, ...rest] = state.recentlyClosedTabs;
+    const counter = state.tabCounter + 1;
+    const id = closed.projectPath ? `term-${closed.projectPath}-${counter}` : `term-main-${counter}`;
+    const tab = { id, label: closed.label, projectPath: closed.projectPath, createdAt: Date.now() };
+    set({
+      recentlyClosedTabs: rest,
+      terminalTabs: [...state.terminalTabs, tab],
+      activeTabId: id,
+      tabCounter: counter,
+    });
+    // Return the new tab + saved scrollback so the caller can restore it
+    return { tab, scrollback: closed.scrollback };
+  },
 
   // Resume a Claude session by sending the resume command to the active terminal
   resumeSession: (sessionId) => {
