@@ -1,13 +1,16 @@
-# Task 2.2 — Create AgentCard component with status indicators
+# Task 2.2: Create Expandable Memory Panel in AgentCard
 
-## What will change
-- Already implemented in Task 2.1's file rewrite. AgentCard, StatusBadge, and Badge components are in Agents.jsx.
+## What
+- Add Memory button to AgentCard action bar
+- Expandable panel with AnimatePresence for smooth transitions
+- Three sections: Context (editable textarea), Journal (scrollable list), Experience (list with add/remove)
+- Clear Memory button with confirmation dialog
 
-## Implementation
-- AgentCard: motion.div with layout, initial/animate, name + StatusBadge top row, badges row, description (3-line clamp), action buttons
-- StatusBadge: green dot + RUNNING or gray dot + OFFLINE
-- Badge: small tag with configurable bg/color
-- Actions: Start (offline) / Chat (running) + Edit/Delete for custom agents
+## Why
+Users need to view and edit agent memory directly from the agent card.
 
 ## Verification
-- `npx vite build` exits 0 (already verified)
+- `npx vite build` exits 0
+
+## Risks
+- AnimatePresence height animation could cause layout shift — mitigated by layout animation on card

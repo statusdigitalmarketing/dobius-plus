@@ -1,12 +1,9 @@
-# Task 2.2 — Review
+# Task 2.2 Review — Memory Panel
 
-## Three things that could be better
-1. AgentCard uses -webkit-line-clamp for description truncation — standard CSS line-clamp would be more portable but has less browser support
-2. StatusBadge hardcodes #3FB950 green — could use a CSS variable for consistency, but this matches the codebase green convention
-3. Card transition on border-color uses inline CSS transition — could use framer-motion instead
+## 3 Improvements
+1. Context saves on blur (not keystroke) — reduces IPC calls
+2. Journal shows newest first via reverse() — most relevant entries visible first
+3. Clear Memory has confirm step — prevents accidental data loss
 
-## One thing I'm fixing now
-Nothing — the AgentCard implementation is clean.
-
-## Concerns
-- None. The card layout follows the existing Sessions.jsx card pattern with appropriate modifications for agent-specific content.
+## 1 Fix
+- No fixes needed — panel follows existing styling patterns exactly
