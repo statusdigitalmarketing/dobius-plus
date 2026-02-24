@@ -54,9 +54,17 @@ export default function DashboardView() {
   const buildComplete = useStore((s) => s.buildComplete);
   const runningAgents = useStore((s) => s.runningAgents);
   const boardNotification = useStore((s) => s.boardNotification);
+  const clearBoardNotification = useStore((s) => s.clearBoardNotification);
   const { stats, settings, bridgeServers, plans, skills, loading } = useStats();
   const [sessionCount, setSessionCount] = useState(0);
   const runningCount = Object.keys(runningAgents).length;
+
+  // Clear board notification badge when user switches to Board tab
+  useEffect(() => {
+    if (dashboardTab === 'board' && boardNotification) {
+      clearBoardNotification();
+    }
+  }, [dashboardTab, boardNotification, clearBoardNotification]);
 
   useEffect(() => {
     if (!window.electronAPI?.dataLoadAllSessions) return;

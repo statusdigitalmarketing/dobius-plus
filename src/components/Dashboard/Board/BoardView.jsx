@@ -33,8 +33,27 @@ export default function BoardView() {
   const setActiveView = useStore((s) => s.setActiveView);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const terminalTabs = useStore((s) => s.terminalTabs);
+  const boardNotification = useStore((s) => s.boardNotification);
+  const clearBoardNotification = useStore((s) => s.clearBoardNotification);
 
   const runningCount = Object.keys(runningAgents).length;
+
+  // Clear notification badge when Board tab is active
+  useEffect(() => {
+    if (boardNotification) {
+      // We're viewing the Board, so clear the badge
+      clearBoardNotification();
+    }
+  }, []); // Run once on mount — user has navigated to Board
+
+  // Auto-dismiss notification banner after 5s
+  const [visibleNotification, setVisibleNotification] = useState(null);
+  useEffect(() => {
+    if (!boardNotification) return;
+    setVisibleNotification(boardNotification);
+    const timer = setTimeout(() => setVisibleNotification(null), 5000);
+    return () => clearTimeout(timer);
+  }, [boardNotification]);
 
   // Tick every second for elapsed time
   const [, setTick] = useState(0);
@@ -117,6 +136,32 @@ export default function BoardView() {
           </div>
         </div>
       </div>
+
+      {/* Notification Banner */}
+      <AnimatePresence>
+        {visibleNotification && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="rounded-lg px-4 py-2 flex items-center justify-between"
+            style={{
+              backgroundColor: visibleNotification.exitCode === 0 ? 'rgba(63,185,80,0.1)' : 'rgba(248,81,73,0.1)',
+              border: `1px solid ${visibleNotification.exitCode === 0 ? 'rgba(63,185,80,0.3)' : 'rgba(248,81,73,0.3)'}`,
+            }}
+          >
+            <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: visibleNotification.exitCode === 0 ? '#3FB950' : '#F85149' }}>
+              {visibleNotification.agentName} completed (exit code {visibleNotification.exitCode ?? '?'})
+            </span>
+            <button
+              onClick={() => setVisibleNotification(null)}
+              style={{ background: 'none', border: 'none', color: 'var(--dim)', cursor: 'pointer', fontSize: 12, padding: '0 4px' }}
+            >
+              x
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Agent Cards Grid */}
       <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>

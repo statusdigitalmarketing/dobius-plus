@@ -120,6 +120,15 @@ export default function ProjectView({ projectPath }) {
           linesOutput: 0,
         };
         window.electronAPI.agentMemoryAppendJournal?.(agentId, entry);
+
+        // Board notification for agent completion
+        const agentName = tab?.label || agentId;
+        state.setBoardNotification({
+          agentId,
+          agentName,
+          exitCode: typeof exitCode === 'number' ? exitCode : null,
+          timestamp: Date.now(),
+        });
       }
     });
     return () => removeExitListener?.();
@@ -196,16 +205,38 @@ export default function ProjectView({ projectPath }) {
           setActiveView('terminal');
         }
       } else if (e.key === 'T' && e.shiftKey) {
-        // Cmd+Shift+T = toggle terminal/dashboard
+        // Cmd+Shift+T = reopen last closed tab (in terminal view) or toggle to terminal (in dashboard)
         e.preventDefault();
-        const current = useStore.getState().activeView;
-        setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
+        const state = useStore.getState();
+        if (state.activeView === 'terminal' && state.recentlyClosedTabs.length > 0) {
+          const result = state.reopenClosedTab();
+          if (result?.tab && result?.scrollback?.length > 0) {
+            // Restore scrollback as dimmed text after terminal initializes
+            setTimeout(() => {
+              if (window.electronAPI?.terminalSaveState) {
+                window.electronAPI.terminalSaveState(result.tab.id, {
+                  scrollback: result.scrollback,
+                  cols: 80,
+                  rows: 24,
+                  savedAt: Date.now(),
+                });
+              }
+            }, 100);
+          }
+        } else {
+          const current = state.activeView;
+          setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
+        }
       } else if (e.key === 'w' && !e.shiftKey) {
         // Cmd+W = close tab (don't close window if last tab)
         e.preventDefault();
         const state = useStore.getState();
         if (state.activeView === 'terminal' && state.terminalTabs.length > 1) {
           const tabId = state.activeTabId;
+          const tab = state.terminalTabs.find((t) => t.id === tabId);
+          if (tab) {
+            state.pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback: null });
+          }
           if (tabId && window.electronAPI) {
             window.electronAPI.terminalKill(tabId);
           }
