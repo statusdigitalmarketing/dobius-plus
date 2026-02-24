@@ -20,3 +20,10 @@
 - Duration: 3 min
 - Files changed: src/components/Project/ProjectView.jsx
 - Verification: PASS (attempts: 1)
+
+## Task 2.1 — MissionControl layout with StatsBar
+- Start: 21:38
+- End: 21:42
+- Duration: 4 min
+- Files changed: src/components/Dashboard/Agents.jsx
+- Verification: PASS (attempts: 1)

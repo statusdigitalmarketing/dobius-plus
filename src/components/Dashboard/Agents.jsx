@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
+import { motion } from 'framer-motion';
 
 const MODEL_LABELS = {
   'claude-opus-4-6': 'Opus',
@@ -7,15 +8,43 @@ const MODEL_LABELS = {
   'claude-haiku-4-5-20251001': 'Haiku',
 };
 
+function StatCard({ label, value, subtitle, accent }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="p-3 rounded-lg"
+      style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
+    >
+      <div className="text-xs font-medium uppercase tracking-wider mb-1" style={{ color: 'var(--dim)', fontSize: 9, letterSpacing: '0.1em' }}>
+        {label}
+      </div>
+      <div className="text-lg font-semibold" style={{ color: accent ? 'var(--accent)' : 'var(--fg)', fontFamily: "'SF Mono', monospace" }}>
+        {value}
+      </div>
+      {subtitle && (
+        <div className="text-xs mt-0.5" style={{ color: accent ? 'var(--accent)' : 'var(--dim)', fontSize: 9 }}>
+          {subtitle}
+        </div>
+      )}
+    </motion.div>
+  );
+}
+
 export default function Agents() {
   const addTab = useStore((s) => s.addTab);
   const renameTab = useStore((s) => s.renameTab);
   const setActiveView = useStore((s) => s.setActiveView);
+  const setActiveTab = useStore((s) => s.setActiveTab);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
+  const terminalTabs = useStore((s) => s.terminalTabs);
+  const runningAgents = useStore((s) => s.runningAgents);
+  const registerRunningAgent = useStore((s) => s.registerRunningAgent);
 
   const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [editingAgent, setEditingAgent] = useState(null); // null = closed, {} = new, agent obj = editing
+  const [editingAgent, setEditingAgent] = useState(null);
+  const [sessionCount, setSessionCount] = useState(0);
 
   const loadAgents = useCallback(async () => {
     if (!window.electronAPI?.agentsList) return;
@@ -28,24 +57,36 @@ export default function Agents() {
     loadAgents();
   }, [loadAgents]);
 
+  // Load session count for stats
+  useEffect(() => {
+    if (!window.electronAPI?.dataLoadAllSessions) return;
+    window.electronAPI.dataLoadAllSessions().then((sessions) => {
+      setSessionCount(sessions?.length || 0);
+    });
+  }, []);
+
   const handleLaunch = useCallback(async (agent) => {
     if (!window.electronAPI?.agentsWriteTempPrompt) return;
-    // Write system prompt to temp file
     const promptPath = await window.electronAPI.agentsWriteTempPrompt(agent.systemPrompt);
     if (!promptPath) return;
-    // Create new tab
     const tab = addTab(currentProjectPath);
     renameTab(tab.id, agent.name);
+    registerRunningAgent(agent.id, tab.id);
     setActiveView('terminal');
-    // Write claude command after a brief delay for terminal to initialize
     setTimeout(() => {
       const modelFlag = agent.model ? ` --model ${agent.model}` : '';
-      // Shell-escape the prompt path
       const safePath = promptPath.replace(/'/g, "'\\''");
       const cmd = `claude --system-prompt-file '${safePath}'${modelFlag}\r`;
       window.electronAPI.terminalWrite(tab.id, cmd);
     }, 500);
-  }, [addTab, renameTab, setActiveView, currentProjectPath]);
+  }, [addTab, renameTab, setActiveView, currentProjectPath, registerRunningAgent]);
+
+  const handleChat = useCallback((agentId) => {
+    const tabId = runningAgents[agentId];
+    if (!tabId) return;
+    setActiveTab(tabId);
+    setActiveView('terminal');
+  }, [runningAgents, setActiveTab, setActiveView]);
 
   const handleDelete = useCallback(async (agentId) => {
     if (!window.electronAPI?.agentsDelete) return;
@@ -60,25 +101,32 @@ export default function Agents() {
     setEditingAgent(null);
   }, [loadAgents]);
 
+  const runningCount = Object.keys(runningAgents).length;
+
   if (loading) {
-    return (
-      <div className="p-6">
-        <div className="grid grid-cols-2 gap-3">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="h-32 rounded animate-pulse" style={{ backgroundColor: 'var(--surface)' }} />
-          ))}
-        </div>
-      </div>
-    );
+    return <MissionControlSkeleton />;
   }
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-5 space-y-5">
+      {/* Stats Bar */}
+      <div className="grid grid-cols-4 gap-3">
+        <StatCard label="Agents" value={agents.length} subtitle={runningCount > 0 ? `${runningCount} running` : 'none running'} accent={runningCount > 0} />
+        <StatCard label="Terminals" value={terminalTabs.length} subtitle="active" />
+        <StatCard label="Sessions" value={sessionCount} subtitle="total" />
+        <StatCard label="Memory" value="Synced" subtitle="config" accent />
+      </div>
+
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wider" style={{ color: 'var(--fg)', letterSpacing: '0.1em' }}>
-          Agents
-        </h2>
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider" style={{ color: 'var(--fg)', letterSpacing: '0.1em' }}>
+            Mission Control
+          </h2>
+          <div className="text-xs mt-0.5" style={{ color: 'var(--dim)', fontSize: 10 }}>
+            All systems at a glance
+          </div>
+        </div>
         <button
           onClick={() => setEditingAgent({ name: '', description: '', systemPrompt: '', model: '' })}
           style={{
@@ -97,96 +145,23 @@ export default function Agents() {
       </div>
 
       {/* Agent grid */}
-      <div className="grid grid-cols-2 gap-3">
-        {agents.map((agent) => (
-          <div
-            key={agent.id}
-            className="p-4 rounded-lg flex flex-col"
-            style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
-          >
-            <div className="flex items-start justify-between mb-2">
-              <div>
-                <div className="text-xs font-semibold flex items-center gap-2" style={{ color: 'var(--fg)' }}>
-                  {agent.name}
-                  {agent.builtIn && (
-                    <span
-                      className="text-xs px-1.5 py-0.5 rounded"
-                      style={{ fontSize: 9, backgroundColor: 'var(--border)', color: 'var(--dim)' }}
-                    >
-                      BUILT-IN
-                    </span>
-                  )}
-                  {agent.model && (
-                    <span
-                      className="text-xs px-1.5 py-0.5 rounded"
-                      style={{ fontSize: 9, backgroundColor: 'rgba(88,166,255,0.15)', color: 'var(--accent)' }}
-                    >
-                      {MODEL_LABELS[agent.model] || agent.model}
-                    </span>
-                  )}
-                </div>
-                <div className="text-xs mt-1" style={{ color: 'var(--dim)', fontSize: 10, lineHeight: 1.4 }}>
-                  {agent.description}
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-auto pt-3 flex items-center gap-1.5">
-              <button
-                onClick={() => handleLaunch(agent)}
-                style={{
-                  padding: '4px 12px',
-                  fontSize: 10,
-                  fontFamily: "'SF Mono', monospace",
-                  color: 'var(--bg)',
-                  backgroundColor: 'var(--accent)',
-                  border: 'none',
-                  borderRadius: 4,
-                  cursor: 'pointer',
-                }}
-              >
-                Launch
-              </button>
-              {!agent.builtIn && (
-                <>
-                  <button
-                    onClick={() => setEditingAgent(agent)}
-                    style={{
-                      padding: '4px 10px',
-                      fontSize: 10,
-                      fontFamily: "'SF Mono', monospace",
-                      color: 'var(--dim)',
-                      backgroundColor: 'transparent',
-                      border: '1px solid var(--border)',
-                      borderRadius: 4,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => handleDelete(agent.id)}
-                    style={{
-                      padding: '4px 10px',
-                      fontSize: 10,
-                      fontFamily: "'SF Mono', monospace",
-                      color: '#F85149',
-                      backgroundColor: 'transparent',
-                      border: '1px solid var(--border)',
-                      borderRadius: 4,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Delete
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        ))}
+      <div className="grid grid-cols-2 gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
+        {agents.map((agent) => {
+          const isRunning = !!runningAgents[agent.id];
+          return (
+            <AgentCard
+              key={agent.id}
+              agent={agent}
+              isRunning={isRunning}
+              onLaunch={handleLaunch}
+              onChat={handleChat}
+              onEdit={setEditingAgent}
+              onDelete={handleDelete}
+            />
+          );
+        })}
       </div>
 
-      {/* Editor modal */}
       {editingAgent && (
         <AgentEditor
           agent={editingAgent}
@@ -194,6 +169,170 @@ export default function Agents() {
           onClose={() => setEditingAgent(null)}
         />
       )}
+    </div>
+  );
+}
+
+function StatusBadge({ running }) {
+  return (
+    <span className="inline-flex items-center gap-1" style={{ fontSize: 9, fontFamily: "'SF Mono', monospace" }}>
+      <span
+        className="inline-block w-1.5 h-1.5 rounded-full"
+        style={{ backgroundColor: running ? '#3FB950' : 'var(--dim)' }}
+      />
+      <span style={{ color: running ? '#3FB950' : 'var(--dim)' }}>
+        {running ? 'RUNNING' : 'OFFLINE'}
+      </span>
+    </span>
+  );
+}
+
+function Badge({ label, bg, color }) {
+  return (
+    <span
+      className="text-xs px-1.5 py-0.5 rounded"
+      style={{ fontSize: 9, backgroundColor: bg, color }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      className="p-4 rounded-lg flex flex-col"
+      style={{
+        backgroundColor: 'var(--surface)',
+        border: '1px solid var(--border)',
+        transition: 'border-color 150ms',
+      }}
+    >
+      {/* Top row: name + status */}
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="font-semibold" style={{ color: 'var(--fg)', fontSize: 13 }}>
+          {agent.name}
+        </span>
+        <StatusBadge running={isRunning} />
+      </div>
+
+      {/* Badges */}
+      <div className="flex items-center gap-1.5 mb-2">
+        <Badge
+          label={agent.builtIn ? 'BUILT-IN' : 'CUSTOM'}
+          bg={agent.builtIn ? 'var(--border)' : 'rgba(88,166,255,0.1)'}
+          color={agent.builtIn ? 'var(--dim)' : 'var(--accent)'}
+        />
+        {agent.model && (
+          <Badge
+            label={MODEL_LABELS[agent.model] || agent.model}
+            bg="rgba(88,166,255,0.15)"
+            color="var(--accent)"
+          />
+        )}
+      </div>
+
+      {/* Description */}
+      <div
+        className="text-xs flex-1"
+        style={{ color: 'var(--dim)', fontSize: 10, lineHeight: 1.4, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
+      >
+        {agent.description}
+      </div>
+
+      {/* Actions */}
+      <div
+        className="mt-3 pt-3 flex items-center gap-1.5"
+        style={{ borderTop: '1px solid var(--border)' }}
+      >
+        {isRunning ? (
+          <button
+            onClick={() => onChat(agent.id)}
+            style={{
+              padding: '4px 12px',
+              fontSize: 10,
+              fontFamily: "'SF Mono', monospace",
+              color: 'var(--accent)',
+              backgroundColor: 'transparent',
+              border: '1px solid var(--accent)',
+              borderRadius: 4,
+              cursor: 'pointer',
+            }}
+          >
+            Chat
+          </button>
+        ) : (
+          <button
+            onClick={() => onLaunch(agent)}
+            style={{
+              padding: '4px 12px',
+              fontSize: 10,
+              fontFamily: "'SF Mono', monospace",
+              color: 'var(--bg)',
+              backgroundColor: 'var(--accent)',
+              border: 'none',
+              borderRadius: 4,
+              cursor: 'pointer',
+            }}
+          >
+            Start
+          </button>
+        )}
+        {!agent.builtIn && (
+          <>
+            <button
+              onClick={() => onEdit(agent)}
+              style={{
+                padding: '4px 10px',
+                fontSize: 10,
+                fontFamily: "'SF Mono', monospace",
+                color: 'var(--dim)',
+                backgroundColor: 'transparent',
+                border: '1px solid var(--border)',
+                borderRadius: 4,
+                cursor: 'pointer',
+              }}
+            >
+              Edit
+            </button>
+            <button
+              onClick={() => onDelete(agent.id)}
+              style={{
+                padding: '4px 10px',
+                fontSize: 10,
+                fontFamily: "'SF Mono', monospace",
+                color: '#F85149',
+                backgroundColor: 'transparent',
+                border: '1px solid var(--border)',
+                borderRadius: 4,
+                cursor: 'pointer',
+              }}
+            >
+              Delete
+            </button>
+          </>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
+function MissionControlSkeleton() {
+  return (
+    <div className="p-5 space-y-5">
+      <div className="grid grid-cols-4 gap-3">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i} className="h-16 rounded-lg animate-pulse" style={{ backgroundColor: 'var(--surface)' }} />
+        ))}
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        {[1, 2, 3, 4, 5, 6].map((i) => (
+          <div key={i} className="h-36 rounded-lg animate-pulse" style={{ backgroundColor: 'var(--surface)' }} />
+        ))}
+      </div>
     </div>
   );
 }
