@@ -1,12 +1,9 @@
-# Task 1.3 Review — Wire IPC handlers + preload for sessions + tags
+# Task 1.3 Review — Preload + Auto-Capture
 
-## Three things that could be better
-1. Could add type documentation for the IPC channel signatures
-2. Could batch the loadAllSessions IPC call with a debounce since it scans many files
-3. The preload method names are getting long — could use a namespace pattern
+## 3 Improvements
+1. Auto-capture uses reverse lookup from runningAgents to find agentId — clean O(n) over small map
+2. Duration calculated from tab.createdAt — accurate for agent lifetime
+3. Journal entry created before unregister to ensure agent is still tracked
 
-## One thing I'm fixing right now
-- Nothing — straightforward IPC wiring matching existing patterns exactly
-
-## Concerns
-- None — all 5 new IPC channels follow exact same pattern as existing ones
+## 1 Fix
+- Added projectPath to useEffect dependency array since it's used in the journal entry

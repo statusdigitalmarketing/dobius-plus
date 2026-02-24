@@ -1,24 +1,16 @@
-# Task 1.3 — Wire IPC handlers + preload for sessions + tags
+# Task 1.3: Expose Memory APIs in Preload + Auto-Capture on Agent Exit
 
-## What will change
-- `electron/main.js`: Add IPC handlers in setupDataHandlers() and setupConfigHandlers()
-  - `data:loadAllSessions` → loadAllSessions()
-  - `data:getLatestSession` → getLatestSession(projectPath)
-  - `config:getSessionTags` → getSessionTags()
-  - `config:setSessionTag` → setSessionTag(sessionId, label, color)
-  - `config:removeSessionTag` → removeSessionTag(sessionId)
-- `electron/preload.js`: Add corresponding electronAPI methods
+## What
+1. Add 6 agentMemory API methods in preload.js
+2. Extend onTerminalExit listener in ProjectView to auto-capture journal entries when agent terminals exit
 
 ## Why
-The renderer needs IPC access to the new data-service and config-manager functions.
+- Preload exposes IPC bridge for renderer to access memory
+- Auto-capture provides passive run logging without user action
 
 ## Verification
-- `npm run build` exits 0
-- All existing IPC still works (dashboard loads, sessions load, config saves)
+- `npx vite build` exits 0
+- `grep -c 'agentMemory' electron/preload.js` returns 6
 
-## What could go wrong
-- Import collision if function names overlap — unlikely, names are unique
-- Forgetting to import new functions in main.js
-
-## Estimated time
-8 minutes
+## Risks
+- Journal entry won't have terminal output summary (no scrollback access from exit handler) — acceptable for v1

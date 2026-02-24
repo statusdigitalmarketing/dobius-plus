@@ -91,14 +91,34 @@ export default function ProjectView({ projectPath }) {
     }
   }, [tabs, tabsInitialized, projectPath]);
 
-  // Clean up running agents when a terminal PTY exits
+  // Clean up running agents when a terminal PTY exits + auto-capture journal
   useEffect(() => {
     if (!window.electronAPI?.onTerminalExit) return;
-    const removeExitListener = window.electronAPI.onTerminalExit((termId) => {
-      useStore.getState().unregisterAgentsByTabId(termId);
+    const removeExitListener = window.electronAPI.onTerminalExit((termId, exitCode) => {
+      const state = useStore.getState();
+      // Find which agent (if any) was running in this tab
+      const agentId = Object.keys(state.runningAgents).find(
+        (key) => state.runningAgents[key] === termId
+      );
+      if (agentId) {
+        // Auto-capture journal entry
+        const tab = state.terminalTabs.find((t) => t.id === termId);
+        const duration = tab?.createdAt ? Math.round((Date.now() - tab.createdAt) / 1000) : 0;
+        const entry = {
+          id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: tab?.createdAt || Date.now(),
+          duration,
+          projectPath: projectPath || '',
+          exitCode: typeof exitCode === 'number' ? exitCode : null,
+          summary: '',
+          linesOutput: 0,
+        };
+        window.electronAPI.agentMemoryAppendJournal?.(agentId, entry);
+      }
+      state.unregisterAgentsByTabId(termId);
     });
     return () => removeExitListener?.();
-  }, []);
+  }, [projectPath]);
 
   // Load initial data
   useEffect(() => {

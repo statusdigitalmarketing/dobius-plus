@@ -40,6 +40,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   agentsDelete: (agentId) => ipcRenderer.invoke('agents:delete', agentId),
   agentsWriteTempPrompt: (text) => ipcRenderer.invoke('agents:writeTempPrompt', text),
 
+  // Agent Memory
+  agentMemoryGet: (agentId) => ipcRenderer.invoke('agentMemory:get', agentId),
+  agentMemorySetContext: (agentId, context) => ipcRenderer.invoke('agentMemory:setContext', agentId, context),
+  agentMemoryAppendJournal: (agentId, entry) => ipcRenderer.invoke('agentMemory:appendJournal', agentId, entry),
+  agentMemoryAddExperience: (agentId, text) => ipcRenderer.invoke('agentMemory:addExperience', agentId, text),
+  agentMemoryRemoveExperience: (agentId, index) => ipcRenderer.invoke('agentMemory:removeExperience', agentId, index),
+  agentMemoryClear: (agentId) => ipcRenderer.invoke('agentMemory:clear', agentId),
+
   // File (CLAUDE.md editor)
   fileRead: (filePath) => ipcRenderer.invoke('file:read', filePath),
   fileWrite: (filePath, content) => ipcRenderer.invoke('file:write', filePath, content),
