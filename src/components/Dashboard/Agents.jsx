@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
 import { motion } from 'framer-motion';
 
+const ALLOWED_MODELS = ['claude-opus-4-6', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'];
+
 const MODEL_LABELS = {
   'claude-opus-4-6': 'Opus',
   'claude-sonnet-4-5-20250929': 'Sonnet',
@@ -75,7 +77,7 @@ export default function Agents() {
     registerRunningAgent(agent.id, tab.id);
     setActiveView('terminal');
     setTimeout(() => {
-      const modelFlag = agent.model ? ` --model ${agent.model}` : '';
+      const modelFlag = agent.model && ALLOWED_MODELS.includes(agent.model) ? ` --model ${agent.model}` : '';
       const safePath = promptPath.replace(/'/g, "'\\''");
       const cmd = `claude --system-prompt-file '${safePath}'${modelFlag}\r`;
       window.electronAPI.terminalWrite(tab.id, cmd);

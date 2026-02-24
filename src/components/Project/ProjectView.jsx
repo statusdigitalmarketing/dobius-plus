@@ -97,7 +97,7 @@ export default function ProjectView({ projectPath }) {
     const removeExitListener = window.electronAPI.onTerminalExit((termId) => {
       useStore.getState().unregisterAgentsByTabId(termId);
     });
-    return removeExitListener;
+    return () => removeExitListener?.();
   }, []);
 
   // Load initial data
