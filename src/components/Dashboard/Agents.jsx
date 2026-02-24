@@ -495,30 +495,46 @@ function MemoryPanel({ agentId, memory, onMemoryChange }) {
 
   const handleContextBlur = useCallback(async () => {
     if (!window.electronAPI?.agentMemorySetContext) return;
-    await window.electronAPI.agentMemorySetContext(agentId, context);
-    onMemoryChange?.();
+    try {
+      await window.electronAPI.agentMemorySetContext(agentId, context);
+      onMemoryChange?.();
+    } catch (err) {
+      console.error('[AgentMemory] Failed to save context:', err);
+    }
   }, [agentId, context, onMemoryChange]);
 
   const handleAddExperience = useCallback(async () => {
     const text = newExp.trim();
     if (!text || !window.electronAPI?.agentMemoryAddExperience) return;
-    await window.electronAPI.agentMemoryAddExperience(agentId, text);
-    setNewExp('');
-    onMemoryChange?.();
+    try {
+      await window.electronAPI.agentMemoryAddExperience(agentId, text);
+      setNewExp('');
+      onMemoryChange?.();
+    } catch (err) {
+      console.error('[AgentMemory] Failed to add experience:', err);
+    }
   }, [agentId, newExp, onMemoryChange]);
 
   const handleRemoveExperience = useCallback(async (index) => {
     if (!window.electronAPI?.agentMemoryRemoveExperience) return;
-    await window.electronAPI.agentMemoryRemoveExperience(agentId, index);
-    onMemoryChange?.();
+    try {
+      await window.electronAPI.agentMemoryRemoveExperience(agentId, index);
+      onMemoryChange?.();
+    } catch (err) {
+      console.error('[AgentMemory] Failed to remove experience:', err);
+    }
   }, [agentId, onMemoryChange]);
 
   const handleClear = useCallback(async () => {
     if (!window.electronAPI?.agentMemoryClear) return;
-    await window.electronAPI.agentMemoryClear(agentId);
-    setContext('');
-    setClearing(false);
-    onMemoryChange?.();
+    try {
+      await window.electronAPI.agentMemoryClear(agentId);
+      setContext('');
+      setClearing(false);
+      onMemoryChange?.();
+    } catch (err) {
+      console.error('[AgentMemory] Failed to clear memory:', err);
+    }
   }, [agentId, onMemoryChange]);
 
   const journal = memory?.journal || [];

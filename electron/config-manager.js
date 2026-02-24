@@ -40,7 +40,14 @@ export function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
       const content = fs.readFileSync(CONFIG_PATH, 'utf8');
-      configCache = { ...DEFAULT_CONFIG, ...JSON.parse(content) };
+      const loaded = JSON.parse(content);
+      // Sanitize unsafe keys from nested objects (prototype pollution guard)
+      for (const topKey of ['agentMemory', 'sessionTags', 'projects']) {
+        if (loaded[topKey] && typeof loaded[topKey] === 'object') {
+          for (const key of UNSAFE_KEYS) delete loaded[topKey][key];
+        }
+      }
+      configCache = { ...DEFAULT_CONFIG, ...loaded };
     } else {
       configCache = { ...DEFAULT_CONFIG };
     }
