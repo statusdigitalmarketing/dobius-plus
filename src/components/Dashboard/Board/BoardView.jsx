@@ -52,6 +52,7 @@ export default function BoardView() {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const terminalTabs = useStore((s) => s.terminalTabs);
   const boardNotification = useStore((s) => s.boardNotification);
+  const activeOrchestration = useStore((s) => s.activeOrchestration);
 
   const runningCount = Object.keys(runningAgents).length;
 
@@ -176,6 +177,33 @@ export default function BoardView() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Orchestration banner */}
+      {activeOrchestration && activeOrchestration.status === 'running' && (
+        <div
+          className="px-4 py-2 rounded-lg flex items-center justify-between"
+          style={{ backgroundColor: 'rgba(88,166,255,0.08)', border: '1px solid rgba(88,166,255,0.2)' }}
+        >
+          <span style={{ fontSize: 10, fontFamily: "'SF Mono', monospace", color: 'var(--accent)' }}>
+            Orchestrated: {activeOrchestration.description?.slice(0, 80)}{activeOrchestration.description?.length > 80 ? '...' : ''}
+          </span>
+          <button
+            onClick={() => setDashboardTab('orchestrator')}
+            style={{
+              padding: '2px 8px',
+              fontSize: 9,
+              fontFamily: "'SF Mono', monospace",
+              color: 'var(--accent)',
+              backgroundColor: 'transparent',
+              border: '1px solid var(--accent)',
+              borderRadius: 4,
+              cursor: 'pointer',
+            }}
+          >
+            View Orchestrator
+          </button>
+        </div>
+      )}
 
       {/* Agent Cards Grid */}
       <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>

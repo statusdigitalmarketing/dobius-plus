@@ -157,10 +157,12 @@ export default function Agents() {
     setEditingAgent(null);
   }, [loadAgents]);
 
+  const activeOrchestration = useStore((s) => s.activeOrchestration);
   const runningCount = Object.keys(runningAgents).length;
   const memoryAgentCount = Object.values(agentMemories).filter(
     (m) => m.journal?.length > 0 || m.context || m.experience?.length > 0
   ).length;
+  const orchStatus = activeOrchestration ? activeOrchestration.status : null;
 
   if (loading) {
     return <MissionControlSkeleton />;
@@ -169,11 +171,12 @@ export default function Agents() {
   return (
     <div className="p-5 space-y-5">
       {/* Stats Bar */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-5 gap-3">
         <StatCard index={0} label="Agents" value={agents.length} subtitle={runningCount > 0 ? `${runningCount} running` : 'none running'} accent={runningCount > 0} onClick={runningCount > 0 ? () => setDashboardTab('board') : undefined} />
         <StatCard index={1} label="Terminals" value={terminalTabs.length} subtitle="active" />
         <StatCard index={2} label="Sessions" value={sessionCount} subtitle="total" />
         <StatCard index={3} label="Memory" value={memoryAgentCount} subtitle={memoryAgentCount === 1 ? 'agent' : 'agents'} accent={memoryAgentCount > 0} />
+        <StatCard index={4} label="Orchestrator" value={orchStatus === 'running' ? 'Active' : 'Idle'} subtitle={orchStatus === 'running' ? `${activeOrchestration.subtasks?.length || 0} subtasks` : 'no active run'} accent={orchStatus === 'running'} onClick={() => setDashboardTab('orchestrator')} />
       </div>
 
       {/* View on Board link */}
