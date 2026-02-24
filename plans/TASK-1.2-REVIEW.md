@@ -1,9 +1,20 @@
-# Task 1.2 Review — IPC Handlers
+# Task 1.2 Review
 
-## 3 Improvements
-1. All handlers validate agentId type, length (max 200), and existence before processing
-2. Follows existing pattern: setupAgentMemoryHandlers() registered in app.whenReady() chain
-3. addExperience checks array bounds (max 20) before push — prevents unbounded growth
+## Modified
+- `src/store/store.js` — added agentActivity, activityTimeline, boardNotification state + actions
 
-## 1 Fix
-- No fixes needed — all 6 handlers follow consistent validation pattern
+## New State
+- `agentActivity: {}` — Map<agentId, activity>
+- `activityTimeline: []` — chronological feed (max 100)
+- `boardNotification: null` — completion alerts
+
+## New Actions
+- `updateAgentActivity(agentId, activity)` — merge activity data
+- `clearAgentActivity(agentId)` — remove on exit
+- `appendActivityTimeline(entry)` — FIFO buffer with 100 cap
+- `setBoardNotification(n)` / `clearBoardNotification()` — notification lifecycle
+
+## Modified
+- `unregisterAgentsByTabId` — now also cleans up agentActivity
+
+## Build: PASS
