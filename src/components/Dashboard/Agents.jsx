@@ -8,11 +8,12 @@ const MODEL_LABELS = {
   'claude-haiku-4-5-20251001': 'Haiku',
 };
 
-function StatCard({ label, value, subtitle, accent }) {
+function StatCard({ label, value, subtitle, accent, index = 0 }) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: index * 0.05, duration: 0.2 }}
       className="p-3 rounded-lg"
       style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
     >
@@ -111,10 +112,10 @@ export default function Agents() {
     <div className="p-5 space-y-5">
       {/* Stats Bar */}
       <div className="grid grid-cols-4 gap-3">
-        <StatCard label="Agents" value={agents.length} subtitle={runningCount > 0 ? `${runningCount} running` : 'none running'} accent={runningCount > 0} />
-        <StatCard label="Terminals" value={terminalTabs.length} subtitle="active" />
-        <StatCard label="Sessions" value={sessionCount} subtitle="total" />
-        <StatCard label="Memory" value="Synced" subtitle="config" accent />
+        <StatCard index={0} label="Agents" value={agents.length} subtitle={runningCount > 0 ? `${runningCount} running` : 'none running'} accent={runningCount > 0} />
+        <StatCard index={1} label="Terminals" value={terminalTabs.length} subtitle="active" />
+        <StatCard index={2} label="Sessions" value={sessionCount} subtitle="total" />
+        <StatCard index={3} label="Memory" value="Synced" subtitle="config" accent />
       </div>
 
       {/* Header */}
@@ -145,22 +146,47 @@ export default function Agents() {
       </div>
 
       {/* Agent grid */}
-      <div className="grid grid-cols-2 gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
-        {agents.map((agent) => {
-          const isRunning = !!runningAgents[agent.id];
-          return (
-            <AgentCard
-              key={agent.id}
-              agent={agent}
-              isRunning={isRunning}
-              onLaunch={handleLaunch}
-              onChat={handleChat}
-              onEdit={setEditingAgent}
-              onDelete={handleDelete}
-            />
-          );
-        })}
-      </div>
+      {agents.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-12" style={{ color: 'var(--dim)' }}>
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ opacity: 0.4, marginBottom: 12 }}>
+            <circle cx="12" cy="8" r="4" />
+            <path d="M6 21v-2a4 4 0 014-4h4a4 4 0 014 4v2" />
+          </svg>
+          <div className="text-xs mb-3" style={{ fontSize: 11 }}>No agents configured</div>
+          <button
+            onClick={() => setEditingAgent({ name: '', description: '', systemPrompt: '', model: '' })}
+            style={{
+              padding: '5px 14px',
+              fontSize: 11,
+              fontFamily: "'SF Mono', monospace",
+              color: 'var(--bg)',
+              backgroundColor: 'var(--accent)',
+              border: 'none',
+              borderRadius: 6,
+              cursor: 'pointer',
+            }}
+          >
+            Create Agent
+          </button>
+        </div>
+      ) : (
+        <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
+          {agents.map((agent) => {
+            const isRunning = !!runningAgents[agent.id];
+            return (
+              <AgentCard
+                key={agent.id}
+                agent={agent}
+                isRunning={isRunning}
+                onLaunch={handleLaunch}
+                onChat={handleChat}
+                onEdit={setEditingAgent}
+                onDelete={handleDelete}
+              />
+            );
+          })}
+        </div>
+      )}
 
       {editingAgent && (
         <AgentEditor
@@ -198,17 +224,20 @@ function Badge({ label, bg, color }) {
   );
 }
 
+const btnHover = { transition: 'opacity 150ms', };
+const btnHoverStyle = (e, opacity) => { e.currentTarget.style.opacity = opacity; };
+
 function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
   return (
     <motion.div
       layout
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
+      whileHover={{ borderColor: 'rgba(88,166,255,0.3)' }}
       className="p-4 rounded-lg flex flex-col"
       style={{
         backgroundColor: 'var(--surface)',
         border: '1px solid var(--border)',
-        transition: 'border-color 150ms',
       }}
     >
       {/* Top row: name + status */}
@@ -251,6 +280,8 @@ function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
         {isRunning ? (
           <button
             onClick={() => onChat(agent.id)}
+            onMouseEnter={(e) => btnHoverStyle(e, '0.8')}
+            onMouseLeave={(e) => btnHoverStyle(e, '1')}
             style={{
               padding: '4px 12px',
               fontSize: 10,
@@ -260,6 +291,7 @@ function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
               border: '1px solid var(--accent)',
               borderRadius: 4,
               cursor: 'pointer',
+              ...btnHover,
             }}
           >
             Chat
@@ -267,6 +299,8 @@ function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
         ) : (
           <button
             onClick={() => onLaunch(agent)}
+            onMouseEnter={(e) => btnHoverStyle(e, '0.85')}
+            onMouseLeave={(e) => btnHoverStyle(e, '1')}
             style={{
               padding: '4px 12px',
               fontSize: 10,
@@ -276,6 +310,7 @@ function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
               border: 'none',
               borderRadius: 4,
               cursor: 'pointer',
+              ...btnHover,
             }}
           >
             Start
@@ -285,6 +320,8 @@ function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
           <>
             <button
               onClick={() => onEdit(agent)}
+              onMouseEnter={(e) => btnHoverStyle(e, '0.8')}
+              onMouseLeave={(e) => btnHoverStyle(e, '1')}
               style={{
                 padding: '4px 10px',
                 fontSize: 10,
@@ -294,12 +331,15 @@ function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
                 border: '1px solid var(--border)',
                 borderRadius: 4,
                 cursor: 'pointer',
+                ...btnHover,
               }}
             >
               Edit
             </button>
             <button
               onClick={() => onDelete(agent.id)}
+              onMouseEnter={(e) => btnHoverStyle(e, '0.8')}
+              onMouseLeave={(e) => btnHoverStyle(e, '1')}
               style={{
                 padding: '4px 10px',
                 fontSize: 10,
@@ -309,6 +349,7 @@ function AgentCard({ agent, isRunning, onLaunch, onChat, onEdit, onDelete }) {
                 border: '1px solid var(--border)',
                 borderRadius: 4,
                 cursor: 'pointer',
+                ...btnHover,
               }}
             >
               Delete
