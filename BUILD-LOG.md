@@ -41,3 +41,10 @@
 - Duration: 1 min (code already implemented in 2.1)
 - Files changed: (documentation only — code in 2.1 commit)
 - Verification: PASS (attempts: 1)
+
+## Task 2.4 — Rename Agents tab to Mission Control
+- Start: 21:45
+- End: 21:47
+- Duration: 2 min
+- Files changed: src/components/Dashboard/DashboardView.jsx
+- Verification: PASS (attempts: 1)
