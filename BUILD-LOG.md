@@ -48,3 +48,10 @@
 - Duration: 2 min
 - Files changed: src/components/Dashboard/DashboardView.jsx
 - Verification: PASS (attempts: 1)
+
+## Task 3.1 — Fix Shift+Enter multiline in command input bar
+- Start: 21:47
+- End: 21:52
+- Duration: 5 min
+- Files changed: src/components/Project/TerminalPane.jsx
+- Verification: PASS (attempts: 1)
