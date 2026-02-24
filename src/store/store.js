@@ -34,6 +34,9 @@ export const useStore = create((set, get) => ({
   // Recently closed tabs (stack, max 10) for Cmd+Shift+T reopen
   recentlyClosedTabs: [],
 
+  // Active orchestration run (or null)
+  activeOrchestration: null,
+
   // Board notification
   boardNotification: null,
 
@@ -169,6 +172,17 @@ export const useStore = create((set, get) => ({
     if (timeline.length > 100) timeline.shift();
     return { activityTimeline: timeline };
   }),
+
+  // Orchestration
+  setActiveOrchestration: (run) => set({ activeOrchestration: run }),
+  updateSubtaskStatus: (subtaskId, updates) => set((s) => {
+    if (!s.activeOrchestration) return {};
+    const subtasks = s.activeOrchestration.subtasks.map((st) =>
+      st.id === subtaskId ? { ...st, ...updates } : st
+    );
+    return { activeOrchestration: { ...s.activeOrchestration, subtasks } };
+  }),
+  clearOrchestration: () => set({ activeOrchestration: null }),
 
   // Board notifications
   setBoardNotification: (notification) => set({ boardNotification: notification }),
