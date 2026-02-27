@@ -105,11 +105,12 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
         window.electronAPI.terminalWrite(id, chars[i]);
         i++;
         if (i < chars.length) {
-          setTimeout(sendNext, 5);
+          setTimeout(sendNext, 8);
         }
       }
     };
-    sendNext();
+    // Small delay before first char — gives Claude's TUI time to be ready for input
+    setTimeout(sendNext, 15);
     if (trimmed) {
       setHistory((prev) => {
         const next = prev.filter((cmd) => cmd !== trimmed);
@@ -127,12 +128,19 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
       sendCommand();
     } else if (e.key === 'ArrowUp' && !e.shiftKey) {
       if (history.length === 0) return;
+      const el = inputRef.current;
+      // Only go to history if cursor is at the very start (position 0)
+      // This lets up-arrow navigate within multi-line text first
+      if (el && el.selectionStart > 0) return;
       e.preventDefault();
       const newIndex = historyIndex === -1 ? history.length - 1 : Math.max(0, historyIndex - 1);
       setHistoryIndex(newIndex);
       setInput(history[newIndex]);
     } else if (e.key === 'ArrowDown' && !e.shiftKey) {
       if (historyIndex === -1) return;
+      const el = inputRef.current;
+      // Only go forward in history if cursor is at the very end
+      if (el && el.selectionStart < el.value.length) return;
       e.preventDefault();
       const newIndex = historyIndex + 1;
       if (newIndex >= history.length) {
@@ -172,6 +180,38 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     }
     // Text paste falls through to default behavior
   }, []);
+
+  // Window-level paste handler — catches image pastes even when xterm has focus
+  useEffect(() => {
+    const windowPasteHandler = async (e) => {
+      // Only handle for the active tab
+      if (useStore.getState().activeTabId !== id) return;
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          e.preventDefault();
+          e.stopPropagation();
+          const blob = item.getAsFile();
+          if (!blob) return;
+          const arrayBuffer = await blob.arrayBuffer();
+          const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+          const filePath = await window.electronAPI.saveClipboardImage(base64, item.type);
+          if (filePath) {
+            setInput((prev) => {
+              const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+              return prev + (needsSpace ? ' ' : '') + shellEscape(filePath);
+            });
+            setHistoryIndex(-1);
+            inputRef.current?.focus();
+          }
+          return;
+        }
+      }
+    };
+    document.addEventListener('paste', windowPasteHandler, true);
+    return () => document.removeEventListener('paste', windowPasteHandler, true);
+  }, [id]);
 
   // Listen for file drops relayed by App.jsx via custom event
   useEffect(() => {

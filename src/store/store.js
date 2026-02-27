@@ -213,7 +213,7 @@ export const useStore = create((set, get) => ({
 
   // Resume a Claude session by sending the resume command to the active terminal
   resumeSession: (sessionId) => {
-    if (!sessionId || sessionId.length > 100 || !/^[\w-]+$/.test(sessionId)) return;
+    if (!sessionId || sessionId.length > 100 || !/^[a-zA-Z0-9][\w-]*$/.test(sessionId)) return;
     set({ activeView: 'terminal' });
     const termId = get().activeTabId;
     if (!window.electronAPI || !termId) return;
@@ -226,10 +226,10 @@ export const useStore = create((set, get) => ({
         window.electronAPI.terminalWrite(termId, chars[i]);
         i++;
         if (i < chars.length) {
-          setTimeout(sendNext, 5);
+          setTimeout(sendNext, 8);
         }
       }
     };
-    sendNext();
+    setTimeout(sendNext, 15);
   },
 }));
