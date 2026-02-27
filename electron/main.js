@@ -20,7 +20,7 @@ import { watchFiles, stopWatching } from './watcher-service.js';
 import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-monitor-watcher.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
-  getPinnedSessions, setPinnedSessions, getSettings, updateSettings, flushConfig,
+  getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig,
   getSessionTags, setSessionTag, removeSessionTag,
   getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
   getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
@@ -434,6 +434,8 @@ function setupConfigHandlers() {
   ipcMain.handle('config:setProject', (_event, projectPath, settings) => setProjectConfig(projectPath, settings));
   ipcMain.handle('config:getPinned', () => getPinnedSessions());
   ipcMain.handle('config:setPinned', (_event, sessionIds) => setPinnedSessions(sessionIds));
+  ipcMain.handle('config:getPinnedProjects', () => getPinnedProjects());
+  ipcMain.handle('config:setPinnedProjects', (_event, paths) => setPinnedProjects(paths));
   ipcMain.handle('config:getSettings', () => getSettings());
   ipcMain.handle('config:updateSettings', (_event, updates) => updateSettings(updates));
   ipcMain.handle('config:getSessionTags', () => getSessionTags());
@@ -686,7 +688,7 @@ app.on('before-quit', (e) => {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('terminal:requestSave');
       });
-      setTimeout(() => app.quit(), 300);
+      setTimeout(() => app.quit(), 500);
     });
     return;
   }

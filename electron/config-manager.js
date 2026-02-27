@@ -42,7 +42,7 @@ export function loadConfig() {
       const content = fs.readFileSync(CONFIG_PATH, 'utf8');
       const loaded = JSON.parse(content);
       // Sanitize unsafe keys from nested objects (prototype pollution guard)
-      for (const topKey of ['agentMemory', 'sessionTags', 'projects']) {
+      for (const topKey of ['agentMemory', 'sessionTags', 'projects', 'orchestrationRuns']) {
         if (loaded[topKey] && typeof loaded[topKey] === 'object') {
           for (const key of UNSAFE_KEYS) delete loaded[topKey][key];
         }
@@ -139,6 +139,23 @@ export function getPinnedSessions() {
 export function setPinnedSessions(sessionIds) {
   const config = loadConfig();
   config.pinnedSessions = sessionIds;
+  saveConfig(config);
+}
+
+/**
+ * Get pinned project paths.
+ */
+export function getPinnedProjects() {
+  const config = loadConfig();
+  return config.pinnedProjects || [];
+}
+
+/**
+ * Set pinned project paths.
+ */
+export function setPinnedProjects(projectPaths) {
+  const config = loadConfig();
+  config.pinnedProjects = Array.isArray(projectPaths) ? projectPaths : [];
   saveConfig(config);
 }
 

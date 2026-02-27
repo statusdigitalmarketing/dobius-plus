@@ -91,6 +91,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   configSetProject: (projectPath, settings) => ipcRenderer.invoke('config:setProject', projectPath, settings),
   configGetPinned: () => ipcRenderer.invoke('config:getPinned'),
   configSetPinned: (sessionIds) => ipcRenderer.invoke('config:setPinned', sessionIds),
+  configGetPinnedProjects: () => ipcRenderer.invoke('config:getPinnedProjects'),
+  configSetPinnedProjects: (paths) => ipcRenderer.invoke('config:setPinnedProjects', paths),
   configGetSettings: () => ipcRenderer.invoke('config:getSettings'),
   configUpdateSettings: (updates) => ipcRenderer.invoke('config:updateSettings', updates),
   configGetSessionTags: () => ipcRenderer.invoke('config:getSessionTags'),
