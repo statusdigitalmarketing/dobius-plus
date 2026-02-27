@@ -61,6 +61,7 @@ export function createTerminal(id, cwd, webContents) {
       PATH: fullPath,
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
+      DOBIUS_CWD: safeCwd,
       ...extraEnv,
     },
   });
@@ -128,17 +129,17 @@ export function killTerminal(id) {
  */
 export async function gracefulCloseAll() {
   if (terminals.size === 0) return;
-  // First Ctrl+C
-  for (const [, entry] of terminals) {
-    try { entry.pty.write('\x03'); } catch { void 0; }
-  }
-  await new Promise((r) => setTimeout(r, 300));
-  // Second Ctrl+C
+  // First Ctrl+C — interrupts any running command
   for (const [, entry] of terminals) {
     try { entry.pty.write('\x03'); } catch { void 0; }
   }
   await new Promise((r) => setTimeout(r, 500));
-  killAll();
+  // Second Ctrl+C — triggers Claude to print resume session ID
+  for (const [, entry] of terminals) {
+    try { entry.pty.write('\x03'); } catch { void 0; }
+  }
+  // Give Claude time to print the resume ID before terminals get killed
+  await new Promise((r) => setTimeout(r, 1500));
 }
 
 /**
