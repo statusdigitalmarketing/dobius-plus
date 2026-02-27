@@ -104,8 +104,6 @@ export default function ProjectView({ projectPath }) {
       const agentId = Object.keys(state.runningAgents).find(
         (key) => state.runningAgents[key] === termId
       );
-      // Unregister first to prevent duplicate processing if event fires twice
-      state.unregisterAgentsByTabId(termId);
       if (agentId) {
         // Auto-capture journal entry
         const tab = state.terminalTabs.find((t) => t.id === termId);
@@ -186,6 +184,9 @@ export default function ProjectView({ projectPath }) {
           }
         }
       }
+
+      // Unregister AFTER all state-dependent operations complete
+      state.unregisterAgentsByTabId(termId);
     });
     return () => removeExitListener?.();
   }, [projectPath]);
