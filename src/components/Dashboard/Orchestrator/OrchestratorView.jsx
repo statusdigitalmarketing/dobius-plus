@@ -106,11 +106,11 @@ Respond with ONLY valid JSON (no markdown, no explanation):
 
       // Write system prompt to temp file
       const promptPath = await window.electronAPI.agentsWriteTempPrompt(systemPrompt);
-      if (!promptPath) throw new Error('Failed to write decomposition prompt');
+      if (!promptPath || !promptPath.startsWith('/') || /[\n\r]/.test(promptPath)) throw new Error('Failed to write decomposition prompt');
 
       // Write user description to temp file (avoids shell injection via -p flag)
       const descPath = await window.electronAPI.agentsWriteTempPrompt(description.trim());
-      if (!descPath) throw new Error('Failed to write task description');
+      if (!descPath || !descPath.startsWith('/') || /[\n\r]/.test(descPath)) throw new Error('Failed to write task description');
 
       // Create a temp tab for decomposition
       const tab = addTab(currentProjectPath);
@@ -123,7 +123,10 @@ Respond with ONLY valid JSON (no markdown, no explanation):
 
       try {
         removeDataListener = window.electronAPI.onTerminalData((id, data) => {
-          if (id === tabId) output += data;
+          if (id === tabId && output.length < 100000) {
+            output += data;
+            if (output.length > 100000) output = output.slice(-100000);
+          }
         });
 
         // Launch non-interactive claude — pipe description from file to avoid shell injection
@@ -522,7 +525,7 @@ function OrchestrationProgress() {
     prompt += `\n\n---\n## Orchestrated Task\nYou are working as part of an orchestrated team. Your specific assignment:\n\n**${subtask.title}**\n${subtask.description}\n\nOverall goal: ${description}\n`;
 
     const promptPath = await window.electronAPI.agentsWriteTempPrompt(prompt);
-    if (!promptPath) return;
+    if (!promptPath || !promptPath.startsWith('/') || /[\n\r]/.test(promptPath)) return;
 
     const tab = addTab(currentProjectPath);
     renameTab(tab.id, `[O] ${subtask.title.slice(0, 30)}`);

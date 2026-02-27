@@ -133,7 +133,8 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
       restorePromise = window.electronAPI.terminalLoadState(id).then((state) => {
         if (state?.scrollback?.length > 0 && termRef.current) {
           for (const line of state.scrollback) {
-            termRef.current.write(`\x1b[2m${line}\x1b[0m\r\n`);
+            const safeLine = String(line).replace(/\x1b/g, '');
+            termRef.current.write('\x1b[2m' + safeLine + '\x1b[0m\r\n');
           }
           termRef.current.write('\x1b[2m\x1b[38;5;240m── previous session ──\x1b[0m\r\n\r\n');
         }

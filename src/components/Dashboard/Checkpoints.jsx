@@ -65,7 +65,8 @@ export default function Checkpoints() {
     // Write checkpoint scrollback as dimmed text to active terminal
     if (cp.scrollback?.length > 0) {
       for (const line of cp.scrollback) {
-        window.electronAPI.terminalWrite(activeTabId, `\x1b[2m${line}\x1b[0m\r\n`);
+        const safeLine = String(line).replace(/\x1b/g, '');
+        window.electronAPI.terminalWrite(activeTabId, '\x1b[2m' + safeLine + '\x1b[0m\r\n');
       }
       window.electronAPI.terminalWrite(activeTabId, '\x1b[2m\x1b[38;5;240m── restored checkpoint ──\x1b[0m\r\n\r\n');
     }

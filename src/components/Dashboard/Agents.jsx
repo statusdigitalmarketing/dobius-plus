@@ -124,7 +124,7 @@ export default function Agents() {
       }
     }
     const promptPath = await window.electronAPI.agentsWriteTempPrompt(prompt);
-    if (!promptPath) return;
+    if (!promptPath || !promptPath.startsWith('/') || /[\n\r]/.test(promptPath)) return;
     const tab = addTab(currentProjectPath);
     renameTab(tab.id, agent.name);
     registerRunningAgent(agent.id, tab.id);
