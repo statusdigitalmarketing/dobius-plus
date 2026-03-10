@@ -422,6 +422,100 @@ function encodePathLikeClaude(p) {
 }
 
 /**
+ * Try to reconstruct a real filesystem path from a Claude-encoded dir name.
+ * Checks common path patterns and verifies they exist on disk.
+ * Returns the real path if found, or null.
+ */
+function tryReconstructPath(encodedName) {
+  // Known prefix: -Users-<user>-...
+  // Try to rebuild by replacing dashes back, checking if result exists
+  const home = os.homedir();
+  const homeEncoded = encodePathLikeClaude(home); // e.g. -Users-statusmacbook2024
+
+  if (!encodedName.startsWith(homeEncoded)) return null;
+
+  // Strip home prefix, try to reconstruct the rest
+  const rest = encodedName.slice(homeEncoded.length); // e.g. -Projects--Code--dobius-plus
+  if (!rest) return home;
+
+  // Try the path as-is by checking if it exists under common parent dirs
+  // The encoded rest starts with - (from the / separator)
+  const segments = rest.split('-').filter(Boolean);
+  if (segments.length === 0) return null;
+
+  // Try progressively joining segments to find existing paths
+  // This handles "Projects--Code--thing" → "Projects (Code)/thing"
+  let current = home;
+  let i = 0;
+  while (i < segments.length) {
+    const seg = segments[i];
+    const candidate = path.join(current, seg);
+    try {
+      const stat = fsSync.statSync(candidate);
+      if (stat.isDirectory()) {
+        current = candidate;
+        i++;
+        continue;
+      }
+    } catch { /* doesn't exist as-is */ }
+
+    // Try joining with next segment(s) using common separators: space, (, ), -, .
+    let found = false;
+    for (let j = i + 1; j <= Math.min(i + 4, segments.length); j++) {
+      const joined = segments.slice(i, j).join('-');
+      // Also try with spaces and parens: "Projects--Code" → "Projects (Code)"
+      const variants = [
+        joined,
+        segments.slice(i, j).join(' '),
+      ];
+      // Special: try to reconstruct "(X)" patterns from empty-segment gaps
+      // "Projects--Code-" in segments becomes ["Projects", "", "Code", ""]
+      // which after filter(Boolean) is ["Projects", "Code"]
+      if (j === i + 2) {
+        variants.push(segments[i] + ' (' + segments[i + 1] + ')');
+        variants.push(segments[i] + '(' + segments[i + 1] + ')');
+      }
+      for (const v of variants) {
+        const c = path.join(current, v);
+        try {
+          if (fsSync.statSync(c).isDirectory()) {
+            current = c;
+            i = j;
+            found = true;
+            break;
+          }
+        } catch { /* nope */ }
+      }
+      if (found) break;
+    }
+    if (!found) return null; // Can't reconstruct further
+  }
+  return current;
+}
+
+/**
+ * Extract a readable display name from a Claude-encoded dir name.
+ * Uses the last meaningful path segment rather than just the last dash-segment.
+ */
+function extractDisplayName(encodedName) {
+  // Remove common prefixes to get the project-specific part
+  const home = os.homedir();
+  const homeEncoded = encodePathLikeClaude(home);
+  let rest = encodedName;
+  if (rest.startsWith(homeEncoded)) {
+    rest = rest.slice(homeEncoded.length);
+  }
+  // Remove common dir prefixes like -Projects--Code-
+  rest = rest.replace(/^-Projects--Code--?/, '').replace(/^-/, '');
+  // Take the full remaining string, replace dashes with spaces for readability
+  // But keep consecutive dashes as path separators
+  if (!rest) return encodedName;
+  // Split on double-dash (path separator) and take the last segment
+  const parts = rest.split(/--+/).filter(Boolean);
+  return parts.length > 0 ? parts.join('/') : rest;
+}
+
+/**
  * List all projects — merges filesystem scan with Claude session data.
  * Filesystem paths are canonical; Claude session dirs are matched by encoded name.
  */
@@ -499,23 +593,78 @@ export async function listProjects() {
           // Merge session data into existing filesystem entry
           const existing = projectMap.get(realPath);
           existing.encodedPath = d.name;
-          existing.sessionCount = sessionCount;
+          existing.sessionCount += sessionCount;
           if (latestTimestamp > existing.latestTimestamp) {
             existing.latestTimestamp = latestTimestamp;
             existing.age = timeAgo(latestTimestamp);
           }
         } else {
-          // Claude session project not in filesystem scan — use encoded name as-is
-          const fallbackPath = realPath || ('/' + d.name.replace(/-/g, '/'));
-          const displayName = d.name.split('-').filter(Boolean).pop() || d.name;
-          projectMap.set(d.name, {
-            encodedPath: d.name,
-            decodedPath: fallbackPath,
-            displayName,
-            sessionCount,
-            latestTimestamp,
-            age: latestTimestamp ? timeAgo(latestTimestamp) : 'unknown',
-          });
+          // Not in filesystem scan — try to reconstruct real path
+          const reconstructed = tryReconstructPath(d.name);
+
+          if (reconstructed && projectMap.has(reconstructed)) {
+            // Exact match — merge sessions into existing entry
+            const existing = projectMap.get(reconstructed);
+            existing.encodedPath = existing.encodedPath || d.name;
+            existing.sessionCount += sessionCount;
+            if (latestTimestamp > existing.latestTimestamp) {
+              existing.latestTimestamp = latestTimestamp;
+              existing.age = timeAgo(latestTimestamp);
+            }
+          } else if (reconstructed) {
+            // Check if this is a subdirectory of an existing project — merge into parent
+            let mergedIntoParent = false;
+            for (const [key, existing] of projectMap) {
+              if (reconstructed.startsWith(key + '/')) {
+                existing.sessionCount += sessionCount;
+                if (latestTimestamp > existing.latestTimestamp) {
+                  existing.latestTimestamp = latestTimestamp;
+                  existing.age = timeAgo(latestTimestamp);
+                }
+                mergedIntoParent = true;
+                break;
+              }
+            }
+            if (!mergedIntoParent) {
+              // Valid path on disk, not a subdir of known project — add as its own entry
+              const displayName = path.basename(reconstructed);
+              projectMap.set(reconstructed, {
+                encodedPath: d.name,
+                decodedPath: reconstructed,
+                displayName,
+                sessionCount,
+                latestTimestamp,
+                age: latestTimestamp ? timeAgo(latestTimestamp) : 'unknown',
+              });
+            }
+          } else {
+            // Can't reconstruct — use readable display name, skip garbage paths
+            const displayName = extractDisplayName(d.name);
+            // Check if this is a subdirectory of a known project (by prefix match)
+            let merged = false;
+            for (const [key, existing] of projectMap) {
+              const existingEncoded = existing.encodedPath || encodePathLikeClaude(key);
+              if (d.name.startsWith(existingEncoded + '-') && d.name !== existingEncoded) {
+                existing.sessionCount += sessionCount;
+                if (latestTimestamp > existing.latestTimestamp) {
+                  existing.latestTimestamp = latestTimestamp;
+                  existing.age = timeAgo(latestTimestamp);
+                }
+                merged = true;
+                break;
+              }
+            }
+            if (!merged) {
+              projectMap.set(d.name, {
+                encodedPath: d.name,
+                decodedPath: null, // no valid path — can't open terminal here
+                displayName,
+                sessionCount,
+                latestTimestamp,
+                age: latestTimestamp ? timeAgo(latestTimestamp) : 'unknown',
+              });
+            }
+          }
         }
       }));
     }

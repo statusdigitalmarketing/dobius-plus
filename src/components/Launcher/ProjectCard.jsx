@@ -2,6 +2,7 @@ import { motion } from 'framer-motion';
 import { timeAgo } from '../../lib/time-ago';
 
 export default function ProjectCard({ project, isOpen, isPinned, onClick, onTogglePin, index = 0 }) {
+  const hasPath = Boolean(project.decodedPath);
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -12,10 +13,11 @@ export default function ProjectCard({ project, isOpen, isPinned, onClick, onTogg
         backgroundColor: 'var(--surface)',
         border: '1px solid var(--border)',
         borderLeft: isOpen ? '3px solid var(--accent)' : isPinned ? '3px solid var(--warning)' : '3px solid transparent',
-        cursor: 'pointer',
+        cursor: hasPath ? 'pointer' : 'default',
+        opacity: hasPath ? 1 : 0.5,
       }}
-      whileHover={{ scale: 1.02 }}
-      onDoubleClick={onClick}
+      whileHover={hasPath ? { scale: 1.02 } : {}}
+      onDoubleClick={hasPath ? onClick : undefined}
     >
       {/* Pin button */}
       <button
@@ -43,9 +45,9 @@ export default function ProjectCard({ project, isOpen, isPinned, onClick, onTogg
           <div
             className="text-xs mt-1 truncate"
             style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}
-            title={project.decodedPath}
+            title={project.decodedPath || 'Session data only — folder not found'}
           >
-            {project.decodedPath}
+            {project.decodedPath || 'sessions only'}
           </div>
         </div>
         {isOpen && (

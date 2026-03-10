@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll } from './terminal-manager.js';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -97,6 +97,10 @@ function setupTerminalHandlers() {
 
   ipcMain.on('terminal:resize', (_event, id, cols, rows) => {
     resizeTerminal(id, cols, rows);
+  });
+
+  ipcMain.handle('terminal:getProcess', (_event, id) => {
+    return getTerminalProcess(id);
   });
 
   ipcMain.on('terminal:kill', (_event, id) => {

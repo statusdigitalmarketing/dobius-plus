@@ -108,6 +108,36 @@ export function resizeTerminal(id, cols, rows) {
 }
 
 /**
+ * Check if a terminal has a busy child process (not just the shell).
+ * Returns the process name if busy, or null if idle.
+ */
+export function getTerminalProcess(id) {
+  const entry = terminals.get(id);
+  if (!entry) return null;
+  try {
+    const pid = entry.pty.pid;
+    if (typeof pid !== 'number' || pid <= 0) return null;
+    const { execFileSync } = require('child_process');
+    const result = execFileSync('pgrep', ['-lP', String(pid)], {
+      timeout: 1000,
+      encoding: 'utf8',
+    }).trim();
+    if (!result) return null;
+    // pgrep -lP returns lines like "12345 claude" — extract process names
+    const lines = result.split('\n').filter(Boolean);
+    if (lines.length === 0) return null;
+    // Return the first non-shell child process name
+    for (const line of lines) {
+      const name = line.trim().split(/\s+/).slice(1).join(' ');
+      if (name && name !== 'zsh' && name !== 'bash' && name !== 'sh') return name;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Kill a specific terminal.
  */
 export function killTerminal(id) {

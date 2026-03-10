@@ -246,6 +246,39 @@ export default function ProjectView({ projectPath }) {
     }
   }, [setActiveView]);
 
+  // Close active tab with process confirmation
+  const closeActiveTab = useCallback(async () => {
+    const state = useStore.getState();
+    if (state.activeView !== 'terminal' || state.terminalTabs.length <= 1) return;
+
+    const tabId = state.activeTabId;
+    if (!tabId) return;
+
+    // Check for active child process (claude, node, etc.)
+    if (window.electronAPI?.terminalGetProcess) {
+      try {
+        const processName = await window.electronAPI.terminalGetProcess(tabId);
+        if (processName) {
+          const confirmed = window.confirm(
+            `"${processName}" is still running in this tab.\n\nClose anyway?`
+          );
+          if (!confirmed) return;
+        }
+      } catch {
+        // If check fails, proceed with close
+      }
+    }
+
+    const tab = state.terminalTabs.find((t) => t.id === tabId);
+    if (tab) {
+      state.pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback: null });
+    }
+    if (window.electronAPI) {
+      window.electronAPI.terminalKill(tabId);
+    }
+    removeTab(tabId);
+  }, [removeTab]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -285,20 +318,9 @@ export default function ProjectView({ projectPath }) {
           setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
         }
       } else if (e.key === 'w' && !e.shiftKey) {
-        // Cmd+W = close tab (don't close window if last tab)
+        // Cmd+W = close tab (with process confirmation)
         e.preventDefault();
-        const state = useStore.getState();
-        if (state.activeView === 'terminal' && state.terminalTabs.length > 1) {
-          const tabId = state.activeTabId;
-          const tab = state.terminalTabs.find((t) => t.id === tabId);
-          if (tab) {
-            state.pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback: null });
-          }
-          if (tabId && window.electronAPI) {
-            window.electronAPI.terminalKill(tabId);
-          }
-          removeTab(state.activeTabId);
-        }
+        closeActiveTab();
       } else if (e.key === 'b') {
         e.preventDefault();
         toggleSidebar();
@@ -347,7 +369,7 @@ export default function ProjectView({ projectPath }) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel]);
+  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab]);
 
   // Menu bar events
   useEffect(() => {
@@ -363,19 +385,10 @@ export default function ProjectView({ projectPath }) {
         addTab(projectPath);
         setActiveView('terminal');
       }),
-      window.electronAPI.onMenuCloseTab?.(() => {
-        const state = useStore.getState();
-        if (state.terminalTabs.length > 1) {
-          const tabId = state.activeTabId;
-          if (tabId && window.electronAPI) {
-            window.electronAPI.terminalKill(tabId);
-          }
-          removeTab(state.activeTabId);
-        }
-      }),
+      window.electronAPI.onMenuCloseTab?.(() => closeActiveTab()),
     ];
     return () => cleanups.forEach((fn) => fn?.());
-  }, [setActiveView, toggleSidebar, toggleGitPanel, addTab, removeTab, projectPath]);
+  }, [setActiveView, toggleSidebar, toggleGitPanel, addTab, removeTab, projectPath, closeActiveTab]);
 
   return (
     <div className="h-full w-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>

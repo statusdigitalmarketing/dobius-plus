@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   terminalWrite: (id, data) => ipcRenderer.send('terminal:write', id, data),
   terminalResize: (id, cols, rows) => ipcRenderer.send('terminal:resize', id, cols, rows),
   terminalKill: (id) => ipcRenderer.send('terminal:kill', id),
+  terminalGetProcess: (id) => ipcRenderer.invoke('terminal:getProcess', id),
   onTerminalData: (callback) => {
     const handler = (_event, id, data) => callback(id, data);
     ipcRenderer.on('terminal:data', handler);

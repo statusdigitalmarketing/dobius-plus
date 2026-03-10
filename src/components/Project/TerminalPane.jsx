@@ -8,6 +8,17 @@ function shellEscape(filePath) {
   return "'" + filePath.replace(/'/g, "'\\''") + "'";
 }
 
+/** Convert ArrayBuffer to base64 without blowing the call stack on large images. */
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 8192;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
 /**
  * TerminalPane — renders an xterm.js terminal with an editable command input bar.
  * @param {{ id: string, cwd: string, theme?: object, className?: string }} props
@@ -166,7 +177,7 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
         const blob = item.getAsFile();
         if (!blob) return;
         const arrayBuffer = await blob.arrayBuffer();
-        const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+        const base64 = arrayBufferToBase64(arrayBuffer);
         const filePath = await window.electronAPI.saveClipboardImage(base64, item.type);
         if (filePath) {
           setInput((prev) => {
@@ -195,7 +206,7 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
           const blob = item.getAsFile();
           if (!blob) return;
           const arrayBuffer = await blob.arrayBuffer();
-          const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+          const base64 = arrayBufferToBase64(arrayBuffer);
           const filePath = await window.electronAPI.saveClipboardImage(base64, item.type);
           if (filePath) {
             setInput((prev) => {

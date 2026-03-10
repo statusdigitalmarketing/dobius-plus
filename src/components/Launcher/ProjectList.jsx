@@ -63,7 +63,7 @@ export default function ProjectList() {
   }, []);
 
   const handleOpenProject = (project) => {
-    if (!window.electronAPI) return;
+    if (!window.electronAPI || !project.decodedPath) return;
     window.electronAPI.windowOpenProject(project.decodedPath);
     window.electronAPI.windowGetOpen().then(setOpenProjects);
   };
@@ -77,15 +77,15 @@ export default function ProjectList() {
       list = list.filter(
         (p) =>
           p.displayName.toLowerCase().includes(q) ||
-          p.decodedPath.toLowerCase().includes(q)
+          (p.decodedPath && p.decodedPath.toLowerCase().includes(q))
       );
     }
 
     // Category filter
     if (filter === 'pinned') {
-      list = list.filter((p) => pinnedPaths.includes(p.decodedPath));
+      list = list.filter((p) => p.decodedPath && pinnedPaths.includes(p.decodedPath));
     } else if (filter === 'open') {
-      list = list.filter((p) => openProjects.includes(p.decodedPath));
+      list = list.filter((p) => p.decodedPath && openProjects.includes(p.decodedPath));
     } else if (filter === 'recent') {
       const cutoff = Date.now() - SEVEN_DAYS_MS;
       list = list.filter((p) => p.latestTimestamp && p.latestTimestamp > cutoff);
@@ -94,7 +94,7 @@ export default function ProjectList() {
     const pin = [];
     const unpin = [];
     for (const p of list) {
-      if (pinnedPaths.includes(p.decodedPath)) {
+      if (p.decodedPath && pinnedPaths.includes(p.decodedPath)) {
         pin.push(p);
       } else {
         unpin.push(p);
@@ -105,7 +105,7 @@ export default function ProjectList() {
 
   const filterCounts = useMemo(() => ({
     all: projects.length,
-    pinned: projects.filter((p) => pinnedPaths.includes(p.decodedPath)).length,
+    pinned: projects.filter((p) => p.decodedPath && pinnedPaths.includes(p.decodedPath)).length,
     open: openProjects.length,
     recent: projects.filter((p) => p.latestTimestamp && p.latestTimestamp > Date.now() - SEVEN_DAYS_MS).length,
   }), [projects, pinnedPaths, openProjects]);
