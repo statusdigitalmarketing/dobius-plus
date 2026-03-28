@@ -1,24 +1,38 @@
 # Orchestrator Build — Handoff
 
-## Status: IN PROGRESS
-## Current Task: 0.1 — Pre-flight + Branch
-## Branch: build/orchestrator
+## Status: BUILD COMPLETE
+## Branch: build/orchestrator (merged to main)
 
-## What's Done
-- Created branch `build/orchestrator` from main (d575ebc)
-- Build infrastructure files created
-- Pre-flight: build passes, branch created
+## What Was Built
+- **Task Orchestrator**: 14th dashboard tab for delegating work to agent teams
+- **Decomposition Engine**: Uses Haiku to break tasks into 2-5 subtasks
+- **Parallel Agent Launch**: Launch All button with 1s stagger, or per-subtask Launch
+- **Progress Monitoring**: Real-time status via terminal exit handler + agentActivity
+- **Synthesis Summary**: Status banner, per-subtask output, duration, history
+- **Cross-linking**: MC stats card, Board orchestration banner, View on Board/Terminal links
+- **Self-review**: 8 findings fixed (shell injection, race conditions, listener leaks, dead code)
 
-## What's Next
-- Task 1.1: Orchestration run model, config storage, and IPC
-- Task 1.2: Add orchestration state to Zustand store
+## Stats
+- 10 commits, 0 verification failures
+- 14 files changed, +1,263/-45 lines
+- Bundle: ~1,330KB (minimal growth, no new deps)
+- Dashboard tabs: 14
 
 ## Key Files
-- `electron/config-manager.js` — orchestration run storage (CRUD)
+- `electron/config-manager.js` — orchestration CRUD (max 20 runs, FIFO)
 - `electron/main.js` — orchestration IPC handlers
 - `electron/preload.js` — orchestration API bridge
-- `src/store/store.js` — activeOrchestration state
-- `src/components/Dashboard/Orchestrator/OrchestratorView.jsx` — main UI
-- `src/components/Dashboard/DashboardView.jsx` — tab registration
+- `src/store/store.js` — activeOrchestration + updateSubtaskStatus
+- `src/components/Dashboard/Orchestrator/OrchestratorView.jsx` — full UI
+- `src/components/Project/ProjectView.jsx` — orchestration completion tracking
+- `src/components/Dashboard/DashboardView.jsx` — tab registration (#14)
+- `src/components/Dashboard/Agents.jsx` — Orchestrator stat card
+- `src/components/Dashboard/Board/BoardView.jsx` — orchestration banner
+
+## Key Security
+- Shell injection fix: user description piped via temp file, never shell-evaluated
+- ALLOWED_MODELS allowlist enforced on all agent launches
+- IPC input validation: length checks, type checks, prototype pollution guards
+- Listener cleanup: try-finally pattern prevents leaks
 
 ## Build Passes: YES
