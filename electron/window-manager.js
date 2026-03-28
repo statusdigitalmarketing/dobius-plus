@@ -28,6 +28,9 @@ export function openProjectWindow(projectPath) {
   const projectConfig = getProjectConfig(projectPath) || {};
   const bounds = projectConfig.windowBounds || {};
 
+  // Extract folder name for window title (shown in Mission Control / App Exposé)
+  const folderName = path.basename(projectPath);
+
   const win = new BrowserWindow({
     width: bounds.width || 1280,
     height: bounds.height || 860,
@@ -35,6 +38,7 @@ export function openProjectWindow(projectPath) {
     y: bounds.y,
     minWidth: 900,
     minHeight: 600,
+    title: `${folderName} — Dobius+`,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
     backgroundColor: '#0D1117',
@@ -55,6 +59,11 @@ export function openProjectWindow(projectPath) {
       query: { project: projectPath },
     });
   }
+
+  // Keep window title after page sets <title> — ensures Mission Control shows project name
+  win.on('page-title-updated', (e) => {
+    e.preventDefault();
+  });
 
   // Start file watchers for this window
   watchFiles(win.webContents);

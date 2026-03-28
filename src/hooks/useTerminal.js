@@ -82,12 +82,12 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     }
   }, [id]);
 
-  const saveState = useCallback(() => {
+  const saveState = useCallback((forceFlush = false) => {
     if (!termRef.current || !window.electronAPI?.terminalSaveState) return;
     const state = getScrollback(termRef.current, maxScrollbackLines);
     if (state.scrollback.length > 0) {
       state.savedAt = Date.now();
-      window.electronAPI.terminalSaveState(id, state);
+      window.electronAPI.terminalSaveState(id, state, forceFlush);
     }
   }, [id, maxScrollbackLines]);
 
@@ -165,6 +165,12 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
       saveState();
     });
 
+    // Periodic auto-save every 30s — Chrome-style crash recovery.
+    // forceFlush=true ensures an atomic write to disk, not just the debounce cache.
+    const autoSaveInterval = setInterval(() => {
+      saveState(true);
+    }, 30000);
+
     let resizeTimer;
     const observer = new ResizeObserver(() => {
       clearTimeout(resizeTimer);
@@ -173,6 +179,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     observer.observe(containerRef.current);
 
     return () => {
+      clearInterval(autoSaveInterval);
       clearTimeout(resizeTimer);
       observer.disconnect();
       saveState();

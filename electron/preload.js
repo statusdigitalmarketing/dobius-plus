@@ -18,7 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('terminal:data', handler);
     return () => ipcRenderer.removeListener('terminal:data', handler);
   },
-  terminalSaveState: (id, state) => ipcRenderer.invoke('terminal:saveState', id, state),
+  terminalSaveState: (id, state, forceFlush) => ipcRenderer.invoke('terminal:saveState', id, state, !!forceFlush),
   terminalLoadState: (id) => ipcRenderer.invoke('terminal:loadState', id),
   terminalSaveTabs: (projectPath, tabs, counter) => ipcRenderer.invoke('terminal:saveTabs', projectPath, tabs, counter),
   terminalLoadTabs: (projectPath) => ipcRenderer.invoke('terminal:loadTabs', projectPath),

@@ -37,6 +37,8 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
 
   const { containerRef, termRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, maxScrollbackLines: scrollbackLines });
   const [input, setInput] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const mountedRef = useRef(true);
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [dragOver, setDragOver] = useState(false);
@@ -44,6 +46,12 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
   const [searchQuery, setSearchQuery] = useState('');
   const inputRef = useRef(null);
   const searchInputRef = useRef(null);
+
+  // Track mount state for in-flight send cleanup
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Auto-focus the command input on mount and when this tab becomes active
   const activeTabId = useStore((s) => s.activeTabId);
@@ -101,27 +109,61 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
   }, [searchAddonRef, searchQuery]);
 
   const sendCommand = useCallback(() => {
-    if (!window.electronAPI) return;
+    if (!window.electronAPI || isSending) return;
     const trimmed = input.trim();
-    const text = trimmed || '';
-    // Send each character individually then \r — Claude Code's TUI reads
-    // in raw mode and may not process bulk writes the same as keystrokes.
-    // Replace \n with \r so multiline input (via Shift+Enter) sends proper
-    // carriage returns that the PTY interprets as Enter keypresses.
-    const chars = text.replace(/\n/g, '\r').split('');
-    chars.push('\r');
-    let i = 0;
-    const sendNext = () => {
-      if (i < chars.length) {
-        window.electronAPI.terminalWrite(id, chars[i]);
-        i++;
+    const text = (trimmed || '').replace(/\n/g, '\r');
+
+    const done = () => { if (mountedRef.current) setIsSending(false); };
+
+    // Short text (< 80 chars): char-by-char for Claude TUI raw-mode compat
+    // Long text (>= 80 chars): chunked sending — keeps the UI responsive
+    // and avoids the 8ms-per-char bottleneck (5000 chars = 40s → now ~50ms)
+    const CHAR_THRESHOLD = 80;
+    const CHUNK_SIZE = 256;
+
+    setIsSending(true);
+
+    if (text.length < CHAR_THRESHOLD) {
+      // Char-by-char for short commands
+      const chars = text.split('');
+      chars.push('\r');
+      let i = 0;
+      const sendNext = () => {
+        if (!mountedRef.current) { done(); return; }
         if (i < chars.length) {
-          setTimeout(sendNext, 8);
+          window.electronAPI.terminalWrite(id, chars[i]);
+          i++;
+          if (i < chars.length) setTimeout(sendNext, 5);
+          else done();
         }
+      };
+      setTimeout(sendNext, 10);
+    } else {
+      // Chunked sending for large text — fast but gives the PTY breathing room
+      const chunks = [];
+      for (let i = 0; i < text.length; i += CHUNK_SIZE) {
+        chunks.push(text.slice(i, i + CHUNK_SIZE));
       }
-    };
-    // Small delay before first char — gives Claude's TUI time to be ready for input
-    setTimeout(sendNext, 15);
+      let i = 0;
+      const sendNextChunk = () => {
+        if (!mountedRef.current) { done(); return; }
+        if (i < chunks.length) {
+          window.electronAPI.terminalWrite(id, chunks[i]);
+          i++;
+          if (i < chunks.length) {
+            setTimeout(sendNextChunk, 2);
+          } else {
+            // All text sent — send Enter after a brief pause
+            setTimeout(() => {
+              if (mountedRef.current) window.electronAPI.terminalWrite(id, '\r');
+              done();
+            }, 10);
+          }
+        }
+      };
+      setTimeout(sendNextChunk, 10);
+    }
+
     if (trimmed) {
       setHistory((prev) => {
         const next = prev.filter((cmd) => cmd !== trimmed);
@@ -131,7 +173,7 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     }
     setInput('');
     setHistoryIndex(-1);
-  }, [id, input]);
+  }, [id, input, isSending]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -188,11 +230,24 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
         }
         return;
       }
+      // Non-image files (PDF, etc. copied from Finder) — insert as path
+      if (item.kind === 'file' && !item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file?.path) {
+          e.preventDefault();
+          setInput((prev) => {
+            const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+            return prev + (needsSpace ? ' ' : '') + shellEscape(file.path);
+          });
+          setHistoryIndex(-1);
+          return;
+        }
+      }
     }
     // Text paste falls through to default behavior
   }, []);
 
-  // Window-level paste handler — catches image pastes even when xterm has focus
+  // Window-level paste handler — catches image/file pastes even when xterm has focus
   useEffect(() => {
     const windowPasteHandler = async (e) => {
       // Only handle for the active tab
@@ -218,6 +273,21 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
           }
           return;
         }
+        // Non-image files (PDF, etc.) — insert as path
+        if (item.kind === 'file' && !item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file?.path) {
+            e.preventDefault();
+            e.stopPropagation();
+            setInput((prev) => {
+              const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+              return prev + (needsSpace ? ' ' : '') + shellEscape(file.path);
+            });
+            setHistoryIndex(-1);
+            inputRef.current?.focus();
+            return;
+          }
+        }
       }
     };
     document.addEventListener('paste', windowPasteHandler, true);
@@ -241,6 +311,23 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     };
     window.addEventListener('dobius:drop-files', handler);
     return () => window.removeEventListener('dobius:drop-files', handler);
+  }, [id]);
+
+  // Listen for text/URL drops relayed by App.jsx
+  useEffect(() => {
+    const handler = (e) => {
+      if (useStore.getState().activeTabId !== id) return;
+      const text = e.detail?.text;
+      if (!text) return;
+      setInput((prev) => {
+        const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+        return prev + (needsSpace ? ' ' : '') + text;
+      });
+      setHistoryIndex(-1);
+      inputRef.current?.focus();
+    };
+    window.addEventListener('dobius:drop-text', handler);
+    return () => window.removeEventListener('dobius:drop-text', handler);
   }, [id]);
 
   // Visual drag overlay via capture-phase listeners on the wrapper
@@ -404,22 +491,22 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
         />
         <button
           onClick={sendCommand}
-          disabled={!input.trim()}
+          disabled={!input.trim() || isSending}
           style={{
             padding: '2px 10px',
             fontSize: 12,
             fontFamily: "'SF Mono', monospace",
-            color: input.trim() ? bg : border,
-            backgroundColor: input.trim() ? fg : 'transparent',
+            color: (input.trim() && !isSending) ? bg : border,
+            backgroundColor: (input.trim() && !isSending) ? fg : 'transparent',
             border: `1px solid ${border}`,
             borderRadius: 4,
-            cursor: input.trim() ? 'pointer' : 'default',
-            opacity: input.trim() ? 1 : 0.4,
+            cursor: (input.trim() && !isSending) ? 'pointer' : 'default',
+            opacity: (input.trim() && !isSending) ? 1 : 0.4,
             transition: 'all 150ms',
             marginBottom: 1,
           }}
         >
-          Run
+          {isSending ? 'Sending…' : 'Run'}
         </button>
       </div>
     </div>

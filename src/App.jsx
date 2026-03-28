@@ -15,6 +15,7 @@ export default function App() {
     const preventDragOver = (e) => { e.preventDefault(); };
     const handleDrop = (e) => {
       e.preventDefault();
+      // 1. File drops (from Finder, etc.)
       const files = e.dataTransfer?.files;
       if (files && files.length > 0) {
         const paths = Array.from(files).map((f) => {
@@ -22,6 +23,16 @@ export default function App() {
         }).filter(Boolean);
         if (paths.length > 0) {
           window.dispatchEvent(new CustomEvent('dobius:drop-files', { detail: { paths } }));
+          return;
+        }
+      }
+      // 2. URL/link drops (from browsers, etc.)
+      const uri = e.dataTransfer?.getData('text/uri-list');
+      const text = uri || e.dataTransfer?.getData('text/plain');
+      if (text) {
+        const trimmed = text.split('\n').filter((l) => l && !l.startsWith('#')).join(' ').trim();
+        if (trimmed) {
+          window.dispatchEvent(new CustomEvent('dobius:drop-text', { detail: { text: trimmed } }));
         }
       }
     };

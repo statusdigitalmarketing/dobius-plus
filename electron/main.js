@@ -46,6 +46,7 @@ function createWindow() {
     y: bounds.y,
     minWidth: 900,
     minHeight: 600,
+    title: 'Dobius+ — Launcher',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
     backgroundColor: '#0D1117',
@@ -55,6 +56,9 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  // Keep window title after page sets <title>
+  mainWindow.on('page-title-updated', (e) => e.preventDefault());
 
   const isDev = !app.isPackaged;
   if (isDev) {
@@ -108,7 +112,7 @@ function setupTerminalHandlers() {
   });
 
   // Terminal state persistence — save/load scrollback per tab
-  ipcMain.handle('terminal:saveState', (_event, id, state) => {
+  ipcMain.handle('terminal:saveState', (_event, id, state, forceFlush) => {
     // Tab ID format: "term-/path/to/project-N" — extract project path
     const match = id.match(/^term-(.+)-\d+$/);
     const projectPath = match ? match[1] : (id.startsWith('term-') ? id.slice(5) : null);
@@ -117,6 +121,8 @@ function setupTerminalHandlers() {
     const terminalStates = config?.terminalStates || {};
     terminalStates[id] = state;
     setProjectConfig(projectPath, { terminalStates });
+    // Auto-save triggers forceFlush to ensure crash recovery writes to disk immediately
+    if (forceFlush) flushConfig();
   });
 
   ipcMain.handle('terminal:loadState', (_event, id) => {
