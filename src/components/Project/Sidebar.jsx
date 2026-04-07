@@ -1,14 +1,27 @@
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useSessions } from '../../hooks/useSessions';
+import { useStore } from '../../store/store';
 import ConversationCard from './ConversationCard';
 import Preview from './Preview';
+
+function timeAgo(ts) {
+  if (!ts) return '';
+  const diff = Date.now() - ts;
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  return `${Math.floor(diff / 86400000)}d ago`;
+}
 
 export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, onCdToProject }) {
   const { sessions, loading, search, setSearch } = useSessions();
   const [selectedId, setSelectedId] = useState(null);
   const [previewSession, setPreviewSession] = useState(null);
   const [searchFocused, setSearchFocused] = useState(false);
+  const [closedTabsExpanded, setClosedTabsExpanded] = useState(false);
+  const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
+  const reopenClosedTab = useStore((s) => s.reopenClosedTab);
 
   const handleClick = (session, e) => {
     if (e.detail === 2) {
@@ -85,6 +98,64 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
           />
         </div>
       </div>
+
+      {/* Closed tabs section */}
+      {recentlyClosedTabs.length > 0 && (
+        <div className="shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+          <button
+            onClick={() => setClosedTabsExpanded((v) => !v)}
+            className="w-full flex items-center justify-between px-3 py-1.5"
+            style={{
+              backgroundColor: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              color: 'var(--dim)',
+              fontSize: 10,
+              fontFamily: "'SF Mono', monospace",
+              textTransform: 'uppercase',
+              letterSpacing: '0.1em',
+            }}
+          >
+            <span>Closed Tabs ({recentlyClosedTabs.length})</span>
+            <span style={{ fontSize: 8 }}>{closedTabsExpanded ? '\u25B2' : '\u25BC'}</span>
+          </button>
+          {closedTabsExpanded && (
+            <div className="px-1 pb-1" style={{ maxHeight: 200, overflowY: 'auto' }}>
+              {recentlyClosedTabs.map((closed, idx) => (
+                <button
+                  key={`closed-${idx}`}
+                  onClick={() => {
+                    const result = reopenClosedTab(idx);
+                    if (result?.tab && result?.scrollback?.length > 0) {
+                      setTimeout(() => {
+                        window.electronAPI?.terminalSaveState?.(result.tab.id, {
+                          scrollback: result.scrollback,
+                          cols: 80, rows: 24, savedAt: Date.now(),
+                        });
+                      }, 100);
+                    }
+                  }}
+                  className="w-full flex items-center gap-2 px-2 py-1 rounded"
+                  style={{
+                    backgroundColor: 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: 11,
+                    fontFamily: "'SF Mono', monospace",
+                    color: 'var(--fg)',
+                    textAlign: 'left',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--border)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                >
+                  <span className="truncate" style={{ flex: 1 }}>{closed.label || 'Tab'}</span>
+                  <span style={{ color: 'var(--dim)', fontSize: 9, flexShrink: 0 }}>{timeAgo(closed.closedAt)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Conversations list */}
       <div className="flex-1 overflow-y-auto">

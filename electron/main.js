@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess } from './terminal-manager.js';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, reassignTerminal } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -26,7 +26,7 @@ import {
   getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
 } from './config-manager.js';
 import {
-  openProjectWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
+  openProjectWindow, openTornOffWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
 } from './window-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -155,6 +155,25 @@ function setupTerminalHandlers() {
       return { tabs: config.tabs, tabCounter: config.tabCounter || 0 };
     }
     return null;
+  });
+
+  // Save/load recently closed tabs per project (persisted across window sessions)
+  ipcMain.handle('terminal:saveClosedTabs', (_event, projectPath, closedTabs) => {
+    if (!projectPath || !Array.isArray(closedTabs)) return;
+    // Keep max 20 closed tabs, strip scrollback over 500 lines to limit config size
+    const trimmed = closedTabs.slice(0, 20).map((t) => ({
+      label: typeof t.label === 'string' ? t.label.slice(0, 100) : 'Tab',
+      projectPath: t.projectPath || projectPath,
+      scrollback: Array.isArray(t.scrollback) ? t.scrollback.slice(-500) : null,
+      closedAt: t.closedAt || Date.now(),
+    }));
+    setProjectConfig(projectPath, { closedTabs: trimmed });
+  });
+
+  ipcMain.handle('terminal:loadClosedTabs', (_event, projectPath) => {
+    if (!projectPath) return [];
+    const config = getProjectConfig(projectPath);
+    return config?.closedTabs || [];
   });
 
   // Request all terminals to save their scrollback NOW (used by checkpoint save)
@@ -503,6 +522,26 @@ function setupWindowHandlers() {
   ipcMain.handle('window:close', (_event, projectPath) => {
     closeProjectWindow(projectPath);
     return { ok: true };
+  });
+
+  // Tab tear-off: create a new window for a dragged-out tab
+  ipcMain.handle('window:tearOffTab', (_event, projectPath, tabId, tabLabel, screenX, screenY) => {
+    if (!projectPath || !tabId) return { ok: false };
+    // Validate tabId format
+    if (!/^term-.+-\d+$/.test(tabId)) return { ok: false };
+    const label = typeof tabLabel === 'string' ? tabLabel.slice(0, 100) : 'Tab';
+    const win = openTornOffWindow(projectPath, tabId, label, screenX || 200, screenY || 200);
+    // Immediately redirect PTY output to the new window so no data is lost
+    // during the handoff (before the new renderer calls terminal:claimPty)
+    reassignTerminal(tabId, win.webContents);
+    return { ok: true, id: win.id };
+  });
+
+  // Claim an existing PTY for a new window (used after tear-off)
+  ipcMain.handle('terminal:claimPty', (event, tabId) => {
+    if (!tabId || !/^term-.+-\d+$/.test(tabId)) return { ok: false };
+    const success = reassignTerminal(tabId, event.sender);
+    return { ok: success };
   });
 }
 

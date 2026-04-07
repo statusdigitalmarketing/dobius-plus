@@ -4,6 +4,12 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 
+// Terminal IDs that should not be killed on unmount (torn-off tabs).
+// Populated by TerminalTabBar before removing the tab, checked by cleanup.
+const doNotKillSet = new Set();
+export function markDoNotKill(id) { doNotKillSet.add(id); }
+export function unmarkDoNotKill(id) { doNotKillSet.delete(id); }
+
 const DEFAULT_THEME = {
   background: '#0D1117',
   foreground: '#E6EDF3',
@@ -60,9 +66,10 @@ function getScrollback(term, maxLines = MAX_SCROLLBACK_LINES) {
  * @param {string} options.id — unique terminal ID
  * @param {string} options.cwd — working directory for the pty
  * @param {Object} [options.theme] — xterm theme object
+ * @param {boolean} [options.claimExisting] — if true, claim an existing PTY (for tab tear-off)
  * @returns {{ containerRef: React.RefObject, termRef: React.RefObject, searchAddonRef: React.RefObject }}
  */
-export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines = MAX_SCROLLBACK_LINES }) {
+export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines = MAX_SCROLLBACK_LINES, claimExisting = false }) {
   const containerRef = useRef(null);
   const termRef = useRef(null);
   const fitAddonRef = useRef(null);
@@ -158,7 +165,12 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     });
 
     restorePromise.then(() => {
-      window.electronAPI.terminalCreate(id, cwd);
+      if (claimExisting) {
+        // Tear-off: claim the existing PTY from the old window
+        window.electronAPI.terminalClaimPty(id);
+      } else {
+        window.electronAPI.terminalCreate(id, cwd);
+      }
     });
 
     const removeRequestSave = window.electronAPI.onTerminalRequestSave?.(() => {
@@ -187,13 +199,18 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
       removeDataListener();
       removeExitListener();
       removeRequestSave?.();
-      window.electronAPI.terminalKill(id);
+      // Don't kill PTY if: (a) this is a claimed terminal, or (b) it was marked
+      // as do-not-kill by the tear-off handler (old window unmounting torn-off tab)
+      if (!claimExisting && !doNotKillSet.has(id)) {
+        window.electronAPI.terminalKill(id);
+      }
+      doNotKillSet.delete(id);
       term.dispose();
       termRef.current = null;
       fitAddonRef.current = null;
       searchAddonRef.current = null;
     };
-  }, [id, cwd, fit, saveState]);
+  }, [id, cwd, fit, saveState, claimExisting]);
 
   // Separate effect: update theme without recreating terminal
   useEffect(() => {

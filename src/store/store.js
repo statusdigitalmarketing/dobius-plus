@@ -69,10 +69,30 @@ export const useStore = create((set, get) => ({
     set({ terminalTabs: tabs, activeTabId: newActive, runningAgents: ra });
   },
 
+  // Remove tab from this window's state without killing the PTY.
+  // Used for tab tear-off: the PTY continues in the new window.
+  removeTabWithoutKilling: (tabId) => {
+    const state = get();
+    const tabs = state.terminalTabs.filter((t) => t.id !== tabId);
+    if (tabs.length === 0) return; // don't remove last tab
+    const newActive = state.activeTabId === tabId
+      ? tabs[Math.max(0, state.terminalTabs.findIndex((t) => t.id === tabId) - 1)]?.id || tabs[0]?.id
+      : state.activeTabId;
+    const ra = { ...state.runningAgents };
+    for (const key of Object.keys(ra)) {
+      if (ra[key] === tabId) delete ra[key];
+    }
+    set({ terminalTabs: tabs, activeTabId: newActive, runningAgents: ra });
+  },
+
   setActiveTab: (tabId) => set({ activeTabId: tabId }),
 
   renameTab: (tabId, label) => set((s) => ({
     terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? { ...t, label } : t),
+  })),
+
+  togglePinTab: (tabId) => set((s) => ({
+    terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? { ...t, pinned: !t.pinned } : t),
   })),
 
   initTabs: (tabs, counter) => set({
@@ -188,16 +208,26 @@ export const useStore = create((set, get) => ({
   setBoardNotification: (notification) => set({ boardNotification: notification }),
   clearBoardNotification: () => set({ boardNotification: null }),
 
-  // Recently closed tabs
+  // Recently closed tabs (persisted to config for cross-session recovery)
   pushClosedTab: (closedTab) => set((s) => {
-    const stack = [closedTab, ...s.recentlyClosedTabs].slice(0, 10);
+    const entry = { ...closedTab, closedAt: Date.now() };
+    const stack = [entry, ...s.recentlyClosedTabs].slice(0, 20);
+    // Persist to config
+    const projectPath = s.currentProjectPath;
+    if (projectPath && window.electronAPI?.terminalSaveClosedTabs) {
+      window.electronAPI.terminalSaveClosedTabs(projectPath, stack);
+    }
     return { recentlyClosedTabs: stack };
   }),
 
-  reopenClosedTab: () => {
+  initClosedTabs: (closedTabs) => set({ recentlyClosedTabs: closedTabs || [] }),
+
+  reopenClosedTab: (index = 0) => {
     const state = get();
     if (state.recentlyClosedTabs.length === 0) return null;
-    const [closed, ...rest] = state.recentlyClosedTabs;
+    const idx = Math.min(index, state.recentlyClosedTabs.length - 1);
+    const closed = state.recentlyClosedTabs[idx];
+    const rest = state.recentlyClosedTabs.filter((_, i) => i !== idx);
     const counter = state.tabCounter + 1;
     const id = closed.projectPath ? `term-${closed.projectPath}-${counter}` : `term-main-${counter}`;
     const tab = { id, label: closed.label, projectPath: closed.projectPath, createdAt: Date.now() };
@@ -207,6 +237,11 @@ export const useStore = create((set, get) => ({
       activeTabId: id,
       tabCounter: counter,
     });
+    // Persist updated closed tabs list
+    const projectPath = state.currentProjectPath;
+    if (projectPath && window.electronAPI?.terminalSaveClosedTabs) {
+      window.electronAPI.terminalSaveClosedTabs(projectPath, rest);
+    }
     // Return the new tab + saved scrollback so the caller can restore it
     return { tab, scrollback: closed.scrollback };
   },

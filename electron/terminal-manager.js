@@ -67,15 +67,17 @@ export function createTerminal(id, cwd, webContents) {
   });
 
   term.onData((data) => {
-    if (!webContents.isDestroyed()) {
-      webContents.send('terminal:data', id, data);
+    const entry = terminals.get(id);
+    if (entry && !entry.webContents.isDestroyed()) {
+      entry.webContents.send('terminal:data', id, data);
     }
   });
 
   term.onExit(({ exitCode, signal }) => {
+    const entry = terminals.get(id);
     terminals.delete(id);
-    if (!webContents.isDestroyed()) {
-      webContents.send('terminal:exit', id, exitCode, signal);
+    if (entry && !entry.webContents.isDestroyed()) {
+      entry.webContents.send('terminal:exit', id, exitCode, signal);
     }
   });
 
@@ -153,23 +155,51 @@ export function killTerminal(id) {
 }
 
 /**
- * Gracefully close all terminals by sending Ctrl+C twice (ends Claude sessions
- * cleanly so they can be resumed), then kill after a delay.
+ * Gracefully close specific terminals by sending Ctrl+C twice (ends Claude
+ * sessions cleanly so they can be resumed), then wait for output.
+ * @param {string[]} [ids] — terminal IDs to close. If omitted, closes all.
  * @returns {Promise<void>}
  */
-export async function gracefulCloseAll() {
-  if (terminals.size === 0) return;
+export async function gracefulCloseTerminals(ids) {
+  const entries = ids
+    ? ids.map((id) => terminals.get(id)).filter(Boolean)
+    : Array.from(terminals.values());
+  if (entries.length === 0) return;
   // First Ctrl+C — interrupts any running command
-  for (const [, entry] of terminals) {
+  for (const entry of entries) {
     try { entry.pty.write('\x03'); } catch { void 0; }
   }
   await new Promise((r) => setTimeout(r, 500));
   // Second Ctrl+C — triggers Claude to print resume session ID
-  for (const [, entry] of terminals) {
+  for (const entry of entries) {
     try { entry.pty.write('\x03'); } catch { void 0; }
   }
   // Give Claude time to print the resume ID before terminals get killed
   await new Promise((r) => setTimeout(r, 1500));
+}
+
+/**
+ * Gracefully close all terminals — called on app quit.
+ * @returns {Promise<void>}
+ */
+export async function gracefulCloseAll() {
+  return gracefulCloseTerminals();
+}
+
+/**
+ * Get terminal IDs matching a project path prefix.
+ * @param {string} projectPath
+ * @returns {string[]}
+ */
+export function getTerminalsForProject(projectPath) {
+  const prefix = `term-${projectPath}`;
+  const matching = [];
+  for (const id of terminals.keys()) {
+    if (id === prefix || id.startsWith(`${prefix}-`)) {
+      matching.push(id);
+    }
+  }
+  return matching;
 }
 
 /**
@@ -185,6 +215,21 @@ export function killAll() {
   }
   terminals.clear();
 }
+
+/**
+ * Reassign a terminal's output to a different BrowserWindow's webContents.
+ * Used for tab tear-off: the PTY stays alive but sends data to the new window.
+ * @param {string} id — terminal ID
+ * @param {Electron.WebContents} newWebContents — the new window's webContents
+ * @returns {boolean} true if reassigned, false if terminal not found
+ */
+export function reassignTerminal(id, newWebContents) {
+  const entry = terminals.get(id);
+  if (!entry) return false;
+  entry.webContents = newWebContents;
+  return true;
+}
+
 
 /**
  * Get all active terminal IDs.

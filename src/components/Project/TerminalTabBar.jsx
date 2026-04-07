@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
+import { markDoNotKill } from '../../hooks/useTerminal';
 
 export default function TerminalTabBar() {
   const tabs = useStore((s) => s.terminalTabs);
@@ -13,6 +14,7 @@ export default function TerminalTabBar() {
   const closeTabsToRight = useStore((s) => s.closeTabsToRight);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const pushClosedTab = useStore((s) => s.pushClosedTab);
+  const togglePinTab = useStore((s) => s.togglePinTab);
 
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
@@ -101,8 +103,13 @@ export default function TerminalTabBar() {
 
   const handleCloseTab = useCallback(async (e, tabId) => {
     e.stopPropagation();
-    // Save tab info + scrollback for Cmd+Shift+T reopen
     const tab = tabs.find((t) => t.id === tabId);
+    // Pinned tabs require confirmation
+    if (tab?.pinned) {
+      const confirmed = window.confirm(`"${tab.label}" is pinned. Close anyway?`);
+      if (!confirmed) return;
+    }
+    // Save tab info + scrollback for Cmd+Shift+T reopen
     let scrollback = null;
     if (window.electronAPI?.terminalLoadState) {
       await window.electronAPI.terminalRequestSaveNow?.();
@@ -145,12 +152,40 @@ export default function TerminalTabBar() {
     setContextMenu({ x: e.clientX, y: e.clientY, tabId });
   }, []);
 
-  // Drag-to-reorder (#26)
+  const removeTabWithoutKilling = useStore((s) => s.removeTabWithoutKilling);
+
+  // Track whether the drag has left the window (for tear-off detection)
+  const dragLeftWindow = useRef(false);
+
+  // Drag-to-reorder (#26) + drag-out-of-window for tab tear-off
   const handleDragStart = useCallback((e, tabId) => {
     setDragTabId(tabId);
+    dragLeftWindow.current = false;
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', tabId);
   }, []);
+
+  // Detect when drag leaves the document (cursor exits the window)
+  useEffect(() => {
+    if (!dragTabId) return;
+    const handleDocDragLeave = (e) => {
+      // When the cursor truly leaves the window, e.relatedTarget is null
+      // and clientX/clientY are at 0,0 or out of bounds
+      if (!e.relatedTarget && (e.clientX <= 0 || e.clientY <= 0 ||
+          e.clientX >= window.innerWidth || e.clientY >= window.innerHeight)) {
+        dragLeftWindow.current = true;
+      }
+    };
+    const handleDocDragEnter = () => {
+      dragLeftWindow.current = false;
+    };
+    document.addEventListener('dragleave', handleDocDragLeave);
+    document.addEventListener('dragenter', handleDocDragEnter);
+    return () => {
+      document.removeEventListener('dragleave', handleDocDragLeave);
+      document.removeEventListener('dragenter', handleDocDragEnter);
+    };
+  }, [dragTabId]);
 
   const handleDragOver = useCallback((e, idx) => {
     e.preventDefault();
@@ -169,10 +204,70 @@ export default function TerminalTabBar() {
     setDragOverIdx(null);
   }, [dragTabId, tabs, reorderTabs]);
 
-  const handleDragEnd = useCallback(() => {
+  const handleDragEnd = useCallback(async (e) => {
+    const tabId = dragTabId;
+    // Capture screen coordinates before any async work (event may be recycled)
+    const sx = e.screenX;
+    const sy = e.screenY;
+
     setDragTabId(null);
     setDragOverIdx(null);
-  }, []);
+
+    if (!tabId || !currentProjectPath) return;
+
+    // Detect if the drag ended outside the window.
+    // Rely on the dragleave tracker — Electron zeros clientX/clientY for
+    // out-of-window drops which would cause false positives with coordinate checks.
+    if (!dragLeftWindow.current) return;
+    if (tabs.length <= 1) return; // Don't tear off the last tab
+
+    const tab = tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+
+    // Mark this terminal as "do not kill" BEFORE removing the tab.
+    // This prevents useTerminal's cleanup from killing the PTY when React
+    // unmounts the TerminalPane in the old window.
+    markDoNotKill(tabId);
+
+    // Save terminal state so the new window can restore scrollback.
+    // Await + small delay to ensure the IPC roundtrip completes (same pattern
+    // as handleCloseTab's checkpoint save).
+    await window.electronAPI?.terminalRequestSaveNow?.();
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Create new window for the torn-off tab.
+    // The main process immediately reassigns the PTY output to the new window
+    // so no data is lost during the handoff.
+    window.electronAPI?.windowTearOffTab(
+      currentProjectPath,
+      tabId,
+      tab.label,
+      sx,
+      sy
+    );
+
+    // Remove tab from this window without killing the PTY
+    removeTabWithoutKilling(tabId);
+  }, [dragTabId, tabs, currentProjectPath, removeTabWithoutKilling]);
+
+  // Poll active process for each tab (for status badges)
+  const [tabProcesses, setTabProcesses] = useState({});
+  useEffect(() => {
+    if (!window.electronAPI?.terminalGetProcess || tabs.length === 0) return;
+    const poll = async () => {
+      const result = {};
+      for (const tab of tabs) {
+        try {
+          const proc = await window.electronAPI.terminalGetProcess(tab.id);
+          if (proc) result[tab.id] = proc;
+        } catch { /* ignore */ }
+      }
+      setTabProcesses(result);
+    };
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => clearInterval(interval);
+  }, [tabs.length]);
 
   // Scroll arrows (#27)
   const scrollBy = useCallback((dir) => {
@@ -251,6 +346,27 @@ export default function TerminalTabBar() {
                   className="absolute bottom-0 left-2 right-2 h-0.5 rounded-full"
                   style={{ backgroundColor: 'var(--accent)' }}
                 />
+              )}
+
+              {/* Process status badge */}
+              {tabProcesses[tab.id] && (
+                <span
+                  title={tabProcesses[tab.id]}
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    backgroundColor: tabProcesses[tab.id].includes('claude') ? '#3FB950' : '#D29922',
+                    flexShrink: 0,
+                  }}
+                />
+              )}
+
+              {/* Pin indicator */}
+              {tab.pinned && (
+                <span style={{ fontSize: 9, color: 'var(--dim)', flexShrink: 0, lineHeight: 1 }} title="Pinned">
+                  {'//'}
+                </span>
               )}
 
               {/* Label or edit input */}
@@ -357,6 +473,7 @@ export default function TerminalTabBar() {
           tabId={contextMenu.tabId}
           tabCount={tabs.length}
           tabIndex={tabs.findIndex((t) => t.id === contextMenu.tabId)}
+          isPinned={!!tabs.find((t) => t.id === contextMenu.tabId)?.pinned}
           onRename={() => {
             const tab = tabs.find((t) => t.id === contextMenu.tabId);
             if (tab) handleDoubleClick(tab);
@@ -377,19 +494,51 @@ export default function TerminalTabBar() {
             closeTabsToRight(contextMenu.tabId);
             setContextMenu(null);
           }}
+          onPin={() => {
+            togglePinTab(contextMenu.tabId);
+            setContextMenu(null);
+          }}
+          onDismiss={() => setContextMenu(null)}
         />
       )}
     </div>
   );
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, onRename, onClose, onCloseOthers, onCloseToRight }) {
+function timeAgo(ts) {
+  if (!ts) return '';
+  const diff = Date.now() - ts;
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  return `${Math.floor(diff / 86400000)}d ago`;
+}
+
+function ContextMenu({ x, y, tabCount, tabIndex, isPinned, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onDismiss }) {
+  const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
+  const reopenClosedTab = useStore((s) => s.reopenClosedTab);
+
   const items = [
+    { label: isPinned ? 'Unpin Tab' : 'Pin Tab', onClick: onPin },
     { label: 'Rename', onClick: onRename },
+    { type: 'divider' },
     { label: 'Close', onClick: onClose, disabled: tabCount <= 1 },
     { label: 'Close Others', onClick: onCloseOthers, disabled: tabCount <= 1 },
     { label: 'Close to Right', onClick: onCloseToRight, disabled: tabIndex >= tabCount - 1 },
   ];
+
+  const handleReopen = (idx) => {
+    const result = reopenClosedTab(idx);
+    if (result?.tab && result?.scrollback?.length > 0) {
+      setTimeout(() => {
+        window.electronAPI?.terminalSaveState?.(result.tab.id, {
+          scrollback: result.scrollback,
+          cols: 80, rows: 24, savedAt: Date.now(),
+        });
+      }, 100);
+    }
+    onDismiss();
+  };
 
   return (
     <div
@@ -402,33 +551,72 @@ function ContextMenu({ x, y, tabCount, tabIndex, onRename, onClose, onCloseOther
         border: '1px solid var(--border)',
         borderRadius: 6,
         padding: '4px 0',
-        minWidth: 160,
+        minWidth: 200,
         boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
       }}
       onClick={(e) => e.stopPropagation()}
     >
-      {items.map((item) => (
-        <button
-          key={item.label}
-          onClick={item.disabled ? undefined : item.onClick}
-          style={{
-            display: 'block',
-            width: '100%',
-            textAlign: 'left',
-            padding: '5px 14px',
-            fontSize: 11,
-            fontFamily: "'SF Mono', monospace",
-            color: item.disabled ? 'var(--border)' : 'var(--fg)',
-            backgroundColor: 'transparent',
-            border: 'none',
-            cursor: item.disabled ? 'default' : 'pointer',
-          }}
-          onMouseEnter={(e) => { if (!item.disabled) e.currentTarget.style.backgroundColor = 'var(--border)'; }}
-          onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
-        >
-          {item.label}
-        </button>
-      ))}
+      {items.map((item, i) =>
+        item.type === 'divider' ? (
+          <div key={`div-${i}`} style={{ height: 1, backgroundColor: 'var(--border)', margin: '4px 0' }} />
+        ) : (
+          <button
+            key={item.label}
+            onClick={item.disabled ? undefined : item.onClick}
+            style={{
+              display: 'block',
+              width: '100%',
+              textAlign: 'left',
+              padding: '5px 14px',
+              fontSize: 11,
+              fontFamily: "'SF Mono', monospace",
+              color: item.disabled ? 'var(--border)' : 'var(--fg)',
+              backgroundColor: 'transparent',
+              border: 'none',
+              cursor: item.disabled ? 'default' : 'pointer',
+            }}
+            onMouseEnter={(e) => { if (!item.disabled) e.currentTarget.style.backgroundColor = 'var(--border)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+          >
+            {item.label}
+          </button>
+        )
+      )}
+
+      {/* Reopen closed tabs section */}
+      {recentlyClosedTabs.length > 0 && (
+        <>
+          <div style={{ height: 1, backgroundColor: 'var(--border)', margin: '4px 0' }} />
+          <div style={{ padding: '3px 14px', fontSize: 10, color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
+            Reopen Closed Tab
+          </div>
+          {recentlyClosedTabs.slice(0, 8).map((closed, idx) => (
+            <button
+              key={`closed-${idx}`}
+              onClick={() => handleReopen(idx)}
+              style={{
+                display: 'flex',
+                width: '100%',
+                textAlign: 'left',
+                padding: '4px 14px',
+                fontSize: 11,
+                fontFamily: "'SF Mono', monospace",
+                color: 'var(--fg)',
+                backgroundColor: 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                gap: 8,
+                alignItems: 'center',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--border)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+            >
+              <span className="truncate" style={{ flex: 1 }}>{closed.label || 'Tab'}</span>
+              <span style={{ color: 'var(--dim)', fontSize: 10, flexShrink: 0 }}>{timeAgo(closed.closedAt)}</span>
+            </button>
+          ))}
+        </>
+      )}
     </div>
   );
 }

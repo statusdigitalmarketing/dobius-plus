@@ -4,7 +4,10 @@ import ProjectList from './components/Launcher/ProjectList';
 import ErrorBoundary from './components/shared/ErrorBoundary';
 
 export default function App() {
-  const projectPath = new URLSearchParams(window.location.search).get('project') || undefined;
+  const params = new URLSearchParams(window.location.search);
+  const projectPath = params.get('project') || undefined;
+  const tearOffTabId = params.get('tearOffTab') || undefined;
+  const tearOffLabel = params.get('tearOffLabel') || undefined;
 
   // Handle file drag-and-drop globally.
   // dragover: preventDefault enables drop target behaviour.
@@ -55,7 +58,7 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      <ProjectView projectPath={projectPath} />
+      <ProjectView projectPath={projectPath} tearOffTabId={tearOffTabId} tearOffLabel={tearOffLabel} />
     </ErrorBoundary>
   );
 }

@@ -12,7 +12,7 @@ import QuitOverlay from '../shared/QuitOverlay';
 import ResumeBanner from './ResumeBanner';
 import { useAgentActivity } from '../../hooks/useAgentActivity';
 
-export default function ProjectView({ projectPath }) {
+export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel }) {
   const activeView = useStore((s) => s.activeView);
   const setActiveView = useStore((s) => s.setActiveView);
   const sidebarVisible = useStore((s) => s.sidebarVisible);
@@ -32,6 +32,7 @@ export default function ProjectView({ projectPath }) {
   const removeTab = useStore((s) => s.removeTab);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const initTabs = useStore((s) => s.initTabs);
+  const initClosedTabs = useStore((s) => s.initClosedTabs);
 
   const [pinnedIds, setPinnedIds] = useState([]);
   const [tabsInitialized, setTabsInitialized] = useState(false);
@@ -58,6 +59,27 @@ export default function ProjectView({ projectPath }) {
   useEffect(() => {
     if (!window.electronAPI?.configGetPinned) return;
     window.electronAPI.configGetPinned().then(setPinnedIds);
+
+    // Tear-off window: initialize with the single torn-off tab
+    if (tearOffTabId && projectPath) {
+      window.electronAPI.configGetProject(projectPath).then((config) => {
+        if (config && typeof config.themeIndex === 'number') {
+          setThemeIndex(config.themeIndex);
+        }
+        const tab = {
+          id: tearOffTabId,
+          label: tearOffLabel || 'Tab',
+          projectPath,
+          createdAt: Date.now(),
+        };
+        // Use the existing tabCounter from the project config to avoid ID collisions
+        const counter = config?.tabCounter || 1;
+        initTabs([tab], counter);
+        setTabsInitialized(true);
+      });
+      return;
+    }
+
     if (projectPath) {
       window.electronAPI.configGetProject(projectPath).then((config) => {
         if (config && typeof config.themeIndex === 'number') {
@@ -72,6 +94,10 @@ export default function ProjectView({ projectPath }) {
         }
         setTabsInitialized(true);
       });
+      // Load persisted closed tabs for Cmd+Shift+T recovery across sessions
+      window.electronAPI.terminalLoadClosedTabs?.(projectPath).then((closed) => {
+        if (closed?.length > 0) initClosedTabs(closed);
+      });
     } else {
       // No project path (launcher) — create a default tab
       if (tabs.length === 0) {
@@ -79,7 +105,7 @@ export default function ProjectView({ projectPath }) {
       }
       setTabsInitialized(true);
     }
-  }, [projectPath, setThemeIndex]);
+  }, [projectPath, setThemeIndex, tearOffTabId, tearOffLabel]);
 
   // Save theme to config when it changes
   useEffect(() => {
@@ -87,13 +113,14 @@ export default function ProjectView({ projectPath }) {
     window.electronAPI.configSetProject(projectPath, { themeIndex });
   }, [themeIndex, projectPath]);
 
-  // Save tabs to config whenever they change
+  // Save tabs to config whenever they change (skip for tear-off windows to avoid conflicts)
   useEffect(() => {
+    if (tearOffTabId) return; // Tear-off windows don't persist tabs
     if (!tabsInitialized || !projectPath || !window.electronAPI?.terminalSaveTabs) return;
     if (tabs.length > 0) {
       window.electronAPI.terminalSaveTabs(projectPath, tabs, useStore.getState().tabCounter);
     }
-  }, [tabs, tabsInitialized, projectPath]);
+  }, [tabs, tabsInitialized, projectPath, tearOffTabId]);
 
   // Clean up running agents when a terminal PTY exits + auto-capture journal + orchestration tracking
   useEffect(() => {
@@ -431,6 +458,7 @@ export default function ProjectView({ projectPath }) {
                     id={tab.id}
                     cwd={tab.projectPath}
                     theme={theme.xtermTheme}
+                    claimExisting={tab.id === tearOffTabId}
                   />
                 </div>
               ))}

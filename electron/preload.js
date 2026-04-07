@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   terminalLoadState: (id) => ipcRenderer.invoke('terminal:loadState', id),
   terminalSaveTabs: (projectPath, tabs, counter) => ipcRenderer.invoke('terminal:saveTabs', projectPath, tabs, counter),
   terminalLoadTabs: (projectPath) => ipcRenderer.invoke('terminal:loadTabs', projectPath),
+  terminalSaveClosedTabs: (projectPath, closedTabs) => ipcRenderer.invoke('terminal:saveClosedTabs', projectPath, closedTabs),
+  terminalLoadClosedTabs: (projectPath) => ipcRenderer.invoke('terminal:loadClosedTabs', projectPath),
   terminalRequestSaveNow: () => ipcRenderer.invoke('terminal:requestSaveNow'),
   onTerminalRequestSave: (callback) => {
     const handler = () => callback();
@@ -104,6 +106,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),
   windowGetOpen: () => ipcRenderer.invoke('window:getOpen'),
   windowClose: (projectPath) => ipcRenderer.invoke('window:close', projectPath),
+  windowTearOffTab: (projectPath, tabId, tabLabel, screenX, screenY) =>
+    ipcRenderer.invoke('window:tearOffTab', projectPath, tabId, tabLabel, screenX, screenY),
+  terminalClaimPty: (tabId) => ipcRenderer.invoke('terminal:claimPty', tabId),
 
   // Build Monitor
   buildMonitorLoadProgress: (projectDir) => ipcRenderer.invoke('buildMonitor:loadProgress', projectDir),

@@ -23,7 +23,7 @@ function arrayBufferToBase64(buffer) {
  * TerminalPane — renders an xterm.js terminal with an editable command input bar.
  * @param {{ id: string, cwd: string, theme?: object, className?: string }} props
  */
-export default function TerminalPane({ id, cwd, theme, className = '' }) {
+export default function TerminalPane({ id, cwd, theme, className = '', claimExisting = false }) {
   const [termFontSize, setTermFontSize] = useState(13);
   const [scrollbackLines, setScrollbackLines] = useState(1000);
 
@@ -35,7 +35,7 @@ export default function TerminalPane({ id, cwd, theme, className = '' }) {
     });
   }, []);
 
-  const { containerRef, termRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, maxScrollbackLines: scrollbackLines });
+  const { containerRef, termRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, maxScrollbackLines: scrollbackLines, claimExisting });
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const mountedRef = useRef(true);
