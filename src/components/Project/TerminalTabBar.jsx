@@ -152,7 +152,6 @@ export default function TerminalTabBar() {
     setContextMenu({ x: e.clientX, y: e.clientY, tabId });
   }, []);
 
-  const removeTabWithoutKilling = useStore((s) => s.removeTabWithoutKilling);
 
   // Track whether the drag has left the window (for tear-off detection)
   const dragLeftWindow = useRef(false);
@@ -235,9 +234,13 @@ export default function TerminalTabBar() {
     await window.electronAPI?.terminalRequestSaveNow?.();
     await new Promise((r) => setTimeout(r, 200));
 
+    // Re-check that the tab still exists after the async wait (it could have
+    // been closed by Cmd+W or another action during the delay)
+    if (!useStore.getState().terminalTabs.find((t) => t.id === tabId)) {
+      return;
+    }
+
     // Create new window for the torn-off tab.
-    // The main process immediately reassigns the PTY output to the new window
-    // so no data is lost during the handoff.
     window.electronAPI?.windowTearOffTab(
       currentProjectPath,
       tabId,
@@ -247,8 +250,8 @@ export default function TerminalTabBar() {
     );
 
     // Remove tab from this window without killing the PTY
-    removeTabWithoutKilling(tabId);
-  }, [dragTabId, tabs, currentProjectPath, removeTabWithoutKilling]);
+    removeTab(tabId);
+  }, [dragTabId, tabs, currentProjectPath, removeTab]);
 
   // Poll active process for each tab (for status badges)
   const [tabProcesses, setTabProcesses] = useState({});
@@ -267,7 +270,7 @@ export default function TerminalTabBar() {
     poll();
     const interval = setInterval(poll, 3000);
     return () => clearInterval(interval);
-  }, [tabs.length]);
+  }, [tabs]);
 
   // Scroll arrows (#27)
   const scrollBy = useCallback((dir) => {
@@ -479,10 +482,9 @@ export default function TerminalTabBar() {
             if (tab) handleDoubleClick(tab);
             setContextMenu(null);
           }}
-          onClose={() => {
+          onClose={async () => {
             if (tabs.length > 1) {
-              if (window.electronAPI) window.electronAPI.terminalKill(contextMenu.tabId);
-              removeTab(contextMenu.tabId);
+              await handleCloseTab({ stopPropagation: () => {} }, contextMenu.tabId);
             }
             setContextMenu(null);
           }}

@@ -69,21 +69,6 @@ export const useStore = create((set, get) => ({
     set({ terminalTabs: tabs, activeTabId: newActive, runningAgents: ra });
   },
 
-  // Remove tab from this window's state without killing the PTY.
-  // Used for tab tear-off: the PTY continues in the new window.
-  removeTabWithoutKilling: (tabId) => {
-    const state = get();
-    const tabs = state.terminalTabs.filter((t) => t.id !== tabId);
-    if (tabs.length === 0) return; // don't remove last tab
-    const newActive = state.activeTabId === tabId
-      ? tabs[Math.max(0, state.terminalTabs.findIndex((t) => t.id === tabId) - 1)]?.id || tabs[0]?.id
-      : state.activeTabId;
-    const ra = { ...state.runningAgents };
-    for (const key of Object.keys(ra)) {
-      if (ra[key] === tabId) delete ra[key];
-    }
-    set({ terminalTabs: tabs, activeTabId: newActive, runningAgents: ra });
-  },
 
   setActiveTab: (tabId) => set({ activeTabId: tabId }),
 
@@ -110,9 +95,10 @@ export const useStore = create((set, get) => ({
 
   closeOtherTabs: (tabId) => {
     const state = get();
-    const kept = state.terminalTabs.filter((t) => t.id === tabId);
+    // Keep the target tab AND any pinned tabs
+    const kept = state.terminalTabs.filter((t) => t.id === tabId || t.pinned);
     if (kept.length === 0) return;
-    const removed = state.terminalTabs.filter((t) => t.id !== tabId);
+    const removed = state.terminalTabs.filter((t) => t.id !== tabId && !t.pinned);
     removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
     const removedIds = new Set(removed.map((t) => t.id));
     const ra = { ...state.runningAgents };
@@ -127,15 +113,19 @@ export const useStore = create((set, get) => ({
     const idx = state.terminalTabs.findIndex((t) => t.id === tabId);
     if (idx === -1) return;
     const kept = state.terminalTabs.slice(0, idx + 1);
-    const removed = state.terminalTabs.slice(idx + 1);
+    // Preserve pinned tabs that are to the right
+    const rightTabs = state.terminalTabs.slice(idx + 1);
+    const pinnedRight = rightTabs.filter((t) => t.pinned);
+    const removed = rightTabs.filter((t) => !t.pinned);
     removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
     const removedIds = new Set(removed.map((t) => t.id));
     const ra = { ...state.runningAgents };
     for (const key of Object.keys(ra)) {
       if (removedIds.has(ra[key])) delete ra[key];
     }
-    const newActive = kept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
-    set({ terminalTabs: kept, activeTabId: newActive, runningAgents: ra });
+    const allKept = [...kept, ...pinnedRight];
+    const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
+    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra });
   },
 
   // Actions

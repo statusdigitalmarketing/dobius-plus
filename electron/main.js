@@ -531,9 +531,9 @@ function setupWindowHandlers() {
     if (!/^term-.+-\d+$/.test(tabId)) return { ok: false };
     const label = typeof tabLabel === 'string' ? tabLabel.slice(0, 100) : 'Tab';
     const win = openTornOffWindow(projectPath, tabId, label, screenX || 200, screenY || 200);
-    // Immediately redirect PTY output to the new window so no data is lost
-    // during the handoff (before the new renderer calls terminal:claimPty)
-    reassignTerminal(tabId, win.webContents);
+    // PTY stays assigned to old webContents until new window calls terminal:claimPty.
+    // Small gap of ~1-2s where output may go to the old (unmounted) listener —
+    // acceptable tradeoff; scrollback was saved before tear-off.
     return { ok: true, id: win.id };
   });
 

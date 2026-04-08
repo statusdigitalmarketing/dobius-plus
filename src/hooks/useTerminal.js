@@ -174,7 +174,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     });
 
     const removeRequestSave = window.electronAPI.onTerminalRequestSave?.(() => {
-      saveState();
+      saveState(true); // force flush — called before window close
     });
 
     // Periodic auto-save every 30s — Chrome-style crash recovery.

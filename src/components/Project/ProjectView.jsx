@@ -72,8 +72,10 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
           projectPath,
           createdAt: Date.now(),
         };
-        // Use the existing tabCounter from the project config to avoid ID collisions
-        const counter = config?.tabCounter || 1;
+        // Offset tabCounter for tear-off windows to avoid ID collisions with
+        // the primary window (which shares the same project config counter).
+        // Using timestamp-based offset ensures uniqueness across windows.
+        const counter = (config?.tabCounter || 1) + Math.floor(Date.now() / 1000) % 10000;
         initTabs([tab], counter);
         setTabsInitialized(true);
       });
@@ -297,8 +299,21 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     }
 
     const tab = state.terminalTabs.find((t) => t.id === tabId);
+    // Check pin protection
+    if (tab?.pinned) {
+      const confirmed = window.confirm(`"${tab.label}" is pinned. Close anyway?`);
+      if (!confirmed) return;
+    }
+    // Save scrollback before closing so Cmd+Shift+T can restore it
+    let scrollback = null;
+    if (window.electronAPI?.terminalLoadState) {
+      await window.electronAPI.terminalRequestSaveNow?.();
+      await new Promise((r) => setTimeout(r, 200));
+      const saved = await window.electronAPI.terminalLoadState(tabId);
+      scrollback = saved?.scrollback || null;
+    }
     if (tab) {
-      state.pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback: null });
+      state.pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback });
     }
     if (window.electronAPI) {
       window.electronAPI.terminalKill(tabId);
