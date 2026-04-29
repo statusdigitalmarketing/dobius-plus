@@ -106,6 +106,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),
   windowGetOpen: () => ipcRenderer.invoke('window:getOpen'),
   windowClose: (projectPath) => ipcRenderer.invoke('window:close', projectPath),
+  windowSetTitle: (title) => ipcRenderer.invoke('window:setTitle', title),
+
+  // Auto-updater
+  updaterCheck: () => ipcRenderer.invoke('updater:check'),
+  updaterInstall: () => ipcRenderer.invoke('updater:install'),
+  updaterGetPending: () => ipcRenderer.invoke('updater:getPending'),
+  onUpdaterStatus: (callback) => {
+    const handler = (_event, status) => callback(status);
+    ipcRenderer.on('updater:status', handler);
+    return () => ipcRenderer.removeListener('updater:status', handler);
+  },
   windowTearOffTab: (projectPath, tabId, tabLabel, screenX, screenY) =>
     ipcRenderer.invoke('window:tearOffTab', projectPath, tabId, tabLabel, screenX, screenY),
   terminalClaimPty: (tabId) => ipcRenderer.invoke('terminal:claimPty', tabId),

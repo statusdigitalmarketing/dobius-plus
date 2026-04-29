@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import ProjectView from './components/Project/ProjectView';
 import ProjectList from './components/Launcher/ProjectList';
 import ErrorBoundary from './components/shared/ErrorBoundary';
+import UpdateBanner from './components/shared/UpdateBanner';
 
 export default function App() {
   const params = new URLSearchParams(window.location.search);
@@ -52,6 +53,7 @@ export default function App() {
     return (
       <ErrorBoundary>
         <ProjectList />
+        <UpdateBanner />
       </ErrorBoundary>
     );
   }
@@ -59,6 +61,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <ProjectView projectPath={projectPath} tearOffTabId={tearOffTabId} tearOffLabel={tearOffLabel} />
+      <UpdateBanner />
     </ErrorBoundary>
   );
 }

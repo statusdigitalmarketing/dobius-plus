@@ -50,6 +50,32 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     setCurrentProjectPath(projectPath || null);
   }, [projectPath, setCurrentProjectPath]);
 
+  // Track current git branch (poll every 20s — users switch branches via terminal)
+  const currentBranch = useStore((s) => s.currentBranch);
+  const setCurrentBranch = useStore((s) => s.setCurrentBranch);
+  useEffect(() => {
+    if (!projectPath || !window.electronAPI?.gitStatus) {
+      setCurrentBranch('');
+      return;
+    }
+    let cancelled = false;
+    const refresh = () => {
+      window.electronAPI.gitStatus(projectPath).then((s) => {
+        if (!cancelled) setCurrentBranch(s?.isRepo ? (s.branch || '') : '');
+      }).catch(() => {});
+    };
+    refresh();
+    const id = setInterval(refresh, 20000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [projectPath, setCurrentBranch]);
+
+  // Push window title (shown in Mission Control / window switcher): include branch
+  useEffect(() => {
+    if (!window.electronAPI?.windowSetTitle) return;
+    const branchPart = currentBranch ? ` — ${currentBranch}` : '';
+    window.electronAPI.windowSetTitle(`${projectName}${branchPart} — Dobius+`);
+  }, [projectName, currentBranch]);
+
   // Apply theme on mount and change
   useEffect(() => {
     applyTheme(theme);

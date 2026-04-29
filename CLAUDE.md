@@ -59,9 +59,12 @@ Dobius+ is an Electron desktop app that wraps Claude Code CLI in themed terminal
 ```bash
 npm run electron:dev     # Dev mode (Vite + Electron)
 npm run build            # Build Vite frontend
-npm run electron:build   # Build .app bundle
+npm run electron:build   # Build .app bundle (signed + notarized when APPLE_* env vars set)
 ./build-and-install.sh   # Build + install to /Applications
 ```
+
+## Releasing
+See `RELEASING.md` for the full signed/notarized publish workflow (auto-update via GitHub Releases).
 
 ## Reference Code
 - Gmail Dashboard Electron patterns: `../gmail-mcp/desktop-app/electron/main.js`

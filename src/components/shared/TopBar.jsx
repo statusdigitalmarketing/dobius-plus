@@ -7,6 +7,11 @@ export default function TopBar({ projectName }) {
   const themeIndex = useStore((s) => s.themeIndex);
   const setThemeIndex = useStore((s) => s.setThemeIndex);
   const toggleSidebar = useStore((s) => s.toggleSidebar);
+  const tabs = useStore((s) => s.terminalTabs);
+  const activeTabId = useStore((s) => s.activeTabId);
+  const activeTabLabel = activeView === 'terminal'
+    ? (tabs.find((t) => t.id === activeTabId)?.label || '')
+    : '';
 
   return (
     <div
@@ -41,12 +46,18 @@ export default function TopBar({ projectName }) {
         />
       </div>
 
-      {/* Center: project name */}
+      {/* Center: project name + active tab */}
       <span
-        className="text-xs font-medium absolute left-1/2 -translate-x-1/2 max-w-48 truncate"
+        className="text-xs font-medium absolute left-1/2 -translate-x-1/2 max-w-96 truncate flex items-center gap-1.5"
         style={{ color: 'var(--dim)' }}
       >
-        {projectName || 'Dobius+'}
+        <span>{projectName || 'Dobius+'}</span>
+        {activeTabLabel && (
+          <>
+            <span style={{ opacity: 0.5 }}>·</span>
+            <span style={{ color: 'var(--fg)' }}>{activeTabLabel}</span>
+          </>
+        )}
       </span>
 
       {/* Right: theme picker */}

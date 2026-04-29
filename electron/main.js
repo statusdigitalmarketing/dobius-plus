@@ -28,6 +28,7 @@ import {
 import {
   openProjectWindow, openTornOffWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
 } from './window-manager.js';
+import { initAutoUpdater } from './auto-updater.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -524,6 +525,15 @@ function setupWindowHandlers() {
     return { ok: true };
   });
 
+  // Set this window's title from the renderer (project + branch + tab)
+  ipcMain.handle('window:setTitle', (event, title) => {
+    if (typeof title !== 'string') return { ok: false };
+    const sanitized = title.replace(/[\x00-\x1F\x7F]/g, '').slice(0, 200);
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win && !win.isDestroyed()) win.setTitle(sanitized);
+    return { ok: true };
+  });
+
   // Tab tear-off: create a new window for a dragged-out tab
   ipcMain.handle('window:tearOffTab', (_event, projectPath, tabId, tabLabel, screenX, screenY) => {
     if (!projectPath || !tabId) return { ok: false };
@@ -688,6 +698,7 @@ app.whenReady().then(() => {
   setupGitHandlers();
   setupMenu();
   createWindow();
+  initAutoUpdater();
 
   // Restore previously open project windows (Chrome-style tab restore)
   const config = loadConfig();

@@ -141,6 +141,10 @@ export const useStore = create((set, get) => ({
   },
 
   setCurrentProjectPath: (p) => set({ currentProjectPath: p }),
+
+  currentBranch: '',
+  setCurrentBranch: (b) => set({ currentBranch: b || '' }),
+
   setSessions: (sessions) => set({ sessions }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),
   setBuildComplete: (val) => set({ buildComplete: val }),
