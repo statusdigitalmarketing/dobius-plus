@@ -9,6 +9,7 @@ How to ship a signed, notarized, auto-updating release of Dobius+ to users.
 - **Auto-update** uses [`electron-updater`](https://www.electron.build/auto-update) pointed at GitHub Releases for `statusdigitalmarketing/dobius-plus`. The app checks 30s after launch and every 4 hours after that.
 - **Hardened runtime + entitlements** are in `build/entitlements.mac.plist`. Required for notarization. The entitlements allow JIT (V8), unsigned executable memory, and library validation skip (for the `node-pty` native module).
 - **DMG container signing is currently manual** — `electron-builder` v26 signs the .app inside but not the DMG wrapping it. See "Step 4" below.
+- **Artifact filenames must use `${name}` not `${productName}`** — `latest-mac.yml` writes URLs using `${name}` (`dobius-plus`), but the default `artifactName` uses `${productName}` (`Dobius+`). They never match, so auto-update downloads 404. Fixed by pinning `mac.artifactName: ${name}-${version}-${arch}-mac.${ext}` and `dmg.artifactName: ${name}-${version}.${ext}` in `electron-builder.yml`. Don't change those without verifying the YAML still matches the actual files.
 
 ## One-time setup
 
@@ -65,19 +66,19 @@ cd dist-electron
 # Sign the DMG
 codesign --sign E95B5A61D673D466CCDA22615C9BF0F061BB9F2B \
   --timestamp \
-  "Dobius+-$(node -p "require('../package.json').version")-arm64.dmg"
+  "dobius-plus-$(node -p "require('../package.json').version").dmg"
 
 # Notarize and staple
-xcrun notarytool submit "Dobius+-$(node -p "require('../package.json').version")-arm64.dmg" \
+xcrun notarytool submit "dobius-plus-$(node -p "require('../package.json').version").dmg" \
   --apple-id "$APPLE_ID" \
   --team-id "$APPLE_TEAM_ID" \
   --password "$APPLE_APP_SPECIFIC_PASSWORD" \
   --wait
 
-xcrun stapler staple "Dobius+-$(node -p "require('../package.json').version")-arm64.dmg"
+xcrun stapler staple "dobius-plus-$(node -p "require('../package.json').version").dmg"
 
 # Verify
-spctl -a -vvv -t install "Dobius+-$(node -p "require('../package.json').version")-arm64.dmg"
+spctl -a -vvv -t install "dobius-plus-$(node -p "require('../package.json').version").dmg"
 # Expected: "accepted, source=Notarized Developer ID"
 ```
 
@@ -85,7 +86,7 @@ Then re-upload the now-signed DMG to the GitHub release (it overwrites the unsig
 
 ```bash
 gh release upload "v$(node -p "require('./package.json').version")" \
-  "dist-electron/Dobius+-$(node -p "require('./package.json').version")-arm64.dmg" \
+  "dist-electron/dobius-plus-$(node -p "require('./package.json').version").dmg" \
   --clobber
 ```
 
@@ -126,14 +127,15 @@ If they never click Restart, the update installs automatically the next time the
 | `notarize: should be a boolean` | electron-builder v26 schema | Use `notarize: true`, not the object form. Team ID comes from `APPLE_TEAM_ID` env var. |
 | User sees "Apple could not verify..." after double-clicking DMG | DMG container wasn't signed/notarized (only the .app inside) | Run Step 3 above |
 | User doesn't see the update | Release is still in draft, or `latest-mac.yml` is missing from the release | Check release is published; check release assets include all three files |
+| Auto-update silently fails (downloads start, never complete) | Filename in `latest-mac.yml` doesn't match the uploaded asset (404 on download URL) | Verify with `python3 -c "import urllib.request; print(urllib.request.urlopen('https://github.com/statusdigitalmarketing/dobius-plus/releases/latest/download/latest-mac.yml').read().decode())"` then HEAD-check each `url:` field. If they 404, your `artifactName` config drifted — see Architecture note above. |
 | `GH_TOKEN` not set | Missing or expired | Regenerate at https://github.com/settings/tokens with `repo` scope |
 
 ## Build output reference
 
 After a successful build, `dist-electron/` contains:
 
-- `Dobius+-x.y.z-arm64.dmg` — the installer users download
-- `Dobius+-x.y.z-arm64-mac.zip` — used by `electron-updater` for delta updates
+- `dobius-plus-x.y.z.dmg` — the installer users download
+- `dobius-plus-x.y.z-arm64-mac.zip` — used by `electron-updater` for delta updates
 - `latest-mac.yml` — manifest the app reads to detect new versions
 - `mac-arm64/Dobius+.app` — the unpackaged app (for local testing)
 - `*.blockmap` — diff support for delta updates (optional, but ships with default config)
