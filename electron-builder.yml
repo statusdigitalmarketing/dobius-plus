@@ -12,8 +12,10 @@ mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   notarize: true
+  artifactName: ${name}-${version}-${arch}-mac.${ext}
 dmg:
   title: "Dobius+"
+  artifactName: ${name}-${version}.${ext}
   contents:
     - x: 130
       y: 220

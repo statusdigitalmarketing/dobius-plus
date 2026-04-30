@@ -103,6 +103,31 @@ const themes = [
     bg: '#C3DFD1', fg: '#1F3329', cursor: '#4A6B5C',
     accent1: '#2D6E58', accent2: '#5A8A47', accent3: '#B8860B', accent4: '#A04545',
   },
+  {
+    name: 'Blossom',
+    bg: '#F5C6CB', fg: '#4A1A22', cursor: '#8B3A4A',
+    accent1: '#B83755', accent2: '#6B7A3D', accent3: '#B8860B', accent4: '#8B2D2D',
+  },
+  {
+    name: 'Lavender',
+    bg: '#DCD0F0', fg: '#2D1B4E', cursor: '#5C447F',
+    accent1: '#5B3FA8', accent2: '#4A7B5C', accent3: '#B8860B', accent4: '#A03340',
+  },
+  {
+    name: 'Powder',
+    bg: '#C8E0EE', fg: '#1A2E40', cursor: '#4A6B85',
+    accent1: '#1F5F8B', accent2: '#2D7A5C', accent3: '#B8860B', accent4: '#B83344',
+  },
+  {
+    name: 'Butter',
+    bg: '#FFE9A8', fg: '#3D3318', cursor: '#6B5C2E',
+    accent1: '#C28A1B', accent2: '#5C7A3D', accent3: '#8B5A2B', accent4: '#A03333',
+  },
+  {
+    name: 'Peach',
+    bg: '#FFD1B8', fg: '#3D1F0F', cursor: '#6B3D24',
+    accent1: '#C45A2B', accent2: '#5F7A3D', accent3: '#B8860B', accent4: '#8B2D2D',
+  },
 ];
 
 // Add xtermTheme and CSS variables to each theme
