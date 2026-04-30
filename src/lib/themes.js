@@ -88,6 +88,21 @@ const themes = [
     bg: '#1F1410', fg: '#FF6B6B', cursor: '#FF4757',
     accent1: '#FF4757', accent2: '#FF6348', accent3: '#FFA502', accent4: '#FF7F50',
   },
+  {
+    name: 'Lagoon',
+    bg: '#0FC3C4', fg: '#0A1F20', cursor: '#00595B',
+    accent1: '#0066A3', accent2: '#008572', accent3: '#B36A00', accent4: '#C44545',
+  },
+  {
+    name: 'Linen',
+    bg: '#E0DBC4', fg: '#2B2820', cursor: '#6B5A36',
+    accent1: '#8B5A2B', accent2: '#5F7A3D', accent3: '#A6741D', accent4: '#A03333',
+  },
+  {
+    name: 'Sage',
+    bg: '#C3DFD1', fg: '#1F3329', cursor: '#4A6B5C',
+    accent1: '#2D6E58', accent2: '#5A8A47', accent3: '#B8860B', accent4: '#A04545',
+  },
 ];
 
 // Add xtermTheme and CSS variables to each theme
