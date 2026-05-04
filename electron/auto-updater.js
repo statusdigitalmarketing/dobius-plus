@@ -5,18 +5,30 @@ const { autoUpdater } = electronUpdater;
 
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 let pendingUpdate = null;
+let lastStatus = { state: 'idle' }; // last broadcast status, served on getPending for late-mounting UI
 
 function broadcast(channel, payload) {
+  if (channel === 'updater:status') lastStatus = payload;
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(channel, payload);
   }
 }
 
+async function safeCheck() {
+  broadcast('updater:status', { state: 'checking' });
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (err) {
+    broadcast('updater:status', { state: 'error', message: String(err?.message || err) });
+  }
+}
+
 export function initAutoUpdater() {
-  // Always register IPC handlers so the renderer's UpdateBanner can call them
-  // without errors in dev mode. The actual update polling only runs in packaged builds.
+  // Always register IPC handlers so the renderer can call them in any mode.
+  // The actual update logic only runs in packaged builds.
   ipcMain.handle('updater:check', () => {
-    if (app.isPackaged) autoUpdater.checkForUpdates().catch(() => {});
+    if (app.isPackaged) safeCheck();
+    else broadcast('updater:status', { state: 'error', message: 'Updates only run in packaged builds (you are running dev mode).' });
     return { ok: app.isPackaged };
   });
   ipcMain.handle('updater:install', () => {
@@ -24,6 +36,8 @@ export function initAutoUpdater() {
     return { ok: app.isPackaged && !!pendingUpdate };
   });
   ipcMain.handle('updater:getPending', () => pendingUpdate);
+  ipcMain.handle('updater:getStatus', () => lastStatus);
+  ipcMain.handle('updater:getCurrentVersion', () => app.getVersion());
 
   if (!app.isPackaged) return; // skip the rest in dev — no app-update.yml
 
@@ -60,6 +74,6 @@ export function initAutoUpdater() {
   });
 
   // First check 30s after launch (don't block startup), then every 4h
-  setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 30000);
-  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), CHECK_INTERVAL_MS);
+  setTimeout(safeCheck, 30000);
+  setInterval(safeCheck, CHECK_INTERVAL_MS);
 }

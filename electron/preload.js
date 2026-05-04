@@ -112,6 +112,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updaterCheck: () => ipcRenderer.invoke('updater:check'),
   updaterInstall: () => ipcRenderer.invoke('updater:install'),
   updaterGetPending: () => ipcRenderer.invoke('updater:getPending'),
+  updaterGetStatus: () => ipcRenderer.invoke('updater:getStatus'),
+  updaterGetCurrentVersion: () => ipcRenderer.invoke('updater:getCurrentVersion'),
   onUpdaterStatus: (callback) => {
     const handler = (_event, status) => callback(status);
     ipcRenderer.on('updater:status', handler);

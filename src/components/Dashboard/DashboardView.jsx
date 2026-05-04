@@ -16,6 +16,7 @@ import ClaudeMdEditor from './ClaudeMdEditor';
 import Settings from './Settings';
 import BoardView from './Board/BoardView';
 import OrchestratorView from './Orchestrator/OrchestratorView';
+import Updates from './Updates';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -31,6 +32,7 @@ const TABS = [
   { id: 'builds', label: 'Builds' },
   { id: 'git', label: 'Git' },
   { id: 'claudemd', label: 'CLAUDE.md' },
+  { id: 'updates', label: 'Updates' },
   { id: 'settings', label: 'Settings' },
 ];
 
@@ -48,6 +50,7 @@ const TAB_CONTENT = {
   builds: () => <BuildMonitorView />,
   git: () => <GitView />,
   claudemd: () => <ClaudeMdEditor />,
+  updates: () => <Updates />,
   settings: () => <Settings />,
 };
 
