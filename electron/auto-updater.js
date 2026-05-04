@@ -13,7 +13,19 @@ function broadcast(channel, payload) {
 }
 
 export function initAutoUpdater() {
-  if (!app.isPackaged) return; // skip in dev — no app-update.yml
+  // Always register IPC handlers so the renderer's UpdateBanner can call them
+  // without errors in dev mode. The actual update polling only runs in packaged builds.
+  ipcMain.handle('updater:check', () => {
+    if (app.isPackaged) autoUpdater.checkForUpdates().catch(() => {});
+    return { ok: app.isPackaged };
+  });
+  ipcMain.handle('updater:install', () => {
+    if (app.isPackaged && pendingUpdate) autoUpdater.quitAndInstall();
+    return { ok: app.isPackaged && !!pendingUpdate };
+  });
+  ipcMain.handle('updater:getPending', () => pendingUpdate);
+
+  if (!app.isPackaged) return; // skip the rest in dev — no app-update.yml
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -46,18 +58,6 @@ export function initAutoUpdater() {
   autoUpdater.on('error', (err) => {
     broadcast('updater:status', { state: 'error', message: String(err?.message || err) });
   });
-
-  ipcMain.handle('updater:check', () => {
-    autoUpdater.checkForUpdates().catch(() => {});
-    return { ok: true };
-  });
-
-  ipcMain.handle('updater:install', () => {
-    if (pendingUpdate) autoUpdater.quitAndInstall();
-    return { ok: !!pendingUpdate };
-  });
-
-  ipcMain.handle('updater:getPending', () => pendingUpdate);
 
   // First check 30s after launch (don't block startup), then every 4h
   setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 30000);

@@ -44,6 +44,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   const [dragOver, setDragOver] = useState(false);
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [inputExpanded, setInputExpanded] = useState(false);
   const inputRef = useRef(null);
   const searchInputRef = useRef(null);
 
@@ -369,13 +370,23 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     setHistoryIndex(-1);
   }, []);
 
-  // Resize textarea whenever input changes (handles Shift+Enter newlines, paste, history nav)
+  // Resize textarea whenever input changes (handles Shift+Enter newlines, paste, history nav).
+  // Cap is 200px collapsed, ~50vh expanded. Beyond the cap, native textarea overflow
+  // gives an internal scrollbar so users can review long input.
   useEffect(() => {
     const el = inputRef.current;
     if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
-  }, [input]);
+    const recompute = () => {
+      const cap = inputExpanded ? Math.round(window.innerHeight * 0.5) : 200;
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, cap) + 'px';
+    };
+    recompute();
+    if (inputExpanded) {
+      window.addEventListener('resize', recompute);
+      return () => window.removeEventListener('resize', recompute);
+    }
+  }, [input, inputExpanded]);
 
   const bg = theme?.background || '#0D1117';
   const fg = theme?.foreground || '#E6EDF3';
@@ -485,10 +496,32 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
             fontSize: 13,
             lineHeight: 1.4,
             resize: 'none',
-            overflow: 'hidden',
-            maxHeight: 120,
+            overflow: 'auto',
           }}
         />
+        <button
+          type="button"
+          onClick={() => {
+            setInputExpanded((v) => !v);
+            requestAnimationFrame(() => inputRef.current?.focus());
+          }}
+          title={inputExpanded ? 'Collapse input (long entries scroll inside the box)' : 'Expand input for long-form composition'}
+          aria-label={inputExpanded ? 'Collapse input' : 'Expand input'}
+          style={{
+            padding: '2px 6px',
+            fontSize: 11,
+            fontFamily: "'SF Mono', monospace",
+            color: border,
+            backgroundColor: 'transparent',
+            border: `1px solid ${border}`,
+            borderRadius: 4,
+            cursor: 'pointer',
+            marginBottom: 1,
+            lineHeight: 1,
+          }}
+        >
+          {inputExpanded ? '⌄' : '⌃'}
+        </button>
         <button
           onClick={sendCommand}
           disabled={!input.trim() || isSending}
