@@ -140,6 +140,32 @@ export function getTerminalProcess(id) {
 }
 
 /**
+ * Get the current working directory of a terminal's shell process.
+ * Uses `lsof` to query the shell PID's cwd descriptor. Returns null if the
+ * terminal doesn't exist or lsof can't determine the cwd.
+ */
+export function getTerminalCwd(id) {
+  const entry = terminals.get(id);
+  if (!entry) return null;
+  try {
+    const pid = entry.pty.pid;
+    if (typeof pid !== 'number' || pid <= 0) return null;
+    const { execFileSync } = require('child_process');
+    // -Fn prints "p<pid>\nn<cwd>" — parse the n-prefixed line
+    const out = execFileSync('lsof', ['-a', '-d', 'cwd', '-p', String(pid), '-Fn'], {
+      timeout: 1500,
+      encoding: 'utf8',
+    });
+    for (const line of out.split('\n')) {
+      if (line.startsWith('n') && line.length > 1) return line.slice(1);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Kill a specific terminal.
  */
 export function killTerminal(id) {

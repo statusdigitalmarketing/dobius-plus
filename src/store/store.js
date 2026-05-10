@@ -145,6 +145,9 @@ export const useStore = create((set, get) => ({
   currentBranch: '',
   setCurrentBranch: (b) => set({ currentBranch: b || '' }),
 
+  currentIsWorktree: false,
+  setCurrentIsWorktree: (v) => set({ currentIsWorktree: !!v }),
+
   setSessions: (sessions) => set({ sessions }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),
   setBuildComplete: (val) => set({ buildComplete: val }),

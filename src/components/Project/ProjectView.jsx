@@ -50,31 +50,49 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     setCurrentProjectPath(projectPath || null);
   }, [projectPath, setCurrentProjectPath]);
 
-  // Track current git branch (poll every 20s — users switch branches via terminal)
+  // Track active tab's git branch + worktree status. Each tab has its own
+  // shell with its own cwd — the user might `cd` into a worktree in one tab
+  // and stay on main in another. Fetches the active tab's shell cwd via lsof,
+  // then runs git status against that cwd. Re-runs on tab switch + every 20s.
   const currentBranch = useStore((s) => s.currentBranch);
   const setCurrentBranch = useStore((s) => s.setCurrentBranch);
+  const currentIsWorktree = useStore((s) => s.currentIsWorktree);
+  const setCurrentIsWorktree = useStore((s) => s.setCurrentIsWorktree);
   useEffect(() => {
     if (!projectPath || !window.electronAPI?.gitStatus) {
       setCurrentBranch('');
+      setCurrentIsWorktree(false);
       return;
     }
     let cancelled = false;
-    const refresh = () => {
-      window.electronAPI.gitStatus(projectPath).then((s) => {
-        if (!cancelled) setCurrentBranch(s?.isRepo ? (s.branch || '') : '');
-      }).catch(() => {});
+    const refresh = async () => {
+      try {
+        let cwd = null;
+        if (activeTabId && window.electronAPI?.terminalGetCwd) {
+          cwd = await window.electronAPI.terminalGetCwd(activeTabId);
+        }
+        const dir = cwd || projectPath;
+        const s = await window.electronAPI.gitStatus(dir);
+        if (cancelled) return;
+        setCurrentBranch(s?.isRepo ? (s.branch || '') : '');
+        setCurrentIsWorktree(!!s?.isWorktree);
+      } catch {
+        // Swallow — leave previous values in place
+      }
     };
     refresh();
     const id = setInterval(refresh, 20000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [projectPath, setCurrentBranch]);
+  }, [projectPath, activeTabId, setCurrentBranch, setCurrentIsWorktree]);
 
-  // Push window title (shown in Mission Control / window switcher): include branch
+  // Push window title (shown in Mission Control / window switcher).
+  // Includes branch and a "(worktree)" suffix when the active tab is in one.
   useEffect(() => {
     if (!window.electronAPI?.windowSetTitle) return;
-    const branchPart = currentBranch ? ` — ${currentBranch}` : '';
+    const wtTag = currentIsWorktree ? ' (worktree)' : '';
+    const branchPart = currentBranch ? ` — ${currentBranch}${wtTag}` : '';
     window.electronAPI.windowSetTitle(`${projectName}${branchPart} — Dobius+`);
-  }, [projectName, currentBranch]);
+  }, [projectName, currentBranch, currentIsWorktree]);
 
   // Apply theme on mount and change
   useEffect(() => {

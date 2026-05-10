@@ -36,10 +36,12 @@ export async function getGitStatus(projectDir) {
   const dir = validateDir(projectDir);
   if (!dir) return { isRepo: false };
   try {
-    const [branchOut, statusOut, aheadBehindOut] = await Promise.all([
+    const [branchOut, statusOut, aheadBehindOut, gitDirOut, commonDirOut] = await Promise.all([
       run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], dir),
       run('git', ['status', '--porcelain'], dir),
       run('git', ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'], dir).catch(() => '0\t0'),
+      run('git', ['rev-parse', '--git-dir'], dir).catch(() => ''),
+      run('git', ['rev-parse', '--git-common-dir'], dir).catch(() => ''),
     ]);
 
     const lines = statusOut.trim().split('\n').filter(Boolean);
@@ -53,6 +55,13 @@ export async function getGitStatus(projectDir) {
 
     const [ahead, behind] = aheadBehindOut.trim().split(/\s+/).map(Number);
 
+    // Worktree detection: a linked worktree's --git-dir is .git/worktrees/<name>
+    // inside the main repo, while --git-common-dir always resolves to the main
+    // .git. When the two differ, we're inside a linked worktree.
+    const gitDir = gitDirOut.trim();
+    const commonDir = commonDirOut.trim();
+    const isWorktree = !!(gitDir && commonDir && gitDir !== commonDir);
+
     return {
       isRepo: true,
       branch: branchOut.trim(),
@@ -61,6 +70,7 @@ export async function getGitStatus(projectDir) {
       staged,
       modified,
       untracked,
+      isWorktree,
     };
   } catch {
     return { isRepo: false };

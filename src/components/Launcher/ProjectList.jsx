@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import ProjectCard from './ProjectCard';
 import QuitOverlay from '../shared/QuitOverlay';
@@ -20,6 +20,13 @@ export default function ProjectList() {
   const [filter, setFilter] = useState('all');
   const [loading, setLoading] = useState(true);
   const [searchFocused, setSearchFocused] = useState(false);
+  const searchInputRef = useRef(null);
+
+  // Auto-focus the search input when the launcher opens (Cmd+N flow), so typing
+  // goes straight to the search without clicking. rAF lets the DOM settle first.
+  useEffect(() => {
+    requestAnimationFrame(() => searchInputRef.current?.focus());
+  }, []);
 
   useEffect(() => {
     if (!window.electronAPI) {
@@ -191,6 +198,7 @@ export default function ProjectList() {
             <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
           </svg>
           <input
+            ref={searchInputRef}
             type="text"
             placeholder="Search projects..."
             value={search}

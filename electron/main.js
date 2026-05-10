@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, reassignTerminal } from './terminal-manager.js';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, reassignTerminal } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -106,6 +106,10 @@ function setupTerminalHandlers() {
 
   ipcMain.handle('terminal:getProcess', (_event, id) => {
     return getTerminalProcess(id);
+  });
+
+  ipcMain.handle('terminal:getCwd', (_event, id) => {
+    return getTerminalCwd(id);
   });
 
   ipcMain.on('terminal:kill', (_event, id) => {
