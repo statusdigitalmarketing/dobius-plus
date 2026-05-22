@@ -110,7 +110,7 @@ export function createTerminal(id, cwd, webContents) {
 
 /**
  * Subscribe a sink to a terminal's output. The sink is { onData, onExit }.
- * Returns { unsubscribe, buffer } — buffer is the recent output for replay so
+ * Returns { unsubscribe, buffer }. The buffer is recent output for replay so
  * a freshly-attached client (e.g. a phone) doesn't see a blank screen.
  */
 export function subscribeTerminal(id, sink) {
