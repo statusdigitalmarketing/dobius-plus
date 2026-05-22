@@ -9,7 +9,7 @@ function basename(p) {
   return parts[parts.length - 1] || p;
 }
 
-export default function TerminalScreen({ connection, status }) {
+export default function TerminalScreen({ connection, status, onShowHistory }) {
   const [terminals, setTerminals] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -62,6 +62,7 @@ export default function TerminalScreen({ connection, status }) {
           </span>
           <span className="chevron">{switcherOpen ? '▴' : '▾'}</span>
         </button>
+        <button className="icon-btn" onClick={onShowHistory} aria-label="Chat history">☷</button>
         <button className="icon-btn" onClick={newTerminal} aria-label="New terminal">+</button>
       </header>
 

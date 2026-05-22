@@ -73,7 +73,6 @@ export default function XtermView({ connection, activeId }) {
       connection.send({ type: 'detach', id: prev });
     }
     if (activeId && activeId !== prev) {
-      termRef.current?.clear();
       termRef.current?.reset();
       connection.send({ type: 'attach', id: activeId });
       const fit = fitRef.current;

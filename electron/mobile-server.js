@@ -27,6 +27,7 @@ import {
   listTerminals, subscribeTerminal, writeTerminal,
   resizeTerminal, killTerminal, createTerminal,
 } from './terminal-manager.js';
+import { loadAllSessions, loadTranscript } from './data-service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -138,13 +139,44 @@ function handleAuthedMessage(socket, msg, subs) {
       break;
 
     case 'createTerminal': {
-      // Phase 2: phone-spawned PTY (no desktop tab yet). Desktop tab-sync
-      // lands in Phase 3 once there's a UI to drive and verify it.
+      // Phone-spawned PTY (no desktop tab). Desktop tab-sync is future work.
       const cwd = typeof msg.cwd === 'string' ? msg.cwd : os.homedir();
       const id = `term-mobile-${Date.now()}`;
       try {
         createTerminal(id, cwd, null);
         wsSend(socket, { type: 'terminalCreated', id });
+      } catch (err) {
+        wsSend(socket, { type: 'error', message: String(err?.message || err) });
+      }
+      break;
+    }
+
+    case 'listSessions':
+      loadAllSessions()
+        .then((list) => wsSend(socket, { type: 'sessions', list: list || [] }))
+        .catch((err) => wsSend(socket, { type: 'error', message: String(err?.message || err) }));
+      break;
+
+    case 'loadTranscript': {
+      const { sessionId, projectPath } = msg;
+      if (typeof sessionId !== 'string' || typeof projectPath !== 'string') break;
+      loadTranscript(sessionId, projectPath)
+        .then((entries) => wsSend(socket, { type: 'transcript', sessionId, entries: entries || [] }))
+        .catch((err) => wsSend(socket, { type: 'error', message: String(err?.message || err) }));
+      break;
+    }
+
+    case 'resumeSession': {
+      // Open a phone terminal in the session's project and resume Claude there.
+      const { sessionId, projectPath } = msg;
+      if (typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) break;
+      const cwd = typeof projectPath === 'string' ? projectPath : os.homedir();
+      const id = `term-mobile-${Date.now()}`;
+      try {
+        createTerminal(id, cwd, null);
+        wsSend(socket, { type: 'terminalCreated', id });
+        // Give the shell a beat to print its prompt before sending the command.
+        setTimeout(() => writeTerminal(id, `claude --resume ${sessionId}\r`), 700);
       } catch (err) {
         wsSend(socket, { type: 'error', message: String(err?.message || err) });
       }

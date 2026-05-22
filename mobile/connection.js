@@ -15,6 +15,7 @@ export class Connection {
     this.reconnectDelay = 1000;
     this.shouldReconnect = true;
     this._reconnectTimer = null;
+    this._pingTimer = null;
   }
 
   onMessage(cb) { this.listeners.add(cb); return () => this.listeners.delete(cb); }
@@ -36,6 +37,7 @@ export class Connection {
 
   _open() {
     clearTimeout(this._reconnectTimer);
+    this._stopPing();
     this._setStatus('connecting');
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     let ws;
@@ -48,21 +50,27 @@ export class Connection {
     this.ws = ws;
 
     ws.onopen = () => {
+      if (this.ws !== ws) return; // superseded by a newer socket
       this._setStatus('connected');
       this.send({ type: 'auth', token: this.token });
     };
 
     ws.onmessage = (e) => {
+      if (this.ws !== ws) return;
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
       if (msg.type === 'authed') {
         this.reconnectDelay = 1000;
         this._setStatus('authed');
+        this._startPing();
       }
       this._emit(msg);
     };
 
     ws.onclose = (e) => {
+      // Ignore a close from a socket we already replaced (wake() race).
+      if (this.ws !== ws) return;
+      this._stopPing();
       this._setStatus('disconnected');
       if (e.code === 4003) {
         // Token rejected: stop retrying, let the app re-pair.
@@ -74,6 +82,17 @@ export class Connection {
     };
 
     ws.onerror = () => { /* onclose handles the retry */ };
+  }
+
+  /** Keepalive: mobile NAT/carrier middleboxes drop idle sockets in ~60s. */
+  _startPing() {
+    this._stopPing();
+    this._pingTimer = setInterval(() => this.send({ type: 'ping' }), 30000);
+  }
+
+  _stopPing() {
+    clearInterval(this._pingTimer);
+    this._pingTimer = null;
   }
 
   _scheduleReconnect() {
@@ -99,6 +118,7 @@ export class Connection {
   close() {
     this.shouldReconnect = false;
     clearTimeout(this._reconnectTimer);
+    this._stopPing();
     if (this.ws) { try { this.ws.close(); } catch { /* noop */ } }
   }
 }

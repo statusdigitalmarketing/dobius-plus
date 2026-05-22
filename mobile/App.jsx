@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import Pairing from './Pairing';
 import TerminalScreen from './Terminal';
+import History from './History';
 import { Connection } from './connection';
 
 const TOKEN_KEY = 'dobius-mobile-token';
@@ -9,6 +10,7 @@ export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) || '');
   const [conn, setConn] = useState(null);
   const [status, setStatus] = useState('disconnected');
+  const [view, setView] = useState('terminal'); // 'terminal' | 'history'
 
   useEffect(() => {
     if (!token) { setConn(null); return undefined; }
@@ -50,5 +52,14 @@ export default function App() {
   if (!conn) {
     return <div className="screen center"><p className="muted">Connecting...</p></div>;
   }
-  return <TerminalScreen connection={conn} status={status} />;
+  if (view === 'history') {
+    return <History connection={conn} onBack={() => setView('terminal')} />;
+  }
+  return (
+    <TerminalScreen
+      connection={conn}
+      status={status}
+      onShowHistory={() => setView('history')}
+    />
+  );
 }
