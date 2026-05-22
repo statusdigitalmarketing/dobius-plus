@@ -28,6 +28,7 @@ directories:
   buildResources: build
 files:
   - dist/**/*
+  - dist-mobile/**/*
   - electron/**/*
   - node_modules/node-pty/**/*
   - package.json

@@ -75,6 +75,11 @@ function wsSend(socket, obj) {
  * Handle a message from an authenticated phone client. The terminal bridge:
  * the phone attaches to live PTYs, streams their output, and writes input
  * back to the same shells the desktop uses.
+ *
+ * Access policy: any paired device may input/resize/kill any terminal without
+ * a prior attach. This is intentional for a single-user personal tool (one
+ * user, one tailnet, one Mac). If multi-user pairing is ever added, this needs
+ * an attach-before-operate gate.
  */
 function handleAuthedMessage(socket, msg, subs) {
   switch (msg.type) {
@@ -92,6 +97,8 @@ function handleAuthedMessage(socket, msg, subs) {
       const sink = {
         onData: (tid, data) => wsSend(socket, { type: 'output', id: tid, data }),
         onExit: (tid, code, signal) => {
+          // onExit can fire after the socket already closed (close cleanup
+          // ran first). wsSend's readyState guard makes that a safe no-op.
           wsSend(socket, { type: 'exit', id: tid, code, signal });
           const u = subs.get(tid);
           if (u) { u(); subs.delete(tid); }

@@ -1,8 +1,11 @@
 node_modules/
 dist/
+dist-mobile/
 dist-electron/
 .DS_Store
 *.dmg
+mobile-pairing-smoketest.png
+*-smoketest.png
 .claude-backups/
 AUTONOMOUS-REPAIR.md
 scripts/supervisor.log

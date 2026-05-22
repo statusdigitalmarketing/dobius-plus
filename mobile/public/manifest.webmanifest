@@ -1,0 +1,19 @@
+{
+  "name": "Dobius+ Mobile",
+  "short_name": "Dobius+",
+  "description": "Reach your Dobius+ terminals and Claude Code chats from your phone",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0D1117",
+  "theme_color": "#0D1117",
+  "icons": [
+    {
+      "src": "./icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
