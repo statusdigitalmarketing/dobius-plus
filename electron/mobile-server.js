@@ -56,6 +56,24 @@ function getTailnetIp() {
   return null;
 }
 
+/** Find the Mac's private LAN IPv4 (10/8, 172.16/12, 192.168/16), or null. */
+function getLanIp() {
+  const ifaces = os.networkInterfaces();
+  for (const addrs of Object.values(ifaces)) {
+    for (const a of addrs || []) {
+      if (a.family === 'IPv4' && !a.internal) {
+        const [o1, o2] = a.address.split('.').map(Number);
+        if (o1 === 100 && o2 >= 64 && o2 <= 127) continue; // skip tailnet
+        const isPrivate = o1 === 10
+          || (o1 === 172 && o2 >= 16 && o2 <= 31)
+          || (o1 === 192 && o2 === 168);
+        if (isPrivate) return a.address;
+      }
+    }
+  }
+  return null;
+}
+
 function genPairingCode() {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
@@ -192,7 +210,9 @@ function handleAuthedMessage(socket, msg, subs) {
 export function getMobileServerStatus() {
   return {
     running: !!httpServer,
+    bindMode: getMobileServerConfig().bindMode || 'tailscale',
     tailnetIp: getTailnetIp(),
+    lanIp: getLanIp(),
     address: boundAddress,
     pairingCode: httpServer ? pairingCode : null,
     deviceCount: getMobileServerConfig().devices.length,
@@ -203,11 +223,18 @@ export function getMobileServerStatus() {
 export async function startMobileServer() {
   if (httpServer) return getMobileServerStatus();
 
-  const ip = getTailnetIp();
+  const cfg = getMobileServerConfig();
+  const mode = cfg.bindMode === 'lan' ? 'lan' : 'tailscale';
+  const ip = mode === 'lan' ? getLanIp() : getTailnetIp();
   if (!ip) {
-    return { running: false, error: 'No Tailscale connection found. Open Tailscale, sign in, then try again.' };
+    return {
+      running: false,
+      error: mode === 'lan'
+        ? 'No local network connection found. Connect the Mac to Wi-Fi and try again.'
+        : 'No Tailscale connection found. Open Tailscale, sign in, then try again.',
+    };
   }
-  const port = getMobileServerConfig().port || 8420;
+  const port = cfg.port || 8420;
 
   const expApp = express();
   expApp.use(express.json({ limit: '64kb' }));

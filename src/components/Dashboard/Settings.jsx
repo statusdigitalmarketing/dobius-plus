@@ -66,6 +66,13 @@ export default function Settings() {
     refreshMobile();
   }, [refreshMobile]);
 
+  const setMobileBindMode = useCallback(async (mode) => {
+    setMobileError('');
+    const status = await window.electronAPI.mobileServerSetBindMode(mode);
+    if (status?.error) setMobileError(status.error);
+    setMobileStatus(status);
+  }, []);
+
   const updateSetting = useCallback((key, value) => {
     setSettings((prev) => {
       const next = { ...prev, [key]: value };
@@ -239,12 +246,39 @@ export default function Settings() {
       <Section title="Mobile Access">
         <SettingRow
           label="Mobile Server"
-          description="Reach your terminals from your phone over Tailscale"
+          description="Reach your terminals from your phone or iPad"
         >
           <Toggle
             checked={!!mobileStatus?.running}
             onChange={(v) => { if (!mobileBusy) toggleMobileServer(v); }}
           />
+        </SettingRow>
+
+        <SettingRow
+          label="Network"
+          description={mobileStatus?.bindMode === 'lan'
+            ? 'LAN: same Wi-Fi only, simplest for testing'
+            : 'Tailscale: works anywhere, fully private'}
+        >
+          <div className="flex rounded overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+            {['tailscale', 'lan'].map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setMobileBindMode(mode)}
+                style={{
+                  padding: '4px 12px',
+                  fontSize: 11,
+                  fontFamily: "'SF Mono', monospace",
+                  color: (mobileStatus?.bindMode || 'tailscale') === mode ? 'var(--bg)' : 'var(--dim)',
+                  backgroundColor: (mobileStatus?.bindMode || 'tailscale') === mode ? 'var(--accent)' : 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                }}
+              >
+                {mode === 'lan' ? 'LAN' : 'Tailscale'}
+              </button>
+            ))}
+          </div>
         </SettingRow>
 
         {mobileError && (

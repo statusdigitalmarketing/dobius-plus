@@ -24,7 +24,7 @@ import {
   getSessionTags, setSessionTag, removeSessionTag,
   getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
   getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
-  getMobileServerConfig,
+  getMobileServerConfig, updateMobileServerConfig,
 } from './config-manager.js';
 import {
   openProjectWindow, openTornOffWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
@@ -530,6 +530,17 @@ function setupMobileServerHandlers() {
     return getMobileServerStatus();
   });
   ipcMain.handle('mobileServer:removeDevice', (_event, token) => removeMobileDevice(token));
+  ipcMain.handle('mobileServer:setBindMode', async (_event, mode) => {
+    if (mode !== 'lan' && mode !== 'tailscale') return getMobileServerStatus();
+    updateMobileServerConfig({ bindMode: mode });
+    // If the server is running, restart it so the new bind takes effect.
+    const status = getMobileServerStatus();
+    if (status.running) {
+      stopMobileServer();
+      return startMobileServer();
+    }
+    return getMobileServerStatus();
+  });
   // Device list without exposing the secret tokens.
   ipcMain.handle('mobileServer:listDevices', () => {
     return getMobileServerConfig().devices.map((d) => ({

@@ -116,6 +116,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mobileServerRegenerateCode: () => ipcRenderer.invoke('mobileServer:regenerateCode'),
   mobileServerListDevices: () => ipcRenderer.invoke('mobileServer:listDevices'),
   mobileServerRemoveDevice: (token) => ipcRenderer.invoke('mobileServer:removeDevice', token),
+  mobileServerSetBindMode: (mode) => ipcRenderer.invoke('mobileServer:setBindMode', mode),
 
   // Auto-updater
   updaterCheck: () => ipcRenderer.invoke('updater:check'),

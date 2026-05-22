@@ -22,6 +22,7 @@ const DEFAULT_CONFIG = {
   mobileServer: {
     enabled: false,
     port: 8420,
+    bindMode: 'tailscale', // 'tailscale' (remote, private) or 'lan' (same Wi-Fi)
     devices: [], // [{ token, name, pairedAt }] for paired phones
   },
 };
