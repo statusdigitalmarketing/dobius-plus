@@ -1,5 +1,5 @@
 /**
- * Mobile server — embedded HTTP + WebSocket server that bridges Dobius+ to a
+ * Mobile server: embedded HTTP + WebSocket server that bridges Dobius+ to a
  * phone PWA over the user's Tailscale tailnet.
  *
  * Phase 1: server lifecycle, Tailscale-only binding, and the pairing flow.

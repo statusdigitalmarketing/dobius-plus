@@ -22,7 +22,7 @@ const DEFAULT_CONFIG = {
   mobileServer: {
     enabled: false,
     port: 8420,
-    devices: [], // [{ token, name, pairedAt }] — paired phones
+    devices: [], // [{ token, name, pairedAt }] for paired phones
   },
 };
 
