@@ -15,14 +15,26 @@ function timeAgo(ts) {
 }
 
 export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, onCdToProject }) {
-  const { sessions, loading, search, setSearch } = useSessions();
+  const { sessions, sessionTabMap, loading, search, setSearch } = useSessions();
   const [selectedId, setSelectedId] = useState(null);
   const [previewSession, setPreviewSession] = useState(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const [closedTabsExpanded, setClosedTabsExpanded] = useState(false);
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
+  const terminalTabs = useStore((s) => s.terminalTabs);
   const searchInputRef = useRef(null);
+
+  // Resolve a session to its terminal tab's live label (Cmd+B tab badge).
+  // Stores the tabId, so a renamed tab shows its new name automatically.
+  const tabLabelFor = (sessionId) => {
+    const link = sessionTabMap?.[sessionId];
+    if (!link?.tabId) return null;
+    const open = terminalTabs.find((t) => t.id === link.tabId);
+    if (open) return open.label;
+    const closed = recentlyClosedTabs.find((c) => c.id === link.tabId);
+    return closed ? `${closed.label} (closed)` : null;
+  };
 
   // Auto-focus search on open (Sidebar mounts/unmounts with sidebarVisible).
   // setTimeout(50) rather than rAF so xterm can't steal focus on the reflow.
@@ -204,6 +216,7 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
                         session={session}
                         selected={selectedId === session.sessionId}
                         pinned
+                        tabLabel={tabLabelFor(session.sessionId)}
                         onSelect={(e) => handleClick(session, e)}
                         onTogglePin={() => onTogglePin?.(session.sessionId)}
                       />
@@ -233,6 +246,7 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
                     session={session}
                     selected={selectedId === session.sessionId}
                     pinned={false}
+                    tabLabel={tabLabelFor(session.sessionId)}
                     onSelect={(e) => handleClick(session, e)}
                     onTogglePin={() => onTogglePin?.(session.sessionId)}
                   />

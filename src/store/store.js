@@ -249,6 +249,9 @@ export const useStore = create((set, get) => ({
     set({ activeView: 'terminal' });
     const termId = get().activeTabId;
     if (!window.electronAPI || !termId) return;
+    // Tier 1 capture: link this session to the tab it is being resumed into,
+    // so the Cmd+B sidebar can show which tab the session belongs to.
+    window.electronAPI.configSetSessionTabLink?.(sessionId, termId, get().currentProjectPath);
     const cmd = `claude --resume ${sessionId}`;
     const chars = cmd.split('');
     chars.push('\r');

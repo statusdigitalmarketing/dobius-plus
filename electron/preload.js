@@ -102,6 +102,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   configGetSessionTags: () => ipcRenderer.invoke('config:getSessionTags'),
   configSetSessionTag: (sessionId, label, color) => ipcRenderer.invoke('config:setSessionTag', sessionId, label, color),
   configRemoveSessionTag: (sessionId) => ipcRenderer.invoke('config:removeSessionTag', sessionId),
+  configGetSessionTabMap: () => ipcRenderer.invoke('config:getSessionTabMap'),
+  configSetSessionTabLink: (sessionId, tabId, projectPath) => ipcRenderer.invoke('config:setSessionTabLink', sessionId, tabId, projectPath),
 
   // Window management
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),

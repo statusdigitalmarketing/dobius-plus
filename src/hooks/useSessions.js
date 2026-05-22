@@ -5,14 +5,19 @@ import { useState, useEffect, useCallback } from 'react';
  */
 export function useSessions() {
   const [sessions, setSessions] = useState([]);
+  const [sessionTabMap, setSessionTabMap] = useState({});
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
 
   const loadSessions = useCallback(async () => {
     if (!window.electronAPI) return;
     try {
-      const data = await window.electronAPI.dataLoadHistory();
+      const [data, tabMap] = await Promise.all([
+        window.electronAPI.dataLoadHistory(),
+        window.electronAPI.configGetSessionTabMap?.() ?? {},
+      ]);
       setSessions(data);
+      setSessionTabMap(tabMap || {});
     } catch (err) {
       console.warn('[useSessions] Failed to load:', err.message);
     } finally {
@@ -36,5 +41,5 @@ export function useSessions() {
       )
     : sessions;
 
-  return { sessions: filtered, allSessions: sessions, loading, search, setSearch };
+  return { sessions: filtered, allSessions: sessions, sessionTabMap, loading, search, setSearch };
 }

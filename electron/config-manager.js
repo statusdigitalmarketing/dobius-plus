@@ -12,6 +12,7 @@ const DEFAULT_CONFIG = {
   defaultTheme: 0,
   projects: {},
   pinnedSessions: [],
+  sessionTabMap: {}, // sessionId -> { tabId, projectPath, capturedAt }
   launcherBounds: null,
   settings: {
     projectScanDir: '',
@@ -48,7 +49,7 @@ export function loadConfig() {
       const content = fs.readFileSync(CONFIG_PATH, 'utf8');
       const loaded = JSON.parse(content);
       // Sanitize unsafe keys from nested objects (prototype pollution guard)
-      for (const topKey of ['agentMemory', 'sessionTags', 'projects', 'orchestrationRuns']) {
+      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns']) {
         if (loaded[topKey] && typeof loaded[topKey] === 'object') {
           for (const key of UNSAFE_KEYS) delete loaded[topKey][key];
         }
@@ -224,6 +225,64 @@ export function removeSessionTag(sessionId) {
   const config = loadConfig();
   if (config.sessionTags) {
     delete config.sessionTags[sessionId];
+    saveConfig(config);
+  }
+}
+
+// sessionTabMap links a Claude session to the terminal tab it was resumed in,
+// so the sidebar can show which tab a session belongs to. Entries older than
+// this are pruned on read to bound growth.
+const SESSION_TAB_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const TAB_ID_RE = /^term-.+-\d+$/;
+
+/**
+ * Get the sessionId → { tabId, projectPath, capturedAt } map, pruned of
+ * entries older than 30 days.
+ */
+export function getSessionTabMap() {
+  const config = loadConfig();
+  const map = config.sessionTabMap;
+  if (!map || typeof map !== 'object') return {};
+  const cutoff = Date.now() - SESSION_TAB_MAX_AGE_MS;
+  let pruned = false;
+  for (const [sid, entry] of Object.entries(map)) {
+    if (!entry || typeof entry.capturedAt !== 'number' || entry.capturedAt < cutoff) {
+      delete map[sid];
+      pruned = true;
+    }
+  }
+  if (pruned) saveConfig(config);
+  // Return a shallow copy so callers can't mutate the live config object.
+  return { ...map };
+}
+
+/**
+ * Link a session to the terminal tab it is running in.
+ */
+export function setSessionTabLink(sessionId, tabId, projectPath) {
+  if (!sessionId || typeof sessionId !== 'string' || UNSAFE_KEYS.has(sessionId)) return;
+  if (sessionId.length > 100) return;
+  if (!tabId || typeof tabId !== 'string' || !TAB_ID_RE.test(tabId)) return;
+  const config = loadConfig();
+  if (!config.sessionTabMap || typeof config.sessionTabMap !== 'object') {
+    config.sessionTabMap = {};
+  }
+  config.sessionTabMap[sessionId] = {
+    tabId,
+    projectPath: typeof projectPath === 'string' ? projectPath : '',
+    capturedAt: Date.now(),
+  };
+  saveConfig(config);
+}
+
+/**
+ * Remove a session-to-tab link.
+ */
+export function removeSessionTabLink(sessionId) {
+  if (!sessionId || typeof sessionId !== 'string') return;
+  const config = loadConfig();
+  if (config.sessionTabMap) {
+    delete config.sessionTabMap[sessionId];
     saveConfig(config);
   }
 }

@@ -1,6 +1,6 @@
 import { timeAgo } from '../../lib/time-ago';
 
-export default function ConversationCard({ session, selected, pinned, onSelect, onTogglePin }) {
+export default function ConversationCard({ session, selected, pinned, tabLabel, onSelect, onTogglePin }) {
   const projectName = session.project?.split('/').filter(Boolean).pop() || 'Unknown';
 
   return (
@@ -36,6 +36,23 @@ export default function ConversationCard({ session, selected, pinned, onSelect, 
           </div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
+          {tabLabel && (
+            <span
+              className="truncate"
+              title={`Open in ${tabLabel}`}
+              style={{
+                color: 'var(--accent)',
+                backgroundColor: 'var(--surface-hover)',
+                borderRadius: 3,
+                padding: '1px 5px',
+                fontSize: '9px',
+                fontFamily: "'SF Mono', monospace",
+                maxWidth: 90,
+              }}
+            >
+              {tabLabel}
+            </span>
+          )}
           {pinned && (
             <span
               className="w-1.5 h-1.5 rounded-full inline-block"

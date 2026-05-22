@@ -22,7 +22,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { app } from 'electron';
-import { getMobileServerConfig, updateMobileServerConfig } from './config-manager.js';
+import { getMobileServerConfig, updateMobileServerConfig, setSessionTabLink } from './config-manager.js';
 import {
   listTerminals, subscribeTerminal, writeTerminal,
   resizeTerminal, killTerminal, createTerminal,
@@ -193,6 +193,8 @@ function handleAuthedMessage(socket, msg, subs) {
       try {
         createTerminal(id, cwd, null);
         wsSend(socket, { type: 'terminalCreated', id });
+        // Link the session to this tab so the sidebar shows where it resumed.
+        setSessionTabLink(sessionId, id, cwd);
         // Give the shell a beat to print its prompt before sending the command.
         setTimeout(() => writeTerminal(id, `claude --resume ${sessionId}\r`), 700);
       } catch (err) {

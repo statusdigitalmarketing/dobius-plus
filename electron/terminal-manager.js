@@ -189,6 +189,35 @@ export function getTerminalProcess(id) {
 }
 
 /**
+ * If a terminal is running `claude --resume <id>` (or `-r <id>`), return that
+ * session id. Used to link a session to its tab even when the resume was
+ * typed manually rather than launched through the app. Returns null otherwise.
+ */
+export function getTerminalProcessArgv(id) {
+  const entry = terminals.get(id);
+  if (!entry) return null;
+  try {
+    const pid = entry.pty.pid;
+    if (typeof pid !== 'number' || pid <= 0) return null;
+    const children = execFileSync('/usr/bin/pgrep', ['-P', String(pid)], {
+      timeout: 1000,
+      encoding: 'utf8',
+    }).trim().split('\n').filter(Boolean);
+    for (const childPid of children) {
+      const cmd = execFileSync('/bin/ps', ['-o', 'command=', '-p', childPid], {
+        timeout: 1000,
+        encoding: 'utf8',
+      }).trim();
+      const m = cmd.match(/\bclaude\b.*?\s(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
+      if (m) return m[1];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Get the current working directory of a terminal's shell process.
  * Uses `lsof` to query the shell PID's cwd descriptor. Returns null if the
  * terminal doesn't exist or lsof can't determine the cwd.

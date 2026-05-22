@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, reassignTerminal } from './terminal-manager.js';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, listTerminals, reassignTerminal } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -22,6 +22,7 @@ import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig,
   getSessionTags, setSessionTag, removeSessionTag,
+  getSessionTabMap, setSessionTabLink,
   getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
   getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
   getMobileServerConfig, updateMobileServerConfig,
@@ -480,6 +481,27 @@ function setupConfigHandlers() {
   ipcMain.handle('config:getSessionTags', () => getSessionTags());
   ipcMain.handle('config:setSessionTag', (_event, sessionId, label, color) => setSessionTag(sessionId, label, color));
   ipcMain.handle('config:removeSessionTag', (_event, sessionId) => removeSessionTag(sessionId));
+  ipcMain.handle('config:getSessionTabMap', () => getSessionTabMap());
+  ipcMain.handle('config:setSessionTabLink', (_event, sessionId, tabId, projectPath) => setSessionTabLink(sessionId, tabId, projectPath));
+}
+
+// Tier 2 session-to-tab capture: every 15s, scan live terminals for a
+// `claude --resume <id>` process and link the session to its tab. Coarse
+// interval because the pgrep/ps calls block the main process briefly.
+function setupSessionTabCapture() {
+  setInterval(() => {
+    try {
+      const map = getSessionTabMap();
+      const linkedTabs = new Set(Object.values(map).map((e) => e && e.tabId));
+      for (const t of listTerminals()) {
+        if (linkedTabs.has(t.id)) continue;
+        const sessionId = getTerminalProcessArgv(t.id);
+        if (sessionId && !map[sessionId]) {
+          setSessionTabLink(sessionId, t.id, t.cwd);
+        }
+      }
+    } catch { /* best-effort */ }
+  }, 15000);
 }
 
 function setupBuildMonitorHandlers() {
@@ -743,6 +765,7 @@ app.whenReady().then(() => {
   createWindow();
   initAutoUpdater();
   maybeAutoStartMobileServer();
+  setupSessionTabCapture();
 
   // Restore previously open project windows (Chrome-style tab restore)
   const config = loadConfig();
