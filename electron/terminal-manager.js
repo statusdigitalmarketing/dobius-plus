@@ -7,9 +7,10 @@ import { app } from 'electron';
 
 const terminals = new Map();
 
-// Per-terminal rolling output buffer cap (bytes). Lets a freshly-attached
-// mobile client replay recent screen content instead of seeing a blank pane.
-const OUTPUT_BUFFER_BYTES = 64 * 1024;
+// Per-terminal rolling output buffer cap (bytes). Replayed to a freshly-
+// attached mobile client so it has real scrollback, not just the last screen.
+// 1MB is roughly 10-15k lines of terminal text.
+const OUTPUT_BUFFER_BYTES = 1024 * 1024;
 
 /**
  * Create a new terminal session.

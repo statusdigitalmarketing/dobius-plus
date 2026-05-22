@@ -20,7 +20,7 @@ export default function XtermView({ connection, activeId }) {
       fontSize: 13,
       theme: { background: '#0D1117', foreground: '#E6EDF3', cursor: '#58A6FF' },
       cursorBlink: true,
-      scrollback: 5000,
+      scrollback: 12000,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -80,7 +80,15 @@ export default function XtermView({ connection, activeId }) {
       if (fit && term) {
         try {
           fit.fit();
-          connection.send({ type: 'resize', id: activeId, cols: term.cols, rows: term.rows });
+          const { cols, rows } = term;
+          // Two resizes (rows-1 then rows) force a SIGWINCH so a TUI like
+          // Claude Code repaints its whole screen on attach. The server's
+          // replay buffer is empty for an idle or freshly-restored terminal,
+          // so without this the pane looks blank until the next keystroke.
+          connection.send({ type: 'resize', id: activeId, cols, rows: Math.max(1, rows - 1) });
+          setTimeout(() => {
+            connection.send({ type: 'resize', id: activeId, cols, rows });
+          }, 80);
         } catch { /* noop */ }
       }
       termRef.current?.focus();
