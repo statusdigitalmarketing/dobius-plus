@@ -156,7 +156,7 @@ export function openProjectWindow(projectPath) {
     y: bounds.y,
     minWidth: 900,
     minHeight: 600,
-    title: `${folderName} — Dobius+`,
+    title: `${folderName} | Dobius+`,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
     backgroundColor: '#0D1117',
@@ -197,8 +197,8 @@ export function openTornOffWindow(projectPath, tabId, tabLabel, screenX, screenY
   const existingCount = getWindowIdsForProject(projectPath).length;
   const windowNumber = existingCount + 1;
   const title = windowNumber > 1
-    ? `${folderName} (${windowNumber}) — Dobius+`
-    : `${folderName} — Dobius+`;
+    ? `${folderName} (${windowNumber}) | Dobius+`
+    : `${folderName} | Dobius+`;
 
   // Position window near the cursor, offset so title bar is under cursor
   const display = screen.getDisplayNearestPoint({ x: screenX, y: screenY });

@@ -145,6 +145,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('menu:toggle-view', handler);
     return () => ipcRenderer.removeListener('menu:toggle-view', handler);
   },
+  onLauncherFocusSearch: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('launcher:focusSearch', handler);
+    return () => ipcRenderer.removeListener('launcher:focusSearch', handler);
+  },
   onMenuToggleSidebar: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('menu:toggle-sidebar', handler);

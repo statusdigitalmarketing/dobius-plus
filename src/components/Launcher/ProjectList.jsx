@@ -22,10 +22,14 @@ export default function ProjectList() {
   const [searchFocused, setSearchFocused] = useState(false);
   const searchInputRef = useRef(null);
 
-  // Auto-focus the search input when the launcher opens (Cmd+N flow), so typing
-  // goes straight to the search without clicking. rAF lets the DOM settle first.
+  // Auto-focus the search input when the launcher opens, so typing goes straight
+  // to the search without clicking. Fires on mount (first launch) AND on the
+  // launcher:focusSearch IPC nudge (Cmd+N reshows the already-mounted window).
   useEffect(() => {
-    requestAnimationFrame(() => searchInputRef.current?.focus());
+    const focusSearch = () => setTimeout(() => searchInputRef.current?.focus(), 50);
+    focusSearch();
+    const off = window.electronAPI?.onLauncherFocusSearch?.(focusSearch);
+    return () => off?.();
   }, []);
 
   useEffect(() => {

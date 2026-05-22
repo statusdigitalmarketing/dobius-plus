@@ -90,8 +90,8 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   useEffect(() => {
     if (!window.electronAPI?.windowSetTitle) return;
     const wtTag = currentIsWorktree ? ' (worktree)' : '';
-    const branchPart = currentBranch ? ` — ${currentBranch}${wtTag}` : '';
-    window.electronAPI.windowSetTitle(`${projectName}${branchPart} — Dobius+`);
+    const branchPart = currentBranch ? ` - ${currentBranch}${wtTag}` : '';
+    window.electronAPI.windowSetTitle(`${projectName}${branchPart} | Dobius+`);
   }, [projectName, currentBranch, currentIsWorktree]);
 
   // Apply theme on mount and change

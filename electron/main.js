@@ -47,7 +47,7 @@ function createWindow() {
     y: bounds.y,
     minWidth: 900,
     minHeight: 600,
-    title: 'Dobius+ — Launcher',
+    title: 'Dobius+ Launcher',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
     backgroundColor: '#0D1117',
@@ -602,6 +602,9 @@ function setupMenu() {
             if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.show();
               mainWindow.focus();
+              // ProjectList stays mounted across show/hide, so its mount-time
+              // focus effect won't re-fire. Nudge it to focus the search input.
+              mainWindow.webContents.send('launcher:focusSearch');
             } else {
               createWindow();
             }

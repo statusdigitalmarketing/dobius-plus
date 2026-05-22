@@ -2,6 +2,7 @@ import pty from 'node-pty';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execFileSync } from 'child_process';
 import { app } from 'electron';
 
 const terminals = new Map();
@@ -119,8 +120,7 @@ export function getTerminalProcess(id) {
   try {
     const pid = entry.pty.pid;
     if (typeof pid !== 'number' || pid <= 0) return null;
-    const { execFileSync } = require('child_process');
-    const result = execFileSync('pgrep', ['-lP', String(pid)], {
+    const result = execFileSync('/usr/bin/pgrep', ['-lP', String(pid)], {
       timeout: 1000,
       encoding: 'utf8',
     }).trim();
@@ -150,9 +150,8 @@ export function getTerminalCwd(id) {
   try {
     const pid = entry.pty.pid;
     if (typeof pid !== 'number' || pid <= 0) return null;
-    const { execFileSync } = require('child_process');
-    // -Fn prints "p<pid>\nn<cwd>" — parse the n-prefixed line
-    const out = execFileSync('lsof', ['-a', '-d', 'cwd', '-p', String(pid), '-Fn'], {
+    // -Fn prints a "p<pid>" line then an "n<cwd>" line. Parse the n-prefixed one.
+    const out = execFileSync('/usr/sbin/lsof', ['-a', '-d', 'cwd', '-p', String(pid), '-Fn'], {
       timeout: 1500,
       encoding: 'utf8',
     });

@@ -24,9 +24,11 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
   const searchInputRef = useRef(null);
 
-  // Auto-focus search on open (Sidebar mounts/unmounts with sidebarVisible)
+  // Auto-focus search on open (Sidebar mounts/unmounts with sidebarVisible).
+  // setTimeout(50) rather than rAF so xterm can't steal focus on the reflow.
   useEffect(() => {
-    requestAnimationFrame(() => searchInputRef.current?.focus());
+    const t = setTimeout(() => searchInputRef.current?.focus(), 50);
+    return () => clearTimeout(t);
   }, []);
 
   const handleClick = (session, e) => {
