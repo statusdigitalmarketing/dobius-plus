@@ -7,6 +7,10 @@ import { app } from 'electron';
 
 const terminals = new Map();
 
+// Per-terminal rolling output buffer cap (bytes). Lets a freshly-attached
+// mobile client replay recent screen content instead of seeing a blank pane.
+const OUTPUT_BUFFER_BYTES = 64 * 1024;
+
 /**
  * Create a new terminal session.
  * @param {string} id — unique terminal ID
@@ -69,21 +73,65 @@ export function createTerminal(id, cwd, webContents) {
 
   term.onData((data) => {
     const entry = terminals.get(id);
-    if (entry && !entry.webContents.isDestroyed()) {
+    if (!entry) return;
+    // Desktop window (unchanged path).
+    if (entry.webContents && !entry.webContents.isDestroyed()) {
       entry.webContents.send('terminal:data', id, data);
+    }
+    // Rolling buffer so a late subscriber (phone) can replay recent output.
+    entry.outputBuffer = (entry.outputBuffer + data).slice(-OUTPUT_BUFFER_BYTES);
+    // Fan out to mobile / other subscribers.
+    for (const sub of entry.subscribers) {
+      try { sub.onData?.(id, data); } catch { /* drop bad subscriber silently */ }
     }
   });
 
   term.onExit(({ exitCode, signal }) => {
     const entry = terminals.get(id);
     terminals.delete(id);
-    if (entry && !entry.webContents.isDestroyed()) {
+    if (!entry) return;
+    if (entry.webContents && !entry.webContents.isDestroyed()) {
       entry.webContents.send('terminal:exit', id, exitCode, signal);
+    }
+    for (const sub of entry.subscribers) {
+      try { sub.onExit?.(id, exitCode, signal); } catch { /* noop */ }
     }
   });
 
-  terminals.set(id, { pty: term, webContents });
+  terminals.set(id, {
+    pty: term,
+    webContents,
+    subscribers: new Set(),
+    outputBuffer: '',
+    cwd: safeCwd,
+  });
   return { pid: term.pid };
+}
+
+/**
+ * Subscribe a sink to a terminal's output. The sink is { onData, onExit }.
+ * Returns { unsubscribe, buffer } — buffer is the recent output for replay so
+ * a freshly-attached client (e.g. a phone) doesn't see a blank screen.
+ */
+export function subscribeTerminal(id, sink) {
+  const entry = terminals.get(id);
+  if (!entry || !sink) return { unsubscribe: () => {}, buffer: '' };
+  entry.subscribers.add(sink);
+  return {
+    unsubscribe: () => { entry.subscribers.delete(sink); },
+    buffer: entry.outputBuffer,
+  };
+}
+
+/**
+ * List live terminals with their id, shell pid, and starting cwd.
+ */
+export function listTerminals() {
+  return Array.from(terminals.entries()).map(([id, entry]) => ({
+    id,
+    pid: entry.pty.pid,
+    cwd: entry.cwd,
+  }));
 }
 
 /**

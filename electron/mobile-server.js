@@ -23,11 +23,17 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { app } from 'electron';
 import { getMobileServerConfig, updateMobileServerConfig } from './config-manager.js';
+import {
+  listTerminals, subscribeTerminal, writeTerminal,
+  resizeTerminal, killTerminal, createTerminal,
+} from './terminal-manager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const MAX_PAIR_ATTEMPTS = 5;
 const AUTH_TIMEOUT_MS = 5000;
+const MAX_INPUT_BYTES = 100 * 1024;   // cap a single input message (paste)
+const MAX_WS_PAYLOAD = 1024 * 1024;   // 1MB ws frame ceiling
 
 let httpServer = null;
 let wss = null;
@@ -56,6 +62,91 @@ function genPairingCode() {
 function knownToken(token) {
   if (!token || typeof token !== 'string') return false;
   return getMobileServerConfig().devices.some((d) => d.token === token);
+}
+
+/** Send a JSON message on a WebSocket if it's still open. */
+function wsSend(socket, obj) {
+  if (socket.readyState === 1) {
+    try { socket.send(JSON.stringify(obj)); } catch { /* noop */ }
+  }
+}
+
+/**
+ * Handle a message from an authenticated phone client. The terminal bridge:
+ * the phone attaches to live PTYs, streams their output, and writes input
+ * back to the same shells the desktop uses.
+ */
+function handleAuthedMessage(socket, msg, subs) {
+  switch (msg.type) {
+    case 'ping':
+      wsSend(socket, { type: 'pong' });
+      break;
+
+    case 'listTerminals':
+      wsSend(socket, { type: 'terminals', list: listTerminals() });
+      break;
+
+    case 'attach': {
+      const id = msg.id;
+      if (typeof id !== 'string' || subs.has(id)) break;
+      const sink = {
+        onData: (tid, data) => wsSend(socket, { type: 'output', id: tid, data }),
+        onExit: (tid, code, signal) => {
+          wsSend(socket, { type: 'exit', id: tid, code, signal });
+          const u = subs.get(tid);
+          if (u) { u(); subs.delete(tid); }
+        },
+      };
+      const { unsubscribe, buffer } = subscribeTerminal(id, sink);
+      subs.set(id, unsubscribe);
+      // Replay recent output so the phone sees the current screen, not a blank.
+      if (buffer) wsSend(socket, { type: 'output', id, data: buffer, replay: true });
+      wsSend(socket, { type: 'attached', id });
+      break;
+    }
+
+    case 'detach': {
+      const u = subs.get(msg.id);
+      if (u) { u(); subs.delete(msg.id); }
+      break;
+    }
+
+    case 'input':
+      if (typeof msg.id === 'string' && typeof msg.data === 'string'
+          && msg.data.length <= MAX_INPUT_BYTES) {
+        writeTerminal(msg.id, msg.data);
+      }
+      break;
+
+    case 'resize':
+      if (typeof msg.id === 'string'
+          && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)
+          && msg.cols > 0 && msg.rows > 0) {
+        resizeTerminal(msg.id, msg.cols, msg.rows);
+      }
+      break;
+
+    case 'kill':
+      if (typeof msg.id === 'string') killTerminal(msg.id);
+      break;
+
+    case 'createTerminal': {
+      // Phase 2: phone-spawned PTY (no desktop tab yet). Desktop tab-sync
+      // lands in Phase 3 once there's a UI to drive and verify it.
+      const cwd = typeof msg.cwd === 'string' ? msg.cwd : os.homedir();
+      const id = `term-mobile-${Date.now()}`;
+      try {
+        createTerminal(id, cwd, null);
+        wsSend(socket, { type: 'terminalCreated', id });
+      } catch (err) {
+        wsSend(socket, { type: 'error', message: String(err?.message || err) });
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
 }
 
 /** Current server status, safe to expose to the renderer. */
@@ -126,10 +217,12 @@ export async function startMobileServer() {
 
   httpServer = http.createServer(expApp);
 
-  wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+  wss = new WebSocketServer({ server: httpServer, path: '/ws', maxPayload: MAX_WS_PAYLOAD });
   wss.on('connection', (socket) => {
     let authed = false;
+    const subs = new Map(); // terminalId -> unsubscribe fn
     const authTimer = setTimeout(() => { if (!authed) socket.close(4001, 'auth timeout'); }, AUTH_TIMEOUT_MS);
+
     socket.on('message', (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -137,17 +230,24 @@ export async function startMobileServer() {
         if (msg.type === 'auth' && knownToken(msg.token)) {
           authed = true;
           clearTimeout(authTimer);
-          socket.send(JSON.stringify({ type: 'authed', version: app.getVersion() }));
+          wsSend(socket, { type: 'authed', version: app.getVersion() });
         } else {
           socket.close(4003, 'unauthorized');
         }
         return;
       }
-      // Phase 2 wires the terminal protocol here.
-      if (msg.type === 'ping') socket.send(JSON.stringify({ type: 'pong' }));
+      handleAuthedMessage(socket, msg, subs);
     });
-    socket.on('close', () => clearTimeout(authTimer));
-    socket.on('error', () => clearTimeout(authTimer));
+
+    const cleanup = () => {
+      clearTimeout(authTimer);
+      for (const unsubscribe of subs.values()) {
+        try { unsubscribe(); } catch { /* noop */ }
+      }
+      subs.clear();
+    };
+    socket.on('close', cleanup);
+    socket.on('error', cleanup);
   });
 
   pairingCode = genPairingCode();
