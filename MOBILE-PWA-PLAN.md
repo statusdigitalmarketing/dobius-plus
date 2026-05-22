@@ -25,6 +25,20 @@ mobile-optimized PWA frontend.
   once and receives a long-lived device token stored in the PWA. Defense in
   depth — a bug in the token check is still contained by the tailnet boundary.
 
+## Installing on the phone / iPad
+
+No App Store. The PWA installs from the browser:
+1. Tailscale on (Mac + device).
+2. Open Safari, go to the connect URL from Settings > Mobile Access
+   (`http://<tailnet-ip>:8420`).
+3. Share > Add to Home Screen. Launches full-screen via the web manifest.
+
+Nuance: plain `http://` is not a secure context, so iOS won't register a
+service worker (offline caching) over it. The home-screen app experience works
+without one. The full-PWA upgrade is **Tailscale HTTPS** (`tailscale cert` +
+MagicDNS gives `https://<machine>.<tailnet>.ts.net` with a real cert). That is
+a v1.1 polish step, not a blocker for v1.
+
 ## Architecture
 
 ```

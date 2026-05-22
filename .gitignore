@@ -9,3 +9,4 @@ mobile-pairing-smoketest.png
 .claude-backups/
 AUTONOMOUS-REPAIR.md
 scripts/supervisor.log
+.playwright-mcp/
