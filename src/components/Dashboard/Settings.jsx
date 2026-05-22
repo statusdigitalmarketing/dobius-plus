@@ -15,6 +15,12 @@ export default function Settings() {
   const [loaded, setLoaded] = useState(false);
   const [saved, setSaved] = useState(false);
 
+  // Mobile server state
+  const [mobileStatus, setMobileStatus] = useState(null);
+  const [mobileDevices, setMobileDevices] = useState([]);
+  const [mobileBusy, setMobileBusy] = useState(false);
+  const [mobileError, setMobileError] = useState('');
+
   useEffect(() => {
     if (!window.electronAPI?.configGetSettings) return;
     window.electronAPI.configGetSettings().then((s) => {
@@ -22,6 +28,43 @@ export default function Settings() {
       setLoaded(true);
     });
   }, []);
+
+  const refreshMobile = useCallback(async () => {
+    if (!window.electronAPI?.mobileServerStatus) return;
+    const [status, devices] = await Promise.all([
+      window.electronAPI.mobileServerStatus(),
+      window.electronAPI.mobileServerListDevices(),
+    ]);
+    setMobileStatus(status);
+    setMobileDevices(devices || []);
+  }, []);
+
+  useEffect(() => { refreshMobile(); }, [refreshMobile]);
+
+  const toggleMobileServer = useCallback(async (on) => {
+    setMobileBusy(true);
+    setMobileError('');
+    try {
+      const status = on
+        ? await window.electronAPI.mobileServerStart()
+        : await window.electronAPI.mobileServerStop();
+      if (status?.error) setMobileError(status.error);
+      setMobileStatus(status);
+    } finally {
+      setMobileBusy(false);
+      refreshMobile();
+    }
+  }, [refreshMobile]);
+
+  const regenMobileCode = useCallback(async () => {
+    const status = await window.electronAPI.mobileServerRegenerateCode();
+    setMobileStatus(status);
+  }, []);
+
+  const removeMobileDevice = useCallback(async (token) => {
+    await window.electronAPI.mobileServerRemoveDevice(token);
+    refreshMobile();
+  }, [refreshMobile]);
 
   const updateSetting = useCallback((key, value) => {
     setSettings((prev) => {
@@ -190,6 +233,97 @@ export default function Settings() {
             onChange={(v) => updateSetting('sidebarDefaultOpen', v)}
           />
         </SettingRow>
+      </Section>
+
+      {/* Mobile Access */}
+      <Section title="Mobile Access">
+        <SettingRow
+          label="Mobile Server"
+          description="Reach your terminals from your phone over Tailscale"
+        >
+          <Toggle
+            checked={!!mobileStatus?.running}
+            onChange={(v) => { if (!mobileBusy) toggleMobileServer(v); }}
+          />
+        </SettingRow>
+
+        {mobileError && (
+          <div
+            className="text-xs px-3 py-2 rounded"
+            style={{ backgroundColor: 'var(--surface)', color: 'var(--danger)', border: '1px solid var(--danger)' }}
+          >
+            {mobileError}
+          </div>
+        )}
+
+        {mobileStatus?.running && (
+          <>
+            <SettingRow label="Connect URL" description="Open this on your phone (Tailscale must be on)">
+              <code
+                className="text-xs px-2 py-1 rounded select-text"
+                style={{
+                  backgroundColor: 'var(--bg)', color: 'var(--fg)',
+                  border: '1px solid var(--border)', fontFamily: "'SF Mono', monospace",
+                }}
+              >
+                {mobileStatus.address ? `http://${mobileStatus.address.host}:${mobileStatus.address.port}` : '...'}
+              </code>
+            </SettingRow>
+
+            <SettingRow label="Pairing Code" description="Enter once on the phone to pair it">
+              <div className="flex items-center gap-2">
+                <span
+                  className="px-2 py-1 rounded"
+                  style={{
+                    backgroundColor: 'var(--bg)', color: 'var(--accent)',
+                    border: '1px solid var(--border)', fontFamily: "'SF Mono', monospace",
+                    fontSize: 16, letterSpacing: '0.2em',
+                  }}
+                >
+                  {mobileStatus.pairingCode || '------'}
+                </span>
+                <button
+                  onClick={regenMobileCode}
+                  style={{
+                    padding: '4px 10px', fontSize: 11, fontFamily: "'SF Mono', monospace",
+                    color: 'var(--fg)', backgroundColor: 'var(--surface)',
+                    border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer',
+                  }}
+                >
+                  Regenerate
+                </button>
+              </div>
+            </SettingRow>
+
+            {mobileDevices.length > 0 && (
+              <div>
+                <div className="text-xs mb-1.5" style={{ color: 'var(--dim)', fontSize: 10 }}>
+                  Paired devices
+                </div>
+                <div className="space-y-1">
+                  {mobileDevices.map((d) => (
+                    <div
+                      key={d.token}
+                      className="flex items-center justify-between px-2 py-1 rounded"
+                      style={{ backgroundColor: 'var(--surface)' }}
+                    >
+                      <span className="text-xs" style={{ color: 'var(--fg)' }}>{d.name}</span>
+                      <button
+                        onClick={() => removeMobileDevice(d.token)}
+                        style={{
+                          fontSize: 10, color: 'var(--danger)', background: 'none',
+                          border: 'none', cursor: 'pointer',
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </Section>
 
       {/* Keyboard Shortcuts */}

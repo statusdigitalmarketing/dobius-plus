@@ -109,6 +109,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   windowClose: (projectPath) => ipcRenderer.invoke('window:close', projectPath),
   windowSetTitle: (title) => ipcRenderer.invoke('window:setTitle', title),
 
+  // Mobile server
+  mobileServerStart: () => ipcRenderer.invoke('mobileServer:start'),
+  mobileServerStop: () => ipcRenderer.invoke('mobileServer:stop'),
+  mobileServerStatus: () => ipcRenderer.invoke('mobileServer:status'),
+  mobileServerRegenerateCode: () => ipcRenderer.invoke('mobileServer:regenerateCode'),
+  mobileServerListDevices: () => ipcRenderer.invoke('mobileServer:listDevices'),
+  mobileServerRemoveDevice: (token) => ipcRenderer.invoke('mobileServer:removeDevice', token),
+
   // Auto-updater
   updaterCheck: () => ipcRenderer.invoke('updater:check'),
   updaterInstall: () => ipcRenderer.invoke('updater:install'),

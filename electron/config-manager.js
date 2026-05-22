@@ -19,6 +19,11 @@ const DEFAULT_CONFIG = {
     terminalFontSize: 13,
     sidebarDefaultOpen: false,
   },
+  mobileServer: {
+    enabled: false,
+    port: 8420,
+    devices: [], // [{ token, name, pairedAt }] — paired phones
+  },
 };
 
 let configCache = null;
@@ -123,6 +128,29 @@ export function updateSettings(updates) {
   config.settings = { ...DEFAULT_CONFIG.settings, ...config.settings, ...sanitized };
   saveConfig(config);
   return config.settings;
+}
+
+/**
+ * Get mobile server config (enabled state, port, paired devices).
+ */
+export function getMobileServerConfig() {
+  const config = loadConfig();
+  return { ...DEFAULT_CONFIG.mobileServer, ...config.mobileServer };
+}
+
+/**
+ * Update mobile server config (merge).
+ */
+export function updateMobileServerConfig(updates) {
+  if (!updates || typeof updates !== 'object') return getMobileServerConfig();
+  const config = loadConfig();
+  const sanitized = {};
+  for (const [key, value] of Object.entries(updates)) {
+    if (!UNSAFE_KEYS.has(key)) sanitized[key] = value;
+  }
+  config.mobileServer = { ...DEFAULT_CONFIG.mobileServer, ...config.mobileServer, ...sanitized };
+  saveConfig(config);
+  return config.mobileServer;
 }
 
 /**

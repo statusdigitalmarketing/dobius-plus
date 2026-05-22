@@ -24,11 +24,16 @@ import {
   getSessionTags, setSessionTag, removeSessionTag,
   getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
   getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
+  getMobileServerConfig,
 } from './config-manager.js';
 import {
   openProjectWindow, openTornOffWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
+import {
+  startMobileServer, stopMobileServer, getMobileServerStatus,
+  regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
+} from './mobile-server.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -516,6 +521,25 @@ function setupShellHandlers() {
   });
 }
 
+function setupMobileServerHandlers() {
+  ipcMain.handle('mobileServer:start', () => startMobileServer());
+  ipcMain.handle('mobileServer:stop', () => stopMobileServer());
+  ipcMain.handle('mobileServer:status', () => getMobileServerStatus());
+  ipcMain.handle('mobileServer:regenerateCode', () => {
+    regeneratePairingCode();
+    return getMobileServerStatus();
+  });
+  ipcMain.handle('mobileServer:removeDevice', (_event, token) => removeMobileDevice(token));
+  // Device list without exposing the secret tokens.
+  ipcMain.handle('mobileServer:listDevices', () => {
+    return getMobileServerConfig().devices.map((d) => ({
+      token: d.token, // needed so the UI can target removal
+      name: d.name,
+      pairedAt: d.pairedAt,
+    }));
+  });
+}
+
 function setupWindowHandlers() {
   ipcMain.handle('window:openProject', (_event, projectPath) => {
     const win = openProjectWindow(projectPath);
@@ -700,12 +724,14 @@ app.whenReady().then(() => {
   setupOrchestrationHandlers();
   setupFileHandlers();
   setupShellHandlers();
+  setupMobileServerHandlers();
   setupWindowHandlers();
   setupBuildMonitorHandlers();
   setupGitHandlers();
   setupMenu();
   createWindow();
   initAutoUpdater();
+  maybeAutoStartMobileServer();
 
   // Restore previously open project windows (Chrome-style tab restore)
   const config = loadConfig();
