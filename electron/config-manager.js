@@ -32,6 +32,35 @@ let configCache = null;
 let saveTimer = null;
 
 /**
+ * Drop terminalStates entries whose tab no longer exists in either the live
+ * tabs list or the closedTabs list. Orphans accumulate over time as tabs come
+ * and go; left unchecked, the config grows into the tens of MB which slows
+ * every save and load. Called once on config load.
+ */
+function pruneOrphanTerminalStates(cfg) {
+  if (!cfg || typeof cfg !== 'object' || !cfg.projects) return;
+  let prunedCount = 0;
+  for (const proj of Object.values(cfg.projects)) {
+    if (!proj || typeof proj !== 'object') continue;
+    const states = proj.terminalStates;
+    if (!states || typeof states !== 'object') continue;
+    const liveIds = new Set();
+    for (const t of (Array.isArray(proj.tabs) ? proj.tabs : [])) {
+      if (t && typeof t.id === 'string') liveIds.add(t.id);
+    }
+    for (const c of (Array.isArray(proj.closedTabs) ? proj.closedTabs : [])) {
+      if (c && typeof c.id === 'string') liveIds.add(c.id);
+    }
+    for (const tabId of Object.keys(states)) {
+      if (!liveIds.has(tabId)) { delete states[tabId]; prunedCount += 1; }
+    }
+  }
+  if (prunedCount > 0) {
+    console.log(`[config-manager] pruned ${prunedCount} orphaned terminalStates`);
+  }
+}
+
+/**
  * Atomic write — write to tmp then rename (prevents corruption on crash).
  */
 function atomicWriteSync(filePath, data) {
@@ -55,6 +84,7 @@ export function loadConfig() {
         }
       }
       configCache = { ...DEFAULT_CONFIG, ...loaded };
+      pruneOrphanTerminalStates(configCache);
     } else {
       configCache = { ...DEFAULT_CONFIG };
     }

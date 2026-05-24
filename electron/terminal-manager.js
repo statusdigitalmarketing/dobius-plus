@@ -2,7 +2,15 @@ import pty from 'node-pty';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+// Promise-based subprocess execution. Replaces the previous execFileSync
+// callers because the sync version blocks the main thread on every call,
+// which under load became a noticeable typing-latency contributor (the
+// 3s-per-tab process-detection poll in TerminalTabBar was firing ~12-30 sync
+// pgrep calls per second across many tabs).
+const execFileP = promisify(execFile);
 import { app } from 'electron';
 
 const terminals = new Map();
@@ -79,11 +87,15 @@ export function createTerminal(id, cwd, webContents) {
     if (entry.webContents && !entry.webContents.isDestroyed()) {
       entry.webContents.send('terminal:data', id, data);
     }
-    // Rolling buffer so a late subscriber (phone) can replay recent output.
-    entry.outputBuffer = (entry.outputBuffer + data).slice(-OUTPUT_BUFFER_BYTES);
-    // Fan out to mobile / other subscribers.
-    for (const sub of entry.subscribers) {
-      try { sub.onData?.(id, data); } catch { /* drop bad subscriber silently */ }
+    // Rolling buffer for late mobile subscribers, only maintained when a
+    // subscriber is actually attached. With no mobile client connected (the
+    // common case), the per-event string concat + slice is skipped entirely,
+    // which removes ~1MB-per-event allocation pressure from the hot path.
+    if (entry.subscribers.size > 0) {
+      entry.outputBuffer = (entry.outputBuffer + data).slice(-OUTPUT_BUFFER_BYTES);
+      for (const sub of entry.subscribers) {
+        try { sub.onData?.(id, data); } catch { /* drop bad subscriber silently */ }
+      }
     }
   });
 
@@ -163,21 +175,21 @@ export function resizeTerminal(id, cols, rows) {
  * Check if a terminal has a busy child process (not just the shell).
  * Returns the process name if busy, or null if idle.
  */
-export function getTerminalProcess(id) {
+export async function getTerminalProcess(id) {
   const entry = terminals.get(id);
   if (!entry) return null;
   try {
     const pid = entry.pty.pid;
     if (typeof pid !== 'number' || pid <= 0) return null;
-    const result = execFileSync('/usr/bin/pgrep', ['-lP', String(pid)], {
+    const { stdout } = await execFileP('/usr/bin/pgrep', ['-lP', String(pid)], {
       timeout: 1000,
       encoding: 'utf8',
-    }).trim();
+    });
+    const result = stdout.trim();
     if (!result) return null;
-    // pgrep -lP returns lines like "12345 claude" — extract process names
+    // pgrep -lP returns lines like "12345 claude"
     const lines = result.split('\n').filter(Boolean);
     if (lines.length === 0) return null;
-    // Return the first non-shell child process name
     for (const line of lines) {
       const name = line.trim().split(/\s+/).slice(1).join(' ');
       if (name && name !== 'zsh' && name !== 'bash' && name !== 'sh') return name;
@@ -193,22 +205,23 @@ export function getTerminalProcess(id) {
  * session id. Used to link a session to its tab even when the resume was
  * typed manually rather than launched through the app. Returns null otherwise.
  */
-export function getTerminalProcessArgv(id) {
+export async function getTerminalProcessArgv(id) {
   const entry = terminals.get(id);
   if (!entry) return null;
   try {
     const pid = entry.pty.pid;
     if (typeof pid !== 'number' || pid <= 0) return null;
-    const children = execFileSync('/usr/bin/pgrep', ['-P', String(pid)], {
+    const { stdout: pgrepOut } = await execFileP('/usr/bin/pgrep', ['-P', String(pid)], {
       timeout: 1000,
       encoding: 'utf8',
-    }).trim().split('\n').filter(Boolean);
+    });
+    const children = pgrepOut.trim().split('\n').filter(Boolean);
     for (const childPid of children) {
-      const cmd = execFileSync('/bin/ps', ['-o', 'command=', '-p', childPid], {
+      const { stdout: psOut } = await execFileP('/bin/ps', ['-o', 'command=', '-p', childPid], {
         timeout: 1000,
         encoding: 'utf8',
-      }).trim();
-      const m = cmd.match(/\bclaude\b.*?\s(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
+      });
+      const m = psOut.trim().match(/\bclaude\b.*?\s(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
       if (m) return m[1];
     }
     return null;
@@ -222,18 +235,18 @@ export function getTerminalProcessArgv(id) {
  * Uses `lsof` to query the shell PID's cwd descriptor. Returns null if the
  * terminal doesn't exist or lsof can't determine the cwd.
  */
-export function getTerminalCwd(id) {
+export async function getTerminalCwd(id) {
   const entry = terminals.get(id);
   if (!entry) return null;
   try {
     const pid = entry.pty.pid;
     if (typeof pid !== 'number' || pid <= 0) return null;
     // -Fn prints a "p<pid>" line then an "n<cwd>" line. Parse the n-prefixed one.
-    const out = execFileSync('/usr/sbin/lsof', ['-a', '-d', 'cwd', '-p', String(pid), '-Fn'], {
+    const { stdout } = await execFileP('/usr/sbin/lsof', ['-a', '-d', 'cwd', '-p', String(pid), '-Fn'], {
       timeout: 1500,
       encoding: 'utf8',
     });
-    for (const line of out.split('\n')) {
+    for (const line of stdout.split('\n')) {
       if (line.startsWith('n') && line.length > 1) return line.slice(1);
     }
     return null;

@@ -486,16 +486,17 @@ function setupConfigHandlers() {
 }
 
 // Tier 2 session-to-tab capture: every 15s, scan live terminals for a
-// `claude --resume <id>` process and link the session to its tab. Coarse
-// interval because the pgrep/ps calls block the main process briefly.
+// `claude --resume <id>` process and link the session to its tab.
+// getTerminalProcessArgv is async (non-blocking execFile), so the main
+// thread isn't held during the per-terminal pgrep/ps round-trips.
 function setupSessionTabCapture() {
-  setInterval(() => {
+  setInterval(async () => {
     try {
       const map = getSessionTabMap();
       const linkedTabs = new Set(Object.values(map).map((e) => e && e.tabId));
       for (const t of listTerminals()) {
         if (linkedTabs.has(t.id)) continue;
-        const sessionId = getTerminalProcessArgv(t.id);
+        const sessionId = await getTerminalProcessArgv(t.id);
         if (sessionId && !map[sessionId]) {
           setSessionTabLink(sessionId, t.id, t.cwd);
         }

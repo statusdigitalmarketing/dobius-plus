@@ -268,7 +268,9 @@ export default function TerminalTabBar() {
       setTabProcesses(result);
     };
     poll();
-    const interval = setInterval(poll, 3000);
+    // 10s, not 3s: under many tabs/windows the per-tab IPC + main-process
+    // pgrep added measurable load. Status badges aren't time-critical.
+    const interval = setInterval(poll, 10000);
     return () => clearInterval(interval);
   }, [tabs]);
 
