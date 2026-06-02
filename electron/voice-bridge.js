@@ -114,6 +114,43 @@ function handleTabList(_req, res) {
   return sendJson(res, 200, { ok: true, tabs: listTerminals() });
 }
 
+// --- Phase 2: work registry endpoints ----------------------------------
+// Lazy import to dodge circular dep: work-registry imports imessage-bridge
+// which imports voice-bridge.
+let workRegistry = null;
+async function getWorkRegistry() {
+  if (!workRegistry) workRegistry = await import('./work-registry.js');
+  return workRegistry;
+}
+
+async function handleTrackWork(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  const reg = await getWorkRegistry();
+  const result = reg.registerWork(body || {});
+  return sendJson(res, result.ok ? 200 : 400, result);
+}
+
+async function handleGetStatus(req, res) {
+  let body;
+  try { body = await readJsonBody(req); } catch { body = {}; }
+  const reg = await getWorkRegistry();
+  const target = body?.target;
+  const snapshot = reg.formatStatusSnapshot(target);
+  const list = reg.getStatus(target);
+  return sendJson(res, 200, { ok: true, snapshot, count: list.length });
+}
+
+async function handleMarkDone(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  const reg = await getWorkRegistry();
+  const result = reg.markDone(body?.workId, body?.summary, body?.status);
+  return sendJson(res, result.ok ? 200 : 400, result);
+}
+
 // Per-request reply table. Each voice intent gets a unique requestId; the
 // Conductor must echo that id back in `dobius-reply <id> "<message>"`. The
 // matching /voice/reply long-poll reads from this map by id. Critical
@@ -246,6 +283,9 @@ function handleRequest(req, res) {
   if (req.url === '/tabList') return handleTabList(req, res);
   if (req.url === '/setReply') return handleSetReply(req, res);
   if (req.url === '/getReply') return handleGetReply(req, res);
+  if (req.url === '/trackWork') return handleTrackWork(req, res);
+  if (req.url === '/getStatus') return handleGetStatus(req, res);
+  if (req.url === '/markDone') return handleMarkDone(req, res);
   res.writeHead(404);
   res.end();
 }
@@ -302,11 +342,14 @@ export function stopVoiceBridge() {
 
 // --- CLI script auto-install ---------------------------------------------
 
-const CLI_VERSION = 3;
+const CLI_VERSION = 4;
 const CLI_DIR = path.join(os.homedir(), '.local', 'bin');
 const CLI_PATH = path.join(CLI_DIR, 'dobius-send');
 const CLI_TABS_PATH = path.join(CLI_DIR, 'dobius-tabs');
 const CLI_REPLY_PATH = path.join(CLI_DIR, 'dobius-reply');
+const CLI_TRACK_PATH = path.join(CLI_DIR, 'dobius-track');
+const CLI_STATUS_PATH = path.join(CLI_DIR, 'dobius-status');
+const CLI_MARKDONE_PATH = path.join(CLI_DIR, 'dobius-mark-done');
 const CLI_MARKER = `# dobius-cli v${CLI_VERSION}`;
 
 // All CLI scripts read the bridge token from a 0o600 file in userData and
@@ -372,6 +415,65 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/setReply" \\
   >/dev/null
 `;
 
+const CLI_TRACK_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Register a dispatched work item with the registry. Conductor calls this
+# right after dobius-send so the registry can auto-text Sam when the work
+# completes (tab exits). The requestId ties final-reports back to the
+# original iMessage thread; pass the same [req-XXXX] id from your input.
+# Usage: dobius-track <workId> <tabId> <requestId> "<description>"
+set -e
+if [ $# -lt 4 ]; then
+  echo "usage: dobius-track <workId> <tabId> <requestId> <description>" >&2
+  exit 1
+fi
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-track: bridge token unreadable" >&2; exit 2; }
+WORK_ID="$1"; TAB_ID="$2"; REQUEST_ID="$3"; shift 3
+DESCRIPTION="$*"
+curl -fsS -X POST "http://127.0.0.1:${PORT}/trackWork" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "tabId": sys.argv[2], "requestId": sys.argv[3], "description": sys.argv[4]}))' "$WORK_ID" "$TAB_ID" "$REQUEST_ID" "$DESCRIPTION")"
+`;
+
+const CLI_STATUS_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Query work-registry. Returns a short snapshot suitable for an iMessage reply.
+# Conductor calls this when Sam asks "how's X going" — pipe the snapshot into
+# dobius-reply.
+# Usage: dobius-status [target]      (target is workId, project name substring, or empty for all)
+set -e
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-status: bridge token unreadable" >&2; exit 2; }
+TARGET="$*"
+curl -fsS -X POST "http://127.0.0.1:${PORT}/getStatus" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"target": sys.argv[1]}))' "$TARGET")" \\
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("snapshot",""))'
+`;
+
+const CLI_MARKDONE_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Manually mark a work item as done. Use when the tracked tab won't exit
+# (e.g. a long Claude session you observed completing in the output) so the
+# final-report iMessage still fires.
+# Usage: dobius-mark-done <workId> "<summary>" [status]    (status: completed|failed|cancelled, default completed)
+set -e
+if [ $# -lt 2 ]; then
+  echo "usage: dobius-mark-done <workId> <summary> [status]" >&2
+  exit 1
+fi
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-mark-done: bridge token unreadable" >&2; exit 2; }
+WORK_ID="$1"; SUMMARY="$2"; STATUS="${3-completed}"
+curl -fsS -X POST "http://127.0.0.1:${PORT}/markDone" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "summary": sys.argv[2], "status": sys.argv[3]}))' "$WORK_ID" "$SUMMARY" "$STATUS")"
+`;
+
 /**
  * Write the dobius-send / dobius-tabs scripts to ~/.local/bin if missing or
  * if the marker version doesn't match. Idempotent + cheap to run on boot.
@@ -382,6 +484,9 @@ function installCliScript() {
     writeIfChanged(CLI_PATH, CLI_SEND_SCRIPT);
     writeIfChanged(CLI_TABS_PATH, CLI_TABS_SCRIPT);
     writeIfChanged(CLI_REPLY_PATH, CLI_REPLY_SCRIPT);
+    writeIfChanged(CLI_TRACK_PATH, CLI_TRACK_SCRIPT);
+    writeIfChanged(CLI_STATUS_PATH, CLI_STATUS_SCRIPT);
+    writeIfChanged(CLI_MARKDONE_PATH, CLI_MARKDONE_SCRIPT);
   } catch (err) {
     console.warn(`[voice-bridge] CLI install failed: ${err.message}`);
   }

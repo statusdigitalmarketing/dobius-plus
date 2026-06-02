@@ -37,6 +37,9 @@ const DEFAULT_CONFIG = {
     selfHandle: null,            // Sam's own iMessage handle (email or phone) — required
     lastSeenRowid: 0,            // chat.db ROWID high-water mark for restart safety
   },
+  workRegistry: {
+    items: [],                   // capped at 200 entries (FIFO), see work-registry.js
+  },
 };
 
 let configCache = null;
@@ -190,7 +193,7 @@ export function loadConfig() {
       const content = fs.readFileSync(CONFIG_PATH, 'utf8');
       const loaded = JSON.parse(content);
       // Sanitize unsafe keys from nested objects (prototype pollution guard)
-      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns', 'imessageBridge']) {
+      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns', 'imessageBridge', 'workRegistry']) {
         if (loaded[topKey] && typeof loaded[topKey] === 'object') {
           for (const key of UNSAFE_KEYS) delete loaded[topKey][key];
         }
