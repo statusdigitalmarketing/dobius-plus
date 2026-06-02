@@ -252,6 +252,55 @@ async function handleAsanaListAllowed(_req, res) {
   }
 }
 
+// --- Phase 5: scheduled-tasks endpoints + handoff -----------------------
+
+async function handleListScheduled(_req, res) {
+  try {
+    const s = await import('./scheduled-tasks.js');
+    return sendJson(res, 200, { ok: true, tasks: s.listScheduledTasks() });
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
+async function handleUpdateScheduled(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  try {
+    const s = await import('./scheduled-tasks.js');
+    const result = s.updateScheduledTask(body?.id, body?.patch || {});
+    return sendJson(res, result.ok ? 200 : 400, result);
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
+// Handoff: write `context` to the target tab, also write a short ack to the
+// source tab so it knows the handoff landed. Conductor uses this to chain
+// work across agents (e.g. "review tab found a bug -> hand to b2b tab to fix").
+async function handleHandoff(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  const { fromTabId, toTabId, context } = body || {};
+  if (typeof toTabId !== 'string' || !/^term-.+-\d+$/.test(toTabId)) {
+    return sendJson(res, 400, { ok: false, error: 'toTabId malformed' });
+  }
+  if (typeof context !== 'string' || !context.trim()) {
+    return sendJson(res, 400, { ok: false, error: 'context required' });
+  }
+  // Write context (chunked) to the target.
+  const CHUNK = 256;
+  for (let i = 0; i < context.length; i += CHUNK) writeTerminal(toTabId, context.slice(i, i + CHUNK));
+  writeTerminal(toTabId, '\r');
+  // Echo a one-liner back to source so it shows up there too.
+  if (typeof fromTabId === 'string' && /^term-.+-\d+$/.test(fromTabId)) {
+    writeTerminal(fromTabId, `# handoff to ${toTabId} sent\r`);
+  }
+  return sendJson(res, 200, { ok: true });
+}
+
 // Per-request reply table. Each voice intent gets a unique requestId; the
 // Conductor must echo that id back in `dobius-reply <id> "<message>"`. The
 // matching /voice/reply long-poll reads from this map by id. Critical
@@ -394,6 +443,9 @@ function handleRequest(req, res) {
   if (req.url === '/asana/fetch') return handleAsanaFetch(req, res);
   if (req.url === '/asana/allow') return handleAsanaAllow(req, res);
   if (req.url === '/asana/listAllowed') return handleAsanaListAllowed(req, res);
+  if (req.url === '/scheduled/list') return handleListScheduled(req, res);
+  if (req.url === '/scheduled/update') return handleUpdateScheduled(req, res);
+  if (req.url === '/handoff') return handleHandoff(req, res);
   res.writeHead(404);
   res.end();
 }
@@ -450,7 +502,7 @@ export function stopVoiceBridge() {
 
 // --- CLI script auto-install ---------------------------------------------
 
-const CLI_VERSION = 6;
+const CLI_VERSION = 7;
 const CLI_DIR = path.join(os.homedir(), '.local', 'bin');
 const CLI_PATH = path.join(CLI_DIR, 'dobius-send');
 const CLI_TABS_PATH = path.join(CLI_DIR, 'dobius-tabs');
@@ -465,6 +517,8 @@ const CLI_ASANA_FETCH_PATH = path.join(CLI_DIR, 'dobius-asana-fetch');
 const CLI_ASANA_ALLOW_PATH = path.join(CLI_DIR, 'dobius-asana-allow');
 const CLI_ASANA_LIST_PATH = path.join(CLI_DIR, 'dobius-asana-list-allowed');
 const CLI_CONFIRM_PATH = path.join(CLI_DIR, 'dobius-confirm');
+const CLI_HANDOFF_PATH = path.join(CLI_DIR, 'dobius-handoff');
+const CLI_SCHEDULED_PATH = path.join(CLI_DIR, 'dobius-scheduled');
 const CLI_MARKER = `# dobius-cli v${CLI_VERSION}`;
 
 // All CLI scripts read the bridge token from a 0o600 file in userData and
@@ -721,6 +775,47 @@ curl -fsS --max-time 320 -X POST "http://127.0.0.1:${PORT}/ask" \\
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("answer") or "")'
 `;
 
+const CLI_HANDOFF_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Hand off context from one Dobius+ tab to another. The target tab receives
+# the context as its next input + a carriage return. The source tab gets a
+# one-line echo so it knows the handoff landed.
+# Usage: dobius-handoff <fromTabId> <toTabId> "<context message>"
+set -e
+[ $# -ge 3 ] || { echo "usage: dobius-handoff <fromTabId> <toTabId> <context>" >&2; exit 1; }
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-handoff: bridge token unreadable" >&2; exit 2; }
+FROM="$1"; TO="$2"; shift 2
+CONTEXT="$*"
+curl -fsS -X POST "http://127.0.0.1:${PORT}/handoff" \\
+  -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"fromTabId": sys.argv[1], "toTabId": sys.argv[2], "context": sys.argv[3]}))' "$FROM" "$TO" "$CONTEXT")"
+`;
+
+const CLI_SCHEDULED_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Manage proactive scheduled checkpoints (morning brief, end-of-day, etc).
+# Usage: dobius-scheduled list
+#        dobius-scheduled enable <id>
+#        dobius-scheduled disable <id>
+set -e
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-scheduled: bridge token unreadable" >&2; exit 2; }
+case "\${1-list}" in
+  list)
+    curl -fsS -X POST "http://127.0.0.1:${PORT}/scheduled/list" \\
+      -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{}" \\
+      | python3 -c 'import json,sys; d=json.load(sys.stdin); [print("[{}]".format("x" if t["enabled"] else " "), t["id"], "-", t.get("prompt","")[:60]) for t in d.get("tasks",[])]'
+    ;;
+  enable|disable)
+    ACTION="\$1"; [ $# -ge 2 ] || { echo "usage: dobius-scheduled \$ACTION <id>" >&2; exit 1; }
+    ENABLED=\$([ "\$ACTION" = "enable" ] && echo true || echo false)
+    curl -fsS -X POST "http://127.0.0.1:${PORT}/scheduled/update" \\
+      -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+      --data-binary "{\\\"id\\\": \\\"\$2\\\", \\\"patch\\\": {\\\"enabled\\\": \$ENABLED}}"
+    ;;
+  *) echo "usage: dobius-scheduled list | enable <id> | disable <id>" >&2; exit 1 ;;
+esac
+`;
+
 /**
  * Write the dobius-send / dobius-tabs scripts to ~/.local/bin if missing or
  * if the marker version doesn't match. Idempotent + cheap to run on boot.
@@ -741,6 +836,8 @@ function installCliScript() {
     writeIfChanged(CLI_ASANA_ALLOW_PATH, CLI_ASANA_ALLOW_SCRIPT);
     writeIfChanged(CLI_ASANA_LIST_PATH, CLI_ASANA_LIST_SCRIPT);
     writeIfChanged(CLI_CONFIRM_PATH, CLI_CONFIRM_SCRIPT);
+    writeIfChanged(CLI_HANDOFF_PATH, CLI_HANDOFF_SCRIPT);
+    writeIfChanged(CLI_SCHEDULED_PATH, CLI_SCHEDULED_SCRIPT);
   } catch (err) {
     console.warn(`[voice-bridge] CLI install failed: ${err.message}`);
   }

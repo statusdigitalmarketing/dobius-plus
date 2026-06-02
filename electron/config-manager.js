@@ -200,7 +200,7 @@ export function loadConfig() {
       const content = fs.readFileSync(CONFIG_PATH, 'utf8');
       const loaded = JSON.parse(content);
       // Sanitize unsafe keys from nested objects (prototype pollution guard)
-      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns', 'imessageBridge', 'workRegistry', 'asanaQueue']) {
+      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns', 'imessageBridge', 'workRegistry', 'asanaQueue', 'scheduledTasks']) {
         if (loaded[topKey] && typeof loaded[topKey] === 'object') {
           for (const key of UNSAFE_KEYS) delete loaded[topKey][key];
         }

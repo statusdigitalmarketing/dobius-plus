@@ -42,6 +42,7 @@ import {
   startImessageBridge, stopImessageBridge, restartImessageBridge,
   sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus,
 } from './imessage-bridge.js';
+import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { getImessageBridge, updateImessageBridge } from './config-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -909,6 +910,9 @@ app.whenReady().then(() => {
   // iMessage transport — drives Conductor via text-yourself commands.
   // No-op until the user enables it + sets selfHandle in Settings.
   startImessageBridge();
+  // Scheduled checkpoints — all defaults disabled; Sam toggles via
+  // `dobius-scheduled enable <id>`.
+  startScheduledTasks();
 
   // Restore previously open project windows (Chrome-style tab restore)
   const config = loadConfig();
@@ -947,6 +951,7 @@ app.on('before-quit', (e) => {
     stopAllBuildWatchers();
     stopVoiceBridge();
     stopImessageBridge();
+    stopScheduledTasks();
     return;
   }
 
