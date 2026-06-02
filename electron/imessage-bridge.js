@@ -205,6 +205,19 @@ async function pollNewMessages() {
       }
       const command = trimmed.slice(cfg.triggerPrefix.length).trim();
       if (!command) continue;
+      // Phase 3: if the Conductor has a pending askSam, this incoming text
+      // is the answer to it — resolve there instead of starting a new turn.
+      // Lazy-imported to avoid circular dep (conversation-router imports
+      // imessage-bridge for sendImessageToSelf).
+      try {
+        const router = await import('./conversation-router.js');
+        if (router.tryResolvePending(command)) {
+          console.log('[imessage-bridge] resolved pending askSam');
+          continue;
+        }
+      } catch (err) {
+        console.warn(`[imessage-bridge] conversation-router import failed: ${err.message}`);
+      }
       handleCommand(command).catch((err) => {
         console.warn(`[imessage-bridge] handleCommand failed: ${err.message}`);
       });

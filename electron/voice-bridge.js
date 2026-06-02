@@ -151,6 +151,67 @@ async function handleMarkDone(req, res) {
   return sendJson(res, result.ok ? 200 : 400, result);
 }
 
+// --- Phase 3: spawn + lead-tab + ask endpoints --------------------------
+// Built-in agents come from main.js — set by setBuiltinAgents below at boot.
+let builtinAgentsRef = [];
+export function setBuiltinAgents(arr) { builtinAgentsRef = Array.isArray(arr) ? arr : []; }
+
+async function handleSpawn(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  try {
+    const spawner = await import('./agent-spawner.js');
+    const result = await spawner.spawnAgent({
+      projectPath: body?.projectPath,
+      agentId: body?.agentId,
+      initialPrompt: body?.initialPrompt,
+      builtinAgents: builtinAgentsRef,
+    });
+    return sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    return sendJson(res, 400, { ok: false, error: err.message });
+  }
+}
+
+async function handleAsk(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  try {
+    const router = await import('./conversation-router.js');
+    const result = await router.askSam(body?.question, body?.timeoutMs);
+    return sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
+async function handleSetLeadTab(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  try {
+    const spawner = await import('./agent-spawner.js');
+    const result = spawner.setLeadTab(body?.projectPath, body?.tabId ?? null);
+    return sendJson(res, result.ok ? 200 : 400, result);
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
+async function handleGetLeadTab(req, res) {
+  let body;
+  try { body = await readJsonBody(req); } catch { body = {}; }
+  try {
+    const spawner = await import('./agent-spawner.js');
+    const leadTabId = spawner.getLeadTab(body?.projectPath);
+    return sendJson(res, 200, { ok: true, leadTabId });
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
 // Per-request reply table. Each voice intent gets a unique requestId; the
 // Conductor must echo that id back in `dobius-reply <id> "<message>"`. The
 // matching /voice/reply long-poll reads from this map by id. Critical
@@ -286,6 +347,10 @@ function handleRequest(req, res) {
   if (req.url === '/trackWork') return handleTrackWork(req, res);
   if (req.url === '/getStatus') return handleGetStatus(req, res);
   if (req.url === '/markDone') return handleMarkDone(req, res);
+  if (req.url === '/spawn') return handleSpawn(req, res);
+  if (req.url === '/ask') return handleAsk(req, res);
+  if (req.url === '/setLeadTab') return handleSetLeadTab(req, res);
+  if (req.url === '/getLeadTab') return handleGetLeadTab(req, res);
   res.writeHead(404);
   res.end();
 }
@@ -342,7 +407,7 @@ export function stopVoiceBridge() {
 
 // --- CLI script auto-install ---------------------------------------------
 
-const CLI_VERSION = 4;
+const CLI_VERSION = 5;
 const CLI_DIR = path.join(os.homedir(), '.local', 'bin');
 const CLI_PATH = path.join(CLI_DIR, 'dobius-send');
 const CLI_TABS_PATH = path.join(CLI_DIR, 'dobius-tabs');
@@ -350,6 +415,9 @@ const CLI_REPLY_PATH = path.join(CLI_DIR, 'dobius-reply');
 const CLI_TRACK_PATH = path.join(CLI_DIR, 'dobius-track');
 const CLI_STATUS_PATH = path.join(CLI_DIR, 'dobius-status');
 const CLI_MARKDONE_PATH = path.join(CLI_DIR, 'dobius-mark-done');
+const CLI_SPAWN_PATH = path.join(CLI_DIR, 'dobius-spawn');
+const CLI_ASK_PATH = path.join(CLI_DIR, 'dobius-ask');
+const CLI_LEADTAB_PATH = path.join(CLI_DIR, 'dobius-lead-tab');
 const CLI_MARKER = `# dobius-cli v${CLI_VERSION}`;
 
 // All CLI scripts read the bridge token from a 0o600 file in userData and
@@ -474,6 +542,80 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/markDone" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "summary": sys.argv[2], "status": sys.argv[3]}))' "$WORK_ID" "$SUMMARY" "$STATUS")"
 `;
 
+const CLI_SPAWN_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Spawn a fresh Claude agent in a Dobius+ tab. Gated by askSam — Sam gets
+# an iMessage prompt to confirm before the spawn fires.
+# Usage: dobius-spawn <projectPath> <agentId> ["<initial prompt>"]
+set -e
+if [ $# -lt 2 ]; then
+  echo "usage: dobius-spawn <projectPath> <agentId> [initial prompt]" >&2
+  exit 1
+fi
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-spawn: bridge token unreadable" >&2; exit 2; }
+PROJECT="$1"; AGENT="$2"; shift 2
+INITIAL="$*"
+curl -fsS -X POST "http://127.0.0.1:${PORT}/spawn" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "agentId": sys.argv[2], "initialPrompt": sys.argv[3]}))' "$PROJECT" "$AGENT" "$INITIAL")"
+`;
+
+const CLI_ASK_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Ask Sam a question via iMessage and wait up to 5 min for his reply.
+# Blocks until Sam responds or timeout. Conductor uses this to gate any
+# irreversible / external-visible action (push, delete, asana comment).
+# Usage: dobius-ask "<question>"
+set -e
+if [ $# -lt 1 ]; then
+  echo "usage: dobius-ask <question>" >&2
+  exit 1
+fi
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-ask: bridge token unreadable" >&2; exit 2; }
+QUESTION="$*"
+curl -fsS --max-time 320 -X POST "http://127.0.0.1:${PORT}/ask" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"question": sys.argv[1]}))' "$QUESTION")" \\
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("answer") or ("(timeout)" if d.get("timedOut") else ""))'
+`;
+
+const CLI_LEADTAB_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Get or set the lead tab for a project. Lead tab = Conductor routes new
+# work there instead of asking to spawn a fresh agent each time.
+# Usage: dobius-lead-tab get <projectPath>
+#        dobius-lead-tab set <projectPath> <tabId>
+#        dobius-lead-tab clear <projectPath>
+set -e
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-lead-tab: bridge token unreadable" >&2; exit 2; }
+case "\${1-}" in
+  get)
+    [ $# -ge 2 ] || { echo "usage: dobius-lead-tab get <projectPath>" >&2; exit 1; }
+    curl -fsS -X POST "http://127.0.0.1:${PORT}/getLeadTab" \\
+      -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+      --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1]}))' "$2")"
+    ;;
+  set)
+    [ $# -ge 3 ] || { echo "usage: dobius-lead-tab set <projectPath> <tabId>" >&2; exit 1; }
+    curl -fsS -X POST "http://127.0.0.1:${PORT}/setLeadTab" \\
+      -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+      --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "tabId": sys.argv[2]}))' "$2" "$3")"
+    ;;
+  clear)
+    [ $# -ge 2 ] || { echo "usage: dobius-lead-tab clear <projectPath>" >&2; exit 1; }
+    curl -fsS -X POST "http://127.0.0.1:${PORT}/setLeadTab" \\
+      -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+      --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "tabId": None}))' "$2")"
+    ;;
+  *)
+    echo "usage: dobius-lead-tab get|set|clear <projectPath> [tabId]" >&2; exit 1 ;;
+esac
+`;
+
 /**
  * Write the dobius-send / dobius-tabs scripts to ~/.local/bin if missing or
  * if the marker version doesn't match. Idempotent + cheap to run on boot.
@@ -487,6 +629,9 @@ function installCliScript() {
     writeIfChanged(CLI_TRACK_PATH, CLI_TRACK_SCRIPT);
     writeIfChanged(CLI_STATUS_PATH, CLI_STATUS_SCRIPT);
     writeIfChanged(CLI_MARKDONE_PATH, CLI_MARKDONE_SCRIPT);
+    writeIfChanged(CLI_SPAWN_PATH, CLI_SPAWN_SCRIPT);
+    writeIfChanged(CLI_ASK_PATH, CLI_ASK_SCRIPT);
+    writeIfChanged(CLI_LEADTAB_PATH, CLI_LEADTAB_SCRIPT);
   } catch (err) {
     console.warn(`[voice-bridge] CLI install failed: ${err.message}`);
   }

@@ -36,7 +36,7 @@ import {
   startMobileServer, stopMobileServer, getMobileServerStatus,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
 } from './mobile-server.js';
-import { startVoiceBridge, stopVoiceBridge } from './voice-bridge.js';
+import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents } from './voice-bridge.js';
 import { ensureVoiceConductor, getVoiceConductorTabId } from './voice-conductor.js';
 import {
   startImessageBridge, stopImessageBridge, restartImessageBridge,
@@ -327,8 +327,19 @@ Every voice transcript arrives with a request id prefix like \`[req-abc123] tell
 - **dobius-track <workId> <tabId> <requestId> "<description>"** — register dispatched work with the registry so it can auto-text Sam when the tab completes. Run this right after dobius-send when you've kicked off real work. Pass the SAME requestId from your input — that's how the final-report iMessage knows to come back. Generate a short workId like "wk-abc12".
 - **dobius-status [target]** — query the work registry. Returns a snapshot (e.g. "wk-abc12 • 3m in • brain agent summarizing commits"). Use this when Sam asks "how is X going" — pipe the output into your dobius-reply.
 - **dobius-mark-done <workId> "<summary>" [status]** — manually mark a tracked work item complete when the tab won't exit (e.g. a long Claude session you observed finishing). Fires the final-report iMessage.
+- **dobius-spawn <projectPath> <agentId> "<initial prompt>"** — spawn a fresh Claude agent in a new tab. AUTOMATICALLY asks Sam via iMessage for confirmation before spawning; you'll get back the new tabId on confirm or an error like "spawn declined (rejected: no)" on reject. Don't try to ask Sam yourself — just call this.
+- **dobius-ask "<question>"** — ask Sam ANY clarifying question via iMessage and block (up to 5 min) for his reply. Output is his answer text. Use BEFORE any irreversible / externally-visible action (gh push, asana comment, send a message to someone else, delete files).
+- **dobius-lead-tab get|set|clear <projectPath> [tabId]** — manage the "lead tab" for a project. If a project has a lead tab, prefer dispatching there over asking to spawn a fresh agent.
 - Bash, Read, Edit, Glob, Grep — standard Claude Code tools
 - All MCP servers configured in this session (Asana, Telegram, GitHub via gh CLI, etc.)
+
+# Routing decision tree for new work
+
+For each "do X" request:
+1. Identify the target project (from Sam's words or by fuzzy-matching dobius-tabs cwd paths)
+2. Check lead tab: \`dobius-lead-tab get <projectPath>\` — if set + alive, that's your target. Go to step 4.
+3. No lead tab → check dobius-tabs for an existing tab in that project. If one obvious match, use it. If multiple or none, call \`dobius-spawn\` (which asks Sam to confirm).
+4. dobius-send to the target tab + dobius-track to register the work + dobius-reply with a short ack.
 
 # Hybrid reply model — three kinds of turns
 
@@ -853,6 +864,9 @@ app.whenReady().then(() => {
   maybeAutoStartMobileServer();
   setupSessionTabCapture();
   startVoiceBridge();
+  // Hand the built-in agent list to voice-bridge so dobius-spawn can find
+  // them by id (Code Reviewer, Bug Hunter, Voice Conductor, etc.).
+  setBuiltinAgents(BUILTIN_AGENTS);
   // Auto-launch the Voice Conductor (Opus) in a background PTY so voice
   // commands from the iPhone Shortcut have a target to route into.
   const conductor = BUILTIN_AGENTS.find((a) => a.id === 'builtin-voice-conductor');
