@@ -216,7 +216,17 @@ button.primary:disabled { opacity: 0.4; }
   cursor: pointer;
 }
 
-.session-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.session-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  /* Tell iOS the container owns vertical pan so child buttons don't eat the
+   * touch as a tap before it becomes a scroll. Without this, dragging on a
+   * .session-main button (which fills most of each item) just does nothing
+   * because iOS thinks you're tapping. */
+  touch-action: pan-y;
+}
 .session-item {
   display: flex;
   align-items: center;
@@ -235,6 +245,10 @@ button.primary:disabled { opacity: 0.4; }
   color: var(--fg);
   text-align: left;
   cursor: pointer;
+  /* Manipulation tells iOS this button only handles tap + double-tap, not
+   * pan gestures — so vertical drags pass through to the .session-list
+   * scroll container instead of being eaten as a tap-with-no-movement. */
+  touch-action: manipulation;
 }
 .session-head { display: flex; align-items: baseline; gap: 8px; }
 .session-head .terminal-name { flex: 1 1 auto; }
@@ -253,6 +267,7 @@ button.primary:disabled { opacity: 0.4; }
   overflow-y: auto;
   padding: 12px;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
 }
 .msg { margin-bottom: 14px; }
 .msg-role {
