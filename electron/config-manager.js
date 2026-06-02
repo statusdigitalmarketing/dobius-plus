@@ -39,6 +39,13 @@ const DEFAULT_CONFIG = {
   },
   workRegistry: {
     items: [],                   // capped at 200 entries (FIFO), see work-registry.js
+    limits: {
+      maxConcurrentAgents: 1,    // strictly serial by default
+      maxPerProject: 1,
+    },
+  },
+  asanaQueue: {
+    allowedProjects: [],         // [{ name, gid }] — auto-process only these
   },
 };
 
@@ -193,7 +200,7 @@ export function loadConfig() {
       const content = fs.readFileSync(CONFIG_PATH, 'utf8');
       const loaded = JSON.parse(content);
       // Sanitize unsafe keys from nested objects (prototype pollution guard)
-      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns', 'imessageBridge', 'workRegistry']) {
+      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns', 'imessageBridge', 'workRegistry', 'asanaQueue']) {
         if (loaded[topKey] && typeof loaded[topKey] === 'object') {
           for (const key of UNSAFE_KEYS) delete loaded[topKey][key];
         }

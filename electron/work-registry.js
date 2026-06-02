@@ -69,6 +69,25 @@ export function registerWork(opts) {
   if (typeof workId !== 'string' || !/^[a-zA-Z0-9_-]{3,80}$/.test(workId)) return { ok: false, error: 'workId malformed' };
   if (typeof tabId !== 'string' || !/^term-.+-\d+$/.test(tabId)) return { ok: false, error: 'tabId malformed' };
 
+  // Concurrency cap — strictly serial by default (maxConcurrentAgents=1).
+  // The Conductor must check `dobius-status` and back off / re-queue when
+  // this fires. Phase 5 will add an internal FIFO that resumes paused work
+  // automatically; for now the Conductor mediates retries.
+  try {
+    const cfg = loadConfig();
+    const limits = cfg.workRegistry?.limits || { maxConcurrentAgents: 1, maxPerProject: 1 };
+    const running = Array.from(items.values()).filter((e) => e.status === 'running');
+    if (running.length >= (limits.maxConcurrentAgents || 1)) {
+      return { ok: false, error: `concurrency cap: ${running.length}/${limits.maxConcurrentAgents} agents already running`, retryable: true };
+    }
+    if (projectPath) {
+      const inProject = running.filter((e) => e.projectPath === projectPath).length;
+      if (inProject >= (limits.maxPerProject || 1)) {
+        return { ok: false, error: `per-project cap: ${inProject}/${limits.maxPerProject} agents already running in ${projectPath}`, retryable: true };
+      }
+    }
+  } catch { /* config error: proceed without cap rather than block */ }
+
   const entry = {
     workId,
     tabId,

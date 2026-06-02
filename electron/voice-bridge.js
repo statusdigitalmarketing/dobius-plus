@@ -212,6 +212,46 @@ async function handleGetLeadTab(req, res) {
   }
 }
 
+// --- Phase 4: Asana queue endpoints -------------------------------------
+
+async function handleAsanaFetch(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  try {
+    const q = await import('./asana-queue.js');
+    const result = await q.fetchNewTasks({ projectName: body?.projectName });
+    if (result.ok) {
+      result.summary = q.formatTaskList(result.tasks);
+    }
+    return sendJson(res, result.ok ? 200 : 400, result);
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
+async function handleAsanaAllow(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  try {
+    const q = await import('./asana-queue.js');
+    const result = q.addAllowedProject({ name: body?.name, gid: body?.gid });
+    return sendJson(res, result.ok ? 200 : 400, result);
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
+async function handleAsanaListAllowed(_req, res) {
+  try {
+    const q = await import('./asana-queue.js');
+    return sendJson(res, 200, { ok: true, projects: q.listAllowedProjects() });
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
 // Per-request reply table. Each voice intent gets a unique requestId; the
 // Conductor must echo that id back in `dobius-reply <id> "<message>"`. The
 // matching /voice/reply long-poll reads from this map by id. Critical
@@ -351,6 +391,9 @@ function handleRequest(req, res) {
   if (req.url === '/ask') return handleAsk(req, res);
   if (req.url === '/setLeadTab') return handleSetLeadTab(req, res);
   if (req.url === '/getLeadTab') return handleGetLeadTab(req, res);
+  if (req.url === '/asana/fetch') return handleAsanaFetch(req, res);
+  if (req.url === '/asana/allow') return handleAsanaAllow(req, res);
+  if (req.url === '/asana/listAllowed') return handleAsanaListAllowed(req, res);
   res.writeHead(404);
   res.end();
 }
@@ -407,7 +450,7 @@ export function stopVoiceBridge() {
 
 // --- CLI script auto-install ---------------------------------------------
 
-const CLI_VERSION = 5;
+const CLI_VERSION = 6;
 const CLI_DIR = path.join(os.homedir(), '.local', 'bin');
 const CLI_PATH = path.join(CLI_DIR, 'dobius-send');
 const CLI_TABS_PATH = path.join(CLI_DIR, 'dobius-tabs');
@@ -418,6 +461,10 @@ const CLI_MARKDONE_PATH = path.join(CLI_DIR, 'dobius-mark-done');
 const CLI_SPAWN_PATH = path.join(CLI_DIR, 'dobius-spawn');
 const CLI_ASK_PATH = path.join(CLI_DIR, 'dobius-ask');
 const CLI_LEADTAB_PATH = path.join(CLI_DIR, 'dobius-lead-tab');
+const CLI_ASANA_FETCH_PATH = path.join(CLI_DIR, 'dobius-asana-fetch');
+const CLI_ASANA_ALLOW_PATH = path.join(CLI_DIR, 'dobius-asana-allow');
+const CLI_ASANA_LIST_PATH = path.join(CLI_DIR, 'dobius-asana-list-allowed');
+const CLI_CONFIRM_PATH = path.join(CLI_DIR, 'dobius-confirm');
 const CLI_MARKER = `# dobius-cli v${CLI_VERSION}`;
 
 // All CLI scripts read the bridge token from a 0o600 file in userData and
@@ -616,6 +663,64 @@ case "\${1-}" in
 esac
 `;
 
+const CLI_ASANA_FETCH_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Fetch incomplete Asana tasks for an allowlisted project. Returns JSON
+# with .tasks[] and a pre-formatted .summary string suitable for an
+# iMessage body. Conductor pipes the summary into dobius-ask for batch
+# approval before processing.
+# Usage: dobius-asana-fetch <projectName>      (fuzzy substring match)
+set -e
+[ $# -ge 1 ] || { echo "usage: dobius-asana-fetch <projectName>" >&2; exit 1; }
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-fetch: bridge token unreadable" >&2; exit 2; }
+PROJECT="$*"
+curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/fetch" \\
+  -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectName": sys.argv[1]}))' "$PROJECT")"
+`;
+
+const CLI_ASANA_ALLOW_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Add an Asana project to the auto-process allowlist. Pass the project's
+# display name and its gid (find via the Asana web URL: app.asana.com/0/<GID>/...).
+# Usage: dobius-asana-allow <name> <gid>
+set -e
+[ $# -ge 2 ] || { echo "usage: dobius-asana-allow <name> <gid>" >&2; exit 1; }
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-allow: bridge token unreadable" >&2; exit 2; }
+NAME="$1"; GID="$2"
+curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/allow" \\
+  -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "gid": sys.argv[2]}))' "$NAME" "$GID")"
+`;
+
+const CLI_ASANA_LIST_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# List allowlisted Asana projects.
+# Usage: dobius-asana-list-allowed
+set -e
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-list-allowed: bridge token unreadable" >&2; exit 2; }
+curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/listAllowed" \\
+  -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{}" \\
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(p["name"], p["gid"]) for p in d.get("projects",[])]'
+`;
+
+const CLI_CONFIRM_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Pre-action confirmation gate. Calls dobius-ask with a YES/NO-framed
+# question. Returns Sam's answer (typically "yes" / "no" / "" on timeout).
+# Use BEFORE any irreversible action (gh push, asana comment, delete, etc.).
+# Usage: dobius-confirm "Push 5 commits to main?"
+set -e
+[ $# -ge 1 ] || { echo "usage: dobius-confirm <action description>" >&2; exit 1; }
+ACTION="$*"
+QUESTION="\${ACTION}\\nReply YES to confirm or NO to skip."
+TOKEN=\$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-confirm: bridge token unreadable" >&2; exit 2; }
+curl -fsS --max-time 320 -X POST "http://127.0.0.1:${PORT}/ask" \\
+  -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer \$TOKEN" -H "Content-Type: application/json" \\
+  --data-binary "\$(python3 -c 'import json,sys; print(json.dumps({"question": sys.argv[1]}))' "\$QUESTION")" \\
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("answer") or "")'
+`;
+
 /**
  * Write the dobius-send / dobius-tabs scripts to ~/.local/bin if missing or
  * if the marker version doesn't match. Idempotent + cheap to run on boot.
@@ -632,6 +737,10 @@ function installCliScript() {
     writeIfChanged(CLI_SPAWN_PATH, CLI_SPAWN_SCRIPT);
     writeIfChanged(CLI_ASK_PATH, CLI_ASK_SCRIPT);
     writeIfChanged(CLI_LEADTAB_PATH, CLI_LEADTAB_SCRIPT);
+    writeIfChanged(CLI_ASANA_FETCH_PATH, CLI_ASANA_FETCH_SCRIPT);
+    writeIfChanged(CLI_ASANA_ALLOW_PATH, CLI_ASANA_ALLOW_SCRIPT);
+    writeIfChanged(CLI_ASANA_LIST_PATH, CLI_ASANA_LIST_SCRIPT);
+    writeIfChanged(CLI_CONFIRM_PATH, CLI_CONFIRM_SCRIPT);
   } catch (err) {
     console.warn(`[voice-bridge] CLI install failed: ${err.message}`);
   }

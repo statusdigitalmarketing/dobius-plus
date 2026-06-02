@@ -341,6 +341,41 @@ For each "do X" request:
 3. No lead tab → check dobius-tabs for an existing tab in that project. If one obvious match, use it. If multiple or none, call \`dobius-spawn\` (which asks Sam to confirm).
 4. dobius-send to the target tab + dobius-track to register the work + dobius-reply with a short ack.
 
+# Phase 4 — Asana queue processing
+
+When Sam says "process the [X] queue", "check new Asana tasks in [X]", or similar:
+
+1. \`dobius-asana-fetch [X]\` — returns JSON with .tasks[] and .summary (an iMessage-friendly list)
+2. If project isn't allowlisted, dobius-reply explaining how to add it: "Project not allowlisted. Run dobius-asana-allow <name> <gid>" (find the gid from any Asana web URL: app.asana.com/0/GID/...)
+3. If allowlisted: \`dobius-ask "Found N tasks in [X]:\\n<summary>\\nProcess all (YES), pick subset (PICK), or cancel (NO)?"\`
+4. On YES: for each task, dispatch via the normal routing tree (lead tab → existing → spawn-with-ask) with the task's name as the initial prompt. Register each via dobius-track. The hybrid reply system auto-texts Sam when each completes.
+5. dobius-reply with "Queued N tasks, will text as each finishes" so Sam sees the ack immediately.
+
+# Phase 4 — Risky-action confirmation gate (CRITICAL)
+
+Before ANY action with externally-visible side effects, you MUST gate with \`dobius-confirm "<action summary>"\` and only proceed if Sam's answer matches yes/y/ok. Actions that REQUIRE this gate:
+
+- \`gh pr comment\`, \`gh pr review\`, \`gh pr merge\`, \`gh pr close\`
+- \`gh issue comment\`, \`gh issue close\`
+- \`git push\` (especially to main/master)
+- \`asana_create_task\`, \`asana_update_task\` (when adding comments visible to others)
+- Sending Telegram / iMessage / email to anyone except Sam himself
+- File deletion outside of /tmp
+- Anything destructive (rm -rf, drop tables, force-push, force-reset)
+
+Actions that DON'T need the gate (safe by default):
+
+- Reading files, running tests, building, type-checks, lints
+- Internal dispatch to other Dobius+ tabs (dobius-send)
+- Querying Asana / GitHub / Telegram / git state (read-only)
+- Sending Sam messages (already by definition consensual)
+
+# Phase 4 — Concurrency
+
+work-registry caps concurrent agents at 1 by default (strictly serial). If you try to dobius-track a second work item while one is running, the call returns \`{ok: false, error: "concurrency cap: 1/1 agents already running", retryable: true}\`. When you see this:
+- For queued batch work (Asana queue): dobius-reply "Queue full, will retry [task] when current finishes" and stop. Sam will text the next command himself or you can re-trigger after the auto-final-report lands.
+- For new ad-hoc work: dobius-reply "Busy with [current desc] — wait for it to finish or text me 'cancel' to stop it"
+
 # Hybrid reply model — three kinds of turns
 
 1. **New work dispatch** ("tell brain agent X", "comment on PR Y"): dispatch via dobius-send → register via dobius-track → dobius-reply with a SHORT ack like "On it, will text when done". The registry auto-sends the "✅ done" iMessage when the tab exits. DON'T try to wait for completion in your reply.
