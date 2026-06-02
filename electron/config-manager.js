@@ -1,10 +1,15 @@
 import fs from 'fs';
+import fsp from 'fs/promises';
 import path from 'path';
 import { app } from 'electron';
 
 const CONFIG_DIR = path.join(app.getPath('userData'));
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 const CONFIG_TMP = path.join(CONFIG_DIR, 'config.json.tmp');
+// Per-tab scrollback lives in its own file under terminal-history so config.json
+// stays tiny. Before this, scrollback was inlined into config.projects[*].terminalStates
+// and every per-tab auto-save serialized + sync-wrote the entire config (12+ MB).
+const SCROLLBACK_DIR = path.join(CONFIG_DIR, 'terminal-history');
 
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -25,6 +30,12 @@ const DEFAULT_CONFIG = {
     port: 8420,
     bindMode: 'tailscale', // 'tailscale' (remote, private) or 'lan' (same Wi-Fi)
     devices: [], // [{ token, name, pairedAt }] for paired phones
+  },
+  imessageBridge: {
+    enabled: false,
+    triggerPrefix: 'd:',         // commands must start with this
+    selfHandle: null,            // Sam's own iMessage handle (email or phone) — required
+    lastSeenRowid: 0,            // chat.db ROWID high-water mark for restart safety
   },
 };
 
@@ -61,11 +72,112 @@ function pruneOrphanTerminalStates(cfg) {
 }
 
 /**
- * Atomic write — write to tmp then rename (prevents corruption on crash).
+ * Atomic write (async) — write to tmp then rename. Does not block the main
+ * thread, which matters because writes can hit 100KB+ and they used to
+ * stall every IPC round-trip while the renderer waited.
+ */
+async function atomicWrite(filePath, data) {
+  await fsp.writeFile(CONFIG_TMP, data);
+  await fsp.rename(CONFIG_TMP, filePath);
+}
+
+/**
+ * Atomic write (sync) — only used by flushConfig on app quit, where blocking
+ * is acceptable because we need the data to land before the process dies.
  */
 function atomicWriteSync(filePath, data) {
   fs.writeFileSync(CONFIG_TMP, data);
   fs.renameSync(CONFIG_TMP, filePath);
+}
+
+/**
+ * Resolve the scrollback file path for a (project, tab) pair. Uses the same
+ * base64url encoding scheme as the per-project zsh-history dir.
+ */
+function getScrollbackPath(projectPath, tabId) {
+  const encoded = Buffer.from(projectPath).toString('base64url');
+  return path.join(SCROLLBACK_DIR, encoded, `${tabId}.scrollback.json`);
+}
+
+/**
+ * Save a tab's scrollback to its own file. Replaces the old pattern of
+ * stuffing scrollback into config.projects[*].terminalStates and rewriting
+ * the whole config blob every 30s per tab.
+ */
+export async function saveTerminalScrollback(projectPath, tabId, state) {
+  if (!projectPath || typeof projectPath !== 'string') return;
+  if (!tabId || typeof tabId !== 'string') return;
+  if (UNSAFE_KEYS.has(projectPath) || UNSAFE_KEYS.has(tabId)) return;
+  const filePath = getScrollbackPath(projectPath, tabId);
+  // Unique tmp suffix per call: concurrent saves for the same (project, tab)
+  // can occur when a manual checkpoint fires alongside the 30s autosave.
+  // A shared `.tmp` path would race write→rename and silently clobber.
+  const tmpPath = `${filePath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
+  try {
+    await fsp.mkdir(path.dirname(filePath), { recursive: true });
+    await fsp.writeFile(tmpPath, JSON.stringify(state));
+    await fsp.rename(tmpPath, filePath);
+  } catch (err) {
+    console.warn(`[config-manager] saveTerminalScrollback failed for ${tabId}: ${err.message}`);
+    // Best-effort cleanup of orphan tmp file (rename failure leaves it behind).
+    try { await fsp.unlink(tmpPath); } catch { /* nothing to do */ }
+  }
+}
+
+/**
+ * Load a tab's scrollback from its own file. Returns null if no file exists.
+ */
+export async function loadTerminalScrollback(projectPath, tabId) {
+  if (!projectPath || !tabId) return null;
+  try {
+    const content = await fsp.readFile(getScrollbackPath(projectPath, tabId), 'utf8');
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One-time migration: move every config.projects[*].terminalStates[*] with a
+ * scrollback array into its per-tab file, then strip the inlined data from
+ * config. Drops config.json from 13 MB to ~50 KB on first load after upgrade.
+ */
+function migrateScrollbackOutOfConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object' || !cfg.projects) return false;
+  let migrated = 0;
+  let configChanged = false;
+  for (const [projectPath, proj] of Object.entries(cfg.projects)) {
+    if (!proj?.terminalStates || typeof proj.terminalStates !== 'object') continue;
+    for (const [tabId, state] of Object.entries(proj.terminalStates)) {
+      if (!state || typeof state !== 'object') continue;
+      if (Array.isArray(state.scrollback) && state.scrollback.length > 0) {
+        try {
+          const filePath = getScrollbackPath(projectPath, tabId);
+          // Atomic per-file write (tmp + rename) — if the process dies between
+          // write and rename, we leave the inline entry intact and the next
+          // boot retries the migration. Without rename, a half-written file
+          // could be returned by loadTerminalScrollback as valid scrollback.
+          const tmpPath = `${filePath}.migrate.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
+          fs.mkdirSync(path.dirname(filePath), { recursive: true });
+          fs.writeFileSync(tmpPath, JSON.stringify(state));
+          fs.renameSync(tmpPath, filePath);
+          delete proj.terminalStates[tabId];
+          migrated += 1;
+          configChanged = true;
+        } catch (err) {
+          console.warn(`[config-manager] migrate failed for ${tabId}: ${err.message}`);
+        }
+      }
+    }
+    if (Object.keys(proj.terminalStates).length === 0) {
+      delete proj.terminalStates;
+      configChanged = true;
+    }
+  }
+  if (migrated > 0) {
+    console.log(`[config-manager] migrated ${migrated} scrollback entries to per-tab files`);
+  }
+  return configChanged;
 }
 
 /**
@@ -78,13 +190,24 @@ export function loadConfig() {
       const content = fs.readFileSync(CONFIG_PATH, 'utf8');
       const loaded = JSON.parse(content);
       // Sanitize unsafe keys from nested objects (prototype pollution guard)
-      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns']) {
+      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns', 'imessageBridge']) {
         if (loaded[topKey] && typeof loaded[topKey] === 'object') {
           for (const key of UNSAFE_KEYS) delete loaded[topKey][key];
         }
       }
       configCache = { ...DEFAULT_CONFIG, ...loaded };
       pruneOrphanTerminalStates(configCache);
+      const migrated = migrateScrollbackOutOfConfig(configCache);
+      if (migrated) {
+        // Persist immediately so the 12 MB scrollback blob is off disk on
+        // the next read. Use sync write here because we're inside the
+        // synchronous loadConfig path and need the result before returning.
+        try {
+          atomicWriteSync(CONFIG_PATH, JSON.stringify(configCache, null, 2));
+        } catch (err) {
+          console.warn('[config-manager] post-migration save failed:', err.message);
+        }
+      }
     } else {
       configCache = { ...DEFAULT_CONFIG };
     }
@@ -96,7 +219,9 @@ export function loadConfig() {
 }
 
 /**
- * Save config to disk (debounced 500ms, atomic write).
+ * Save config to disk (debounced 500ms, atomic write, ASYNC I/O).
+ * The async write means the main process keeps responding to IPC while the
+ * file is being written. Previously, sync writes stalled every IPC round-trip.
  */
 export function saveConfig(config) {
   configCache = config;
@@ -106,10 +231,13 @@ export function saveConfig(config) {
       if (!fs.existsSync(CONFIG_DIR)) {
         fs.mkdirSync(CONFIG_DIR, { recursive: true });
       }
-      atomicWriteSync(CONFIG_PATH, JSON.stringify(config, null, 2));
     } catch (err) {
-      console.warn('[config-manager] Failed to save config:', err.message);
+      console.warn('[config-manager] mkdir failed:', err.message);
+      return;
     }
+    atomicWrite(CONFIG_PATH, JSON.stringify(config, null, 2)).catch((err) => {
+      console.warn('[config-manager] Failed to save config:', err.message);
+    });
   }, 500);
 }
 
@@ -160,6 +288,29 @@ export function updateSettings(updates) {
   config.settings = { ...DEFAULT_CONFIG.settings, ...config.settings, ...sanitized };
   saveConfig(config);
   return config.settings;
+}
+
+/**
+ * Get iMessage bridge config.
+ */
+export function getImessageBridge() {
+  const config = loadConfig();
+  return { ...DEFAULT_CONFIG.imessageBridge, ...config.imessageBridge };
+}
+
+/**
+ * Update iMessage bridge config (merge with sanitize).
+ */
+export function updateImessageBridge(updates) {
+  if (!updates || typeof updates !== 'object') return getImessageBridge();
+  const config = loadConfig();
+  const sanitized = {};
+  for (const [key, value] of Object.entries(updates)) {
+    if (!UNSAFE_KEYS.has(key)) sanitized[key] = value;
+  }
+  config.imessageBridge = { ...DEFAULT_CONFIG.imessageBridge, ...config.imessageBridge, ...sanitized };
+  saveConfig(config);
+  return config.imessageBridge;
 }
 
 /**

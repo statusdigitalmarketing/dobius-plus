@@ -24,10 +24,12 @@ import { fileURLToPath } from 'url';
 import { app } from 'electron';
 import { getMobileServerConfig, updateMobileServerConfig, setSessionTabLink } from './config-manager.js';
 import {
-  listTerminals, subscribeTerminal, writeTerminal,
+  listTerminals, subscribeTerminal, writeTerminal, terminalHasDesktopAttached,
   resizeTerminal, killTerminal, createTerminal,
 } from './terminal-manager.js';
 import { loadAllSessions, loadTranscript } from './data-service.js';
+import { peekReply } from './voice-bridge.js';
+import { getVoiceConductorTabId } from './voice-conductor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -148,7 +150,14 @@ function handleAuthedMessage(socket, msg, subs) {
       if (typeof msg.id === 'string'
           && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)
           && msg.cols > 0 && msg.rows > 0) {
-        resizeTerminal(msg.id, msg.cols, msg.rows);
+        // If a desktop window is driving this PTY, ignore phone-side resize.
+        // Reshaping the PTY to phone dimensions makes TUI apps repaint at the
+        // smaller geometry, which mangles the desktop xterm. Phone-only PTYs
+        // (e.g. ones created via `createTerminal` from mobile) still get
+        // resized normally.
+        if (!terminalHasDesktopAttached(msg.id)) {
+          resizeTerminal(msg.id, msg.cols, msg.rows);
+        }
       }
       break;
 
@@ -267,6 +276,93 @@ export async function startMobileServer() {
     pairingCode = genPairingCode();
     pairAttempts = 0;
     res.json({ ok: true, token });
+  });
+
+  // ----- Voice Conductor endpoints (Siri / glasses entry point) -----
+  // Auth: Bearer token in the Authorization header, same token issued at /pair.
+  function bearerOk(req) {
+    const h = req.headers.authorization || '';
+    const m = h.match(/^Bearer\s+([0-9a-f]{64})$/i);
+    return m && knownToken(m[1]);
+  }
+
+  // POST /voice/intent  { transcript: string, tabId?: string }
+  // Two modes:
+  //   1. Conductor (default): omit tabId. Routes through the Voice Conductor
+  //      (Opus) which decides what to do. Smart but slower (~3-5s).
+  //   2. Direct: pass tabId of any live Dobius+ terminal tab. The transcript
+  //      is typed straight into that tab — no Conductor involved, no req-id
+  //      tagging, no reply expected. Fast and dumb. Useful when you already
+  //      know exactly which tab you want to talk to.
+  expApp.post('/voice/intent', (req, res) => {
+    if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
+    const transcript = req.body?.transcript;
+    const directTabId = req.body?.tabId;
+    if (typeof transcript !== 'string' || !transcript.trim()) {
+      return res.status(400).json({ ok: false, error: 'transcript required' });
+    }
+    // Direct mode — write straight into the named tab, skip Conductor.
+    if (typeof directTabId === 'string' && directTabId) {
+      if (!/^term-.+-\d+$/.test(directTabId)) {
+        return res.status(400).json({ ok: false, error: 'tabId malformed' });
+      }
+      if (!listTerminals().some((t) => t.id === directTabId)) {
+        return res.status(404).json({ ok: false, error: 'tabId not alive' });
+      }
+      const text = transcript.slice(0, 4000).replace(/[\r\n]+/g, ' ');
+      const CHUNK = 256;
+      for (let i = 0; i < text.length; i += CHUNK) writeTerminal(directTabId, text.slice(i, i + CHUNK));
+      writeTerminal(directTabId, '\r');
+      // No requestId for direct mode — there's no Conductor to reply.
+      return res.json({ ok: true, mode: 'direct', tabId: directTabId });
+    }
+    // Conductor mode (default) — tagged with a per-request id so /voice/reply
+    // can match the right reply when multiple intents are in flight.
+    const conductorId = getVoiceConductorTabId();
+    const requestId = `req-${crypto.randomBytes(6).toString('hex')}`;
+    const tagged = `[${requestId}] ${transcript.slice(0, 4000).replace(/[\r\n]+/g, ' ')}`;
+    const CHUNK = 256;
+    for (let i = 0; i < tagged.length; i += CHUNK) {
+      writeTerminal(conductorId, tagged.slice(i, i + CHUNK));
+    }
+    writeTerminal(conductorId, '\r');
+    res.json({ ok: true, mode: 'conductor', requestId });
+  });
+
+  // GET /voice/tabs
+  // Returns the live Dobius+ terminal tab list for the iPhone Shortcut's
+  // "Choose From List" step when the user wants direct-to-tab mode.
+  expApp.get('/voice/tabs', (req, res) => {
+    if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
+    // Strip term-/path/N → friendly label so the Shortcut shows readable names.
+    const tabs = listTerminals().map((t) => {
+      const m = t.id.match(/^term-(.+)-(\d+)$/);
+      const projectPath = m ? m[1] : '';
+      const tabNum = m ? m[2] : '';
+      const projName = projectPath.split('/').filter(Boolean).pop() || 'unknown';
+      return { id: t.id, label: `${projName} • ${tabNum}`, cwd: t.cwd };
+    });
+    res.json({ ok: true, tabs });
+  });
+
+  // POST /voice/reply  { requestId: string, timeoutMs?: number }
+  // Long-polls (up to timeoutMs, default 25s) for the Conductor's reply to
+  // the specific requestId. Returns the spoken message when it lands.
+  expApp.post('/voice/reply', async (req, res) => {
+    if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
+    const requestId = req.body?.requestId;
+    if (typeof requestId !== 'string') {
+      return res.status(400).json({ ok: false, error: 'requestId required' });
+    }
+    const timeoutMs = Math.min(Math.max(Number(req.body?.timeoutMs) || 25000, 1000), 60000);
+    const deadline = Date.now() + timeoutMs;
+    const tick = () => {
+      const r = peekReply(requestId);
+      if (r) return res.json({ ok: true, reply: r.message, ts: r.ts });
+      if (Date.now() >= deadline) return res.json({ ok: false, reason: 'timeout' });
+      setTimeout(tick, 200);
+    };
+    tick();
   });
 
   // Serve the mobile PWA build if present (added in Phase 3), else a placeholder.

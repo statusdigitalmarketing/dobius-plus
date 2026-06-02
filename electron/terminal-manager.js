@@ -172,6 +172,19 @@ export function resizeTerminal(id, cols, rows) {
 }
 
 /**
+ * Whether a desktop window is currently driving this terminal (vs phone-only).
+ * Used by the mobile bridge to avoid resizing a PTY out from under a desktop
+ * xterm — when a phone at 60x24 reshapes a PTY that the desktop has at 200x50,
+ * TUI apps re-render to the phone's geometry and the desktop display turns to
+ * garbage. Lets the mobile path treat its resize as advisory in that case.
+ */
+export function terminalHasDesktopAttached(id) {
+  const entry = terminals.get(id);
+  if (!entry) return false;
+  return !!(entry.webContents && !entry.webContents.isDestroyed());
+}
+
+/**
  * Check if a terminal has a busy child process (not just the shell).
  * Returns the process name if busy, or null if idle.
  */

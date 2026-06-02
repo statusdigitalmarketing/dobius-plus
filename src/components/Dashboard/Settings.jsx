@@ -21,6 +21,45 @@ export default function Settings() {
   const [mobileBusy, setMobileBusy] = useState(false);
   const [mobileError, setMobileError] = useState('');
 
+  // iMessage Bridge state
+  const [imsgCfg, setImsgCfg] = useState(null);
+  const [imsgStatus, setImsgStatus] = useState(null);
+  const [imsgBusy, setImsgBusy] = useState(false);
+  const [imsgFeedback, setImsgFeedback] = useState('');
+
+  const refreshImsg = useCallback(async () => {
+    if (!window.electronAPI?.imessageBridgeGetConfig) return;
+    const [cfg, status] = await Promise.all([
+      window.electronAPI.imessageBridgeGetConfig(),
+      window.electronAPI.imessageBridgeStatus(),
+    ]);
+    setImsgCfg(cfg);
+    setImsgStatus(status);
+  }, []);
+  useEffect(() => { refreshImsg(); }, [refreshImsg]);
+
+  const saveImsg = useCallback(async (updates) => {
+    setImsgBusy(true);
+    setImsgFeedback('');
+    try {
+      await window.electronAPI.imessageBridgeUpdateConfig(updates);
+      await refreshImsg();
+    } finally {
+      setImsgBusy(false);
+    }
+  }, [refreshImsg]);
+
+  const testImsgSend = useCallback(async () => {
+    setImsgBusy(true);
+    setImsgFeedback('Sending...');
+    try {
+      const r = await window.electronAPI.imessageBridgeTestSend();
+      setImsgFeedback(r.ok ? 'Sent! Check your Messages app.' : `Failed: ${r.error}`);
+    } finally {
+      setImsgBusy(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (!window.electronAPI?.configGetSettings) return;
     window.electronAPI.configGetSettings().then((s) => {
@@ -357,6 +396,102 @@ export default function Settings() {
               </div>
             )}
           </>
+        )}
+      </Section>
+
+      {/* iMessage Bridge — text yourself to drive Dobius */}
+      <Section title="iMessage Bridge">
+        <SettingRow
+          label="Enable bridge"
+          description="Text yourself in iMessage with the prefix below to drive Dobius."
+        >
+          <Toggle
+            checked={!!imsgCfg?.enabled}
+            onChange={(on) => saveImsg({ enabled: on })}
+          />
+        </SettingRow>
+
+        <SettingRow
+          label="Trigger prefix"
+          description="Commands must start with this. Default 'd:' (e.g. 'd: what tabs are open')."
+        >
+          <input
+            type="text"
+            value={imsgCfg?.triggerPrefix || ''}
+            onChange={(e) => setImsgCfg({ ...imsgCfg, triggerPrefix: e.target.value })}
+            onBlur={() => saveImsg({ triggerPrefix: imsgCfg?.triggerPrefix || 'd:' })}
+            maxLength={10}
+            style={{
+              width: 60, fontSize: 12, padding: '2px 6px',
+              fontFamily: "'SF Mono', monospace",
+              backgroundColor: 'var(--bg)', color: 'var(--fg)',
+              border: '1px solid var(--border)', borderRadius: 4,
+            }}
+          />
+        </SettingRow>
+
+        <SettingRow
+          label="Your iMessage handle"
+          description="Email or phone Messages.app is signed into (the bridge listens for messages FROM this handle TO itself)."
+        >
+          <input
+            type="text"
+            placeholder="you@icloud.com or +1234..."
+            value={imsgCfg?.selfHandle || ''}
+            onChange={(e) => setImsgCfg({ ...imsgCfg, selfHandle: e.target.value })}
+            onBlur={() => saveImsg({ selfHandle: imsgCfg?.selfHandle || null })}
+            style={{
+              width: 200, fontSize: 12, padding: '2px 6px',
+              fontFamily: "'SF Mono', monospace",
+              backgroundColor: 'var(--bg)', color: 'var(--fg)',
+              border: '1px solid var(--border)', borderRadius: 4,
+            }}
+          />
+        </SettingRow>
+
+        <SettingRow
+          label="Full Disk Access"
+          description={imsgStatus?.chatDbReadable?.ok
+            ? `Granted — ${imsgStatus.chatDbReadable.messageCount.toLocaleString()} messages readable.`
+            : `Required — Dobius+ needs to read ~/Library/Messages/chat.db.`}
+        >
+          <button
+            onClick={() => window.electronAPI.imessageBridgeOpenFullDiskAccess()}
+            style={{
+              fontSize: 11, padding: '4px 10px', borderRadius: 4,
+              backgroundColor: 'var(--accent)', color: 'var(--bg)',
+              border: 'none', cursor: 'pointer',
+            }}
+          >
+            Open System Settings
+          </button>
+        </SettingRow>
+
+        <SettingRow
+          label="Test send"
+          description={imsgFeedback || "Sends a test iMessage to your selfHandle. Confirms send pipeline works."}
+        >
+          <button
+            disabled={imsgBusy || !imsgCfg?.selfHandle}
+            onClick={testImsgSend}
+            style={{
+              fontSize: 11, padding: '4px 10px', borderRadius: 4,
+              backgroundColor: 'var(--surface)', color: 'var(--fg)',
+              border: '1px solid var(--border)',
+              opacity: (imsgBusy || !imsgCfg?.selfHandle) ? 0.5 : 1,
+              cursor: (imsgBusy || !imsgCfg?.selfHandle) ? 'not-allowed' : 'pointer',
+            }}
+          >
+            Test
+          </button>
+        </SettingRow>
+
+        {imsgStatus && (
+          <div className="text-xs" style={{ color: 'var(--dim)', fontSize: 10 }}>
+            Status: {imsgStatus.isRunning ? 'running' : 'stopped'} ·
+            last ROWID: {imsgStatus.lastSeenRowid} ·
+            recent outbound (60s): {imsgStatus.outboundLastMin}
+          </div>
         )}
       </Section>
 

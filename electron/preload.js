@@ -120,6 +120,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mobileServerRemoveDevice: (token) => ipcRenderer.invoke('mobileServer:removeDevice', token),
   mobileServerSetBindMode: (mode) => ipcRenderer.invoke('mobileServer:setBindMode', mode),
 
+  // iMessage bridge — drive Dobius+ by texting yourself
+  imessageBridgeGetConfig: () => ipcRenderer.invoke('imessageBridge:getConfig'),
+  imessageBridgeUpdateConfig: (updates) => ipcRenderer.invoke('imessageBridge:updateConfig', updates),
+  imessageBridgeStatus: () => ipcRenderer.invoke('imessageBridge:status'),
+  imessageBridgeOpenFullDiskAccess: () => ipcRenderer.invoke('imessageBridge:openFullDiskAccess'),
+  imessageBridgeTestSend: () => ipcRenderer.invoke('imessageBridge:testSend'),
+
   // Auto-updater
   updaterCheck: () => ipcRenderer.invoke('updater:check'),
   updaterInstall: () => ipcRenderer.invoke('updater:install'),
