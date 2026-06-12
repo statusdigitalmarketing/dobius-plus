@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell } from 'electron';
+import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -8,6 +9,7 @@ import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession,
+  loadProjectTokens, searchTranscripts, estimateContextSize, deleteSession,
 } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
@@ -17,6 +19,7 @@ import {
   checkGhAvailable, getPullRequests, getIssues, getPrDetails, getIssueDetails,
 } from './git-service.js';
 import { watchFiles, stopWatching } from './watcher-service.js';
+import { watchProjectDir, unwatchProjectDir, getProjectEvents, stopAllFileWatchers } from './file-change-service.js';
 import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-monitor-watcher.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
@@ -27,6 +30,8 @@ import {
   getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
   getMobileServerConfig, updateMobileServerConfig,
   saveTerminalScrollback, loadTerminalScrollback,
+  addManualProject, setProjectDisplayName, addHiddenProject,
+  getAccounts, saveAccount, deleteAccount, getProjectAccount, setProjectAccount,
 } from './config-manager.js';
 import {
   openProjectWindow, openTornOffWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
@@ -50,6 +55,19 @@ const __dirname = path.dirname(__filename);
 
 let mainWindow;
 
+// Returns the claude binary path to use for background CLI calls (orchestration,
+// prompt-improve). Prefers the active Claude account's cliPath if set, then
+// falls back to CLAUDE_PATH env var, then bare 'claude' (resolved via PATH).
+function resolveActiveCliPath() {
+  const config = loadConfig();
+  const activeId = config.activeClaudeAccountId;
+  if (activeId) {
+    const account = (config.accounts || []).find((a) => a.id === activeId && a.type === 'claude');
+    if (account?.cliPath) return account.cliPath;
+  }
+  return process.env.CLAUDE_PATH || 'claude';
+}
+
 function createWindow() {
   // Restore saved window bounds
   const config = loadConfig();
@@ -66,6 +84,7 @@ function createWindow() {
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
     backgroundColor: '#0D1117',
+    acceptFirstMouse: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -108,7 +127,19 @@ function createWindow() {
 
 function setupTerminalHandlers() {
   ipcMain.handle('terminal:create', (event, id, cwd) => {
-    return createTerminal(id, cwd, event.sender);
+    const accountEnv = {};
+    const account = cwd ? getProjectAccount(cwd) : null;
+    if (account?.type === 'codex' && account.apiKey) {
+      accountEnv.OPENAI_API_KEY = account.apiKey;
+    } else if (account?.type === 'claude') {
+      if (account.claudeJsonPath) {
+        accountEnv.CLAUDE_CONFIG_DIR = path.dirname(account.claudeJsonPath);
+      }
+      if (account.cliPath) {
+        accountEnv.DOBIUS_CLI_DIR = path.dirname(account.cliPath);
+      }
+    }
+    return createTerminal(id, cwd, event.sender, accountEnv);
   });
 
   ipcMain.on('terminal:write', (_event, id, data) => {
@@ -233,6 +264,37 @@ function setupDataHandlers() {
   ipcMain.handle('data:listProjects', () => listProjects());
   ipcMain.handle('data:loadAllSessions', () => loadAllSessions());
   ipcMain.handle('data:getLatestSession', (_event, projectPath) => getLatestSession(projectPath));
+  ipcMain.handle('data:killProcess', (_event, pid) => {
+    const n = parseInt(pid, 10);
+    if (!Number.isFinite(n) || n <= 1) throw new Error('Invalid PID');
+    try {
+      process.kill(n, 'SIGTERM');
+      return true;
+    } catch (err) {
+      throw new Error(err.message);
+    }
+  });
+  ipcMain.handle('data:loadProjectTokens', () => loadProjectTokens());
+  ipcMain.handle('data:searchTranscripts', (_event, query) => searchTranscripts(query));
+  ipcMain.handle('data:estimateContextSize', (_event, projectPath) => estimateContextSize(projectPath));
+  ipcMain.handle('data:deleteSession', (_event, sessionId, projectPath) => deleteSession(sessionId, projectPath));
+}
+
+function setupFileWatcherHandlers() {
+  ipcMain.handle('filewatcher:watch', (event, projectPath) => {
+    if (!projectPath || typeof projectPath !== 'string') return;
+    watchProjectDir(projectPath, event.sender);
+  });
+
+  ipcMain.handle('filewatcher:unwatch', (_event, projectPath) => {
+    if (!projectPath) return;
+    unwatchProjectDir(projectPath);
+  });
+
+  ipcMain.handle('filewatcher:getEvents', (_event, projectPath) => {
+    if (!projectPath) return [];
+    return getProjectEvents(projectPath);
+  });
 }
 
 function setupCheckpointHandlers() {
@@ -513,6 +575,36 @@ function setupOrchestrationHandlers() {
     return saveOrchestrationRun(run);
   });
 
+  ipcMain.handle('orchestration:decompose', async (_event, { systemPrompt, userPrompt }) => {
+    const promptDir = path.join(os.tmpdir(), 'dobius-agents');
+    fs.mkdirSync(promptDir, { recursive: true });
+    const sysPath = path.join(promptDir, `decomp-sys-${Date.now()}.txt`);
+    fs.writeFileSync(sysPath, systemPrompt, 'utf8');
+
+    return new Promise((resolve, reject) => {
+      const claudePath = resolveActiveCliPath();
+      const proc = spawn(claudePath, [
+        '-p', userPrompt,
+        '--model', 'claude-haiku-4-5-20251001',
+        '--system-prompt-file', sysPath,
+      ], {
+        env: { ...process.env, PATH: (process.env.PATH || '') + ':/usr/local/bin:/opt/homebrew/bin' },
+      });
+
+      let out = '';
+      let err = '';
+      proc.stdout.on('data', (d) => { out += d.toString(); });
+      proc.stderr.on('data', (d) => { err += d.toString(); });
+      proc.on('close', (code) => {
+        try { fs.unlinkSync(sysPath); } catch {}
+        if (code !== 0) return reject(new Error(`Decomposition failed (exit ${code}): ${err.slice(0, 300)}`));
+        resolve(out.trim());
+      });
+      proc.on('error', (e) => { try { fs.unlinkSync(sysPath); } catch {} reject(e); });
+      setTimeout(() => { proc.kill(); reject(new Error('Decomposition timed out after 60s')); }, 60000);
+    });
+  });
+
   ipcMain.handle('orchestration:delete', (_event, runId) => {
     if (!runId || typeof runId !== 'string' || runId.length > 200) return;
     deleteOrchestrationRun(runId);
@@ -546,6 +638,45 @@ function setupFileHandlers() {
     try {
       const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(filePath, content, 'utf8');
+      return { ok: true };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  // Skill file editor — locked to ~/.claude/skills/ directory
+  const skillsDir = path.join(homedir, '.claude', 'skills');
+  const ALLOWED_SKILL_FILES = ['CLAUDE.md', 'skill.json'];
+
+  function isAllowedSkillPath(skillPath, filename) {
+    if (!skillPath || typeof skillPath !== 'string') return false;
+    if (!ALLOWED_SKILL_FILES.includes(filename)) return false;
+    // Must be an absolute path inside the skills dir — no traversal allowed
+    const normalSkill = path.normalize(skillPath);
+    const normalSkillsDir = path.normalize(skillsDir);
+    return normalSkill.startsWith(normalSkillsDir + path.sep) &&
+      !normalSkill.includes('..') &&
+      path.dirname(normalSkill) === normalSkillsDir; // must be one level deep (skill subdir)
+  }
+
+  ipcMain.handle('skill:readFile', (_event, skillPath, filename) => {
+    if (!isAllowedSkillPath(skillPath, filename)) return { error: 'Access denied' };
+    const filePath = path.join(skillPath, filename);
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.size > MAX_FILE_SIZE) return { error: 'File too large' };
+      return { content: fs.readFileSync(filePath, 'utf8') };
+    } catch {
+      return { content: '' };
+    }
+  });
+
+  ipcMain.handle('skill:writeFile', (_event, skillPath, filename, content) => {
+    if (!isAllowedSkillPath(skillPath, filename)) return { error: 'Access denied' };
+    if (typeof content !== 'string' || content.length > MAX_FILE_SIZE) return { error: 'Content too large' };
+    const filePath = path.join(skillPath, filename);
+    try {
       fs.writeFileSync(filePath, content, 'utf8');
       return { ok: true };
     } catch (err) {
@@ -592,6 +723,60 @@ function setupConfigHandlers() {
   ipcMain.handle('config:removeSessionTag', (_event, sessionId) => removeSessionTag(sessionId));
   ipcMain.handle('config:getSessionTabMap', () => getSessionTabMap());
   ipcMain.handle('config:setSessionTabLink', (_event, sessionId, tabId, projectPath) => setSessionTabLink(sessionId, tabId, projectPath));
+
+  ipcMain.handle('utils:getHomeDirPath', () => os.homedir());
+
+  // Account management
+  ipcMain.handle('accounts:list', () => getAccounts());
+  ipcMain.handle('accounts:save', (_event, account) => saveAccount(account));
+  ipcMain.handle('accounts:delete', (_event, accountId) => deleteAccount(accountId));
+  ipcMain.handle('accounts:getForProject', (_event, projectPath) => getProjectAccount(projectPath));
+  ipcMain.handle('accounts:setForProject', (_event, projectPath, accountId) => setProjectAccount(projectPath, accountId));
+
+  // Activate a Claude account by swapping ~/.claude.json
+  ipcMain.handle('accounts:activateClaude', async (_event, accountId) => {
+    const accounts = getAccounts();
+    const account = accounts.find((a) => a.id === accountId && a.type === 'claude');
+    if (!account) return { ok: false, error: 'Account not found' };
+    if (!account.claudeJsonPath) return { ok: false, error: 'No profile snapshot for this account' };
+    const claudeJsonPath = path.join(os.homedir(), '.claude.json');
+    const backupPath = path.join(os.homedir(), `.claude.json.dobius-backup-${Date.now()}`);
+    try {
+      // Backup current ~/.claude.json
+      if (fs.existsSync(claudeJsonPath)) {
+        await fs.promises.copyFile(claudeJsonPath, backupPath);
+      }
+      // Swap in the profile snapshot
+      await fs.promises.copyFile(account.claudeJsonPath, claudeJsonPath);
+      // Track which account is active
+      const config = loadConfig();
+      config.activeClaudeAccountId = accountId;
+      saveConfig(config);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Get active Claude account id
+  ipcMain.handle('accounts:getActiveClaude', () => {
+    return loadConfig().activeClaudeAccountId || null;
+  });
+
+  // Capture an existing ~/.claude.json as a named profile snapshot
+  ipcMain.handle('accounts:captureClaudeJson', async (_event, destPath) => {
+    const src = path.join(os.homedir(), '.claude.json');
+    try {
+      if (!fs.existsSync(src)) return { ok: false, error: 'No ~/.claude.json found' };
+      if (!destPath || typeof destPath !== 'string') return { ok: false, error: 'Invalid destPath' };
+      const dir = path.dirname(destPath);
+      await fs.promises.mkdir(dir, { recursive: true });
+      await fs.promises.copyFile(src, destPath);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
 }
 
 // Tier 2 session-to-tab capture: every 15s, scan live terminals for a
@@ -649,6 +834,28 @@ function setupShellHandlers() {
     // Only allow http/https URLs
     if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
       shell.openExternal(url);
+    }
+  });
+
+  ipcMain.handle('shell:showInFinder', (_event, filePath) => {
+    if (typeof filePath === 'string' && filePath.startsWith('/')) {
+      shell.showItemInFolder(filePath);
+    }
+  });
+
+  ipcMain.handle('project:setDisplayName', (_event, projectPath, name) => {
+    if (typeof projectPath !== 'string') return;
+    setProjectDisplayName(projectPath, name);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('data:updated', projectPath);
+    }
+  });
+
+  ipcMain.handle('project:removeFromList', (_event, projectPath) => {
+    if (typeof projectPath !== 'string') return;
+    addHiddenProject(projectPath);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('data:updated', projectPath);
     }
   });
 }
@@ -711,6 +918,32 @@ function setupWindowHandlers() {
     return { ok: true, id: win.id };
   });
 
+  ipcMain.handle('window:pickAndOpenProject', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory'],
+      title: 'Select a project folder',
+    });
+    if (result.canceled || result.filePaths.length === 0) return { ok: false };
+    const projectPath = result.filePaths[0];
+    addManualProject(projectPath);
+    openProjectWindow(projectPath);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('data:updated', projectPath);
+    }
+    return { ok: true, path: projectPath };
+  });
+
+  ipcMain.handle('window:showLauncher', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createWindow();
+    }
+    return { ok: true };
+  });
+
   ipcMain.handle('window:getOpen', () => getOpenProjects());
 
   ipcMain.handle('window:close', (_event, projectPath) => {
@@ -758,6 +991,35 @@ function setupGitHandlers() {
   ipcMain.handle('git:issues', (_event, projectDir) => getIssues(projectDir));
   ipcMain.handle('git:prDetails', (_event, projectDir, prNumber) => getPrDetails(projectDir, prNumber));
   ipcMain.handle('git:issueDetails', (_event, projectDir, issueNumber) => getIssueDetails(projectDir, issueNumber));
+
+  ipcMain.handle('prompt:improve', (_event, rawPrompt) => {
+    return new Promise((resolve, reject) => {
+      if (!rawPrompt || !rawPrompt.trim()) return resolve(rawPrompt);
+
+      const systemPrompt =
+        'You are an expert prompt engineer. Rewrite the user\'s prompt to be clearer, more specific, and more effective for Claude. ' +
+        'Preserve the original intent exactly. Output ONLY the improved prompt — no explanations, no preamble, no quotes.';
+
+      const fullPrompt = `${systemPrompt}\n\nOriginal prompt:\n${rawPrompt.trim()}\n\nImproved prompt:`;
+
+      const claudePath = resolveActiveCliPath();
+      const proc = spawn(claudePath, ['-p', fullPrompt], {
+        env: { ...process.env, PATH: process.env.PATH + ':/usr/local/bin:/opt/homebrew/bin' },
+      });
+
+      let out = '';
+      let err = '';
+      proc.stdout.on('data', (d) => { out += d.toString(); });
+      proc.stderr.on('data', (d) => { err += d.toString(); });
+      proc.on('close', (code) => {
+        if (code !== 0) return reject(new Error(err || `claude exited ${code}`));
+        resolve(out.trim() || rawPrompt);
+      });
+      proc.on('error', (e) => reject(e));
+
+      setTimeout(() => { proc.kill(); reject(new Error('Improve prompt timed out')); }, 30000);
+    });
+  });
 }
 
 function sendToFocused(channel, ...args) {
@@ -894,6 +1156,7 @@ app.whenReady().then(() => {
   setupWindowHandlers();
   setupBuildMonitorHandlers();
   setupGitHandlers();
+  setupFileWatcherHandlers();
   setupMenu();
   createWindow();
   initAutoUpdater();
@@ -949,6 +1212,7 @@ app.on('before-quit', (e) => {
     killAll();
     stopWatching();
     stopAllBuildWatchers();
+    stopAllFileWatchers();
     stopVoiceBridge();
     stopImessageBridge();
     stopScheduledTasks();

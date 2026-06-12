@@ -27,7 +27,7 @@ const OUTPUT_BUFFER_BYTES = 1024 * 1024;
  * @param {Electron.WebContents} webContents — renderer to send data to
  * @returns {{ pid: number }}
  */
-export function createTerminal(id, cwd, webContents) {
+export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   // Kill existing terminal with this ID if any
   if (terminals.has(id)) {
     killTerminal(id);
@@ -61,8 +61,15 @@ export function createTerminal(id, cwd, webContents) {
 
   // Electron's process.env.PATH is minimal when launched from Finder/Dock.
   // Prepend Homebrew paths so tools like zoxide, fzf, brew etc. are available.
+  // If the account has a specific CLI path, prepend its directory first so
+  // typing `claude` in the shell resolves to the account's binary.
   const extraPaths = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
+  if (accountEnv.DOBIUS_CLI_DIR) {
+    extraPaths.unshift(accountEnv.DOBIUS_CLI_DIR);
+  }
   const fullPath = [...extraPaths, process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'].join(':');
+
+  const { DOBIUS_CLI_DIR: _ignored, ...termEnv } = accountEnv;
 
   const shell = process.env.SHELL || '/bin/zsh';
   const term = pty.spawn(shell, ['-l'], {
@@ -77,6 +84,7 @@ export function createTerminal(id, cwd, webContents) {
       COLORTERM: 'truecolor',
       DOBIUS_CWD: safeCwd,
       ...extraEnv,
+      ...termEnv,
     },
   });
 
