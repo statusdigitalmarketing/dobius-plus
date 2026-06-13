@@ -17,6 +17,15 @@ export const useStore = create((set, get) => ({
   activeProcesses: [],
   buildComplete: false,
 
+  // Monitors — tab IDs the user is watching ("monitor this terminal").
+  // Active/idle is derived from the tab's running process, not stored here.
+  monitoredTabs: [],
+  toggleMonitor: (tabId) => set((s) => ({
+    monitoredTabs: s.monitoredTabs.includes(tabId)
+      ? s.monitoredTabs.filter((id) => id !== tabId)
+      : [...s.monitoredTabs, tabId],
+  })),
+
   // Terminal tabs
   terminalTabs: [],
   activeTabId: null,

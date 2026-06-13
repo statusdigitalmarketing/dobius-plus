@@ -12,6 +12,8 @@ export default function TerminalTabBar() {
   const reorderTabs = useStore((s) => s.reorderTabs);
   const closeOtherTabs = useStore((s) => s.closeOtherTabs);
   const closeTabsToRight = useStore((s) => s.closeTabsToRight);
+  const monitoredTabs = useStore((s) => s.monitoredTabs);
+  const toggleMonitor = useStore((s) => s.toggleMonitor);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const pushClosedTab = useStore((s) => s.pushClosedTab);
   const togglePinTab = useStore((s) => s.togglePinTab);
@@ -514,6 +516,11 @@ export default function TerminalTabBar() {
             setContextMenu(null);
           }}
           isSplit={contextMenu.tabId === splitTabId}
+          isMonitored={monitoredTabs.includes(contextMenu.tabId)}
+          onMonitor={() => {
+            toggleMonitor(contextMenu.tabId);
+            setContextMenu(null);
+          }}
           onDismiss={() => setContextMenu(null)}
         />
       )}
@@ -530,11 +537,12 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onDismiss }) {
+function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
 
   const items = [
+    { label: isMonitored ? 'Stop Monitoring' : 'Monitor this Terminal', onClick: onMonitor },
     { label: isPinned ? 'Unpin Tab' : 'Pin Tab', onClick: onPin },
     { label: 'Rename', onClick: onRename },
     { label: isSplit ? 'Unsplit' : 'Split View', onClick: onSplit, disabled: tabCount <= 1 },

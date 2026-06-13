@@ -8,6 +8,54 @@ function ctxColor(pct) {
   return '#3FB950';
 }
 
+const SHELLS = ['zsh', '-zsh', 'bash', '-bash', 'sh', '-sh', 'login', 'fish', '-fish'];
+
+// Monitored terminals: count + how many are actively running (not a bare shell).
+function useMonitors() {
+  const monitoredTabs = useStore((s) => s.monitoredTabs);
+  const tabs = useStore((s) => s.terminalTabs);
+  const live = monitoredTabs.filter((id) => tabs.some((t) => t.id === id));
+  const key = live.join(',');
+  const [activeCount, setActiveCount] = useState(0);
+
+  useEffect(() => {
+    if (!window.electronAPI?.terminalGetProcess || live.length === 0) { setActiveCount(0); return; }
+    let cancelled = false;
+    const poll = async () => {
+      let active = 0;
+      for (const id of live) {
+        try {
+          const proc = await window.electronAPI.terminalGetProcess(id);
+          if (proc && !SHELLS.includes(String(proc).trim())) active += 1;
+        } catch { /* ignore */ }
+      }
+      if (!cancelled) setActiveCount(active);
+    };
+    poll();
+    const i = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(i); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  return { count: live.length, activeCount };
+}
+
+// Whether the always-on Asana monitor (Auto Mode) is enabled.
+function useAsanaMonitor() {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    if (!window.electronAPI?.autoModeGet) return;
+    let cancelled = false;
+    const refresh = () => window.electronAPI.autoModeGet()
+      .then((a) => { if (!cancelled) setOn(!!a?.enabled); })
+      .catch(() => {});
+    refresh();
+    const i = setInterval(refresh, 30000);
+    return () => { cancelled = true; clearInterval(i); };
+  }, []);
+  return on;
+}
+
 function useContextSize(projectPath) {
   const [ctx, setCtx] = useState(null);
 
@@ -41,9 +89,12 @@ export default function StatusBar() {
   const currentIsWorktree = useStore((s) => s.currentIsWorktree);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const ctx = useContextSize(currentProjectPath);
+  const monitors = useMonitors();
+  const asanaOn = useAsanaMonitor();
 
   const hasActive = activeProcesses.length > 0;
   const activeTab = tabs.find((t) => t.id === activeTabId);
+  const projectName = currentProjectPath ? currentProjectPath.split('/').filter(Boolean).pop() : '';
 
   return (
     <div
@@ -56,6 +107,25 @@ export default function StatusBar() {
       }}
     >
       <div className="flex items-center gap-4">
+        {asanaOn && (
+          <span className="flex items-center gap-1.5" title="Auto Mode is polling Asana for new tasks" style={{ color: 'var(--fg)' }}>
+            <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ backgroundColor: '#3FB950', boxShadow: '0 0 4px #3FB950' }} />
+            Asana monitor
+          </span>
+        )}
+        {monitors.count > 0 && (
+          <span
+            className="flex items-center gap-1.5"
+            title={`${monitors.count} monitored terminal${monitors.count !== 1 ? 's' : ''} in ${projectName || 'this project'} — ${monitors.activeCount} active`}
+            style={{ color: 'var(--fg)' }}
+          >
+            <span
+              className="w-1.5 h-1.5 rounded-full inline-block"
+              style={{ backgroundColor: monitors.activeCount > 0 ? '#3FB950' : 'var(--dim)' }}
+            />
+            {projectName || 'monitor'} ×{monitors.count}
+          </span>
+        )}
         {currentBranch && (
           <span
             className="flex items-center gap-1"
