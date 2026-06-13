@@ -1,4 +1,36 @@
 import { useStore } from '../../store/store';
+import { useState, useEffect } from 'react';
+
+function ctxColor(pct) {
+  if (pct >= 95) return '#f85149';
+  if (pct >= 80) return '#f0883e';
+  if (pct >= 50) return '#e3b341';
+  return '#3FB950';
+}
+
+function useContextSize(projectPath) {
+  const [ctx, setCtx] = useState(null);
+
+  useEffect(() => {
+    if (!projectPath || !window.electronAPI?.dataEstimateContextSize) return;
+    let cancelled = false;
+
+    const refresh = async () => {
+      try {
+        const result = await window.electronAPI.dataEstimateContextSize(projectPath);
+        if (!cancelled) setCtx(result);
+      } catch {
+        void 0;
+      }
+    };
+
+    refresh();
+    const id = setInterval(refresh, 30000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [projectPath]);
+
+  return ctx;
+}
 
 export default function StatusBar() {
   const sessions = useStore((s) => s.sessions);
@@ -7,6 +39,8 @@ export default function StatusBar() {
   const activeTabId = useStore((s) => s.activeTabId);
   const currentBranch = useStore((s) => s.currentBranch);
   const currentIsWorktree = useStore((s) => s.currentIsWorktree);
+  const currentProjectPath = useStore((s) => s.currentProjectPath);
+  const ctx = useContextSize(currentProjectPath);
 
   const hasActive = activeProcesses.length > 0;
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -54,7 +88,34 @@ export default function StatusBar() {
           </span>
         )}
       </div>
-      <span>v2.0</span>
+      <div className="flex items-center gap-3">
+        {ctx && (() => {
+          const pct = Math.round((ctx.tokens / ctx.maxTokens) * 100);
+          const color = ctxColor(pct);
+          const tokStr = ctx.tokens >= 1000 ? `${(ctx.tokens / 1000).toFixed(0)}k` : ctx.tokens;
+          const maxStr = `${ctx.maxTokens / 1000}k`;
+          return (
+            <span
+              className="flex items-center gap-1.5"
+              title={`Context window: ~${ctx.tokens.toLocaleString()} / ${ctx.maxTokens.toLocaleString()} tokens (${pct}%)\nModel: ${ctx.model || 'unknown'}`}
+              style={{ cursor: 'default' }}
+            >
+              <span style={{ color, fontSize: 9 }}>ctx</span>
+              <span
+                className="relative h-1.5 rounded-full overflow-hidden"
+                style={{ width: 40, backgroundColor: 'var(--border)' }}
+              >
+                <span
+                  className="absolute inset-y-0 left-0 rounded-full"
+                  style={{ width: `${pct}%`, backgroundColor: color, transition: 'width 0.4s, background-color 0.4s' }}
+                />
+              </span>
+              <span style={{ color, fontSize: 9, fontFamily: "'SF Mono', monospace" }}>{pct}%</span>
+            </span>
+          );
+        })()}
+        <span>v2.0</span>
+      </div>
     </div>
   );
 }

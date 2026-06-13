@@ -1,9 +1,10 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useStore } from '../../store/store';
 
 export default function Overview({ stats, settings }) {
   const sessions = useStore((s) => s.sessions);
   const activeProcesses = useStore((s) => s.activeProcesses);
+  const setActiveProcesses = useStore((s) => s.setActiveProcesses);
 
   const dailyActivity = stats?.dailyActivity;
   const { totalMessages, totalSessions, totalTools } = useMemo(() => {
@@ -44,24 +45,17 @@ export default function Overview({ stats, settings }) {
                 <tr style={{ backgroundColor: 'var(--surface)' }}>
                   <th className="text-left px-3 py-1.5 font-medium" style={{ color: 'var(--dim)' }}>PID</th>
                   <th className="text-left px-3 py-1.5 font-medium" style={{ color: 'var(--dim)' }}>Command</th>
+                  <th className="px-3 py-1.5" />
                 </tr>
               </thead>
               <tbody>
                 {activeProcesses.map((p, i) => (
-                  <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
-                    <td
-                      className="px-3 py-1.5"
-                      style={{ color: 'var(--accent)', fontFamily: "'SF Mono', monospace" }}
-                    >
-                      {p.pid}
-                    </td>
-                    <td
-                      className="px-3 py-1.5 truncate max-w-md"
-                      style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}
-                    >
-                      {p.command}
-                    </td>
-                  </tr>
+                  <ProcessRow
+                    key={p.pid}
+                    process={p}
+                    isLast={i === activeProcesses.length - 1}
+                    onKilled={() => setActiveProcesses(activeProcesses.filter((x) => x.pid !== p.pid))}
+                  />
                 ))}
               </tbody>
             </table>
@@ -77,6 +71,67 @@ export default function Overview({ stats, settings }) {
         </div>
       )}
     </div>
+  );
+}
+
+function ProcessRow({ process: p, isLast, onKilled }) {
+  const [confirm, setConfirm] = useState(false);
+  const [killing, setKilling] = useState(false);
+
+  const handleKill = async () => {
+    if (!confirm) {
+      setConfirm(true);
+      setTimeout(() => setConfirm(false), 3000);
+      return;
+    }
+    setKilling(true);
+    try {
+      await window.electronAPI?.dataKillProcess(p.pid);
+      onKilled();
+    } catch {
+      setKilling(false);
+      setConfirm(false);
+    }
+  };
+
+  return (
+    <tr
+      style={{
+        borderTop: '1px solid var(--border)',
+        opacity: killing ? 0.4 : 1,
+        transition: 'opacity 0.2s',
+        backgroundColor: confirm ? 'rgba(248,81,73,0.05)' : 'transparent',
+      }}
+    >
+      <td className="px-3 py-1.5" style={{ color: 'var(--accent)', fontFamily: "'SF Mono', monospace" }}>
+        {p.pid}
+      </td>
+      <td className="px-3 py-1.5" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace", maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {p.command}
+      </td>
+      <td className="px-3 py-1.5 text-right">
+        <button
+          onClick={handleKill}
+          title={confirm ? 'Click again to send SIGTERM' : 'Kill process'}
+          style={{
+            padding: '2px 7px',
+            fontSize: 9,
+            fontFamily: "'SF Mono', monospace",
+            borderRadius: 3,
+            cursor: 'pointer',
+            border: `1px solid ${confirm ? 'rgba(248,81,73,0.5)' : 'var(--border)'}`,
+            backgroundColor: confirm ? 'rgba(248,81,73,0.12)' : 'transparent',
+            color: confirm ? '#f85149' : 'var(--dim)',
+            transition: 'all 0.15s',
+            whiteSpace: 'nowrap',
+          }}
+          onMouseEnter={(e) => { if (!confirm) { e.currentTarget.style.color = '#f85149'; e.currentTarget.style.borderColor = 'rgba(248,81,73,0.4)'; } }}
+          onMouseLeave={(e) => { if (!confirm) { e.currentTarget.style.color = 'var(--dim)'; e.currentTarget.style.borderColor = 'var(--border)'; } }}
+        >
+          {confirm ? 'kill?' : '× kill'}
+        </button>
+      </td>
+    </tr>
   );
 }
 

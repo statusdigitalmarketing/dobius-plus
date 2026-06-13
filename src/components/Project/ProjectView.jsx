@@ -33,6 +33,8 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const setActiveTab = useStore((s) => s.setActiveTab);
   const initTabs = useStore((s) => s.initTabs);
   const initClosedTabs = useStore((s) => s.initClosedTabs);
+  const splitTabId = useStore((s) => s.splitTabId);
+  const clearSplitTab = useStore((s) => s.clearSplitTab);
 
   const [pinnedIds, setPinnedIds] = useState([]);
   const [tabsInitialized, setTabsInitialized] = useState(false);
@@ -472,9 +474,16 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         setActiveView('terminal');
       }),
       window.electronAPI.onMenuCloseTab?.(() => closeActiveTab()),
+      window.electronAPI.onMenuResumeSession?.(() => {
+        // Cmd+R — resume this project's most recent Claude session in the active tab
+        if (!projectPath || !window.electronAPI?.dataGetLatestSession) return;
+        window.electronAPI.dataGetLatestSession(projectPath).then((session) => {
+          if (session?.sessionId) handleResumeSession(session);
+        });
+      }),
     ];
     return () => cleanups.forEach((fn) => fn?.());
-  }, [setActiveView, toggleSidebar, toggleGitPanel, addTab, removeTab, projectPath, closeActiveTab]);
+  }, [setActiveView, toggleSidebar, toggleGitPanel, addTab, removeTab, projectPath, closeActiveTab, handleResumeSession]);
 
   return (
     <div className="h-full w-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>
@@ -506,21 +515,72 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
           >
             <TerminalTabBar />
             <ResumeBanner projectPath={projectPath} />
-            <div className="flex-1 relative min-h-0">
-              {tabsInitialized && tabs.map((tab) => (
-                <div
-                  key={tab.id}
-                  className="absolute inset-0"
-                  style={{ display: tab.id === activeTabId ? 'flex' : 'none' }}
-                >
-                  <TerminalPane
-                    id={tab.id}
-                    cwd={tab.projectPath}
-                    theme={theme.xtermTheme}
-                    claimExisting={tab.id === tearOffTabId}
-                  />
-                </div>
-              ))}
+            <div className="flex-1 relative min-h-0 flex flex-row min-w-0">
+              {/* Left pane */}
+              <div className="flex-1 relative min-h-0" style={{ minWidth: 0 }}>
+                {tabsInitialized && tabs.filter((t) => t.id !== splitTabId).map((tab) => (
+                  <div
+                    key={tab.id}
+                    className="absolute inset-0"
+                    style={{ display: tab.id === activeTabId ? 'flex' : 'none' }}
+                  >
+                    <TerminalPane
+                      id={tab.id}
+                      cwd={tab.projectPath}
+                      theme={theme.xtermTheme}
+                      claimExisting={tab.id === tearOffTabId}
+                    />
+                  </div>
+                ))}
+              </div>
+
+              {/* Right split pane */}
+              {splitTabId && (() => {
+                const splitTab = tabs.find((t) => t.id === splitTabId);
+                if (!splitTab) return null;
+                return (
+                  <>
+                    <div style={{ width: 1, backgroundColor: 'var(--border)', flexShrink: 0 }} />
+                    <div className="flex flex-col min-h-0" style={{ width: '50%', minWidth: 0, flexShrink: 0 }}>
+                      <div style={{
+                        height: 28,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '0 10px',
+                        borderBottom: '1px solid var(--border)',
+                        backgroundColor: 'var(--surface)',
+                        flexShrink: 0,
+                      }}>
+                        <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--dim)' }}>
+                          {splitTab.label}
+                        </span>
+                        <button
+                          onClick={clearSplitTab}
+                          title="Exit split view"
+                          style={{
+                            background: 'transparent', border: 'none', cursor: 'pointer',
+                            color: 'var(--dim)', fontSize: 13, lineHeight: 1, padding: '2px 4px',
+                          }}
+                          onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--fg)'; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dim)'; }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <div className="flex-1 relative min-h-0">
+                        <div className="absolute inset-0 flex">
+                          <TerminalPane
+                            id={splitTab.id}
+                            cwd={splitTab.projectPath}
+                            theme={theme.xtermTheme}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           </div>
           {activeView !== 'terminal' && <DashboardView />}

@@ -36,3 +36,23 @@
 - Listener cleanup: try-finally pattern prevents leaks
 
 ## Build Passes: YES
+
+---
+
+## Handoff update — 2026-06-13 (scaffolding)
+
+**Done:**
+- `.claude/CLAUDE.md` (Claude workflow layer) in place.
+- `.claude/settings.json` created with scoped permissions: allows `dev`, `build`, `build:mobile`, `electron:dev`, `start`, read-only git (`status`, `diff`, `log`), and `npx electron-rebuild`. Denies `npm run electron:build` (signed/notarized release — human-only) and `./build-and-install.sh` (rm -rf + install to /Applications — human-only).
+- Scaffolding files (LESSONS-LEARNED.md, BUILD-LOG.md, HANDOFF.md) updated with a dated section each.
+
+**In progress:**
+- ~27 uncommitted files — the in-flight dashboard feature. Untracked: `electron/file-change-service.js`, `src/components/Dashboard/{ChangeFeed,Costs,Prompts,Search}.jsx`, `src/components/Launcher/ProjectContextMenu.jsx`. Plus 21 modified (Dashboard views, store.js, electron data/preload/window/voice services, several launcher/project/shared components, AUTONOMOUS-BUILD.md, package-lock.json).
+- Branch: `feature/multi-account-cli-path`, last commit `d082675`.
+
+**Next:**
+- Review and branch the in-flight dashboard work deliberately before starting new builds. Do not blow it away; confirm intent before committing or branching over it.
+
+**Known issues / cautions:**
+- See `LESSONS-LEARNED.md` (incl. the 2026-06-13 audit section) for runtime/build gotchas: null bytes in `execFile`, dev process name `"Electron"`, `build-and-install.sh` rm -rf, mounted-tab requirement, native-module rebuild, remote-debugging-port pre-ship check, config.json not hand-editable.
+- `npm run electron:build` and `./build-and-install.sh` are human-initiated only and are denied in `.claude/settings.json`.

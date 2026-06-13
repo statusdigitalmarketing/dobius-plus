@@ -2,13 +2,13 @@
 
 ## Launch Command (Preferred — with supervisor auto-resume)
 ```bash
-cd "/Users/statusmacbook2024/Projects (Code)/dobius-plus"
+cd "/Users/bayou/dobius-plus"
 bash scripts/crackbot-supervisor.sh AUTONOMOUS-BUILD.md
 ```
 
 ## Launch Command (Manual — no auto-resume)
 ```bash
-cd "/Users/statusmacbook2024/Projects (Code)/dobius-plus"
+cd "/Users/bayou/dobius-plus"
 claude --dangerously-skip-permissions -p "$(cat AUTONOMOUS-BUILD.md)"
 ```
 
@@ -73,7 +73,7 @@ The UI must NOT look like a generic AI-generated app. Specific rules:
 - Study the existing theme system in `src/lib/themes.js` — every theme generates CSS variables, use ONLY those
 
 ## Critical Rule: npx vite build must succeed after every task
-The codebase is at `/Users/statusmacbook2024/Projects (Code)/dobius-plus`. Do NOT create a new project. Do NOT modify existing working functionality. All existing features MUST continue working after every single task.
+The codebase is at `/Users/bayou/dobius-plus`. Do NOT create a new project. Do NOT modify existing working functionality. All existing features MUST continue working after every single task.
 
 ---
 

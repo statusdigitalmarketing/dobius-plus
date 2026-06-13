@@ -45,7 +45,10 @@ const DEFAULT_CONFIG = {
     },
   },
   asanaQueue: {
+    pat: '',                     // Asana personal access token
     allowedProjects: [],         // [{ name, gid }] — auto-process only these
+    myGid: '1215600517617968',   // Carson — tasks assigned to me get BUILT (full pipeline)
+    reviewGid: '1213473231797717', // Sam — tasks assigned to him only get REVIEWED (double-check)
   },
   accounts: [],                  // [{ id, name, type: 'claude'|'codex', claudeJsonPath?, apiKey? }]
   projectAccounts: {},           // projectPath → accountId
@@ -780,6 +783,21 @@ export function setProjectAccount(projectPath, accountId) {
  * Flush any pending config save immediately (synchronous, atomic).
  * Call this in before-quit to avoid losing recent changes.
  */
+export function getAsanaQueue() {
+  const config = loadConfig();
+  return { ...DEFAULT_CONFIG.asanaQueue, ...config.asanaQueue };
+}
+
+export function updateAsanaQueue(updates) {
+  const config = loadConfig();
+  const allowed = ['pat', 'allowedProjects', 'myGid', 'reviewGid'];
+  const safe = Object.fromEntries(
+    Object.entries(updates || {}).filter(([k]) => allowed.includes(k))
+  );
+  config.asanaQueue = { ...DEFAULT_CONFIG.asanaQueue, ...config.asanaQueue, ...safe };
+  saveConfig(config);
+}
+
 export function flushConfig() {
   if (saveTimer) {
     clearTimeout(saveTimer);

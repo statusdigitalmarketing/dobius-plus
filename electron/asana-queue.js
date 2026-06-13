@@ -105,27 +105,57 @@ export function resolveProjectByName(query) {
 }
 
 /**
- * Fetch incomplete tasks assigned to Sam in the given allowlisted project.
- * `assigneeGid` defaults to Sam's gid from CLAUDE.md (1213473231797717).
+ * Two assignee lanes (configurable; defaults in config-manager DEFAULT_CONFIG):
+ *   - build  → tasks assigned to me (Carson). Get the FULL pipeline:
+ *              build via the routed skill, then review + audit + ship-test.
+ *   - review → tasks assigned to Sam. We only double-check his work
+ *              (review + audit + ship-test); we never build these.
+ * Returns [{ gid, lane }].
  */
-export async function fetchNewTasks({ projectName, assigneeGid }) {
+function getLaneAssignees() {
+  const q = getAsanaQueue();
+  return [
+    { gid: q.myGid || '1215600517617968', lane: 'build' },
+    { gid: q.reviewGid || '1213473231797717', lane: 'review' },
+  ];
+}
+
+const FIELDS = ['gid', 'name', 'permalink_url', 'modified_at', 'due_on', 'notes', 'assignee'].join(',');
+
+/**
+ * Fetch incomplete tasks for an allowlisted project across both lanes.
+ * Each task is tagged with its `lane` ('build' | 'review') and `assigneeGid`
+ * so the Conductor knows whether to build-then-verify or only verify.
+ *
+ * `lanes` lets a caller restrict to one lane (e.g. ['build']); defaults to both.
+ */
+export async function fetchNewTasks({ projectName, lanes }) {
   const project = resolveProjectByName(projectName);
   if (!project) {
     return { ok: false, error: `project not allowlisted: "${projectName}"` };
   }
-  const assignee = assigneeGid || '1213473231797717';
-  const fields = ['gid', 'name', 'permalink_url', 'modified_at', 'due_on', 'notes'].join(',');
-  const path = `/api/1.0/tasks?project=${project.gid}&assignee=${assignee}&completed_since=now&limit=${MAX_TASKS_PER_FETCH}&opt_fields=${fields}`;
+  const wanted = getLaneAssignees().filter((a) => !lanes || lanes.includes(a.lane));
+  const seen = new Set();
+  const tasks = [];
   try {
-    const data = await asanaGet(path);
-    const tasks = (data?.data || []).map((t) => ({
-      gid: t.gid,
-      name: t.name || '(untitled)',
-      url: t.permalink_url || `https://app.asana.com/0/${project.gid}/${t.gid}`,
-      modifiedAt: t.modified_at,
-      dueOn: t.due_on,
-      notesPreview: (t.notes || '').slice(0, 200),
-    }));
+    for (const { gid, lane } of wanted) {
+      const path = `/api/1.0/tasks?project=${project.gid}&assignee=${gid}&completed_since=now&limit=${MAX_TASKS_PER_FETCH}&opt_fields=${FIELDS}`;
+      const data = await asanaGet(path);
+      for (const t of (data?.data || [])) {
+        if (seen.has(t.gid)) continue;     // a task can't be in both lanes, but guard anyway
+        seen.add(t.gid);
+        tasks.push({
+          gid: t.gid,
+          name: t.name || '(untitled)',
+          url: t.permalink_url || `https://app.asana.com/0/${project.gid}/${t.gid}`,
+          modifiedAt: t.modified_at,
+          dueOn: t.due_on,
+          notesPreview: (t.notes || '').slice(0, 200),
+          lane,
+          assigneeGid: gid,
+        });
+      }
+    }
     return { ok: true, project, tasks };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -134,10 +164,13 @@ export async function fetchNewTasks({ projectName, assigneeGid }) {
 
 /**
  * Format a task list as a short iMessage-friendly summary (<800 chars).
+ * Each line is prefixed with its lane so Sam-review vs build-mine is obvious.
  */
 export function formatTaskList(tasks) {
   if (!tasks || tasks.length === 0) return 'no new tasks';
-  const lines = tasks.slice(0, 5).map((t, i) => `${i + 1}. ${t.name.slice(0, 80)}${t.dueOn ? ` (due ${t.dueOn})` : ''}`);
+  const icon = (lane) => (lane === 'review' ? '🔍' : '🔨');
+  const lines = tasks.slice(0, 5).map((t, i) =>
+    `${i + 1}. ${icon(t.lane)} ${t.name.slice(0, 78)}${t.dueOn ? ` (due ${t.dueOn})` : ''}`);
   if (tasks.length > 5) lines.push(`...and ${tasks.length - 5} more`);
-  return lines.join('\n');
+  return `🔨 build (mine)  •  🔍 review (Sam's)\n${lines.join('\n')}`;
 }

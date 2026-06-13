@@ -15,6 +15,9 @@ export default function TerminalTabBar() {
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const pushClosedTab = useStore((s) => s.pushClosedTab);
   const togglePinTab = useStore((s) => s.togglePinTab);
+  const splitTabId = useStore((s) => s.splitTabId);
+  const setSplitTab = useStore((s) => s.setSplitTab);
+  const clearSplitTab = useStore((s) => s.clearSplitTab);
 
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
@@ -319,7 +322,7 @@ export default function TerminalTabBar() {
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => { if (tab.id === splitTabId) clearSplitTab(); setActiveTab(tab.id); }}
               onDoubleClick={() => handleDoubleClick(tab)}
               onMouseDown={(e) => handleMouseDown(e, tab.id)}
               onContextMenu={(e) => handleContextMenu(e, tab.id)}
@@ -502,6 +505,15 @@ export default function TerminalTabBar() {
             togglePinTab(contextMenu.tabId);
             setContextMenu(null);
           }}
+          onSplit={() => {
+            if (contextMenu.tabId === splitTabId) {
+              clearSplitTab();
+            } else {
+              setSplitTab(contextMenu.tabId);
+            }
+            setContextMenu(null);
+          }}
+          isSplit={contextMenu.tabId === splitTabId}
           onDismiss={() => setContextMenu(null)}
         />
       )}
@@ -518,13 +530,14 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, isPinned, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onDismiss }) {
+function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
 
   const items = [
     { label: isPinned ? 'Unpin Tab' : 'Pin Tab', onClick: onPin },
     { label: 'Rename', onClick: onRename },
+    { label: isSplit ? 'Unsplit' : 'Split View', onClick: onSplit, disabled: tabCount <= 1 },
     { type: 'divider' },
     { label: 'Close', onClick: onClose, disabled: tabCount <= 1 },
     { label: 'Close Others', onClick: onCloseOthers, disabled: tabCount <= 1 },

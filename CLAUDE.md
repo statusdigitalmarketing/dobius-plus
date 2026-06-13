@@ -74,7 +74,7 @@ See `RELEASING.md` for the full signed/notarized publish workflow (auto-update v
 - `node-pty` requires native compilation — use `electron-rebuild` after install
 - macOS: `titleBarStyle: 'hiddenInset'` for frameless native look
 - Dev: Vite on localhost:5173, Electron loads URL. Prod: Electron loads `dist/index.html`
-- Config persistence: `~/Library/Application Support/Dobius/config.json`
+- Config persistence: `~/Library/Application Support/dobius-plus/config.json` (Electron `userData` resolves to the package `name` `dobius-plus`; `app.setName('Dobius+')` runs after userData is cached so it does NOT change this path)
 - `build-and-install.sh` MUST `rm -rf` old .app before `cp -R` (asar overwrite issue)
 - **NEVER use null bytes (`\x00`) in `execFile` arguments** — Node.js throws `ERR_INVALID_ARG_VALUE`. Use a text separator like `||SEP||` instead (see `git-service.js` commit log format).
 - **Dev process name is "Electron"**, not the app name. Use `tell process "Electron"` in AppleScript during dev; the display name only applies to packaged `.app` builds.

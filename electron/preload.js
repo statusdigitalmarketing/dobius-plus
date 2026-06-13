@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   agentMemoryClear: (agentId) => ipcRenderer.invoke('agentMemory:clear', agentId),
 
   // Orchestration
+  orchestrationDecompose: (args) => ipcRenderer.invoke('orchestration:decompose', args),
   orchestrationList: () => ipcRenderer.invoke('orchestration:list'),
   orchestrationGet: (runId) => ipcRenderer.invoke('orchestration:get', runId),
   orchestrationSave: (run) => ipcRenderer.invoke('orchestration:save', run),
@@ -62,6 +63,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   fileRead: (filePath) => ipcRenderer.invoke('file:read', filePath),
   fileWrite: (filePath, content) => ipcRenderer.invoke('file:write', filePath, content),
   fileListClaudeMd: (projectPath) => ipcRenderer.invoke('file:listClaudeMd', projectPath),
+  skillReadFile: (skillPath, filename) => ipcRenderer.invoke('skill:readFile', skillPath, filename),
+  skillWriteFile: (skillPath, filename, content) => ipcRenderer.invoke('skill:writeFile', skillPath, filename, content),
 
   // Checkpoints
   checkpointSave: (projectPath, checkpoint) => ipcRenderer.invoke('checkpoint:save', projectPath, checkpoint),
@@ -82,10 +85,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataListProjects: () => ipcRenderer.invoke('data:listProjects'),
   dataLoadAllSessions: () => ipcRenderer.invoke('data:loadAllSessions'),
   dataGetLatestSession: (projectPath) => ipcRenderer.invoke('data:getLatestSession', projectPath),
+  dataDeleteSession: (sessionId, projectPath) => ipcRenderer.invoke('data:deleteSession', sessionId, projectPath),
+  dataKillProcess: (pid) => ipcRenderer.invoke('data:killProcess', pid),
+  dataLoadProjectTokens: () => ipcRenderer.invoke('data:loadProjectTokens'),
+  dataSearchTranscripts: (query) => ipcRenderer.invoke('data:searchTranscripts', query),
+  dataEstimateContextSize: (projectPath) => ipcRenderer.invoke('data:estimateContextSize', projectPath),
   onDataUpdated: (callback) => {
     const handler = (_event, changedPath) => callback(changedPath);
     ipcRenderer.on('data:updated', handler);
     return () => ipcRenderer.removeListener('data:updated', handler);
+  },
+
+  // File change watcher
+  filewatcherWatch: (projectPath) => ipcRenderer.invoke('filewatcher:watch', projectPath),
+  filewatcherUnwatch: (projectPath) => ipcRenderer.invoke('filewatcher:unwatch', projectPath),
+  filewatcherGetEvents: (projectPath) => ipcRenderer.invoke('filewatcher:getEvents', projectPath),
+  onFilewatcherChange: (callback) => {
+    const handler = (_event, projectPath, entry) => callback(projectPath, entry);
+    ipcRenderer.on('filewatcher:change', handler);
+    return () => ipcRenderer.removeListener('filewatcher:change', handler);
   },
 
   // Config (persisted to ~/Library/Application Support/Dobius/)
@@ -105,11 +123,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   configGetSessionTabMap: () => ipcRenderer.invoke('config:getSessionTabMap'),
   configSetSessionTabLink: (sessionId, tabId, projectPath) => ipcRenderer.invoke('config:setSessionTabLink', sessionId, tabId, projectPath),
 
+  // Account management
+  accountsList: () => ipcRenderer.invoke('accounts:list'),
+  accountsSave: (account) => ipcRenderer.invoke('accounts:save', account),
+  accountsDelete: (accountId) => ipcRenderer.invoke('accounts:delete', accountId),
+  accountsGetForProject: (projectPath) => ipcRenderer.invoke('accounts:getForProject', projectPath),
+  accountsSetForProject: (projectPath, accountId) => ipcRenderer.invoke('accounts:setForProject', projectPath, accountId),
+  accountsCaptureClaudeJson: (destPath) => ipcRenderer.invoke('accounts:captureClaudeJson', destPath),
+  accountsActivateClaude: (accountId) => ipcRenderer.invoke('accounts:activateClaude', accountId),
+  accountsGetActiveClaude: () => ipcRenderer.invoke('accounts:getActiveClaude'),
+
+  getHomeDirPath: () => ipcRenderer.invoke('utils:getHomeDirPath'),
+
   // Window management
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),
   windowGetOpen: () => ipcRenderer.invoke('window:getOpen'),
   windowClose: (projectPath) => ipcRenderer.invoke('window:close', projectPath),
   windowSetTitle: (title) => ipcRenderer.invoke('window:setTitle', title),
+  windowShowLauncher: () => ipcRenderer.invoke('window:showLauncher'),
+  windowPickAndOpenProject: () => ipcRenderer.invoke('window:pickAndOpenProject'),
 
   // Mobile server
   mobileServerStart: () => ipcRenderer.invoke('mobileServer:start'),
@@ -188,6 +220,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('menu:close-tab', handler);
     return () => ipcRenderer.removeListener('menu:close-tab', handler);
   },
+  onMenuResumeSession: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('menu:resume-session', handler);
+    return () => ipcRenderer.removeListener('menu:resume-session', handler);
+  },
 
   // File path from drag-drop (File.path removed in Electron 32+)
   getPathForFile: (file) => webUtils.getPathForFile(file),
@@ -209,6 +246,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Shell
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+  shellShowInFinder: (filePath) => ipcRenderer.invoke('shell:showInFinder', filePath),
+
+  // Project management
+  projectSetDisplayName: (projectPath, name) => ipcRenderer.invoke('project:setDisplayName', projectPath, name),
+  projectRemoveFromList: (projectPath) => ipcRenderer.invoke('project:removeFromList', projectPath),
 
   // Git
   gitStatus: (projectDir) => ipcRenderer.invoke('git:status', projectDir),
@@ -220,4 +262,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gitIssues: (projectDir) => ipcRenderer.invoke('git:issues', projectDir),
   gitPrDetails: (projectDir, prNumber) => ipcRenderer.invoke('git:prDetails', projectDir, prNumber),
   gitIssueDetails: (projectDir, issueNumber) => ipcRenderer.invoke('git:issueDetails', projectDir, issueNumber),
+  improvePrompt: (rawPrompt) => ipcRenderer.invoke('prompt:improve', rawPrompt),
+
+  // Project tasks (to-do list dropdown)
+  tasksList: (projectPath) => ipcRenderer.invoke('tasks:list', projectPath),
+  tasksAdd: (projectPath, taskData) => ipcRenderer.invoke('tasks:add', projectPath, taskData),
+  tasksUpdate: (projectPath, taskId, patch) => ipcRenderer.invoke('tasks:update', projectPath, taskId, patch),
+  tasksDelete: (projectPath, taskId) => ipcRenderer.invoke('tasks:delete', projectPath, taskId),
+  tasksSyncAsana: (projectPath) => ipcRenderer.invoke('tasks:syncAsana', projectPath),
+  asanaGetConfig: () => ipcRenderer.invoke('asana:getConfig'),
+  asanaUpdateConfig: (updates) => ipcRenderer.invoke('asana:updateConfig', updates),
+  visualOpenWindow: (projectPath) => ipcRenderer.invoke('visual:openWindow', projectPath),
+  visualStart: (projectPath) => ipcRenderer.invoke('visual:start', projectPath),
+  visualStop: () => ipcRenderer.invoke('visual:stop'),
+  visualGetPort: () => ipcRenderer.invoke('visual:getPort'),
+  visualScreenshot: (webContentsId) => ipcRenderer.invoke('visual:screenshot', webContentsId),
+  visualListPages: () => ipcRenderer.invoke('visual:listPages'),
 });

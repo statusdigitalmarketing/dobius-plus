@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run dev)",
+      "Bash(npm run build)",
+      "Bash(npm run build:mobile)",
+      "Bash(npm run electron:dev)",
+      "Bash(npm start)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(npx electron-rebuild:*)"
+    ],
+    "deny": [
+      "Bash(npm run electron:build)",
+      "Bash(./build-and-install.sh:*)"
+    ]
+  }
+}

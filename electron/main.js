@@ -35,6 +35,7 @@ import {
 } from './config-manager.js';
 import {
   openProjectWindow, openTornOffWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
+  openVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
 import {
@@ -48,7 +49,9 @@ import {
   sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus,
 } from './imessage-bridge.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
-import { getImessageBridge, updateImessageBridge } from './config-manager.js';
+import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks } from './tasks-service.js';
+import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
+import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages } from './visual-server.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -406,13 +409,23 @@ For each "do X" request:
 
 # Phase 4 — Asana queue processing
 
-When Sam says "process the [X] queue", "check new Asana tasks in [X]", or similar:
+When Carson says "process the [X] queue", "check new Asana tasks in [X]", or similar:
 
-1. \`dobius-asana-fetch [X]\` — returns JSON with .tasks[] and .summary (an iMessage-friendly list)
+1. \`dobius-asana-fetch [X]\` — returns JSON with .tasks[] and .summary. Each task carries a **lane**:
+   - \`build\`  (🔨, assigned to Carson) — we BUILD it: dispatch the right skill, do the work, then verify.
+   - \`review\` (🔍, assigned to Sam)     — we ONLY double-check his work. Never build/modify scope; just verify and report.
 2. If project isn't allowlisted, dobius-reply explaining how to add it: "Project not allowlisted. Run dobius-asana-allow <name> <gid>" (find the gid from any Asana web URL: app.asana.com/0/GID/...)
 3. If allowlisted: \`dobius-ask "Found N tasks in [X]:\\n<summary>\\nProcess all (YES), pick subset (PICK), or cancel (NO)?"\`
-4. On YES: for each task, dispatch via the normal routing tree (lead tab → existing → spawn-with-ask) with the task's name as the initial prompt. Register each via dobius-track. The hybrid reply system auto-texts Sam when each completes.
-5. dobius-reply with "Queued N tasks, will text as each finishes" so Sam sees the ack immediately.
+4. On YES, per task — by lane:
+   - **build lane:** dispatch via the normal routing tree (lead tab → existing → spawn-with-ask) with the task name as the initial prompt. Then run the **verify pipeline** below.
+   - **review lane:** do NOT change scope. Pull Sam's branch/PR for the task, run the **verify pipeline** read-only, and report findings on the task.
+   - Register each via dobius-track. The hybrid reply system auto-texts Carson when each completes.
+5. **Verify pipeline (every task, every time — build AND review):**
+   a. \`review-audit\` skill — dual code review + architecture audit on the diff.
+   b. \`ship-test\` skill — health/critical-path checks against the deploy or local server.
+   c. **See the work:** open a Visual preview window (visual:openWindow) for the project and capture a screenshot of the rendered result; attach it to the task report. Screenshots taken via Playwright/webapp-testing must use a FRESH window each time (see global skills/hooks rules).
+6. dobius-reply with "Queued N tasks (M build, K review), will text as each finishes" so Carson sees the ack immediately.
+7. NEVER mark an Asana task complete and NEVER push/deploy — surface for Carson to approve.
 
 # Phase 4 — Risky-action confirmation gate (CRITICAL)
 
@@ -608,6 +621,48 @@ function setupOrchestrationHandlers() {
   ipcMain.handle('orchestration:delete', (_event, runId) => {
     if (!runId || typeof runId !== 'string' || runId.length > 200) return;
     deleteOrchestrationRun(runId);
+  });
+
+  // --- Project task to-do list ---
+  ipcMain.handle('tasks:list', (_event, projectPath) => listTasks(projectPath));
+  ipcMain.handle('tasks:add', (_event, projectPath, taskData) => addTask(projectPath, taskData));
+  ipcMain.handle('tasks:update', (_event, projectPath, taskId, patch) => updateTask(projectPath, taskId, patch));
+  ipcMain.handle('tasks:delete', (_event, projectPath, taskId) => deleteTask(projectPath, taskId));
+  ipcMain.handle('tasks:syncAsana', (_event, projectPath) => syncAsanaTasks(projectPath));
+  ipcMain.handle('asana:getConfig', () => getAsanaQueue());
+  ipcMain.handle('asana:updateConfig', (_event, updates) => updateAsanaQueue(updates));
+
+  // --- Visual preview server ---
+  ipcMain.handle('visual:openWindow', (_event, projectPath) => {
+    if (!projectPath) return { ok: false, error: 'No project path' };
+    openVisualWindow(projectPath);
+    return { ok: true };
+  });
+  ipcMain.handle('visual:start', async (_event, projectPath) => {
+    try {
+      const port = await startVisualServer(projectPath);
+      return { ok: true, port, url: `http://127.0.0.1:${port}` };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('visual:stop', async () => {
+    await stopVisualServer();
+    return { ok: true };
+  });
+  ipcMain.handle('visual:getPort', () => getVisualPort());
+  ipcMain.handle('visual:listPages', () => listVisualPages());
+  ipcMain.handle('visual:screenshot', async (_event, webContentsId) => {
+    try {
+      const wc = webContentsId != null
+        ? require('electron').webContents.fromId(webContentsId)
+        : null;
+      if (!wc) return { ok: false, error: 'webContents not found' };
+      const image = await wc.capturePage();
+      return { ok: true, dataUrl: image.toDataURL() };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   });
 }
 
@@ -1108,7 +1163,15 @@ function setupMenu() {
           click: () => sendToFocused('menu:toggle-git-panel'),
         },
         { type: 'separator' },
-        { role: 'reload' },
+        {
+          label: 'Resume Last Session',
+          accelerator: 'CmdOrCtrl+R',
+          click: () => sendToFocused('menu:resume-session'),
+        },
+        { type: 'separator' },
+        // Reload is moved OFF Cmd+R on purpose: a renderer reload tears down every
+        // xterm buffer + PTY. Cmd+R now resumes the last session instead.
+        { role: 'reload', accelerator: 'CmdOrCtrl+Alt+R' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },
         { type: 'separator' },

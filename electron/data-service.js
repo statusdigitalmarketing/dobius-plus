@@ -4,10 +4,10 @@ import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
 import {
-  HISTORY_PATH, STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PROJECTS_DIR,
+  HISTORY_PATH, STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PLUGINS_DIR, PROJECTS_DIR,
   parseJsonl, timeAgo, pathExists,
 } from './data-utils.js';
-import { getSettings } from './config-manager.js';
+import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects } from './config-manager.js';
 
 /**
  * Load session history from ~/.claude/history.jsonl
@@ -68,9 +68,14 @@ export async function loadAllSessions() {
       void 0;
     }
 
+    // Also seed manually-added projects so they resolve correctly
+    for (const manualPath of getManualProjects()) {
+      encodedToReal.set(encodePathLikeClaude(manualPath), manualPath);
+    }
+
     await Promise.all(projectDirs.map(async (dir) => {
       const projectDir = path.join(PROJECTS_DIR, dir.name);
-      const realPath = encodedToReal.get(dir.name);
+      const realPath = encodedToReal.get(dir.name) || tryReconstructPath(dir.name);
       const projectPath = realPath || ('/' + dir.name.replace(/-/g, '/'));
       const projectName = realPath
         ? realPath.split('/').filter(Boolean).pop()
@@ -302,39 +307,116 @@ export async function readPlanFile(planName) {
   }
 }
 
+async function readSkillDescription(skillDir) {
+  // Check skill.json first (Claude Code standard format)
+  const skillJson = path.join(skillDir, 'skill.json');
+  try {
+    const raw = await fs.readFile(skillJson, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed.description) return parsed.description;
+  } catch {}
+
+  // Fallback: SKILL.md frontmatter
+  const skillMd = path.join(skillDir, 'SKILL.md');
+  try {
+    const content = await fs.readFile(skillMd, 'utf8');
+    const lines = content.split('\n');
+    for (const line of lines) {
+      if (line.startsWith('description:')) {
+        return line.replace('description:', '').trim().replace(/^["']|["']$/g, '');
+      }
+    }
+    return lines.find((l) => l.trim() && !l.startsWith('#') && !l.startsWith('---')) || '';
+  } catch {
+    return '';
+  }
+}
+
+async function collectSkillsFromDir(dir, source) {
+  if (!(await pathExists(dir))) return [];
+  const dirents = await fs.readdir(dir, { withFileTypes: true });
+  return Promise.all(
+    dirents.filter((d) => d.isDirectory()).map(async (d) => {
+      const skillDir = path.join(dir, d.name);
+      const description = await readSkillDescription(skillDir);
+      return { name: d.name, path: skillDir, description: description.trim(), source };
+    })
+  );
+}
+
 /**
- * Load installed skills from ~/.claude/skills/
+ * Load installed skills from ~/.claude/skills/ and ~/.claude/plugins/ (all marketplaces).
  */
 export async function loadSkills() {
   try {
-    if (!(await pathExists(SKILLS_DIR))) return [];
-    const dirents = await fs.readdir(SKILLS_DIR, { withFileTypes: true });
-    const dirs = dirents.filter((d) => d.isDirectory());
-    return Promise.all(dirs.map(async (d) => {
-      const skillDir = path.join(SKILLS_DIR, d.name);
-      const skillMd = path.join(skillDir, 'SKILL.md');
-      let description = '';
-      try {
-        const content = await fs.readFile(skillMd, 'utf8');
-        const lines = content.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('description:')) {
-            description = line.replace('description:', '').trim().replace(/^["']|["']$/g, '');
-            break;
-          }
-        }
-        if (!description && lines.length > 0) {
-          description = lines.find((l) => l.trim() && !l.startsWith('#') && !l.startsWith('---')) || '';
-        }
-      } catch {
-        void 0;
-      }
-      return { name: d.name, path: skillDir, description: description.trim() };
-    }));
+    const results = await Promise.allSettled([
+      // Custom user skills
+      collectSkillsFromDir(SKILLS_DIR, 'custom'),
+      // Plugin skills: scan each marketplace → each plugin → skills/
+      (async () => {
+        if (!(await pathExists(PLUGINS_DIR))) return [];
+        const marketplacesDir = path.join(PLUGINS_DIR, 'marketplaces');
+        if (!(await pathExists(marketplacesDir))) return [];
+        const marketplaces = (await fs.readdir(marketplacesDir, { withFileTypes: true }))
+          .filter((d) => d.isDirectory()).map((d) => d.name);
+        const allPluginSkills = await Promise.all(marketplaces.map(async (marketplace) => {
+          const pluginsDir = path.join(marketplacesDir, marketplace, 'plugins');
+          if (!(await pathExists(pluginsDir))) return [];
+          const plugins = (await fs.readdir(pluginsDir, { withFileTypes: true }))
+            .filter((d) => d.isDirectory());
+          return Promise.all(plugins.map(async (plugin) => {
+            const skillsDir = path.join(pluginsDir, plugin.name, 'skills');
+            return collectSkillsFromDir(skillsDir, plugin.name);
+          }));
+        }));
+        return allPluginSkills.flat(2);
+      })(),
+    ]);
+    const all = results.flatMap((r) => r.status === 'fulfilled' ? r.value : []);
+    // Deduplicate by name+source
+    const seen = new Set();
+    return all.filter((s) => {
+      const key = `${s.source}:${s.name}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   } catch (err) {
     console.warn('[data-service] Failed to load skills:', err.message);
     return [];
   }
+}
+
+/**
+ * Delete a session JSONL file. Searches the encoded project dir first,
+ * then falls back to scanning all project dirs for the session ID.
+ */
+export async function deleteSession(sessionId, projectPath) {
+  if (!sessionId || !/^[\w-]+$/.test(sessionId)) throw new Error('Invalid sessionId');
+
+  // Try primary path via encoded projectPath
+  if (projectPath) {
+    const encodedProject = projectPath.replace(/\//g, '-').replace(/^-/, '');
+    const primary = path.join(PROJECTS_DIR, encodedProject, `${sessionId}.jsonl`);
+    if (await pathExists(primary)) {
+      await fs.unlink(primary);
+      return true;
+    }
+  }
+
+  // Fallback: scan all project dirs
+  if (await pathExists(PROJECTS_DIR)) {
+    const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+    for (const dir of dirents.filter((d) => d.isDirectory())) {
+      const candidate = path.join(PROJECTS_DIR, dir.name, `${sessionId}.jsonl`);
+      if (await pathExists(candidate)) {
+        await fs.unlink(candidate);
+        return true;
+      }
+    }
+  }
+
+  throw new Error('Session file not found');
 }
 
 /**
@@ -523,6 +605,27 @@ export async function listProjects() {
   const projectMap = new Map(); // realPath → project object
   const encodedToReal = new Map(); // Claude-encoded name → real filesystem path
 
+  // 0. Seed manually-added projects (picked via folder dialog, may have no sessions yet)
+  for (const manualPath of getManualProjects()) {
+    if (!projectMap.has(manualPath)) {
+      const encoded = encodePathLikeClaude(manualPath);
+      encodedToReal.set(encoded, manualPath);
+      let latestTimestamp = 0;
+      try {
+        const s = await fs.stat(manualPath);
+        latestTimestamp = s.mtimeMs;
+      } catch { void 0; }
+      projectMap.set(manualPath, {
+        encodedPath: null,
+        decodedPath: manualPath,
+        displayName: manualPath.split('/').pop(),
+        sessionCount: 0,
+        latestTimestamp,
+        age: latestTimestamp ? timeAgo(latestTimestamp) : 'unknown',
+      });
+    }
+  }
+
   // 1. Scan filesystem projectScanDir FIRST so we have real paths for matching
   try {
     const settings = getSettings();
@@ -672,6 +775,240 @@ export async function listProjects() {
     console.warn('[data-service] Failed to scan Claude projects:', err.message);
   }
 
+  const hidden = new Set(getHiddenProjects());
+  const displayNames = getProjectDisplayNames();
+
   return Array.from(projectMap.values())
+    .filter((p) => !p.decodedPath || !hidden.has(p.decodedPath))
+    .map((p) => ({
+      ...p,
+      displayName: (p.decodedPath && displayNames[p.decodedPath]) || p.displayName,
+    }))
     .sort((a, b) => b.latestTimestamp - a.latestTimestamp);
+}
+
+// Pricing per 1M tokens (USD) — keyed by model name substring
+const MODEL_PRICING = [
+  { pattern: 'opus',   input: 15,   output: 75,   cacheRead: 1.5,   cacheWrite: 3.75 },
+  { pattern: 'sonnet', input: 3,    output: 15,   cacheRead: 0.3,   cacheWrite: 0.375 },
+  { pattern: 'haiku',  input: 0.80, output: 4,    cacheRead: 0.08,  cacheWrite: 0.10 },
+];
+
+function getPricing(model) {
+  const m = (model || '').toLowerCase();
+  return MODEL_PRICING.find((p) => m.includes(p.pattern)) || MODEL_PRICING[1];
+}
+
+/**
+ * Scan all projects' transcripts and aggregate token usage + estimated cost per project.
+ */
+export async function loadProjectTokens() {
+  const results = {};
+  try {
+    if (!(await pathExists(PROJECTS_DIR))) return results;
+    const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+
+    await Promise.all(dirents.filter((d) => d.isDirectory()).map(async (dir) => {
+      const projectDir = path.join(PROJECTS_DIR, dir.name);
+      let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0;
+      let sessions = 0;
+      const modelTotals = {};
+
+      try {
+        const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
+        await Promise.all(files.map(async (f) => {
+          sessions++;
+          const filePath = path.join(projectDir, f);
+          try {
+            const stat = await fs.stat(filePath);
+            if (stat.size > 8 * 1024 * 1024) return; // skip files > 8MB
+          } catch { return; }
+          const entries = await parseJsonl(filePath);
+          for (const entry of entries) {
+            const usage = entry.message?.usage;
+            const model = entry.message?.model || 'unknown';
+            if (!usage) continue;
+            const inp = (usage.input_tokens || 0);
+            const out = (usage.output_tokens || 0);
+            const cr  = (usage.cache_read_input_tokens || 0);
+            const cw  = (usage.cache_creation_input_tokens || 0);
+            inputTokens += inp;
+            outputTokens += out;
+            cacheReadTokens += cr;
+            cacheWriteTokens += cw;
+            if (!modelTotals[model]) modelTotals[model] = { inp: 0, out: 0, cr: 0, cw: 0 };
+            modelTotals[model].inp += inp;
+            modelTotals[model].out += out;
+            modelTotals[model].cr  += cr;
+            modelTotals[model].cw  += cw;
+          }
+        }));
+      } catch {
+        return;
+      }
+
+      if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0) return;
+
+      // Compute estimated cost per model
+      let estimatedCostUsd = 0;
+      for (const [model, t] of Object.entries(modelTotals)) {
+        const p = getPricing(model);
+        estimatedCostUsd +=
+          (t.inp / 1e6) * p.input +
+          (t.out / 1e6) * p.output +
+          (t.cr  / 1e6) * p.cacheRead +
+          (t.cw  / 1e6) * p.cacheWrite;
+      }
+
+      const displayName = dir.name.split('-').filter(Boolean).pop() || dir.name;
+      results[dir.name] = {
+        projectName: displayName,
+        encodedPath: dir.name,
+        sessions,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+        models: Object.keys(modelTotals),
+        estimatedCostUsd,
+      };
+    }));
+  } catch (err) {
+    console.warn('[data-service] Failed to load project tokens:', err.message);
+  }
+  return results;
+}
+
+/**
+ * Full-text search across all session JSONL files.
+ * Returns up to 100 matches sorted by recency.
+ */
+export async function searchTranscripts(query) {
+  if (!query || typeof query !== 'string') return [];
+  const q = query.trim().slice(0, 200);
+  if (q.length < 2) return [];
+  const qLower = q.toLowerCase();
+  const matches = [];
+
+  try {
+    if (!(await pathExists(PROJECTS_DIR))) return [];
+    const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+
+    await Promise.all(dirents.filter((d) => d.isDirectory()).map(async (dir) => {
+      const projectDir = path.join(PROJECTS_DIR, dir.name);
+      const projectName = dir.name.split('-').filter(Boolean).pop() || dir.name;
+      const projectPath = '/' + dir.name.replace(/-/g, '/');
+
+      try {
+        const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
+        await Promise.all(files.map(async (f) => {
+          if (matches.length >= 200) return;
+          const sessionId = f.replace('.jsonl', '');
+          const filePath = path.join(projectDir, f);
+          try {
+            const stat = await fs.stat(filePath);
+            if (stat.size > 5 * 1024 * 1024) return; // skip very large sessions
+          } catch { return; }
+
+          const entries = await parseJsonl(filePath);
+          let sessionTimestamp = 0;
+
+          for (const entry of entries) {
+            const ts = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
+            if (ts > sessionTimestamp) sessionTimestamp = ts;
+
+            // Extract searchable text
+            let text = '';
+            const msgContent = entry.message?.content;
+            if (typeof msgContent === 'string') {
+              text = msgContent;
+            } else if (Array.isArray(msgContent)) {
+              text = msgContent
+                .map((c) => c.text || c.thinking || '')
+                .filter(Boolean)
+                .join(' ');
+            }
+
+            if (!text || !text.toLowerCase().includes(qLower)) continue;
+
+            const idx = text.toLowerCase().indexOf(qLower);
+            const start = Math.max(0, idx - 80);
+            const end = Math.min(text.length, idx + q.length + 80);
+            const excerpt =
+              (start > 0 ? '…' : '') +
+              text.slice(start, end) +
+              (end < text.length ? '…' : '');
+
+            const role = entry.type || entry.message?.role || 'unknown';
+            matches.push({
+              sessionId,
+              projectName,
+              projectPath,
+              role,
+              excerpt,
+              timestamp: ts || sessionTimestamp,
+            });
+
+            if (matches.length >= 200) return;
+          }
+        }));
+      } catch {
+        void 0;
+      }
+    }));
+  } catch (err) {
+    console.warn('[data-service] Failed to search transcripts:', err.message);
+  }
+
+  return matches.sort((a, b) => b.timestamp - a.timestamp).slice(0, 100);
+}
+
+/**
+ * Estimate context window usage for the most recent session of a project.
+ * Returns { tokens, maxTokens, model } or null.
+ */
+export async function estimateContextSize(projectPath) {
+  try {
+    if (!projectPath || typeof projectPath !== 'string') return null;
+    const encoded = encodePathLikeClaude(projectPath);
+    const projectDir = path.join(PROJECTS_DIR, encoded);
+    if (!(await pathExists(projectDir))) return null;
+
+    const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
+    if (files.length === 0) return null;
+
+    const fileStats = await Promise.all(files.map(async (f) => {
+      try {
+        const stat = await fs.stat(path.join(projectDir, f));
+        return { file: f, mtime: stat.mtimeMs };
+      } catch {
+        return { file: f, mtime: 0 };
+      }
+    }));
+    const latest = fileStats.reduce((a, b) => b.mtime > a.mtime ? b : a);
+
+    const filePath = path.join(projectDir, latest.file);
+    const entries = await parseJsonl(filePath);
+
+    let lastInputTokens = 0;
+    let lastModel = '';
+    for (const entry of entries) {
+      const usage = entry.message?.usage;
+      if (!usage) continue;
+      const total =
+        (usage.input_tokens || 0) +
+        (usage.cache_read_input_tokens || 0) +
+        (usage.cache_creation_input_tokens || 0);
+      if (total > lastInputTokens) {
+        lastInputTokens = total;
+        if (entry.message?.model) lastModel = entry.message.model;
+      }
+    }
+
+    if (!lastInputTokens) return null;
+    return { tokens: lastInputTokens, maxTokens: 200000, model: lastModel };
+  } catch (err) {
+    console.warn('[data-service] Failed to estimate context size:', err.message);
+    return null;
+  }
 }

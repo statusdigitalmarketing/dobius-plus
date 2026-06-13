@@ -45,6 +45,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [inputExpanded, setInputExpanded] = useState(false);
+  const [isImproving, setIsImproving] = useState(false);
   const inputRef = useRef(null);
   const searchInputRef = useRef(null);
 
@@ -350,19 +351,16 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     };
   }, []);
 
-  // Single click → command input bar, double click → focus terminal (for interactive prompts)
+  // Double click → focus xterm directly (for interactive prompts like vim)
+  // Single click is left alone so xterm keeps focus from its own mousedown handler
   const lastClickTime = useRef(0);
-  const handleTerminalClick = useCallback((e) => {
+  const handleTerminalClick = useCallback(() => {
     const now = Date.now();
     if (now - lastClickTime.current < 300) {
-      // Double click → focus terminal
       containerRef.current?.querySelector('.xterm-helper-textarea')?.focus();
-    } else if (!window.getSelection()?.toString() && !termRef.current?.hasSelection()) {
-      // Single click (no text selected in browser or xterm) → focus input bar
-      inputRef.current?.focus();
     }
     lastClickTime.current = now;
-  }, [containerRef, termRef]);
+  }, [containerRef]);
 
   // Auto-resize textarea to fit content
   const handleInputChange = useCallback((e) => {
@@ -499,6 +497,46 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
             overflow: 'auto',
           }}
         />
+        {input.trim() && (
+          <button
+            type="button"
+            disabled={isImproving}
+            onClick={async () => {
+              if (!window.electronAPI?.improvePrompt) return;
+              setIsImproving(true);
+              try {
+                const improved = await window.electronAPI.improvePrompt(input);
+                setInput(improved);
+                setHistoryIndex(-1);
+                requestAnimationFrame(() => {
+                  inputRef.current?.focus();
+                  inputRef.current?.setSelectionRange(improved.length, improved.length);
+                });
+              } catch {
+                // silently leave input unchanged on error
+              } finally {
+                setIsImproving(false);
+              }
+            }}
+            title="Improve this prompt with AI"
+            style={{
+              padding: '2px 8px',
+              fontSize: 11,
+              fontFamily: "'SF Mono', monospace",
+              color: isImproving ? border : fg,
+              backgroundColor: isImproving ? 'transparent' : 'rgba(99,102,241,0.15)',
+              border: `1px solid ${isImproving ? border : 'rgba(99,102,241,0.6)'}`,
+              borderRadius: 4,
+              cursor: isImproving ? 'default' : 'pointer',
+              marginBottom: 1,
+              lineHeight: 1,
+              transition: 'all 150ms',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {isImproving ? '✦ …' : '✦ Improve'}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => {

@@ -21,6 +21,7 @@ export const useStore = create((set, get) => ({
   terminalTabs: [],
   activeTabId: null,
   tabCounter: 0,
+  splitTabId: null,
 
   // Running agents: Map<agentId, tabId>
   runningAgents: {},
@@ -66,9 +67,16 @@ export const useStore = create((set, get) => ({
     for (const key of Object.keys(ra)) {
       if (ra[key] === tabId) delete ra[key];
     }
-    set({ terminalTabs: tabs, activeTabId: newActive, runningAgents: ra });
+    set({
+      terminalTabs: tabs,
+      activeTabId: newActive,
+      runningAgents: ra,
+      splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
+    });
   },
 
+  setSplitTab: (tabId) => set({ splitTabId: tabId }),
+  clearSplitTab: () => set({ splitTabId: null }),
 
   setActiveTab: (tabId) => set({ activeTabId: tabId }),
 
