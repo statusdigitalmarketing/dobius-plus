@@ -49,6 +49,7 @@ import {
   sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus,
 } from './imessage-bridge.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
+import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages } from './visual-server.js';
@@ -427,6 +428,40 @@ When Carson says "process the [X] queue", "check new Asana tasks in [X]", or sim
 6. dobius-reply with "Queued N tasks (M build, K review), will text as each finishes" so Carson sees the ack immediately.
 7. NEVER mark an Asana task complete and NEVER push/deploy — surface for Carson to approve.
 
+# Phase 5 — Auto Mode (tasks tagged [auto-<gid>])
+
+Auto Mode polls Asana and dispatches new tasks to you automatically. When you receive an \`[auto-...]\`-tagged task:
+- Do NOT ask Carson to approve STARTING — auto-mode tasks are pre-approved to begin.
+- **build lane:** run it FULL-AUTO via the project's \`scripts/crackbot-supervisor.sh\` (crack_bot for new builds, crack_repair for bugs/fixes) so it runs to completion, then the verify pipeline.
+- **review lane:** verify Sam's work only (review-audit → ship-test → screenshot); never change scope.
+- The ONLY two stop-and-confirm gates (use \`dobius-confirm\`, block on Carson's yes — see Phase 4 risky-action gate):
+   1. before posting ANYTHING to Asana, and
+   2. before ANY git push or deploy to production.
+- Everything between start and those gates runs unattended. Text Carson at each gate and when the task finishes.
+
+# Phase 5 — Asana documentation + replies (build-lane / Carson's tasks)
+
+Every build-lane task gets documented ON the Asana task in **Sam's reply style** (plain English, no emojis, no "I", specific numbers, quote Carson's own words). Two comments:
+
+1. **Ack (when work starts):** \`add_comment\` →
+   "On it. <one specific sentence on what you're about to do>. Will post screenshot when done."
+
+2. **Completion / pre-ship doc (BEFORE any push or deploy):** post the full writeup as an Asana comment, THEN \`dobius-confirm\` for the OK to push/deploy. Documentation goes to Asana FIRST — never push or deploy before the task is commented. Format (mirror Sam):
+   - First line: what's ready + where it will go (e.g. "Ready to ship on branch X → pocketcologne.com. Awaiting your OK to push.").
+   - Plain-English summary of what changed and why, quoting Carson's task notes verbatim where relevant.
+   - Exact before → after values (sizes, paddings, copy used verbatim, class names).
+   - "Verified live at <resolution>. Screenshot attached." + attach the screenshot.
+   - On Carson's YES → push/deploy, then a short follow-up comment: "Shipped in commit <hash>. Live on <domain>."
+
+NEVER mark the task complete — only Carson does that.
+
+# Phase 5 — Auto-documentation (PDF into the Docs folder)
+
+As you work EVERY task, keep a detailed running doc and finalize it to PDF:
+- Live markdown log at \`<docsFolder>/<ProjectName>/<gid>-<slug>.md\` (docsFolder default \`~/Projects (Code)/Docs\`), appended as you go: task received → plan → each change with exact values → verify results → screenshot paths → Asana comment posted → ship status.
+- On completion, render it to PDF (use the \`pdf\` skill) at \`<docsFolder>/<ProjectName>/<gid>-<slug>.pdf\`. The PDF is the permanent record; the markdown is the working draft.
+- This mirrors the Asana comment but is the full detailed audit trail.
+
 # Phase 4 — Risky-action confirmation gate (CRITICAL)
 
 Before ANY action with externally-visible side effects, you MUST gate with \`dobius-confirm "<action summary>"\` and only proceed if Sam's answer matches yes/y/ok. Actions that REQUIRE this gate:
@@ -631,6 +666,8 @@ function setupOrchestrationHandlers() {
   ipcMain.handle('tasks:syncAsana', (_event, projectPath) => syncAsanaTasks(projectPath));
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());
   ipcMain.handle('asana:updateConfig', (_event, updates) => updateAsanaQueue(updates));
+  ipcMain.handle('automode:get', () => getAutoMode());
+  ipcMain.handle('automode:setEnabled', (_event, on) => setAutoModeEnabled(on));
 
   // --- Visual preview server ---
   ipcMain.handle('visual:openWindow', (_event, projectPath) => {
@@ -1240,6 +1277,10 @@ app.whenReady().then(() => {
   // `dobius-scheduled enable <id>`.
   startScheduledTasks();
 
+  // Always-on Asana monitor — polls for new tasks when auto mode is enabled
+  // (no-op while disabled). Default OFF.
+  startAutoMode();
+
   // Restore previously open project windows (Chrome-style tab restore)
   const config = loadConfig();
   if (Array.isArray(config.lastOpenProjects) && config.lastOpenProjects.length > 0) {
@@ -1279,6 +1320,7 @@ app.on('before-quit', (e) => {
     stopVoiceBridge();
     stopImessageBridge();
     stopScheduledTasks();
+    stopAutoMode();
     return;
   }
 

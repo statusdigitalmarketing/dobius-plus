@@ -272,6 +272,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   tasksSyncAsana: (projectPath) => ipcRenderer.invoke('tasks:syncAsana', projectPath),
   asanaGetConfig: () => ipcRenderer.invoke('asana:getConfig'),
   asanaUpdateConfig: (updates) => ipcRenderer.invoke('asana:updateConfig', updates),
+  autoModeGet: () => ipcRenderer.invoke('automode:get'),
+  autoModeSetEnabled: (on) => ipcRenderer.invoke('automode:setEnabled', on),
   visualOpenWindow: (projectPath) => ipcRenderer.invoke('visual:openWindow', projectPath),
   visualStart: (projectPath) => ipcRenderer.invoke('visual:start', projectPath),
   visualStop: () => ipcRenderer.invoke('visual:stop'),

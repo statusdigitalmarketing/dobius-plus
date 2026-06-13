@@ -26,11 +26,13 @@ export default function Settings() {
   const [asanaPat, setAsanaPat] = useState('');
   const [asanaPatSaved, setAsanaPatSaved] = useState(false);
   const [asanaPatVisible, setAsanaPatVisible] = useState(false);
+  const [autoMode, setAutoMode] = useState({ enabled: false, intervalMinutes: 10 });
 
   useEffect(() => {
     window.electronAPI?.asanaGetConfig?.().then((cfg) => {
       if (cfg?.pat) setAsanaPat(cfg.pat);
     });
+    window.electronAPI?.autoModeGet?.().then((a) => { if (a) setAutoMode(a); });
   }, []);
 
   const saveAsanaPat = useCallback(async () => {
@@ -38,6 +40,11 @@ export default function Settings() {
     setAsanaPatSaved(true);
     setTimeout(() => setAsanaPatSaved(false), 2000);
   }, [asanaPat]);
+
+  const toggleAutoMode = useCallback(async (on) => {
+    const r = await window.electronAPI?.autoModeSetEnabled?.(on);
+    setAutoMode((a) => ({ ...a, enabled: r?.enabled ?? on }));
+  }, []);
 
   // iMessage Bridge state
   const [imsgCfg, setImsgCfg] = useState(null);
@@ -348,6 +355,13 @@ export default function Settings() {
               {asanaPatSaved ? 'Saved' : 'Save'}
             </button>
           </div>
+        </SettingRow>
+
+        <SettingRow
+          label="Auto Mode"
+          description={`Poll Asana every ${autoMode.intervalMinutes || 10} min and auto-run new tasks (build mine + review Sam's). Stops only for your OK before posting to Asana or deploying.`}
+        >
+          <Toggle checked={!!autoMode.enabled} onChange={toggleAutoMode} />
         </SettingRow>
       </Section>
 

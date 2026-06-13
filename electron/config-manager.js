@@ -49,6 +49,13 @@ const DEFAULT_CONFIG = {
     allowedProjects: [],         // [{ name, gid }] — auto-process only these
     myGid: '1215600517617968',   // Carson — tasks assigned to me get BUILT (full pipeline)
     reviewGid: '1213473231797717', // Sam — tasks assigned to him only get REVIEWED (double-check)
+    autoMode: {                  // hands-off intake (auto-mode.js); writes managed there
+      enabled: false,            // OFF by default
+      intervalMinutes: 10,       // poll cadence
+      lanes: ['build', 'review'],
+      seen: [],                  // dispatched task GIDs (capped)
+    },
+    docsFolder: '~/Projects (Code)/Docs', // per-task PDFs land here (per-project subfolders)
   },
   accounts: [],                  // [{ id, name, type: 'claude'|'codex', claudeJsonPath?, apiKey? }]
   projectAccounts: {},           // projectPath → accountId
@@ -790,7 +797,7 @@ export function getAsanaQueue() {
 
 export function updateAsanaQueue(updates) {
   const config = loadConfig();
-  const allowed = ['pat', 'allowedProjects', 'myGid', 'reviewGid'];
+  const allowed = ['pat', 'allowedProjects', 'myGid', 'reviewGid', 'docsFolder'];
   const safe = Object.fromEntries(
     Object.entries(updates || {}).filter(([k]) => allowed.includes(k))
   );
