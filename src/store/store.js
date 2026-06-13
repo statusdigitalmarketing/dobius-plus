@@ -81,6 +81,7 @@ export const useStore = create((set, get) => ({
       activeTabId: newActive,
       runningAgents: ra,
       splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
+      monitoredTabs: state.monitoredTabs.filter((id) => id !== tabId),
     });
   },
 
@@ -122,7 +123,7 @@ export const useStore = create((set, get) => ({
     for (const key of Object.keys(ra)) {
       if (removedIds.has(ra[key])) delete ra[key];
     }
-    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra });
+    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra, monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {
@@ -142,7 +143,7 @@ export const useStore = create((set, get) => ({
     }
     const allKept = [...kept, ...pinnedRight];
     const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
-    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra });
+    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra, monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   // Actions

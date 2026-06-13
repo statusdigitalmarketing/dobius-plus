@@ -792,7 +792,11 @@ export function setProjectAccount(projectPath, accountId) {
  */
 export function getAsanaQueue() {
   const config = loadConfig();
-  return { ...DEFAULT_CONFIG.asanaQueue, ...config.asanaQueue };
+  return {
+    ...DEFAULT_CONFIG.asanaQueue,
+    ...config.asanaQueue,
+    autoMode: { ...DEFAULT_CONFIG.asanaQueue.autoMode, ...(config.asanaQueue?.autoMode || {}) },
+  };
 }
 
 export function updateAsanaQueue(updates) {

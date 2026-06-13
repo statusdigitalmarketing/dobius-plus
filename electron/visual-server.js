@@ -68,13 +68,20 @@ export async function startVisualServer(projectPath) {
   _wss = new WebSocketServer({ server: httpServer, path: '/__vreload' });
 
   _watcher = chokidar.watch(projectPath, {
-    ignored: /(^|[/\\])\.|node_modules/,
+    ignored: /(^|[/\\])\.|node_modules|dist|build|\.next|\.vercel|coverage|out/,
     persistent: true,
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 80, pollInterval: 50 },
   });
-  _watcher.on('change', () => broadcast('reload'));
-  _watcher.on('add', () => broadcast('reload'));
+  // Debounce so a multi-file save triggers ONE reload, not a storm.
+  let reloadTimer = null;
+  const scheduleReload = () => {
+    if (reloadTimer) clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(() => { reloadTimer = null; broadcast('reload'); }, 150);
+  };
+  _watcher.on('change', scheduleReload);
+  _watcher.on('add', scheduleReload);
+  _watcher.on('unlink', scheduleReload);
 
   await new Promise((resolve) => {
     httpServer.listen(0, '127.0.0.1', () => {

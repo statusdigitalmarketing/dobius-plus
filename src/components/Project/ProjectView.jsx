@@ -421,16 +421,6 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         if (window.electronAPI && termId) {
           window.electronAPI.terminalWrite(termId, 'clear\r');
         }
-      } else if (e.key === 'r' && !e.shiftKey) {
-        // Cmd+R = resume last Claude session
-        e.preventDefault();
-        if (projectPath && window.electronAPI?.dataGetLatestSession) {
-          window.electronAPI.dataGetLatestSession(projectPath).then((session) => {
-            if (session?.sessionId) {
-              useStore.getState().resumeSession(session.sessionId);
-            }
-          });
-        }
       } else if (e.key === '[' && e.shiftKey) {
         // Cmd+Shift+[ = prev tab
         e.preventDefault();

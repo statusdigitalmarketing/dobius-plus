@@ -246,14 +246,34 @@ export function openTornOffWindow(projectPath, tabId, tabLabel, screenX, screenY
 
 /** Single Visual preview window (phone-shaped, its own window so it never covers the terminal). */
 let visualWindow = null;
+let visualWindowProject = null;
+
+function visualUrl(win, projectPath) {
+  const isDev = !app.isPackaged;
+  const encodedProject = encodeURIComponent(projectPath);
+  if (isDev) {
+    win.loadURL(`http://localhost:5173?project=${encodedProject}&visual=1`);
+  } else {
+    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
+      query: { project: projectPath, visual: '1' },
+    });
+  }
+}
 
 /**
- * Open (or focus) the Visual preview window for a project.
+ * Open (or focus) the Visual preview window for a project. If a window is
+ * already open for a DIFFERENT project, reload it to the requested project
+ * (instead of silently showing the previous project).
  * @param {string} projectPath
  * @returns {BrowserWindow}
  */
 export function openVisualWindow(projectPath) {
   if (visualWindow && !visualWindow.isDestroyed()) {
+    if (visualWindowProject !== projectPath) {
+      visualWindowProject = projectPath;
+      visualUrl(visualWindow, projectPath);
+      visualWindow.setTitle(`Visual — ${path.basename(projectPath)}`);
+    }
     visualWindow.focus();
     return visualWindow;
   }
@@ -279,23 +299,23 @@ export function openVisualWindow(projectPath) {
     },
   });
 
-  const isDev = !app.isPackaged;
-  const encodedProject = encodeURIComponent(projectPath);
-  if (isDev) {
-    win.loadURL(`http://localhost:5173?project=${encodedProject}&visual=1`);
-  } else {
-    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
-      query: { project: projectPath, visual: '1' },
-    });
-  }
+  visualUrl(win, projectPath);
 
-  win.on('closed', () => { visualWindow = null; });
+  win.on('closed', () => { visualWindow = null; visualWindowProject = null; });
   visualWindow = win;
+  visualWindowProject = projectPath;
   return win;
 }
 
 export function getVisualWindow() {
   return (visualWindow && !visualWindow.isDestroyed()) ? visualWindow : null;
+}
+
+/** Destroy the Visual window if open (used on quit so its server can be torn down). */
+export function closeVisualWindow() {
+  if (visualWindow && !visualWindow.isDestroyed()) visualWindow.destroy();
+  visualWindow = null;
+  visualWindowProject = null;
 }
 
 /**

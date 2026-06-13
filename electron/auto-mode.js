@@ -17,7 +17,7 @@
  * A task GID in `seen` is never dispatched again (capped to the last SEEN_CAP).
  */
 import { loadConfig, saveConfig, getAsanaQueue } from './config-manager.js';
-import { writeTerminal } from './terminal-manager.js';
+import { writeTerminal, listTerminals } from './terminal-manager.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
 import { fetchNewTasks, listAllowedProjects } from './asana-queue.js';
 
@@ -70,7 +70,12 @@ function mutateAutoMode(fn) {
 }
 
 function persistSeen(seen) {
-  mutateAutoMode((a) => { a.seen = seen.slice(-SEEN_CAP); });
+  // Union with whatever is currently persisted so a concurrent full-object
+  // saveConfig elsewhere can't drop our newly-seen GIDs (re-dispatch guard).
+  mutateAutoMode((a) => {
+    const merged = new Set([...(Array.isArray(a.seen) ? a.seen : []), ...seen]);
+    a.seen = [...merged].slice(-SEEN_CAP);
+  });
 }
 
 function restart() {
@@ -89,7 +94,12 @@ async function tick() {
   if (!enabled) return;
 
   const conductorId = getVoiceConductorTabId();
-  if (!conductorId) { console.log('[auto-mode] no Conductor tab — skipping tick'); return; }
+  // getVoiceConductorTabId() returns a constant id — verify the PTY is actually
+  // alive, else a dispatch silently no-ops and we'd mark the task seen forever.
+  if (!conductorId || !listTerminals().some((t) => t.id === conductorId)) {
+    console.log('[auto-mode] Conductor PTY not alive — skipping tick');
+    return;
+  }
 
   const projects = listAllowedProjects();
   if (!projects.length) return;
@@ -121,7 +131,9 @@ async function tick() {
 function dispatchToConductor(conductorId, project, task) {
   const reqId = `auto-${task.gid}`;
   const lane = task.lane === 'review' ? 'review' : 'build';
-  const name = (task.name || '').replace(/[\r\n]+/g, ' ').slice(0, 300);
+  // Strip ALL control chars (not just CR/LF) — task names are attacker-controllable
+  // third-party content written into a live terminal/prompt.
+  const name = (task.name || '').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 300);
   const laneRule = lane === 'build'
     ? 'build it FULL-AUTO via the project crack_bot/crack_repair supervisor, then run the verify pipeline'
     : "verify Sam's work only (review-audit -> ship-test -> screenshot); do NOT change scope";

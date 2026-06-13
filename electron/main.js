@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents } from 'electron';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
@@ -35,7 +35,7 @@ import {
 } from './config-manager.js';
 import {
   openProjectWindow, openTornOffWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
-  openVisualWindow,
+  openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
 import {
@@ -692,7 +692,7 @@ function setupOrchestrationHandlers() {
   ipcMain.handle('visual:screenshot', async (_event, webContentsId) => {
     try {
       const wc = webContentsId != null
-        ? require('electron').webContents.fromId(webContentsId)
+        ? webContents.fromId(webContentsId)
         : null;
       if (!wc) return { ok: false, error: 'webContents not found' };
       const image = await wc.capturePage();
@@ -1321,6 +1321,8 @@ app.on('before-quit', (e) => {
     stopImessageBridge();
     stopScheduledTasks();
     stopAutoMode();
+    closeVisualWindow();
+    void stopVisualServer();
     return;
   }
 

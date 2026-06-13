@@ -36,22 +36,24 @@ export default function VisualView({ projectPath }) {
   // Start the local preview server when the window opens; stop it on close
   useEffect(() => {
     if (!projectPath) return;
+    let cancelled = false;
     setLoading(true);
     setStatus('Starting preview server…');
 
     window.electronAPI?.visualStart?.(projectPath).then(async (result) => {
+      if (cancelled) return; // effect was torn down before the server came up
       if (result?.ok) {
         setPort(result.port);
         setStatus('');
         const found = await window.electronAPI.visualListPages?.() || ['/'];
-        setPages(found.length ? found : ['/']);
+        if (!cancelled) setPages(found.length ? found : ['/']);
       } else {
         setStatus(`Error: ${result?.error || 'Failed to start server'}`);
       }
-      setLoading(false);
+      if (!cancelled) setLoading(false);
     });
 
-    return () => { window.electronAPI?.visualStop?.(); };
+    return () => { cancelled = true; window.electronAPI?.visualStop?.(); };
   }, [projectPath]);
 
   // Map a page path to the URL for the active source
@@ -234,7 +236,7 @@ export default function VisualView({ projectPath }) {
             width: 100, height: 24, backgroundColor: '#2a2a2a',
             borderBottomLeftRadius: 14, borderBottomRightRadius: 14, zIndex: 2,
           }} />
-          {url && <webview ref={webviewRef} src={url} style={{ width: '100%', height: '100%', border: 'none' }} />}
+          <webview ref={webviewRef} src={url || 'about:blank'} style={{ width: '100%', height: '100%', border: 'none' }} />
         </div>
       </div>
 
