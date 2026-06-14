@@ -24,7 +24,7 @@
  */
 import crypto from 'crypto';
 import { loadConfig, saveConfig } from './config-manager.js';
-import { writeTerminal } from './terminal-manager.js';
+import { writeTerminal, listTerminals } from './terminal-manager.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
 import { sendImessageToSelf } from './imessage-bridge.js';
 import { subscribeReply } from './voice-bridge.js';
@@ -144,6 +144,13 @@ function shouldFire(task) {
 async function fireTask(task) {
   const requestId = `req-sched-${crypto.randomBytes(4).toString('hex')}`;
   const conductorId = getVoiceConductorTabId();
+  // The Conductor tab id is a constant; writeTerminal silently no-ops if that
+  // PTY isn't alive. Skip without stamping lastFiredAt so the task retries on a
+  // later tick once the Conductor is back, instead of being marked fired.
+  if (!conductorId || !listTerminals().some((t) => t.id === conductorId)) {
+    console.log(`[scheduled-tasks] Conductor PTY not alive — deferring ${task.id}`);
+    return;
+  }
   const tagged = `[${requestId}] ${task.prompt.replace(/[\r\n]+/g, ' ').slice(0, 2000)}`;
   console.log(`[scheduled-tasks] firing ${task.id} as ${requestId}`);
   updateScheduledTask(task.id, { lastFiredAt: Date.now() });
