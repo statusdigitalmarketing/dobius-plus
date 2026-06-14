@@ -65,6 +65,13 @@ export async function startVisualServer(projectPath) {
   // Intercept HTML files to inject reload script
   app.use((req, res, next) => {
     let filePath = path.join(webRoot, req.path === '/' ? 'index.html' : req.path);
+    // Containment guard: `req.path` is not normalized, so `../` segments could
+    // escape webRoot and read arbitrary local files. Reject anything that
+    // resolves outside the web root before we readFileSync it.
+    const resolved = path.resolve(filePath);
+    if (resolved !== path.resolve(webRoot) && !resolved.startsWith(path.resolve(webRoot) + path.sep)) {
+      return next();
+    }
     // Attempt directory index
     if (!path.extname(filePath) || fs.existsSync(filePath + '.html')) {
       const candidate = fs.existsSync(filePath + '.html') ? filePath + '.html' : path.join(filePath, 'index.html');
