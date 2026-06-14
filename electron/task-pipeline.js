@@ -97,6 +97,10 @@ export function advance(task, toStage, { note = null, actor = 'system', at = Dat
 /** Move a task to `blocked`, remembering the stage it came from. Returns a NEW task. */
 export function block(task, reason, { actor = 'system', at = Date.now() } = {}) {
   const from = currentStage(task);
+  // `done` is terminal — block() must not reopen a completed task (the
+  // transition table forbids it for advance(); enforce the same here since
+  // block() bypasses the table).
+  if (from === 'done') throw new Error('cannot block a completed task');
   // Re-blocking an already-blocked task keeps the original origin stage.
   const blockedFrom = from === 'blocked' ? (task.blockedFrom || 'queued') : from;
   const events = cap([...(task.events || []), event('blocked', from, 'blocked', reason, actor, at)], MAX_EVENTS);
@@ -154,7 +158,10 @@ export function pipelineFields({ at = Date.now() } = {}) {
  */
 export function migrate(task, { at = Date.now() } = {}) {
   if (!task || typeof task !== 'object') return task;
-  if (isValidStage(task.stage) && Array.isArray(task.events)) return task; // already current
+  // Intentionally NO "already current" early-return. Re-applying every default
+  // idempotently means fields added to this shape in a future schema version
+  // get back-filled onto existing tasks on the next read, instead of being
+  // skipped just because the task already had a valid stage + events.
   const stage = isValidStage(task.stage) ? task.stage : (task.done ? 'done' : 'intake');
   const createdAt = task.createdAt || at;
   return {
