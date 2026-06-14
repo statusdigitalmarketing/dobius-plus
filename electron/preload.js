@@ -269,6 +269,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   tasksAdd: (projectPath, taskData) => ipcRenderer.invoke('tasks:add', projectPath, taskData),
   tasksUpdate: (projectPath, taskId, patch) => ipcRenderer.invoke('tasks:update', projectPath, taskId, patch),
   tasksDelete: (projectPath, taskId) => ipcRenderer.invoke('tasks:delete', projectPath, taskId),
+  tasksComplete: (projectPath, taskId) => ipcRenderer.invoke('tasks:complete', projectPath, taskId),
   tasksSyncAsana: (projectPath) => ipcRenderer.invoke('tasks:syncAsana', projectPath),
   tasksAdvance: (p, id, stage, opts) => ipcRenderer.invoke('tasks:advance', p, id, stage, opts),
   tasksBlock: (p, id, reason, opts) => ipcRenderer.invoke('tasks:block', p, id, reason, opts),
