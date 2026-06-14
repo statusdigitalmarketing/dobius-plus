@@ -40,7 +40,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const gridSlots = useStore((s) => s.gridSlots);
   const draggingTabId = useStore((s) => s.draggingTabId);
   const setDraggingTabId = useStore((s) => s.setDraggingTabId);
-  const placeInGrid = useStore((s) => s.placeInGrid);
+  const addToGrid = useStore((s) => s.addToGrid);
   const removeFromGrid = useStore((s) => s.removeFromGrid);
   const swapGrid = useStore((s) => s.swapGrid);
   const clearGrid = useStore((s) => s.clearGrid);
@@ -146,11 +146,11 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         // Restore saved tabs
         if (config?.tabs?.length > 0 && config.tabCounter > 0) {
           initTabs(config.tabs, config.tabCounter);
-          // Restore a persisted grid layout, dropping any slot whose tab is gone.
+          // Restore a persisted grid layout, dropping any entry whose tab is gone.
           if (Array.isArray(config.gridSlots)) {
             const validIds = new Set(config.tabs.map((t) => t.id));
-            const restored = config.gridSlots.map((id) => (id && validIds.has(id) ? id : null));
-            if (restored.some(Boolean)) setGridSlots(restored);
+            const restored = config.gridSlots.filter((id) => id && validIds.has(id));
+            if (restored.length) setGridSlots(restored);
           }
         } else {
           // First open: create initial tab
@@ -581,20 +581,29 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
               // Single layout engine for all modes. Every TerminalPane mounts ONCE
               // in this container and is positioned purely by CSS — never moved
               // between containers — so neither split nor grid ever unmounts a pane
-              // or kills its PTY. Grid = 2 columns × up to 3 rows; cell positions are
-              // fixed (no reflow), with one spare row shown for the next drop.
-              const GRID_COLS = 2;
+              // or kills its PTY. The grid is a DENSE list of 1–6 terminals whose
+              // tile layout is derived from the count, so there are never empty cells:
+              //   1 → full · 2 → side-by-side · 3 → 2 over 1(span) · 4 → 2×2
+              //   5 → 2,2,1(span) · 6 → 2×3
               const gridActive = !!gridSlots;
-              const lastFilledIdx = gridActive ? gridSlots.reduce((m, id, i) => (id ? i : m), 0) : 0;
-              const visibleRows = gridActive ? Math.min(3, Math.floor(lastFilledIdx / GRID_COLS) + 2) : 1;
-              const visibleCells = visibleRows * GRID_COLS;
+              const n = gridActive ? gridSlots.length : 0;
+              const cols = n === 1 ? 1 : 2;
+              const rows = Math.max(1, Math.ceil(n / cols));
+
+              // CSS placement for the i-th terminal. An odd final terminal spans
+              // the full row so the grid stays gap-free.
+              const placement = (i) => {
+                if (n === 1) return { gridColumn: '1 / -1', gridRow: 1 };
+                if (n > 1 && n % 2 === 1 && i === n - 1) return { gridColumn: '1 / -1', gridRow: rows };
+                return { gridColumn: (i % 2) + 1, gridRow: Math.floor(i / 2) + 1 };
+              };
 
               const containerStyle = gridActive
                 ? {
                     position: 'relative',
                     display: 'grid',
-                    gridTemplateColumns: `repeat(${GRID_COLS}, minmax(0, 1fr))`,
-                    gridTemplateRows: `repeat(${visibleRows}, minmax(0, 1fr))`,
+                    gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+                    gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
                     gap: 1,
                     backgroundColor: 'var(--border)',
                   }
@@ -606,8 +615,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                   const idx = gridSlots.indexOf(tab.id);
                   if (idx === -1) return { display: 'none' };
                   return {
-                    gridColumn: (idx % GRID_COLS) + 1,
-                    gridRow: Math.floor(idx / GRID_COLS) + 1,
+                    ...placement(idx),
                     position: 'relative',
                     display: 'flex',
                     minWidth: 0,
@@ -626,16 +634,9 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                 return { position: 'absolute', inset: 0, display: isActive ? 'flex' : 'none' };
               };
 
-              const handleCellDrop = (e, idx, occupied) => {
-                e.preventDefault();
-                const dragged = e.dataTransfer.getData('text/plain') || draggingTabId;
-                if (dragged) {
-                  const from = gridSlots ? gridSlots.indexOf(dragged) : -1;
-                  if (from !== -1 && occupied) swapGrid(from, idx);
-                  else placeInGrid(idx, dragged);
-                }
-                setDraggingTabId(null);
-              };
+              // True while dragging a tab that isn't already a grid cell — i.e. one
+              // that can be added. (Dragging an existing cell drives reorder instead.)
+              const draggingNewTab = !!draggingTabId && (!gridSlots || !gridSlots.includes(draggingTabId));
 
               return (
                 <div className="flex-1 min-h-0 min-w-0" style={containerStyle}>
@@ -681,63 +682,51 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                     );
                   })()}
 
-                  {/* Grid chrome — per-cell header (drag handle + remove) for filled
-                      cells, drop-zone placeholders for empty cells. Each is a grid
-                      item placed at its cell; headers overlay the pane's top padding. */}
-                  {gridActive && Array.from({ length: visibleCells }).map((_, idx) => {
-                    const col = (idx % GRID_COLS) + 1;
-                    const row = Math.floor(idx / GRID_COLS) + 1;
-                    const slotTabId = gridSlots[idx];
-                    const slotTab = slotTabId ? tabs.find((t) => t.id === slotTabId) : null;
-                    if (slotTab) {
-                      return (
-                        <div
-                          key={`gh-${idx}`}
-                          style={{
-                            gridColumn: col, gridRow: row, alignSelf: 'start', position: 'relative', zIndex: 6,
-                            height: 24, width: '100%', display: 'flex', alignItems: 'center',
-                            justifyContent: 'space-between', padding: '0 8px',
-                            backgroundColor: 'var(--surface)', borderBottom: '1px solid var(--border)',
-                            cursor: 'grab', boxSizing: 'border-box',
-                          }}
-                          draggable
-                          onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', slotTabId); setDraggingTabId(slotTabId); }}
-                          onDragEnd={() => setDraggingTabId(null)}
-                          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
-                          onDrop={(e) => handleCellDrop(e, idx, true)}
-                          onClick={() => setActiveTab(slotTabId)}
-                          title="Drag to move · click to focus"
-                        >
-                          <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {slotTab.label}
-                          </span>
-                          <span
-                            onClick={(e) => { e.stopPropagation(); removeFromGrid(idx); }}
-                            title="Remove from grid"
-                            style={{ cursor: 'pointer', color: 'var(--dim)', fontSize: 13, lineHeight: 1, padding: '0 2px', flexShrink: 0 }}
-                            onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--fg)'; }}
-                            onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dim)'; }}
-                          >
-                            ✕
-                          </span>
-                        </div>
-                      );
-                    }
+                  {/* Grid chrome — one header per terminal (drag to reorder · click to
+                      focus · ✕ to remove). Placed at the same cell as its pane and keyed
+                      by tabId so it travels with the terminal on reorder. */}
+                  {gridActive && gridSlots.map((slotTabId, idx) => {
+                    const slotTab = tabs.find((t) => t.id === slotTabId);
+                    if (!slotTab) return null;
                     return (
                       <div
-                        key={`gp-${idx}`}
+                        key={`gh-${slotTabId}`}
                         style={{
-                          gridColumn: col, gridRow: row, zIndex: 1,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          backgroundColor: 'var(--bg)', color: 'var(--dim)',
-                          fontSize: 11, fontFamily: "'SF Mono', monospace",
-                          border: draggingTabId ? '2px dashed var(--accent)' : '1px dashed var(--border)',
-                          boxSizing: 'border-box',
+                          ...placement(idx), alignSelf: 'start', position: 'relative', zIndex: 6,
+                          height: 24, width: '100%', display: 'flex', alignItems: 'center',
+                          justifyContent: 'space-between', padding: '0 8px',
+                          backgroundColor: 'var(--surface)', borderBottom: '1px solid var(--border)',
+                          cursor: 'grab', boxSizing: 'border-box',
                         }}
+                        draggable
+                        onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', slotTabId); setDraggingTabId(slotTabId); }}
+                        onDragEnd={() => setDraggingTabId(null)}
                         onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
-                        onDrop={(e) => handleCellDrop(e, idx, false)}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const dragged = e.dataTransfer.getData('text/plain') || draggingTabId;
+                          if (dragged) {
+                            const from = gridSlots.indexOf(dragged);
+                            if (from !== -1) swapGrid(from, idx);
+                            else addToGrid(dragged);
+                          }
+                          setDraggingTabId(null);
+                        }}
+                        onClick={() => setActiveTab(slotTabId)}
+                        title="Drag to reorder · click to focus"
                       >
-                        drop a tab here
+                        <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {slotTab.label}
+                        </span>
+                        <span
+                          onClick={(e) => { e.stopPropagation(); removeFromGrid(idx); }}
+                          title="Remove from grid"
+                          style={{ cursor: 'pointer', color: 'var(--dim)', fontSize: 13, lineHeight: 1, padding: '0 2px', flexShrink: 0 }}
+                          onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--fg)'; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dim)'; }}
+                        >
+                          ✕
+                        </span>
                       </div>
                     );
                   })}
@@ -759,34 +748,35 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                     </button>
                   )}
 
-                  {/* Transient drop overlay — dragging a tab while NOT already in grid
-                      mode reveals six zones; dropping into one starts the grid. This is
-                      the only way to enter grid mode. */}
-                  {!gridActive && draggingTabId && (
+                  {/* Drop affordance — dragging a not-yet-gridded tab reveals one zone
+                      covering the area; dropping adds it (opening the grid if needed).
+                      This drag-drop is the only way to build the grid. */}
+                  {draggingNewTab && (
                     <div
+                      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const dragged = e.dataTransfer.getData('text/plain') || draggingTabId;
+                        if (dragged) addToGrid(dragged);
+                        setDraggingTabId(null);
+                      }}
                       style={{
-                        position: 'absolute', inset: 0, zIndex: 30, display: 'grid',
-                        gridTemplateColumns: `repeat(${GRID_COLS}, 1fr)`,
-                        gridTemplateRows: 'repeat(3, 1fr)', gap: 8, padding: 8,
+                        position: 'absolute', inset: 0, zIndex: 30, padding: 12,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
                         backgroundColor: 'rgba(0,0,0,0.4)',
                       }}
                     >
-                      {Array.from({ length: 6 }).map((_, idx) => (
-                        <div
-                          key={`start-${idx}`}
-                          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; e.currentTarget.style.backgroundColor = 'rgba(99,102,241,0.35)'; }}
-                          onDragLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
-                          onDrop={(e) => { e.preventDefault(); const dragged = e.dataTransfer.getData('text/plain') || draggingTabId; if (dragged) placeInGrid(idx, dragged); setDraggingTabId(null); }}
-                          style={{
-                            border: '2px dashed rgba(255,255,255,0.5)', borderRadius: 8,
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            color: 'rgba(255,255,255,0.9)', fontSize: 12, fontFamily: "'SF Mono', monospace",
-                            transition: 'background-color 100ms',
-                          }}
-                        >
-                          Drop here
-                        </div>
-                      ))}
+                      <div style={{
+                        width: '60%', height: '60%', maxWidth: 420, maxHeight: 260,
+                        border: '2px dashed rgba(255,255,255,0.55)', borderRadius: 10,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        color: 'rgba(255,255,255,0.92)', fontSize: 13, fontFamily: "'SF Mono', monospace",
+                        textAlign: 'center', padding: 16,
+                      }}>
+                        {gridActive
+                          ? (n >= 6 ? 'Grid is full (6 max)' : 'Drop to add to the grid')
+                          : 'Drop to open this terminal in a grid'}
+                      </div>
                     </div>
                   )}
                 </div>

@@ -1,12 +1,13 @@
 import { create } from 'zustand';
 import { THEMES, applyTheme } from '../lib/themes';
 
-// Drop any grid slots whose tab is no longer present. Returns null when the
-// grid would be left empty (i.e. grid mode turns off).
+// Drop any grid entries whose tab is no longer present. Returns null when the
+// grid would be left empty (i.e. grid mode turns off). gridSlots is a dense,
+// ordered list of tabIds (1–6) — no gaps — so the layout auto-fits the count.
 function pruneGrid(gridSlots, keptIds) {
   if (!gridSlots) return null;
-  const pruned = gridSlots.map((id) => (id && keptIds.has(id) ? id : null));
-  return pruned.some(Boolean) ? pruned : null;
+  const pruned = gridSlots.filter((id) => keptIds.has(id));
+  return pruned.length ? pruned : null;
 }
 
 export const useStore = create((set, get) => ({
@@ -40,9 +41,9 @@ export const useStore = create((set, get) => ({
   tabCounter: 0,
   splitTabId: null,
 
-  // Terminal grid — null when off; otherwise a fixed array of 6 slots
-  // (index = cell position in a 2-col × 3-row grid), each holding a tabId or null.
-  // Split view and grid are mutually exclusive. Drag-to-place is the only way in.
+  // Terminal grid — null when off; otherwise a dense, ordered list of 1–6 tabIds.
+  // The tile layout is derived from the count (no empty cells). Split view and
+  // grid are mutually exclusive. Drag-to-add is the only way in.
   gridSlots: null,
 
   // tabId currently being dragged from the tab bar (drives grid drop zones).
@@ -107,32 +108,31 @@ export const useStore = create((set, get) => ({
   clearSplitTab: () => set({ splitTabId: null }),
 
   // Grid actions ----------------------------------------------------------
-  // Place a tab into a specific cell. Moves it out of any cell it already
-  // occupies (a tab can't be in two cells) and clears split view.
-  placeInGrid: (index, tabId) => set((s) => {
-    if (index < 0 || index > 5 || !tabId) return {};
-    const slots = s.gridSlots ? [...s.gridSlots] : [null, null, null, null, null, null];
-    for (let i = 0; i < slots.length; i++) {
-      if (slots[i] === tabId) slots[i] = null;
-    }
-    slots[index] = tabId;
-    return { gridSlots: slots, splitTabId: null, activeTabId: tabId };
+  // Append a tab to the grid (max 6), starting grid mode if needed. A tab can
+  // only appear once. Clears split view (mutually exclusive).
+  addToGrid: (tabId) => set((s) => {
+    if (!tabId) return {};
+    const cur = s.gridSlots || [];
+    if (cur.includes(tabId)) return { splitTabId: null, activeTabId: tabId };
+    if (cur.length >= 6) return {};
+    return { gridSlots: [...cur, tabId], splitTabId: null, activeTabId: tabId };
   }),
 
-  // Swap the contents of two cells (used when dragging one cell onto another).
+  // Swap two cells by index (dragging one cell's header onto another).
   swapGrid: (a, b) => set((s) => {
     if (!s.gridSlots || a === b) return {};
+    if (a < 0 || b < 0 || a >= s.gridSlots.length || b >= s.gridSlots.length) return {};
     const slots = [...s.gridSlots];
     [slots[a], slots[b]] = [slots[b], slots[a]];
     return { gridSlots: slots };
   }),
 
-  // Remove a tab from a cell. Exits grid mode when the last cell empties.
+  // Remove a cell by index; the grid compacts and reflows. Exits grid mode
+  // when the last cell is removed.
   removeFromGrid: (index) => set((s) => {
     if (!s.gridSlots) return {};
-    const slots = [...s.gridSlots];
-    slots[index] = null;
-    return { gridSlots: slots.some(Boolean) ? slots : null };
+    const slots = s.gridSlots.filter((_, i) => i !== index);
+    return { gridSlots: slots.length ? slots : null };
   }),
 
   clearGrid: () => set({ gridSlots: null }),
