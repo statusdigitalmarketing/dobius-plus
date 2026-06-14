@@ -338,7 +338,10 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     const el = wrapperRef.current;
     if (!el) return;
     let dragCount = 0;
-    const onDragEnter = (e) => { e.preventDefault(); dragCount++; if (dragCount === 1) setDragOver(true); };
+    // Only react to OS file drags — ignore tab drags (which carry text/plain and
+    // drive the grid drop zones), so we don't flash "Drop files" during a tab drag.
+    const isFileDrag = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+    const onDragEnter = (e) => { if (!isFileDrag(e)) return; e.preventDefault(); dragCount++; if (dragCount === 1) setDragOver(true); };
     const onDragLeave = (e) => { e.preventDefault(); dragCount--; if (dragCount <= 0) { dragCount = 0; setDragOver(false); } };
     const onDrop = () => { dragCount = 0; setDragOver(false); };
     el.addEventListener('dragenter', onDragEnter, true);

@@ -1,6 +1,14 @@
 import { create } from 'zustand';
 import { THEMES, applyTheme } from '../lib/themes';
 
+// Drop any grid slots whose tab is no longer present. Returns null when the
+// grid would be left empty (i.e. grid mode turns off).
+function pruneGrid(gridSlots, keptIds) {
+  if (!gridSlots) return null;
+  const pruned = gridSlots.map((id) => (id && keptIds.has(id) ? id : null));
+  return pruned.some(Boolean) ? pruned : null;
+}
+
 export const useStore = create((set, get) => ({
   // View state
   activeView: 'terminal', // 'terminal' | 'dashboard'
@@ -31,6 +39,15 @@ export const useStore = create((set, get) => ({
   activeTabId: null,
   tabCounter: 0,
   splitTabId: null,
+
+  // Terminal grid — null when off; otherwise a fixed array of 6 slots
+  // (index = cell position in a 2-col × 3-row grid), each holding a tabId or null.
+  // Split view and grid are mutually exclusive. Drag-to-place is the only way in.
+  gridSlots: null,
+
+  // tabId currently being dragged from the tab bar (drives grid drop zones).
+  draggingTabId: null,
+  setDraggingTabId: (id) => set({ draggingTabId: id }),
 
   // Running agents: Map<agentId, tabId>
   runningAgents: {},
@@ -81,12 +98,47 @@ export const useStore = create((set, get) => ({
       activeTabId: newActive,
       runningAgents: ra,
       splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
+      gridSlots: pruneGrid(state.gridSlots, new Set(tabs.map((t) => t.id))),
       monitoredTabs: state.monitoredTabs.filter((id) => id !== tabId),
     });
   },
 
-  setSplitTab: (tabId) => set({ splitTabId: tabId }),
+  setSplitTab: (tabId) => set({ splitTabId: tabId, gridSlots: null }),
   clearSplitTab: () => set({ splitTabId: null }),
+
+  // Grid actions ----------------------------------------------------------
+  // Place a tab into a specific cell. Moves it out of any cell it already
+  // occupies (a tab can't be in two cells) and clears split view.
+  placeInGrid: (index, tabId) => set((s) => {
+    if (index < 0 || index > 5 || !tabId) return {};
+    const slots = s.gridSlots ? [...s.gridSlots] : [null, null, null, null, null, null];
+    for (let i = 0; i < slots.length; i++) {
+      if (slots[i] === tabId) slots[i] = null;
+    }
+    slots[index] = tabId;
+    return { gridSlots: slots, splitTabId: null, activeTabId: tabId };
+  }),
+
+  // Swap the contents of two cells (used when dragging one cell onto another).
+  swapGrid: (a, b) => set((s) => {
+    if (!s.gridSlots || a === b) return {};
+    const slots = [...s.gridSlots];
+    [slots[a], slots[b]] = [slots[b], slots[a]];
+    return { gridSlots: slots };
+  }),
+
+  // Remove a tab from a cell. Exits grid mode when the last cell empties.
+  removeFromGrid: (index) => set((s) => {
+    if (!s.gridSlots) return {};
+    const slots = [...s.gridSlots];
+    slots[index] = null;
+    return { gridSlots: slots.some(Boolean) ? slots : null };
+  }),
+
+  clearGrid: () => set({ gridSlots: null }),
+
+  // Restore a persisted layout (already validated against live tabs by caller).
+  setGridSlots: (slots) => set({ gridSlots: slots }),
 
   setActiveTab: (tabId) => set({ activeTabId: tabId }),
 
@@ -123,7 +175,7 @@ export const useStore = create((set, get) => ({
     for (const key of Object.keys(ra)) {
       if (removedIds.has(ra[key])) delete ra[key];
     }
-    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra, monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {
@@ -143,7 +195,7 @@ export const useStore = create((set, get) => ({
     }
     const allKept = [...kept, ...pinnedRight];
     const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
-    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra, monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   // Actions

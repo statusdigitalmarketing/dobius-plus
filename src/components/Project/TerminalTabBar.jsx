@@ -20,6 +20,7 @@ export default function TerminalTabBar() {
   const splitTabId = useStore((s) => s.splitTabId);
   const setSplitTab = useStore((s) => s.setSplitTab);
   const clearSplitTab = useStore((s) => s.clearSplitTab);
+  const setDraggingTabId = useStore((s) => s.setDraggingTabId);
 
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
@@ -164,10 +165,11 @@ export default function TerminalTabBar() {
   // Drag-to-reorder (#26) + drag-out-of-window for tab tear-off
   const handleDragStart = useCallback((e, tabId) => {
     setDragTabId(tabId);
+    setDraggingTabId(tabId); // reveal grid drop zones over the terminal area
     dragLeftWindow.current = false;
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', tabId);
-  }, []);
+  }, [setDraggingTabId]);
 
   // Detect when drag leaves the document (cursor exits the window)
   useEffect(() => {
@@ -206,7 +208,8 @@ export default function TerminalTabBar() {
     }
     setDragTabId(null);
     setDragOverIdx(null);
-  }, [dragTabId, tabs, reorderTabs]);
+    setDraggingTabId(null);
+  }, [dragTabId, tabs, reorderTabs, setDraggingTabId]);
 
   const handleDragEnd = useCallback(async (e) => {
     const tabId = dragTabId;
@@ -216,6 +219,7 @@ export default function TerminalTabBar() {
 
     setDragTabId(null);
     setDragOverIdx(null);
+    setDraggingTabId(null);
 
     if (!tabId || !currentProjectPath) return;
 
@@ -256,7 +260,7 @@ export default function TerminalTabBar() {
 
     // Remove tab from this window without killing the PTY
     removeTab(tabId);
-  }, [dragTabId, tabs, currentProjectPath, removeTab]);
+  }, [dragTabId, tabs, currentProjectPath, removeTab, setDraggingTabId]);
 
   // Poll active process for each tab (for status badges)
   const [tabProcesses, setTabProcesses] = useState({});

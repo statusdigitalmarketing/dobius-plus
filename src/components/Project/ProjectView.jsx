@@ -36,6 +36,16 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const splitTabId = useStore((s) => s.splitTabId);
   const clearSplitTab = useStore((s) => s.clearSplitTab);
 
+  // Terminal grid state + actions
+  const gridSlots = useStore((s) => s.gridSlots);
+  const draggingTabId = useStore((s) => s.draggingTabId);
+  const setDraggingTabId = useStore((s) => s.setDraggingTabId);
+  const placeInGrid = useStore((s) => s.placeInGrid);
+  const removeFromGrid = useStore((s) => s.removeFromGrid);
+  const swapGrid = useStore((s) => s.swapGrid);
+  const clearGrid = useStore((s) => s.clearGrid);
+  const setGridSlots = useStore((s) => s.setGridSlots);
+
   const [pinnedIds, setPinnedIds] = useState([]);
   const [tabsInitialized, setTabsInitialized] = useState(false);
 
@@ -136,6 +146,12 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         // Restore saved tabs
         if (config?.tabs?.length > 0 && config.tabCounter > 0) {
           initTabs(config.tabs, config.tabCounter);
+          // Restore a persisted grid layout, dropping any slot whose tab is gone.
+          if (Array.isArray(config.gridSlots)) {
+            const validIds = new Set(config.tabs.map((t) => t.id));
+            const restored = config.gridSlots.map((id) => (id && validIds.has(id) ? id : null));
+            if (restored.some(Boolean)) setGridSlots(restored);
+          }
         } else {
           // First open: create initial tab
           addTab(projectPath);
@@ -169,6 +185,19 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
       window.electronAPI.terminalSaveTabs(projectPath, tabs, useStore.getState().tabCounter);
     }
   }, [tabs, tabsInitialized, projectPath, tearOffTabId]);
+
+  // Persist grid layout per project (merged into project config; skip tear-offs).
+  // Gate on hydration so the mount-time default (gridSlots: null) can't clobber a
+  // saved layout before the load effect has had a chance to restore it.
+  const gridHydratedRef = useRef(false);
+  useEffect(() => {
+    if (tabsInitialized) gridHydratedRef.current = true;
+  }, [tabsInitialized]);
+  useEffect(() => {
+    if (tearOffTabId || !gridHydratedRef.current) return;
+    if (!tabsInitialized || !projectPath || !window.electronAPI?.configSetProject) return;
+    window.electronAPI.configSetProject(projectPath, { gridSlots });
+  }, [gridSlots, tabsInitialized, projectPath, tearOffTabId]);
 
   // Clean up running agents when a terminal PTY exits + auto-capture journal + orchestration tracking
   useEffect(() => {
@@ -548,84 +577,221 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
           >
             <TerminalTabBar />
             <ResumeBanner projectPath={projectPath} />
-            <div className="flex-1 relative min-h-0 min-w-0">
-              {/* All terminal panes mount ONCE here and are positioned purely by
-                  CSS. A pane is never moved between containers, so entering or
-                  exiting split view never unmounts its TerminalPane — which means
-                  useTerminal's cleanup never fires and the PTY (and any running
-                  `claude` session) is never killed. This stable-mount model is
-                  also the foundation for the multi-cell grid. */}
-              {tabsInitialized && tabs.map((tab) => {
-                const isSplit = !!splitTabId && tab.id === splitTabId;
-                const isActive = tab.id === activeTabId;
-                let paneStyle;
-                if (splitTabId) {
-                  if (isSplit) {
-                    // Right half — paddingTop leaves room for the split header overlay.
-                    paneStyle = { position: 'absolute', top: 0, bottom: 0, right: 0, width: '50%', paddingTop: 28, display: 'flex' };
-                  } else if (isActive) {
-                    // Left half — the active non-split tab.
-                    paneStyle = { position: 'absolute', top: 0, bottom: 0, left: 0, width: '50%', display: 'flex' };
-                  } else {
-                    paneStyle = { position: 'absolute', inset: 0, display: 'none' };
-                  }
-                } else {
-                  paneStyle = { position: 'absolute', inset: 0, display: isActive ? 'flex' : 'none' };
-                }
-                return (
-                  <div key={tab.id} style={paneStyle}>
-                    <TerminalPane
-                      id={tab.id}
-                      cwd={tab.projectPath}
-                      theme={theme.xtermTheme}
-                      claimExisting={tab.id === tearOffTabId}
-                    />
-                  </div>
-                );
-              })}
+            {(() => {
+              // Single layout engine for all modes. Every TerminalPane mounts ONCE
+              // in this container and is positioned purely by CSS — never moved
+              // between containers — so neither split nor grid ever unmounts a pane
+              // or kills its PTY. Grid = 2 columns × up to 3 rows; cell positions are
+              // fixed (no reflow), with one spare row shown for the next drop.
+              const GRID_COLS = 2;
+              const gridActive = !!gridSlots;
+              const lastFilledIdx = gridActive ? gridSlots.reduce((m, id, i) => (id ? i : m), 0) : 0;
+              const visibleRows = gridActive ? Math.min(3, Math.floor(lastFilledIdx / GRID_COLS) + 2) : 1;
+              const visibleCells = visibleRows * GRID_COLS;
 
-              {/* Split chrome (divider + header) drawn as absolute overlays so the
-                  pane wrappers' children never change — keeps every pane stable. */}
-              {splitTabId && (() => {
-                const splitTab = tabs.find((t) => t.id === splitTabId);
-                if (!splitTab) return null;
-                return (
-                  <>
-                    <div style={{ position: 'absolute', top: 0, bottom: 0, left: 'calc(50% - 0.5px)', width: 1, backgroundColor: 'var(--border)', zIndex: 5 }} />
-                    <div style={{
-                      position: 'absolute',
-                      top: 0,
-                      right: 0,
-                      width: '50%',
-                      height: 28,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '0 10px',
-                      borderBottom: '1px solid var(--border)',
-                      backgroundColor: 'var(--surface)',
-                      zIndex: 6,
-                    }}>
-                      <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--dim)' }}>
-                        {splitTab.label}
-                      </span>
-                      <button
-                        onClick={clearSplitTab}
-                        title="Exit split view"
-                        style={{
-                          background: 'transparent', border: 'none', cursor: 'pointer',
-                          color: 'var(--dim)', fontSize: 13, lineHeight: 1, padding: '2px 4px',
-                        }}
-                        onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--fg)'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dim)'; }}
-                      >
-                        ✕
-                      </button>
+              const containerStyle = gridActive
+                ? {
+                    position: 'relative',
+                    display: 'grid',
+                    gridTemplateColumns: `repeat(${GRID_COLS}, minmax(0, 1fr))`,
+                    gridTemplateRows: `repeat(${visibleRows}, minmax(0, 1fr))`,
+                    gap: 1,
+                    backgroundColor: 'var(--border)',
+                  }
+                : { position: 'relative' };
+
+              const paneStyleFor = (tab) => {
+                const isActive = tab.id === activeTabId;
+                if (gridActive) {
+                  const idx = gridSlots.indexOf(tab.id);
+                  if (idx === -1) return { display: 'none' };
+                  return {
+                    gridColumn: (idx % GRID_COLS) + 1,
+                    gridRow: Math.floor(idx / GRID_COLS) + 1,
+                    position: 'relative',
+                    display: 'flex',
+                    minWidth: 0,
+                    minHeight: 0,
+                    paddingTop: 24, // room for the cell header overlay
+                    backgroundColor: 'var(--bg)',
+                    outline: isActive ? '2px solid var(--accent)' : 'none',
+                    outlineOffset: '-2px',
+                  };
+                }
+                if (splitTabId) {
+                  if (tab.id === splitTabId) return { position: 'absolute', top: 0, bottom: 0, right: 0, width: '50%', paddingTop: 28, display: 'flex' };
+                  if (isActive) return { position: 'absolute', top: 0, bottom: 0, left: 0, width: '50%', display: 'flex' };
+                  return { position: 'absolute', inset: 0, display: 'none' };
+                }
+                return { position: 'absolute', inset: 0, display: isActive ? 'flex' : 'none' };
+              };
+
+              const handleCellDrop = (e, idx, occupied) => {
+                e.preventDefault();
+                const dragged = e.dataTransfer.getData('text/plain') || draggingTabId;
+                if (dragged) {
+                  const from = gridSlots ? gridSlots.indexOf(dragged) : -1;
+                  if (from !== -1 && occupied) swapGrid(from, idx);
+                  else placeInGrid(idx, dragged);
+                }
+                setDraggingTabId(null);
+              };
+
+              return (
+                <div className="flex-1 min-h-0 min-w-0" style={containerStyle}>
+                  {tabsInitialized && tabs.map((tab) => (
+                    <div key={tab.id} style={paneStyleFor(tab)}>
+                      <TerminalPane
+                        id={tab.id}
+                        cwd={tab.projectPath}
+                        theme={theme.xtermTheme}
+                        claimExisting={tab.id === tearOffTabId}
+                      />
                     </div>
-                  </>
-                );
-              })()}
-            </div>
+                  ))}
+
+                  {/* Split chrome (divider + header) as overlays — pane children
+                      never change, so every pane stays mounted. */}
+                  {splitTabId && !gridActive && (() => {
+                    const splitTab = tabs.find((t) => t.id === splitTabId);
+                    if (!splitTab) return null;
+                    return (
+                      <>
+                        <div style={{ position: 'absolute', top: 0, bottom: 0, left: 'calc(50% - 0.5px)', width: 1, backgroundColor: 'var(--border)', zIndex: 5 }} />
+                        <div style={{
+                          position: 'absolute', top: 0, right: 0, width: '50%', height: 28,
+                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                          padding: '0 10px', borderBottom: '1px solid var(--border)',
+                          backgroundColor: 'var(--surface)', zIndex: 6,
+                        }}>
+                          <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--dim)' }}>
+                            {splitTab.label}
+                          </span>
+                          <button
+                            onClick={clearSplitTab}
+                            title="Exit split view"
+                            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--dim)', fontSize: 13, lineHeight: 1, padding: '2px 4px' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--fg)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dim)'; }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </>
+                    );
+                  })()}
+
+                  {/* Grid chrome — per-cell header (drag handle + remove) for filled
+                      cells, drop-zone placeholders for empty cells. Each is a grid
+                      item placed at its cell; headers overlay the pane's top padding. */}
+                  {gridActive && Array.from({ length: visibleCells }).map((_, idx) => {
+                    const col = (idx % GRID_COLS) + 1;
+                    const row = Math.floor(idx / GRID_COLS) + 1;
+                    const slotTabId = gridSlots[idx];
+                    const slotTab = slotTabId ? tabs.find((t) => t.id === slotTabId) : null;
+                    if (slotTab) {
+                      return (
+                        <div
+                          key={`gh-${idx}`}
+                          style={{
+                            gridColumn: col, gridRow: row, alignSelf: 'start', position: 'relative', zIndex: 6,
+                            height: 24, width: '100%', display: 'flex', alignItems: 'center',
+                            justifyContent: 'space-between', padding: '0 8px',
+                            backgroundColor: 'var(--surface)', borderBottom: '1px solid var(--border)',
+                            cursor: 'grab', boxSizing: 'border-box',
+                          }}
+                          draggable
+                          onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', slotTabId); setDraggingTabId(slotTabId); }}
+                          onDragEnd={() => setDraggingTabId(null)}
+                          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                          onDrop={(e) => handleCellDrop(e, idx, true)}
+                          onClick={() => setActiveTab(slotTabId)}
+                          title="Drag to move · click to focus"
+                        >
+                          <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {slotTab.label}
+                          </span>
+                          <span
+                            onClick={(e) => { e.stopPropagation(); removeFromGrid(idx); }}
+                            title="Remove from grid"
+                            style={{ cursor: 'pointer', color: 'var(--dim)', fontSize: 13, lineHeight: 1, padding: '0 2px', flexShrink: 0 }}
+                            onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--fg)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dim)'; }}
+                          >
+                            ✕
+                          </span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        key={`gp-${idx}`}
+                        style={{
+                          gridColumn: col, gridRow: row, zIndex: 1,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          backgroundColor: 'var(--bg)', color: 'var(--dim)',
+                          fontSize: 11, fontFamily: "'SF Mono', monospace",
+                          border: draggingTabId ? '2px dashed var(--accent)' : '1px dashed var(--border)',
+                          boxSizing: 'border-box',
+                        }}
+                        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                        onDrop={(e) => handleCellDrop(e, idx, false)}
+                      >
+                        drop a tab here
+                      </div>
+                    );
+                  })}
+
+                  {gridActive && (
+                    <button
+                      onClick={clearGrid}
+                      title="Exit grid"
+                      style={{
+                        position: 'absolute', top: 4, right: 8, zIndex: 20,
+                        padding: '2px 8px', fontSize: 11, fontFamily: "'SF Mono', monospace",
+                        color: 'var(--dim)', backgroundColor: 'var(--surface)',
+                        border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer',
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--fg)'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dim)'; }}
+                    >
+                      Exit grid ✕
+                    </button>
+                  )}
+
+                  {/* Transient drop overlay — dragging a tab while NOT already in grid
+                      mode reveals six zones; dropping into one starts the grid. This is
+                      the only way to enter grid mode. */}
+                  {!gridActive && draggingTabId && (
+                    <div
+                      style={{
+                        position: 'absolute', inset: 0, zIndex: 30, display: 'grid',
+                        gridTemplateColumns: `repeat(${GRID_COLS}, 1fr)`,
+                        gridTemplateRows: 'repeat(3, 1fr)', gap: 8, padding: 8,
+                        backgroundColor: 'rgba(0,0,0,0.4)',
+                      }}
+                    >
+                      {Array.from({ length: 6 }).map((_, idx) => (
+                        <div
+                          key={`start-${idx}`}
+                          onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; e.currentTarget.style.backgroundColor = 'rgba(99,102,241,0.35)'; }}
+                          onDragLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                          onDrop={(e) => { e.preventDefault(); const dragged = e.dataTransfer.getData('text/plain') || draggingTabId; if (dragged) placeInGrid(idx, dragged); setDraggingTabId(null); }}
+                          style={{
+                            border: '2px dashed rgba(255,255,255,0.5)', borderRadius: 8,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            color: 'rgba(255,255,255,0.9)', fontSize: 12, fontFamily: "'SF Mono', monospace",
+                            transition: 'background-color 100ms',
+                          }}
+                        >
+                          Drop here
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
           {activeView !== 'terminal' && <DashboardView />}
         </div>
