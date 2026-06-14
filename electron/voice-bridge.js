@@ -25,7 +25,8 @@ import os from 'os';
 import crypto from 'crypto';
 import { app, BrowserWindow } from 'electron';
 import { writeTerminal, listTerminals } from './terminal-manager.js';
-import { completeTaskByRef } from './tasks-service.js';
+import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
+import { STAGES } from './task-pipeline.js';
 
 const PORT = 8421;
 const HOST = '127.0.0.1';
@@ -163,6 +164,37 @@ async function handleTaskDone(req, res) {
   const projectPath = body?.projectPath;
   const ref = body?.ref;
   const result = completeTaskByRef(projectPath, ref);
+  if (result.ok) {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('tasks:updated', projectPath);
+    }
+  }
+  return sendJson(res, result.ok ? 200 : 400, result);
+}
+
+// Move a task between pipeline stages from a terminal (skills / the Conductor
+// drive the Kanban board with this). Uses a 'system' actor, so the transition
+// table AND the human-only rule are enforced in tasks-service/task-pipeline:
+// approval -> done is human-only, so a /stage call to 'done' is rejected by
+// design (drag the card to Done in the UI, or use /taskDone to force-complete).
+// On success we broadcast `tasks:updated` so the board (and Tasks panel) animate
+// live in EVERY window. -sS semantics: illegal-transition / human-only /
+// candidate errors are returned in the body with a 4xx so the caller can react.
+async function handleStage(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  const projectPath = body?.projectPath;
+  const ref = body?.ref;
+  const stage = body?.stage;
+  const note = body?.note ?? null;
+  if (!STAGES.includes(stage)) {
+    return sendJson(res, 400, { ok: false, error: `invalid stage "${stage}". valid: ${STAGES.join(', ')}` });
+  }
+  const resolved = resolveTaskRef(projectPath, ref);
+  if (!resolved.ok) return sendJson(res, 400, resolved);
+  // actor:'system' — never 'human'. This is what enforces the approval->done gate.
+  const result = advanceTask(projectPath, resolved.task.id, stage, { actor: 'system', note });
   if (result.ok) {
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) win.webContents.send('tasks:updated', projectPath);
@@ -457,6 +489,7 @@ function handleRequest(req, res) {
   if (req.url === '/getStatus') return handleGetStatus(req, res);
   if (req.url === '/markDone') return handleMarkDone(req, res);
   if (req.url === '/taskDone') return handleTaskDone(req, res);
+  if (req.url === '/stage') return handleStage(req, res);
   if (req.url === '/spawn') return handleSpawn(req, res);
   if (req.url === '/ask') return handleAsk(req, res);
   if (req.url === '/setLeadTab') return handleSetLeadTab(req, res);
@@ -523,7 +556,7 @@ export function stopVoiceBridge() {
 
 // --- CLI script auto-install ---------------------------------------------
 
-const CLI_VERSION = 8;
+const CLI_VERSION = 9;
 const CLI_DIR = path.join(os.homedir(), '.local', 'bin');
 const CLI_PATH = path.join(CLI_DIR, 'dobius-send');
 const CLI_TABS_PATH = path.join(CLI_DIR, 'dobius-tabs');
@@ -532,6 +565,7 @@ const CLI_TRACK_PATH = path.join(CLI_DIR, 'dobius-track');
 const CLI_STATUS_PATH = path.join(CLI_DIR, 'dobius-status');
 const CLI_MARKDONE_PATH = path.join(CLI_DIR, 'dobius-mark-done');
 const CLI_TASKDONE_PATH = path.join(CLI_DIR, 'dobius-task-done');
+const CLI_STAGE_PATH = path.join(CLI_DIR, 'dobius-stage');
 const CLI_SPAWN_PATH = path.join(CLI_DIR, 'dobius-spawn');
 const CLI_ASK_PATH = path.join(CLI_DIR, 'dobius-ask');
 const CLI_LEADTAB_PATH = path.join(CLI_DIR, 'dobius-lead-tab');
@@ -694,6 +728,42 @@ curl -sS -X POST "http://127.0.0.1:${PORT}/taskDone" \\
   -H "Authorization: Bearer $TOKEN" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2]}))' "$PROJECT" "$REF")"
+`;
+
+const CLI_STAGE_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Move a task through the Dobius+ pipeline (Kanban board). Skills and the
+# Conductor call this to advance a task between stages as the work progresses:
+# building, review, shiptest, approval (also intake/queued/blocked). The board
+# updates live in every window.
+# Matches by task title (substring, case-insensitive), Asana gid, or task id.
+# Uses a 'system' actor, so it CANNOT set a task to 'done' — approval -> done is
+# human-only (drag the card to Done in the UI, or use dobius-task-done to
+# force-complete). Illegal transitions (e.g. intake -> shiptest) are rejected.
+# Usage: dobius-stage "<task title | asanaGid | taskId>" <stage>            (project = current dir)
+#        dobius-stage <projectPath> "<task title | asanaGid | taskId>" <stage>
+#   stages: intake queued building review shiptest approval blocked  (done is human-only)
+set -e
+if [ $# -lt 2 ]; then
+  echo "usage: dobius-stage [projectPath] <task ref> <stage>" >&2
+  echo "  stages: intake queued building review shiptest approval blocked  (done is human-only)" >&2
+  exit 1
+fi
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-stage: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# 2 args → <ref> <stage>, project defaults to the working dir (hand-driven use).
+# 3 args → <projectPath> <ref> <stage> (Conductor staging across projects).
+if [ $# -eq 2 ]; then
+  PROJECT="$(pwd)"; REF="$1"; STAGE="$2"
+else
+  PROJECT="$1"; REF="$2"; STAGE="$3"
+fi
+# -sS (not -fsS): we WANT the JSON body on a 4xx so the caller sees the
+# illegal-transition / human-only / candidate-list error and can react.
+curl -sS -X POST "http://127.0.0.1:${PORT}/stage" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2], "stage": sys.argv[3]}))' "$PROJECT" "$REF" "$STAGE")"
 `;
 
 const CLI_SPAWN_SCRIPT = `#!/bin/bash
@@ -883,6 +953,7 @@ function installCliScript() {
     writeIfChanged(CLI_STATUS_PATH, CLI_STATUS_SCRIPT);
     writeIfChanged(CLI_MARKDONE_PATH, CLI_MARKDONE_SCRIPT);
     writeIfChanged(CLI_TASKDONE_PATH, CLI_TASKDONE_SCRIPT);
+    writeIfChanged(CLI_STAGE_PATH, CLI_STAGE_SCRIPT);
     writeIfChanged(CLI_SPAWN_PATH, CLI_SPAWN_SCRIPT);
     writeIfChanged(CLI_ASK_PATH, CLI_ASK_SCRIPT);
     writeIfChanged(CLI_LEADTAB_PATH, CLI_LEADTAB_SCRIPT);
