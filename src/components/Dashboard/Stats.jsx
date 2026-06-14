@@ -2,13 +2,13 @@ import { useMemo } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
 export default function Stats({ stats }) {
-  if (!stats) {
-    return <div className="p-4 text-xs" style={{ color: 'var(--dim)' }}>No stats available</div>;
-  }
-
-  const modelUsage = stats.modelUsage || {};
-  const dailyActivity = (stats.dailyActivity || []).slice(-14);
-  const hourCounts = stats.hourCounts || {};
+  // Hooks must run on every render in the same order, so derive source data and
+  // call both useMemo hooks BEFORE any early return. Returning early above these
+  // (when stats is null) changes the hook count between renders and crashes the
+  // component to a blank screen once stats loads.
+  const modelUsage = stats?.modelUsage || {};
+  const dailyActivity = (stats?.dailyActivity || []).slice(-14);
+  const hourCounts = stats?.hourCounts || {};
 
   const hourData = useMemo(() => {
     return Array.from({ length: 24 }, (_, h) => ({
@@ -26,6 +26,10 @@ export default function Stats({ stats }) {
       surface: style.getPropertyValue('--surface').trim() || '#161B22',
     };
   }, []);
+
+  if (!stats) {
+    return <div className="p-4 text-xs" style={{ color: 'var(--dim)' }}>No stats available</div>;
+  }
 
   return (
     <div className="p-4 space-y-5 overflow-y-auto h-full">
