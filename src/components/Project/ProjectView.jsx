@@ -421,26 +421,51 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     }
     // Save scrollback before closing so Cmd+Shift+T can restore it
     let scrollback = null;
+    let saved = null;
     if (window.electronAPI?.terminalLoadState) {
       await window.electronAPI.terminalRequestSaveNow?.();
       await new Promise((r) => setTimeout(r, 200));
-      const saved = await window.electronAPI.terminalLoadState(tabId);
+      saved = await window.electronAPI.terminalLoadState(tabId);
       scrollback = saved?.scrollback || null;
     }
     if (tab) {
       state.pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback });
     }
+    // Auto-checkpoint on close, matching the tab-bar X / middle-click / context-menu
+    // paths (Cmd+W previously skipped this, so the same close produced no checkpoint).
+    // Reuse the scrollback already loaded above — no second save round-trip.
+    if (scrollback?.length > 0 && projectPath && window.electronAPI?.checkpointSave) {
+      try {
+        await window.electronAPI.checkpointSave(projectPath, {
+          label: `Auto: ${tab?.label || 'closed tab'}`,
+          terminalId: tabId,
+          scrollback,
+          cols: saved?.cols || 80,
+          rows: saved?.rows || 24,
+        });
+      } catch (err) {
+        console.error('[ProjectView] auto-checkpoint on close failed:', err);
+      }
+    }
     if (window.electronAPI) {
       window.electronAPI.terminalKill(tabId);
     }
     removeTab(tabId);
-  }, [removeTab]);
+  }, [removeTab, projectPath]);
 
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
+
+      // When focus is in one of the app's OWN text fields (the command bar or a
+      // tab-rename input) — but NOT the xterm terminal, which uses a hidden
+      // textarea — don't let disruptive shortcuts hijack the keystroke (e.g.
+      // Cmd+K wiping the terminal mid-compose, Cmd+W closing during a rename).
+      const ae = document.activeElement;
+      const inXterm = ae?.classList?.contains?.('xterm-helper-textarea');
+      const inAppField = !inXterm && !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
 
       if (e.key === 't' && !e.shiftKey) {
         // Cmd+T = new tab
@@ -476,6 +501,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         }
       } else if (e.key === 'w' && !e.shiftKey) {
         // Cmd+W = close tab (with process confirmation)
+        if (inAppField) return;
         e.preventDefault();
         closeActiveTab();
       } else if (e.key === 'b') {
@@ -485,6 +511,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         e.preventDefault();
         toggleGitPanel();
       } else if (e.key === 'k') {
+        if (inAppField) return;
         e.preventDefault();
         const termId = useStore.getState().activeTabId;
         if (window.electronAPI && termId) {
