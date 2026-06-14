@@ -23,7 +23,7 @@
  * dispatch target tab.
  */
 import https from 'https';
-import { loadConfig, saveConfig } from './config-manager.js';
+import { loadConfig, saveConfig, getAsanaQueue } from './config-manager.js';
 
 const ASANA_BASE = 'app.asana.com';
 const ASANA_TIMEOUT_MS = 10_000;
