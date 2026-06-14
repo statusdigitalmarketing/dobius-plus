@@ -556,7 +556,7 @@ export function stopVoiceBridge() {
 
 // --- CLI script auto-install ---------------------------------------------
 
-const CLI_VERSION = 9;
+const CLI_VERSION = 10;
 const CLI_DIR = path.join(os.homedir(), '.local', 'bin');
 const CLI_PATH = path.join(CLI_DIR, 'dobius-send');
 const CLI_TABS_PATH = path.join(CLI_DIR, 'dobius-tabs');
@@ -588,6 +588,8 @@ ${CLI_MARKER}
 # Usage: dobius-send <tabId> "<message>"
 # tabId format: term-/path/to/project-N  (see: dobius-tabs)
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 2 ]; then
   echo "usage: dobius-send <tabId> <message>" >&2
   exit 1
@@ -608,6 +610,8 @@ ${CLI_MARKER}
 # List currently open Dobius+ terminal tabs.
 # Usage: dobius-tabs
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-tabs: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
 curl -fsS -X POST "http://127.0.0.1:${PORT}/tabList" \\
   -H "Host: 127.0.0.1:${PORT}" \\
@@ -625,6 +629,8 @@ ${CLI_MARKER}
 # when multiple voice intents are in flight concurrently.
 # Usage: dobius-reply <requestId> "your one-line reply"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 2 ]; then
   echo "usage: dobius-reply <requestId> <message>" >&2
   exit 1
@@ -648,6 +654,8 @@ ${CLI_MARKER}
 # original iMessage thread; pass the same [req-XXXX] id from your input.
 # Usage: dobius-track <workId> <tabId> <requestId> "<description>"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 4 ]; then
   echo "usage: dobius-track <workId> <tabId> <requestId> <description>" >&2
   exit 1
@@ -669,6 +677,8 @@ ${CLI_MARKER}
 # dobius-reply.
 # Usage: dobius-status [target]      (target is workId, project name substring, or empty for all)
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-status: bridge token unreadable" >&2; exit 2; }
 TARGET="$*"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/getStatus" \\
@@ -686,6 +696,8 @@ ${CLI_MARKER}
 # final-report iMessage still fires.
 # Usage: dobius-mark-done <workId> "<summary>" [status]    (status: completed|failed|cancelled, default completed)
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 2 ]; then
   echo "usage: dobius-mark-done <workId> <summary> [status]" >&2
   exit 1
@@ -709,6 +721,8 @@ ${CLI_MARKER}
 # Usage: dobius-task-done "<task title | asanaGid | taskId>"            (project = current dir)
 #        dobius-task-done <projectPath> "<task title | asanaGid | taskId>"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 1 ]; then
   echo "usage: dobius-task-done [projectPath] <task title|asanaGid|taskId>" >&2
   exit 1
@@ -744,6 +758,8 @@ ${CLI_MARKER}
 #        dobius-stage <projectPath> "<task title | asanaGid | taskId>" <stage>
 #   stages: intake queued building review shiptest approval blocked  (done is human-only)
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 2 ]; then
   echo "usage: dobius-stage [projectPath] <task ref> <stage>" >&2
   echo "  stages: intake queued building review shiptest approval blocked  (done is human-only)" >&2
@@ -772,6 +788,8 @@ ${CLI_MARKER}
 # an iMessage prompt to confirm before the spawn fires.
 # Usage: dobius-spawn <projectPath> <agentId> ["<initial prompt>"]
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 2 ]; then
   echo "usage: dobius-spawn <projectPath> <agentId> [initial prompt]" >&2
   exit 1
@@ -793,6 +811,8 @@ ${CLI_MARKER}
 # irreversible / external-visible action (push, delete, asana comment).
 # Usage: dobius-ask "<question>"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 1 ]; then
   echo "usage: dobius-ask <question>" >&2
   exit 1
@@ -815,6 +835,8 @@ ${CLI_MARKER}
 #        dobius-lead-tab set <projectPath> <tabId>
 #        dobius-lead-tab clear <projectPath>
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-lead-tab: bridge token unreadable" >&2; exit 2; }
 case "\${1-}" in
   get)
@@ -848,6 +870,8 @@ ${CLI_MARKER}
 # approval before processing.
 # Usage: dobius-asana-fetch <projectName>      (fuzzy substring match)
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 1 ] || { echo "usage: dobius-asana-fetch <projectName>" >&2; exit 1; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-fetch: bridge token unreadable" >&2; exit 2; }
 PROJECT="$*"
@@ -862,6 +886,8 @@ ${CLI_MARKER}
 # display name and its gid (find via the Asana web URL: app.asana.com/0/<GID>/...).
 # Usage: dobius-asana-allow <name> <gid>
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 2 ] || { echo "usage: dobius-asana-allow <name> <gid>" >&2; exit 1; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-allow: bridge token unreadable" >&2; exit 2; }
 NAME="$1"; GID="$2"
@@ -875,6 +901,8 @@ ${CLI_MARKER}
 # List allowlisted Asana projects.
 # Usage: dobius-asana-list-allowed
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-list-allowed: bridge token unreadable" >&2; exit 2; }
 curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/listAllowed" \\
   -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{}" \\
@@ -888,6 +916,8 @@ ${CLI_MARKER}
 # Use BEFORE any irreversible action (gh push, asana comment, delete, etc.).
 # Usage: dobius-confirm "Push 5 commits to main?"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 1 ] || { echo "usage: dobius-confirm <action description>" >&2; exit 1; }
 ACTION="$*"
 QUESTION="\${ACTION}\\nReply YES to confirm or NO to skip."
@@ -905,6 +935,8 @@ ${CLI_MARKER}
 # one-line echo so it knows the handoff landed.
 # Usage: dobius-handoff <fromTabId> <toTabId> "<context message>"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 3 ] || { echo "usage: dobius-handoff <fromTabId> <toTabId> <context>" >&2; exit 1; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-handoff: bridge token unreadable" >&2; exit 2; }
 FROM="$1"; TO="$2"; shift 2
@@ -921,6 +953,8 @@ ${CLI_MARKER}
 #        dobius-scheduled enable <id>
 #        dobius-scheduled disable <id>
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-scheduled: bridge token unreadable" >&2; exit 2; }
 case "\${1-list}" in
   list)
@@ -931,9 +965,10 @@ case "\${1-list}" in
   enable|disable)
     ACTION="\$1"; [ $# -ge 2 ] || { echo "usage: dobius-scheduled \$ACTION <id>" >&2; exit 1; }
     ENABLED=\$([ "\$ACTION" = "enable" ] && echo true || echo false)
+    BODY="\$(python3 -c 'import json,sys; print(json.dumps({"id": sys.argv[1], "patch": {"enabled": sys.argv[2] == "true"}}))' "\$2" "\$ENABLED")"
     curl -fsS -X POST "http://127.0.0.1:${PORT}/scheduled/update" \\
       -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
-      --data-binary "{\\\"id\\\": \\\"\$2\\\", \\\"patch\\\": {\\\"enabled\\\": \$ENABLED}}"
+      --data-binary "\$BODY"
     ;;
   *) echo "usage: dobius-scheduled list | enable <id> | disable <id>" >&2; exit 1 ;;
 esac

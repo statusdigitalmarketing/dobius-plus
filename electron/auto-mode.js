@@ -117,6 +117,11 @@ async function tick() {
         if (seenSet.has(task.gid)) continue;
         dispatchToConductor(conductorId, proj, task);
         seenSet.add(task.gid);
+        // Persist this gid IMMEDIATELY, not just in the end-of-loop finally: a
+        // crash after dispatch but before that persist would re-dispatch the
+        // task on restart (duplicate autonomous build). persistSeen union-merges
+        // and caps, so incremental writes are safe and idempotent.
+        persistSeen([task.gid]);
         dispatched++;
       }
     }

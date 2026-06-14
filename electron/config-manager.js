@@ -301,19 +301,23 @@ export function saveConfig(config) {
   }, 500);
 }
 
-// Apply only top-level scalar keys of a foreign whole-config snapshot onto the
-// live cache (add/update, and honor deletions of scalar keys). Object/array
-// sections are skipped so a stale snapshot can never overwrite the nested state
-// (projects, settings, accounts, …) that other writers manage concurrently.
+// Apply only top-level scalar keys that the foreign whole-config snapshot
+// EXPLICITLY contains, onto the live cache. Object/array sections are skipped so
+// a stale snapshot can never overwrite the nested state (projects, settings,
+// accounts, …) that other writers manage concurrently.
+//
+// We deliberately do NOT delete scalar keys that are merely absent from the
+// snapshot: a config:save sends a whole-config object captured a moment earlier,
+// so "absent" can just mean "another writer added this key after the snapshot
+// was taken" — deleting it would drop that brand-new key. Only keys the snapshot
+// names are touched. (A renderer that wants to delete a key should send it as
+// null, or send a patch of changed keys rather than a whole-config object.)
 function mergeForeignScalars(foreign) {
   if (!configCache) return;
   const isScalar = (v) => v === null || typeof v !== 'object';
   for (const [key, value] of Object.entries(foreign)) {
     if (UNSAFE_KEYS.has(key)) continue;
     if (isScalar(value)) configCache[key] = value;
-  }
-  for (const key of Object.keys(configCache)) {
-    if (isScalar(configCache[key]) && !(key in foreign)) delete configCache[key];
   }
 }
 
