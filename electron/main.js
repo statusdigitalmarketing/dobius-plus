@@ -53,6 +53,7 @@ import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages } from './visual-server.js';
+import { deployStatus, deployPreview, promote } from './deploy-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -703,6 +704,11 @@ function setupOrchestrationHandlers() {
       return { ok: false, error: err.message };
     }
   });
+
+  // --- Visual deploy (git: preview branch, then promote to live) ---
+  ipcMain.handle('visual:deployStatus', (_event, projectPath, opts) => deployStatus(projectPath, opts || {}));
+  ipcMain.handle('visual:deployPreview', (_event, projectPath, opts) => deployPreview(projectPath, opts || {}));
+  ipcMain.handle('visual:promote', (_event, projectPath, opts) => promote(projectPath, opts || {}));
 }
 
 function setupFileHandlers() {

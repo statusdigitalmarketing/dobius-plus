@@ -287,4 +287,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   visualGetPort: () => ipcRenderer.invoke('visual:getPort'),
   visualScreenshot: (webContentsId) => ipcRenderer.invoke('visual:screenshot', webContentsId),
   visualListPages: () => ipcRenderer.invoke('visual:listPages'),
+  visualDeployStatus: (projectPath, opts) => ipcRenderer.invoke('visual:deployStatus', projectPath, opts),
+  visualDeployPreview: (projectPath, opts) => ipcRenderer.invoke('visual:deployPreview', projectPath, opts),
+  visualPromote: (projectPath, opts) => ipcRenderer.invoke('visual:promote', projectPath, opts),
 });
