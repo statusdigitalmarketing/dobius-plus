@@ -26,6 +26,23 @@ let _wss = null;
 let _watcher = null;
 let _port = null;
 let _projectPath = null;
+let _webRoot = null;
+
+// Subfolders to probe (in priority order) when the project root has no
+// index.html. Source/content dirs come before build outputs so we serve the
+// editable files, not a stale build.
+const WEB_ROOT_CANDIDATES = ['website', 'public', 'site', 'www', 'docs', 'dist', 'build', 'out'];
+
+// Find the folder that actually contains index.html so sites kept in a
+// subfolder (and using absolute asset paths like /css/app.css) preview
+// correctly. Root index.html always wins, so existing projects are unaffected.
+function resolveWebRoot(projectPath) {
+  if (fs.existsSync(path.join(projectPath, 'index.html'))) return projectPath;
+  for (const sub of WEB_ROOT_CANDIDATES) {
+    if (fs.existsSync(path.join(projectPath, sub, 'index.html'))) return path.join(projectPath, sub);
+  }
+  return projectPath;
+}
 
 function broadcast(msg) {
   if (!_wss) return;
@@ -40,12 +57,14 @@ function injectReload(html) {
 export async function startVisualServer(projectPath) {
   if (_server) await stopVisualServer();
   _projectPath = projectPath;
+  _webRoot = resolveWebRoot(projectPath);
+  const webRoot = _webRoot;
 
   const app = express();
 
   // Intercept HTML files to inject reload script
   app.use((req, res, next) => {
-    let filePath = path.join(projectPath, req.path === '/' ? 'index.html' : req.path);
+    let filePath = path.join(webRoot, req.path === '/' ? 'index.html' : req.path);
     // Attempt directory index
     if (!path.extname(filePath) || fs.existsSync(filePath + '.html')) {
       const candidate = fs.existsSync(filePath + '.html') ? filePath + '.html' : path.join(filePath, 'index.html');
@@ -62,12 +81,12 @@ export async function startVisualServer(projectPath) {
     next();
   });
 
-  app.use(express.static(projectPath, { etag: false, maxAge: 0 }));
+  app.use(express.static(webRoot, { etag: false, maxAge: 0 }));
 
   const httpServer = createServer(app);
   _wss = new WebSocketServer({ server: httpServer, path: '/__vreload' });
 
-  _watcher = chokidar.watch(projectPath, {
+  _watcher = chokidar.watch(webRoot, {
     ignored: /(^|[/\\])\.|node_modules|dist|build|\.next|\.vercel|coverage|out/,
     persistent: true,
     ignoreInitial: true,
@@ -100,13 +119,14 @@ export async function stopVisualServer() {
   if (_server) { await new Promise((r) => _server.close(r)); _server = null; }
   _port = null;
   _projectPath = null;
+  _webRoot = null;
 }
 
 export function getVisualPort() { return _port; }
 export function getVisualProjectPath() { return _projectPath; }
 
 export function listVisualPages() {
-  if (!_projectPath) return ['/'];
+  if (!_webRoot) return ['/'];
   try {
     const walk = (dir, base) => {
       const results = [];
@@ -119,7 +139,7 @@ export function listVisualPages() {
       }
       return results;
     };
-    const pages = walk(_projectPath, '').map((p) => p.replace(/\/index\.html$/, '/') || '/');
+    const pages = walk(_webRoot, '').map((p) => p.replace(/\/index\.html$/, '/') || '/');
     return ['/'].concat(pages.filter((p) => p !== '/').sort()).slice(0, 40);
   } catch {
     return ['/'];
