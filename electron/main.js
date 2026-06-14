@@ -50,7 +50,7 @@ import {
 } from './imessage-bridge.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
-import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks } from './tasks-service.js';
+import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
@@ -667,6 +667,31 @@ function setupOrchestrationHandlers() {
   ipcMain.handle('tasks:update', (_event, projectPath, taskId, patch) => updateTask(projectPath, taskId, patch));
   ipcMain.handle('tasks:delete', (_event, projectPath, taskId) => deleteTask(projectPath, taskId));
   ipcMain.handle('tasks:syncAsana', (_event, projectPath) => syncAsanaTasks(projectPath));
+
+  // Pipeline stage transitions (Epic 7). The service enforces the transition
+  // table and returns { ok, task } | { ok:false, error } — it does not throw.
+  // Broadcast tasks:updated to every window only on success, so all open boards
+  // (Pipeline + the legacy Tasks panel) re-render live, matching handleTaskDone.
+  const broadcastTasksUpdated = (projectPath) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('tasks:updated', projectPath);
+    }
+  };
+  ipcMain.handle('tasks:advance', (_event, projectPath, taskId, toStage, opts) => {
+    const result = advanceTask(projectPath, taskId, toStage, opts || {});
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
+  ipcMain.handle('tasks:block', (_event, projectPath, taskId, reason, opts) => {
+    const result = blockTask(projectPath, taskId, reason, opts || {});
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
+  ipcMain.handle('tasks:unblock', (_event, projectPath, taskId, opts) => {
+    const result = unblockTask(projectPath, taskId, opts || {});
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());
   ipcMain.handle('asana:updateConfig', (_event, updates) => updateAsanaQueue(updates));
   ipcMain.handle('automode:get', () => getAutoMode());

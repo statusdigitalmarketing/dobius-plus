@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { THEMES, applyTheme } from '../lib/themes';
+import { groupByStage } from '../lib/stages';
 
 // Drop any grid entries whose tab is no longer present. Returns null when the
 // grid would be left empty (i.e. grid mode turns off). gridSlots is a dense,
@@ -277,6 +278,27 @@ export const useStore = create((set, get) => ({
   // Board notifications
   setBoardNotification: (notification) => set({ boardNotification: notification }),
   clearBoardNotification: () => set({ boardNotification: null }),
+
+  // Pipeline tasks (Epic 7 — Kanban board). The stage mutations go through the
+  // main process, which enforces the transition table and broadcasts
+  // `tasks:updated`; the UI subscribes to that and calls loadTasks to refresh.
+  // The mutators RETURN the service result ({ ok, task } | { ok:false, error })
+  // so the UI can snap an illegal drop back instead of crashing.
+  tasks: [],
+  loadTasks: async (projectPath) => {
+    const r = await window.electronAPI.tasksList(projectPath);
+    set({ tasks: Array.isArray(r) ? r : [] });
+  },
+  setTaskStage: async (projectPath, taskId, toStage, opts) => {
+    return window.electronAPI.tasksAdvance(projectPath, taskId, toStage, opts || { actor: 'human' });
+  },
+  blockTask: async (projectPath, taskId, reason) => {
+    return window.electronAPI.tasksBlock(projectPath, taskId, reason, { actor: 'human' });
+  },
+  unblockTask: async (projectPath, taskId, opts) => {
+    return window.electronAPI.tasksUnblock(projectPath, taskId, opts || { actor: 'human' });
+  },
+  tasksByStage: () => groupByStage(get().tasks),
 
   // Recently closed tabs (persisted to config for cross-session recovery)
   pushClosedTab: (closedTab) => set((s) => {
