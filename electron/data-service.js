@@ -817,12 +817,14 @@ export async function loadProjectTokens() {
       try {
         const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
         await Promise.all(files.map(async (f) => {
-          sessions++;
           const filePath = path.join(projectDir, f);
           try {
             const stat = await fs.stat(filePath);
             if (stat.size > 8 * 1024 * 1024) return; // skip files > 8MB
           } catch { return; }
+          // Only count sessions we actually scanned — skipped (too large) or
+          // unreadable files must not inflate the Costs "sessions" metric.
+          sessions++;
           const entries = await parseJsonl(filePath);
           for (const entry of entries) {
             const usage = entry.message?.usage;
@@ -939,7 +941,12 @@ export async function searchTranscripts(query) {
               text.slice(start, end) +
               (end < text.length ? '…' : '');
 
-            const role = entry.type || entry.message?.role || 'unknown';
+            // Normalize roles the way the other parsers in this file do: older
+            // transcripts use type 'human' for the user, which must not render
+            // as Claude. Anything that isn't a user message is the assistant.
+            const role = (entry.type === 'human' || entry.type === 'user'
+              || entry.role === 'user' || entry.message?.role === 'user')
+              ? 'user' : 'assistant';
             matches.push({
               sessionId,
               projectName,
