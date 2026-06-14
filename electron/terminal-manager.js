@@ -15,6 +15,45 @@ import { app } from 'electron';
 
 const terminals = new Map();
 
+/**
+ * Defensive startup check: node-pty's `spawn-helper` MUST be executable or
+ * every PTY opens blank (the helper is exec'd to launch the shell, and without
+ * +x that exec fails with EACCES). electron-builder's asar-unpack step has been
+ * seen to drop the bit, and an external file copy (scp/rsync) or a recursive
+ * chmod can do the same. Re-assert 0755 on launch so neither a bad build nor an
+ * accidental permission change can leave the user with dead terminals again.
+ * Safe to call every launch (chmod on an already-correct file is a no-op) and
+ * only touches a file inside our own app bundle. Returns true if the helper is
+ * executable afterward.
+ */
+export function ensureSpawnHelperExecutable() {
+  const candidates = [
+    process.resourcesPath
+      ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'node-pty', 'build', 'Release', 'spawn-helper')
+      : null,
+    path.join(process.cwd(), 'node_modules', 'node-pty', 'build', 'Release', 'spawn-helper'),
+  ].filter(Boolean);
+
+  let ok = false;
+  for (const helper of candidates) {
+    try {
+      if (!fs.existsSync(helper)) continue;
+      const mode = fs.statSync(helper).mode;
+      if ((mode & 0o111) === 0) {
+        fs.chmodSync(helper, 0o755);
+        console.warn(`[terminal-manager] spawn-helper was not executable; restored 0755: ${helper}`);
+      }
+      ok = true;
+    } catch (err) {
+      console.error(`[terminal-manager] spawn-helper check failed for ${helper}:`, err.message);
+    }
+  }
+  if (!ok) {
+    console.error('[terminal-manager] WARNING: node-pty spawn-helper not found or not fixable; terminals may open blank.');
+  }
+  return ok;
+}
+
 // Per-terminal rolling output buffer cap (bytes). Replayed to a freshly-
 // attached mobile client so it has real scrollback, not just the last screen.
 // 1MB is roughly 10-15k lines of terminal text.

@@ -635,7 +635,7 @@ if [ $# -lt 2 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-mark-done: bridge token unreadable" >&2; exit 2; }
-WORK_ID="$1"; SUMMARY="$2"; STATUS="${3-completed}"
+WORK_ID="$1"; SUMMARY="$2"; STATUS="\${3-completed}"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/markDone" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H "Authorization: Bearer $TOKEN" \\

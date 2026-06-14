@@ -30,8 +30,30 @@ function rehydrate() {
     const cfg = loadConfig();
     const persisted = cfg.workRegistry?.items;
     if (Array.isArray(persisted)) {
+      let reconciled = 0;
       for (const e of persisted) {
-        if (e && typeof e.workId === 'string') items.set(e.workId, e);
+        if (!e || typeof e.workId !== 'string') continue;
+        // A 'running' item cannot survive a process restart: its tab/PTY is
+        // gone and rehydrate never recreates a watcher for it, so it would sit
+        // 'running' forever. Left as-is it permanently trips the
+        // maxConcurrentAgents cap in registerWork (default 1), which counts
+        // running items, so every new Conductor dispatch after a relaunch
+        // returns "concurrency cap: 1/1 agents already running" for a tab that
+        // no longer exists. Reconcile it to 'interrupted' so the cap and status
+        // queries reflect reality. We do NOT fire a final-report iMessage here
+        // (that would spam Sam on every launch); this is a silent status fix.
+        if (e.status === 'running') {
+          e.status = 'interrupted';
+          e.completedAt = e.completedAt || Date.now();
+          e.lastUpdate = Date.now();
+          e.finalReport = e.finalReport || 'interrupted by app restart';
+          reconciled += 1;
+        }
+        items.set(e.workId, e);
+      }
+      if (reconciled > 0) {
+        console.log(`[work-registry] reconciled ${reconciled} interrupted work item(s) from previous session`);
+        persist();
       }
     }
   } catch (err) {

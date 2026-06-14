@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, listTerminals, reassignTerminal } from './terminal-manager.js';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, listTerminals, reassignTerminal, ensureSpawnHelperExecutable } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -878,7 +878,44 @@ function cleanClipboardTemp() {
   } catch { /* ignore */ }
 }
 
+/**
+ * Write a readable line to userData/crash.log for failures that would otherwise
+ * leave only a bare SIGTRAP/SIGABRT crash report. JS-level handlers cannot
+ * intercept native (node-pty/sqlite) or V8-fatal (heap OOM) aborts, so those
+ * still produce a system .ips report; what this DOES capture is uncaught JS
+ * errors and renderer/child-process deaths (reason 'oom'/'crashed'), which is
+ * the diagnostic that was missing when the dashboard crash was investigated.
+ */
+function setupCrashLogging() {
+  const logPath = path.join(app.getPath('userData'), 'crash.log');
+  const write = (kind, detail) => {
+    try {
+      fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${kind}: ${detail}\n`);
+    } catch {
+      // Logging must never throw.
+    }
+  };
+  process.on('uncaughtException', (err) => {
+    write('uncaughtException', (err && err.stack) || String(err));
+    // Preserve Node's default fatal behavior (adding a handler suppresses the
+    // automatic exit, which would otherwise leave the app in an unknown state).
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    write('unhandledRejection', (reason && reason.stack) || String(reason));
+  });
+  app.on('render-process-gone', (_e, _wc, details) => {
+    write('render-process-gone', `reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  app.on('child-process-gone', (_e, details) => {
+    write('child-process-gone', `type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+}
+
 app.whenReady().then(() => {
+  setupCrashLogging();
+  // Make sure node-pty can actually launch shells before any tab is created.
+  ensureSpawnHelperExecutable();
   cleanClipboardTemp();
   setupTerminalHandlers();
   setupDataHandlers();

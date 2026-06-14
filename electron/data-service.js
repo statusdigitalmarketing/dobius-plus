@@ -5,7 +5,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import {
   HISTORY_PATH, STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PROJECTS_DIR,
-  parseJsonl, timeAgo, pathExists,
+  parseJsonl, timeAgo, pathExists, mapLimit,
 } from './data-utils.js';
 import { getSettings } from './config-manager.js';
 
@@ -68,63 +68,74 @@ export async function loadAllSessions() {
       void 0;
     }
 
-    await Promise.all(projectDirs.map(async (dir) => {
+    // Flatten every transcript across every project into one task list, then
+    // process it with a bounded worker pool. The previous nested Promise.all
+    // fanned out across all projects AND all files at once, opening thousands
+    // of file handles simultaneously — combined with the old whole-file read
+    // in parseJsonl, that OOM-crashed the main process on dashboards with large
+    // ~/.claude histories. A cap of 24 keeps memory and fd usage flat.
+    const fileTasks = [];
+    for (const dir of projectDirs) {
       const projectDir = path.join(PROJECTS_DIR, dir.name);
       const realPath = encodedToReal.get(dir.name);
       const projectPath = realPath || ('/' + dir.name.replace(/-/g, '/'));
       const projectName = realPath
         ? realPath.split('/').filter(Boolean).pop()
         : dir.name.split('-').filter(Boolean).pop() || dir.name;
-
+      let files = [];
       try {
-        const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
-        await Promise.all(files.map(async (f) => {
-          const sessionId = f.replace('.jsonl', '');
-          const filePath = path.join(projectDir, f);
+        files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
+      } catch {
+        continue;
+      }
+      for (const f of files) {
+        fileTasks.push({ projectDir, projectPath, projectName, file: f });
+      }
+    }
+
+    await mapLimit(fileTasks, 24, async ({ projectDir, projectPath, projectName, file }) => {
+      const sessionId = file.replace('.jsonl', '');
+      const filePath = path.join(projectDir, file);
+      try {
+        const entries = await parseJsonl(filePath, 5);
+        let preview = '';
+        let timestamp = 0;
+
+        for (const entry of entries) {
+          if (entry.timestamp && entry.timestamp > timestamp) {
+            timestamp = entry.timestamp;
+          }
+          if (!preview && (entry.type === 'human' || entry.role === 'user')) {
+            const content = typeof entry.message === 'string'
+              ? entry.message
+              : entry.message?.content || entry.content || '';
+            if (content) {
+              preview = content.slice(0, 200);
+            }
+          }
+        }
+
+        if (!timestamp) {
           try {
-            const entries = await parseJsonl(filePath, 5);
-            let preview = '';
-            let timestamp = 0;
-
-            for (const entry of entries) {
-              if (entry.timestamp && entry.timestamp > timestamp) {
-                timestamp = entry.timestamp;
-              }
-              if (!preview && (entry.type === 'human' || entry.role === 'user')) {
-                const content = typeof entry.message === 'string'
-                  ? entry.message
-                  : entry.message?.content || entry.content || '';
-                if (content) {
-                  preview = content.slice(0, 200);
-                }
-              }
-            }
-
-            if (!timestamp) {
-              try {
-                const stat = await fs.stat(filePath);
-                timestamp = stat.mtimeMs;
-              } catch {
-                void 0;
-              }
-            }
-
-            sessions.push({
-              sessionId,
-              projectPath,
-              projectName,
-              preview: preview || 'No preview available',
-              timestamp,
-              age: timestamp ? timeAgo(timestamp) : 'unknown',
-            });
+            const stat = await fs.stat(filePath);
+            timestamp = stat.mtimeMs;
           } catch {
             void 0;
           }
-        }));
+        }
+
+        sessions.push({
+          sessionId,
+          projectPath,
+          projectName,
+          preview: preview || 'No preview available',
+          timestamp,
+          age: timestamp ? timeAgo(timestamp) : 'unknown',
+        });
       } catch {
         void 0;
       }
-    }));
+    });
   } catch (err) {
     console.warn('[data-service] Failed to load all sessions:', err.message);
     return [];
