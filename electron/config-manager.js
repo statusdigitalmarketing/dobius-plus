@@ -5,7 +5,6 @@ import { app } from 'electron';
 
 const CONFIG_DIR = path.join(app.getPath('userData'));
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
-const CONFIG_TMP = path.join(CONFIG_DIR, 'config.json.tmp');
 // Per-tab scrollback lives in its own file under terminal-history so config.json
 // stays tiny. Before this, scrollback was inlined into config.projects[*].terminalStates
 // and every per-tab auto-save serialized + sync-wrote the entire config (12+ MB).
@@ -51,6 +50,10 @@ const DEFAULT_CONFIG = {
 
 let configCache = null;
 let saveTimer = null;
+// Single promise chain so every async config write runs sequentially. Combined
+// with a per-write unique tmp file, concurrent writers can never interleave a
+// write→rename and tear config.json.
+let writeChain = Promise.resolve();
 
 /**
  * Drop terminalStates entries whose tab no longer exists in either the live
@@ -82,22 +85,45 @@ function pruneOrphanTerminalStates(cfg) {
 }
 
 /**
- * Atomic write (async) — write to tmp then rename. Does not block the main
- * thread, which matters because writes can hit 100KB+ and they used to
+ * Atomic write (async) — write to a unique tmp then rename. Does not block the
+ * main thread, which matters because writes can hit 100KB+ and they used to
  * stall every IPC round-trip while the renderer waited.
+ *
+ * Serialized through `writeChain` and given a per-call unique tmp name: a shared
+ * tmp path let two overlapping writers race write→rename and leave config.json
+ * truncated (the app's source of truth — accounts, projects, Asana PAT, tabs).
+ * Errors are logged, never rethrown, so a single failed write can't poison the
+ * chain and block every later write.
  */
-async function atomicWrite(filePath, data) {
-  await fsp.writeFile(CONFIG_TMP, data);
-  await fsp.rename(CONFIG_TMP, filePath);
+function atomicWrite(filePath, data) {
+  const tmp = `${filePath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
+  writeChain = writeChain.then(async () => {
+    try {
+      await fsp.writeFile(tmp, data);
+      await fsp.rename(tmp, filePath);
+    } catch (err) {
+      console.warn('[config-manager] config write failed:', err.message);
+      try { await fsp.unlink(tmp); } catch { /* nothing to clean up */ }
+    }
+  });
+  return writeChain;
 }
 
 /**
- * Atomic write (sync) — only used by flushConfig on app quit, where blocking
- * is acceptable because we need the data to land before the process dies.
+ * Atomic write (sync) — used by flushConfig on app quit and the load-time
+ * migration, where blocking is acceptable because we need the data to land
+ * before continuing. Unique tmp so it never collides with an in-flight async
+ * write's rename.
  */
 function atomicWriteSync(filePath, data) {
-  fs.writeFileSync(CONFIG_TMP, data);
-  fs.renameSync(CONFIG_TMP, filePath);
+  const tmp = `${filePath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
+  try {
+    fs.writeFileSync(tmp, data);
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    throw err;
+  }
 }
 
 /**
@@ -234,7 +260,19 @@ export function loadConfig() {
  * file is being written. Previously, sync writes stalled every IPC round-trip.
  */
 export function saveConfig(config) {
-  configCache = config;
+  if (!configCache) loadConfig();
+  if (config && config === configCache) {
+    // Native writers do loadConfig() → mutate the live cache → saveConfig(cache).
+    // The cache already holds their change; nothing to merge.
+  } else if (config && typeof config === 'object') {
+    // A foreign full object (renderer config:save) is a stale whole-config
+    // snapshot. Replacing the cache with it would clobber changes other writers
+    // made since that snapshot (e.g. a tab/grid save dropped by a Git-dir save).
+    // config:save callers only set top-level SCALAR keys (gitProjectDir,
+    // monitoredBuildDir), so apply just those onto the live cache and leave the
+    // object/array sections — owned by their dedicated writers — untouched.
+    mergeForeignScalars(config);
+  }
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     try {
@@ -245,10 +283,26 @@ export function saveConfig(config) {
       console.warn('[config-manager] mkdir failed:', err.message);
       return;
     }
-    atomicWrite(CONFIG_PATH, JSON.stringify(config, null, 2)).catch((err) => {
-      console.warn('[config-manager] Failed to save config:', err.message);
-    });
+    // Persist the LIVE cache (not the captured arg) so a coalesced write always
+    // flushes the freshest merged state. The write is serialized in atomicWrite.
+    void atomicWrite(CONFIG_PATH, JSON.stringify(configCache, null, 2));
   }, 500);
+}
+
+// Apply only top-level scalar keys of a foreign whole-config snapshot onto the
+// live cache (add/update, and honor deletions of scalar keys). Object/array
+// sections are skipped so a stale snapshot can never overwrite the nested state
+// (projects, settings, accounts, …) that other writers manage concurrently.
+function mergeForeignScalars(foreign) {
+  if (!configCache) return;
+  const isScalar = (v) => v === null || typeof v !== 'object';
+  for (const [key, value] of Object.entries(foreign)) {
+    if (UNSAFE_KEYS.has(key)) continue;
+    if (isScalar(value)) configCache[key] = value;
+  }
+  for (const key of Object.keys(configCache)) {
+    if (isScalar(configCache[key]) && !(key in foreign)) delete configCache[key];
+  }
 }
 
 /**
