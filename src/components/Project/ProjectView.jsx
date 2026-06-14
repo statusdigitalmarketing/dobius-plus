@@ -548,15 +548,32 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
           >
             <TerminalTabBar />
             <ResumeBanner projectPath={projectPath} />
-            <div className="flex-1 relative min-h-0 flex flex-row min-w-0">
-              {/* Left pane */}
-              <div className="flex-1 relative min-h-0" style={{ minWidth: 0 }}>
-                {tabsInitialized && tabs.filter((t) => t.id !== splitTabId).map((tab) => (
-                  <div
-                    key={tab.id}
-                    className="absolute inset-0"
-                    style={{ display: tab.id === activeTabId ? 'flex' : 'none' }}
-                  >
+            <div className="flex-1 relative min-h-0 min-w-0">
+              {/* All terminal panes mount ONCE here and are positioned purely by
+                  CSS. A pane is never moved between containers, so entering or
+                  exiting split view never unmounts its TerminalPane — which means
+                  useTerminal's cleanup never fires and the PTY (and any running
+                  `claude` session) is never killed. This stable-mount model is
+                  also the foundation for the multi-cell grid. */}
+              {tabsInitialized && tabs.map((tab) => {
+                const isSplit = !!splitTabId && tab.id === splitTabId;
+                const isActive = tab.id === activeTabId;
+                let paneStyle;
+                if (splitTabId) {
+                  if (isSplit) {
+                    // Right half — paddingTop leaves room for the split header overlay.
+                    paneStyle = { position: 'absolute', top: 0, bottom: 0, right: 0, width: '50%', paddingTop: 28, display: 'flex' };
+                  } else if (isActive) {
+                    // Left half — the active non-split tab.
+                    paneStyle = { position: 'absolute', top: 0, bottom: 0, left: 0, width: '50%', display: 'flex' };
+                  } else {
+                    paneStyle = { position: 'absolute', inset: 0, display: 'none' };
+                  }
+                } else {
+                  paneStyle = { position: 'absolute', inset: 0, display: isActive ? 'flex' : 'none' };
+                }
+                return (
+                  <div key={tab.id} style={paneStyle}>
                     <TerminalPane
                       id={tab.id}
                       cwd={tab.projectPath}
@@ -564,52 +581,46 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                       claimExisting={tab.id === tearOffTabId}
                     />
                   </div>
-                ))}
-              </div>
+                );
+              })}
 
-              {/* Right split pane */}
+              {/* Split chrome (divider + header) drawn as absolute overlays so the
+                  pane wrappers' children never change — keeps every pane stable. */}
               {splitTabId && (() => {
                 const splitTab = tabs.find((t) => t.id === splitTabId);
                 if (!splitTab) return null;
                 return (
                   <>
-                    <div style={{ width: 1, backgroundColor: 'var(--border)', flexShrink: 0 }} />
-                    <div className="flex flex-col min-h-0" style={{ width: '50%', minWidth: 0, flexShrink: 0 }}>
-                      <div style={{
-                        height: 28,
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        padding: '0 10px',
-                        borderBottom: '1px solid var(--border)',
-                        backgroundColor: 'var(--surface)',
-                        flexShrink: 0,
-                      }}>
-                        <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--dim)' }}>
-                          {splitTab.label}
-                        </span>
-                        <button
-                          onClick={clearSplitTab}
-                          title="Exit split view"
-                          style={{
-                            background: 'transparent', border: 'none', cursor: 'pointer',
-                            color: 'var(--dim)', fontSize: 13, lineHeight: 1, padding: '2px 4px',
-                          }}
-                          onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--fg)'; }}
-                          onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dim)'; }}
-                        >
-                          ✕
-                        </button>
-                      </div>
-                      <div className="flex-1 relative min-h-0">
-                        <div className="absolute inset-0 flex">
-                          <TerminalPane
-                            id={splitTab.id}
-                            cwd={splitTab.projectPath}
-                            theme={theme.xtermTheme}
-                          />
-                        </div>
-                      </div>
+                    <div style={{ position: 'absolute', top: 0, bottom: 0, left: 'calc(50% - 0.5px)', width: 1, backgroundColor: 'var(--border)', zIndex: 5 }} />
+                    <div style={{
+                      position: 'absolute',
+                      top: 0,
+                      right: 0,
+                      width: '50%',
+                      height: 28,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '0 10px',
+                      borderBottom: '1px solid var(--border)',
+                      backgroundColor: 'var(--surface)',
+                      zIndex: 6,
+                    }}>
+                      <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--dim)' }}>
+                        {splitTab.label}
+                      </span>
+                      <button
+                        onClick={clearSplitTab}
+                        title="Exit split view"
+                        style={{
+                          background: 'transparent', border: 'none', cursor: 'pointer',
+                          color: 'var(--dim)', fontSize: 13, lineHeight: 1, padding: '2px 4px',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--fg)'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dim)'; }}
+                      >
+                        ✕
+                      </button>
                     </div>
                   </>
                 );
