@@ -15,6 +15,7 @@ import Agents from './Agents';
 import ClaudeMdEditor from './ClaudeMdEditor';
 import Settings from './Settings';
 import BoardView from './Board/BoardView';
+import KanbanView from './Kanban/KanbanView';
 import OrchestratorView from './Orchestrator/OrchestratorView';
 import Updates from './Updates';
 import Prompts from './Prompts';
@@ -35,6 +36,7 @@ const TABS = [
   { id: 'prompts', label: 'Prompts' },
   { id: 'agents', label: 'Mission Control' },
   { id: 'board', label: 'Board' },
+  { id: 'pipeline', label: 'Pipeline' },
   { id: 'orchestrator', label: 'Orchestrator' },
   { id: 'builds', label: 'Builds' },
   { id: 'git', label: 'Git' },
@@ -55,6 +57,7 @@ const TAB_CONTENT = {
   checkpoints: () => <Checkpoints />,
   agents: () => <Agents />,
   board: () => <BoardView />,
+  pipeline: () => <KanbanView />,
   orchestrator: () => <OrchestratorView />,
   plans: (props) => <Plans plans={props.plans} />,
   prompts: () => <Prompts />,
