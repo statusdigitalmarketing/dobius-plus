@@ -218,6 +218,9 @@ export const useStore = create((set, get) => ({
   currentIsWorktree: false,
   setCurrentIsWorktree: (v) => set({ currentIsWorktree: !!v }),
 
+  currentDetached: false,
+  setCurrentDetached: (v) => set({ currentDetached: !!v }),
+
   setSessions: (sessions) => set({ sessions }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),
   setBuildComplete: (val) => set({ buildComplete: val }),

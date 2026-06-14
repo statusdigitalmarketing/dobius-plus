@@ -15,6 +15,14 @@ export default function TopBar({ projectName }) {
     ? (tabs.find((t) => t.id === activeTabId)?.label || '')
     : '';
 
+  // Git context for the active tab. Hidden entirely outside a git repo.
+  const currentBranch = useStore((s) => s.currentBranch);
+  const currentIsWorktree = useStore((s) => s.currentIsWorktree);
+  const currentDetached = useStore((s) => s.currentDetached);
+  const showGit = activeView === 'terminal' && (currentDetached || !!currentBranch);
+  const gitRef = currentDetached ? 'detached' : currentBranch;
+  const gitKind = currentDetached ? null : (currentIsWorktree ? 'worktree' : 'branch');
+
   return (
     <>
     <div
@@ -69,6 +77,25 @@ export default function TopBar({ projectName }) {
           <>
             <span style={{ opacity: 0.5 }}>·</span>
             <span style={{ color: 'var(--fg)' }}>{activeTabLabel}</span>
+          </>
+        )}
+        {showGit && (
+          <>
+            <span style={{ opacity: 0.5 }}>·</span>
+            <span style={{ color: 'var(--fg)' }}>{gitRef}</span>
+            {gitKind && (
+              <>
+                <span style={{ opacity: 0.5 }}>·</span>
+                <span
+                  style={{
+                    color: gitKind === 'worktree' ? 'var(--git-worktree)' : 'var(--dim)',
+                    fontWeight: gitKind === 'worktree' ? 600 : 400,
+                  }}
+                >
+                  {gitKind}
+                </span>
+              </>
+            )}
           </>
         )}
       </span>

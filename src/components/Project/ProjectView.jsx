@@ -70,10 +70,12 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const setCurrentBranch = useStore((s) => s.setCurrentBranch);
   const currentIsWorktree = useStore((s) => s.currentIsWorktree);
   const setCurrentIsWorktree = useStore((s) => s.setCurrentIsWorktree);
+  const setCurrentDetached = useStore((s) => s.setCurrentDetached);
   useEffect(() => {
     if (!projectPath || !window.electronAPI?.gitStatus) {
       setCurrentBranch('');
       setCurrentIsWorktree(false);
+      setCurrentDetached(false);
       return;
     }
     let cancelled = false;
@@ -88,6 +90,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         if (cancelled) return;
         setCurrentBranch(s?.isRepo ? (s.branch || '') : '');
         setCurrentIsWorktree(!!s?.isWorktree);
+        setCurrentDetached(!!(s?.isRepo && s?.detached));
       } catch {
         // Swallow — leave previous values in place
       }
@@ -95,7 +98,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     refresh();
     const id = setInterval(refresh, 20000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [projectPath, activeTabId, setCurrentBranch, setCurrentIsWorktree]);
+  }, [projectPath, activeTabId, setCurrentBranch, setCurrentIsWorktree, setCurrentDetached]);
 
   // Push window title (shown in Mission Control / window switcher).
   // Includes branch and a "(worktree)" suffix when the active tab is in one.

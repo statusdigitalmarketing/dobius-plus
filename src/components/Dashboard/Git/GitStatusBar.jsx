@@ -16,7 +16,7 @@ export default function GitStatusBar({ status, onRefresh }) {
             <path d="M18 9a9 9 0 0 1-9 9" />
           </svg>
           <span className="text-xs font-medium" style={{ color: 'var(--fg)' }}>
-            {status.branch}
+            {status.branch || (status.detached ? 'detached' : status.branch)}
           </span>
         </div>
 

@@ -62,9 +62,15 @@ export async function getGitStatus(projectDir) {
     const commonDir = commonDirOut.trim();
     const isWorktree = !!(gitDir && commonDir && gitDir !== commonDir);
 
+    // Detached HEAD: `git rev-parse --abbrev-ref HEAD` returns the literal
+    // "HEAD" when not on a branch. Surface it as a flag so the UI can label it.
+    const rawBranch = branchOut.trim();
+    const detached = rawBranch === 'HEAD';
+
     return {
       isRepo: true,
-      branch: branchOut.trim(),
+      branch: detached ? '' : rawBranch,
+      detached,
       ahead: ahead || 0,
       behind: behind || 0,
       staged,

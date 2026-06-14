@@ -49,7 +49,7 @@ export default function GitSidePanel({ projectDir }) {
                   className="text-xs font-medium truncate"
                   style={{ color: 'var(--accent)', fontFamily: "'SF Mono', monospace" }}
                 >
-                  {status.branch}
+                  {status.branch || (status.detached ? 'detached' : status.branch)}
                 </p>
               </div>
 
