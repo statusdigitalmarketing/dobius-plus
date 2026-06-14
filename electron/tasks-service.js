@@ -20,7 +20,13 @@ const ASANA_TIMEOUT_MS = 15_000;
 const MAX_TITLE = 500;
 
 function tasksPath(projectPath) {
-  const safe = String(projectPath).replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 120);
+  // Normalize so the renderer (store currentProjectPath) and the CLI (which may
+  // pass ~, a trailing slash, or a relative cwd) encode to the SAME filename.
+  // path.resolve on an already-clean absolute path is a no-op, so existing task
+  // files keyed on the renderer's path are unaffected.
+  const expanded = String(projectPath).replace(/^~(?=$|\/)/, os.homedir());
+  const norm = path.resolve(expanded);
+  const safe = norm.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 120);
   return path.join(TASKS_DIR, `${safe}.json`);
 }
 
@@ -94,6 +100,71 @@ export function deleteTask(projectPath, taskId) {
   const next = tasks.filter((t) => t.id !== taskId);
   writeTasks(projectPath, next);
   return { ok: true };
+}
+
+/**
+ * Resolve a single pending task by reference and mark it done. The reference
+ * is whatever Claude knows about the task it just finished: its internal id,
+ * its Asana gid, or a substring of its title (case-insensitive).
+ *
+ * Resolution is deliberately conservative — it only ever flips a task that is
+ * still pending, and a title match must resolve to exactly ONE pending task.
+ * On ambiguity it returns the candidates instead of guessing, so we never
+ * check off the wrong thing.
+ *
+ * This is LOCAL ONLY. It never calls the Asana API — completing an Asana task
+ * is a human decision (house rule: never auto-close Asana tasks).
+ *
+ * Returns { ok:true, task } | { ok:false, error, candidates? }.
+ */
+export function completeTaskByRef(projectPath, ref) {
+  if (!projectPath) return { ok: false, error: 'projectPath required' };
+  const needle = String(ref || '').trim();
+  if (!needle) return { ok: false, error: 'task reference required' };
+
+  const tasks = readTasks(projectPath);
+  if (!tasks.length) return { ok: false, error: 'no tasks for this project' };
+
+  // 1. Exact id or asanaGid match (may be already done — that's fine, idempotent).
+  const exact = tasks.find((t) => t.id === needle || t.asanaGid === needle);
+  if (exact) return markTaskDone(projectPath, tasks, exact);
+
+  // 2. Fuzzy title match, restricted to PENDING tasks only.
+  const pending = tasks.filter((t) => !t.done);
+  const low = needle.toLowerCase();
+  let matches = pending.filter((t) => (t.title || '').toLowerCase().includes(low));
+
+  // Fall back to the reverse direction: ref contains the title (Claude may pass
+  // a longer sentence than the stored title). Only consider titles of >= 6 chars
+  // so a trivially short title ("fix", "test", "deploy") can't match an unrelated
+  // sentence that merely happens to contain that word.
+  if (matches.length === 0) {
+    matches = pending.filter((t) => {
+      const title = (t.title || '').toLowerCase();
+      return title.length >= 6 && low.includes(title);
+    });
+  }
+
+  if (matches.length === 0) {
+    return { ok: false, error: `no pending task matching "${needle}"` };
+  }
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      error: `"${needle}" matches ${matches.length} pending tasks — be more specific`,
+      candidates: matches.map((t) => ({ id: t.id, title: t.title })),
+    };
+  }
+  return markTaskDone(projectPath, tasks, matches[0]);
+}
+
+function markTaskDone(projectPath, tasks, target) {
+  const idx = tasks.findIndex((t) => t.id === target.id);
+  if (idx === -1) return { ok: false, error: 'task not found' };
+  const already = tasks[idx].done === true;
+  tasks[idx] = { ...tasks[idx], done: true };
+  if (!already) writeTasks(projectPath, tasks);
+  return { ok: true, task: tasks[idx], already };
 }
 
 // --- Asana sync -----------------------------------------------------------

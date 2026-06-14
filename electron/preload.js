@@ -270,6 +270,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   tasksUpdate: (projectPath, taskId, patch) => ipcRenderer.invoke('tasks:update', projectPath, taskId, patch),
   tasksDelete: (projectPath, taskId) => ipcRenderer.invoke('tasks:delete', projectPath, taskId),
   tasksSyncAsana: (projectPath) => ipcRenderer.invoke('tasks:syncAsana', projectPath),
+  // Fires when a task is completed from a terminal via dobius-task-done, so an
+  // open Tasks panel can re-check the box live. Callback receives projectPath.
+  onTasksUpdated: (cb) => {
+    const handler = (_e, projectPath) => cb(projectPath);
+    ipcRenderer.on('tasks:updated', handler);
+    return () => ipcRenderer.removeListener('tasks:updated', handler);
+  },
   asanaGetConfig: () => ipcRenderer.invoke('asana:getConfig'),
   asanaUpdateConfig: (updates) => ipcRenderer.invoke('asana:updateConfig', updates),
   autoModeGet: () => ipcRenderer.invoke('automode:get'),

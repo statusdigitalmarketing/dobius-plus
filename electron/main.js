@@ -425,8 +425,9 @@ When Carson says "process the [X] queue", "check new Asana tasks in [X]", or sim
    a. \`review-audit\` skill — dual code review + architecture audit on the diff.
    b. \`ship-test\` skill — health/critical-path checks against the deploy or local server.
    c. **See the work:** open a Visual preview window (visual:openWindow) for the project and capture a screenshot of the rendered result; attach it to the task report. Screenshots taken via Playwright/webapp-testing must use a FRESH window each time (see global skills/hooks rules).
+   d. **Check it off the panel:** once the task is fully verified (and, for build lane, documented), run \`dobius-task-done <projectPath> "<task name>"\` to tick it done in Carson's Tasks panel. This is LOCAL ONLY — it never completes the task in Asana.
 6. dobius-reply with "Queued N tasks (M build, K review), will text as each finishes" so Carson sees the ack immediately.
-7. NEVER mark an Asana task complete and NEVER push/deploy — surface for Carson to approve.
+7. NEVER mark an Asana task complete and NEVER push/deploy — surface for Carson to approve. (\`dobius-task-done\` is fine — it only updates the local panel, not Asana.)
 
 # Phase 5 — Auto Mode (tasks tagged [auto-<gid>])
 
@@ -438,6 +439,7 @@ Auto Mode polls Asana and dispatches new tasks to you automatically. When you re
    1. before posting ANYTHING to Asana, and
    2. before ANY git push or deploy to production.
 - Everything between start and those gates runs unattended. Text Carson at each gate and when the task finishes.
+- When the task is finished and verified, run \`dobius-task-done <projectPath> "<task name>"\` to tick it off Carson's Tasks panel (local panel only — this is NOT the Asana-completion gate, so it does not need a confirm).
 
 # Phase 5 — Asana documentation + replies (build-lane / Carson's tasks)
 

@@ -23,8 +23,9 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { app } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import { writeTerminal, listTerminals } from './terminal-manager.js';
+import { completeTaskByRef } from './tasks-service.js';
 
 const PORT = 8421;
 const HOST = '127.0.0.1';
@@ -148,6 +149,25 @@ async function handleMarkDone(req, res) {
   catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
   const reg = await getWorkRegistry();
   const result = reg.markDone(body?.workId, body?.summary, body?.status);
+  return sendJson(res, result.ok ? 200 : 400, result);
+}
+
+// Mark a Tasks-panel item done from inside a terminal. LOCAL ONLY — this
+// flips the checkbox in the per-project tasks JSON and never touches Asana
+// (house rule: never auto-close Asana tasks). On success we broadcast
+// `tasks:updated` so an open TasksDropdown re-checks the box live.
+async function handleTaskDone(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  const projectPath = body?.projectPath;
+  const ref = body?.ref;
+  const result = completeTaskByRef(projectPath, ref);
+  if (result.ok) {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('tasks:updated', projectPath);
+    }
+  }
   return sendJson(res, result.ok ? 200 : 400, result);
 }
 
@@ -436,6 +456,7 @@ function handleRequest(req, res) {
   if (req.url === '/trackWork') return handleTrackWork(req, res);
   if (req.url === '/getStatus') return handleGetStatus(req, res);
   if (req.url === '/markDone') return handleMarkDone(req, res);
+  if (req.url === '/taskDone') return handleTaskDone(req, res);
   if (req.url === '/spawn') return handleSpawn(req, res);
   if (req.url === '/ask') return handleAsk(req, res);
   if (req.url === '/setLeadTab') return handleSetLeadTab(req, res);
@@ -502,7 +523,7 @@ export function stopVoiceBridge() {
 
 // --- CLI script auto-install ---------------------------------------------
 
-const CLI_VERSION = 7;
+const CLI_VERSION = 8;
 const CLI_DIR = path.join(os.homedir(), '.local', 'bin');
 const CLI_PATH = path.join(CLI_DIR, 'dobius-send');
 const CLI_TABS_PATH = path.join(CLI_DIR, 'dobius-tabs');
@@ -510,6 +531,7 @@ const CLI_REPLY_PATH = path.join(CLI_DIR, 'dobius-reply');
 const CLI_TRACK_PATH = path.join(CLI_DIR, 'dobius-track');
 const CLI_STATUS_PATH = path.join(CLI_DIR, 'dobius-status');
 const CLI_MARKDONE_PATH = path.join(CLI_DIR, 'dobius-mark-done');
+const CLI_TASKDONE_PATH = path.join(CLI_DIR, 'dobius-task-done');
 const CLI_SPAWN_PATH = path.join(CLI_DIR, 'dobius-spawn');
 const CLI_ASK_PATH = path.join(CLI_DIR, 'dobius-ask');
 const CLI_LEADTAB_PATH = path.join(CLI_DIR, 'dobius-lead-tab');
@@ -641,6 +663,37 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/markDone" \\
   -H "Authorization: Bearer $TOKEN" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "summary": sys.argv[2], "status": sys.argv[3]}))' "$WORK_ID" "$SUMMARY" "$STATUS")"
+`;
+
+const CLI_TASKDONE_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Mark a task in the Dobius+ Tasks panel (top-right) as done. Call this when
+# you finish a task that appears in that panel — whether it's a build-lane task
+# of Carson's or a review of Sam's work. The panel re-checks the box live.
+# Matches by task title (substring, case-insensitive), Asana gid, or task id.
+# LOCAL ONLY — this never completes the task in Asana; that stays a human step.
+# Usage: dobius-task-done "<task title | asanaGid | taskId>"            (project = current dir)
+#        dobius-task-done <projectPath> "<task title | asanaGid | taskId>"
+set -e
+if [ $# -lt 1 ]; then
+  echo "usage: dobius-task-done [projectPath] <task title|asanaGid|taskId>" >&2
+  exit 1
+fi
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-task-done: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# One arg → task ref only, project defaults to the working dir (hand-driven use).
+# Two+ args → first is the project path (Conductor dispatching across projects).
+if [ $# -eq 1 ]; then
+  PROJECT="$(pwd)"; REF="$1"
+else
+  PROJECT="$1"; shift; REF="$*"
+fi
+# -sS (not -fsS): we WANT the JSON body on a 4xx so the caller can read the
+# error / candidate list and retry with a more specific title.
+curl -sS -X POST "http://127.0.0.1:${PORT}/taskDone" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2]}))' "$PROJECT" "$REF")"
 `;
 
 const CLI_SPAWN_SCRIPT = `#!/bin/bash
@@ -829,6 +882,7 @@ function installCliScript() {
     writeIfChanged(CLI_TRACK_PATH, CLI_TRACK_SCRIPT);
     writeIfChanged(CLI_STATUS_PATH, CLI_STATUS_SCRIPT);
     writeIfChanged(CLI_MARKDONE_PATH, CLI_MARKDONE_SCRIPT);
+    writeIfChanged(CLI_TASKDONE_PATH, CLI_TASKDONE_SCRIPT);
     writeIfChanged(CLI_SPAWN_PATH, CLI_SPAWN_SCRIPT);
     writeIfChanged(CLI_ASK_PATH, CLI_ASK_SCRIPT);
     writeIfChanged(CLI_LEADTAB_PATH, CLI_LEADTAB_SCRIPT);

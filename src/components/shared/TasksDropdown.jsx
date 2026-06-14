@@ -37,6 +37,17 @@ export default function TasksDropdown() {
     if (open) load();
   }, [open, load]);
 
+  // Live refresh when a task is completed from a terminal (dobius-task-done).
+  // Reload whenever the event has no path or matches the current project, so
+  // the badge count and checkboxes update without reopening the panel.
+  useEffect(() => {
+    if (!window.electronAPI?.onTasksUpdated) return;
+    const unsubscribe = window.electronAPI.onTasksUpdated((projectPath) => {
+      if (!projectPath || projectPath === currentProjectPath) load();
+    });
+    return unsubscribe;
+  }, [currentProjectPath, load]);
+
   // Close on outside click
   useEffect(() => {
     if (!open) return;
