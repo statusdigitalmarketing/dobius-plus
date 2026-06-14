@@ -109,9 +109,14 @@ test('migrate legacy done:true -> done', () => {
   const m = p.migrate({ id: 'old', title: 'x', done: true, createdAt: AT });
   assert.equal(m.stage, 'done');
 });
-test('migrate is idempotent on current tasks', () => {
+test('migrate is value-idempotent on current tasks', () => {
+  // migrate() no longer early-returns the same reference (so future fields can
+  // back-fill), but migrating a current task must not change its VALUE, and
+  // repeated migration must be stable.
   const t = newTask();
-  assert.equal(p.migrate(t), t);
+  const once = p.migrate(t);
+  assert.deepEqual(once, t);
+  assert.deepEqual(p.migrate(once), once);
 });
 
 // --- complete() force-done works from any stage ---
@@ -119,6 +124,12 @@ test('complete force-done from intake', () => {
   const t = p.complete(newTask(), { at: AT });
   assert.equal(t.stage, 'done');
   assert.equal(t.done, true);
+});
+
+// --- done is terminal: block() must refuse a completed task ---
+test('block() refuses a completed task', () => {
+  const done = p.complete(newTask(), { at: AT });
+  assert.throws(() => p.block(done, 'nope', { at: AT }), /completed task/);
 });
 
 // --- event cap ---

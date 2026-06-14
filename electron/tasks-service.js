@@ -32,24 +32,48 @@ function tasksPath(projectPath) {
 }
 
 function readTasks(projectPath) {
+  const p = tasksPath(projectPath);
   try {
     fs.mkdirSync(TASKS_DIR, { recursive: true });
-    const p = tasksPath(projectPath);
     if (!fs.existsSync(p)) return [];
     const raw = fs.readFileSync(p, 'utf8');
-    const parsed = JSON.parse(raw);
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (parseErr) {
+      // Corrupt/truncated JSON (e.g. a crash mid-write before this file was made
+      // atomic). Do NOT silently return [] — the next writeTasks would then
+      // overwrite the file and the data would be lost for good. Move the bad
+      // file aside so it's recoverable, and surface the problem.
+      const backup = `${p}.corrupt-${Date.now()}`;
+      try { fs.renameSync(p, backup); } catch { /* leave the file in place if the move fails */ }
+      console.error(`[tasks-service] Corrupt task file for ${projectPath}; backed up to ${backup}: ${parseErr.message}`);
+      return [];
+    }
     // Normalize legacy (done-only) tasks to the current stage shape on read.
-    // migrate() is a cheap no-op for already-current tasks; the upgraded shape
-    // is persisted on the next write.
+    // The upgraded shape is persisted on the next write.
     return Array.isArray(parsed) ? parsed.map((t) => pipeline.migrate(t)) : [];
-  } catch {
+  } catch (err) {
+    console.error(`[tasks-service] Failed to read tasks for ${projectPath}: ${err.message}`);
     return [];
   }
 }
 
+// Atomic write: write to a unique temp file then rename over the target, so a
+// crash mid-write leaves the previous file intact instead of a truncated/corrupt
+// one. Mirrors config-manager's atomicWriteSync. Throws on failure (callers
+// translate the throw into { ok:false } so the IPC contract never rejects).
 function writeTasks(projectPath, tasks) {
   fs.mkdirSync(TASKS_DIR, { recursive: true });
-  fs.writeFileSync(tasksPath(projectPath), JSON.stringify(tasks, null, 2), 'utf8');
+  const filePath = tasksPath(projectPath);
+  const tmp = `${filePath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(tasks, null, 2), 'utf8');
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    throw err;
+  }
 }
 
 export function listTasks(projectPath) {
@@ -79,7 +103,11 @@ export function addTask(projectPath, { title, source = 'manual', dueOn = null, a
     ...pipeline.pipelineFields(), // stage, events, runs, stagedAt, sessionId, tabId
   };
   tasks.push(task);
-  writeTasks(projectPath, tasks);
+  try {
+    writeTasks(projectPath, tasks);
+  } catch (err) {
+    return { ok: false, error: `failed to save task: ${err.message}` };
+  }
   return { ok: true, task };
 }
 
@@ -99,7 +127,11 @@ export function updateTask(projectPath, taskId, patch) {
       .map(([k, v]) => [k, k === 'title' ? String(v).slice(0, MAX_TITLE) : v])
   );
   tasks[idx] = { ...tasks[idx], ...safe };
-  writeTasks(projectPath, tasks);
+  try {
+    writeTasks(projectPath, tasks);
+  } catch (err) {
+    return { ok: false, error: `failed to save task: ${err.message}` };
+  }
   return { ok: true, task: tasks[idx] };
 }
 
@@ -115,7 +147,11 @@ function mutateTask(projectPath, taskId, fn) {
   } catch (err) {
     return { ok: false, error: err.message };
   }
-  writeTasks(projectPath, tasks);
+  try {
+    writeTasks(projectPath, tasks);
+  } catch (err) {
+    return { ok: false, error: `failed to save task: ${err.message}` };
+  }
   return { ok: true, task: tasks[idx] };
 }
 
