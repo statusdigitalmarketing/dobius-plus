@@ -282,6 +282,23 @@ async function handleAsanaFetch(req, res) {
   }
 }
 
+// Mark an Asana task complete (the one Asana WRITE). The dobius-asana-complete
+// CLI fronts this; the safety gate (Carson's explicit yes) is enforced by the
+// review-lane prompt, which forbids calling it without approval — mirroring how
+// push/deploy is gated. Bearer-auth + loopback still apply at the bridge level.
+async function handleAsanaComplete(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  try {
+    const q = await import('./asana-queue.js');
+    const result = await q.markTaskComplete(body?.gid);
+    return sendJson(res, result.ok ? 200 : 400, result);
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
 async function handleAsanaAllow(req, res) {
   let body;
   try { body = await readJsonBody(req); }
@@ -495,6 +512,7 @@ function handleRequest(req, res) {
   if (req.url === '/setLeadTab') return handleSetLeadTab(req, res);
   if (req.url === '/getLeadTab') return handleGetLeadTab(req, res);
   if (req.url === '/asana/fetch') return handleAsanaFetch(req, res);
+  if (req.url === '/asana/complete') return handleAsanaComplete(req, res);
   if (req.url === '/asana/allow') return handleAsanaAllow(req, res);
   if (req.url === '/asana/listAllowed') return handleAsanaListAllowed(req, res);
   if (req.url === '/scheduled/list') return handleListScheduled(req, res);
@@ -556,7 +574,7 @@ export function stopVoiceBridge() {
 
 // --- CLI script auto-install ---------------------------------------------
 
-const CLI_VERSION = 10;
+const CLI_VERSION = 11;
 const CLI_DIR = path.join(os.homedir(), '.local', 'bin');
 const CLI_PATH = path.join(CLI_DIR, 'dobius-send');
 const CLI_TABS_PATH = path.join(CLI_DIR, 'dobius-tabs');
@@ -565,6 +583,7 @@ const CLI_TRACK_PATH = path.join(CLI_DIR, 'dobius-track');
 const CLI_STATUS_PATH = path.join(CLI_DIR, 'dobius-status');
 const CLI_MARKDONE_PATH = path.join(CLI_DIR, 'dobius-mark-done');
 const CLI_TASKDONE_PATH = path.join(CLI_DIR, 'dobius-task-done');
+const CLI_ASANA_COMPLETE_PATH = path.join(CLI_DIR, 'dobius-asana-complete');
 const CLI_STAGE_PATH = path.join(CLI_DIR, 'dobius-stage');
 const CLI_SPAWN_PATH = path.join(CLI_DIR, 'dobius-spawn');
 const CLI_ASK_PATH = path.join(CLI_DIR, 'dobius-ask');
@@ -742,6 +761,28 @@ curl -sS -X POST "http://127.0.0.1:${PORT}/taskDone" \\
   -H "Authorization: Bearer $TOKEN" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2]}))' "$PROJECT" "$REF")"
+`;
+
+// Mark Sam's task COMPLETE in Asana — the one Asana write. Only run this AFTER
+// Carson has explicitly approved (terminal "approve" or a dobius-confirm yes).
+// Never call it autonomously: it closes the task for everyone.
+const CLI_ASANA_COMPLETE_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Mark an Asana task complete. WRITE action — only after Carson's explicit yes.
+# Usage: dobius-asana-complete <asanaTaskGid>
+set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
+if [ $# -lt 1 ]; then
+  echo "usage: dobius-asana-complete <asanaTaskGid>" >&2
+  exit 1
+fi
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-complete: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+curl -sS -X POST "http://127.0.0.1:${PORT}/asana/complete" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"gid": sys.argv[1]}))' "$1")"
 `;
 
 const CLI_STAGE_SCRIPT = `#!/bin/bash
@@ -988,6 +1029,7 @@ function installCliScript() {
     writeIfChanged(CLI_STATUS_PATH, CLI_STATUS_SCRIPT);
     writeIfChanged(CLI_MARKDONE_PATH, CLI_MARKDONE_SCRIPT);
     writeIfChanged(CLI_TASKDONE_PATH, CLI_TASKDONE_SCRIPT);
+    writeIfChanged(CLI_ASANA_COMPLETE_PATH, CLI_ASANA_COMPLETE_SCRIPT);
     writeIfChanged(CLI_STAGE_PATH, CLI_STAGE_SCRIPT);
     writeIfChanged(CLI_SPAWN_PATH, CLI_SPAWN_SCRIPT);
     writeIfChanged(CLI_ASK_PATH, CLI_ASK_SCRIPT);

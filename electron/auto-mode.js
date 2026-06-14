@@ -136,15 +136,26 @@ async function tick() {
 function dispatchToConductor(conductorId, project, task) {
   const reqId = `auto-${task.gid}`;
   const lane = task.lane === 'review' ? 'review' : 'build';
-  // Strip ALL control chars (not just CR/LF) — task names are attacker-controllable
+  // Strip ALL control chars (not just CR/LF) — task content is attacker-controllable
   // third-party content written into a live terminal/prompt.
-  const name = (task.name || '').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 300);
+  const clean = (s) => String(s || '').replace(/[\x00-\x1f\x7f]/g, ' ');
+  const name = clean(task.name).slice(0, 300);
   const laneRule = lane === 'build'
     ? 'build it FULL-AUTO via the project crack_bot/crack_repair supervisor, then run the verify pipeline'
-    : "verify Sam's work only (review-audit -> ship-test -> screenshot); do NOT change scope";
+    : "Sam COMPLETED this — REVIEW his work only (read his comments + open his screenshots below, run review-audit, then webapp-testing/Playwright against the LIVE site to confirm it matches the task in detail); do NOT change scope. When satisfied, request approval (Telegram + terminal) and ONLY after Carson's explicit yes run: dobius-asana-complete " + task.gid + ". NEVER complete it without that yes.";
+  // For review, fold in what Sam wrote + the screenshots he attached.
+  let samEvidence = '';
+  if (lane === 'review') {
+    if (Array.isArray(task.comments) && task.comments.length) {
+      samEvidence += " Sam's comments: " + task.comments.map((c) => clean(c.text).slice(0, 300)).join(' | ').slice(0, 900) + '.';
+    }
+    if (Array.isArray(task.attachments) && task.attachments.length) {
+      samEvidence += ' Screenshots: ' + task.attachments.map((a) => clean(a.url)).filter(Boolean).join(' , ').slice(0, 600) + '.';
+    }
+  }
   const instruction =
-    `[${reqId}] AUTO MODE — new Asana task in ${project.name} (${lane} lane): "${name}". ` +
-    `Task: ${task.url}. Process per the Auto Mode rules: do NOT ask me to start; ${laneRule}. ` +
+    `[${reqId}] AUTO MODE — Asana task in ${project.name} (${lane} lane): "${name}". ` +
+    `Task: ${task.url}.${samEvidence} Process per the Auto Mode rules: do NOT ask me to start; ${laneRule} ` +
     `Stop and dobius-confirm ONLY before posting to Asana or before any push/deploy.`;
   const text = instruction.slice(0, 2000);
   for (let i = 0; i < text.length; i += CHUNK) writeTerminal(conductorId, text.slice(i, i + CHUNK));

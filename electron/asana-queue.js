@@ -62,33 +62,57 @@ export function removeAllowedProject(gid) {
 
 // --- Asana REST ---------------------------------------------------------
 
+// Prefer the env var (Sam's global env per CLAUDE.md); fall back to the Settings
+// PAT so a GUI-launched app works even when shell exports don't reach it.
+function asanaToken() {
+  return process.env.ASANA_PAT || getAsanaQueue().pat || null;
+}
+
 function asanaGet(path) {
-  const token = process.env.ASANA_PAT;
-  if (!token) return Promise.reject(new Error('ASANA_PAT not set in env'));
+  return asanaRequest('GET', path);
+}
+
+// Single request helper. `body` (object) is sent as JSON for write methods.
+function asanaRequest(method, path, body) {
+  const token = asanaToken();
+  if (!token) return Promise.reject(new Error('ASANA_PAT not set (env or Settings)'));
+  const payload = body ? JSON.stringify({ data: body }) : null;
   return new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: ASANA_BASE,
-      path,
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-      timeout: ASANA_TIMEOUT_MS,
-    }, (res) => {
+    const headers = { Authorization: `Bearer ${token}` };
+    if (payload) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(payload); }
+    const req = https.request({ hostname: ASANA_BASE, path, method, headers, timeout: ASANA_TIMEOUT_MS }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf8');
+        const respBody = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode >= 200 && res.statusCode < 300) {
-          try { resolve(JSON.parse(body)); }
+          try { resolve(respBody ? JSON.parse(respBody) : {}); }
           catch (err) { reject(new Error(`bad JSON from Asana: ${err.message}`)); }
         } else {
-          reject(new Error(`Asana HTTP ${res.statusCode}: ${body.slice(0, 200)}`));
+          reject(new Error(`Asana HTTP ${res.statusCode}: ${respBody.slice(0, 200)}`));
         }
       });
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(new Error('Asana timeout')); });
+    if (payload) req.write(payload);
     req.end();
   });
+}
+
+/**
+ * Mark an Asana task complete. This is the ONLY Asana WRITE in the app and it
+ * must only ever be called after explicit human approval (see the Conductor
+ * review-lane prompt + dobius-asana-complete CLI). Never call autonomously.
+ */
+export async function markTaskComplete(taskGid) {
+  if (!/^\d{6,30}$/.test(String(taskGid))) return { ok: false, error: 'task gid malformed' };
+  try {
+    await asanaRequest('PUT', `/api/1.0/tasks/${taskGid}`, { completed: true });
+    return { ok: true, gid: taskGid };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 }
 
 /**
@@ -120,7 +144,36 @@ function getLaneAssignees() {
   ];
 }
 
-const FIELDS = ['gid', 'name', 'permalink_url', 'modified_at', 'due_on', 'notes', 'assignee'].join(',');
+const FIELDS = ['gid', 'name', 'permalink_url', 'modified_at', 'due_on', 'notes', 'assignee', 'completed', 'completed_at'].join(',');
+
+// Review lane surfaces Sam's tasks COMPLETED within this window — we review what
+// he actually did, not work in progress.
+const REVIEW_COMPLETED_WINDOW_MS = 48 * 60 * 60 * 1000;
+const MAX_COMMENTS_PER_TASK = 8;
+const MAX_ATTACHMENTS_PER_TASK = 8;
+
+// Sam's comment stories (what he wrote about what he did). Best-effort: returns
+// [] on any error so a comment fetch can't break the whole poll.
+async function fetchTaskComments(gid) {
+  try {
+    const data = await asanaGet(`/api/1.0/tasks/${gid}/stories?opt_fields=text,created_at,created_by.name,resource_subtype`);
+    return (data?.data || [])
+      .filter((s) => s.resource_subtype === 'comment_added' && s.text)
+      .slice(-MAX_COMMENTS_PER_TASK)
+      .map((s) => ({ at: s.created_at, by: s.created_by?.name || 'unknown', text: String(s.text).slice(0, 500) }));
+  } catch { return []; }
+}
+
+// Sam's attachments (screenshots etc.) with view URLs the reviewer can open.
+async function fetchTaskAttachments(gid) {
+  try {
+    const data = await asanaGet(`/api/1.0/attachments?parent=${gid}&opt_fields=name,download_url,view_url,resource_subtype`);
+    return (data?.data || [])
+      .slice(0, MAX_ATTACHMENTS_PER_TASK)
+      .map((a) => ({ name: a.name || 'attachment', url: a.view_url || a.download_url || null }))
+      .filter((a) => a.url);
+  } catch { return []; }
+}
 
 /**
  * Fetch incomplete tasks for an allowlisted project across both lanes.
@@ -139,18 +192,33 @@ export async function fetchNewTasks({ projectName, lanes }) {
   const tasks = [];
   try {
     for (const { gid, lane } of wanted) {
-      const path = `/api/1.0/tasks?project=${project.gid}&assignee=${gid}&completed_since=now&limit=${MAX_TASKS_PER_FETCH}&opt_fields=${FIELDS}`;
+      // build lane = Carson's INCOMPLETE tasks (to build). review lane = Sam's
+      // tasks COMPLETED in the recent window (to review what he actually did).
+      const completedSince = lane === 'review'
+        ? new Date(Date.now() - REVIEW_COMPLETED_WINDOW_MS).toISOString()
+        : 'now';
+      const path = `/api/1.0/tasks?project=${project.gid}&assignee=${gid}&completed_since=${encodeURIComponent(completedSince)}&limit=${MAX_TASKS_PER_FETCH}&opt_fields=${FIELDS}`;
       const data = await asanaGet(path);
       for (const t of (data?.data || [])) {
         if (seen.has(t.gid)) continue;     // a task can't be in both lanes, but guard anyway
+        // Review only finished work: `completed_since=<ts>` also returns
+        // incomplete tasks, so drop those.
+        if (lane === 'review' && !t.completed) continue;
         seen.add(t.gid);
+        // For review, pull what Sam wrote + the screenshots he attached.
+        const [comments, attachments] = lane === 'review'
+          ? await Promise.all([fetchTaskComments(t.gid), fetchTaskAttachments(t.gid)])
+          : [[], []];
         tasks.push({
           gid: t.gid,
           name: t.name || '(untitled)',
           url: t.permalink_url || `https://app.asana.com/0/${project.gid}/${t.gid}`,
           modifiedAt: t.modified_at,
+          completedAt: t.completed_at || null,
           dueOn: t.due_on,
           notesPreview: (t.notes || '').slice(0, 200),
+          comments,
+          attachments,
           lane,
           assigneeGid: gid,
         });

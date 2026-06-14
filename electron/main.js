@@ -420,7 +420,7 @@ When Carson says "process the [X] queue", "check new Asana tasks in [X]", or sim
 3. If allowlisted: \`dobius-ask "Found N tasks in [X]:\\n<summary>\\nProcess all (YES), pick subset (PICK), or cancel (NO)?"\`
 4. On YES, per task — by lane:
    - **build lane:** dispatch via the normal routing tree (lead tab → existing → spawn-with-ask) with the task name as the initial prompt. Then run the **verify pipeline** below.
-   - **review lane:** do NOT change scope. Pull Sam's branch/PR for the task, run the **verify pipeline** read-only, and report findings on the task.
+   - **review lane (Sam's COMPLETED tasks):** do NOT change scope. Read Sam's Asana comments + open the screenshots he attached (both are included in the auto-dispatch, or fetch them from the task), pull his branch/PR, run the **verify pipeline** read-only INCLUDING a webapp-testing/Playwright check against the LIVE site, and confirm the result matches the task in detail. Report findings on the task. Completion is gated — see the review-lane completion gate in Phase 5.
    - Register each via dobius-track. The hybrid reply system auto-texts Carson when each completes.
 5. **Verify pipeline (every task, every time — build AND review):**
    a. \`review-audit\` skill — dual code review + architecture audit on the diff.
@@ -428,17 +428,19 @@ When Carson says "process the [X] queue", "check new Asana tasks in [X]", or sim
    c. **See the work:** open a Visual preview window (visual:openWindow) for the project and capture a screenshot of the rendered result; attach it to the task report. Screenshots taken via Playwright/webapp-testing must use a FRESH window each time (see global skills/hooks rules).
    d. **Check it off the panel:** once the task is fully verified (and, for build lane, documented), run \`dobius-task-done <projectPath> "<task name>"\` to tick it done in Carson's Tasks panel. This is LOCAL ONLY — it never completes the task in Asana.
 6. dobius-reply with "Queued N tasks (M build, K review), will text as each finishes" so Carson sees the ack immediately.
-7. NEVER mark an Asana task complete and NEVER push/deploy — surface for Carson to approve. (\`dobius-task-done\` is fine — it only updates the local panel, not Asana.)
+7. NEVER push/deploy without Carson's confirm. The ONLY Asana completion allowed is a REVIEWED review-lane task via \`dobius-asana-complete <gid>\` after Carson's explicit yes (Phase 5 gate) — never auto-complete a build-lane task. (\`dobius-task-done\` is always fine — it only updates the local panel, not Asana.)
 
 # Phase 5 — Auto Mode (tasks tagged [auto-<gid>])
 
 Auto Mode polls Asana and dispatches new tasks to you automatically. When you receive an \`[auto-...]\`-tagged task:
 - Do NOT ask Carson to approve STARTING — auto-mode tasks are pre-approved to begin.
 - **build lane:** run it FULL-AUTO via the project's \`scripts/crackbot-supervisor.sh\` (crack_bot for new builds, crack_repair for bugs/fixes) so it runs to completion, then the verify pipeline.
-- **review lane:** verify Sam's work only (review-audit → ship-test → screenshot); never change scope.
-- The ONLY two stop-and-confirm gates (use \`dobius-confirm\`, block on Carson's yes — see Phase 4 risky-action gate):
+- **review lane (Sam's COMPLETED work):** REVIEW only, never change scope. Step through it: (1) read Sam's Asana comments + open the screenshots he attached (included in the dispatch), (2) run review-audit on the diff, (3) run webapp-testing/Playwright against the **live site** and confirm it actually does what the task asked, to the detail, (4) post your findings + a clear pass/fail verdict on the task.
+- **Review-lane completion gate (the ONLY way an Asana task gets closed):** if review passes, notify Carson on Telegram AND in the terminal that it's ready, then STOP and wait for his explicit approval (he replies "approve"/"complete" in the terminal — Telegram is notify-only for now). ONLY after that yes, run \`dobius-asana-complete <asanaGid>\` to mark it done in Asana. NEVER complete a task without Carson's explicit yes, and NEVER complete on the build lane.
+- The ONLY stop-and-confirm gates (use \`dobius-confirm\`, block on Carson's yes — see Phase 4 risky-action gate):
    1. before posting ANYTHING to Asana, and
-   2. before ANY git push or deploy to production.
+   2. before ANY git push or deploy to production, and
+   3. before \`dobius-asana-complete\` (closing Sam's reviewed task).
 - Everything between start and those gates runs unattended. Text Carson at each gate and when the task finishes.
 - When the task is finished and verified, run \`dobius-task-done <projectPath> "<task name>"\` to tick it off Carson's Tasks panel (local panel only — this is NOT the Asana-completion gate, so it does not need a confirm).
 
