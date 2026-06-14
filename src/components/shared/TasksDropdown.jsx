@@ -61,9 +61,19 @@ export default function TasksDropdown() {
   }, [open]);
 
   const handleToggle = (taskId, done) => {
+    // Marking done must go THROUGH the pipeline (tasks:complete →
+    // completeTaskByRef → pipeline.complete) so stage + done + the event log stay
+    // consistent — never patch `done` out of band. Un-completing stays on
+    // tasksUpdate for now (Stream A is hardening updateTask's allow-list).
+    if (done) {
+      if (!window.electronAPI?.tasksComplete) return;
+      setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, done: true } : t));
+      window.electronAPI.tasksComplete(currentProjectPath, taskId);
+      return;
+    }
     if (!window.electronAPI?.tasksUpdate) return;
-    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, done } : t));
-    window.electronAPI.tasksUpdate(currentProjectPath, taskId, { done });
+    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, done: false } : t));
+    window.electronAPI.tasksUpdate(currentProjectPath, taskId, { done: false });
   };
 
   const handleDelete = async (taskId) => {

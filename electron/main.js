@@ -50,7 +50,7 @@ import {
 } from './imessage-bridge.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
-import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask } from './tasks-service.js';
+import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
@@ -662,14 +662,6 @@ function setupOrchestrationHandlers() {
   });
 
   // --- Project task to-do list ---
-  ipcMain.handle('tasks:list', (_event, projectPath) => listTasks(projectPath));
-  ipcMain.handle('tasks:add', (_event, projectPath, taskData) => addTask(projectPath, taskData));
-  ipcMain.handle('tasks:update', (_event, projectPath, taskId, patch) => updateTask(projectPath, taskId, patch));
-  ipcMain.handle('tasks:delete', (_event, projectPath, taskId) => deleteTask(projectPath, taskId));
-  ipcMain.handle('tasks:syncAsana', (_event, projectPath) => syncAsanaTasks(projectPath));
-
-  // Pipeline stage transitions (Epic 7). The service enforces the transition
-  // table and returns { ok, task } | { ok:false, error } — it does not throw.
   // Broadcast tasks:updated to every window only on success, so all open boards
   // (Pipeline + the legacy Tasks panel) re-render live, matching handleTaskDone.
   const broadcastTasksUpdated = (projectPath) => {
@@ -677,6 +669,27 @@ function setupOrchestrationHandlers() {
       if (!win.isDestroyed()) win.webContents.send('tasks:updated', projectPath);
     }
   };
+  ipcMain.handle('tasks:list', (_event, projectPath) => listTasks(projectPath));
+  ipcMain.handle('tasks:add', (_event, projectPath, taskData) => addTask(projectPath, taskData));
+  ipcMain.handle('tasks:update', (_event, projectPath, taskId, patch) => {
+    const result = updateTask(projectPath, taskId, patch);
+    if (result?.ok) broadcastTasksUpdated(projectPath); // L1: keep other windows in sync after a title/dueOn edit
+    return result;
+  });
+  ipcMain.handle('tasks:delete', (_event, projectPath, taskId) => deleteTask(projectPath, taskId));
+  ipcMain.handle('tasks:syncAsana', (_event, projectPath) => syncAsanaTasks(projectPath));
+
+  // Complete a task THROUGH the pipeline (actor 'human') so stage + done + the
+  // event log stay consistent — the Tasks-panel checkbox routes here instead of
+  // patching `done` out of band via tasks:update.
+  ipcMain.handle('tasks:complete', (_event, projectPath, taskId) => {
+    const result = completeTaskByRef(projectPath, taskId);
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
+
+  // Pipeline stage transitions (Epic 7). The service enforces the transition
+  // table and returns { ok, task } | { ok:false, error } — it does not throw.
   ipcMain.handle('tasks:advance', (_event, projectPath, taskId, toStage, opts) => {
     const result = advanceTask(projectPath, taskId, toStage, opts || {});
     if (result?.ok) broadcastTasksUpdated(projectPath);
@@ -741,9 +754,67 @@ function setupFileHandlers() {
   const ALLOWED_FILENAME = 'CLAUDE.md';
   const homedir = os.homedir();
 
-  function isAllowedPath(filePath) {
+  // Allowed roots for CLAUDE.md read/write: ~/.claude plus every registered
+  // project directory (and its .claude subdir). Symlinks in each root are
+  // resolved so containment is checked against the REAL path.
+  function allowedRoots() {
+    const roots = [path.join(homedir, '.claude')];
+    try {
+      const projects = loadConfig().projects || {};
+      for (const p of Object.keys(projects)) {
+        roots.push(p);
+        roots.push(path.join(p, '.claude'));
+      }
+    } catch { /* config unreadable — fall back to ~/.claude only */ }
+    return roots.map((r) => { try { return fs.realpathSync(r); } catch { return path.resolve(r); } });
+  }
+
+  function isContained(target, roots) {
+    return roots.some((root) => target === root || target.startsWith(root + path.sep));
+  }
+
+  // Resolve the would-be absolute path with symlinks in the existing prefix
+  // resolved, so a write that creates a new dir (e.g. project/.claude) still
+  // gets its real-path checked, and a symlinked ancestor can't escape.
+  function resolveThroughExisting(targetPath) {
+    let dir = path.dirname(targetPath);
+    const pending = [path.basename(targetPath)];
+    for (let i = 0; i < 64; i++) {
+      if (fs.existsSync(dir)) {
+        return path.join(fs.realpathSync(dir), ...pending.slice().reverse());
+      }
+      pending.push(path.basename(dir));
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return null;
+  }
+
+  // Gate CLAUDE.md access on the REAL path (symlinks resolved), not just the
+  // basename — otherwise a symlink named CLAUDE.md exfiltrates ~/.ssh/id_rsa on
+  // read, or clobbers an arbitrary file on write. Mirrors isAllowedSkillPath.
+  function isAllowedPath(filePath, { forWrite = false } = {}) {
     if (!filePath || typeof filePath !== 'string') return false;
-    return path.basename(filePath) === ALLOWED_FILENAME;
+    if (path.basename(filePath) !== ALLOWED_FILENAME) return false;
+    const roots = allowedRoots();
+    try {
+      if (forWrite) {
+        // File may not exist yet — resolve through the nearest existing ancestor.
+        const resolved = resolveThroughExisting(filePath);
+        if (!resolved || path.basename(resolved) !== ALLOWED_FILENAME || !isContained(resolved, roots)) return false;
+        // If the target already exists, also reject writing THROUGH a symlink.
+        if (fs.existsSync(filePath)) {
+          const realTarget = fs.realpathSync(filePath);
+          if (path.basename(realTarget) !== ALLOWED_FILENAME || !isContained(realTarget, roots)) return false;
+        }
+        return true;
+      }
+      const realTarget = fs.realpathSync(filePath);
+      return path.basename(realTarget) === ALLOWED_FILENAME && isContained(realTarget, roots);
+    } catch {
+      return false; // missing file / broken symlink / unreadable ancestor → deny
+    }
   }
 
   ipcMain.handle('file:read', (_event, filePath) => {
@@ -758,7 +829,7 @@ function setupFileHandlers() {
   });
 
   ipcMain.handle('file:write', (_event, filePath, content) => {
-    if (!isAllowedPath(filePath)) return { error: 'Only CLAUDE.md files can be written' };
+    if (!isAllowedPath(filePath, { forWrite: true })) return { error: 'Only CLAUDE.md files can be written' };
     if (typeof content !== 'string' || content.length > MAX_FILE_SIZE) return { error: 'Content too large (>1MB)' };
     try {
       const dir = path.dirname(filePath);
@@ -1339,24 +1410,14 @@ let savedBeforeQuit = false;
 
 app.on('before-quit', (e) => {
   if (quitConfirmed && savedBeforeQuit) {
-    // Phase 3: scrollback saved, now actually quit
+    // Phase 3: scrollback saved, persist open-projects for tab-restore, then let
+    // the quit proceed. Resource teardown happens in will-quit (every quit path).
     const openProjects = getOpenProjects();
     const config = loadConfig();
     config.lastOpenProjects = openProjects;
     saveConfig(config);
     flushConfig();
     closeAllProjectWindows();
-    killAll();
-    stopWatching();
-    stopAllBuildWatchers();
-    stopAllFileWatchers();
-    stopVoiceBridge();
-    stopImessageBridge();
-    stopScheduledTasks();
-    stopAutoMode();
-    stopMobileServer();
-    closeVisualWindow();
-    void stopVisualServer();
     return;
   }
 
@@ -1390,6 +1451,27 @@ app.on('before-quit', (e) => {
       if (!win.isDestroyed()) win.webContents.send('app:quit-cancel');
     });
   }, 1000);
+});
+
+// Resource teardown runs on EVERY quit path (confirmed two-press quit, force
+// quit, OS shutdown, window-all-closed → app.quit()), not just the two-press
+// branch of before-quit — otherwise PTYs, the voice bridge, the Visual server,
+// auto-mode and the watchers leak on a force quit. Idempotent via didTeardown.
+let didTeardown = false;
+app.on('will-quit', () => {
+  if (didTeardown) return;
+  didTeardown = true;
+  killAll();
+  stopWatching();
+  stopAllBuildWatchers();
+  stopAllFileWatchers();
+  stopVoiceBridge();
+  stopImessageBridge();
+  stopScheduledTasks();
+  stopAutoMode();
+  stopMobileServer();
+  closeVisualWindow();
+  void stopVisualServer();
 });
 
 app.on('window-all-closed', () => {
