@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useStore } from '../../store/store';
 import { THEMES, applyTheme } from '../../lib/themes';
 import TopBar from '../shared/TopBar';
@@ -310,6 +310,46 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     }
   }, [setActiveView]);
 
+  // Cmd+R / menu "Resume Last Session" — resume the latest session that ran in
+  // the ACTIVE tab (via the session↔tab link), falling back to the project's
+  // most recent session only if this tab has no linked session yet.
+  // Guarded so the keydown path and the menu accelerator can't double-fire.
+  const resumeGuardRef = useRef(0);
+  const doResumeLatest = useCallback(() => {
+    const now = Date.now();
+    if (now - resumeGuardRef.current < 1500) return;
+    resumeGuardRef.current = now;
+    if (!projectPath || !window.electronAPI) return;
+    const api = window.electronAPI;
+    const termId = useStore.getState().activeTabId;
+
+    const resolve = async () => {
+      // 1. Latest session linked to THIS tab.
+      if (termId && api.configGetSessionTabMap) {
+        try {
+          const map = await api.configGetSessionTabMap();
+          let best = null;
+          for (const [sid, entry] of Object.entries(map || {})) {
+            if (entry?.tabId === termId && (!best || (entry.capturedAt || 0) > best.capturedAt)) {
+              best = { sessionId: sid, capturedAt: entry.capturedAt || 0 };
+            }
+          }
+          if (best?.sessionId) return best.sessionId;
+        } catch { /* fall through */ }
+      }
+      // 2. Fallback: project's most recent session.
+      if (api.dataGetLatestSession) {
+        const s = await api.dataGetLatestSession(projectPath);
+        return s?.sessionId || null;
+      }
+      return null;
+    };
+
+    resolve().then((sessionId) => {
+      if (sessionId) handleResumeSession({ sessionId });
+    });
+  }, [projectPath, handleResumeSession]);
+
   const handleCdToProject = useCallback((sessionProject) => {
     if (!sessionProject || !sessionProject.startsWith('/') || /[;&|`$\x00-\x1F\x7F]/.test(sessionProject)) return;
     setActiveView('terminal');
@@ -421,6 +461,12 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         if (window.electronAPI && termId) {
           window.electronAPI.terminalWrite(termId, 'clear\r');
         }
+      } else if (e.key === 'r' && !e.shiftKey) {
+        // Cmd+R = resume last Claude session. Keydown is the reliable path
+        // (fires even when the xterm terminal has focus); the menu item shares
+        // doResumeLatest's debounce so the two can't double-fire.
+        e.preventDefault();
+        doResumeLatest();
       } else if (e.key === '[' && e.shiftKey) {
         // Cmd+Shift+[ = prev tab
         e.preventDefault();
@@ -447,7 +493,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab]);
+  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab, doResumeLatest]);
 
   // Menu bar events
   useEffect(() => {
@@ -465,15 +511,12 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
       }),
       window.electronAPI.onMenuCloseTab?.(() => closeActiveTab()),
       window.electronAPI.onMenuResumeSession?.(() => {
-        // Cmd+R — resume this project's most recent Claude session in the active tab
-        if (!projectPath || !window.electronAPI?.dataGetLatestSession) return;
-        window.electronAPI.dataGetLatestSession(projectPath).then((session) => {
-          if (session?.sessionId) handleResumeSession(session);
-        });
+        // Menu "Resume Last Session" — shares the keydown's guarded path.
+        doResumeLatest();
       }),
     ];
     return () => cleanups.forEach((fn) => fn?.());
-  }, [setActiveView, toggleSidebar, toggleGitPanel, addTab, removeTab, projectPath, closeActiveTab, handleResumeSession]);
+  }, [setActiveView, toggleSidebar, toggleGitPanel, addTab, removeTab, projectPath, closeActiveTab, doResumeLatest]);
 
   return (
     <div className="h-full w-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>
