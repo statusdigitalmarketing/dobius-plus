@@ -13,6 +13,7 @@ import path from 'path';
 import os from 'os';
 import https from 'https';
 import { getAsanaQueue } from './config-manager.js';
+import * as pipeline from './task-pipeline.js';
 
 const TASKS_DIR = path.join(os.homedir(), '.claude', 'project-tasks');
 const ASANA_BASE = 'app.asana.com';
@@ -37,7 +38,10 @@ function readTasks(projectPath) {
     if (!fs.existsSync(p)) return [];
     const raw = fs.readFileSync(p, 'utf8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    // Normalize legacy (done-only) tasks to the current stage shape on read.
+    // migrate() is a cheap no-op for already-current tasks; the upgraded shape
+    // is persisted on the next write.
+    return Array.isArray(parsed) ? parsed.map((t) => pipeline.migrate(t)) : [];
   } catch {
     return [];
   }
@@ -72,6 +76,7 @@ export function addTask(projectPath, { title, source = 'manual', dueOn = null, a
     lane: lane || null,          // 'build' (mine) | 'review' (Sam's)
     assignee: assignee || null,  // display name
     createdAt: Date.now(),
+    ...pipeline.pipelineFields(), // stage, events, runs, stagedAt, sessionId, tabId
   };
   tasks.push(task);
   writeTasks(projectPath, tasks);
@@ -83,7 +88,11 @@ export function updateTask(projectPath, taskId, patch) {
   const tasks = readTasks(projectPath);
   const idx = tasks.findIndex((t) => t.id === taskId);
   if (idx === -1) return { ok: false, error: 'task not found' };
-  const allowed = ['done', 'title', 'dueOn'];
+  // Benign metadata only. `stage`/`events`/`runs`/`stagedAt` are intentionally
+  // NOT patchable here — stage changes must go through advanceTask/blockTask so
+  // the transition rules are enforced. (Without this allow-list, any new field
+  // a caller passes would be silently dropped — see the architect review.)
+  const allowed = ['done', 'title', 'dueOn', 'sessionId', 'tabId'];
   const safe = Object.fromEntries(
     Object.entries(patch || {})
       .filter(([k]) => allowed.includes(k))
@@ -92,6 +101,37 @@ export function updateTask(projectPath, taskId, patch) {
   tasks[idx] = { ...tasks[idx], ...safe };
   writeTasks(projectPath, tasks);
   return { ok: true, task: tasks[idx] };
+}
+
+// --- Validated stage transitions (delegate to the pure pipeline module) -----
+
+function mutateTask(projectPath, taskId, fn) {
+  if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
+  const tasks = readTasks(projectPath);
+  const idx = tasks.findIndex((t) => t.id === taskId);
+  if (idx === -1) return { ok: false, error: 'task not found' };
+  try {
+    tasks[idx] = fn(tasks[idx]);
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  writeTasks(projectPath, tasks);
+  return { ok: true, task: tasks[idx] };
+}
+
+/** Advance a task to a stage, enforcing the transition table. actor: 'system'|'human'. */
+export function advanceTask(projectPath, taskId, toStage, { note = null, actor = 'system' } = {}) {
+  return mutateTask(projectPath, taskId, (t) => pipeline.advance(t, toStage, { note, actor }));
+}
+
+/** Move a task to blocked with a reason. */
+export function blockTask(projectPath, taskId, reason, { actor = 'system' } = {}) {
+  return mutateTask(projectPath, taskId, (t) => pipeline.block(t, reason, { actor }));
+}
+
+/** Leave blocked, returning to the origin stage (or an explicit target). */
+export function unblockTask(projectPath, taskId, { toStage = null, note = null, actor = 'system' } = {}) {
+  return mutateTask(projectPath, taskId, (t) => pipeline.unblock(t, { toStage, note, actor }));
 }
 
 export function deleteTask(projectPath, taskId) {
@@ -162,7 +202,9 @@ function markTaskDone(projectPath, tasks, target) {
   const idx = tasks.findIndex((t) => t.id === target.id);
   if (idx === -1) return { ok: false, error: 'task not found' };
   const already = tasks[idx].done === true;
-  tasks[idx] = { ...tasks[idx], done: true };
+  // complete() is the explicit human force-done path (works from any stage) and
+  // keeps stage + done + the event log consistent.
+  tasks[idx] = pipeline.complete(tasks[idx], { actor: 'human' });
   if (!already) writeTasks(projectPath, tasks);
   return { ok: true, task: tasks[idx], already };
 }
