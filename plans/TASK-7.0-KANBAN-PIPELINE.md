@@ -7,6 +7,18 @@
 
 ---
 
+## Review corrections (Opus architect pass, 2026-06-14) — these OVERRIDE the body below
+
+1. **Transition signal mechanism (§5) was wrong.** The body proposes a renderer `tasks:advance` IPC as primary. The harness/Conductor runs in a PTY and has no `ipcRenderer`. The **proven** path is the token-authed local HTTP bridge `electron/voice-bridge.js` (route table ~452-469). `dobius-task-done` already does the exact advance pattern: POST `/taskDone` → `completeTaskByRef()` → broadcasts `tasks:updated` (voice-bridge.js 159-172). **Primary mechanism = a new `/stage` bridge route + a `dobius-stage <ref> <stage>` CLI** the skills/Conductor call. Renderer IPC stays for drag-drop only. This reshapes task 7.4.
+2. **§5.2 "Building" trigger** must NOT rely on the 20s branch poll (it only runs for the open `currentProjectPath` window; racy, misses other-project builds). Use the explicit `/stage building` signal from the supervisor-start path as the trigger; branch-poll is at most confirmation.
+3. **`updateTask` allow-list is `['done','title','dueOn']` (tasks-service.js:86).** Every new field (`stage`, `events`, `runs`, `sessionId`, `tabId`, `stagedAt`, `consecutiveFailures`) MUST be added to that allow-list in 7.1 or writes silently drop. Body §4 omits this — add it.
+4. **Approval gate uses the existing `dobius-confirm` primitive** (voice-bridge.js:541, already used for push/deploy stops), not a new mechanism. And `TRANSITIONS` (7.1) must encode "no auto `approval→done`" in the **table**, not just prose. `dobius-task-done` currently sets `done:true` directly — route the final step through the gate.
+5. **7.3 dedup:** `addTask` already dedupes on `asanaGid` (tasks-service.js:62). `auto-mode.js`'s `seen[]` (108-119) guards *dispatch to the Conductor*, a different concern. Do NOT drop `seen[]` wholesale — keep a dispatch-side idempotency guard or the same task re-dispatches every poll.
+
+Confirmed accurate by the review: `tasks:*` IPC at main.js 665-669; Board tab renders agents (reuse of `boardNotification`/`activityTimeline` holds); `completeTaskByRef` is local-only (safety claim real); `sessionTabMap`, `asanaQueue`, `workRegistry.limits` shapes all as cited.
+
+---
+
 ## 0. Why this exists (the one finding)
 
 **Dobius+ runs its pipeline as prose. Hermes runs its pipeline as data.**
