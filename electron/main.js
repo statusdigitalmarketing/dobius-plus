@@ -1329,6 +1329,7 @@ app.on('before-quit', (e) => {
     stopImessageBridge();
     stopScheduledTasks();
     stopAutoMode();
+    stopMobileServer();
     closeVisualWindow();
     void stopVisualServer();
     return;
