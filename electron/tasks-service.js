@@ -153,12 +153,15 @@ export async function syncAsanaTasks(projectPath) {
     ];
 
     const fields = 'gid,name,due_on,completed,notes,permalink_url';
+    // Sam's review lane: only his tasks touched in the last 48 hours.
+    const sinceISO = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
     let added = 0;
     let total = 0;
     for (const { gid, lane, assignee } of lanes) {
       for (const ws of workspaces) {
+        const recent = lane === 'review' ? `&modified_since=${sinceISO}` : '';
         const data = await asanaGet(
-          `/api/1.0/tasks?assignee=${gid}&workspace=${ws.gid}&completed_since=now&limit=50&opt_fields=${fields}`,
+          `/api/1.0/tasks?assignee=${gid}&workspace=${ws.gid}&completed_since=now&limit=50&opt_fields=${fields}${recent}`,
           token
         );
         for (const t of (data?.data || [])) {
