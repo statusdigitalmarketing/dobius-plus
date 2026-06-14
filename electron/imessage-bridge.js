@@ -24,7 +24,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import Database from 'better-sqlite3';
-import { writeTerminal } from './terminal-manager.js';
+import { writeTerminal, listTerminals } from './terminal-manager.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
 import { subscribeReply } from './voice-bridge.js';
 import { getImessageBridge, updateImessageBridge } from './config-manager.js';
@@ -240,6 +240,12 @@ async function pollNewMessages() {
 async function handleCommand(command) {
   const requestId = `req-im-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const conductorId = getVoiceConductorTabId();
+  // The Conductor tab id is a constant; writeTerminal silently no-ops if that
+  // PTY isn't alive, leaving the sender waiting 90s for nothing. Tell them now.
+  if (!conductorId || !listTerminals().some((t) => t.id === conductorId)) {
+    await sendImessageToSelf('(Conductor offline — open Dobius+ and start the Voice Conductor, then resend)').catch(() => {});
+    return;
+  }
   const tagged = `[${requestId}] ${command.replace(/[\r\n]+/g, ' ').slice(0, 4000)}`;
   console.log(`[imessage-bridge] dispatch ${requestId}: ${command.slice(0, 80)}`);
 

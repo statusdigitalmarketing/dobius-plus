@@ -319,6 +319,12 @@ export async function startMobileServer() {
     // Conductor mode (default) — tagged with a per-request id so /voice/reply
     // can match the right reply when multiple intents are in flight.
     const conductorId = getVoiceConductorTabId();
+    // The Conductor tab id is a constant; writeTerminal silently no-ops if that
+    // PTY isn't alive. Without this check the phone gets a requestId and a fake
+    // ok:true, then waits 25s for a reply that never comes. Mirror auto-mode's guard.
+    if (!conductorId || !listTerminals().some((t) => t.id === conductorId)) {
+      return res.status(503).json({ ok: false, error: 'conductor offline' });
+    }
     const requestId = `req-${crypto.randomBytes(6).toString('hex')}`;
     const tagged = `[${requestId}] ${transcript.slice(0, 4000).replace(/[\r\n]+/g, ' ')}`;
     const CHUNK = 256;
