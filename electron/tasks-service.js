@@ -157,7 +157,20 @@ export function deleteTask(projectPath, taskId) {
  *
  * Returns { ok:true, task } | { ok:false, error, candidates? }.
  */
-export function completeTaskByRef(projectPath, ref) {
+/**
+ * Resolve a task reference (id / asanaGid / conservative fuzzy title) to a
+ * single task, WITHOUT mutating anything. Shared by completeTaskByRef
+ * (dobius-task-done) and the /stage bridge route (dobius-stage) so both resolve
+ * references identically.
+ *
+ * - Exact id or asanaGid match wins (returns the task even if already done).
+ * - Otherwise a case-insensitive title match restricted to PENDING tasks, with
+ *   the reverse direction (ref contains a >=6-char title) as a fallback. An
+ *   ambiguous title returns { candidates } instead of guessing.
+ *
+ * Returns { ok:true, task } | { ok:false, error, candidates? }.
+ */
+export function resolveTaskRef(projectPath, ref) {
   if (!projectPath) return { ok: false, error: 'projectPath required' };
   const needle = String(ref || '').trim();
   if (!needle) return { ok: false, error: 'task reference required' };
@@ -167,14 +180,14 @@ export function completeTaskByRef(projectPath, ref) {
 
   // 1. Exact id or asanaGid match (may be already done — that's fine, idempotent).
   const exact = tasks.find((t) => t.id === needle || t.asanaGid === needle);
-  if (exact) return markTaskDone(projectPath, tasks, exact);
+  if (exact) return { ok: true, task: exact };
 
   // 2. Fuzzy title match, restricted to PENDING tasks only.
   const pending = tasks.filter((t) => !t.done);
   const low = needle.toLowerCase();
   let matches = pending.filter((t) => (t.title || '').toLowerCase().includes(low));
 
-  // Fall back to the reverse direction: ref contains the title (Claude may pass
+  // Fall back to the reverse direction: ref contains the title (a caller may pass
   // a longer sentence than the stored title). Only consider titles of >= 6 chars
   // so a trivially short title ("fix", "test", "deploy") can't match an unrelated
   // sentence that merely happens to contain that word.
@@ -195,7 +208,20 @@ export function completeTaskByRef(projectPath, ref) {
       candidates: matches.map((t) => ({ id: t.id, title: t.title })),
     };
   }
-  return markTaskDone(projectPath, tasks, matches[0]);
+  return { ok: true, task: matches[0] };
+}
+
+/**
+ * Resolve a task reference and mark it done (the explicit human force-complete
+ * path behind dobius-task-done). See resolveTaskRef for the resolution rules.
+ * LOCAL ONLY — never calls the Asana API (house rule: never auto-close Asana).
+ * Returns { ok:true, task, already } | { ok:false, error, candidates? }.
+ */
+export function completeTaskByRef(projectPath, ref) {
+  const resolved = resolveTaskRef(projectPath, ref);
+  if (!resolved.ok) return resolved;
+  const tasks = readTasks(projectPath);
+  return markTaskDone(projectPath, tasks, resolved.task);
 }
 
 function markTaskDone(projectPath, tasks, target) {
