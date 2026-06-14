@@ -90,15 +90,19 @@ export const useStore = create((set, get) => ({
     const newActive = state.activeTabId === tabId
       ? tabs[Math.max(0, state.terminalTabs.findIndex((t) => t.id === tabId) - 1)]?.id || tabs[0]?.id
       : state.activeTabId;
-    // Clean up any running agents associated with this tab
+    // Clean up any running agents associated with this tab — prune BOTH
+    // runningAgents and agentActivity (otherwise stale activity entries leak
+    // and the activity UI keeps rendering agents for a closed tab).
     const ra = { ...state.runningAgents };
+    const aa = { ...state.agentActivity };
     for (const key of Object.keys(ra)) {
-      if (ra[key] === tabId) delete ra[key];
+      if (ra[key] === tabId) { delete ra[key]; delete aa[key]; }
     }
     set({
       terminalTabs: tabs,
       activeTabId: newActive,
       runningAgents: ra,
+      agentActivity: aa,
       splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
       gridSlots: pruneGrid(state.gridSlots, new Set(tabs.map((t) => t.id))),
       monitoredTabs: state.monitoredTabs.filter((id) => id !== tabId),
@@ -173,10 +177,11 @@ export const useStore = create((set, get) => ({
     removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
     const removedIds = new Set(removed.map((t) => t.id));
     const ra = { ...state.runningAgents };
+    const aa = { ...state.agentActivity };
     for (const key of Object.keys(ra)) {
-      if (removedIds.has(ra[key])) delete ra[key];
+      if (removedIds.has(ra[key])) { delete ra[key]; delete aa[key]; }
     }
-    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra, agentActivity: aa, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {
@@ -191,12 +196,13 @@ export const useStore = create((set, get) => ({
     removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
     const removedIds = new Set(removed.map((t) => t.id));
     const ra = { ...state.runningAgents };
+    const aa = { ...state.agentActivity };
     for (const key of Object.keys(ra)) {
-      if (removedIds.has(ra[key])) delete ra[key];
+      if (removedIds.has(ra[key])) { delete ra[key]; delete aa[key]; }
     }
     const allKept = [...kept, ...pinnedRight];
     const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
-    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra, agentActivity: aa, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   // Actions

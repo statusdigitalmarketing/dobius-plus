@@ -125,6 +125,11 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
     subscribers: new Set(),
     outputBuffer: '',
     cwd: safeCwd,
+    // The project this terminal belongs to (the requested cwd before any home
+    // fallback). Used for exact-match project lookup — NOT a string prefix —
+    // so sibling projects sharing a path prefix (e.g. /x/app vs /x/app-v2)
+    // can't have their live PTYs killed by the wrong window closing.
+    projectPath: (cwd && typeof cwd === 'string') ? cwd : null,
   });
   return { pid: term.pid };
 }
@@ -324,15 +329,17 @@ export async function gracefulCloseAll() {
 }
 
 /**
- * Get terminal IDs matching a project path prefix.
+ * Get terminal IDs belonging to a project, matched on the stored projectPath by
+ * exact equality (not an id string-prefix, which collides for sibling projects
+ * whose paths share a prefix, e.g. /x/app vs /x/app-v2).
  * @param {string} projectPath
  * @returns {string[]}
  */
 export function getTerminalsForProject(projectPath) {
-  const prefix = `term-${projectPath}`;
+  const target = (projectPath && typeof projectPath === 'string') ? projectPath : null;
   const matching = [];
-  for (const id of terminals.keys()) {
-    if (id === prefix || id.startsWith(`${prefix}-`)) {
+  for (const [id, entry] of terminals) {
+    if (entry.projectPath === target) {
       matching.push(id);
     }
   }
