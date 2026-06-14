@@ -47,7 +47,7 @@ export function listTasks(projectPath) {
   return readTasks(projectPath);
 }
 
-export function addTask(projectPath, { title, source = 'manual', dueOn = null, asanaGid = null } = {}) {
+export function addTask(projectPath, { title, source = 'manual', dueOn = null, asanaGid = null, lane = null, assignee = null } = {}) {
   if (!projectPath || !title) return { ok: false, error: 'projectPath and title required' };
   const clean = String(title).slice(0, MAX_TITLE).trim();
   if (!clean) return { ok: false, error: 'title empty' };
@@ -63,6 +63,8 @@ export function addTask(projectPath, { title, source = 'manual', dueOn = null, a
     source,
     dueOn: dueOn || null,
     asanaGid: asanaGid || null,
+    lane: lane || null,          // 'build' (mine) | 'review' (Sam's)
+    assignee: assignee || null,  // display name
     createdAt: Date.now(),
   };
   tasks.push(task);
@@ -136,39 +138,46 @@ export async function syncAsanaTasks(projectPath) {
   if (!token) return { ok: false, error: 'No Asana PAT configured. Add it in Settings > Integrations.' };
 
   try {
+    const q = getAsanaQueue();
     // Get current user gid + workspaces in one call
     const me = await asanaGet('/api/1.0/users/me?opt_fields=gid,workspaces', token);
-    const assigneeGid = me?.data?.gid;
+    const myGid = q.myGid || me?.data?.gid;
     const workspaces = me?.data?.workspaces || [];
-    if (!assigneeGid) return { ok: false, error: 'Could not get Asana user GID' };
+    if (!myGid) return { ok: false, error: 'Could not get Asana user GID' };
     if (!workspaces.length) return { ok: false, error: 'No Asana workspaces found' };
 
-    // Fetch incomplete tasks across all workspaces
+    // Two lanes: my tasks (build, mine) and Sam's (review, double-check his work).
+    const lanes = [
+      { gid: myGid, lane: 'build', assignee: 'Me' },
+      { gid: q.reviewGid || '1213473231797717', lane: 'review', assignee: "Sam" },
+    ];
+
     const fields = 'gid,name,due_on,completed,notes,permalink_url';
-    const allTasks = [];
-    for (const ws of workspaces) {
-      const data = await asanaGet(
-        `/api/1.0/tasks?assignee=${assigneeGid}&workspace=${ws.gid}&completed_since=now&limit=50&opt_fields=${fields}`,
-        token
-      );
-      allTasks.push(...(data?.data || []));
-    }
-
-    const asanaTasks = allTasks;
     let added = 0;
-
-    for (const t of asanaTasks) {
-      if (!t.gid || !t.name) continue;
-      const result = addTask(projectPath, {
-        title: t.name,
-        source: 'asana',
-        dueOn: t.due_on || null,
-        asanaGid: t.gid,
-      });
-      if (result.ok) added++;
+    let total = 0;
+    for (const { gid, lane, assignee } of lanes) {
+      for (const ws of workspaces) {
+        const data = await asanaGet(
+          `/api/1.0/tasks?assignee=${gid}&workspace=${ws.gid}&completed_since=now&limit=50&opt_fields=${fields}`,
+          token
+        );
+        for (const t of (data?.data || [])) {
+          if (!t.gid || !t.name) continue;
+          total++;
+          const result = addTask(projectPath, {
+            title: t.name,
+            source: 'asana',
+            dueOn: t.due_on || null,
+            asanaGid: t.gid,
+            lane,
+            assignee,
+          });
+          if (result.ok) added++;
+        }
+      }
     }
 
-    return { ok: true, added, total: asanaTasks.length };
+    return { ok: true, added, total };
   } catch (err) {
     return { ok: false, error: err.message };
   }

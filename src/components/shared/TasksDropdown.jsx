@@ -8,6 +8,12 @@ const SOURCE_COLORS = {
   manual: { bg: 'rgba(139,148,158,0.12)', text: 'var(--dim)' },
 };
 
+// Lane = who the Asana task is assigned to. Build = mine (blue), review = Sam's (purple).
+const LANE_COLORS = {
+  build:  { stripe: '#58A6FF', bg: 'rgba(88,166,255,0.14)',  text: '#58A6FF', label: 'Mine' },
+  review: { stripe: '#A371F7', bg: 'rgba(163,113,247,0.14)', text: '#A371F7', label: "Sam · review" },
+};
+
 export default function TasksDropdown() {
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const [open, setOpen] = useState(false);
@@ -291,6 +297,7 @@ export default function TasksDropdown() {
 function TaskRow({ task, onToggle, onDelete }) {
   const [hovered, setHovered] = useState(false);
   const src = SOURCE_COLORS[task.source] || SOURCE_COLORS.manual;
+  const lane = task.lane ? LANE_COLORS[task.lane] : null;
 
   return (
     <div
@@ -301,6 +308,7 @@ function TaskRow({ task, onToggle, onDelete }) {
         alignItems: 'flex-start',
         gap: 8,
         padding: '6px 12px',
+        borderLeft: `3px solid ${lane ? lane.stripe : 'transparent'}`,
         backgroundColor: hovered ? 'var(--surface-hover)' : 'transparent',
         transition: 'background 100ms',
       }}
@@ -342,7 +350,20 @@ function TaskRow({ task, onToggle, onDelete }) {
           {task.title}
         </span>
         <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 2 }}>
-          {task.source !== 'manual' && (
+          {lane ? (
+            <span style={{
+              fontSize: 8,
+              padding: '1px 5px',
+              borderRadius: 3,
+              backgroundColor: lane.bg,
+              color: lane.text,
+              fontFamily: "'SF Mono', monospace",
+              textTransform: 'uppercase',
+              letterSpacing: '0.06em',
+            }}>
+              {lane.label}
+            </span>
+          ) : task.source !== 'manual' && (
             <span style={{
               fontSize: 8,
               padding: '1px 5px',
