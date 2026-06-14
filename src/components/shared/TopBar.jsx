@@ -13,6 +13,15 @@ export default function TopBar({ projectName }) {
     ? (tabs.find((t) => t.id === activeTabId)?.label || '')
     : '';
 
+  // Git context shown in the top bar: which branch / worktree / fork you're on.
+  const currentBranch = useStore((s) => s.currentBranch);
+  const currentIsWorktree = useStore((s) => s.currentIsWorktree);
+  const currentDetached = useStore((s) => s.currentDetached);
+  const currentIsFork = useStore((s) => s.currentIsFork);
+  const showGit = activeView === 'terminal' && (currentDetached || !!currentBranch);
+  // A fork takes label priority over worktree (you can be both); detached has no kind tag.
+  const gitKind = currentDetached ? null : (currentIsFork ? 'fork' : (currentIsWorktree ? 'worktree' : null));
+
   return (
     <div
       className="drag-region flex items-center justify-between px-4 h-10 shrink-0"
@@ -56,6 +65,32 @@ export default function TopBar({ projectName }) {
           <>
             <span style={{ opacity: 0.5 }}>·</span>
             <span style={{ color: 'var(--fg)' }}>{activeTabLabel}</span>
+          </>
+        )}
+        {showGit && (
+          <>
+            <span style={{ opacity: 0.5 }}>·</span>
+            <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ opacity: 0.7 }}>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m9-9a3 3 0 11-3-3m3 3v3a3 3 0 01-3 3H9" />
+            </svg>
+            <span
+              style={{ color: 'var(--fg)' }}
+              title={currentDetached
+                ? 'Detached HEAD — not on a branch'
+                : `On branch ${currentBranch}${gitKind ? ` (${gitKind})` : ''}. Polled every 20s, follows the active tab's cwd.`}
+            >
+              {currentDetached ? 'detached' : currentBranch}
+            </span>
+            {gitKind && (
+              <span
+                style={{
+                  color: gitKind === 'branch' ? 'var(--dim)' : 'var(--accent)',
+                  fontWeight: 600,
+                }}
+              >
+                {gitKind}
+              </span>
+            )}
           </>
         )}
       </span>

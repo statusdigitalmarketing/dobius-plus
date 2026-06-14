@@ -1,6 +1,15 @@
 import { create } from 'zustand';
 import { THEMES, applyTheme } from '../lib/themes';
 
+// Drop any grid entries whose tab is no longer present. Returns null when the
+// grid would be left empty (i.e. grid mode turns off). gridSlots is a dense,
+// ordered list of tabIds (1–6) — no gaps — so the layout auto-fits the count.
+function pruneGrid(gridSlots, keptIds) {
+  if (!gridSlots) return null;
+  const pruned = gridSlots.filter((id) => keptIds.has(id));
+  return pruned.length ? pruned : null;
+}
+
 export const useStore = create((set, get) => ({
   // View state
   activeView: 'terminal', // 'terminal' | 'dashboard'
@@ -17,16 +26,45 @@ export const useStore = create((set, get) => ({
   activeProcesses: [],
   buildComplete: false,
 
+  // Monitors — tab IDs the user is watching ("monitor this terminal").
+  // Active/idle is derived from the tab's running process, not stored here.
+  monitoredTabs: [],
+  toggleMonitor: (tabId) => set((s) => ({
+    monitoredTabs: s.monitoredTabs.includes(tabId)
+      ? s.monitoredTabs.filter((id) => id !== tabId)
+      : [...s.monitoredTabs, tabId],
+  })),
+
   // Terminal tabs
   terminalTabs: [],
   activeTabId: null,
   tabCounter: 0,
+  splitTabId: null,
+
+  // Terminal grid — null when off; otherwise a dense, ordered list of 1–6 tabIds.
+  // The tile layout is derived from the count (no empty cells). Split view and
+  // grid are mutually exclusive. Drag-to-add is the only way in.
+  gridSlots: null,
+
+  // tabId currently being dragged from the tab bar (drives grid drop zones).
+  draggingTabId: null,
+  setDraggingTabId: (id) => set({ draggingTabId: id }),
 
   // Running agents: Map<agentId, tabId>
   runningAgents: {},
 
   // Agent activity: Map<agentId, { status, lastActivity, linesProcessed, startTime, currentAction }>
   agentActivity: {},
+
+  // Terminal-tab status: Map<tabId, 'working' | 'done' | 'needs'>. Drives the
+  // text-message-style status dot on each tab (yellow = working, green = done,
+  // red = needs your response). Ephemeral runtime state — intentionally NOT
+  // persisted to config or stored on the tab object.
+  tabStatus: {},
+  setTabStatus: (tabId, status) => set((s) => {
+    if (!tabId || s.tabStatus[tabId] === status) return {};
+    return { tabStatus: { ...s.tabStatus, [tabId]: status } };
+  }),
 
   // Activity timeline: chronological feed of agent actions (max 100)
   activityTimeline: [],
@@ -61,14 +99,63 @@ export const useStore = create((set, get) => ({
     const newActive = state.activeTabId === tabId
       ? tabs[Math.max(0, state.terminalTabs.findIndex((t) => t.id === tabId) - 1)]?.id || tabs[0]?.id
       : state.activeTabId;
-    // Clean up any running agents associated with this tab
+    // Clean up any running agents associated with this tab — prune BOTH
+    // runningAgents and agentActivity (otherwise stale activity entries leak
+    // and the activity UI keeps rendering agents for a closed tab).
     const ra = { ...state.runningAgents };
+    const aa = { ...state.agentActivity };
     for (const key of Object.keys(ra)) {
-      if (ra[key] === tabId) delete ra[key];
+      if (ra[key] === tabId) { delete ra[key]; delete aa[key]; }
     }
-    set({ terminalTabs: tabs, activeTabId: newActive, runningAgents: ra });
+    const ts = { ...state.tabStatus };
+    delete ts[tabId];
+    set({
+      terminalTabs: tabs,
+      activeTabId: newActive,
+      runningAgents: ra,
+      agentActivity: aa,
+      tabStatus: ts,
+      splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
+      gridSlots: pruneGrid(state.gridSlots, new Set(tabs.map((t) => t.id))),
+      monitoredTabs: state.monitoredTabs.filter((id) => id !== tabId),
+    });
   },
 
+  setSplitTab: (tabId) => set({ splitTabId: tabId, gridSlots: null }),
+  clearSplitTab: () => set({ splitTabId: null }),
+
+  // Grid actions ----------------------------------------------------------
+  // Append a tab to the grid (max 6), starting grid mode if needed. A tab can
+  // only appear once. Clears split view (mutually exclusive).
+  addToGrid: (tabId) => set((s) => {
+    if (!tabId) return {};
+    const cur = s.gridSlots || [];
+    if (cur.includes(tabId)) return { splitTabId: null, activeTabId: tabId };
+    if (cur.length >= 6) return {};
+    return { gridSlots: [...cur, tabId], splitTabId: null, activeTabId: tabId };
+  }),
+
+  // Swap two cells by index (dragging one cell's header onto another).
+  swapGrid: (a, b) => set((s) => {
+    if (!s.gridSlots || a === b) return {};
+    if (a < 0 || b < 0 || a >= s.gridSlots.length || b >= s.gridSlots.length) return {};
+    const slots = [...s.gridSlots];
+    [slots[a], slots[b]] = [slots[b], slots[a]];
+    return { gridSlots: slots };
+  }),
+
+  // Remove a cell by index; the grid compacts and reflows. Exits grid mode
+  // when the last cell is removed.
+  removeFromGrid: (index) => set((s) => {
+    if (!s.gridSlots) return {};
+    const slots = s.gridSlots.filter((_, i) => i !== index);
+    return { gridSlots: slots.length ? slots : null };
+  }),
+
+  clearGrid: () => set({ gridSlots: null }),
+
+  // Restore a persisted layout (already validated against live tabs by caller).
+  setGridSlots: (slots) => set({ gridSlots: slots }),
 
   setActiveTab: (tabId) => set({ activeTabId: tabId }),
 
@@ -102,10 +189,13 @@ export const useStore = create((set, get) => ({
     removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
     const removedIds = new Set(removed.map((t) => t.id));
     const ra = { ...state.runningAgents };
+    const aa = { ...state.agentActivity };
     for (const key of Object.keys(ra)) {
-      if (removedIds.has(ra[key])) delete ra[key];
+      if (removedIds.has(ra[key])) { delete ra[key]; delete aa[key]; }
     }
-    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra });
+    const ts = { ...state.tabStatus };
+    for (const id of removedIds) delete ts[id];
+    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {
@@ -120,12 +210,15 @@ export const useStore = create((set, get) => ({
     removed.forEach((t) => window.electronAPI?.terminalKill(t.id));
     const removedIds = new Set(removed.map((t) => t.id));
     const ra = { ...state.runningAgents };
+    const aa = { ...state.agentActivity };
     for (const key of Object.keys(ra)) {
-      if (removedIds.has(ra[key])) delete ra[key];
+      if (removedIds.has(ra[key])) { delete ra[key]; delete aa[key]; }
     }
+    const ts = { ...state.tabStatus };
+    for (const id of removedIds) delete ts[id];
     const allKept = [...kept, ...pinnedRight];
     const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
-    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra });
+    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   // Actions
@@ -147,6 +240,13 @@ export const useStore = create((set, get) => ({
 
   currentIsWorktree: false,
   setCurrentIsWorktree: (v) => set({ currentIsWorktree: !!v }),
+
+  currentDetached: false,
+  setCurrentDetached: (v) => set({ currentDetached: !!v }),
+
+  // Fork checkout (origin + upstream remotes) — labeled distinctly from a plain branch.
+  currentIsFork: false,
+  setCurrentIsFork: (v) => set({ currentIsFork: !!v }),
 
   setSessions: (sessions) => set({ sessions }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),

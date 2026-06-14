@@ -38,8 +38,9 @@ export async function loadHistory() {
 
 /**
  * Load ALL sessions across all projects by scanning ~/.claude/projects/.
- * Returns array of { sessionId, projectPath, projectName, preview, timestamp, age }
- * sorted by recency, limited to 500.
+ * Returns array of { sessionId, projectPath, projectName, preview, timestamp, age, status }
+ * sorted by recency, limited to 500. `status` is 'working' | 'needs' | 'done'
+ * (same red/yellow/green meaning as the terminal tab dots).
  */
 export async function loadAllSessions() {
   const sessions = [];
@@ -85,11 +86,22 @@ export async function loadAllSessions() {
             const entries = await parseJsonl(filePath, 5);
             let preview = '';
             let timestamp = 0;
+            // Who spoke last in the transcript — drives the cross-session status dot.
+            let lastRole = '';
 
             for (const entry of entries) {
-              if (entry.timestamp && entry.timestamp > timestamp) {
-                timestamp = entry.timestamp;
+              // Transcript timestamps are ISO 8601 strings — parse to epoch ms so
+              // recency math (and the 'working' check below) uses real milliseconds.
+              const tsMs = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
+              if (tsMs && tsMs > timestamp) {
+                timestamp = tsMs;
               }
+              const role = (entry.type === 'human' || entry.role === 'user' || entry.message?.role === 'user')
+                ? 'user'
+                : (entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant')
+                  ? 'assistant'
+                  : '';
+              if (role) lastRole = role; // array is oldest→newest, so the final wins
               if (!preview && (entry.type === 'human' || entry.role === 'user')) {
                 const content = typeof entry.message === 'string'
                   ? entry.message
@@ -109,6 +121,14 @@ export async function loadAllSessions() {
               }
             }
 
+            // Cross-session status, same red/yellow/green meaning as the terminal
+            // tabs: yellow = working (transcript written in the last 45s),
+            // red = needs your response (you spoke last and it's gone quiet),
+            // green = done (Claude finished its turn). A live terminal tab for
+            // this session overrides this with its real-time status in the UI.
+            const recentlyActive = timestamp && (Date.now() - timestamp < 45000);
+            const status = recentlyActive ? 'working' : (lastRole === 'user' ? 'needs' : 'done');
+
             sessions.push({
               sessionId,
               projectPath,
@@ -116,6 +136,7 @@ export async function loadAllSessions() {
               preview: preview || 'No preview available',
               timestamp,
               age: timestamp ? timeAgo(timestamp) : 'unknown',
+              status,
             });
           } catch {
             void 0;

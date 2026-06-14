@@ -21,6 +21,24 @@ export default function Settings() {
   const [mobileBusy, setMobileBusy] = useState(false);
   const [mobileError, setMobileError] = useState('');
 
+  // Terminal-tab status dots — managed Claude Notification hook
+  const [statusHooks, setStatusHooks] = useState(false);
+  const [statusHooksBusy, setStatusHooksBusy] = useState(false);
+  const [statusHooksError, setStatusHooksError] = useState('');
+  useEffect(() => {
+    window.electronAPI?.claudeHooksGetStatus?.().then((r) => { if (r) setStatusHooks(!!r.installed); });
+  }, []);
+  const toggleStatusHooks = useCallback(async (on) => {
+    setStatusHooksBusy(true);
+    setStatusHooksError('');
+    const r = on
+      ? await window.electronAPI?.claudeHooksEnable?.()
+      : await window.electronAPI?.claudeHooksDisable?.();
+    if (r?.error) setStatusHooksError(r.error);
+    else setStatusHooks(!!r?.installed);
+    setStatusHooksBusy(false);
+  }, []);
+
   // iMessage Bridge state
   const [imsgCfg, setImsgCfg] = useState(null);
   const [imsgStatus, setImsgStatus] = useState(null);
@@ -278,6 +296,22 @@ export default function Settings() {
             checked={settings.sidebarDefaultOpen}
             onChange={(v) => updateSetting('sidebarDefaultOpen', v)}
           />
+        </SettingRow>
+
+        <SettingRow
+          label="Tab status dots"
+          description="Green = done, yellow = working, red = needs you. Installs a Claude notification hook in ~/.claude/settings.json (your other hooks are left untouched)."
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {statusHooksError && (
+              <span style={{ color: 'var(--danger)', fontSize: 10, maxWidth: 180 }}>{statusHooksError}</span>
+            )}
+            <Toggle
+              checked={statusHooks}
+              disabled={statusHooksBusy}
+              onChange={(v) => toggleStatusHooks(v)}
+            />
+          </div>
         </SettingRow>
       </Section>
 
@@ -546,10 +580,11 @@ function SettingRow({ label, description, children }) {
   );
 }
 
-function Toggle({ checked, onChange }) {
+function Toggle({ checked, onChange, disabled = false }) {
   return (
     <button
-      onClick={() => onChange(!checked)}
+      onClick={() => { if (!disabled) onChange(!checked); }}
+      disabled={disabled}
       style={{
         width: 36,
         height: 20,
@@ -557,7 +592,8 @@ function Toggle({ checked, onChange }) {
         backgroundColor: checked ? 'var(--accent)' : 'var(--border)',
         position: 'relative',
         border: 'none',
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
         transition: 'background-color 150ms',
       }}
     >
