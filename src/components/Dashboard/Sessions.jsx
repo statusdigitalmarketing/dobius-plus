@@ -2,6 +2,30 @@ import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
 import { timeAgo } from '../../lib/time-ago';
 
+// Cross-session status, same red/yellow/green meaning as the terminal tab dots:
+// green = done, yellow = working, red = needs your response.
+const STATUS_COLORS = { working: '#D29922', done: '#3FB950', needs: '#F85149' };
+const STATUS_LABELS = { working: 'Working', done: 'Done', needs: 'Needs your response' };
+const SESSION_CAP = 500; // mirrors loadAllSessions() — surface when we hit it
+
+function StatusDot({ status, size = 7 }) {
+  const st = STATUS_COLORS[status] ? status : 'done';
+  return (
+    <span
+      title={STATUS_LABELS[st]}
+      className={st === 'needs' ? 'dobius-status-pulse' : undefined}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: '50%',
+        backgroundColor: STATUS_COLORS[st],
+        flexShrink: 0,
+        display: 'inline-block',
+      }}
+    />
+  );
+}
+
 export default function Sessions() {
   const [sessions, setSessions] = useState([]);
   const [tags, setTags] = useState({});
@@ -30,6 +54,10 @@ export default function Sessions() {
 
   useEffect(() => {
     loadData();
+    // Live refresh: re-scan whenever the watcher reports session/history activity,
+    // so the cross-session status dots stay current without leaving the tab.
+    const remove = window.electronAPI?.onDataUpdated?.(() => loadData());
+    return remove;
   }, [loadData]);
 
   // Filter sessions
@@ -108,6 +136,11 @@ export default function Sessions() {
         </h2>
         <span className="text-xs" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
           {totalSessions} session{totalSessions !== 1 ? 's' : ''} across {totalProjects} project{totalProjects !== 1 ? 's' : ''}
+          {sessions.length >= SESSION_CAP && (
+            <span style={{ color: STATUS_COLORS.working, marginLeft: 6 }} title={`Showing the ${SESSION_CAP} most recent sessions; older ones are not listed.`}>
+              (showing newest {SESSION_CAP})
+            </span>
+          )}
         </span>
       </div>
 
@@ -194,6 +227,27 @@ export default function Sessions() {
                 <span className="text-xs" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
                   ({group.sessions.length})
                 </span>
+                {/* Status rollup — surfaces "needs you" / "working" counts per project */}
+                {(() => {
+                  const needs = group.sessions.filter((s) => s.status === 'needs').length;
+                  const working = group.sessions.filter((s) => s.status === 'working').length;
+                  return (
+                    <span className="flex items-center gap-1.5 ml-1">
+                      {needs > 0 && (
+                        <span className="flex items-center gap-1" title={`${needs} session${needs !== 1 ? 's' : ''} need your response`}>
+                          <StatusDot status="needs" size={6} />
+                          <span style={{ color: STATUS_COLORS.needs, fontSize: 10, fontFamily: "'SF Mono', monospace" }}>{needs}</span>
+                        </span>
+                      )}
+                      {working > 0 && (
+                        <span className="flex items-center gap-1" title={`${working} session${working !== 1 ? 's' : ''} working`}>
+                          <StatusDot status="working" size={6} />
+                          <span style={{ color: STATUS_COLORS.working, fontSize: 10, fontFamily: "'SF Mono', monospace" }}>{working}</span>
+                        </span>
+                      )}
+                    </span>
+                  );
+                })()}
                 <span className="text-xs ml-auto" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace", fontSize: 10 }}>
                   {timeAgo(group.latestTimestamp)}
                 </span>
@@ -271,6 +325,8 @@ function SessionCard({ session, tag, onTagsChanged }) {
       onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border)'}
     >
       <div className="flex items-center gap-3">
+        {/* Status dot — green = done, yellow = working, red = needs your response */}
+        <StatusDot status={session.status} />
         {/* Preview text */}
         <div className="flex-1 min-w-0">
           <div className="text-xs truncate" style={{ color: 'var(--fg)' }}>

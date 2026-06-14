@@ -574,6 +574,105 @@ function setupFileHandlers() {
     }
     return files;
   });
+
+  // --- Claude status hooks (drive the terminal-tab status dots) ---------------
+  // We install an opt-in block into ~/.claude/settings.json that makes Claude emit
+  // a hidden marker (OSC 777;dobius;<state>) into each session's terminal:
+  //   UserPromptSubmit / PreToolUse        -> working (yellow)
+  //   Notification[permission_prompt]      -> needs   (red)
+  //   Notification[idle_prompt] / Stop     -> done    (green)
+  // Markers are identified by the ']777;dobius;' substring so the block can be
+  // removed cleanly without ever touching the user's own hooks.
+  const claudeSettingsPath = path.join(homedir, '.claude', 'settings.json');
+  const STATUS_MARKER = ']777;dobius;';
+  // printf '%s' does NOT interpret backslash escapes, so the JSON \uXXXX escapes
+  // reach Claude's hook parser verbatim and become ESC / BEL when it emits them.
+  const statusCmd = (state) =>
+    `printf '%s' '{"terminalSequence":"\\u001b]777;dobius;${state}\\u0007"}'`;
+  const cmdEntry = (state) => ({ type: 'command', command: statusCmd(state) });
+  const isStatusGroup = (group) =>
+    Array.isArray(group?.hooks) &&
+    group.hooks.some((h) => typeof h?.command === 'string' && h.command.includes(STATUS_MARKER));
+
+  function readClaudeSettings() {
+    try {
+      if (!fs.existsSync(claudeSettingsPath)) return {};
+      return JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8'));
+    } catch {
+      return null; // unparseable — signal failure so we never clobber it
+    }
+  }
+
+  // Atomic write (tmp + rename) — never leave the user's settings.json half-written
+  // if the process dies mid-write. Mirrors config-manager's atomicWriteSync.
+  function writeClaudeSettings(settings) {
+    fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
+    const data = JSON.stringify(settings, null, 2) + '\n';
+    const tmp = `${claudeSettingsPath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
+    try {
+      fs.writeFileSync(tmp, data, 'utf8');
+      fs.renameSync(tmp, claudeSettingsPath);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+      throw err;
+    }
+  }
+
+  // Strip any previously-installed Dobius status groups from a hooks object.
+  function stripStatusHooks(hooks) {
+    if (!hooks || typeof hooks !== 'object') return {};
+    const out = {};
+    for (const [event, groups] of Object.entries(hooks)) {
+      if (!Array.isArray(groups)) { out[event] = groups; continue; }
+      const kept = groups.filter((g) => !isStatusGroup(g));
+      if (kept.length) out[event] = kept;
+    }
+    return out;
+  }
+
+  ipcMain.handle('claudeHooks:getStatus', () => {
+    const settings = readClaudeSettings();
+    if (settings === null) return { installed: false, error: 'settings.json is not valid JSON' };
+    const hooks = settings.hooks || {};
+    const installed = Object.values(hooks).some(
+      (groups) => Array.isArray(groups) && groups.some(isStatusGroup)
+    );
+    return { installed };
+  });
+
+  ipcMain.handle('claudeHooks:enable', () => {
+    const settings = readClaudeSettings();
+    if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
+    // Start from a clean slate (remove any stale Dobius groups) then add ours,
+    // appending to the user's existing hooks for each event.
+    const hooks = stripStatusHooks(settings.hooks);
+    const add = (event, group) => { hooks[event] = [...(hooks[event] || []), group]; };
+    add('UserPromptSubmit', { hooks: [cmdEntry('working')] });
+    add('PreToolUse', { hooks: [cmdEntry('working')] }); // no matcher = all tools
+    add('Notification', { matcher: 'permission_prompt', hooks: [cmdEntry('needs')] });
+    add('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
+    add('Stop', { hooks: [cmdEntry('done')] });
+    settings.hooks = hooks;
+    try {
+      writeClaudeSettings(settings);
+      return { ok: true, installed: true };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  ipcMain.handle('claudeHooks:disable', () => {
+    const settings = readClaudeSettings();
+    if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
+    settings.hooks = stripStatusHooks(settings.hooks);
+    if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+    try {
+      writeClaudeSettings(settings);
+      return { ok: true, installed: false };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
 }
 
 function setupConfigHandlers() {

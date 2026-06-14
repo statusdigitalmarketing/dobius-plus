@@ -2,6 +2,13 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
 import { markDoNotKill } from '../../hooks/useTerminal';
 
+// Text-message-style tab status. NOTE: this intentionally differs from the app's
+// other surfaces (Board/Mission Control), where green = working. On the terminal
+// tabs the user wants: green = done/at rest, yellow = working, red = needs you.
+// Don't "fix" this to match the other convention.
+const STATUS_COLORS = { working: '#D29922', done: '#3FB950', needs: '#F85149' };
+const STATUS_LABELS = { working: 'Working', done: 'Done', needs: 'Needs your response' };
+
 export default function TerminalTabBar() {
   const tabs = useStore((s) => s.terminalTabs);
   const activeTabId = useStore((s) => s.activeTabId);
@@ -12,9 +19,16 @@ export default function TerminalTabBar() {
   const reorderTabs = useStore((s) => s.reorderTabs);
   const closeOtherTabs = useStore((s) => s.closeOtherTabs);
   const closeTabsToRight = useStore((s) => s.closeTabsToRight);
+  const monitoredTabs = useStore((s) => s.monitoredTabs);
+  const toggleMonitor = useStore((s) => s.toggleMonitor);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const pushClosedTab = useStore((s) => s.pushClosedTab);
   const togglePinTab = useStore((s) => s.togglePinTab);
+  const splitTabId = useStore((s) => s.splitTabId);
+  const setSplitTab = useStore((s) => s.setSplitTab);
+  const clearSplitTab = useStore((s) => s.clearSplitTab);
+  const setDraggingTabId = useStore((s) => s.setDraggingTabId);
+  const tabStatus = useStore((s) => s.tabStatus);
 
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
@@ -159,10 +173,11 @@ export default function TerminalTabBar() {
   // Drag-to-reorder (#26) + drag-out-of-window for tab tear-off
   const handleDragStart = useCallback((e, tabId) => {
     setDragTabId(tabId);
+    setDraggingTabId(tabId); // reveal grid drop zones over the terminal area
     dragLeftWindow.current = false;
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', tabId);
-  }, []);
+  }, [setDraggingTabId]);
 
   // Detect when drag leaves the document (cursor exits the window)
   useEffect(() => {
@@ -201,7 +216,8 @@ export default function TerminalTabBar() {
     }
     setDragTabId(null);
     setDragOverIdx(null);
-  }, [dragTabId, tabs, reorderTabs]);
+    setDraggingTabId(null);
+  }, [dragTabId, tabs, reorderTabs, setDraggingTabId]);
 
   const handleDragEnd = useCallback(async (e) => {
     const tabId = dragTabId;
@@ -211,6 +227,7 @@ export default function TerminalTabBar() {
 
     setDragTabId(null);
     setDragOverIdx(null);
+    setDraggingTabId(null);
 
     if (!tabId || !currentProjectPath) return;
 
@@ -251,7 +268,7 @@ export default function TerminalTabBar() {
 
     // Remove tab from this window without killing the PTY
     removeTab(tabId);
-  }, [dragTabId, tabs, currentProjectPath, removeTab]);
+  }, [dragTabId, tabs, currentProjectPath, removeTab, setDraggingTabId]);
 
   // Poll active process for each tab (for status badges)
   const [tabProcesses, setTabProcesses] = useState({});
@@ -319,7 +336,7 @@ export default function TerminalTabBar() {
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => { if (tab.id === splitTabId) clearSplitTab(); setActiveTab(tab.id); }}
               onDoubleClick={() => handleDoubleClick(tab)}
               onMouseDown={(e) => handleMouseDown(e, tab.id)}
               onContextMenu={(e) => handleContextMenu(e, tab.id)}
@@ -353,19 +370,27 @@ export default function TerminalTabBar() {
                 />
               )}
 
-              {/* Process status badge */}
-              {tabProcesses[tab.id] && (
-                <span
-                  title={tabProcesses[tab.id]}
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    backgroundColor: tabProcesses[tab.id].includes('claude') ? '#3FB950' : '#D29922',
-                    flexShrink: 0,
-                  }}
-                />
-              )}
+              {/* Status dot — green = done, yellow = working, red = needs you.
+                  Falls back to "done" (green) when no status is known yet. */}
+              {(() => {
+                const status = tabStatus[tab.id] || 'done';
+                const color = STATUS_COLORS[status];
+                const proc = tabProcesses[tab.id];
+                const title = proc ? `${STATUS_LABELS[status]} · ${proc}` : STATUS_LABELS[status];
+                return (
+                  <span
+                    title={title}
+                    className={status === 'needs' ? 'dobius-status-pulse' : undefined}
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: '50%',
+                      backgroundColor: color,
+                      flexShrink: 0,
+                    }}
+                  />
+                );
+              })()}
 
               {/* Pin indicator */}
               {tab.pinned && (
@@ -502,6 +527,20 @@ export default function TerminalTabBar() {
             togglePinTab(contextMenu.tabId);
             setContextMenu(null);
           }}
+          onSplit={() => {
+            if (contextMenu.tabId === splitTabId) {
+              clearSplitTab();
+            } else {
+              setSplitTab(contextMenu.tabId);
+            }
+            setContextMenu(null);
+          }}
+          isSplit={contextMenu.tabId === splitTabId}
+          isMonitored={monitoredTabs.includes(contextMenu.tabId)}
+          onMonitor={() => {
+            toggleMonitor(contextMenu.tabId);
+            setContextMenu(null);
+          }}
           onDismiss={() => setContextMenu(null)}
         />
       )}
@@ -518,13 +557,15 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, isPinned, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onDismiss }) {
+function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
 
   const items = [
+    { label: isMonitored ? 'Stop Monitoring' : 'Monitor this Terminal', onClick: onMonitor },
     { label: isPinned ? 'Unpin Tab' : 'Pin Tab', onClick: onPin },
     { label: 'Rename', onClick: onRename },
+    { label: isSplit ? 'Unsplit' : 'Split View', onClick: onSplit, disabled: tabCount <= 1 },
     { type: 'divider' },
     { label: 'Close', onClick: onClose, disabled: tabCount <= 1 },
     { label: 'Close Others', onClick: onCloseOthers, disabled: tabCount <= 1 },

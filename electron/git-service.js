@@ -36,12 +36,13 @@ export async function getGitStatus(projectDir) {
   const dir = validateDir(projectDir);
   if (!dir) return { isRepo: false };
   try {
-    const [branchOut, statusOut, aheadBehindOut, gitDirOut, commonDirOut] = await Promise.all([
+    const [branchOut, statusOut, aheadBehindOut, gitDirOut, commonDirOut, remotesOut] = await Promise.all([
       run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], dir),
       run('git', ['status', '--porcelain'], dir),
       run('git', ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'], dir).catch(() => '0\t0'),
       run('git', ['rev-parse', '--git-dir'], dir).catch(() => ''),
       run('git', ['rev-parse', '--git-common-dir'], dir).catch(() => ''),
+      run('git', ['remote'], dir).catch(() => ''),
     ]);
 
     const lines = statusOut.trim().split('\n').filter(Boolean);
@@ -62,15 +63,29 @@ export async function getGitStatus(projectDir) {
     const commonDir = commonDirOut.trim();
     const isWorktree = !!(gitDir && commonDir && gitDir !== commonDir);
 
+    // Detached HEAD: `git rev-parse --abbrev-ref HEAD` returns the literal
+    // "HEAD" when not on a branch. Surface it as a flag so the UI can label it.
+    const rawBranch = branchOut.trim();
+    const detached = rawBranch === 'HEAD';
+
+    // Fork detection: the canonical GitHub fork setup keeps your fork as `origin`
+    // and the original repo as a separate `upstream` remote. When both exist we
+    // treat the checkout as a fork so the top bar can label it distinctly from a
+    // plain branch. (Offline/fast — no network or `gh` dependency.)
+    const remotes = remotesOut.split('\n').map((r) => r.trim()).filter(Boolean);
+    const isFork = remotes.includes('origin') && remotes.includes('upstream');
+
     return {
       isRepo: true,
-      branch: branchOut.trim(),
+      branch: detached ? '' : rawBranch,
+      detached,
       ahead: ahead || 0,
       behind: behind || 0,
       staged,
       modified,
       untracked,
       isWorktree,
+      isFork,
     };
   } catch {
     return { isRepo: false };

@@ -38,8 +38,9 @@ export async function loadHistory() {
 
 /**
  * Load ALL sessions across all projects by scanning ~/.claude/projects/.
- * Returns array of { sessionId, projectPath, projectName, preview, timestamp, age }
- * sorted by recency, limited to 500.
+ * Returns array of { sessionId, projectPath, projectName, preview, timestamp, age, status }
+ * sorted by recency, limited to 500. `status` is 'working' | 'needs' | 'done'
+ * (same red/yellow/green meaning as the terminal tab dots).
  */
 export async function loadAllSessions() {
   const sessions = [];
@@ -97,14 +98,30 @@ export async function loadAllSessions() {
       const sessionId = file.replace('.jsonl', '');
       const filePath = path.join(projectDir, file);
       try {
+        // parseJsonl is bounded since v1.0.23 — uses readTail under the hood so
+        // a 24MB transcript no longer pulls 95MB into memory. The status fields
+        // here ride on top of that bounded read; we never re-read the file.
         const entries = await parseJsonl(filePath, 5);
         let preview = '';
         let timestamp = 0;
+        // lastRole drives the cross-session status dot.
+        let lastRole = '';
 
         for (const entry of entries) {
-          if (entry.timestamp && entry.timestamp > timestamp) {
-            timestamp = entry.timestamp;
+          // Transcript timestamps are ISO 8601 strings — parse to epoch ms so
+          // recency math + the 'working' check use real milliseconds.
+          const tsMs = typeof entry.timestamp === 'number'
+            ? entry.timestamp
+            : (entry.timestamp ? new Date(entry.timestamp).getTime() : 0);
+          if (tsMs && tsMs > timestamp) {
+            timestamp = tsMs;
           }
+          const role = (entry.type === 'human' || entry.role === 'user' || entry.message?.role === 'user')
+            ? 'user'
+            : (entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant')
+              ? 'assistant'
+              : '';
+          if (role) lastRole = role; // array is oldest→newest, so the final wins
           if (!preview && (entry.type === 'human' || entry.role === 'user')) {
             const content = typeof entry.message === 'string'
               ? entry.message
@@ -124,6 +141,21 @@ export async function loadAllSessions() {
           }
         }
 
+        // Cross-session status — same red/yellow/green meaning as terminal tabs:
+        //   yellow 'working' = Claude is actively streaming (recent activity + Claude spoke last)
+        //   red    'needs'   = user spoke last and Claude hasn't replied yet
+        //   green  'done'    = Claude finished its turn cleanly
+        //
+        // 120s window (was 45s during PR review) + lastRole gate: 45s falsely
+        // flipped streaming sessions to 'done' during slow tool calls, AND a
+        // bare recency check labeled "user just spoke" as 'working' even when
+        // Claude hadn't started. Both flagged independently by review agents.
+        // The live terminal tab dot still overrides this for the active tab.
+        const recent = timestamp && (Date.now() - timestamp < 120_000);
+        let status = 'done';
+        if (recent && lastRole === 'assistant') status = 'working';
+        else if (lastRole === 'user') status = 'needs';
+
         sessions.push({
           sessionId,
           projectPath,
@@ -131,6 +163,7 @@ export async function loadAllSessions() {
           preview: preview || 'No preview available',
           timestamp,
           age: timestamp ? timeAgo(timestamp) : 'unknown',
+          status,
         });
       } catch {
         void 0;

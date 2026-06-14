@@ -3,6 +3,11 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
+import { useStore } from '../store/store';
+
+// States carried by the Dobius status marker (OSC 777;dobius;<state>), emitted by
+// the managed Claude Notification/Stop hook. Anything else is ignored.
+const TAB_STATUS_VALUES = new Set(['working', 'done', 'needs']);
 
 // Terminal IDs that should not be killed on unmount (torn-off tabs).
 // Populated by TerminalTabBar before removing the tab, checked by cleanup.
@@ -152,6 +157,18 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
       window.electronAPI.terminalWrite(id, data);
     });
 
+    // Deterministic tab status: the managed Claude hook emits OSC 777;dobius;<state>
+    // into this PTY. xterm reassembles chunk-split OSC sequences for us; we map the
+    // marker to this tab's status and swallow it (return true) so it never renders.
+    const oscDisposable = term.parser.registerOscHandler(777, (payload) => {
+      const parts = String(payload).split(';');
+      if (parts[0] === 'dobius' && TAB_STATUS_VALUES.has(parts[1])) {
+        useStore.getState().setTabStatus(id, parts[1]);
+        return true; // handled — do not pass through to other handlers / the screen
+      }
+      return false; // not ours (e.g. a real `notify` payload) — let xterm handle it
+    });
+
     const removeDataListener = window.electronAPI.onTerminalData((termId, data) => {
       if (termId === id && termRef.current) {
         termRef.current.write(data);
@@ -196,6 +213,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
       observer.disconnect();
       saveState();
       inputDisposable.dispose();
+      oscDisposable.dispose();
       removeDataListener();
       removeExitListener();
       removeRequestSave?.();
