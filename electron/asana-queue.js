@@ -197,9 +197,14 @@ export async function fetchNewTasks({ projectName, lanes }) {
       const completedSince = lane === 'review'
         ? new Date(Date.now() - REVIEW_COMPLETED_WINDOW_MS).toISOString()
         : 'now';
-      const path = `/api/1.0/tasks?project=${project.gid}&assignee=${gid}&completed_since=${encodeURIComponent(completedSince)}&limit=${MAX_TASKS_PER_FETCH}&opt_fields=${FIELDS}`;
+      // Asana rejects project + assignee in the same query ("Must specify
+      // exactly one of project, tag, section, user task list, or assignee +
+      // workspace"). Query by project, then filter to the lane assignee
+      // client-side (FIELDS includes the compact assignee record).
+      const path = `/api/1.0/tasks?project=${project.gid}&completed_since=${encodeURIComponent(completedSince)}&limit=${MAX_TASKS_PER_FETCH}&opt_fields=${FIELDS}`;
       const data = await asanaGet(path);
       for (const t of (data?.data || [])) {
+        if (t.assignee?.gid !== gid) continue;   // only this lane's assignee
         if (seen.has(t.gid)) continue;     // a task can't be in both lanes, but guard anyway
         // Review only finished work: `completed_since=<ts>` also returns
         // incomplete tasks, so drop those.
