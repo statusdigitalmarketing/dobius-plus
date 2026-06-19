@@ -594,19 +594,43 @@ function setupFileHandlers() {
     Array.isArray(group?.hooks) &&
     group.hooks.some((h) => typeof h?.command === 'string' && h.command.includes(STATUS_MARKER));
 
+  // Returns { settings, mtime, exists }. The mtime travels with the read so
+  // writeClaudeSettings can detect a lost-update race against Claude itself
+  // (it rewrites settings.json when the user changes permission rules, MCP,
+  // plugins, etc.). settings = null means the file was unparseable — never
+  // overwrite that case. exists = false means the file genuinely doesn't
+  // exist; the enable path uses this to refuse silent creation.
   function readClaudeSettings() {
     try {
-      if (!fs.existsSync(claudeSettingsPath)) return {};
-      return JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8'));
+      if (!fs.existsSync(claudeSettingsPath)) return { settings: {}, mtime: 0, exists: false };
+      const stat = fs.statSync(claudeSettingsPath);
+      const settings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8'));
+      return { settings, mtime: stat.mtimeMs, exists: true };
     } catch {
-      return null; // unparseable — signal failure so we never clobber it
+      return { settings: null, mtime: 0, exists: true };
     }
   }
 
-  // Atomic write (tmp + rename) — never leave the user's settings.json half-written
-  // if the process dies mid-write. Mirrors config-manager's atomicWriteSync.
-  function writeClaudeSettings(settings) {
+  // Atomic write (tmp + rename) — never leave the user's settings.json half-
+  // written. expectedMtime lets us detect a concurrent rewrite by Claude CLI
+  // between our read and rename; if it changed we abort instead of clobbering
+  // Claude's update with our stale base. Mirrors config-manager's
+  // atomicWriteSync but adds the optimistic-concurrency check.
+  function writeClaudeSettings(settings, expectedMtime) {
     fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
+    if (expectedMtime !== undefined && expectedMtime > 0) {
+      try {
+        const currentMtime = fs.statSync(claudeSettingsPath).mtimeMs;
+        // 5ms slack absorbs filesystem mtime precision (HFS+ is whole-second);
+        // anything bigger indicates a real external rewrite mid-edit.
+        if (Math.abs(currentMtime - expectedMtime) > 5) {
+          throw new Error('settings.json changed under us — retry');
+        }
+      } catch (err) {
+        if (err.message.includes('changed under us')) throw err;
+        // stat failed because file vanished — fall through to write (recreate)
+      }
+    }
     const data = JSON.stringify(settings, null, 2) + '\n';
     const tmp = `${claudeSettingsPath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
     try {
@@ -631,18 +655,25 @@ function setupFileHandlers() {
   }
 
   ipcMain.handle('claudeHooks:getStatus', () => {
-    const settings = readClaudeSettings();
+    const { settings, exists } = readClaudeSettings();
     if (settings === null) return { installed: false, error: 'settings.json is not valid JSON' };
+    if (!exists) return { installed: false, exists: false };
     const hooks = settings.hooks || {};
     const installed = Object.values(hooks).some(
       (groups) => Array.isArray(groups) && groups.some(isStatusGroup)
     );
-    return { installed };
+    return { installed, exists: true };
   });
 
-  ipcMain.handle('claudeHooks:enable', () => {
-    const settings = readClaudeSettings();
+  ipcMain.handle('claudeHooks:enable', (_evt, opts) => {
+    const { settings, mtime, exists } = readClaudeSettings();
     if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
+    // Refuse silent file creation: if ~/.claude/settings.json doesn't exist
+    // yet, the user has never opted into having one. Require explicit consent
+    // (renderer passes { confirmCreate: true } after a confirm dialog).
+    if (!exists && !opts?.confirmCreate) {
+      return { error: 'needs-confirm-create', message: '~/.claude/settings.json does not exist. Confirm creation to enable hooks.' };
+    }
     // Start from a clean slate (remove any stale Dobius groups) then add ours,
     // appending to the user's existing hooks for each event.
     const hooks = stripStatusHooks(settings.hooks);
@@ -652,26 +683,90 @@ function setupFileHandlers() {
     add('Notification', { matcher: 'permission_prompt', hooks: [cmdEntry('needs')] });
     add('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
     add('Stop', { hooks: [cmdEntry('done')] });
-    settings.hooks = hooks;
-    try {
-      writeClaudeSettings(settings);
-      return { ok: true, installed: true };
-    } catch (err) {
-      return { error: err.message };
+    // No-op if the file already has exactly these hooks. Avoids bumping mtime
+    // on every "Enable" click and prevents any downstream file watchers from
+    // re-firing when nothing actually changed.
+    if (JSON.stringify(settings.hooks || {}) === JSON.stringify(hooks)) {
+      return { ok: true, installed: true, unchanged: true };
     }
+    settings.hooks = hooks;
+    // One retry on mtime conflict: Claude's typical write is <100ms so a
+    // re-read after the race almost always succeeds. Beyond that, surface
+    // error. CRITICAL: on retry the WHOLE fresh.settings becomes the write
+    // base — never just splice fresh.settings.hooks back onto stale
+    // `settings`, that would discard the permission/MCP/plugin updates
+    // Claude just made and recreate the lost-update bug the mtime check
+    // was supposed to prevent.
+    let toWrite = settings;
+    let mtimeForWrite = mtime;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        // ALWAYS pass mtimeForWrite — dropping the guard on retry would let a
+        // SECOND concurrent Claude rewrite (between the fresh read and the
+        // retry write) get silently clobbered. If the retry ALSO conflicts,
+        // surface the error rather than retry indefinitely.
+        writeClaudeSettings(toWrite, mtimeForWrite);
+        return { ok: true, installed: true };
+      } catch (err) {
+        if (err.message.includes('changed under us') && attempt === 0) {
+          const fresh = readClaudeSettings();
+          if (fresh.settings === null) return { error: 'settings.json became unparseable mid-edit' };
+          // Reapply OUR hook block on top of Claude's just-written settings.
+          fresh.settings.hooks = stripStatusHooks(fresh.settings.hooks);
+          const add2 = (event, group) => { fresh.settings.hooks[event] = [...(fresh.settings.hooks[event] || []), group]; };
+          add2('UserPromptSubmit', { hooks: [cmdEntry('working')] });
+          add2('PreToolUse', { hooks: [cmdEntry('working')] });
+          add2('Notification', { matcher: 'permission_prompt', hooks: [cmdEntry('needs')] });
+          add2('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
+          add2('Stop', { hooks: [cmdEntry('done')] });
+          toWrite = fresh.settings;
+          mtimeForWrite = fresh.mtime;
+          continue;
+        }
+        return { error: err.message.includes('changed under us')
+          ? 'settings.json keeps changing under us — try again in a moment'
+          : err.message };
+      }
+    }
+    return { error: 'enable failed after retry' };
   });
 
   ipcMain.handle('claudeHooks:disable', () => {
-    const settings = readClaudeSettings();
+    const { settings, mtime, exists } = readClaudeSettings();
     if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
+    // No file = nothing to disable. Don't create an empty file just to remove
+    // hooks that were never there.
+    if (!exists) return { ok: true, installed: false };
     settings.hooks = stripStatusHooks(settings.hooks);
     if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
-    try {
-      writeClaudeSettings(settings);
-      return { ok: true, installed: false };
-    } catch (err) {
-      return { error: err.message };
+    // Same lost-update guard as enable — on retry, write fresh.settings as
+    // the base so Claude's concurrent updates aren't clobbered. Object.assign
+    // from the old version was buggy: it deep-copied fresh's keys onto stale
+    // `settings` but stale keys that fresh removed would still be present.
+    let toWrite = settings;
+    let mtimeForWrite = mtime;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        // Same as enable: always pass mtimeForWrite so a second concurrent
+        // Claude rewrite can't slip through the retry.
+        writeClaudeSettings(toWrite, mtimeForWrite);
+        return { ok: true, installed: false };
+      } catch (err) {
+        if (err.message.includes('changed under us') && attempt === 0) {
+          const fresh = readClaudeSettings();
+          if (fresh.settings === null) return { error: 'settings.json became unparseable mid-edit' };
+          fresh.settings.hooks = stripStatusHooks(fresh.settings.hooks);
+          if (Object.keys(fresh.settings.hooks).length === 0) delete fresh.settings.hooks;
+          toWrite = fresh.settings;
+          mtimeForWrite = fresh.mtime;
+          continue;
+        }
+        return { error: err.message.includes('changed under us')
+          ? 'settings.json keeps changing under us — try again in a moment'
+          : err.message };
+      }
     }
+    return { error: 'disable failed after retry' };
   });
 }
 

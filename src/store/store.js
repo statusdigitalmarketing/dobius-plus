@@ -61,9 +61,24 @@ export const useStore = create((set, get) => ({
   // red = needs your response). Ephemeral runtime state — intentionally NOT
   // persisted to config or stored on the tab object.
   tabStatus: {},
+  // Tabs whose current status came from the OSC hook (PreToolUse/UserPromptSubmit/
+  // Stop). useTabActivity's quiet-output settler ignores these — only the hook
+  // can clear hook-owned status, so a long quiet tool call no longer flips
+  // 'working' → 'done' while Claude is mid-turn.
+  hookOwnedTabs: {},
   setTabStatus: (tabId, status) => set((s) => {
     if (!tabId || s.tabStatus[tabId] === status) return {};
     return { tabStatus: { ...s.tabStatus, [tabId]: status } };
+  }),
+  // OSC handler calls this. Hook-owned 'working' / 'needs' survive quiet
+  // output; hook-owned 'done' releases ownership so the next inferred working
+  // tracks normally.
+  markHookOwned: (tabId, status) => set((s) => {
+    if (!tabId) return {};
+    const next = { ...s.hookOwnedTabs };
+    if (status === 'working' || status === 'needs') next[tabId] = true;
+    else delete next[tabId]; // 'done' or anything else releases the claim
+    return { hookOwnedTabs: next };
   }),
 
   // Activity timeline: chronological feed of agent actions (max 100)
@@ -145,11 +160,19 @@ export const useStore = create((set, get) => ({
   }),
 
   // Remove a cell by index; the grid compacts and reflows. Exits grid mode
-  // when the last cell is removed.
+  // when the last cell is removed. If the removed cell held the active tab,
+  // reseat activeTabId onto a surviving grid cell so paneStyleFor doesn't
+  // hide it (otherwise input/paste/git polling routes to an invisible tab).
   removeFromGrid: (index) => set((s) => {
     if (!s.gridSlots) return {};
+    const removedTabId = s.gridSlots[index];
     const slots = s.gridSlots.filter((_, i) => i !== index);
-    return { gridSlots: slots.length ? slots : null };
+    const next = { gridSlots: slots.length ? slots : null };
+    if (removedTabId === s.activeTabId && slots.length) {
+      // Pick the cell that took the removed cell's index, or the last cell.
+      next.activeTabId = slots[index] || slots[slots.length - 1];
+    }
+    return next;
   }),
 
   clearGrid: () => set({ gridSlots: null }),
@@ -195,7 +218,11 @@ export const useStore = create((set, get) => ({
     }
     const ts = { ...state.tabStatus };
     for (const id of removedIds) delete ts[id];
-    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    // Clear splitTabId if the split pane was killed — otherwise the layout
+    // stays stuck in split mode pointing at a dead tab and the surviving
+    // active terminal is constrained to half-width with no header to exit.
+    const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
+    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {
@@ -218,7 +245,10 @@ export const useStore = create((set, get) => ({
     for (const id of removedIds) delete ts[id];
     const allKept = [...kept, ...pinnedRight];
     const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
-    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    // Same split-cleanup as closeOtherTabs — kill the split pointer if the
+    // tab it referenced just got removed.
+    const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
+    set({ terminalTabs: allKept, activeTabId: newActive, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   // Actions

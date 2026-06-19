@@ -37,11 +37,19 @@ export function useTabActivity() {
 
     tickTimer.current = setInterval(() => {
       const now = Date.now();
-      const { tabStatus, setTabStatus } = useStore.getState();
+      const { tabStatus, setTabStatus, hookOwnedTabs } = useStore.getState();
       for (const [termId, ts] of Object.entries(lastDataTs.current)) {
         // Drop timers for tabs that have been closed (status entry pruned).
         if (!(termId in tabStatus)) { delete lastDataTs.current[termId]; continue; }
-        if (tabStatus[termId] === 'working' && now - ts > QUIET_MS) {
+        // Only settle 'working' tabs that AREN'T hook-owned. A quiet tool
+        // call (long shell exec, slow git fetch) emits no output for many
+        // seconds — but the hook's Stop event hasn't fired, so the tab is
+        // genuinely still working. hookOwnedTabs is set by useTerminal's OSC
+        // handler whenever the marker sets 'working' / 'needs', released
+        // when it sets 'done'.
+        if (tabStatus[termId] === 'working'
+            && !hookOwnedTabs[termId]
+            && now - ts > QUIET_MS) {
           setTabStatus(termId, 'done');
         }
       }

@@ -84,7 +84,7 @@ export default function TopBar({ projectName }) {
             {gitKind && (
               <span
                 style={{
-                  color: gitKind === 'branch' ? 'var(--dim)' : 'var(--accent)',
+                  color: 'var(--accent)',
                   fontWeight: 600,
                 }}
               >

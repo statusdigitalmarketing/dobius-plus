@@ -163,7 +163,12 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     const oscDisposable = term.parser.registerOscHandler(777, (payload) => {
       const parts = String(payload).split(';');
       if (parts[0] === 'dobius' && TAB_STATUS_VALUES.has(parts[1])) {
-        useStore.getState().setTabStatus(id, parts[1]);
+        const store = useStore.getState();
+        store.setTabStatus(id, parts[1]);
+        // Claim hook-ownership so useTabActivity's silence settler doesn't
+        // flip this tab to 'done' during a long quiet tool call. 'done' or
+        // unknown payload releases the claim back to output-flow inference.
+        store.markHookOwned(id, parts[1]);
         return true; // handled — do not pass through to other handlers / the screen
       }
       return false; // not ours (e.g. a real `notify` payload) — let xterm handle it

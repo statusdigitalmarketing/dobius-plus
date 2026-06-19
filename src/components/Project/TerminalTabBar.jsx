@@ -1,13 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
 import { markDoNotKill } from '../../hooks/useTerminal';
+import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 
 // Text-message-style tab status. NOTE: this intentionally differs from the app's
 // other surfaces (Board/Mission Control), where green = working. On the terminal
 // tabs the user wants: green = done/at rest, yellow = working, red = needs you.
 // Don't "fix" this to match the other convention.
-const STATUS_COLORS = { working: '#D29922', done: '#3FB950', needs: '#F85149' };
-const STATUS_LABELS = { working: 'Working', done: 'Done', needs: 'Needs your response' };
+// STATUS_COLORS/LABELS hoisted to src/lib/status-colors.js so the three
+// places that render the same status dot (tab bar, grid pane, sessions
+// dashboard) cannot drift apart.
 
 export default function TerminalTabBar() {
   const tabs = useStore((s) => s.terminalTabs);
@@ -336,7 +338,19 @@ export default function TerminalTabBar() {
           return (
             <button
               key={tab.id}
-              onClick={() => { if (tab.id === splitTabId) clearSplitTab(); setActiveTab(tab.id); }}
+              onClick={() => {
+                const state = useStore.getState();
+                if (tab.id === splitTabId) clearSplitTab();
+                // If grid mode is on and the clicked tab isn't currently a
+                // grid cell, exit grid mode — otherwise paneStyleFor returns
+                // display:none for the just-activated tab and input/paste/git
+                // polling would route to an invisible terminal. Matches the
+                // user's intent: "I want to see this tab".
+                if (state.gridSlots && !state.gridSlots.includes(tab.id)) {
+                  state.setGridSlots(null);
+                }
+                setActiveTab(tab.id);
+              }}
               onDoubleClick={() => handleDoubleClick(tab)}
               onMouseDown={(e) => handleMouseDown(e, tab.id)}
               onContextMenu={(e) => handleContextMenu(e, tab.id)}
@@ -396,6 +410,16 @@ export default function TerminalTabBar() {
               {tab.pinned && (
                 <span style={{ fontSize: 9, color: 'var(--dim)', flexShrink: 0, lineHeight: 1 }} title="Pinned">
                   {'//'}
+                </span>
+              )}
+
+              {/* Monitor indicator — present whenever the user toggled
+                  "Monitor this Terminal" from the context menu. Makes the
+                  monitoredTabs store slice actually visible instead of dead
+                  state (the toggle previously had no observable effect). */}
+              {monitoredTabs.includes(tab.id) && (
+                <span style={{ fontSize: 10, color: 'var(--accent)', flexShrink: 0, lineHeight: 1 }} title="Monitored">
+                  ◉
                 </span>
               )}
 
@@ -531,6 +555,17 @@ export default function TerminalTabBar() {
             if (contextMenu.tabId === splitTabId) {
               clearSplitTab();
             } else {
+              // paneStyleFor uses splitTabId for the right pane and the active
+              // tab for the left. If the user picks split on the currently
+              // active tab, both slots would resolve to the same tab and the
+              // left pane renders blank — flip the active tab to a different
+              // one first so both panes are populated.
+              if (contextMenu.tabId === useStore.getState().activeTabId) {
+                const tabs = useStore.getState().terminalTabs;
+                const idx = tabs.findIndex((t) => t.id === contextMenu.tabId);
+                const other = tabs[idx + 1] || tabs[idx - 1];
+                if (other) setActiveTab(other.id);
+              }
               setSplitTab(contextMenu.tabId);
             }
             setContextMenu(null);

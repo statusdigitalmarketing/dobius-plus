@@ -1,11 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
 import { timeAgo } from '../../lib/time-ago';
+import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 
-// Cross-session status, same red/yellow/green meaning as the terminal tab dots:
-// green = done, yellow = working, red = needs your response.
-const STATUS_COLORS = { working: '#D29922', done: '#3FB950', needs: '#F85149' };
-const STATUS_LABELS = { working: 'Working', done: 'Done', needs: 'Needs your response' };
 const SESSION_CAP = 500; // mirrors loadAllSessions() — surface when we hit it
 
 function StatusDot({ status, size = 7 }) {
@@ -54,10 +51,19 @@ export default function Sessions() {
 
   useEffect(() => {
     loadData();
-    // Live refresh: re-scan whenever the watcher reports session/history activity,
-    // so the cross-session status dots stay current without leaving the tab.
-    const remove = window.electronAPI?.onDataUpdated?.(() => loadData());
-    return remove;
+    // Live refresh: re-scan whenever the watcher reports session/history
+    // activity. Debounced 500ms — during an active Claude session the
+    // transcript flushes every few seconds, and a 6k-file scan even with
+    // v1.0.23's bounded readTail isn't free to fire back-to-back.
+    let timer = null;
+    const remove = window.electronAPI?.onDataUpdated?.(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { timer = null; loadData(); }, 500);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      remove?.();
+    };
   }, [loadData]);
 
   // Filter sessions

@@ -66,7 +66,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Claude status hooks — manages an opt-in Notification/Stop hook block in
   // ~/.claude/settings.json that drives the terminal-tab status dots.
   claudeHooksGetStatus: () => ipcRenderer.invoke('claudeHooks:getStatus'),
-  claudeHooksEnable: () => ipcRenderer.invoke('claudeHooks:enable'),
+  claudeHooksEnable: (opts) => ipcRenderer.invoke('claudeHooks:enable', opts),
   claudeHooksDisable: () => ipcRenderer.invoke('claudeHooks:disable'),
 
   // Checkpoints

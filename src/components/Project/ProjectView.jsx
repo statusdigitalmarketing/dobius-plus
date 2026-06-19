@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useStore } from '../../store/store';
 import { THEMES, applyTheme } from '../../lib/themes';
 import TopBar from '../shared/TopBar';
@@ -12,11 +12,7 @@ import QuitOverlay from '../shared/QuitOverlay';
 import ResumeBanner from './ResumeBanner';
 import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
-
-// Terminal-tab status colors (green = done, yellow = working, red = needs you) —
-// mirrored from TerminalTabBar so the grid cell headers show the same dot.
-const STATUS_COLORS = { working: '#D29922', done: '#3FB950', needs: '#F85149' };
-const STATUS_LABELS = { working: 'Working', done: 'Done', needs: 'Needs your response' };
+import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 
 export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel }) {
   const activeView = useStore((s) => s.activeView);
@@ -195,11 +191,57 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   // Persist the grid layout per project. Gate on hydration so the mount-time
   // default (gridSlots: null) can't clobber a saved layout before it loads.
   // Tear-off windows are ephemeral and never persist their grid.
+  // Skip the first persist after hydration — the restored gridSlots came
+  // from disk, writing it back is wasted I/O (and touches mtime, triggering
+  // any downstream watchers on the config file).
+  const gridPersistArmed = useRef(false);
   useEffect(() => {
     if (tearOffTabId) return;
     if (!tabsInitialized || !projectPath || !window.electronAPI?.configSetProject) return;
+    if (!gridPersistArmed.current) { gridPersistArmed.current = true; return; }
     window.electronAPI.configSetProject(projectPath, { gridSlots });
   }, [gridSlots, tabsInitialized, projectPath, tearOffTabId]);
+
+  // Force xterm to re-fit when the pane layout changes. Switching to/from
+  // split or grid only changes the pane's CSS width (100% → 50%), and the
+  // ResizeObserver inside useTerminal doesn't reliably fire on pure CSS
+  // reflows where the parent didn't resize. Dispatching a window resize is
+  // the safest cross-browser signal — xterm's FitAddon + all the per-tab
+  // ResizeObservers respond to it. Delayed via rAF so the new CSS has been
+  // painted before xterm measures the new container.
+  useEffect(() => {
+    if (!tabsInitialized) return;
+    const id = requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+    return () => cancelAnimationFrame(id);
+  }, [splitTabId, gridSlots, tabsInitialized]);
+
+  // Defensive guard: paneStyleFor renders splitTabId on the right and
+  // activeTabId on the left. If those collide (Cmd+number activated the
+  // split tab, programmatic activeTab change, etc.), the left half goes
+  // blank. The menu handler already routes around this, but any other path
+  // that sets activeTabId can hit it — auto-pick a different tab as the
+  // left pane when the collision is detected.
+  useEffect(() => {
+    if (!splitTabId || splitTabId !== activeTabId) return;
+    const tabs = useStore.getState().terminalTabs;
+    const idx = tabs.findIndex((t) => t.id === splitTabId);
+    const other = tabs[idx + 1] || tabs[idx - 1];
+    if (other) useStore.getState().setActiveTab(other.id);
+    else useStore.getState().clearSplitTab(); // only one tab — split is meaningless
+  }, [activeTabId, splitTabId]);
+
+  // Same class of defense for grid mode: paneStyleFor hides any tab not in
+  // gridSlots when grid mode is on. The tab-bar click handler exits grid
+  // mode when the user clicks a non-grid tab, but Cmd+1-9, New Tab, and any
+  // programmatic setActiveTab bypass that. Mirror the guard at the state
+  // level — if the active tab isn't in the grid, drop grid mode so the
+  // newly-active terminal becomes visible (input/paste/git polling target
+  // matches what the user sees).
+  useEffect(() => {
+    if (!gridSlots || !activeTabId) return;
+    if (gridSlots.includes(activeTabId)) return;
+    useStore.getState().setGridSlots(null);
+  }, [activeTabId, gridSlots]);
 
   // Save tabs to config whenever they change (skip for tear-off windows to avoid conflicts)
   useEffect(() => {

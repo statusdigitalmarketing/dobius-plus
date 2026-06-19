@@ -31,9 +31,16 @@ export default function Settings() {
   const toggleStatusHooks = useCallback(async (on) => {
     setStatusHooksBusy(true);
     setStatusHooksError('');
-    const r = on
+    let r = on
       ? await window.electronAPI?.claudeHooksEnable?.()
       : await window.electronAPI?.claudeHooksDisable?.();
+    // Confirm creation of ~/.claude/settings.json on first opt-in. The main
+    // process refuses to silently create the file — we ask the user first.
+    if (r?.error === 'needs-confirm-create') {
+      const ok = window.confirm(`${r.message}\n\nCreate it now?`);
+      if (!ok) { setStatusHooksBusy(false); return; }
+      r = await window.electronAPI?.claudeHooksEnable?.({ confirmCreate: true });
+    }
     if (r?.error) setStatusHooksError(r.error);
     else setStatusHooks(!!r?.installed);
     setStatusHooksBusy(false);
