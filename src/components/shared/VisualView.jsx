@@ -183,13 +183,17 @@ export default function VisualView({ projectPath }) {
   const editingLabel = editing === 'prod' ? 'production' : 'preview';
 
   return (
-    <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', backgroundColor: 'var(--bg)' }}>
-      <div className="drag-region" style={{ height: 28, flexShrink: 0 }} />
+    <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', backgroundColor: 'var(--bg)', overflow: 'hidden' }}>
+      <div className="drag-region" style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 28, zIndex: 20 }} />
 
       {/* ── Header ── */}
       <div className="no-drag" style={{
-        display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px',
-        borderBottom: '1px solid var(--border)', backgroundColor: 'var(--surface)', flexShrink: 0, flexWrap: 'wrap',
+        position: 'absolute', top: 34, left: '50%', transform: 'translateX(-50%)', zIndex: 21,
+        display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px',
+        backgroundColor: 'color-mix(in srgb, var(--surface) 88%, transparent)',
+        border: '1px solid var(--border)', borderRadius: 8,
+        boxShadow: '0 10px 30px rgba(0,0,0,0.28)', backdropFilter: 'blur(12px)',
+        flexWrap: 'wrap', maxWidth: 'calc(100% - 24px)',
       }}>
         {/* Source toggle */}
         <div style={{ display: 'flex', gap: 1, padding: 2, backgroundColor: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
@@ -249,7 +253,13 @@ export default function VisualView({ projectPath }) {
 
       {/* URL input bar */}
       {editing && (
-        <div className="no-drag" style={{ display: 'flex', gap: 6, padding: '6px 12px', borderBottom: '1px solid var(--border)', backgroundColor: 'var(--surface)', flexShrink: 0 }}>
+        <div className="no-drag" style={{
+          position: 'absolute', top: 82, left: '50%', transform: 'translateX(-50%)', zIndex: 21,
+          display: 'flex', gap: 6, padding: 8, width: 'min(720px, calc(100% - 24px))',
+          backgroundColor: 'color-mix(in srgb, var(--surface) 90%, transparent)',
+          border: '1px solid var(--border)', borderRadius: 8,
+          boxShadow: '0 10px 30px rgba(0,0,0,0.28)', backdropFilter: 'blur(12px)',
+        }}>
           <input autoFocus value={urlInput} onChange={(e) => setUrlInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') saveUrl(editing, urlInput); if (e.key === 'Escape') setEditing(null); }}
             placeholder={editing === 'prod' ? 'https://pocketcologne.com' : 'https://your-project-git-visual-preview-….vercel.app'}
@@ -260,7 +270,7 @@ export default function VisualView({ projectPath }) {
       )}
 
       {/* ── Preview ── */}
-      <div className="no-drag" style={{ flex: 1, overflow: 'auto', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: 16, backgroundColor: '#111', position: 'relative' }}>
+      <div className="no-drag" style={{ flex: 1, overflow: 'auto', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '96px 16px 28px', backgroundColor: 'var(--bg)', position: 'relative' }}>
         {(loading || status) && (
           <div style={centeredMsg}>{loading ? 'Starting preview server…' : status}</div>
         )}
@@ -274,11 +284,10 @@ export default function VisualView({ projectPath }) {
         )}
 
         <div style={{
-          width: PHONE_W, height: '100%', maxHeight: 760, borderRadius: 36, overflow: 'hidden',
-          border: '8px solid #2a2a2a', boxShadow: '0 0 0 1px #333, 0 20px 60px rgba(0,0,0,0.6)',
+          width: PHONE_W, height: '100%', maxHeight: 760, overflow: 'hidden',
+          border: 'none', boxShadow: 'none',
           flexShrink: 0, position: 'relative', display: showFrame ? 'block' : 'none',
         }}>
-          <div style={{ position: 'absolute', top: 0, left: '50%', transform: 'translateX(-50%)', width: 100, height: 24, backgroundColor: '#2a2a2a', borderBottomLeftRadius: 14, borderBottomRightRadius: 14, zIndex: 2 }} />
           <webview ref={webviewRef} src={url || 'about:blank'} style={{ width: '100%', height: '100%', border: 'none' }} />
         </div>
 
@@ -296,7 +305,7 @@ export default function VisualView({ projectPath }) {
       </div>
 
       {/* Footer */}
-      <div style={{ padding: '4px 12px', borderTop: '1px solid var(--border)', backgroundColor: 'var(--surface)', fontSize: 9, fontFamily: "'SF Mono', monospace", color: 'var(--dim)', flexShrink: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+      <div style={{ position: 'absolute', left: 12, right: 12, bottom: 10, zIndex: 20, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 6, backgroundColor: 'color-mix(in srgb, var(--surface) 82%, transparent)', backdropFilter: 'blur(10px)', fontSize: 9, fontFamily: "'SF Mono', monospace", color: 'var(--dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {url || (source === 'local' ? '— waiting for server —' : `— set a ${editingLabelFor(source)} URL above —`)}
       </div>
     </div>

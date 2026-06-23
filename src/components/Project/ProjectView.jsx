@@ -11,6 +11,7 @@ import GitSidePanel from '../shared/GitSidePanel';
 import QuitOverlay from '../shared/QuitOverlay';
 import ResumeBanner from './ResumeBanner';
 import { useAgentActivity } from '../../hooks/useAgentActivity';
+import { useTabActivity } from '../../hooks/useTabActivity';
 
 export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel }) {
   const activeView = useStore((s) => s.activeView);
@@ -35,9 +36,13 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const initClosedTabs = useStore((s) => s.initClosedTabs);
   const splitTabId = useStore((s) => s.splitTabId);
   const clearSplitTab = useStore((s) => s.clearSplitTab);
+  const splitRatio = useStore((s) => s.splitRatio);
+  const setSplitRatio = useStore((s) => s.setSplitRatio);
 
   // Terminal grid state + actions
   const gridSlots = useStore((s) => s.gridSlots);
+  const gridColumnRatio = useStore((s) => s.gridColumnRatio);
+  const gridRowRatios = useStore((s) => s.gridRowRatios);
   const draggingTabId = useStore((s) => s.draggingTabId);
   const setDraggingTabId = useStore((s) => s.setDraggingTabId);
   const addToGrid = useStore((s) => s.addToGrid);
@@ -45,12 +50,17 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const swapGrid = useStore((s) => s.swapGrid);
   const clearGrid = useStore((s) => s.clearGrid);
   const setGridSlots = useStore((s) => s.setGridSlots);
+  const setGridColumnRatio = useStore((s) => s.setGridColumnRatio);
+  const setGridRowRatios = useStore((s) => s.setGridRowRatios);
 
   const [pinnedIds, setPinnedIds] = useState([]);
   const [tabsInitialized, setTabsInitialized] = useState(false);
+  const terminalLayoutRef = useRef(null);
 
   // Start agent activity monitoring for all running agents
   useAgentActivity();
+  // Per-tab status dots (working/done from output flow; red is hook-driven)
+  useTabActivity();
 
   // Extract project name from path
   const projectName = projectPath
@@ -146,6 +156,9 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         if (config && typeof config.themeIndex === 'number') {
           setThemeIndex(config.themeIndex);
         }
+        if (typeof config?.splitRatio === 'number') setSplitRatio(config.splitRatio);
+        if (typeof config?.gridColumnRatio === 'number') setGridColumnRatio(config.gridColumnRatio);
+        if (Array.isArray(config?.gridRowRatios)) setGridRowRatios(config.gridRowRatios);
         // Restore saved tabs
         if (config?.tabs?.length > 0 && config.tabCounter > 0) {
           initTabs(config.tabs, config.tabCounter);
@@ -172,7 +185,79 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
       }
       setTabsInitialized(true);
     }
-  }, [projectPath, setThemeIndex, tearOffTabId, tearOffLabel]);
+  }, [projectPath, setThemeIndex, setSplitRatio, setGridColumnRatio, setGridRowRatios, tearOffTabId, tearOffLabel]);
+
+  const startSplitResize = useCallback((e) => {
+    e.preventDefault();
+    const el = terminalLayoutRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const onMove = (moveEvent) => {
+      setSplitRatio((moveEvent.clientX - rect.left) / rect.width);
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp, { once: true });
+  }, [setSplitRatio]);
+
+  const startGridColumnResize = useCallback((e) => {
+    e.preventDefault();
+    const el = terminalLayoutRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const onMove = (moveEvent) => {
+      setGridColumnRatio((moveEvent.clientX - rect.left) / rect.width);
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp, { once: true });
+  }, [setGridColumnRatio]);
+
+  const startGridRowResize = useCallback((e, boundaryIndex, rowCount, currentRatios) => {
+    e.preventDefault();
+    const el = terminalLayoutRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const min = 0.12;
+    const ratios = currentRatios.length === rowCount
+      ? currentRatios
+      : Array.from({ length: rowCount }, () => 1 / rowCount);
+    const before = ratios.slice(0, boundaryIndex).reduce((sum, r) => sum + r, 0);
+    const after = ratios.slice(boundaryIndex + 1).reduce((sum, r) => sum + r, 0);
+    const movableTotal = ratios[boundaryIndex] + ratios[boundaryIndex + 1];
+    const onMove = (moveEvent) => {
+      const rawBoundary = (moveEvent.clientY - rect.top) / rect.height;
+      const nextTop = Math.min(before + movableTotal - min, Math.max(before + min, rawBoundary));
+      const next = [...ratios];
+      next[boundaryIndex] = nextTop - before;
+      next[boundaryIndex + 1] = 1 - after - nextTop;
+      setGridRowRatios(next);
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp, { once: true });
+  }, [setGridRowRatios]);
 
   // Save theme to config when it changes
   useEffect(() => {
@@ -199,8 +284,13 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   useEffect(() => {
     if (tearOffTabId || !gridHydratedRef.current) return;
     if (!tabsInitialized || !projectPath || !window.electronAPI?.configSetProject) return;
-    window.electronAPI.configSetProject(projectPath, { gridSlots });
-  }, [gridSlots, tabsInitialized, projectPath, tearOffTabId]);
+    window.electronAPI.configSetProject(projectPath, {
+      gridSlots,
+      splitRatio,
+      gridColumnRatio,
+      gridRowRatios,
+    });
+  }, [gridSlots, splitRatio, gridColumnRatio, gridRowRatios, tabsInitialized, projectPath, tearOffTabId]);
 
   // Clean up running agents when a terminal PTY exits + auto-capture journal + orchestration tracking
   useEffect(() => {
@@ -619,6 +709,17 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
               const n = gridActive ? gridSlots.length : 0;
               const cols = n === 1 ? 1 : 2;
               const rows = Math.max(1, Math.ceil(n / cols));
+              const splitPct = Math.round(splitRatio * 10000) / 100;
+              const gridColPct = Math.round(gridColumnRatio * 10000) / 100;
+              const rowRatios = gridRowRatios.length === rows
+                ? gridRowRatios
+                : Array.from({ length: rows }, () => 1 / rows);
+              const rowTotal = rowRatios.reduce((sum, r) => sum + r, 0) || 1;
+              const normalizedRows = rowRatios.map((r) => r / rowTotal);
+              const rowTemplate = normalizedRows.map((r) => `${Math.max(0.12, r)}fr`).join(' ');
+              const primarySplitTabId = splitTabId && activeTabId === splitTabId
+                ? tabs.find((t) => t.id !== splitTabId)?.id
+                : activeTabId;
 
               // CSS placement for the i-th terminal. An odd final terminal spans
               // the full row so the grid stays gap-free.
@@ -632,8 +733,10 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                 ? {
                     position: 'relative',
                     display: 'grid',
-                    gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-                    gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+                    gridTemplateColumns: cols === 1
+                      ? 'minmax(0, 1fr)'
+                      : `minmax(0, ${gridColPct}fr) minmax(0, ${100 - gridColPct}fr)`,
+                    gridTemplateRows: rowTemplate,
                     gap: 1,
                     backgroundColor: 'var(--border)',
                   }
@@ -657,8 +760,8 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                   };
                 }
                 if (splitTabId) {
-                  if (tab.id === splitTabId) return { position: 'absolute', top: 0, bottom: 0, right: 0, width: '50%', paddingTop: 28, display: 'flex' };
-                  if (isActive) return { position: 'absolute', top: 0, bottom: 0, left: 0, width: '50%', display: 'flex' };
+                  if (tab.id === splitTabId) return { position: 'absolute', top: 0, bottom: 0, left: `${splitPct}%`, right: 0, paddingTop: 28, display: 'flex' };
+                  if (tab.id === primarySplitTabId) return { position: 'absolute', top: 0, bottom: 0, left: 0, width: `${splitPct}%`, display: 'flex' };
                   return { position: 'absolute', inset: 0, display: 'none' };
                 }
                 return { position: 'absolute', inset: 0, display: isActive ? 'flex' : 'none' };
@@ -669,7 +772,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
               const draggingNewTab = !!draggingTabId && (!gridSlots || !gridSlots.includes(draggingTabId));
 
               return (
-                <div className="flex-1 min-h-0 min-w-0" style={containerStyle}>
+                <div ref={terminalLayoutRef} className="flex-1 min-h-0 min-w-0" style={containerStyle}>
                   {tabsInitialized && tabs.map((tab) => (
                     <div key={tab.id} style={paneStyleFor(tab)}>
                       <TerminalPane
@@ -688,9 +791,17 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                     if (!splitTab) return null;
                     return (
                       <>
-                        <div style={{ position: 'absolute', top: 0, bottom: 0, left: 'calc(50% - 0.5px)', width: 1, backgroundColor: 'var(--border)', zIndex: 5 }} />
+                        <div style={{ position: 'absolute', top: 0, bottom: 0, left: `calc(${splitPct}% - 0.5px)`, width: 1, backgroundColor: 'var(--border)', zIndex: 5 }} />
+                        <div
+                          onMouseDown={startSplitResize}
+                          title="Drag to resize split"
+                          style={{
+                            position: 'absolute', top: 0, bottom: 0, left: `calc(${splitPct}% - 4px)`,
+                            width: 8, cursor: 'col-resize', zIndex: 9,
+                          }}
+                        />
                         <div style={{
-                          position: 'absolute', top: 0, right: 0, width: '50%', height: 28,
+                          position: 'absolute', top: 0, right: 0, left: `${splitPct}%`, height: 28,
                           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                           padding: '0 10px', borderBottom: '1px solid var(--border)',
                           backgroundColor: 'var(--surface)', zIndex: 6,
@@ -711,6 +822,32 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                       </>
                     );
                   })()}
+
+                  {gridActive && cols === 2 && (
+                    <div
+                      onMouseDown={startGridColumnResize}
+                      title="Drag to resize columns"
+                      style={{
+                        position: 'absolute', top: 0, bottom: 0, left: `calc(${gridColPct}% - 4px)`,
+                        width: 8, cursor: 'col-resize', zIndex: 9,
+                      }}
+                    />
+                  )}
+
+                  {gridActive && rows > 1 && normalizedRows.slice(0, -1).map((_, idx) => {
+                    const top = normalizedRows.slice(0, idx + 1).reduce((sum, r) => sum + r, 0) * 100;
+                    return (
+                      <div
+                        key={`gr-${idx}`}
+                        onMouseDown={(e) => startGridRowResize(e, idx, rows, normalizedRows)}
+                        title="Drag to resize rows"
+                        style={{
+                          position: 'absolute', left: 0, right: 0, top: `calc(${top}% - 4px)`,
+                          height: 8, cursor: 'row-resize', zIndex: 9,
+                        }}
+                      />
+                    );
+                  })}
 
                   {/* Grid chrome — one header per terminal (drag to reorder · click to
                       focus · ✕ to remove). Placed at the same cell as its pane and keyed

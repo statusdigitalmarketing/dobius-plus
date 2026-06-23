@@ -41,11 +41,14 @@ export const useStore = create((set, get) => ({
   activeTabId: null,
   tabCounter: 0,
   splitTabId: null,
+  splitRatio: 0.5,
 
   // Terminal grid — null when off; otherwise a dense, ordered list of 1–6 tabIds.
   // The tile layout is derived from the count (no empty cells). Split view and
   // grid are mutually exclusive. Drag-to-add is the only way in.
   gridSlots: null,
+  gridColumnRatio: 0.5,
+  gridRowRatios: [],
 
   // tabId currently being dragged from the tab bar (drives grid drop zones).
   draggingTabId: null,
@@ -56,6 +59,17 @@ export const useStore = create((set, get) => ({
 
   // Agent activity: Map<agentId, { status, lastActivity, linesProcessed, startTime, currentAction }>
   agentActivity: {},
+
+  // Terminal-tab status: Map<tabId, 'idle' | 'working' | 'done' | 'needs'>.
+  // Drives the text-message-style status dot on each tab (gray = plain shell,
+  // yellow = working, green = managed Claude/Codex done, red = needs your
+  // response). Ephemeral runtime state — intentionally NOT persisted to config
+  // or stored on the tab object.
+  tabStatus: {},
+  setTabStatus: (tabId, status) => set((s) => {
+    if (!tabId || s.tabStatus[tabId] === status) return {};
+    return { tabStatus: { ...s.tabStatus, [tabId]: status } };
+  }),
 
   // Activity timeline: chronological feed of agent actions (max 100)
   activityTimeline: [],
@@ -98,11 +112,14 @@ export const useStore = create((set, get) => ({
     for (const key of Object.keys(ra)) {
       if (ra[key] === tabId) { delete ra[key]; delete aa[key]; }
     }
+    const ts = { ...state.tabStatus };
+    delete ts[tabId];
     set({
       terminalTabs: tabs,
       activeTabId: newActive,
       runningAgents: ra,
       agentActivity: aa,
+      tabStatus: ts,
       splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
       gridSlots: pruneGrid(state.gridSlots, new Set(tabs.map((t) => t.id))),
       monitoredTabs: state.monitoredTabs.filter((id) => id !== tabId),
@@ -111,6 +128,7 @@ export const useStore = create((set, get) => ({
 
   setSplitTab: (tabId) => set({ splitTabId: tabId, gridSlots: null }),
   clearSplitTab: () => set({ splitTabId: null }),
+  setSplitRatio: (ratio) => set({ splitRatio: Math.min(0.8, Math.max(0.2, Number(ratio) || 0.5)) }),
 
   // Grid actions ----------------------------------------------------------
   // Append a tab to the grid (max 6), starting grid mode if needed. A tab can
@@ -144,6 +162,12 @@ export const useStore = create((set, get) => ({
 
   // Restore a persisted layout (already validated against live tabs by caller).
   setGridSlots: (slots) => set({ gridSlots: slots }),
+  setGridColumnRatio: (ratio) => set({ gridColumnRatio: Math.min(0.8, Math.max(0.2, Number(ratio) || 0.5)) }),
+  setGridRowRatios: (ratios) => set({
+    gridRowRatios: Array.isArray(ratios)
+      ? ratios.map((r) => Math.max(0.12, Number(r) || 0)).filter((r) => r > 0)
+      : [],
+  }),
 
   setActiveTab: (tabId) => set({ activeTabId: tabId }),
 
@@ -181,7 +205,9 @@ export const useStore = create((set, get) => ({
     for (const key of Object.keys(ra)) {
       if (removedIds.has(ra[key])) { delete ra[key]; delete aa[key]; }
     }
-    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra, agentActivity: aa, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    const ts = { ...state.tabStatus };
+    for (const id of removedIds) delete ts[id];
+    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {
@@ -200,9 +226,11 @@ export const useStore = create((set, get) => ({
     for (const key of Object.keys(ra)) {
       if (removedIds.has(ra[key])) { delete ra[key]; delete aa[key]; }
     }
+    const ts = { ...state.tabStatus };
+    for (const id of removedIds) delete ts[id];
     const allKept = [...kept, ...pinnedRight];
     const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
-    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra, agentActivity: aa, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   // Actions

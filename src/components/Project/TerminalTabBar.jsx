@@ -2,6 +2,18 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
 import { markDoNotKill } from '../../hooks/useTerminal';
 
+// Text-message-style tab status. NOTE: this intentionally differs from the app's
+// other surfaces (Board/Mission Control), where green = working. On terminal
+// tabs: gray = plain shell/idle, yellow = working, green = managed done, red =
+// needs you.
+// Don't "fix" this to match the other convention.
+const STATUS_COLORS = { idle: '#8B949E', working: '#D29922', done: '#3FB950', needs: '#F85149' };
+const STATUS_LABELS = { idle: 'Terminal idle', working: 'Working', done: 'Done', needs: 'Needs your response' };
+
+function isManagedAgentProcess(proc) {
+  return /\b(claude|codex)\b/i.test(String(proc || ''));
+}
+
 export default function TerminalTabBar() {
   const tabs = useStore((s) => s.terminalTabs);
   const activeTabId = useStore((s) => s.activeTabId);
@@ -21,6 +33,7 @@ export default function TerminalTabBar() {
   const setSplitTab = useStore((s) => s.setSplitTab);
   const clearSplitTab = useStore((s) => s.clearSplitTab);
   const setDraggingTabId = useStore((s) => s.setDraggingTabId);
+  const tabStatus = useStore((s) => s.tabStatus);
 
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
@@ -362,19 +375,27 @@ export default function TerminalTabBar() {
                 />
               )}
 
-              {/* Process status badge */}
-              {tabProcesses[tab.id] && (
-                <span
-                  title={tabProcesses[tab.id]}
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: '50%',
-                    backgroundColor: tabProcesses[tab.id].includes('claude') ? '#3FB950' : '#D29922',
-                    flexShrink: 0,
-                  }}
-                />
-              )}
+              {/* Status dot — unknown/plain terminal state falls back to gray. */}
+              {(() => {
+                const proc = tabProcesses[tab.id];
+                const rawStatus = tabStatus[tab.id] || 'idle';
+                const status = rawStatus === 'done' && !isManagedAgentProcess(proc) ? 'idle' : rawStatus;
+                const color = STATUS_COLORS[status] || STATUS_COLORS.idle;
+                const title = proc ? `${STATUS_LABELS[status]} · ${proc}` : STATUS_LABELS[status];
+                return (
+                  <span
+                    title={title}
+                    className={status === 'needs' ? 'dobius-status-pulse' : undefined}
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: '50%',
+                      backgroundColor: color,
+                      flexShrink: 0,
+                    }}
+                  />
+                );
+              })()}
 
               {/* Pin indicator */}
               {tab.pinned && (

@@ -48,6 +48,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   const [isImproving, setIsImproving] = useState(false);
   const inputRef = useRef(null);
   const searchInputRef = useRef(null);
+  const suppressNextAutoFocusRef = useRef(false);
 
   // Track mount state for in-flight send cleanup
   useEffect(() => {
@@ -58,12 +59,23 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   // Auto-focus the command input on mount and when this tab becomes active
   const activeTabId = useStore((s) => s.activeTabId);
   const activeView = useStore((s) => s.activeView);
+  const setActiveTab = useStore((s) => s.setActiveTab);
   useEffect(() => {
     if (activeTabId === id && activeView === 'terminal') {
+      if (suppressNextAutoFocusRef.current) {
+        suppressNextAutoFocusRef.current = false;
+        return;
+      }
       // Use rAF to ensure DOM is ready after display:none→flex switch
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [activeTabId, activeView, id]);
+
+  const activatePane = useCallback((preserveFocus = true) => {
+    if (useStore.getState().activeTabId === id) return;
+    suppressNextAutoFocusRef.current = preserveFocus;
+    setActiveTab(id);
+  }, [id, setActiveTab]);
 
   // Cmd+F to toggle search
   useEffect(() => {
@@ -398,6 +410,9 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       ref={wrapperRef}
       className={`w-full h-full flex flex-col ${className}`}
       style={{ backgroundColor: bg, position: 'relative' }}
+      onMouseDownCapture={() => activatePane(true)}
+      onFocusCapture={() => activatePane(true)}
+      onDragEnterCapture={() => activatePane(true)}
     >
       {/* Search bar */}
       {searchVisible && (
