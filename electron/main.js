@@ -70,6 +70,11 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // <webview> required for BrowserPane (v1.0.25+). Webview tag is sandboxed
+      // by default and partitioned via the persist:dobius-browser-pane string,
+      // so each browser pane is isolated from the renderer + from other panes'
+      // localStorage / cookies.
+      webviewTag: true,
     },
   });
 

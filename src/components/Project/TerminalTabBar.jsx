@@ -18,6 +18,7 @@ export default function TerminalTabBar() {
   const removeTab = useStore((s) => s.removeTab);
   const renameTab = useStore((s) => s.renameTab);
   const addTab = useStore((s) => s.addTab);
+  const addBrowserTab = useStore((s) => s.addBrowserTab);
   const reorderTabs = useStore((s) => s.reorderTabs);
   const closeOtherTabs = useStore((s) => s.closeOtherTabs);
   const closeTabsToRight = useStore((s) => s.closeTabsToRight);
@@ -384,9 +385,17 @@ export default function TerminalTabBar() {
                 />
               )}
 
-              {/* Status dot — green = done, yellow = working, red = needs you.
-                  Falls back to "done" (green) when no status is known yet. */}
-              {(() => {
+              {/* Browser tabs get a globe glyph; terminal tabs get the
+                  green/yellow/red status dot (no terminal status applies to
+                  webview-backed tabs). */}
+              {tab.kind === 'browser' ? (
+                <span
+                  title={tab.url || 'Browser'}
+                  style={{ fontSize: 10, color: 'var(--dim)', flexShrink: 0, lineHeight: 1 }}
+                >
+                  ◯
+                </span>
+              ) : (() => {
                 const status = tabStatus[tab.id] || 'done';
                 const color = STATUS_COLORS[status];
                 const proc = tabProcesses[tab.id];
@@ -492,31 +501,34 @@ export default function TerminalTabBar() {
         </button>
       )}
 
-      {/* New tab button */}
+      {/* New tab buttons — terminal (default click) + browser (alt/right-click,
+          or the dedicated globe button for discoverability). */}
       <button
         onClick={() => addTab(currentProjectPath)}
-        title="New Tab (Cmd+T)"
+        onContextMenu={(e) => { e.preventDefault(); addBrowserTab(currentProjectPath); }}
+        title="New Tab (Cmd+T) — right-click for Browser tab"
         style={{
-          width: 28,
-          height: 28,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          marginRight: 4,
-          marginLeft: 2,
-          borderRadius: 4,
-          fontSize: 16,
-          lineHeight: 1,
-          color: 'var(--dim)',
-          backgroundColor: 'transparent',
-          border: 'none',
-          cursor: 'pointer',
-          flexShrink: 0,
+          width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          marginLeft: 2, borderRadius: 4, fontSize: 16, lineHeight: 1,
+          color: 'var(--dim)', backgroundColor: 'transparent', border: 'none', cursor: 'pointer', flexShrink: 0,
         }}
         onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--border)'; }}
         onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
       >
         +
+      </button>
+      <button
+        onClick={() => addBrowserTab(currentProjectPath)}
+        title="New Browser tab (embedded preview)"
+        style={{
+          width: 26, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          marginRight: 4, marginLeft: 0, borderRadius: 4, fontSize: 13, lineHeight: 1,
+          color: 'var(--dim)', backgroundColor: 'transparent', border: 'none', cursor: 'pointer', flexShrink: 0,
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--border)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+      >
+        ◯
       </button>
 
       {/* Context menu (#25) */}

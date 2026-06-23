@@ -4,6 +4,7 @@ import { THEMES, applyTheme } from '../../lib/themes';
 import TopBar from '../shared/TopBar';
 import StatusBar from '../shared/StatusBar';
 import TerminalPane from './TerminalPane';
+import BrowserPane from './BrowserPane';
 import TerminalTabBar from './TerminalTabBar';
 import Sidebar from './Sidebar';
 import DashboardView from '../Dashboard/DashboardView';
@@ -655,12 +656,16 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                 <div className="flex-1 min-h-0 min-w-0" style={containerStyle}>
                   {tabsInitialized && tabs.map((tab) => (
                     <div key={tab.id} style={paneStyleFor(tab)}>
-                      <TerminalPane
-                        id={tab.id}
-                        cwd={tab.projectPath}
-                        theme={theme.xtermTheme}
-                        claimExisting={tab.id === tearOffTabId}
-                      />
+                      {tab.kind === 'browser' ? (
+                        <BrowserPane id={tab.id} url={tab.url} theme={theme.xtermTheme} />
+                      ) : (
+                        <TerminalPane
+                          id={tab.id}
+                          cwd={tab.projectPath}
+                          theme={theme.xtermTheme}
+                          claimExisting={tab.id === tearOffTabId}
+                        />
+                      )}
                     </div>
                   ))}
 

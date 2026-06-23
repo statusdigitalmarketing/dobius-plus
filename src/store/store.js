@@ -98,7 +98,10 @@ export const useStore = create((set, get) => ({
     const state = get();
     const counter = state.tabCounter + 1;
     const id = projectPath ? `term-${projectPath}-${counter}` : `term-main-${counter}`;
-    const tab = { id, label: `Tab ${counter}`, projectPath, createdAt: Date.now() };
+    // kind:'terminal' is the default and (load-bearing) — every existing
+    // tab persisted before v1.0.25 has no kind field, so the dispatcher in
+    // ProjectView treats undefined as 'terminal' (backwards compatible).
+    const tab = { id, label: `Tab ${counter}`, projectPath, kind: 'terminal', createdAt: Date.now() };
     set({
       terminalTabs: [...state.terminalTabs, tab],
       activeTabId: id,
@@ -106,6 +109,37 @@ export const useStore = create((set, get) => ({
     });
     return tab;
   },
+
+  // Add a browser pane (embedded webview). Slots into the same terminalTabs
+  // list as terminal tabs — the layout engine in ProjectView treats them
+  // uniformly except for which component renders inside the pane.
+  addBrowserTab: (projectPath, url) => {
+    const state = get();
+    const counter = state.tabCounter + 1;
+    const id = projectPath ? `term-${projectPath}-${counter}` : `term-main-${counter}`;
+    const safeUrl = (typeof url === 'string' && url.trim()) ? url.trim() : 'http://localhost:5173';
+    const tab = {
+      id,
+      label: 'Browser',
+      projectPath,
+      kind: 'browser',
+      url: safeUrl,
+      createdAt: Date.now(),
+    };
+    set({
+      terminalTabs: [...state.terminalTabs, tab],
+      activeTabId: id,
+      tabCounter: counter,
+    });
+    return tab;
+  },
+
+  // Update the URL stored on a browser tab — called when the user navigates
+  // inside the webview so the persisted state matches what's on screen.
+  updateTabUrl: (tabId, url) => set((s) => ({
+    terminalTabs: s.terminalTabs.map((t) =>
+      t.id === tabId && t.kind === 'browser' ? { ...t, url } : t),
+  })),
 
   removeTab: (tabId) => {
     const state = get();
