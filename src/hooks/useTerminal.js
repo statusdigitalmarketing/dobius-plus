@@ -7,7 +7,7 @@ import { useStore } from '../store/store';
 
 // States carried by the Dobius status marker (OSC 777;dobius;<state>), emitted by
 // the managed Claude Notification/Stop hook. Anything else is ignored.
-const TAB_STATUS_VALUES = new Set(['idle', 'working', 'done', 'needs']);
+const TAB_STATUS_VALUES = new Set(['working', 'done', 'needs']);
 
 // Terminal IDs that should not be killed on unmount (torn-off tabs).
 // Populated by TerminalTabBar before removing the tab, checked by cleanup.
@@ -135,7 +135,13 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
 
     term.open(containerRef.current);
 
-    requestAnimationFrame(() => {
+    // Cancellation flag for any async work that resolves after this effect
+    // unmounts (Codex audit HIGH: useTerminal.js:189 — restorePromise was
+    // calling terminalCreate / terminalClaimPty against a disposed term).
+    // Same flag also gates the rAF below and any future async resolves.
+    let cancelled = false;
+    const rafId = requestAnimationFrame(() => {
+      if (cancelled) return;
       fit();
     });
 
@@ -143,6 +149,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     let restorePromise = Promise.resolve();
     if (window.electronAPI.terminalLoadState) {
       restorePromise = window.electronAPI.terminalLoadState(id).then((state) => {
+        if (cancelled) return;
         if (state?.scrollback?.length > 0 && termRef.current) {
           for (const line of state.scrollback) {
             const safeLine = String(line).replace(/\x1b/g, '');
@@ -163,7 +170,12 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     const oscDisposable = term.parser.registerOscHandler(777, (payload) => {
       const parts = String(payload).split(';');
       if (parts[0] === 'dobius' && TAB_STATUS_VALUES.has(parts[1])) {
-        useStore.getState().setTabStatus(id, parts[1]);
+        const store = useStore.getState();
+        store.setTabStatus(id, parts[1]);
+        // Claim hook-ownership so useTabActivity's silence settler doesn't
+        // flip this tab to 'done' during a long quiet tool call. 'done' or
+        // unknown payload releases the claim back to output-flow inference.
+        store.markHookOwned(id, parts[1]);
         return true; // handled — do not pass through to other handlers / the screen
       }
       return false; // not ours (e.g. a real `notify` payload) — let xterm handle it
@@ -182,8 +194,12 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     });
 
     restorePromise.then(() => {
+      // Guard against the effect having unmounted between the restore and
+      // this callback. terminalCreate/terminalClaimPty would otherwise spawn
+      // a PTY for a disposed terminal component, leaking the PTY + producing
+      // ghost output that nothing renders.
+      if (cancelled) return;
       if (claimExisting) {
-        // Tear-off: claim the existing PTY from the old window
         window.electronAPI.terminalClaimPty(id);
       } else {
         window.electronAPI.terminalCreate(id, cwd);
@@ -207,10 +223,29 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     });
     observer.observe(containerRef.current);
 
+    // v1.0.28 copy-on-select: when the user finishes a selection (mouseup),
+    // auto-copy it to clipboard. xterm doesn't have a built-in copyOnSelect
+    // flag — onSelectionChange fires per-frame during drag which would spam
+    // the clipboard. mouseup fires once at the end which is the right time.
+    // Capture the container node in a local — containerRef.current can
+    // change between this effect and cleanup if the host element remounts,
+    // leaving a stale listener attached. Codex v1.0.28 round-1 LOW.
+    const mouseUpNode = containerRef.current;
+    const onMouseUp = () => {
+      const sel = term.getSelection();
+      if (sel && sel.trim()) {
+        navigator.clipboard?.writeText(sel).catch(() => { /* clipboard denied or unavailable */ });
+      }
+    };
+    mouseUpNode.addEventListener('mouseup', onMouseUp);
+
     return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafId);
       clearInterval(autoSaveInterval);
       clearTimeout(resizeTimer);
       observer.disconnect();
+      mouseUpNode?.removeEventListener('mouseup', onMouseUp);
       saveState();
       inputDisposable.dispose();
       oscDisposable.dispose();

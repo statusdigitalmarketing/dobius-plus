@@ -66,6 +66,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   skillReadFile: (skillPath, filename) => ipcRenderer.invoke('skill:readFile', skillPath, filename),
   skillWriteFile: (skillPath, filename, content) => ipcRenderer.invoke('skill:writeFile', skillPath, filename, content),
 
+  // Claude status hooks — manages an opt-in Notification/Stop hook block in
+  // ~/.claude/settings.json that drives the terminal-tab status dots.
+  claudeHooksGetStatus: () => ipcRenderer.invoke('claudeHooks:getStatus'),
+  claudeHooksEnable: (opts) => ipcRenderer.invoke('claudeHooks:enable', opts),
+  claudeHooksDisable: () => ipcRenderer.invoke('claudeHooks:disable'),
+
   // Checkpoints
   checkpointSave: (projectPath, checkpoint) => ipcRenderer.invoke('checkpoint:save', projectPath, checkpoint),
   checkpointList: (projectPath) => ipcRenderer.invoke('checkpoint:list', projectPath),

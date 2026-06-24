@@ -15,6 +15,45 @@ import { app } from 'electron';
 
 const terminals = new Map();
 
+/**
+ * Defensive startup check: node-pty's `spawn-helper` MUST be executable or
+ * every PTY opens blank (the helper is exec'd to launch the shell, and without
+ * +x that exec fails with EACCES). electron-builder's asar-unpack step has been
+ * seen to drop the bit, and an external file copy (scp/rsync) or a recursive
+ * chmod can do the same. Re-assert 0755 on launch so neither a bad build nor an
+ * accidental permission change can leave the user with dead terminals again.
+ * Safe to call every launch (chmod on an already-correct file is a no-op) and
+ * only touches a file inside our own app bundle. Returns true if the helper is
+ * executable afterward.
+ */
+export function ensureSpawnHelperExecutable() {
+  const candidates = [
+    process.resourcesPath
+      ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'node-pty', 'build', 'Release', 'spawn-helper')
+      : null,
+    path.join(process.cwd(), 'node_modules', 'node-pty', 'build', 'Release', 'spawn-helper'),
+  ].filter(Boolean);
+
+  let ok = false;
+  for (const helper of candidates) {
+    try {
+      if (!fs.existsSync(helper)) continue;
+      const mode = fs.statSync(helper).mode;
+      if ((mode & 0o111) === 0) {
+        fs.chmodSync(helper, 0o755);
+        console.warn(`[terminal-manager] spawn-helper was not executable; restored 0755: ${helper}`);
+      }
+      ok = true;
+    } catch (err) {
+      console.error(`[terminal-manager] spawn-helper check failed for ${helper}:`, err.message);
+    }
+  }
+  if (!ok) {
+    console.error('[terminal-manager] WARNING: node-pty spawn-helper not found or not fixable; terminals may open blank.');
+  }
+  return ok;
+}
+
 // Per-terminal rolling output buffer cap (bytes). Replayed to a freshly-
 // attached mobile client so it has real scrollback, not just the last screen.
 // 1MB is roughly 10-15k lines of terminal text.
@@ -125,10 +164,11 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
     subscribers: new Set(),
     outputBuffer: '',
     cwd: safeCwd,
-    // The project this terminal belongs to (the requested cwd before any home
-    // fallback). Used for exact-match project lookup — NOT a string prefix —
-    // so sibling projects sharing a path prefix (e.g. /x/app vs /x/app-v2)
-    // can't have their live PTYs killed by the wrong window closing.
+    // Track the requested project path (pre-fallback) for exact-match lookup
+    // in getTerminalsForProject. Carson's audit #2 (CRITICAL): the old
+    // id-string-prefix lookup collided on sibling projects whose paths
+    // shared a prefix (e.g. /x/app vs /x/app-v2 — closing one's window
+    // would kill the other's live PTYs).
     projectPath: (cwd && typeof cwd === 'string') ? cwd : null,
   });
   return { pid: term.pid };
@@ -329,9 +369,10 @@ export async function gracefulCloseAll() {
 }
 
 /**
- * Get terminal IDs belonging to a project, matched on the stored projectPath by
- * exact equality (not an id string-prefix, which collides for sibling projects
- * whose paths share a prefix, e.g. /x/app vs /x/app-v2).
+ * Get terminal IDs belonging to a project, matched on the stored projectPath
+ * by exact equality (not an id string-prefix, which collides for sibling
+ * projects whose paths share a prefix — e.g. /x/app vs /x/app-v2).
+ * Carson's audit #2 (CRITICAL).
  * @param {string} projectPath
  * @returns {string[]}
  */

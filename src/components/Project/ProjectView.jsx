@@ -4,6 +4,7 @@ import { THEMES, applyTheme } from '../../lib/themes';
 import TopBar from '../shared/TopBar';
 import StatusBar from '../shared/StatusBar';
 import TerminalPane from './TerminalPane';
+import BrowserPane from './BrowserPane';
 import TerminalTabBar from './TerminalTabBar';
 import Sidebar from './Sidebar';
 import DashboardView from '../Dashboard/DashboardView';
@@ -12,6 +13,7 @@ import QuitOverlay from '../shared/QuitOverlay';
 import ResumeBanner from './ResumeBanner';
 import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
+import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 
 export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel }) {
   const activeView = useStore((s) => s.activeView);
@@ -34,12 +36,11 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const setActiveTab = useStore((s) => s.setActiveTab);
   const initTabs = useStore((s) => s.initTabs);
   const initClosedTabs = useStore((s) => s.initClosedTabs);
+  // Split view + terminal grid state and actions
   const splitTabId = useStore((s) => s.splitTabId);
   const clearSplitTab = useStore((s) => s.clearSplitTab);
   const splitRatio = useStore((s) => s.splitRatio);
   const setSplitRatio = useStore((s) => s.setSplitRatio);
-
-  // Terminal grid state + actions
   const gridSlots = useStore((s) => s.gridSlots);
   const gridColumnRatio = useStore((s) => s.gridColumnRatio);
   const gridRowRatios = useStore((s) => s.gridRowRatios);
@@ -52,6 +53,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const setGridSlots = useStore((s) => s.setGridSlots);
   const setGridColumnRatio = useStore((s) => s.setGridColumnRatio);
   const setGridRowRatios = useStore((s) => s.setGridRowRatios);
+  const tabStatus = useStore((s) => s.tabStatus);
 
   const [pinnedIds, setPinnedIds] = useState([]);
   const [tabsInitialized, setTabsInitialized] = useState(false);
@@ -59,7 +61,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
 
   // Start agent activity monitoring for all running agents
   useAgentActivity();
-  // Per-tab status dots (working/done from output flow; red is hook-driven)
+  // Per-tab status dots (working/done inferred from output flow; red is hook-driven)
   useTabActivity();
 
   // Extract project name from path
@@ -81,11 +83,13 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const currentIsWorktree = useStore((s) => s.currentIsWorktree);
   const setCurrentIsWorktree = useStore((s) => s.setCurrentIsWorktree);
   const setCurrentDetached = useStore((s) => s.setCurrentDetached);
+  const setCurrentIsFork = useStore((s) => s.setCurrentIsFork);
   useEffect(() => {
     if (!projectPath || !window.electronAPI?.gitStatus) {
       setCurrentBranch('');
       setCurrentIsWorktree(false);
       setCurrentDetached(false);
+      setCurrentIsFork(false);
       return;
     }
     let cancelled = false;
@@ -101,6 +105,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         setCurrentBranch(s?.isRepo ? (s.branch || '') : '');
         setCurrentIsWorktree(!!s?.isWorktree);
         setCurrentDetached(!!(s?.isRepo && s?.detached));
+        setCurrentIsFork(!!(s?.isRepo && s?.isFork));
       } catch {
         // Swallow — leave previous values in place
       }
@@ -108,7 +113,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     refresh();
     const id = setInterval(refresh, 20000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [projectPath, activeTabId, setCurrentBranch, setCurrentIsWorktree, setCurrentDetached]);
+  }, [projectPath, activeTabId, setCurrentBranch, setCurrentIsWorktree, setCurrentDetached, setCurrentIsFork]);
 
   // Push window title (shown in Mission Control / window switcher).
   // Includes branch and a "(worktree)" suffix when the active tab is in one.
@@ -264,6 +269,61 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     if (!window.electronAPI?.configSetProject || !projectPath) return;
     window.electronAPI.configSetProject(projectPath, { themeIndex });
   }, [themeIndex, projectPath]);
+
+  // Persist the grid layout per project. Gate on hydration so the mount-time
+  // default (gridSlots: null) can't clobber a saved layout before it loads.
+  // Tear-off windows are ephemeral and never persist their grid.
+  // Skip the first persist after hydration — the restored gridSlots came
+  // from disk, writing it back is wasted I/O (and touches mtime, triggering
+  // any downstream watchers on the config file).
+  const gridPersistArmed = useRef(false);
+  useEffect(() => {
+    if (tearOffTabId) return;
+    if (!tabsInitialized || !projectPath || !window.electronAPI?.configSetProject) return;
+    if (!gridPersistArmed.current) { gridPersistArmed.current = true; return; }
+    window.electronAPI.configSetProject(projectPath, { gridSlots });
+  }, [gridSlots, tabsInitialized, projectPath, tearOffTabId]);
+
+  // Force xterm to re-fit when the pane layout changes. Switching to/from
+  // split or grid only changes the pane's CSS width (100% → 50%), and the
+  // ResizeObserver inside useTerminal doesn't reliably fire on pure CSS
+  // reflows where the parent didn't resize. Dispatching a window resize is
+  // the safest cross-browser signal — xterm's FitAddon + all the per-tab
+  // ResizeObservers respond to it. Delayed via rAF so the new CSS has been
+  // painted before xterm measures the new container.
+  useEffect(() => {
+    if (!tabsInitialized) return;
+    const id = requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+    return () => cancelAnimationFrame(id);
+  }, [splitTabId, gridSlots, tabsInitialized]);
+
+  // Defensive guard: paneStyleFor renders splitTabId on the right and
+  // activeTabId on the left. If those collide (Cmd+number activated the
+  // split tab, programmatic activeTab change, etc.), the left half goes
+  // blank. The menu handler already routes around this, but any other path
+  // that sets activeTabId can hit it — auto-pick a different tab as the
+  // left pane when the collision is detected.
+  useEffect(() => {
+    if (!splitTabId || splitTabId !== activeTabId) return;
+    const tabs = useStore.getState().terminalTabs;
+    const idx = tabs.findIndex((t) => t.id === splitTabId);
+    const other = tabs[idx + 1] || tabs[idx - 1];
+    if (other) useStore.getState().setActiveTab(other.id);
+    else useStore.getState().clearSplitTab(); // only one tab — split is meaningless
+  }, [activeTabId, splitTabId]);
+
+  // Same class of defense for grid mode: paneStyleFor hides any tab not in
+  // gridSlots when grid mode is on. The tab-bar click handler exits grid
+  // mode when the user clicks a non-grid tab, but Cmd+1-9, New Tab, and any
+  // programmatic setActiveTab bypass that. Mirror the guard at the state
+  // level — if the active tab isn't in the grid, drop grid mode so the
+  // newly-active terminal becomes visible (input/paste/git polling target
+  // matches what the user sees).
+  useEffect(() => {
+    if (!gridSlots || !activeTabId) return;
+    if (gridSlots.includes(activeTabId)) return;
+    useStore.getState().setGridSlots(null);
+  }, [activeTabId, gridSlots]);
 
   // Save tabs to config whenever they change (skip for tear-off windows to avoid conflicts)
   useEffect(() => {
@@ -424,12 +484,49 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
 
   const handleResumeSession = useCallback((session) => {
     if (!session.sessionId || !/^[\w-]+$/.test(session.sessionId)) return;
-    setActiveView('terminal');
-    const cmd = `claude --resume ${session.sessionId}\r`;
-    const termId = useStore.getState().activeTabId;
-    if (window.electronAPI && termId) {
-      window.electronAPI.terminalWrite(termId, cmd);
+
+    // v1.0.28 fix #2 — dead-session guard. Sessions whose transcripts have
+    // ballooned past Claude's load ceiling will hang silently on --resume.
+    // Block them up front with a visible reason. sizeMB threshold is empirical
+    // (~80MB starts paging out the CLI on M-series machines, >150MB OOMs).
+    if (session.sizeMB && session.sizeMB > 80) {
+      const mb = session.sizeMB.toFixed(0);
+      console.warn(`[resume] skipping ${session.sessionId} (${mb}MB, too large to load)`);
+      // Surface to user via a one-shot alert — better than silent hang.
+      if (typeof window !== 'undefined') {
+        window.alert(`Can't resume this session — transcript is ${mb}MB, too large for Claude to load.\n\nStart a fresh session and use HANDOFF.md / git log to bring it up to speed.`);
+      }
+      return;
     }
+
+    setActiveView('terminal');
+    const termId = useStore.getState().activeTabId;
+    if (!window.electronAPI || !termId) return;
+
+    // v1.0.28 fix #1 — cd to the session's project first. claude --resume
+    // assumes the cwd matches the project the session was originally run in;
+    // resuming a session for /x/projectA from a terminal sitting in /x/projectB
+    // gave Claude the wrong file context. `&&` short-circuits if cd fails
+    // (typo, deleted dir), so we never run resume in the wrong place.
+    //
+    // Single-quoting an absolute path is shell-safe for everything except
+    // embedded single quotes — which we escape by closing-quote + literal
+    // backslash-quote + reopening-quote, the canonical POSIX trick. NULs
+    // and other control chars never appear in real filesystem paths but
+    // we reject them defensively. Critically: if the path can't be made
+    // safe, we ABORT (no fallback to bare --resume — that's the wrong-cwd
+    // bug we're trying to fix). Codex v1.0.28 round-1 MED.
+    const projectPath = session.project || '';
+    if (!projectPath || !projectPath.startsWith('/') || /[\x00-\x1F\x7F]/.test(projectPath)) {
+      console.warn(`[resume] aborting — invalid project path for session ${session.sessionId}`);
+      if (typeof window !== 'undefined') {
+        window.alert(`Can't resume this session — its project path is missing or invalid.\n\nOpen the session's project window directly first.`);
+      }
+      return;
+    }
+    const safeProject = projectPath.replace(/'/g, "'\\''");
+    const cmd = `cd '${safeProject}' && claude --resume ${session.sessionId}\r`;
+    window.electronAPI.terminalWrite(termId, cmd);
   }, [setActiveView]);
 
   // Cmd+R / menu "Resume Last Session" — resume the latest session that ran in
@@ -775,12 +872,16 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                 <div ref={terminalLayoutRef} className="flex-1 min-h-0 min-w-0" style={containerStyle}>
                   {tabsInitialized && tabs.map((tab) => (
                     <div key={tab.id} style={paneStyleFor(tab)}>
-                      <TerminalPane
-                        id={tab.id}
-                        cwd={tab.projectPath}
-                        theme={theme.xtermTheme}
-                        claimExisting={tab.id === tearOffTabId}
-                      />
+                      {tab.kind === 'browser' ? (
+                        <BrowserPane id={tab.id} url={tab.url} theme={theme.xtermTheme} />
+                      ) : (
+                        <TerminalPane
+                          id={tab.id}
+                          cwd={tab.projectPath}
+                          theme={theme.xtermTheme}
+                          claimExisting={tab.id === tearOffTabId}
+                        />
+                      )}
                     </div>
                   ))}
 
@@ -849,12 +950,13 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                     );
                   })}
 
-                  {/* Grid chrome — one header per terminal (drag to reorder · click to
-                      focus · ✕ to remove). Placed at the same cell as its pane and keyed
-                      by tabId so it travels with the terminal on reorder. */}
+                  {/* Grid chrome — one header per terminal (status dot · drag to
+                      reorder · click to focus · ✕ to remove). Placed at the same cell
+                      as its pane and keyed by tabId so it travels on reorder. */}
                   {gridActive && gridSlots.map((slotTabId, idx) => {
                     const slotTab = tabs.find((t) => t.id === slotTabId);
                     if (!slotTab) return null;
+                    const status = tabStatus[slotTabId] || 'done';
                     return (
                       <div
                         key={`gh-${slotTabId}`}
@@ -882,8 +984,16 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                         onClick={() => setActiveTab(slotTabId)}
                         title="Drag to reorder · click to focus"
                       >
-                        <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {slotTab.label}
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>
+                          {/* Status dot — green = done, yellow = working, red = needs you */}
+                          <span
+                            title={STATUS_LABELS[status]}
+                            className={status === 'needs' ? 'dobius-status-pulse' : undefined}
+                            style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: STATUS_COLORS[status], flexShrink: 0 }}
+                          />
+                          <span style={{ fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {slotTab.label}
+                          </span>
                         </span>
                         <span
                           onClick={(e) => { e.stopPropagation(); removeFromGrid(idx); }}

@@ -15,13 +15,14 @@ export default function TopBar({ projectName }) {
     ? (tabs.find((t) => t.id === activeTabId)?.label || '')
     : '';
 
-  // Git context for the active tab. Hidden entirely outside a git repo.
+  // Git context shown in the top bar: which branch / worktree / fork you're on.
   const currentBranch = useStore((s) => s.currentBranch);
   const currentIsWorktree = useStore((s) => s.currentIsWorktree);
   const currentDetached = useStore((s) => s.currentDetached);
+  const currentIsFork = useStore((s) => s.currentIsFork);
   const showGit = activeView === 'terminal' && (currentDetached || !!currentBranch);
-  const gitRef = currentDetached ? 'detached' : currentBranch;
-  const gitKind = currentDetached ? null : (currentIsWorktree ? 'worktree' : 'branch');
+  // A fork takes label priority over worktree (you can be both); detached has no kind tag.
+  const gitKind = currentDetached ? null : (currentIsFork ? 'fork' : (currentIsWorktree ? 'worktree' : null));
 
   return (
     <>
@@ -82,19 +83,26 @@ export default function TopBar({ projectName }) {
         {showGit && (
           <>
             <span style={{ opacity: 0.5 }}>·</span>
-            <span style={{ color: 'var(--fg)' }}>{gitRef}</span>
+            <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ opacity: 0.7 }}>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m9-9a3 3 0 11-3-3m3 3v3a3 3 0 01-3 3H9" />
+            </svg>
+            <span
+              style={{ color: 'var(--fg)' }}
+              title={currentDetached
+                ? 'Detached HEAD — not on a branch'
+                : `On branch ${currentBranch}${gitKind ? ` (${gitKind})` : ''}. Polled every 20s, follows the active tab's cwd.`}
+            >
+              {currentDetached ? 'detached' : currentBranch}
+            </span>
             {gitKind && (
-              <>
-                <span style={{ opacity: 0.5 }}>·</span>
-                <span
-                  style={{
-                    color: gitKind === 'worktree' ? 'var(--git-worktree)' : 'var(--dim)',
-                    fontWeight: gitKind === 'worktree' ? 600 : 400,
-                  }}
-                >
-                  {gitKind}
-                </span>
-              </>
+              <span
+                style={{
+                  color: 'var(--accent)',
+                  fontWeight: 600,
+                }}
+              >
+                {gitKind}
+              </span>
             )}
           </>
         )}

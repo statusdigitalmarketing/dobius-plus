@@ -87,6 +87,8 @@ export default function StatusBar() {
   const activeTabId = useStore((s) => s.activeTabId);
   const currentBranch = useStore((s) => s.currentBranch);
   const currentIsWorktree = useStore((s) => s.currentIsWorktree);
+  const currentDetached = useStore((s) => s.currentDetached);
+  const currentIsFork = useStore((s) => s.currentIsFork);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const ctx = useContextSize(currentProjectPath);
   const monitors = useMonitors();
@@ -95,6 +97,7 @@ export default function StatusBar() {
   const hasActive = activeProcesses.length > 0;
   const activeTab = tabs.find((t) => t.id === activeTabId);
   const projectName = currentProjectPath ? currentProjectPath.split('/').filter(Boolean).pop() : '';
+  const gitKind = currentDetached ? null : (currentIsFork ? 'fork' : (currentIsWorktree ? 'worktree' : null));
 
   return (
     <div
@@ -126,20 +129,20 @@ export default function StatusBar() {
             {projectName || 'monitor'} ×{monitors.count}
           </span>
         )}
-        {currentBranch && (
+        {(currentBranch || currentDetached) && (
           <span
             className="flex items-center gap-1"
-            title={currentIsWorktree
-              ? `Branch ${currentBranch} (linked git worktree). Polled every 20s, follows the active tab's cwd.`
-              : `Branch ${currentBranch}. Polled every 20s, follows the active tab's cwd.`}
+            title={currentDetached
+              ? 'Detached HEAD — not on a branch. Polled every 20s, follows the active tab\'s cwd.'
+              : `Branch ${currentBranch}${gitKind ? ` (${gitKind})` : ''}. Polled every 20s, follows the active tab's cwd.`}
             style={{ color: 'var(--fg)' }}
           >
             <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
               <path d="M11.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm-2.25.75a2.25 2.25 0 1 1 3 2.122v1.005A2.25 2.25 0 0 1 10.25 8.5h-3.5a.75.75 0 0 0-.75.75v2.378a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.875a2.25 2.25 0 0 1 .75-.128h3.5a.75.75 0 0 0 .75-.75V5.372A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" />
             </svg>
-            {currentBranch}
-            {currentIsWorktree && (
-              <span style={{ color: 'var(--accent)', marginLeft: 4 }}>worktree</span>
+            {currentDetached ? 'detached' : currentBranch}
+            {gitKind && (
+              <span style={{ color: 'var(--accent)', marginLeft: 4 }}>{gitKind}</span>
             )}
           </span>
         )}

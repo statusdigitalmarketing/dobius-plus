@@ -85,6 +85,24 @@ function knownToken(token) {
   return getMobileServerConfig().devices.some((d) => d.token === token);
 }
 
+// Compute the public-facing opaque deviceId for a device. Stored deviceId
+// wins (post-v1.0.28 devices). Legacy entries without one get a deterministic
+// SHA-256-derived id so the UI/removal path agrees with listDevices on the
+// same value. Single source of truth: BOTH listDevices AND removeMobileDevice
+// must use this helper or removal silently no-ops on legacy entries.
+// Codex v1.0.28 round-1 HIGH.
+export function deriveDeviceId(device) {
+  if (device?.deviceId) return device.deviceId;
+  if (!device?.token) return null;
+  return `legacy-${crypto.createHash('sha256').update(device.token).digest('hex').slice(0, 16)}`;
+}
+
+// Active authenticated WebSocket sessions, keyed by token, so removeMobileDevice
+// can forcibly close every live socket for a revoked device instead of leaving
+// pre-revocation connections authorized until they disconnect on their own.
+// Codex v1.0.28 HIGH (mobile-server.js:400).
+const activeSocketsByToken = new Map(); // token -> Set<WebSocket>
+
 /** Send a JSON message on a WebSocket if it's still open. */
 function wsSend(socket, obj) {
   if (socket.readyState === 1) {
@@ -265,9 +283,13 @@ export async function startMobileServer() {
       return res.status(403).json({ ok: false, error: 'Invalid pairing code.' });
     }
     const token = crypto.randomBytes(32).toString('hex');
+    // Stable opaque device id used by the UI for listing + removal targeting.
+    // Tokens stay server-side only — Codex v1.0.28 HIGH (main.js:987).
+    const deviceId = crypto.randomBytes(8).toString('hex');
     const cfg = getMobileServerConfig();
     const devices = [...cfg.devices, {
       token,
+      deviceId,
       name: typeof deviceName === 'string' && deviceName.trim() ? deviceName.trim().slice(0, 60) : 'Phone',
       pairedAt: Date.now(),
     }];
@@ -390,6 +412,7 @@ export async function startMobileServer() {
   wss = new WebSocketServer({ server: httpServer, path: '/ws', maxPayload: MAX_WS_PAYLOAD });
   wss.on('connection', (socket) => {
     let authed = false;
+    let authedToken = null; // remembered so cleanup + revocation lookup work
     const subs = new Map(); // terminalId -> unsubscribe fn
     const authTimer = setTimeout(() => { if (!authed) socket.close(4001, 'auth timeout'); }, AUTH_TIMEOUT_MS);
 
@@ -399,7 +422,12 @@ export async function startMobileServer() {
       if (!authed) {
         if (msg.type === 'auth' && knownToken(msg.token)) {
           authed = true;
+          authedToken = msg.token;
           clearTimeout(authTimer);
+          // Register so removeMobileDevice can force-disconnect us if revoked.
+          let set = activeSocketsByToken.get(authedToken);
+          if (!set) { set = new Set(); activeSocketsByToken.set(authedToken, set); }
+          set.add(socket);
           wsSend(socket, { type: 'authed', version: app.getVersion() });
         } else {
           socket.close(4003, 'unauthorized');
@@ -415,6 +443,13 @@ export async function startMobileServer() {
         try { unsubscribe(); } catch { /* noop */ }
       }
       subs.clear();
+      if (authedToken) {
+        const set = activeSocketsByToken.get(authedToken);
+        if (set) {
+          set.delete(socket);
+          if (set.size === 0) activeSocketsByToken.delete(authedToken);
+        }
+      }
     };
     socket.on('close', cleanup);
     socket.on('error', cleanup);
@@ -445,6 +480,16 @@ export async function startMobileServer() {
 
 /** Stop the server. Resolves to a status object. */
 export function stopMobileServer() {
+  // Close every authenticated client socket explicitly. wss.close() rejects
+  // new connections but leaves existing ones alive until they drop on their
+  // own — phones could keep streaming PTY data after stopMobileServer.
+  // Codex v1.0.28 round-1 MED.
+  for (const sockets of activeSocketsByToken.values()) {
+    for (const s of sockets) {
+      try { s.close(1001, 'server stopped'); } catch { /* noop */ }
+    }
+  }
+  activeSocketsByToken.clear();
   if (wss) { try { wss.close(); } catch { /* noop */ } wss = null; }
   if (httpServer) { try { httpServer.close(); } catch { /* noop */ } httpServer = null; }
   boundAddress = null;
@@ -462,10 +507,31 @@ export function regeneratePairingCode() {
   return pairingCode;
 }
 
-/** Remove a paired device by token. */
-export function removeMobileDevice(token) {
+/**
+ * Remove a paired device by its opaque deviceId. Closes every authenticated
+ * WebSocket associated with the revoked device's token so a pre-revocation
+ * connection can't keep terminal access. Falls back to token-matching for
+ * pre-v1.0.28 callers (legacy UI passed the raw token); new UI passes deviceId.
+ * Codex v1.0.28 HIGHs (main.js:987 + mobile-server.js:400).
+ */
+export function removeMobileDevice(idOrToken) {
   const cfg = getMobileServerConfig();
-  updateMobileServerConfig({ devices: cfg.devices.filter((d) => d.token !== token) });
+  // Match by stored deviceId, the derived legacy deviceId, OR raw token
+  // (last is a back-compat path; current UI passes deviceId only).
+  const removed = cfg.devices.find((d) =>
+    d.deviceId === idOrToken
+    || deriveDeviceId(d) === idOrToken
+    || d.token === idOrToken);
+  if (!removed) return getMobileServerStatus();
+  updateMobileServerConfig({ devices: cfg.devices.filter((d) => d !== removed) });
+  // Force-close every authenticated socket bound to the revoked token.
+  const sockets = activeSocketsByToken.get(removed.token);
+  if (sockets) {
+    for (const s of sockets) {
+      try { s.close(4003, 'revoked'); } catch { /* noop */ }
+    }
+    activeSocketsByToken.delete(removed.token);
+  }
   return getMobileServerStatus();
 }
 

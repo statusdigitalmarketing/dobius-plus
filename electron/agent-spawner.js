@@ -116,8 +116,32 @@ export async function spawnAgent({ projectPath, agentId, initialPrompt, builtinA
   createTerminal(tabId, projectPath, null);
 
   // Type the launch command. Brief delay lets the shell prompt render first.
+  // Codex audit HIGH (agent-spawner.js:120): agent.model was interpolated
+  // into the shell command unsanitized. A custom agent with model:
+  // `claude-sonnet-4-6;rm -rf ~` would have run the rm. Whitelist the
+  // exact model IDs we know about, drop everything else silently.
+  // Allowed model identifiers. MUST include every value the renderer's
+  // model picker can save so a custom agent isn't silently launched
+  // model-less when its persisted model isn't in the set.
+  // Codex round-2 HIGH on agent-spawner.js:124. Keep this list in sync
+  // with src/components/Dashboard/AgentManager model selector + any other
+  // place the renderer offers model choices.
+  const KNOWN_MODELS = new Set([
+    'opus',                              // alias → claude-opus-4-8
+    'claude-opus-4-8',
+    'claude-opus-4-7',
+    'claude-opus-4-6',
+    'claude-sonnet-4-6',
+    'claude-sonnet-4-5-20250929',
+    'claude-haiku-4-5-20251001',
+    'claude-fable-5',
+  ]);
   const safePromptPath = promptPath.replace(/'/g, "'\\''");
-  const modelFlag = agent.model ? ` --model ${agent.model === 'opus' ? 'claude-opus-4-8' : agent.model}` : '';
+  let modelFlag = '';
+  if (agent.model && KNOWN_MODELS.has(agent.model)) {
+    const resolved = agent.model === 'opus' ? 'claude-opus-4-8' : agent.model;
+    modelFlag = ` --model ${resolved}`;
+  }
   const cmd = `claude --system-prompt-file '${safePromptPath}'${modelFlag}\r`;
   setTimeout(() => {
     writeTerminal(tabId, cmd);

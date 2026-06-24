@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useSessions } from '../../hooks/useSessions';
 import { useStore } from '../../store/store';
@@ -15,7 +15,32 @@ function timeAgo(ts) {
 }
 
 export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, onCdToProject }) {
-  const { sessions, sessionTabMap, loading, search, setSearch } = useSessions();
+  // v1.0.26: sidebar can scope to the current project via a toggle in the
+  // header. Persisted in config.settings.sidebarFilterToProject so it sticks
+  // across reloads. Fetched once on mount; updated whenever the toggle fires.
+  const currentProjectPath = useStore((s) => s.currentProjectPath);
+  const [projectScoped, setProjectScoped] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    window.electronAPI?.configGetSettings?.().then((s) => {
+      if (cancelled) return;
+      if (s?.sidebarFilterToProject !== undefined) setProjectScoped(!!s.sidebarFilterToProject);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const toggleProjectScope = useCallback(async () => {
+    const next = !projectScoped;
+    setProjectScoped(next);
+    try { await window.electronAPI?.configUpdateSettings?.({ sidebarFilterToProject: next }); }
+    catch (err) { console.warn('[Sidebar] persist filter toggle failed:', err.message); }
+  }, [projectScoped]);
+
+  const {
+    sessions, sessionTabMap, loading, search, setSearch, setLabel, clearLabel,
+  } = useSessions({ projectFilter: projectScoped && currentProjectPath ? currentProjectPath : null });
+
   const [selectedId, setSelectedId] = useState(null);
   const [previewSession, setPreviewSession] = useState(null);
   const [searchFocused, setSearchFocused] = useState(false);
@@ -74,20 +99,43 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
 
   return (
     <div className="h-full flex flex-col">
-      {/* Header + hint */}
-      <div className="px-3 pt-3 pb-1 shrink-0 flex items-center justify-between">
+      {/* Header + project-scope toggle */}
+      <div className="px-3 pt-3 pb-1 shrink-0 flex items-center justify-between gap-2">
         <span
           className="text-xs font-semibold uppercase tracking-wider"
           style={{ color: 'var(--fg)', fontSize: '11px', letterSpacing: '0.1em' }}
         >
           Sessions
         </span>
-        <span
-          className="text-xs italic"
-          style={{ color: 'var(--dim)', fontSize: '10px' }}
-        >
-          double-click to resume
-        </span>
+        <div className="flex items-center gap-2">
+          {currentProjectPath && (
+            <button
+              onClick={toggleProjectScope}
+              title={projectScoped
+                ? 'Showing only sessions from this project — click to show all'
+                : 'Showing all sessions — click to filter to this project'}
+              style={{
+                background: projectScoped ? 'var(--surface-hover)' : 'transparent',
+                color: projectScoped ? 'var(--accent)' : 'var(--dim)',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                cursor: 'pointer',
+                fontSize: 9,
+                fontFamily: "'SF Mono', monospace",
+                padding: '1px 6px',
+                lineHeight: 1.4,
+              }}
+            >
+              {projectScoped ? '⊙ this project' : '○ all'}
+            </button>
+          )}
+          <span
+            className="text-xs italic"
+            style={{ color: 'var(--dim)', fontSize: '10px' }}
+          >
+            dbl-click to resume
+          </span>
+        </div>
       </div>
 
       {/* Search */}
@@ -217,8 +265,11 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
                         selected={selectedId === session.sessionId}
                         pinned
                         tabLabel={tabLabelFor(session.sessionId)}
+                        hasCustomLabel={!!session.customLabel}
                         onSelect={(e) => handleClick(session, e)}
                         onTogglePin={() => onTogglePin?.(session.sessionId)}
+                        onRename={setLabel}
+                        onClearRename={clearLabel}
                       />
                     </motion.div>
                   ))}
@@ -247,8 +298,11 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
                     selected={selectedId === session.sessionId}
                     pinned={false}
                     tabLabel={tabLabelFor(session.sessionId)}
+                    hasCustomLabel={!!session.customLabel}
                     onSelect={(e) => handleClick(session, e)}
                     onTogglePin={() => onTogglePin?.(session.sessionId)}
+                    onRename={setLabel}
+                    onClearRename={clearLabel}
                   />
                 </motion.div>
               ))}

@@ -46,6 +46,31 @@ export default function Settings() {
     setAutoMode((a) => ({ ...a, enabled: r?.enabled ?? on }));
   }, []);
 
+  // Terminal-tab status dots — managed Claude Notification hook
+  const [statusHooks, setStatusHooks] = useState(false);
+  const [statusHooksBusy, setStatusHooksBusy] = useState(false);
+  const [statusHooksError, setStatusHooksError] = useState('');
+  useEffect(() => {
+    window.electronAPI?.claudeHooksGetStatus?.().then((r) => { if (r) setStatusHooks(!!r.installed); });
+  }, []);
+  const toggleStatusHooks = useCallback(async (on) => {
+    setStatusHooksBusy(true);
+    setStatusHooksError('');
+    let r = on
+      ? await window.electronAPI?.claudeHooksEnable?.()
+      : await window.electronAPI?.claudeHooksDisable?.();
+    // Confirm creation of ~/.claude/settings.json on first opt-in. The main
+    // process refuses to silently create the file — we ask the user first.
+    if (r?.error === 'needs-confirm-create') {
+      const ok = window.confirm(`${r.message}\n\nCreate it now?`);
+      if (!ok) { setStatusHooksBusy(false); return; }
+      r = await window.electronAPI?.claudeHooksEnable?.({ confirmCreate: true });
+    }
+    if (r?.error) setStatusHooksError(r.error);
+    else setStatusHooks(!!r?.installed);
+    setStatusHooksBusy(false);
+  }, []);
+
   // iMessage Bridge state
   const [imsgCfg, setImsgCfg] = useState(null);
   const [imsgStatus, setImsgStatus] = useState(null);
@@ -125,8 +150,10 @@ export default function Settings() {
     setMobileStatus(status);
   }, []);
 
-  const removeMobileDevice = useCallback(async (token) => {
-    await window.electronAPI.mobileServerRemoveDevice(token);
+  // v1.0.28: callers now pass the opaque deviceId (not the raw token) —
+  // listDevices no longer returns the bearer token to the renderer.
+  const removeMobileDevice = useCallback(async (deviceId) => {
+    await window.electronAPI.mobileServerRemoveDevice(deviceId);
     refreshMobile();
   }, [refreshMobile]);
 
@@ -307,6 +334,22 @@ export default function Settings() {
             onChange={(v) => updateSetting('sidebarDefaultOpen', v)}
           />
         </SettingRow>
+
+        <SettingRow
+          label="Tab status dots"
+          description="Green = done, yellow = working, red = needs you. Installs a Claude notification hook in ~/.claude/settings.json (your other hooks are left untouched)."
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {statusHooksError && (
+              <span style={{ color: 'var(--danger)', fontSize: 10, maxWidth: 180 }}>{statusHooksError}</span>
+            )}
+            <Toggle
+              checked={statusHooks}
+              disabled={statusHooksBusy}
+              onChange={(v) => toggleStatusHooks(v)}
+            />
+          </div>
+        </SettingRow>
       </Section>
 
       {/* Integrations */}
@@ -460,13 +503,13 @@ export default function Settings() {
                 <div className="space-y-1">
                   {mobileDevices.map((d) => (
                     <div
-                      key={d.token}
+                      key={d.deviceId || d.token /* legacy */}
                       className="flex items-center justify-between px-2 py-1 rounded"
                       style={{ backgroundColor: 'var(--surface)' }}
                     >
                       <span className="text-xs" style={{ color: 'var(--fg)' }}>{d.name}</span>
                       <button
-                        onClick={() => removeMobileDevice(d.token)}
+                        onClick={() => removeMobileDevice(d.deviceId || d.token)}
                         style={{
                           fontSize: 10, color: 'var(--danger)', background: 'none',
                           border: 'none', cursor: 'pointer',
@@ -630,10 +673,11 @@ function SettingRow({ label, description, children }) {
   );
 }
 
-function Toggle({ checked, onChange }) {
+function Toggle({ checked, onChange, disabled = false }) {
   return (
     <button
-      onClick={() => onChange(!checked)}
+      onClick={() => { if (!disabled) onChange(!checked); }}
+      disabled={disabled}
       style={{
         width: 36,
         height: 20,
@@ -641,7 +685,8 @@ function Toggle({ checked, onChange }) {
         backgroundColor: checked ? 'var(--accent)' : 'var(--border)',
         position: 'relative',
         border: 'none',
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
         transition: 'background-color 150ms',
       }}
     >

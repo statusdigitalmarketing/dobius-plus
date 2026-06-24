@@ -165,6 +165,8 @@ export function openProjectWindow(projectPath) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // BrowserPane (v1.0.25+) embeds <webview> for the dev-server preview.
+      // Tag is sandboxed + isolated via partition string in BrowserPane.jsx.
       webviewTag: true,
     },
   });
@@ -223,6 +225,9 @@ export function openTornOffWindow(projectPath, tabId, tabLabel, screenX, screenY
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // BrowserPane (v1.0.25+) embeds <webview> for the dev-server preview.
+      // Tag is sandboxed + isolated via partition string in BrowserPane.jsx.
+      webviewTag: true,
     },
   });
 

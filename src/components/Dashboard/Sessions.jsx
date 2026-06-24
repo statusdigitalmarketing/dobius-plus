@@ -1,6 +1,27 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
 import { timeAgo } from '../../lib/time-ago';
+import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
+
+const SESSION_CAP = 500; // mirrors loadAllSessions() — surface when we hit it
+
+function StatusDot({ status, size = 7 }) {
+  const st = STATUS_COLORS[status] ? status : 'done';
+  return (
+    <span
+      title={STATUS_LABELS[st]}
+      className={st === 'needs' ? 'dobius-status-pulse' : undefined}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: '50%',
+        backgroundColor: STATUS_COLORS[st],
+        flexShrink: 0,
+        display: 'inline-block',
+      }}
+    />
+  );
+}
 
 export default function Sessions() {
   const [sessions, setSessions] = useState([]);
@@ -30,6 +51,19 @@ export default function Sessions() {
 
   useEffect(() => {
     loadData();
+    // Live refresh: re-scan whenever the watcher reports session/history
+    // activity. Debounced 500ms — during an active Claude session the
+    // transcript flushes every few seconds, and a 6k-file scan even with
+    // v1.0.23's bounded readTail isn't free to fire back-to-back.
+    let timer = null;
+    const remove = window.electronAPI?.onDataUpdated?.(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { timer = null; loadData(); }, 500);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      remove?.();
+    };
   }, [loadData]);
 
   // Filter sessions
@@ -108,6 +142,11 @@ export default function Sessions() {
         </h2>
         <span className="text-xs" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
           {totalSessions} session{totalSessions !== 1 ? 's' : ''} across {totalProjects} project{totalProjects !== 1 ? 's' : ''}
+          {sessions.length >= SESSION_CAP && (
+            <span style={{ color: STATUS_COLORS.working, marginLeft: 6 }} title={`Showing the ${SESSION_CAP} most recent sessions; older ones are not listed.`}>
+              (showing newest {SESSION_CAP})
+            </span>
+          )}
         </span>
       </div>
 
@@ -194,6 +233,27 @@ export default function Sessions() {
                 <span className="text-xs" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
                   ({group.sessions.length})
                 </span>
+                {/* Status rollup — surfaces "needs you" / "working" counts per project */}
+                {(() => {
+                  const needs = group.sessions.filter((s) => s.status === 'needs').length;
+                  const working = group.sessions.filter((s) => s.status === 'working').length;
+                  return (
+                    <span className="flex items-center gap-1.5 ml-1">
+                      {needs > 0 && (
+                        <span className="flex items-center gap-1" title={`${needs} session${needs !== 1 ? 's' : ''} need your response`}>
+                          <StatusDot status="needs" size={6} />
+                          <span style={{ color: STATUS_COLORS.needs, fontSize: 10, fontFamily: "'SF Mono', monospace" }}>{needs}</span>
+                        </span>
+                      )}
+                      {working > 0 && (
+                        <span className="flex items-center gap-1" title={`${working} session${working !== 1 ? 's' : ''} working`}>
+                          <StatusDot status="working" size={6} />
+                          <span style={{ color: STATUS_COLORS.working, fontSize: 10, fontFamily: "'SF Mono', monospace" }}>{working}</span>
+                        </span>
+                      )}
+                    </span>
+                  );
+                })()}
                 <span className="text-xs ml-auto" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace", fontSize: 10 }}>
                   {timeAgo(group.latestTimestamp)}
                 </span>
@@ -296,6 +356,8 @@ function SessionCard({ session, tag, onTagsChanged, onDeleted }) {
       onMouseLeave={(e) => { if (!confirmDelete) e.currentTarget.style.borderColor = 'var(--border)'; }}
     >
       <div className="flex items-center gap-3">
+        {/* Status dot — green = done, yellow = working, red = needs your response */}
+        <StatusDot status={session.status} />
         {/* Preview text */}
         <div className="flex-1 min-w-0">
           <div className="text-xs truncate" style={{ color: 'var(--fg)' }}>

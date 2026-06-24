@@ -66,6 +66,12 @@ let saveTimer = null;
 // with a per-write unique tmp file, concurrent writers can never interleave a
 // write→rename and tear config.json.
 let writeChain = Promise.resolve();
+// Set true by flushConfig() at quit time. Any pending or new atomicWrite
+// callbacks that fire after this flips become no-ops, so a queued async
+// rename can't land AFTER the sync flush and overwrite fresher state
+// (v1.0.25/v1.0.26 tab/grid/browser-pane/terminal-ownership). Codex v1.0.27
+// round-1 HIGH.
+let flushed = false;
 
 /**
  * Drop terminalStates entries whose tab no longer exists in either the live
@@ -110,8 +116,13 @@ function pruneOrphanTerminalStates(cfg) {
 function atomicWrite(filePath, data) {
   const tmp = `${filePath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
   writeChain = writeChain.then(async () => {
+    // If flushConfig already wrote synchronously at quit time, the queued
+    // async write is stale by definition — skip it so it can't land after
+    // the sync flush and clobber fresher state.
+    if (flushed) return;
     try {
       await fsp.writeFile(tmp, data);
+      if (flushed) { try { await fsp.unlink(tmp); } catch { /* ignore */ } return; }
       await fsp.rename(tmp, filePath);
     } catch (err) {
       console.warn('[config-manager] config write failed:', err.message);
@@ -301,23 +312,19 @@ export function saveConfig(config) {
   }, 500);
 }
 
-// Apply only top-level scalar keys that the foreign whole-config snapshot
-// EXPLICITLY contains, onto the live cache. Object/array sections are skipped so
-// a stale snapshot can never overwrite the nested state (projects, settings,
-// accounts, …) that other writers manage concurrently.
-//
-// We deliberately do NOT delete scalar keys that are merely absent from the
-// snapshot: a config:save sends a whole-config object captured a moment earlier,
-// so "absent" can just mean "another writer added this key after the snapshot
-// was taken" — deleting it would drop that brand-new key. Only keys the snapshot
-// names are touched. (A renderer that wants to delete a key should send it as
-// null, or send a patch of changed keys rather than a whole-config object.)
+// Apply only top-level scalar keys of a foreign whole-config snapshot onto the
+// live cache (add/update, and honor deletions of scalar keys). Object/array
+// sections are skipped so a stale snapshot can never overwrite the nested state
+// (projects, settings, accounts, …) that other writers manage concurrently.
 function mergeForeignScalars(foreign) {
   if (!configCache) return;
   const isScalar = (v) => v === null || typeof v !== 'object';
   for (const [key, value] of Object.entries(foreign)) {
     if (UNSAFE_KEYS.has(key)) continue;
     if (isScalar(value)) configCache[key] = value;
+  }
+  for (const key of Object.keys(configCache)) {
+    if (isScalar(configCache[key]) && !(key in foreign)) delete configCache[key];
   }
 }
 
@@ -867,7 +874,28 @@ export function updateAsanaQueue(updates) {
   saveConfig(config);
 }
 
+// Async drain variant — awaits any queued atomicWrite calls before doing
+// the sync flush. This is the watertight version: a mid-flight rename
+// can't land AFTER a sync flush because we wait for it first.
+// Callers in before-quit MUST await this (preventDefault + app.quit()).
+export async function flushConfigAsync() {
+  // Wait for any pending writes to land BEFORE latching flushed. After this
+  // point, any NEW atomicWrite calls will be queued onto a chain that we
+  // immediately disarm via the flushed flag.
+  try { await writeChain; } catch { /* drain errors are already logged */ }
+  return flushConfigSyncTail();
+}
+
 export function flushConfig() {
+  // Legacy sync entrypoint. Does NOT drain the chain — pending async writes
+  // CAN still land after this returns (the race Codex called out). Use
+  // flushConfigAsync() instead. Kept here for the brief startup paths that
+  // still need a non-blocking sync flush.
+  return flushConfigSyncTail();
+}
+
+function flushConfigSyncTail() {
+  flushed = true;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;

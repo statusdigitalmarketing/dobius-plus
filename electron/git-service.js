@@ -36,12 +36,18 @@ export async function getGitStatus(projectDir) {
   const dir = validateDir(projectDir);
   if (!dir) return { isRepo: false };
   try {
-    const [branchOut, statusOut, aheadBehindOut, gitDirOut, commonDirOut] = await Promise.all([
+    const [branchOut, statusOut, aheadBehindOut, gitDirOut, commonDirOut, remotesOut, hasCommitsOut] = await Promise.all([
       run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], dir),
       run('git', ['status', '--porcelain'], dir),
-      run('git', ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'], dir).catch(() => '0\t0'),
+      run('git', ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'], dir).catch(() => ''),
       run('git', ['rev-parse', '--git-dir'], dir).catch(() => ''),
       run('git', ['rev-parse', '--git-common-dir'], dir).catch(() => ''),
+      run('git', ['remote'], dir).catch(() => ''),
+      // Virgin-repo guard: a freshly-`git init`'d repo with no commits also
+      // makes `rev-parse --abbrev-ref HEAD` return the literal "HEAD" in some
+      // Git versions — same as detached HEAD. Probing for an actual commit
+      // disambiguates the two.
+      run('git', ['rev-parse', '--verify', 'HEAD'], dir).catch(() => ''),
     ]);
 
     const lines = statusOut.trim().split('\n').filter(Boolean);
@@ -53,8 +59,6 @@ export async function getGitStatus(projectDir) {
       if (y !== ' ' && y !== '?') modified++;
     }
 
-    const [ahead, behind] = aheadBehindOut.trim().split(/\s+/).map(Number);
-
     // Worktree detection: a linked worktree's --git-dir is .git/worktrees/<name>
     // inside the main repo, while --git-common-dir always resolves to the main
     // .git. When the two differ, we're inside a linked worktree.
@@ -63,20 +67,46 @@ export async function getGitStatus(projectDir) {
     const isWorktree = !!(gitDir && commonDir && gitDir !== commonDir);
 
     // Detached HEAD: `git rev-parse --abbrev-ref HEAD` returns the literal
-    // "HEAD" when not on a branch. Surface it as a flag so the UI can label it.
+    // "HEAD" when not on a branch. But the same string comes back for a
+    // virgin repo (no commits yet), so gate on a successful HEAD resolve.
     const rawBranch = branchOut.trim();
-    const detached = rawBranch === 'HEAD';
+    const hasCommits = hasCommitsOut.trim().length > 0;
+    const detached = rawBranch === 'HEAD' && hasCommits;
+    const emptyRepo = rawBranch === 'HEAD' && !hasCommits;
+
+    // ahead/behind only have meaning when (a) we resolved a count AND (b) we're
+    // on a tracking branch. On detached HEAD or no-upstream there's no
+    // comparison to make — surface null so the UI shows "—" rather than a
+    // misleading "0 / 0 in sync" for a detached checkout that's miles off.
+    let ahead = null, behind = null;
+    if (!detached && !emptyRepo && aheadBehindOut.trim()) {
+      const [a, b] = aheadBehindOut.trim().split(/\s+/).map(Number);
+      if (Number.isFinite(a) && Number.isFinite(b)) { ahead = a; behind = b; }
+    }
+
+    // Fork detection: the canonical GitHub fork setup keeps your fork as `origin`
+    // and the original repo as a separate `upstream` remote. When both exist we
+    // treat the checkout as a fork so the top bar can label it distinctly from a
+    // plain branch. (Offline/fast — no network or `gh` dependency.)
+    const remotes = remotesOut.split('\n').map((r) => r.trim()).filter(Boolean);
+    const isFork = remotes.includes('origin') && remotes.includes('upstream');
 
     return {
       isRepo: true,
-      branch: detached ? '' : rawBranch,
+      // Give detached / empty-repo a human-readable branch label so existing
+      // consumers (GitSidePanel, GitStatusBar) that render status.branch
+      // directly don't show a blank field. The detached/emptyRepo flags
+      // remain available for callers that want to style the label specially.
+      branch: detached ? 'detached' : (emptyRepo ? 'no commits' : rawBranch),
       detached,
-      ahead: ahead || 0,
-      behind: behind || 0,
+      emptyRepo,
+      ahead,
+      behind,
       staged,
       modified,
       untracked,
       isWorktree,
+      isFork,
     };
   } catch {
     return { isRepo: false };

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '../store/store';
 
-const QUIET_MS = 1500;   // output silence before a working tab settles to idle
+const QUIET_MS = 1500;   // output silence before a working tab settles to "done"
 const TICK_MS = 1000;    // how often the settle check runs
 
 /**
@@ -9,13 +9,12 @@ const TICK_MS = 1000;    // how often the settle check runs
  * deterministic Claude hook markers (see useTerminal's OSC 777 handler).
  *
  * - Output flowing  → 'working' (yellow)
- * - ~1.5s of quiet  → 'idle' (gray)
+ * - ~1.5s of quiet  → 'done' (green)
  *
  * It deliberately NEVER sets or clears 'needs' (red): that state is owned by the
  * managed Claude hook so a repainting permission dialog can't flip it, and it
  * persists until the user actually answers (which fires a working/done marker).
- * This layer gives plain shell commands a yellow→gray dot; green is reserved for
- * managed Claude/Codex done markers.
+ * This layer also gives plain shell commands (e.g. a build) a yellow→green dot.
  *
  * Call once at the ProjectView level — a single onTerminalData listener routes
  * data to per-tab timers, mirroring useAgentActivity.
@@ -38,12 +37,20 @@ export function useTabActivity() {
 
     tickTimer.current = setInterval(() => {
       const now = Date.now();
-      const { tabStatus, setTabStatus } = useStore.getState();
+      const { tabStatus, setTabStatus, hookOwnedTabs } = useStore.getState();
       for (const [termId, ts] of Object.entries(lastDataTs.current)) {
         // Drop timers for tabs that have been closed (status entry pruned).
         if (!(termId in tabStatus)) { delete lastDataTs.current[termId]; continue; }
-        if (tabStatus[termId] === 'working' && now - ts > QUIET_MS) {
-          setTabStatus(termId, 'idle');
+        // Only settle 'working' tabs that AREN'T hook-owned. A quiet tool
+        // call (long shell exec, slow git fetch) emits no output for many
+        // seconds — but the hook's Stop event hasn't fired, so the tab is
+        // genuinely still working. hookOwnedTabs is set by useTerminal's OSC
+        // handler whenever the marker sets 'working' / 'needs', released
+        // when it sets 'done'.
+        if (tabStatus[termId] === 'working'
+            && !hookOwnedTabs[termId]
+            && now - ts > QUIET_MS) {
+          setTabStatus(termId, 'done');
         }
       }
     }, TICK_MS);

@@ -70,7 +70,8 @@ button {
   -webkit-backdrop-filter: blur(12px);
 }
 
-/* Terminal-tab "needs your response" dot — gentle pulse so it stands out. */
+/* "Needs your response" status dot — gentle pulse so it stands out.
+   Used by the terminal-tab dots, the grid cell headers, and the cross-session list. */
 @keyframes dobius-status-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }

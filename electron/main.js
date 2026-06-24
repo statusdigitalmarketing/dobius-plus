@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, listTerminals, reassignTerminal } from './terminal-manager.js';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, listTerminals, reassignTerminal, ensureSpawnHelperExecutable } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -23,7 +23,7 @@ import { watchProjectDir, unwatchProjectDir, getProjectEvents, stopAllFileWatche
 import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-monitor-watcher.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
-  getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig,
+  getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig, flushConfigAsync,
   getSessionTags, setSessionTag, removeSessionTag,
   getSessionTabMap, setSessionTabLink,
   getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
@@ -41,6 +41,7 @@ import { initAutoUpdater } from './auto-updater.js';
 import {
   startMobileServer, stopMobileServer, getMobileServerStatus,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
+  deriveDeviceId,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents } from './voice-bridge.js';
 import { ensureVoiceConductor, getVoiceConductorTabId } from './voice-conductor.js';
@@ -94,6 +95,11 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // <webview> required for BrowserPane (v1.0.25+). Webview tag is sandboxed
+      // by default and partitioned via the persist:dobius-browser-pane string,
+      // so each browser pane is isolated from the renderer + from other panes'
+      // localStorage / cookies.
+      webviewTag: true,
     },
   });
 
@@ -130,8 +136,49 @@ function createWindow() {
   });
 }
 
+// Tab ids are deterministic — `term-<projectPath>-<counter>` from store.addTab,
+// or `term-voice-conductor-1` / `term-mobile-*` for the bridges. Anything else
+// is renderer-fabricated and must be rejected before it can spawn a PTY or
+// write into one. Codex audit HIGH finding (main.js:115 + main.js:119).
+const TERMINAL_ID_RE = /^term-.+-\d+$/;
+const TERMINAL_WRITE_MAX_BYTES = 256 * 1024; // 256KB per write — plenty for a paste, blocks DoS
+
+// Per-webContents ownership of terminal ids. terminal:create records the
+// owning sender; terminal:write/resize/kill require the same sender. This
+// scopes the blast radius of a compromised renderer — XSS in window-A can't
+// reach into window-B's PTYs. Voice/mobile-bridge PTYs aren't created via
+// IPC (they go through createTerminal directly), so they're naturally
+// excluded from renderer write access. Codex round-2 HIGH on main.js:118.
+const terminalOwners = new Map(); // id -> webContents.id
+
+function ownsTerminal(senderId, id) {
+  if (!terminalOwners.has(id)) return false; // tab not created via IPC by ANY window
+  return terminalOwners.get(id) === senderId;
+}
+
 function setupTerminalHandlers() {
   ipcMain.handle('terminal:create', (event, id, cwd) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
+    if (cwd !== undefined && cwd !== null && typeof cwd !== 'string') return null;
+    // Reject hijack attempts: if this id is already owned by a DIFFERENT
+    // webContents, don't let the caller's createTerminal kill+replace the
+    // existing PTY. Same sender re-creating (e.g. after a reload) is fine.
+    // Codex round-3 HIGH on main.js:135.
+    const existingOwner = terminalOwners.get(id);
+    if (existingOwner !== undefined && existingOwner !== event.sender.id) return null;
+    terminalOwners.set(id, event.sender.id);
+    // If this sender goes away (window close, navigation), drop ownership so
+    // the id can be re-created by a new sender later. terminal-manager kills
+    // the actual PTY independently via webContents-destroyed logic. Guard
+    // the cleanup so it only removes when WE still own the id — a tear-off
+    // claim may have transferred ownership to another window between the
+    // create and the destroyed event.
+    const ownerId = event.sender.id;
+    event.sender.once('destroyed', () => {
+      if (terminalOwners.get(id) === ownerId) terminalOwners.delete(id);
+    });
+    // Per-account env (codex/claude) — points the spawned CLI at the right
+    // account's config dir / API key for this project.
     const accountEnv = {};
     const account = cwd ? getProjectAccount(cwd) : null;
     if (account?.type === 'codex' && account.apiKey) {
@@ -147,23 +194,39 @@ function setupTerminalHandlers() {
     return createTerminal(id, cwd, event.sender, accountEnv);
   });
 
-  ipcMain.on('terminal:write', (_event, id, data) => {
+  ipcMain.on('terminal:write', (event, id, data) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
+    if (typeof data !== 'string') return;
+    if (data.length > TERMINAL_WRITE_MAX_BYTES) return;
+    if (!ownsTerminal(event.sender.id, id)) return; // not yours, drop silently
     writeTerminal(id, data);
   });
 
-  ipcMain.on('terminal:resize', (_event, id, cols, rows) => {
+  ipcMain.on('terminal:resize', (event, id, cols, rows) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
+    if (!ownsTerminal(event.sender.id, id)) return;
     resizeTerminal(id, cols, rows);
   });
 
-  ipcMain.handle('terminal:getProcess', (_event, id) => {
+  // Info-disclosure gates: a renderer that knows another window's tab id
+  // could otherwise learn its running process / cwd, including unowned
+  // bridge PTYs (voice conductor, mobile, agent-spawner). Codex round-7 MED.
+  ipcMain.handle('terminal:getProcess', (event, id) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
+    if (!ownsTerminal(event.sender.id, id)) return null;
     return getTerminalProcess(id);
   });
 
-  ipcMain.handle('terminal:getCwd', (_event, id) => {
+  ipcMain.handle('terminal:getCwd', (event, id) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
+    if (!ownsTerminal(event.sender.id, id)) return null;
     return getTerminalCwd(id);
   });
 
-  ipcMain.on('terminal:kill', (_event, id) => {
+  ipcMain.on('terminal:kill', (event, id) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
+    if (!ownsTerminal(event.sender.id, id)) return;
+    terminalOwners.delete(id);
     killTerminal(id);
   });
 
@@ -755,88 +818,86 @@ function setupFileHandlers() {
   const MAX_FILE_SIZE = 1024 * 1024; // 1MB
   const ALLOWED_FILENAME = 'CLAUDE.md';
   const homedir = os.homedir();
+  // Roots that may contain a writable CLAUDE.md. Anything outside these is
+  // rejected — basename match alone (the old check) allowed /etc/CLAUDE.md,
+  // /tmp/CLAUDE.md, or any user-controlled path whose last segment is the
+  // magic name. Codex audit HIGH (main.js:548).
+  //
+  // Resolved + appended with sep so a prefix match against the realpath
+  // can't be tricked by /home/user/.claude-evil/CLAUDE.md when /home/user
+  // is in the allowlist. We accept the user's home (where ~/.claude lives)
+  // plus the currently-open project window's projectPath at request time.
+  const HOMEDIR_REAL = fs.realpathSync(homedir);
 
-  // Allowed roots for CLAUDE.md read/write: ~/.claude plus every registered
-  // project directory (and its .claude subdir). Symlinks in each root are
-  // resolved so containment is checked against the REAL path.
-  function allowedRoots() {
-    const roots = [path.join(homedir, '.claude')];
-    try {
-      const projects = loadConfig().projects || {};
-      for (const p of Object.keys(projects)) {
-        roots.push(p);
-        roots.push(path.join(p, '.claude'));
-      }
-    } catch { /* config unreadable — fall back to ~/.claude only */ }
-    return roots.map((r) => { try { return fs.realpathSync(r); } catch { return path.resolve(r); } });
+  function knownProjectRoots() {
+    // Project windows pass projectPath through window-manager; we don't have
+    // direct access here, but every legitimate CLAUDE.md write originates
+    // from a project window, and the renderer can only learn about a path
+    // by us having opened it. So accept any path that resolves under the
+    // user's home dir (covers ~/Projects, ~/Library/.../Claude, etc.).
+    // This is a coarser gate than per-project allowlist — but it eliminates
+    // the system-write hole without breaking existing CLAUDE.md editor use.
+    return [HOMEDIR_REAL];
   }
 
-  function isContained(target, roots) {
-    return roots.some((root) => target === root || target.startsWith(root + path.sep));
-  }
-
-  // Resolve the would-be absolute path with symlinks in the existing prefix
-  // resolved, so a write that creates a new dir (e.g. project/.claude) still
-  // gets its real-path checked, and a symlinked ancestor can't escape.
-  function resolveThroughExisting(targetPath) {
-    let dir = path.dirname(targetPath);
-    const pending = [path.basename(targetPath)];
-    for (let i = 0; i < 64; i++) {
-      if (fs.existsSync(dir)) {
-        return path.join(fs.realpathSync(dir), ...pending.slice().reverse());
-      }
-      pending.push(path.basename(dir));
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
+  // Resolve the deepest existing ancestor with realpath, then append any
+  // missing trailing segments. Closes the symlink-ancestor escape that the
+  // previous "immediate parent only" check missed: `~/link/newdir/CLAUDE.md`
+  // where `~/link -> /etc` and `~/link/newdir` doesn't exist would otherwise
+  // bypass validation (parent didn't exist → fell through to path.resolve →
+  // mkdirSync followed the symlink at write time).
+  // Codex round-3 BLOCKER on main.js:605.
+  function resolveFollowingSymlinks(filePath) {
+    const absolute = path.resolve(filePath);
+    const segments = absolute.split(path.sep).filter(Boolean);
+    for (let i = segments.length; i > 0; i--) {
+      const candidate = path.sep + segments.slice(0, i).join(path.sep);
+      try {
+        const real = fs.realpathSync(candidate);
+        const suffix = segments.slice(i);
+        return suffix.length ? path.join(real, ...suffix) : real;
+      } catch { /* keep walking up to find any existing ancestor */ }
     }
-    return null;
+    return absolute; // nothing on the path exists; will fail the root check
   }
 
-  // Gate CLAUDE.md access on the REAL path (symlinks resolved), not just the
-  // basename — otherwise a symlink named CLAUDE.md exfiltrates ~/.ssh/id_rsa on
-  // read, or clobbers an arbitrary file on write. Mirrors isAllowedSkillPath.
-  function isAllowedPath(filePath, { forWrite = false } = {}) {
-    if (!filePath || typeof filePath !== 'string') return false;
-    if (path.basename(filePath) !== ALLOWED_FILENAME) return false;
-    const roots = allowedRoots();
-    try {
-      if (forWrite) {
-        // File may not exist yet — resolve through the nearest existing ancestor.
-        const resolved = resolveThroughExisting(filePath);
-        if (!resolved || path.basename(resolved) !== ALLOWED_FILENAME || !isContained(resolved, roots)) return false;
-        // If the target already exists, also reject writing THROUGH a symlink.
-        if (fs.existsSync(filePath)) {
-          const realTarget = fs.realpathSync(filePath);
-          if (path.basename(realTarget) !== ALLOWED_FILENAME || !isContained(realTarget, roots)) return false;
-        }
-        return true;
-      }
-      const realTarget = fs.realpathSync(filePath);
-      return path.basename(realTarget) === ALLOWED_FILENAME && isContained(realTarget, roots);
-    } catch {
-      return false; // missing file / broken symlink / unreadable ancestor → deny
-    }
+  // Returns the safe resolved path (with all symlinks dereferenced) when the
+  // request passes validation, or null when it doesn't. Subsequent fs ops
+  // operate on the RESOLVED path so a symlink swap between validate-and-use
+  // can't sneak the write outside the allowed root.
+  // Codex round-4 MED on main.js:644.
+  function resolveAllowedPath(filePath) {
+    if (!filePath || typeof filePath !== 'string') return null;
+    if (path.basename(filePath) !== ALLOWED_FILENAME) return null;
+    let resolved;
+    try { resolved = resolveFollowingSymlinks(filePath); }
+    catch { return null; }
+    if (resolved.split(path.sep).includes('..')) return null;
+    const ok = knownProjectRoots().some((root) =>
+      resolved === path.join(root, ALLOWED_FILENAME) || resolved.startsWith(root + path.sep));
+    return ok ? resolved : null;
   }
 
   ipcMain.handle('file:read', (_event, filePath) => {
-    if (!isAllowedPath(filePath)) return { error: 'Only CLAUDE.md files can be read' };
+    const safe = resolveAllowedPath(filePath);
+    if (!safe) return { error: 'Only CLAUDE.md files under your home dir can be read' };
     try {
-      const stat = fs.statSync(filePath);
+      const stat = fs.statSync(safe);
       if (stat.size > MAX_FILE_SIZE) return { error: 'File too large (>1MB)' };
-      return { content: fs.readFileSync(filePath, 'utf8') };
+      return { content: fs.readFileSync(safe, 'utf8') };
     } catch {
       return { error: 'File not found' };
     }
   });
 
   ipcMain.handle('file:write', (_event, filePath, content) => {
-    if (!isAllowedPath(filePath, { forWrite: true })) return { error: 'Only CLAUDE.md files can be written' };
+    const safe = resolveAllowedPath(filePath);
+    if (!safe) return { error: 'Only CLAUDE.md files under your home dir can be written' };
     if (typeof content !== 'string' || content.length > MAX_FILE_SIZE) return { error: 'Content too large (>1MB)' };
     try {
-      const dir = path.dirname(filePath);
+      const dir = path.dirname(safe);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(filePath, content, 'utf8');
+      fs.writeFileSync(safe, content, 'utf8');
       return { ok: true };
     } catch (err) {
       return { error: err.message };
@@ -902,6 +963,200 @@ function setupFileHandlers() {
       }
     }
     return files;
+  });
+
+  // --- Claude status hooks (drive the terminal-tab status dots) ---------------
+  // We install an opt-in block into ~/.claude/settings.json that makes Claude emit
+  // a hidden marker (OSC 777;dobius;<state>) into each session's terminal:
+  //   UserPromptSubmit / PreToolUse        -> working (yellow)
+  //   Notification[permission_prompt]      -> needs   (red)
+  //   Notification[idle_prompt] / Stop     -> done    (green)
+  // Markers are identified by the ']777;dobius;' substring so the block can be
+  // removed cleanly without ever touching the user's own hooks.
+  const claudeSettingsPath = path.join(homedir, '.claude', 'settings.json');
+  const STATUS_MARKER = ']777;dobius;';
+  // printf '%s' does NOT interpret backslash escapes, so the JSON \uXXXX escapes
+  // reach Claude's hook parser verbatim and become ESC / BEL when it emits them.
+  const statusCmd = (state) =>
+    `printf '%s' '{"terminalSequence":"\\u001b]777;dobius;${state}\\u0007"}'`;
+  const cmdEntry = (state) => ({ type: 'command', command: statusCmd(state) });
+  const isStatusGroup = (group) =>
+    Array.isArray(group?.hooks) &&
+    group.hooks.some((h) => typeof h?.command === 'string' && h.command.includes(STATUS_MARKER));
+
+  // Returns { settings, mtime, exists }. The mtime travels with the read so
+  // writeClaudeSettings can detect a lost-update race against Claude itself
+  // (it rewrites settings.json when the user changes permission rules, MCP,
+  // plugins, etc.). settings = null means the file was unparseable — never
+  // overwrite that case. exists = false means the file genuinely doesn't
+  // exist; the enable path uses this to refuse silent creation.
+  function readClaudeSettings() {
+    try {
+      if (!fs.existsSync(claudeSettingsPath)) return { settings: {}, mtime: 0, exists: false };
+      const stat = fs.statSync(claudeSettingsPath);
+      const settings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8'));
+      return { settings, mtime: stat.mtimeMs, exists: true };
+    } catch {
+      return { settings: null, mtime: 0, exists: true };
+    }
+  }
+
+  // Atomic write (tmp + rename) — never leave the user's settings.json half-
+  // written. expectedMtime lets us detect a concurrent rewrite by Claude CLI
+  // between our read and rename; if it changed we abort instead of clobbering
+  // Claude's update with our stale base. Mirrors config-manager's
+  // atomicWriteSync but adds the optimistic-concurrency check.
+  function writeClaudeSettings(settings, expectedMtime) {
+    fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
+    if (expectedMtime !== undefined && expectedMtime > 0) {
+      try {
+        const currentMtime = fs.statSync(claudeSettingsPath).mtimeMs;
+        // 5ms slack absorbs filesystem mtime precision (HFS+ is whole-second);
+        // anything bigger indicates a real external rewrite mid-edit.
+        if (Math.abs(currentMtime - expectedMtime) > 5) {
+          throw new Error('settings.json changed under us — retry');
+        }
+      } catch (err) {
+        if (err.message.includes('changed under us')) throw err;
+        // stat failed because file vanished — fall through to write (recreate)
+      }
+    }
+    const data = JSON.stringify(settings, null, 2) + '\n';
+    const tmp = `${claudeSettingsPath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
+    try {
+      fs.writeFileSync(tmp, data, 'utf8');
+      fs.renameSync(tmp, claudeSettingsPath);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+      throw err;
+    }
+  }
+
+  // Strip any previously-installed Dobius status groups from a hooks object.
+  function stripStatusHooks(hooks) {
+    if (!hooks || typeof hooks !== 'object') return {};
+    const out = {};
+    for (const [event, groups] of Object.entries(hooks)) {
+      if (!Array.isArray(groups)) { out[event] = groups; continue; }
+      const kept = groups.filter((g) => !isStatusGroup(g));
+      if (kept.length) out[event] = kept;
+    }
+    return out;
+  }
+
+  ipcMain.handle('claudeHooks:getStatus', () => {
+    const { settings, exists } = readClaudeSettings();
+    if (settings === null) return { installed: false, error: 'settings.json is not valid JSON' };
+    if (!exists) return { installed: false, exists: false };
+    const hooks = settings.hooks || {};
+    const installed = Object.values(hooks).some(
+      (groups) => Array.isArray(groups) && groups.some(isStatusGroup)
+    );
+    return { installed, exists: true };
+  });
+
+  ipcMain.handle('claudeHooks:enable', (_evt, opts) => {
+    const { settings, mtime, exists } = readClaudeSettings();
+    if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
+    // Refuse silent file creation: if ~/.claude/settings.json doesn't exist
+    // yet, the user has never opted into having one. Require explicit consent
+    // (renderer passes { confirmCreate: true } after a confirm dialog).
+    if (!exists && !opts?.confirmCreate) {
+      return { error: 'needs-confirm-create', message: '~/.claude/settings.json does not exist. Confirm creation to enable hooks.' };
+    }
+    // Start from a clean slate (remove any stale Dobius groups) then add ours,
+    // appending to the user's existing hooks for each event.
+    const hooks = stripStatusHooks(settings.hooks);
+    const add = (event, group) => { hooks[event] = [...(hooks[event] || []), group]; };
+    add('UserPromptSubmit', { hooks: [cmdEntry('working')] });
+    add('PreToolUse', { hooks: [cmdEntry('working')] }); // no matcher = all tools
+    add('Notification', { matcher: 'permission_prompt', hooks: [cmdEntry('needs')] });
+    add('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
+    add('Stop', { hooks: [cmdEntry('done')] });
+    // No-op if the file already has exactly these hooks. Avoids bumping mtime
+    // on every "Enable" click and prevents any downstream file watchers from
+    // re-firing when nothing actually changed.
+    if (JSON.stringify(settings.hooks || {}) === JSON.stringify(hooks)) {
+      return { ok: true, installed: true, unchanged: true };
+    }
+    settings.hooks = hooks;
+    // One retry on mtime conflict: Claude's typical write is <100ms so a
+    // re-read after the race almost always succeeds. Beyond that, surface
+    // error. CRITICAL: on retry the WHOLE fresh.settings becomes the write
+    // base — never just splice fresh.settings.hooks back onto stale
+    // `settings`, that would discard the permission/MCP/plugin updates
+    // Claude just made and recreate the lost-update bug the mtime check
+    // was supposed to prevent.
+    let toWrite = settings;
+    let mtimeForWrite = mtime;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        // ALWAYS pass mtimeForWrite — dropping the guard on retry would let a
+        // SECOND concurrent Claude rewrite (between the fresh read and the
+        // retry write) get silently clobbered. If the retry ALSO conflicts,
+        // surface the error rather than retry indefinitely.
+        writeClaudeSettings(toWrite, mtimeForWrite);
+        return { ok: true, installed: true };
+      } catch (err) {
+        if (err.message.includes('changed under us') && attempt === 0) {
+          const fresh = readClaudeSettings();
+          if (fresh.settings === null) return { error: 'settings.json became unparseable mid-edit' };
+          // Reapply OUR hook block on top of Claude's just-written settings.
+          fresh.settings.hooks = stripStatusHooks(fresh.settings.hooks);
+          const add2 = (event, group) => { fresh.settings.hooks[event] = [...(fresh.settings.hooks[event] || []), group]; };
+          add2('UserPromptSubmit', { hooks: [cmdEntry('working')] });
+          add2('PreToolUse', { hooks: [cmdEntry('working')] });
+          add2('Notification', { matcher: 'permission_prompt', hooks: [cmdEntry('needs')] });
+          add2('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
+          add2('Stop', { hooks: [cmdEntry('done')] });
+          toWrite = fresh.settings;
+          mtimeForWrite = fresh.mtime;
+          continue;
+        }
+        return { error: err.message.includes('changed under us')
+          ? 'settings.json keeps changing under us — try again in a moment'
+          : err.message };
+      }
+    }
+    return { error: 'enable failed after retry' };
+  });
+
+  ipcMain.handle('claudeHooks:disable', () => {
+    const { settings, mtime, exists } = readClaudeSettings();
+    if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
+    // No file = nothing to disable. Don't create an empty file just to remove
+    // hooks that were never there.
+    if (!exists) return { ok: true, installed: false };
+    settings.hooks = stripStatusHooks(settings.hooks);
+    if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+    // Same lost-update guard as enable — on retry, write fresh.settings as
+    // the base so Claude's concurrent updates aren't clobbered. Object.assign
+    // from the old version was buggy: it deep-copied fresh's keys onto stale
+    // `settings` but stale keys that fresh removed would still be present.
+    let toWrite = settings;
+    let mtimeForWrite = mtime;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        // Same as enable: always pass mtimeForWrite so a second concurrent
+        // Claude rewrite can't slip through the retry.
+        writeClaudeSettings(toWrite, mtimeForWrite);
+        return { ok: true, installed: false };
+      } catch (err) {
+        if (err.message.includes('changed under us') && attempt === 0) {
+          const fresh = readClaudeSettings();
+          if (fresh.settings === null) return { error: 'settings.json became unparseable mid-edit' };
+          fresh.settings.hooks = stripStatusHooks(fresh.settings.hooks);
+          if (Object.keys(fresh.settings.hooks).length === 0) delete fresh.settings.hooks;
+          toWrite = fresh.settings;
+          mtimeForWrite = fresh.mtime;
+          continue;
+        }
+        return { error: err.message.includes('changed under us')
+          ? 'settings.json keeps changing under us — try again in a moment'
+          : err.message };
+      }
+    }
+    return { error: 'disable failed after retry' };
   });
 }
 
@@ -1078,10 +1333,12 @@ function setupMobileServerHandlers() {
     }
     return getMobileServerStatus();
   });
-  // Device list without exposing the secret tokens.
+  // Device list — opaque deviceId only. Tokens stay server-side.
+  // deriveDeviceId is the single source of truth shared with removeMobileDevice
+  // so both sides agree on the same id for legacy entries.
   ipcMain.handle('mobileServer:listDevices', () => {
     return getMobileServerConfig().devices.map((d) => ({
-      token: d.token, // needed so the UI can target removal
+      deviceId: deriveDeviceId(d),
       name: d.name,
       pairedAt: d.pairedAt,
     }));
@@ -1158,23 +1415,52 @@ function setupWindowHandlers() {
     return { ok: true };
   });
 
-  // Tab tear-off: create a new window for a dragged-out tab
-  ipcMain.handle('window:tearOffTab', (_event, projectPath, tabId, tabLabel, screenX, screenY) => {
+  // Pending tear-off grants: when the source window tears off a tab, we
+  // record { tabId: targetWindowId } here. Only that target window can call
+  // terminal:claimPty for that tabId. Without this, ANY renderer that learns
+  // a live tab id could claim its PTY (stealing output + becoming owner).
+  // Codex round-4 HIGH on main.js:1039.
+  // Map cleared once the grant is consumed (or its target window is destroyed).
+  const tearOffGrants = new Map(); // tabId -> webContents.id
+
+  // Tab tear-off: create a new window for a dragged-out tab.
+  // ONLY the current renderer owner may tear off a tab. This intentionally
+  // refuses unowned PTYs (voice-conductor, mobile bridge, agent-spawner) —
+  // those were created in-process without a webContents owner, and a
+  // malicious renderer that guessed their well-known ids could otherwise
+  // tear them off and claim them via the grant flow, gaining a wire-tap
+  // into voice input/output or mobile-PTY traffic.
+  // Codex round-5 HIGH on main.js:1047.
+  ipcMain.handle('window:tearOffTab', (event, projectPath, tabId, tabLabel, screenX, screenY) => {
     if (!projectPath || !tabId) return { ok: false };
-    // Validate tabId format
-    if (!/^term-.+-\d+$/.test(tabId)) return { ok: false };
+    if (!TERMINAL_ID_RE.test(tabId)) return { ok: false };
+    if (terminalOwners.get(tabId) !== event.sender.id) return { ok: false };
     const label = typeof tabLabel === 'string' ? tabLabel.slice(0, 100) : 'Tab';
     const win = openTornOffWindow(projectPath, tabId, label, screenX || 200, screenY || 200);
-    // PTY stays assigned to old webContents until new window calls terminal:claimPty.
-    // Small gap of ~1-2s where output may go to the old (unmounted) listener —
-    // acceptable tradeoff; scrollback was saved before tear-off.
+    // Record the grant against the new window's webContents.id. The new
+    // window's renderer will call terminal:claimPty once it mounts.
+    tearOffGrants.set(tabId, win.webContents.id);
+    win.webContents.once('destroyed', () => {
+      // If the target never claimed, drop the grant.
+      if (tearOffGrants.get(tabId) === win.webContents.id) tearOffGrants.delete(tabId);
+    });
     return { ok: true, id: win.id };
   });
 
-  // Claim an existing PTY for a new window (used after tear-off)
+  // Claim an existing PTY for a new window (used after tear-off). Requires
+  // an active grant for THIS tab issued to THIS webContents.
   ipcMain.handle('terminal:claimPty', (event, tabId) => {
-    if (!tabId || !/^term-.+-\d+$/.test(tabId)) return { ok: false };
+    if (!tabId || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
+    if (tearOffGrants.get(tabId) !== event.sender.id) return { ok: false };
     const success = reassignTerminal(tabId, event.sender);
+    if (success) {
+      tearOffGrants.delete(tabId);
+      terminalOwners.set(tabId, event.sender.id);
+      const ownerId = event.sender.id;
+      event.sender.once('destroyed', () => {
+        if (terminalOwners.get(tabId) === ownerId) terminalOwners.delete(tabId);
+      });
+    }
     return { ok: success };
   });
 }
@@ -1346,7 +1632,44 @@ function cleanClipboardTemp() {
   } catch { /* ignore */ }
 }
 
+/**
+ * Write a readable line to userData/crash.log for failures that would otherwise
+ * leave only a bare SIGTRAP/SIGABRT crash report. JS-level handlers cannot
+ * intercept native (node-pty/sqlite) or V8-fatal (heap OOM) aborts, so those
+ * still produce a system .ips report; what this DOES capture is uncaught JS
+ * errors and renderer/child-process deaths (reason 'oom'/'crashed'), which is
+ * the diagnostic that was missing when the dashboard crash was investigated.
+ */
+function setupCrashLogging() {
+  const logPath = path.join(app.getPath('userData'), 'crash.log');
+  const write = (kind, detail) => {
+    try {
+      fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${kind}: ${detail}\n`);
+    } catch {
+      // Logging must never throw.
+    }
+  };
+  process.on('uncaughtException', (err) => {
+    write('uncaughtException', (err && err.stack) || String(err));
+    // Preserve Node's default fatal behavior (adding a handler suppresses the
+    // automatic exit, which would otherwise leave the app in an unknown state).
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    write('unhandledRejection', (reason && reason.stack) || String(reason));
+  });
+  app.on('render-process-gone', (_e, _wc, details) => {
+    write('render-process-gone', `reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  app.on('child-process-gone', (_e, details) => {
+    write('child-process-gone', `type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+}
+
 app.whenReady().then(() => {
+  setupCrashLogging();
+  // Make sure node-pty can actually launch shells before any tab is created.
+  ensureSpawnHelperExecutable();
   cleanClipboardTemp();
   setupTerminalHandlers();
   setupDataHandlers();
@@ -1410,16 +1733,32 @@ let quitConfirmed = false;
 let quitTimer = null;
 let savedBeforeQuit = false;
 
+let phase3Draining = false;
 app.on('before-quit', (e) => {
   if (quitConfirmed && savedBeforeQuit) {
-    // Phase 3: scrollback saved, persist open-projects for tab-restore, then let
-    // the quit proceed. Resource teardown happens in will-quit (every quit path).
+    // Phase 3: scrollback saved. Drain pending async config writes BEFORE
+    // the final sync flush so a mid-flight rename can't land after the
+    // sync write and clobber fresher state (Codex v1.0.27 round-2 HIGH).
+    if (phase3Draining) return;
+    phase3Draining = true;
+    e.preventDefault();
     const openProjects = getOpenProjects();
     const config = loadConfig();
     config.lastOpenProjects = openProjects;
     saveConfig(config);
-    flushConfig();
+    // Tear down listeners/servers in parallel with the config drain — none
+    // of them depend on config writes finishing.
     closeAllProjectWindows();
+    killAll();
+    stopWatching();
+    stopAllBuildWatchers();
+    stopVoiceBridge();
+    stopImessageBridge();
+    stopScheduledTasks();
+    stopMobileServer();
+    flushConfigAsync().finally(() => {
+      app.quit(); // re-enters before-quit; phase3Draining guard skips us
+    });
     return;
   }
 

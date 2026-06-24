@@ -60,15 +60,29 @@ export const useStore = create((set, get) => ({
   // Agent activity: Map<agentId, { status, lastActivity, linesProcessed, startTime, currentAction }>
   agentActivity: {},
 
-  // Terminal-tab status: Map<tabId, 'idle' | 'working' | 'done' | 'needs'>.
-  // Drives the text-message-style status dot on each tab (gray = plain shell,
-  // yellow = working, green = managed Claude/Codex done, red = needs your
-  // response). Ephemeral runtime state — intentionally NOT persisted to config
-  // or stored on the tab object.
+  // Terminal-tab status: Map<tabId, 'working' | 'done' | 'needs'>. Drives the
+  // text-message-style status dot on each tab (yellow = working, green = done,
+  // red = needs your response). Ephemeral runtime state — intentionally NOT
+  // persisted to config or stored on the tab object.
   tabStatus: {},
+  // Tabs whose current status came from the OSC hook (PreToolUse/UserPromptSubmit/
+  // Stop). useTabActivity's quiet-output settler ignores these — only the hook
+  // can clear hook-owned status, so a long quiet tool call no longer flips
+  // 'working' → 'done' while Claude is mid-turn.
+  hookOwnedTabs: {},
   setTabStatus: (tabId, status) => set((s) => {
     if (!tabId || s.tabStatus[tabId] === status) return {};
     return { tabStatus: { ...s.tabStatus, [tabId]: status } };
+  }),
+  // OSC handler calls this. Hook-owned 'working' / 'needs' survive quiet
+  // output; hook-owned 'done' releases ownership so the next inferred working
+  // tracks normally.
+  markHookOwned: (tabId, status) => set((s) => {
+    if (!tabId) return {};
+    const next = { ...s.hookOwnedTabs };
+    if (status === 'working' || status === 'needs') next[tabId] = true;
+    else delete next[tabId]; // 'done' or anything else releases the claim
+    return { hookOwnedTabs: next };
   }),
 
   // Activity timeline: chronological feed of agent actions (max 100)
@@ -88,7 +102,10 @@ export const useStore = create((set, get) => ({
     const state = get();
     const counter = state.tabCounter + 1;
     const id = projectPath ? `term-${projectPath}-${counter}` : `term-main-${counter}`;
-    const tab = { id, label: `Tab ${counter}`, projectPath, createdAt: Date.now() };
+    // kind:'terminal' is the default and (load-bearing) — every existing
+    // tab persisted before v1.0.25 has no kind field, so the dispatcher in
+    // ProjectView treats undefined as 'terminal' (backwards compatible).
+    const tab = { id, label: `Tab ${counter}`, projectPath, kind: 'terminal', createdAt: Date.now() };
     set({
       terminalTabs: [...state.terminalTabs, tab],
       activeTabId: id,
@@ -96,6 +113,37 @@ export const useStore = create((set, get) => ({
     });
     return tab;
   },
+
+  // Add a browser pane (embedded webview). Slots into the same terminalTabs
+  // list as terminal tabs — the layout engine in ProjectView treats them
+  // uniformly except for which component renders inside the pane.
+  addBrowserTab: (projectPath, url) => {
+    const state = get();
+    const counter = state.tabCounter + 1;
+    const id = projectPath ? `term-${projectPath}-${counter}` : `term-main-${counter}`;
+    const safeUrl = (typeof url === 'string' && url.trim()) ? url.trim() : 'http://localhost:5173';
+    const tab = {
+      id,
+      label: 'Browser',
+      projectPath,
+      kind: 'browser',
+      url: safeUrl,
+      createdAt: Date.now(),
+    };
+    set({
+      terminalTabs: [...state.terminalTabs, tab],
+      activeTabId: id,
+      tabCounter: counter,
+    });
+    return tab;
+  },
+
+  // Update the URL stored on a browser tab — called when the user navigates
+  // inside the webview so the persisted state matches what's on screen.
+  updateTabUrl: (tabId, url) => set((s) => ({
+    terminalTabs: s.terminalTabs.map((t) =>
+      t.id === tabId && t.kind === 'browser' ? { ...t, url } : t),
+  })),
 
   removeTab: (tabId) => {
     const state = get();
@@ -114,12 +162,19 @@ export const useStore = create((set, get) => ({
     }
     const ts = { ...state.tabStatus };
     delete ts[tabId];
+    // Also prune hookOwnedTabs — otherwise a closed-then-reopened tab id
+    // (collision after high tabCounter wrap, or torn-off tab re-attaching)
+    // could inherit stale hook ownership and never settle.
+    // Codex audit MED (store.js:159).
+    const hot = { ...state.hookOwnedTabs };
+    delete hot[tabId];
     set({
       terminalTabs: tabs,
       activeTabId: newActive,
       runningAgents: ra,
       agentActivity: aa,
       tabStatus: ts,
+      hookOwnedTabs: hot,
       splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
       gridSlots: pruneGrid(state.gridSlots, new Set(tabs.map((t) => t.id))),
       monitoredTabs: state.monitoredTabs.filter((id) => id !== tabId),
@@ -129,6 +184,12 @@ export const useStore = create((set, get) => ({
   setSplitTab: (tabId) => set({ splitTabId: tabId, gridSlots: null }),
   clearSplitTab: () => set({ splitTabId: null }),
   setSplitRatio: (ratio) => set({ splitRatio: Math.min(0.8, Math.max(0.2, Number(ratio) || 0.5)) }),
+  setGridColumnRatio: (ratio) => set({ gridColumnRatio: Math.min(0.8, Math.max(0.2, Number(ratio) || 0.5)) }),
+  setGridRowRatios: (ratios) => set({
+    gridRowRatios: Array.isArray(ratios)
+      ? ratios.map((r) => Math.max(0.12, Number(r) || 0)).filter((r) => r > 0)
+      : [],
+  }),
 
   // Grid actions ----------------------------------------------------------
   // Append a tab to the grid (max 6), starting grid mode if needed. A tab can
@@ -151,25 +212,36 @@ export const useStore = create((set, get) => ({
   }),
 
   // Remove a cell by index; the grid compacts and reflows. Exits grid mode
-  // when the last cell is removed.
+  // when the last cell is removed. If the removed cell held the active tab,
+  // reseat activeTabId onto a surviving grid cell so paneStyleFor doesn't
+  // hide it (otherwise input/paste/git polling routes to an invisible tab).
   removeFromGrid: (index) => set((s) => {
     if (!s.gridSlots) return {};
+    const removedTabId = s.gridSlots[index];
     const slots = s.gridSlots.filter((_, i) => i !== index);
-    return { gridSlots: slots.length ? slots : null };
+    const next = { gridSlots: slots.length ? slots : null };
+    if (removedTabId === s.activeTabId && slots.length) {
+      // Pick the cell that took the removed cell's index, or the last cell.
+      next.activeTabId = slots[index] || slots[slots.length - 1];
+    }
+    return next;
   }),
 
   clearGrid: () => set({ gridSlots: null }),
 
   // Restore a persisted layout (already validated against live tabs by caller).
   setGridSlots: (slots) => set({ gridSlots: slots }),
-  setGridColumnRatio: (ratio) => set({ gridColumnRatio: Math.min(0.8, Math.max(0.2, Number(ratio) || 0.5)) }),
-  setGridRowRatios: (ratios) => set({
-    gridRowRatios: Array.isArray(ratios)
-      ? ratios.map((r) => Math.max(0.12, Number(r) || 0)).filter((r) => r > 0)
-      : [],
-  }),
 
-  setActiveTab: (tabId) => set({ activeTabId: tabId }),
+  // Validate against the current tabs list to avoid routing input/git polling
+  // to a tab id that doesn't exist (Codex audit MED: store.js:217). Accept
+  // null to deliberately clear; reject unknown ids silently to preserve
+  // existing state rather than blow up on a stale caller.
+  setActiveTab: (tabId) => set((s) => {
+    if (tabId === null || tabId === undefined) return { activeTabId: null };
+    if (typeof tabId !== 'string') return {};
+    if (!s.terminalTabs.some((t) => t.id === tabId)) return {};
+    return { activeTabId: tabId };
+  }),
 
   renameTab: (tabId, label) => set((s) => ({
     terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? { ...t, label } : t),
@@ -179,10 +251,45 @@ export const useStore = create((set, get) => ({
     terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? { ...t, pinned: !t.pinned } : t),
   })),
 
-  initTabs: (tabs, counter) => set({
-    terminalTabs: tabs,
-    activeTabId: tabs.length > 0 ? tabs[0].id : null,
-    tabCounter: counter,
+  // Replacing terminalTabs wholesale (e.g. switching project or restoring a
+  // window) MUST also prune every map keyed by tab id. Without this, the
+  // store carries split/grid/runningAgents/hookOwnedTabs/etc from the
+  // previous project, and the next render references tab ids that don't
+  // exist. Codex audit HIGH (store.js:227).
+  initTabs: (tabs, counter) => set((s) => {
+    const liveIds = new Set(tabs.map((t) => t.id));
+    // tabStatus + hookOwnedTabs are keyed by tab id directly.
+    const pruneByTabId = (obj) => {
+      const next = {};
+      for (const [k, v] of Object.entries(obj || {})) if (liveIds.has(k)) next[k] = v;
+      return next;
+    };
+    // runningAgents is { agentId: tabId } — keep entries whose tabId is live.
+    const liveAgentIds = new Set();
+    const ra = {};
+    for (const [agentId, tabId] of Object.entries(s.runningAgents || {})) {
+      if (liveIds.has(tabId)) { ra[agentId] = tabId; liveAgentIds.add(agentId); }
+    }
+    // agentActivity is { agentId: activityObject } — keep entries whose
+    // agentId still has a live running tab. Codex round-2 MED on
+    // store.js:255 (the old `pruneAgentMap` treated activity OBJECTS as if
+    // they were tab ids, dropping all activity on every init).
+    const aa = {};
+    for (const [agentId, activity] of Object.entries(s.agentActivity || {})) {
+      if (liveAgentIds.has(agentId)) aa[agentId] = activity;
+    }
+    return {
+      terminalTabs: tabs,
+      activeTabId: tabs.length > 0 ? tabs[0].id : null,
+      tabCounter: counter,
+      splitTabId: s.splitTabId && liveIds.has(s.splitTabId) ? s.splitTabId : null,
+      gridSlots: pruneGrid(s.gridSlots, liveIds),
+      runningAgents: ra,
+      agentActivity: aa,
+      tabStatus: pruneByTabId(s.tabStatus),
+      hookOwnedTabs: pruneByTabId(s.hookOwnedTabs),
+      monitoredTabs: (s.monitoredTabs || []).filter((id) => liveIds.has(id)),
+    };
   }),
 
   reorderTabs: (fromIndex, toIndex) => set((s) => {
@@ -207,7 +314,13 @@ export const useStore = create((set, get) => ({
     }
     const ts = { ...state.tabStatus };
     for (const id of removedIds) delete ts[id];
-    set({ terminalTabs: kept, activeTabId: tabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    const hot = { ...state.hookOwnedTabs };
+    for (const id of removedIds) delete hot[id];
+    // Clear splitTabId if the split pane was killed — otherwise the layout
+    // stays stuck in split mode pointing at a dead tab and the surviving
+    // active terminal is constrained to half-width with no header to exit.
+    const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
+    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {
@@ -228,9 +341,14 @@ export const useStore = create((set, get) => ({
     }
     const ts = { ...state.tabStatus };
     for (const id of removedIds) delete ts[id];
+    const hot = { ...state.hookOwnedTabs };
+    for (const id of removedIds) delete hot[id];
     const allKept = [...kept, ...pinnedRight];
     const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
-    set({ terminalTabs: allKept, activeTabId: newActive, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    // Same split-cleanup as closeOtherTabs — kill the split pointer if the
+    // tab it referenced just got removed.
+    const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
+    set({ terminalTabs: allKept, activeTabId: newActive, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   // Actions
@@ -255,6 +373,10 @@ export const useStore = create((set, get) => ({
 
   currentDetached: false,
   setCurrentDetached: (v) => set({ currentDetached: !!v }),
+
+  // Fork checkout (origin + upstream remotes) — labeled distinctly from a plain branch.
+  currentIsFork: false,
+  setCurrentIsFork: (v) => set({ currentIsFork: !!v }),
 
   setSessions: (sessions) => set({ sessions }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),

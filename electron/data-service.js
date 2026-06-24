@@ -5,7 +5,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import {
   HISTORY_PATH, STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PLUGINS_DIR, PROJECTS_DIR,
-  parseJsonl, timeAgo, pathExists,
+  parseJsonl, timeAgo, pathExists, mapLimit,
 } from './data-utils.js';
 import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects } from './config-manager.js';
 
@@ -24,22 +24,49 @@ export async function loadHistory() {
       }
     }
   }
-  return Array.from(bySession.values())
+  // v1.0.28: enrich each session with transcriptExists + sizeMB. Filter
+  // ghosts BEFORE the 100-session cap so the sidebar never empties out when
+  // a user has 100 recent index entries pointing at deleted transcripts.
+  // We cap candidates at 400 to keep stat() count bounded; 400 newest-by-
+  // index after dedupe is far more than the 100 the sidebar ultimately shows.
+  // Codex v1.0.28 round-1 MED.
+  const candidatesAll = Array.from(bySession.values())
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
-    .slice(0, 100)
-    .map((entry) => ({
+    .slice(0, 400);
+
+  const enriched = await mapLimit(candidatesAll, 16, async (entry) => {
+    let transcriptExists = false;
+    let sizeMB = 0;
+    if (entry.project) {
+      try {
+        const encoded = encodePathLikeClaude(entry.project);
+        const transcriptPath = path.join(PROJECTS_DIR, encoded, `${entry.sessionId}.jsonl`);
+        const stat = await fs.stat(transcriptPath);
+        transcriptExists = true;
+        sizeMB = stat.size / (1024 * 1024);
+      } catch { /* missing file → transcriptExists stays false */ }
+    }
+    return {
       sessionId: entry.sessionId,
       project: entry.project || '',
       display: entry.display || '',
       timestamp: entry.timestamp || 0,
       age: timeAgo(entry.timestamp || 0),
-    }));
+      transcriptExists,
+      sizeMB,
+    };
+  });
+
+  return enriched
+    .filter((s) => s.transcriptExists)
+    .slice(0, 100);
 }
 
 /**
  * Load ALL sessions across all projects by scanning ~/.claude/projects/.
- * Returns array of { sessionId, projectPath, projectName, preview, timestamp, age }
- * sorted by recency, limited to 500.
+ * Returns array of { sessionId, projectPath, projectName, preview, timestamp, age, status }
+ * sorted by recency, limited to 500. `status` is 'working' | 'needs' | 'done'
+ * (same red/yellow/green meaning as the terminal tab dots).
  */
 export async function loadAllSessions() {
   const sessions = [];
@@ -73,63 +100,106 @@ export async function loadAllSessions() {
       encodedToReal.set(encodePathLikeClaude(manualPath), manualPath);
     }
 
-    await Promise.all(projectDirs.map(async (dir) => {
+    // Flatten every transcript across every project into one task list, then
+    // process it with a bounded worker pool. The previous nested Promise.all
+    // fanned out across all projects AND all files at once, opening thousands
+    // of file handles simultaneously — combined with the old whole-file read
+    // in parseJsonl, that OOM-crashed the main process on dashboards with large
+    // ~/.claude histories. A cap of 24 keeps memory and fd usage flat.
+    const fileTasks = [];
+    for (const dir of projectDirs) {
       const projectDir = path.join(PROJECTS_DIR, dir.name);
       const realPath = encodedToReal.get(dir.name) || tryReconstructPath(dir.name);
       const projectPath = realPath || ('/' + dir.name.replace(/-/g, '/'));
       const projectName = realPath
         ? realPath.split('/').filter(Boolean).pop()
         : dir.name.split('-').filter(Boolean).pop() || dir.name;
-
+      let files = [];
       try {
-        const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
-        await Promise.all(files.map(async (f) => {
-          const sessionId = f.replace('.jsonl', '');
-          const filePath = path.join(projectDir, f);
+        files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
+      } catch {
+        continue;
+      }
+      for (const f of files) {
+        fileTasks.push({ projectDir, projectPath, projectName, file: f });
+      }
+    }
+
+    await mapLimit(fileTasks, 24, async ({ projectDir, projectPath, projectName, file }) => {
+      const sessionId = file.replace('.jsonl', '');
+      const filePath = path.join(projectDir, file);
+      try {
+        // parseJsonl is bounded since v1.0.23 — uses readTail under the hood so
+        // a 24MB transcript no longer pulls 95MB into memory. The status fields
+        // here ride on top of that bounded read; we never re-read the file.
+        const entries = await parseJsonl(filePath, 5);
+        let preview = '';
+        let timestamp = 0;
+        // lastRole drives the cross-session status dot.
+        let lastRole = '';
+
+        for (const entry of entries) {
+          // Transcript timestamps are ISO 8601 strings — parse to epoch ms so
+          // recency math + the 'working' check use real milliseconds.
+          const tsMs = typeof entry.timestamp === 'number'
+            ? entry.timestamp
+            : (entry.timestamp ? new Date(entry.timestamp).getTime() : 0);
+          if (tsMs && tsMs > timestamp) {
+            timestamp = tsMs;
+          }
+          const role = (entry.type === 'human' || entry.role === 'user' || entry.message?.role === 'user')
+            ? 'user'
+            : (entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant')
+              ? 'assistant'
+              : '';
+          if (role) lastRole = role; // array is oldest→newest, so the final wins
+          if (!preview && (entry.type === 'human' || entry.role === 'user')) {
+            const content = typeof entry.message === 'string'
+              ? entry.message
+              : entry.message?.content || entry.content || '';
+            if (content) {
+              preview = content.slice(0, 200);
+            }
+          }
+        }
+
+        if (!timestamp) {
           try {
-            const entries = await parseJsonl(filePath, 5);
-            let preview = '';
-            let timestamp = 0;
-
-            for (const entry of entries) {
-              if (entry.timestamp && entry.timestamp > timestamp) {
-                timestamp = entry.timestamp;
-              }
-              if (!preview && (entry.type === 'human' || entry.role === 'user')) {
-                const content = typeof entry.message === 'string'
-                  ? entry.message
-                  : entry.message?.content || entry.content || '';
-                if (content) {
-                  preview = content.slice(0, 200);
-                }
-              }
-            }
-
-            if (!timestamp) {
-              try {
-                const stat = await fs.stat(filePath);
-                timestamp = stat.mtimeMs;
-              } catch {
-                void 0;
-              }
-            }
-
-            sessions.push({
-              sessionId,
-              projectPath,
-              projectName,
-              preview: preview || 'No preview available',
-              timestamp,
-              age: timestamp ? timeAgo(timestamp) : 'unknown',
-            });
+            const stat = await fs.stat(filePath);
+            timestamp = stat.mtimeMs;
           } catch {
             void 0;
           }
-        }));
+        }
+
+        // Cross-session status — same red/yellow/green meaning as terminal tabs:
+        //   yellow 'working' = Claude is actively streaming (recent activity + Claude spoke last)
+        //   red    'needs'   = user spoke last and Claude hasn't replied yet
+        //   green  'done'    = Claude finished its turn cleanly
+        //
+        // 120s window (was 45s during PR review) + lastRole gate: 45s falsely
+        // flipped streaming sessions to 'done' during slow tool calls, AND a
+        // bare recency check labeled "user just spoke" as 'working' even when
+        // Claude hadn't started. Both flagged independently by review agents.
+        // The live terminal tab dot still overrides this for the active tab.
+        const recent = timestamp && (Date.now() - timestamp < 120_000);
+        let status = 'done';
+        if (recent && lastRole === 'assistant') status = 'working';
+        else if (lastRole === 'user') status = 'needs';
+
+        sessions.push({
+          sessionId,
+          projectPath,
+          projectName,
+          preview: preview || 'No preview available',
+          timestamp,
+          age: timestamp ? timeAgo(timestamp) : 'unknown',
+          status,
+        });
       } catch {
         void 0;
       }
-    }));
+    });
   } catch (err) {
     console.warn('[data-service] Failed to load all sessions:', err.message);
     return [];
