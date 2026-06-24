@@ -729,12 +729,27 @@ export function deleteOrchestrationRun(runId) {
  * Flush any pending config save immediately (synchronous, atomic).
  * Call this in before-quit to avoid losing recent changes.
  */
+// Async drain variant — awaits any queued atomicWrite calls before doing
+// the sync flush. This is the watertight version: a mid-flight rename
+// can't land AFTER a sync flush because we wait for it first.
+// Callers in before-quit MUST await this (preventDefault + app.quit()).
+export async function flushConfigAsync() {
+  // Wait for any pending writes to land BEFORE latching flushed. After this
+  // point, any NEW atomicWrite calls will be queued onto a chain that we
+  // immediately disarm via the flushed flag.
+  try { await writeChain; } catch { /* drain errors are already logged */ }
+  return flushConfigSyncTail();
+}
+
 export function flushConfig() {
-  // Latch the flushed flag BEFORE the sync write — any async writes already
-  // queued in writeChain that have not started their try-block yet will see
-  // this and bail; writes mid-rename are still atomic per file but their
-  // value is what they were when queued (acceptable, the sync flush below
-  // is the authoritative final state).
+  // Legacy sync entrypoint. Does NOT drain the chain — pending async writes
+  // CAN still land after this returns (the race Codex called out). Use
+  // flushConfigAsync() instead. Kept here for the brief startup paths that
+  // still need a non-blocking sync flush.
+  return flushConfigSyncTail();
+}
+
+function flushConfigSyncTail() {
   flushed = true;
   if (saveTimer) {
     clearTimeout(saveTimer);

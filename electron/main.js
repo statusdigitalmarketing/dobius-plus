@@ -20,7 +20,7 @@ import { watchFiles, stopWatching } from './watcher-service.js';
 import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-monitor-watcher.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
-  getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig,
+  getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig, flushConfigAsync,
   getSessionTags, setSessionTag, removeSessionTag,
   getSessionTabMap, setSessionTabLink,
   getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
@@ -1313,14 +1313,21 @@ let quitConfirmed = false;
 let quitTimer = null;
 let savedBeforeQuit = false;
 
+let phase3Draining = false;
 app.on('before-quit', (e) => {
   if (quitConfirmed && savedBeforeQuit) {
-    // Phase 3: scrollback saved, now actually quit
+    // Phase 3: scrollback saved. Drain pending async config writes BEFORE
+    // the final sync flush so a mid-flight rename can't land after the
+    // sync write and clobber fresher state (Codex v1.0.27 round-2 HIGH).
+    if (phase3Draining) return;
+    phase3Draining = true;
+    e.preventDefault();
     const openProjects = getOpenProjects();
     const config = loadConfig();
     config.lastOpenProjects = openProjects;
     saveConfig(config);
-    flushConfig();
+    // Tear down listeners/servers in parallel with the config drain — none
+    // of them depend on config writes finishing.
     closeAllProjectWindows();
     killAll();
     stopWatching();
@@ -1328,10 +1335,10 @@ app.on('before-quit', (e) => {
     stopVoiceBridge();
     stopImessageBridge();
     stopScheduledTasks();
-    // From Carson's audit (3841d18): mobile server was the one teardown call
-    // missing from before-quit, so its HTTP/WS listener stayed bound to the
-    // tailnet/LAN IP after app exit until the port was force-released.
     stopMobileServer();
+    flushConfigAsync().finally(() => {
+      app.quit(); // re-enters before-quit; phase3Draining guard skips us
+    });
     return;
   }
 
