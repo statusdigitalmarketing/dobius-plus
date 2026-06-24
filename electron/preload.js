@@ -88,6 +88,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataListProjects: () => ipcRenderer.invoke('data:listProjects'),
   dataLoadAllSessions: () => ipcRenderer.invoke('data:loadAllSessions'),
   dataGetLatestSession: (projectPath) => ipcRenderer.invoke('data:getLatestSession', projectPath),
+  dataLastAssistantMessage: (sessionId, projectPath) =>
+    ipcRenderer.invoke('data:lastAssistantMessage', sessionId, projectPath),
   onDataUpdated: (callback) => {
     const handler = (_event, changedPath) => callback(changedPath);
     ipcRenderer.on('data:updated', handler);

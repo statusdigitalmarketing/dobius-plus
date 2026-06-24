@@ -437,6 +437,61 @@ export async function loadTranscript(sessionId, projectPath) {
   }
 }
 
+/**
+ * v1.0.29: get the most recent assistant message from a session's transcript
+ * as plain text, suitable for clipboard copy. Returns null if the session is
+ * unknown, the transcript is missing, or contains no assistant turns.
+ *
+ * Walks ONLY the tail of the JSONL (parseJsonl bounded read) so a 50MB
+ * transcript doesn't load the whole file. Handles both string and content
+ * block array shapes. Strips internal Anthropic markers and tool_use blocks
+ * so what lands on the clipboard is what the user actually saw.
+ */
+export async function getLastAssistantMessage(sessionId, projectPath) {
+  if (!sessionId || typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) return null;
+  // Codex v1.0.29 round-1 MED: require an explicit projectPath. The old
+  // global-fallback scan let a renderer that knew any session id read its
+  // transcript from any project, side-stepping the per-window scope. The
+  // caller (TerminalTabBar) always has a project link via sessionTabMap,
+  // so requiring it costs nothing.
+  if (typeof projectPath !== 'string' || !projectPath) return null;
+  const encoded = encodePathLikeClaude(projectPath);
+  const transcriptPath = path.join(PROJECTS_DIR, encoded, `${sessionId}.jsonl`);
+  if (!(await pathExists(transcriptPath))) return null;
+  // Codex v1.0.29 round-1 MED: long tool/thinking tails can push the last
+  // visible text past a 200-entry tail window. 1000 covers realistic agent
+  // sessions while still bounded (parseJsonl(..., N) caps the read).
+  const entries = await parseJsonl(transcriptPath, 1000);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    const isAssistant = entry.type === 'assistant'
+      || entry.role === 'assistant'
+      || entry.message?.role === 'assistant';
+    if (!isAssistant) continue;
+    const text = extractAssistantText(entry);
+    if (text) return text;
+  }
+  return null;
+}
+
+function extractAssistantText(entry) {
+  const msg = entry.message ?? entry;
+  // String content (older transcripts).
+  if (typeof msg === 'string') return msg;
+  if (typeof msg.content === 'string') return msg.content;
+  if (typeof entry.content === 'string') return entry.content;
+  // Array of content blocks (Anthropic API shape): keep text blocks only,
+  // skip tool_use / tool_result / thinking, the user never saw those as text.
+  if (Array.isArray(msg.content)) {
+    return msg.content
+      .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text)
+      .join('\n\n')
+      .trim() || null;
+  }
+  return null;
+}
+
 async function parseTranscriptFile(filePath) {
   const entries = await parseJsonl(filePath, 100);
   const messages = [];

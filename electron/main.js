@@ -7,7 +7,7 @@ import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, g
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession,
+  loadAllSessions, getLatestSession, getLastAssistantMessage,
 } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
@@ -294,6 +294,13 @@ function setupDataHandlers() {
   ipcMain.handle('data:listProjects', () => listProjects());
   ipcMain.handle('data:loadAllSessions', () => loadAllSessions());
   ipcMain.handle('data:getLatestSession', (_event, projectPath) => getLatestSession(projectPath));
+  // v1.0.29: Copy last Claude response button uses this. Strict validation
+  // happens inside getLastAssistantMessage. Returns null on any failure so
+  // the renderer can show "no response found" without leaking error info.
+  ipcMain.handle('data:lastAssistantMessage', (_event, sessionId, projectPath) => {
+    if (typeof sessionId !== 'string') return null;
+    return getLastAssistantMessage(sessionId, projectPath);
+  });
 }
 
 function setupCheckpointHandlers() {
