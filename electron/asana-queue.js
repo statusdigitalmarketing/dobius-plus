@@ -23,7 +23,11 @@
  * dispatch target tab.
  */
 import https from 'https';
-import { loadConfig, saveConfig, getAsanaQueue } from './config-manager.js';
+// getAsanaQueue was imported in Carson's cherry-pick but is never used in
+// this module (lives in his Auto Mode code that isn't on main). Codex round-1
+// BLOCKER — module instantiation fails because main's config-manager.js
+// doesn't export it.
+import { loadConfig, saveConfig } from './config-manager.js';
 
 const ASANA_BASE = 'app.asana.com';
 const ASANA_TIMEOUT_MS = 10_000;

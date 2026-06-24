@@ -54,6 +54,12 @@ let saveTimer = null;
 // with a per-write unique tmp file, concurrent writers can never interleave a
 // write→rename and tear config.json.
 let writeChain = Promise.resolve();
+// Set true by flushConfig() at quit time. Any pending or new atomicWrite
+// callbacks that fire after this flips become no-ops, so a queued async
+// rename can't land AFTER the sync flush and overwrite fresher state
+// (v1.0.25/v1.0.26 tab/grid/browser-pane/terminal-ownership). Codex v1.0.27
+// round-1 HIGH.
+let flushed = false;
 
 /**
  * Drop terminalStates entries whose tab no longer exists in either the live
@@ -98,8 +104,13 @@ function pruneOrphanTerminalStates(cfg) {
 function atomicWrite(filePath, data) {
   const tmp = `${filePath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
   writeChain = writeChain.then(async () => {
+    // If flushConfig already wrote synchronously at quit time, the queued
+    // async write is stale by definition — skip it so it can't land after
+    // the sync flush and clobber fresher state.
+    if (flushed) return;
     try {
       await fsp.writeFile(tmp, data);
+      if (flushed) { try { await fsp.unlink(tmp); } catch { /* ignore */ } return; }
       await fsp.rename(tmp, filePath);
     } catch (err) {
       console.warn('[config-manager] config write failed:', err.message);
@@ -719,6 +730,12 @@ export function deleteOrchestrationRun(runId) {
  * Call this in before-quit to avoid losing recent changes.
  */
 export function flushConfig() {
+  // Latch the flushed flag BEFORE the sync write — any async writes already
+  // queued in writeChain that have not started their try-block yet will see
+  // this and bail; writes mid-rename are still atomic per file but their
+  // value is what they were when queued (acceptable, the sync flush below
+  // is the authoritative final state).
+  flushed = true;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
