@@ -35,6 +35,7 @@ import { initAutoUpdater } from './auto-updater.js';
 import {
   startMobileServer, stopMobileServer, getMobileServerStatus,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
+  deriveDeviceId,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents } from './voice-bridge.js';
 import { ensureVoiceConductor, getVoiceConductorTabId } from './voice-conductor.js';
@@ -983,10 +984,12 @@ function setupMobileServerHandlers() {
     }
     return getMobileServerStatus();
   });
-  // Device list without exposing the secret tokens.
+  // Device list — opaque deviceId only. Tokens stay server-side.
+  // deriveDeviceId is the single source of truth shared with removeMobileDevice
+  // so both sides agree on the same id for legacy entries.
   ipcMain.handle('mobileServer:listDevices', () => {
     return getMobileServerConfig().devices.map((d) => ({
-      token: d.token, // needed so the UI can target removal
+      deviceId: deriveDeviceId(d),
       name: d.name,
       pairedAt: d.pairedAt,
     }));

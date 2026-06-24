@@ -125,8 +125,10 @@ export default function Settings() {
     setMobileStatus(status);
   }, []);
 
-  const removeMobileDevice = useCallback(async (token) => {
-    await window.electronAPI.mobileServerRemoveDevice(token);
+  // v1.0.28: callers now pass the opaque deviceId (not the raw token) —
+  // listDevices no longer returns the bearer token to the renderer.
+  const removeMobileDevice = useCallback(async (deviceId) => {
+    await window.electronAPI.mobileServerRemoveDevice(deviceId);
     refreshMobile();
   }, [refreshMobile]);
 
@@ -417,13 +419,13 @@ export default function Settings() {
                 <div className="space-y-1">
                   {mobileDevices.map((d) => (
                     <div
-                      key={d.token}
+                      key={d.deviceId || d.token /* legacy */}
                       className="flex items-center justify-between px-2 py-1 rounded"
                       style={{ backgroundColor: 'var(--surface)' }}
                     >
                       <span className="text-xs" style={{ color: 'var(--fg)' }}>{d.name}</span>
                       <button
-                        onClick={() => removeMobileDevice(d.token)}
+                        onClick={() => removeMobileDevice(d.deviceId || d.token)}
                         style={{
                           fontSize: 10, color: 'var(--danger)', background: 'none',
                           border: 'none', cursor: 'pointer',

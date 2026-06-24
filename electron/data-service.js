@@ -24,16 +24,42 @@ export async function loadHistory() {
       }
     }
   }
-  return Array.from(bySession.values())
+  // v1.0.28: enrich each session with transcriptExists + sizeMB. Filter
+  // ghosts BEFORE the 100-session cap so the sidebar never empties out when
+  // a user has 100 recent index entries pointing at deleted transcripts.
+  // We cap candidates at 400 to keep stat() count bounded; 400 newest-by-
+  // index after dedupe is far more than the 100 the sidebar ultimately shows.
+  // Codex v1.0.28 round-1 MED.
+  const candidatesAll = Array.from(bySession.values())
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
-    .slice(0, 100)
-    .map((entry) => ({
+    .slice(0, 400);
+
+  const enriched = await mapLimit(candidatesAll, 16, async (entry) => {
+    let transcriptExists = false;
+    let sizeMB = 0;
+    if (entry.project) {
+      try {
+        const encoded = encodePathLikeClaude(entry.project);
+        const transcriptPath = path.join(PROJECTS_DIR, encoded, `${entry.sessionId}.jsonl`);
+        const stat = await fs.stat(transcriptPath);
+        transcriptExists = true;
+        sizeMB = stat.size / (1024 * 1024);
+      } catch { /* missing file → transcriptExists stays false */ }
+    }
+    return {
       sessionId: entry.sessionId,
       project: entry.project || '',
       display: entry.display || '',
       timestamp: entry.timestamp || 0,
       age: timeAgo(entry.timestamp || 0),
-    }));
+      transcriptExists,
+      sizeMB,
+    };
+  });
+
+  return enriched
+    .filter((s) => s.transcriptExists)
+    .slice(0, 100);
 }
 
 /**

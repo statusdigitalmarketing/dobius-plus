@@ -223,12 +223,29 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     });
     observer.observe(containerRef.current);
 
+    // v1.0.28 copy-on-select: when the user finishes a selection (mouseup),
+    // auto-copy it to clipboard. xterm doesn't have a built-in copyOnSelect
+    // flag — onSelectionChange fires per-frame during drag which would spam
+    // the clipboard. mouseup fires once at the end which is the right time.
+    // Capture the container node in a local — containerRef.current can
+    // change between this effect and cleanup if the host element remounts,
+    // leaving a stale listener attached. Codex v1.0.28 round-1 LOW.
+    const mouseUpNode = containerRef.current;
+    const onMouseUp = () => {
+      const sel = term.getSelection();
+      if (sel && sel.trim()) {
+        navigator.clipboard?.writeText(sel).catch(() => { /* clipboard denied or unavailable */ });
+      }
+    };
+    mouseUpNode.addEventListener('mouseup', onMouseUp);
+
     return () => {
       cancelled = true;
       cancelAnimationFrame(rafId);
       clearInterval(autoSaveInterval);
       clearTimeout(resizeTimer);
       observer.disconnect();
+      mouseUpNode?.removeEventListener('mouseup', onMouseUp);
       saveState();
       inputDisposable.dispose();
       oscDisposable.dispose();

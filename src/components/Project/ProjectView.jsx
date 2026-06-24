@@ -385,12 +385,49 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
 
   const handleResumeSession = useCallback((session) => {
     if (!session.sessionId || !/^[\w-]+$/.test(session.sessionId)) return;
-    setActiveView('terminal');
-    const cmd = `claude --resume ${session.sessionId}\r`;
-    const termId = useStore.getState().activeTabId;
-    if (window.electronAPI && termId) {
-      window.electronAPI.terminalWrite(termId, cmd);
+
+    // v1.0.28 fix #2 — dead-session guard. Sessions whose transcripts have
+    // ballooned past Claude's load ceiling will hang silently on --resume.
+    // Block them up front with a visible reason. sizeMB threshold is empirical
+    // (~80MB starts paging out the CLI on M-series machines, >150MB OOMs).
+    if (session.sizeMB && session.sizeMB > 80) {
+      const mb = session.sizeMB.toFixed(0);
+      console.warn(`[resume] skipping ${session.sessionId} (${mb}MB, too large to load)`);
+      // Surface to user via a one-shot alert — better than silent hang.
+      if (typeof window !== 'undefined') {
+        window.alert(`Can't resume this session — transcript is ${mb}MB, too large for Claude to load.\n\nStart a fresh session and use HANDOFF.md / git log to bring it up to speed.`);
+      }
+      return;
     }
+
+    setActiveView('terminal');
+    const termId = useStore.getState().activeTabId;
+    if (!window.electronAPI || !termId) return;
+
+    // v1.0.28 fix #1 — cd to the session's project first. claude --resume
+    // assumes the cwd matches the project the session was originally run in;
+    // resuming a session for /x/projectA from a terminal sitting in /x/projectB
+    // gave Claude the wrong file context. `&&` short-circuits if cd fails
+    // (typo, deleted dir), so we never run resume in the wrong place.
+    //
+    // Single-quoting an absolute path is shell-safe for everything except
+    // embedded single quotes — which we escape by closing-quote + literal
+    // backslash-quote + reopening-quote, the canonical POSIX trick. NULs
+    // and other control chars never appear in real filesystem paths but
+    // we reject them defensively. Critically: if the path can't be made
+    // safe, we ABORT (no fallback to bare --resume — that's the wrong-cwd
+    // bug we're trying to fix). Codex v1.0.28 round-1 MED.
+    const projectPath = session.project || '';
+    if (!projectPath || !projectPath.startsWith('/') || /[\x00-\x1F\x7F]/.test(projectPath)) {
+      console.warn(`[resume] aborting — invalid project path for session ${session.sessionId}`);
+      if (typeof window !== 'undefined') {
+        window.alert(`Can't resume this session — its project path is missing or invalid.\n\nOpen the session's project window directly first.`);
+      }
+      return;
+    }
+    const safeProject = projectPath.replace(/'/g, "'\\''");
+    const cmd = `cd '${safeProject}' && claude --resume ${session.sessionId}\r`;
+    window.electronAPI.terminalWrite(termId, cmd);
   }, [setActiveView]);
 
   const handleCdToProject = useCallback((sessionProject) => {
