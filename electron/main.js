@@ -1328,6 +1328,10 @@ app.on('before-quit', (e) => {
     stopVoiceBridge();
     stopImessageBridge();
     stopScheduledTasks();
+    // From Carson's audit (3841d18): mobile server was the one teardown call
+    // missing from before-quit, so its HTTP/WS listener stayed bound to the
+    // tailnet/LAN IP after app exit until the port was force-released.
+    stopMobileServer();
     return;
   }
 
