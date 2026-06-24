@@ -111,28 +111,83 @@ function createWindow() {
   });
 }
 
+// Tab ids are deterministic — `term-<projectPath>-<counter>` from store.addTab,
+// or `term-voice-conductor-1` / `term-mobile-*` for the bridges. Anything else
+// is renderer-fabricated and must be rejected before it can spawn a PTY or
+// write into one. Codex audit HIGH finding (main.js:115 + main.js:119).
+const TERMINAL_ID_RE = /^term-.+-\d+$/;
+const TERMINAL_WRITE_MAX_BYTES = 256 * 1024; // 256KB per write — plenty for a paste, blocks DoS
+
+// Per-webContents ownership of terminal ids. terminal:create records the
+// owning sender; terminal:write/resize/kill require the same sender. This
+// scopes the blast radius of a compromised renderer — XSS in window-A can't
+// reach into window-B's PTYs. Voice/mobile-bridge PTYs aren't created via
+// IPC (they go through createTerminal directly), so they're naturally
+// excluded from renderer write access. Codex round-2 HIGH on main.js:118.
+const terminalOwners = new Map(); // id -> webContents.id
+
+function ownsTerminal(senderId, id) {
+  if (!terminalOwners.has(id)) return false; // tab not created via IPC by ANY window
+  return terminalOwners.get(id) === senderId;
+}
+
 function setupTerminalHandlers() {
   ipcMain.handle('terminal:create', (event, id, cwd) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
+    if (cwd !== undefined && cwd !== null && typeof cwd !== 'string') return null;
+    // Reject hijack attempts: if this id is already owned by a DIFFERENT
+    // webContents, don't let the caller's createTerminal kill+replace the
+    // existing PTY. Same sender re-creating (e.g. after a reload) is fine.
+    // Codex round-3 HIGH on main.js:135.
+    const existingOwner = terminalOwners.get(id);
+    if (existingOwner !== undefined && existingOwner !== event.sender.id) return null;
+    terminalOwners.set(id, event.sender.id);
+    // If this sender goes away (window close, navigation), drop ownership so
+    // the id can be re-created by a new sender later. terminal-manager kills
+    // the actual PTY independently via webContents-destroyed logic. Guard
+    // the cleanup so it only removes when WE still own the id — a tear-off
+    // claim may have transferred ownership to another window between the
+    // create and the destroyed event.
+    const ownerId = event.sender.id;
+    event.sender.once('destroyed', () => {
+      if (terminalOwners.get(id) === ownerId) terminalOwners.delete(id);
+    });
     return createTerminal(id, cwd, event.sender);
   });
 
-  ipcMain.on('terminal:write', (_event, id, data) => {
+  ipcMain.on('terminal:write', (event, id, data) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
+    if (typeof data !== 'string') return;
+    if (data.length > TERMINAL_WRITE_MAX_BYTES) return;
+    if (!ownsTerminal(event.sender.id, id)) return; // not yours, drop silently
     writeTerminal(id, data);
   });
 
-  ipcMain.on('terminal:resize', (_event, id, cols, rows) => {
+  ipcMain.on('terminal:resize', (event, id, cols, rows) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
+    if (!ownsTerminal(event.sender.id, id)) return;
     resizeTerminal(id, cols, rows);
   });
 
-  ipcMain.handle('terminal:getProcess', (_event, id) => {
+  // Info-disclosure gates: a renderer that knows another window's tab id
+  // could otherwise learn its running process / cwd, including unowned
+  // bridge PTYs (voice conductor, mobile, agent-spawner). Codex round-7 MED.
+  ipcMain.handle('terminal:getProcess', (event, id) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
+    if (!ownsTerminal(event.sender.id, id)) return null;
     return getTerminalProcess(id);
   });
 
-  ipcMain.handle('terminal:getCwd', (_event, id) => {
+  ipcMain.handle('terminal:getCwd', (event, id) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
+    if (!ownsTerminal(event.sender.id, id)) return null;
     return getTerminalCwd(id);
   });
 
-  ipcMain.on('terminal:kill', (_event, id) => {
+  ipcMain.on('terminal:kill', (event, id) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
+    if (!ownsTerminal(event.sender.id, id)) return;
+    terminalOwners.delete(id);
     killTerminal(id);
   });
 
@@ -528,30 +583,86 @@ function setupFileHandlers() {
   const MAX_FILE_SIZE = 1024 * 1024; // 1MB
   const ALLOWED_FILENAME = 'CLAUDE.md';
   const homedir = os.homedir();
+  // Roots that may contain a writable CLAUDE.md. Anything outside these is
+  // rejected — basename match alone (the old check) allowed /etc/CLAUDE.md,
+  // /tmp/CLAUDE.md, or any user-controlled path whose last segment is the
+  // magic name. Codex audit HIGH (main.js:548).
+  //
+  // Resolved + appended with sep so a prefix match against the realpath
+  // can't be tricked by /home/user/.claude-evil/CLAUDE.md when /home/user
+  // is in the allowlist. We accept the user's home (where ~/.claude lives)
+  // plus the currently-open project window's projectPath at request time.
+  const HOMEDIR_REAL = fs.realpathSync(homedir);
 
-  function isAllowedPath(filePath) {
-    if (!filePath || typeof filePath !== 'string') return false;
-    return path.basename(filePath) === ALLOWED_FILENAME;
+  function knownProjectRoots() {
+    // Project windows pass projectPath through window-manager; we don't have
+    // direct access here, but every legitimate CLAUDE.md write originates
+    // from a project window, and the renderer can only learn about a path
+    // by us having opened it. So accept any path that resolves under the
+    // user's home dir (covers ~/Projects, ~/Library/.../Claude, etc.).
+    // This is a coarser gate than per-project allowlist — but it eliminates
+    // the system-write hole without breaking existing CLAUDE.md editor use.
+    return [HOMEDIR_REAL];
+  }
+
+  // Resolve the deepest existing ancestor with realpath, then append any
+  // missing trailing segments. Closes the symlink-ancestor escape that the
+  // previous "immediate parent only" check missed: `~/link/newdir/CLAUDE.md`
+  // where `~/link -> /etc` and `~/link/newdir` doesn't exist would otherwise
+  // bypass validation (parent didn't exist → fell through to path.resolve →
+  // mkdirSync followed the symlink at write time).
+  // Codex round-3 BLOCKER on main.js:605.
+  function resolveFollowingSymlinks(filePath) {
+    const absolute = path.resolve(filePath);
+    const segments = absolute.split(path.sep).filter(Boolean);
+    for (let i = segments.length; i > 0; i--) {
+      const candidate = path.sep + segments.slice(0, i).join(path.sep);
+      try {
+        const real = fs.realpathSync(candidate);
+        const suffix = segments.slice(i);
+        return suffix.length ? path.join(real, ...suffix) : real;
+      } catch { /* keep walking up to find any existing ancestor */ }
+    }
+    return absolute; // nothing on the path exists; will fail the root check
+  }
+
+  // Returns the safe resolved path (with all symlinks dereferenced) when the
+  // request passes validation, or null when it doesn't. Subsequent fs ops
+  // operate on the RESOLVED path so a symlink swap between validate-and-use
+  // can't sneak the write outside the allowed root.
+  // Codex round-4 MED on main.js:644.
+  function resolveAllowedPath(filePath) {
+    if (!filePath || typeof filePath !== 'string') return null;
+    if (path.basename(filePath) !== ALLOWED_FILENAME) return null;
+    let resolved;
+    try { resolved = resolveFollowingSymlinks(filePath); }
+    catch { return null; }
+    if (resolved.split(path.sep).includes('..')) return null;
+    const ok = knownProjectRoots().some((root) =>
+      resolved === path.join(root, ALLOWED_FILENAME) || resolved.startsWith(root + path.sep));
+    return ok ? resolved : null;
   }
 
   ipcMain.handle('file:read', (_event, filePath) => {
-    if (!isAllowedPath(filePath)) return { error: 'Only CLAUDE.md files can be read' };
+    const safe = resolveAllowedPath(filePath);
+    if (!safe) return { error: 'Only CLAUDE.md files under your home dir can be read' };
     try {
-      const stat = fs.statSync(filePath);
+      const stat = fs.statSync(safe);
       if (stat.size > MAX_FILE_SIZE) return { error: 'File too large (>1MB)' };
-      return { content: fs.readFileSync(filePath, 'utf8') };
+      return { content: fs.readFileSync(safe, 'utf8') };
     } catch {
       return { error: 'File not found' };
     }
   });
 
   ipcMain.handle('file:write', (_event, filePath, content) => {
-    if (!isAllowedPath(filePath)) return { error: 'Only CLAUDE.md files can be written' };
+    const safe = resolveAllowedPath(filePath);
+    if (!safe) return { error: 'Only CLAUDE.md files under your home dir can be written' };
     if (typeof content !== 'string' || content.length > MAX_FILE_SIZE) return { error: 'Content too large (>1MB)' };
     try {
-      const dir = path.dirname(filePath);
+      const dir = path.dirname(safe);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(filePath, content, 'utf8');
+      fs.writeFileSync(safe, content, 'utf8');
       return { ok: true };
     } catch (err) {
       return { error: err.message };
@@ -926,23 +1037,52 @@ function setupWindowHandlers() {
     return { ok: true };
   });
 
-  // Tab tear-off: create a new window for a dragged-out tab
-  ipcMain.handle('window:tearOffTab', (_event, projectPath, tabId, tabLabel, screenX, screenY) => {
+  // Pending tear-off grants: when the source window tears off a tab, we
+  // record { tabId: targetWindowId } here. Only that target window can call
+  // terminal:claimPty for that tabId. Without this, ANY renderer that learns
+  // a live tab id could claim its PTY (stealing output + becoming owner).
+  // Codex round-4 HIGH on main.js:1039.
+  // Map cleared once the grant is consumed (or its target window is destroyed).
+  const tearOffGrants = new Map(); // tabId -> webContents.id
+
+  // Tab tear-off: create a new window for a dragged-out tab.
+  // ONLY the current renderer owner may tear off a tab. This intentionally
+  // refuses unowned PTYs (voice-conductor, mobile bridge, agent-spawner) —
+  // those were created in-process without a webContents owner, and a
+  // malicious renderer that guessed their well-known ids could otherwise
+  // tear them off and claim them via the grant flow, gaining a wire-tap
+  // into voice input/output or mobile-PTY traffic.
+  // Codex round-5 HIGH on main.js:1047.
+  ipcMain.handle('window:tearOffTab', (event, projectPath, tabId, tabLabel, screenX, screenY) => {
     if (!projectPath || !tabId) return { ok: false };
-    // Validate tabId format
-    if (!/^term-.+-\d+$/.test(tabId)) return { ok: false };
+    if (!TERMINAL_ID_RE.test(tabId)) return { ok: false };
+    if (terminalOwners.get(tabId) !== event.sender.id) return { ok: false };
     const label = typeof tabLabel === 'string' ? tabLabel.slice(0, 100) : 'Tab';
     const win = openTornOffWindow(projectPath, tabId, label, screenX || 200, screenY || 200);
-    // PTY stays assigned to old webContents until new window calls terminal:claimPty.
-    // Small gap of ~1-2s where output may go to the old (unmounted) listener —
-    // acceptable tradeoff; scrollback was saved before tear-off.
+    // Record the grant against the new window's webContents.id. The new
+    // window's renderer will call terminal:claimPty once it mounts.
+    tearOffGrants.set(tabId, win.webContents.id);
+    win.webContents.once('destroyed', () => {
+      // If the target never claimed, drop the grant.
+      if (tearOffGrants.get(tabId) === win.webContents.id) tearOffGrants.delete(tabId);
+    });
     return { ok: true, id: win.id };
   });
 
-  // Claim an existing PTY for a new window (used after tear-off)
+  // Claim an existing PTY for a new window (used after tear-off). Requires
+  // an active grant for THIS tab issued to THIS webContents.
   ipcMain.handle('terminal:claimPty', (event, tabId) => {
-    if (!tabId || !/^term-.+-\d+$/.test(tabId)) return { ok: false };
+    if (!tabId || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
+    if (tearOffGrants.get(tabId) !== event.sender.id) return { ok: false };
     const success = reassignTerminal(tabId, event.sender);
+    if (success) {
+      tearOffGrants.delete(tabId);
+      terminalOwners.set(tabId, event.sender.id);
+      const ownerId = event.sender.id;
+      event.sender.once('destroyed', () => {
+        if (terminalOwners.get(tabId) === ownerId) terminalOwners.delete(tabId);
+      });
+    }
     return { ok: success };
   });
 }

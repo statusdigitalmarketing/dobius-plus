@@ -135,7 +135,13 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
 
     term.open(containerRef.current);
 
-    requestAnimationFrame(() => {
+    // Cancellation flag for any async work that resolves after this effect
+    // unmounts (Codex audit HIGH: useTerminal.js:189 — restorePromise was
+    // calling terminalCreate / terminalClaimPty against a disposed term).
+    // Same flag also gates the rAF below and any future async resolves.
+    let cancelled = false;
+    const rafId = requestAnimationFrame(() => {
+      if (cancelled) return;
       fit();
     });
 
@@ -143,6 +149,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     let restorePromise = Promise.resolve();
     if (window.electronAPI.terminalLoadState) {
       restorePromise = window.electronAPI.terminalLoadState(id).then((state) => {
+        if (cancelled) return;
         if (state?.scrollback?.length > 0 && termRef.current) {
           for (const line of state.scrollback) {
             const safeLine = String(line).replace(/\x1b/g, '');
@@ -187,8 +194,12 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     });
 
     restorePromise.then(() => {
+      // Guard against the effect having unmounted between the restore and
+      // this callback. terminalCreate/terminalClaimPty would otherwise spawn
+      // a PTY for a disposed terminal component, leaking the PTY + producing
+      // ghost output that nothing renders.
+      if (cancelled) return;
       if (claimExisting) {
-        // Tear-off: claim the existing PTY from the old window
         window.electronAPI.terminalClaimPty(id);
       } else {
         window.electronAPI.terminalCreate(id, cwd);
@@ -213,6 +224,8 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     observer.observe(containerRef.current);
 
     return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafId);
       clearInterval(autoSaveInterval);
       clearTimeout(resizeTimer);
       observer.disconnect();

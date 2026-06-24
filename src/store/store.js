@@ -158,12 +158,19 @@ export const useStore = create((set, get) => ({
     }
     const ts = { ...state.tabStatus };
     delete ts[tabId];
+    // Also prune hookOwnedTabs — otherwise a closed-then-reopened tab id
+    // (collision after high tabCounter wrap, or torn-off tab re-attaching)
+    // could inherit stale hook ownership and never settle.
+    // Codex audit MED (store.js:159).
+    const hot = { ...state.hookOwnedTabs };
+    delete hot[tabId];
     set({
       terminalTabs: tabs,
       activeTabId: newActive,
       runningAgents: ra,
       agentActivity: aa,
       tabStatus: ts,
+      hookOwnedTabs: hot,
       splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
       gridSlots: pruneGrid(state.gridSlots, new Set(tabs.map((t) => t.id))),
       monitoredTabs: state.monitoredTabs.filter((id) => id !== tabId),
@@ -214,7 +221,16 @@ export const useStore = create((set, get) => ({
   // Restore a persisted layout (already validated against live tabs by caller).
   setGridSlots: (slots) => set({ gridSlots: slots }),
 
-  setActiveTab: (tabId) => set({ activeTabId: tabId }),
+  // Validate against the current tabs list to avoid routing input/git polling
+  // to a tab id that doesn't exist (Codex audit MED: store.js:217). Accept
+  // null to deliberately clear; reject unknown ids silently to preserve
+  // existing state rather than blow up on a stale caller.
+  setActiveTab: (tabId) => set((s) => {
+    if (tabId === null || tabId === undefined) return { activeTabId: null };
+    if (typeof tabId !== 'string') return {};
+    if (!s.terminalTabs.some((t) => t.id === tabId)) return {};
+    return { activeTabId: tabId };
+  }),
 
   renameTab: (tabId, label) => set((s) => ({
     terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? { ...t, label } : t),
@@ -224,10 +240,45 @@ export const useStore = create((set, get) => ({
     terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? { ...t, pinned: !t.pinned } : t),
   })),
 
-  initTabs: (tabs, counter) => set({
-    terminalTabs: tabs,
-    activeTabId: tabs.length > 0 ? tabs[0].id : null,
-    tabCounter: counter,
+  // Replacing terminalTabs wholesale (e.g. switching project or restoring a
+  // window) MUST also prune every map keyed by tab id. Without this, the
+  // store carries split/grid/runningAgents/hookOwnedTabs/etc from the
+  // previous project, and the next render references tab ids that don't
+  // exist. Codex audit HIGH (store.js:227).
+  initTabs: (tabs, counter) => set((s) => {
+    const liveIds = new Set(tabs.map((t) => t.id));
+    // tabStatus + hookOwnedTabs are keyed by tab id directly.
+    const pruneByTabId = (obj) => {
+      const next = {};
+      for (const [k, v] of Object.entries(obj || {})) if (liveIds.has(k)) next[k] = v;
+      return next;
+    };
+    // runningAgents is { agentId: tabId } — keep entries whose tabId is live.
+    const liveAgentIds = new Set();
+    const ra = {};
+    for (const [agentId, tabId] of Object.entries(s.runningAgents || {})) {
+      if (liveIds.has(tabId)) { ra[agentId] = tabId; liveAgentIds.add(agentId); }
+    }
+    // agentActivity is { agentId: activityObject } — keep entries whose
+    // agentId still has a live running tab. Codex round-2 MED on
+    // store.js:255 (the old `pruneAgentMap` treated activity OBJECTS as if
+    // they were tab ids, dropping all activity on every init).
+    const aa = {};
+    for (const [agentId, activity] of Object.entries(s.agentActivity || {})) {
+      if (liveAgentIds.has(agentId)) aa[agentId] = activity;
+    }
+    return {
+      terminalTabs: tabs,
+      activeTabId: tabs.length > 0 ? tabs[0].id : null,
+      tabCounter: counter,
+      splitTabId: s.splitTabId && liveIds.has(s.splitTabId) ? s.splitTabId : null,
+      gridSlots: pruneGrid(s.gridSlots, liveIds),
+      runningAgents: ra,
+      agentActivity: aa,
+      tabStatus: pruneByTabId(s.tabStatus),
+      hookOwnedTabs: pruneByTabId(s.hookOwnedTabs),
+      monitoredTabs: (s.monitoredTabs || []).filter((id) => liveIds.has(id)),
+    };
   }),
 
   reorderTabs: (fromIndex, toIndex) => set((s) => {
@@ -252,11 +303,13 @@ export const useStore = create((set, get) => ({
     }
     const ts = { ...state.tabStatus };
     for (const id of removedIds) delete ts[id];
+    const hot = { ...state.hookOwnedTabs };
+    for (const id of removedIds) delete hot[id];
     // Clear splitTabId if the split pane was killed — otherwise the layout
     // stays stuck in split mode pointing at a dead tab and the surviving
     // active terminal is constrained to half-width with no header to exit.
     const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
-    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {
@@ -277,12 +330,14 @@ export const useStore = create((set, get) => ({
     }
     const ts = { ...state.tabStatus };
     for (const id of removedIds) delete ts[id];
+    const hot = { ...state.hookOwnedTabs };
+    for (const id of removedIds) delete hot[id];
     const allKept = [...kept, ...pinnedRight];
     const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
     // Same split-cleanup as closeOtherTabs — kill the split pointer if the
     // tab it referenced just got removed.
     const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
-    set({ terminalTabs: allKept, activeTabId: newActive, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: allKept, activeTabId: newActive, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   // Actions
