@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { killTerminal, getActiveTerminals, gracefulCloseTerminals, getTerminalsForProject } from './terminal-manager.js';
 import { watchFiles } from './watcher-service.js';
 import { getProjectConfig, setProjectConfig } from './config-manager.js';
+import { getQuittingForUpdate } from './quit-state.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -76,9 +77,16 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
   // save scrollback, then kill terminals. Prevents immediate PTY death on window X.
   let closingGracefully = false;
   win.on('close', (e) => {
-    if (closingGracefully) return; // Phase 2 — let it close
+    if (closingGracefully) return; // Phase 2, let it close
 
-    // Phase 1 — intercept, do graceful shutdown
+    // Updater-bypass: when the Restart button is firing app.quit() through
+    // squirrel.mac, the bundle replace expects the app to exit FAST. Let
+    // every window close immediately; will-quit + the updater branch of
+    // before-quit handle PTY/server teardown. Without this bypass, the
+    // graceful Ctrl+C+save dance can race the bundle replacement.
+    if (getQuittingForUpdate && getQuittingForUpdate()) return;
+
+    // Phase 1, intercept and do graceful shutdown
     e.preventDefault();
     closingGracefully = true;
 

@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import { getQuittingForUpdate } from './quit-state.js';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, listTerminals, reassignTerminal, ensureSpawnHelperExecutable } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
@@ -2018,8 +2019,41 @@ let quitConfirmed = false;
 let quitTimer = null;
 let savedBeforeQuit = false;
 
+// Updater quit bypass. When the user clicks the Restart button on the auto-
+// update toast, autoUpdater.quitAndInstall() internally calls app.quit()
+// which fires before-quit. Without a bypass the two-press Cmd+Q overlay
+// intercepts the quit, e.preventDefault()'s it, and squirrel.mac never gets
+// to swap the bundle. Flag lives in ./quit-state.js so window-manager.js
+// can read it without a circular import on main.js.
+// (imported at top of file via `import { getQuittingForUpdate } from './quit-state.js'`)
+
+// Forward-declared so the updater-bypass branch of before-quit can share the
+// same single-fire guard as will-quit. Actual reset is in will-quit below.
+let didTeardown = false;
+
 let phase3Draining = false;
 app.on('before-quit', (e) => {
+  // Updater bypass: skip both the 2-press Cmd+Q overlay and the 3-phase
+  // teardown gate. Run a single best-effort teardown synchronously and let
+  // the quit through. squirrel.mac needs a clean exit FAST or the install
+  // can corrupt. flushConfigAsync was already awaited in auto-updater.js
+  // before quitAndInstall was called, so config is flushed by here.
+  if (getQuittingForUpdate()) {
+    if (didTeardown) return;
+    didTeardown = true;
+    try { killAll(); } catch {}
+    try { stopWatching(); } catch {}
+    try { stopAllBuildWatchers(); } catch {}
+    try { stopAllFileWatchers(); } catch {}
+    try { stopVoiceBridge(); } catch {}
+    try { stopImessageBridge(); } catch {}
+    try { stopScheduledTasks(); } catch {}
+    try { stopAutoMode(); } catch {}
+    try { stopMobileServer(); } catch {}
+    try { closeVisualWindow(); } catch {}
+    try { void stopVisualServer(); } catch {}
+    return; // do NOT preventDefault, let the quit proceed
+  }
   if (quitConfirmed && savedBeforeQuit) {
     // Phase 3: scrollback saved. Drain pending async config writes BEFORE
     // the final sync flush so a mid-flight rename can't land after the
@@ -2080,10 +2114,10 @@ app.on('before-quit', (e) => {
 });
 
 // Resource teardown runs on EVERY quit path (confirmed two-press quit, force
-// quit, OS shutdown, window-all-closed → app.quit()), not just the two-press
-// branch of before-quit — otherwise PTYs, the voice bridge, the Visual server,
-// auto-mode and the watchers leak on a force quit. Idempotent via didTeardown.
-let didTeardown = false;
+// quit, OS shutdown, window-all-closed -> app.quit()), not just the two-press
+// branch of before-quit, otherwise PTYs, the voice bridge, the Visual server,
+// auto-mode and the watchers leak on a force quit. Idempotent via didTeardown
+// (forward-declared above so the updater-bypass branch can share it).
 app.on('will-quit', () => {
   if (didTeardown) return;
   didTeardown = true;
