@@ -84,12 +84,18 @@ export function advance(task, toStage, { note = null, actor = 'system', at = Dat
   }
   const events = cap([...(task.events || []), event(toStage, from, toStage, note, actor, at)], MAX_EVENTS);
   const stagedAt = { ...(task.stagedAt || {}), [toStage]: at };
+  // Entering `blocked` via advance() (e.g. the /stage bridge) must remember the
+  // origin stage so unblock() returns there — matching block(). Any other
+  // transition clears it.
+  const blockedFrom = toStage === 'blocked'
+    ? (from === 'blocked' ? (task.blockedFrom || 'queued') : from)
+    : null;
   return {
     ...task,
     stage: toStage,
     events,
     stagedAt,
-    blockedFrom: null,
+    blockedFrom,
     ...(toStage === 'done' ? { done: true } : {}),
   };
 }

@@ -174,7 +174,11 @@ export function deleteTask(projectPath, taskId) {
   if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
   const tasks = readTasks(projectPath);
   const next = tasks.filter((t) => t.id !== taskId);
-  writeTasks(projectPath, next);
+  try {
+    writeTasks(projectPath, next);
+  } catch (err) {
+    return { ok: false, error: `failed to delete task: ${err.message}` };
+  }
   return { ok: true };
 }
 

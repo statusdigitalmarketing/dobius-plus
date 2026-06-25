@@ -28,11 +28,17 @@ export default function Settings() {
   const [asanaPatVisible, setAsanaPatVisible] = useState(false);
   const [autoMode, setAutoMode] = useState({ enabled: false, intervalMinutes: 10 });
 
+  // Terminal-tab status dots — managed Claude Notification hook
+  const [statusHooks, setStatusHooks] = useState(false);
+  const [statusHooksBusy, setStatusHooksBusy] = useState(false);
+  const [statusHooksError, setStatusHooksError] = useState('');
+
   useEffect(() => {
     window.electronAPI?.asanaGetConfig?.().then((cfg) => {
       if (cfg?.pat) setAsanaPat(cfg.pat);
     });
     window.electronAPI?.autoModeGet?.().then((a) => { if (a) setAutoMode(a); });
+    window.electronAPI?.claudeHooksGetStatus?.().then((r) => { if (r) setStatusHooks(!!r.installed); });
   }, []);
 
   const saveAsanaPat = useCallback(async () => {
@@ -46,13 +52,6 @@ export default function Settings() {
     setAutoMode((a) => ({ ...a, enabled: r?.enabled ?? on }));
   }, []);
 
-  // Terminal-tab status dots — managed Claude Notification hook
-  const [statusHooks, setStatusHooks] = useState(false);
-  const [statusHooksBusy, setStatusHooksBusy] = useState(false);
-  const [statusHooksError, setStatusHooksError] = useState('');
-  useEffect(() => {
-    window.electronAPI?.claudeHooksGetStatus?.().then((r) => { if (r) setStatusHooks(!!r.installed); });
-  }, []);
   const toggleStatusHooks = useCallback(async (on) => {
     setStatusHooksBusy(true);
     setStatusHooksError('');

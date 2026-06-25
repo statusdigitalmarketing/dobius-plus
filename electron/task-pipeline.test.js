@@ -89,6 +89,14 @@ test('unblock to explicit target', () => {
 test('unblock on non-blocked throws', () => {
   assert.throws(() => p.unblock(newTask(), { at: AT }), /not blocked/);
 });
+test('advance() into blocked remembers origin (e.g. /stage bridge), unblock returns there', () => {
+  let t = p.advance(newTask(), 'building', { at: AT });
+  t = p.advance(t, 'blocked', { actor: 'system', at: AT }); // bridge path, not block()
+  assert.equal(t.stage, 'blocked');
+  assert.equal(t.blockedFrom, 'building');
+  t = p.unblock(t, { at: AT });
+  assert.equal(t.stage, 'building'); // returns to origin, not the 'queued' fallback
+});
 
 // --- immutability: input never mutated ---
 test('advance does not mutate input', () => {

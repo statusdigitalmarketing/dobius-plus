@@ -10,3 +10,11 @@ mobile-pairing-smoketest.png
 AUTONOMOUS-REPAIR.md
 scripts/supervisor.log
 .playwright-mcp/
+.dobius/
+
+# Parallel git worktrees / sibling clones that live inside the repo dir
+dobius-plus-fix-main/
+dobius-plus-fix-svc/
+dobius-plus-kanban/
+dobius-plus-terminal/
+dobius-voice-conductor/

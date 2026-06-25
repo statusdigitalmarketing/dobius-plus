@@ -3,6 +3,11 @@
 ## Overview
 Dobius+ is an Electron desktop app that wraps Claude Code CLI in themed terminal windows. Each project gets its own window with multi-tab terminals (xterm.js + node-pty), session checkpoints, custom agents, CLAUDE.md editor, conversation history sidebar, and dashboard tabs.
 
+## Project memory
+Session notes and learnings live in `.dobius/NOTES.md` (also editable from the Dashboard "Notes" tab). The file is imported below so it loads at the start of every session — read it, and when you learn something durable about this project, append a dated note.
+
+@.dobius/NOTES.md
+
 ## Tech Stack
 - **Electron 33+** — desktop shell, multi-window, IPC
 - **Vite 6 + React 19** — renderer UI

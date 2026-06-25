@@ -904,6 +904,64 @@ function setupFileHandlers() {
     }
   });
 
+  // Per-project notes / memory file: <project>/.dobius/NOTES.md. Shared by the
+  // human (Notes dashboard tab) and the terminal agent (plain file in its cwd).
+  // The renderer passes only projectPath — we derive and validate the file path
+  // here so an arbitrary path from the renderer can never be read/written.
+  function resolveNotesPath(projectPath) {
+    if (!projectPath || typeof projectPath !== 'string') return null;
+    let registered;
+    try {
+      registered = Object.keys(loadConfig().projects || {});
+    } catch {
+      return null; // config unreadable — deny
+    }
+    // Match the project against the registered set on its real path.
+    let realProject;
+    try { realProject = fs.realpathSync(projectPath); } catch { return null; }
+    const isRegistered = registered.some((p) => {
+      try { return fs.realpathSync(p) === realProject; } catch { return false; }
+    });
+    if (!isRegistered) return null;
+    const target = path.join(realProject, '.dobius', 'NOTES.md');
+    // Containment guard: resolve symlinks in the path and confirm the real
+    // target still sits inside the project root (mirrors resolveAllowedPath).
+    const resolved = resolveFollowingSymlinks(target);
+    if (!resolved || path.basename(resolved) !== 'NOTES.md' || !resolved.startsWith(realProject + path.sep)) {
+      return null;
+    }
+    return target;
+  }
+
+  ipcMain.handle('notes:read', (_event, projectPath) => {
+    const notesPath = resolveNotesPath(projectPath);
+    if (!notesPath) return { error: 'Notes unavailable for this project' };
+    try {
+      if (!fs.existsSync(notesPath)) return { content: '' };
+      const stat = fs.statSync(notesPath);
+      if (stat.size > MAX_FILE_SIZE) return { error: 'Notes file too large (>1MB)' };
+      return { content: fs.readFileSync(notesPath, 'utf8') };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  ipcMain.handle('notes:write', (_event, projectPath, content) => {
+    const notesPath = resolveNotesPath(projectPath);
+    if (!notesPath) return { error: 'Notes unavailable for this project' };
+    if (typeof content !== 'string' || content.length > MAX_FILE_SIZE) {
+      return { error: 'Notes content too large (>1MB)' };
+    }
+    try {
+      const dir = path.dirname(notesPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(notesPath, content, 'utf8');
+      return { ok: true };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
   // Skill file editor — locked to ~/.claude/skills/ directory
   const skillsDir = path.join(homedir, '.claude', 'skills');
   const ALLOWED_SKILL_FILES = ['CLAUDE.md', 'skill.json'];

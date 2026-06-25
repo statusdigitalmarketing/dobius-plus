@@ -19,6 +19,7 @@ import KanbanView from './Kanban/KanbanView';
 import OrchestratorView from './Orchestrator/OrchestratorView';
 import Updates from './Updates';
 import Prompts from './Prompts';
+import Notes from './Notes';
 import Costs from './Costs';
 import ChangeFeed from './ChangeFeed';
 import Search from './Search';
@@ -34,6 +35,7 @@ const TABS = [
   { id: 'checkpoints', label: 'Checkpoints' },
   { id: 'plans', label: 'Plans' },
   { id: 'prompts', label: 'Prompts' },
+  { id: 'notes', label: 'Notes' },
   { id: 'agents', label: 'Mission Control' },
   { id: 'board', label: 'Board' },
   { id: 'pipeline', label: 'Pipeline' },
@@ -61,6 +63,7 @@ const TAB_CONTENT = {
   orchestrator: () => <OrchestratorView />,
   plans: (props) => <Plans plans={props.plans} />,
   prompts: () => <Prompts />,
+  notes: () => <Notes />,
   builds: () => <BuildMonitorView />,
   git: () => <GitView />,
   changes: () => <ChangeFeed />,

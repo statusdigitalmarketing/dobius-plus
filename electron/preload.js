@@ -63,6 +63,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   fileRead: (filePath) => ipcRenderer.invoke('file:read', filePath),
   fileWrite: (filePath, content) => ipcRenderer.invoke('file:write', filePath, content),
   fileListClaudeMd: (projectPath) => ipcRenderer.invoke('file:listClaudeMd', projectPath),
+
+  // Per-project notes / memory (<project>/.dobius/NOTES.md)
+  notesRead: (projectPath) => ipcRenderer.invoke('notes:read', projectPath),
+  notesWrite: (projectPath, content) => ipcRenderer.invoke('notes:write', projectPath, content),
+
+  // Claude status hooks — manages an opt-in Notification/Stop hook block in
+  // ~/.claude/settings.json that drives the terminal-tab status dots.
+  claudeHooksGetStatus: () => ipcRenderer.invoke('claudeHooks:getStatus'),
+  claudeHooksEnable: () => ipcRenderer.invoke('claudeHooks:enable'),
+  claudeHooksDisable: () => ipcRenderer.invoke('claudeHooks:disable'),
   skillReadFile: (skillPath, filename) => ipcRenderer.invoke('skill:readFile', skillPath, filename),
   skillWriteFile: (skillPath, filename, content) => ipcRenderer.invoke('skill:writeFile', skillPath, filename, content),
 
