@@ -68,7 +68,13 @@ export async function loadHistory() {
  * sorted by recency, limited to 500. `status` is 'working' | 'needs' | 'done'
  * (same red/yellow/green meaning as the terminal tab dots).
  */
-export async function loadAllSessions() {
+export async function loadAllSessions(projectFilter) {
+  // projectFilter (optional): when provided, restrict the scan to JSONL files
+  // whose resolved projectPath matches this string. Critical for project-scoped
+  // sidebar: without filtering BEFORE the global 500-cap, an older project on
+  // a machine with more than 500 newer cross-project sessions would appear
+  // empty in its own sidebar even though its transcripts exist on disk.
+  // Codex PR#3 r8 P2.
   const sessions = [];
   try {
     if (!(await pathExists(PROJECTS_DIR))) return [];
@@ -111,6 +117,9 @@ export async function loadAllSessions() {
       const projectDir = path.join(PROJECTS_DIR, dir.name);
       const realPath = encodedToReal.get(dir.name) || tryReconstructPath(dir.name);
       const projectPath = realPath || ('/' + dir.name.replace(/-/g, '/'));
+      // Pre-filter by project so the global 500-cap applies to the matching
+      // set, not to everything-then-trimmed. Codex PR#3 r8 P2.
+      if (projectFilter && projectPath !== projectFilter) continue;
       const projectName = realPath
         ? realPath.split('/').filter(Boolean).pop()
         : dir.name.split('-').filter(Boolean).pop() || dir.name;

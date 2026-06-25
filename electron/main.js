@@ -193,11 +193,19 @@ function setupTerminalHandlers() {
     if (account?.type === 'codex' && account.apiKey) {
       accountEnv.OPENAI_API_KEY = account.apiKey;
     } else if (account?.type === 'claude') {
+      // Expand a leading ~ before splitting paths. Shells do not expand `~`
+      // inside $PATH or env vars, so a saved cliPath of `~/.nvm/.../claude`
+      // would leave `~/.nvm/...` literally in DOBIUS_CLI_DIR, the assigned
+      // terminal would then fall back to the default `claude` on PATH. Same
+      // class of bug as round-6 R6-1 (resolveActiveCliPath). Codex PR#3 r8 P2.
+      const expandTilde = (p) => (typeof p === 'string' && p.startsWith('~'))
+        ? path.join(os.homedir(), p.slice(1))
+        : p;
       if (account.claudeJsonPath) {
-        accountEnv.CLAUDE_CONFIG_DIR = path.dirname(account.claudeJsonPath);
+        accountEnv.CLAUDE_CONFIG_DIR = path.dirname(expandTilde(account.claudeJsonPath));
       }
       if (account.cliPath) {
-        accountEnv.DOBIUS_CLI_DIR = path.dirname(account.cliPath);
+        accountEnv.DOBIUS_CLI_DIR = path.dirname(expandTilde(account.cliPath));
       }
     }
     return createTerminal(id, cwd, event.sender, accountEnv);
@@ -347,7 +355,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:loadTranscript', (_event, sessionId, projectPath) => loadTranscript(sessionId, projectPath));
   ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
   ipcMain.handle('data:listProjects', () => listProjects());
-  ipcMain.handle('data:loadAllSessions', () => loadAllSessions());
+  ipcMain.handle('data:loadAllSessions', (_event, projectFilter) => loadAllSessions(typeof projectFilter === 'string' ? projectFilter : undefined));
   ipcMain.handle('data:getLatestSession', (_event, projectPath) => getLatestSession(projectPath));
   ipcMain.handle('data:killProcess', async (_event, pid) => {
     const n = parseInt(pid, 10);

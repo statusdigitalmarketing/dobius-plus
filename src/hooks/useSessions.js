@@ -32,13 +32,13 @@ export function useSessions({ projectFilter = null } = {}) {
       // Use dataLoadAllSessions (reads transcript files directly from
       // ~/.claude/projects/) instead of dataLoadHistory (reads
       // ~/.claude/history.jsonl, which on this Mac is 95% incomplete
-      // and 92% full of ghost entries for deleted transcripts). The
-      // sidebar was effectively only able to surface the ~83 sessions
-      // that happened to be in BOTH lists, out of 4,367 real ones on
-      // disk. Switching to the disk source shows everything that
-      // actually exists, capped at 500 most-recent.
+      // and 92% full of ghost entries for deleted transcripts).
+      // Pass projectFilter to the IPC so the global 500-cap applies AFTER
+      // the project filter. Without this, an older project's sidebar on a
+      // machine with more than 500 newer sessions in other projects would
+      // appear empty. Codex PR#3 r8 P2.
       const [raw, tabMap, tags] = await Promise.all([
-        window.electronAPI.dataLoadAllSessions(),
+        window.electronAPI.dataLoadAllSessions(projectFilter || undefined),
         window.electronAPI.configGetSessionTabMap?.() ?? {},
         window.electronAPI.configGetSessionTags?.() ?? {},
       ]);
@@ -65,7 +65,7 @@ export function useSessions({ projectFilter = null } = {}) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [projectFilter]);
 
   useEffect(() => {
     loadSessions();

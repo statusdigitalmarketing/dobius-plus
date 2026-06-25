@@ -226,11 +226,25 @@ export default function Skills({ skills }) {
                     style={{
                       backgroundColor: 'var(--surface)',
                       border: '1px solid var(--border)',
-                      cursor: skill.path ? 'pointer' : 'default',
+                      cursor: (skill.path && !skill.path.includes('/.claude/plugins/')) ? 'pointer' : 'default',
                       transition: 'border-color 0.15s',
                     }}
-                    onDoubleClick={() => skill.path && setEditing(skill)}
-                    title={skill.path ? 'Double-click to edit' : undefined}
+                    // Plugin skills (under ~/.claude/plugins/) are owned by their
+                    // plugin author; the main-process IPC only permits writes inside
+                    // ~/.claude/skills/<one-level>, so opening the editor would show
+                    // "Access denied". Gate the double-click instead of letting it
+                    // silently fail. Codex PR#3 r8 P2.
+                    onDoubleClick={() => {
+                      if (!skill.path) return;
+                      if (skill.path.includes('/.claude/plugins/')) return;
+                      setEditing(skill);
+                    }}
+                    title={
+                      !skill.path ? undefined
+                        : skill.path.includes('/.claude/plugins/')
+                          ? 'Plugin skill (read-only, edit in source repo)'
+                          : 'Double-click to edit'
+                    }
                   >
                     <div className="text-sm font-medium" style={{ color: 'var(--fg)' }}>
                       {skill.name}
