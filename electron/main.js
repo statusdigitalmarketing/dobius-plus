@@ -55,7 +55,7 @@ import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue, getAutoResume, updateAutoResume } from './config-manager.js';
-import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages } from './visual-server.js';
+import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages, getVisualProjectPath } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -919,7 +919,18 @@ function setupOrchestrationHandlers() {
       return { ok: false, error: err.message };
     }
   });
-  ipcMain.handle('visual:stop', async () => {
+  ipcMain.handle('visual:stop', async (_event, projectPath) => {
+    // Project-scoped stop. When the Visual window switches projects, the old
+    // VisualView unmounts and fires this IPC; without a project scope it can
+    // race after the NEW view's visual:start and kill the freshly-started
+    // server, leaving the window blank. Ignore stops that don't match the
+    // currently-running project. Codex r29 P2.
+    if (typeof projectPath === 'string' && projectPath) {
+      const current = getVisualProjectPath();
+      if (current && current !== projectPath) {
+        return { ok: true, ignored: true };
+      }
+    }
     await stopVisualServer();
     return { ok: true };
   });

@@ -75,7 +75,14 @@ export default function VisualView({ projectPath }) {
       if (!cancelled) setLoading(false);
     });
 
-    return () => { cancelled = true; window.electronAPI?.visualStop?.(); };
+    return () => {
+      cancelled = true;
+      // Pass projectPath so main can ignore the stop if the Visual window
+      // has already switched to a different project (otherwise this unmount
+      // races and kills the new project's freshly-started server).
+      // Codex r29 P2.
+      window.electronAPI?.visualStop?.(projectPath);
+    };
   }, [projectPath]);
 
   const baseFor = useCallback((src) => {

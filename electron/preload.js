@@ -319,7 +319,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   autoModeSetEnabled: (on) => ipcRenderer.invoke('automode:setEnabled', on),
   visualOpenWindow: (projectPath) => ipcRenderer.invoke('visual:openWindow', projectPath),
   visualStart: (projectPath) => ipcRenderer.invoke('visual:start', projectPath),
-  visualStop: () => ipcRenderer.invoke('visual:stop'),
+  visualStop: (projectPath) => ipcRenderer.invoke('visual:stop', projectPath),
   visualGetPort: () => ipcRenderer.invoke('visual:getPort'),
   visualScreenshot: (webContentsId) => ipcRenderer.invoke('visual:screenshot', webContentsId),
   visualListPages: () => ipcRenderer.invoke('visual:listPages'),
