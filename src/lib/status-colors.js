@@ -11,13 +11,15 @@
  * Hex values mirror the theme's accent/success/danger tokens.
  */
 export const STATUS_COLORS = Object.freeze({
-  working: '#D29922', // yellow — Claude is actively streaming
-  done: '#3FB950',    // green  — Claude finished its turn
-  needs: '#F85149',   // red    — user needs to respond
+  working: '#D29922', // yellow, Claude is actively streaming
+  done: '#3FB950',    // green,  Claude finished its turn
+  needs: '#F85149',   // red,    user needs to respond
+  queued: '#A371F7',  // purple, auto-resume queued to fire (cluster v1.0.30)
 });
 
 export const STATUS_LABELS = Object.freeze({
   working: 'Working',
   done: 'Done',
   needs: 'Needs your response',
+  queued: 'Auto-resume queued',
 });

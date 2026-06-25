@@ -167,7 +167,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mobileServerRemoveDevice: (token) => ipcRenderer.invoke('mobileServer:removeDevice', token),
   mobileServerSetBindMode: (mode) => ipcRenderer.invoke('mobileServer:setBindMode', mode),
 
-  // iMessage bridge — drive Dobius+ by texting yourself
+  // Auto-resume queue (v1.0.30): re-engage previously-active Claude sessions
+  // on app launch, staggered. Settings UI + Cmd+Shift+R cancel hook.
+  autoResumeGet: () => ipcRenderer.invoke('autoResume:get'),
+  autoResumeUpdate: (updates) => ipcRenderer.invoke('autoResume:update', updates),
+  autoResumeCancelAll: () => ipcRenderer.invoke('autoResume:cancelAll'),
+  autoResumePendingCount: () => ipcRenderer.invoke('autoResume:pendingCount'),
+  // Main pushes per-tab status (queued / working / done) on this channel.
+  // The renderer forwards to the Zustand store's setTabStatus so the dot
+  // shows up on the tab without any new UI surface.
+  onTabStatus: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('tab:status', handler);
+    return () => ipcRenderer.removeListener('tab:status', handler);
+  },
+
+  // iMessage bridge, drive Dobius+ by texting yourself
   imessageBridgeGetConfig: () => ipcRenderer.invoke('imessageBridge:getConfig'),
   imessageBridgeUpdateConfig: (updates) => ipcRenderer.invoke('imessageBridge:updateConfig', updates),
   imessageBridgeStatus: () => ipcRenderer.invoke('imessageBridge:status'),

@@ -119,6 +119,16 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
   win.on('closed', () => {
     projectWindows.delete(win.id);
 
+    // Auto-resume cancel: drop any pending queue entries for this project
+    // since the tabs are about to die. Dynamic import avoids a hard
+    // circular dep on the orchestrator module.
+    try {
+      // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+      import('./auto-resume.js').then((m) => {
+        if (m?.cancelTabsForProject) m.cancelTabsForProject(projectPath);
+      }).catch(() => {});
+    } catch { /* noop */ }
+
     // If this is a tear-off window, only kill the specific torn-off terminal
     if (isTearOff && tearOffTabId) {
       killTerminal(tearOffTabId);
@@ -130,7 +140,7 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
     const otherWindowIds = getWindowIdsForProject(projectPath);
     if (otherWindowIds.length > 0) return;
 
-    // No other windows — kill all terminals for this project
+    // No other windows, kill all terminals for this project
     const termIds = getTerminalsForProject(projectPath);
     for (const id of termIds) {
       killTerminal(id);

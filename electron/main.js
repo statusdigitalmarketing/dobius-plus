@@ -5,6 +5,7 @@ import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { getQuittingForUpdate } from './quit-state.js';
+import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, cancelTabsForProject as cancelAutoResumeProject, pendingCount as autoResumePending } from './auto-resume.js';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, listTerminals, reassignTerminal, ensureSpawnHelperExecutable } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
@@ -53,7 +54,7 @@ import {
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
-import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
+import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue, getAutoResume, updateAutoResume } from './config-manager.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
 
@@ -217,6 +218,14 @@ function setupTerminalHandlers() {
     if (typeof data !== 'string') return;
     if (data.length > TERMINAL_WRITE_MAX_BYTES) return;
     if (!ownsTerminal(event.sender.id, id)) return; // not yours, drop silently
+    // Auto-resume cancellation: if the user types into a tab BEFORE its
+    // scheduled `claude --resume` fires, skip that tab. The store's own
+    // resumeSession path also writes here (it's how the staggered queue is
+    // disambiguated from real user input we add a marker arg below later if
+    // needed). Today we cancel on any incoming write that isn't the
+    // orchestrator itself, which is the desired behavior: if anything
+    // touches the tab first, the queued resume defers to that.
+    cancelAutoResumeTab(id);
     writeTerminal(id, data);
   });
 
@@ -1660,6 +1669,17 @@ function setupMobileServerHandlers() {
   });
 }
 
+function setupAutoResumeHandlers() {
+  // Settings UI getter + toggle/tuning setter for the autoResume bucket.
+  ipcMain.handle('autoResume:get', () => getAutoResume());
+  ipcMain.handle('autoResume:update', (_event, updates) => updateAutoResume(updates || {}));
+  // Cmd+Shift+R cancellation entry point: cancels every pending tab. Returns
+  // how many were in flight so the UI can show a tiny "cancelled N queued
+  // resumes" toast.
+  ipcMain.handle('autoResume:cancelAll', () => ({ ok: true, cancelled: cancelAllAutoResume() }));
+  ipcMain.handle('autoResume:pendingCount', () => autoResumePending());
+}
+
 function setupImessageBridgeHandlers() {
   ipcMain.handle('imessageBridge:getConfig', () => getImessageBridge());
   ipcMain.handle('imessageBridge:updateConfig', (_event, updates) => {
@@ -2025,6 +2045,7 @@ app.whenReady().then(() => {
   setupFileHandlers();
   setupShellHandlers();
   setupMobileServerHandlers();
+  setupAutoResumeHandlers();
   setupImessageBridgeHandlers();
   setupWindowHandlers();
   setupBuildMonitorHandlers();
@@ -2066,6 +2087,14 @@ app.whenReady().then(() => {
       }
     }, 500);
   }
+
+  // Auto-resume queue (v1.0.30): after the project windows above mount and
+  // their terminals come up, walk every live tab's prior sessionTabMap entry
+  // and stagger-write `claude --resume <id>` into each. Default ON; per-tab
+  // cancel on user-input; Cmd+Shift+R cancels the whole queue. See
+  // electron/auto-resume.js. startAutoResume waits an internal startupDelay
+  // for terminals to be ready, so no separate setTimeout needed here.
+  void startAutoResume();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

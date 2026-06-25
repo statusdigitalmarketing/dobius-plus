@@ -59,6 +59,17 @@ const DEFAULT_CONFIG = {
   },
   accounts: [],                  // [{ id, name, type: 'claude'|'codex', claudeJsonPath?, apiKey? }]
   projectAccounts: {},           // projectPath → accountId
+  autoResume: {
+    // Re-engage every previously-active Claude session on app launch.
+    // Reads sessionTabMap to find each tab's last-running sessionId, validates
+    // the transcript (exists + under skipOversizedMB) and project, then
+    // staggers `claude --resume <id>` writes into each tab so 14 PTYs don't
+    // spin up simultaneously. See electron/auto-resume.js.
+    enabled: true,               // default ON per Sam's choice
+    staggerMs: 50,               // delay between consecutive resume writes
+    skipOversizedMB: 80,         // matches the existing dead-session guard
+    cancelOnUserInput: true,     // skip a tab if the user types into it first
+  },
 };
 
 let configCache = null;
@@ -404,6 +415,41 @@ export function updateSettings(updates) {
 export function getImessageBridge() {
   const config = loadConfig();
   return { ...DEFAULT_CONFIG.imessageBridge, ...config.imessageBridge };
+}
+
+/**
+ * Get autoResume config (the v1.0.30 staggered re-engage-on-launch feature).
+ */
+export function getAutoResume() {
+  const config = loadConfig();
+  return { ...DEFAULT_CONFIG.autoResume, ...(config.autoResume || {}) };
+}
+
+/**
+ * Update autoResume config (merge with sanitize). Renderer Settings UI
+ * writes here when the user toggles or tunes stagger.
+ */
+export function updateAutoResume(updates) {
+  if (!updates || typeof updates !== 'object') return getAutoResume();
+  const config = loadConfig();
+  const sanitized = {};
+  for (const [key, value] of Object.entries(updates)) {
+    if (!UNSAFE_KEYS.has(key)) sanitized[key] = value;
+  }
+  // Coerce + clamp to safe ranges so a bad UI write can't make the queue toxic.
+  if ('enabled' in sanitized) sanitized.enabled = !!sanitized.enabled;
+  if ('staggerMs' in sanitized) {
+    const n = Number(sanitized.staggerMs);
+    sanitized.staggerMs = Number.isFinite(n) ? Math.max(10, Math.min(2000, n)) : 50;
+  }
+  if ('skipOversizedMB' in sanitized) {
+    const n = Number(sanitized.skipOversizedMB);
+    sanitized.skipOversizedMB = Number.isFinite(n) ? Math.max(1, Math.min(500, n)) : 80;
+  }
+  if ('cancelOnUserInput' in sanitized) sanitized.cancelOnUserInput = !!sanitized.cancelOnUserInput;
+  config.autoResume = { ...DEFAULT_CONFIG.autoResume, ...(config.autoResume || {}), ...sanitized };
+  saveConfig(config);
+  return config.autoResume;
 }
 
 /**

@@ -480,6 +480,18 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     };
   }, [setSessions, setActiveProcesses]);
 
+  // Auto-resume status listener (v1.0.30). Main process pushes
+  // { tabId, status } on the 'tab:status' channel as the queue progresses;
+  // forward to the store's setTabStatus action so the existing dot UI
+  // reflects 'queued' / 'working' / 'done' without any new render surface.
+  useEffect(() => {
+    if (!window.electronAPI?.onTabStatus) return;
+    const setTabStatus = useStore.getState().setTabStatus;
+    return window.electronAPI.onTabStatus(({ tabId, status }) => {
+      if (tabId && status) setTabStatus(tabId, status);
+    });
+  }, []);
+
   const handleTogglePin = useCallback((sessionId) => {
     setPinnedIds((prev) => {
       const next = prev.includes(sessionId)
@@ -763,6 +775,11 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         if (useStore.getState().activeView !== 'terminal') return;
         e.preventDefault();
         doResumeLatest();
+      } else if (e.key === 'R' && e.shiftKey) {
+        // Cmd+Shift+R = cancel the auto-resume queue (v1.0.30).
+        // Doesn't matter which view we're in, this is global.
+        e.preventDefault();
+        window.electronAPI?.autoResumeCancelAll?.();
       } else if (e.key === '[' && e.shiftKey) {
         if (inAppField) return;
         e.preventDefault();
