@@ -382,9 +382,32 @@ function setupDataHandlers() {
   ipcMain.handle('data:deleteSession', (_event, sessionId, projectPath) => deleteSession(sessionId, projectPath));
 }
 
+/**
+ * Returns true iff `projectPath` is a known project root (open window OR in
+ * the registered project list). Used to gate IPC handlers that perform
+ * sensitive per-project operations (git deploys, filewatcher, static server,
+ * etc.) so a renderer bug / compromised page cannot point them at arbitrary
+ * local directories. Codex PR#3 r14+r15 P1/P2.
+ */
+async function isKnownProject(projectPath) {
+  if (!projectPath || typeof projectPath !== 'string') return false;
+  try {
+    const known = new Set([
+      ...(getOpenProjects() || []),
+      ...((await listProjects()) || []).map((p) => p.decodedPath).filter(Boolean),
+    ]);
+    return known.has(projectPath);
+  } catch {
+    return false;
+  }
+}
+
 function setupFileWatcherHandlers() {
-  ipcMain.handle('filewatcher:watch', (event, projectPath) => {
-    if (!projectPath || typeof projectPath !== 'string') return;
+  ipcMain.handle('filewatcher:watch', async (event, projectPath) => {
+    // SECURITY: chokidar with an arbitrary absolute path would stream
+    // filenames from any local directory back to the renderer AND create
+    // an expensive recursive watcher. Gate on isKnownProject. Codex PR#3 r15.
+    if (!(await isKnownProject(projectPath))) return;
     watchProjectDir(projectPath, event.sender);
   });
 
@@ -862,21 +885,11 @@ function setupOrchestrationHandlers() {
     return { ok: true };
   });
   ipcMain.handle('visual:start', async (_event, projectPath) => {
-    // SECURITY: only serve directories that map to a currently-open project
-    // window OR a known/listed project. Without this, a renderer bug or
-    // compromised page could pass an arbitrary path and start an
-    // unauthenticated localhost server for ANY local directory. Codex PR#3 r14 P2.
-    if (!projectPath || typeof projectPath !== 'string') {
-      return { ok: false, error: 'projectPath required' };
+    // SECURITY: only serve known project roots, see isKnownProject.
+    if (!(await isKnownProject(projectPath))) {
+      return { ok: false, error: 'projectPath is not a known project root' };
     }
     try {
-      const known = new Set([
-        ...(getOpenProjects() || []),
-        ...((await listProjects()) || []).map((p) => p.decodedPath).filter(Boolean),
-      ]);
-      if (!known.has(projectPath)) {
-        return { ok: false, error: 'projectPath is not a known project root' };
-      }
       const port = await startVisualServer(projectPath);
       return { ok: true, port, url: `http://127.0.0.1:${port}` };
     } catch (err) {
@@ -913,9 +926,28 @@ function setupOrchestrationHandlers() {
   });
 
   // --- Visual deploy (git: preview branch, then promote to live) ---
-  ipcMain.handle('visual:deployStatus', (_event, projectPath, opts) => deployStatus(projectPath, opts || {}));
-  ipcMain.handle('visual:deployPreview', (_event, projectPath, opts) => deployPreview(projectPath, opts || {}));
-  ipcMain.handle('visual:promote', (_event, projectPath, opts) => promote(projectPath, opts || {}));
+  // SECURITY: each handler runs `git add`, commits, and pushes (force-push
+  // for preview). A renderer bug or compromised page passing an arbitrary
+  // repo path could push from anywhere on disk. Gate on isKnownProject.
+  // Codex PR#3 r15 P1.
+  ipcMain.handle('visual:deployStatus', async (_event, projectPath, opts) => {
+    if (!(await isKnownProject(projectPath))) {
+      return { ok: false, error: 'projectPath is not a known project root' };
+    }
+    return deployStatus(projectPath, opts || {});
+  });
+  ipcMain.handle('visual:deployPreview', async (_event, projectPath, opts) => {
+    if (!(await isKnownProject(projectPath))) {
+      return { ok: false, error: 'projectPath is not a known project root' };
+    }
+    return deployPreview(projectPath, opts || {});
+  });
+  ipcMain.handle('visual:promote', async (_event, projectPath, opts) => {
+    if (!(await isKnownProject(projectPath))) {
+      return { ok: false, error: 'projectPath is not a known project root' };
+    }
+    return promote(projectPath, opts || {});
+  });
 }
 
 function setupFileHandlers() {
