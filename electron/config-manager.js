@@ -471,8 +471,18 @@ export function getManualProjects() {
 export function addManualProject(projectPath) {
   const config = loadConfig();
   const existing = config.manualProjects || [];
-  if (!existing.includes(projectPath)) {
+  // Always also clear the hidden marker. Without this, removing then
+  // re-adding the same folder left it filtered out of listProjects()
+  // permanently with no in-UI way to recover. Codex PR#3 r20 P2.
+  const wasHidden = (config.hiddenProjects || []).includes(projectPath);
+  if (wasHidden) {
+    config.hiddenProjects = (config.hiddenProjects || []).filter((p) => p !== projectPath);
+  }
+  const alreadyManual = existing.includes(projectPath);
+  if (!alreadyManual) {
     config.manualProjects = [...existing, projectPath];
+  }
+  if (wasHidden || !alreadyManual) {
     saveConfig(config);
   }
 }

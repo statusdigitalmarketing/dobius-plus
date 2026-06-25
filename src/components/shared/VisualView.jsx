@@ -124,10 +124,12 @@ export default function VisualView({ projectPath }) {
     setEditing(null);
     if (which === 'prod')    setProdUrl(clean);
     if (which === 'preview') setPreviewUrl(clean);
-    if (clean) {
-      const key = which === 'prod' ? 'visualProdUrl' : 'visualPreviewUrl';
-      await window.electronAPI?.configSetProject?.(projectPath, { [key]: clean });
-    }
+    // Persist the new value, INCLUDING the empty string. Without this, the
+    // user-cleared field would only clear local state and the old URL would
+    // come back on next open since project config is merge-only.
+    // Codex PR#3 r20 P3.
+    const key = which === 'prod' ? 'visualProdUrl' : 'visualPreviewUrl';
+    await window.electronAPI?.configSetProject?.(projectPath, { [key]: clean });
     const activeWhich = source === 'live' ? 'prod' : source === 'preview' ? 'preview' : null;
     if (clean && activeWhich === which) {
       const p = currentPage === '/' ? '' : currentPage.replace(/\.html$/, '').replace(/\/index$/, '/');
