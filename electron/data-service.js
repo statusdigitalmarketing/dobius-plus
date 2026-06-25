@@ -1202,24 +1202,39 @@ export async function searchTranscripts(query) {
 export async function estimateContextSize(projectPath) {
   try {
     if (!projectPath || typeof projectPath !== 'string') return null;
-    const encoded = encodePathLikeClaude(projectPath);
-    const projectDir = path.join(PROJECTS_DIR, encoded);
-    if (!(await pathExists(projectDir))) return null;
-
-    const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
-    if (files.length === 0) return null;
-
-    const fileStats = await Promise.all(files.map(async (f) => {
-      try {
-        const stat = await fs.stat(path.join(projectDir, f));
-        return { file: f, mtime: stat.mtimeMs };
-      } catch {
-        return { file: f, mtime: 0 };
-      }
-    }));
+    // Scan BOTH encoder forms (new + legacy slash-to-dash). Without this,
+    // any project whose transcripts still live in the legacy `(Code)` dir
+    // returned null and the status-bar context % was permanently missing.
+    // Same pattern as getLatestSession / loadAllSessions / getSessionSize.
+    // Codex Apple-grade audit r26 P2.
+    const encodings = [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)];
+    const seenDirs = new Set();
+    const fileStats = [];
+    let activeProjectDir = null;
+    for (const enc of encodings) {
+      if (seenDirs.has(enc)) continue;
+      seenDirs.add(enc);
+      const projectDir = path.join(PROJECTS_DIR, enc);
+      if (!(await pathExists(projectDir))) continue;
+      let files;
+      try { files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl')); }
+      catch { continue; }
+      const localStats = await Promise.all(files.map(async (f) => {
+        try {
+          const stat = await fs.stat(path.join(projectDir, f));
+          return { file: f, mtime: stat.mtimeMs, projectDir };
+        } catch { return { file: f, mtime: 0, projectDir }; }
+      }));
+      for (const s of localStats) fileStats.push(s);
+      activeProjectDir = projectDir; // last non-empty seen, sort below picks the real latest
+    }
+    if (fileStats.length === 0) return null;
     const latest = fileStats.reduce((a, b) => b.mtime > a.mtime ? b : a);
 
-    const filePath = path.join(projectDir, latest.file);
+    // Use the projectDir attached to the chosen file (its OWN dir), not the
+    // last-seen activeProjectDir, so the path resolves even when the newest
+    // session lives in a different encoding form than the last one scanned.
+    const filePath = path.join(latest.projectDir || activeProjectDir, latest.file);
     // BOUNDED tail read. estimateContextSize fires every 30s while a project
     // window is open. Reading the whole transcript each time stalls or OOMs
     // main on the typical Claude transcript size in this app (20-30MB common).
