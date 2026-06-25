@@ -2,14 +2,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- Required by V8 JIT -->
   <key>com.apple.security.cs.allow-jit</key>
   <true/>
+  <!-- Required by Electron's native code -->
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
   <true/>
+  <!-- Required so node-pty / better-sqlite3 native modules load -->
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
-  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
-  <true/>
+  <!--
+    REMOVED: com.apple.security.cs.allow-dyld-environment-variables.
+    Apple flags this entitlement as "weakens runtime hardening" in their
+    notarization guidance, and Dobius+ does NOT need DYLD_* env vars to run.
+    Apple-grade audit P3 (entitlement that an Apple Store review would call out).
+  -->
   <key>com.apple.security.inherit</key>
   <true/>
 </dict>

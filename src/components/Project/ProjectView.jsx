@@ -737,9 +737,14 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         e.preventDefault();
         closeActiveTab();
       } else if (e.key === 'b') {
+        // Don't toggle the sidebar while the user is typing in a textarea
+        // (CLAUDE.md editor, tab rename, notes). Previously this hijacked
+        // mid-edit. Apple-grade audit P2 (shortcut hijack).
+        if (inAppField) return;
         e.preventDefault();
         toggleSidebar();
       } else if (e.key === 'g') {
+        if (inAppField) return;
         e.preventDefault();
         toggleGitPanel();
       } else if (e.key === 'k') {
@@ -750,25 +755,30 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
           window.electronAPI.terminalWrite(termId, 'clear\r');
         }
       } else if (e.key === 'r' && !e.shiftKey) {
-        // Cmd+R = resume last Claude session. Keydown is the reliable path
-        // (fires even when the xterm terminal has focus); the menu item shares
-        // doResumeLatest's debounce so the two can't double-fire.
+        // Cmd+R = resume last Claude session. Skip if user is typing in a
+        // form field (e.g. URL bar in Visual editor, CLAUDE.md editor),
+        // and skip if not in Terminal view (no session to resume in the
+        // Updates/Settings tab and the user probably expects "refresh").
+        if (inAppField) return;
+        if (useStore.getState().activeView !== 'terminal') return;
         e.preventDefault();
         doResumeLatest();
       } else if (e.key === '[' && e.shiftKey) {
-        // Cmd+Shift+[ = prev tab
+        if (inAppField) return;
         e.preventDefault();
         const state = useStore.getState();
         const idx = state.terminalTabs.findIndex((t) => t.id === state.activeTabId);
         if (idx > 0) setActiveTab(state.terminalTabs[idx - 1].id);
       } else if (e.key === ']' && e.shiftKey) {
-        // Cmd+Shift+] = next tab
+        if (inAppField) return;
         e.preventDefault();
         const state = useStore.getState();
         const idx = state.terminalTabs.findIndex((t) => t.id === state.activeTabId);
         if (idx < state.terminalTabs.length - 1) setActiveTab(state.terminalTabs[idx + 1].id);
       } else if (e.key >= '1' && e.key <= '9') {
-        // Cmd+1-9 = switch to tab N
+        // Cmd+1-9 = switch to tab N. Don't hijack while user is typing in
+        // a form field (number entry in inputs would be eaten otherwise).
+        if (inAppField) return;
         e.preventDefault();
         const state = useStore.getState();
         const tabIdx = parseInt(e.key, 10) - 1;

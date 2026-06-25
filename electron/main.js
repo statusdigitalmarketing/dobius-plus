@@ -1584,7 +1584,12 @@ function setupBuildMonitorHandlers() {
       new Notification({ title, body }).show();
     }
   });
-  ipcMain.handle('buildMonitor:watch', (event, projectDir) => {
+  ipcMain.handle('buildMonitor:watch', async (event, projectDir) => {
+    // SECURITY: any renderer with electronAPI could otherwise spin up a
+    // recursive chokidar watcher on any local directory and stream the
+    // filenames back. Gate on isKnownProject like the other watchers.
+    // Apple-grade audit P2.
+    if (!(await isKnownProject(projectDir))) return;
     watchBuildDir(event.sender, projectDir);
   });
   ipcMain.handle('buildMonitor:unwatch', (event, projectDir) => {
@@ -1679,6 +1684,21 @@ function setupImessageBridgeHandlers() {
 
 function setupWindowHandlers() {
   ipcMain.handle('window:openProject', (_event, projectPath) => {
+    // Existence + safety guard. Avoids opening a window for a deleted /
+    // typo / sensitive path. Resolves symlinks then verifies the path is
+    // an actual directory. Apple-grade audit P2.
+    if (typeof projectPath !== 'string' || !projectPath.startsWith('/')) {
+      return { ok: false, error: 'projectPath must be an absolute path' };
+    }
+    try {
+      const real = fs.realpathSync(projectPath);
+      const stat = fs.statSync(real);
+      if (!stat.isDirectory()) {
+        return { ok: false, error: 'projectPath is not a directory' };
+      }
+    } catch (err) {
+      return { ok: false, error: `cannot open project: ${err.message}` };
+    }
     const win = openProjectWindow(projectPath);
     return { ok: true, id: win.id };
   });

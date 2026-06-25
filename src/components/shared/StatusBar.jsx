@@ -85,6 +85,18 @@ export default function StatusBar() {
   const activeProcesses = useStore((s) => s.activeProcesses);
   const tabs = useStore((s) => s.terminalTabs);
   const activeTabId = useStore((s) => s.activeTabId);
+  // Real app version pulled from main (was hardcoded "v2.0" while package
+  // was at 1.0.28, exactly the kind of detail that makes the app feel
+  // un-polished). Apple-grade audit P3.
+  const [appVersion, setAppVersion] = useState('');
+  useEffect(() => {
+    if (!window.electronAPI?.updaterGetCurrentVersion) return;
+    let cancelled = false;
+    window.electronAPI.updaterGetCurrentVersion()
+      .then((v) => { if (!cancelled && v) setAppVersion(String(v)); })
+      .catch(() => { /* keep blank */ });
+    return () => { cancelled = true; };
+  }, []);
   const currentBranch = useStore((s) => s.currentBranch);
   const currentIsWorktree = useStore((s) => s.currentIsWorktree);
   const currentDetached = useStore((s) => s.currentDetached);
@@ -187,7 +199,7 @@ export default function StatusBar() {
             </span>
           );
         })()}
-        <span>v2.0</span>
+        <span>{appVersion ? `v${appVersion}` : ''}</span>
       </div>
     </div>
   );

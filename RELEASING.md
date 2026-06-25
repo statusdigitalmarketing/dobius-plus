@@ -51,7 +51,7 @@ This single command will:
 3. Sign the .app with the Developer ID cert
 4. Submit the .app to Apple's notary service and wait (~5–10 min)
 5. Staple the notarization ticket to the .app
-6. Build `Dobius+-x.y.z-arm64.dmg`, `Dobius+-x.y.z-arm64-mac.zip`, and `latest-mac.yml`
+6. Build `dobius-plus-x.y.z-arm64.dmg`, `dobius-plus-x.y.z-arm64-mac.zip`, and `latest-mac.yml` (artifact names per electron-builder.yml `artifactName: ${name}-${version}-${arch}-mac.${ext}`)
 7. Upload all three to GitHub as a **draft** release
 
 If something fails before step 7, fix the issue and re-run — `electron-builder` will skip steps that already completed.

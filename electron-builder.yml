@@ -9,7 +9,10 @@ mac:
   darkModeSupport: true
   identity: "Status Consulting Firm LLC (Z349CC556Z)"
   hardenedRuntime: true
-  gatekeeperAssess: false
+  # gatekeeperAssess defaults to true. Enable so the local `spctl --assess`
+  # check verifies the signed app is Gatekeeper-acceptable at BUILD time,
+  # not when users download. Codex Apple-grade audit P3.
+  gatekeeperAssess: true
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   notarize: true
