@@ -40,7 +40,7 @@ function Divider() {
   return <div style={{ height: 1, backgroundColor: 'var(--border)', margin: '3px 0' }} />;
 }
 
-export default function ProjectContextMenu({ x, y, project, isPinned, isOpen, onClose, onOpen, onRename, onTogglePin, onRemove }) {
+export default function ProjectContextMenu({ x, y, project, isPinned, isOpen, onClose, onOpen, onCloseWindow, onRename, onTogglePin, onRemove }) {
   const ref = useRef(null);
   const [accounts, setAccounts] = useState([]);
   const [projectAccountId, setProjectAccountId] = useState(null);
@@ -107,7 +107,9 @@ export default function ProjectContextMenu({ x, y, project, isPinned, isOpen, on
         <MenuItem
           icon="⌘"
           label={isOpen ? 'Close Window' : 'Open in New Window'}
-          onClick={act(onOpen)}
+          // Wire the open-vs-close action to its actual handler instead of
+          // always calling onOpen (which just refocused). Codex PR#3 r10 P2.
+          onClick={act(isOpen && onCloseWindow ? onCloseWindow : onOpen)}
         />
       )}
       <Divider />

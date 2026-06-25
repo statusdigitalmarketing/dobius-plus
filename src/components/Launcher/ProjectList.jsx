@@ -394,6 +394,7 @@ export default function ProjectList() {
           isOpen={openProjects.includes(contextMenu.project.decodedPath)}
           onClose={() => setContextMenu(null)}
           onOpen={() => handleOpenProject(contextMenu.project)}
+          onCloseWindow={() => window.electronAPI?.windowClose?.(contextMenu.project.decodedPath)}
           onRename={() => handleRenameStart(contextMenu.project)}
           onTogglePin={() => handleTogglePin(contextMenu.project.decodedPath)}
           onRemove={() => handleRemoveProject(contextMenu.project)}

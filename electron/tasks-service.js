@@ -160,7 +160,13 @@ export function reopenTask(projectPath, taskId, { actor = 'human', note = null }
     toStage: 'approval',
     note: note || null,
   });
-  tasks[idx] = { ...t, done: false, stage: 'approval', stagedAt: Date.now(), events };
+  // stagedAt is a { [stage]: timestamp } MAP across the rest of the pipeline
+  // (see task-pipeline.js advance/unblock). Round-3 wrote it as a bare number,
+  // which the next transition or reload then either lost or treated as garbage.
+  // Merge the new approval timestamp into the existing map. Codex PR#3 r10 P3.
+  const at = Date.now();
+  const stagedAt = { ...(t.stagedAt && typeof t.stagedAt === 'object' ? t.stagedAt : {}), approval: at };
+  tasks[idx] = { ...t, done: false, stage: 'approval', stagedAt, events };
   try {
     writeTasks(projectPath, tasks);
   } catch (err) {
