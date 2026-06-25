@@ -210,11 +210,16 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
       saveState(true); // force flush — called before window close
     });
 
-    // Periodic auto-save every 30s — Chrome-style crash recovery.
-    // forceFlush=true ensures an atomic write to disk, not just the debounce cache.
+    // Periodic auto-save every 60s with forceFlush=false (per-file debounce
+    // coalesces). The previous 30s + forceFlush=true did one atomic disk
+    // write per tab every 30s, regardless of whether scrollback actually
+    // changed. With 10 tabs that was ~28,800 forced atomic writes per day
+    // fighting SSD power management on battery. Apple-grade audit P2.
+    // The unmount path (Cmd+W close) still does saveState(true) below so
+    // an intentional close is fully durable.
     const autoSaveInterval = setInterval(() => {
-      saveState(true);
-    }, 30000);
+      saveState(false);
+    }, 60000);
 
     let resizeTimer;
     const observer = new ResizeObserver(() => {

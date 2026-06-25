@@ -23,6 +23,7 @@ import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { powerMonitor } from 'electron';
 import Database from 'better-sqlite3';
 import { writeTerminal, listTerminals } from './terminal-manager.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
@@ -32,11 +33,18 @@ import { getImessageBridge, updateImessageBridge } from './config-manager.js';
 const execFileP = promisify(execFile);
 
 const CHAT_DB_PATH = path.join(os.homedir(), 'Library', 'Messages', 'chat.db');
-const POLL_INTERVAL_MS = 2000;
+// Two-tier polling cadence. ACTIVE (screen unlocked, system active) hits
+// chat.db every 2s for fast response to iMessage commands. IDLE (screen
+// locked OR system asleep OR explicitly entered sleep) backs off to 30s so
+// the bridge stops burning ~43k SQLite queries/day on battery while Sam is
+// away from the Mac. Apple-grade audit P2 (battery drain).
+const POLL_INTERVAL_ACTIVE_MS = 2000;
+const POLL_INTERVAL_IDLE_MS = 30000;
 const REPLY_TIMEOUT_MS = 90 * 1000;       // wait up to 90s for Conductor reply
 const OUTBOUND_RATE_LIMIT_PER_MIN = 10;   // cap iMessage sends
 
 let pollTimer = null;
+let currentPollInterval = POLL_INTERVAL_ACTIVE_MS;
 let db = null;
 let outboundTimestamps = [];              // sliding window for rate limit
 let isStartingUp = false;
@@ -79,8 +87,38 @@ export function startImessageBridge() {
       console.warn(`[imessage-bridge] could not init lastSeenRowid: ${err.message}`);
     }
   }
-  pollTimer = setInterval(pollNewMessages, POLL_INTERVAL_MS);
+  startPollTimer(POLL_INTERVAL_ACTIVE_MS);
+  // powerMonitor: throttle to IDLE interval when the screen is locked or the
+  // system goes to sleep; restore ACTIVE on unlock/resume. The 'on' calls
+  // tolerate being unwired with a try/catch on stop.
+  try {
+    powerMonitor.on('lock-screen', enterIdleMode);
+    powerMonitor.on('suspend', enterIdleMode);
+    powerMonitor.on('unlock-screen', enterActiveMode);
+    powerMonitor.on('resume', enterActiveMode);
+  } catch (err) {
+    console.warn(`[imessage-bridge] powerMonitor wiring failed: ${err.message}`);
+  }
   isStartingUp = false;
+}
+
+function startPollTimer(intervalMs) {
+  if (pollTimer) clearInterval(pollTimer);
+  currentPollInterval = intervalMs;
+  pollTimer = setInterval(pollNewMessages, intervalMs);
+}
+
+function enterIdleMode() {
+  if (currentPollInterval === POLL_INTERVAL_IDLE_MS) return;
+  startPollTimer(POLL_INTERVAL_IDLE_MS);
+}
+
+function enterActiveMode() {
+  if (currentPollInterval === POLL_INTERVAL_ACTIVE_MS) return;
+  startPollTimer(POLL_INTERVAL_ACTIVE_MS);
+  // Catch-up poll right away so a command sent while idle is picked up
+  // immediately on unlock instead of after the next 2s tick.
+  void pollNewMessages();
 }
 
 /**
@@ -88,6 +126,12 @@ export function startImessageBridge() {
  */
 export function stopImessageBridge() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  try {
+    powerMonitor.removeListener('lock-screen', enterIdleMode);
+    powerMonitor.removeListener('suspend', enterIdleMode);
+    powerMonitor.removeListener('unlock-screen', enterActiveMode);
+    powerMonitor.removeListener('resume', enterActiveMode);
+  } catch { /* noop */ }
   if (db) { try { db.close(); } catch { /* noop */ } db = null; }
 }
 
