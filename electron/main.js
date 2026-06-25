@@ -51,7 +51,7 @@ import {
 } from './imessage-bridge.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
-import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef } from './tasks-service.js';
+import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
@@ -802,9 +802,16 @@ function setupOrchestrationHandlers() {
   });
 
   // Pipeline stage transitions (Epic 7). The service enforces the transition
-  // table and returns { ok, task } | { ok:false, error } — it does not throw.
+  // table and returns { ok, task } | { ok:false, error }, does not throw.
   ipcMain.handle('tasks:advance', (_event, projectPath, taskId, toStage, opts) => {
     const result = advanceTask(projectPath, taskId, toStage, opts || {});
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
+  // Reopen a completed task. Pipeline makes 'done' terminal, so advance can't
+  // exit it. This atomic path resets done + stage + logs the event.
+  ipcMain.handle('tasks:reopen', (_event, projectPath, taskId, opts) => {
+    const result = reopenTask(projectPath, taskId, opts || {});
     if (result?.ok) broadcastTasksUpdated(projectPath);
     return result;
   });
@@ -1332,16 +1339,27 @@ function setupConfigHandlers() {
     return loadConfig().activeClaudeAccountId || null;
   });
 
-  // Capture an existing ~/.claude.json as a named profile snapshot
+  // Capture an existing ~/.claude.json as a named profile snapshot.
+  // SECURITY: ~/.claude.json contains Claude credentials. A renderer bug or
+  // XSS supplying an arbitrary destPath could exfiltrate creds into a
+  // user-readable project folder, or clobber any user-writable file. Constrain
+  // the destination to ~/.claude-profiles/<basename>, derived in the main
+  // process (only the basename is honored from the renderer). PR#3 r3 P2.
   ipcMain.handle('accounts:captureClaudeJson', async (_event, destPath) => {
     const src = path.join(os.homedir(), '.claude.json');
     try {
       if (!fs.existsSync(src)) return { ok: false, error: 'No ~/.claude.json found' };
       if (!destPath || typeof destPath !== 'string') return { ok: false, error: 'Invalid destPath' };
-      const dir = path.dirname(destPath);
-      await fs.promises.mkdir(dir, { recursive: true });
-      await fs.promises.copyFile(src, destPath);
-      return { ok: true };
+      const base = path.basename(destPath);
+      // Reject names that try to escape via separators or absolutes.
+      if (!base || base.includes('/') || base.includes('\\') || base.startsWith('.')) {
+        return { ok: false, error: 'destPath basename must be a simple file name' };
+      }
+      const profilesDir = path.join(os.homedir(), '.claude-profiles');
+      const finalDest = path.join(profilesDir, base);
+      await fs.promises.mkdir(profilesDir, { recursive: true });
+      await fs.promises.copyFile(src, finalDest);
+      return { ok: true, path: finalDest };
     } catch (err) {
       return { ok: false, error: err.message };
     }

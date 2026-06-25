@@ -135,6 +135,40 @@ export function updateTask(projectPath, taskId, patch) {
   return { ok: true, task: tasks[idx] };
 }
 
+/**
+ * Reopen a completed pipeline task. The pipeline makes `done` a terminal
+ * stage, so advanceTask from 'done' is rejected. The Tasks dropdown lets a
+ * user uncheck a completed task, so we need an explicit reverse path that
+ * writes both `done: false` AND moves stage back to 'approval' atomically,
+ * with an event log entry recording the reopen. Codex PR#3 r3 P2.
+ */
+export function reopenTask(projectPath, taskId, { actor = 'human', note = null } = {}) {
+  if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
+  const tasks = readTasks(projectPath);
+  const idx = tasks.findIndex((t) => t.id === taskId);
+  if (idx === -1) return { ok: false, error: 'task not found' };
+  const t = tasks[idx];
+  if (!t.done && t.stage !== 'done') {
+    return { ok: false, error: 'task is not completed' };
+  }
+  const events = Array.isArray(t.events) ? t.events.slice() : [];
+  events.push({
+    at: Date.now(),
+    actor,
+    kind: 'reopened',
+    fromStage: 'done',
+    toStage: 'approval',
+    note: note || null,
+  });
+  tasks[idx] = { ...t, done: false, stage: 'approval', stagedAt: Date.now(), events };
+  try {
+    writeTasks(projectPath, tasks);
+  } catch (err) {
+    return { ok: false, error: `failed to save task: ${err.message}` };
+  }
+  return { ok: true, task: tasks[idx] };
+}
+
 // --- Validated stage transitions (delegate to the pure pipeline module) -----
 
 function mutateTask(projectPath, taskId, fn) {

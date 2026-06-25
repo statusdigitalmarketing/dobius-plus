@@ -52,15 +52,16 @@ export default function AccountsSection() {
 
     if (form.type === 'claude' && !editing) {
       const id = `acct-${Date.now()}`;
-      const homeDir = await window.electronAPI.getHomeDirPath();
-      const destPath = `${homeDir}/.claude-profiles/${id}.json`;
       payload.id = id;
-      payload.claudeJsonPath = destPath;
-      const result = await window.electronAPI.accountsCaptureClaudeJson(destPath);
+      // Main process now constrains the destination to ~/.claude-profiles/
+      // and only honors the basename of what we send. Send just the file name
+      // we want, and trust main's returned path. PR#3 r3 P2.
+      const result = await window.electronAPI.accountsCaptureClaudeJson(`${id}.json`);
       if (!result.ok) {
         flash(`Could not capture ~/.claude.json: ${result.error}`, true);
         return;
       }
+      payload.claudeJsonPath = result.path;
     }
 
     await window.electronAPI.accountsSave(payload);

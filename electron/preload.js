@@ -286,6 +286,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   tasksComplete: (projectPath, taskId) => ipcRenderer.invoke('tasks:complete', projectPath, taskId),
   tasksSyncAsana: (projectPath) => ipcRenderer.invoke('tasks:syncAsana', projectPath),
   tasksAdvance: (p, id, stage, opts) => ipcRenderer.invoke('tasks:advance', p, id, stage, opts),
+  tasksReopen: (p, id, opts) => ipcRenderer.invoke('tasks:reopen', p, id, opts),
   tasksBlock: (p, id, reason, opts) => ipcRenderer.invoke('tasks:block', p, id, reason, opts),
   tasksUnblock: (p, id, opts) => ipcRenderer.invoke('tasks:unblock', p, id, opts),
   // Fires when a task is completed from a terminal via dobius-task-done, so an

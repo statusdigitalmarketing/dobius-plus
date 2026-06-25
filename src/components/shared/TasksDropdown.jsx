@@ -80,17 +80,15 @@ export default function TasksDropdown() {
     }
     // Un-completing: must reverse BOTH `done` and the pipeline `stage`,
     // otherwise Tasks dropdown counts it as pending while Kanban still
-    // buckets it in Done (inconsistent state). For non-pipeline tasks (no
-    // stage), the bare tasksUpdate path is fine. For pipeline tasks already
-    // in 'done', move them back through tasks:advance to the previous active
-    // stage so the transition is recorded in the event log. Codex PR#3 r2 P2.
+    // buckets it in Done (inconsistent state). Pipeline makes 'done' terminal
+    // so tasksAdvance from 'done' is rejected. Use the dedicated tasksReopen
+    // path which atomically writes done:false + stage:'approval' and logs
+    // the reopen event. Codex PR#3 r3 P2 (round-2 fix used advance, broken).
     const task = tasks.find((t) => t.id === taskId);
     const isPipelineDone = task?.stage === 'done';
-    if (isPipelineDone && window.electronAPI?.tasksAdvance) {
+    if (isPipelineDone && window.electronAPI?.tasksReopen) {
       setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, done: false, stage: 'approval' } : t));
-      // 'approval' is the last stage before 'done' in the pipeline. Moving
-      // back there is the least surprising reverse-the-completion path.
-      await window.electronAPI.tasksAdvance(currentProjectPath, taskId, 'approval', { note: 'unchecked from Tasks dropdown' });
+      await window.electronAPI.tasksReopen(currentProjectPath, taskId, { note: 'unchecked from Tasks dropdown' });
       return;
     }
     if (!window.electronAPI?.tasksUpdate) return;
