@@ -546,22 +546,30 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
               best = { sessionId: sid, capturedAt: entry.capturedAt || 0 };
             }
           }
-          if (best?.sessionId) return best.sessionId;
+          if (best?.sessionId) return { sessionId: best.sessionId };
         } catch { /* fall through */ }
       }
-      // 2. Fallback: project's most recent session.
+      // 2. Fallback: project's most recent session. Return the full object
+      // so sizeMB flows into the dead-session guard. Codex PR#3 r19 P2.
       if (api.dataGetLatestSession) {
         const s = await api.dataGetLatestSession(projectPath);
-        return s?.sessionId || null;
+        return s?.sessionId ? { sessionId: s.sessionId, sizeMB: s.sizeMB } : null;
       }
       return null;
     };
 
-    resolve().then((sessionId) => {
-      // Pass projectPath: handleResumeSession now requires `project` and
-      // aborts with an alert if missing. Cmd+R is scoped to the current
-      // project window, so projectPath is always known and correct here.
-      if (sessionId) handleResumeSession({ sessionId, project: projectPath });
+    resolve().then((info) => {
+      // Pass project (handleResumeSession requires it) AND sizeMB so the
+      // >80MB dead-session guard fires for Cmd+R too. Previously only the
+      // bare sessionId came through, the guard never ran from this path,
+      // and a 100MB latest transcript would hang Claude on resume.
+      if (info?.sessionId) {
+        handleResumeSession({
+          sessionId: info.sessionId,
+          project: projectPath,
+          sizeMB: info.sizeMB,
+        });
+      }
     });
   }, [projectPath, handleResumeSession]);
 

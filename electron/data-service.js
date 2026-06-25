@@ -1027,28 +1027,27 @@ export async function searchTranscripts(query) {
     }
 
     await mapLimit(fileTasks, 16, async ({ projectDir, projectName, projectPath, file: f }) => {
-      // Cap honored at task-start AND inside the entry loop. The cap can be
-      // reached after this task was scheduled but before it ran, in which
-      // case we just return without reading the file.
+      // Cap honored at task-start AND inside the line callback.
       if (matches.length >= 200) return;
       const sessionId = f.replace('.jsonl', '');
       const filePath = path.join(projectDir, f);
       try {
-        const stat = await fs.stat(filePath);
-        if (stat.size > 5 * 1024 * 1024) return;
+        await fs.stat(filePath);
       } catch { return; }
-      const entries = await parseJsonl(filePath);
+      // Stream the file line-by-line. The previous version skipped any
+      // transcript >5MB entirely, so the most recent long-running sessions
+      // were silently unsearchable. streamJsonl scans with flat memory and
+      // we honor the result cap with a per-file flag we can flip mid-stream.
+      // Codex PR#3 r19 P2.
       let sessionTimestamp = 0;
-      for (const entry of entries) {
+      let capHit = false;
+      const buffered = []; // hold matches until end-of-file to fill in sessionTimestamp fallback
+      await streamJsonl(filePath, (entry) => {
+        if (capHit) return;
+        if (matches.length + buffered.length >= 200) { capHit = true; return; }
         const ts = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
         if (ts > sessionTimestamp) sessionTimestamp = ts;
         let text = '';
-        // Cover all the user/assistant content shapes loadTranscript handles.
-        // Older transcripts store user turns with `entry.message` as a bare
-        // string or `entry.content` at the top level; the new code path only
-        // looked at entry.message.content, so search missed legacy text. The
-        // UI advertises "user + assistant" so missing the user side here is
-        // particularly bad. Codex PR#3 r17 P2.
         const msgContent = entry.message?.content;
         if (typeof msgContent === 'string') {
           text = msgContent;
@@ -1062,8 +1061,7 @@ export async function searchTranscripts(query) {
         } else if (typeof entry.content === 'string') {
           text = entry.content;
         }
-
-        if (!text || !text.toLowerCase().includes(qLower)) continue;
+        if (!text || !text.toLowerCase().includes(qLower)) return;
 
         const idx = text.toLowerCase().indexOf(qLower);
         const start = Math.max(0, idx - 80);
@@ -1072,23 +1070,23 @@ export async function searchTranscripts(query) {
           (start > 0 ? '...' : '') +
           text.slice(start, end) +
           (end < text.length ? '...' : '');
-
-        // Normalize roles the way the other parsers in this file do: older
-        // transcripts use type 'human' for the user, which must not render
-        // as Claude. Anything that isn't a user message is the assistant.
         const role = (entry.type === 'human' || entry.type === 'user'
           || entry.role === 'user' || entry.message?.role === 'user')
           ? 'user' : 'assistant';
-        matches.push({
-          sessionId,
-          projectName,
-          projectPath,
-          role,
-          excerpt,
-          timestamp: ts || sessionTimestamp,
+        buffered.push({
+          sessionId, projectName, projectPath, role, excerpt, ts,
         });
-
-        if (matches.length >= 200) return;
+      });
+      for (const m of buffered) {
+        if (matches.length >= 200) break;
+        matches.push({
+          sessionId: m.sessionId,
+          projectName: m.projectName,
+          projectPath: m.projectPath,
+          role: m.role,
+          excerpt: m.excerpt,
+          timestamp: m.ts || sessionTimestamp,
+        });
       }
     });
   } catch (err) {
