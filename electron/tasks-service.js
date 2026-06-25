@@ -366,19 +366,32 @@ export async function syncAsanaTasks(projectPath) {
     ];
 
     const fields = 'gid,name,due_on,completed,notes,permalink_url';
-    // Sam's review lane: only his tasks touched in the last 48 hours.
+    // Sam's review lane: recently COMPLETED tasks (last 48h) so he can
+    // double-check shipped work. The previous query used `completed_since=now`
+    // which Asana interprets as "return tasks NOT completed since now" (i.e.
+    // incomplete tasks), so the review lane was filling with in-progress
+    // tasks while missing the completed ones it was supposed to surface.
+    // Codex PR#3 r5 P2. For the build lane, keep the original incomplete-only
+    // filter (`completed_since=now`).
     const sinceISO = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
     let added = 0;
     let total = 0;
     for (const { gid, lane, assignee } of lanes) {
       for (const ws of workspaces) {
-        const recent = lane === 'review' ? `&modified_since=${sinceISO}` : '';
+        const isReview = lane === 'review';
+        const completedFilter = isReview
+          ? `&completed_since=${sinceISO}`
+          : '&completed_since=now';
         const data = await asanaGet(
-          `/api/1.0/tasks?assignee=${gid}&workspace=${ws.gid}&completed_since=now&limit=50&opt_fields=${fields}${recent}`,
+          `/api/1.0/tasks?assignee=${gid}&workspace=${ws.gid}${completedFilter}&limit=50&opt_fields=${fields}`,
           token
         );
         for (const t of (data?.data || [])) {
           if (!t.gid || !t.name) continue;
+          // Review lane: keep only the actually-completed ones (Asana's
+          // completed_since=<iso> returns tasks "completed since OR still open
+          // and modified since", so we still have to filter).
+          if (isReview && !t.completed) continue;
           total++;
           const result = addTask(projectPath, {
             title: t.name,

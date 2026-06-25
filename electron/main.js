@@ -1029,7 +1029,11 @@ function setupFileHandlers() {
 
   // Skill file editor — locked to ~/.claude/skills/ directory
   const skillsDir = path.join(homedir, '.claude', 'skills');
-  const ALLOWED_SKILL_FILES = ['CLAUDE.md', 'skill.json'];
+  // SKILL.md is the canonical file Claude Code's skill loader reads (and
+  // every installed/available skill ships with). CLAUDE.md is kept in the
+  // allowlist for backward-compat with any legacy skill that still uses it.
+  // Codex PR#3 r5 P2.
+  const ALLOWED_SKILL_FILES = ['SKILL.md', 'CLAUDE.md', 'skill.json'];
 
   function isAllowedSkillPath(skillPath, filename) {
     if (!skillPath || typeof skillPath !== 'string') return false;

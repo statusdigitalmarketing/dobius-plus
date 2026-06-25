@@ -9,11 +9,21 @@ function SkillEditor({ skill, onClose }) {
 
   useEffect(() => {
     async function load() {
+      // Read SKILL.md (canonical), fall back to CLAUDE.md only for any
+      // legacy skill that still uses the old filename. Writes always go to
+      // SKILL.md so the skill loader (which reads SKILL.md) picks them up.
+      // Codex PR#3 r5 P2: previously read+wrote CLAUDE.md, which the loader
+      // ignored, so saves looked successful but did nothing.
       const [md, json] = await Promise.all([
-        window.electronAPI.skillReadFile(skill.path, 'CLAUDE.md'),
+        window.electronAPI.skillReadFile(skill.path, 'SKILL.md'),
         window.electronAPI.skillReadFile(skill.path, 'skill.json'),
       ]);
-      setClaudeContent(md.content ?? '');
+      let content = md.content ?? '';
+      if (!content) {
+        const legacy = await window.electronAPI.skillReadFile(skill.path, 'CLAUDE.md');
+        content = legacy.content ?? '';
+      }
+      setClaudeContent(content);
       setJsonContent(json.content ?? '');
     }
     load();
@@ -22,7 +32,9 @@ function SkillEditor({ skill, onClose }) {
   const save = useCallback(async () => {
     setSaving(true);
     setStatus('');
-    const filename = tab === 'claude' ? 'CLAUDE.md' : 'skill.json';
+    // Always write to SKILL.md (the loader reads SKILL.md; writing to
+    // CLAUDE.md as before was a silent no-op).
+    const filename = tab === 'claude' ? 'SKILL.md' : 'skill.json';
     const content = tab === 'claude' ? claudeContent : jsonContent;
     const res = await window.electronAPI.skillWriteFile(skill.path, filename, content);
     setSaving(false);
@@ -117,7 +129,7 @@ function SkillEditor({ skill, onClose }) {
                 marginBottom: '-1px',
               }}
             >
-              {t === 'claude' ? 'CLAUDE.md' : 'skill.json'}
+              {t === 'claude' ? 'SKILL.md' : 'skill.json'}
             </button>
           ))}
         </div>

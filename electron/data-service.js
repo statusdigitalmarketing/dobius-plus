@@ -969,7 +969,14 @@ export async function searchTranscripts(query) {
     await Promise.all(dirents.filter((d) => d.isDirectory()).map(async (dir) => {
       const projectDir = path.join(PROJECTS_DIR, dir.name);
       const projectName = dir.name.split('-').filter(Boolean).pop() || dir.name;
-      const projectPath = '/' + dir.name.replace(/-/g, '/');
+      // Use tryReconstructPath (probes the filesystem) instead of a naive
+      // dash-to-slash replace. The naive version mangles double-dash encodings
+      // like `-Users-foo-Projects--Code--dobius-plus` into garbage paths like
+      // `/Users/foo/Projects//Code//dobius/plus`. Search hits then pass that
+      // broken path to resumeSession which cd's into a non-existent dir.
+      // Codex PR#3 r5 P2. Falls back to the naive form only if reconstruction
+      // can't find a real path on disk (better wrong than missing).
+      const projectPath = tryReconstructPath(dir.name) || ('/' + dir.name.replace(/-/g, '/'));
 
       try {
         const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
