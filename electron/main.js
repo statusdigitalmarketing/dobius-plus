@@ -292,13 +292,21 @@ function setupTerminalHandlers() {
   // Save/load recently closed tabs per project (persisted across window sessions)
   ipcMain.handle('terminal:saveClosedTabs', (_event, projectPath, closedTabs) => {
     if (!projectPath || !Array.isArray(closedTabs)) return;
-    // Keep max 20 closed tabs, strip scrollback over 500 lines to limit config size
-    const trimmed = closedTabs.slice(0, 20).map((t) => ({
-      label: typeof t.label === 'string' ? t.label.slice(0, 100) : 'Tab',
-      projectPath: t.projectPath || projectPath,
-      scrollback: Array.isArray(t.scrollback) ? t.scrollback.slice(-500) : null,
-      closedAt: t.closedAt || Date.now(),
-    }));
+    // Keep max 20 closed tabs, strip scrollback over 500 lines to limit
+    // config size. Also persist kind+url for browser tabs so cross-session
+    // Cmd+Shift+T resurrects a browser as a browser (not a blank terminal).
+    // Codex PR#3 r7 P3, completes the R1 H5 fix end-to-end.
+    const trimmed = closedTabs.slice(0, 20).map((t) => {
+      const out = {
+        label: typeof t.label === 'string' ? t.label.slice(0, 100) : 'Tab',
+        projectPath: t.projectPath || projectPath,
+        scrollback: Array.isArray(t.scrollback) ? t.scrollback.slice(-500) : null,
+        closedAt: t.closedAt || Date.now(),
+      };
+      if (typeof t.kind === 'string' && t.kind) out.kind = t.kind;
+      if (typeof t.url === 'string' && /^https?:\/\//i.test(t.url)) out.url = t.url;
+      return out;
+    });
     setProjectConfig(projectPath, { closedTabs: trimmed });
   });
 

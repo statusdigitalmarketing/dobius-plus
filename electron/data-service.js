@@ -1082,7 +1082,13 @@ export async function estimateContextSize(projectPath) {
     const latest = fileStats.reduce((a, b) => b.mtime > a.mtime ? b : a);
 
     const filePath = path.join(projectDir, latest.file);
-    const entries = await parseJsonl(filePath);
+    // BOUNDED tail read. estimateContextSize fires every 30s while a project
+    // window is open. Reading the whole transcript each time stalls or OOMs
+    // main on the typical Claude transcript size in this app (20-30MB common).
+    // Token usage lives on assistant messages, which only need the most-recent
+    // run to estimate context. Last 50 entries is plenty since usage stamps
+    // appear every assistant turn. Codex PR#3 r7 P2.
+    const entries = await parseJsonl(filePath, 50);
 
     let lastInputTokens = 0;
     let lastModel = '';
