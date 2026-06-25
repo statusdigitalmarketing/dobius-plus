@@ -1031,8 +1031,13 @@ export async function searchTranscripts(query) {
       if (matches.length >= 200) return;
       const sessionId = f.replace('.jsonl', '');
       const filePath = path.join(projectDir, f);
+      // Capture size so a resume-from-search can hit the >80MB dead-session
+      // guard. Without sizeMB on each match, Search bypassed the block and
+      // oversized transcripts still hung Claude. Codex PR#3 r22 P2.
+      let sizeMB = 0;
       try {
-        await fs.stat(filePath);
+        const st = await fs.stat(filePath);
+        sizeMB = st.size / (1024 * 1024);
       } catch { return; }
       // Stream the file line-by-line. The previous version skipped any
       // transcript >5MB entirely, so the most recent long-running sessions
@@ -1086,6 +1091,7 @@ export async function searchTranscripts(query) {
           role: m.role,
           excerpt: m.excerpt,
           timestamp: m.ts || sessionTimestamp,
+          sizeMB, // feeds the resume dead-session guard, Codex PR#3 r22 P2
         });
       }
     });
