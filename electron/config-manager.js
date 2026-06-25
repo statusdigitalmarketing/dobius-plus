@@ -1,6 +1,7 @@
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
+import os from 'os';
 import { app } from 'electron';
 
 const CONFIG_DIR = path.join(app.getPath('userData'));
@@ -809,13 +810,25 @@ export function saveAccount(account) {
   if (!account || typeof account !== 'object') return null;
   const id = account.id || `acct-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   if (!ACCOUNT_TYPES.has(account.type)) return null;
+  // SECURITY: validate claudeJsonPath lives under ~/.claude-profiles. Without
+  // this, a crafted accountsSave call could persist an arbitrary path (e.g.
+  // /etc/passwd, ~/.ssh/id_rsa) and later activating the account would copy
+  // that file over ~/.claude.json. Codex PR#3 r21 P2.
+  const profilesRoot = path.join(os.homedir(), '.claude-profiles');
+  function safeClaudeJsonPath(raw) {
+    if (typeof raw !== 'string' || raw.length === 0 || raw.length > 500) return null;
+    const resolved = path.resolve(raw);
+    if (resolved !== profilesRoot && !resolved.startsWith(profilesRoot + path.sep)) return null;
+    return resolved;
+  }
+  const claudeJsonPath = account.type === 'claude'
+    ? safeClaudeJsonPath(account.claudeJsonPath)
+    : null;
   const sanitized = {
     id,
     name: typeof account.name === 'string' ? account.name.slice(0, 100) : 'Unnamed',
     type: account.type,
-    ...(account.type === 'claude' && account.claudeJsonPath
-      ? { claudeJsonPath: String(account.claudeJsonPath).slice(0, 500) }
-      : {}),
+    ...(claudeJsonPath ? { claudeJsonPath } : {}),
     ...(account.type === 'claude' && account.cliPath
       ? { cliPath: String(account.cliPath).slice(0, 500) }
       : {}),
