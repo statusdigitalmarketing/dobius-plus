@@ -129,7 +129,16 @@ export async function loadAllSessions() {
       const sessionId = file.replace('.jsonl', '');
       const filePath = path.join(projectDir, file);
       try {
-        // parseJsonl is bounded since v1.0.23 — uses readTail under the hood so
+        // Capture file size so the resume dead-session guard (>80MB blocks the
+        // resume) still works after the sidebar moved off the history-based
+        // source. Without this, double-clicking a 100MB transcript from the
+        // sidebar would hang Claude. Codex PR#3 r6 P2.
+        let sizeMB = 0;
+        try {
+          const st = await fs.stat(filePath);
+          sizeMB = st.size / (1024 * 1024);
+        } catch { /* file vanished between readdir + stat, leave 0 */ }
+        // parseJsonl is bounded since v1.0.23, uses readTail under the hood so
         // a 24MB transcript no longer pulls 95MB into memory. The status fields
         // here ride on top of that bounded read; we never re-read the file.
         const entries = await parseJsonl(filePath, 5);
@@ -195,6 +204,7 @@ export async function loadAllSessions() {
           timestamp,
           age: timestamp ? timeAgo(timestamp) : 'unknown',
           status,
+          sizeMB, // for the resume dead-session guard, Codex PR#3 r6 P2
         });
       } catch {
         void 0;

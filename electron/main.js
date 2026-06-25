@@ -67,11 +67,20 @@ let mainWindow;
 function resolveActiveCliPath() {
   const config = loadConfig();
   const activeId = config.activeClaudeAccountId;
+  let raw = null;
   if (activeId) {
     const account = (config.accounts || []).find((a) => a.id === activeId && a.type === 'claude');
-    if (account?.cliPath) return account.cliPath;
+    if (account?.cliPath) raw = account.cliPath;
   }
-  return process.env.CLAUDE_PATH || 'claude';
+  raw = raw || process.env.CLAUDE_PATH || 'claude';
+  // Expand a leading ~ to $HOME. Node's spawn() does NOT expand tildes, so a
+  // saved CLI path like `~/.nvm/versions/.../claude` (the form the settings
+  // UI explicitly suggests) was failing with ENOENT for orchestration/prompt
+  // improve and other spawn-based background calls. Codex PR#3 r6 P2.
+  if (typeof raw === 'string' && raw.startsWith('~')) {
+    return path.join(os.homedir(), raw.slice(1));
+  }
+  return raw;
 }
 
 function createWindow() {
