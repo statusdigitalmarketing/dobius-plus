@@ -1448,13 +1448,21 @@ function setupConfigHandlers() {
       if (!fs.existsSync(src)) return { ok: false, error: 'No ~/.claude.json found' };
       if (!destPath || typeof destPath !== 'string') return { ok: false, error: 'Invalid destPath' };
       const base = path.basename(destPath);
-      // Reject names that try to escape via separators or absolutes.
       if (!base || base.includes('/') || base.includes('\\') || base.startsWith('.')) {
         return { ok: false, error: 'destPath basename must be a simple file name' };
       }
-      const profilesDir = path.join(os.homedir(), '.claude-profiles');
-      const finalDest = path.join(profilesDir, base);
-      await fs.promises.mkdir(profilesDir, { recursive: true });
+      // Store each profile in its OWN per-account subdirectory with the
+      // canonical .claude.json filename. The CLI reads
+      // CLAUDE_CONFIG_DIR/.claude.json, so the previous flat layout
+      // (~/.claude-profiles/<id>.json) made the captured credentials
+      // invisible to the CLI when assigned to a project terminal.
+      // Strip any extension off the id-derived basename so a passed
+      // 'acct-XXX.json' yields the dir 'acct-XXX'. Codex PR#3 r17 P2.
+      const idDir = base.replace(/\.json$/i, '');
+      const profilesRoot = path.join(os.homedir(), '.claude-profiles');
+      const profileDir = path.join(profilesRoot, idDir);
+      const finalDest = path.join(profileDir, '.claude.json');
+      await fs.promises.mkdir(profileDir, { recursive: true });
       await fs.promises.copyFile(src, finalDest);
       return { ok: true, path: finalDest };
     } catch (err) {

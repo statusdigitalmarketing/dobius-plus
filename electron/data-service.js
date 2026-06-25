@@ -1043,6 +1043,12 @@ export async function searchTranscripts(query) {
         const ts = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
         if (ts > sessionTimestamp) sessionTimestamp = ts;
         let text = '';
+        // Cover all the user/assistant content shapes loadTranscript handles.
+        // Older transcripts store user turns with `entry.message` as a bare
+        // string or `entry.content` at the top level; the new code path only
+        // looked at entry.message.content, so search missed legacy text. The
+        // UI advertises "user + assistant" so missing the user side here is
+        // particularly bad. Codex PR#3 r17 P2.
         const msgContent = entry.message?.content;
         if (typeof msgContent === 'string') {
           text = msgContent;
@@ -1051,6 +1057,10 @@ export async function searchTranscripts(query) {
             .map((c) => c.text || c.thinking || '')
             .filter(Boolean)
             .join(' ');
+        } else if (typeof entry.message === 'string') {
+          text = entry.message;
+        } else if (typeof entry.content === 'string') {
+          text = entry.content;
         }
 
         if (!text || !text.toLowerCase().includes(qLower)) continue;
