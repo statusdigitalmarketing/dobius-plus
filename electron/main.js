@@ -379,7 +379,19 @@ function setupDataHandlers() {
   ipcMain.handle('data:loadProjectTokens', () => loadProjectTokens());
   ipcMain.handle('data:searchTranscripts', (_event, query) => searchTranscripts(query));
   ipcMain.handle('data:estimateContextSize', (_event, projectPath) => estimateContextSize(projectPath));
-  ipcMain.handle('data:deleteSession', (_event, sessionId, projectPath) => deleteSession(sessionId, projectPath));
+  ipcMain.handle('data:deleteSession', async (_event, sessionId, projectPath) => {
+    const result = await deleteSession(sessionId, projectPath);
+    // Broadcast data:updated so other open windows refresh their session
+    // lists. Without this, a deleted session keeps showing in any sidebar
+    // or Sessions dashboard that was open in another window, and offering
+    // to resume it. Codex PR#3 r16 P2.
+    if (result?.ok !== false) {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send('data:updated', projectPath);
+      }
+    }
+    return result;
+  });
 }
 
 /**

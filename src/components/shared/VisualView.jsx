@@ -150,8 +150,16 @@ export default function VisualView({ projectPath }) {
     setCommitMsg('Update website');
     setDeployModal('preview');
     const s = await window.electronAPI?.visualDeployStatus?.(projectPath, { previewBranch, prodBranch });
-    if (s?.ok) setDeployFiles(s.changedFiles || []);
-    else setDeployResult({ ok: false, kind: 'preview', message: s?.error || 'Could not read git status' });
+    if (s?.ok) {
+      setDeployFiles(s.changedFiles || []);
+    } else {
+      // Preflight failed (e.g. not a git repo). Clear the modal so the
+      // overlay falls into its result-rendering branch and the user sees
+      // the real error instead of a confirm dialog over broken state.
+      // Codex PR#3 r16 P3.
+      setDeployModal(null);
+      setDeployResult({ ok: false, kind: 'preview', message: s?.error || 'Could not read git status' });
+    }
   }, [projectPath, previewBranch, prodBranch]);
 
   const runPreviewDeploy = useCallback(async () => {
