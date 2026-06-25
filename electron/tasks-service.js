@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import https from 'https';
+import crypto from 'crypto';
 import { getAsanaQueue } from './config-manager.js';
 import * as pipeline from './task-pipeline.js';
 
@@ -27,8 +28,29 @@ function tasksPath(projectPath) {
   // files keyed on the renderer's path are unaffected.
   const expanded = String(projectPath).replace(/^~(?=$|\/)/, os.homedir());
   const norm = path.resolve(expanded);
-  const safe = norm.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 120);
-  return path.join(TASKS_DIR, `${safe}.json`);
+  // Two-part key: slug + 8-char hash of the FULL normalized path. Without
+  // the hash, two project paths sharing the same first 120 sanitized
+  // characters (deep worktrees, long monorepo paths) collide on the same
+  // file and their tasks mix. Codex Apple-grade audit r25 P2.
+  const slug = norm.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 100);
+  const hash = crypto.createHash('sha1').update(norm).digest('hex').slice(0, 8);
+  const newPath = path.join(TASKS_DIR, `${slug}.${hash}.json`);
+  // One-shot legacy migration: if the new file doesn't exist but the old
+  // 120-char slug filename DOES, rename it in place so existing tasks
+  // carry through. Idempotent (only runs when new is absent + legacy is
+  // present); silent failure leaves both alone so a future read still hits
+  // the legacy path via the secondary fallback below.
+  try {
+    if (!fs.existsSync(newPath)) {
+      const legacySafe = norm.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 120);
+      const legacyPath = path.join(TASKS_DIR, `${legacySafe}.json`);
+      if (fs.existsSync(legacyPath)) {
+        fs.mkdirSync(TASKS_DIR, { recursive: true });
+        fs.renameSync(legacyPath, newPath);
+      }
+    }
+  } catch { /* fall through, the secondary fallback in readTasks covers it */ }
+  return newPath;
 }
 
 function readTasks(projectPath) {

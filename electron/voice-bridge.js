@@ -768,10 +768,13 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-task-done: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
-# One arg → task ref only, project defaults to the working dir (hand-driven use).
-# Two+ args → first is the project path (Conductor dispatching across projects).
+# One arg, task ref only, project defaults to the project ROOT (DOBIUS_CWD)
+# the terminal was spawned with. Using $(pwd) was wrong: after the agent
+# cd's into a subdir, tasks would be keyed on the subdir and never match
+# the project's task file. Codex Apple-grade r25 P2.
+# Two+ args, first is the project path (Conductor dispatching across projects).
 if [ $# -eq 1 ]; then
-  PROJECT="$(pwd)"; REF="$1"
+  PROJECT="\${DOBIUS_CWD:-$(pwd)}"; REF="$1"
 else
   PROJECT="$1"; shift; REF="$*"
 fi
@@ -828,10 +831,11 @@ if [ $# -lt 2 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-stage: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
-# 2 args → <ref> <stage>, project defaults to the working dir (hand-driven use).
-# 3 args → <projectPath> <ref> <stage> (Conductor staging across projects).
+# 2 args, <ref> <stage>, project defaults to DOBIUS_CWD (project ROOT) so
+# subdir cd's don't key tasks under a non-project path. Codex r25 P2.
+# 3 args, <projectPath> <ref> <stage> (Conductor staging across projects).
 if [ $# -eq 2 ]; then
-  PROJECT="$(pwd)"; REF="$1"; STAGE="$2"
+  PROJECT="\${DOBIUS_CWD:-$(pwd)}"; REF="$1"; STAGE="$2"
 else
   PROJECT="$1"; REF="$2"; STAGE="$3"
 fi
