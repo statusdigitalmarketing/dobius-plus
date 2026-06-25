@@ -68,15 +68,29 @@ export default function TasksDropdown() {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  const handleToggle = (taskId, done) => {
-    // Marking done must go THROUGH the pipeline (tasks:complete →
-    // completeTaskByRef → pipeline.complete) so stage + done + the event log stay
-    // consistent — never patch `done` out of band. Un-completing stays on
-    // tasksUpdate for now (Stream A is hardening updateTask's allow-list).
+  const handleToggle = async (taskId, done) => {
+    // Marking done must go THROUGH the pipeline (tasks:complete ->
+    // completeTaskByRef -> pipeline.complete) so stage + done + the event log
+    // stay consistent. Never patch `done` out of band.
     if (done) {
       if (!window.electronAPI?.tasksComplete) return;
       setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, done: true } : t));
       window.electronAPI.tasksComplete(currentProjectPath, taskId);
+      return;
+    }
+    // Un-completing: must reverse BOTH `done` and the pipeline `stage`,
+    // otherwise Tasks dropdown counts it as pending while Kanban still
+    // buckets it in Done (inconsistent state). For non-pipeline tasks (no
+    // stage), the bare tasksUpdate path is fine. For pipeline tasks already
+    // in 'done', move them back through tasks:advance to the previous active
+    // stage so the transition is recorded in the event log. Codex PR#3 r2 P2.
+    const task = tasks.find((t) => t.id === taskId);
+    const isPipelineDone = task?.stage === 'done';
+    if (isPipelineDone && window.electronAPI?.tasksAdvance) {
+      setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, done: false, stage: 'approval' } : t));
+      // 'approval' is the last stage before 'done' in the pipeline. Moving
+      // back there is the least surprising reverse-the-completion path.
+      await window.electronAPI.tasksAdvance(currentProjectPath, taskId, 'approval', { note: 'unchecked from Tasks dropdown' });
       return;
     }
     if (!window.electronAPI?.tasksUpdate) return;

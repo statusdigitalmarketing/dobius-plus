@@ -172,7 +172,16 @@ export default function Search() {
                           key={`${item.sessionId}-${idx}`}
                           className="rounded-lg p-3 cursor-pointer transition-colors"
                           style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
-                          onClick={() => resumeSession(item.sessionId)}
+                          // Pass the search hit's project + sizeMB so the
+                          // store's cwd-aware path runs. The legacy string
+                          // overload puts Claude in the CURRENT window's cwd,
+                          // which is usually wrong for a cross-project hit.
+                          // Codex PR#3 r2 P2.
+                          onClick={() => resumeSession({
+                            sessionId: item.sessionId,
+                            project: item.projectPath || item.project,
+                            sizeMB: item.sizeMB,
+                          })}
                           title={`Resume session ${item.sessionId}`}
                         >
                           <div className="flex items-center justify-between gap-2 mb-1.5">
