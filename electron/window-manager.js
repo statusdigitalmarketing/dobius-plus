@@ -324,7 +324,18 @@ export function openVisualWindow(projectPath) {
 
   visualUrl(win, projectPath);
 
-  win.on('closed', () => { visualWindow = null; visualWindowProject = null; });
+  win.on('closed', () => {
+    visualWindow = null;
+    visualWindowProject = null;
+    // Stop the express server + chokidar watcher when the Visual window
+    // closes. The renderer's visualStop IPC is not reliable once the
+    // BrowserWindow is being destroyed (channel can die mid-flight), so
+    // tear down from the main side too. Dynamic import to avoid a top-of-
+    // file circular risk. Codex r28 P2.
+    import('./visual-server.js').then((m) => {
+      if (m?.stopVisualServer) m.stopVisualServer().catch(() => {});
+    }).catch(() => {});
+  });
   visualWindow = win;
   visualWindowProject = projectPath;
   return win;
