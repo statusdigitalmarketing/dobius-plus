@@ -543,30 +543,40 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
           let best = null;
           for (const [sid, entry] of Object.entries(map || {})) {
             if (entry?.tabId === termId && (!best || (entry.capturedAt || 0) > best.capturedAt)) {
-              best = { sessionId: sid, capturedAt: entry.capturedAt || 0 };
+              // Capture the linked session's projectPath too. A tab can be
+              // linked to a session from a DIFFERENT project (the store
+              // records entry.projectPath for exactly this case, e.g. user
+              // resumed cross-project from the Sessions dashboard into this
+              // tab). Cmd+R must cd to THAT project, not the current window.
+              // Codex PR#3 r23 P2.
+              best = {
+                sessionId: sid,
+                capturedAt: entry.capturedAt || 0,
+                project: entry.projectPath || null,
+              };
             }
           }
-          if (best?.sessionId) return { sessionId: best.sessionId };
+          if (best?.sessionId) {
+            return { sessionId: best.sessionId, project: best.project || projectPath };
+          }
         } catch { /* fall through */ }
       }
       // 2. Fallback: project's most recent session. Return the full object
       // so sizeMB flows into the dead-session guard. Codex PR#3 r19 P2.
       if (api.dataGetLatestSession) {
         const s = await api.dataGetLatestSession(projectPath);
-        return s?.sessionId ? { sessionId: s.sessionId, sizeMB: s.sizeMB } : null;
+        return s?.sessionId
+          ? { sessionId: s.sessionId, project: projectPath, sizeMB: s.sizeMB }
+          : null;
       }
       return null;
     };
 
     resolve().then((info) => {
-      // Pass project (handleResumeSession requires it) AND sizeMB so the
-      // >80MB dead-session guard fires for Cmd+R too. Previously only the
-      // bare sessionId came through, the guard never ran from this path,
-      // and a 100MB latest transcript would hang Claude on resume.
       if (info?.sessionId) {
         handleResumeSession({
           sessionId: info.sessionId,
-          project: projectPath,
+          project: info.project || projectPath,
           sizeMB: info.sizeMB,
         });
       }
