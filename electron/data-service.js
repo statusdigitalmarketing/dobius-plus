@@ -903,48 +903,62 @@ export async function loadProjectTokens() {
     if (!(await pathExists(PROJECTS_DIR))) return results;
     const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
 
-    await Promise.all(dirents.filter((d) => d.isDirectory()).map(async (dir) => {
+    // Flatten projects + files into one task list and use mapLimit(24).
+    // The previous nested Promise.all started parseJsonl(filePath) on every
+    // sub-8MB session in every project simultaneously, which saturated file
+    // descriptors and main-process memory on machines with hundreds-thousands
+    // of sessions. Same OOM class as the v1.0.23 loadAllSessions fix.
+    // Codex PR#3 r13 P2.
+    const perProject = new Map(); // dirName -> { inputTokens, ..., sessions, modelTotals }
+    const fileTasks = [];
+    for (const dir of dirents.filter((d) => d.isDirectory())) {
       const projectDir = path.join(PROJECTS_DIR, dir.name);
-      let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0;
-      let sessions = 0;
-      const modelTotals = {};
-
+      perProject.set(dir.name, {
+        projectDir,
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+        sessions: 0,
+        modelTotals: {},
+      });
       try {
         const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
-        await Promise.all(files.map(async (f) => {
-          const filePath = path.join(projectDir, f);
-          try {
-            const stat = await fs.stat(filePath);
-            if (stat.size > 8 * 1024 * 1024) return; // skip files > 8MB
-          } catch { return; }
-          // Only count sessions we actually scanned — skipped (too large) or
-          // unreadable files must not inflate the Costs "sessions" metric.
-          sessions++;
-          const entries = await parseJsonl(filePath);
-          for (const entry of entries) {
-            const usage = entry.message?.usage;
-            const model = entry.message?.model || 'unknown';
-            if (!usage) continue;
-            const inp = (usage.input_tokens || 0);
-            const out = (usage.output_tokens || 0);
-            const cr  = (usage.cache_read_input_tokens || 0);
-            const cw  = (usage.cache_creation_input_tokens || 0);
-            inputTokens += inp;
-            outputTokens += out;
-            cacheReadTokens += cr;
-            cacheWriteTokens += cw;
-            if (!modelTotals[model]) modelTotals[model] = { inp: 0, out: 0, cr: 0, cw: 0 };
-            modelTotals[model].inp += inp;
-            modelTotals[model].out += out;
-            modelTotals[model].cr  += cr;
-            modelTotals[model].cw  += cw;
-          }
-        }));
-      } catch {
-        return;
-      }
+        for (const f of files) fileTasks.push({ dirName: dir.name, file: f });
+      } catch { /* unreadable project dir, skip */ }
+    }
 
-      if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0) return;
+    await mapLimit(fileTasks, 24, async ({ dirName, file }) => {
+      const acc = perProject.get(dirName);
+      if (!acc) return;
+      const filePath = path.join(acc.projectDir, file);
+      try {
+        const stat = await fs.stat(filePath);
+        if (stat.size > 8 * 1024 * 1024) return;
+      } catch { return; }
+      acc.sessions += 1;
+      const entries = await parseJsonl(filePath);
+      for (const entry of entries) {
+        const usage = entry.message?.usage;
+        const model = entry.message?.model || 'unknown';
+        if (!usage) continue;
+        const inp = (usage.input_tokens || 0);
+        const out = (usage.output_tokens || 0);
+        const cr  = (usage.cache_read_input_tokens || 0);
+        const cw  = (usage.cache_creation_input_tokens || 0);
+        acc.inputTokens += inp;
+        acc.outputTokens += out;
+        acc.cacheReadTokens += cr;
+        acc.cacheWriteTokens += cw;
+        if (!acc.modelTotals[model]) acc.modelTotals[model] = { inp: 0, out: 0, cr: 0, cw: 0 };
+        acc.modelTotals[model].inp += inp;
+        acc.modelTotals[model].out += out;
+        acc.modelTotals[model].cr  += cr;
+        acc.modelTotals[model].cw  += cw;
+      }
+    });
+
+    for (const [dirName, acc] of perProject) {
+      const { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, sessions, modelTotals } = acc;
+      if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0) continue;
+      const dir = { name: dirName };
 
       // Compute estimated cost per model
       let estimatedCostUsd = 0;
@@ -969,7 +983,7 @@ export async function loadProjectTokens() {
         models: Object.keys(modelTotals),
         estimatedCostUsd,
       };
-    }));
+    }
   } catch (err) {
     console.warn('[data-service] Failed to load project tokens:', err.message);
   }
@@ -991,80 +1005,78 @@ export async function searchTranscripts(query) {
     if (!(await pathExists(PROJECTS_DIR))) return [];
     const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
 
-    await Promise.all(dirents.filter((d) => d.isDirectory()).map(async (dir) => {
+    // Flatten + mapLimit (same OOM-prevention pattern as loadAllSessions and
+    // loadProjectTokens). The previous nested Promise.all started a whole-file
+    // parseJsonl for EVERY sub-5MB session in EVERY project concurrently; the
+    // matches.length>=200 guard inside each task did not stop fresh work from
+    // being scheduled, so on large ~/.claude/projects the Search tab could
+    // freeze the main process before returning. Codex PR#3 r13 P2.
+    const fileTasks = [];
+    for (const dir of dirents.filter((d) => d.isDirectory())) {
       const projectDir = path.join(PROJECTS_DIR, dir.name);
       const projectName = dir.name.split('-').filter(Boolean).pop() || dir.name;
-      // Use tryReconstructPath (probes the filesystem) instead of a naive
-      // dash-to-slash replace. The naive version mangles double-dash encodings
-      // like `-Users-foo-Projects--Code--dobius-plus` into garbage paths like
-      // `/Users/foo/Projects//Code//dobius/plus`. Search hits then pass that
-      // broken path to resumeSession which cd's into a non-existent dir.
-      // Codex PR#3 r5 P2. Falls back to the naive form only if reconstruction
-      // can't find a real path on disk (better wrong than missing).
       const projectPath = tryReconstructPath(dir.name) || ('/' + dir.name.replace(/-/g, '/'));
-
       try {
         const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
-        await Promise.all(files.map(async (f) => {
-          if (matches.length >= 200) return;
-          const sessionId = f.replace('.jsonl', '');
-          const filePath = path.join(projectDir, f);
-          try {
-            const stat = await fs.stat(filePath);
-            if (stat.size > 5 * 1024 * 1024) return; // skip very large sessions
-          } catch { return; }
+        for (const f of files) fileTasks.push({ projectDir, projectName, projectPath, file: f });
+      } catch { /* skip unreadable project */ }
+    }
 
-          const entries = await parseJsonl(filePath);
-          let sessionTimestamp = 0;
+    await mapLimit(fileTasks, 16, async ({ projectDir, projectName, projectPath, file: f }) => {
+      // Cap honored at task-start AND inside the entry loop. The cap can be
+      // reached after this task was scheduled but before it ran, in which
+      // case we just return without reading the file.
+      if (matches.length >= 200) return;
+      const sessionId = f.replace('.jsonl', '');
+      const filePath = path.join(projectDir, f);
+      try {
+        const stat = await fs.stat(filePath);
+        if (stat.size > 5 * 1024 * 1024) return;
+      } catch { return; }
+      const entries = await parseJsonl(filePath);
+      let sessionTimestamp = 0;
+      for (const entry of entries) {
+        const ts = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
+        if (ts > sessionTimestamp) sessionTimestamp = ts;
+        let text = '';
+        const msgContent = entry.message?.content;
+        if (typeof msgContent === 'string') {
+          text = msgContent;
+        } else if (Array.isArray(msgContent)) {
+          text = msgContent
+            .map((c) => c.text || c.thinking || '')
+            .filter(Boolean)
+            .join(' ');
+        }
 
-          for (const entry of entries) {
-            const ts = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
-            if (ts > sessionTimestamp) sessionTimestamp = ts;
+        if (!text || !text.toLowerCase().includes(qLower)) continue;
 
-            // Extract searchable text
-            let text = '';
-            const msgContent = entry.message?.content;
-            if (typeof msgContent === 'string') {
-              text = msgContent;
-            } else if (Array.isArray(msgContent)) {
-              text = msgContent
-                .map((c) => c.text || c.thinking || '')
-                .filter(Boolean)
-                .join(' ');
-            }
+        const idx = text.toLowerCase().indexOf(qLower);
+        const start = Math.max(0, idx - 80);
+        const end = Math.min(text.length, idx + q.length + 80);
+        const excerpt =
+          (start > 0 ? '...' : '') +
+          text.slice(start, end) +
+          (end < text.length ? '...' : '');
 
-            if (!text || !text.toLowerCase().includes(qLower)) continue;
+        // Normalize roles the way the other parsers in this file do: older
+        // transcripts use type 'human' for the user, which must not render
+        // as Claude. Anything that isn't a user message is the assistant.
+        const role = (entry.type === 'human' || entry.type === 'user'
+          || entry.role === 'user' || entry.message?.role === 'user')
+          ? 'user' : 'assistant';
+        matches.push({
+          sessionId,
+          projectName,
+          projectPath,
+          role,
+          excerpt,
+          timestamp: ts || sessionTimestamp,
+        });
 
-            const idx = text.toLowerCase().indexOf(qLower);
-            const start = Math.max(0, idx - 80);
-            const end = Math.min(text.length, idx + q.length + 80);
-            const excerpt =
-              (start > 0 ? '…' : '') +
-              text.slice(start, end) +
-              (end < text.length ? '…' : '');
-
-            // Normalize roles the way the other parsers in this file do: older
-            // transcripts use type 'human' for the user, which must not render
-            // as Claude. Anything that isn't a user message is the assistant.
-            const role = (entry.type === 'human' || entry.type === 'user'
-              || entry.role === 'user' || entry.message?.role === 'user')
-              ? 'user' : 'assistant';
-            matches.push({
-              sessionId,
-              projectName,
-              projectPath,
-              role,
-              excerpt,
-              timestamp: ts || sessionTimestamp,
-            });
-
-            if (matches.length >= 200) return;
-          }
-        }));
-      } catch {
-        void 0;
+        if (matches.length >= 200) return;
       }
-    }));
+    });
   } catch (err) {
     console.warn('[data-service] Failed to search transcripts:', err.message);
   }
