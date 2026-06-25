@@ -29,11 +29,31 @@ export function useSessions({ projectFilter = null } = {}) {
   const loadSessions = useCallback(async () => {
     if (!window.electronAPI) return;
     try {
-      const [data, tabMap, tags] = await Promise.all([
-        window.electronAPI.dataLoadHistory(),
+      // Use dataLoadAllSessions (reads transcript files directly from
+      // ~/.claude/projects/) instead of dataLoadHistory (reads
+      // ~/.claude/history.jsonl, which on this Mac is 95% incomplete
+      // and 92% full of ghost entries for deleted transcripts). The
+      // sidebar was effectively only able to surface the ~83 sessions
+      // that happened to be in BOTH lists, out of 4,367 real ones on
+      // disk. Switching to the disk source shows everything that
+      // actually exists, capped at 500 most-recent.
+      const [raw, tabMap, tags] = await Promise.all([
+        window.electronAPI.dataLoadAllSessions(),
         window.electronAPI.configGetSessionTabMap?.() ?? {},
         window.electronAPI.configGetSessionTags?.() ?? {},
       ]);
+      // dataLoadAllSessions returns { sessionId, projectPath, projectName,
+      // preview, timestamp, age, status }. The sidebar consumes the older
+      // { sessionId, project, display, timestamp } shape that dataLoadHistory
+      // used, so alias the new field names without changing the consumers.
+      const data = (raw || []).map((s) => ({
+        ...s,
+        project: s.projectPath || s.project,
+        // Prefer projectName (clean readable label) over the raw preview text.
+        // If both are missing fall back to "Untitled" so render code never
+        // hits undefined.
+        display: s.projectName || s.preview || 'Untitled',
+      }));
       setSessions(data);
       setSessionTabMap(tabMap || {});
       const safeTags = tags || {};

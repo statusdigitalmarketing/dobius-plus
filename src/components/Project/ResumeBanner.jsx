@@ -53,7 +53,14 @@ export default function ResumeBanner({ projectPath }) {
       </span>
       <button
         onClick={() => {
-          resumeSession(session.sessionId);
+          // Pass project + sizeMB so the store's cwd-aware path runs.
+          // Without project the store falls back to bare --resume in the
+          // wrong cwd, which is what v1.0.28 was supposed to fix.
+          resumeSession({
+            sessionId: session.sessionId,
+            project: projectPath,
+            sizeMB: session.sizeMB,
+          });
           setDismissed(true);
         }}
         className="px-2 py-0.5 rounded text-xs"

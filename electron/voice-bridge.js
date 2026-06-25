@@ -163,6 +163,14 @@ async function handleTaskDone(req, res) {
   catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
   const projectPath = body?.projectPath;
   const ref = body?.ref;
+  // Type guards. Bearer + loopback restrict callers, but undefined args
+  // still shouldn't reach the service layer. PR#3 r1 MED.
+  if (typeof projectPath !== 'string' || !projectPath) {
+    return sendJson(res, 400, { ok: false, error: 'projectPath must be a non-empty string' });
+  }
+  if (typeof ref !== 'string' && typeof ref !== 'number') {
+    return sendJson(res, 400, { ok: false, error: 'ref must be a string or number' });
+  }
   const result = completeTaskByRef(projectPath, ref);
   if (result.ok) {
     for (const win of BrowserWindow.getAllWindows()) {
@@ -188,6 +196,12 @@ async function handleStage(req, res) {
   const ref = body?.ref;
   const stage = body?.stage;
   const note = body?.note ?? null;
+  if (typeof projectPath !== 'string' || !projectPath) {
+    return sendJson(res, 400, { ok: false, error: 'projectPath must be a non-empty string' });
+  }
+  if (typeof ref !== 'string' && typeof ref !== 'number') {
+    return sendJson(res, 400, { ok: false, error: 'ref must be a string or number' });
+  }
   if (!STAGES.includes(stage)) {
     return sendJson(res, 400, { ok: false, error: `invalid stage "${stage}". valid: ${STAGES.join(', ')}` });
   }
@@ -290,9 +304,16 @@ async function handleAsanaComplete(req, res) {
   let body;
   try { body = await readJsonBody(req); }
   catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  // /asana/complete is the ONE Asana write endpoint, double-check the gid
+  // shape here (the service also regex-validates, but only after String(undef)
+  // turns into the string "undefined" and gets rejected as malformed). PR#3 MED.
+  const gid = body?.gid;
+  if (typeof gid !== 'string' || !/^\d{6,30}$/.test(gid)) {
+    return sendJson(res, 400, { ok: false, error: 'gid must be a numeric string (6-30 digits)' });
+  }
   try {
     const q = await import('./asana-queue.js');
-    const result = await q.markTaskComplete(body?.gid);
+    const result = await q.markTaskComplete(gid);
     return sendJson(res, result.ok ? 200 : 400, result);
   } catch (err) {
     return sendJson(res, 500, { ok: false, error: err.message });

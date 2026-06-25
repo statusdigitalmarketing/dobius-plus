@@ -93,13 +93,22 @@ export default function VisualView({ projectPath }) {
     return base + p;
   }, [baseFor]);
 
+  // Scheme guard for any webview.src assignment. Without it, a saved prod /
+  // preview URL of `javascript:` or `file://` would execute as-is when the
+  // user clicks the corresponding source tab. http(s) only. PR#3 r1 MED.
+  const setWebviewSrc = useCallback((raw) => {
+    if (!webviewRef.current || !raw || typeof raw !== 'string') return;
+    if (!/^https?:\/\//i.test(raw)) return;
+    webviewRef.current.src = raw;
+  }, []);
+
   const url = urlForSrc(source, currentPage);
 
   const navigate = useCallback((page) => {
     setCurrentPage(page);
     const u = urlForSrc(source, page);
-    if (webviewRef.current && u) webviewRef.current.src = u;
-  }, [urlForSrc, source]);
+    setWebviewSrc(u);
+  }, [urlForSrc, source, setWebviewSrc]);
 
   const switchSource = useCallback((mode) => {
     // Switching to a remote source with no URL set yet: open its editor.
@@ -107,8 +116,8 @@ export default function VisualView({ projectPath }) {
     if (mode === 'preview' && !previewUrl){ setSource('preview'); setUrlInput(''); setEditing('preview'); return; }
     setSource(mode);
     const u = urlForSrc(mode, currentPage);
-    if (webviewRef.current && u) webviewRef.current.src = u;
-  }, [prodUrl, previewUrl, urlForSrc, currentPage]);
+    setWebviewSrc(u);
+  }, [prodUrl, previewUrl, urlForSrc, currentPage, setWebviewSrc]);
 
   const saveUrl = useCallback(async (which, raw) => {
     const clean = raw.trim().replace(/\/$/, '');
@@ -120,11 +129,11 @@ export default function VisualView({ projectPath }) {
       await window.electronAPI?.configSetProject?.(projectPath, { [key]: clean });
     }
     const activeWhich = source === 'live' ? 'prod' : source === 'preview' ? 'preview' : null;
-    if (clean && activeWhich === which && webviewRef.current) {
+    if (clean && activeWhich === which) {
       const p = currentPage === '/' ? '' : currentPage.replace(/\.html$/, '').replace(/\/index$/, '/');
-      webviewRef.current.src = clean + p;
+      setWebviewSrc(clean + p);
     }
-  }, [projectPath, source, currentPage]);
+  }, [projectPath, source, currentPage, setWebviewSrc]);
 
   // Remote reloads bypass cache so we always pull the freshest deployed version.
   const reload = useCallback(() => {
@@ -154,12 +163,12 @@ export default function VisualView({ projectPath }) {
       setDeployResult({ ok: true, kind: 'preview',
         message: `Pushed to ${r.previewBranch}${r.sha ? ` (${r.sha})` : ''}. Preview is building — give the host ~30s, then Reload.`,
         log: r.log });
-      if (previewUrl) { setSource('preview'); const u = urlForSrc('preview', currentPage); if (webviewRef.current && u) webviewRef.current.src = u; }
+      if (previewUrl) { setSource('preview'); setWebviewSrc(urlForSrc('preview', currentPage)); }
       else { setSource('preview'); setUrlInput(''); setEditing('preview'); }
     } else {
       setDeployResult({ ok: false, kind: 'preview', message: r?.error || 'Preview deploy failed', detail: r?.detail, log: r?.log });
     }
-  }, [projectPath, commitMsg, previewBranch, prodBranch, previewUrl, urlForSrc, currentPage]);
+  }, [projectPath, commitMsg, previewBranch, prodBranch, previewUrl, urlForSrc, currentPage, setWebviewSrc]);
 
   const runPromote = useCallback(async () => {
     setDeployBusy(true);
@@ -170,14 +179,14 @@ export default function VisualView({ projectPath }) {
       setDeployResult({ ok: true, kind: 'live', message: `Pushed ${r.prodBranch} to GitHub. The live site is deploying — refreshing shortly.`, log: r.log });
       if (prodUrl) {
         setSource('live');
-        const reloadLive = () => { const u = urlForSrc('live', currentPage); if (webviewRef.current && u) webviewRef.current.src = u; };
+        const reloadLive = () => { setWebviewSrc(urlForSrc('live', currentPage)); };
         reloadLive();
         setTimeout(reloadLive, 30000); // host needs ~30s to publish
       }
     } else {
       setDeployResult({ ok: false, kind: 'live', message: r?.error || 'Go Live failed', detail: r?.detail, log: r?.log });
     }
-  }, [projectPath, prodBranch, prodUrl, urlForSrc, currentPage]);
+  }, [projectPath, prodBranch, prodUrl, urlForSrc, currentPage, setWebviewSrc]);
 
   const showFrame = !!url && !status && !loading;
   const editingLabel = editing === 'prod' ? 'production' : 'preview';
@@ -288,7 +297,14 @@ export default function VisualView({ projectPath }) {
           border: 'none', boxShadow: 'none',
           flexShrink: 0, position: 'relative', display: showFrame ? 'block' : 'none',
         }}>
-          <webview ref={webviewRef} src={url || 'about:blank'} style={{ width: '100%', height: '100%', border: 'none' }} />
+          {/* eslint-disable-next-line react/no-unknown-property -- <webview> is Electron-specific */}
+          <webview
+            ref={webviewRef}
+            src={(url && /^https?:\/\//i.test(url)) ? url : 'about:blank'}
+            partition="persist:dobius-visual"
+            webpreferences="contextIsolation=true,nodeIntegration=false"
+            style={{ width: '100%', height: '100%', border: 'none' }}
+          />
         </div>
 
         {/* Deploy confirm / result overlay */}

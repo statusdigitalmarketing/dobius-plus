@@ -273,16 +273,11 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   // Persist the grid layout per project. Gate on hydration so the mount-time
   // default (gridSlots: null) can't clobber a saved layout before it loads.
   // Tear-off windows are ephemeral and never persist their grid.
-  // Skip the first persist after hydration — the restored gridSlots came
-  // from disk, writing it back is wasted I/O (and touches mtime, triggering
-  // any downstream watchers on the config file).
+  // The grid-only persist effect that used to live here was a duplicate of the
+  // wider one below (which also persists splitRatio + gridColumnRatio +
+  // gridRowRatios). Both fired on every gridSlots change, double-writing
+  // config. Removed in PR #3 round-1 review (Carson self-flag #3).
   const gridPersistArmed = useRef(false);
-  useEffect(() => {
-    if (tearOffTabId) return;
-    if (!tabsInitialized || !projectPath || !window.electronAPI?.configSetProject) return;
-    if (!gridPersistArmed.current) { gridPersistArmed.current = true; return; }
-    window.electronAPI.configSetProject(projectPath, { gridSlots });
-  }, [gridSlots, tabsInitialized, projectPath, tearOffTabId]);
 
   // Force xterm to re-fit when the pane layout changes. Switching to/from
   // split or grid only changes the pane's CSS width (100% → 50%), and the
@@ -334,16 +329,14 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     }
   }, [tabs, tabsInitialized, projectPath, tearOffTabId]);
 
-  // Persist grid layout per project (merged into project config; skip tear-offs).
-  // Gate on hydration so the mount-time default (gridSlots: null) can't clobber a
-  // saved layout before the load effect has had a chance to restore it.
-  const gridHydratedRef = useRef(false);
+  // Persist grid layout per project (merged into project config, skip tear-offs).
+  // Uses the gridPersistArmed ref pattern so the FIRST post-hydration call is
+  // skipped (the restored values just came from disk, writing them back is
+  // wasted I/O and bumps config mtime needlessly).
   useEffect(() => {
-    if (tabsInitialized) gridHydratedRef.current = true;
-  }, [tabsInitialized]);
-  useEffect(() => {
-    if (tearOffTabId || !gridHydratedRef.current) return;
+    if (tearOffTabId) return;
     if (!tabsInitialized || !projectPath || !window.electronAPI?.configSetProject) return;
+    if (!gridPersistArmed.current) { gridPersistArmed.current = true; return; }
     window.electronAPI.configSetProject(projectPath, {
       gridSlots,
       splitRatio,
@@ -565,7 +558,10 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     };
 
     resolve().then((sessionId) => {
-      if (sessionId) handleResumeSession({ sessionId });
+      // Pass projectPath: handleResumeSession now requires `project` and
+      // aborts with an alert if missing. Cmd+R is scoped to the current
+      // project window, so projectPath is always known and correct here.
+      if (sessionId) handleResumeSession({ sessionId, project: projectPath });
     });
   }, [projectPath, handleResumeSession]);
 
@@ -619,7 +615,9 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
       scrollback = saved?.scrollback || null;
     }
     if (tab) {
-      state.pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback });
+      // Preserve kind/url so a closed browser tab can be resurrected via
+      // Cmd+Shift+T as a browser (not a blank terminal). Carson self-flag #4.
+      state.pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url });
     }
     // Auto-checkpoint on close, matching the tab-bar X / middle-click / context-menu
     // paths (Cmd+W previously skipped this, so the same close produced no checkpoint).

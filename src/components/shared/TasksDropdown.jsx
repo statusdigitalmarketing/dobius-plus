@@ -37,6 +37,14 @@ export default function TasksDropdown() {
     if (open) load();
   }, [open, load]);
 
+  // Prime the badge count on mount + when the project changes, so the
+  // trigger never shows 0 while real tasks are waiting. Without this, the
+  // count stayed cold until the dropdown was opened or a tasks:updated
+  // event fired. PR#3 r1 LOW.
+  useEffect(() => {
+    load();
+  }, [load]);
+
   // Live refresh when a task is completed from a terminal (dobius-task-done).
   // Reload whenever the event has no path or matches the current project, so
   // the badge count and checkboxes update without reopening the panel.

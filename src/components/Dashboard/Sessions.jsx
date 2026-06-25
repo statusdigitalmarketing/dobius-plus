@@ -377,7 +377,11 @@ function SessionCard({ session, tag, onTagsChanged, onDeleted }) {
 
         {/* Action buttons */}
         <div className="flex items-center gap-1 shrink-0">
-          <CardBtn label="Resume" onClick={() => resumeSession(session.sessionId)} accent />
+          <CardBtn label="Resume" onClick={() => resumeSession({
+            sessionId: session.sessionId,
+            project: session.projectPath,
+            sizeMB: session.sizeMB,
+          })} accent />
           {isDifferentProject && (
             <CardBtn
               label="Open"

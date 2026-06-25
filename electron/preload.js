@@ -68,16 +68,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   notesRead: (projectPath) => ipcRenderer.invoke('notes:read', projectPath),
   notesWrite: (projectPath, content) => ipcRenderer.invoke('notes:write', projectPath, content),
 
-  // Claude status hooks — manages an opt-in Notification/Stop hook block in
-  // ~/.claude/settings.json that drives the terminal-tab status dots.
-  claudeHooksGetStatus: () => ipcRenderer.invoke('claudeHooks:getStatus'),
-  claudeHooksEnable: () => ipcRenderer.invoke('claudeHooks:enable'),
-  claudeHooksDisable: () => ipcRenderer.invoke('claudeHooks:disable'),
+  // Skill files (read/write).
   skillReadFile: (skillPath, filename) => ipcRenderer.invoke('skill:readFile', skillPath, filename),
   skillWriteFile: (skillPath, filename, content) => ipcRenderer.invoke('skill:writeFile', skillPath, filename, content),
 
-  // Claude status hooks — manages an opt-in Notification/Stop hook block in
-  // ~/.claude/settings.json that drives the terminal-tab status dots.
+  // Claude status hooks: manage an opt-in Notification/Stop hook block in
+  // ~/.claude/settings.json that drives the terminal-tab status dots. The
+  // duplicate block here previously shadowed itself (last-wins), only by
+  // luck did claudeHooksEnable still get its opts arg. De-duped.
   claudeHooksGetStatus: () => ipcRenderer.invoke('claudeHooks:getStatus'),
   claudeHooksEnable: (opts) => ipcRenderer.invoke('claudeHooks:enable', opts),
   claudeHooksDisable: () => ipcRenderer.invoke('claudeHooks:disable'),

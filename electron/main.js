@@ -332,10 +332,19 @@ function setupDataHandlers() {
   ipcMain.handle('data:listProjects', () => listProjects());
   ipcMain.handle('data:loadAllSessions', () => loadAllSessions());
   ipcMain.handle('data:getLatestSession', (_event, projectPath) => getLatestSession(projectPath));
-  ipcMain.handle('data:killProcess', (_event, pid) => {
+  ipcMain.handle('data:killProcess', async (_event, pid) => {
     const n = parseInt(pid, 10);
     if (!Number.isFinite(n) || n <= 1) throw new Error('Invalid PID');
+    // SECURITY: only kill PIDs that getActiveProcesses() reports. Without
+    // this gate, a renderer bug or compromised page could SIGTERM ANY
+    // user-owned process (Chrome, Slack, etc). Codex flagged HIGH on PR #3.
     try {
+      const active = await getActiveProcesses();
+      const allowed = new Set((Array.isArray(active) ? active : [])
+        .map((p) => Number(p.pid)).filter(Number.isFinite));
+      if (!allowed.has(n)) {
+        throw new Error('PID is not in the active-processes list, refusing to kill');
+      }
       process.kill(n, 'SIGTERM');
       return true;
     } catch (err) {
@@ -354,9 +363,13 @@ function setupFileWatcherHandlers() {
     watchProjectDir(projectPath, event.sender);
   });
 
-  ipcMain.handle('filewatcher:unwatch', (_event, projectPath) => {
+  ipcMain.handle('filewatcher:unwatch', (event, projectPath) => {
     if (!projectPath) return;
-    unwatchProjectDir(projectPath);
+    // Pass the sender so unwatchProjectDir can release ONLY this window's
+    // subscriber. Without it, in multi-window setups one window's Stop /
+    // unmount tears down the shared watcher subscriber set and leaves the
+    // closing window subscribed forever. Codex PR#3 r1 MED.
+    unwatchProjectDir(projectPath, event.sender);
   });
 
   ipcMain.handle('filewatcher:getEvents', (_event, projectPath) => {
@@ -692,10 +705,20 @@ function setupOrchestrationHandlers() {
   });
 
   ipcMain.handle('orchestration:decompose', async (_event, { systemPrompt, userPrompt }) => {
+    // Input validation: writeFileSync(path, undefined) throws and leaks the
+    // tmp file path; spawn with undefined args produces opaque errors. Codex
+    // HIGH on PR #3 r1.
+    if (typeof systemPrompt !== 'string') throw new Error('systemPrompt must be a string');
+    if (typeof userPrompt !== 'string') throw new Error('userPrompt must be a string');
     const promptDir = path.join(os.tmpdir(), 'dobius-agents');
     fs.mkdirSync(promptDir, { recursive: true });
-    const sysPath = path.join(promptDir, `decomp-sys-${Date.now()}.txt`);
+    // Random suffix prevents same-ms call collision (two parallel decomposes).
+    const sysPath = path.join(promptDir, `decomp-sys-${Date.now()}-${Math.floor(Math.random()*1e6)}.txt`);
     fs.writeFileSync(sysPath, systemPrompt, 'utf8');
+
+    // Output cap: a runaway model could emit megabytes and OOM the main proc.
+    // 512KB is well above any realistic decomposition response.
+    const MAX_OUT_BYTES = 512 * 1024;
 
     return new Promise((resolve, reject) => {
       const claudePath = resolveActiveCliPath();
@@ -709,12 +732,23 @@ function setupOrchestrationHandlers() {
 
       let out = '';
       let err = '';
-      proc.stdout.on('data', (d) => { out += d.toString(); });
-      proc.stderr.on('data', (d) => { err += d.toString(); });
+      let truncated = false;
+      proc.stdout.on('data', (d) => {
+        if (out.length >= MAX_OUT_BYTES) { truncated = true; return; }
+        out += d.toString();
+        if (out.length > MAX_OUT_BYTES) {
+          out = out.slice(0, MAX_OUT_BYTES);
+          truncated = true;
+          try { proc.kill('SIGTERM'); } catch { /* noop */ }
+        }
+      });
+      proc.stderr.on('data', (d) => {
+        if (err.length < 16 * 1024) err += d.toString();
+      });
       proc.on('close', (code) => {
         try { fs.unlinkSync(sysPath); } catch {}
-        if (code !== 0) return reject(new Error(`Decomposition failed (exit ${code}): ${err.slice(0, 300)}`));
-        resolve(out.trim());
+        if (code !== 0 && !truncated) return reject(new Error(`Decomposition failed (exit ${code}): ${err.slice(0, 300)}`));
+        resolve(out.trim() + (truncated ? '\n\n[output truncated at 512KB]' : ''));
       });
       proc.on('error', (e) => { try { fs.unlinkSync(sysPath); } catch {} reject(e); });
       setTimeout(() => { proc.kill(); reject(new Error('Decomposition timed out after 60s')); }, 60000);
@@ -735,14 +769,28 @@ function setupOrchestrationHandlers() {
     }
   };
   ipcMain.handle('tasks:list', (_event, projectPath) => listTasks(projectPath));
-  ipcMain.handle('tasks:add', (_event, projectPath, taskData) => addTask(projectPath, taskData));
+  ipcMain.handle('tasks:add', (_event, projectPath, taskData) => {
+    const result = addTask(projectPath, taskData);
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
   ipcMain.handle('tasks:update', (_event, projectPath, taskId, patch) => {
     const result = updateTask(projectPath, taskId, patch);
     if (result?.ok) broadcastTasksUpdated(projectPath); // L1: keep other windows in sync after a title/dueOn edit
     return result;
   });
-  ipcMain.handle('tasks:delete', (_event, projectPath, taskId) => deleteTask(projectPath, taskId));
-  ipcMain.handle('tasks:syncAsana', (_event, projectPath) => syncAsanaTasks(projectPath));
+  ipcMain.handle('tasks:delete', (_event, projectPath, taskId) => {
+    const result = deleteTask(projectPath, taskId);
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
+  ipcMain.handle('tasks:syncAsana', async (_event, projectPath) => {
+    const result = await syncAsanaTasks(projectPath);
+    // Sync can mutate tasks without a direct write call, so always broadcast
+    // (no result.ok check, service may not return that shape).
+    broadcastTasksUpdated(projectPath);
+    return result;
+  });
 
   // Complete a task THROUGH the pipeline (actor 'human') so stage + done + the
   // event log stay consistent — the Tasks-panel checkbox routes here instead of
@@ -969,12 +1017,22 @@ function setupFileHandlers() {
   function isAllowedSkillPath(skillPath, filename) {
     if (!skillPath || typeof skillPath !== 'string') return false;
     if (!ALLOWED_SKILL_FILES.includes(filename)) return false;
-    // Must be an absolute path inside the skills dir — no traversal allowed
-    const normalSkill = path.normalize(skillPath);
+    // Must be an absolute path inside the skills dir, no traversal allowed.
+    // The `.includes('..')` check was dead post-normalize (normalize already
+    // collapses `..`), so containment relied on path.dirname equality alone.
+    // realpathSync resolves symlinks, blocking a symlink-swap inside a skill
+    // dir from escaping containment. PR#3 r1 LOW.
     const normalSkillsDir = path.normalize(skillsDir);
-    return normalSkill.startsWith(normalSkillsDir + path.sep) &&
-      !normalSkill.includes('..') &&
-      path.dirname(normalSkill) === normalSkillsDir; // must be one level deep (skill subdir)
+    let realSkill;
+    let realSkillsDir;
+    try {
+      realSkill = fs.realpathSync(skillPath);
+      realSkillsDir = fs.realpathSync(normalSkillsDir);
+    } catch {
+      return false; // dir missing or unreadable
+    }
+    return realSkill.startsWith(realSkillsDir + path.sep) &&
+      path.dirname(realSkill) === realSkillsDir; // must be one level deep
   }
 
   ipcMain.handle('skill:readFile', (_event, skillPath, filename) => {
@@ -1536,11 +1594,13 @@ function setupGitHandlers() {
 
   ipcMain.handle('prompt:improve', (_event, rawPrompt) => {
     return new Promise((resolve, reject) => {
-      if (!rawPrompt || !rawPrompt.trim()) return resolve(rawPrompt);
+      // Type guard: undefined/null/non-string rawPrompt would call .trim()
+      // on the wrong target and throw before the early return. Codex HIGH.
+      if (typeof rawPrompt !== 'string' || !rawPrompt.trim()) return resolve(rawPrompt);
 
       const systemPrompt =
         'You are an expert prompt engineer. Rewrite the user\'s prompt to be clearer, more specific, and more effective for Claude. ' +
-        'Preserve the original intent exactly. Output ONLY the improved prompt — no explanations, no preamble, no quotes.';
+        'Preserve the original intent exactly. Output ONLY the improved prompt, no explanations, no preamble, no quotes.';
 
       const fullPrompt = `${systemPrompt}\n\nOriginal prompt:\n${rawPrompt.trim()}\n\nImproved prompt:`;
 
@@ -1549,12 +1609,24 @@ function setupGitHandlers() {
         env: { ...process.env, PATH: process.env.PATH + ':/usr/local/bin:/opt/homebrew/bin' },
       });
 
+      // 256KB cap: a prompt rewrite should never exceed a few KB. Beyond
+      // that, the model is running away and would OOM the main process.
+      const MAX_OUT_BYTES = 256 * 1024;
       let out = '';
       let err = '';
-      proc.stdout.on('data', (d) => { out += d.toString(); });
-      proc.stderr.on('data', (d) => { err += d.toString(); });
+      let truncated = false;
+      proc.stdout.on('data', (d) => {
+        if (out.length >= MAX_OUT_BYTES) { truncated = true; return; }
+        out += d.toString();
+        if (out.length > MAX_OUT_BYTES) {
+          out = out.slice(0, MAX_OUT_BYTES);
+          truncated = true;
+          try { proc.kill('SIGTERM'); } catch { /* noop */ }
+        }
+      });
+      proc.stderr.on('data', (d) => { if (err.length < 16 * 1024) err += d.toString(); });
       proc.on('close', (code) => {
-        if (code !== 0) return reject(new Error(err || `claude exited ${code}`));
+        if (code !== 0 && !truncated) return reject(new Error(err || `claude exited ${code}`));
         resolve(out.trim() || rawPrompt);
       });
       proc.on('error', (e) => reject(e));

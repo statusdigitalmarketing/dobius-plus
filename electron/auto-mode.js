@@ -16,7 +16,7 @@
  * State lives in config.asanaQueue.autoMode = { enabled, intervalMinutes, lanes, seen[] }.
  * A task GID in `seen` is never dispatched again (capped to the last SEEN_CAP).
  */
-import { loadConfig, saveConfig, getAsanaQueue } from './config-manager.js';
+import { loadConfig, saveConfig, getAsanaQueue, flushConfigAsync } from './config-manager.js';
 import { writeTerminal, listTerminals } from './terminal-manager.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
 import { fetchNewTasks, listAllowedProjects } from './asana-queue.js';
@@ -120,15 +120,22 @@ async function tick() {
         // Persist this gid IMMEDIATELY, not just in the end-of-loop finally: a
         // crash after dispatch but before that persist would re-dispatch the
         // task on restart (duplicate autonomous build). persistSeen union-merges
-        // and caps, so incremental writes are safe and idempotent.
+        // and caps, so incremental writes are safe and idempotent. flush after
+        // each persist because saveConfig is debounced, a quit between
+        // dispatch and the debounced write would still lose the seen-mark.
+        // PR#3 r1 LOW.
         persistSeen([task.gid]);
+        try { await flushConfigAsync(); } catch { /* best-effort */ }
         dispatched++;
       }
     }
   } catch (err) {
     console.warn(`[auto-mode] tick error: ${err.message}`);
   } finally {
-    if (dispatched > 0) persistSeen([...seenSet]);
+    if (dispatched > 0) {
+      persistSeen([...seenSet]);
+      try { await flushConfigAsync(); } catch { /* best-effort */ }
+    }
     isTicking = false;
   }
 }

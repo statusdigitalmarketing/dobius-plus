@@ -170,7 +170,12 @@ export default function BrowserPane({ id, url: initialUrl, theme }) {
           ref={webviewRef}
           src={url}
           partition="persist:dobius-browser-pane"
-          allowpopups="true"
+          // allowpopups dropped: combined with persist: partition, a
+          // compromised page in the pane could spawn windows that inherit
+          // cookies from anything else loaded in the same partition. Pages
+          // that need to open links route through openExternal instead.
+          // PR#3 r1 MED.
+          webpreferences="contextIsolation=true,nodeIntegration=false"
           style={{ width: '100%', height: '100%', display: 'flex' }}
         />
         {error && (

@@ -121,7 +121,10 @@ export const useStore = create((set, get) => ({
     const state = get();
     const counter = state.tabCounter + 1;
     const id = projectPath ? `term-${projectPath}-${counter}` : `term-main-${counter}`;
-    const safeUrl = (typeof url === 'string' && url.trim()) ? url.trim() : 'http://localhost:5173';
+    // Scheme guard: only http/https survive. javascript:/file:/data: would
+    // otherwise be passed straight to <webview src>. PR#3 r1 LOW.
+    const candidate = (typeof url === 'string' && url.trim()) ? url.trim() : '';
+    const safeUrl = /^https?:\/\//i.test(candidate) ? candidate : 'http://localhost:5173';
     const tab = {
       id,
       label: 'Browser',
@@ -284,6 +287,16 @@ export const useStore = create((set, get) => ({
       tabCounter: counter,
       splitTabId: s.splitTabId && liveIds.has(s.splitTabId) ? s.splitTabId : null,
       gridSlots: pruneGrid(s.gridSlots, liveIds),
+      // Reset layout ratios on project switch. Otherwise the previous project's
+      // splitRatio / gridColumnRatio / gridRowRatios carry into the new project
+      // as initial UI state, flashing the wrong layout until the new project's
+      // config-load effect overwrites them, AND if the new project's config has
+      // no saved ratios they stick. The per-project load effect (ProjectView
+      // useEffect that reads configGetProject) will overwrite these defaults
+      // with persisted values when they exist.
+      splitRatio: 0.5,
+      gridColumnRatio: 0.5,
+      gridRowRatios: [],
       runningAgents: ra,
       agentActivity: aa,
       tabStatus: pruneByTabId(s.tabStatus),
@@ -478,7 +491,18 @@ export const useStore = create((set, get) => ({
     const rest = state.recentlyClosedTabs.filter((_, i) => i !== idx);
     const counter = state.tabCounter + 1;
     const id = closed.projectPath ? `term-${closed.projectPath}-${counter}` : `term-main-${counter}`;
-    const tab = { id, label: closed.label, projectPath: closed.projectPath, createdAt: Date.now() };
+    // Restore kind/url too. If the closed tab was a browser, reopening as a
+    // terminal (which is what dropping these fields did) would be a clear
+    // regression. Default to terminal when kind is missing (legacy pre-v1.0.25
+    // closed entries had no kind field).
+    const tab = {
+      id,
+      label: closed.label,
+      projectPath: closed.projectPath,
+      kind: closed.kind || 'terminal',
+      ...(closed.url ? { url: closed.url } : {}),
+      createdAt: Date.now(),
+    };
     set({
       recentlyClosedTabs: rest,
       terminalTabs: [...state.terminalTabs, tab],
@@ -495,15 +519,52 @@ export const useStore = create((set, get) => ({
   },
 
   // Resume a Claude session by sending the resume command to the active terminal
-  resumeSession: (sessionId) => {
+  // Accepts EITHER a bare sessionId (legacy callers, treated as current
+  // project's cwd, NOT recommended) or a { sessionId, project, sizeMB? }
+  // object. v1.0.28's cwd fix lives here so EVERY caller benefits, not just
+  // the in-Project resume path. ResumeBanner + Sessions dashboard both call
+  // this and previously dropped the project, putting Claude in the wrong cwd
+  // for the session. Fix: cd to project first, then run --resume.
+  resumeSession: (arg) => {
+    const session = typeof arg === 'string' ? { sessionId: arg } : (arg || {});
+    const { sessionId, sizeMB } = session;
     if (!sessionId || sessionId.length > 100 || !/^[a-zA-Z0-9][\w-]*$/.test(sessionId)) return;
+    // Dead-session guard: transcripts past Claude's load ceiling hang silently.
+    if (sizeMB && sizeMB > 80) {
+      console.warn(`[resume] skipping ${sessionId} (${sizeMB.toFixed(0)}MB, too large to load)`);
+      if (typeof window !== 'undefined') {
+        window.alert(`Can't resume this session, transcript is ${sizeMB.toFixed(0)}MB, too large for Claude to load.\n\nStart a fresh session and use HANDOFF.md / git log to bring it up to speed.`);
+      }
+      return;
+    }
     set({ activeView: 'terminal' });
     const termId = get().activeTabId;
     if (!window.electronAPI || !termId) return;
-    // Tier 1 capture: link this session to the tab it is being resumed into,
-    // so the Cmd+B sidebar can show which tab the session belongs to.
-    window.electronAPI.configSetSessionTabLink?.(sessionId, termId, get().currentProjectPath);
-    const cmd = `claude --resume ${sessionId}`;
+    // Tier 1 capture: link session to the tab so the Cmd+B sidebar can show
+    // which tab the session belongs to.
+    const projectForLink = session.project || get().currentProjectPath;
+    window.electronAPI.configSetSessionTabLink?.(sessionId, termId, projectForLink);
+    // cd to the session's project before resume. claude --resume assumes the
+    // cwd matches where the session was originally run. Resuming session for
+    // /x/projectA from a terminal in /x/projectB gave Claude the wrong file
+    // context. Single-quote escape the path, abort if the path is missing or
+    // unsafe (no fallback to bare --resume, that's the bug we're fixing).
+    const projectPath = session.project || '';
+    let cmd;
+    if (projectPath && projectPath.startsWith('/') && !/[\x00-\x1F\x7F]/.test(projectPath)) {
+      const safeProject = projectPath.replace(/'/g, "'\\''");
+      cmd = `cd '${safeProject}' && claude --resume ${sessionId}`;
+    } else if (!projectPath) {
+      // Legacy bare-sessionId path: stay in current tab's cwd. Not ideal but
+      // preserves backward compat for callers that haven't been updated.
+      cmd = `claude --resume ${sessionId}`;
+    } else {
+      console.warn(`[resume] aborting, invalid project path for session ${sessionId}`);
+      if (typeof window !== 'undefined') {
+        window.alert(`Can't resume this session, its project path is missing or invalid.\n\nOpen the session's project window directly first.`);
+      }
+      return;
+    }
     const chars = cmd.split('');
     chars.push('\r');
     let i = 0;
@@ -511,9 +572,7 @@ export const useStore = create((set, get) => ({
       if (i < chars.length) {
         window.electronAPI.terminalWrite(termId, chars[i]);
         i++;
-        if (i < chars.length) {
-          setTimeout(sendNext, 8);
-        }
+        if (i < chars.length) setTimeout(sendNext, 8);
       }
     };
     setTimeout(sendNext, 15);
