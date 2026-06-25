@@ -246,9 +246,9 @@ export async function getLatestSession(projectPath) {
     const fileStats = await Promise.all(files.map(async (f) => {
       try {
         const stat = await fs.stat(path.join(projectDir, f));
-        return { file: f, mtime: stat.mtimeMs };
+        return { file: f, mtime: stat.mtimeMs, size: stat.size };
       } catch {
-        return { file: f, mtime: 0 };
+        return { file: f, mtime: 0, size: 0 };
       }
     }));
 
@@ -256,6 +256,7 @@ export async function getLatestSession(projectPath) {
     if (!latest || latest.mtime === 0) return null;
     const latestFile = latest.file;
     const latestMtime = latest.mtime;
+    const latestSize = latest.size || 0;
 
     const sessionId = latestFile.replace('.jsonl', '');
     const filePath = path.join(projectDir, latestFile);
@@ -282,6 +283,11 @@ export async function getLatestSession(projectPath) {
       preview: preview || 'No preview available',
       timestamp,
       age: timestamp ? timeAgo(timestamp) : 'unknown',
+      // sizeMB drives the >80MB dead-session guard in resumeSession. Without
+      // it, ResumeBanner's session.sizeMB was undefined and the guard never
+      // fired, so clicking Resume on an oversized transcript still hung
+      // Claude. Codex PR#3 r12 P2.
+      sizeMB: latestSize / (1024 * 1024),
     };
   } catch (err) {
     console.warn('[data-service] Failed to get latest session:', err.message);

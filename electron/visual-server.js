@@ -132,8 +132,25 @@ export async function startVisualServer(projectPath) {
   const httpServer = createServer(app);
   _wss = new WebSocketServer({ server: httpServer, path: '/__vreload' });
 
+  // If resolveWebRoot selected one of the build-output dirs as the active
+  // root (project's only index.html is in dist/), the static ignore pattern
+  // would also suppress events INSIDE that root, breaking live reload. Pass
+  // a function-form ignore that always allows the active webRoot itself.
+  // Codex PR#3 r12 P2.
+  const ignorePattern = /(^|[/\\])\.|node_modules|dist|build|\.next|\.vercel|coverage|out/;
+  const ignoreFn = (p) => {
+    // Always allow events at or under the active webRoot itself.
+    const rel = path.relative(webRoot, p);
+    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+      // Inside webRoot: only ignore truly hidden / nested-build dirs that
+      // aren't the root itself. Strip the webRoot prefix before matching so a
+      // dist-rooted project doesn't get its own root ignored.
+      return ignorePattern.test(rel);
+    }
+    return ignorePattern.test(p);
+  };
   _watcher = chokidar.watch(webRoot, {
-    ignored: /(^|[/\\])\.|node_modules|dist|build|\.next|\.vercel|coverage|out/,
+    ignored: ignoreFn,
     persistent: true,
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 80, pollInterval: 50 },
