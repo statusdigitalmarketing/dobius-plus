@@ -18,7 +18,6 @@
 import { subscribeTerminal } from './terminal-manager.js';
 import { sendImessageToSelf } from './imessage-bridge.js';
 import { loadConfig, saveConfig } from './config-manager.js';
-import { publishRunStart, publishRunFinish } from './supabase-bridge.js';
 
 const MAX_ITEMS = 200;
 const items = new Map();        // workId -> entry
@@ -140,7 +139,6 @@ export function registerWork(opts) {
   watchers.set(workId, sub);
 
   persist();
-  try { void publishRunStart(entry); } catch { /* bridge must never break the runner */ }
   return { ok: true, workId };
 }
 
@@ -158,7 +156,6 @@ export function markDone(workId, summary, status = 'completed') {
   entry.lastUpdate = Date.now();
   entry.finalReport = typeof summary === 'string' ? summary.slice(0, 400) : '';
   persist();
-  try { void publishRunFinish(entry); } catch { /* bridge */ }
   fireFinalReport(entry);
   return { ok: true };
 }
@@ -218,7 +215,6 @@ async function handleTabExit(workId, exitCode) {
   entry.exitCode = typeof exitCode === 'number' ? exitCode : null;
   entry.finalReport = entry.finalReport || `tab exited (code ${exitCode ?? '?'})`;
   persist();
-  try { void publishRunFinish(entry); } catch { /* bridge */ }
   await fireFinalReport(entry);
 }
 
