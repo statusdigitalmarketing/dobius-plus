@@ -1605,11 +1605,15 @@ function setupBuildMonitorHandlers() {
     }
   });
   ipcMain.handle('buildMonitor:watch', async (event, projectDir) => {
-    // SECURITY: any renderer with electronAPI could otherwise spin up a
-    // recursive chokidar watcher on any local directory and stream the
-    // filenames back. Gate on isKnownProject like the other watchers.
-    // Apple-grade audit P2.
-    if (!(await isKnownProject(projectDir))) return;
+    // SECURITY: gate so a renderer can't spin a recursive chokidar on any
+    // arbitrary disk path. ALLOW either a known project root OR the saved
+    // monitoredBuildDir (Build Monitor has its own picker that writes to
+    // config.monitoredBuildDir but doesn't add to listProjects). Without
+    // this allowance the gate kills live refresh after a picker-selected
+    // dir is chosen. Codex r30 P2 (fix to Apple-grade r15 P2).
+    const knownProject = await isKnownProject(projectDir);
+    const monitored = (loadConfig().monitoredBuildDir || '');
+    if (!knownProject && projectDir !== monitored) return;
     watchBuildDir(event.sender, projectDir);
   });
   ipcMain.handle('buildMonitor:unwatch', (event, projectDir) => {
