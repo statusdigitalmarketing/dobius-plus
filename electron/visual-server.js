@@ -62,20 +62,46 @@ export async function startVisualServer(projectPath) {
 
   const app = express();
 
+  // realpath of webRoot, used for symlink containment. resolveSafe() returns
+  // the REAL absolute path if it exists AND falls inside realWebRoot, else
+  // null. Prevents symlink-follow attacks where e.g. `secret.html` is a
+  // symlink to ~/.ssh/id_rsa inside the project. Codex PR#3 r9 P2.
+  const realWebRoot = (() => {
+    try { return fs.realpathSync(path.resolve(webRoot)); } catch { return path.resolve(webRoot); }
+  })();
+  const resolveSafe = (p) => {
+    try {
+      const real = fs.realpathSync(p);
+      if (real === realWebRoot || real.startsWith(realWebRoot + path.sep)) return real;
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
   // Intercept HTML files to inject reload script
   app.use((req, res, next) => {
     let filePath = path.join(webRoot, req.path === '/' ? 'index.html' : req.path);
     // Containment guard: `req.path` is not normalized, so `../` segments could
-    // escape webRoot and read arbitrary local files. Reject anything that
-    // resolves outside the web root before we readFileSync it.
-    const resolved = path.resolve(filePath);
-    if (resolved !== path.resolve(webRoot) && !resolved.startsWith(path.resolve(webRoot) + path.sep)) {
-      return next();
-    }
-    // Attempt directory index
-    if (!path.extname(filePath) || fs.existsSync(filePath + '.html')) {
-      const candidate = fs.existsSync(filePath + '.html') ? filePath + '.html' : path.join(filePath, 'index.html');
-      if (fs.existsSync(candidate)) filePath = candidate;
+    // escape webRoot AND a symlink could point outside the project. Resolve
+    // through realpath, reject if the real target leaves webRoot.
+    const safe = resolveSafe(filePath);
+    if (!safe) {
+      // Try the directory-index forms before giving up.
+      const htmlCandidate = resolveSafe(filePath + '.html');
+      const indexCandidate = resolveSafe(path.join(filePath, 'index.html'));
+      if (!htmlCandidate && !indexCandidate) return next();
+      filePath = htmlCandidate || indexCandidate;
+    } else {
+      // Attempt directory index when the resolved path is a directory or
+      // lacks an extension.
+      if (!path.extname(safe) || fs.existsSync(safe + '.html')) {
+        const candidate = resolveSafe(safe + '.html') || resolveSafe(path.join(safe, 'index.html'));
+        if (candidate) filePath = candidate;
+        else filePath = safe;
+      } else {
+        filePath = safe;
+      }
     }
     if (filePath.endsWith('.html') && fs.existsSync(filePath)) {
       try {
@@ -88,7 +114,20 @@ export async function startVisualServer(projectPath) {
     next();
   });
 
-  app.use(express.static(webRoot, { etag: false, maxAge: 0 }));
+  // Symlink-aware static middleware. express.static follows symlinks with no
+  // hook to deny, so wrap it: realpath-check first, reject anything that
+  // escapes webRoot, then hand the (already-resolved) safe path to a per-file
+  // res.sendFile. Codex PR#3 r9 P2 ALSO covers the express.static path.
+  app.use((req, res, next) => {
+    const requested = path.join(webRoot, req.path);
+    const safe = resolveSafe(requested);
+    if (!safe) return next();
+    const stat = (() => { try { return fs.statSync(safe); } catch { return null; } })();
+    if (!stat) return next();
+    if (stat.isDirectory()) return next();
+    res.setHeader('Cache-Control', 'no-store');
+    return res.sendFile(safe);
+  });
 
   const httpServer = createServer(app);
   _wss = new WebSocketServer({ server: httpServer, path: '/__vreload' });
