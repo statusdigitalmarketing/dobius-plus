@@ -8,7 +8,24 @@ import path from 'path';
 // stops another window's feed, and events fan out to every live subscriber.
 const watchers = new Map();
 const MAX_EVENTS = 150;
-const IGNORED = /(node_modules|\.git|dist|dist-electron|\.DS_Store|__pycache__|\.next|\.nuxt)/;
+// Match path COMPONENTS, not substrings. The previous /(node_modules|\.git|dist|...)/
+// regex hit any path containing those letters, so .gitignore, .github/workflows,
+// and any project with "dist" in its name (e.g. /Users/sam/distributed-app)
+// silently never reported file changes. Codex PR#3 r18 P2.
+const IGNORED_COMPONENTS = new Set([
+  'node_modules', '.git', 'dist', 'dist-electron', '.DS_Store',
+  '__pycache__', '.next', '.nuxt',
+]);
+function IGNORED(p) {
+  // chokidar passes the full path. Split on the OS separator and any forward
+  // slash (we may see either on macOS), check each segment for an exact match.
+  if (typeof p !== 'string') return false;
+  const parts = p.split(/[/\\]/);
+  for (const part of parts) {
+    if (IGNORED_COMPONENTS.has(part)) return true;
+  }
+  return false;
+}
 
 export function watchProjectDir(projectPath, webContents) {
   const existing = watchers.get(projectPath);

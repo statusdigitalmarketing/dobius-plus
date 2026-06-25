@@ -1139,9 +1139,41 @@ function setupFileHandlers() {
       path.dirname(realSkill) === realSkillsDir; // must be one level deep
   }
 
+  /**
+   * Realpath-check the actual file path before any read/write. The skill dir
+   * was already validated by isAllowedSkillPath, but if the file itself is
+   * a symlink pointing outside the skill tree, write would follow it and
+   * clobber an arbitrary user-writable file. For reads it would expose the
+   * target. Returns the realpath (safe to read/write) or null. For writes
+   * targeting a not-yet-existing file we accept the synthesized path since
+   * writeFileSync only follows existing symlinks. Codex PR#3 r18 P2.
+   */
+  function resolveSafeSkillFile(skillPath, filename) {
+    if (!isAllowedSkillPath(skillPath, filename)) return null;
+    const normalSkillsDir = path.normalize(skillsDir);
+    let realSkillsDir;
+    try { realSkillsDir = fs.realpathSync(normalSkillsDir); } catch { return null; }
+    const candidate = path.join(skillPath, filename);
+    if (fs.existsSync(candidate)) {
+      try {
+        const real = fs.realpathSync(candidate);
+        if (real === realSkillsDir || real.startsWith(realSkillsDir + path.sep)) {
+          return real;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    }
+    // Doesn't exist yet (first save of a new SKILL.md). The parent dir is
+    // already realpath-contained via isAllowedSkillPath, and writeFileSync
+    // on a non-existent path won't follow a symlink that isn't there.
+    return candidate;
+  }
+
   ipcMain.handle('skill:readFile', (_event, skillPath, filename) => {
-    if (!isAllowedSkillPath(skillPath, filename)) return { error: 'Access denied' };
-    const filePath = path.join(skillPath, filename);
+    const filePath = resolveSafeSkillFile(skillPath, filename);
+    if (!filePath) return { error: 'Access denied' };
     try {
       const stat = fs.statSync(filePath);
       if (stat.size > MAX_FILE_SIZE) return { error: 'File too large' };
@@ -1152,9 +1184,9 @@ function setupFileHandlers() {
   });
 
   ipcMain.handle('skill:writeFile', (_event, skillPath, filename, content) => {
-    if (!isAllowedSkillPath(skillPath, filename)) return { error: 'Access denied' };
+    const filePath = resolveSafeSkillFile(skillPath, filename);
+    if (!filePath) return { error: 'Access denied' };
     if (typeof content !== 'string' || content.length > MAX_FILE_SIZE) return { error: 'Content too large' };
-    const filePath = path.join(skillPath, filename);
     try {
       fs.writeFileSync(filePath, content, 'utf8');
       return { ok: true };
