@@ -44,9 +44,18 @@ function validateDir(dir) {
 
 // Only accept simple, safe branch names; reject anything that could be an option
 // or a traversal. Falls back to null so callers use their default.
+// SECURITY (Codex PR#3 r11 P1): also reject fully qualified refs like
+// `refs/heads/main`. The downstream `previewBranch === prodBranch` guard does
+// short-name equality, so a preview branch configured as `refs/heads/main`
+// alongside prodBranch `main` would slip past, and `git push -f origin
+// HEAD:refs/heads/main` would force-update production through the preview
+// deploy path. Strip the refs/heads/ prefix and treat the bare name as the
+// candidate (or reject entirely; we reject to keep the contract simple).
 function sanitizeBranch(name) {
   if (!name || typeof name !== 'string') return null;
   const s = name.trim();
+  // Refuse fully qualified refs.
+  if (s.startsWith('refs/')) return null;
   if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$/.test(s)) return null;
   if (s.includes('..')) return null;
   return s;
