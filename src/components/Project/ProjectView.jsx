@@ -543,12 +543,6 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
           let best = null;
           for (const [sid, entry] of Object.entries(map || {})) {
             if (entry?.tabId === termId && (!best || (entry.capturedAt || 0) > best.capturedAt)) {
-              // Capture the linked session's projectPath too. A tab can be
-              // linked to a session from a DIFFERENT project (the store
-              // records entry.projectPath for exactly this case, e.g. user
-              // resumed cross-project from the Sessions dashboard into this
-              // tab). Cmd+R must cd to THAT project, not the current window.
-              // Codex PR#3 r23 P2.
               best = {
                 sessionId: sid,
                 capturedAt: entry.capturedAt || 0,
@@ -557,7 +551,22 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
             }
           }
           if (best?.sessionId) {
-            return { sessionId: best.sessionId, project: best.project || projectPath };
+            // Fetch sizeMB for the dead-session guard. Without it, Cmd+R on a
+            // tab linked to a fat session bypasses the >80MB block and Claude
+            // hangs silently. dataGetLatestSession is project-scoped and may
+            // not return THIS specific session, so call a per-session size
+            // probe (falls back gracefully if unavailable).
+            let sizeMB;
+            try {
+              if (api.dataGetSessionSize) {
+                sizeMB = await api.dataGetSessionSize(best.sessionId, best.project || projectPath);
+              }
+            } catch { /* size unknown, guard will skip */ }
+            return {
+              sessionId: best.sessionId,
+              project: best.project || projectPath,
+              sizeMB,
+            };
           }
         } catch { /* fall through */ }
       }

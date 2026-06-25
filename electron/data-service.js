@@ -233,61 +233,131 @@ export async function loadAllSessions(projectFilter) {
  * Get the most recent session for a given project path.
  * Returns { sessionId, preview, timestamp, age } or null.
  */
+/**
+ * Per-session size probe used by Cmd+R / tab-map resume to feed the
+ * >80MB dead-session guard. Checks both encoder forms (legacy + new).
+ * Returns sizeMB as a number, or null if the file can't be found.
+ */
+export async function getSessionSize(sessionId, projectPath) {
+  if (!sessionId || typeof sessionId !== 'string') return null;
+  if (!/^[\w-]+$/.test(sessionId)) return null;
+  if (!projectPath || typeof projectPath !== 'string') return null;
+  const encodings = [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)];
+  for (const enc of encodings) {
+    try {
+      const filePath = path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`);
+      const st = await fs.stat(filePath);
+      return st.size / (1024 * 1024);
+    } catch { /* try next encoding */ }
+  }
+  return null;
+}
+
+// Encode the project path the OLD way (slash-to-dash only, special chars
+// preserved). Claude's encoder changed at some point and a single logical
+// project can end up with sessions split across both directory forms.
+// Returning both lets getLatestSession + loadAllSessions consider all real
+// transcripts even when the new encoder doesn't match the directory Claude
+// actually wrote.
+function encodePathLikeClaudeLegacy(p) {
+  return p.replace(/\//g, '-');
+}
+
+// Parse a timestamp value the transcript might store as ISO string OR epoch
+// number. Returns 0 if unparseable (so the caller can keep the previous best).
+function tsToEpochMs(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  if (typeof v === 'string') {
+    const n = new Date(v).getTime();
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
 export async function getLatestSession(projectPath) {
   try {
     if (!projectPath || typeof projectPath !== 'string') return null;
-    const encoded = encodePathLikeClaude(projectPath);
-    const projectDir = path.join(PROJECTS_DIR, encoded);
-    if (!(await pathExists(projectDir))) return null;
-
-    const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
-    if (files.length === 0) return null;
-
-    const fileStats = await Promise.all(files.map(async (f) => {
-      try {
-        const stat = await fs.stat(path.join(projectDir, f));
-        return { file: f, mtime: stat.mtimeMs, size: stat.size };
-      } catch {
-        return { file: f, mtime: 0, size: 0 };
-      }
-    }));
-
-    const latest = fileStats.reduce((best, cur) => cur.mtime > best.mtime ? cur : best);
-    if (!latest || latest.mtime === 0) return null;
-    const latestFile = latest.file;
-    const latestMtime = latest.mtime;
-    const latestSize = latest.size || 0;
-
-    const sessionId = latestFile.replace('.jsonl', '');
-    const filePath = path.join(projectDir, latestFile);
-    const entries = await parseJsonl(filePath, 5);
-
-    let preview = '';
-    let timestamp = latestMtime;
-    for (const entry of entries) {
-      if (entry.timestamp && entry.timestamp > timestamp) {
-        timestamp = entry.timestamp;
-      }
-      if (!preview && (entry.type === 'human' || entry.role === 'user')) {
-        const content = typeof entry.message === 'string'
-          ? entry.message
-          : entry.message?.content || entry.content || '';
-        if (content) {
-          preview = content.slice(0, 200);
-        }
+    // Look in BOTH encoding directories. Codex + resume-audit independently
+    // flagged: a project that was once accessed via the old encoder still has
+    // transcripts in `-Users-...-Projects (Code)-name`, but the new encoder
+    // produces `-Users-...-Projects--Code--name`. Without checking both, Cmd+R
+    // can pick the latest from the new dir and miss the actually-newest session
+    // in the old dir. Both forms are real on Sam's machine (verified earlier
+    // in the session).
+    const encodings = [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)];
+    const seenDirs = new Set();
+    const candidates = [];
+    for (const enc of encodings) {
+      if (seenDirs.has(enc)) continue;
+      seenDirs.add(enc);
+      const projectDir = path.join(PROJECTS_DIR, enc);
+      if (!(await pathExists(projectDir))) continue;
+      let files;
+      try { files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl')); }
+      catch { continue; }
+      for (const f of files) {
+        candidates.push({ projectDir, file: f });
       }
     }
+    if (candidates.length === 0) return null;
+
+    // Get mtime + size for every candidate, AND the newest message timestamp
+    // INSIDE each transcript. Sort by the message timestamp (truth) instead of
+    // mtime (which any `touch` / rsync / Time Machine restore can lie about).
+    // mtime is the fallback only when no parseable timestamp exists in the file.
+    const enriched = await Promise.all(candidates.map(async ({ projectDir, file }) => {
+      const filePath = path.join(projectDir, file);
+      let mtime = 0;
+      let size = 0;
+      try {
+        const st = await fs.stat(filePath);
+        mtime = st.mtimeMs;
+        size = st.size;
+      } catch {
+        return null;
+      }
+      // Read the tail to find the newest message timestamp. parseJsonl with
+      // a limit uses readTail under the hood so this stays memory-bounded
+      // even on a 100MB transcript. 20 entries is enough to find the last
+      // user/assistant message timestamp.
+      let msgTs = 0;
+      let lastUserPreview = '';
+      try {
+        const tail = await parseJsonl(filePath, 20);
+        for (const e of tail) {
+          const t = tsToEpochMs(e.timestamp);
+          if (t > msgTs) msgTs = t;
+          // Track the LAST user message we see in the tail as a preview.
+          if (e.type === 'human' || e.role === 'user' || e.message?.role === 'user') {
+            const content = typeof e.message === 'string'
+              ? e.message
+              : (typeof e.message?.content === 'string' ? e.message.content
+                : (typeof e.content === 'string' ? e.content : ''));
+            if (content) lastUserPreview = content.slice(0, 200);
+          }
+        }
+      } catch { /* unparseable transcript, fall back to mtime */ }
+      return {
+        filePath,
+        sessionId: file.replace('.jsonl', ''),
+        sortKey: msgTs || mtime, // prefer message ts, fall back to mtime
+        mtime,
+        sizeMB: size / (1024 * 1024),
+        preview: lastUserPreview,
+      };
+    }));
+
+    const valid = enriched.filter((e) => e && e.sortKey > 0);
+    if (valid.length === 0) return null;
+    valid.sort((a, b) => b.sortKey - a.sortKey);
+    const best = valid[0];
 
     return {
-      sessionId,
-      preview: preview || 'No preview available',
-      timestamp,
-      age: timestamp ? timeAgo(timestamp) : 'unknown',
-      // sizeMB drives the >80MB dead-session guard in resumeSession. Without
-      // it, ResumeBanner's session.sizeMB was undefined and the guard never
-      // fired, so clicking Resume on an oversized transcript still hung
-      // Claude. Codex PR#3 r12 P2.
-      sizeMB: latestSize / (1024 * 1024),
+      sessionId: best.sessionId,
+      preview: best.preview || 'No preview available',
+      timestamp: best.sortKey,
+      age: best.sortKey ? timeAgo(best.sortKey) : 'unknown',
+      sizeMB: best.sizeMB,
     };
   } catch (err) {
     console.warn('[data-service] Failed to get latest session:', err.message);

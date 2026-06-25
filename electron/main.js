@@ -9,7 +9,7 @@ import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, g
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession,
+  loadAllSessions, getLatestSession, getSessionSize,
   loadProjectTokens, searchTranscripts, estimateContextSize, deleteSession,
 } from './data-service.js';
 import {
@@ -26,7 +26,7 @@ import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig, flushConfigAsync,
   getSessionTags, setSessionTag, removeSessionTag,
-  getSessionTabMap, setSessionTabLink,
+  getSessionTabMap, setSessionTabLink, removeSessionTabLink,
   getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
   getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
   getMobileServerConfig, updateMobileServerConfig,
@@ -358,6 +358,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:listProjects', () => listProjects());
   ipcMain.handle('data:loadAllSessions', (_event, projectFilter) => loadAllSessions(typeof projectFilter === 'string' ? projectFilter : undefined));
   ipcMain.handle('data:getLatestSession', (_event, projectPath) => getLatestSession(projectPath));
+  ipcMain.handle('data:getSessionSize', (_event, sessionId, projectPath) => getSessionSize(sessionId, projectPath));
   ipcMain.handle('data:killProcess', async (_event, pid) => {
     const n = parseInt(pid, 10);
     if (!Number.isFinite(n) || n <= 1) throw new Error('Invalid PID');
@@ -1504,24 +1505,61 @@ function setupConfigHandlers() {
   });
 }
 
-// Tier 2 session-to-tab capture: every 15s, scan live terminals for a
-// `claude --resume <id>` process and link the session to its tab.
-// getTerminalProcessArgv is async (non-blocking execFile), so the main
-// thread isn't held during the per-terminal pgrep/ps round-trips.
+// Tier 2 session-to-tab capture. Every 15s:
+//   1. PURGE map entries whose tabId is no longer alive. Stale entries from
+//      closed tabs were lingering for 30 days and Cmd+R's "latest linked
+//      session for this tab" lookup was hitting them when tab ids recycled.
+//      (Tab ids are per-project counters, so a closed `term-pcif-7` and a
+//      new `term-pcif-7` are indistinguishable.)
+//   2. RE-LINK tabs whose running sessionId no longer matches the map entry.
+//      Previously the `if (sessionId && !map[sessionId])` guard skipped
+//      already-mapped sessions, so a tab that died and started a NEW
+//      `claude --resume X` session never got its old `claude --resume Y`
+//      mapping overwritten. Now: if the tab is currently running session X
+//      but the map says tab→Y, remove Y and re-link X.
+//   3. LINK newly-discovered sessions running in tabs that have no map entry.
+// Cancellable: store the interval ref so will-quit can clear it.
+let sessionTabCaptureInterval = null;
 function setupSessionTabCapture() {
-  setInterval(async () => {
+  if (sessionTabCaptureInterval) return;
+  sessionTabCaptureInterval = setInterval(async () => {
     try {
       const map = getSessionTabMap();
-      const linkedTabs = new Set(Object.values(map).map((e) => e && e.tabId));
+      const liveTabIds = new Set(listTerminals().map((t) => t.id));
+      // Step 1: purge map entries for dead tabs.
+      for (const [sid, entry] of Object.entries(map || {})) {
+        if (!entry?.tabId) continue;
+        if (!liveTabIds.has(entry.tabId)) {
+          removeSessionTabLink(sid);
+        }
+      }
+      // Step 2 + 3: walk every live terminal and reconcile.
+      // Use the freshest map after the purge.
+      const fresh = getSessionTabMap();
+      const tabToSessionId = new Map();
+      for (const [sid, entry] of Object.entries(fresh || {})) {
+        if (entry?.tabId) tabToSessionId.set(entry.tabId, sid);
+      }
       for (const t of listTerminals()) {
-        if (linkedTabs.has(t.id)) continue;
-        const sessionId = await getTerminalProcessArgv(t.id);
-        if (sessionId && !map[sessionId]) {
-          setSessionTabLink(sessionId, t.id, t.cwd);
+        const runningSessionId = await getTerminalProcessArgv(t.id);
+        if (!runningSessionId) continue;
+        const mappedSessionId = tabToSessionId.get(t.id);
+        if (mappedSessionId === runningSessionId) continue;
+        // Tab is running a different (or new) session than the map says.
+        if (mappedSessionId) removeSessionTabLink(mappedSessionId);
+        if (!fresh[runningSessionId]) {
+          setSessionTabLink(runningSessionId, t.id, t.cwd);
         }
       }
     } catch { /* best-effort */ }
   }, 15000);
+}
+
+export function stopSessionTabCapture() {
+  if (sessionTabCaptureInterval) {
+    clearInterval(sessionTabCaptureInterval);
+    sessionTabCaptureInterval = null;
+  }
 }
 
 function setupBuildMonitorHandlers() {
@@ -2130,6 +2168,7 @@ app.on('will-quit', () => {
   stopScheduledTasks();
   stopAutoMode();
   stopMobileServer();
+  stopSessionTabCapture(); // previously this interval never cleared, hot loop after quit attempts
   closeVisualWindow();
   void stopVisualServer();
 });
