@@ -614,26 +614,49 @@ export async function loadTranscript(sessionId, projectPath) {
   }
 }
 
+// Memory-bounded ceilings for the FULL-transcript preview path. The previous
+// hard-coded 100-entry + 500-char-per-message caps meant the user could never
+// see their actual chat history beyond the last 100 records (with each one
+// clipped). For a daily-driver tool that is unacceptable. We stream the file
+// line-by-line (flat memory regardless of transcript size) and only stop if
+// the total preview payload approaches MAX_PAYLOAD_BYTES so the IPC channel
+// stays sane. Each individual message keeps its full content up to
+// MAX_MESSAGE_CHARS which is large enough for any real Claude turn.
+const MAX_MESSAGE_CHARS = 20_000;
+const MAX_PAYLOAD_BYTES = 12 * 1024 * 1024; // 12 MB JSON ceiling
 async function parseTranscriptFile(filePath) {
-  const entries = await parseJsonl(filePath, 100);
   const messages = [];
-  for (const entry of entries) {
-    if (entry.type === 'human' || entry.role === 'user') {
-      const content = typeof entry.message === 'string'
-        ? entry.message
-        : entry.message?.content || entry.content || '';
-      if (content) {
-        messages.push({ role: 'user', content: content.slice(0, 500), timestamp: entry.timestamp });
-      }
-    } else if (entry.type === 'assistant' || entry.role === 'assistant') {
-      const content = typeof entry.message === 'string'
-        ? entry.message
-        : entry.message?.content || entry.content || '';
-      if (content) {
-        messages.push({ role: 'assistant', content: content.slice(0, 500), timestamp: entry.timestamp });
-      }
+  let payloadBytes = 0;
+  let truncated = false;
+  await streamJsonl(filePath, (entry) => {
+    if (truncated) return;
+    let role = null;
+    if (entry.type === 'human' || entry.role === 'user' || entry.message?.role === 'user') role = 'user';
+    else if (entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant') role = 'assistant';
+    if (!role) return;
+    let content = '';
+    const msgContent = entry.message?.content;
+    if (typeof msgContent === 'string') {
+      content = msgContent;
+    } else if (Array.isArray(msgContent)) {
+      content = msgContent.map((c) => c.text || c.thinking || '').filter(Boolean).join('\n');
+    } else if (typeof entry.message === 'string') {
+      content = entry.message;
+    } else if (typeof entry.content === 'string') {
+      content = entry.content;
     }
-  }
+    if (!content) return;
+    if (content.length > MAX_MESSAGE_CHARS) {
+      content = content.slice(0, MAX_MESSAGE_CHARS) + `\n\n[message truncated at ${MAX_MESSAGE_CHARS} chars]`;
+    }
+    payloadBytes += content.length + 64; // rough overhead for the wrapper object
+    if (payloadBytes > MAX_PAYLOAD_BYTES) {
+      truncated = true;
+      messages.push({ role: 'system', content: `[transcript preview truncated: payload exceeded ${MAX_PAYLOAD_BYTES} bytes]`, timestamp: null });
+      return;
+    }
+    messages.push({ role, content, timestamp: entry.timestamp || null });
+  });
   return messages;
 }
 

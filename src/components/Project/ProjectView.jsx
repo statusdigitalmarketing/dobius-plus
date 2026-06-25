@@ -173,6 +173,13 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
             const restored = config.gridSlots.filter((id) => id && validIds.has(id));
             if (restored.length) setGridSlots(restored);
           }
+          // Restore the LAST active tab, not just tabs[0]. Quit on tab 4 used
+          // to relaunch on tab 1 because initTabs hardcoded activeTabId to
+          // tabs[0]. Apple-grade audit P2 (state loss on quit).
+          if (typeof config.activeTabId === 'string') {
+            const stillExists = config.tabs.some((t) => t.id === config.activeTabId);
+            if (stillExists) setActiveTab(config.activeTabId);
+          }
         } else {
           // First open: create initial tab
           addTab(projectPath);
@@ -328,6 +335,16 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
       window.electronAPI.terminalSaveTabs(projectPath, tabs, useStore.getState().tabCounter);
     }
   }, [tabs, tabsInitialized, projectPath, tearOffTabId]);
+
+  // Persist active tab id so quit-on-tab-4 returns to tab-4 instead of tab-1.
+  // configSetProject is merge-only so this won't disturb other project state.
+  // Apple-grade audit P2 (state loss on quit).
+  useEffect(() => {
+    if (tearOffTabId) return;
+    if (!tabsInitialized || !projectPath || !activeTabId) return;
+    if (!window.electronAPI?.configSetProject) return;
+    window.electronAPI.configSetProject(projectPath, { activeTabId });
+  }, [activeTabId, tabsInitialized, projectPath, tearOffTabId]);
 
   // Persist grid layout per project (merged into project config, skip tear-offs).
   // Uses the gridPersistArmed ref pattern so the FIRST post-hydration call is

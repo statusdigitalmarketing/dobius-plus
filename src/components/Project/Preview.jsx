@@ -104,8 +104,10 @@ export default function Preview({ session, onClose, onResume }) {
                 style={{
                   backgroundColor: 'var(--surface)',
                   color: 'var(--fg)',
-                  maxHeight: '200px',
-                  overflow: 'hidden',
+                  // Removed maxHeight:200 + overflow:hidden. Bubbles were
+                  // visually clipped after 200px so users saw only the top
+                  // of any longer message. The parent scroll container in
+                  // the Sidebar handles overall scrolling fine.
                   maxWidth: '90%',
                   border: '1px solid var(--border)',
                 }}

@@ -2156,7 +2156,7 @@ app.on('before-quit', (e) => {
 // branch of before-quit, otherwise PTYs, the voice bridge, the Visual server,
 // auto-mode and the watchers leak on a force quit. Idempotent via didTeardown
 // (forward-declared above so the updater-bypass branch can share it).
-app.on('will-quit', () => {
+app.on('will-quit', (e) => {
   if (didTeardown) return;
   didTeardown = true;
   killAll();
@@ -2168,9 +2168,22 @@ app.on('will-quit', () => {
   stopScheduledTasks();
   stopAutoMode();
   stopMobileServer();
-  stopSessionTabCapture(); // previously this interval never cleared, hot loop after quit attempts
+  stopSessionTabCapture();
   closeVisualWindow();
   void stopVisualServer();
+  // Drain pending debounced config writes BEFORE the OS reaps the process.
+  // Force-quit / OS shutdown / non-darwin window-all-closed previously
+  // dropped the last 500ms of unflushed state (tab adds, theme changes,
+  // grid layout, etc.) because will-quit was sync-only. Bound by a 1.5s
+  // hard timeout so a stuck filesystem can't strand the quit forever.
+  // Apple-grade audit P2 (state loss on quit).
+  e.preventDefault();
+  Promise.race([
+    flushConfigAsync(),
+    new Promise((resolve) => setTimeout(resolve, 1500)),
+  ]).finally(() => {
+    app.exit(0); // hard exit, the work above already tore everything down
+  });
 });
 
 app.on('window-all-closed', () => {

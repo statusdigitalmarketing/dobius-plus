@@ -248,7 +248,30 @@ export function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
       const content = fs.readFileSync(CONFIG_PATH, 'utf8');
-      const loaded = JSON.parse(content);
+      let loaded;
+      try {
+        loaded = JSON.parse(content);
+      } catch (parseErr) {
+        // CRITICAL: previously this silently reset configCache to DEFAULT_CONFIG
+        // on parse failure. Accounts, Asana PAT, tabs, every per-project
+        // setting were destroyed permanently. Now we BACK UP the corrupt
+        // file with a timestamp suffix and surface the error so the user
+        // can recover by hand. Apple-grade audit P2 from UX agent.
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const backupPath = `${CONFIG_PATH}.corrupt-${stamp}.bak`;
+        try {
+          fs.copyFileSync(CONFIG_PATH, backupPath);
+          console.error(`[config-manager] CORRUPT CONFIG, original saved at: ${backupPath}`);
+          console.error(`[config-manager] parse error: ${parseErr.message}`);
+        } catch (cpErr) {
+          console.error(`[config-manager] CORRUPT CONFIG and backup FAILED: ${cpErr.message}`);
+        }
+        // Use defaults this session, but DO NOT overwrite the on-disk file
+        // until the user takes an action that triggers saveConfig. That way
+        // a separate process or manual fix to the corrupt file is recoverable.
+        configCache = { ...DEFAULT_CONFIG, __loadedFromCorrupt: true, __corruptBackup: backupPath };
+        return configCache;
+      }
       // Sanitize unsafe keys from nested objects (prototype pollution guard)
       for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns', 'imessageBridge', 'workRegistry', 'asanaQueue', 'scheduledTasks']) {
         if (loaded[topKey] && typeof loaded[topKey] === 'object') {
@@ -259,9 +282,6 @@ export function loadConfig() {
       pruneOrphanTerminalStates(configCache);
       const migrated = migrateScrollbackOutOfConfig(configCache);
       if (migrated) {
-        // Persist immediately so the 12 MB scrollback blob is off disk on
-        // the next read. Use sync write here because we're inside the
-        // synchronous loadConfig path and need the result before returning.
         try {
           atomicWriteSync(CONFIG_PATH, JSON.stringify(configCache, null, 2));
         } catch (err) {
