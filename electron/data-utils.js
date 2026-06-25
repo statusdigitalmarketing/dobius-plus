@@ -1,4 +1,6 @@
 import fs from 'fs/promises';
+import { createReadStream } from 'fs';
+import readline from 'readline';
 import path from 'path';
 import os from 'os';
 
@@ -87,6 +89,41 @@ export async function parseJsonl(filePath, limit = 0) {
     console.warn(`[data-utils] Failed to parse ${filePath}:`, err.message);
     return [];
   }
+}
+
+/**
+ * Stream a JSONL file line-by-line, invoking `onEntry(parsedObject)` for each
+ * successfully parsed line. Memory stays flat regardless of file size, so
+ * this is the right tool for ANY pass that needs to scan every record in a
+ * potentially huge transcript (e.g. token-usage aggregation across the whole
+ * conversation). Use parseJsonl when you only need the head/tail or a small
+ * count. Malformed lines are skipped silently. Resolves when EOF is reached;
+ * never rejects, on any open/parse error it just resolves with the entries
+ * processed so far.
+ */
+export async function streamJsonl(filePath, onEntry) {
+  return new Promise((resolve) => {
+    let stream;
+    try {
+      stream = createReadStream(filePath, { encoding: 'utf8' });
+    } catch {
+      resolve();
+      return;
+    }
+    let count = 0;
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    rl.on('line', (line) => {
+      if (!line) return;
+      try {
+        const obj = JSON.parse(line);
+        onEntry(obj);
+        count += 1;
+      } catch { /* skip malformed */ }
+    });
+    rl.on('close', () => resolve(count));
+    rl.on('error', () => resolve(count));
+    stream.on('error', () => { try { rl.close(); } catch {} resolve(count); });
+  });
 }
 
 /**

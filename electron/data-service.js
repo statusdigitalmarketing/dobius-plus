@@ -5,7 +5,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import {
   HISTORY_PATH, STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PLUGINS_DIR, PROJECTS_DIR,
-  parseJsonl, timeAgo, pathExists, mapLimit,
+  parseJsonl, streamJsonl, timeAgo, pathExists, mapLimit,
 } from './data-utils.js';
 import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects } from './config-manager.js';
 
@@ -929,16 +929,20 @@ export async function loadProjectTokens() {
       const acc = perProject.get(dirName);
       if (!acc) return;
       const filePath = path.join(acc.projectDir, file);
+      // Stat is cheap and lets us skip unreadable files. The previous 8MB
+      // skip dropped large transcripts entirely (the most expensive sessions
+      // disappeared from Costs totals), so the totals materially under-
+      // reported usage. Switched to streamJsonl which is line-by-line, flat
+      // memory, can scan a 100MB transcript without an OOM risk.
+      // Codex PR#3 r14 P2.
       try {
-        const stat = await fs.stat(filePath);
-        if (stat.size > 8 * 1024 * 1024) return;
+        await fs.stat(filePath);
       } catch { return; }
       acc.sessions += 1;
-      const entries = await parseJsonl(filePath);
-      for (const entry of entries) {
+      await streamJsonl(filePath, (entry) => {
         const usage = entry.message?.usage;
         const model = entry.message?.model || 'unknown';
-        if (!usage) continue;
+        if (!usage) return;
         const inp = (usage.input_tokens || 0);
         const out = (usage.output_tokens || 0);
         const cr  = (usage.cache_read_input_tokens || 0);
@@ -952,7 +956,7 @@ export async function loadProjectTokens() {
         acc.modelTotals[model].out += out;
         acc.modelTotals[model].cr  += cr;
         acc.modelTotals[model].cw  += cw;
-      }
+      });
     });
 
     for (const [dirName, acc] of perProject) {

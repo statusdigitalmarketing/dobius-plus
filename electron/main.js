@@ -862,7 +862,21 @@ function setupOrchestrationHandlers() {
     return { ok: true };
   });
   ipcMain.handle('visual:start', async (_event, projectPath) => {
+    // SECURITY: only serve directories that map to a currently-open project
+    // window OR a known/listed project. Without this, a renderer bug or
+    // compromised page could pass an arbitrary path and start an
+    // unauthenticated localhost server for ANY local directory. Codex PR#3 r14 P2.
+    if (!projectPath || typeof projectPath !== 'string') {
+      return { ok: false, error: 'projectPath required' };
+    }
     try {
+      const known = new Set([
+        ...(getOpenProjects() || []),
+        ...((await listProjects()) || []).map((p) => p.decodedPath).filter(Boolean),
+      ]);
+      if (!known.has(projectPath)) {
+        return { ok: false, error: 'projectPath is not a known project root' };
+      }
       const port = await startVisualServer(projectPath);
       return { ok: true, port, url: `http://127.0.0.1:${port}` };
     } catch (err) {
