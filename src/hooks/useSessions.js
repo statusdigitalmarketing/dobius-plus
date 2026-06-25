@@ -49,10 +49,11 @@ export function useSessions({ projectFilter = null } = {}) {
       const data = (raw || []).map((s) => ({
         ...s,
         project: s.projectPath || s.project,
-        // Prefer projectName (clean readable label) over the raw preview text.
-        // If both are missing fall back to "Untitled" so render code never
-        // hits undefined.
-        display: s.projectName || s.preview || 'Untitled',
+        // Prefer preview (session-specific first message) over projectName.
+        // Using projectName as primary made every session card in a single
+        // project's sidebar identical, which is the opposite of useful.
+        // Codex PR#3 r4 P2.
+        display: s.preview || s.projectName || 'Untitled',
       }));
       setSessions(data);
       setSessionTabMap(tabMap || {});

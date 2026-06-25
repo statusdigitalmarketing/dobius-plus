@@ -850,12 +850,22 @@ function setupOrchestrationHandlers() {
   });
   ipcMain.handle('visual:getPort', () => getVisualPort());
   ipcMain.handle('visual:listPages', () => listVisualPages());
-  ipcMain.handle('visual:screenshot', async (_event, webContentsId) => {
+  ipcMain.handle('visual:screenshot', async (event, webContentsId) => {
     try {
-      const wc = webContentsId != null
-        ? webContents.fromId(webContentsId)
-        : null;
+      const wc = webContentsId != null ? webContents.fromId(webContentsId) : null;
       if (!wc) return { ok: false, error: 'webContents not found' };
+      // SECURITY: verify the requested webContents was either created by the
+      // caller's window (i.e. it's the Visual preview's child <webview>) or IS
+      // the caller. Without this, any renderer with electronAPI access could
+      // pass an arbitrary id and screenshot another window's contents.
+      // Codex PR#3 r4 P2.
+      const callerId = event.sender.id;
+      const isSelf = wc.id === callerId;
+      // Electron exposes the parent that hosts a <webview> via hostWebContents.
+      const hostId = wc.hostWebContents ? wc.hostWebContents.id : null;
+      if (!isSelf && hostId !== callerId) {
+        return { ok: false, error: 'refusing to capture a webContents you do not own' };
+      }
       const image = await wc.capturePage();
       return { ok: true, dataUrl: image.toDataURL() };
     } catch (err) {
