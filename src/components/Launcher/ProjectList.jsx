@@ -127,16 +127,23 @@ export default function ProjectList() {
   }, []);
 
   const { pinned, unpinned } = useMemo(() => {
-    const q = search.toLowerCase();
+    const q = search.toLowerCase().trim();
     let list = projects;
 
-    // Search filter
+    // Search filter. Two real bugs were here:
+    //   1) `p.displayName.toLowerCase()` threw when displayName was undefined,
+    //      crashing the .filter and silently emptying the list.
+    //   2) Single-substring match. "viral engine" failed to match
+    //      "viral-engine" because the user's space wasn't tokenized.
+    // Now: split the query on whitespace AND non-word chars; require every
+    // token to match anywhere in displayName OR decodedPath. Guards every
+    // field with optional chaining + lowercase fallback to ''.
     if (q) {
-      list = list.filter(
-        (p) =>
-          p.displayName.toLowerCase().includes(q) ||
-          (p.decodedPath && p.decodedPath.toLowerCase().includes(q))
-      );
+      const tokens = q.split(/[\s\-_/.]+/).filter(Boolean);
+      list = list.filter((p) => {
+        const haystack = `${(p.displayName || '').toLowerCase()} ${(p.decodedPath || '').toLowerCase()}`;
+        return tokens.every((t) => haystack.includes(t));
+      });
     }
 
     // Category filter
