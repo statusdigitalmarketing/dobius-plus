@@ -1158,17 +1158,39 @@ export async function searchTranscripts(query) {
     if (!(await pathExists(PROJECTS_DIR))) return [];
     const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
 
-    // Flatten + mapLimit (same OOM-prevention pattern as loadAllSessions and
-    // loadProjectTokens). The previous nested Promise.all started a whole-file
-    // parseJsonl for EVERY sub-5MB session in EVERY project concurrently; the
-    // matches.length>=200 guard inside each task did not stop fresh work from
-    // being scheduled, so on large ~/.claude/projects the Search tab could
-    // freeze the main process before returning. Codex PR#3 r13 P2.
+    // v1.0.33 Codex fix: build encodedToReal map the same way loadAllSessions
+    // does, so search hits resolve to REAL project paths instead of a
+    // fabricated dash-to-slash guess. Previously a click-to-resume on a
+    // hit whose project name contained underscores or other encoded chars
+    // would `cd '<fabricated path>' && claude --resume ...` and fail.
+    const encodedToReal = new Map();
+    try {
+      const settings = getSettings();
+      let scanDir = settings.projectScanDir;
+      if (scanDir) {
+        scanDir = scanDir.replace(/^~/, os.homedir());
+        if (await pathExists(scanDir)) {
+          const scanDirents = await fs.readdir(scanDir, { withFileTypes: true });
+          for (const d of scanDirents) {
+            if (!d.isDirectory() || d.name.startsWith('.')) continue;
+            const fullPath = path.join(scanDir, d.name);
+            encodedToReal.set(encodePathLikeClaude(fullPath), fullPath);
+          }
+        }
+      }
+    } catch { /* noop */ }
+    for (const manualPath of getManualProjects()) {
+      encodedToReal.set(encodePathLikeClaude(manualPath), manualPath);
+    }
+
     const fileTasks = [];
     for (const dir of dirents.filter((d) => d.isDirectory())) {
       const projectDir = path.join(PROJECTS_DIR, dir.name);
-      const projectName = dir.name.split('-').filter(Boolean).pop() || dir.name;
-      const projectPath = tryReconstructPath(dir.name) || ('/' + dir.name.replace(/-/g, '/'));
+      const realPath = encodedToReal.get(dir.name) || tryReconstructPath(dir.name);
+      const projectPath = realPath || ('/' + dir.name.replace(/-/g, '/'));
+      const projectName = realPath
+        ? realPath.split('/').filter(Boolean).pop()
+        : (dir.name.split('-').filter(Boolean).pop() || dir.name);
       try {
         const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
         for (const f of files) fileTasks.push({ projectDir, projectName, projectPath, file: f });
