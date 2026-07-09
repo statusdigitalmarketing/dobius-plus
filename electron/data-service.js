@@ -553,35 +553,31 @@ export async function loadSkills() {
 }
 
 /**
- * Delete a session JSONL file. Searches the encoded project dir first,
- * then falls back to scanning all project dirs for the session ID.
+ * Delete a session JSONL file. SCOPED to the supplied projectPath: probes
+ * both encoder forms (new + legacy slash-to-dash) and deletes the first
+ * match. If neither exists, returns an error rather than falling back to a
+ * global scan. Codex v1.0.33 P2: the previous global-fallback path could
+ * unlink a transcript from a DIFFERENT project when a stale/wrong
+ * projectPath came in from the renderer, or when a compromised renderer
+ * knew any sessionId. Now the projectPath is a hard scope.
  */
 export async function deleteSession(sessionId, projectPath) {
   if (!sessionId || !/^[\w-]+$/.test(sessionId)) throw new Error('Invalid sessionId');
+  if (typeof projectPath !== 'string' || !projectPath) throw new Error('projectPath required');
 
-  // Try primary path via encoded projectPath
-  if (projectPath) {
-    const encodedProject = projectPath.replace(/\//g, '-').replace(/^-/, '');
-    const primary = path.join(PROJECTS_DIR, encodedProject, `${sessionId}.jsonl`);
-    if (await pathExists(primary)) {
-      await fs.unlink(primary);
+  const encodings = [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)];
+  const seen = new Set();
+  for (const enc of encodings) {
+    if (seen.has(enc)) continue;
+    seen.add(enc);
+    const candidate = path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`);
+    if (await pathExists(candidate)) {
+      await fs.unlink(candidate);
       return true;
     }
   }
 
-  // Fallback: scan all project dirs
-  if (await pathExists(PROJECTS_DIR)) {
-    const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
-    for (const dir of dirents.filter((d) => d.isDirectory())) {
-      const candidate = path.join(PROJECTS_DIR, dir.name, `${sessionId}.jsonl`);
-      if (await pathExists(candidate)) {
-        await fs.unlink(candidate);
-        return true;
-      }
-    }
-  }
-
-  throw new Error('Session file not found');
+  throw new Error('Session file not found for this project');
 }
 
 /**
