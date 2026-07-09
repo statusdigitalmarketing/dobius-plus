@@ -975,6 +975,20 @@ export async function flushConfigAsync() {
   return flushConfigSyncTail();
 }
 
+/**
+ * Non-latching drain. Waits for the current writeChain to settle so an
+ * immediately-following `saveConfig` sees a clean chain, but does NOT set
+ * the shutdown flag. Use this from RUNTIME code paths (e.g. Auto Mode
+ * persisting a seen task gid before the app might crash) that want a
+ * synchronization point without breaking future writes.
+ * Codex Apple-grade audit v1.0.32 P2 (auto-mode was latching the shutdown
+ * flag on every dispatched task, silently killing subsequent config
+ * persistence for accounts / tabs / settings until relaunch).
+ */
+export async function drainConfigWrites() {
+  try { await writeChain; } catch { /* drain errors are already logged */ }
+}
+
 export function flushConfig() {
   // Legacy sync entrypoint. Does NOT drain the chain — pending async writes
   // CAN still land after this returns (the race Codex called out). Use
