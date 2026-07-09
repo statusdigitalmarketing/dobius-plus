@@ -1,6 +1,7 @@
 import { useStore } from '../../store/store';
 import ThemePicker from './ThemePicker';
 import TasksDropdown from './TasksDropdown';
+import SpeakButton from './SpeakButton';
 
 export default function TopBar({ projectName }) {
   const activeView = useStore((s) => s.activeView);
@@ -140,6 +141,7 @@ export default function TopBar({ projectName }) {
           Visual
         </button>
         <TasksDropdown />
+        <SpeakButton />
         <ThemePicker currentIndex={themeIndex} onChange={setThemeIndex} />
       </div>
     </div>

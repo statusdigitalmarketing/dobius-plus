@@ -173,6 +173,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   autoResumeUpdate: (updates) => ipcRenderer.invoke('autoResume:update', updates),
   autoResumeCancelAll: () => ipcRenderer.invoke('autoResume:cancelAll'),
   autoResumePendingCount: () => ipcRenderer.invoke('autoResume:pendingCount'),
+
+  // Voice playback (v1.0.32): read out Claude's last response via macOS say.
+  voiceSpeakLast: (args) => ipcRenderer.invoke('voice:speakLast', args),
+  voiceStop: () => ipcRenderer.invoke('voice:stop'),
+  voiceIsActive: () => ipcRenderer.invoke('voice:isActive'),
   // Main pushes per-tab status (queued / working / done) on this channel.
   // The renderer forwards to the Zustand store's setTabStatus so the dot
   // shows up on the tab without any new UI surface.

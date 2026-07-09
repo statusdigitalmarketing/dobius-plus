@@ -6,6 +6,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { getQuittingForUpdate } from './quit-state.js';
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, cancelTabsForProject as cancelAutoResumeProject, pendingCount as autoResumePending } from './auto-resume.js';
+import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, listTerminals, reassignTerminal, ensureSpawnHelperExecutable } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
@@ -1695,6 +1696,13 @@ function setupAutoResumeHandlers() {
   ipcMain.handle('autoResume:pendingCount', () => autoResumePending());
 }
 
+function setupVoicePlaybackHandlers() {
+  // v1.0.32: TopBar Speak button reads out Claude's last response.
+  ipcMain.handle('voice:speakLast', (_event, args) => speakLastResponse(args || {}));
+  ipcMain.handle('voice:stop', () => stopVoicePlayback());
+  ipcMain.handle('voice:isActive', () => isVoicePlaybackActive());
+}
+
 function setupImessageBridgeHandlers() {
   ipcMain.handle('imessageBridge:getConfig', () => getImessageBridge());
   ipcMain.handle('imessageBridge:updateConfig', (_event, updates) => {
@@ -2061,6 +2069,7 @@ app.whenReady().then(() => {
   setupShellHandlers();
   setupMobileServerHandlers();
   setupAutoResumeHandlers();
+  setupVoicePlaybackHandlers();
   setupImessageBridgeHandlers();
   setupWindowHandlers();
   setupBuildMonitorHandlers();
@@ -2233,6 +2242,7 @@ app.on('will-quit', (e) => {
   stopAutoMode();
   stopMobileServer();
   stopSessionTabCapture();
+  try { stopVoicePlayback(); } catch { /* noop */ }
   closeVisualWindow();
   void stopVisualServer();
   // Drain pending debounced config writes BEFORE the OS reaps the process.
