@@ -590,6 +590,59 @@ export default function TerminalTabBar() {
             toggleMonitor(contextMenu.tabId);
             setContextMenu(null);
           }}
+          onCopyLastResponse={async () => {
+            const targetTabId = contextMenu.tabId;
+            // Pin the target tab's projectPath up-front (read from the live
+            // tab list, not from the persisted map). Codex v1.0.29 round-1
+            // MED: stale sessionTabMap entries could attach to a reused
+            // tab id after restart and copy from the OLD session's project.
+            // Requiring the link's projectPath to match the current tab's
+            // project blocks that cross-project bleed.
+            const liveTab = useStore.getState().terminalTabs.find((t) => t.id === targetTabId);
+            const expectedProject = liveTab?.projectPath || currentProjectPath || null;
+            setContextMenu(null);
+            try {
+              const map = await window.electronAPI?.configGetSessionTabMap?.() ?? {};
+              let latest = null;
+              for (const [sid, entry] of Object.entries(map)) {
+                if (entry?.tabId !== targetTabId) continue;
+                // When we know the tab's project, require strict equality.
+                // Codex v1.0.29 round-2 LOW: skipping the check on a missing
+                // entry.projectPath let a newer malformed/legacy entry mask
+                // a valid older one for the same tab and silently miss the
+                // session that actually has the response.
+                if (expectedProject && entry.projectPath !== expectedProject) continue;
+                if (!latest || (entry.capturedAt || 0) > (latest.capturedAt || 0)) {
+                  latest = { sessionId: sid, ...entry };
+                }
+              }
+              if (!latest) {
+                window.alert('No Claude session is linked to this tab yet. Start or resume a session in this tab first.');
+                return;
+              }
+              const text = await window.electronAPI?.dataLastAssistantMessage?.(latest.sessionId, latest.projectPath);
+              if (!text) {
+                window.alert("Couldn't find an assistant response in this session's transcript yet.");
+                return;
+              }
+              // Codex v1.0.29 round-1 LOW: surface clipboard-unavailable
+              // explicitly instead of silently no-op'ing. Falls back to
+              // window.prompt so the user can manually copy when the modern
+              // clipboard API is missing or denied.
+              if (!navigator.clipboard?.writeText) {
+                window.prompt('Copy this text (clipboard API unavailable):', text);
+                return;
+              }
+              try {
+                await navigator.clipboard.writeText(text);
+              } catch (err) {
+                window.prompt('Clipboard write was denied. Copy this text manually:', text);
+              }
+            } catch (err) {
+              console.warn('[copy-last-response]', err);
+              window.alert(`Copy failed: ${err.message || err}`);
+            }
+          }}
           onDismiss={() => setContextMenu(null)}
         />
       )}
@@ -606,7 +659,7 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onDismiss }) {
+function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
 
@@ -615,6 +668,8 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored,
     { label: isPinned ? 'Unpin Tab' : 'Pin Tab', onClick: onPin },
     { label: 'Rename', onClick: onRename },
     { label: isSplit ? 'Unsplit' : 'Split View', onClick: onSplit, disabled: tabCount <= 1 },
+    { type: 'divider' },
+    { label: 'Copy Last Claude Response', onClick: onCopyLastResponse },
     { type: 'divider' },
     { label: 'Close', onClick: onClose, disabled: tabCount <= 1 },
     { label: 'Close Others', onClick: onCloseOthers, disabled: tabCount <= 1 },

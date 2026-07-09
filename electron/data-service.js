@@ -624,6 +624,66 @@ export async function loadTranscript(sessionId, projectPath) {
 // MAX_MESSAGE_CHARS which is large enough for any real Claude turn.
 const MAX_MESSAGE_CHARS = 20_000;
 const MAX_PAYLOAD_BYTES = 12 * 1024 * 1024; // 12 MB JSON ceiling
+
+/**
+ * v1.0.29: get the most recent assistant message from a session's transcript
+ * as plain text, suitable for clipboard copy. Returns null if the session is
+ * unknown, the transcript is missing, or contains no assistant turns.
+ *
+ * Walks ONLY the tail of the JSONL (parseJsonl bounded read) so a 50MB
+ * transcript doesn't load the whole file. Handles both string and content
+ * block array shapes. Strips internal Anthropic markers and tool_use blocks
+ * so what lands on the clipboard is what the user actually saw.
+ *
+ * v1.0.33 merge note: the audit branch's dual-encoding fix (getLatestSession
+ * / getSessionSize scan BOTH encoder forms) is applied here too. Without it,
+ * copying the last response for a session whose transcript lives in the
+ * legacy `(Code)` directory would return null.
+ */
+export async function getLastAssistantMessage(sessionId, projectPath) {
+  if (!sessionId || typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) return null;
+  // Require an explicit projectPath. Codex v1.0.29 round-1 MED.
+  if (typeof projectPath !== 'string' || !projectPath) return null;
+  // Try both encoder forms (v1.0.33 merge, matches getLatestSession pattern).
+  const encodings = [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)];
+  let transcriptPath = null;
+  for (const enc of encodings) {
+    const p = path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`);
+    if (await pathExists(p)) { transcriptPath = p; break; }
+  }
+  if (!transcriptPath) return null;
+  // Long tool/thinking tails can push the last visible text past a 200-entry
+  // tail window. 1000 covers realistic agent sessions while still bounded.
+  const entries = await parseJsonl(transcriptPath, 1000);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    const isAssistant = entry.type === 'assistant'
+      || entry.role === 'assistant'
+      || entry.message?.role === 'assistant';
+    if (!isAssistant) continue;
+    const text = extractAssistantText(entry);
+    if (text) return text;
+  }
+  return null;
+}
+
+function extractAssistantText(entry) {
+  const msg = entry.message ?? entry;
+  if (typeof msg === 'string') return msg;
+  if (typeof msg.content === 'string') return msg.content;
+  if (typeof entry.content === 'string') return entry.content;
+  // Array of content blocks (Anthropic API shape): keep text blocks only,
+  // skip tool_use / tool_result / thinking, the user never saw those as text.
+  if (Array.isArray(msg.content)) {
+    return msg.content
+      .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text)
+      .join('\n\n')
+      .trim() || null;
+  }
+  return null;
+}
+
 async function parseTranscriptFile(filePath) {
   const messages = [];
   let payloadBytes = 0;

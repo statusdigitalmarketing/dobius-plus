@@ -105,6 +105,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataLoadProjectTokens: () => ipcRenderer.invoke('data:loadProjectTokens'),
   dataSearchTranscripts: (query) => ipcRenderer.invoke('data:searchTranscripts', query),
   dataEstimateContextSize: (projectPath) => ipcRenderer.invoke('data:estimateContextSize', projectPath),
+  // v1.0.29 feature: Copy last Claude response from a tab (via TerminalTabBar
+  // right-click). Returns the raw content of the most recent assistant turn.
+  dataLastAssistantMessage: (sessionId, projectPath) => ipcRenderer.invoke('data:lastAssistantMessage', sessionId, projectPath),
   onDataUpdated: (callback) => {
     const handler = (_event, changedPath) => callback(changedPath);
     ipcRenderer.on('data:updated', handler);

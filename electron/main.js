@@ -13,6 +13,7 @@ import {
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession, getSessionSize,
   loadProjectTokens, searchTranscripts, estimateContextSize, deleteSession,
+  getLastAssistantMessage,
 } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
@@ -403,6 +404,14 @@ function setupDataHandlers() {
       }
     }
     return result;
+  });
+  // v1.0.29 feature: "Copy last Claude response" (TerminalTabBar right-click).
+  // Strict validation happens inside getLastAssistantMessage; returns null on
+  // any failure so the renderer can show "no response found" without leaking
+  // error info. Merged in v1.0.33.
+  ipcMain.handle('data:lastAssistantMessage', (_event, sessionId, projectPath) => {
+    if (typeof sessionId !== 'string') return null;
+    return getLastAssistantMessage(sessionId, projectPath);
   });
 }
 
