@@ -79,14 +79,9 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     return;
   }
 
-  // Wait for windows + terminals to fully mount. ProjectView's initTabs
-  // dispatches createTerminal calls during this window.
-  await new Promise((r) => setTimeout(r, startupDelayMs));
-
+  // Build the target tabId -> best-session map ONCE upfront (sessionTabMap
+  // is stable across the poll window since we haven't started resuming yet).
   const tabMap = getSessionTabMap() || {};
-  // Invert: tabId -> { sessionId, projectPath, capturedAt }
-  // If a tab has multiple historical sessions (the captured map can stack
-  // over time), prefer the most recently captured one.
   const tabToBest = new Map();
   for (const [sid, entry] of Object.entries(tabMap)) {
     if (!entry?.tabId || !entry?.projectPath) continue;
@@ -100,17 +95,39 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     }
   }
 
-  // Filter to tabs that are actually alive in the new launch.
-  const live = listTerminals();
-  const liveIds = new Set(live.map((t) => t.id));
-  const candidates = [];
-  for (const [tabId, info] of tabToBest) {
-    if (!liveIds.has(tabId)) continue;
-    candidates.push({ tabId, ...info });
+  // Poll for terminals: with many restored project windows / slow PTY init,
+  // a single fixed delay can miss late-mounting tabs and permanently skip
+  // their resume. Retry until either we see EVERY mapped tab alive, we hit
+  // a stable count (no new mounts for one full interval), or we exhaust
+  // the total budget. Codex v1.0.33 P2.
+  const POLL_INTERVAL_MS = Math.max(500, startupDelayMs);
+  const TOTAL_BUDGET_MS = 15_000;
+  const deadline = Date.now() + TOTAL_BUDGET_MS;
+  let candidates = [];
+  let lastCount = -1;
+  let stableTicks = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    const live = listTerminals();
+    const liveIds = new Set(live.map((t) => t.id));
+    candidates = [];
+    for (const [tabId, info] of tabToBest) {
+      if (liveIds.has(tabId)) candidates.push({ tabId, ...info });
+    }
+    // Done: every mapped tab is now alive.
+    if (candidates.length === tabToBest.size) break;
+    // Stable: count hasn't changed for 2 ticks, no more late mounts expected.
+    if (candidates.length === lastCount) {
+      stableTicks += 1;
+      if (stableTicks >= 2 && candidates.length > 0) break;
+    } else {
+      stableTicks = 0;
+      lastCount = candidates.length;
+    }
   }
 
   if (candidates.length === 0) {
-    console.log('[auto-resume] no live tabs with mapped sessions, nothing to do');
+    console.log('[auto-resume] no live tabs with mapped sessions after 15s budget, nothing to do');
     return;
   }
 
