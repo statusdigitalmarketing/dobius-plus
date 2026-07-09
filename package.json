@@ -1,6 +1,6 @@
 {
   "name": "dobius-plus",
-  "version": "1.0.33",
+  "version": "1.0.34",
   "description": "Multi-window Claude Code desktop app with themed terminals",
   "main": "electron/main.js",
   "type": "module",

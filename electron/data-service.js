@@ -148,37 +148,58 @@ export async function loadAllSessions(projectFilter) {
           sizeMB = st.size / (1024 * 1024);
         } catch { /* file vanished between readdir + stat, leave 0 */ }
         // parseJsonl is bounded since v1.0.23, uses readTail under the hood so
-        // a 24MB transcript no longer pulls 95MB into memory. The status fields
-        // here ride on top of that bounded read; we never re-read the file.
-        const entries = await parseJsonl(filePath, 5);
+        // a 24MB transcript no longer pulls 95MB into memory. Read 200 entries
+        // (was 5): modern Claude Code transcripts pad the tail with metadata
+        // entries (last-prompt, ai-title, mode, permission-mode,
+        // queue-operation, attachment, file-history-snapshot, system) and
+        // assistant replies. The user's most recent prompt often sits well
+        // beyond the last 5 records, so a 5-entry tail found no user message,
+        // no parseable timestamp, and returned "No preview available" +
+        // timestamp=0 for every recent session (v1.0.34 fix).
+        const entries = await parseJsonl(filePath, 200);
         let preview = '';
         let timestamp = 0;
         // lastRole drives the cross-session status dot.
         let lastRole = '';
-
-        for (const entry of entries) {
-          // Transcript timestamps are ISO 8601 strings — parse to epoch ms so
-          // recency math + the 'working' check use real milliseconds.
+        // Walk from newest to oldest so the FIRST user message we find is the
+        // most recent one, and we stop as soon as we have both preview + a
+        // parseable timestamp + a role signal.
+        for (let i = entries.length - 1; i >= 0; i -= 1) {
+          const entry = entries[i];
           const tsMs = typeof entry.timestamp === 'number'
             ? entry.timestamp
             : (entry.timestamp ? new Date(entry.timestamp).getTime() : 0);
-          if (tsMs && tsMs > timestamp) {
-            timestamp = tsMs;
-          }
+          if (tsMs && tsMs > timestamp) timestamp = tsMs;
           const role = (entry.type === 'human' || entry.role === 'user' || entry.message?.role === 'user')
             ? 'user'
             : (entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant')
               ? 'assistant'
               : '';
-          if (role) lastRole = role; // array is oldest→newest, so the final wins
-          if (!preview && (entry.type === 'human' || entry.role === 'user')) {
-            const content = typeof entry.message === 'string'
-              ? entry.message
-              : entry.message?.content || entry.content || '';
-            if (content) {
-              preview = content.slice(0, 200);
+          // lastRole is the newest role we saw (tail walk, first match wins).
+          if (role && !lastRole) lastRole = role;
+          if (!preview && role === 'user') {
+            const raw = entry.message?.content !== undefined
+              ? entry.message.content
+              : (entry.content !== undefined
+                ? entry.content
+                : (typeof entry.message === 'string' ? entry.message : ''));
+            let text = '';
+            if (typeof raw === 'string') {
+              text = raw;
+            } else if (Array.isArray(raw)) {
+              // Anthropic content-blocks shape. Keep text-type blocks only,
+              // skip tool_use / tool_result / image so the sidebar doesn't
+              // preview a base64 blob. Codex-alike shape check.
+              text = raw
+                .filter((b) => b && (b.type === 'text' || typeof b.text === 'string'))
+                .map((b) => (typeof b.text === 'string' ? b.text : ''))
+                .filter(Boolean)
+                .join(' ');
             }
+            text = String(text).trim();
+            if (text) preview = text.slice(0, 200);
           }
+          if (preview && timestamp && lastRole) break;
         }
 
         if (!timestamp) {
