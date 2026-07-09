@@ -1,7 +1,7 @@
 import electronUpdater from 'electron-updater';
 import { app, BrowserWindow, Notification, ipcMain } from 'electron';
 import { setQuittingForUpdate } from './quit-state.js';
-import { flushConfigAsync } from './config-manager.js';
+import { drainConfigWrites } from './config-manager.js';
 
 const { autoUpdater } = electronUpdater;
 
@@ -67,7 +67,7 @@ async function performInstall() {
   setQuittingForUpdate(true);
   try {
     await Promise.race([
-      flushConfigAsync(),
+      drainConfigWrites(), // v1.0.33: non-latching, so if quitAndInstall throws we can still persist
       new Promise((resolve) => setTimeout(resolve, QUIT_INSTALL_FLUSH_TIMEOUT_MS)),
     ]);
   } catch { /* best effort */ }
