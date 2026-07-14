@@ -2174,6 +2174,19 @@ app.on('before-quit', (e) => {
   if (getQuittingForUpdate()) {
     if (didTeardown) return;
     didTeardown = true;
+    // Stamp lastQuitAt on the updater path too: will-quit's stamp is behind
+    // the didTeardown guard we just set, so without this an update-restart
+    // followed by a relaunch beyond the 20-min slack would skip auto-resume
+    // for sessions that were live during the update. Codex v1.0.35 r7 P2.
+    // Sync write: squirrel.mac needs a fast exit; saveConfig's debounce may
+    // not flush in time and performInstall's drain already ran.
+    try {
+      const cfgUp = loadConfig();
+      cfgUp.lastQuitAt = Date.now();
+      saveConfig(cfgUp);
+      flushConfig();
+    } catch { /* best-effort */ }
+    try { stopSessionTabCapture(); } catch {}
     try { killAll(); } catch {}
     try { stopWatching(); } catch {}
     try { stopAllBuildWatchers(); } catch {}

@@ -553,8 +553,18 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
       }
       return;
     }
-    const safeProject = projectPath.replace(/'/g, "'\\''");
-    const cmd = `cd '${safeProject}' && claude --resume ${session.sessionId}\r`;
+    // Same-project resume: bare `claude --resume`, no cd. The tab's shell is
+    // already where the user wants it (often a worktree or subdir) and
+    // force-cd'ing to the project root yanked them out of it (Sam-reported
+    // v1.0.35). cd only when resuming a session from a DIFFERENT project.
+    const windowProject = useStore.getState().currentProjectPath;
+    let cmd;
+    if (windowProject && projectPath === windowProject) {
+      cmd = `claude --resume ${session.sessionId}\r`;
+    } else {
+      const safeProject = projectPath.replace(/'/g, "'\\''");
+      cmd = `cd '${safeProject}' && claude --resume ${session.sessionId}\r`;
+    }
     window.electronAPI.terminalWrite(termId, cmd);
   }, [setActiveView]);
 

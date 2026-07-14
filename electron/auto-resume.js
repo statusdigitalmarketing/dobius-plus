@@ -55,10 +55,21 @@ function broadcastStatus(tabId, status) {
  * Single-quote escape the project path; abort if the path or sessionId
  * smell wrong. Matches the shape the renderer's store.resumeSession uses.
  */
-function buildResumeCommand(projectPath, sessionId) {
+function buildResumeCommand(projectPath, sessionId, tabId) {
   if (!projectPath || !projectPath.startsWith('/')) return null;
   if (/[\x00-\x1F\x7F]/.test(projectPath)) return null;
   if (!sessionId || !/^[a-zA-Z0-9][\w-]*$/.test(sessionId)) return null;
+  // Same-project resume: bare `claude --resume`, no cd. The restored tab's
+  // PTY spawns at its own project root already, and cd'ing yanks the user
+  // out of any worktree/subdir their shell profile lands them in
+  // (Sam-reported v1.0.35). cd only for cross-project links, where the
+  // tab's project genuinely differs from the session's.
+  const tabProject = typeof tabId === 'string'
+    ? (tabId.match(/^term-(\/.+)-\d+$/) || [])[1]
+    : null;
+  if (tabProject && tabProject === projectPath) {
+    return `claude --resume ${sessionId}\r`;
+  }
   const safeProject = projectPath.replace(/'/g, "'\\''");
   return `cd '${safeProject}' && claude --resume ${sessionId}\r`;
 }
@@ -95,9 +106,8 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   //     session live at quit reads within ~15s + one save debounce of
   //     lastQuitAt. 20 minutes of slack also covers a crash (no lastQuitAt
   //     write) followed by a quick relaunch.
-  //   - the tab id must actually belong to the entry's project
-  //     (`term-<projectPath>-<n>`), so a cross-project stale link can never
-  //     type a resume into the wrong project's tab.
+  //   - the tab id only needs SHAPE sanity (cross-project links are a
+  //     supported flow, see r2 note below); freshness is the staleness guard.
   const RUNNING_AT_QUIT_SLACK_MS = 20 * 60 * 1000;
   const cfgAll = loadConfig();
   const lastQuitAt = typeof cfgAll.lastQuitAt === 'number' ? cfgAll.lastQuitAt : 0;
@@ -210,7 +220,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     broadcastStatus(e.tabId, 'queued');
     const timer = setTimeout(() => {
       queue.delete(e.tabId);
-      const cmd = buildResumeCommand(e.projectPath, e.sessionId);
+      const cmd = buildResumeCommand(e.projectPath, e.sessionId, e.tabId);
       if (!cmd) {
         console.log(`[auto-resume] ${e.tabId}: command build failed, skipping`);
         broadcastStatus(e.tabId, 'done');

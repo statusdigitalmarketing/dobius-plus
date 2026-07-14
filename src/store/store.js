@@ -540,14 +540,19 @@ export const useStore = create((set, get) => ({
     set({ activeView: 'terminal' });
     const termId = get().activeTabId;
     if (!window.electronAPI || !termId) return;
-    // cd to the session's project before resume. claude --resume assumes the
-    // cwd matches where the session was originally run. Resuming session for
-    // /x/projectA from a terminal in /x/projectB gave Claude the wrong file
-    // context. Single-quote escape the path, abort if the path is missing or
-    // unsafe (no fallback to bare --resume, that's the bug we're fixing).
+    // cd BEFORE resume only for CROSS-project resumes (Sessions dashboard /
+    // Search into a tab belonging to a different project), where wrong-cwd
+    // is guaranteed. For SAME-project resumes (Cmd+R, ResumeBanner, sidebar
+    // double-click in this window) issue a bare `claude --resume`: the tab's
+    // shell is already where the user wants it, often a WORKTREE or subdir,
+    // and force-cd'ing to the project root was yanking them out of it
+    // (Sam-reported v1.0.35: "branches and worktree mess things up").
     const projectPath = session.project || '';
+    const sameProject = projectPath && projectPath === get().currentProjectPath;
     let cmd;
-    if (projectPath && projectPath.startsWith('/') && !/[\x00-\x1F\x7F]/.test(projectPath)) {
+    if (sameProject) {
+      cmd = `claude --resume ${sessionId}`;
+    } else if (projectPath && projectPath.startsWith('/') && !/[\x00-\x1F\x7F]/.test(projectPath)) {
       const safeProject = projectPath.replace(/'/g, "'\\''");
       cmd = `cd '${safeProject}' && claude --resume ${sessionId}`;
     } else if (!projectPath) {
