@@ -29,7 +29,7 @@ import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig, flushConfigAsync,
   getSessionTags, setSessionTag, removeSessionTag,
-  getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink,
+  getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink, clearSessionTabRunning,
   getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
   getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
   getMobileServerConfig, updateMobileServerConfig,
@@ -1572,7 +1572,15 @@ function setupSessionTabCapture() {
       }
       for (const t of listTerminals()) {
         const runningSessionId = await getTerminalProcessArgv(t.id);
-        if (!runningSessionId) continue;
+        if (!runningSessionId) {
+          // Tab is open but no Claude session is running in it. If the map
+          // still links a session here, zero its freshness stamp so quitting
+          // within the slack window doesn't resurrect a session the user
+          // already stopped. Codex v1.0.35 r3 P2.
+          const mappedIdle = tabToSessionId.get(t.id);
+          if (mappedIdle) clearSessionTabRunning(mappedIdle);
+          continue;
+        }
         const mappedSessionId = tabToSessionId.get(t.id);
         if (mappedSessionId === runningSessionId) {
           // Still running: refresh the lastRunningAt stamp so auto-resume

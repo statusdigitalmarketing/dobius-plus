@@ -690,6 +690,21 @@ export function touchSessionTabLink(sessionId) {
 }
 
 /**
+ * Zero the lastRunningAt stamp when the capture loop observes the session's
+ * Claude process has EXITED while the tab stays open. Without this, quitting
+ * within the freshness slack after stopping Claude would still auto-resume a
+ * session that was not actually running at quit. Codex v1.0.35 r3 P2.
+ */
+export function clearSessionTabRunning(sessionId) {
+  if (!sessionId || typeof sessionId !== 'string' || UNSAFE_KEYS.has(sessionId)) return;
+  const config = loadConfig();
+  const entry = config.sessionTabMap?.[sessionId];
+  if (!entry || !entry.lastRunningAt) return;
+  entry.lastRunningAt = 0;
+  saveConfig(config);
+}
+
+/**
  * Remove a session-to-tab link.
  */
 export function removeSessionTabLink(sessionId) {
