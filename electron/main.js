@@ -2253,6 +2253,11 @@ app.on('before-quit', (e) => {
     // capture window, where the link-time stamp is still fresh and would
     // otherwise auto-resume a session the user deliberately stopped.
     // Bounded at 2s so a hung pgrep can't stall the quit. Codex v1.0.35 r9 P2.
+    // Abort flag: if the 2s race times out and gracefulCloseAll starts
+    // Ctrl-C'ing terminals, a still-running reconcile loop must NOT observe
+    // those force-stopped tabs as idle and wipe stamps for sessions that
+    // were genuinely live at quit. Codex v1.0.35 r10 P2.
+    let reconcileAborted = false;
     const finalReconcile = (async () => {
       try {
         const mapQ = getSessionTabMap() || {};
@@ -2261,14 +2266,17 @@ app.on('before-quit', (e) => {
           if (en?.tabId && en.lastRunningAt) tabToSid.set(en.tabId, sid);
         }
         for (const t of listTerminals()) {
+          if (reconcileAborted) return;
           const sid = tabToSid.get(t.id);
           if (!sid) continue;
           const running = await getTerminalProcessArgv(t.id);
+          if (reconcileAborted) return;
           if (!running) clearSessionTabRunning(sid);
         }
       } catch { /* best-effort */ }
     })();
-    Promise.race([finalReconcile, new Promise((r) => setTimeout(r, 2000))]).then(() => gracefulCloseAll()).then(() => {
+    Promise.race([finalReconcile, new Promise((r) => setTimeout(r, 2000))])
+      .then(() => { reconcileAborted = true; return gracefulCloseAll(); }).then(() => {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('terminal:requestSave');
       });
