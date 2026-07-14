@@ -2248,7 +2248,27 @@ app.on('before-quit', (e) => {
       cfgQuit.lastQuitAt = Date.now();
       saveConfig(cfgQuit);
     } catch { /* best-effort */ }
-    gracefulCloseAll().then(() => {
+    // Final reconcile BEFORE Ctrl-C: zero the stamp for any mapped tab whose
+    // Claude has already exited. Covers resume->stop->quit inside one 15s
+    // capture window, where the link-time stamp is still fresh and would
+    // otherwise auto-resume a session the user deliberately stopped.
+    // Bounded at 2s so a hung pgrep can't stall the quit. Codex v1.0.35 r9 P2.
+    const finalReconcile = (async () => {
+      try {
+        const mapQ = getSessionTabMap() || {};
+        const tabToSid = new Map();
+        for (const [sid, en] of Object.entries(mapQ)) {
+          if (en?.tabId && en.lastRunningAt) tabToSid.set(en.tabId, sid);
+        }
+        for (const t of listTerminals()) {
+          const sid = tabToSid.get(t.id);
+          if (!sid) continue;
+          const running = await getTerminalProcessArgv(t.id);
+          if (!running) clearSessionTabRunning(sid);
+        }
+      } catch { /* best-effort */ }
+    })();
+    Promise.race([finalReconcile, new Promise((r) => setTimeout(r, 2000))]).then(() => gracefulCloseAll()).then(() => {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('terminal:requestSave');
       });
