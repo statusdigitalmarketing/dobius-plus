@@ -107,7 +107,13 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   let skippedStale = 0;
   for (const [sid, entry] of Object.entries(tabMap)) {
     if (!entry?.tabId || !entry?.projectPath) continue;
-    if (!entry.tabId.startsWith(`term-${entry.projectPath}-`)) { skippedStale += 1; continue; }
+    // Shape sanity only (term-/abs/path-N). Do NOT require the tab's project
+    // to equal entry.projectPath: a supported flow is resuming a project-A
+    // session from a tab living in project B's window (store.resumeSession
+    // cd's to A first), and that link legitimately has tabId=term-B-N with
+    // projectPath=A. The freshness gate below is the real staleness guard.
+    // Codex v1.0.35 r2 P2.
+    if (!/^term-\/.+-\d+$/.test(entry.tabId)) { skippedStale += 1; continue; }
     const ranAt = typeof entry.lastRunningAt === 'number' ? entry.lastRunningAt : 0;
     // Fresh if the session was running near the last CLEAN quit, OR near
     // "now" (covers a crash: lastQuitAt is stale from an older clean quit,
