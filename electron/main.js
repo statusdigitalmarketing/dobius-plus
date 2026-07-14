@@ -2268,10 +2268,19 @@ app.on('before-quit', (e) => {
         for (const t of listTerminals()) {
           if (reconcileAborted) return;
           const sid = tabToSid.get(t.id);
-          if (!sid) continue;
           const running = await getTerminalProcessArgv(t.id);
           if (reconcileAborted) return;
-          if (!running) clearSessionTabRunning(sid);
+          if (sid && !running) {
+            // Mapped but idle: stopped before quit, don't resurrect.
+            clearSessionTabRunning(sid);
+          } else if (running && running !== sid) {
+            // Tab switched sessions since the last capture tick (user ran
+            // `claude --resume B` in a tab mapped to A, then quit fast).
+            // Mirror the tick: drop the stale link, record the live one so
+            // auto-resume revives B, not A. Codex v1.0.35 r11 P2.
+            if (sid) removeSessionTabLink(sid);
+            setSessionTabLink(running, t.id, t.cwd);
+          }
         }
       } catch { /* best-effort */ }
     })();
