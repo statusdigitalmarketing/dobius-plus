@@ -619,6 +619,13 @@ export async function loadTranscript(sessionId, projectPath) {
     // (Claude CLI always writes leading-dash), but probing it is free and
     // closes the theoretical gap Codex flagged when the global fallback
     // was removed. Codex v1.0.35 r4 P2.
+    //
+    // NOTE (r8 false-positive proof): probe #3 ALSO exactly round-trips the
+    // lossy fallback projectPath loadAllSessions emits for UNRESOLVED dirs
+    // ('/'+dir.replace(/-/g,'/')): dashes->slashes->dashes restores dir.name
+    // and .replace(/^-/,'') strips the doubled leading dash. Verified for
+    // new-encoding, legacy-(Code), and deleted-project dir names, so
+    // previews for sessions of deleted/unscanned projects still load.
     const encodings = [
       encodePathLikeClaude(projectPath),
       encodePathLikeClaudeLegacy(projectPath),
