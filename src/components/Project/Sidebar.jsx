@@ -55,13 +55,16 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
   const tabLabelFor = (sessionId) => {
     const link = sessionTabMap?.[sessionId];
     if (!link?.tabId) return null;
-    // Project-match guard: tab ids recycle across restarts (per-project
-    // counters), so a stale link whose projectPath differs from this window's
-    // project must not badge a current tab with an old session. Same guard
-    // Copy-last-response uses in TerminalTabBar. Codex v1.0.35 P2.
-    if (link.projectPath && currentProjectPath && link.projectPath !== currentProjectPath) return null;
+    // Live tab in THIS window: badge is legit regardless of the session's
+    // home project (cross-project resumes park a project-A session in a
+    // project-B tab, link.projectPath = A while the tab lives here).
     const open = terminalTabs.find((t) => t.id === link.tabId);
     if (open) return open.label;
+    // Fallback to recently-closed only when the link's project matches this
+    // window. Tab ids recycle across restarts (per-project counters), so a
+    // stale cross-project link must not badge a closed tab here with an old
+    // session. Codex v1.0.35 r5 P3.
+    if (link.projectPath && currentProjectPath && link.projectPath !== currentProjectPath) return null;
     const closed = recentlyClosedTabs.find((c) => c.id === link.tabId);
     return closed ? `${closed.label} (closed)` : null;
   };
