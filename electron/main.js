@@ -2224,6 +2224,17 @@ app.on('before-quit', (e) => {
     // then flush scrollback, then quit.
     e.preventDefault();
     savedBeforeQuit = true;
+    // Stop the Tier-2 capture BEFORE gracefulCloseAll: a 15s tick landing
+    // mid-shutdown would observe the just-Ctrl-C'd tabs as idle and zero
+    // their lastRunningAt, making auto-resume skip exactly the sessions
+    // this quit is gracefully closing. Also stamp lastQuitAt NOW, while
+    // the running-state stamps are still fresh. Codex v1.0.35 r6 P2.
+    stopSessionTabCapture();
+    try {
+      const cfgQuit = loadConfig();
+      cfgQuit.lastQuitAt = Date.now();
+      saveConfig(cfgQuit);
+    } catch { /* best-effort */ }
     gracefulCloseAll().then(() => {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('terminal:requestSave');
