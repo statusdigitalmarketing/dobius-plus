@@ -29,7 +29,7 @@ import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
   getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig, flushConfigAsync,
   getSessionTags, setSessionTag, removeSessionTag,
-  getSessionTabMap, setSessionTabLink, removeSessionTabLink,
+  getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink,
   getAgentMemory, setAgentMemory, appendJournalEntry, pruneOldMemory,
   getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
   getMobileServerConfig, updateMobileServerConfig,
@@ -1574,7 +1574,12 @@ function setupSessionTabCapture() {
         const runningSessionId = await getTerminalProcessArgv(t.id);
         if (!runningSessionId) continue;
         const mappedSessionId = tabToSessionId.get(t.id);
-        if (mappedSessionId === runningSessionId) continue;
+        if (mappedSessionId === runningSessionId) {
+          // Still running: refresh the lastRunningAt stamp so auto-resume
+          // can tell "was live at quit" from "linked weeks ago" (v1.0.35).
+          touchSessionTabLink(runningSessionId);
+          continue;
+        }
         // Tab is running a different (or new) session than the map says.
         if (mappedSessionId) removeSessionTabLink(mappedSessionId);
         if (!fresh[runningSessionId]) {
@@ -2184,6 +2189,10 @@ app.on('before-quit', (e) => {
     const openProjects = getOpenProjects();
     const config = loadConfig();
     config.lastOpenProjects = openProjects;
+    // Quit timestamp: auto-resume compares each link's lastRunningAt against
+    // this to only revive sessions that were ACTUALLY running at quit
+    // (v1.0.35 stale-link fix).
+    config.lastQuitAt = Date.now();
     saveConfig(config);
     // Tear down listeners/servers in parallel with the config drain — none
     // of them depend on config writes finishing.
@@ -2254,6 +2263,14 @@ app.on('will-quit', (e) => {
   try { stopVoicePlayback(); } catch { /* noop */ }
   closeVisualWindow();
   void stopVisualServer();
+  // Stamp lastQuitAt on EVERY quit path (updater bypass, force quit, OS
+  // shutdown), not just the 3-phase Cmd+Q flow, so auto-resume's freshness
+  // gate has a reference point regardless of how the app exited (v1.0.35).
+  try {
+    const cfg = loadConfig();
+    cfg.lastQuitAt = Date.now();
+    saveConfig(cfg);
+  } catch { /* best-effort */ }
   // Drain pending debounced config writes BEFORE the OS reaps the process.
   // Force-quit / OS shutdown / non-darwin window-all-closed previously
   // dropped the last 500ms of unflushed state (tab adds, theme changes,

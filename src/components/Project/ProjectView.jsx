@@ -441,7 +441,14 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
             window.electronAPI.terminalLoadState(termId).then((saved) => {
               let summary = null;
               if (saved?.scrollback) {
-                const stripped = saved.scrollback.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+                // useTerminal saves scrollback as an ARRAY of lines; older
+                // states may be a string. Normalize before .replace, the
+                // array path used to throw and the catch silently returned
+                // null summaries. Codex v1.0.35 P3.
+                const text = Array.isArray(saved.scrollback)
+                  ? saved.scrollback.join('\n')
+                  : String(saved.scrollback);
+                const stripped = text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
                 summary = stripped.slice(-500).trim();
               }
               doUpdate(summary);

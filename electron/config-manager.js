@@ -666,7 +666,26 @@ export function setSessionTabLink(sessionId, tabId, projectPath) {
     tabId,
     projectPath: typeof projectPath === 'string' ? projectPath : '',
     capturedAt: Date.now(),
+    // Freshness stamp: updated every Tier-2 capture tick while the session is
+    // ACTIVELY running in the tab. Auto-resume only trusts links whose
+    // lastRunningAt is near lastQuitAt, which kills the stale-link class of
+    // bug (v1.0.35: 19-28 day old links were auto-resumed into fresh tabs).
+    lastRunningAt: Date.now(),
   };
+  saveConfig(config);
+}
+
+/**
+ * Refresh the lastRunningAt stamp on an existing link WITHOUT resetting
+ * capturedAt. Called by the Tier-2 capture loop each 15s tick for every
+ * session it observes actively running. Cheap no-op if the link is gone.
+ */
+export function touchSessionTabLink(sessionId) {
+  if (!sessionId || typeof sessionId !== 'string' || UNSAFE_KEYS.has(sessionId)) return;
+  const config = loadConfig();
+  const entry = config.sessionTabMap?.[sessionId];
+  if (!entry) return;
+  entry.lastRunningAt = Date.now();
   saveConfig(config);
 }
 

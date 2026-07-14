@@ -55,6 +55,11 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession, 
   const tabLabelFor = (sessionId) => {
     const link = sessionTabMap?.[sessionId];
     if (!link?.tabId) return null;
+    // Project-match guard: tab ids recycle across restarts (per-project
+    // counters), so a stale link whose projectPath differs from this window's
+    // project must not badge a current tab with an old session. Same guard
+    // Copy-last-response uses in TerminalTabBar. Codex v1.0.35 P2.
+    if (link.projectPath && currentProjectPath && link.projectPath !== currentProjectPath) return null;
     const open = terminalTabs.find((t) => t.id === link.tabId);
     if (open) return open.label;
     const closed = recentlyClosedTabs.find((c) => c.id === link.tabId);

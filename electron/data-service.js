@@ -344,7 +344,7 @@ export async function getLatestSession(projectPath) {
       let msgTs = 0;
       let lastUserPreview = '';
       try {
-        const tail = await parseJsonl(filePath, 20);
+        const tail = await parseJsonl(filePath, 200);
         for (const e of tail) {
           const t = tsToEpochMs(e.timestamp);
           if (t > msgTs) msgTs = t;
@@ -607,24 +607,22 @@ export async function deleteSession(sessionId, projectPath) {
 export async function loadTranscript(sessionId, projectPath) {
   try {
     if (!/^[\w-]+$/.test(sessionId)) return [];
+    if (typeof projectPath !== 'string' || !projectPath) return [];
 
-    const encodedProject = projectPath.replace(/\//g, '-').replace(/^-/, '');
-    const transcriptPath = path.join(PROJECTS_DIR, encodedProject, `${sessionId}.jsonl`);
-
-    if (!(await pathExists(transcriptPath))) {
-      if (await pathExists(PROJECTS_DIR)) {
-        const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
-        for (const dir of dirents.filter((d) => d.isDirectory())) {
-          const altPath = path.join(PROJECTS_DIR, dir.name, `${sessionId}.jsonl`);
-          if (await pathExists(altPath)) {
-            return parseTranscriptFile(altPath);
-          }
-        }
-      }
-      return [];
+    // Scoped to the supplied project, both encoder forms. The old global
+    // fallback scanned EVERY project dir and returned the first sessionId
+    // match, so a stale/wrong projectPath could show a transcript from a
+    // completely different project (Codex v1.0.35 P1, same class as the
+    // deleteSession fix in v1.0.33).
+    const encodings = [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)];
+    const seen = new Set();
+    for (const enc of encodings) {
+      if (seen.has(enc)) continue;
+      seen.add(enc);
+      const p = path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`);
+      if (await pathExists(p)) return parseTranscriptFile(p);
     }
-
-    return parseTranscriptFile(transcriptPath);
+    return [];
   } catch (err) {
     console.warn('[data-service] Failed to load transcript:', err.message);
     return [];
@@ -1340,7 +1338,7 @@ export async function estimateContextSize(projectPath) {
     // Token usage lives on assistant messages, which only need the most-recent
     // run to estimate context. Last 50 entries is plenty since usage stamps
     // appear every assistant turn. Codex PR#3 r7 P2.
-    const entries = await parseJsonl(filePath, 50);
+    const entries = await parseJsonl(filePath, 200);
 
     let lastInputTokens = 0;
     let lastModel = '';

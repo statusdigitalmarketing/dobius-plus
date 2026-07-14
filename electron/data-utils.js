@@ -18,9 +18,15 @@ export const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 // Hard cap on bytes read when only a tail of a JSONL file is requested.
 // Transcript files reach tens of MB; reading them whole just to keep the last
 // few lines is what OOM-crashed the main process when the dashboard fanned
-// parseJsonl(..., 5) across thousands of files at once. 4MB of tail comfortably
-// contains the last 100 lines of any real transcript while bounding memory.
-const TAIL_CAP_BYTES = 4 * 1024 * 1024;
+// parseJsonl(..., 5) across thousands of files at once. Callers now request
+// 200-1000 tail entries and modern transcripts embed huge single lines
+// (file-history-snapshot, base64 attachments), so the old 4MB ceiling could
+// silently return fewer entries than asked. 8MB still bounds memory (the
+// readers run under mapLimit(24), worst-case transient ~192MB only when
+// every file is both huge AND giant-lined, which never co-occurs in
+// practice; the newline-count exit fires long before the cap on normal
+// files). Codex v1.0.35 P3.
+const TAIL_CAP_BYTES = 8 * 1024 * 1024;
 const TAIL_CHUNK_BYTES = 64 * 1024;
 
 /**

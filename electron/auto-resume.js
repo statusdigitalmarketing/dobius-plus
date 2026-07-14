@@ -29,7 +29,7 @@
  *   - Window close: caller invokes cancelTabsForProject(projectPath).
  */
 
-import { getAutoResume, getSessionTabMap } from './config-manager.js';
+import { getAutoResume, getSessionTabMap, loadConfig } from './config-manager.js';
 import { listTerminals, writeTerminal } from './terminal-manager.js';
 import { getSessionSize } from './data-service.js';
 import { BrowserWindow } from 'electron';
@@ -81,18 +81,56 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
 
   // Build the target tabId -> best-session map ONCE upfront (sessionTabMap
   // is stable across the poll window since we haven't started resuming yet).
+  //
+  // FRESHNESS GATE (v1.0.35): only links whose session was ACTUALLY RUNNING
+  // at last quit are eligible. Tab ids are deterministic per-project counters
+  // (`term-<path>-1` is always tab 1), so after a restart a fresh tab matches
+  // ANY link ever captured for that slot, up to the map's 30-day retention.
+  // Without this gate, 19-28 day old sessions were auto-resumed into Sam's
+  // tabs ("random ass shit popped up that I was not just using").
+  //   - entry.lastRunningAt must exist (links from before v1.0.35 have none
+  //     and are skipped outright), AND
+  //   - it must fall within RUNNING_AT_QUIT_SLACK_MS of lastQuitAt. The
+  //     Tier-2 capture stamps it every 15s while the session runs, so a
+  //     session live at quit reads within ~15s + one save debounce of
+  //     lastQuitAt. 20 minutes of slack also covers a crash (no lastQuitAt
+  //     write) followed by a quick relaunch.
+  //   - the tab id must actually belong to the entry's project
+  //     (`term-<projectPath>-<n>`), so a cross-project stale link can never
+  //     type a resume into the wrong project's tab.
+  const RUNNING_AT_QUIT_SLACK_MS = 20 * 60 * 1000;
+  const cfgAll = loadConfig();
+  const lastQuitAt = typeof cfgAll.lastQuitAt === 'number' ? cfgAll.lastQuitAt : 0;
+  // Reference point: prefer lastQuitAt; on crash (missing/ancient) fall back
+  // to "now" so the slack window still measures recency of the link itself.
+  const referenceTs = lastQuitAt > 0 ? lastQuitAt : Date.now();
   const tabMap = getSessionTabMap() || {};
   const tabToBest = new Map();
+  let skippedStale = 0;
   for (const [sid, entry] of Object.entries(tabMap)) {
     if (!entry?.tabId || !entry?.projectPath) continue;
+    if (!entry.tabId.startsWith(`term-${entry.projectPath}-`)) { skippedStale += 1; continue; }
+    const ranAt = typeof entry.lastRunningAt === 'number' ? entry.lastRunningAt : 0;
+    if (!ranAt || Math.abs(referenceTs - ranAt) > RUNNING_AT_QUIT_SLACK_MS) {
+      skippedStale += 1;
+      continue;
+    }
     const prev = tabToBest.get(entry.tabId);
-    if (!prev || (entry.capturedAt || 0) > (prev.capturedAt || 0)) {
+    if (!prev || ranAt > prev.lastRunningAt) {
       tabToBest.set(entry.tabId, {
         sessionId: sid,
         projectPath: entry.projectPath,
         capturedAt: entry.capturedAt || 0,
+        lastRunningAt: ranAt,
       });
     }
+  }
+  if (skippedStale > 0) {
+    console.log(`[auto-resume] skipped ${skippedStale} stale/mismatched link(s); ${tabToBest.size} fresh candidate(s)`);
+  }
+  if (tabToBest.size === 0) {
+    console.log('[auto-resume] no sessions were running at last quit, nothing to resume');
+    return;
   }
 
   // Poll for terminals: with many restored project windows / slow PTY init,

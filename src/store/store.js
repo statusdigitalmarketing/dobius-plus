@@ -540,10 +540,6 @@ export const useStore = create((set, get) => ({
     set({ activeView: 'terminal' });
     const termId = get().activeTabId;
     if (!window.electronAPI || !termId) return;
-    // Tier 1 capture: link session to the tab so the Cmd+B sidebar can show
-    // which tab the session belongs to.
-    const projectForLink = session.project || get().currentProjectPath;
-    window.electronAPI.configSetSessionTabLink?.(sessionId, termId, projectForLink);
     // cd to the session's project before resume. claude --resume assumes the
     // cwd matches where the session was originally run. Resuming session for
     // /x/projectA from a terminal in /x/projectB gave Claude the wrong file
@@ -565,6 +561,10 @@ export const useStore = create((set, get) => ({
       }
       return;
     }
+    // Tier 1 capture: link session to the tab AFTER validation so an aborted
+    // resume never persists a bad session-tab link. Codex v1.0.35 P2.
+    const projectForLink = projectPath || get().currentProjectPath;
+    window.electronAPI.configSetSessionTabLink?.(sessionId, termId, projectForLink);
     const chars = cmd.split('');
     chars.push('\r');
     let i = 0;
