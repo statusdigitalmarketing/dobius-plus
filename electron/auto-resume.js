@@ -101,9 +101,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   const RUNNING_AT_QUIT_SLACK_MS = 20 * 60 * 1000;
   const cfgAll = loadConfig();
   const lastQuitAt = typeof cfgAll.lastQuitAt === 'number' ? cfgAll.lastQuitAt : 0;
-  // Reference point: prefer lastQuitAt; on crash (missing/ancient) fall back
-  // to "now" so the slack window still measures recency of the link itself.
-  const referenceTs = lastQuitAt > 0 ? lastQuitAt : Date.now();
+  const now = Date.now();
   const tabMap = getSessionTabMap() || {};
   const tabToBest = new Map();
   let skippedStale = 0;
@@ -111,7 +109,13 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     if (!entry?.tabId || !entry?.projectPath) continue;
     if (!entry.tabId.startsWith(`term-${entry.projectPath}-`)) { skippedStale += 1; continue; }
     const ranAt = typeof entry.lastRunningAt === 'number' ? entry.lastRunningAt : 0;
-    if (!ranAt || Math.abs(referenceTs - ranAt) > RUNNING_AT_QUIT_SLACK_MS) {
+    // Fresh if the session was running near the last CLEAN quit, OR near
+    // "now" (covers a crash: lastQuitAt is stale from an older clean quit,
+    // but the Tier-2 stamp kept updating until the crash, so a quick
+    // relaunch still sees a recent lastRunningAt). Codex v1.0.35 r1 P2.
+    const freshVsQuit = lastQuitAt > 0 && Math.abs(lastQuitAt - ranAt) <= RUNNING_AT_QUIT_SLACK_MS;
+    const freshVsNow = (now - ranAt) <= RUNNING_AT_QUIT_SLACK_MS;
+    if (!ranAt || (!freshVsQuit && !freshVsNow)) {
       skippedStale += 1;
       continue;
     }
