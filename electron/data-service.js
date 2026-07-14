@@ -614,10 +614,19 @@ export async function loadTranscript(sessionId, projectPath) {
     // match, so a stale/wrong projectPath could show a transcript from a
     // completely different project (Codex v1.0.35 P1, same class as the
     // deleteSession fix in v1.0.33).
-    const encodings = [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)];
+    // Third candidate: the stripped-leading-dash form this function's old
+    // naive encoder produced. No such dir exists on any known machine
+    // (Claude CLI always writes leading-dash), but probing it is free and
+    // closes the theoretical gap Codex flagged when the global fallback
+    // was removed. Codex v1.0.35 r4 P2.
+    const encodings = [
+      encodePathLikeClaude(projectPath),
+      encodePathLikeClaudeLegacy(projectPath),
+      projectPath.replace(/\//g, '-').replace(/^-/, ''),
+    ];
     const seen = new Set();
     for (const enc of encodings) {
-      if (seen.has(enc)) continue;
+      if (!enc || seen.has(enc)) continue;
       seen.add(enc);
       const p = path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`);
       if (await pathExists(p)) return parseTranscriptFile(p);
