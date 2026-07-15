@@ -230,18 +230,39 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
 
     // v1.0.28 copy-on-select: when the user finishes a selection (mouseup),
     // auto-copy it to clipboard. xterm doesn't have a built-in copyOnSelect
-    // flag — onSelectionChange fires per-frame during drag which would spam
+    // flag; onSelectionChange fires per-frame during drag which would spam
     // the clipboard. mouseup fires once at the end which is the right time.
-    // Capture the container node in a local — containerRef.current can
+    // Capture the container node in a local; containerRef.current can
     // change between this effect and cleanup if the host element remounts,
     // leaving a stale listener attached. Codex v1.0.28 round-1 LOW.
+    //
+    // v1.0.36 fix (Brett's "Issue with Copying"): the original handler wrote
+    // the clipboard on ANY mouseup with a non-empty selection, so a bare
+    // click in a terminal that still had a stale selection re-copied that old
+    // terminal text over whatever the user had just copied in another app
+    // (symptom 1), and a lingering Claude TUI border (a run of U+2500) got
+    // pasted into Adobe as "a long horizontal line" (symptom 2). Fix: only
+    // copy when THIS gesture actually produced/changed the selection, skip
+    // pure box-drawing/whitespace selections, and require window focus.
     const mouseUpNode = containerRef.current;
+    // Snapshot the selection at mousedown so mouseup can tell a genuine new
+    // drag/double/triple-click selection from a bare click on a stale one.
+    let selectionAtDown = '';
+    const onMouseDown = () => { selectionAtDown = term.getSelection() || ''; };
+    // A selection made entirely of box-drawing glyphs (U+2500..U+257F) and
+    // whitespace is a TUI border, never something a user means to copy.
+    const isBorderOnly = (s) => !/[^─-╿\s]/.test(s);
     const onMouseUp = () => {
       const sel = term.getSelection();
-      if (sel && sel.trim()) {
-        navigator.clipboard?.writeText(sel).catch(() => { /* clipboard denied or unavailable */ });
-      }
+      if (!sel || !sel.trim()) return;              // empty / cleared: skip
+      if (sel === selectionAtDown) return;          // stale, not made now: skip
+      if (isBorderOnly(sel)) return;                // pure TUI border: skip
+      if (typeof document !== 'undefined' && !document.hasFocus()) return; // background window click-through: skip
+      navigator.clipboard?.writeText(sel).catch((err) => {
+        console.debug('[copy-on-select] clipboard write failed:', err?.message || err);
+      });
     };
+    mouseUpNode.addEventListener('mousedown', onMouseDown);
     mouseUpNode.addEventListener('mouseup', onMouseUp);
 
     return () => {
@@ -250,6 +271,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
       clearInterval(autoSaveInterval);
       clearTimeout(resizeTimer);
       observer.disconnect();
+      mouseUpNode?.removeEventListener('mousedown', onMouseDown);
       mouseUpNode?.removeEventListener('mouseup', onMouseUp);
       saveState();
       inputDisposable.dispose();
