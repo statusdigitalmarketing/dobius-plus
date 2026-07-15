@@ -242,27 +242,45 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
     // terminal text over whatever the user had just copied in another app
     // (symptom 1), and a lingering Claude TUI border (a run of U+2500) got
     // pasted into Adobe as "a long horizontal line" (symptom 2). Fix: only
-    // copy when THIS gesture actually produced/changed the selection, skip
-    // pure box-drawing/whitespace selections, and require window focus.
+    // copy when THIS mouse cycle was an actual SELECTION GESTURE (a drag, or
+    // a double/triple-click), skip pure box-drawing/whitespace selections,
+    // and require window focus.
+    //
+    // We detect the gesture rather than compare selection strings (Codex
+    // v1.0.36 r1): a string compare wrongly suppressed deliberately
+    // re-selecting the same text. `dragged` = the mouse moved past a small
+    // threshold while the button was down; e.detail >= 2 on mouseup means a
+    // double/triple-click. A bare single click that happens to leave a stale
+    // selection intact is neither, so it no-ops.
     const mouseUpNode = containerRef.current;
-    // Snapshot the selection at mousedown so mouseup can tell a genuine new
-    // drag/double/triple-click selection from a bare click on a stale one.
-    let selectionAtDown = '';
-    const onMouseDown = () => { selectionAtDown = term.getSelection() || ''; };
+    let dragged = false;
+    let downX = 0;
+    let downY = 0;
+    const DRAG_THRESHOLD_PX = 3;
+    const onMouseDown = (e) => { dragged = false; downX = e.clientX; downY = e.clientY; };
+    const onMouseMove = (e) => {
+      if (dragged) return;
+      if (Math.abs(e.clientX - downX) > DRAG_THRESHOLD_PX || Math.abs(e.clientY - downY) > DRAG_THRESHOLD_PX) {
+        dragged = true;
+      }
+    };
     // A selection made entirely of box-drawing glyphs (U+2500..U+257F) and
     // whitespace is a TUI border, never something a user means to copy.
     const isBorderOnly = (s) => !/[^─-╿\s]/.test(s);
-    const onMouseUp = () => {
+    const onMouseUp = (e) => {
+      const gesture = dragged || e.detail >= 2; // real drag OR double/triple-click
+      dragged = false;
+      if (!gesture) return;                          // bare click on stale selection: skip
       const sel = term.getSelection();
-      if (!sel || !sel.trim()) return;              // empty / cleared: skip
-      if (sel === selectionAtDown) return;          // stale, not made now: skip
-      if (isBorderOnly(sel)) return;                // pure TUI border: skip
+      if (!sel || !sel.trim()) return;               // empty / cleared: skip
+      if (isBorderOnly(sel)) return;                 // pure TUI border: skip
       if (typeof document !== 'undefined' && !document.hasFocus()) return; // background window click-through: skip
       navigator.clipboard?.writeText(sel).catch((err) => {
         console.debug('[copy-on-select] clipboard write failed:', err?.message || err);
       });
     };
     mouseUpNode.addEventListener('mousedown', onMouseDown);
+    mouseUpNode.addEventListener('mousemove', onMouseMove);
     mouseUpNode.addEventListener('mouseup', onMouseUp);
 
     return () => {
@@ -272,6 +290,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, maxScrollbackLines 
       clearTimeout(resizeTimer);
       observer.disconnect();
       mouseUpNode?.removeEventListener('mousedown', onMouseDown);
+      mouseUpNode?.removeEventListener('mousemove', onMouseMove);
       mouseUpNode?.removeEventListener('mouseup', onMouseUp);
       saveState();
       inputDisposable.dispose();
