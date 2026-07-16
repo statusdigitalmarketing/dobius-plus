@@ -2330,7 +2330,19 @@ app.on('before-quit', (e) => {
           // Codex v1.0.39 r1 P2.
           const info = await getTerminalClaudeInfo(t.id);
           const claudeAlive = !!info;
-          const running = info?.sessionId || null;
+          let running = info?.sessionId || null;
+          // Resolve FRESH sessions here too, exactly like the periodic tick.
+          // Without this, a tab mapped to A that starts a bare `claude` (B)
+          // and quits before the next 15s tick would leave A's stamp fresh
+          // and auto-resume would reopen A instead of B. Codex v1.0.39 r3 P2.
+          if (claudeAlive && !running && info.startedAt) {
+            const cwdQ = await getTerminalCwd(t.id);
+            if (cwdQ) {
+              const claimedByOthers = new Set(tabToSid.values());
+              if (sid) claimedByOthers.delete(sid);
+              running = await resolveFreshSessionId(cwdQ, info.startedAt, claimedByOthers);
+            }
+          }
           if (reconcileAborted) return;
           if (sid && !claudeAlive) {
             // Mapped but no claude running: stopped before quit, don't resurrect.

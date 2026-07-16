@@ -277,6 +277,30 @@ export async function getTerminalProcessArgv(id) {
 }
 
 /**
+ * Is this command line ACTUALLY the claude CLI, as opposed to some unrelated
+ * process that merely mentions the word?
+ *
+ * The old check was /\bclaude\b/ against the whole line, so `vim
+ * claude-notes.md` or `tail -f claude.log` in a tab counted as a live Claude.
+ * At quit that made the reconcile see claudeAlive and skip clearing a stopped
+ * session's freshness stamp, so auto-resume would resurrect it.
+ * Codex v1.0.39 r3 P2.
+ *
+ * Only argv[0] decides. Accepts `claude`, an absolute path ending in
+ * `/claude`, and the versioned binary the CLI re-execs as
+ * (~/.local/share/claude/versions/<v>), which is how it appears in ps on this
+ * machine.
+ */
+function isClaudeCommand(command) {
+  if (!command) return false;
+  const argv0 = command.trim().split(/\s+/)[0] || '';
+  if (!argv0) return false;
+  const base = argv0.split('/').pop();
+  if (base === 'claude') return true;
+  return /[/\\]claude[/\\]versions[/\\][^/\\]+$/.test(argv0);
+}
+
+/**
  * Inspect the claude process (if any) running inside a terminal.
  * Returns { sessionId, startedAt } where:
  *   - sessionId: the id from `--resume <id>` / `-r <id>`, else null
@@ -309,14 +333,14 @@ export async function getTerminalClaudeInfo(id) {
       });
       const line = psOut.trim();
       if (!line) continue;
-      // Only care about claude processes. `lstart` is a fixed 24-char date
-      // ("Wed Jul 15 21:49:26 2026"), the rest is the command.
-      if (!/\bclaude\b/.test(line)) continue;
+      // `lstart` is a fixed 24-char date ("Wed Jul 15 21:49:26 2026"), the
+      // rest is the command.
       const lstart = line.slice(0, 24);
       const command = line.slice(24).trim();
+      if (!isClaudeCommand(command)) continue;
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
-      const m = command.match(/\bclaude\b.*?\s(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
+      const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
       return { sessionId: m ? m[1] : null, startedAt };
     }
     return null;
