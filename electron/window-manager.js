@@ -160,6 +160,7 @@ export function openProjectWindow(projectPath) {
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
     backgroundColor: '#0D1117',
+    acceptFirstMouse: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -219,6 +220,7 @@ export function openTornOffWindow(projectPath, tabId, tabLabel, screenX, screenY
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
     backgroundColor: '#0D1117',
+    acceptFirstMouse: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -245,6 +247,80 @@ export function openTornOffWindow(projectPath, tabId, tabLabel, screenX, screenY
 
   setupWindowEvents(win, projectPath, { isTearOff: true, tearOffTabId: tabId });
   return win;
+}
+
+/** Single Visual preview window (phone-shaped, its own window so it never covers the terminal). */
+let visualWindow = null;
+let visualWindowProject = null;
+
+function visualUrl(win, projectPath) {
+  const isDev = !app.isPackaged;
+  const encodedProject = encodeURIComponent(projectPath);
+  if (isDev) {
+    win.loadURL(`http://localhost:5173?project=${encodedProject}&visual=1`);
+  } else {
+    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
+      query: { project: projectPath, visual: '1' },
+    });
+  }
+}
+
+/**
+ * Open (or focus) the Visual preview window for a project. If a window is
+ * already open for a DIFFERENT project, reload it to the requested project
+ * (instead of silently showing the previous project).
+ * @param {string} projectPath
+ * @returns {BrowserWindow}
+ */
+export function openVisualWindow(projectPath) {
+  if (visualWindow && !visualWindow.isDestroyed()) {
+    if (visualWindowProject !== projectPath) {
+      visualWindowProject = projectPath;
+      visualUrl(visualWindow, projectPath);
+      visualWindow.setTitle(`Visual — ${path.basename(projectPath)}`);
+    }
+    visualWindow.focus();
+    return visualWindow;
+  }
+
+  const folderName = path.basename(projectPath);
+
+  // Phone-shaped: 375 viewport + 8px bezel each side + panel padding, plus header/footer chrome.
+  const win = new BrowserWindow({
+    width: 431,
+    height: 880,
+    minWidth: 431,
+    minHeight: 560,
+    title: `Visual — ${folderName}`,
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 12, y: 12 },
+    backgroundColor: '#0D1117',
+    acceptFirstMouse: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: true,
+    },
+  });
+
+  visualUrl(win, projectPath);
+
+  win.on('closed', () => { visualWindow = null; visualWindowProject = null; });
+  visualWindow = win;
+  visualWindowProject = projectPath;
+  return win;
+}
+
+export function getVisualWindow() {
+  return (visualWindow && !visualWindow.isDestroyed()) ? visualWindow : null;
+}
+
+/** Destroy the Visual window if open (used on quit so its server can be torn down). */
+export function closeVisualWindow() {
+  if (visualWindow && !visualWindow.isDestroyed()) visualWindow.destroy();
+  visualWindow = null;
+  visualWindowProject = null;
 }
 
 /**

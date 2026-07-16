@@ -2,13 +2,26 @@ import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../../store/store';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const ALLOWED_MODELS = ['claude-opus-4-6', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'];
+const ALLOWED_MODELS = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
 
 const MODEL_LABELS = {
-  'claude-opus-4-6': 'Opus',
-  'claude-sonnet-4-5-20250929': 'Sonnet',
+  'claude-opus-4-8': 'Opus',
+  'claude-sonnet-4-6': 'Sonnet',
   'claude-haiku-4-5-20251001': 'Haiku',
 };
+
+// Poll the real OS process list instead of guessing with a fixed delay —
+// works no matter what the TUI draws on screen, since it checks reality,
+// not terminal output.
+async function waitForClaudeProcess(tabId, { intervalMs = 250, timeoutMs = 10000 } = {}) {
+  if (!window.electronAPI?.terminalGetProcess) return true;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await window.electronAPI.terminalGetProcess(tabId)) === 'claude') return true;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return false;
+}
 
 export default function OrchestratorView() {
   const activeOrchestration = useStore((s) => s.activeOrchestration);
@@ -51,9 +64,6 @@ function TaskInput() {
   const [history, setHistory] = useState([]);
 
   const setActiveOrchestration = useStore((s) => s.setActiveOrchestration);
-  const addTab = useStore((s) => s.addTab);
-  const removeTab = useStore((s) => s.removeTab);
-  const currentProjectPath = useStore((s) => s.currentProjectPath);
 
   // Load agents
   useEffect(() => {
@@ -104,74 +114,14 @@ Respond with ONLY valid JSON (no markdown, no explanation):
   ]
 }`;
 
-      // Write system prompt to temp file
-      const promptPath = await window.electronAPI.agentsWriteTempPrompt(systemPrompt);
-      if (!promptPath || !promptPath.startsWith('/') || /[\n\r]/.test(promptPath)) throw new Error('Failed to write decomposition prompt');
-
-      // Write user description to temp file (avoids shell injection via -p flag)
-      const descPath = await window.electronAPI.agentsWriteTempPrompt(description.trim());
-      if (!descPath || !descPath.startsWith('/') || /[\n\r]/.test(descPath)) throw new Error('Failed to write task description');
-
-      // Create a temp tab for decomposition
-      const tab = addTab(currentProjectPath);
-      const tabId = tab.id;
-
-      // Collect output from the temp tab
-      let output = '';
-      let removeDataListener = null;
-      let removeExitListener = null;
-
-      try {
-        removeDataListener = window.electronAPI.onTerminalData((id, data) => {
-          if (id === tabId && output.length < 100000) {
-            output += data;
-            if (output.length > 100000) output = output.slice(-100000);
-          }
-        });
-
-        // Launch non-interactive claude — pipe description from file to avoid shell injection
-        const safePromptPath = promptPath.replace(/'/g, "'\\''");
-        const safeDescPath = descPath.replace(/'/g, "'\\''");
-        const cmd = `cat '${safeDescPath}' | claude -p - --model claude-haiku-4-5-20251001 --system-prompt-file '${safePromptPath}'\r`;
-
-        // Write command char-by-char with 5ms delay
-        const chars = cmd.split('');
-        for (let i = 0; i < chars.length; i++) {
-          window.electronAPI.terminalWrite(tabId, chars[i]);
-          if (i < chars.length - 1) await new Promise((r) => setTimeout(r, 5));
-        }
-
-        // Wait for completion (poll for terminal exit)
-        const exitCode = await new Promise((resolve) => {
-          let resolved = false;
-          removeExitListener = window.electronAPI.onTerminalExit((id, code) => {
-            if (id === tabId && !resolved) {
-              resolved = true;
-              resolve(code);
-            }
-          });
-          // Timeout after 60s
-          setTimeout(() => {
-            if (!resolved) {
-              resolved = true;
-              resolve(-1);
-            }
-          }, 60000);
-        });
-
-        if (exitCode !== 0 && exitCode !== null) {
-          throw new Error(`Decomposition agent exited with code ${exitCode}`);
-        }
-      } finally {
-        // Always clean up listeners and temp tab
-        removeDataListener?.();
-        removeExitListener?.();
-        if (window.electronAPI) window.electronAPI.terminalKill(tabId);
-        removeTab(tabId);
-      }
+      // Run decomposition directly in main process — no PTY, reliable exit codes
+      const rawOutput = await window.electronAPI.orchestrationDecompose({
+        systemPrompt,
+        userPrompt: description.trim(),
+      });
 
       // Parse JSON from output — find the first { ... } block
-      const jsonMatch = output.match(/\{[\s\S]*"subtasks"[\s\S]*\}/);
+      const jsonMatch = rawOutput.match(/\{[\s\S]*"subtasks"[\s\S]*\}/);
       if (!jsonMatch) throw new Error('Failed to parse decomposition response');
 
       const parsed = JSON.parse(jsonMatch[0]);
@@ -217,7 +167,7 @@ Respond with ONLY valid JSON (no markdown, no explanation):
     } finally {
       setDecomposing(false);
     }
-  }, [description, selectedAgents, agents, addTab, removeTab, currentProjectPath, setActiveOrchestration]);
+  }, [description, selectedAgents, agents, setActiveOrchestration]);
 
   const handleLoadRun = useCallback(async (run) => {
     setActiveOrchestration(run);
@@ -358,7 +308,7 @@ Respond with ONLY valid JSON (no markdown, no explanation):
               transition: 'all 150ms',
             }}
           >
-            {decomposing ? 'Decomposing...' : 'Decompose & Launch'}
+            {decomposing ? 'Decomposing...' : 'Decompose'}
           </button>
           {decomposing && (
             <span className="text-xs" style={{ color: 'var(--dim)', fontSize: 10 }}>
@@ -472,6 +422,7 @@ function OrchestrationProgress() {
   const setActiveView = useStore((s) => s.setActiveView);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const setDashboardTab = useStore((s) => s.setDashboardTab);
+  const tabStatus = useStore((s) => s.tabStatus);
   const [agents, setAgents] = useState([]);
   const [agentMemories, setAgentMemories] = useState({});
   const [launching, setLaunching] = useState(false);
@@ -482,6 +433,43 @@ function OrchestrationProgress() {
     if (!window.electronAPI?.agentsList) return;
     window.electronAPI.agentsList().then((list) => setAgents(list || []));
   }, []);
+
+  // A subtask's tab going 'done' is driven by Claude Code's own Stop/idle
+  // hooks (see useTerminal.js) — real signal, not a guess. When it fires for
+  // a still-"running" subtask, read back the result file the agent was told
+  // to write after verifying its own work. No file (or a bad one) means the
+  // agent went idle without finishing verification — that's a failure, not
+  // an assumed success.
+  useEffect(() => {
+    if (!activeOrchestration || !window.electronAPI?.orchestrationReadResult) return;
+    const running = activeOrchestration.subtasks.filter((st) => st.status === 'running' && st.tabId);
+    running.forEach(async (st) => {
+      if (tabStatus[st.tabId] !== 'done') return;
+      const result = await window.electronAPI.orchestrationReadResult(activeOrchestration.id, st.id);
+      const current = useStore.getState().activeOrchestration;
+      if (!current || current.id !== activeOrchestration.id) return;
+      const completedAt = Date.now();
+      const subtasks = current.subtasks.map((task) => task.id === st.id ? {
+        ...task,
+        status: result?.status === 'completed' ? 'completed' : 'failed',
+        exitCode: result?.status === 'completed' ? 0 : 1,
+        outputSummary: result?.summary || 'Agent went idle without writing a verified result — treated as incomplete.',
+        completedAt,
+      } : task);
+      const allDone = subtasks.every((task) => task.status === 'completed' || task.status === 'failed');
+      const failedCount = subtasks.filter((task) => task.status === 'failed').length;
+      const nextRun = {
+        ...current,
+        subtasks,
+        ...(allDone ? {
+          status: failedCount === 0 ? 'completed' : 'failed',
+          completedAt,
+        } : {}),
+      };
+      setActiveOrchestration(nextRun);
+      window.electronAPI.orchestrationSave(nextRun).catch(() => {});
+    });
+  }, [tabStatus, activeOrchestration, setActiveOrchestration, updateSubtaskStatus]);
 
   useEffect(() => {
     if (!window.electronAPI?.agentMemoryGet || agents.length === 0) return;
@@ -507,6 +495,8 @@ function OrchestrationProgress() {
     const agent = agents.find((a) => a.id === subtask.agentId);
     if (!agent || !window.electronAPI?.agentsWriteTempPrompt) return;
 
+    const resultPath = await window.electronAPI.orchestrationResultPath?.(activeOrchestration.id, subtask.id);
+
     // Build enhanced system prompt
     let prompt = agent.systemPrompt;
     const mem = agentMemories[agent.id];
@@ -521,8 +511,17 @@ function OrchestrationProgress() {
       if (maxMemory > 100) prompt += memorySection.slice(0, maxMemory);
     }
 
+    // Skill-check comes before the task itself, not after — models weight
+    // early instructions more heavily, and a check buried at the end of a
+    // long prompt is a check that gets skipped.
+    prompt += `\n\n---\n## Before anything else\nCheck your installed skills (the Skill tool) for one that matches the task below before you improvise an approach. If one fits, use it. If none does, say so explicitly, then proceed on your own.\n`;
+
     // Append orchestrator task context
     prompt += `\n\n---\n## Orchestrated Task\nYou are working as part of an orchestrated team. Your specific assignment:\n\n**${subtask.title}**\n${subtask.description}\n\nOverall goal: ${description}\n`;
+
+    if (resultPath) {
+      prompt += `\n\n---\n## Before you report done\n1. Finish the assignment above.\n2. Review your own diff/output for mistakes, like a second reviewer would.\n3. Actually verify it: run this project's real build/test command (or the ship-test skill if this touches something deployed). Don't rely on your own claim — let a real exit code decide.\n4. Only after verification passes or definitively fails, write your result to exactly this path (nowhere else):\n${resultPath}\nContent: {"status": "completed", "summary": "<1-3 sentences on what you did>"} if it passed, or {"status": "failed", "summary": "<what broke>"} if it didn't.\n5. Do not just say "done" in chat — write that file. Dobius+ only checks the file, never your messages.\n`;
+    }
 
     const promptPath = await window.electronAPI.agentsWriteTempPrompt(prompt);
     if (!promptPath || !promptPath.startsWith('/') || /[\n\r]/.test(promptPath)) return;
@@ -550,6 +549,21 @@ function OrchestrationProgress() {
       for (let i = 0; i < chars.length; i++) {
         window.electronAPI.terminalWrite(tab.id, chars[i]);
         if (i < chars.length - 1) await new Promise((r) => setTimeout(r, 5));
+      }
+
+      // Real readiness check instead of trusting the typed command landed —
+      // confirm claude is actually alive in this tab, or mark the subtask
+      // failed instead of leaving it stuck at "running" with nothing behind it.
+      const ready = await waitForClaudeProcess(tab.id);
+      if (!ready) {
+        updateSubtaskStatus(subtask.id, {
+          status: 'failed',
+          exitCode: 1,
+          outputSummary: 'claude did not start in this tab within 10s',
+          completedAt: Date.now(),
+        });
+        const stuckRun = useStore.getState().activeOrchestration;
+        if (stuckRun) window.electronAPI.orchestrationSave(stuckRun).catch(() => {});
       }
     }, 500);
   };

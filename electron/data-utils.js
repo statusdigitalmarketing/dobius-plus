@@ -10,6 +10,7 @@ export const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
 export const MCP_BRIDGE_CONFIG = path.join(CLAUDE_DIR, 'mcp-bridge.json');
 export const PLANS_DIR = path.join(CLAUDE_DIR, 'plans');
 export const SKILLS_DIR = path.join(CLAUDE_DIR, 'skills');
+export const PLUGINS_DIR = path.join(CLAUDE_DIR, 'plugins');
 export const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 
 // Hard cap on bytes read when only a tail of a JSONL file is requested.

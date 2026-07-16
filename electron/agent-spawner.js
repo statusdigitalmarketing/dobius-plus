@@ -23,7 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { app } from 'electron';
-import { createTerminal, writeTerminal, listTerminals } from './terminal-manager.js';
+import { createTerminal, writeTerminal, listTerminals, waitForProcess } from './terminal-manager.js';
 import { askSam } from './conversation-router.js';
 import { getProjectConfig, setProjectConfig } from './config-manager.js';
 
@@ -143,18 +143,25 @@ export async function spawnAgent({ projectPath, agentId, initialPrompt, builtinA
     modelFlag = ` --model ${resolved}`;
   }
   const cmd = `claude --system-prompt-file '${safePromptPath}'${modelFlag}\r`;
-  setTimeout(() => {
-    writeTerminal(tabId, cmd);
-    // If the spawner was given an initialPrompt, send it as the agent's
-    // first input AFTER claude boots (give it ~3s — Claude TUI takes a
-    // beat to be ready for input).
-    if (initialPrompt && typeof initialPrompt === 'string' && initialPrompt.trim()) {
-      setTimeout(() => {
-        writeTerminal(tabId, initialPrompt.trim());
-        writeTerminal(tabId, '\r');
-      }, 3000);
-    }
-  }, 800);
+  // Brief settle so the shell prompt is ready before we type into it.
+  await new Promise((r) => setTimeout(r, 800));
+  writeTerminal(tabId, cmd);
+
+  // Real readiness check instead of a blind delay: confirm claude is
+  // actually alive under this tab before handing it work. Catches a launch
+  // that silently failed (bad path, crash) instead of typing into a dead shell.
+  const ready = await waitForProcess(tabId, 'claude', { timeoutMs: 10000 });
+  if (!ready) {
+    throw new Error(`spawn failed: claude did not start in tab ${tabId} within 10s`);
+  }
+
+  if (initialPrompt && typeof initialPrompt === 'string' && initialPrompt.trim()) {
+    // Short settle after the process appears — the TUI still needs a beat
+    // to finish its first render before it can take input.
+    await new Promise((r) => setTimeout(r, 500));
+    writeTerminal(tabId, initialPrompt.trim());
+    writeTerminal(tabId, '\r');
+  }
 
   return { tabId, agentName: agent.name };
 }

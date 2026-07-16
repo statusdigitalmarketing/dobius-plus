@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import ProjectCard from './ProjectCard';
+import ProjectContextMenu from './ProjectContextMenu';
 import QuitOverlay from '../shared/QuitOverlay';
 
 const FILTERS = [
@@ -21,6 +22,10 @@ export default function ProjectList() {
   const [loading, setLoading] = useState(true);
   const [searchFocused, setSearchFocused] = useState(false);
   const searchInputRef = useRef(null);
+  const [contextMenu, setContextMenu] = useState(null); // { x, y, project }
+  const [renaming, setRenaming] = useState(null); // { project, value }
+  const [projectAccounts, setProjectAccounts] = useState({}); // projectPath → account
+  const renameInputRef = useRef(null);
 
   // Auto-focus the search input when the launcher opens, so typing goes straight
   // to the search without clicking. Fires on mount (first launch) AND on the
@@ -42,11 +47,27 @@ export default function ProjectList() {
       window.electronAPI.dataListProjects(),
       window.electronAPI.windowGetOpen(),
       window.electronAPI.configGetPinnedProjects?.() || [],
-    ]).then(([projectList, openList, pinned]) => {
+      window.electronAPI.accountsList?.() || [],
+    ]).then(([projectList, openList, pinned, accounts]) => {
       setProjects(projectList);
       setOpenProjects(openList);
       setPinnedPaths(pinned || []);
       setLoading(false);
+      // Pre-load account assignments for all projects
+      if (accounts?.length) {
+        Promise.all(
+          projectList.filter((p) => p.decodedPath).map(async (p) => {
+            const acct = await window.electronAPI.accountsGetForProject?.(p.decodedPath);
+            return [p.decodedPath, acct];
+          })
+        ).then((pairs) => {
+          const map = {};
+          for (const [path, acct] of pairs) {
+            if (acct) map[path] = acct;
+          }
+          setProjectAccounts(map);
+        });
+      }
     });
 
     const interval = setInterval(() => {
@@ -78,6 +99,32 @@ export default function ProjectList() {
     window.electronAPI.windowOpenProject(project.decodedPath);
     window.electronAPI.windowGetOpen().then(setOpenProjects);
   };
+
+  const handleContextMenu = useCallback((e, project) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, project });
+  }, []);
+
+  const handleRenameStart = useCallback((project) => {
+    setRenaming({ project, value: project.displayName });
+    setTimeout(() => renameInputRef.current?.select(), 50);
+  }, []);
+
+  const handleRenameCommit = useCallback(async () => {
+    if (!renaming) return;
+    const { project, value } = renaming;
+    setRenaming(null);
+    if (!value.trim() || !project.decodedPath) return;
+    await window.electronAPI?.projectSetDisplayName?.(project.decodedPath, value.trim());
+    window.electronAPI.dataListProjects().then(setProjects);
+  }, [renaming]);
+
+  const handleRemoveProject = useCallback(async (project) => {
+    if (!project.decodedPath) return;
+    await window.electronAPI?.projectRemoveFromList?.(project.decodedPath);
+    window.electronAPI.dataListProjects().then(setProjects);
+  }, []);
 
   const { pinned, unpinned } = useMemo(() => {
     const q = search.toLowerCase();
@@ -154,13 +201,15 @@ export default function ProjectList() {
 
   const renderCard = (project, index) => (
     <ProjectCard
-      key={project.encodedPath}
+      key={project.encodedPath || project.decodedPath}
       project={project}
       isOpen={openProjects.includes(project.decodedPath)}
       isPinned={pinnedPaths.includes(project.decodedPath)}
       onClick={() => handleOpenProject(project)}
       onTogglePin={() => handleTogglePin(project.decodedPath)}
+      onContextMenu={(e) => handleContextMenu(e, project)}
       index={index}
+      account={project.decodedPath ? projectAccounts[project.decodedPath] || null : null}
     />
   );
 
@@ -179,12 +228,38 @@ export default function ProjectList() {
         >
           Dobius+
         </h1>
-        <span
-          className="absolute right-5 text-xs no-drag"
-          style={{ color: 'var(--dim)' }}
-        >
-          {projects.length} project{projects.length !== 1 ? 's' : ''}
-        </span>
+        <div className="absolute right-5 flex items-center gap-3 no-drag">
+          <span className="text-xs" style={{ color: 'var(--dim)' }}>
+            {projects.length} project{projects.length !== 1 ? 's' : ''}
+          </span>
+          <button
+            onClick={() => window.electronAPI?.windowPickAndOpenProject?.().then((res) => {
+              if (res?.ok) window.electronAPI.windowGetOpen().then(setOpenProjects);
+            })}
+            title="Open a folder as a new project"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              padding: '4px 10px',
+              fontSize: 11,
+              fontFamily: "'SF Mono', monospace",
+              color: 'var(--bg)',
+              backgroundColor: 'var(--accent)',
+              border: 'none',
+              borderRadius: 6,
+              cursor: 'pointer',
+              fontWeight: 600,
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.opacity = '0.85'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path strokeLinecap="round" d="M12 5v14M5 12h14" />
+            </svg>
+            New Project
+          </button>
+        </div>
       </div>
 
       {/* Search + filters */}
@@ -308,6 +383,87 @@ export default function ProjectList() {
         )}
       </div>
       <QuitOverlay />
+
+      {/* Right-click context menu */}
+      {contextMenu && (
+        <ProjectContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          project={contextMenu.project}
+          isPinned={pinnedPaths.includes(contextMenu.project.decodedPath)}
+          isOpen={openProjects.includes(contextMenu.project.decodedPath)}
+          onClose={() => setContextMenu(null)}
+          onOpen={() => handleOpenProject(contextMenu.project)}
+          onRename={() => handleRenameStart(contextMenu.project)}
+          onTogglePin={() => handleTogglePin(contextMenu.project.decodedPath)}
+          onRemove={() => handleRemoveProject(contextMenu.project)}
+        />
+      )}
+
+      {/* Rename modal */}
+      {renaming && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 9998,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          onClick={() => setRenaming(null)}
+        >
+          <div
+            style={{
+              backgroundColor: 'var(--surface)',
+              border: '1px solid var(--border)',
+              borderRadius: 10,
+              padding: '20px 24px',
+              width: 340,
+              boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-sm font-semibold mb-1" style={{ color: 'var(--fg)' }}>
+              Rename Project
+            </div>
+            <div className="text-xs mb-3 truncate" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
+              {renaming.project.decodedPath}
+            </div>
+            <input
+              ref={renameInputRef}
+              type="text"
+              value={renaming.value}
+              onChange={(e) => setRenaming((r) => ({ ...r, value: e.target.value }))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleRenameCommit();
+                if (e.key === 'Escape') setRenaming(null);
+              }}
+              autoFocus
+              className="w-full px-3 py-2 text-sm rounded-lg outline-none"
+              style={{
+                backgroundColor: 'var(--bg)',
+                color: 'var(--fg)',
+                border: '1px solid var(--dim)',
+                fontFamily: "'SF Mono', monospace",
+              }}
+            />
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                onClick={() => setRenaming(null)}
+                className="px-3 py-1.5 text-xs rounded"
+                style={{ backgroundColor: 'var(--border)', color: 'var(--fg)', border: 'none', cursor: 'pointer', fontFamily: "'SF Mono', monospace" }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRenameCommit}
+                className="px-3 py-1.5 text-xs rounded"
+                style={{ backgroundColor: 'var(--accent)', color: 'var(--bg)', border: 'none', cursor: 'pointer', fontFamily: "'SF Mono', monospace", fontWeight: 600 }}
+              >
+                Rename
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,0 +1,71 @@
+.floating-phone-document,
+.floating-phone-document body,
+.floating-phone-document #root {
+  background: transparent;
+}
+
+.floating-phone-root {
+  -webkit-app-region: drag;
+  background: transparent;
+}
+
+.floating-phone-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+.floating-phone-bezel {
+  background: color-mix(in srgb, var(--foreground) 94%, var(--background));
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 42px;
+}
+
+.floating-phone-screen {
+  /* Why: the screen is device glass, not app chrome — always dark like a real
+   * phone regardless of app theme. Web mode's webview paints over it. */
+  background: #0a0a0a;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 30px;
+  overflow: hidden;
+}
+
+.floating-phone-webview {
+  background: #ffffff;
+  border: none;
+  display: flex;
+  height: 100%;
+  width: 100%;
+}
+
+.floating-phone-traffic-dot {
+  -webkit-app-region: no-drag;
+  border: none;
+  border-radius: 9999px;
+  cursor: pointer;
+  height: 12px;
+  padding: 0;
+  width: 12px;
+}
+
+.floating-phone-traffic-close {
+  background: #ff5f57;
+}
+
+.floating-phone-traffic-minimize {
+  background: #febc2e;
+}
+
+.floating-phone-traffic-zoom {
+  background: #28c840;
+}
+
+.floating-phone-traffic-dot:hover {
+  filter: brightness(0.9);
+}
+
+.floating-phone-side-button {
+  -webkit-app-region: no-drag;
+  background: color-mix(in srgb, var(--foreground) 88%, var(--background));
+  border: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+  position: absolute;
+  width: 9px;
+}

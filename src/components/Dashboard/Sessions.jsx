@@ -270,6 +270,7 @@ export default function Sessions() {
                         session={s}
                         tag={tag}
                         onTagsChanged={loadData}
+                        onDeleted={(id) => setSessions((prev) => prev.filter((p) => p.sessionId !== id))}
                       />
                     );
                   })}
@@ -285,12 +286,31 @@ export default function Sessions() {
 
 const TAG_COLOR_NAMES = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink'];
 
-function SessionCard({ session, tag, onTagsChanged }) {
+function SessionCard({ session, tag, onTagsChanged, onDeleted }) {
   const resumeSession = useStore((s) => s.resumeSession);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const [editing, setEditing] = useState(false);
   const [tagLabel, setTagLabel] = useState(tag?.label || '');
   const [tagColor, setTagColor] = useState(tag?.color || 'blue');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      // Auto-cancel confirm after 3s if user doesn't click again
+      setTimeout(() => setConfirmDelete(false), 3000);
+      return;
+    }
+    setDeleting(true);
+    try {
+      await window.electronAPI?.dataDeleteSession(session.sessionId, session.projectPath);
+      onDeleted?.(session.sessionId);
+    } catch {
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
+  };
 
   const isDifferentProject = currentProjectPath && session.projectPath !== currentProjectPath;
 
@@ -326,9 +346,14 @@ function SessionCard({ session, tag, onTagsChanged }) {
   return (
     <div
       className="px-3 py-2.5 rounded transition-colors duration-100"
-      style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
-      onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--dim)'}
-      onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border)'}
+      style={{
+        backgroundColor: 'var(--surface)',
+        border: `1px solid ${confirmDelete ? '#f85149' : 'var(--border)'}`,
+        opacity: deleting ? 0.4 : 1,
+        transition: 'opacity 0.2s, border-color 0.15s',
+      }}
+      onMouseEnter={(e) => { if (!confirmDelete) e.currentTarget.style.borderColor = 'var(--dim)'; }}
+      onMouseLeave={(e) => { if (!confirmDelete) e.currentTarget.style.borderColor = 'var(--border)'; }}
     >
       <div className="flex items-center gap-3">
         {/* Status dot — green = done, yellow = working, red = needs your response */}
@@ -352,7 +377,11 @@ function SessionCard({ session, tag, onTagsChanged }) {
 
         {/* Action buttons */}
         <div className="flex items-center gap-1 shrink-0">
-          <CardBtn label="Resume" onClick={() => resumeSession(session.sessionId)} accent />
+          <CardBtn
+            label="Resume"
+            onClick={() => resumeSession({ sessionId: session.sessionId, projectPath: session.projectPath })}
+            accent
+          />
           {isDifferentProject && (
             <CardBtn
               label="Open"
@@ -370,6 +399,36 @@ function SessionCard({ session, tag, onTagsChanged }) {
         >
           {session.sessionId.slice(0, 8)}
         </span>
+
+        {/* Delete X */}
+        <button
+          onClick={handleDelete}
+          title={confirmDelete ? 'Click again to confirm delete' : 'Delete session'}
+          className="shrink-0 flex items-center justify-center w-5 h-5 rounded transition-all duration-150"
+          style={{
+            color: confirmDelete ? '#f85149' : 'var(--dim)',
+            backgroundColor: confirmDelete ? 'rgba(248,81,73,0.12)' : 'transparent',
+            border: confirmDelete ? '1px solid rgba(248,81,73,0.4)' : '1px solid transparent',
+            fontSize: confirmDelete ? 9 : 11,
+            fontFamily: "'SF Mono', monospace",
+            cursor: 'pointer',
+            lineHeight: 1,
+          }}
+          onMouseEnter={(e) => {
+            if (!confirmDelete) {
+              e.currentTarget.style.color = '#f85149';
+              e.currentTarget.style.borderColor = 'rgba(248,81,73,0.3)';
+            }
+          }}
+          onMouseLeave={(e) => {
+            if (!confirmDelete) {
+              e.currentTarget.style.color = 'var(--dim)';
+              e.currentTarget.style.borderColor = 'transparent';
+            }
+          }}
+        >
+          {confirmDelete ? 'del?' : '×'}
+        </button>
       </div>
 
       {/* Inline tag editor */}

@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a problem with Dobius
+title: '[Bug]: '
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for Dobius bugs. Include enough detail for someone else to reproduce the issue.
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: dobius_version
+    attributes:
+      label: Dobius version
+      description: Include the exact Dobius version if you can. You can find it in `Dobius > About Dobius`.
+      placeholder: v0.14.2
+    validations:
+      required: false
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Describe the bug in your own words. Include a short summary, reproduction steps, and anything else that seems relevant.
+      placeholder: |
+        Short summary:
+        Dobius crashes when ...
+
+        What happened?
+
+        How can we reproduce it?
+        1. ...
+        2. ...
+        3. ...
+
+        Anything else that might help:
+    validations:
+      required: true

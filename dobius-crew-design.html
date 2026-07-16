@@ -1,0 +1,1432 @@
+<meta charset="utf-8">
+<title>Dobius+ Crew — Interactive Prototype</title>
+<style>
+  :root, :root[data-theme="light"], :root[data-theme="dark"] {
+    --canvas:#0f1012; --page:#17181b; --card:#1e2024; --card-2:#232529; --input:#131417;
+    --border:rgba(255,255,255,0.08); --border-strong:rgba(255,255,255,0.14);
+    --fg:#e9eaec; --fg-mid:#b9bcc2; --muted:#83878f; --faint:#5b5f66;
+    --ok:#62c073; --ok-dim:rgba(98,192,115,0.14);
+    --wait:#f0b44c; --wait-dim:rgba(240,180,76,0.13);
+    --err:#e0645c; --err-dim:rgba(224,100,92,0.12);
+    --pri:#e9eaec; --pri-fg:#131417;
+    --r:10px; --r-sm:6px; --r-lg:14px;
+    --sans:"Geist",-apple-system,"SF Pro Text","Segoe UI",sans-serif;
+    --mono:"Geist Mono",ui-monospace,"SF Mono","Cascadia Code",Menlo,monospace;
+    --text-scale:1; /* Aa control: 1 / 1.15 / 1.3 */
+  }
+  *{box-sizing:border-box;margin:0}
+  html{background:var(--canvas)}
+  body{font-family:var(--sans);color:var(--fg);background:var(--canvas);letter-spacing:0.01em;font-size:14px;line-height:1.5;padding:40px 20px 72px}
+  .wrap{max-width:1180px;margin:0 auto}
+  .ic{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+  .avatar{display:grid;place-items:center;border-radius:8px;background:var(--card-2);border:1px solid var(--border);color:var(--fg-mid)}
+  button{font-family:var(--sans)}
+
+  .kicker{font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;color:var(--muted)}
+  h1{font-size:26px;font-weight:650;letter-spacing:-0.015em;margin:6px 0 8px;text-wrap:balance}
+  .lede{color:var(--fg-mid);max-width:64ch}
+  .lede b{color:var(--fg);font-weight:600}
+  .intro{margin-bottom:28px}
+
+  .window{border:1px solid var(--border-strong);border-radius:var(--r-lg);background:var(--page);overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,0.5)}
+  .titlebar{display:flex;align-items:center;gap:14px;padding:10px 14px;border-bottom:1px solid var(--border);background:#1b1c1f}
+  .lights{display:flex;gap:7px}
+  .lights i{width:11px;height:11px;border-radius:50%;display:block}
+  .lights i:nth-child(1){background:#e0645c}.lights i:nth-child(2){background:#f0b44c}.lights i:nth-child(3){background:#62c073}
+  .titlebar .app-name{font-size:13px;font-weight:600}
+  .rollup{margin-left:auto;display:flex;align-items:center;gap:16px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .rollup b{color:var(--fg-mid);font-weight:600}
+  .pips{display:inline-flex;gap:3px;margin-left:5px;vertical-align:1px}
+  .pips i{width:6px;height:6px;border-radius:50%;background:var(--wait);display:block}
+  .pips i.spent{background:var(--faint)}
+  .rollup .hint{color:var(--faint)}
+
+  .layout{display:grid;grid-template-columns:240px 1fr;min-height:660px}
+  @media (max-width:900px){.layout{grid-template-columns:1fr}}
+
+  .roster{border-right:1px solid var(--border);background:#1b1c1f;padding:14px 10px;display:flex;flex-direction:column;gap:2px}
+  .sec-label{font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:var(--faint);padding:4px 8px 6px}
+  .member{display:grid;grid-template-columns:28px 1fr auto;align-items:center;column-gap:9px;padding:7px 8px;border-radius:var(--r-sm);cursor:pointer;border:1px solid transparent;background:none;text-align:left;width:100%;color:var(--fg)}
+  .member:hover{background:rgba(255,255,255,0.05)}
+  .member.sel{background:rgba(255,255,255,0.07);border-color:var(--border)}
+  .member .avatar{width:28px;height:28px}
+  .member .who{min-width:0}
+  .member .name{font-size:13px;font-weight:600}
+  .member .doing{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .member .doing code{font-family:var(--mono);font-size:10.5px;color:var(--fg-mid)}
+  .dot{width:8px;height:8px;border-radius:50%;justify-self:end}
+  .dot.ok{background:var(--ok)}
+  .dot.wait{background:var(--wait);animation:pulse 1.6s ease-in-out infinite}
+  .dot.sleep{background:transparent;border:1.5px solid var(--faint)}
+  .dot.idle{background:var(--faint)}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(240,180,76,0.5)}55%{box-shadow:0 0 0 6px rgba(240,180,76,0)}}
+  @media (prefers-reduced-motion:reduce){.dot.wait{animation:none}}
+  .member.waiting{background:var(--wait-dim);border-color:rgba(240,180,76,0.25)}
+  .member.waiting .doing{color:var(--wait);font-weight:500}
+  .new-member{margin:8px 6px 0;padding:7px 10px;border:1px dashed var(--border-strong);border-radius:var(--r-sm);background:none;color:var(--muted);font:500 12.5px var(--sans);cursor:pointer;text-align:left;display:flex;align-items:center;gap:7px}
+  .new-member:hover{color:var(--fg-mid);border-color:var(--faint)}
+  .new-member .ic{width:13px;height:13px}
+  .channels{margin-top:auto;padding-top:14px}
+  .chan{display:flex;align-items:center;gap:8px;padding:5px 8px;font-size:12px;color:var(--fg-mid)}
+  .chan .ic{width:13px;height:13px;color:var(--muted)}
+  .chan .meta{color:var(--faint);margin-left:auto;font-size:11px}
+  .chan .meta i{color:var(--ok);font-style:normal}
+
+  .main{padding:16px 18px 22px;display:flex;flex-direction:column;gap:14px;min-width:0}
+
+  .queue-head{display:flex;align-items:baseline;gap:10px;padding-bottom:8px}
+  .queue-head h2{font-size:13px;font-weight:650}
+  .badge{background:var(--wait);color:#1c1503;font-size:11px;font-weight:700;border-radius:999px;padding:1px 7px;font-variant-numeric:tabular-nums}
+  .badge.zero{background:var(--card-2);color:var(--faint)}
+  .queue-head .sub{font-size:12px;color:var(--faint)}
+  #queue{display:flex;flex-direction:column;gap:8px}
+  .queue-empty{border:1px dashed var(--border);border-radius:var(--r);padding:14px;text-align:center;font-size:12.5px;color:var(--faint)}
+  .ticket{border:1px solid rgba(240,180,76,0.3);background:var(--wait-dim);border-radius:var(--r);padding:11px 13px;display:flex;flex-direction:column;gap:9px;transition:opacity .35s,transform .35s}
+  .ticket.q{border-color:var(--border-strong);background:var(--card)}
+  .ticket.leaving{opacity:0;transform:translateX(24px)}
+  .t-row{display:flex;align-items:center;gap:9px;font-size:13px;flex-wrap:wrap}
+  .t-row .avatar{width:22px;height:22px;border-radius:6px}
+  .t-row .avatar .ic{width:12px;height:12px}
+  .t-row .agent{font-weight:650}
+  .t-row .verb{color:var(--fg-mid)}
+  .t-row .age{margin-left:auto;font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+  .cmd{font-family:var(--mono);font-size:calc(12px * var(--text-scale));color:var(--fg);background:var(--input);border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 10px;overflow-x:auto;white-space:pre}
+  .cmd .ctx{color:var(--faint)}
+  .cmd[contenteditable="true"]{box-shadow:0 0 0 1.5px var(--wait);outline:none}
+  .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .btn{font:600 12.5px var(--sans);border-radius:var(--r-sm);padding:5px 13px;cursor:pointer;border:1px solid transparent}
+  .btn.pri{background:var(--pri);color:var(--pri-fg)}
+  .btn.pri:hover{background:#fff}
+  .btn.ghost{background:none;border-color:var(--border-strong);color:var(--fg-mid)}
+  .btn.ghost:hover{background:rgba(255,255,255,0.05);color:var(--fg)}
+  .btn.deny{background:none;border-color:transparent;color:var(--err)}
+  .btn.deny:hover{background:var(--err-dim)}
+  .always{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);margin-left:auto;cursor:pointer}
+  .always input{accent-color:var(--wait)}
+  .always code{font-family:var(--mono);font-size:10.5px}
+  .inline-reply{display:flex;gap:8px}
+  .inline-reply input{flex:1;background:var(--input);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-family:var(--sans);font-size:calc(13px * var(--text-scale));padding:6px 10px}
+  .inline-reply input::placeholder{color:var(--faint)}
+  .inline-reply input:focus{outline:none;box-shadow:0 0 0 1.5px var(--border-strong)}
+
+  .detail{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);overflow:hidden}
+  .d-head{display:flex;align-items:flex-start;gap:13px;padding:14px 16px 12px}
+  .d-head .avatar{width:44px;height:44px;border-radius:12px}
+  .d-head .avatar .ic{width:22px;height:22px}
+  .d-id{min-width:0}
+  .d-id .d-name{font-size:16px;font-weight:650;letter-spacing:-0.01em;display:flex;align-items:center;gap:8px}
+  .d-id .d-soul{font-size:12.5px;color:var(--muted);max-width:52ch;border-radius:4px;padding:1px 4px;margin-left:-4px;outline:none}
+  .d-id .d-soul:hover{background:rgba(255,255,255,0.05);cursor:text}
+  .d-id .d-soul:focus{background:var(--input);box-shadow:0 0 0 1.5px var(--border-strong);color:var(--fg)}
+  .hint-click{cursor:pointer}
+  .hint-click:hover{color:var(--fg-mid)}
+  .edit-btn{display:inline-flex;align-items:center;gap:5px;background:none;border:1px solid var(--border-strong);color:var(--muted);font:500 11px var(--sans);border-radius:999px;padding:2px 9px;cursor:pointer}
+  .edit-btn:hover{color:var(--fg);border-color:var(--faint)}
+  .edit-btn .ic{width:11px;height:11px}
+  .d-chips{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+  .chip{font-size:11px;font-weight:500;color:var(--fg-mid);background:var(--card-2);border:1px solid var(--border);border-radius:999px;padding:2.5px 9px;white-space:nowrap}
+  .chip.mono{font-family:var(--mono);font-size:10.5px}
+  .tabs{display:flex;gap:2px;padding:0 12px;border-bottom:1px solid var(--border)}
+  .tab{font:500 12.5px var(--sans);color:var(--muted);padding:8px 11px 9px;border:none;background:none;cursor:pointer;position:relative}
+  .tab:hover{color:var(--fg-mid)}
+  .tab.on{color:var(--fg);font-weight:600}
+  .tab.on::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:2px;background:var(--fg);border-radius:2px}
+  .tab .mini{font-size:10px;color:var(--faint);margin-left:4px}
+  .tabpane{padding:14px 16px 16px;display:flex;flex-direction:column;gap:13px}
+
+  .waterfall{display:flex;flex-direction:column;gap:4px}
+  .wf-scale{display:flex;justify-content:space-between;font-size:10px;color:var(--faint);font-variant-numeric:tabular-nums;padding:0 1px 2px}
+  .wf-row{display:grid;grid-template-columns:108px 1fr;align-items:center;gap:10px}
+  .wf-row .wf-label{font-family:var(--mono);font-size:10.5px;color:var(--muted);text-align:right}
+  .wf-track{position:relative;height:14px;background:rgba(255,255,255,0.03);border-radius:3px}
+  .wf-bar{position:absolute;top:2px;bottom:2px;border-radius:3px;background:#3f4653}
+  .wf-bar.think{background:#34383f}
+  .wf-bar.live{background:var(--ok);opacity:0.75}
+  .wf-bar span{position:absolute;left:calc(100% + 6px);top:50%;transform:translateY(-50%);font-size:9.5px;color:var(--faint);white-space:nowrap}
+
+  .stream{display:flex;flex-direction:column;gap:8px;resize:vertical;overflow:auto;min-height:120px;padding:2px 6px 10px 2px;border-radius:var(--r-sm)}
+  .stream:hover{outline:1px dashed var(--border)}
+  .ev{font-size:calc(13px * var(--text-scale));color:var(--fg-mid);max-width:70ch}
+  .ev.sys{font-size:calc(11.5px * var(--text-scale));color:var(--faint);font-family:var(--mono)}
+  .ev.tool{font-family:var(--mono);font-size:calc(11.5px * var(--text-scale));color:var(--muted)}
+  .ev.tool b{color:var(--fg-mid);font-weight:500}
+  .ev.tool .live-mark{color:var(--ok)}
+  .result-card{border:1px solid var(--border-strong);background:var(--card-2);border-radius:var(--r);padding:11px 13px;display:flex;flex-direction:column;gap:7px}
+  .result-card .r-tag{font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--ok)}
+  .result-card p{font-size:calc(13px * var(--text-scale));color:var(--fg);max-width:68ch}
+  .metrics{display:flex;gap:14px;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;flex-wrap:wrap}
+  .metrics b{color:var(--fg-mid);font-weight:600}
+
+  .hist-row{display:grid;grid-template-columns:14px 1fr auto auto auto;gap:12px;align-items:center;padding:8px 4px;font-size:12.5px;border-bottom:1px solid var(--border);color:var(--fg-mid);font-variant-numeric:tabular-nums;cursor:pointer;border-radius:4px}
+  .hist-row:last-child{border-bottom:none}
+  .hist-row:hover{background:rgba(255,255,255,0.03)}
+  .hist-row .st{width:7px;height:7px;border-radius:50%}
+  .st.ok{background:var(--ok)}.st.err{background:var(--err)}.st.run{background:var(--wait)}
+  .hist-row .h-meta{color:var(--faint);font-size:11.5px}
+
+  /* memory tab */
+  .mem-file{font-family:var(--mono);font-size:11px;color:var(--faint);padding-bottom:4px}
+  .mem-line{font-size:calc(12.5px * var(--text-scale));color:var(--fg-mid);padding:3px 24px 3px 6px;max-width:60ch;border-radius:4px;position:relative;outline:none}
+  .mem-line::before{content:"– ";color:var(--faint)}
+  .mem-line:hover{background:rgba(255,255,255,0.05)}
+  .mem-line:hover::after{content:"✎";position:absolute;right:6px;top:3px;color:var(--faint);font-size:11px}
+  .mem-line:focus{background:var(--input);box-shadow:0 0 0 1.5px var(--border-strong)}
+  .mem-proposal{display:flex;align-items:center;gap:8px;background:var(--ok-dim);border-radius:6px;padding:4px 8px;max-width:64ch}
+  .mem-proposal .txt{font-size:12.5px;color:var(--ok);flex:1}
+  .mem-proposal .txt::before{content:"+ "}
+  .mem-proposal .btn{padding:2px 9px;font-size:11px}
+  .mem-add{background:none;border:1px dashed var(--border-strong);border-radius:6px;color:var(--faint);font:500 12px var(--sans);padding:5px 10px;cursor:pointer;align-self:flex-start}
+  .mem-add:hover{color:var(--fg-mid);border-color:var(--faint)}
+  .mem-note{font-size:11px;color:var(--faint)}
+
+  /* schedule tab */
+  .sched{display:grid;grid-template-columns:150px 1fr;gap:12px 16px;align-items:center;max-width:520px}
+  .sched label{font-size:12px;color:var(--muted)}
+  .sched select,.sched input[type="time"],.sched input[type="text"]{background:var(--input);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font:400 12.5px var(--sans);padding:6px 9px;width:100%}
+  .sched .row{display:flex;gap:8px;align-items:center}
+  .switch{position:relative;width:34px;height:19px;flex-shrink:0}
+  .switch input{opacity:0;width:0;height:0}
+  .switch .sl{position:absolute;inset:0;background:var(--card-2);border:1px solid var(--border-strong);border-radius:999px;cursor:pointer;transition:.2s}
+  .switch .sl::before{content:"";position:absolute;width:13px;height:13px;left:2px;top:2px;background:var(--muted);border-radius:50%;transition:.2s}
+  .switch input:checked + .sl{background:var(--ok-dim);border-color:var(--ok)}
+  .switch input:checked + .sl::before{transform:translateX(15px);background:var(--ok)}
+  .sched-note{grid-column:1/-1;font-size:11.5px;color:var(--faint);max-width:56ch}
+  .budget-val{font-family:var(--mono);font-size:11.5px;color:var(--fg-mid);min-width:44px;text-align:right}
+  input[type="range"]{accent-color:var(--wait);flex:1}
+
+  /* edit/create form */
+  .form{display:flex;flex-direction:column;gap:13px;max-width:560px}
+  .f-row{display:grid;grid-template-columns:110px 1fr;gap:12px;align-items:start}
+  .f-row > label{font-size:12px;color:var(--muted);padding-top:7px}
+  .f-row input[type="text"],.f-row textarea,.f-row select{background:var(--input);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-family:var(--sans);font-size:calc(13px * var(--text-scale));padding:7px 10px;width:100%}
+  .f-row textarea{resize:vertical;min-height:56px}
+  .f-row input:focus,.f-row textarea:focus,.f-row select:focus{outline:none;box-shadow:0 0 0 1.5px var(--border-strong)}
+  .icon-pick{display:flex;gap:6px;flex-wrap:wrap}
+  .icon-pick button{width:34px;height:34px;border-radius:8px;background:var(--card-2);border:1px solid var(--border);color:var(--fg-mid);display:grid;place-items:center;cursor:pointer}
+  .icon-pick button.on{border-color:var(--fg);color:var(--fg)}
+  .tool-pick{display:flex;gap:6px;flex-wrap:wrap}
+  .tool-pick .tp{font-size:11.5px;font-weight:500;color:var(--muted);background:var(--card-2);border:1px solid var(--border);border-radius:999px;padding:3px 11px;cursor:pointer}
+  .tool-pick .tp.on{color:var(--fg);border-color:var(--fg-mid)}
+  .tool-pick .tp.danger.on{color:var(--wait);border-color:var(--wait)}
+  .form .actions{padding-top:2px}
+  .bypass-warn{font-size:11.5px;color:var(--wait)}
+  .ftabs{display:flex;gap:5px;flex-wrap:wrap;padding-bottom:7px}
+  .ftab{font:500 11.5px var(--mono);color:var(--muted);background:var(--card-2);border:1px solid var(--border);border-radius:6px;padding:3px 10px;cursor:pointer}
+  .ftab:hover{color:var(--fg-mid)}
+  .ftab.on{color:var(--fg);border-color:var(--fg-mid);background:var(--input)}
+  .file-hint{font-size:11px;color:var(--faint);padding:0 1px 6px;max-width:56ch}
+  .file-ta{width:100%;min-height:150px;background:var(--input);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-family:var(--mono);font-size:calc(12px * var(--text-scale));line-height:1.6;padding:9px 11px;resize:vertical}
+  .file-ta:focus{outline:none;box-shadow:0 0 0 1.5px var(--border-strong)}
+  .crew-files{margin:6px 6px 0;padding:6px 10px;border:1px solid var(--border);border-radius:var(--r-sm);background:none;color:var(--muted);font:500 12px var(--sans);cursor:pointer;text-align:left;display:flex;align-items:center;gap:7px;width:calc(100% - 12px)}
+  .crew-files:hover{color:var(--fg-mid);border-color:var(--border-strong)}
+  .crew-files .ic{width:13px;height:13px}
+
+  /* panels */
+  .panels{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-top:26px}
+  @media (max-width:900px){.panels{grid-template-columns:1fr}}
+  .panel{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--page);overflow:hidden;display:flex;flex-direction:column}
+  .panel .p-head{padding:12px 14px 4px}
+  .panel .p-head .phase{float:right;font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--border);border-radius:4px;padding:1px 6px}
+  .panel h3{font-size:13.5px;font-weight:650}
+  .panel .p-sub{font-size:12px;color:var(--muted);padding:0 14px 10px;max-width:52ch}
+  .p-body{margin:0 12px 12px;border:1px solid var(--border);border-radius:var(--r);background:var(--card);padding:12px 13px;flex:1}
+  .brief-time{font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:var(--faint);padding-bottom:8px}
+  .brief-item{display:grid;grid-template-columns:22px 1fr;gap:8px;padding:5px 0;font-size:12.5px;color:var(--fg-mid);align-items:start}
+  .brief-item .avatar{width:18px;height:18px;border-radius:5px;margin-top:1px}
+  .brief-item .avatar .ic{width:10px;height:10px}
+  .brief-item b{color:var(--fg);font-weight:600}
+  .brief-foot{font-size:11px;color:var(--faint);padding-top:9px;border-top:1px solid var(--border);margin-top:9px;display:flex;align-items:center;gap:10px}
+  .brief-foot .btn{margin-left:auto;padding:3px 10px;font-size:11px}
+
+  .imsg{display:flex;flex-direction:column;gap:7px;min-height:150px}
+  .bubble{max-width:88%;padding:7px 12px;border-radius:16px;font-size:calc(12.5px * var(--text-scale));line-height:1.45}
+  .bubble.me{align-self:flex-end;background:#2f7cf6;color:#fff;border-bottom-right-radius:5px}
+  .bubble.crew{align-self:flex-start;background:#2a2c31;color:var(--fg);border-bottom-left-radius:5px}
+  .bubble.typing{color:var(--faint);letter-spacing:2px}
+  .imsg-send{display:flex;gap:8px;padding-top:9px}
+  .imsg-send input{flex:1;background:var(--input);border:1px solid var(--border);border-radius:999px;color:var(--fg);font-family:var(--sans);font-size:calc(12.5px * var(--text-scale));padding:6px 13px}
+  .imsg-send input:focus{outline:none;box-shadow:0 0 0 1.5px var(--border-strong)}
+  .imsg .guard{font-size:11px;color:var(--faint);padding-top:6px;max-width:48ch}
+
+  .notes{margin-top:30px;display:grid;grid-template-columns:repeat(2,1fr);gap:12px 26px}
+  @media (max-width:760px){.notes{grid-template-columns:1fr}}
+  .note h4{font-size:12.5px;font-weight:650;padding-bottom:3px}
+  .note h4 .phase{font-family:var(--mono);font-size:10px;color:var(--faint);border:1px solid var(--border);border-radius:4px;padding:1px 6px;margin-left:7px;vertical-align:1px}
+  .note p{font-size:12.5px;color:var(--muted);max-width:58ch}
+  .foot{margin-top:34px;font-size:12px;color:var(--faint);max-width:70ch}
+
+  /* artifacts + steering + delegation */
+  .artifact{border:1px solid var(--border-strong);background:var(--input);border-radius:var(--r);padding:11px 13px;display:flex;flex-direction:column;gap:8px;max-width:70ch}
+  .artifact .a-tag{font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--fg-mid);display:flex;align-items:center;gap:7px}
+  .artifact .a-tag .ic{width:12px;height:12px}
+  .a-item{font-family:var(--mono);font-size:calc(11.5px * var(--text-scale));color:var(--fg-mid);padding:1px 0}
+  .a-item.done{color:var(--faint);text-decoration:line-through}
+  .a-item .bx{color:var(--ok);margin-right:6px}
+  .a-item.todo .bx{color:var(--faint)}
+  .a-comment{display:flex;gap:8px;padding-top:4px}
+  .a-comment input{flex:1;background:var(--card);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-family:var(--sans);font-size:calc(12px * var(--text-scale));padding:5px 10px}
+  .a-comment input::placeholder{color:var(--faint)}
+  .ev.you{color:var(--fg);font-weight:500}
+  .ev.you::before{content:"you · ";color:var(--faint);font-weight:400;font-size:11px}
+  .ev.deleg{font-size:calc(12px * var(--text-scale));color:#7aa2f7}
+  .steer{display:flex;gap:8px;border-top:1px solid var(--border);padding-top:12px}
+  .steer input{flex:1;background:var(--input);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-family:var(--sans);font-size:calc(13px * var(--text-scale));padding:7px 11px}
+  .steer input::placeholder{color:var(--faint)}
+  .steer input:focus{outline:none;box-shadow:0 0 0 1.5px var(--border-strong)}
+  .term-banner{display:flex;align-items:center;gap:10px;background:var(--card-2);border:1px solid var(--border);border-radius:var(--r);padding:9px 12px;font-size:12.5px;color:var(--fg-mid)}
+  .term-banner .btn{margin-left:auto}
+
+  /* modal */
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,0.55);backdrop-filter:blur(3px);display:grid;place-items:center;z-index:40;opacity:0;transition:opacity .2s}
+  .overlay.show{opacity:1}
+  .modal{background:var(--page);border:1px solid var(--border-strong);border-radius:var(--r-lg);box-shadow:0 24px 70px rgba(0,0,0,0.6);width:min(620px,calc(100vw - 40px));max-height:calc(100vh - 60px);overflow-y:auto;transform:translateY(10px) scale(.985);transition:transform .2s}
+  .overlay.show .modal{transform:none}
+  .modal .d-head{border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--page);z-index:1}
+  .modal .m-close{margin-left:auto;background:none;border:none;color:var(--faint);font-size:18px;cursor:pointer;padding:2px 6px;border-radius:6px;line-height:1}
+  .modal .m-close:hover{color:var(--fg);background:rgba(255,255,255,0.06)}
+  @media (prefers-reduced-motion:reduce){.overlay,.overlay .modal{transition:none}}
+
+  /* notification dropdown */
+  .titlebar{position:relative}
+  .notif-btn{position:relative;background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);padding:3px 7px;cursor:pointer;display:grid;place-items:center}
+  .notif-btn:hover{color:var(--fg-mid);border-color:var(--border-strong)}
+  .notif-btn .ic{width:14px;height:14px}
+  .notif-badge{position:absolute;top:-5px;right:-5px;background:var(--wait);color:#1c1503;font-size:9.5px;font-weight:700;border-radius:999px;padding:0 4.5px;min-width:15px;text-align:center;line-height:15px}
+  .notif-panel{position:absolute;top:calc(100% + 6px);right:10px;width:330px;background:var(--card-2);border:1px solid var(--border-strong);border-radius:var(--r);box-shadow:0 14px 40px rgba(0,0,0,0.5);z-index:30;overflow:hidden}
+  .notif-head{font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:var(--faint);padding:9px 12px 6px}
+  .n-row{display:grid;grid-template-columns:24px 1fr auto auto;gap:9px;align-items:center;padding:7px 12px;cursor:pointer;border-top:1px solid var(--border)}
+  .n-row:hover{background:rgba(255,255,255,0.04)}
+  .n-row .avatar{width:24px;height:24px;border-radius:7px}
+  .n-row .avatar .ic{width:13px;height:13px}
+  .n-row .n-txt{font-size:12px;color:var(--fg-mid);line-height:1.35}
+  .n-row .n-txt b{color:var(--fg);font-weight:600}
+  .n-row .n-when{font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+  .n-mark{width:16px;height:16px;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:800}
+  .n-mark.ok{background:var(--ok-dim);color:var(--ok)}
+  .n-mark.err{background:var(--err-dim);color:var(--err)}
+  /* terminal identity: dashed tile + prompt glyph */
+  .avatar.term{border-style:dashed;border-radius:6px}
+  .tglyph{font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:-0.5px}
+  .kind-tag{font-family:var(--mono);font-size:9.5px;color:var(--faint);border:1px dashed var(--border-strong);border-radius:4px;padding:0 5px;text-transform:uppercase;letter-spacing:0.05em}
+
+  /* today scoreboard */
+  .stat-row{display:grid;grid-template-columns:22px 1fr auto auto auto;gap:9px;align-items:center;padding:6px 0;font-size:12.5px;color:var(--fg-mid);font-variant-numeric:tabular-nums;border-bottom:1px solid var(--border)}
+  .stat-row .avatar{width:18px;height:18px;border-radius:5px}
+  .stat-row .avatar .ic{width:10px;height:10px}
+  .stat-row b{color:var(--fg);font-weight:600}
+  .stat-row .s-meta{color:var(--faint);font-size:11.5px;text-align:right}
+  .stat-total{display:flex;gap:14px;padding-top:9px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;flex-wrap:wrap}
+  .stat-total b{color:var(--fg);font-weight:650}
+  .brief-tune{margin-left:auto;background:none;border:1px solid var(--border);border-radius:999px;color:var(--faint);font:500 10.5px var(--sans);padding:1px 9px;cursor:pointer;align-self:center}
+  .brief-tune:hover{color:var(--fg-mid);border-color:var(--border-strong)}
+  .brief-item{grid-template-columns:22px 1fr auto}
+
+  /* directory picker */
+  .dir-field{display:flex;align-items:center;gap:8px;width:100%;background:var(--input);border:1px solid var(--border);border-radius:var(--r-sm);color:var(--fg);font-family:var(--sans);font-size:calc(13px * var(--text-scale));padding:7px 10px;cursor:pointer;text-align:left}
+  .dir-field:hover{border-color:var(--border-strong)}
+  .dir-field .ic{width:13px;height:13px;color:var(--muted)}
+  .dir-field .chev{margin-left:auto;color:var(--faint);font-size:10px}
+  .dir-pop{position:absolute;left:0;right:0;top:calc(100% + 4px);background:var(--card-2);border:1px solid var(--border-strong);border-radius:var(--r);box-shadow:0 12px 34px rgba(0,0,0,0.5);z-index:5;overflow:hidden}
+  .dir-pop .dp-head{font-size:10.5px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:var(--faint);padding:8px 12px 4px}
+  .dir-row{display:grid;grid-template-columns:16px 1fr auto;gap:9px;align-items:center;padding:7px 12px;cursor:pointer;font-size:12.5px;color:var(--fg-mid)}
+  .dir-row:hover{background:rgba(255,255,255,0.05)}
+  .dir-row .ic{width:13px;height:13px;color:var(--muted)}
+  .dir-row b{color:var(--fg);font-weight:600}
+  .dir-row .dp-path{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  .dir-row.browse{border-top:1px solid var(--border);color:var(--muted)}
+
+  /* project filter + skills + knowledge + ledger + coverage */
+  .proj-chips{display:flex;gap:5px;flex-wrap:wrap;padding:0 8px 10px}
+  .pchip{font:500 11px var(--sans);color:var(--muted);background:none;border:1px solid var(--border);border-radius:999px;padding:2px 10px;cursor:pointer}
+  .pchip:hover{color:var(--fg-mid)}
+  .pchip.on{color:var(--fg);border-color:var(--fg-mid);background:rgba(255,255,255,0.06)}
+  .chip.skill{color:var(--fg-mid)}
+  .chip.skill .ic{width:9px;height:9px;vertical-align:-1px;margin-right:3px;color:var(--wait)}
+  .kn-row{display:grid;grid-template-columns:16px 1fr auto auto;gap:10px;align-items:center;padding:7px 4px;font-size:12.5px;color:var(--fg-mid);border-bottom:1px solid var(--border)}
+  .kn-row .ic{width:13px;height:13px;color:var(--muted)}
+  .kn-row b{color:var(--fg);font-weight:600}
+  .kn-row .kn-path{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  .kn-row .kn-status{font-size:10.5px;color:var(--ok)}
+  .lg-row{display:grid;grid-template-columns:44px 16px 1fr auto;gap:10px;align-items:baseline;padding:6px 4px;font-size:12.5px;color:var(--fg-mid);border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
+  .lg-row .lg-when{font-size:10.5px;color:var(--faint)}
+  .lg-row .lg-mark{font-size:11px;text-align:center}
+  .lg-row .lg-mark.ok{color:var(--ok)} .lg-row .lg-mark.err{color:var(--err)} .lg-row .lg-mark.info{color:var(--faint)}
+  .lg-row .lg-rcpt{font-family:var(--mono);font-size:9.5px;color:var(--faint)}
+  .lg-note{font-size:11px;color:var(--faint);padding-top:9px;max-width:56ch}
+  .cover{position:relative;height:30px;background:rgba(255,255,255,0.03);border-radius:6px;margin-top:10px}
+  .cover .cv-tick{position:absolute;top:6px;bottom:6px;width:2.5px;border-radius:2px}
+  .cover .cv-band{position:absolute;height:3px;border-radius:2px;opacity:0.65}
+  .cover-scale{display:flex;justify-content:space-between;font-size:9.5px;color:var(--faint);padding-top:3px;font-variant-numeric:tabular-nums}
+  .cover-label{font-size:11px;font-weight:600;letter-spacing:0.05em;text-transform:uppercase;color:var(--faint);padding-top:12px}
+
+  /* knowledge base departments */
+  .kb-row{display:grid;grid-template-columns:14px 1fr auto auto;gap:10px;align-items:center;padding:7px 4px;font-size:12.5px;color:var(--fg-mid);border-bottom:1px solid var(--border)}
+  .kb-dot{width:9px;height:9px;border-radius:50%;box-shadow:0 0 8px -1px currentColor}
+  .kb-row b{color:var(--fg);font-weight:600}
+  .kb-row .kb-sub{font-size:10.5px;color:var(--faint);letter-spacing:0.03em}
+  .kb-row .kb-nodes{font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+  .kb-row .kb-x{background:none;border:none;color:var(--faint);cursor:pointer;font-size:13px;padding:0 4px}
+  .kb-row .kb-x:hover{color:var(--err)}
+  .kb-pick-row{display:grid;grid-template-columns:14px 1fr auto;gap:11px;align-items:center;padding:9px 4px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px;color:var(--fg-mid)}
+  .kb-pick-row:hover{background:rgba(255,255,255,0.04)}
+  .kb-pick-row.attached{opacity:0.45;cursor:default}
+  .sub-label{font-size:10.5px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:var(--faint);padding:2px 0 4px}
+
+  /* tune-briefing modal */
+  .tune-cur{background:var(--input);border:1px solid var(--border);border-radius:var(--r-sm);padding:9px 11px;font-size:calc(12.5px * var(--text-scale));color:var(--muted);line-height:1.55;max-width:64ch}
+
+  /* live pulse monitor */
+  .live-row{display:grid;grid-template-columns:24px 1fr auto;gap:10px;align-items:center;padding:8px 4px;border-bottom:1px solid var(--border);cursor:pointer;border-radius:4px}
+  .live-row:hover{background:rgba(255,255,255,0.03)}
+  .live-row:last-child{border-bottom:none}
+  .live-row .avatar{width:24px;height:24px;border-radius:7px}
+  .live-row .avatar .ic{width:13px;height:13px}
+  .live-row .lv-name{font-size:12.5px;font-weight:600;color:var(--fg)}
+  .live-row .lv-doing{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34ch}
+  .live-row .lv-doing code{font-family:var(--mono);font-size:10px;color:var(--fg-mid)}
+  .eq{display:flex;gap:2.5px;align-items:flex-end;height:18px;width:42px}
+  .eq i{flex:1;background:currentColor;border-radius:1.5px;height:14%;transition:height .3s}
+  .eq.working i{animation:eqb 0.9s ease-in-out infinite}
+  .eq.working i:nth-child(1){animation-delay:0s}
+  .eq.working i:nth-child(2){animation-delay:.14s}
+  .eq.working i:nth-child(3){animation-delay:.28s}
+  .eq.working i:nth-child(4){animation-delay:.1s}
+  .eq.working i:nth-child(5){animation-delay:.22s}
+  @keyframes eqb{0%,100%{height:18%}50%{height:96%}}
+  .eq.waiting{color:var(--wait)}
+  .eq.waiting i{height:45%;animation:eqw 1.5s ease-in-out infinite}
+  .eq.waiting i:nth-child(odd){animation-delay:.4s}
+  @keyframes eqw{0%,100%{opacity:.35}50%{opacity:1}}
+  .eq.flat i{height:12%;opacity:.3;animation:none}
+  @media (prefers-reduced-motion:reduce){.eq i{animation:none !important}}
+
+  /* toasts */
+  #toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:50}
+  .toast{background:var(--card-2);border:1px solid var(--border-strong);border-radius:var(--r);padding:9px 14px;font-size:12.5px;color:var(--fg);box-shadow:0 10px 24px rgba(0,0,0,0.4);opacity:0;transform:translateY(8px);transition:opacity .25s,transform .25s;max-width:340px}
+  .toast.show{opacity:1;transform:none}
+  .toast b{font-weight:600}
+  .toast.warn{border-color:rgba(240,180,76,0.4)}
+</style>
+
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></symbol>
+  <symbol id="i-pen" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/></symbol>
+  <symbol id="i-bot" viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+  <symbol id="i-msg" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
+  <symbol id="i-zap" viewBox="0 0 24 24"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></symbol>
+</svg>
+
+<div class="wrap">
+  <div class="intro">
+    <div class="kicker">Dobius+ · interactive prototype · v3</div>
+    <h1>The Agents tab, Crew era</h1>
+    <p class="lede"><b>Everything below works.</b> Click crew members, switch tabs, approve or deny the queue, edit memory lines, build a new agent, text the crew. The only loud color on screen is an agent waiting on you.</p>
+  </div>
+
+  <div class="window">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span class="app-name">Dobius+</span>
+      <div class="rollup">
+        <span>today <b id="ru-cost">$4.12</b></span>
+        <span><b id="ru-runs">23</b> runs · <b>91%</b> ok</span>
+        <span class="hint hint-click" id="ru-budget" title="Click to change the daily ping budget">pings <span id="ru-pings">2/4</span> <span class="pips" id="pips"></span></span>
+        <button class="notif-btn" id="pause-btn" title="Pause crew — all heartbeats sleep until resumed" aria-label="Pause crew"><svg class="ic"><use href="#i-pause"/></svg></button>
+        <button class="notif-btn" id="notif-btn" title="Notifications" aria-label="Notifications"><svg class="ic"><use href="#i-bell"/></svg><span class="notif-badge" id="notif-badge">3</span></button>
+        <button class="hint hint-click" id="ru-textsize" title="Text size: small / medium / large" style="background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);padding:1px 8px;font-size:12px;cursor:pointer;font-family:var(--sans)"><b style="font-size:13px">A</b>a</button>
+      </div>
+    </div>
+
+    <div class="layout">
+      <aside class="roster">
+        <div class="proj-chips" id="proj-chips"></div>
+        <div class="sec-label">Crew</div>
+        <div id="roster-list"></div>
+        <button class="new-member" id="btn-new"><svg class="ic"><use href="#i-plus"/></svg> New crew member</button>
+        <div class="channels">
+          <div class="sec-label">Channels</div>
+          <div class="chan"><svg class="ic"><use href="#i-msg"/></svg> iMessage <span class="meta">paired <i>●</i></span></div>
+          <div class="chan"><svg class="ic"><use href="#i-send"/></svg> Telegram <span class="meta">@bot <i>●</i></span></div>
+          <button class="crew-files" id="btn-crew-files"><svg class="ic"><use href="#i-book"/></svg> Crew files · USER.md</button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div class="detail" id="detail"></div>
+      </main>
+    </div>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <div class="p-head"><span class="phase">P2</span><h3>The morning briefing</h3></div>
+      <p class="p-sub">Overnight "digest" verdicts batch into one card. <b style="color:var(--fg-mid)">Tune</b> opens that agent's role.md — edit what it watches for.</p>
+      <div class="p-body" id="briefing">
+        <div class="brief-time">Tue 8:05 · 3 items · $0.87 overnight</div>
+        <div class="brief-item"><span class="avatar" style="color:#f0b44c"><svg class="ic"><use href="#i-shield"/></svg></span><span><b>Auditor:</b> tech debt still concentrated in session-refresh; no regression from Sam's commits.</span><button class="brief-tune" data-a="auditor">Tune</button></div>
+        <div class="brief-item"><span class="avatar" style="color:#e0645c"><svg class="ic"><use href="#i-activity"/></svg></span><span><b>Sentry Watch:</b> error rate flat; one new TypeError, 2 users, non-blocking.</span><button class="brief-tune" data-a="sentry">Tune</button></div>
+        <div class="brief-item"><span class="avatar" style="color:#7aa2f7"><svg class="ic"><use href="#i-compass"/></svg></span><span><b>Triage:</b> 2 new Asana tasks queued — one build-lane, one review of Sam's PR.</span><button class="brief-tune" data-a="triage">Tune</button></div>
+        <div class="brief-foot">17 checks ran silent overnight · nothing else worth your time <button class="btn ghost" id="brief-dismiss">Dismiss</button></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="p-head"><span class="phase">P5</span><h3>Live</h3></div>
+      <p class="p-sub">The pulse of the whole operation — every agent, right now. Bars dance while it works, breathe amber while it waits on you, go flat when it sleeps.</p>
+      <div class="p-body" id="live-body"></div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="note"><h4>Amber is the only loud color <span class="phase">rule</span></h4><p>Working is calm green, sleeping is an outline, errors are quiet red rows — but "waiting on you" gets the tinted ticket, the pulsing dot, and the badge. If nothing needs you, the page is nearly monochrome.</p></div>
+    <div class="note"><h4>Answer where you're asked <span class="phase">P3</span></h4><p>Every ticket shows the exact command, diff, or question — never a paraphrase — with Approve / Edit / Respond / Deny inline. "Always allow" is how the queue gets quieter every week.</p></div>
+    <div class="note"><h4>Cost lives on results, not rows <span class="phase">rule</span></h4><p>The roster shows who needs you; dollars appear on run summaries and the titlebar day rollup. Triage first, accounting second.</p></div>
+    <div class="note"><h4>The pips are a promise <span class="phase">P2</span></h4><p>"pings 2/4" is the crew's daily interruption budget. When it's spent, everything demotes to the morning briefing. A crew you trust is one that shuts up.</p></div>
+  </div>
+
+  <p class="foot">Icons are lucide — the app's real icon set. Renders in Geist inside the app. Phases: P1 identity/memory · P2 heartbeats/briefing · P3 decision queue · P4 channels · P5 unified board with terminal agents. Architecture: plans/CREW-DESIGN.md.</p>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+'use strict';
+/* ---------------- state ---------------- */
+const PROJECTS = [
+  { name:'Forge', path:'~/Projects/forge' },
+  { name:'dobius-plus', path:'~/DobiusPlus' },
+  { name:'axiom-connect', path:'~/Projects/axiom-connect' }
+];
+const KB_DEPTS = [
+  { name:'Intelligence', color:'#6ea8d8', sub:'companies · people · markets', nodes:214 },
+  { name:'Customer', color:'#d86e8a', sub:'support · success · community', nodes:158 },
+  { name:'Operations', color:'#5abfa5', sub:'onboarding · builds · client ops', nodes:301 },
+  { name:'Back Office', color:'#d8b64e', sub:'money in · books · office · people', nodes:96 },
+  { name:'Marketing', color:'#9d7ed8', sub:'content · brand · distribution', nodes:187 },
+  { name:'Sales', color:'#d8955e', sub:'targeting · outreach · sequencing', nodes:142 },
+  { name:'Deals', color:'#d86e5e', sub:'replies · calls · closing · pipeline', nodes:119 }
+];
+const SKILLS = ['review-audit','ship-test','webapp-testing','frontend-design','iris-agent','pdf'];
+const COLORS = ['#b9bcc2','#7aa2f7','#62c073','#f0b44c','#e0645c','#b48ead','#56b6c2'];
+const CREW = {
+  triage: {
+    name:'Triage', icon:'i-compass', soul:'Reads every incoming Asana task, figures out what it actually needs, and routes it to the right specialist.',
+    color:'#7aa2f7', notify:'digest + urgent', channels:{imessage:true, telegram:false},
+    projects:['Forge','axiom-connect','dobius-plus'], skills:['iris-agent'], kb:['Operations','Deals'],
+    brief:'Report new Asana tasks by lane (build vs review) with a one-line brief each. Flag anything urgent-tagged. Skip days with no new tasks.',
+    knowledge:[ ['folder','Asana lane config','~/Library/…/dobius-plus/asana-config.json','indexed'],
+      ['folder','Docs','~/Projects (Code)/Docs','indexed 2m ago'] ],
+    ledger:[ ['9:41','info','Run started — Asana poll','—'],
+      ['9:41','ok','Delegated to Auditor (hero coupling check)','rcpt 2fa8…'],
+      ['9:31','ok','Poll finished — nothing new','rcpt c214…'] ],
+    files:{
+      soul:'Decisive but never presumptuous — routing a task wrong is worse than asking.\nPlain speech, no filler. One question max per task, then act.\nTreat Sam’s task notes as sacred: quote them verbatim, never paraphrase.',
+      role:'Own the intake pipe: every Asana task that lands in either lane.\nClassify: build lane (Carson) vs review lane (Sam) by assignee gid.\nRoute each task to the right specialist with a one-paragraph brief.\nDone = task briefed, routed, and visible in the Tasks panel.',
+      playbook:'1. Read memory + lane gids from config.\n2. Read the full task description and attachments before classifying.\n3. Ambiguous project? Ask Rich once — never guess between repos.\n4. Write the brief: goal, repo, files likely touched, risk level.\n5. Verdict: silent if nothing new · digest for routine · now only for urgent-flagged tasks.',
+      rules:'Never mark Asana tasks complete.\nNever guess a project — ask.\nNever start build work yourself — route it.'
+    },
+    model:'opus-4.8', tools:['Read','Grep','Glob'], cwd:'~/Projects', sched:'every 10 min · Asana poll',
+    status:'working', doing:'⏺ Grep asana-client.ts',
+    memory:[ 'Build lane = Carson’s gid, review lane = Sam’s gid — never swap them',
+      'Sam’s copy tasks usually mean Forge unless he names a repo',
+      'Never mark Asana tasks complete — surface for Rich to approve' ],
+    proposal:null,
+    stream:[ ['sys','09:41:12 · woke on Asana poll · 2 new tasks in queue'],
+      ['ev','Two new tasks. Sam’s "update the hero copy" doesn’t name a project — asking Rich rather than guessing.'],
+      ['tool','<b>⏺ Grep</b> "hero" src/ — checking both repos for hero components'],
+      ['deleg','→ delegated to Auditor: "sanity-check the hero component for hidden coupling before the copy change"'] ],
+    hist:[ ['run','Asana poll — 2 new tasks','running','—','now'], ['ok','Asana poll — no new tasks','$0.02 · 1 turn','14s','9:31'],
+      ['ok','Asana poll — 1 review task routed','$0.11 · 4 turns','48s','9:21'], ['ok','Asana poll — no new tasks','$0.02 · 1 turn','12s','9:11'] ],
+    wf:[ ['read memory',0,4,''], ['Grep ×3',4,18,''], ['thinking',22,10,'think'], ['Grep hero',32,20,'live'] ], wfEnd:'58s'
+  },
+  auditor: {
+    name:'Auditor', icon:'i-shield', soul:'Skeptical senior reviewer. Walks the repos every morning; speaks only when something’s wrong.',
+    color:'#f0b44c', notify:'urgent only', channels:{imessage:true, telegram:true},
+    projects:['Forge','axiom-connect','dobius-plus'], skills:['review-audit','ship-test'], kb:['Operations','Intelligence'],
+    brief:'Report new tech debt since yesterday, regressions from overnight commits, and anything above minor severity. Known issues only if they got worse. Rank by blast radius.',
+    knowledge:[ ['folder','Forge runbook','~/Projects (Code)/Docs/Forge','indexed'],
+      ['file','STYLEGUIDE.md','~/DobiusPlus/docs/STYLEGUIDE.md','indexed'],
+      ['url','Vercel status','vercel-status.com','checked hourly'] ],
+    ledger:[ ['8:02','ok','Run finished — morning walk · $0.31','rcpt 9f3a…'],
+      ['8:01','info','Memory proposal created (session-refresh)','rcpt 4bc1…'],
+      ['8:00','info','Run started — schedule 8:00','—'],
+      ['Mon 21:15','ok','iMessage reply sent to you','rcpt 03ee…'],
+      ['Sun 8:04','err','Run failed — budget cap $0.50','rcpt 77d2…'] ],
+    files:{
+      soul:'Skeptical, terse, allergic to false alarms.\nSpeak only when something is wrong or when asked.\nRank everything by blast radius, never by count.\nWhen uncertain, say so — never invent a finding.',
+      role:'Own the health of the ~/Projects repos.\nWalk Forge, axiom-connect, and DobiusPlus every morning at 8.\nWatch for: new tech debt, failing types, risky patterns, dead code.\nDone = a ranked list with file:line and a one-line fix per item.',
+      playbook:'1. Read memory + progress log first — never re-find known issues.\n2. Diff since the last walk (git log --since) before any broad scan.\n3. Grep the known hot spots, then widen only if the diff warrants it.\n4. Verify type claims with tsc --noEmit before flagging.\n5. Close every run with a verdict: silent · digest · now. Default silent.',
+      rules:'Never push without approval.\nNever touch credentials, .env, or keychain files.\nNever write outside the repo being audited.\nNever file or close Asana tasks.'
+    },
+    model:'opus-4.8', tools:['Read','Grep','Glob','Bash'], cwd:'~/Projects', sched:'every day 8:00',
+    status:'waiting', doing:'waiting on you · 2m',
+    memory:[ 'Forge deploys from main via Vercel; staging is preview branches',
+      'Rich prefers findings ranked by blast radius, not count',
+      'axiom-connect tests are flaky on CI — rerun once before flagging' ],
+    proposal:'auth/session-refresh.ts: 3 timeout paths, no retry (2026-07-07)',
+    stream:[ ['sys','08:00:02 · session resumed (3 days of context) · memory loaded: 14 facts'],
+      ['ev','Morning pass on 3 repos. Yesterday’s flagged auth-timeout issue in Forge is still open — checking whether Sam’s overnight commits touched it.'],
+      ['artifact','Morning walk — plan','[x] Diff all repos since yesterday\n[x] Type-check Forge + axiom-connect\n[ ] Deep read: auth/session-refresh.ts\n[ ] Verdict + memory update'],
+      ['tool','<b>⏺ Grep</b> "setTimeout.*auth" — 4 hits in src/auth/'],
+      ['tool','<b>⏺ Bash</b> npx tsc --noEmit <span style="color:var(--ok)">exit 0</span>'],
+      ['tool','<b>⏺ Bash</b> git push origin fix/auth-timeout <span style="color:var(--wait)">▮ awaiting approval</span>'],
+      ['result','Yesterday’s result','Tech debt is concentrated in one place: <b>auth/session-refresh.ts</b> has 3 timeout paths with no retry. Everything else is minor.','2m 14s|$0.31|9 turns|digest'] ],
+    hist:[ ['run','Morning walk — 3 repos','running','—','now'], ['ok','Morning walk — 3 repos','$0.31 · 9 turns','2m 14s','yesterday 8:00'],
+      ['ok','"how bad is tech debt" · via iMessage','$0.19 · 5 turns','1m 02s','Mon 21:14'], ['err','Morning walk — 3 repos','budget cap hit','4m 00s','Sun 8:00'] ],
+    wf:[ ['read memory',0,5,''], ['Grep ×6',5,14,''], ['Bash tsc',20,38,''], ['thinking',58,12,'think'], ['git push',70,8,'live'] ], wfEnd:'2m 14s'
+  },
+  sentry: {
+    name:'Sentry Watch', icon:'i-activity', soul:'Watches production errors. Interrupts only for new, spreading, or user-blocking failures.',
+    color:'#e0645c', notify:'urgent only', channels:{imessage:false, telegram:true},
+    projects:['Forge'], skills:[], kb:['Operations'],
+    brief:'Report error rate vs baseline and any new error types with user counts and build versions. Never include known noise.',
+    knowledge:[ ['url','Sentry — Forge project','sentry.io/forge','live'],
+      ['file','Known-noise list','~/.dobius/agents/sentry/known-noise.md','indexed'] ],
+    ledger:[ ['8:05','ok','Hourly check — silent verdict','rcpt 8d20…'],
+      ['7:05','ok','Hourly check — silent verdict','rcpt 5a91…'],
+      ['6:05','info','Digest item logged (new TypeError)','rcpt e442…'] ],
+    files:{
+      soul:'Calm under noise. A page at 3am better be worth it.\nDistinguish new from known, spreading from stable, user-facing from cosmetic.',
+      role:'Own production error awareness for Forge.\nCheck Sentry hourly; know the baseline cold.\nDone = a verdict every hour, an alert only when the rules say so.',
+      playbook:'1. Pull the last hour of events; compare to baseline (~0.3%).\n2. New error type → check user count and build version first.\n3. Known noise (Safari IndexedDB) is never worth a line.\n4. Verdict: now only if >1% or new + spreading + user-facing.',
+      rules:'Alert only above 1% error rate or on new error types.\nNever mutate anything — read-only agent.\nQuiet hours 23:00–8:00 are absolute.'
+    },
+    model:'haiku-4.5', tools:['Read','WebFetch'], cwd:'~/Projects/forge', sched:'hourly · quiet 23:00–8:00',
+    status:'sleeping', doing:'sleeping · wakes 9:00',
+    memory:[ 'Baseline error rate ~0.3% — alert only above 1% or on new error types',
+      'The Safari IndexedDB error is known noise — ignore it' ],
+    proposal:null,
+    stream:[ ['sys','08:05:40 · hourly check complete · verdict: silent'],
+      ['ev','Error rate flat at 0.28%. One new TypeError affecting 2 users on an old build — not worth your attention. Logged to digest.'],
+      ['result','Last check','Error rate flat; one new TypeError (2 users, old build). Non-blocking.','22s|$0.03|2 turns|silent'] ],
+    hist:[ ['ok','Hourly check — silent','$0.03 · 2 turns','22s','8:05'], ['ok','Hourly check — silent','$0.03 · 2 turns','19s','7:05'],
+      ['ok','Hourly check — digest (new TypeError)','$0.05 · 3 turns','41s','6:05'] ],
+    wf:[ ['fetch sentry',0,30,''], ['thinking',30,15,'think'], ['verdict',45,8,''] ], wfEnd:'22s'
+  },
+  scribe: {
+    name:'Scribe', icon:'i-pen', soul:'Writes the docs nobody else wants to: Asana comments, build logs, PDF records. Quotes the user verbatim.',
+    color:'#b48ead', notify:'digest + urgent', channels:{imessage:false, telegram:false},
+    projects:['Forge','axiom-connect','dobius-plus'], skills:['pdf'], kb:['Marketing','Customer'],
+    brief:'Report drafts waiting for approval and docs completed yesterday. One line per item.',
+    knowledge:[ ['folder','Docs archive','~/Projects (Code)/Docs','indexed'],
+      ['file','Asana voice guide','~/.dobius/agents/scribe/voice.md','indexed'] ],
+    ledger:[ ['9:34','ok','Draft posted to queue (hero copy)','rcpt b7c3…'],
+      ['8:52','ok','BUILD-LOG entry written','rcpt 1e09…'] ],
+    files:{
+      soul:'Invisible craftsman. The doc should read like Rich wrote it on a good day.\nPlain English, short sentences, zero jargon, zero emojis, no "I" pronoun.',
+      role:'Own the paper trail: Asana comments, BUILD-LOG entries, PDF records.\nEvery build-lane task gets its doc BEFORE any push or deploy.\nDone = comment drafted in the queue with exact before → after values.',
+      playbook:'1. Read the diff and the task notes — quote the notes verbatim.\n2. First line states what is ready and where it goes.\n3. Include exact values: sizes, paddings, class names, copy strings.\n4. End with "Verified live at <resolution>. Screenshot attached."\n5. Everything lands as a draft in the queue — nothing posts itself.',
+      rules:'Plain text, no emojis, no "I" pronoun.\nQuote the user’s task notes verbatim.\nNever post to Asana directly — draft for approval.'
+    },
+    model:'sonnet-5', tools:['Read','Write','Glob'], cwd:'~/Projects (Code)/Docs', sched:'on demand',
+    status:'idle', doing:'idle · last run 7m ago',
+    memory:[ 'Asana voice: plain text, no emojis, no "I" pronoun, exact before → after values',
+      'Docs folder: ~/Projects (Code)/Docs/<Project>/<gid>-<slug>.md' ],
+    proposal:null,
+    stream:[ ['sys','09:34:02 · run complete'],
+      ['ev','Drafted the completion comment for the hero-copy task with exact before → after values. It’s in the queue for approval — not posted.'],
+      ['result','Last run','Asana doc comment drafted and queued. 214 words, values verified against the diff.','54s|$0.08|4 turns|digest'] ],
+    hist:[ ['ok','Draft Asana comment — hero copy','$0.08 · 4 turns','54s','9:34'], ['ok','BUILD-LOG entry — agents page','$0.06 · 3 turns','38s','8:52'] ],
+    wf:[ ['read diff',0,35,''], ['thinking',35,20,'think'], ['Write draft',55,25,''] ], wfEnd:'54s'
+  }
+};
+const ICONS = ['i-compass','i-shield','i-activity','i-pen','i-bot','i-eye','i-wrench','i-book'];
+const TERMS = {
+  't-forge': { kind:'terminal', name:'forge · claude', icon:'i-bot', color:'#62c073', model:'claude', tabName:'Forge — fix/hero-copy', projects:['Forge'],
+    status:'working', doing:'⏺ Edit Hero.tsx', notify:'—',
+    stream:[ ['sys','terminal tab · Forge — fix/hero-copy · claude'],
+      ['ev','Updating the hero copy per Sam\u2019s task. Two components touched so far.'],
+      ['tool','<b>⏺ Edit</b> src/components/Hero.tsx'],
+      ['tool','<b>⏺ Bash</b> npx tsc --noEmit <span class="live-mark">▮ running</span>'] ],
+    hist:[ ['ok','fix/hero-copy — 4 commits','—','41m','today'] ] },
+  't-dp': { kind:'terminal', name:'dobius-plus · codex', icon:'i-bot', color:'#7aa2f7', model:'codex', tabName:'DobiusPlus — feat/agents-page', projects:['dobius-plus'],
+    status:'waiting', doing:'waiting on you · 30s', notify:'—',
+    stream:[ ['sys','terminal tab · DobiusPlus — feat/agents-page · codex'],
+      ['ev','Ready to install the new dependency but that needs your OK.'],
+      ['tool','<b>⏺ Bash</b> pnpm add lucide-react <span style="color:var(--wait)">▮ awaiting approval</span>'] ],
+    hist:[] }
+};
+function ag(key){ return CREW[key] || TERMS[key]; }
+const state = { sel:'auditor', tab:'run', pingsUsed:2, maxPings:4, cost:4.12, runs:23, filter:'All', paused:false };
+const $ = (s,el)=> (el||document).querySelector(s);
+const el = (html)=>{ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstChild; };
+const icon = (id,cls)=>`<svg class="ic ${cls||''}"><use href="#${id}"/></svg>`;
+
+/* ---------------- toasts ---------------- */
+function toast(msg, warn){
+  const t = el(`<div class="toast ${warn?'warn':''}">${msg}</div>`);
+  $('#toasts').appendChild(t);
+  requestAnimationFrame(()=> t.classList.add('show'));
+  setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(), 300); }, 3200);
+}
+
+/* ---------------- rollup ---------------- */
+function renderRollup(){
+  $('#ru-cost').textContent = '$' + state.cost.toFixed(2);
+  $('#ru-runs').textContent = state.runs;
+  $('#ru-pings').textContent = state.pingsUsed + '/' + state.maxPings;
+  $('#pips').innerHTML = Array.from({length: state.maxPings}, (_,i)=>`<i class="${i<state.pingsUsed?'spent':''}"></i>`).join('');
+}
+
+/* ---------------- roster ---------------- */
+function dotClass(st){ return {working:'ok', waiting:'wait', sleeping:'sleep', idle:'idle'}[st]; }
+function avatarHTML(a){
+  return a.kind==='terminal'
+    ? `<span class="avatar term" style="color:${a.color}"><span class="tglyph">&gt;_</span></span>`
+    : `<span class="avatar" style="color:${a.color}">${icon(a.icon)}</span>`;
+}
+function memberRow(key, a){
+    const doing = a.status==='working' ? `<code>${a.doing}</code>` : a.doing;
+    const b = el(`<button class="member ${key===state.sel?'sel':''} ${a.status==='waiting'?'waiting':''}">
+      ${avatarHTML(a)}
+      <span class="who"><span class="name" style="display:block">${a.name}</span><span class="doing" style="display:block">${doing}</span></span>
+      <span class="dot ${dotClass(a.status)}"></span></button>`);
+    b.addEventListener('click', ()=>{ state.sel=key; state.tab='run'; renderRoster(); renderDetail(); });
+    return b;
+}
+function inFilter(a){ return state.filter==='All' || (a.projects||[]).includes(state.filter); }
+function renderProjChips(){
+  const box = $('#proj-chips'); box.innerHTML='';
+  for (const f of ['All', ...PROJECTS.map(p=>p.name)]){
+    const c = el(`<button class="pchip ${state.filter===f?'on':''}">${f}</button>`);
+    c.addEventListener('click', ()=>{ state.filter=f; renderProjChips(); renderRoster(); });
+    box.appendChild(c);
+  }
+}
+function renderRoster(){
+  const box = $('#roster-list'); box.innerHTML='';
+  for (const [key,a] of Object.entries(CREW)){
+    if (!inFilter(a)) continue;
+    const doing = a.status==='working' ? `<code>${a.doing}</code>` : a.doing;
+    const b = el(`<button class="member ${key===state.sel?'sel':''} ${a.status==='waiting'?'waiting':''}">
+      <span class="avatar" style="color:${a.color}">${icon(a.icon)}</span>
+      <span class="who"><span class="name" style="display:block">${a.name}</span><span class="doing" style="display:block">${doing}</span></span>
+      <span class="dot ${dotClass(a.status)}"></span></button>`);
+    b.addEventListener('click', ()=>{ state.sel=key; state.tab='run'; renderRoster(); renderDetail(); });
+    box.appendChild(b);
+  }
+  const terms = Object.entries(TERMS).filter(([k,a])=> inFilter(a));
+  if (terms.length){
+    box.appendChild(el(`<div class="sec-label" style="padding-top:12px">Terminals</div>`));
+    for (const [key,a] of terms) box.appendChild(memberRow(key, a));
+  }
+  renderLive();
+}
+
+/* ---------------- queue ---------------- */
+const queue = [
+  { id:'push', agent:'auditor', verb:'wants to run a command', age:'2m',
+    body:`<div class="cmd" data-cmd><span class="ctx">~/Projects/forge · fix/auth-timeout</span>\ngit push origin fix/auth-timeout</div>`,
+    kind:'approval' },
+  { id:'npm', agent:'t-dp', verb:'wants to run a command', age:'30s',
+    body:`<div class="cmd" data-cmd><span class="ctx">~/DobiusPlus \u00b7 feat/agents-page \u00b7 terminal tab</span>\npnpm add lucide-react</div>`,
+    kind:'approval' },
+  { id:'ask', agent:'triage', verb:'asked a question', age:'40s',
+    body:`<p style="font-size:13px;color:var(--fg);max-width:66ch;">Sam's task says "update the hero copy" but doesn't name a project — Forge or axiom-connect?</p>`,
+    kind:'question' }
+];
+function resolveTicket(id, after){
+  const node = $(`[data-ticket="${id}"]`);
+  if (!node) return;
+  node.classList.add('leaving');
+  setTimeout(()=>{ node.remove(); const i=queue.findIndex(q=>q.id===id); if(i>=0) queue.splice(i,1); renderBadge(); if(!queue.length) renderQueue(); if(after) after(); }, 340);
+}
+function renderBadge(){
+  const b = $('#q-badge'); if (!b) return;
+  b.textContent = queue.length; b.classList.toggle('zero', !queue.length);
+}
+function renderQueue(){
+  const box = $('#queue'); if (!box) return;
+  box.innerHTML='';
+  if (!queue.length){ box.appendChild(el(`<div class="queue-empty">Nothing needs you. The crew will speak up when something does.</div>`)); renderBadge(); return; }
+  for (const q of queue){ box.appendChild(buildTicket(q, (cb)=>resolver(cb))); }
+  renderBadge();
+}
+function buildTicket(q, resolver){
+    const a = ag(q.agent);
+    const t = el(`<div class="ticket ${q.kind==='question'?'q':''}" data-ticket="${q.id}">
+      <div class="t-row">${avatarHTML(a)}<span class="agent">${a.name}</span>${a.kind?'<span class="kind-tag">terminal</span>':''}<span class="verb">${q.verb}</span><span class="age">waiting ${q.age}</span></div>
+      ${q.body}
+      <div class="actions"></div></div>`);
+    const acts = $('.actions', t);
+    if (q.kind==='approval'){
+      const isTerm = !!a.kind;
+      const cmdName = q.id==='push' ? 'git push' : 'pnpm add';
+      const approve = el(`<button class="btn pri">Approve</button>`);
+      const edit = el(`<button class="btn ghost">Edit</button>`);
+      const respond = el(`<button class="btn ghost">Respond</button>`);
+      const deny = el(`<button class="btn deny">Deny</button>`);
+      const bypass = el(`<button class="btn ghost" style="color:var(--wait);border-color:rgba(240,180,76,0.45)" title="Approve everything for the rest of this run">Bypass run</button>`);
+      const always = el(`<label class="always"><input type="checkbox"> always allow <code>${cmdName}</code> for ${a.name}</label>`);
+      bypass.addEventListener('click', ()=> resolver(()=>{
+        a.status='working'; a.doing='⏺ running · bypass this run';
+        a.stream.push(['sys','bypass granted for the rest of this run — rules.md hard rails still enforced']);
+        renderRoster(); renderDetail();
+        toast(`<b>Bypass granted</b> — ${a.name} won't ask again this run. Hard rails still apply.`, true);
+        pushNotif(q.agent, true, `<b>${a.name}</b> bypass granted for this run`);
+        if (q.id==='push') setTimeout(()=> finishAuditorRun(), 4200);
+      }));
+      approve.addEventListener('click', ()=>{
+        const alw = $('input', always).checked;
+        resolver(()=>{
+          a.status='working';
+          if (q.id==='push'){
+            a.doing='⏺ Bash git push';
+            a.stream.push(['tool','<b>⏺ Bash</b> git push origin fix/auth-timeout <span style="color:var(--ok)">approved · running</span>']);
+            setTimeout(()=> finishAuditorRun(), 4200);
+          } else {
+            a.doing='⏺ Bash pnpm add lucide-react';
+            a.stream.push(['tool','<b>⏺ Bash</b> pnpm add lucide-react <span style="color:var(--ok)">approved · running</span>']);
+          }
+          renderRoster(); renderDetail();
+          toast(`<b>Approved</b> — ${a.name} is running ${cmdName}`);
+          pushNotif(q.agent, true, `<b>${a.name}</b> ${cmdName} approved — running`);
+          if (alw) setTimeout(()=>toast(`<b>Rule saved:</b> ${cmdName} auto-allowed for ${a.name}`, true), 500);
+        });
+      });
+      edit.addEventListener('click', ()=>{
+        const cmd = $('[data-cmd]', t); cmd.setAttribute('contenteditable','true'); cmd.focus();
+        approve.textContent='Approve edited';
+        toast('Editing the command — Approve runs your version');
+      });
+      respond.addEventListener('click', ()=>{
+        if ($('.inline-reply', t)) return;
+        const r = el(`<div class="inline-reply"><input placeholder="Tell ${a.name} what to do instead…"><button class="btn pri">Send</button></div>`);
+        $('button', r).addEventListener('click', ()=>{
+          const v = $('input', r).value.trim(); if(!v) return;
+          resolver(()=>{ toast(`<b>Sent to ${a.name}</b> — it will adjust and continue`); a.status='working'; a.doing='⏺ adjusting per your reply'; renderRoster(); });
+        });
+        t.insertBefore(r, acts); $('input', r).focus();
+      });
+      deny.addEventListener('click', ()=> resolver(()=>{
+        a.status='idle'; a.doing='idle · denied';
+        toast(`<b>Denied</b> — ${a.name} will continue without it`); renderRoster();
+        pushNotif(q.agent, false, `<b>${a.name}</b> ${cmdName} denied`);
+      }));
+      acts.append(approve, edit, respond, deny, bypass, always);
+    } else {
+      const r = el(`<div class="inline-reply"><input placeholder="Reply to Triage…"><button class="btn pri">Send</button></div>`);
+      const send = ()=>{
+        const v = $('input', r).value.trim(); if(!v) return;
+        resolver(()=>{
+          CREW.triage.doing='⏺ planning: '+ (v.length>26 ? v.slice(0,26)+'…' : v);
+          toast('<b>Sent to Triage</b> — routing the task'); renderRoster();
+        });
+      };
+      $('button', r).addEventListener('click', send);
+      $('input', r).addEventListener('keydown', e=>{ if(e.key==='Enter') send(); });
+      t.insertBefore(r, acts); acts.remove();
+    }
+    return t;
+}
+function finishAuditorRun(){
+  const a = CREW.auditor;
+  if (a.status!=='working') return;
+  a.status='idle'; a.doing='idle · run finished just now';
+  a.stream.push(['result','Result','Pushed <b>fix/auth-timeout</b>. Branch is up on origin — open the PR when ready. Nothing else needs attention.','2m 41s|$0.36|11 turns|now']);
+  a.hist[0] = ['ok','Morning walk — 3 repos','$0.36 · 11 turns','2m 41s','just now'];
+  state.cost += 0.36; state.runs += 1;
+  renderRollup(); renderRoster(); if(state.sel==='auditor') renderDetail();
+  toast('<b>Auditor finished</b> — $0.36 · 11 turns');
+  pushNotif('auditor', true, '<b>Auditor</b> finished — pushed fix/auth-timeout · $0.36');
+}
+
+/* ---------------- detail ---------------- */
+function chipHTML(a){
+  const skills = (a.skills||[]).map(s=>`<span class="chip skill">${icon('i-zap')}${s}</span>`).join('');
+  return `<span class="chip mono">${a.model}</span><span class="chip">${a.tools.join(' · ')}</span>${skills}<span class="chip mono">${a.cwd}</span><span class="chip">${a.sched}</span><span class="chip">🔕 ${a.notify}</span>`;
+}
+function renderDetail(){
+  const d = $('#detail');
+  const a = ag(state.sel);
+  if (a.kind==='terminal') return renderTermDetail(d, a);
+  d.innerHTML = `
+    <div class="d-head">
+      <div class="avatar" style="color:${a.color}">${icon(a.icon)}</div>
+      <div class="d-id">
+        <div class="d-name">${a.name} <button class="edit-btn" id="d-edit">${icon('i-pen')} Edit agent</button></div>
+        <div class="d-soul" id="d-soul" contenteditable="true" spellcheck="false" title="Click to edit the persona">${a.soul}</div>
+      </div>
+      <div class="d-chips">${chipHTML(a)}</div>
+    </div>
+    <div class="tabs">
+      <button class="tab ${state.tab==='run'?'on':''}" data-tab="run">Live run</button>
+      <button class="tab ${state.tab==='mem'?'on':''}" data-tab="mem">Memory <span class="mini">${a.memory.length + (a.proposal?1:0)} facts</span></button>
+      <button class="tab ${state.tab==='know'?'on':''}" data-tab="know">Knowledge <span class="mini">${(a.knowledge||[]).length}</span></button>
+      <button class="tab ${state.tab==='sched'?'on':''}" data-tab="sched">Schedule</button>
+      <button class="tab ${state.tab==='hist'?'on':''}" data-tab="hist">History <span class="mini">${a.hist.length}</span></button>
+      <button class="tab ${state.tab==='ledger'?'on':''}" data-tab="ledger">Ledger</button>
+    </div>
+    <div class="tabpane" id="pane"></div>`;
+  $('#d-edit').addEventListener('click', ()=> openFormModal(a));
+  $('#d-soul').addEventListener('blur', ()=>{
+    const v = $('#d-soul').textContent.trim();
+    if (v && v!==a.soul){ a.soul=v; toast('<b>Persona updated</b> — applies on next run'); }
+  });
+  d.querySelectorAll('.tab').forEach(b=> b.addEventListener('click', ()=>{ state.tab=b.dataset.tab; renderDetail(); }));
+  const pane = $('#pane');
+  if (state.tab==='run') renderRun(pane, a);
+  if (state.tab==='mem') renderMem(pane, a);
+  if (state.tab==='sched') renderSched(pane, a);
+  if (state.tab==='hist') renderHist(pane, a);
+  if (state.tab==='know') renderKnow(pane, a);
+  if (state.tab==='ledger') renderLedger(pane, a);
+}
+function renderKnow(pane, a){
+  a.kb = a.kb || [];
+  pane.appendChild(el(`<div class="sub-label">Knowledge base — departments</div>`));
+  for (const dname of a.kb){
+    const d = KB_DEPTS.find(x=>x.name===dname); if (!d) continue;
+    const row = el(`<div class="kb-row"><span class="kb-dot" style="color:${d.color};background:${d.color}"></span><span><b>${d.name}</b> <span class="kb-sub">${d.sub}</span></span><span class="kb-nodes">${d.nodes} nodes</span><button class="kb-x" title="Detach">×</button></div>`);
+    $('.kb-x', row).addEventListener('click', ()=>{ a.kb = a.kb.filter(x=>x!==dname); renderDetail(); toast(`<b>${d.name}</b> detached from ${a.name}`); });
+    pane.appendChild(row);
+  }
+  const attach = el(`<button class="mem-add">+ Attach a department</button>`);
+  attach.addEventListener('click', ()=> openKbPicker(a));
+  pane.appendChild(attach);
+  pane.appendChild(el(`<div class="sub-label" style="padding-top:12px">Local sources</div>`));
+  const KICON = { folder:'i-folder', file:'i-book', url:'i-msg' };
+  for (const [type,name,path,status] of (a.knowledge||[])){
+    pane.appendChild(el(`<div class="kn-row">${icon(KICON[type]||'i-book')}<span><b>${name}</b></span><span class="kn-path">${path}</span><span class="kn-status">● ${status}</span></div>`));
+  }
+  const add = el(`<button class="mem-add">+ Add source — folder, file, or URL</button>`);
+  add.addEventListener('click', ()=> toast('Opens the source picker: project folder, file, or URL'));
+  pane.appendChild(add);
+  pane.appendChild(el(`<div class="mem-note">${a.name} retrieves only from its attached departments + local sources, and cites what it used. Department content updates flow in automatically — no re-attaching.</div>`));
+}
+function openKbPicker(a){
+  closeFormModal();
+  const overlay = el(`<div class="overlay" id="form-overlay"><div class="modal" style="position:relative;width:min(560px,calc(100vw - 40px))">
+    <button class="m-close" id="kb-close" aria-label="Close" style="position:absolute;top:8px;right:10px;z-index:2">×</button>
+    <div style="padding:16px">
+      <div class="d-name" style="font-size:15px;padding-bottom:2px">Attach knowledge — ${a.name}</div>
+      <div class="d-soul" style="pointer-events:none;padding-bottom:10px">One knowledge base, split by department. Attach what this agent should retrieve from.</div>
+      <div id="kb-list"></div>
+    </div></div></div>`);
+  const list = $('#kb-list', overlay);
+  for (const d of KB_DEPTS){
+    const attached = a.kb.includes(d.name);
+    const row = el(`<div class="kb-pick-row ${attached?'attached':''}"><span class="kb-dot" style="color:${d.color};background:${d.color}"></span><span><b style="color:var(--fg)">${d.name}</b><br><span class="kb-sub">${d.sub}</span></span><span class="kb-nodes">${attached?'attached':d.nodes+' nodes'}</span></div>`);
+    if (!attached) row.addEventListener('click', ()=>{
+      a.kb.push(d.name);
+      closeFormModal(); renderDetail();
+      toast(`<b>${d.name}</b> attached — ${a.name} can now retrieve from ${d.nodes} nodes`);
+    });
+    list.appendChild(row);
+  }
+  document.body.appendChild(overlay);
+  requestAnimationFrame(()=> overlay.classList.add('show'));
+  overlay.addEventListener('click', e=>{ if (e.target===overlay) closeFormModal(); });
+  $('#kb-close', overlay).addEventListener('click', closeFormModal);
+  document.addEventListener('keydown', escClose);
+}
+function renderLedger(pane, a){
+  for (const [when,mark,text,rcpt] of (a.ledger||[])){
+    pane.appendChild(el(`<div class="lg-row"><span class="lg-when">${when}</span><span class="lg-mark ${mark}">${mark==='ok'?'✓':mark==='err'?'✕':'●'}</span><span>${text}</span><span class="lg-rcpt">${rcpt}</span></div>`));
+  }
+  pane.appendChild(el(`<div class="lg-note">Every side effect — runs, approvals, memory writes, messages — lands here with a signed receipt. An agent can never claim work the ledger can't prove.</div>`));
+}
+function renderTermDetail(d, a){
+  d.innerHTML = `
+    <div class="d-head">
+      <span class="avatar term" style="color:${a.color};width:44px;height:44px;border-radius:10px"><span class="tglyph" style="font-size:16px">&gt;_</span></span>
+      <div class="d-id"><div class="d-name">${a.name} <span class="kind-tag">terminal</span></div>
+      <div class="d-soul" style="pointer-events:none">Terminal agent — running in a tab, monitored here via agent hooks.</div></div>
+      <div class="d-chips"><span class="chip mono">${a.model}</span><span class="chip mono">${a.tabName}</span></div>
+    </div>
+    <div class="tabpane">
+      <div class="term-banner">${icon('i-bot')} This agent lives in a terminal tab. Watch it here; drive it there.
+        <button class="btn ghost" id="t-open">Open terminal</button></div>
+      <div class="stream" id="t-stream"></div>
+    </div>`;
+  const stream = $('#t-stream');
+  for (const ev of a.stream) stream.appendChild(el(`<div class="ev ${ev[0]==='sys'?'sys':ev[0]==='tool'?'tool':''}">${ev[1]}</div>`));
+  $('#t-open').addEventListener('click', ()=> toast(`<b>Would jump to tab:</b> ${a.tabName}`));
+}
+function renderRun(pane, a){
+  const wf = el(`<div class="waterfall"><div class="wf-scale"><span>0s</span><span></span><span>${a.wfEnd}</span></div></div>`);
+  for (const [label,left,width,cls] of a.wf){
+    wf.appendChild(el(`<div class="wf-row"><div class="wf-label">${label}</div><div class="wf-track"><div class="wf-bar ${cls}" style="left:${left}%;width:${width}%">${cls==='live'?'<span>now</span>':''}</div></div></div>`));
+  }
+  pane.appendChild(wf);
+  const stream = el(`<div class="stream"></div>`);
+  for (const ev of a.stream){
+    if (ev[0]==='artifact'){
+      const card = el(`<div class="artifact"><div class="a-tag">${icon('i-book')} ${ev[1]}</div></div>`);
+      for (const line of ev[2].split('\n')){
+        const done = line.startsWith('[x]');
+        card.appendChild(el(`<div class="a-item ${done?'done':'todo'}"><span class="bx">${done?'✓':'○'}</span>${line.slice(3).trim()}</div>`));
+      }
+      const c = el(`<div class="a-comment"><input placeholder="Comment on this plan — ${a.name} folds it in without stopping"><button class="btn ghost" style="padding:4px 11px">Send</button></div>`);
+      const sendC = ()=>{
+        const v = $('input', c).value.trim(); if(!v) return;
+        a.stream.push(['you', v]);
+        a.stream.push(['ev', 'Noted — folding that into the plan without stopping the run.']);
+        renderDetail();
+        toast(`<b>Comment sent</b> — ${a.name} adjusts mid-run`);
+      };
+      $('button', c).addEventListener('click', sendC);
+      $('input', c).addEventListener('keydown', e=>{ if(e.key==='Enter') sendC(); });
+      card.appendChild(c);
+      stream.appendChild(card);
+      continue;
+    }
+    if (ev[0]==='result'){
+      const m = ev[3].split('|');
+      stream.appendChild(el(`<div class="result-card"><div class="r-tag">${ev[1]}</div><p>${ev[2]}</p>
+        <div class="metrics"><span><b>${m[0]}</b></span><span><b>${m[1]}</b></span><span><b>${m[2]}</b></span><span>urgency: <b style="color:${m[3]==='now'?'var(--wait)':'var(--faint)'}">${m[3]}</b></span></div></div>`));
+    } else {
+      const cls = {sys:'sys', tool:'tool', you:'you', deleg:'deleg'}[ev[0]] || '';
+      stream.appendChild(el(`<div class="ev ${cls}">${ev[1]}</div>`));
+    }
+  }
+  pane.appendChild(stream);
+  /* steer / task bar — the missing basic: give the agent work from here */
+  const idle = a.status!=='working' && a.status!=='waiting';
+  const bar = el(`<div class="steer">
+    <input id="steer-in" placeholder="${idle ? 'Give '+a.name+' a task…' : 'Steer '+a.name+' mid-run — it adjusts without stopping…'}">
+    <button class="btn pri">${idle?'Run':'Send'}</button>
+    ${a.status==='working'?'<button class="btn deny" id="steer-stop">Stop</button>':''}
+  </div>`);
+  const go = ()=>{
+    const v = $('#steer-in').value.trim(); if(!v) return;
+    a.stream.push(['you', v]);
+    if (idle){
+      a.status='working'; a.doing='⏺ working on your task';
+      a.stream.push(['sys','new run · session resumed · memory loaded']);
+      a.stream.push(['ev','On it.']);
+      state.runs += 1; renderRollup();
+      toast(`<b>${a.name} started</b> — streaming below`);
+    } else {
+      a.stream.push(['ev','Adjusting — no restart needed.']);
+      toast(`<b>Steered</b> — ${a.name} folds it in mid-run`);
+    }
+    renderRoster(); renderDetail();
+  };
+  $('button.pri', bar).addEventListener('click', go);
+  $('#steer-in', bar).addEventListener('keydown', e=>{ if(e.key==='Enter') go(); });
+  const stop = $('#steer-stop', bar);
+  if (stop) stop.addEventListener('click', ()=>{
+    a.status='idle'; a.doing='idle · stopped by you';
+    a.stream.push(['sys','run interrupted by user']);
+    toast(`<b>Stopped</b> — ${a.name} is idle`);
+    renderRoster(); renderDetail();
+  });
+  pane.appendChild(bar);
+}
+function renderMem(pane, a){
+  pane.appendChild(el(`<div class="mem-file">~/.claude/agent-memory/${a.name.toLowerCase().replace(/\s+/g,'-')}/MEMORY.md</div>`));
+  a.memory.forEach((m,i)=>{
+    const line = el(`<div class="mem-line" contenteditable="true" spellcheck="false">${m}</div>`);
+    line.addEventListener('blur', ()=>{ const v=line.textContent.trim(); if(v && v!==a.memory[i]){ a.memory[i]=v; toast('<b>Memory updated</b> — saved to MEMORY.md'); } });
+    pane.appendChild(line);
+  });
+  if (a.proposal){
+    const p = el(`<div class="mem-proposal"><span class="txt">${a.proposal}</span><button class="btn pri">Accept</button><button class="btn ghost">Reject</button></div>`);
+    p.querySelectorAll('button')[0].addEventListener('click', ()=>{ a.memory.push(a.proposal); a.proposal=null; toast('<b>Memory accepted</b>'); renderDetail(); });
+    p.querySelectorAll('button')[1].addEventListener('click', ()=>{ a.proposal=null; toast('Proposal rejected — not saved'); renderDetail(); });
+    pane.appendChild(p);
+  }
+  const add = el(`<button class="mem-add">+ Add memory</button>`);
+  add.addEventListener('click', ()=>{
+    a.memory.push('…');
+    renderDetail();
+    const lines = $('#pane').querySelectorAll('.mem-line');
+    const last = lines[lines.length-1]; last.textContent=''; last.focus();
+  });
+  pane.appendChild(add);
+  pane.appendChild(el(`<div class="mem-note">Click any line to edit. Scheduled and texted runs can only propose memories (green) — you accept or reject.</div>`));
+}
+function renderSched(pane, a){
+  const on = a.sched!=='on demand';
+  pane.appendChild(el(`<div class="sched">
+    <label>Heartbeat</label>
+    <div class="row"><label class="switch"><input type="checkbox" id="s-on" ${on?'checked':''}><span class="sl"></span></label><span style="font-size:12.5px;color:var(--fg-mid)" id="s-state">${on?'On — '+a.sched:'Off — runs on demand only'}</span></div>
+    <label>Frequency</label>
+    <select id="s-freq"><option${/day/.test(a.sched)?' selected':''}>every day</option><option${/hour/.test(a.sched)?' selected':''}>hourly</option><option${/10 min/.test(a.sched)?' selected':''}>every 10 minutes</option><option>weekdays</option></select>
+    <label>At</label><input type="time" value="08:00">
+    <label>Quiet hours</label><div class="row"><input type="time" value="23:00"><span style="color:var(--faint);font-size:12px">to</span><input type="time" value="08:00"></div>
+    <label>Budget per run</label><div class="row"><input type="range" min="10" max="200" value="50" id="s-bud"><span class="budget-val" id="s-budv">$0.50</span></div>
+    <div class="sched-note">Every scheduled run is bounded: max turns + max budget, tools locked to the agent's allowlist, and the verdict must be <span style="font-family:var(--mono)">silent · digest · now</span>. Silence is golden.</div>
+  </div>`));
+  $('#s-bud').addEventListener('input', e=> $('#s-budv').textContent = '$'+(e.target.value/100).toFixed(2));
+  $('#s-on').addEventListener('change', e=>{ $('#s-state').textContent = e.target.checked ? 'On — '+a.sched : 'Off — runs on demand only'; toast(e.target.checked?'<b>Heartbeat on</b>':'Heartbeat off'); });
+}
+function renderHist(pane, a){
+  for (const [st,label,meta,dur,when] of a.hist){
+    const r = el(`<div class="hist-row"><div class="st ${st}"></div><div>${label}</div><div class="h-meta">${meta}</div><div class="h-meta">${dur}</div><div class="h-meta">${when}</div></div>`);
+    r.addEventListener('click', ()=>{ state.tab='run'; renderDetail(); toast('Loaded run: '+label.replace(/<[^>]*>/g,'')); });
+    pane.appendChild(r);
+  }
+}
+
+/* ---------------- edit / create modal ---------------- */
+function closeFormModal(){
+  const o = $('#form-overlay');
+  if (!o) return;
+  o.classList.remove('show');
+  setTimeout(()=> o.remove(), 200);
+  document.removeEventListener('keydown', escClose);
+}
+function escClose(e){ if (e.key==='Escape') closeFormModal(); }
+function openFormModal(a, focusFile){
+  closeFormModal();
+  const isNew = !a;
+  const data = a || { name:'', icon:'i-bot', color:'#b9bcc2', soul:'', model:'opus-4.8', tools:['Read','Grep','Glob'], cwd:'~/Projects', sched:'on demand', notify:'digest + urgent', channels:{imessage:false, telegram:false},
+    files:{
+      soul:'How does this agent think and talk? Values, tone, when to speak vs stay silent.',
+      role:'The job. What do they own, what do they watch, what does "done" look like?',
+      playbook:'How they work: numbered steps, output format, conventions.\n1. Read memory first.\n2. …',
+      rules:'Hard boundaries, one per line. These become enforced hooks — not suggestions.\nNever push without approval.'
+    } };
+  const overlay = el(`<div class="overlay" id="form-overlay"><div class="modal" role="dialog" aria-modal="true" aria-label="${isNew?'New crew member':'Edit agent'}"></div></div>`);
+  const d = $('.modal', overlay);
+  d.innerHTML = `
+    <div class="d-head"><div class="avatar" id="f-av" style="color:${data.color}">${icon(data.icon)}</div>
+      <div class="d-id"><div class="d-name">${isNew?'New crew member':'Edit '+data.name}</div>
+      <div class="d-soul" style="pointer-events:none">${isNew?'Who are they, what do they watch, when do they speak?':'Changes apply to the next run.'}</div></div>
+      <button class="m-close" id="f-close" aria-label="Close">×</button></div>
+    <div class="tabpane"><div class="form">
+      <div class="f-row"><label>Name</label><input type="text" id="f-name" value="${data.name}" placeholder="e.g. Deploy Watch"></div>
+      <div class="f-row"><label>Icon</label><div class="icon-pick" id="f-icons">${ICONS.map(i=>`<button data-i="${i}" class="${i===data.icon?'on':''}">${icon(i)}</button>`).join('')}</div></div>
+      <div class="f-row"><label>Color</label><div class="icon-pick" id="f-colors">${COLORS.map(c=>`<button data-c="${c}" class="${c===data.color?'on':''}" style="color:${c}"><span style="width:14px;height:14px;border-radius:50%;background:${c};display:block"></span></button>`).join('')}</div></div>
+      <div class="f-row"><label>Tagline</label><input type="text" id="f-soul" value="${data.soul}" placeholder="One line shown on the roster — e.g. Speaks only when something's wrong."></div>
+      <div class="f-row"><label>Identity files</label><div>
+        <div class="ftabs" id="f-ftabs">
+          <button class="ftab on" data-f="soul">soul.md</button>
+          <button class="ftab" data-f="role">role.md</button>
+          <button class="ftab" data-f="playbook">playbook.md</button>
+          <button class="ftab" data-f="rules">rules.md</button>
+        </div>
+        <div class="file-hint" id="f-fhint"></div>
+        <textarea class="file-ta" id="f-file" spellcheck="false"></textarea>
+      </div></div>
+      <div class="f-row"><label>Model</label><select id="f-model">${['opus-4.8','fable-5','sonnet-5','haiku-4.5'].map(m=>`<option${m===data.model?' selected':''}>${m}</option>`).join('')}</select></div>
+      <div class="f-row"><label>Tools</label><div><div class="tool-pick" id="f-tools">${['Read','Grep','Glob','Bash','Edit','Write','WebFetch','WebSearch'].map(t=>`<span class="tp ${data.tools.includes(t)?'on':''}" data-t="${t}">${t}</span>`).join('')}<span class="tp danger" data-t="__bypass">Bypass permissions</span></div>
+        <div class="bypass-warn" id="f-warn" style="display:none">⚠ Runs tools without asking — hard rails still apply (no force-push, no credential reads).</div></div></div>
+      <div class="f-row"><label>Skills</label><div class="tool-pick" id="f-skills">${SKILLS.map(s=>`<span class="tp ${(data.skills||[]).includes(s)?'on':''}" data-t="${s}">⚡ ${s}</span>`).join('')}</div></div>
+      <div class="f-row"><label>Projects</label><div class="tool-pick" id="f-projects">${PROJECTS.map(pr=>`<span class="tp ${(data.projects||[]).includes(pr.name)?'on':''}" data-t="${pr.name}">${pr.name}</span>`).join('')}</div></div>
+      <div class="f-row"><label>Notify me for</label><select id="f-notify">${['urgent only','digest + urgent','everything'].map(n=>`<option${n===data.notify?' selected':''}>${n}</option>`).join('')}</select></div>
+      <div class="f-row"><label>Reachable via</label><div class="tool-pick" id="f-chan">
+        <span class="tp ${data.channels.imessage?'on':''}" data-t="imessage">iMessage</span>
+        <span class="tp ${data.channels.telegram?'on':''}" data-t="telegram">Telegram</span></div></div>
+      <div class="f-row"><label>Working dir</label><div style="position:relative">
+        <button type="button" class="dir-field" id="f-cwd-btn">${icon('i-folder')} <span id="f-cwd-label">${data.cwd}</span><span class="chev">▾</span></button>
+        <div class="dir-pop" id="f-dirpop" hidden>
+          <div class="dp-head">Dobius+ projects</div>
+          ${PROJECTS.map(pr=>`<div class="dir-row" data-path="${pr.path}">${icon('i-folder')}<span><b>${pr.name}</b></span><span class="dp-path">${pr.path}</span></div>`).join('')}
+          <div class="dir-row browse" data-path="">${icon('i-plus')}<span>Browse for a folder…</span><span class="dp-path">macOS picker</span></div>
+        </div>
+      </div></div>
+      <div class="actions"><button class="btn pri" id="f-save">${isNew?'Create agent':'Save changes'}</button><button class="btn ghost" id="f-cancel">Cancel</button>${isNew?'':'<button class="btn deny" id="f-del">Delete agent</button>'}</div>
+    </div></div>`;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(()=> overlay.classList.add('show'));
+  overlay.addEventListener('click', e=>{ if (e.target===overlay) closeFormModal(); });
+  $('#f-close').addEventListener('click', closeFormModal);
+  document.addEventListener('keydown', escClose);
+  $('#f-name').focus();
+  let picked = data.icon;
+  let pickedColor = data.color;
+  $('#f-icons').querySelectorAll('button').forEach(b=> b.addEventListener('click', ()=>{
+    $('#f-icons').querySelectorAll('button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on'); picked=b.dataset.i; $('#f-av').innerHTML=icon(picked);
+  }));
+  $('#f-colors').querySelectorAll('button').forEach(b=> b.addEventListener('click', ()=>{
+    $('#f-colors').querySelectorAll('button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on'); pickedColor=b.dataset.c; $('#f-av').style.color=pickedColor;
+  }));
+  $('#f-chan').querySelectorAll('.tp').forEach(t=> t.addEventListener('click', ()=> t.classList.toggle('on')));
+  $('#f-skills').querySelectorAll('.tp').forEach(t=> t.addEventListener('click', ()=> t.classList.toggle('on')));
+  $('#f-projects').querySelectorAll('.tp').forEach(t=> t.addEventListener('click', ()=> t.classList.toggle('on')));
+  /* working-dir picker: the app's project list + native browse */
+  let pickedCwd = data.cwd;
+  const dirpop = $('#f-dirpop');
+  $('#f-cwd-btn').addEventListener('click', (e)=>{ e.stopPropagation(); dirpop.hidden = !dirpop.hidden; });
+  dirpop.querySelectorAll('.dir-row').forEach(r=> r.addEventListener('click', ()=>{
+    if (r.classList.contains('browse')){
+      toast('Opens the macOS folder picker in the real app');
+      dirpop.hidden = true;
+      return;
+    }
+    pickedCwd = r.dataset.path;
+    $('#f-cwd-label').textContent = pickedCwd;
+    dirpop.hidden = true;
+  }));
+  d.addEventListener('click', (e)=>{ if (!e.target.closest('#f-dirpop') && !e.target.closest('#f-cwd-btn')) dirpop.hidden = true; });
+  /* identity file editor */
+  const FHINTS = {
+    soul:'Personality. Values, tone, when to speak vs stay silent. Injected first, every run.',
+    role:'The job. What they own, what they watch, what "done" looks like.',
+    playbook:'How they work: steps, output format, conventions. The agent follows this literally.',
+    rules:'Hard boundaries, one per line. Enforced as PreToolUse hooks in code — not vibes.'
+  };
+  const fileState = { ...data.files };
+  let curFile = 'soul';
+  const fta = $('#f-file');
+  const loadFile = (f)=>{ curFile=f; fta.value=fileState[f]||''; $('#f-fhint').textContent=FHINTS[f];
+    $('#f-ftabs').querySelectorAll('.ftab').forEach(b=> b.classList.toggle('on', b.dataset.f===f)); };
+  fta.addEventListener('input', ()=>{ fileState[curFile]=fta.value; });
+  $('#f-ftabs').querySelectorAll('.ftab').forEach(b=> b.addEventListener('click', ()=> loadFile(b.dataset.f)));
+  loadFile(focusFile || 'soul');
+  $('#f-tools').querySelectorAll('.tp').forEach(t=> t.addEventListener('click', ()=>{
+    t.classList.toggle('on');
+    if (t.dataset.t==='__bypass') $('#f-warn').style.display = t.classList.contains('on') ? 'block' : 'none';
+  }));
+  $('#f-cancel').addEventListener('click', closeFormModal);
+  if (!isNew) $('#f-del').addEventListener('click', ()=>{
+    delete CREW[state.sel]; state.sel=Object.keys(CREW)[0];
+    closeFormModal();
+    toast('<b>Agent deleted</b> — memory file kept on disk'); renderRoster(); renderDetail();
+  });
+  $('#f-save').addEventListener('click', ()=>{
+    const name = $('#f-name').value.trim() || 'Unnamed';
+    const tools = [...$('#f-tools').querySelectorAll('.tp.on')].map(t=>t.dataset.t).filter(t=>t!=='__bypass');
+    const chans = {};
+    $('#f-chan').querySelectorAll('.tp').forEach(t=> chans[t.dataset.t]=t.classList.contains('on'));
+    const rec = { name, icon:picked, color:pickedColor, soul:$('#f-soul').value.trim()||'—', model:$('#f-model').value, tools,
+      files:{...fileState}, notify:$('#f-notify').value, channels:chans,
+      skills:[...$('#f-skills').querySelectorAll('.tp.on')].map(t=>t.dataset.t),
+      projects:[...$('#f-projects').querySelectorAll('.tp.on')].map(t=>t.dataset.t),
+      knowledge: a?(a.knowledge||[]):[], ledger: a?(a.ledger||[]):[], kb: a?(a.kb||[]):[],
+      cwd:pickedCwd||'~', sched: isNew?'on demand':data.sched,
+      status:'idle', doing: isNew?'idle · never run':data.doing,
+      memory: a?a.memory:[], proposal:null,
+      stream: a?a.stream:[['sys','no runs yet'],['ev','Give this agent its first prompt from the Live run tab — or text it once channels are on.']],
+      hist: a?a.hist:[], wf: a?a.wf:[['(no run)',0,0,'']], wfEnd: a?a.wfEnd:'—' };
+    if (isNew){ const key = name.toLowerCase().replace(/[^a-z0-9]+/g,'-'); CREW[key]=rec; state.sel=key; toast(`<b>${name} joined the crew</b>`); }
+    else { Object.assign(CREW[state.sel], rec); toast('<b>Saved</b> — applies on next run'); }
+    closeFormModal();
+    renderRoster(); renderDetail();
+  });
+}
+
+/* ---------------- panels ---------------- */
+$('#brief-dismiss').addEventListener('click', ()=>{
+  $('#briefing').innerHTML = `<div class="queue-empty" style="border:none">Briefing dismissed. Next one lands tomorrow at 8:05.</div>`;
+  toast('Briefing dismissed');
+});
+
+/* ---------------- new member ---------------- */
+$('#btn-new').addEventListener('click', ()=> openFormModal(null));
+
+/* ---------------- crew-wide files ---------------- */
+const CREW_FILES = {
+  'USER.md':'Rich (Carson) — Status Digital Marketing.\nPrefers plain English, short sentences, no jargon.\nWants findings ranked by impact; hates being pinged for noise.\nNever ship or close Asana tasks without his explicit OK.\nMorning briefing lands at 8:05; quiet hours 23:00–8:00.',
+  'TOOLS.md':'dobius CLI is installed everywhere — use it for app control.\nAsana writes are draft-only; the human posts.\nScreenshots: always a fresh Playwright window, never a reused one.\nDeploys: Vercel; verify with ship-test before calling anything live.'
+};
+const CFHINTS = {
+  'USER.md':'Who you are. Every crew member reads this before every run — preferences, boundaries, schedule.',
+  'TOOLS.md':'House conventions for tools and infrastructure. Shared by the whole crew.'
+};
+$('#btn-crew-files').addEventListener('click', ()=>{
+  closeFormModal();
+  const overlay = el(`<div class="overlay" id="form-overlay"><div class="modal" role="dialog" aria-modal="true" aria-label="Crew files">
+    <div class="d-head"><div class="avatar" style="color:#b9bcc2">${icon('i-book')}</div>
+      <div class="d-id"><div class="d-name">Crew files</div>
+      <div class="d-soul" style="pointer-events:none">Shared context every agent reads before every run.</div></div>
+      <button class="m-close" id="cf-close" aria-label="Close">×</button></div>
+    <div class="tabpane"><div class="form">
+      <div class="ftabs" id="cf-tabs">${Object.keys(CREW_FILES).map((f,i)=>`<button class="ftab ${i===0?'on':''}" data-f="${f}">${f}</button>`).join('')}</div>
+      <div class="file-hint" id="cf-hint"></div>
+      <textarea class="file-ta" id="cf-ta" spellcheck="false" style="min-height:190px"></textarea>
+      <div class="actions"><button class="btn pri" id="cf-save">Save</button><button class="btn ghost" id="cf-cancel">Cancel</button></div>
+    </div></div></div>`);
+  document.body.appendChild(overlay);
+  requestAnimationFrame(()=> overlay.classList.add('show'));
+  overlay.addEventListener('click', e=>{ if (e.target===overlay) closeFormModal(); });
+  document.addEventListener('keydown', escClose);
+  let cur = 'USER.md';
+  const ta = $('#cf-ta');
+  const temp = {...CREW_FILES};
+  const load = (f)=>{ cur=f; ta.value=temp[f]; $('#cf-hint').textContent=CFHINTS[f];
+    $('#cf-tabs').querySelectorAll('.ftab').forEach(b=> b.classList.toggle('on', b.dataset.f===f)); };
+  ta.addEventListener('input', ()=>{ temp[cur]=ta.value; });
+  $('#cf-tabs').querySelectorAll('.ftab').forEach(b=> b.addEventListener('click', ()=> load(b.dataset.f)));
+  load('USER.md');
+  $('#cf-close').addEventListener('click', closeFormModal);
+  $('#cf-cancel').addEventListener('click', closeFormModal);
+  $('#cf-save').addEventListener('click', ()=>{ Object.assign(CREW_FILES, temp); closeFormModal(); toast('<b>Crew files saved</b> — every agent reads these next run'); });
+});
+
+/* ---------------- live simulation ---------------- */
+const TRIAGE_TICKS = [
+  '<b>⏺ Grep</b> "hero" apps/web/src — 2 components found',
+  '<b>⏺ Read</b> apps/web/src/components/Hero.tsx',
+  '<b>⏺ Glob</b> axiom-connect/**/Hero* — no matches'
+];
+let tick = 0;
+setInterval(()=>{
+  const a = CREW.triage;
+  if (!a || a.status!=='working') return;
+  if (tick < TRIAGE_TICKS.length){ a.stream.push(['tool', TRIAGE_TICKS[tick++]]); if (state.sel==='triage' && state.tab==='run') renderDetail(); }
+}, 4500);
+
+/* ---------------- ping budget ---------------- */
+$('#ru-budget').addEventListener('click', ()=>{
+  const order = [2,4,6];
+  state.maxPings = order[(order.indexOf(state.maxPings)+1) % order.length];
+  renderRollup();
+  toast(`<b>Ping budget:</b> ${state.maxPings}/day — overflow goes to the morning briefing`);
+});
+
+/* ---------------- ticket popup ---------------- */
+function openTicketModal(q){
+  closeFormModal();
+  const overlay = el(`<div class="overlay" id="form-overlay"><div class="modal" style="position:relative;width:min(700px,calc(100vw - 40px))">
+    <button class="m-close" id="tk-close" aria-label="Close" style="position:absolute;top:8px;right:10px;z-index:2">×</button>
+    <div style="padding:16px 16px 15px">
+      <div class="queue-head" style="padding-bottom:8px"><h2>Needs you</h2><span class="sub">acting closes this popup</span></div>
+      <div id="tk-slot"></div>
+    </div></div></div>`);
+  const resolver = (cb)=>{
+    closeFormModal();
+    const i = queue.findIndex(x=>x.id===q.id);
+    if (i>=0) queue.splice(i,1);
+    renderQueue();
+    if (cb) cb();
+  };
+  $('#tk-slot', overlay).appendChild(buildTicket(q, resolver));
+  document.body.appendChild(overlay);
+  requestAnimationFrame(()=> overlay.classList.add('show'));
+  overlay.addEventListener('click', e=>{ if (e.target===overlay) closeFormModal(); });
+  $('#tk-close', overlay).addEventListener('click', closeFormModal);
+  document.addEventListener('keydown', escClose);
+}
+
+/* ---------------- notification center ---------------- */
+const NOTIFS = [
+  { agent:'t-dp', ok:false, ticket:'npm', text:'<b>dobius-plus · codex</b> blocked on pnpm add — in the queue', when:'now' },
+  { agent:'auditor', ok:false, ticket:'push', text:'<b>Auditor</b> waiting on git push approval', when:'2m' },
+  { agent:'triage', ok:false, ticket:'ask', text:'<b>Triage</b> asked a question — needs an answer', when:'40s' },
+  { agent:'scribe', ok:true, text:'<b>Scribe</b> drafted the Asana comment → queue', when:'9:34' },
+  { agent:'sentry', ok:true, text:'<b>Sentry Watch</b> hourly check — silent', when:'8:05' },
+  { agent:'auditor', ok:true, text:'<b>Auditor</b> finished the morning walk — $0.31 · 9 turns', when:'8:02' }
+];
+let notifUnread = 3;
+function renderNotifBadge(){
+  const b = $('#notif-badge');
+  b.textContent = notifUnread;
+  b.style.display = notifUnread ? 'block' : 'none';
+}
+function pushNotif(agentKey, ok, text){
+  NOTIFS.unshift({ agent:agentKey, ok, text, when:'now' });
+  if (NOTIFS.length > 12) NOTIFS.pop();
+  notifUnread++;
+  renderNotifBadge();
+}
+function closeNotifPanel(){ const pnl = $('#notif-panel'); if (pnl) pnl.remove(); }
+$('#notif-btn').addEventListener('click', (e)=>{
+  e.stopPropagation();
+  if ($('#notif-panel')) return closeNotifPanel();
+  notifUnread = 0; renderNotifBadge();
+  const pnl = el(`<div class="notif-panel" id="notif-panel"><div class="notif-head">Notifications</div></div>`);
+  for (const n of NOTIFS){
+    const a = ag(n.agent);
+    const row = el(`<div class="n-row">${avatarHTML(a)}<span class="n-txt">${n.text}</span><span class="n-when">${n.when}</span><span class="n-mark ${n.ok?'ok':'err'}">${n.ok?'✓':'✕'}</span></div>`);
+    row.addEventListener('click', ()=>{
+      closeNotifPanel();
+      const tq = n.ticket ? queue.find(x=>x.id===n.ticket) : null;
+      if (tq) return openTicketModal(tq);
+      state.sel=n.agent; state.tab='run'; renderRoster(); renderDetail();
+    });
+    pnl.appendChild(row);
+  }
+  $('.titlebar').appendChild(pnl);
+});
+document.addEventListener('click', (e)=>{ if ($('#notif-panel') && !e.target.closest('#notif-panel') && !e.target.closest('#notif-btn')) closeNotifPanel(); });
+
+/* ---------------- text size ---------------- */
+const SCALES = [ [1,'Small'], [1.15,'Medium'], [1.3,'Large'] ];
+let scaleIdx = 0;
+$('#ru-textsize').addEventListener('click', ()=>{
+  scaleIdx = (scaleIdx + 1) % SCALES.length;
+  document.documentElement.style.setProperty('--text-scale', SCALES[scaleIdx][0]);
+  toast(`<b>Text size:</b> ${SCALES[scaleIdx][1]}`);
+});
+
+/* ---------------- 24h coverage strip ---------------- */
+(function(){
+  const cv = $('#coverage'); if (!cv) return;
+  // Triage: continuous 10-min poll — a faint band across the day
+  cv.appendChild(el(`<div class="cv-band" style="left:1%;right:1%;top:5px;background:#7aa2f7" title="Triage — every 10 min"></div>`));
+  // Sentry: hourly ticks, quiet 23–8
+  for (let hr=8; hr<23; hr++) cv.appendChild(el(`<div class="cv-tick" style="left:${(hr/24*98+1).toFixed(1)}%;background:#e0645c" title="Sentry Watch — hourly"></div>`));
+  // Auditor: one 8:00 mark
+  cv.appendChild(el(`<div class="cv-tick" style="left:${(8/24*98+1).toFixed(1)}%;top:3px;bottom:3px;width:4px;background:#f0b44c" title="Auditor — daily 8:00"></div>`));
+})();
+
+/* ---------------- live pulse monitor ---------------- */
+function renderLive(){
+  const box = $('#live-body'); if (!box) return;
+  box.innerHTML='';
+  for (const [key,a] of [...Object.entries(CREW), ...Object.entries(TERMS)]){
+    const mode = a.status==='working' ? 'working' : a.status==='waiting' ? 'waiting' : 'flat';
+    const doing = a.status==='working' ? `<code>${a.doing}</code>` : a.doing;
+    const row = el(`<div class="live-row">${avatarHTML(a)}
+      <span><span class="lv-name" style="display:block">${a.name}</span><span class="lv-doing" style="display:block">${doing}</span></span>
+      <span class="eq ${mode}" style="color:${mode==='waiting'?'var(--wait)':a.color}"><i></i><i></i><i></i><i></i><i></i></span></div>`);
+    row.addEventListener('click', ()=>{ state.sel=key; state.tab='run'; renderRoster(); renderDetail(); window.scrollTo({top:0,behavior:'smooth'}); });
+    box.appendChild(row);
+  }
+}
+
+/* ---------------- pause crew ---------------- */
+$('#pause-btn').addEventListener('click', ()=>{
+  state.paused = !state.paused;
+  for (const a of Object.values(CREW)){
+    if (state.paused){ a._prev = [a.status, a.doing]; a.status='sleeping'; a.doing='paused · crew on hold'; }
+    else if (a._prev){ [a.status, a.doing] = a._prev; delete a._prev; }
+  }
+  $('#pause-btn').style.color = state.paused ? 'var(--wait)' : '';
+  renderRoster(); renderDetail();
+  toast(state.paused ? '<b>Crew paused</b> — no heartbeats, no pings until you resume' : '<b>Crew resumed</b> — schedules back on', state.paused);
+});
+
+/* ---------------- briefing tune ---------------- */
+function openTuneModal(key){
+  closeFormModal();
+  const a = CREW[key];
+  const overlay = el(`<div class="overlay" id="form-overlay"><div class="modal" style="position:relative;width:min(600px,calc(100vw - 40px))">
+    <button class="m-close" id="tn-close" aria-label="Close" style="position:absolute;top:8px;right:10px;z-index:2">×</button>
+    <div style="padding:16px 16px 15px">
+      <div class="d-name" style="font-size:15px;display:flex;align-items:center;gap:9px">${avatarHTML(a)} Tune the briefing — ${a.name}</div>
+      <div class="d-soul" style="pointer-events:none;padding:2px 0 12px">What ${a.name} reports in the 8:05 morning brief.</div>
+      <div class="sub-label">Current</div>
+      <div class="tune-cur">${a.brief}</div>
+      <div class="sub-label" style="padding-top:12px">Your edit</div>
+      <textarea class="file-ta" id="tn-edit" spellcheck="false" style="min-height:110px;font-family:var(--sans)">${a.brief}</textarea>
+      <div class="actions" style="padding-top:10px">
+        <button class="btn pri" id="tn-save">Save</button>
+        <button class="btn ghost" id="tn-cancel">Cancel</button>
+        <span style="margin-left:auto;font-size:11px;color:var(--faint)">applies to tomorrow's brief</span>
+      </div>
+    </div></div></div>`);
+  document.body.appendChild(overlay);
+  requestAnimationFrame(()=> overlay.classList.add('show'));
+  overlay.addEventListener('click', e=>{ if (e.target===overlay) closeFormModal(); });
+  $('#tn-close', overlay).addEventListener('click', closeFormModal);
+  $('#tn-cancel', overlay).addEventListener('click', closeFormModal);
+  document.addEventListener('keydown', escClose);
+  $('#tn-save', overlay).addEventListener('click', ()=>{
+    const v = $('#tn-edit').value.trim();
+    if (v && v !== a.brief){ a.brief = v; toast(`<b>Briefing tuned</b> — ${a.name} reports this from tomorrow`); }
+    closeFormModal();
+  });
+  $('#tn-edit').focus();
+}
+document.querySelectorAll('.brief-tune').forEach(b=> b.addEventListener('click', ()=> openTuneModal(b.dataset.a)));
+
+/* ---------------- boot ---------------- */
+renderRollup(); renderProjChips(); renderRoster(); renderQueue(); renderDetail();
+</script>

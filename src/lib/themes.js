@@ -145,8 +145,19 @@ export const THEMES = themes.map((t) => ({
     '--dim': `${t.fg}88`,
     '--danger': t.accent4,
     '--warning': t.accent3,
+    // Worktree indicator: teal, tuned so it stays legible on both dark and
+    // the light-background themes (Butter, Peach). Bright teal on dark bg,
+    // deeper teal on light bg.
+    '--git-worktree': isLightBg(t.bg) ? '#0D9488' : '#2DD4BF',
   },
 }));
+
+/** True when a background hex is light enough to need a darker accent. */
+function isLightBg(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  // Perceived luminance (ITU-R BT.601), 0-255.
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 140;
+}
 
 /**
  * Simple hex color mix for surface color.

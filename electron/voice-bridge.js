@@ -23,8 +23,10 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { app } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import { writeTerminal, listTerminals } from './terminal-manager.js';
+import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
+import { STAGES } from './task-pipeline.js';
 
 const PORT = 8421;
 const HOST = '127.0.0.1';
@@ -151,6 +153,56 @@ async function handleMarkDone(req, res) {
   return sendJson(res, result.ok ? 200 : 400, result);
 }
 
+// Mark a Tasks-panel item done from inside a terminal. LOCAL ONLY — this
+// flips the checkbox in the per-project tasks JSON and never touches Asana
+// (house rule: never auto-close Asana tasks). On success we broadcast
+// `tasks:updated` so an open TasksDropdown re-checks the box live.
+async function handleTaskDone(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  const projectPath = body?.projectPath;
+  const ref = body?.ref;
+  const result = completeTaskByRef(projectPath, ref);
+  if (result.ok) {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('tasks:updated', projectPath);
+    }
+  }
+  return sendJson(res, result.ok ? 200 : 400, result);
+}
+
+// Move a task between pipeline stages from a terminal (skills / the Conductor
+// drive the Kanban board with this). Uses a 'system' actor, so the transition
+// table AND the human-only rule are enforced in tasks-service/task-pipeline:
+// approval -> done is human-only, so a /stage call to 'done' is rejected by
+// design (drag the card to Done in the UI, or use /taskDone to force-complete).
+// On success we broadcast `tasks:updated` so the board (and Tasks panel) animate
+// live in EVERY window. -sS semantics: illegal-transition / human-only /
+// candidate errors are returned in the body with a 4xx so the caller can react.
+async function handleStage(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  const projectPath = body?.projectPath;
+  const ref = body?.ref;
+  const stage = body?.stage;
+  const note = body?.note ?? null;
+  if (!STAGES.includes(stage)) {
+    return sendJson(res, 400, { ok: false, error: `invalid stage "${stage}". valid: ${STAGES.join(', ')}` });
+  }
+  const resolved = resolveTaskRef(projectPath, ref);
+  if (!resolved.ok) return sendJson(res, 400, resolved);
+  // actor:'system' — never 'human'. This is what enforces the approval->done gate.
+  const result = advanceTask(projectPath, resolved.task.id, stage, { actor: 'system', note });
+  if (result.ok) {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('tasks:updated', projectPath);
+    }
+  }
+  return sendJson(res, result.ok ? 200 : 400, result);
+}
+
 // --- Phase 3: spawn + lead-tab + ask endpoints --------------------------
 // Built-in agents come from main.js — set by setBuiltinAgents below at boot.
 let builtinAgentsRef = [];
@@ -224,6 +276,23 @@ async function handleAsanaFetch(req, res) {
     if (result.ok) {
       result.summary = q.formatTaskList(result.tasks);
     }
+    return sendJson(res, result.ok ? 200 : 400, result);
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: err.message });
+  }
+}
+
+// Mark an Asana task complete (the one Asana WRITE). The dobius-asana-complete
+// CLI fronts this; the safety gate (Carson's explicit yes) is enforced by the
+// review-lane prompt, which forbids calling it without approval — mirroring how
+// push/deploy is gated. Bearer-auth + loopback still apply at the bridge level.
+async function handleAsanaComplete(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  try {
+    const q = await import('./asana-queue.js');
+    const result = await q.markTaskComplete(body?.gid);
     return sendJson(res, result.ok ? 200 : 400, result);
   } catch (err) {
     return sendJson(res, 500, { ok: false, error: err.message });
@@ -436,11 +505,14 @@ function handleRequest(req, res) {
   if (req.url === '/trackWork') return handleTrackWork(req, res);
   if (req.url === '/getStatus') return handleGetStatus(req, res);
   if (req.url === '/markDone') return handleMarkDone(req, res);
+  if (req.url === '/taskDone') return handleTaskDone(req, res);
+  if (req.url === '/stage') return handleStage(req, res);
   if (req.url === '/spawn') return handleSpawn(req, res);
   if (req.url === '/ask') return handleAsk(req, res);
   if (req.url === '/setLeadTab') return handleSetLeadTab(req, res);
   if (req.url === '/getLeadTab') return handleGetLeadTab(req, res);
   if (req.url === '/asana/fetch') return handleAsanaFetch(req, res);
+  if (req.url === '/asana/complete') return handleAsanaComplete(req, res);
   if (req.url === '/asana/allow') return handleAsanaAllow(req, res);
   if (req.url === '/asana/listAllowed') return handleAsanaListAllowed(req, res);
   if (req.url === '/scheduled/list') return handleListScheduled(req, res);
@@ -502,7 +574,7 @@ export function stopVoiceBridge() {
 
 // --- CLI script auto-install ---------------------------------------------
 
-const CLI_VERSION = 7;
+const CLI_VERSION = 11;
 const CLI_DIR = path.join(os.homedir(), '.local', 'bin');
 const CLI_PATH = path.join(CLI_DIR, 'dobius-send');
 const CLI_TABS_PATH = path.join(CLI_DIR, 'dobius-tabs');
@@ -510,6 +582,9 @@ const CLI_REPLY_PATH = path.join(CLI_DIR, 'dobius-reply');
 const CLI_TRACK_PATH = path.join(CLI_DIR, 'dobius-track');
 const CLI_STATUS_PATH = path.join(CLI_DIR, 'dobius-status');
 const CLI_MARKDONE_PATH = path.join(CLI_DIR, 'dobius-mark-done');
+const CLI_TASKDONE_PATH = path.join(CLI_DIR, 'dobius-task-done');
+const CLI_ASANA_COMPLETE_PATH = path.join(CLI_DIR, 'dobius-asana-complete');
+const CLI_STAGE_PATH = path.join(CLI_DIR, 'dobius-stage');
 const CLI_SPAWN_PATH = path.join(CLI_DIR, 'dobius-spawn');
 const CLI_ASK_PATH = path.join(CLI_DIR, 'dobius-ask');
 const CLI_LEADTAB_PATH = path.join(CLI_DIR, 'dobius-lead-tab');
@@ -532,6 +607,8 @@ ${CLI_MARKER}
 # Usage: dobius-send <tabId> "<message>"
 # tabId format: term-/path/to/project-N  (see: dobius-tabs)
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 2 ]; then
   echo "usage: dobius-send <tabId> <message>" >&2
   exit 1
@@ -552,6 +629,8 @@ ${CLI_MARKER}
 # List currently open Dobius+ terminal tabs.
 # Usage: dobius-tabs
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-tabs: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
 curl -fsS -X POST "http://127.0.0.1:${PORT}/tabList" \\
   -H "Host: 127.0.0.1:${PORT}" \\
@@ -569,6 +648,8 @@ ${CLI_MARKER}
 # when multiple voice intents are in flight concurrently.
 # Usage: dobius-reply <requestId> "your one-line reply"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 2 ]; then
   echo "usage: dobius-reply <requestId> <message>" >&2
   exit 1
@@ -592,6 +673,8 @@ ${CLI_MARKER}
 # original iMessage thread; pass the same [req-XXXX] id from your input.
 # Usage: dobius-track <workId> <tabId> <requestId> "<description>"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 4 ]; then
   echo "usage: dobius-track <workId> <tabId> <requestId> <description>" >&2
   exit 1
@@ -613,6 +696,8 @@ ${CLI_MARKER}
 # dobius-reply.
 # Usage: dobius-status [target]      (target is workId, project name substring, or empty for all)
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-status: bridge token unreadable" >&2; exit 2; }
 TARGET="$*"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/getStatus" \\
@@ -630,6 +715,8 @@ ${CLI_MARKER}
 # final-report iMessage still fires.
 # Usage: dobius-mark-done <workId> "<summary>" [status]    (status: completed|failed|cancelled, default completed)
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 2 ]; then
   echo "usage: dobius-mark-done <workId> <summary> [status]" >&2
   exit 1
@@ -643,12 +730,107 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/markDone" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "summary": sys.argv[2], "status": sys.argv[3]}))' "$WORK_ID" "$SUMMARY" "$STATUS")"
 `;
 
+const CLI_TASKDONE_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Mark a task in the Dobius+ Tasks panel (top-right) as done. Call this when
+# you finish a task that appears in that panel — whether it's a build-lane task
+# of Carson's or a review of Sam's work. The panel re-checks the box live.
+# Matches by task title (substring, case-insensitive), Asana gid, or task id.
+# LOCAL ONLY — this never completes the task in Asana; that stays a human step.
+# Usage: dobius-task-done "<task title | asanaGid | taskId>"            (project = current dir)
+#        dobius-task-done <projectPath> "<task title | asanaGid | taskId>"
+set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
+if [ $# -lt 1 ]; then
+  echo "usage: dobius-task-done [projectPath] <task title|asanaGid|taskId>" >&2
+  exit 1
+fi
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-task-done: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# One arg → task ref only, project defaults to the working dir (hand-driven use).
+# Two+ args → first is the project path (Conductor dispatching across projects).
+if [ $# -eq 1 ]; then
+  PROJECT="$(pwd)"; REF="$1"
+else
+  PROJECT="$1"; shift; REF="$*"
+fi
+# -sS (not -fsS): we WANT the JSON body on a 4xx so the caller can read the
+# error / candidate list and retry with a more specific title.
+curl -sS -X POST "http://127.0.0.1:${PORT}/taskDone" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2]}))' "$PROJECT" "$REF")"
+`;
+
+// Mark Sam's task COMPLETE in Asana — the one Asana write. Only run this AFTER
+// Carson has explicitly approved (terminal "approve" or a dobius-confirm yes).
+// Never call it autonomously: it closes the task for everyone.
+const CLI_ASANA_COMPLETE_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Mark an Asana task complete. WRITE action — only after Carson's explicit yes.
+# Usage: dobius-asana-complete <asanaTaskGid>
+set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
+if [ $# -lt 1 ]; then
+  echo "usage: dobius-asana-complete <asanaTaskGid>" >&2
+  exit 1
+fi
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-complete: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+curl -sS -X POST "http://127.0.0.1:${PORT}/asana/complete" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"gid": sys.argv[1]}))' "$1")"
+`;
+
+const CLI_STAGE_SCRIPT = `#!/bin/bash
+${CLI_MARKER}
+# Move a task through the Dobius+ pipeline (Kanban board). Skills and the
+# Conductor call this to advance a task between stages as the work progresses:
+# building, review, shiptest, approval (also intake/queued/blocked). The board
+# updates live in every window.
+# Matches by task title (substring, case-insensitive), Asana gid, or task id.
+# Uses a 'system' actor, so it CANNOT set a task to 'done' — approval -> done is
+# human-only (drag the card to Done in the UI, or use dobius-task-done to
+# force-complete). Illegal transitions (e.g. intake -> shiptest) are rejected.
+# Usage: dobius-stage "<task title | asanaGid | taskId>" <stage>            (project = current dir)
+#        dobius-stage <projectPath> "<task title | asanaGid | taskId>" <stage>
+#   stages: intake queued building review shiptest approval blocked  (done is human-only)
+set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
+if [ $# -lt 2 ]; then
+  echo "usage: dobius-stage [projectPath] <task ref> <stage>" >&2
+  echo "  stages: intake queued building review shiptest approval blocked  (done is human-only)" >&2
+  exit 1
+fi
+TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-stage: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# 2 args → <ref> <stage>, project defaults to the working dir (hand-driven use).
+# 3 args → <projectPath> <ref> <stage> (Conductor staging across projects).
+if [ $# -eq 2 ]; then
+  PROJECT="$(pwd)"; REF="$1"; STAGE="$2"
+else
+  PROJECT="$1"; REF="$2"; STAGE="$3"
+fi
+# -sS (not -fsS): we WANT the JSON body on a 4xx so the caller sees the
+# illegal-transition / human-only / candidate-list error and can react.
+curl -sS -X POST "http://127.0.0.1:${PORT}/stage" \\
+  -H "Host: 127.0.0.1:${PORT}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2], "stage": sys.argv[3]}))' "$PROJECT" "$REF" "$STAGE")"
+`;
+
 const CLI_SPAWN_SCRIPT = `#!/bin/bash
 ${CLI_MARKER}
 # Spawn a fresh Claude agent in a Dobius+ tab. Gated by askSam — Sam gets
 # an iMessage prompt to confirm before the spawn fires.
 # Usage: dobius-spawn <projectPath> <agentId> ["<initial prompt>"]
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 2 ]; then
   echo "usage: dobius-spawn <projectPath> <agentId> [initial prompt]" >&2
   exit 1
@@ -670,6 +852,8 @@ ${CLI_MARKER}
 # irreversible / external-visible action (push, delete, asana comment).
 # Usage: dobius-ask "<question>"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 if [ $# -lt 1 ]; then
   echo "usage: dobius-ask <question>" >&2
   exit 1
@@ -692,6 +876,8 @@ ${CLI_MARKER}
 #        dobius-lead-tab set <projectPath> <tabId>
 #        dobius-lead-tab clear <projectPath>
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-lead-tab: bridge token unreadable" >&2; exit 2; }
 case "\${1-}" in
   get)
@@ -725,6 +911,8 @@ ${CLI_MARKER}
 # approval before processing.
 # Usage: dobius-asana-fetch <projectName>      (fuzzy substring match)
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 1 ] || { echo "usage: dobius-asana-fetch <projectName>" >&2; exit 1; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-fetch: bridge token unreadable" >&2; exit 2; }
 PROJECT="$*"
@@ -739,6 +927,8 @@ ${CLI_MARKER}
 # display name and its gid (find via the Asana web URL: app.asana.com/0/<GID>/...).
 # Usage: dobius-asana-allow <name> <gid>
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 2 ] || { echo "usage: dobius-asana-allow <name> <gid>" >&2; exit 1; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-allow: bridge token unreadable" >&2; exit 2; }
 NAME="$1"; GID="$2"
@@ -752,6 +942,8 @@ ${CLI_MARKER}
 # List allowlisted Asana projects.
 # Usage: dobius-asana-list-allowed
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-list-allowed: bridge token unreadable" >&2; exit 2; }
 curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/listAllowed" \\
   -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{}" \\
@@ -765,6 +957,8 @@ ${CLI_MARKER}
 # Use BEFORE any irreversible action (gh push, asana comment, delete, etc.).
 # Usage: dobius-confirm "Push 5 commits to main?"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 1 ] || { echo "usage: dobius-confirm <action description>" >&2; exit 1; }
 ACTION="$*"
 QUESTION="\${ACTION}\\nReply YES to confirm or NO to skip."
@@ -782,6 +976,8 @@ ${CLI_MARKER}
 # one-line echo so it knows the handoff landed.
 # Usage: dobius-handoff <fromTabId> <toTabId> "<context message>"
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 3 ] || { echo "usage: dobius-handoff <fromTabId> <toTabId> <context>" >&2; exit 1; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-handoff: bridge token unreadable" >&2; exit 2; }
 FROM="$1"; TO="$2"; shift 2
@@ -798,6 +994,8 @@ ${CLI_MARKER}
 #        dobius-scheduled enable <id>
 #        dobius-scheduled disable <id>
 set -e
+command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-scheduled: bridge token unreadable" >&2; exit 2; }
 case "\${1-list}" in
   list)
@@ -808,9 +1006,10 @@ case "\${1-list}" in
   enable|disable)
     ACTION="\$1"; [ $# -ge 2 ] || { echo "usage: dobius-scheduled \$ACTION <id>" >&2; exit 1; }
     ENABLED=\$([ "\$ACTION" = "enable" ] && echo true || echo false)
+    BODY="\$(python3 -c 'import json,sys; print(json.dumps({"id": sys.argv[1], "patch": {"enabled": sys.argv[2] == "true"}}))' "\$2" "\$ENABLED")"
     curl -fsS -X POST "http://127.0.0.1:${PORT}/scheduled/update" \\
       -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
-      --data-binary "{\\\"id\\\": \\\"\$2\\\", \\\"patch\\\": {\\\"enabled\\\": \$ENABLED}}"
+      --data-binary "\$BODY"
     ;;
   *) echo "usage: dobius-scheduled list | enable <id> | disable <id>" >&2; exit 1 ;;
 esac
@@ -829,6 +1028,9 @@ function installCliScript() {
     writeIfChanged(CLI_TRACK_PATH, CLI_TRACK_SCRIPT);
     writeIfChanged(CLI_STATUS_PATH, CLI_STATUS_SCRIPT);
     writeIfChanged(CLI_MARKDONE_PATH, CLI_MARKDONE_SCRIPT);
+    writeIfChanged(CLI_TASKDONE_PATH, CLI_TASKDONE_SCRIPT);
+    writeIfChanged(CLI_ASANA_COMPLETE_PATH, CLI_ASANA_COMPLETE_SCRIPT);
+    writeIfChanged(CLI_STAGE_PATH, CLI_STAGE_SCRIPT);
     writeIfChanged(CLI_SPAWN_PATH, CLI_SPAWN_SCRIPT);
     writeIfChanged(CLI_ASK_PATH, CLI_ASK_SCRIPT);
     writeIfChanged(CLI_LEADTAB_PATH, CLI_LEADTAB_SCRIPT);

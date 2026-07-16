@@ -15,22 +15,34 @@ import Agents from './Agents';
 import ClaudeMdEditor from './ClaudeMdEditor';
 import Settings from './Settings';
 import BoardView from './Board/BoardView';
+import KanbanView from './Kanban/KanbanView';
 import OrchestratorView from './Orchestrator/OrchestratorView';
 import Updates from './Updates';
+import Prompts from './Prompts';
+import Notes from './Notes';
+import Costs from './Costs';
+import ChangeFeed from './ChangeFeed';
+import Search from './Search';
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
   { id: 'mcp', label: 'MCP' },
   { id: 'skills', label: 'Skills' },
   { id: 'stats', label: 'Stats' },
+  { id: 'costs', label: 'Costs' },
   { id: 'sessions', label: 'Sessions' },
+  { id: 'search', label: 'Search' },
   { id: 'checkpoints', label: 'Checkpoints' },
   { id: 'plans', label: 'Plans' },
+  { id: 'prompts', label: 'Prompts' },
+  { id: 'notes', label: 'Notes' },
   { id: 'agents', label: 'Mission Control' },
   { id: 'board', label: 'Board' },
+  { id: 'pipeline', label: 'Pipeline' },
   { id: 'orchestrator', label: 'Orchestrator' },
   { id: 'builds', label: 'Builds' },
   { id: 'git', label: 'Git' },
+  { id: 'changes', label: 'Changes' },
   { id: 'claudemd', label: 'CLAUDE.md' },
   { id: 'updates', label: 'Updates' },
   { id: 'settings', label: 'Settings' },
@@ -41,14 +53,20 @@ const TAB_CONTENT = {
   mcp: (props) => <MCPServers settings={props.settings} bridgeServers={props.bridgeServers} />,
   skills: (props) => <Skills skills={props.skills} />,
   stats: (props) => <Stats stats={props.stats} />,
+  costs: () => <Costs />,
   sessions: () => <Sessions />,
+  search: () => <Search />,
   checkpoints: () => <Checkpoints />,
   agents: () => <Agents />,
   board: () => <BoardView />,
+  pipeline: () => <KanbanView />,
   orchestrator: () => <OrchestratorView />,
   plans: (props) => <Plans plans={props.plans} />,
+  prompts: () => <Prompts />,
+  notes: () => <Notes />,
   builds: () => <BuildMonitorView />,
   git: () => <GitView />,
+  changes: () => <ChangeFeed />,
   claudemd: () => <ClaudeMdEditor />,
   updates: () => <Updates />,
   settings: () => <Settings />,
@@ -109,8 +127,8 @@ export default function DashboardView() {
     <div className="h-full flex flex-col">
       {/* Tab bar */}
       <div
-        className="flex items-center gap-0.5 px-4 shrink-0"
-        style={{ borderBottom: '1px solid var(--border)' }}
+        className="flex items-center gap-0.5 px-4 shrink-0 overflow-x-auto"
+        style={{ borderBottom: '1px solid var(--border)', scrollbarWidth: 'none' }}
       >
         {TABS.map((tab) => (
           <button

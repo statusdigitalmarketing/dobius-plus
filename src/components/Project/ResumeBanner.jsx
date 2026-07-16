@@ -53,7 +53,7 @@ export default function ResumeBanner({ projectPath }) {
       </span>
       <button
         onClick={() => {
-          resumeSession(session.sessionId);
+          resumeSession({ sessionId: session.sessionId, projectPath });
           setDismissed(true);
         }}
         className="px-2 py-0.5 rounded text-xs"

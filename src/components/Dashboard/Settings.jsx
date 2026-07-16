@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useStore } from '../../store/store';
 import { THEMES } from '../../lib/themes';
+import AccountsSection from './AccountsSection';
 
 export default function Settings() {
   const themeIndex = useStore((s) => s.themeIndex);
@@ -21,13 +22,36 @@ export default function Settings() {
   const [mobileBusy, setMobileBusy] = useState(false);
   const [mobileError, setMobileError] = useState('');
 
+  // Asana state
+  const [asanaPat, setAsanaPat] = useState('');
+  const [asanaPatSaved, setAsanaPatSaved] = useState(false);
+  const [asanaPatVisible, setAsanaPatVisible] = useState(false);
+  const [autoMode, setAutoMode] = useState({ enabled: false, intervalMinutes: 10 });
+
   // Terminal-tab status dots — managed Claude Notification hook
   const [statusHooks, setStatusHooks] = useState(false);
   const [statusHooksBusy, setStatusHooksBusy] = useState(false);
   const [statusHooksError, setStatusHooksError] = useState('');
+
   useEffect(() => {
+    window.electronAPI?.asanaGetConfig?.().then((cfg) => {
+      if (cfg?.pat) setAsanaPat(cfg.pat);
+    });
+    window.electronAPI?.autoModeGet?.().then((a) => { if (a) setAutoMode(a); });
     window.electronAPI?.claudeHooksGetStatus?.().then((r) => { if (r) setStatusHooks(!!r.installed); });
   }, []);
+
+  const saveAsanaPat = useCallback(async () => {
+    await window.electronAPI?.asanaUpdateConfig?.({ pat: asanaPat.trim() });
+    setAsanaPatSaved(true);
+    setTimeout(() => setAsanaPatSaved(false), 2000);
+  }, [asanaPat]);
+
+  const toggleAutoMode = useCallback(async (on) => {
+    const r = await window.electronAPI?.autoModeSetEnabled?.(on);
+    setAutoMode((a) => ({ ...a, enabled: r?.enabled ?? on }));
+  }, []);
+
   const toggleStatusHooks = useCallback(async (on) => {
     setStatusHooksBusy(true);
     setStatusHooksError('');
@@ -179,6 +203,9 @@ export default function Settings() {
         )}
       </div>
 
+      {/* Accounts */}
+      <AccountsSection />
+
       {/* Appearance */}
       <Section title="Appearance">
         <SettingRow label="Theme" description="Terminal and UI color theme">
@@ -321,6 +348,62 @@ export default function Settings() {
               onChange={(v) => toggleStatusHooks(v)}
             />
           </div>
+        </SettingRow>
+      </Section>
+
+      {/* Integrations */}
+      <Section title="Integrations">
+        <SettingRow label="Asana PAT" description="Personal access token for the Asana sync button in Tasks">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type={asanaPatVisible ? 'text' : 'password'}
+              value={asanaPat}
+              onChange={(e) => setAsanaPat(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') saveAsanaPat(); }}
+              placeholder="Paste your Asana PAT…"
+              style={{
+                width: 200,
+                backgroundColor: 'var(--bg)',
+                color: 'var(--fg)',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                padding: '4px 8px',
+                fontSize: 12,
+                fontFamily: "'SF Mono', monospace",
+                outline: 'none',
+              }}
+            />
+            <button
+              onClick={() => setAsanaPatVisible((v) => !v)}
+              title={asanaPatVisible ? 'Hide' : 'Show'}
+              style={{ background: 'none', border: 'none', color: 'var(--dim)', cursor: 'pointer', fontSize: 13, padding: '0 2px' }}
+            >
+              {asanaPatVisible ? '🙈' : '👁'}
+            </button>
+            <button
+              onClick={saveAsanaPat}
+              style={{
+                padding: '4px 10px',
+                fontSize: 11,
+                fontFamily: "'SF Mono', monospace",
+                color: 'var(--bg)',
+                backgroundColor: asanaPatSaved ? 'var(--success, #3fb950)' : 'var(--accent)',
+                border: 'none',
+                borderRadius: 5,
+                cursor: 'pointer',
+                transition: 'background 300ms',
+              }}
+            >
+              {asanaPatSaved ? 'Saved' : 'Save'}
+            </button>
+          </div>
+        </SettingRow>
+
+        <SettingRow
+          label="Auto Mode"
+          description={`Poll Asana every ${autoMode.intervalMinutes || 10} min and auto-run new tasks (build mine + review Sam's). Stops only for your OK before posting to Asana or deploying.`}
+        >
+          <Toggle checked={!!autoMode.enabled} onChange={toggleAutoMode} />
         </SettingRow>
       </Section>
 

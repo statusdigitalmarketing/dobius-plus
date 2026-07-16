@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { THEMES, applyTheme } from '../lib/themes';
+import { groupByStage } from '../lib/stages';
 
 // Drop any grid entries whose tab is no longer present. Returns null when the
 // grid would be left empty (i.e. grid mode turns off). gridSlots is a dense,
@@ -40,11 +41,14 @@ export const useStore = create((set, get) => ({
   activeTabId: null,
   tabCounter: 0,
   splitTabId: null,
+  splitRatio: 0.5,
 
   // Terminal grid — null when off; otherwise a dense, ordered list of 1–6 tabIds.
   // The tile layout is derived from the count (no empty cells). Split view and
   // grid are mutually exclusive. Drag-to-add is the only way in.
   gridSlots: null,
+  gridColumnRatio: 0.5,
+  gridRowRatios: [],
 
   // tabId currently being dragged from the tab bar (drives grid drop zones).
   draggingTabId: null,
@@ -179,6 +183,13 @@ export const useStore = create((set, get) => ({
 
   setSplitTab: (tabId) => set({ splitTabId: tabId, gridSlots: null }),
   clearSplitTab: () => set({ splitTabId: null }),
+  setSplitRatio: (ratio) => set({ splitRatio: Math.min(0.8, Math.max(0.2, Number(ratio) || 0.5)) }),
+  setGridColumnRatio: (ratio) => set({ gridColumnRatio: Math.min(0.8, Math.max(0.2, Number(ratio) || 0.5)) }),
+  setGridRowRatios: (ratios) => set({
+    gridRowRatios: Array.isArray(ratios)
+      ? ratios.map((r) => Math.max(0.12, Number(r) || 0)).filter((r) => r > 0)
+      : [],
+  }),
 
   // Grid actions ----------------------------------------------------------
   // Append a tab to the grid (max 6), starting grid mode if needed. A tab can
@@ -424,6 +435,27 @@ export const useStore = create((set, get) => ({
   setBoardNotification: (notification) => set({ boardNotification: notification }),
   clearBoardNotification: () => set({ boardNotification: null }),
 
+  // Pipeline tasks (Epic 7 — Kanban board). The stage mutations go through the
+  // main process, which enforces the transition table and broadcasts
+  // `tasks:updated`; the UI subscribes to that and calls loadTasks to refresh.
+  // The mutators RETURN the service result ({ ok, task } | { ok:false, error })
+  // so the UI can snap an illegal drop back instead of crashing.
+  tasks: [],
+  loadTasks: async (projectPath) => {
+    const r = await window.electronAPI.tasksList(projectPath);
+    set({ tasks: Array.isArray(r) ? r : [] });
+  },
+  setTaskStage: async (projectPath, taskId, toStage, opts) => {
+    return window.electronAPI.tasksAdvance(projectPath, taskId, toStage, opts || { actor: 'human' });
+  },
+  blockTask: async (projectPath, taskId, reason) => {
+    return window.electronAPI.tasksBlock(projectPath, taskId, reason, { actor: 'human' });
+  },
+  unblockTask: async (projectPath, taskId, opts) => {
+    return window.electronAPI.tasksUnblock(projectPath, taskId, opts || { actor: 'human' });
+  },
+  tasksByStage: () => groupByStage(get().tasks),
+
   // Recently closed tabs (persisted to config for cross-session recovery)
   pushClosedTab: (closedTab) => set((s) => {
     const entry = { ...closedTab, closedAt: Date.now() };
@@ -462,16 +494,30 @@ export const useStore = create((set, get) => ({
     return { tab, scrollback: closed.scrollback };
   },
 
-  // Resume a Claude session by sending the resume command to the active terminal
-  resumeSession: (sessionId) => {
+  // Resume a Claude session by sending the resume command to the active terminal.
+  // Accepts either a bare sessionId (legacy same-project callers) or
+  // { sessionId, projectPath } from cross-project dashboard/search results.
+  resumeSession: (sessionOrId) => {
+    const sessionId = typeof sessionOrId === 'object' && sessionOrId
+      ? sessionOrId.sessionId
+      : sessionOrId;
+    const requestedProjectPath = typeof sessionOrId === 'object' && sessionOrId
+      ? sessionOrId.projectPath
+      : null;
     if (!sessionId || sessionId.length > 100 || !/^[a-zA-Z0-9][\w-]*$/.test(sessionId)) return;
     set({ activeView: 'terminal' });
     const termId = get().activeTabId;
     if (!window.electronAPI || !termId) return;
+    const currentProjectPath = get().currentProjectPath;
+    const projectPath = requestedProjectPath || currentProjectPath;
+    if (projectPath && (!projectPath.startsWith('/') || /[\x00-\x1F\x7F]/.test(projectPath))) return;
     // Tier 1 capture: link this session to the tab it is being resumed into,
     // so the Cmd+B sidebar can show which tab the session belongs to.
-    window.electronAPI.configSetSessionTabLink?.(sessionId, termId, get().currentProjectPath);
-    const cmd = `claude --resume ${sessionId}`;
+    window.electronAPI.configSetSessionTabLink?.(sessionId, termId, projectPath || currentProjectPath);
+    const safeProject = projectPath ? projectPath.replace(/'/g, "'\\''") : null;
+    const cmd = safeProject
+      ? `cd '${safeProject}' && claude --resume ${sessionId}`
+      : `claude --resume ${sessionId}`;
     const chars = cmd.split('');
     chars.push('\r');
     let i = 0;

@@ -1,0 +1,4 @@
+provider: github
+owner: statusdigitalmarketing
+repo: dobius
+updaterCacheDirName: dobius-updater

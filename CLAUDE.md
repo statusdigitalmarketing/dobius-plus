@@ -1,7 +1,23 @@
 # Dobius+ — Multi-Window Claude Code Desktop App
 
+## Repo Role — read this first
+
+This repo is the **active Dobius+ workspace and PR vehicle into `statusdigitalmarketing/dobius-plus` `main`**. Branch `feat/dobius-plus-ui` shares history with that `main` and carries the Dobius+ app under `dobius/` plus the engine-bridge wiring.
+
+- **Make code changes in this workspace:** `/Users/bayou/Projects (Code)/dobius-plus`.
+- **The app source lives in `dobius/` in this repo. Edit it here.** Do not switch to `~/DobiusPlus`, `dobius-plus-redesign/`, `dobius-shell-rebrand/`, `dobius-parallel-worktrees/`, or any adjacent clone unless the user explicitly redirects you.
+- **Install this workspace into the real local app:** `/Applications/Dobius+.app`. Do not create a side app, renamed app, or install from another checkout.
+- **Local-first, PR later:** build, test, and install locally on this machine first. Iterate until `/Applications/Dobius+.app` is in a good working state. Only after the project reaches a stable checkpoint should changes be pushed to the actual `statusdigitalmarketing/dobius-plus` GitHub repo and opened as a PR for review/merge.
+- Before building/installing, confirm `git rev-parse --show-toplevel` is `/Users/bayou/Projects (Code)/dobius-plus` and that the built artifact contains this repo's latest commits.
+- Do not nest one of these repos inside another.
+
 ## Overview
 Dobius+ is an Electron desktop app that wraps Claude Code CLI in themed terminal windows. Each project gets its own window with multi-tab terminals (xterm.js + node-pty), session checkpoints, custom agents, CLAUDE.md editor, conversation history sidebar, and dashboard tabs.
+
+## Project memory
+Session notes and learnings live in `.dobius/NOTES.md` (also editable from the Dashboard "Notes" tab). The file is imported below so it loads at the start of every session — read it, and when you learn something durable about this project, append a dated note.
+
+@.dobius/NOTES.md
 
 ## Tech Stack
 - **Electron 33+** — desktop shell, multi-window, IPC
@@ -74,7 +90,7 @@ See `RELEASING.md` for the full signed/notarized publish workflow (auto-update v
 - `node-pty` requires native compilation — use `electron-rebuild` after install
 - macOS: `titleBarStyle: 'hiddenInset'` for frameless native look
 - Dev: Vite on localhost:5173, Electron loads URL. Prod: Electron loads `dist/index.html`
-- Config persistence: `~/Library/Application Support/Dobius/config.json`
+- Config persistence: `~/Library/Application Support/dobius-plus/config.json` (Electron `userData` resolves to the package `name` `dobius-plus`; `app.setName('Dobius+')` runs after userData is cached so it does NOT change this path)
 - `build-and-install.sh` MUST `rm -rf` old .app before `cp -R` (asar overwrite issue)
 - **NEVER use null bytes (`\x00`) in `execFile` arguments** — Node.js throws `ERR_INVALID_ARG_VALUE`. Use a text separator like `||SEP||` instead (see `git-service.js` commit log format).
 - **Dev process name is "Electron"**, not the app name. Use `tell process "Electron"` in AppleScript during dev; the display name only applies to packaged `.app` builds.

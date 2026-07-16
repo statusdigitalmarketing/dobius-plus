@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents } from 'electron';
+import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -7,7 +8,8 @@ import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, g
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession,
+  loadAllSessions, getLatestSession, getLastAssistantMessage,
+  loadProjectTokens, searchTranscripts, estimateContextSize, deleteSession,
 } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
@@ -17,6 +19,7 @@ import {
   checkGhAvailable, getPullRequests, getIssues, getPrDetails, getIssueDetails,
 } from './git-service.js';
 import { watchFiles, stopWatching } from './watcher-service.js';
+import { watchProjectDir, unwatchProjectDir, getProjectEvents, stopAllFileWatchers } from './file-change-service.js';
 import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-monitor-watcher.js';
 import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig,
@@ -27,9 +30,12 @@ import {
   getOrchestrationRuns, getOrchestrationRun, saveOrchestrationRun, deleteOrchestrationRun,
   getMobileServerConfig, updateMobileServerConfig,
   saveTerminalScrollback, loadTerminalScrollback,
+  addManualProject, setProjectDisplayName, addHiddenProject,
+  getAccounts, saveAccount, deleteAccount, getProjectAccount, setProjectAccount,
 } from './config-manager.js';
 import {
   openProjectWindow, openTornOffWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
+  openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
 import {
@@ -44,12 +50,29 @@ import {
   sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus,
 } from './imessage-bridge.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
-import { getImessageBridge, updateImessageBridge } from './config-manager.js';
+import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
+import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef } from './tasks-service.js';
+import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
+import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages } from './visual-server.js';
+import { deployStatus, deployPreview, promote } from './deploy-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let mainWindow;
+
+// Returns the claude binary path to use for background CLI calls (orchestration,
+// prompt-improve). Prefers the active Claude account's cliPath if set, then
+// falls back to CLAUDE_PATH env var, then bare 'claude' (resolved via PATH).
+function resolveActiveCliPath() {
+  const config = loadConfig();
+  const activeId = config.activeClaudeAccountId;
+  if (activeId) {
+    const account = (config.accounts || []).find((a) => a.id === activeId && a.type === 'claude');
+    if (account?.cliPath) return account.cliPath;
+  }
+  return process.env.CLAUDE_PATH || 'claude';
+}
 
 function createWindow() {
   // Restore saved window bounds
@@ -67,9 +90,13 @@ function createWindow() {
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
     backgroundColor: '#0D1117',
+    acceptFirstMouse: true,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
+      preload: process.env.DOBIUS_DOBIUS_UI
+        ? path.join(__dirname, 'dobius-stub-preload.js')   // experiment: dobius UI on dobius shell
+        : path.join(__dirname, 'preload.js'),
+      contextIsolation: !process.env.DOBIUS_DOBIUS_UI,     // stub sets window globals directly
+      sandbox: false,
       nodeIntegration: false,
       // <webview> required for BrowserPane (v1.0.25+). Webview tag is sandboxed
       // by default and partitioned via the persist:dobius-browser-pane string,
@@ -83,7 +110,15 @@ function createWindow() {
   mainWindow.on('page-title-updated', (e) => e.preventDefault());
 
   const isDev = !app.isPackaged;
-  if (isDev) {
+  if (process.env.DOBIUS_DOBIUS_UI) {
+    // Experiment: render dobius's prebuilt UI on dobius's shell (IPC stubbed).
+    mainWindow.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+      if (level >= 2) console.log(`[dobius-renderer] ${message} (${sourceId}:${line})`);
+    });
+    mainWindow.webContents.on('render-process-gone', (_e, d) => console.log('[dobius-renderer GONE]', JSON.stringify(d)));
+    mainWindow.loadFile(process.env.DOBIUS_DOBIUS_UI);
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  } else if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
   } else {
     mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
@@ -153,7 +188,21 @@ function setupTerminalHandlers() {
     event.sender.once('destroyed', () => {
       if (terminalOwners.get(id) === ownerId) terminalOwners.delete(id);
     });
-    return createTerminal(id, cwd, event.sender);
+    // Per-account env (codex/claude) — points the spawned CLI at the right
+    // account's config dir / API key for this project.
+    const accountEnv = {};
+    const account = cwd ? getProjectAccount(cwd) : null;
+    if (account?.type === 'codex' && account.apiKey) {
+      accountEnv.OPENAI_API_KEY = account.apiKey;
+    } else if (account?.type === 'claude') {
+      if (account.claudeJsonPath) {
+        accountEnv.CLAUDE_CONFIG_DIR = path.dirname(account.claudeJsonPath);
+      }
+      if (account.cliPath) {
+        accountEnv.DOBIUS_CLI_DIR = path.dirname(account.cliPath);
+      }
+    }
+    return createTerminal(id, cwd, event.sender, accountEnv);
   });
 
   ipcMain.on('terminal:write', (event, id, data) => {
@@ -265,20 +314,6 @@ function setupTerminalHandlers() {
   ipcMain.handle('terminal:requestSaveNow', (event) => {
     event.sender.send('terminal:requestSave');
   });
-
-  // Save clipboard image data to a temp file, return the file path
-  const ALLOWED_IMAGE_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
-  const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
-  ipcMain.handle('terminal:saveClipboardImage', (_event, base64Data, mimeType) => {
-    if (!base64Data || base64Data.length > MAX_IMAGE_SIZE * 1.37) return null; // base64 overhead ~37%
-    const ext = ALLOWED_IMAGE_TYPES[mimeType] || '.png';
-    const timestamp = Date.now();
-    const dir = path.join(app.getPath('temp'), 'dobius-clipboard');
-    fs.mkdirSync(dir, { recursive: true });
-    const filePath = path.join(dir, `clipboard-${timestamp}${ext}`);
-    fs.writeFileSync(filePath, Buffer.from(base64Data, 'base64'));
-    return filePath;
-  });
 }
 
 function setupDataHandlers() {
@@ -294,6 +329,44 @@ function setupDataHandlers() {
   ipcMain.handle('data:listProjects', () => listProjects());
   ipcMain.handle('data:loadAllSessions', () => loadAllSessions());
   ipcMain.handle('data:getLatestSession', (_event, projectPath) => getLatestSession(projectPath));
+  ipcMain.handle('data:killProcess', (_event, pid) => {
+    const n = parseInt(pid, 10);
+    if (!Number.isFinite(n) || n <= 1) throw new Error('Invalid PID');
+    try {
+      process.kill(n, 'SIGTERM');
+      return true;
+    } catch (err) {
+      throw new Error(err.message);
+    }
+  });
+  ipcMain.handle('data:loadProjectTokens', () => loadProjectTokens());
+  ipcMain.handle('data:searchTranscripts', (_event, query) => searchTranscripts(query));
+  ipcMain.handle('data:estimateContextSize', (_event, projectPath) => estimateContextSize(projectPath));
+  ipcMain.handle('data:deleteSession', (_event, sessionId, projectPath) => deleteSession(sessionId, projectPath));
+  // v1.0.29: Copy last Claude response button uses this. Strict validation
+  // happens inside getLastAssistantMessage. Returns null on any failure so
+  // the renderer can show "no response found" without leaking error info.
+  ipcMain.handle('data:lastAssistantMessage', (_event, sessionId, projectPath) => {
+    if (typeof sessionId !== 'string') return null;
+    return getLastAssistantMessage(sessionId, projectPath);
+  });
+}
+
+function setupFileWatcherHandlers() {
+  ipcMain.handle('filewatcher:watch', (event, projectPath) => {
+    if (!projectPath || typeof projectPath !== 'string') return;
+    watchProjectDir(projectPath, event.sender);
+  });
+
+  ipcMain.handle('filewatcher:unwatch', (_event, projectPath) => {
+    if (!projectPath) return;
+    unwatchProjectDir(projectPath);
+  });
+
+  ipcMain.handle('filewatcher:getEvents', (_event, projectPath) => {
+    if (!projectPath) return [];
+    return getProjectEvents(projectPath);
+  });
 }
 
 function setupCheckpointHandlers() {
@@ -405,13 +478,61 @@ For each "do X" request:
 
 # Phase 4 — Asana queue processing
 
-When Sam says "process the [X] queue", "check new Asana tasks in [X]", or similar:
+When Carson says "process the [X] queue", "check new Asana tasks in [X]", or similar:
 
-1. \`dobius-asana-fetch [X]\` — returns JSON with .tasks[] and .summary (an iMessage-friendly list)
+1. \`dobius-asana-fetch [X]\` — returns JSON with .tasks[] and .summary. Each task carries a **lane**:
+   - \`build\`  (🔨, assigned to Carson) — we BUILD it: dispatch the right skill, do the work, then verify.
+   - \`review\` (🔍, assigned to Sam)     — we ONLY double-check his work. Never build/modify scope; just verify and report.
 2. If project isn't allowlisted, dobius-reply explaining how to add it: "Project not allowlisted. Run dobius-asana-allow <name> <gid>" (find the gid from any Asana web URL: app.asana.com/0/GID/...)
 3. If allowlisted: \`dobius-ask "Found N tasks in [X]:\\n<summary>\\nProcess all (YES), pick subset (PICK), or cancel (NO)?"\`
-4. On YES: for each task, dispatch via the normal routing tree (lead tab → existing → spawn-with-ask) with the task's name as the initial prompt. Register each via dobius-track. The hybrid reply system auto-texts Sam when each completes.
-5. dobius-reply with "Queued N tasks, will text as each finishes" so Sam sees the ack immediately.
+4. On YES, per task — by lane:
+   - **build lane:** dispatch via the normal routing tree (lead tab → existing → spawn-with-ask) with the task name as the initial prompt. Then run the **verify pipeline** below.
+   - **review lane (Sam's COMPLETED tasks):** do NOT change scope. Read Sam's Asana comments + open the screenshots he attached (both are included in the auto-dispatch, or fetch them from the task), pull his branch/PR, run the **verify pipeline** read-only INCLUDING a webapp-testing/Playwright check against the LIVE site, and confirm the result matches the task in detail. Report findings on the task. Completion is gated — see the review-lane completion gate in Phase 5.
+   - Register each via dobius-track. The hybrid reply system auto-texts Carson when each completes.
+5. **Verify pipeline (every task, every time — build AND review):**
+   a. \`review-audit\` skill — dual code review + architecture audit on the diff.
+   b. \`ship-test\` skill — health/critical-path checks against the deploy or local server.
+   c. **See the work:** open a Visual preview window (visual:openWindow) for the project and capture a screenshot of the rendered result; attach it to the task report. Screenshots taken via Playwright/webapp-testing must use a FRESH window each time (see global skills/hooks rules).
+   d. **Check it off the panel:** once the task is fully verified (and, for build lane, documented), run \`dobius-task-done <projectPath> "<task name>"\` to tick it done in Carson's Tasks panel. This is LOCAL ONLY — it never completes the task in Asana.
+6. dobius-reply with "Queued N tasks (M build, K review), will text as each finishes" so Carson sees the ack immediately.
+7. NEVER push/deploy without Carson's confirm. The ONLY Asana completion allowed is a REVIEWED review-lane task via \`dobius-asana-complete <gid>\` after Carson's explicit yes (Phase 5 gate) — never auto-complete a build-lane task. (\`dobius-task-done\` is always fine — it only updates the local panel, not Asana.)
+
+# Phase 5 — Auto Mode (tasks tagged [auto-<gid>])
+
+Auto Mode polls Asana and dispatches new tasks to you automatically. When you receive an \`[auto-...]\`-tagged task:
+- Do NOT ask Carson to approve STARTING — auto-mode tasks are pre-approved to begin.
+- **build lane:** run it FULL-AUTO via the project's \`scripts/crackbot-supervisor.sh\` (crack_bot for new builds, crack_repair for bugs/fixes) so it runs to completion, then the verify pipeline.
+- **review lane (Sam's COMPLETED work):** REVIEW only, never change scope. Step through it: (1) read Sam's Asana comments + open the screenshots he attached (included in the dispatch), (2) run review-audit on the diff, (3) run webapp-testing/Playwright against the **live site** and confirm it actually does what the task asked, to the detail, (4) post your findings + a clear pass/fail verdict on the task.
+- **Review-lane completion gate (the ONLY way an Asana task gets closed):** if review passes, notify Carson on Telegram AND in the terminal that it's ready, then STOP and wait for his explicit approval (he replies "approve"/"complete" in the terminal — Telegram is notify-only for now). ONLY after that yes, run \`dobius-asana-complete <asanaGid>\` to mark it done in Asana. NEVER complete a task without Carson's explicit yes, and NEVER complete on the build lane.
+- The ONLY stop-and-confirm gates (use \`dobius-confirm\`, block on Carson's yes — see Phase 4 risky-action gate):
+   1. before posting ANYTHING to Asana, and
+   2. before ANY git push or deploy to production, and
+   3. before \`dobius-asana-complete\` (closing Sam's reviewed task).
+- Everything between start and those gates runs unattended. Text Carson at each gate and when the task finishes.
+- When the task is finished and verified, run \`dobius-task-done <projectPath> "<task name>"\` to tick it off Carson's Tasks panel (local panel only — this is NOT the Asana-completion gate, so it does not need a confirm).
+
+# Phase 5 — Asana documentation + replies (build-lane / Carson's tasks)
+
+Every build-lane task gets documented ON the Asana task in **Sam's reply style** (plain English, no emojis, no "I", specific numbers, quote Carson's own words). Two comments:
+
+1. **Ack (when work starts):** \`add_comment\` →
+   "On it. <one specific sentence on what you're about to do>. Will post screenshot when done."
+
+2. **Completion / pre-ship doc (BEFORE any push or deploy):** post the full writeup as an Asana comment, THEN \`dobius-confirm\` for the OK to push/deploy. Documentation goes to Asana FIRST — never push or deploy before the task is commented. Format (mirror Sam):
+   - First line: what's ready + where it will go (e.g. "Ready to ship on branch X → pocketcologne.com. Awaiting your OK to push.").
+   - Plain-English summary of what changed and why, quoting Carson's task notes verbatim where relevant.
+   - Exact before → after values (sizes, paddings, copy used verbatim, class names).
+   - "Verified live at <resolution>. Screenshot attached." + attach the screenshot.
+   - On Carson's YES → push/deploy, then a short follow-up comment: "Shipped in commit <hash>. Live on <domain>."
+
+NEVER mark the task complete — only Carson does that.
+
+# Phase 5 — Auto-documentation (PDF into the Docs folder)
+
+As you work EVERY task, keep a detailed running doc and finalize it to PDF:
+- Live markdown log at \`<docsFolder>/<ProjectName>/<gid>-<slug>.md\` (docsFolder default \`~/Projects (Code)/Docs\`), appended as you go: task received → plan → each change with exact values → verify results → screenshot paths → Asana comment posted → ship status.
+- On completion, render it to PDF (use the \`pdf\` skill) at \`<docsFolder>/<ProjectName>/<gid>-<slug>.pdf\`. The PDF is the permanent record; the markdown is the working draft.
+- This mirrors the Asana comment but is the full detailed audit trail.
 
 # Phase 4 — Risky-action confirmation gate (CRITICAL)
 
@@ -574,10 +695,159 @@ function setupOrchestrationHandlers() {
     return saveOrchestrationRun(run);
   });
 
+  ipcMain.handle('orchestration:decompose', async (_event, { systemPrompt, userPrompt }) => {
+    const promptDir = path.join(os.tmpdir(), 'dobius-agents');
+    fs.mkdirSync(promptDir, { recursive: true });
+    const sysPath = path.join(promptDir, `decomp-sys-${Date.now()}.txt`);
+    fs.writeFileSync(sysPath, systemPrompt, 'utf8');
+
+    return new Promise((resolve, reject) => {
+      const claudePath = resolveActiveCliPath();
+      const proc = spawn(claudePath, [
+        '-p', userPrompt,
+        '--model', 'claude-haiku-4-5-20251001',
+        '--system-prompt-file', sysPath,
+      ], {
+        env: { ...process.env, PATH: (process.env.PATH || '') + ':/usr/local/bin:/opt/homebrew/bin' },
+      });
+
+      let out = '';
+      let err = '';
+      proc.stdout.on('data', (d) => { out += d.toString(); });
+      proc.stderr.on('data', (d) => { err += d.toString(); });
+      proc.on('close', (code) => {
+        try { fs.unlinkSync(sysPath); } catch {}
+        if (code !== 0) return reject(new Error(`Decomposition failed (exit ${code}): ${err.slice(0, 300)}`));
+        resolve(out.trim());
+      });
+      proc.on('error', (e) => { try { fs.unlinkSync(sysPath); } catch {} reject(e); });
+      setTimeout(() => { proc.kill(); reject(new Error('Decomposition timed out after 60s')); }, 60000);
+    });
+  });
+
+  // Subtask agents write {status, summary} JSON here once they've actually
+  // verified their own work (see the Verification section appended to their
+  // system prompt in OrchestratorView). A subtask's chat output is never
+  // trusted as "done" — only this file, read after its tab goes idle, counts.
+  // Namespaced by runId too: subtask ids (subtask-1..5) repeat across runs.
+  const SAFE_ID_RE = /^[a-z0-9-]{1,80}$/;
+  function resultFilePath(runId, subtaskId) {
+    const dir = path.join(os.tmpdir(), 'dobius-agents');
+    fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, `result-${runId}-${subtaskId}.json`);
+  }
+
+  ipcMain.handle('orchestration:resultPath', (_event, runId, subtaskId) => {
+    if (typeof runId !== 'string' || typeof subtaskId !== 'string') return null;
+    if (!SAFE_ID_RE.test(runId) || !SAFE_ID_RE.test(subtaskId)) return null;
+    return resultFilePath(runId, subtaskId);
+  });
+
+  ipcMain.handle('orchestration:readResult', (_event, runId, subtaskId) => {
+    if (typeof runId !== 'string' || typeof subtaskId !== 'string') return null;
+    if (!SAFE_ID_RE.test(runId) || !SAFE_ID_RE.test(subtaskId)) return null;
+    try {
+      const raw = fs.readFileSync(resultFilePath(runId, subtaskId), 'utf8');
+      const parsed = JSON.parse(raw);
+      const status = parsed.status === 'completed' ? 'completed' : 'failed';
+      const summary = typeof parsed.summary === 'string' ? parsed.summary.slice(0, 2000) : '';
+      return { status, summary };
+    } catch {
+      return null;
+    }
+  });
+
   ipcMain.handle('orchestration:delete', (_event, runId) => {
     if (!runId || typeof runId !== 'string' || runId.length > 200) return;
     deleteOrchestrationRun(runId);
   });
+
+  // --- Project task to-do list ---
+  // Broadcast tasks:updated to every window only on success, so all open boards
+  // (Pipeline + the legacy Tasks panel) re-render live, matching handleTaskDone.
+  const broadcastTasksUpdated = (projectPath) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send('tasks:updated', projectPath);
+    }
+  };
+  ipcMain.handle('tasks:list', (_event, projectPath) => listTasks(projectPath));
+  ipcMain.handle('tasks:add', (_event, projectPath, taskData) => addTask(projectPath, taskData));
+  ipcMain.handle('tasks:update', (_event, projectPath, taskId, patch) => {
+    const result = updateTask(projectPath, taskId, patch);
+    if (result?.ok) broadcastTasksUpdated(projectPath); // L1: keep other windows in sync after a title/dueOn edit
+    return result;
+  });
+  ipcMain.handle('tasks:delete', (_event, projectPath, taskId) => deleteTask(projectPath, taskId));
+  ipcMain.handle('tasks:syncAsana', (_event, projectPath) => syncAsanaTasks(projectPath));
+
+  // Complete a task THROUGH the pipeline (actor 'human') so stage + done + the
+  // event log stay consistent — the Tasks-panel checkbox routes here instead of
+  // patching `done` out of band via tasks:update.
+  ipcMain.handle('tasks:complete', (_event, projectPath, taskId) => {
+    const result = completeTaskByRef(projectPath, taskId);
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
+
+  // Pipeline stage transitions (Epic 7). The service enforces the transition
+  // table and returns { ok, task } | { ok:false, error } — it does not throw.
+  ipcMain.handle('tasks:advance', (_event, projectPath, taskId, toStage, opts) => {
+    const result = advanceTask(projectPath, taskId, toStage, opts || {});
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
+  ipcMain.handle('tasks:block', (_event, projectPath, taskId, reason, opts) => {
+    const result = blockTask(projectPath, taskId, reason, opts || {});
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
+  ipcMain.handle('tasks:unblock', (_event, projectPath, taskId, opts) => {
+    const result = unblockTask(projectPath, taskId, opts || {});
+    if (result?.ok) broadcastTasksUpdated(projectPath);
+    return result;
+  });
+  ipcMain.handle('asana:getConfig', () => getAsanaQueue());
+  ipcMain.handle('asana:updateConfig', (_event, updates) => updateAsanaQueue(updates));
+  ipcMain.handle('automode:get', () => getAutoMode());
+  ipcMain.handle('automode:setEnabled', (_event, on) => setAutoModeEnabled(on));
+
+  // --- Visual preview server ---
+  ipcMain.handle('visual:openWindow', (_event, projectPath) => {
+    if (!projectPath) return { ok: false, error: 'No project path' };
+    openVisualWindow(projectPath);
+    return { ok: true };
+  });
+  ipcMain.handle('visual:start', async (_event, projectPath) => {
+    try {
+      const port = await startVisualServer(projectPath);
+      return { ok: true, port, url: `http://127.0.0.1:${port}` };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+  ipcMain.handle('visual:stop', async () => {
+    await stopVisualServer();
+    return { ok: true };
+  });
+  ipcMain.handle('visual:getPort', () => getVisualPort());
+  ipcMain.handle('visual:listPages', () => listVisualPages());
+  ipcMain.handle('visual:screenshot', async (_event, webContentsId) => {
+    try {
+      const wc = webContentsId != null
+        ? webContents.fromId(webContentsId)
+        : null;
+      if (!wc) return { ok: false, error: 'webContents not found' };
+      const image = await wc.capturePage();
+      return { ok: true, dataUrl: image.toDataURL() };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // --- Visual deploy (git: preview branch, then promote to live) ---
+  ipcMain.handle('visual:deployStatus', (_event, projectPath, opts) => deployStatus(projectPath, opts || {}));
+  ipcMain.handle('visual:deployPreview', (_event, projectPath, opts) => deployPreview(projectPath, opts || {}));
+  ipcMain.handle('visual:promote', (_event, projectPath, opts) => promote(projectPath, opts || {}));
 }
 
 function setupFileHandlers() {
@@ -664,6 +934,103 @@ function setupFileHandlers() {
       const dir = path.dirname(safe);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(safe, content, 'utf8');
+      return { ok: true };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  // Per-project notes / memory file: <project>/.dobius/NOTES.md. Shared by the
+  // human (Notes dashboard tab) and the terminal agent (plain file in its cwd).
+  // The renderer passes only projectPath — we derive and validate the file path
+  // here so an arbitrary path from the renderer can never be read/written.
+  function resolveNotesPath(projectPath) {
+    if (!projectPath || typeof projectPath !== 'string') return null;
+    let registered;
+    try {
+      registered = Object.keys(loadConfig().projects || {});
+    } catch {
+      return null; // config unreadable — deny
+    }
+    // Match the project against the registered set on its real path.
+    let realProject;
+    try { realProject = fs.realpathSync(projectPath); } catch { return null; }
+    const isRegistered = registered.some((p) => {
+      try { return fs.realpathSync(p) === realProject; } catch { return false; }
+    });
+    if (!isRegistered) return null;
+    const target = path.join(realProject, '.dobius', 'NOTES.md');
+    // Containment guard: resolve symlinks in the path and confirm the real
+    // target still sits inside the project root (mirrors resolveAllowedPath).
+    const resolved = resolveFollowingSymlinks(target);
+    if (!resolved || path.basename(resolved) !== 'NOTES.md' || !resolved.startsWith(realProject + path.sep)) {
+      return null;
+    }
+    return target;
+  }
+
+  ipcMain.handle('notes:read', (_event, projectPath) => {
+    const notesPath = resolveNotesPath(projectPath);
+    if (!notesPath) return { error: 'Notes unavailable for this project' };
+    try {
+      if (!fs.existsSync(notesPath)) return { content: '' };
+      const stat = fs.statSync(notesPath);
+      if (stat.size > MAX_FILE_SIZE) return { error: 'Notes file too large (>1MB)' };
+      return { content: fs.readFileSync(notesPath, 'utf8') };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  ipcMain.handle('notes:write', (_event, projectPath, content) => {
+    const notesPath = resolveNotesPath(projectPath);
+    if (!notesPath) return { error: 'Notes unavailable for this project' };
+    if (typeof content !== 'string' || content.length > MAX_FILE_SIZE) {
+      return { error: 'Notes content too large (>1MB)' };
+    }
+    try {
+      const dir = path.dirname(notesPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(notesPath, content, 'utf8');
+      return { ok: true };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  // Skill file editor — locked to ~/.claude/skills/ directory
+  const skillsDir = path.join(homedir, '.claude', 'skills');
+  const ALLOWED_SKILL_FILES = ['CLAUDE.md', 'skill.json'];
+
+  function isAllowedSkillPath(skillPath, filename) {
+    if (!skillPath || typeof skillPath !== 'string') return false;
+    if (!ALLOWED_SKILL_FILES.includes(filename)) return false;
+    // Must be an absolute path inside the skills dir — no traversal allowed
+    const normalSkill = path.normalize(skillPath);
+    const normalSkillsDir = path.normalize(skillsDir);
+    return normalSkill.startsWith(normalSkillsDir + path.sep) &&
+      !normalSkill.includes('..') &&
+      path.dirname(normalSkill) === normalSkillsDir; // must be one level deep (skill subdir)
+  }
+
+  ipcMain.handle('skill:readFile', (_event, skillPath, filename) => {
+    if (!isAllowedSkillPath(skillPath, filename)) return { error: 'Access denied' };
+    const filePath = path.join(skillPath, filename);
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.size > MAX_FILE_SIZE) return { error: 'File too large' };
+      return { content: fs.readFileSync(filePath, 'utf8') };
+    } catch {
+      return { content: '' };
+    }
+  });
+
+  ipcMain.handle('skill:writeFile', (_event, skillPath, filename, content) => {
+    if (!isAllowedSkillPath(skillPath, filename)) return { error: 'Access denied' };
+    if (typeof content !== 'string' || content.length > MAX_FILE_SIZE) return { error: 'Content too large' };
+    const filePath = path.join(skillPath, filename);
+    try {
+      fs.writeFileSync(filePath, content, 'utf8');
       return { ok: true };
     } catch (err) {
       return { error: err.message };
@@ -903,6 +1270,60 @@ function setupConfigHandlers() {
   ipcMain.handle('config:removeSessionTag', (_event, sessionId) => removeSessionTag(sessionId));
   ipcMain.handle('config:getSessionTabMap', () => getSessionTabMap());
   ipcMain.handle('config:setSessionTabLink', (_event, sessionId, tabId, projectPath) => setSessionTabLink(sessionId, tabId, projectPath));
+
+  ipcMain.handle('utils:getHomeDirPath', () => os.homedir());
+
+  // Account management
+  ipcMain.handle('accounts:list', () => getAccounts());
+  ipcMain.handle('accounts:save', (_event, account) => saveAccount(account));
+  ipcMain.handle('accounts:delete', (_event, accountId) => deleteAccount(accountId));
+  ipcMain.handle('accounts:getForProject', (_event, projectPath) => getProjectAccount(projectPath));
+  ipcMain.handle('accounts:setForProject', (_event, projectPath, accountId) => setProjectAccount(projectPath, accountId));
+
+  // Activate a Claude account by swapping ~/.claude.json
+  ipcMain.handle('accounts:activateClaude', async (_event, accountId) => {
+    const accounts = getAccounts();
+    const account = accounts.find((a) => a.id === accountId && a.type === 'claude');
+    if (!account) return { ok: false, error: 'Account not found' };
+    if (!account.claudeJsonPath) return { ok: false, error: 'No profile snapshot for this account' };
+    const claudeJsonPath = path.join(os.homedir(), '.claude.json');
+    const backupPath = path.join(os.homedir(), `.claude.json.dobius-backup-${Date.now()}`);
+    try {
+      // Backup current ~/.claude.json
+      if (fs.existsSync(claudeJsonPath)) {
+        await fs.promises.copyFile(claudeJsonPath, backupPath);
+      }
+      // Swap in the profile snapshot
+      await fs.promises.copyFile(account.claudeJsonPath, claudeJsonPath);
+      // Track which account is active
+      const config = loadConfig();
+      config.activeClaudeAccountId = accountId;
+      saveConfig(config);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Get active Claude account id
+  ipcMain.handle('accounts:getActiveClaude', () => {
+    return loadConfig().activeClaudeAccountId || null;
+  });
+
+  // Capture an existing ~/.claude.json as a named profile snapshot
+  ipcMain.handle('accounts:captureClaudeJson', async (_event, destPath) => {
+    const src = path.join(os.homedir(), '.claude.json');
+    try {
+      if (!fs.existsSync(src)) return { ok: false, error: 'No ~/.claude.json found' };
+      if (!destPath || typeof destPath !== 'string') return { ok: false, error: 'Invalid destPath' };
+      const dir = path.dirname(destPath);
+      await fs.promises.mkdir(dir, { recursive: true });
+      await fs.promises.copyFile(src, destPath);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
 }
 
 // Tier 2 session-to-tab capture: every 15s, scan live terminals for a
@@ -960,6 +1381,28 @@ function setupShellHandlers() {
     // Only allow http/https URLs
     if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
       shell.openExternal(url);
+    }
+  });
+
+  ipcMain.handle('shell:showInFinder', (_event, filePath) => {
+    if (typeof filePath === 'string' && filePath.startsWith('/')) {
+      shell.showItemInFolder(filePath);
+    }
+  });
+
+  ipcMain.handle('project:setDisplayName', (_event, projectPath, name) => {
+    if (typeof projectPath !== 'string') return;
+    setProjectDisplayName(projectPath, name);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('data:updated', projectPath);
+    }
+  });
+
+  ipcMain.handle('project:removeFromList', (_event, projectPath) => {
+    if (typeof projectPath !== 'string') return;
+    addHiddenProject(projectPath);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('data:updated', projectPath);
     }
   });
 }
@@ -1022,6 +1465,32 @@ function setupWindowHandlers() {
   ipcMain.handle('window:openProject', (_event, projectPath) => {
     const win = openProjectWindow(projectPath);
     return { ok: true, id: win.id };
+  });
+
+  ipcMain.handle('window:pickAndOpenProject', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openDirectory'],
+      title: 'Select a project folder',
+    });
+    if (result.canceled || result.filePaths.length === 0) return { ok: false };
+    const projectPath = result.filePaths[0];
+    addManualProject(projectPath);
+    openProjectWindow(projectPath);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('data:updated', projectPath);
+    }
+    return { ok: true, path: projectPath };
+  });
+
+  ipcMain.handle('window:showLauncher', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createWindow();
+    }
+    return { ok: true };
   });
 
   ipcMain.handle('window:getOpen', () => getOpenProjects());
@@ -1100,6 +1569,35 @@ function setupGitHandlers() {
   ipcMain.handle('git:issues', (_event, projectDir) => getIssues(projectDir));
   ipcMain.handle('git:prDetails', (_event, projectDir, prNumber) => getPrDetails(projectDir, prNumber));
   ipcMain.handle('git:issueDetails', (_event, projectDir, issueNumber) => getIssueDetails(projectDir, issueNumber));
+
+  ipcMain.handle('prompt:improve', (_event, rawPrompt) => {
+    return new Promise((resolve, reject) => {
+      if (!rawPrompt || !rawPrompt.trim()) return resolve(rawPrompt);
+
+      const systemPrompt =
+        'You are an expert prompt engineer. Rewrite the user\'s prompt to be clearer, more specific, and more effective for Claude. ' +
+        'Preserve the original intent exactly. Output ONLY the improved prompt — no explanations, no preamble, no quotes.';
+
+      const fullPrompt = `${systemPrompt}\n\nOriginal prompt:\n${rawPrompt.trim()}\n\nImproved prompt:`;
+
+      const claudePath = resolveActiveCliPath();
+      const proc = spawn(claudePath, ['-p', fullPrompt], {
+        env: { ...process.env, PATH: process.env.PATH + ':/usr/local/bin:/opt/homebrew/bin' },
+      });
+
+      let out = '';
+      let err = '';
+      proc.stdout.on('data', (d) => { out += d.toString(); });
+      proc.stderr.on('data', (d) => { err += d.toString(); });
+      proc.on('close', (code) => {
+        if (code !== 0) return reject(new Error(err || `claude exited ${code}`));
+        resolve(out.trim() || rawPrompt);
+      });
+      proc.on('error', (e) => reject(e));
+
+      setTimeout(() => { proc.kill(); reject(new Error('Improve prompt timed out')); }, 30000);
+    });
+  });
 }
 
 function sendToFocused(channel, ...args) {
@@ -1188,7 +1686,15 @@ function setupMenu() {
           click: () => sendToFocused('menu:toggle-git-panel'),
         },
         { type: 'separator' },
-        { role: 'reload' },
+        {
+          label: 'Resume Last Session',
+          accelerator: 'CmdOrCtrl+R',
+          click: () => sendToFocused('menu:resume-session'),
+        },
+        { type: 'separator' },
+        // Reload is moved OFF Cmd+R on purpose: a renderer reload tears down every
+        // xterm buffer + PTY. Cmd+R now resumes the last session instead.
+        { role: 'reload', accelerator: 'CmdOrCtrl+Alt+R' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },
         { type: 'separator' },
@@ -1203,21 +1709,6 @@ function setupMenu() {
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
-}
-
-// Clean clipboard temp files older than 24 hours
-function cleanClipboardTemp() {
-  const dir = path.join(app.getPath('temp'), 'dobius-clipboard');
-  try {
-    if (!fs.existsSync(dir)) return;
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    for (const file of fs.readdirSync(dir)) {
-      const filePath = path.join(dir, file);
-      try {
-        if (fs.statSync(filePath).mtimeMs < cutoff) fs.unlinkSync(filePath);
-      } catch { /* ignore */ }
-    }
-  } catch { /* ignore */ }
 }
 
 /**
@@ -1258,7 +1749,6 @@ app.whenReady().then(() => {
   setupCrashLogging();
   // Make sure node-pty can actually launch shells before any tab is created.
   ensureSpawnHelperExecutable();
-  cleanClipboardTemp();
   setupTerminalHandlers();
   setupDataHandlers();
   setupConfigHandlers();
@@ -1273,6 +1763,7 @@ app.whenReady().then(() => {
   setupWindowHandlers();
   setupBuildMonitorHandlers();
   setupGitHandlers();
+  setupFileWatcherHandlers();
   setupMenu();
   createWindow();
   initAutoUpdater();
@@ -1292,6 +1783,10 @@ app.whenReady().then(() => {
   // Scheduled checkpoints — all defaults disabled; Sam toggles via
   // `dobius-scheduled enable <id>`.
   startScheduledTasks();
+
+  // Always-on Asana monitor — polls for new tasks when auto mode is enabled
+  // (no-op while disabled). Default OFF.
+  startAutoMode();
 
   // Restore previously open project windows (Chrome-style tab restore)
   const config = loadConfig();
@@ -1375,6 +1870,27 @@ app.on('before-quit', (e) => {
       if (!win.isDestroyed()) win.webContents.send('app:quit-cancel');
     });
   }, 1000);
+});
+
+// Resource teardown runs on EVERY quit path (confirmed two-press quit, force
+// quit, OS shutdown, window-all-closed → app.quit()), not just the two-press
+// branch of before-quit — otherwise PTYs, the voice bridge, the Visual server,
+// auto-mode and the watchers leak on a force quit. Idempotent via didTeardown.
+let didTeardown = false;
+app.on('will-quit', () => {
+  if (didTeardown) return;
+  didTeardown = true;
+  killAll();
+  stopWatching();
+  stopAllBuildWatchers();
+  stopAllFileWatchers();
+  stopVoiceBridge();
+  stopImessageBridge();
+  stopScheduledTasks();
+  stopAutoMode();
+  stopMobileServer();
+  closeVisualWindow();
+  void stopVisualServer();
 });
 
 app.on('window-all-closed', () => {

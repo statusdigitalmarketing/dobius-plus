@@ -8,17 +8,6 @@ function shellEscape(filePath) {
   return "'" + filePath.replace(/'/g, "'\\''") + "'";
 }
 
-/** Convert ArrayBuffer to base64 without blowing the call stack on large images. */
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const chunk = 8192;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
-}
-
 /**
  * TerminalPane — renders an xterm.js terminal with an editable command input bar.
  * @param {{ id: string, cwd: string, theme?: object, className?: string }} props
@@ -45,8 +34,10 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [inputExpanded, setInputExpanded] = useState(false);
+  const [isImproving, setIsImproving] = useState(false);
   const inputRef = useRef(null);
   const searchInputRef = useRef(null);
+  const suppressNextAutoFocusRef = useRef(false);
 
   // Track mount state for in-flight send cleanup
   useEffect(() => {
@@ -57,12 +48,23 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   // Auto-focus the command input on mount and when this tab becomes active
   const activeTabId = useStore((s) => s.activeTabId);
   const activeView = useStore((s) => s.activeView);
+  const setActiveTab = useStore((s) => s.setActiveTab);
   useEffect(() => {
     if (activeTabId === id && activeView === 'terminal') {
+      if (suppressNextAutoFocusRef.current) {
+        suppressNextAutoFocusRef.current = false;
+        return;
+      }
       // Use rAF to ensure DOM is ready after display:none→flex switch
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [activeTabId, activeView, id]);
+
+  const activatePane = useCallback((preserveFocus = true) => {
+    if (useStore.getState().activeTabId === id) return;
+    suppressNextAutoFocusRef.current = preserveFocus;
+    setActiveTab(id);
+  }, [id, setActiveTab]);
 
   // Cmd+F to toggle search
   useEffect(() => {
@@ -215,22 +217,6 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     if (!items) return;
 
     for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        e.preventDefault();
-        const blob = item.getAsFile();
-        if (!blob) return;
-        const arrayBuffer = await blob.arrayBuffer();
-        const base64 = arrayBufferToBase64(arrayBuffer);
-        const filePath = await window.electronAPI.saveClipboardImage(base64, item.type);
-        if (filePath) {
-          setInput((prev) => {
-            const needsSpace = prev.length > 0 && !prev.endsWith(' ');
-            return prev + (needsSpace ? ' ' : '') + shellEscape(filePath);
-          });
-          setHistoryIndex(-1);
-        }
-        return;
-      }
       // Non-image files (PDF, etc. copied from Finder) — insert as path
       if (item.kind === 'file' && !item.type.startsWith('image/')) {
         const file = item.getAsFile();
@@ -247,53 +233,6 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     }
     // Text paste falls through to default behavior
   }, []);
-
-  // Window-level paste handler — catches image/file pastes even when xterm has focus
-  useEffect(() => {
-    const windowPasteHandler = async (e) => {
-      // Only handle for the active tab
-      if (useStore.getState().activeTabId !== id) return;
-      const items = e.clipboardData?.items;
-      if (!items) return;
-      for (const item of items) {
-        if (item.type.startsWith('image/')) {
-          e.preventDefault();
-          e.stopPropagation();
-          const blob = item.getAsFile();
-          if (!blob) return;
-          const arrayBuffer = await blob.arrayBuffer();
-          const base64 = arrayBufferToBase64(arrayBuffer);
-          const filePath = await window.electronAPI.saveClipboardImage(base64, item.type);
-          if (filePath) {
-            setInput((prev) => {
-              const needsSpace = prev.length > 0 && !prev.endsWith(' ');
-              return prev + (needsSpace ? ' ' : '') + shellEscape(filePath);
-            });
-            setHistoryIndex(-1);
-            inputRef.current?.focus();
-          }
-          return;
-        }
-        // Non-image files (PDF, etc.) — insert as path
-        if (item.kind === 'file' && !item.type.startsWith('image/')) {
-          const file = item.getAsFile();
-          if (file?.path) {
-            e.preventDefault();
-            e.stopPropagation();
-            setInput((prev) => {
-              const needsSpace = prev.length > 0 && !prev.endsWith(' ');
-              return prev + (needsSpace ? ' ' : '') + shellEscape(file.path);
-            });
-            setHistoryIndex(-1);
-            inputRef.current?.focus();
-            return;
-          }
-        }
-      }
-    };
-    document.addEventListener('paste', windowPasteHandler, true);
-    return () => document.removeEventListener('paste', windowPasteHandler, true);
-  }, [id]);
 
   // Listen for file drops relayed by App.jsx via custom event
   useEffect(() => {
@@ -337,7 +276,10 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     const el = wrapperRef.current;
     if (!el) return;
     let dragCount = 0;
-    const onDragEnter = (e) => { e.preventDefault(); dragCount++; if (dragCount === 1) setDragOver(true); };
+    // Only react to OS file drags — ignore tab drags (which carry text/plain and
+    // drive the grid drop zones), so we don't flash "Drop files" during a tab drag.
+    const isFileDrag = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+    const onDragEnter = (e) => { if (!isFileDrag(e)) return; e.preventDefault(); dragCount++; if (dragCount === 1) setDragOver(true); };
     const onDragLeave = (e) => { e.preventDefault(); dragCount--; if (dragCount <= 0) { dragCount = 0; setDragOver(false); } };
     const onDrop = () => { dragCount = 0; setDragOver(false); };
     el.addEventListener('dragenter', onDragEnter, true);
@@ -350,19 +292,16 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     };
   }, []);
 
-  // Single click → command input bar, double click → focus terminal (for interactive prompts)
+  // Double click → focus xterm directly (for interactive prompts like vim)
+  // Single click is left alone so xterm keeps focus from its own mousedown handler
   const lastClickTime = useRef(0);
-  const handleTerminalClick = useCallback((e) => {
+  const handleTerminalClick = useCallback(() => {
     const now = Date.now();
     if (now - lastClickTime.current < 300) {
-      // Double click → focus terminal
       containerRef.current?.querySelector('.xterm-helper-textarea')?.focus();
-    } else if (!window.getSelection()?.toString() && !termRef.current?.hasSelection()) {
-      // Single click (no text selected in browser or xterm) → focus input bar
-      inputRef.current?.focus();
     }
     lastClickTime.current = now;
-  }, [containerRef, termRef]);
+  }, [containerRef]);
 
   // Auto-resize textarea to fit content
   const handleInputChange = useCallback((e) => {
@@ -397,6 +336,9 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       ref={wrapperRef}
       className={`w-full h-full flex flex-col ${className}`}
       style={{ backgroundColor: bg, position: 'relative' }}
+      onMouseDownCapture={() => activatePane(true)}
+      onFocusCapture={() => activatePane(true)}
+      onDragEnterCapture={() => activatePane(true)}
     >
       {/* Search bar */}
       {searchVisible && (
@@ -499,6 +441,46 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
             overflow: 'auto',
           }}
         />
+        {input.trim() && (
+          <button
+            type="button"
+            disabled={isImproving}
+            onClick={async () => {
+              if (!window.electronAPI?.improvePrompt) return;
+              setIsImproving(true);
+              try {
+                const improved = await window.electronAPI.improvePrompt(input);
+                setInput(improved);
+                setHistoryIndex(-1);
+                requestAnimationFrame(() => {
+                  inputRef.current?.focus();
+                  inputRef.current?.setSelectionRange(improved.length, improved.length);
+                });
+              } catch {
+                // silently leave input unchanged on error
+              } finally {
+                setIsImproving(false);
+              }
+            }}
+            title="Improve this prompt with AI"
+            style={{
+              padding: '2px 8px',
+              fontSize: 11,
+              fontFamily: "'SF Mono', monospace",
+              color: isImproving ? border : fg,
+              backgroundColor: isImproving ? 'transparent' : 'rgba(99,102,241,0.15)',
+              border: `1px solid ${isImproving ? border : 'rgba(99,102,241,0.6)'}`,
+              borderRadius: 4,
+              cursor: isImproving ? 'default' : 'pointer',
+              marginBottom: 1,
+              lineHeight: 1,
+              transition: 'all 150ms',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {isImproving ? '✦ …' : '✦ Improve'}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => {

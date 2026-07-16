@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import { timeAgo } from '../../lib/time-ago';
 
-export default function ProjectCard({ project, isOpen, isPinned, onClick, onTogglePin, index = 0 }) {
+export default function ProjectCard({ project, isOpen, isPinned, onClick, onTogglePin, onContextMenu, index = 0, account = null }) {
   const hasPath = Boolean(project.decodedPath);
   return (
     <motion.div
@@ -18,6 +18,7 @@ export default function ProjectCard({ project, isOpen, isPinned, onClick, onTogg
       }}
       whileHover={hasPath ? { scale: 1.02 } : {}}
       onDoubleClick={hasPath ? onClick : undefined}
+      onContextMenu={onContextMenu}
     >
       {/* Pin button */}
       <button
@@ -70,6 +71,19 @@ export default function ProjectCard({ project, isOpen, isPinned, onClick, onTogg
       >
         <span>{project.sessionCount} session{project.sessionCount !== 1 ? 's' : ''}</span>
         <span>{project.latestTimestamp ? timeAgo(project.latestTimestamp) : 'unknown'}</span>
+        {account && (
+          <span
+            className="px-1.5 py-0.5 rounded text-xs"
+            style={{
+              backgroundColor: account.type === 'claude' ? 'rgba(139,92,246,0.15)' : 'rgba(16,185,129,0.15)',
+              color: account.type === 'claude' ? '#a78bfa' : '#34d399',
+              fontFamily: "'SF Mono', monospace",
+            }}
+            title={`Account: ${account.name}`}
+          >
+            {account.name}
+          </span>
+        )}
       </div>
     </motion.div>
   );

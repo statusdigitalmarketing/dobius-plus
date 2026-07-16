@@ -14,8 +14,11 @@ echo "3. Installing to /Applications..."
 # Graceful quit — lets the app save terminal scrollback before exiting
 osascript -e 'tell application "Dobius+" to quit' 2>/dev/null || true
 sleep 3
-# Only force-kill if graceful quit didn't work
-pkill -f "Dobius+" 2>/dev/null || true
+# Only force-kill if graceful quit didn't work. Exact-name match ONLY:
+# a -f pattern would also SIGTERM the detached terminal daemon
+# ("Dobius+ Helper ... daemon-entry.js"), killing every live session.
+pkill -x "Dobius+" 2>/dev/null || true
+pkill -f "Dobius\+ Helper.*--type=" 2>/dev/null || true
 sleep 1
 
 rm -rf "/Applications/Dobius+.app"

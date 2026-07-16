@@ -1,16 +1,21 @@
 {
   "name": "dobius-plus",
-  "version": "1.0.28",
+  "version": "1.0.29",
   "description": "Multi-window Claude Code desktop app with themed terminals",
   "main": "electron/main.js",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "build:mobile": "vite build --config vite.mobile.config.js",
-    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "vite build && vite build --config vite.mobile.config.js && electron-builder --mac",
-    "start": "electron ."
+    "dev": "pnpm --dir dobius dev",
+    "build": "pnpm --dir dobius build",
+    "start": "pnpm --dir dobius start",
+    "electron:dev": "pnpm --dir dobius dev",
+    "electron:build": "pnpm --dir dobius build:mac",
+    "legacy:dev": "vite",
+    "legacy:build": "vite build",
+    "legacy:build:mobile": "vite build --config vite.mobile.config.js",
+    "legacy:electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "legacy:electron:build": "vite build && vite build --config vite.mobile.config.js && electron-builder --mac",
+    "legacy:start": "electron ."
   },
   "keywords": [],
   "author": "Status Digital Marketing",

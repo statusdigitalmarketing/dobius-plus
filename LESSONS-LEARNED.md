@@ -38,6 +38,24 @@
 - **CONTEXT**: electron-builder enforces this naming convention. The cert in Keychain shows the full name, which is misleading.
 - **DETECTION**: Build error message mentions `remove prefix "Developer ID Application:"`. Grep: `grep "identity:" electron-builder.yml` — value should NOT start with "Developer ID Application:".
 
+## Pre-populated rules — audit 2026-06-13
+
+> Appended, not overwritten; only rules not already present above. These runtime/build gotchas were documented in the root `CLAUDE.md` but were missing from this lessons file. Each is a standing rule.
+
+- **Never use null bytes (`\x00`) in `execFile` args** — Node throws `ERR_INVALID_ARG_VALUE`. Use a text separator like `||SEP||` instead (see `git-service.js` commit-log format).
+- **Dev process name is `"Electron"`**, not the app name — use `tell process "Electron"` in AppleScript during dev. The display name only applies to packaged `.app` builds.
+- **`build-and-install.sh` MUST `rm -rf` the old `.app` before `cp -R`** — asar overwrite issue. Do not "optimize" that step away.
+- **All terminal tabs stay mounted (CSS `display:none`)** — unmounting a tab kills the xterm buffer + the underlying PTY.
+- **Native modules need `electron-rebuild`** (`node-pty`, `better-sqlite3`) after any dependency change, or the app fails to load the native addon at launch.
+- **Remove the `remote-debugging-port` switch before shipping** (it enables CDP for Playwright/testing). Not currently present in `main.js` — treat this as a pre-ship check, keep it absent in release builds.
+- **`~/Library/Application Support/Dobius/config.json` is managed by `config-manager.js` — do NOT hand-edit.**
+- **The working tree currently has a large in-flight dashboard feature uncommitted** (Costs/Prompts/Search/ChangeFeed + a file-change service). Review and branch deliberately before building over it; don't blow it away.
+
+## Asana queue (Auto Mode) — 2026-06-14
+- **Asana `/tasks` query cannot combine `project` + `assignee`.** Asana returns HTTP 400 "Must specify exactly one of project, tag, section, user task list, or assignee + workspace". `fetchNewTasks` in `electron/asana-queue.js` must query by **project only** (`?project=<gid>&completed_since=...&opt_fields=<incl. assignee>`) and filter to the lane assignee **client-side** (`t.assignee?.gid !== gid`). Reintroducing `&assignee=` in that URL silently breaks every Auto Mode poll.
+- **Auto Mode runs in the INSTALLED app, not dev.** Any `electron/` change (e.g. the token fallback or the query fix) only takes effect after `./build-and-install.sh`. The installed app reads the Settings PAT via `asanaToken()` (`process.env.ASANA_PAT || getAsanaQueue().pat`) — a Finder-launched app has no env PAT, so the config `pat` fallback is required.
+- **Verify the queue end-to-end via the bridge**, not just config: `POST http://127.0.0.1:8421/asana/fetch` with `{ "projectName": "<allowlisted name>" }` and the token from `userData/voice-bridge-token`. `ok:true` + non-empty `tasks[]` means detection works through the live app. `seen[]` in `config.asanaQueue.autoMode` filling to `MAX_TASKS_PER_TICK` (3) confirms a poll actually dispatched.
+
 ### [Architecture] — 2026-06-12
 - **MISTAKE**: `work-registry.js` `rehydrate()` restored persisted items from `config.workRegistry.items` verbatim, including `status: 'running'`. A `running` item cannot survive a process restart (its PTY/tab is gone and rehydrate never recreates a watcher), so it sat `running` forever. The concurrency cap in `registerWork` counts running items (`running.length >= maxConcurrentAgents`, default 1), so a single phantom-running item from a prior session permanently blocked ALL new Conductor/iMessage work dispatch with `concurrency cap: 1/1 agents already running` for a tab that no longer existed.
 - **FIX**: In `rehydrate()`, reconcile any persisted `status === 'running'` item to `'interrupted'` (stamp `completedAt`/`lastUpdate`/`finalReport`), then `persist()`. Do NOT fire a final-report iMessage on rehydrate (would spam on every launch) — it's a silent status fix. The cap then counts only genuinely-running (current-session) items.
@@ -61,3 +79,18 @@
 - **FIX**: (1) `parseJsonl` now reads only a bounded TAIL of the file when `limit > 0` (new `readTail()` reads backward in 64KB chunks, 4MB cap) instead of the whole file. Verified identical last-5/last-100 output vs the old full read, with +0MB vs +95MB memory on a 24MB file. (2) `loadAllSessions` flattens all files into one list and processes them through a new `mapLimit(items, 24, fn)` bounded worker pool instead of nested unbounded `Promise.all` (also prevents EMFILE from thousands of simultaneous opens). (3) Added `setupCrashLogging()` in main.js (uncaughtException/unhandledRejection/render-process-gone/child-process-gone -> userData/crash.log) so the NEXT failure leaves a readable reason. Honest limitation: native (node-pty/sqlite) aborts and V8 heap OOM still produce a system .ips and bypass the JS handlers; the real defense for those is not loading GB into memory (fix 1+2).
 - **CONTEXT**: Any IPC handler in the main process that reads/parses unbounded amounts of `~/.claude` data is an OOM risk that grows as transcript history grows. A `limit` parameter is only real if it bounds the I/O, not just the returned slice.
 - **DETECTION**: `grep -n "readFile" electron/data-utils.js` — any whole-file read feeding a `slice(-limit)` is the anti-pattern. Also: `du -sh ~/.claude/projects` (927MB at time of bug) shows how much the old loader tried to hold at once.
+
+## 2026-07-09 — zsh eats `echo ===` separators; AppleScript `whose` can't reach deep AX elements
+- Tried: `echo ===LABEL===` as an output separator in Bash tool calls (3x), and `click (first button of group 1 of window 1 whose name is "X")` on Dobius+ (Electron).
+- Failed because: zsh expands a word starting with `=` as `=command` filename expansion → `== not found`, failing the whole compound command. AppleScript `whose` filters only match DIRECT children; Electron web-content buttons are nested many groups deep.
+- Works instead: quote the separator (`echo "===LABEL==="`) or use a non-`=` label. For Electron AX: set `AXManualAccessibility` to true, then iterate `entire contents of group 1 of window 1` and match role+name in the loop.
+
+## 2026-07-09 — Guessed dobius CLI flags the dobius-cli skill already documented
+- Tried: `dobius terminal send --submit` and parsing `terminal read` as `result.text`; both failed (`invalid_argument`, KeyError).
+- Failed because: drove the dobius CLI without loading the `dobius-cli` skill first — it already documents `--enter` and the tail/cursor read shape. Skill-matching rule skipped.
+- Works instead: load `dobius-cli` skill before any dobius CLI session; `--enter` submits, output is `result.terminal.tail`. Runtime discovery should use the Dobius user-data path and `dobius-runtime.json`; terminal handles die when the app restarts (`terminal_handle_stale` -> reacquire via `terminal list`).
+
+## 2026-07-09 — macOS Trash is TCC-protected; agents can't Put Back
+- Tried: restoring `~/.Trash/DobiusPlus` to `~/` via `mv`, then Finder AppleScript (`tell application "Finder" to move ...`), then `ditto` — all with sandbox disabled.
+- Failed because: macOS TCC protects `~/.Trash` from terminal/automation processes without Full Disk Access; Finder automation also needs a user-granted Apple Events permission the host process lacks. Sandbox off ≠ TCC granted. (Reads of a known subpath partially work — `ls`/`stat` on `~/.Trash/<dir>` succeeded — but directory listing, rename, and copy are denied, so discovery via `ls ~/.Trash` silently returns empty with `2>/dev/null`.)
+- Works instead: detect trashed items via `lsof | grep -i <name>` (system daemons like StorageManagement hold handles) or `stat ~/.Trash/<expected-name>` directly; then have the USER restore: Finder → Trash → right-click → Put Back. Don't burn attempts on mv/osascript/ditto.

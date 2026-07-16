@@ -1,4 +1,84 @@
 import { useStore } from '../../store/store';
+import { useState, useEffect } from 'react';
+
+function ctxColor(pct) {
+  if (pct >= 95) return '#f85149';
+  if (pct >= 80) return '#f0883e';
+  if (pct >= 50) return '#e3b341';
+  return '#3FB950';
+}
+
+const SHELLS = ['zsh', '-zsh', 'bash', '-bash', 'sh', '-sh', 'login', 'fish', '-fish'];
+
+// Monitored terminals: count + how many are actively running (not a bare shell).
+function useMonitors() {
+  const monitoredTabs = useStore((s) => s.monitoredTabs);
+  const tabs = useStore((s) => s.terminalTabs);
+  const live = monitoredTabs.filter((id) => tabs.some((t) => t.id === id));
+  const key = live.join(',');
+  const [activeCount, setActiveCount] = useState(0);
+
+  useEffect(() => {
+    if (!window.electronAPI?.terminalGetProcess || live.length === 0) { setActiveCount(0); return; }
+    let cancelled = false;
+    const poll = async () => {
+      let active = 0;
+      for (const id of live) {
+        try {
+          const proc = await window.electronAPI.terminalGetProcess(id);
+          if (proc && !SHELLS.includes(String(proc).trim())) active += 1;
+        } catch { /* ignore */ }
+      }
+      if (!cancelled) setActiveCount(active);
+    };
+    poll();
+    const i = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(i); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  return { count: live.length, activeCount };
+}
+
+// Whether the always-on Asana monitor (Auto Mode) is enabled.
+function useAsanaMonitor() {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    if (!window.electronAPI?.autoModeGet) return;
+    let cancelled = false;
+    const refresh = () => window.electronAPI.autoModeGet()
+      .then((a) => { if (!cancelled) setOn(!!a?.enabled); })
+      .catch(() => {});
+    refresh();
+    const i = setInterval(refresh, 30000);
+    return () => { cancelled = true; clearInterval(i); };
+  }, []);
+  return on;
+}
+
+function useContextSize(projectPath) {
+  const [ctx, setCtx] = useState(null);
+
+  useEffect(() => {
+    if (!projectPath || !window.electronAPI?.dataEstimateContextSize) return;
+    let cancelled = false;
+
+    const refresh = async () => {
+      try {
+        const result = await window.electronAPI.dataEstimateContextSize(projectPath);
+        if (!cancelled) setCtx(result);
+      } catch {
+        void 0;
+      }
+    };
+
+    refresh();
+    const id = setInterval(refresh, 30000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [projectPath]);
+
+  return ctx;
+}
 
 export default function StatusBar() {
   const sessions = useStore((s) => s.sessions);
@@ -9,9 +89,14 @@ export default function StatusBar() {
   const currentIsWorktree = useStore((s) => s.currentIsWorktree);
   const currentDetached = useStore((s) => s.currentDetached);
   const currentIsFork = useStore((s) => s.currentIsFork);
+  const currentProjectPath = useStore((s) => s.currentProjectPath);
+  const ctx = useContextSize(currentProjectPath);
+  const monitors = useMonitors();
+  const asanaOn = useAsanaMonitor();
 
   const hasActive = activeProcesses.length > 0;
   const activeTab = tabs.find((t) => t.id === activeTabId);
+  const projectName = currentProjectPath ? currentProjectPath.split('/').filter(Boolean).pop() : '';
   const gitKind = currentDetached ? null : (currentIsFork ? 'fork' : (currentIsWorktree ? 'worktree' : null));
 
   return (
@@ -25,6 +110,25 @@ export default function StatusBar() {
       }}
     >
       <div className="flex items-center gap-4">
+        {asanaOn && (
+          <span className="flex items-center gap-1.5" title="Auto Mode is polling Asana for new tasks" style={{ color: 'var(--fg)' }}>
+            <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ backgroundColor: '#3FB950', boxShadow: '0 0 4px #3FB950' }} />
+            Asana monitor
+          </span>
+        )}
+        {monitors.count > 0 && (
+          <span
+            className="flex items-center gap-1.5"
+            title={`${monitors.count} monitored terminal${monitors.count !== 1 ? 's' : ''} in ${projectName || 'this project'} — ${monitors.activeCount} active`}
+            style={{ color: 'var(--fg)' }}
+          >
+            <span
+              className="w-1.5 h-1.5 rounded-full inline-block"
+              style={{ backgroundColor: monitors.activeCount > 0 ? '#3FB950' : 'var(--dim)' }}
+            />
+            {projectName || 'monitor'} ×{monitors.count}
+          </span>
+        )}
         {(currentBranch || currentDetached) && (
           <span
             className="flex items-center gap-1"
@@ -57,7 +161,34 @@ export default function StatusBar() {
           </span>
         )}
       </div>
-      <span>v2.0</span>
+      <div className="flex items-center gap-3">
+        {ctx && (() => {
+          const pct = Math.round((ctx.tokens / ctx.maxTokens) * 100);
+          const color = ctxColor(pct);
+          const tokStr = ctx.tokens >= 1000 ? `${(ctx.tokens / 1000).toFixed(0)}k` : ctx.tokens;
+          const maxStr = `${ctx.maxTokens / 1000}k`;
+          return (
+            <span
+              className="flex items-center gap-1.5"
+              title={`Context window: ~${ctx.tokens.toLocaleString()} / ${ctx.maxTokens.toLocaleString()} tokens (${pct}%)\nModel: ${ctx.model || 'unknown'}`}
+              style={{ cursor: 'default' }}
+            >
+              <span style={{ color, fontSize: 9 }}>ctx</span>
+              <span
+                className="relative h-1.5 rounded-full overflow-hidden"
+                style={{ width: 40, backgroundColor: 'var(--border)' }}
+              >
+                <span
+                  className="absolute inset-y-0 left-0 rounded-full"
+                  style={{ width: `${pct}%`, backgroundColor: color, transition: 'width 0.4s, background-color 0.4s' }}
+                />
+              </span>
+              <span style={{ color, fontSize: 9, fontFamily: "'SF Mono', monospace" }}>{pct}%</span>
+            </span>
+          );
+        })()}
+        <span>v2.0</span>
+      </div>
     </div>
   );
 }

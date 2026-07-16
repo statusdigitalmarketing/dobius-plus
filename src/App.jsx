@@ -3,12 +3,14 @@ import ProjectView from './components/Project/ProjectView';
 import ProjectList from './components/Launcher/ProjectList';
 import ErrorBoundary from './components/shared/ErrorBoundary';
 import UpdateBanner from './components/shared/UpdateBanner';
+import VisualView from './components/shared/VisualView';
 
 export default function App() {
   const params = new URLSearchParams(window.location.search);
   const projectPath = params.get('project') || undefined;
   const tearOffTabId = params.get('tearOffTab') || undefined;
   const tearOffLabel = params.get('tearOffLabel') || undefined;
+  const isVisual = params.get('visual') === '1';
 
   // Handle file drag-and-drop globally.
   // dragover: preventDefault enables drop target behaviour.
@@ -47,6 +49,15 @@ export default function App() {
       document.removeEventListener('drop', handleDrop, true);
     };
   }, []);
+
+  // Visual preview window: phone-only live preview in its own window.
+  if (isVisual && projectPath) {
+    return (
+      <ErrorBoundary>
+        <VisualView projectPath={projectPath} />
+      </ErrorBoundary>
+    );
+  }
 
   // If no project path in URL, show the Launcher. Otherwise show the Project view.
   if (!projectPath) {

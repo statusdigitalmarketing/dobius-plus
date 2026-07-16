@@ -1,0 +1,412 @@
+/* eslint-disable max-lines -- Why: this module owns the daemon-side shell
+   wrapper generation for zsh, bash, and PowerShell plus the launch-config
+   plumbing; keeping them together lets the wrapper/marker contract be
+   reviewed as a unit (mirrors src/main/providers/local-pty-shell-ready.ts). */
+import { tmpdir } from 'node:os'
+import { basename, dirname, join, win32 as pathWin32 } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import {
+  encodePowerShellCommand,
+  getPowerShellOsc133Bootstrap,
+  isPowerShellExecutableName
+} from '../powershell-osc133-bootstrap'
+import { getPosixOmpShellWrapper } from '../pty/omp-shell-wrapper'
+import {
+  getZshEnvTemplate,
+  getZshFinalZdotdirRestoreBlock,
+  getZshShellReadyMarkerRegistrationBlock,
+  getZshStartupFileSourceBlock
+} from '../shell-templates'
+
+const DOBIUS_USER_DATA_PATH_ENV = 'DOBIUS_USER_DATA_PATH'
+const SHELL_READY_MARKER = '\\033]777;dobius-shell-ready\\007'
+
+let didEnsureShellReadyWrappers = false
+
+function getShellReadyWrapperRoot(): string {
+  const userDataPath = process.env[DOBIUS_USER_DATA_PATH_ENV]
+  // Why: older/test launchers may not seed DOBIUS_USER_DATA_PATH. Keep a
+  // fallback so daemon startup does not fail before the parent can be fixed.
+  return join(userDataPath || tmpdir(), userDataPath ? 'shell-ready' : 'dobius-shell-ready')
+}
+
+// Why: if our own process inherited ZDOTDIR from a parent shell that was
+// itself an Dobius PTY (e.g. the user launched Dobius from a terminal inside a
+// running Dobius), that ZDOTDIR points at an Dobius shell-ready wrapper dir.
+// Propagating it as the new PTY's DOBIUS_ORIG_ZDOTDIR makes the wrapper's
+// `source "$DOBIUS_ORIG_ZDOTDIR/.zshenv"` line source itself recursively —
+// zsh gives "job table full or recursion limit exceeded" and the shell
+// never reaches a usable prompt.
+//
+// Any path component ending in `/shell-ready/zsh` is an Dobius wrapper dir
+// (regardless of whether it came from this daemon's userData, a packaged
+// Dobius, or a different dev build). Treat it as if ZDOTDIR were unset so the
+// caller falls back to HOME for the user's real config root.
+function normalizeOriginalZdotdirCandidate(value: string | undefined): string | null {
+  if (!value) {
+    return null
+  }
+  // Why: tolerate trailing slashes — some shell startup scripts export
+  // `ZDOTDIR="$dir/"`, and without normalization the suffix check would
+  // miss the self-loop path and restore the recursion bug. Also collapses
+  // a pathological `ZDOTDIR=/` to empty so we fall back to HOME rather than
+  // sourcing `/.zshenv` (which is never the user's real config).
+  const normalized = value.replace(/\/+$/, '')
+  if (!normalized || normalized.endsWith('/shell-ready/zsh')) {
+    return null
+  }
+  return value
+}
+
+function resolveOriginalZdotdir(): string {
+  return (
+    normalizeOriginalZdotdirCandidate(process.env.ZDOTDIR) ||
+    normalizeOriginalZdotdirCandidate(process.env.DOBIUS_ORIG_ZDOTDIR) ||
+    process.env.HOME ||
+    ''
+  )
+}
+
+function resolveOriginalZshenvSourceDir(): string {
+  return normalizeOriginalZdotdirCandidate(process.env.ZDOTDIR) || process.env.HOME || ''
+}
+
+function getRequiredShellReadyWrapperPaths(root = getShellReadyWrapperRoot()): string[] {
+  return [
+    join(root, 'zsh', '.zshenv'),
+    join(root, 'zsh', '.zprofile'),
+    join(root, 'zsh', '.zshrc'),
+    join(root, 'zsh', '.zlogin'),
+    join(root, 'bash', 'rcfile')
+  ]
+}
+
+function shellReadyWrappersExist(): boolean {
+  return getRequiredShellReadyWrapperPaths().every((path) => existsSync(path))
+}
+
+export function getDaemonBashShellReadyRcfileContent(): string {
+  return `# Dobius daemon bash shell-ready wrapper
+[[ -f /etc/profile ]] && source /etc/profile
+if [[ -f "$HOME/.bash_profile" ]]; then
+  source "$HOME/.bash_profile"
+elif [[ -f "$HOME/.bash_login" ]]; then
+  source "$HOME/.bash_login"
+elif [[ -f "$HOME/.profile" ]]; then
+  source "$HOME/.profile"
+fi
+__dobius_restore_attribution_path() {
+  [[ -n "\${DOBIUS_ATTRIBUTION_SHIM_DIR:-}" ]] || return 0
+  case "$PATH" in
+    "\${DOBIUS_ATTRIBUTION_SHIM_DIR}"|"\${DOBIUS_ATTRIBUTION_SHIM_DIR}:"*) return 0 ;;
+  esac
+  export PATH="\${DOBIUS_ATTRIBUTION_SHIM_DIR}:$PATH"
+}
+__dobius_restore_attribution_path
+__dobius_restore_agent_teams_path() {
+  [[ -n "\${DOBIUS_AGENT_TEAMS_SHIM_DIR:-}" ]] || return 0
+  case "$PATH" in
+    "\${DOBIUS_AGENT_TEAMS_SHIM_DIR}"|"\${DOBIUS_AGENT_TEAMS_SHIM_DIR}:"*) return 0 ;;
+  esac
+  export PATH="\${DOBIUS_AGENT_TEAMS_SHIM_DIR}:$PATH"
+}
+__dobius_restore_agent_teams_path
+# Why: user startup files may set the default OpenCode config after Dobius's
+# spawn env; restore the Dobius-managed config dir before the first prompt.
+[[ -n "\${DOBIUS_OPENCODE_CONFIG_DIR:-}" ]] && export OPENCODE_CONFIG_DIR="\${DOBIUS_OPENCODE_CONFIG_DIR}"
+[[ -n "\${DOBIUS_MIMOCODE_HOME:-}" ]] && export MIMOCODE_HOME="\${DOBIUS_MIMOCODE_HOME}"
+${getPosixOmpShellWrapper()}
+# Why: Codex must keep using Dobius's runtime CODEX_HOME after profile scripts.
+[[ -n "\${DOBIUS_CODEX_HOME:-}" ]] && export CODEX_HOME="\${DOBIUS_CODEX_HOME}"
+# Why: emit OSC 133 C/D so terminal-command-lifecycle can drop stale agent
+# status when the foreground command exits — mirrors the zsh daemon wrapper.
+# Without this, bash users (default on most Linux distros) keep a stuck
+# 'working' spinner after the CLI exits without a Stop/SessionEnd hook.
+__dobius_osc133_precmd() {
+  local exit_code=$?
+  __dobius_in_prompt_command=1
+  if [[ -n "\${__dobius_in_command:-}" ]]; then
+    printf "\\033]133;D;%s\\007" "$exit_code"
+    unset __dobius_in_command
+  fi
+  printf "\\033]133;A\\007"
+}
+__dobius_osc133_prompt_done() {
+  unset __dobius_in_prompt_command
+}
+__dobius_run_user_debug_trap() {
+  if [[ -n "\${__dobius_user_debug_trap:-}" ]]; then
+    eval "$__dobius_user_debug_trap" || true
+  fi
+}
+__dobius_osc133_preexec() {
+  __dobius_run_user_debug_trap
+  [[ -z "\${__dobius_in_prompt_command:-}" ]] || return
+  # Why: bash DEBUG fires for every simple command, including PROMPT_COMMAND
+  # bodies. Skip our own prompt-time helpers so they don't mark the shell as
+  # "in command" before the prompt has even drawn.
+  case "$BASH_COMMAND" in
+    *__dobius_osc133_precmd*|*__dobius_osc133_prompt_done*|*__dobius_prompt_mark*) return ;;
+  esac
+  printf "\\033]133;C\\007"
+  __dobius_in_command=1
+}
+# Why: prepend so we capture $? before the user's PROMPT_COMMAND chain mutates it.
+__dobius_normalize_prompt_command() {
+  local __dobius_joined="" __dobius_prompt_part
+  if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+    for __dobius_prompt_part in "\${PROMPT_COMMAND[@]}"; do
+      [[ -n "$__dobius_prompt_part" ]] || continue
+      if [[ -n "$__dobius_joined" ]]; then
+        __dobius_joined="$__dobius_joined;$__dobius_prompt_part"
+      else
+        __dobius_joined="$__dobius_prompt_part"
+      fi
+    done
+    PROMPT_COMMAND="$__dobius_joined"
+  fi
+}
+__dobius_prepend_prompt_command() {
+  __dobius_normalize_prompt_command
+  PROMPT_COMMAND="__dobius_osc133_precmd\${PROMPT_COMMAND:+;\${PROMPT_COMMAND}}"
+}
+__dobius_append_prompt_command() {
+  local command="$1"
+  __dobius_normalize_prompt_command
+  if [[ -n "\${PROMPT_COMMAND:-}" ]]; then
+    PROMPT_COMMAND="\${PROMPT_COMMAND};$command"
+  else
+    PROMPT_COMMAND="$command"
+  fi
+}
+__dobius_prepend_prompt_command
+if [[ "\${DOBIUS_SHELL_READY_MARKER:-0}" == "1" ]]; then
+  __dobius_prompt_mark() {
+    printf "${SHELL_READY_MARKER}"
+  }
+  __dobius_append_prompt_command "__dobius_prompt_mark"
+fi
+__dobius_append_prompt_command "__dobius_osc133_prompt_done"
+__dobius_debug_trap_spec="$(trap -p DEBUG)"
+if [[ -n "$__dobius_debug_trap_spec" ]]; then
+  __dobius_debug_trap_command="\${__dobius_debug_trap_spec#trap -- }"
+  __dobius_debug_trap_command="\${__dobius_debug_trap_command% DEBUG}"
+  eval "__dobius_user_debug_trap=$__dobius_debug_trap_command"
+fi
+unset __dobius_debug_trap_spec __dobius_debug_trap_command
+unset -f __dobius_normalize_prompt_command __dobius_prepend_prompt_command __dobius_append_prompt_command
+# Why: arm DEBUG after wrapper setup; otherwise bash treats our own rcfile
+# commands as a foreground command and emits a fake C/D before the first prompt.
+trap '__dobius_osc133_preexec' DEBUG
+`
+}
+
+export function getDaemonZshShellReadyRcfileContent(): string {
+  return `# Dobius daemon zsh shell-ready wrapper
+${getZshStartupFileSourceBlock({
+  fileName: '.zshrc',
+  interactiveOnly: true,
+  skipWhenHomeIsCurrentZdotdir: true
+})}
+__dobius_restore_attribution_path() {
+  [[ -n "\${DOBIUS_ATTRIBUTION_SHIM_DIR:-}" ]] || return 0
+  case "$PATH" in
+    "\${DOBIUS_ATTRIBUTION_SHIM_DIR}"|"\${DOBIUS_ATTRIBUTION_SHIM_DIR}:"*) return 0 ;;
+  esac
+  export PATH="\${DOBIUS_ATTRIBUTION_SHIM_DIR}:$PATH"
+}
+[[ ! -o login ]] && __dobius_restore_attribution_path
+__dobius_restore_agent_teams_path() {
+  [[ -n "\${DOBIUS_AGENT_TEAMS_SHIM_DIR:-}" ]] || return 0
+  case "$PATH" in
+    "\${DOBIUS_AGENT_TEAMS_SHIM_DIR}"|"\${DOBIUS_AGENT_TEAMS_SHIM_DIR}:"*) return 0 ;;
+  esac
+  export PATH="\${DOBIUS_AGENT_TEAMS_SHIM_DIR}:$PATH"
+}
+[[ ! -o login ]] && __dobius_restore_agent_teams_path
+if [[ ! -o login ]]; then
+  # Why: ~/.zshrc can export the user's default OpenCode config after spawn.
+  [[ -n "\${DOBIUS_OPENCODE_CONFIG_DIR:-}" ]] && export OPENCODE_CONFIG_DIR="\${DOBIUS_OPENCODE_CONFIG_DIR}"
+  [[ -n "\${DOBIUS_MIMOCODE_HOME:-}" ]] && export MIMOCODE_HOME="\${DOBIUS_MIMOCODE_HOME}"
+  ${getPosixOmpShellWrapper()}
+  [[ -n "\${DOBIUS_CODEX_HOME:-}" ]] && export CODEX_HOME="\${DOBIUS_CODEX_HOME}"
+fi
+__dobius_osc133_precmd() {
+  local exit_code=$?
+  if [[ -n "\${__dobius_in_command:-}" ]]; then
+    printf "\\033]133;D;%s\\007" "$exit_code"
+    unset __dobius_in_command
+  fi
+  printf "\\033]133;A\\007"
+}
+__dobius_osc133_preexec() {
+  printf "\\033]133;C\\007"
+  __dobius_in_command=1
+}
+# Why: prepend so Dobius captures $? before user prompt hooks can overwrite it.
+precmd_functions=(__dobius_osc133_precmd \${precmd_functions[@]})
+preexec_functions=(__dobius_osc133_preexec \${preexec_functions[@]})
+if [[ ! -o login ]]; then
+${getZshFinalZdotdirRestoreBlock()}
+fi
+`
+}
+
+function ensureShellReadyWrappers(): void {
+  if (process.platform === 'win32') {
+    return
+  }
+  if (didEnsureShellReadyWrappers && shellReadyWrappersExist()) {
+    return
+  }
+  didEnsureShellReadyWrappers = true
+
+  const root = getShellReadyWrapperRoot()
+  const zshDir = join(root, 'zsh')
+  const bashDir = join(root, 'bash')
+
+  const zshEnv = getZshEnvTemplate(zshDir, 'daemon')
+  const zshProfile = `# Dobius daemon zsh shell-ready wrapper
+${getZshStartupFileSourceBlock({ fileName: '.zprofile' })}
+`
+  const zshRc = getDaemonZshShellReadyRcfileContent()
+  const zshLogin = `# Dobius daemon zsh shell-ready wrapper
+${getZshStartupFileSourceBlock({ fileName: '.zlogin', interactiveOnly: true })}
+__dobius_restore_attribution_path() {
+  [[ -n "\${DOBIUS_ATTRIBUTION_SHIM_DIR:-}" ]] || return 0
+  case "$PATH" in
+    "\${DOBIUS_ATTRIBUTION_SHIM_DIR}"|"\${DOBIUS_ATTRIBUTION_SHIM_DIR}:"*) return 0 ;;
+  esac
+  export PATH="\${DOBIUS_ATTRIBUTION_SHIM_DIR}:$PATH"
+}
+__dobius_restore_attribution_path
+__dobius_restore_agent_teams_path() {
+  [[ -n "\${DOBIUS_AGENT_TEAMS_SHIM_DIR:-}" ]] || return 0
+  case "$PATH" in
+    "\${DOBIUS_AGENT_TEAMS_SHIM_DIR}"|"\${DOBIUS_AGENT_TEAMS_SHIM_DIR}:"*) return 0 ;;
+  esac
+  export PATH="\${DOBIUS_AGENT_TEAMS_SHIM_DIR}:$PATH"
+}
+__dobius_restore_agent_teams_path
+# Why: .zlogin is the final login startup file before the prompt is shown.
+[[ -n "\${DOBIUS_OPENCODE_CONFIG_DIR:-}" ]] && export OPENCODE_CONFIG_DIR="\${DOBIUS_OPENCODE_CONFIG_DIR}"
+[[ -n "\${DOBIUS_MIMOCODE_HOME:-}" ]] && export MIMOCODE_HOME="\${DOBIUS_MIMOCODE_HOME}"
+${getPosixOmpShellWrapper()}
+[[ -n "\${DOBIUS_CODEX_HOME:-}" ]] && export CODEX_HOME="\${DOBIUS_CODEX_HOME}"
+${getZshShellReadyMarkerRegistrationBlock(SHELL_READY_MARKER)}
+${getZshFinalZdotdirRestoreBlock()}
+`
+  const bashRc = getDaemonBashShellReadyRcfileContent()
+
+  const files = [
+    [join(zshDir, '.zshenv'), zshEnv],
+    [join(zshDir, '.zprofile'), zshProfile],
+    [join(zshDir, '.zshrc'), zshRc],
+    [join(zshDir, '.zlogin'), zshLogin],
+    [join(bashDir, 'rcfile'), bashRc]
+  ] as const
+
+  try {
+    for (const [path, content] of files) {
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, content, 'utf8')
+      chmodSync(path, 0o644)
+    }
+  } catch (error) {
+    // Why: wrapper file creation can fail due to read-only filesystems, permission
+    // issues, or disk space. Rather than crashing, log the error and continue.
+    // The shell will launch without the wrapper, which means no shell-ready marker
+    // but at least the PTY is usable.
+    const errorMessage =
+      error instanceof Error
+        ? `${error.message} (${(error as NodeJS.ErrnoException).code || 'unknown'})`
+        : String(error)
+    console.error(`[daemon/shell-ready] Failed to create wrapper files in ${root}: ${errorMessage}`)
+    console.error('[daemon/shell-ready] Shell will launch without wrapper (no shell-ready marker)')
+    // Reset the flag so next attempt will try again
+    didEnsureShellReadyWrappers = false
+  }
+}
+
+export function resolvePtyShellPath(env: Record<string, string>): string {
+  if (process.platform === 'win32') {
+    return env.DOBIUS_TERMINAL_WINDOWS_SHELL || 'powershell.exe'
+  }
+  return env.SHELL || process.env.SHELL || '/bin/zsh'
+}
+
+export function supportsPtyStartupBarrier(env: Record<string, string>): boolean {
+  if (process.platform === 'win32') {
+    return false
+  }
+  const resolvedShell = resolvePtyShellPath(env)
+  const shellName = pathWin32.basename(basename(resolvedShell)).toLowerCase()
+  return shellName === 'zsh' || shellName === 'bash'
+}
+
+type ShellLaunchConfig = {
+  args: string[] | null
+  env: Record<string, string>
+  supportsReadyMarker: boolean
+}
+
+function getWrappedShellLaunchConfig(
+  shellPath: string,
+  options: { emitReadyMarker: boolean }
+): ShellLaunchConfig {
+  const shellName = pathWin32.basename(basename(shellPath)).toLowerCase()
+
+  if (shellName === 'zsh') {
+    ensureShellReadyWrappers()
+    const root = getShellReadyWrapperRoot()
+    return {
+      args: ['-l'],
+      env: {
+        DOBIUS_ORIG_ZDOTDIR: resolveOriginalZdotdir(),
+        DOBIUS_ZSHENV_SOURCE_DIR: resolveOriginalZshenvSourceDir(),
+        ZDOTDIR: join(root, 'zsh'),
+        DOBIUS_SHELL_READY_MARKER: options.emitReadyMarker ? '1' : '0'
+      },
+      supportsReadyMarker: options.emitReadyMarker
+    }
+  }
+
+  if (shellName === 'bash') {
+    ensureShellReadyWrappers()
+    const root = getShellReadyWrapperRoot()
+    return {
+      args: ['--rcfile', join(root, 'bash', 'rcfile')],
+      env: {
+        DOBIUS_SHELL_READY_MARKER: options.emitReadyMarker ? '1' : '0'
+      },
+      supportsReadyMarker: options.emitReadyMarker
+    }
+  }
+
+  if (isPowerShellExecutableName(shellName)) {
+    return {
+      args: [
+        '-NoLogo',
+        '-NoExit',
+        '-EncodedCommand',
+        encodePowerShellCommand(getPowerShellOsc133Bootstrap())
+      ],
+      env: {},
+      supportsReadyMarker: false
+    }
+  }
+
+  return {
+    args: null,
+    env: {},
+    supportsReadyMarker: false
+  }
+}
+
+export function getShellReadyLaunchConfig(shellPath: string): ShellLaunchConfig {
+  return getWrappedShellLaunchConfig(shellPath, { emitReadyMarker: true })
+}
+
+export function getAttributionShellLaunchConfig(shellPath: string): ShellLaunchConfig {
+  return getWrappedShellLaunchConfig(shellPath, { emitReadyMarker: false })
+}

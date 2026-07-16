@@ -36,11 +36,14 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const setActiveTab = useStore((s) => s.setActiveTab);
   const initTabs = useStore((s) => s.initTabs);
   const initClosedTabs = useStore((s) => s.initClosedTabs);
-
   // Split view + terminal grid state and actions
   const splitTabId = useStore((s) => s.splitTabId);
   const clearSplitTab = useStore((s) => s.clearSplitTab);
+  const splitRatio = useStore((s) => s.splitRatio);
+  const setSplitRatio = useStore((s) => s.setSplitRatio);
   const gridSlots = useStore((s) => s.gridSlots);
+  const gridColumnRatio = useStore((s) => s.gridColumnRatio);
+  const gridRowRatios = useStore((s) => s.gridRowRatios);
   const draggingTabId = useStore((s) => s.draggingTabId);
   const setDraggingTabId = useStore((s) => s.setDraggingTabId);
   const addToGrid = useStore((s) => s.addToGrid);
@@ -48,10 +51,13 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
   const swapGrid = useStore((s) => s.swapGrid);
   const clearGrid = useStore((s) => s.clearGrid);
   const setGridSlots = useStore((s) => s.setGridSlots);
+  const setGridColumnRatio = useStore((s) => s.setGridColumnRatio);
+  const setGridRowRatios = useStore((s) => s.setGridRowRatios);
   const tabStatus = useStore((s) => s.tabStatus);
 
   const [pinnedIds, setPinnedIds] = useState([]);
   const [tabsInitialized, setTabsInitialized] = useState(false);
+  const terminalLayoutRef = useRef(null);
 
   // Start agent activity monitoring for all running agents
   useAgentActivity();
@@ -155,6 +161,9 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         if (config && typeof config.themeIndex === 'number') {
           setThemeIndex(config.themeIndex);
         }
+        if (typeof config?.splitRatio === 'number') setSplitRatio(config.splitRatio);
+        if (typeof config?.gridColumnRatio === 'number') setGridColumnRatio(config.gridColumnRatio);
+        if (Array.isArray(config?.gridRowRatios)) setGridRowRatios(config.gridRowRatios);
         // Restore saved tabs
         if (config?.tabs?.length > 0 && config.tabCounter > 0) {
           initTabs(config.tabs, config.tabCounter);
@@ -181,7 +190,79 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
       }
       setTabsInitialized(true);
     }
-  }, [projectPath, setThemeIndex, tearOffTabId, tearOffLabel]);
+  }, [projectPath, setThemeIndex, setSplitRatio, setGridColumnRatio, setGridRowRatios, tearOffTabId, tearOffLabel]);
+
+  const startSplitResize = useCallback((e) => {
+    e.preventDefault();
+    const el = terminalLayoutRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const onMove = (moveEvent) => {
+      setSplitRatio((moveEvent.clientX - rect.left) / rect.width);
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp, { once: true });
+  }, [setSplitRatio]);
+
+  const startGridColumnResize = useCallback((e) => {
+    e.preventDefault();
+    const el = terminalLayoutRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const onMove = (moveEvent) => {
+      setGridColumnRatio((moveEvent.clientX - rect.left) / rect.width);
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp, { once: true });
+  }, [setGridColumnRatio]);
+
+  const startGridRowResize = useCallback((e, boundaryIndex, rowCount, currentRatios) => {
+    e.preventDefault();
+    const el = terminalLayoutRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const min = 0.12;
+    const ratios = currentRatios.length === rowCount
+      ? currentRatios
+      : Array.from({ length: rowCount }, () => 1 / rowCount);
+    const before = ratios.slice(0, boundaryIndex).reduce((sum, r) => sum + r, 0);
+    const after = ratios.slice(boundaryIndex + 1).reduce((sum, r) => sum + r, 0);
+    const movableTotal = ratios[boundaryIndex] + ratios[boundaryIndex + 1];
+    const onMove = (moveEvent) => {
+      const rawBoundary = (moveEvent.clientY - rect.top) / rect.height;
+      const nextTop = Math.min(before + movableTotal - min, Math.max(before + min, rawBoundary));
+      const next = [...ratios];
+      next[boundaryIndex] = nextTop - before;
+      next[boundaryIndex + 1] = 1 - after - nextTop;
+      setGridRowRatios(next);
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp, { once: true });
+  }, [setGridRowRatios]);
 
   // Save theme to config when it changes
   useEffect(() => {
@@ -252,6 +333,24 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
       window.electronAPI.terminalSaveTabs(projectPath, tabs, useStore.getState().tabCounter);
     }
   }, [tabs, tabsInitialized, projectPath, tearOffTabId]);
+
+  // Persist grid layout per project (merged into project config; skip tear-offs).
+  // Gate on hydration so the mount-time default (gridSlots: null) can't clobber a
+  // saved layout before the load effect has had a chance to restore it.
+  const gridHydratedRef = useRef(false);
+  useEffect(() => {
+    if (tabsInitialized) gridHydratedRef.current = true;
+  }, [tabsInitialized]);
+  useEffect(() => {
+    if (tearOffTabId || !gridHydratedRef.current) return;
+    if (!tabsInitialized || !projectPath || !window.electronAPI?.configSetProject) return;
+    window.electronAPI.configSetProject(projectPath, {
+      gridSlots,
+      splitRatio,
+      gridColumnRatio,
+      gridRowRatios,
+    });
+  }, [gridSlots, splitRatio, gridColumnRatio, gridRowRatios, tabsInitialized, projectPath, tearOffTabId]);
 
   // Clean up running agents when a terminal PTY exits + auto-capture journal + orchestration tracking
   useEffect(() => {
@@ -332,7 +431,10 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
             window.electronAPI.terminalLoadState(termId).then((saved) => {
               let summary = null;
               if (saved?.scrollback) {
-                const stripped = saved.scrollback.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+                const rawScrollback = Array.isArray(saved.scrollback)
+                  ? saved.scrollback.join('\n')
+                  : String(saved.scrollback);
+                const stripped = rawScrollback.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
                 summary = stripped.slice(-500).trim();
               }
               doUpdate(summary);
@@ -430,6 +532,46 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     window.electronAPI.terminalWrite(termId, cmd);
   }, [setActiveView]);
 
+  // Cmd+R / menu "Resume Last Session" — resume the latest session that ran in
+  // the ACTIVE tab (via the session↔tab link), falling back to the project's
+  // most recent session only if this tab has no linked session yet.
+  // Guarded so the keydown path and the menu accelerator can't double-fire.
+  const resumeGuardRef = useRef(0);
+  const doResumeLatest = useCallback(() => {
+    const now = Date.now();
+    if (now - resumeGuardRef.current < 1500) return;
+    resumeGuardRef.current = now;
+    if (!projectPath || !window.electronAPI) return;
+    const api = window.electronAPI;
+    const termId = useStore.getState().activeTabId;
+
+    const resolve = async () => {
+      // 1. Latest session linked to THIS tab.
+      if (termId && api.configGetSessionTabMap) {
+        try {
+          const map = await api.configGetSessionTabMap();
+          let best = null;
+          for (const [sid, entry] of Object.entries(map || {})) {
+            if (entry?.tabId === termId && (!best || (entry.capturedAt || 0) > best.capturedAt)) {
+              best = { sessionId: sid, capturedAt: entry.capturedAt || 0 };
+            }
+          }
+          if (best?.sessionId) return best.sessionId;
+        } catch { /* fall through */ }
+      }
+      // 2. Fallback: project's most recent session.
+      if (api.dataGetLatestSession) {
+        const s = await api.dataGetLatestSession(projectPath);
+        return s?.sessionId || null;
+      }
+      return null;
+    };
+
+    resolve().then((sessionId) => {
+      if (sessionId) handleResumeSession({ sessionId });
+    });
+  }, [projectPath, handleResumeSession]);
+
   const handleCdToProject = useCallback((sessionProject) => {
     if (!sessionProject || !sessionProject.startsWith('/') || /[;&|`$\x00-\x1F\x7F]/.test(sessionProject)) return;
     setActiveView('terminal');
@@ -472,26 +614,51 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
     }
     // Save scrollback before closing so Cmd+Shift+T can restore it
     let scrollback = null;
+    let saved = null;
     if (window.electronAPI?.terminalLoadState) {
       await window.electronAPI.terminalRequestSaveNow?.();
       await new Promise((r) => setTimeout(r, 200));
-      const saved = await window.electronAPI.terminalLoadState(tabId);
+      saved = await window.electronAPI.terminalLoadState(tabId);
       scrollback = saved?.scrollback || null;
     }
     if (tab) {
       state.pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback });
     }
+    // Auto-checkpoint on close, matching the tab-bar X / middle-click / context-menu
+    // paths (Cmd+W previously skipped this, so the same close produced no checkpoint).
+    // Reuse the scrollback already loaded above — no second save round-trip.
+    if (scrollback?.length > 0 && projectPath && window.electronAPI?.checkpointSave) {
+      try {
+        await window.electronAPI.checkpointSave(projectPath, {
+          label: `Auto: ${tab?.label || 'closed tab'}`,
+          terminalId: tabId,
+          scrollback,
+          cols: saved?.cols || 80,
+          rows: saved?.rows || 24,
+        });
+      } catch (err) {
+        console.error('[ProjectView] auto-checkpoint on close failed:', err);
+      }
+    }
     if (window.electronAPI) {
       window.electronAPI.terminalKill(tabId);
     }
     removeTab(tabId);
-  }, [removeTab]);
+  }, [removeTab, projectPath]);
 
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
+
+      // When focus is in one of the app's OWN text fields (the command bar or a
+      // tab-rename input) — but NOT the xterm terminal, which uses a hidden
+      // textarea — don't let disruptive shortcuts hijack the keystroke (e.g.
+      // Cmd+K wiping the terminal mid-compose, Cmd+W closing during a rename).
+      const ae = document.activeElement;
+      const inXterm = ae?.classList?.contains?.('xterm-helper-textarea');
+      const inAppField = !inXterm && !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
 
       if (e.key === 't' && !e.shiftKey) {
         // Cmd+T = new tab
@@ -527,6 +694,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         }
       } else if (e.key === 'w' && !e.shiftKey) {
         // Cmd+W = close tab (with process confirmation)
+        if (inAppField) return;
         e.preventDefault();
         closeActiveTab();
       } else if (e.key === 'b') {
@@ -536,21 +704,18 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         e.preventDefault();
         toggleGitPanel();
       } else if (e.key === 'k') {
+        if (inAppField) return;
         e.preventDefault();
         const termId = useStore.getState().activeTabId;
         if (window.electronAPI && termId) {
           window.electronAPI.terminalWrite(termId, 'clear\r');
         }
       } else if (e.key === 'r' && !e.shiftKey) {
-        // Cmd+R = resume last Claude session
+        // Cmd+R = resume last Claude session. Keydown is the reliable path
+        // (fires even when the xterm terminal has focus); the menu item shares
+        // doResumeLatest's debounce so the two can't double-fire.
         e.preventDefault();
-        if (projectPath && window.electronAPI?.dataGetLatestSession) {
-          window.electronAPI.dataGetLatestSession(projectPath).then((session) => {
-            if (session?.sessionId) {
-              useStore.getState().resumeSession(session.sessionId);
-            }
-          });
-        }
+        doResumeLatest();
       } else if (e.key === '[' && e.shiftKey) {
         // Cmd+Shift+[ = prev tab
         e.preventDefault();
@@ -577,7 +742,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab]);
+  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab, doResumeLatest]);
 
   // Menu bar events
   useEffect(() => {
@@ -594,9 +759,13 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
         setActiveView('terminal');
       }),
       window.electronAPI.onMenuCloseTab?.(() => closeActiveTab()),
+      window.electronAPI.onMenuResumeSession?.(() => {
+        // Menu "Resume Last Session" — shares the keydown's guarded path.
+        doResumeLatest();
+      }),
     ];
     return () => cleanups.forEach((fn) => fn?.());
-  }, [setActiveView, toggleSidebar, toggleGitPanel, addTab, removeTab, projectPath, closeActiveTab]);
+  }, [setActiveView, toggleSidebar, toggleGitPanel, addTab, removeTab, projectPath, closeActiveTab, doResumeLatest]);
 
   return (
     <div className="h-full w-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>
@@ -640,6 +809,17 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
               const n = gridActive ? gridSlots.length : 0;
               const cols = n === 1 ? 1 : 2;
               const rows = Math.max(1, Math.ceil(n / cols));
+              const splitPct = Math.round(splitRatio * 10000) / 100;
+              const gridColPct = Math.round(gridColumnRatio * 10000) / 100;
+              const rowRatios = gridRowRatios.length === rows
+                ? gridRowRatios
+                : Array.from({ length: rows }, () => 1 / rows);
+              const rowTotal = rowRatios.reduce((sum, r) => sum + r, 0) || 1;
+              const normalizedRows = rowRatios.map((r) => r / rowTotal);
+              const rowTemplate = normalizedRows.map((r) => `${Math.max(0.12, r)}fr`).join(' ');
+              const primarySplitTabId = splitTabId && activeTabId === splitTabId
+                ? tabs.find((t) => t.id !== splitTabId)?.id
+                : activeTabId;
 
               // CSS placement for the i-th terminal. An odd final terminal spans
               // the full row so the grid stays gap-free.
@@ -653,8 +833,10 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                 ? {
                     position: 'relative',
                     display: 'grid',
-                    gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-                    gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+                    gridTemplateColumns: cols === 1
+                      ? 'minmax(0, 1fr)'
+                      : `minmax(0, ${gridColPct}fr) minmax(0, ${100 - gridColPct}fr)`,
+                    gridTemplateRows: rowTemplate,
                     gap: 1,
                     backgroundColor: 'var(--border)',
                   }
@@ -678,8 +860,8 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                   };
                 }
                 if (splitTabId) {
-                  if (tab.id === splitTabId) return { position: 'absolute', top: 0, bottom: 0, right: 0, width: '50%', paddingTop: 28, display: 'flex' };
-                  if (isActive) return { position: 'absolute', top: 0, bottom: 0, left: 0, width: '50%', display: 'flex' };
+                  if (tab.id === splitTabId) return { position: 'absolute', top: 0, bottom: 0, left: `${splitPct}%`, right: 0, paddingTop: 28, display: 'flex' };
+                  if (tab.id === primarySplitTabId) return { position: 'absolute', top: 0, bottom: 0, left: 0, width: `${splitPct}%`, display: 'flex' };
                   return { position: 'absolute', inset: 0, display: 'none' };
                 }
                 return { position: 'absolute', inset: 0, display: isActive ? 'flex' : 'none' };
@@ -690,7 +872,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
               const draggingNewTab = !!draggingTabId && (!gridSlots || !gridSlots.includes(draggingTabId));
 
               return (
-                <div className="flex-1 min-h-0 min-w-0" style={containerStyle}>
+                <div ref={terminalLayoutRef} className="flex-1 min-h-0 min-w-0" style={containerStyle}>
                   {tabsInitialized && tabs.map((tab) => (
                     <div key={tab.id} style={paneStyleFor(tab)}>
                       {tab.kind === 'browser' ? (
@@ -713,9 +895,17 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                     if (!splitTab) return null;
                     return (
                       <>
-                        <div style={{ position: 'absolute', top: 0, bottom: 0, left: 'calc(50% - 0.5px)', width: 1, backgroundColor: 'var(--border)', zIndex: 5 }} />
+                        <div style={{ position: 'absolute', top: 0, bottom: 0, left: `calc(${splitPct}% - 0.5px)`, width: 1, backgroundColor: 'var(--border)', zIndex: 5 }} />
+                        <div
+                          onMouseDown={startSplitResize}
+                          title="Drag to resize split"
+                          style={{
+                            position: 'absolute', top: 0, bottom: 0, left: `calc(${splitPct}% - 4px)`,
+                            width: 8, cursor: 'col-resize', zIndex: 9,
+                          }}
+                        />
                         <div style={{
-                          position: 'absolute', top: 0, right: 0, width: '50%', height: 28,
+                          position: 'absolute', top: 0, right: 0, left: `${splitPct}%`, height: 28,
                           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                           padding: '0 10px', borderBottom: '1px solid var(--border)',
                           backgroundColor: 'var(--surface)', zIndex: 6,
@@ -736,6 +926,32 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel })
                       </>
                     );
                   })()}
+
+                  {gridActive && cols === 2 && (
+                    <div
+                      onMouseDown={startGridColumnResize}
+                      title="Drag to resize columns"
+                      style={{
+                        position: 'absolute', top: 0, bottom: 0, left: `calc(${gridColPct}% - 4px)`,
+                        width: 8, cursor: 'col-resize', zIndex: 9,
+                      }}
+                    />
+                  )}
+
+                  {gridActive && rows > 1 && normalizedRows.slice(0, -1).map((_, idx) => {
+                    const top = normalizedRows.slice(0, idx + 1).reduce((sum, r) => sum + r, 0) * 100;
+                    return (
+                      <div
+                        key={`gr-${idx}`}
+                        onMouseDown={(e) => startGridRowResize(e, idx, rows, normalizedRows)}
+                        title="Drag to resize rows"
+                        style={{
+                          position: 'absolute', left: 0, right: 0, top: `calc(${top}% - 4px)`,
+                          height: 8, cursor: 'row-resize', zIndex: 9,
+                        }}
+                      />
+                    );
+                  })}
 
                   {/* Grid chrome — one header per terminal (status dot · drag to
                       reorder · click to focus · ✕ to remove). Placed at the same cell

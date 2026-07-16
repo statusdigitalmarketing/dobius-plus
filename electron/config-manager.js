@@ -44,8 +44,20 @@ const DEFAULT_CONFIG = {
     },
   },
   asanaQueue: {
+    pat: '',                     // Asana personal access token
     allowedProjects: [],         // [{ name, gid }] — auto-process only these
+    myGid: '1215600517617968',   // Carson — tasks assigned to me get BUILT (full pipeline)
+    reviewGid: '1213473231797717', // Sam — tasks assigned to him only get REVIEWED (double-check)
+    autoMode: {                  // hands-off intake (auto-mode.js); writes managed there
+      enabled: false,            // OFF by default
+      intervalMinutes: 10,       // poll cadence
+      lanes: ['build', 'review'],
+      seen: [],                  // dispatched task GIDs (capped)
+    },
+    docsFolder: '~/Projects (Code)/Docs', // per-task PDFs land here (per-project subfolders)
   },
+  accounts: [],                  // [{ id, name, type: 'claude'|'codex', claudeJsonPath?, apiKey? }]
+  projectAccounts: {},           // projectPath → accountId
 };
 
 let configCache = null;
@@ -445,6 +457,56 @@ export function setPinnedProjects(projectPaths) {
   saveConfig(config);
 }
 
+/**
+ * Get manually-added project paths (picked via folder dialog, no session required).
+ */
+export function getManualProjects() {
+  const config = loadConfig();
+  return config.manualProjects || [];
+}
+
+/**
+ * Add a path to the manually-added project list (deduped).
+ */
+export function addManualProject(projectPath) {
+  const config = loadConfig();
+  const existing = config.manualProjects || [];
+  if (!existing.includes(projectPath)) {
+    config.manualProjects = [...existing, projectPath];
+    saveConfig(config);
+  }
+}
+
+export function getProjectDisplayNames() {
+  return loadConfig().projectDisplayNames || {};
+}
+
+export function setProjectDisplayName(projectPath, name) {
+  const config = loadConfig();
+  if (!config.projectDisplayNames) config.projectDisplayNames = {};
+  if (name && name.trim()) {
+    config.projectDisplayNames[projectPath] = name.trim();
+  } else {
+    delete config.projectDisplayNames[projectPath];
+  }
+  saveConfig(config);
+}
+
+export function getHiddenProjects() {
+  return loadConfig().hiddenProjects || [];
+}
+
+export function addHiddenProject(projectPath) {
+  const config = loadConfig();
+  const existing = config.hiddenProjects || [];
+  if (!existing.includes(projectPath)) {
+    config.hiddenProjects = [...existing, projectPath];
+    // Also remove from manual projects if present
+    config.manualProjects = (config.manualProjects || []).filter((p) => p !== projectPath);
+    saveConfig(config);
+  }
+}
+
 // Session tag colors
 const TAG_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink'];
 
@@ -725,10 +787,93 @@ export function deleteOrchestrationRun(runId) {
   saveConfig(config);
 }
 
+// --- Account Management ---
+
+const ACCOUNT_TYPES = new Set(['claude', 'codex']);
+
+export function getAccounts() {
+  return loadConfig().accounts || [];
+}
+
+export function saveAccount(account) {
+  if (!account || typeof account !== 'object') return null;
+  const id = account.id || `acct-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  if (!ACCOUNT_TYPES.has(account.type)) return null;
+  const sanitized = {
+    id,
+    name: typeof account.name === 'string' ? account.name.slice(0, 100) : 'Unnamed',
+    type: account.type,
+    ...(account.type === 'claude' && account.claudeJsonPath
+      ? { claudeJsonPath: String(account.claudeJsonPath).slice(0, 500) }
+      : {}),
+    ...(account.type === 'claude' && account.cliPath
+      ? { cliPath: String(account.cliPath).slice(0, 500) }
+      : {}),
+    ...(account.type === 'codex' && account.apiKey
+      ? { apiKey: String(account.apiKey).slice(0, 200) }
+      : {}),
+  };
+  const config = loadConfig();
+  if (!Array.isArray(config.accounts)) config.accounts = [];
+  const idx = config.accounts.findIndex((a) => a.id === id);
+  if (idx >= 0) config.accounts[idx] = sanitized;
+  else config.accounts.push(sanitized);
+  saveConfig(config);
+  return sanitized;
+}
+
+export function deleteAccount(accountId) {
+  if (!accountId || typeof accountId !== 'string') return;
+  const config = loadConfig();
+  config.accounts = (config.accounts || []).filter((a) => a.id !== accountId);
+  // Remove any project assignments pointing to this account
+  if (config.projectAccounts) {
+    for (const [k, v] of Object.entries(config.projectAccounts)) {
+      if (v === accountId) delete config.projectAccounts[k];
+    }
+  }
+  saveConfig(config);
+}
+
+export function getProjectAccount(projectPath) {
+  const config = loadConfig();
+  const accountId = config.projectAccounts?.[projectPath];
+  if (!accountId) return null;
+  return (config.accounts || []).find((a) => a.id === accountId) || null;
+}
+
+export function setProjectAccount(projectPath, accountId) {
+  if (!projectPath || typeof projectPath !== 'string' || UNSAFE_KEYS.has(projectPath)) return;
+  const config = loadConfig();
+  if (!config.projectAccounts) config.projectAccounts = {};
+  if (accountId) config.projectAccounts[projectPath] = accountId;
+  else delete config.projectAccounts[projectPath];
+  saveConfig(config);
+}
+
 /**
  * Flush any pending config save immediately (synchronous, atomic).
  * Call this in before-quit to avoid losing recent changes.
  */
+export function getAsanaQueue() {
+  const config = loadConfig();
+  return {
+    ...DEFAULT_CONFIG.asanaQueue,
+    ...config.asanaQueue,
+    autoMode: { ...DEFAULT_CONFIG.asanaQueue.autoMode, ...(config.asanaQueue?.autoMode || {}) },
+  };
+}
+
+export function updateAsanaQueue(updates) {
+  const config = loadConfig();
+  const allowed = ['pat', 'allowedProjects', 'myGid', 'reviewGid', 'docsFolder'];
+  const safe = Object.fromEntries(
+    Object.entries(updates || {}).filter(([k]) => allowed.includes(k))
+  );
+  config.asanaQueue = { ...DEFAULT_CONFIG.asanaQueue, ...config.asanaQueue, ...safe };
+  saveConfig(config);
+}
+
 // Async drain variant — awaits any queued atomicWrite calls before doing
 // the sync flush. This is the watertight version: a mid-flight rename
 // can't land AFTER a sync flush because we wait for it first.

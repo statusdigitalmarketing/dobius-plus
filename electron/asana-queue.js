@@ -23,11 +23,7 @@
  * dispatch target tab.
  */
 import https from 'https';
-// getAsanaQueue was imported in Carson's cherry-pick but is never used in
-// this module (lives in his Auto Mode code that isn't on main). Codex round-1
-// BLOCKER — module instantiation fails because main's config-manager.js
-// doesn't export it.
-import { loadConfig, saveConfig } from './config-manager.js';
+import { loadConfig, saveConfig, getAsanaQueue } from './config-manager.js';
 
 const ASANA_BASE = 'app.asana.com';
 const ASANA_TIMEOUT_MS = 10_000;
@@ -66,33 +62,57 @@ export function removeAllowedProject(gid) {
 
 // --- Asana REST ---------------------------------------------------------
 
+// Prefer the env var (Sam's global env per CLAUDE.md); fall back to the Settings
+// PAT so a GUI-launched app works even when shell exports don't reach it.
+function asanaToken() {
+  return process.env.ASANA_PAT || getAsanaQueue().pat || null;
+}
+
 function asanaGet(path) {
-  const token = process.env.ASANA_PAT;
-  if (!token) return Promise.reject(new Error('ASANA_PAT not set in env'));
+  return asanaRequest('GET', path);
+}
+
+// Single request helper. `body` (object) is sent as JSON for write methods.
+function asanaRequest(method, path, body) {
+  const token = asanaToken();
+  if (!token) return Promise.reject(new Error('ASANA_PAT not set (env or Settings)'));
+  const payload = body ? JSON.stringify({ data: body }) : null;
   return new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: ASANA_BASE,
-      path,
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
-      timeout: ASANA_TIMEOUT_MS,
-    }, (res) => {
+    const headers = { Authorization: `Bearer ${token}` };
+    if (payload) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(payload); }
+    const req = https.request({ hostname: ASANA_BASE, path, method, headers, timeout: ASANA_TIMEOUT_MS }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf8');
+        const respBody = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode >= 200 && res.statusCode < 300) {
-          try { resolve(JSON.parse(body)); }
+          try { resolve(respBody ? JSON.parse(respBody) : {}); }
           catch (err) { reject(new Error(`bad JSON from Asana: ${err.message}`)); }
         } else {
-          reject(new Error(`Asana HTTP ${res.statusCode}: ${body.slice(0, 200)}`));
+          reject(new Error(`Asana HTTP ${res.statusCode}: ${respBody.slice(0, 200)}`));
         }
       });
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(new Error('Asana timeout')); });
+    if (payload) req.write(payload);
     req.end();
   });
+}
+
+/**
+ * Mark an Asana task complete. This is the ONLY Asana WRITE in the app and it
+ * must only ever be called after explicit human approval (see the Conductor
+ * review-lane prompt + dobius-asana-complete CLI). Never call autonomously.
+ */
+export async function markTaskComplete(taskGid) {
+  if (!/^\d{6,30}$/.test(String(taskGid))) return { ok: false, error: 'task gid malformed' };
+  try {
+    await asanaRequest('PUT', `/api/1.0/tasks/${taskGid}`, { completed: true });
+    return { ok: true, gid: taskGid };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 }
 
 /**
@@ -109,27 +129,106 @@ export function resolveProjectByName(query) {
 }
 
 /**
- * Fetch incomplete tasks assigned to Sam in the given allowlisted project.
- * `assigneeGid` defaults to Sam's gid from CLAUDE.md (1213473231797717).
+ * Two assignee lanes (configurable; defaults in config-manager DEFAULT_CONFIG):
+ *   - build  → tasks assigned to me (Carson). Get the FULL pipeline:
+ *              build via the routed skill, then review + audit + ship-test.
+ *   - review → tasks assigned to Sam. We only double-check his work
+ *              (review + audit + ship-test); we never build these.
+ * Returns [{ gid, lane }].
  */
-export async function fetchNewTasks({ projectName, assigneeGid }) {
+function getLaneAssignees() {
+  const q = getAsanaQueue();
+  return [
+    { gid: q.myGid || '1215600517617968', lane: 'build' },
+    { gid: q.reviewGid || '1213473231797717', lane: 'review' },
+  ];
+}
+
+const FIELDS = ['gid', 'name', 'permalink_url', 'modified_at', 'due_on', 'notes', 'assignee', 'completed', 'completed_at'].join(',');
+
+// Review lane surfaces Sam's tasks COMPLETED within this window — we review what
+// he actually did, not work in progress.
+const REVIEW_COMPLETED_WINDOW_MS = 48 * 60 * 60 * 1000;
+const MAX_COMMENTS_PER_TASK = 8;
+const MAX_ATTACHMENTS_PER_TASK = 8;
+
+// Sam's comment stories (what he wrote about what he did). Best-effort: returns
+// [] on any error so a comment fetch can't break the whole poll.
+async function fetchTaskComments(gid) {
+  try {
+    const data = await asanaGet(`/api/1.0/tasks/${gid}/stories?opt_fields=text,created_at,created_by.name,resource_subtype`);
+    return (data?.data || [])
+      .filter((s) => s.resource_subtype === 'comment_added' && s.text)
+      .slice(-MAX_COMMENTS_PER_TASK)
+      .map((s) => ({ at: s.created_at, by: s.created_by?.name || 'unknown', text: String(s.text).slice(0, 500) }));
+  } catch { return []; }
+}
+
+// Sam's attachments (screenshots etc.) with view URLs the reviewer can open.
+async function fetchTaskAttachments(gid) {
+  try {
+    const data = await asanaGet(`/api/1.0/attachments?parent=${gid}&opt_fields=name,download_url,view_url,resource_subtype`);
+    return (data?.data || [])
+      .slice(0, MAX_ATTACHMENTS_PER_TASK)
+      .map((a) => ({ name: a.name || 'attachment', url: a.view_url || a.download_url || null }))
+      .filter((a) => a.url);
+  } catch { return []; }
+}
+
+/**
+ * Fetch incomplete tasks for an allowlisted project across both lanes.
+ * Each task is tagged with its `lane` ('build' | 'review') and `assigneeGid`
+ * so the Conductor knows whether to build-then-verify or only verify.
+ *
+ * `lanes` lets a caller restrict to one lane (e.g. ['build']); defaults to both.
+ */
+export async function fetchNewTasks({ projectName, lanes }) {
   const project = resolveProjectByName(projectName);
   if (!project) {
     return { ok: false, error: `project not allowlisted: "${projectName}"` };
   }
-  const assignee = assigneeGid || '1213473231797717';
-  const fields = ['gid', 'name', 'permalink_url', 'modified_at', 'due_on', 'notes'].join(',');
-  const path = `/api/1.0/tasks?project=${project.gid}&assignee=${assignee}&completed_since=now&limit=${MAX_TASKS_PER_FETCH}&opt_fields=${fields}`;
+  const wanted = getLaneAssignees().filter((a) => !lanes || lanes.includes(a.lane));
+  const seen = new Set();
+  const tasks = [];
   try {
-    const data = await asanaGet(path);
-    const tasks = (data?.data || []).map((t) => ({
-      gid: t.gid,
-      name: t.name || '(untitled)',
-      url: t.permalink_url || `https://app.asana.com/0/${project.gid}/${t.gid}`,
-      modifiedAt: t.modified_at,
-      dueOn: t.due_on,
-      notesPreview: (t.notes || '').slice(0, 200),
-    }));
+    for (const { gid, lane } of wanted) {
+      // build lane = Carson's INCOMPLETE tasks (to build). review lane = Sam's
+      // tasks COMPLETED in the recent window (to review what he actually did).
+      const completedSince = lane === 'review'
+        ? new Date(Date.now() - REVIEW_COMPLETED_WINDOW_MS).toISOString()
+        : 'now';
+      // Asana rejects project + assignee in the same query ("Must specify
+      // exactly one of project, tag, section, user task list, or assignee +
+      // workspace"). Query by project, then filter to the lane assignee
+      // client-side (FIELDS includes the compact assignee record).
+      const path = `/api/1.0/tasks?project=${project.gid}&completed_since=${encodeURIComponent(completedSince)}&limit=${MAX_TASKS_PER_FETCH}&opt_fields=${FIELDS}`;
+      const data = await asanaGet(path);
+      for (const t of (data?.data || [])) {
+        if (t.assignee?.gid !== gid) continue;   // only this lane's assignee
+        if (seen.has(t.gid)) continue;     // a task can't be in both lanes, but guard anyway
+        // Review only finished work: `completed_since=<ts>` also returns
+        // incomplete tasks, so drop those.
+        if (lane === 'review' && !t.completed) continue;
+        seen.add(t.gid);
+        // For review, pull what Sam wrote + the screenshots he attached.
+        const [comments, attachments] = lane === 'review'
+          ? await Promise.all([fetchTaskComments(t.gid), fetchTaskAttachments(t.gid)])
+          : [[], []];
+        tasks.push({
+          gid: t.gid,
+          name: t.name || '(untitled)',
+          url: t.permalink_url || `https://app.asana.com/0/${project.gid}/${t.gid}`,
+          modifiedAt: t.modified_at,
+          completedAt: t.completed_at || null,
+          dueOn: t.due_on,
+          notesPreview: (t.notes || '').slice(0, 200),
+          comments,
+          attachments,
+          lane,
+          assigneeGid: gid,
+        });
+      }
+    }
     return { ok: true, project, tasks };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -138,10 +237,13 @@ export async function fetchNewTasks({ projectName, assigneeGid }) {
 
 /**
  * Format a task list as a short iMessage-friendly summary (<800 chars).
+ * Each line is prefixed with its lane so Sam-review vs build-mine is obvious.
  */
 export function formatTaskList(tasks) {
   if (!tasks || tasks.length === 0) return 'no new tasks';
-  const lines = tasks.slice(0, 5).map((t, i) => `${i + 1}. ${t.name.slice(0, 80)}${t.dueOn ? ` (due ${t.dueOn})` : ''}`);
+  const icon = (lane) => (lane === 'review' ? '🔍' : '🔨');
+  const lines = tasks.slice(0, 5).map((t, i) =>
+    `${i + 1}. ${icon(t.lane)} ${t.name.slice(0, 78)}${t.dueOn ? ` (due ${t.dueOn})` : ''}`);
   if (tasks.length > 5) lines.push(`...and ${tasks.length - 5} more`);
-  return lines.join('\n');
+  return `🔨 build (mine)  •  🔍 review (Sam's)\n${lines.join('\n')}`;
 }
