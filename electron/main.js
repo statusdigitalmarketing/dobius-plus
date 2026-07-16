@@ -1584,7 +1584,20 @@ function setupSessionTabCapture() {
         if (!runningSessionId && claudeInfo?.startedAt) {
           const cwd = await getTerminalCwd(t.id);
           if (cwd) {
-            runningSessionId = await resolveFreshSessionId(cwd, claudeInfo.startedAt, claimedIds);
+            // Exclude only OTHER tabs' claims. claimedIds is seeded from the
+            // whole map, which includes THIS tab's link from the previous
+            // tick; leaving it in made the resolver skip the tab's own
+            // transcript, return null, and the idle branch then zeroed the
+            // stamp, so every fresh session died after one 15s tick and
+            // auto-resume skipped it. The correlation is stable across ticks
+            // (process start + transcript birth never change), so re-resolving
+            // returns the same id, and if the user starts a DIFFERENT fresh
+            // claude the new start time correctly resolves to the new
+            // transcript. Codex v1.0.39 r2 P2.
+            const ownSid = tabToSessionId.get(t.id);
+            const claimedByOthers = new Set(claimedIds);
+            if (ownSid) claimedByOthers.delete(ownSid);
+            runningSessionId = await resolveFreshSessionId(cwd, claudeInfo.startedAt, claimedByOthers);
           }
         }
         if (!runningSessionId) {
