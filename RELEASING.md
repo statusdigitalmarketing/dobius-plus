@@ -52,9 +52,26 @@ This single command will:
 4. Submit the .app to Apple's notary service and wait (~5–10 min)
 5. Staple the notarization ticket to the .app
 6. Build `dobius-plus-x.y.z-arm64.dmg`, `dobius-plus-x.y.z-arm64-mac.zip`, and `latest-mac.yml` (artifact names per electron-builder.yml `artifactName: ${name}-${version}-${arch}-mac.${ext}`)
-7. Upload all three to GitHub as a **draft** release
+7. Upload all three to GitHub and **PUBLISH the release immediately**
 
-If something fails before step 7, fix the issue and re-run — `electron-builder` will skip steps that already completed.
+If something fails before step 7, fix the issue and re-run. `electron-builder` will skip steps that already completed.
+
+> **The release goes LIVE the moment this command finishes.** `electron-builder.yml`
+> sets `publish.releaseType: release`, not `draft`. This doc used to say "draft",
+> which was wrong, and it made steps 3 and 4 below read as though they happen
+> before users can see anything. They do not.
+>
+> What that means in practice:
+> - **Auto-update is safe.** It downloads the .zip, which electron-builder signed
+>   and notarized in step 2. It is correct the instant it lands.
+> - **The .dmg is briefly unsigned.** Step 3 below signs the DMG container, so
+>   between this command finishing and step 3 completing (about 3 min), anyone
+>   downloading the DMG by hand gets a Gatekeeper warning.
+>
+> Run steps 3 and 4 immediately, and do not announce a release until they are
+> done. To close the window entirely, set `releaseType: draft` in
+> `electron-builder.yml` and publish by hand at step 4, at the cost of a release
+> that reaches nobody if you forget to publish it.
 
 ### 3. Sign + notarize the DMG container (manual, ~3 min)
 
@@ -82,6 +99,33 @@ spctl -a -vvv -t install "dobius-plus-$(node -p "require('../package.json').vers
 # Expected: "accepted, source=Notarized Developer ID"
 ```
 
+**Stapling changes the DMG, so `latest-mac.yml` is now stale for it.** The manifest
+was written during step 2, before the DMG was signed and stapled, so its recorded
+`size` and `sha512` for the .dmg entry describe the pre-staple file (v1.0.39: the
+manifest said 127424931 bytes, the real file was 127436606). Auto-update itself is
+NOT affected, because `path:` points at the .zip and the .zip is never re-signed
+here, but leaving a wrong hash in a published manifest is a trap. Every release
+from v1.0.30 to v1.0.38 shipped with this mismatch.
+
+Regenerate the DMG entry before uploading the manifest:
+
+```bash
+cd dist-electron
+V=$(node -p "require('../package.json').version")
+node -e '
+const fs=require("fs"), cp=require("child_process");
+const v=process.argv[1], dmg=`dobius-plus-${v}.dmg`;
+const size=fs.statSync(dmg).size;
+const hash=cp.execSync(`openssl dgst -sha512 -binary "${dmg}" | openssl base64 -A`).toString().trim();
+let y=fs.readFileSync("latest-mac.yml","utf8");
+const out=y.replace(new RegExp(`(  - url: ${dmg.replace(/\./g,"\\.")}\\n    sha512: )[^\\n]+(\\n    size: )\\d+`), `$1${hash}$2${size}`);
+if(out===y){console.error("PATCH FAILED: dmg entry not matched");process.exit(1);}
+fs.writeFileSync("latest-mac.yml",out);
+console.log("patched dmg entry -> size="+size);
+' "$V"
+gh release upload "v$V" latest-mac.yml --clobber
+```
+
 Then re-upload the now-signed DMG to the GitHub release (it overwrites the unsigned one):
 
 ```bash
@@ -90,13 +134,24 @@ gh release upload "v$(node -p "require('./package.json').version")" \
   --clobber
 ```
 
-### 4. Publish the release
+### 4. Confirm the release is published
+
+With the current `releaseType: release`, step 2 already published it, so this is a
+verification, not an action:
 
 ```bash
-gh release edit "v$(node -p "require('./package.json').version")" --draft=false
+V=$(node -p "require('./package.json').version")
+gh release view "v$V" --json isDraft,isPrerelease,assets \
+  --jq '"draft=\(.isDraft) prerelease=\(.isPrerelease) assets=\([.assets[].name]|join(", "))"'
 ```
 
-Or publish via the web UI at https://github.com/statusdigitalmarketing/dobius-plus/releases.
+Expect `draft=false prerelease=false` and all five assets (.zip, .zip.blockmap,
+.dmg, .dmg.blockmap, latest-mac.yml). If you switched to `releaseType: draft`,
+publish it here instead:
+
+```bash
+gh release edit "v$V" --draft=false
+```
 
 **Important:** `electron-updater` ignores draft releases. The release must be marked Published for users to receive the update.
 
