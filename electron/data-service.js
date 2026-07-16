@@ -288,9 +288,10 @@ export async function loadAllSessions(projectFilter) {
  * @param {number} startedAt    epoch ms the claude process started
  * @param {Set<string>} claimed sessionIds already linked to other live tabs
  */
-const FRESH_BOOT_WINDOW_MS = 3 * 60 * 1000; // transcript appears within ~30s; 3m is generous
+// (No upper bound on transcript birth: Claude writes it on the first message,
+// which may be hours after boot. See the delta check below.)
 const FRESH_CLOCK_SLACK_MS = 10 * 1000;     // ps lstart is second-resolution
-export async function resolveFreshSessionId(projectPath, startedAt, claimed = new Set()) {
+export async function resolveFreshSessionId(projectPath, startedAt, claimed = new Set(), otherFreshStarts = []) {
   if (!projectPath || typeof projectPath !== 'string') return null;
   if (!Number.isFinite(startedAt) || startedAt <= 0) return null;
   const encodings = [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)];
@@ -315,11 +316,32 @@ export async function resolveFreshSessionId(projectPath, startedAt, claimed = ne
       } catch { continue; }
       if (!birth) continue;
       const delta = birth - startedAt;
-      if (delta < -FRESH_CLOCK_SLACK_MS || delta > FRESH_BOOT_WINDOW_MS) continue;
-      if (!best || Math.abs(delta) < Math.abs(best.delta)) best = { sessionId, delta };
+      // Must be born AFTER this process started (a process cannot write a
+      // file before it exists). No upper bound: Claude creates the transcript
+      // on the FIRST MESSAGE, not at boot, and the user may sit at an empty
+      // prompt for hours. The old fixed 3-minute window rejected exactly
+      // those sessions forever. Codex v1.0.39 r4 P2.
+      if (delta < -FRESH_CLOCK_SLACK_MS) continue;
+      // Earliest transcript born after this process started is the one it
+      // created (equivalent to "closest after" once the upper bound is gone).
+      if (!best || delta < best.delta) best = { sessionId, delta, birth };
     }
   }
-  return best ? best.sessionId : null;
+  if (!best) return null;
+  // AMBIGUITY GUARD: if any OTHER live fresh claude in this project started at
+  // or before this transcript was born, that process could equally have
+  // created it, so we cannot tell them apart from (start, birth) alone.
+  // Decline rather than guess: a miss just costs a tab badge, but a mislink
+  // would make auto-resume TYPE `claude --resume <wrong-id>` into a terminal.
+  // Codex v1.0.39 r4 P2.
+  //
+  // Already-linked sessions are excluded via `claimed` before we get here, so
+  // this only declines while two UNLINKED fresh claudes coexist in one
+  // project. The 15s tick claims each session as it becomes identifiable, so
+  // the pool drains as sessions are started at different times.
+  const ambiguous = otherFreshStarts.some((t) => Number.isFinite(t) && t <= best.birth);
+  if (ambiguous) return null;
+  return best.sessionId;
 }
 
 /**

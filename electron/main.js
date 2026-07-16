@@ -1573,8 +1573,25 @@ function setupSessionTabCapture() {
       // Ids already linked to a tab, so a fresh-session correlation can never
       // steal one that belongs elsewhere. v1.0.39.
       const claimedIds = new Set(Object.keys(fresh || {}));
-      for (const t of listTerminals()) {
-        const claudeInfo = await getTerminalClaudeInfo(t.id);
+      // Probe every tab ONCE up front: the fresh-session correlation needs to
+      // know about the OTHER live fresh claudes in the same project to detect
+      // ambiguity, and doing it here keeps it to one ps per tab per tick.
+      // Codex v1.0.39 r4 P2.
+      const liveTabs = listTerminals();
+      const infoByTab = new Map();
+      for (const t of liveTabs) {
+        infoByTab.set(t.id, await getTerminalClaudeInfo(t.id));
+      }
+      // cwd per tab, only needed for tabs running a fresh (unidentified) claude.
+      const cwdByTab = new Map();
+      for (const t of liveTabs) {
+        const inf = infoByTab.get(t.id);
+        if (inf && !inf.sessionId && inf.startedAt) {
+          cwdByTab.set(t.id, await getTerminalCwd(t.id));
+        }
+      }
+      for (const t of liveTabs) {
+        const claudeInfo = infoByTab.get(t.id);
         let runningSessionId = claudeInfo?.sessionId || null;
         // FRESH session (bare `claude`, no --resume): the id is not in the
         // argv, so correlate the process start time to the transcript it
@@ -1582,7 +1599,7 @@ function setupSessionTabCapture() {
         // gets linked, which is why the sidebar showed no tab name and
         // auto-resume could not restore fresh sessions. v1.0.39.
         if (!runningSessionId && claudeInfo?.startedAt) {
-          const cwd = await getTerminalCwd(t.id);
+          const cwd = cwdByTab.get(t.id);
           if (cwd) {
             // Exclude only OTHER tabs' claims. claimedIds is seeded from the
             // whole map, which includes THIS tab's link from the previous
@@ -1597,7 +1614,17 @@ function setupSessionTabCapture() {
             const ownSid = tabToSessionId.get(t.id);
             const claimedByOthers = new Set(claimedIds);
             if (ownSid) claimedByOthers.delete(ownSid);
-            runningSessionId = await resolveFreshSessionId(cwd, claudeInfo.startedAt, claimedByOthers);
+            // Start times of the OTHER live fresh claudes sharing this project.
+            // If any of them predates the candidate transcript's birth, it
+            // could equally own it, so the resolver declines rather than
+            // guessing. Codex v1.0.39 r4 P2.
+            const otherFreshStarts = [];
+            for (const [otherId, otherCwd] of cwdByTab) {
+              if (otherId === t.id || otherCwd !== cwd) continue;
+              const oi = infoByTab.get(otherId);
+              if (oi?.startedAt) otherFreshStarts.push(oi.startedAt);
+            }
+            runningSessionId = await resolveFreshSessionId(cwd, claudeInfo.startedAt, claimedByOthers, otherFreshStarts);
           }
         }
         if (!runningSessionId) {
