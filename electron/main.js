@@ -2346,7 +2346,30 @@ app.on('before-quit', (e) => {
         for (const [sid, en] of Object.entries(mapQ)) {
           if (en?.tabId && en.lastRunningAt) tabToSid.set(en.tabId, sid);
         }
-        for (const t of listTerminals()) {
+        // Ids already linked to a tab. Seeded from the WHOLE map (not just the
+        // running-stamped subset) and mutated below as links are set, so two
+        // fresh tabs reconciled in the same pass can never both claim one
+        // transcript. Codex v1.0.39 r5 P2.
+        const claimedIds = new Set(Object.keys(mapQ));
+        const liveTabs = listTerminals();
+        // Probe every tab ONCE up front, exactly like the periodic tick: the
+        // fresh correlation needs the OTHER live fresh claudes' start times to
+        // detect ambiguity, and quitting is precisely when the tick has NOT
+        // run yet for a just-started bare `claude`. Codex v1.0.39 r5 P2.
+        const infoByTab = new Map();
+        for (const t of liveTabs) {
+          if (reconcileAborted) return;
+          infoByTab.set(t.id, await getTerminalClaudeInfo(t.id));
+        }
+        const cwdByTab = new Map();
+        for (const t of liveTabs) {
+          if (reconcileAborted) return;
+          const inf = infoByTab.get(t.id);
+          if (inf && !inf.sessionId && inf.startedAt) {
+            cwdByTab.set(t.id, await getTerminalCwd(t.id));
+          }
+        }
+        for (const t of liveTabs) {
           if (reconcileAborted) return;
           const sid = tabToSid.get(t.id);
           // Ask whether a claude process is alive AT ALL, not just whether it
@@ -2355,7 +2378,7 @@ app.on('before-quit', (e) => {
           // saw it as idle, zeroed its stamp, and auto-resume then skipped
           // exactly the fresh sessions v1.0.39 exists to restore.
           // Codex v1.0.39 r1 P2.
-          const info = await getTerminalClaudeInfo(t.id);
+          const info = infoByTab.get(t.id);
           const claudeAlive = !!info;
           let running = info?.sessionId || null;
           // Resolve FRESH sessions here too, exactly like the periodic tick.
@@ -2363,16 +2386,28 @@ app.on('before-quit', (e) => {
           // and quits before the next 15s tick would leave A's stamp fresh
           // and auto-resume would reopen A instead of B. Codex v1.0.39 r3 P2.
           if (claudeAlive && !running && info.startedAt) {
-            const cwdQ = await getTerminalCwd(t.id);
+            const cwdQ = cwdByTab.get(t.id);
             if (cwdQ) {
-              const claimedByOthers = new Set(tabToSid.values());
+              const claimedByOthers = new Set(claimedIds);
               if (sid) claimedByOthers.delete(sid);
-              running = await resolveFreshSessionId(cwdQ, info.startedAt, claimedByOthers);
+              // Start times of the OTHER live fresh claudes sharing this
+              // project. If any predates the candidate transcript's birth it
+              // could equally own it, so the resolver declines rather than
+              // mislinking a tab that auto-resume will later type into.
+              const otherFreshStarts = [];
+              for (const [otherId, otherCwd] of cwdByTab) {
+                if (otherId === t.id || otherCwd !== cwdQ) continue;
+                const oi = infoByTab.get(otherId);
+                if (oi?.startedAt) otherFreshStarts.push(oi.startedAt);
+              }
+              running = await resolveFreshSessionId(cwdQ, info.startedAt, claimedByOthers, otherFreshStarts);
             }
           }
           if (reconcileAborted) return;
           if (sid && !claudeAlive) {
             // Mapped but no claude running: stopped before quit, don't resurrect.
+            // NOTE: this only zeroes the running stamp, the link itself stays,
+            // so sid stays claimed.
             clearSessionTabRunning(sid);
           } else if (running && running !== sid) {
             // Tab switched sessions since the last capture tick (user ran
@@ -2381,6 +2416,13 @@ app.on('before-quit', (e) => {
             // auto-resume revives B, not A. Codex v1.0.35 r11 P2.
             if (sid) removeSessionTabLink(sid);
             setSessionTabLink(running, t.id, t.cwd);
+            // Claim it so a later tab in this same pass cannot resolve to the
+            // same transcript. Ids are only ever ADDED to claimedIds, never
+            // removed: staying over-claimed makes a later resolve DECLINE
+            // (a tab loses its name badge), while under-claiming would let it
+            // MISLINK (auto-resume types `claude --resume <wrong-id>` into a
+            // real terminal). Precision over coverage.
+            claimedIds.add(running);
           }
         }
       } catch { /* best-effort */ }
