@@ -33,14 +33,29 @@ const projectWindows = new Map();
 function persistOpenProjects() {
   if (getQuitting()) return; // snapshot frozen: quit in progress
   try {
-    const paths = new Set();
-    for (const [, entry] of projectWindows) {
-      if (!entry.isTearOff && !entry.win.isDestroyed()) paths.add(entry.projectPath);
-    }
     const config = loadConfig();
-    config.lastOpenProjects = Array.from(paths);
+    config.lastOpenProjects = getOpenProjectsForRestore();
     saveConfig(config);
   } catch { /* best-effort */ }
+}
+
+/**
+ * The project paths that SHOULD be reopened on next launch: live primary
+ * windows only. Tear-off windows are excluded because they are ephemeral,
+ * so a project whose primary window the user deliberately closed does not
+ * come back just because a torn-off tab of it is still floating.
+ *
+ * Distinct from getOpenProjects(), which includes tear-offs and is used for
+ * "is this project open right now" checks (isKnownProject, focus routing).
+ * Every writer of lastOpenProjects MUST use this one so the live snapshot
+ * and the quit-path snapshots cannot disagree. Codex v1.0.38 r1 P2.
+ */
+export function getOpenProjectsForRestore() {
+  const paths = new Set();
+  for (const [, entry] of projectWindows) {
+    if (!entry.isTearOff && !entry.win.isDestroyed()) paths.add(entry.projectPath);
+  }
+  return Array.from(paths);
 }
 
 /**

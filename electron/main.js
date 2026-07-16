@@ -38,7 +38,7 @@ import {
   getAccounts, saveAccount, deleteAccount, getProjectAccount, setProjectAccount,
 } from './config-manager.js';
 import {
-  openProjectWindow, openTornOffWindow, getOpenProjects, closeProjectWindow, closeAllProjectWindows,
+  openProjectWindow, openTornOffWindow, getOpenProjects, getOpenProjectsForRestore, closeProjectWindow, closeAllProjectWindows,
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
@@ -2179,7 +2179,7 @@ app.on('before-quit', (e) => {
     // stamp lastQuitAt but never save lastOpenProjects (the only writer was
     // the Phase-3 Cmd+Q branch below), so hitting the update Restart button
     // relaunched into a bare launcher with every window gone.
-    const openForUpdate = getOpenProjects();
+    const openForUpdate = getOpenProjectsForRestore();
     setQuitting(true);
     // Best-effort scrollback flush; do NOT await, squirrel.mac needs a fast
     // exit or the bundle replace can corrupt. Tabs themselves are already
@@ -2224,7 +2224,7 @@ app.on('before-quit', (e) => {
     if (phase3Draining) return;
     phase3Draining = true;
     e.preventDefault();
-    const openProjects = getOpenProjects();
+    const openProjects = getOpenProjectsForRestore();
     // Freeze the live snapshot BEFORE closeAllProjectWindows() below: each
     // window 'closed' persists the open list, and that cascade would rewrite
     // it to [] and wipe the restore state. v1.0.38.
