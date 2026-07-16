@@ -1621,7 +1621,11 @@ function setupSessionTabCapture() {
         // Tab is running a different (or new) session than the map says.
         if (mappedSessionId) removeSessionTabLink(mappedSessionId);
         if (!fresh[runningSessionId]) {
-          setSessionTabLink(runningSessionId, t.id, t.cwd);
+          // Tag how we know: an id read out of `claude --resume <id>` is
+          // certain, one inferred from start/birth timing is not. Auto-resume
+          // acts only on the certain kind. v1.0.39.
+          const how = claudeInfo?.sessionId ? 'argv' : 'fresh';
+          setSessionTabLink(runningSessionId, t.id, t.cwd, how);
         }
       }
     } catch { /* best-effort */ }
@@ -2381,7 +2385,8 @@ app.on('before-quit', (e) => {
             // Mirror the tick: drop the stale link, record the live one so
             // auto-resume revives B, not A. Codex v1.0.35 r11 P2.
             if (sid) removeSessionTabLink(sid);
-            setSessionTabLink(running, t.id, t.cwd);
+            // Same argv-vs-inferred tagging as the tick. v1.0.39.
+            setSessionTabLink(running, t.id, t.cwd, info?.sessionId ? 'argv' : 'fresh');
           }
         }
       } catch { /* best-effort */ }

@@ -115,8 +115,34 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   const tabMap = getSessionTabMap() || {};
   const tabToBest = new Map();
   let skippedStale = 0;
+  let skippedHeuristic = 0;
   for (const [sid, entry] of Object.entries(tabMap)) {
     if (!entry?.tabId || !entry?.projectPath) continue;
+    // HEURISTIC GATE (v1.0.39): never auto-resume a link we INFERRED.
+    //
+    // 'fresh' links come from correlating a bare `claude`'s process start time
+    // to a transcript's birth time, because a bare `claude` carries no session
+    // id in its argv. That correlation cannot be made sound: transcripts record
+    // no pid, so when two claudes in one project could both have written a file
+    // (a second bare `claude`, a `/clear` that starts a new transcript in an
+    // already-linked tab, a `claude` run outside Dobius entirely) nothing
+    // distinguishes them. Codex found a fresh case every round for six rounds,
+    // each fix trading one misattribution for another. It is not a bug left to
+    // fix, it is the ceiling of the available signal.
+    //
+    // So the inference names tabs and nothing more. A wrong badge is cosmetic
+    // and self-corrects on the next 15s tick; a wrong auto-resume TYPES
+    // `claude --resume <wrong-id>` into a live terminal, which is the exact
+    // failure ("random ass shit popped up that I was not just using") this file
+    // exists to prevent. 'argv' links stay eligible and are certain, so this
+    // gives up nothing that worked before v1.0.39: fresh sessions were not
+    // linked at all then, so they were never auto-resumed either.
+    //
+    // ponytail: fresh sessions do not auto-resume. Ceiling is the missing pid.
+    // Upgrade path: have the tab's claude report its own id (a wrapper writing
+    // $CLAUDE_SESSION_ID, or a Claude Code hook), then link by identity rather
+    // than by timing and drop this gate.
+    if (entry.resolvedBy === 'fresh') { skippedHeuristic += 1; continue; }
     // Shape sanity only (term-/abs/path-N). Do NOT require the tab's project
     // to equal entry.projectPath: a supported flow is resuming a project-A
     // session from a tab living in project B's window (store.resumeSession
@@ -144,6 +170,9 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
         lastRunningAt: ranAt,
       });
     }
+  }
+  if (skippedHeuristic > 0) {
+    console.log(`[auto-resume] skipped ${skippedHeuristic} heuristically-linked (bare \`claude\`) session(s): named only, never auto-resumed`);
   }
   if (skippedStale > 0) {
     console.log(`[auto-resume] skipped ${skippedStale} stale/mismatched link(s); ${tabToBest.size} fresh candidate(s)`);

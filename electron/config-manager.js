@@ -653,8 +653,18 @@ export function getSessionTabMap() {
 
 /**
  * Link a session to the terminal tab it is running in.
+ *
+ * @param {'argv'|'fresh'} [resolvedBy] how we know this link is true.
+ *   'argv'  the tab's own `claude --resume <id>` command line carries the id.
+ *           CERTAIN, and the only kind auto-resume will act on.
+ *   'fresh' a bare `claude` with no id in its argv, matched to a transcript by
+ *           correlating process start time to file birth time. A HEURISTIC:
+ *           the transcript records no pid (checked), so when two claudes in a
+ *           project could both have written a file there is no signal that
+ *           separates them. Good enough to NAME a tab, never good enough to
+ *           TYPE `claude --resume <id>` into a live terminal. See auto-resume.js.
  */
-export function setSessionTabLink(sessionId, tabId, projectPath) {
+export function setSessionTabLink(sessionId, tabId, projectPath, resolvedBy = 'argv') {
   if (!sessionId || typeof sessionId !== 'string' || UNSAFE_KEYS.has(sessionId)) return;
   if (sessionId.length > 100) return;
   if (!tabId || typeof tabId !== 'string' || !TAB_ID_RE.test(tabId)) return;
@@ -665,6 +675,7 @@ export function setSessionTabLink(sessionId, tabId, projectPath) {
   config.sessionTabMap[sessionId] = {
     tabId,
     projectPath: typeof projectPath === 'string' ? projectPath : '',
+    resolvedBy: resolvedBy === 'fresh' ? 'fresh' : 'argv',
     capturedAt: Date.now(),
     // Freshness stamp: updated every Tier-2 capture tick while the session is
     // ACTIVELY running in the tab. Auto-resume only trusts links whose
