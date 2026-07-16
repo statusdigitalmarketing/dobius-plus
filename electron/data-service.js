@@ -258,6 +258,71 @@ export async function loadAllSessions(projectFilter) {
  * Returns { sessionId, preview, timestamp, age } or null.
  */
 /**
+ * Resolve the sessionId a FRESH `claude` process is writing to.
+ *
+ * v1.0.39 (Brett-reported: tabs show no name in the session history). A
+ * fresh `claude` (no --resume) generates its session id at runtime, so it
+ * never appears in the process argv and the tab could never be linked to a
+ * session. Verified on this machine that `lsof` does NOT expose the
+ * transcript fd (Claude appends and closes), and the ~/.claude/tasks/<id>/
+ * .lock files are advisory and not held, so neither gives an exact mapping.
+ *
+ * What DOES correlate exactly: the transcript is CREATED moments after the
+ * claude process starts. Measured live: process start 21:49:26 -> transcript
+ * birthtime 21:49:52 (26s later, Claude booting), while every other
+ * transcript in that project was born weeks earlier.
+ *
+ * So: look ONLY inside the tab's own project dir (scoping is what makes this
+ * safe), keep transcripts born in [startedAt - CLOCK_SLACK, startedAt +
+ * BOOT_WINDOW], drop any id already claimed by another tab, and take the
+ * closest to the process start. Returns null when nothing matches, which is
+ * correct and common: a claude sitting at an empty prompt has not written a
+ * transcript at all, so there is no session to link.
+ *
+ * Precision matters more than coverage here because sessionTabMap also feeds
+ * auto-resume, which TYPES `claude --resume <id>` into tabs on launch. A miss
+ * is harmless (no badge); a mislink would resume the wrong session. Hence the
+ * tight window, the project scope, and the claimed-id exclusion.
+ *
+ * @param {string} projectPath  the tab's cwd-derived project root
+ * @param {number} startedAt    epoch ms the claude process started
+ * @param {Set<string>} claimed sessionIds already linked to other live tabs
+ */
+const FRESH_BOOT_WINDOW_MS = 3 * 60 * 1000; // transcript appears within ~30s; 3m is generous
+const FRESH_CLOCK_SLACK_MS = 10 * 1000;     // ps lstart is second-resolution
+export async function resolveFreshSessionId(projectPath, startedAt, claimed = new Set()) {
+  if (!projectPath || typeof projectPath !== 'string') return null;
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return null;
+  const encodings = [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)];
+  const seenDirs = new Set();
+  let best = null;
+  for (const enc of encodings) {
+    if (seenDirs.has(enc)) continue;
+    seenDirs.add(enc);
+    const projectDir = path.join(PROJECTS_DIR, enc);
+    if (!(await pathExists(projectDir))) continue;
+    let files;
+    try { files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl')); }
+    catch { continue; }
+    for (const f of files) {
+      const sessionId = f.replace('.jsonl', '');
+      if (claimed.has(sessionId)) continue;
+      let birth = 0;
+      try {
+        const st = await fs.stat(path.join(projectDir, f));
+        // birthtimeMs is real on APFS. Fall back to ctime if it's absent/0.
+        birth = st.birthtimeMs || st.ctimeMs || 0;
+      } catch { continue; }
+      if (!birth) continue;
+      const delta = birth - startedAt;
+      if (delta < -FRESH_CLOCK_SLACK_MS || delta > FRESH_BOOT_WINDOW_MS) continue;
+      if (!best || Math.abs(delta) < Math.abs(best.delta)) best = { sessionId, delta };
+    }
+  }
+  return best ? best.sessionId : null;
+}
+
+/**
  * Per-session size probe used by Cmd+R / tab-map resume to feed the
  * >80MB dead-session guard. Checks both encoder forms (legacy + new).
  * Returns sizeMB as a number, or null if the file can't be found.

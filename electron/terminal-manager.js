@@ -272,6 +272,24 @@ export async function getTerminalProcess(id) {
  * typed manually rather than launched through the app. Returns null otherwise.
  */
 export async function getTerminalProcessArgv(id) {
+  const info = await getTerminalClaudeInfo(id);
+  return info?.sessionId || null;
+}
+
+/**
+ * Inspect the claude process (if any) running inside a terminal.
+ * Returns { sessionId, startedAt } where:
+ *   - sessionId: the id from `--resume <id>` / `-r <id>`, else null
+ *   - startedAt: epoch ms the claude child process started, else null
+ *
+ * v1.0.39 (Brett-reported: "each tab isn't saying its name in the session
+ * history"): a FRESH `claude` generates its session id at runtime, so the
+ * argv contains no id and the old regex-only linker never linked it. Those
+ * tabs got no name badge in the sidebar, and auto-resume could never restore
+ * them either. startedAt lets the caller correlate the process to the
+ * transcript it created (see resolveFreshSessionId in main.js).
+ */
+export async function getTerminalClaudeInfo(id) {
   const entry = terminals.get(id);
   if (!entry) return null;
   try {
@@ -283,12 +301,23 @@ export async function getTerminalProcessArgv(id) {
     });
     const children = pgrepOut.trim().split('\n').filter(Boolean);
     for (const childPid of children) {
-      const { stdout: psOut } = await execFileP('/bin/ps', ['-o', 'command=', '-p', childPid], {
+      // `lstart` is the process start time; `command` is the argv. One ps
+      // call gets both so the fresh-session correlation costs nothing extra.
+      const { stdout: psOut } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', childPid], {
         timeout: 1000,
         encoding: 'utf8',
       });
-      const m = psOut.trim().match(/\bclaude\b.*?\s(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
-      if (m) return m[1];
+      const line = psOut.trim();
+      if (!line) continue;
+      // Only care about claude processes. `lstart` is a fixed 24-char date
+      // ("Wed Jul 15 21:49:26 2026"), the rest is the command.
+      if (!/\bclaude\b/.test(line)) continue;
+      const lstart = line.slice(0, 24);
+      const command = line.slice(24).trim();
+      const parsed = Date.parse(lstart);
+      const startedAt = Number.isFinite(parsed) ? parsed : null;
+      const m = command.match(/\bclaude\b.*?\s(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
+      return { sessionId: m ? m[1] : null, startedAt };
     }
     return null;
   } catch {

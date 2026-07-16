@@ -7,11 +7,11 @@ import { fileURLToPath } from 'url';
 import { getQuittingForUpdate, setQuitting } from './quit-state.js';
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, cancelTabsForProject as cancelAutoResumeProject, pendingCount as autoResumePending } from './auto-resume.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, listTerminals, reassignTerminal, ensureSpawnHelperExecutable } from './terminal-manager.js';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, getTerminalClaudeInfo, listTerminals, reassignTerminal, ensureSpawnHelperExecutable } from './terminal-manager.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession, getSessionSize,
+  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionId,
   loadProjectTokens, searchTranscripts, estimateContextSize, deleteSession,
   getLastAssistantMessage,
 } from './data-service.js';
@@ -1570,8 +1570,23 @@ function setupSessionTabCapture() {
       for (const [sid, entry] of Object.entries(fresh || {})) {
         if (entry?.tabId) tabToSessionId.set(entry.tabId, sid);
       }
+      // Ids already linked to a tab, so a fresh-session correlation can never
+      // steal one that belongs elsewhere. v1.0.39.
+      const claimedIds = new Set(Object.keys(fresh || {}));
       for (const t of listTerminals()) {
-        const runningSessionId = await getTerminalProcessArgv(t.id);
+        const claudeInfo = await getTerminalClaudeInfo(t.id);
+        let runningSessionId = claudeInfo?.sessionId || null;
+        // FRESH session (bare `claude`, no --resume): the id is not in the
+        // argv, so correlate the process start time to the transcript it
+        // created inside this tab's own project. Without this the tab never
+        // gets linked, which is why the sidebar showed no tab name and
+        // auto-resume could not restore fresh sessions. v1.0.39.
+        if (!runningSessionId && claudeInfo?.startedAt) {
+          const cwd = await getTerminalCwd(t.id);
+          if (cwd) {
+            runningSessionId = await resolveFreshSessionId(cwd, claudeInfo.startedAt, claimedIds);
+          }
+        }
         if (!runningSessionId) {
           // Tab is open but no Claude session is running in it. If the map
           // still links a session here, zero its freshness stamp so quitting
@@ -1581,6 +1596,7 @@ function setupSessionTabCapture() {
           if (mappedIdle) clearSessionTabRunning(mappedIdle);
           continue;
         }
+        claimedIds.add(runningSessionId);
         const mappedSessionId = tabToSessionId.get(t.id);
         if (mappedSessionId === runningSessionId) {
           // Still running: refresh the lastRunningAt stamp so auto-resume
