@@ -11,7 +11,7 @@ import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, g
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionId,
+  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs,
   loadProjectTokens, searchTranscripts, estimateContextSize, deleteSession,
   getLastAssistantMessage,
 } from './data-service.js';
@@ -1590,43 +1590,17 @@ function setupSessionTabCapture() {
           cwdByTab.set(t.id, await getTerminalCwd(t.id));
         }
       }
+      // FRESH sessions (bare `claude`, no --resume): the id is not in the argv,
+      // so correlate process start time to the transcript the process created
+      // inside its own project. Without this a fresh tab never gets linked,
+      // which is why the sidebar showed no tab name for it and auto-resume
+      // could not restore it. v1.0.39.
+      const freshByTab = await resolveFreshSessionsForTabs(
+        liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds,
+      );
       for (const t of liveTabs) {
         const claudeInfo = infoByTab.get(t.id);
-        let runningSessionId = claudeInfo?.sessionId || null;
-        // FRESH session (bare `claude`, no --resume): the id is not in the
-        // argv, so correlate the process start time to the transcript it
-        // created inside this tab's own project. Without this the tab never
-        // gets linked, which is why the sidebar showed no tab name and
-        // auto-resume could not restore fresh sessions. v1.0.39.
-        if (!runningSessionId && claudeInfo?.startedAt) {
-          const cwd = cwdByTab.get(t.id);
-          if (cwd) {
-            // Exclude only OTHER tabs' claims. claimedIds is seeded from the
-            // whole map, which includes THIS tab's link from the previous
-            // tick; leaving it in made the resolver skip the tab's own
-            // transcript, return null, and the idle branch then zeroed the
-            // stamp, so every fresh session died after one 15s tick and
-            // auto-resume skipped it. The correlation is stable across ticks
-            // (process start + transcript birth never change), so re-resolving
-            // returns the same id, and if the user starts a DIFFERENT fresh
-            // claude the new start time correctly resolves to the new
-            // transcript. Codex v1.0.39 r2 P2.
-            const ownSid = tabToSessionId.get(t.id);
-            const claimedByOthers = new Set(claimedIds);
-            if (ownSid) claimedByOthers.delete(ownSid);
-            // Start times of the OTHER live fresh claudes sharing this project.
-            // If any of them predates the candidate transcript's birth, it
-            // could equally own it, so the resolver declines rather than
-            // guessing. Codex v1.0.39 r4 P2.
-            const otherFreshStarts = [];
-            for (const [otherId, otherCwd] of cwdByTab) {
-              if (otherId === t.id || otherCwd !== cwd) continue;
-              const oi = infoByTab.get(otherId);
-              if (oi?.startedAt) otherFreshStarts.push(oi.startedAt);
-            }
-            runningSessionId = await resolveFreshSessionId(cwd, claudeInfo.startedAt, claimedByOthers, otherFreshStarts);
-          }
-        }
+        const runningSessionId = claudeInfo?.sessionId || freshByTab.get(t.id) || null;
         if (!runningSessionId) {
           // Tab is open but no Claude session is running in it. If the map
           // still links a session here, zero its freshness stamp so quitting
@@ -2343,8 +2317,16 @@ app.on('before-quit', (e) => {
       try {
         const mapQ = getSessionTabMap() || {};
         const tabToSid = new Map();
+        // Every tab->session link, INCLUDING ones whose running stamp was
+        // already zeroed. tabToSid below is deliberately the running-stamped
+        // subset (it drives the clear/relink decision), but the fresh resolver
+        // needs the full picture: a link with a zeroed stamp still means that
+        // transcript belongs to that tab and must not be re-claimed.
+        const tabToSidAll = new Map();
         for (const [sid, en] of Object.entries(mapQ)) {
-          if (en?.tabId && en.lastRunningAt) tabToSid.set(en.tabId, sid);
+          if (!en?.tabId) continue;
+          tabToSidAll.set(en.tabId, sid);
+          if (en.lastRunningAt) tabToSid.set(en.tabId, sid);
         }
         // Ids already linked to a tab. Seeded from the WHOLE map (not just the
         // running-stamped subset) and mutated below as links are set, so two
@@ -2369,6 +2351,13 @@ app.on('before-quit', (e) => {
             cwdByTab.set(t.id, await getTerminalCwd(t.id));
           }
         }
+        // Resolve FRESH sessions here too, via the SAME helper the tick uses.
+        // Without this, a tab mapped to A that starts a bare `claude` (B) and
+        // quits before the next 15s tick would leave A's stamp fresh and
+        // auto-resume would reopen A instead of B. Codex v1.0.39 r3 P2.
+        const freshByTab = await resolveFreshSessionsForTabs(
+          liveTabs, infoByTab, cwdByTab, tabToSidAll, claimedIds, () => reconcileAborted,
+        );
         for (const t of liveTabs) {
           if (reconcileAborted) return;
           const sid = tabToSid.get(t.id);
@@ -2380,30 +2369,7 @@ app.on('before-quit', (e) => {
           // Codex v1.0.39 r1 P2.
           const info = infoByTab.get(t.id);
           const claudeAlive = !!info;
-          let running = info?.sessionId || null;
-          // Resolve FRESH sessions here too, exactly like the periodic tick.
-          // Without this, a tab mapped to A that starts a bare `claude` (B)
-          // and quits before the next 15s tick would leave A's stamp fresh
-          // and auto-resume would reopen A instead of B. Codex v1.0.39 r3 P2.
-          if (claudeAlive && !running && info.startedAt) {
-            const cwdQ = cwdByTab.get(t.id);
-            if (cwdQ) {
-              const claimedByOthers = new Set(claimedIds);
-              if (sid) claimedByOthers.delete(sid);
-              // Start times of the OTHER live fresh claudes sharing this
-              // project. If any predates the candidate transcript's birth it
-              // could equally own it, so the resolver declines rather than
-              // mislinking a tab that auto-resume will later type into.
-              const otherFreshStarts = [];
-              for (const [otherId, otherCwd] of cwdByTab) {
-                if (otherId === t.id || otherCwd !== cwdQ) continue;
-                const oi = infoByTab.get(otherId);
-                if (oi?.startedAt) otherFreshStarts.push(oi.startedAt);
-              }
-              running = await resolveFreshSessionId(cwdQ, info.startedAt, claimedByOthers, otherFreshStarts);
-            }
-          }
-          if (reconcileAborted) return;
+          const running = info?.sessionId || freshByTab.get(t.id) || null;
           if (sid && !claudeAlive) {
             // Mapped but no claude running: stopped before quit, don't resurrect.
             // NOTE: this only zeroes the running stamp, the link itself stays,
@@ -2416,13 +2382,6 @@ app.on('before-quit', (e) => {
             // auto-resume revives B, not A. Codex v1.0.35 r11 P2.
             if (sid) removeSessionTabLink(sid);
             setSessionTabLink(running, t.id, t.cwd);
-            // Claim it so a later tab in this same pass cannot resolve to the
-            // same transcript. Ids are only ever ADDED to claimedIds, never
-            // removed: staying over-claimed makes a later resolve DECLINE
-            // (a tab loses its name badge), while under-claiming would let it
-            // MISLINK (auto-resume types `claude --resume <wrong-id>` into a
-            // real terminal). Precision over coverage.
-            claimedIds.add(running);
           }
         }
       } catch { /* best-effort */ }

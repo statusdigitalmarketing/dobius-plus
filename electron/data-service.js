@@ -345,6 +345,75 @@ export async function resolveFreshSessionId(projectPath, startedAt, claimed = ne
 }
 
 /**
+ * Resolve the FRESH (bare `claude`, no --resume) session running in each tab.
+ *
+ * Shared by the 15s capture tick and the Phase-2 quit reconcile in main.js.
+ * Those two hand-rolled separate copies of this and drifted apart twice (Codex
+ * v1.0.39 r3 and r5, each a real mislink), so there is now exactly one copy.
+ * It lives here, next to resolveFreshSessionId, because it takes the process
+ * probe results as plain arguments and so is pure and directly testable, which
+ * main.js (which imports electron) is not.
+ *
+ * @param {Array<{id: string, cwd: string}>} liveTabs terminals to consider
+ * @param {Map<string, {sessionId: string|null, startedAt: number|null}|null>} infoByTab
+ * @param {Map<string, string>} cwdByTab   cwd per tab, only for fresh-claude tabs
+ * @param {Map<string, string>} tabToSessionId  tabId -> currently linked sessionId
+ * @param {Set<string>} claimedIds  sessionIds linked to SOME tab. MUTATED: a
+ *                                  resolved id is added so a later tab in the
+ *                                  same pass cannot claim the same transcript.
+ * @param {() => boolean} [isAborted]  checked between tabs (quit has a 2s cap)
+ * @returns {Promise<Map<string, string>>} tabId -> resolved sessionId
+ */
+export async function resolveFreshSessionsForTabs(
+  liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds, isAborted,
+) {
+  const out = new Map();
+  // Earliest-started first. The earliest bare `claude` in a project owns the
+  // earliest unclaimed transcript, so resolving in start order lets each link
+  // drop that tab out of the NEXT tab's ambiguity set. That ordering is what
+  // makes a second bare `claude` in the same project resolvable in a single
+  // pass, which matters at quit because there is no next tick to converge on.
+  const freshTabs = liveTabs
+    .filter((t) => cwdByTab.has(t.id) && Number.isFinite(infoByTab.get(t.id)?.startedAt))
+    .sort((a, b) => infoByTab.get(a.id).startedAt - infoByTab.get(b.id).startedAt);
+  // Fresh tabs whose claude is already accounted for by a link.
+  const linkedTabs = new Set(
+    freshTabs.filter((t) => tabToSessionId.has(t.id)).map((t) => t.id),
+  );
+  for (const t of freshTabs) {
+    if (isAborted?.()) return out;
+    const cwd = cwdByTab.get(t.id);
+    const info = infoByTab.get(t.id);
+    // Exclude only OTHER tabs' claims. claimedIds is seeded from the whole map,
+    // which includes THIS tab's own link from a previous tick; leaving it in
+    // made the resolver skip the tab's own transcript and return null, so the
+    // idle branch zeroed the stamp and every fresh session died after one tick.
+    // Codex v1.0.39 r2 P2.
+    const ownSid = tabToSessionId.get(t.id);
+    const claimedByOthers = new Set(claimedIds);
+    if (ownSid) claimedByOthers.delete(ownSid);
+    // Ambiguity set: ONLY the other fresh claudes in this same project that are
+    // not yet linked. An already-linked one owns its own transcript and so
+    // cannot also own this candidate. Counting it (as we did) declined every
+    // later bare `claude` in a project for as long as an older one kept
+    // running, which is the normal multi-tab case, not an edge case.
+    // Codex v1.0.39 r6 P2.
+    const otherFreshStarts = [];
+    for (const o of freshTabs) {
+      if (o.id === t.id || linkedTabs.has(o.id) || cwdByTab.get(o.id) !== cwd) continue;
+      otherFreshStarts.push(infoByTab.get(o.id).startedAt);
+    }
+    const sid = await resolveFreshSessionId(cwd, info.startedAt, claimedByOthers, otherFreshStarts);
+    if (sid) {
+      out.set(t.id, sid);
+      claimedIds.add(sid);
+      linkedTabs.add(t.id);
+    }
+  }
+  return out;
+}
+
+/**
  * Per-session size probe used by Cmd+R / tab-map resume to feed the
  * >80MB dead-session guard. Checks both encoder forms (legacy + new).
  * Returns sizeMB as a number, or null if the file can't be found.
