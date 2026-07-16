@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { getQuittingForUpdate } from './quit-state.js';
+import { getQuittingForUpdate, setQuitting } from './quit-state.js';
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, cancelTabsForProject as cancelAutoResumeProject, pendingCount as autoResumePending } from './auto-resume.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalProcessArgv, listTerminals, reassignTerminal, ensureSpawnHelperExecutable } from './terminal-manager.js';
@@ -2174,6 +2174,22 @@ app.on('before-quit', (e) => {
   if (getQuittingForUpdate()) {
     if (didTeardown) return;
     didTeardown = true;
+    // Capture the open-window list BEFORE anything tears windows down, then
+    // freeze the live snapshot. v1.0.38 (Brett-reported): this branch used to
+    // stamp lastQuitAt but never save lastOpenProjects (the only writer was
+    // the Phase-3 Cmd+Q branch below), so hitting the update Restart button
+    // relaunched into a bare launcher with every window gone.
+    const openForUpdate = getOpenProjects();
+    setQuitting(true);
+    // Best-effort scrollback flush; do NOT await, squirrel.mac needs a fast
+    // exit or the bundle replace can corrupt. Tabs themselves are already
+    // persisted on every change, so only the last <60s of scrollback is at
+    // risk.
+    try {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send('terminal:requestSave');
+      }
+    } catch { /* best-effort */ }
     // Stamp lastQuitAt on the updater path too: will-quit's stamp is behind
     // the didTeardown guard we just set, so without this an update-restart
     // followed by a relaunch beyond the 20-min slack would skip auto-resume
@@ -2182,6 +2198,7 @@ app.on('before-quit', (e) => {
     // not flush in time and performInstall's drain already ran.
     try {
       const cfgUp = loadConfig();
+      cfgUp.lastOpenProjects = openForUpdate;
       cfgUp.lastQuitAt = Date.now();
       saveConfig(cfgUp);
       flushConfig();
@@ -2208,6 +2225,10 @@ app.on('before-quit', (e) => {
     phase3Draining = true;
     e.preventDefault();
     const openProjects = getOpenProjects();
+    // Freeze the live snapshot BEFORE closeAllProjectWindows() below: each
+    // window 'closed' persists the open list, and that cascade would rewrite
+    // it to [] and wipe the restore state. v1.0.38.
+    setQuitting(true);
     const config = loadConfig();
     config.lastOpenProjects = openProjects;
     // Quit timestamp: auto-resume compares each link's lastRunningAt against
@@ -2237,6 +2258,10 @@ app.on('before-quit', (e) => {
     // then flush scrollback, then quit.
     e.preventDefault();
     savedBeforeQuit = true;
+    // Quit is committed here (second Cmd+Q). Freeze the open-projects
+    // snapshot now so gracefulCloseAll's window teardown can't wipe the
+    // restore list before Phase 3 writes it. v1.0.38.
+    setQuitting(true);
     // Stop the Tier-2 capture BEFORE gracefulCloseAll: a 15s tick landing
     // mid-shutdown would observe the just-Ctrl-C'd tabs as idle and zero
     // their lastRunningAt, making auto-resume skip exactly the sessions
@@ -2335,7 +2360,12 @@ app.on('will-quit', (e) => {
   // Stamp lastQuitAt on EVERY quit path (updater bypass, force quit, OS
   // shutdown), not just the 3-phase Cmd+Q flow, so auto-resume's freshness
   // gate has a reference point regardless of how the app exited (v1.0.35).
+  // lastOpenProjects is NOT written here on purpose: by the time will-quit
+  // runs the windows may already be gone, so getOpenProjects() would return
+  // [] and wipe the restore list. window-manager keeps the list live on
+  // every open/close instead, so it is already correct on disk. v1.0.38.
   try {
+    setQuitting(true);
     const cfg = loadConfig();
     cfg.lastQuitAt = Date.now();
     saveConfig(cfg);

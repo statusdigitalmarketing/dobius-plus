@@ -3,14 +3,45 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { killTerminal, getActiveTerminals, gracefulCloseTerminals, getTerminalsForProject } from './terminal-manager.js';
 import { watchFiles } from './watcher-service.js';
-import { getProjectConfig, setProjectConfig } from './config-manager.js';
-import { getQuittingForUpdate } from './quit-state.js';
+import { getProjectConfig, setProjectConfig, loadConfig, saveConfig } from './config-manager.js';
+import { getQuittingForUpdate, getQuitting } from './quit-state.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /** Map of windowId (number) → { projectPath, win } */
 const projectWindows = new Map();
+
+/**
+ * Persist the CURRENT set of open project paths to config.lastOpenProjects.
+ *
+ * v1.0.38 (Brett-reported): lastOpenProjects used to be written in exactly
+ * ONE place, the Phase-3 branch of a normal two-press Cmd+Q quit. Any other
+ * exit (the auto-update Restart button, force quit, OS shutdown, crash) never
+ * recorded the window list, so on relaunch the list was stale or empty and
+ * the app came up with just a fresh launcher instead of restoring the
+ * session. Brett hit Restart and lost all his windows exactly this way.
+ *
+ * Keeping the list live on every open/close means the truth is already on
+ * disk before any exit path runs, so restore works no matter HOW the app
+ * went down. Guarded by getQuitting(): once a quit is committed the windows
+ * all close in a cascade, which would otherwise rewrite this to [] and wipe
+ * the state we're trying to restore. saveConfig is debounced so the churn is
+ * cheap. Tear-off windows are excluded (they're ephemeral, not a project's
+ * primary window).
+ */
+function persistOpenProjects() {
+  if (getQuitting()) return; // snapshot frozen: quit in progress
+  try {
+    const paths = new Set();
+    for (const [, entry] of projectWindows) {
+      if (!entry.isTearOff && !entry.win.isDestroyed()) paths.add(entry.projectPath);
+    }
+    const config = loadConfig();
+    config.lastOpenProjects = Array.from(paths);
+    saveConfig(config);
+  } catch { /* best-effort */ }
+}
 
 /**
  * Find the first open window for a project path.
@@ -118,6 +149,10 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
   // Clean up on close (runs after graceful close completes)
   win.on('closed', () => {
     projectWindows.delete(win.id);
+    // Deliberately closed windows should NOT come back next launch. No-ops
+    // during a quit (getQuitting), so the teardown cascade can't wipe the
+    // restore list. v1.0.38.
+    persistOpenProjects();
 
     // Auto-resume cancel: drop any pending queue entries for this project
     // since the tabs are about to die. Dynamic import avoids a hard
@@ -147,7 +182,9 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
     }
   });
 
-  projectWindows.set(win.id, { projectPath, win });
+  projectWindows.set(win.id, { projectPath, win, isTearOff });
+  // Record the new window immediately so any exit path can restore it.
+  persistOpenProjects();
 }
 
 /**
