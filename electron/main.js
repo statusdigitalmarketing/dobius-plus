@@ -1613,6 +1613,16 @@ function setupSessionTabCapture() {
         claimedIds.add(runningSessionId);
         const mappedSessionId = tabToSessionId.get(t.id);
         if (mappedSessionId === runningSessionId) {
+          // UPGRADE provenance: the link was inferred from timing, but the tab's
+          // argv now names this very id, so it is certain. Without this the
+          // 'fresh' tag sticks forever and the r8 auto-resume gate keeps
+          // skipping a session argv has since proven, e.g. Sam Ctrl-Cs a bare
+          // `claude` and reruns it as `claude --resume <same-id>`.
+          // Codex v1.0.39 r12 P2.
+          if (claudeInfo?.sessionId && fresh[runningSessionId]?.resolvedBy === 'fresh') {
+            setSessionTabLink(runningSessionId, t.id, t.cwd, 'argv');
+            continue;
+          }
           // Still running: refresh the lastRunningAt stamp so auto-resume
           // can tell "was live at quit" from "linked weeks ago" (v1.0.35).
           touchSessionTabLink(runningSessionId);
@@ -2388,6 +2398,15 @@ app.on('before-quit', (e) => {
             // NOTE: this only zeroes the running stamp, the link itself stays,
             // so sid stays claimed.
             clearSessionTabRunning(sid);
+          } else if (
+            running && running === sid
+            && info?.sessionId && mapQ[sid]?.resolvedBy === 'fresh'
+          ) {
+            // Same provenance upgrade as the tick: argv now proves an id we had
+            // only inferred, so re-link it as certain. Quitting right after
+            // `claude --resume <same-id>` would otherwise leave it 'fresh' and
+            // the r8 gate would skip restoring it. Codex v1.0.39 r12 P2.
+            setSessionTabLink(sid, t.id, t.cwd, 'argv');
           } else if (running && running !== sid) {
             // Tab switched sessions since the last capture tick (user ran
             // `claude --resume B` in a tab mapped to A, then quit fast).
