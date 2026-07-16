@@ -31,6 +31,7 @@ check('node /opt/homebrew/bin/claude --resume abc123', true, 'r9: npm shebang sh
 check('node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js --resume abc', true, 'r9: npm cli.js entrypoint');
 check('/usr/bin/env node /opt/homebrew/bin/claude', true, 'r9: env node shim');
 check('bun /opt/homebrew/bin/claude --resume x', true, 'r9: bun shim');
+check('node /Users/bigfuckingdog/.local/share/claude/versions/2.1.211/cli.js --resume abc', true, 'r14: native versioned cli.js');
 
 // --- must NOT match ---
 check('vim claude-notes.md', false, 'r3: editing a file named claude-*');
@@ -40,6 +41,10 @@ check('node /private/tmp/x/node_modules/.bin/tsx watch server/index.ts', false, 
 check('node /private/tmp/y/node_modules/.bin/vite --port 5194', false, 'REAL: vite dev server');
 check('grep -iE claude', false, 'grep mentioning claude');
 check('/bin/zsh -c source /Users/bigfuckingdog/.claude/shell-snapshots/snapshot-zsh-123.sh', false, 'REAL: zsh snapshot, path contains /.claude/ but is not claude');
+// r14: ~/.claude holds hooks, skills and user scripts. Running one is not a session.
+check('node /Users/bigfuckingdog/.claude/foo.js --resume abc', false, 'r14: arbitrary .js under ~/.claude');
+check('node /Users/bigfuckingdog/.claude/hooks/notify.js', false, 'r14: a Claude hook script is not the CLI');
+check('node /Users/bigfuckingdog/.claude/skills/x/build.mjs', false, 'r14: a skill script is not the CLI');
 check('', false, 'empty command');
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);

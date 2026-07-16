@@ -37,14 +37,26 @@
  */
 const SHIM_INTERPRETERS = new Set(['node', 'bun', 'deno', 'env', 'npx']);
 
-/** Does this single argv token name a claude entrypoint? */
+/**
+ * Does this single argv token name a claude entrypoint?
+ *
+ * The JS-entrypoint patterns name the ACTUAL CLI files. They deliberately do
+ * not accept "any .js under a claude-ish directory": ~/.claude holds hooks,
+ * skills and user scripts, so `node ~/.claude/foo.js` would have matched and
+ * made an unrelated script read as a live Claude session, linking or preserving
+ * the wrong tab state. Codex v1.0.39 r14 P2.
+ */
 export function isClaudeEntrypoint(tok) {
   if (!tok) return false;
   const base = tok.split('/').pop();
+  // `claude`, /usr/local/bin/claude, and the npm shim script (no extension).
   if (base === 'claude') return true;
+  // The native install re-execs its versioned binary: .../claude/versions/<v>
   if (/[/\\]claude[/\\]versions[/\\][^/\\]+$/.test(tok)) return true;
-  // node .../@anthropic-ai/claude-code/cli.js, .../claude/versions/<v>/cli.js
-  return /[/\\]\.?claude(-code)?[/\\].*\.(js|mjs|cjs)$/.test(tok);
+  // npm: .../@anthropic-ai/claude-code/cli.js
+  if (/[/\\]claude-code[/\\]cli\.(js|mjs|cjs)$/.test(tok)) return true;
+  // native: .../claude/versions/<v>/cli.js
+  return /[/\\]claude[/\\]versions[/\\][^/\\]+[/\\]cli\.(js|mjs|cjs)$/.test(tok);
 }
 
 export function isClaudeCommand(command) {
