@@ -2309,10 +2309,18 @@ app.on('before-quit', (e) => {
         for (const t of listTerminals()) {
           if (reconcileAborted) return;
           const sid = tabToSid.get(t.id);
-          const running = await getTerminalProcessArgv(t.id);
+          // Ask whether a claude process is alive AT ALL, not just whether it
+          // has a --resume id in argv. A FRESH `claude` linked via the
+          // birthtime correlation has no argv id, so the old argv-only check
+          // saw it as idle, zeroed its stamp, and auto-resume then skipped
+          // exactly the fresh sessions v1.0.39 exists to restore.
+          // Codex v1.0.39 r1 P2.
+          const info = await getTerminalClaudeInfo(t.id);
+          const claudeAlive = !!info;
+          const running = info?.sessionId || null;
           if (reconcileAborted) return;
-          if (sid && !running) {
-            // Mapped but idle: stopped before quit, don't resurrect.
+          if (sid && !claudeAlive) {
+            // Mapped but no claude running: stopped before quit, don't resurrect.
             clearSessionTabRunning(sid);
           } else if (running && running !== sid) {
             // Tab switched sessions since the last capture tick (user ran
