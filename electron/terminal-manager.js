@@ -1,4 +1,5 @@
 import pty from 'node-pty';
+import { isClaudeCommand } from './claude-argv.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -274,30 +275,6 @@ export async function getTerminalProcess(id) {
 export async function getTerminalProcessArgv(id) {
   const info = await getTerminalClaudeInfo(id);
   return info?.sessionId || null;
-}
-
-/**
- * Is this command line ACTUALLY the claude CLI, as opposed to some unrelated
- * process that merely mentions the word?
- *
- * The old check was /\bclaude\b/ against the whole line, so `vim
- * claude-notes.md` or `tail -f claude.log` in a tab counted as a live Claude.
- * At quit that made the reconcile see claudeAlive and skip clearing a stopped
- * session's freshness stamp, so auto-resume would resurrect it.
- * Codex v1.0.39 r3 P2.
- *
- * Only argv[0] decides. Accepts `claude`, an absolute path ending in
- * `/claude`, and the versioned binary the CLI re-execs as
- * (~/.local/share/claude/versions/<v>), which is how it appears in ps on this
- * machine.
- */
-function isClaudeCommand(command) {
-  if (!command) return false;
-  const argv0 = command.trim().split(/\s+/)[0] || '';
-  if (!argv0) return false;
-  const base = argv0.split('/').pop();
-  if (base === 'claude') return true;
-  return /[/\\]claude[/\\]versions[/\\][^/\\]+$/.test(argv0);
 }
 
 /**
