@@ -39,6 +39,30 @@ npm version major    # 1.0.1 -> 2.0.0 (breaking)
 
 This updates `package.json`, creates a git tag, and commits the bump.
 
+### 1b. PUSH main FIRST, before you build
+
+```bash
+git push origin main
+```
+
+> **Do this before step 2 or the release tag will point at the WRONG COMMIT.**
+>
+> electron-builder does not push your local tag. It asks GitHub to create the
+> release, and GitHub creates the tag at whatever `main` is **on the remote** at
+> that moment. If your new commits are still local, GitHub happily tags the
+> PREVIOUS version's commit and the release then advertises source that does not
+> match its own binaries.
+>
+> This bit v1.0.39: main was merged and tagged locally, the build ran, and the
+> remote tag landed on `5b9d07e`, the v1.0.38 commit. The artifacts were fine
+> (they are built from the local tree) and auto-update was unaffected, but
+> checking out `v1.0.39` or downloading its "Source code (zip)" gave v1.0.38.
+> Fixed after the fact with `git push origin --force refs/tags/v1.0.39`, which is
+> a public-history rewrite and worth not needing.
+>
+> Push main first and the tag lands where it should. Step 5 then only has to push
+> the tag itself.
+
 ### 2. Build, sign, notarize, and publish to GitHub
 
 ```bash
