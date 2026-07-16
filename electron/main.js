@@ -1625,7 +1625,16 @@ function setupSessionTabCapture() {
           // certain, one inferred from start/birth timing is not. Auto-resume
           // acts only on the certain kind. v1.0.39.
           const how = claudeInfo?.sessionId ? 'argv' : 'fresh';
-          setSessionTabLink(runningSessionId, t.id, t.cwd, how);
+          // A fresh link must persist the cwd the transcript was actually
+          // resolved against (the tab's LIVE cwd), not t.cwd, which is only
+          // where the terminal was originally opened. `cd`ing to another
+          // project and running a bare `claude` is normal, and storing t.cwd
+          // then pointed projectPath at the wrong ~/.claude/projects dir, so
+          // anything loading the transcript from the link (Cmd+R size check,
+          // copy/speak last response) looked in the wrong place.
+          // Codex v1.0.39 r11 P2.
+          const linkPath = how === 'fresh' ? (cwdByTab.get(t.id) || t.cwd) : t.cwd;
+          setSessionTabLink(runningSessionId, t.id, linkPath, how);
         }
       }
     } catch { /* best-effort */ }
@@ -2385,8 +2394,11 @@ app.on('before-quit', (e) => {
             // Mirror the tick: drop the stale link, record the live one so
             // auto-resume revives B, not A. Codex v1.0.35 r11 P2.
             if (sid) removeSessionTabLink(sid);
-            // Same argv-vs-inferred tagging as the tick. v1.0.39.
-            setSessionTabLink(running, t.id, t.cwd, info?.sessionId ? 'argv' : 'fresh');
+            // Same argv-vs-inferred tagging as the tick, and the same
+            // resolved-cwd rule for fresh links. Codex v1.0.39 r11 P2.
+            const howQ = info?.sessionId ? 'argv' : 'fresh';
+            const linkPathQ = howQ === 'fresh' ? (cwdByTab.get(t.id) || t.cwd) : t.cwd;
+            setSessionTabLink(running, t.id, linkPathQ, howQ);
           }
         }
       } catch { /* best-effort */ }
