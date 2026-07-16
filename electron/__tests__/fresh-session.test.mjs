@@ -1,16 +1,25 @@
-// Relative, so the suite runs from any checkout, not just one dev's path.
-import { resolveFreshSessionsForTabs } from '../data-service.js';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 
-// Real fixture: a scratch project dir under ~/.claude/projects with REAL
-// transcript files whose birth times are real (created 15s apart, comfortably
-// outside the resolver's 10s clock slack so each start time maps to exactly
-// one candidate). Removed at the end.
+// ISOLATION: point HOME at a throwaway dir BEFORE importing data-service, whose
+// PROJECTS_DIR is derived from os.homedir() at module load (os.homedir() reads
+// $HOME on POSIX). Without this the suite writes fixtures into the developer's
+// REAL ~/.claude/projects, which pollutes live Claude data and hard-fails
+// wherever HOME is read-only or sandboxed. `npm test` runs this, so it has to
+// be inert. Codex v1.0.39 r10 P2.
+const TMP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'dobius-freshtest-home-'));
+process.env.HOME = TMP_HOME;
+// Dynamic, so it resolves PROJECTS_DIR against TMP_HOME. A static import would
+// hoist above the assignment above and defeat the whole point.
+const { resolveFreshSessionsForTabs } = await import('../data-service.js');
+
+// Real fixture: real transcript files whose birth times are real, created 15s
+// apart so they sit outside the resolver's 10s clock slack and each start time
+// maps to exactly one candidate. All of it lives under TMP_HOME.
 const PROJ = '/private/tmp/dobius-freshtest-proj';
 const enc = PROJ.replace(/[^a-zA-Z0-9.\-]/g, '-');
-const dir = path.join(os.homedir(), '.claude', 'projects', enc);
+const dir = path.join(TMP_HOME, '.claude', 'projects', enc);
 const X = 'aaaaaaaa-1111-1111-1111-111111111111';
 const Y = 'bbbbbbbb-2222-2222-2222-222222222222';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -112,8 +121,9 @@ try {
     check('abort flag stops resolution immediately', r.size, 0);
   }
 } finally {
-  await fs.rm(dir, { recursive: true, force: true });
-  console.log(`\ncleaned up ${dir}`);
+  // Remove the whole throwaway HOME, not just the project dir.
+  await fs.rm(TMP_HOME, { recursive: true, force: true });
+  console.log(`\ncleaned up ${TMP_HOME}`);
 }
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);
 process.exit(fail === 0 ? 0 : 1);
