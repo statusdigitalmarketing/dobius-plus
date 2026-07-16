@@ -2384,19 +2384,27 @@ app.on('before-quit', (e) => {
         for (const t of liveTabs) {
           if (reconcileAborted) return;
           const sid = tabToSid.get(t.id);
-          // Ask whether a claude process is alive AT ALL, not just whether it
-          // has a --resume id in argv. A FRESH `claude` linked via the
-          // birthtime correlation has no argv id, so the old argv-only check
-          // saw it as idle, zeroed its stamp, and auto-resume then skipped
-          // exactly the fresh sessions v1.0.39 exists to restore.
-          // Codex v1.0.39 r1 P2.
           const info = infoByTab.get(t.id);
-          const claudeAlive = !!info;
+          // The tab's CURRENT session: from argv when it is a `--resume`, else
+          // from the fresh correlation. Null means we cannot name what (if
+          // anything) this tab is running.
           const running = info?.sessionId || freshByTab.get(t.id) || null;
-          if (sid && !claudeAlive) {
-            // Mapped but no claude running: stopped before quit, don't resurrect.
+          if (sid && !running) {
+            // The mapped session is NOT what this tab is running now. Covers
+            // both "no claude at all" (stopped before quit) and "a claude we
+            // cannot identify" (a bare `claude` that has written no transcript
+            // yet, or an ambiguous correlation). Either way, zero the stamp so
+            // auto-resume cannot revive a session the user moved on from.
+            // Codex v1.0.39 r13 P2.
+            //
+            // r1 rejected exactly this because clearing here would have killed
+            // fresh-session auto-resume. That reason is gone: since r8 fresh
+            // links never auto-resume at all, so zeroing one costs nothing. And
+            // if sid is an 'argv' link, a null `running` PROVES the tab is no
+            // longer running it, because argv would still carry the id.
+            //
             // NOTE: this only zeroes the running stamp, the link itself stays,
-            // so sid stays claimed.
+            // so sid stays claimed and the tab keeps its name.
             clearSessionTabRunning(sid);
           } else if (
             running && running === sid
