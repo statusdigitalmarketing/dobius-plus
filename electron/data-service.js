@@ -345,6 +345,25 @@ export async function resolveFreshSessionId(projectPath, startedAt, claimed = ne
 }
 
 /**
+ * Birth time (epoch ms) of a session's transcript within a project, checking
+ * both encoder forms. 0 when the file is not found under either.
+ */
+async function sessionTranscriptBirth(projectPath, sessionId) {
+  if (!projectPath || !sessionId) return 0;
+  const seen = new Set();
+  for (const enc of [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)]) {
+    if (seen.has(enc)) continue;
+    seen.add(enc);
+    try {
+      const st = await fs.stat(path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`));
+      const b = st.birthtimeMs || st.ctimeMs || 0;
+      if (b) return b;
+    } catch { /* try the other encoding */ }
+  }
+  return 0;
+}
+
+/**
  * Resolve the FRESH (bare `claude`, no --resume) session running in each tab.
  *
  * Shared by the 15s capture tick and the Phase-2 quit reconcile in main.js.
@@ -376,10 +395,27 @@ export async function resolveFreshSessionsForTabs(
   const freshTabs = liveTabs
     .filter((t) => cwdByTab.has(t.id) && Number.isFinite(infoByTab.get(t.id)?.startedAt))
     .sort((a, b) => infoByTab.get(a.id).startedAt - infoByTab.get(b.id).startedAt);
-  // Fresh tabs whose claude is already accounted for by a link.
-  const linkedTabs = new Set(
-    freshTabs.filter((t) => tabToSessionId.has(t.id)).map((t) => t.id),
-  );
+  // Fresh tabs whose CURRENT process is already accounted for by a link.
+  //
+  // Having a link is not enough: a tab mapped to an old session that has since
+  // started a bare `claude` still has an UNRESOLVED transcript, so it remains a
+  // rival claimant and must stay in everyone's ambiguity set. Treating it as
+  // linked let another fresh tab claim a transcript this one may have created,
+  // which auto-resume would then type into the wrong terminal.
+  // Codex v1.0.39 r7 P2.
+  //
+  // The test: a link belongs to THIS process only if the linked transcript was
+  // born after the process started. A transcript that predates the process
+  // cannot have been written by it.
+  const linkedTabs = new Set();
+  for (const t of freshTabs) {
+    const sid = tabToSessionId.get(t.id);
+    if (!sid) continue;
+    const birth = await sessionTranscriptBirth(cwdByTab.get(t.id), sid);
+    if (birth && birth >= infoByTab.get(t.id).startedAt - FRESH_CLOCK_SLACK_MS) {
+      linkedTabs.add(t.id);
+    }
+  }
   for (const t of freshTabs) {
     if (isAborted?.()) return out;
     const cwd = cwdByTab.get(t.id);

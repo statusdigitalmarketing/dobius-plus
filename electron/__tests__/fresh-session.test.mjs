@@ -1,4 +1,5 @@
-import { resolveFreshSessionsForTabs } from '/Users/bigfuckingdog/Projects (Code)/dobius-plus/electron/data-service.js';
+// Relative, so the suite runs from any checkout, not just one dev's path.
+import { resolveFreshSessionsForTabs } from '../data-service.js';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
@@ -87,7 +88,22 @@ try {
     check('no two tabs share one transcript', new Set(vals).size, vals.length);
   }
 
-  // CASE 5: abort (the quit 2s cap) stops the loop.
+  // CASE 5 (Codex r7): tab A carries a STALE link to X (X was born BEFORE A's
+  // current process started, so a previous process in that tab owned it) and is
+  // now running a bare `claude`. A's real transcript is therefore still
+  // unresolved, which keeps A a rival claimant for Y. Both A and B started
+  // before Y was born, so Y is genuinely ambiguous and BOTH must decline.
+  // Treating A as "linked" (it has a map entry) let B claim Y outright.
+  {
+    const { info, cwd } = mk({ A: by - 3000, B: by - 2000 });
+    const r = await resolveFreshSessionsForTabs(
+      tabs(['A', 'B']), info, cwd, new Map([['A', X]]), new Set([X]),
+    );
+    check('r7: stale-linked tab still counts as a rival (B declines)', r.get('B'), undefined);
+    check('r7: stale-linked tab does not claim the ambiguous one either', r.get('A'), undefined);
+  }
+
+  // CASE 6: abort (the quit 2s cap) stops the loop.
   {
     const { info, cwd } = mk({ A: bx - 1000, B: by - 1000 });
     const r = await resolveFreshSessionsForTabs(
