@@ -170,7 +170,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   accountsDelete: (accountId) => ipcRenderer.invoke('accounts:delete', accountId),
   accountsGetForProject: (projectPath) => ipcRenderer.invoke('accounts:getForProject', projectPath),
   accountsSetForProject: (projectPath, accountId) => ipcRenderer.invoke('accounts:setForProject', projectPath, accountId),
-  accountsCaptureClaudeJson: (destPath) => ipcRenderer.invoke('accounts:captureClaudeJson', destPath),
+  accountsInitProfileDir: (destPath) => ipcRenderer.invoke('accounts:initProfileDir', destPath),
   accountsActivateClaude: (accountId) => ipcRenderer.invoke('accounts:activateClaude', accountId),
   accountsGetActiveClaude: () => ipcRenderer.invoke('accounts:getActiveClaude'),
 

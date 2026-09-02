@@ -30,6 +30,29 @@ the version or branch that shipped them. Sam triggers releases.
       clean. If a stuck "sending..." ever survives past 90s in real use,
       suspect a commit-phase exception around session relink and start here.
 
+## Staged on main (unreleased, next ship = v1.0.65)
+
+- [x] Permanent download link (Dobius-Plus.dmg on every release +
+      retroactively on v1.0.64), draft-then-publish releases (latest never
+      points at a half-built release), and a README with one download
+      button and a releases-page explainer.
+- [x] Claude account switching that actually switches (Sam 8/22).
+      Discovery: Claude Code scopes its LOGIN to CLAUDE_CONFIG_DIR (a
+      fresh dir is logged out even with the Keychain populated), so
+      identities follow config dirs. The old Switch copied a snapshot over
+      ~/.claude.json: cosmetic, never changed the login, left stale
+      oauthAccount metadata (still visible in Sam's ~/.claude.json).
+      Now: Switch sets a pointer; NEW terminals in every project launch
+      with the active account's config dir (global), a project's assigned
+      account still overrides (optional per-project), and a Default row
+      switches back to the Mac's ~/.claude with all its skills/hooks.
+      Add Account creates an EMPTY profile dir (Codex High: the old copy
+      seeded new accounts with the old identity); background CLI calls
+      follow the active account (Codex Medium); deleting the active
+      account falls back to default (Codex Low). One claude auth login
+      per account dir binds it permanently. 10 unit assertions; live
+      harness verification of both directions through the real UI.
+
 ## Done (shipped in v1.0.64)
 
 - [x] Add a Google account entirely in-app (Sam 8/18: no more terminal

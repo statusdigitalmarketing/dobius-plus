@@ -31,9 +31,22 @@ export default function AccountsSection() {
     setActivating(null);
     if (result.ok) {
       setActiveClaudeId(acct.id);
-      flash(`Switched to "${acct.name}". Restart any open Claude terminals to pick up the new account.`);
+      flash(`Switched. NEW terminals everywhere now run as "${acct.name}" (open tabs keep their old account). First time in this account: run claude auth login once in a new tab, it sticks.`);
     } else {
       flash(`Failed to switch: ${result.error}`, true);
+    }
+  };
+
+  // Back to the Mac's default ~/.claude identity (full settings/skills/hooks).
+  const handleUseDefault = async () => {
+    setActivating('__default__');
+    const result = await window.electronAPI.accountsActivateClaude(null);
+    setActivating(null);
+    if (result?.ok) {
+      setActiveClaudeId(null);
+      flash('Back to the default account. New terminals use this Mac\u2019s normal ~/.claude login and setup.');
+    } else {
+      flash(`Failed to switch: ${result?.error || 'unknown'}`, true);
     }
   };
 
@@ -53,12 +66,14 @@ export default function AccountsSection() {
     if (form.type === 'claude' && !editing) {
       const id = `acct-${Date.now()}`;
       payload.id = id;
-      // Main process now constrains the destination to ~/.claude-profiles/
-      // and only honors the basename of what we send. Send just the file name
-      // we want, and trust main's returned path. PR#3 r3 P2.
-      const result = await window.electronAPI.accountsCaptureClaudeJson(`${id}.json`);
+      // v1.0.65: a NEW account gets an EMPTY config dir (its own identity,
+      // bound by the first `claude auth login` run in it). The old flow
+      // copied the CURRENT ~/.claude.json in, which seeded the new account
+      // with the old identity (Codex High). Main constrains the destination
+      // to ~/.claude-profiles/ and only honors the basename. PR#3 r3 P2.
+      const result = await window.electronAPI.accountsInitProfileDir(`${id}.json`);
       if (!result.ok) {
-        flash(`Could not capture ~/.claude.json: ${result.error}`, true);
+        flash(`Could not create the account profile: ${result.error}`, true);
         return;
       }
       payload.claudeJsonPath = result.path;
@@ -67,7 +82,7 @@ export default function AccountsSection() {
     await window.electronAPI.accountsSave(payload);
     await reload();
     setShowForm(false);
-    flash(editing ? 'Account updated.' : 'Account saved — snapshot of current ~/.claude.json stored.');
+    flash(editing ? 'Account updated.' : 'Account saved. Switch to it, open a new terminal, and run claude auth login once there to bind its login.');
   };
 
   const handleDelete = async (id) => {
@@ -108,9 +123,31 @@ export default function AccountsSection() {
         Accounts
       </div>
 
+      {accounts.length > 0 && (
+        <div className="flex items-center justify-between px-3 py-2 rounded-lg mb-2" style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}>
+          <div className="min-w-0">
+            <div className="text-sm font-medium" style={{ color: 'var(--fg)' }}>
+              Default (this Mac&rsquo;s ~/.claude){activeClaudeId === null ? ' · active' : ''}
+            </div>
+            <div className="text-xs mt-0.5" style={{ color: 'var(--dim)' }}>
+              Your main login with all your settings, skills, and hooks. Switching applies to NEW terminals in every project; a project with an assigned account keeps its assignment.
+            </div>
+          </div>
+          {activeClaudeId !== null && (
+            <button
+              style={btn('primary', { padding: '4px 10px', fontSize: 11, flexShrink: 0, marginLeft: 10 })}
+              disabled={activating === '__default__'}
+              onClick={handleUseDefault}
+            >
+              {activating === '__default__' ? 'Switching…' : 'Switch'}
+            </button>
+          )}
+        </div>
+      )}
+
       {accounts.length === 0 && !showForm && (
         <p className="text-xs mb-3" style={{ color: 'var(--dim)' }}>
-          No accounts saved yet. Use <strong>Add Account</strong> to snapshot your current Claude login, then log into a second account and snapshot that too.
+          No accounts saved yet. Add an account, switch to it, open a new terminal, and run <code style={{ fontFamily: 'monospace' }}>claude auth login</code> once there: each account keeps its own login from then on.
         </p>
       )}
 
@@ -227,13 +264,13 @@ export default function AccountsSection() {
             )}
             {form.type === 'claude' && !editing && (
               <div className="text-xs p-2 rounded" style={{ backgroundColor: 'rgba(139,92,246,0.08)', color: 'var(--dim)', border: '1px solid rgba(139,92,246,0.2)' }}>
-                Make sure you're logged into the Claude account you want to save, then click Save. Dobius will snapshot the current <code style={{ fontFamily: 'monospace' }}>~/.claude.json</code>.
+                Name the account and Save. It starts logged out with its own private config: switch to it, open a new terminal, run <code style={{ fontFamily: 'monospace' }}>claude auth login</code> once there, and the login sticks to this account.
               </div>
             )}
             {form.type === 'claude' && (
               <div>
                 <div className="text-xs mb-1" style={{ color: 'var(--dim)' }}>
-                  CLI path <span style={{ opacity: 0.6 }}>(optional — leave blank to use the default <code style={{ fontFamily: 'monospace' }}>claude</code> on PATH)</span>
+                  CLI path <span style={{ opacity: 0.6 }}>(optional : leave blank to use the default <code style={{ fontFamily: 'monospace' }}>claude</code> on PATH)</span>
                 </div>
                 <input
                   style={inp}

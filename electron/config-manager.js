@@ -1147,6 +1147,10 @@ export function deleteAccount(accountId) {
   if (!accountId || typeof accountId !== 'string') return;
   const config = loadConfig();
   config.accounts = (config.accounts || []).filter((a) => a.id !== accountId);
+  // Deleting the ACTIVE account must fall back to the default identity, or
+  // the stale id makes the UI show nothing active while terminals silently
+  // use default (Codex Low).
+  if (config.activeClaudeAccountId === accountId) config.activeClaudeAccountId = null;
   // Remove any project assignments pointing to this account
   if (config.projectAccounts) {
     for (const [k, v] of Object.entries(config.projectAccounts)) {

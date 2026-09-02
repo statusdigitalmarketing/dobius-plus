@@ -6,6 +6,7 @@ import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { getQuittingForUpdate, setQuitting, getQuitting } from './quit-state.js';
+import { resolveTerminalAccount, claudeEnvForAccount } from './claude-account-env.js';
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
@@ -84,6 +85,18 @@ let mainWindow;
 // Returns the claude binary path to use for background CLI calls (orchestration,
 // prompt-improve). Prefers the active Claude account's cliPath if set, then
 // falls back to CLAUDE_PATH env var, then bare 'claude' (resolved via PATH).
+// Env additions for the globally ACTIVE Claude account, so background CLI
+// calls (orchestration decompose, prompt improve) run as the SAME identity
+// new terminals get (Codex Medium: they previously always ran as the
+// default ~/.claude account regardless of the switch).
+function activeClaudeAccountEnv() {
+  const config = loadConfig();
+  const activeId = config.activeClaudeAccountId;
+  if (!activeId) return {};
+  const account = (config.accounts || []).find((a) => a.id === activeId && a.type === 'claude');
+  return claudeEnvForAccount(account || null);
+}
+
 function resolveActiveCliPath() {
   const config = loadConfig();
   const activeId = config.activeClaudeAccountId;
@@ -217,28 +230,20 @@ function setupTerminalHandlers() {
     event.sender.once('destroyed', () => {
       if (terminalOwners.get(id) === ownerId) terminalOwners.delete(id);
     });
-    // Per-account env (codex/claude) — points the spawned CLI at the right
-    // account's config dir / API key for this project.
-    const accountEnv = {};
-    const account = cwd ? getProjectAccount(cwd) : null;
-    if (account?.type === 'codex' && account.apiKey) {
-      accountEnv.OPENAI_API_KEY = account.apiKey;
-    } else if (account?.type === 'claude') {
-      // Expand a leading ~ before splitting paths. Shells do not expand `~`
-      // inside $PATH or env vars, so a saved cliPath of `~/.nvm/.../claude`
-      // would leave `~/.nvm/...` literally in DOBIUS_CLI_DIR, the assigned
-      // terminal would then fall back to the default `claude` on PATH. Same
-      // class of bug as round-6 R6-1 (resolveActiveCliPath). Codex PR#3 r8 P2.
-      const expandTilde = (p) => (typeof p === 'string' && p.startsWith('~'))
-        ? path.join(os.homedir(), p.slice(1))
-        : p;
-      if (account.claudeJsonPath) {
-        accountEnv.CLAUDE_CONFIG_DIR = path.dirname(expandTilde(account.claudeJsonPath));
-      }
-      if (account.cliPath) {
-        accountEnv.DOBIUS_CLI_DIR = path.dirname(expandTilde(account.cliPath));
-      }
+    // Per-account env (codex/claude). Resolution: the project's assigned
+    // account wins (per-project override), else the globally ACTIVE Claude
+    // account (what the Switch button sets: v1.0.65, this is what makes
+    // Switch real and global), else no env = the Mac's default ~/.claude
+    // identity with all its settings/skills/hooks.
+    const projectAccount = cwd ? getProjectAccount(cwd) : null;
+    let activeAccount = null;
+    {
+      const cfgNow = loadConfig();
+      const activeId = cfgNow.activeClaudeAccountId;
+      if (activeId) activeAccount = (cfgNow.accounts || []).find((a) => a.id === activeId && a.type === 'claude') || null;
     }
+    const account = resolveTerminalAccount(projectAccount, activeAccount);
+    const accountEnv = claudeEnvForAccount(account);
     // gws token-broker shim (v1.0.41): put the shim first on PATH as `gws` and
     // tell it where the real gws is. Transparent passthrough until a caller sets
     // DOBIUS_GWS_ACCOUNT=<email> (or a bound tab sets DOBIUS_GWS_ACCOUNT_ID), so
@@ -932,7 +937,7 @@ function setupOrchestrationHandlers() {
         '--model', 'claude-haiku-4-5-20251001',
         '--system-prompt-file', sysPath,
       ], {
-        env: { ...process.env, PATH: (process.env.PATH || '') + ':/usr/local/bin:/opt/homebrew/bin' },
+        env: { ...process.env, ...activeClaudeAccountEnv(), PATH: (process.env.PATH || '') + ':/usr/local/bin:/opt/homebrew/bin' },
       });
 
       let out = '';
@@ -1596,24 +1601,48 @@ function setupConfigHandlers() {
 
   // Activate a Claude account by swapping ~/.claude.json
   ipcMain.handle('accounts:activateClaude', async (_event, accountId) => {
-    const accounts = getAccounts();
-    const account = accounts.find((a) => a.id === accountId && a.type === 'claude');
+    // v1.0.65: switching is a POINTER, not a file swap. The old handler
+    // copied the snapshot over ~/.claude.json, which never changed the real
+    // login (Claude Code scopes credentials to the CONFIG DIR, and the
+    // default dir's token lives in the Keychain), so Switch was cosmetic and
+    // left mismatched oauthAccount metadata behind. Now: set the active id;
+    // every NEW terminal in every project launches with that account's
+    // CLAUDE_CONFIG_DIR (see terminal:create). null = back to the Mac's
+    // default ~/.claude identity. ~/.claude.json is never touched.
+    const config = loadConfig();
+    if (accountId === null) {
+      config.activeClaudeAccountId = null;
+      saveConfig(config);
+      return { ok: true, isDefault: true };
+    }
+    const account = (config.accounts || []).find((a) => a.id === accountId && a.type === 'claude');
     if (!account) return { ok: false, error: 'Account not found' };
     if (!account.claudeJsonPath) return { ok: false, error: 'No profile snapshot for this account' };
-    const claudeJsonPath = path.join(os.homedir(), '.claude.json');
-    const backupPath = path.join(os.homedir(), `.claude.json.dobius-backup-${Date.now()}`);
+    config.activeClaudeAccountId = accountId;
+    saveConfig(config);
+    return { ok: true, isDefault: false };
+  });
+
+  // v1.0.65: create an EMPTY per-account config dir. The old flow copied the
+  // CURRENT ~/.claude.json into the new profile, which under dir-scoped
+  // logins seeded the "new" account with the OLD identity (Codex High). A
+  // fresh dir starts logged out; one `claude auth login` in a tab running as
+  // this account binds it permanently. Destination constrained to
+  // ~/.claude-profiles/<basename-derived-dir>, same posture as the removed
+  // capture handler (PR#3 r3 P2).
+  ipcMain.handle('accounts:initProfileDir', async (_event, destPath) => {
     try {
-      // Backup current ~/.claude.json
-      if (fs.existsSync(claudeJsonPath)) {
-        await fs.promises.copyFile(claudeJsonPath, backupPath);
+      if (!destPath || typeof destPath !== 'string') return { ok: false, error: 'Invalid destPath' };
+      const base = path.basename(destPath);
+      if (!base || base.includes('/') || base.includes('\\') || base.startsWith('.')) {
+        return { ok: false, error: 'destPath basename must be a simple file name' };
       }
-      // Swap in the profile snapshot
-      await fs.promises.copyFile(account.claudeJsonPath, claudeJsonPath);
-      // Track which account is active
-      const config = loadConfig();
-      config.activeClaudeAccountId = accountId;
-      saveConfig(config);
-      return { ok: true };
+      const idDir = base.replace(/\.json$/i, '');
+      const profileDir = path.join(os.homedir(), '.claude-profiles', idDir);
+      await fs.promises.mkdir(profileDir, { recursive: true });
+      // claudeJsonPath stays the canonical pointer shape; the CLI creates
+      // the file itself on first run in this dir.
+      return { ok: true, path: path.join(profileDir, '.claude.json') };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -1624,39 +1653,6 @@ function setupConfigHandlers() {
     return loadConfig().activeClaudeAccountId || null;
   });
 
-  // Capture an existing ~/.claude.json as a named profile snapshot.
-  // SECURITY: ~/.claude.json contains Claude credentials. A renderer bug or
-  // XSS supplying an arbitrary destPath could exfiltrate creds into a
-  // user-readable project folder, or clobber any user-writable file. Constrain
-  // the destination to ~/.claude-profiles/<basename>, derived in the main
-  // process (only the basename is honored from the renderer). PR#3 r3 P2.
-  ipcMain.handle('accounts:captureClaudeJson', async (_event, destPath) => {
-    const src = path.join(os.homedir(), '.claude.json');
-    try {
-      if (!fs.existsSync(src)) return { ok: false, error: 'No ~/.claude.json found' };
-      if (!destPath || typeof destPath !== 'string') return { ok: false, error: 'Invalid destPath' };
-      const base = path.basename(destPath);
-      if (!base || base.includes('/') || base.includes('\\') || base.startsWith('.')) {
-        return { ok: false, error: 'destPath basename must be a simple file name' };
-      }
-      // Store each profile in its OWN per-account subdirectory with the
-      // canonical .claude.json filename. The CLI reads
-      // CLAUDE_CONFIG_DIR/.claude.json, so the previous flat layout
-      // (~/.claude-profiles/<id>.json) made the captured credentials
-      // invisible to the CLI when assigned to a project terminal.
-      // Strip any extension off the id-derived basename so a passed
-      // 'acct-XXX.json' yields the dir 'acct-XXX'. Codex PR#3 r17 P2.
-      const idDir = base.replace(/\.json$/i, '');
-      const profilesRoot = path.join(os.homedir(), '.claude-profiles');
-      const profileDir = path.join(profilesRoot, idDir);
-      const finalDest = path.join(profileDir, '.claude.json');
-      await fs.promises.mkdir(profileDir, { recursive: true });
-      await fs.promises.copyFile(src, finalDest);
-      return { ok: true, path: finalDest };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
 }
 
 // Tier 2 session-to-tab capture. Every 15s:
@@ -2123,7 +2119,7 @@ function setupGitHandlers() {
 
       const claudePath = resolveActiveCliPath();
       const proc = spawn(claudePath, ['-p', fullPrompt], {
-        env: { ...process.env, PATH: process.env.PATH + ':/usr/local/bin:/opt/homebrew/bin' },
+        env: { ...process.env, ...activeClaudeAccountEnv(), PATH: process.env.PATH + ':/usr/local/bin:/opt/homebrew/bin' },
       });
 
       // 256KB cap: a prompt rewrite should never exceed a few KB. Beyond
