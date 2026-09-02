@@ -32,6 +32,22 @@ the version or branch that shipped them. Sam triggers releases.
 
 ## Staged on main (unreleased, next ship = v1.0.65)
 
+- [x] Fixed the every-~2h whole-Mac crash (Sam 8/24 + crash logs: 23 node
+      FatalProcessOutOfMemory aborts in 7 days). Root cause: the Voice
+      Conductor, an always-on background Opus session, grew its V8 heap until
+      the ~4GB cap aborted it and the memory pressure took the OS down ("you
+      can't open the application", forced reboot; the clipboard "can't open"
+      was a downstream symptom). Now OPT-IN (Settings > Diagnostics toggle,
+      default off) and, when on, self-recycles every 90min with a bounded
+      crash-loop breaker so it can never reach the cap. Generation-token
+      guards make toggle-off and rapid off/on safe (Codex High+Medium).
+- [x] Thorough error logging (Sam 8/24: "so you could fix things at least
+      from my system"). Rolling <userData>/logs/error.log (2MB rotate, one
+      backup) tees main console.error/warn, renderer console errors,
+      render-process-gone, preload errors, and child-process crashes, each
+      stamped with version; crash/fatal kinds bypass the noise throttle
+      (Codex Medium). Settings > Diagnostics has a Reveal log button.
+
 - [x] Permanent download link (Dobius-Plus.dmg on every release +
       retroactively on v1.0.64), draft-then-publish releases (latest never
       points at a half-built release), and a README with one download

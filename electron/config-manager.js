@@ -29,6 +29,12 @@ const DEFAULT_CONFIG = {
     terminalFontSize: 13,
     terminalFontFamily: '',   // '' = default SF Mono stack; see src/lib/terminal-font.js
     sidebarDefaultOpen: false,
+    // Voice Conductor: an always-on background Opus session for iPhone voice
+    // routing. Default OFF (v1.0.65): left on unconditionally it grew its heap
+    // until an OOM abort every ~2h and took the whole Mac down. Opt in only if
+    // you use the voice Shortcut; when on it self-recycles to stay under the
+    // heap cap. Sam 8/24.
+    voiceConductorEnabled: false,
     // Session sources (real project paths) hidden from the Sessions history
     // list. Lets the user mute headless-CLI spam (e.g. an app running
     // `claude -p` in a loop) without deleting transcripts. Managed from the

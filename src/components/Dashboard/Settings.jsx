@@ -35,6 +35,8 @@ export default function Settings() {
   const [statusHooks, setStatusHooks] = useState(false);
   const [statusHooksBusy, setStatusHooksBusy] = useState(false);
   const [statusHooksError, setStatusHooksError] = useState('');
+  const [voiceConductor, setVoiceConductor] = useState(false);
+  const [errorLogPath, setErrorLogPath] = useState('');
 
   useEffect(() => {
     window.electronAPI?.asanaGetConfig?.().then((cfg) => {
@@ -42,6 +44,13 @@ export default function Settings() {
     });
     window.electronAPI?.autoModeGet?.().then((a) => { if (a) setAutoMode(a); });
     window.electronAPI?.claudeHooksGetStatus?.().then((r) => { if (r) setStatusHooks(!!r.installed); });
+    window.electronAPI?.voiceConductorGet?.().then((r) => { if (r) setVoiceConductor(!!r.enabled); });
+    window.electronAPI?.errorLogInfo?.().then((r) => { if (r?.path) setErrorLogPath(r.path); });
+  }, []);
+
+  const toggleVoiceConductor = useCallback(async (on) => {
+    const r = await window.electronAPI?.voiceConductorSet?.(on);
+    setVoiceConductor(r?.enabled ?? on);
   }, []);
 
   const saveAsanaPat = useCallback(async () => {
@@ -747,6 +756,31 @@ export default function Settings() {
           <ShortcutRow keys="Esc" action="Focus Terminal (from input)" />
           <ShortcutRow keys="Enter" action="Send Command (from input)" />
         </div>
+      </Section>
+
+      <Section title="Diagnostics">
+        <SettingRow
+          label="Voice Conductor"
+          description="A background Opus session for iPhone voice routing. Off by default: leave it off unless you use the voice Shortcut. When on it self-recycles so it never fills memory."
+        >
+          <Toggle checked={voiceConductor} onChange={toggleVoiceConductor} />
+        </SettingRow>
+        <SettingRow
+          label="Error log"
+          description={errorLogPath
+            ? `Runtime errors and crashes are logged to ${errorLogPath}. Reveal it if something misbehaves so it can be diagnosed.`
+            : 'Runtime errors and crashes are logged so issues can be diagnosed from your machine.'}
+        >
+          <button
+            onClick={() => window.electronAPI?.errorLogReveal?.()}
+            style={{
+              backgroundColor: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)',
+              borderRadius: 6, padding: '5px 12px', fontSize: 12, fontWeight: 500, cursor: 'pointer',
+            }}
+          >
+            Reveal log
+          </button>
+        </SettingRow>
       </Section>
     </div>
   );

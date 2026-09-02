@@ -7,6 +7,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { getQuittingForUpdate, setQuitting, getQuitting } from './quit-state.js';
 import { resolveTerminalAccount, claudeEnvForAccount } from './claude-account-env.js';
+import { installErrorLog, logLine, errorLogPath } from './error-log.js';
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
@@ -65,7 +66,7 @@ import {
   deriveDeviceId,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents } from './voice-bridge.js';
-import { ensureVoiceConductor } from './voice-conductor.js';
+import { ensureVoiceConductor, stopVoiceConductor } from './voice-conductor.js';
 import {
   startImessageBridge, stopImessageBridge, restartImessageBridge,
   sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus,
@@ -512,6 +513,28 @@ function setupDataHandlers() {
   // into userData and upserts the mcpServers.gws entry in Claude Desktop's
   // per-user config. Works on any Mac Dobius is installed on (no node needed:
   // the wrapper runs under our own binary).
+  // Error log (v1.0.65): let the UI show where it lives and reveal it.
+  // Voice Conductor toggle (v1.0.65): turning it on launches it now; off
+  // stops it and disarms its timers. The default is off.
+  ipcMain.handle('voiceConductor:get', () => ({ enabled: !!getSettings().voiceConductorEnabled }));
+  ipcMain.handle('voiceConductor:set', (_event, enabled) => {
+    const on = !!enabled;
+    updateSettings({ voiceConductorEnabled: on });
+    if (on) {
+      const c = BUILTIN_AGENTS.find((a) => a.id === 'builtin-voice-conductor');
+      if (c) ensureVoiceConductor(c.systemPrompt);
+    } else {
+      stopVoiceConductor();
+    }
+    return { ok: true, enabled: on };
+  });
+  ipcMain.handle('errorLog:info', () => ({ path: errorLogPath() }));
+  ipcMain.handle('errorLog:reveal', () => {
+    const p = errorLogPath();
+    if (p && fs.existsSync(p)) shell.showItemInFolder(p);
+    else if (p) shell.showItemInFolder(path.dirname(p));
+    return { ok: true };
+  });
   ipcMain.handle('gwsMcp:status', () => gwsMcpStatus());
   ipcMain.handle('gwsMcp:install', () => installGwsMcp());
   ipcMain.handle('data:loadProjectTokens', () => loadProjectTokens());
@@ -2291,6 +2314,8 @@ function setupCrashLogging() {
     } catch {
       // Logging must never throw.
     }
+    // Also into the rolling error log so one file tells the whole story.
+    logLine(`crash.${kind}`, detail);
   };
   process.on('uncaughtException', (err) => {
     write('uncaughtException', (err && err.stack) || String(err));
@@ -2324,6 +2349,7 @@ function setupCrashLogging() {
 }
 
 app.whenReady().then(() => {
+  installErrorLog();
   setupCrashLogging();
   // Make sure node-pty can actually launch shells before any tab is created.
   ensureSpawnHelperExecutable();
@@ -2366,10 +2392,12 @@ app.whenReady().then(() => {
   // Hand the built-in agent list to voice-bridge so dobius-spawn can find
   // them by id (Code Reviewer, Bug Hunter, Voice Conductor, etc.).
   setBuiltinAgents(BUILTIN_AGENTS);
-  // Auto-launch the Voice Conductor (Opus) in a background PTY so voice
-  // commands from the iPhone Shortcut have a target to route into.
+  // Launch the Voice Conductor (Opus) in a background PTY ONLY if enabled.
+  // Default off since v1.0.65: an always-on Opus session grew its heap until
+  // an OOM abort every ~2h and destabilized the whole Mac. When on it
+  // self-recycles to stay under the cap.
   const conductor = BUILTIN_AGENTS.find((a) => a.id === 'builtin-voice-conductor');
-  if (conductor) ensureVoiceConductor(conductor.systemPrompt);
+  if (conductor && getSettings().voiceConductorEnabled) ensureVoiceConductor(conductor.systemPrompt);
   // iMessage transport — drives Conductor via text-yourself commands.
   // No-op until the user enables it + sets selfHandle in Settings.
   startImessageBridge();

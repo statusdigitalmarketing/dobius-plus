@@ -119,6 +119,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gwsReconnect: (id, opts) => ipcRenderer.invoke('gws:reconnect', id, opts),
   gwsAddViaBrowser: (opts) => ipcRenderer.invoke('gws:addViaBrowser', opts),
   // Claude Desktop MCP setup (v1.0.63): status + one-click install.
+  errorLogInfo: () => ipcRenderer.invoke('errorLog:info'),
+  voiceConductorGet: () => ipcRenderer.invoke('voiceConductor:get'),
+  voiceConductorSet: (enabled) => ipcRenderer.invoke('voiceConductor:set', enabled),
+  errorLogReveal: () => ipcRenderer.invoke('errorLog:reveal'),
   gwsMcpStatus: () => ipcRenderer.invoke('gwsMcp:status'),
   gwsMcpInstall: () => ipcRenderer.invoke('gwsMcp:install'),
   // Mid-reconnect: main pushes the Google consent URL so the panel can offer
