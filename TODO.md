@@ -38,7 +38,7 @@ the version or branch that shipped them. Sam triggers releases.
       clean. If a stuck "sending..." ever survives past 90s in real use,
       suspect a commit-phase exception around session relink and start here.
 
-## Staged on main (unreleased, next ship = v1.0.65)
+## Done (shipped in v1.0.65)
 
 - [x] Mobile board shows ALL tabs (Sam 8/24: "doesnt work with the mobile
       dobius for all the tabs only some"). Idle project groups used to
