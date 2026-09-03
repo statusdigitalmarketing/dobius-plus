@@ -86,7 +86,13 @@ const DEFAULT_CONFIG = {
     // spin up simultaneously. See electron/auto-resume.js.
     enabled: true,               // default ON per Sam's choice
     staggerMs: 50,               // delay between consecutive resume writes
-    skipOversizedMB: 80,         // matches the existing dead-session guard
+    // Was 80, which skipped 10 of Sam's 24 tracked sessions and produced the
+    // "transcript is too big" message on exactly the sessions he most wanted
+    // back. Measured 9/3: a 106MB transcript resumes in 19s and a 725MB one in
+    // 10s, because the CLI reconstructs from the tail rather than parsing the
+    // whole file. Size was never the real cost. Kept as a guard against a
+    // pathological multi-GB file, not as a routine gate.
+    skipOversizedMB: 4000,
     cancelOnUserInput: true,     // skip a tab if the user types into it first
   },
 };
@@ -364,6 +370,27 @@ export async function saveCheckpoints(projectPath, checkpoints) {
  * per-project files, and trim closedTabs to 10 entries x 200 scrollback lines
  * (was 20 x 500). Together these were 8.5MB of an 11MB config.json.
  */
+/**
+ * Lift the old 80MB auto-resume cap off configs that still carry it (v1.0.66).
+ * The value is a persisted DEFAULT, not a choice: there is no UI for it, so a
+ * stored 80 means "whatever shipped", and leaving it would keep skipping the
+ * big sessions on every machine that ever launched an older build. Only the
+ * exact old default is touched, so a hand-edited value is preserved.
+ */
+function migrateAutoResumeCap(cfg) {
+  if (!cfg || cfg.autoResumeCapMigrated) return false;
+  // Record the marker even when nothing changes, so this runs exactly ONCE per
+  // machine. Without it, 80 is indistinguishable from a value the user chose
+  // and every launch would overwrite it again (Codex High). After this, a
+  // deliberate 80 sticks forever.
+  cfg.autoResumeCapMigrated = true;
+  if (cfg.autoResume?.skipOversizedMB === 80) {
+    cfg.autoResume.skipOversizedMB = DEFAULT_CONFIG.autoResume.skipOversizedMB;
+    console.log(`[config-manager] auto-resume cap 80MB -> ${DEFAULT_CONFIG.autoResume.skipOversizedMB}MB (stale default, one time)`);
+  }
+  return true;
+}
+
 function migrateCheckpointsAndClosedTabs(cfg) {
   if (!cfg || typeof cfg !== 'object' || !cfg.projects) return false;
   let configChanged = false;
@@ -449,7 +476,8 @@ export function loadConfig() {
       pruneOrphanTearOffWindows(configCache);
       pruneOrphanPrimaryWindows(configCache);
       const migratedScrollback = migrateScrollbackOutOfConfig(configCache);
-      const migrated = migrateCheckpointsAndClosedTabs(configCache) || migratedScrollback;
+      const migratedCap = migrateAutoResumeCap(configCache);
+      const migrated = migrateCheckpointsAndClosedTabs(configCache) || migratedScrollback || migratedCap;
       if (migrated) {
         try {
           atomicWriteSync(CONFIG_PATH, JSON.stringify(configCache, null, 2));
@@ -707,7 +735,9 @@ export function updateAutoResume(updates) {
   }
   if ('skipOversizedMB' in sanitized) {
     const n = Number(sanitized.skipOversizedMB);
-    sanitized.skipOversizedMB = Number.isFinite(n) ? Math.max(1, Math.min(500, n)) : 80;
+    // Ceiling was 500, below real transcripts on this machine (725MB), so the
+    // setting could not even be raised past the problem.
+    sanitized.skipOversizedMB = Number.isFinite(n) ? Math.max(1, Math.min(8000, n)) : 4000;
   }
   if ('cancelOnUserInput' in sanitized) sanitized.cancelOnUserInput = !!sanitized.cancelOnUserInput;
   config.autoResume = { ...DEFAULT_CONFIG.autoResume, ...(config.autoResume || {}), ...sanitized };

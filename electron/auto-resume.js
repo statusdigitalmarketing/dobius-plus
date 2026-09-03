@@ -248,9 +248,16 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   // Schedule the writes. Each gets a setTimeout with cumulative delay.
   // Mark queued NOW so the user sees the dot immediately, then flip to
   // working when the write fires.
+  // Space the writes by SIZE, not a flat tick. The old 80MB cap hid this by
+  // skipping big transcripts outright; now that they resume (a 725MB one in
+  // 10s), a flat 50ms would fire two dozen heavy `claude --resume` processes
+  // inside about a second (Codex Medium). Tiny sessions still go at full
+  // speed; only the expensive ones buy extra room.
+  let cumulativeMs = 0;
   for (let i = 0; i < eligible.length; i += 1) {
     const e = eligible[i];
-    const delayMs = i * cfg.staggerMs;
+    const delayMs = cumulativeMs;
+    cumulativeMs += cfg.staggerMs + Math.round(Math.min(e.sizeMB || 0, 2000) * 2);
     // CLAIM at queue time, not write time, and not a bare reserve. The stagger
     // means a tab sits scheduled for many seconds: reserving only at the write
     // left that window open for another surface to take the session (Codex
