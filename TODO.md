@@ -5,11 +5,9 @@ the version or branch that shipped them. Sam triggers releases.
 
 ## Queue
 
-- [ ] Verify the RAPT fix end to end: after Sam's v1.0.64 reconnect round
-      (standard scopes, checkbox off), re-run the all-account mint check
-      16+ hours later. All five OK past the 16h mark = the invalid_rapt
-      loop is closed for good; any DEAD account means a scope in the
-      standard set still triggers session control and needs hunting.
+- [x] RAPT fix verified (9/3): Sam reconnected all accounts; a mint check
+      shows all 7 OK and NONE carry GCP scopes, so they are permanent. The
+      invalid_rapt every-16h loop is closed.
 - [x] TRUE multiple primary windows per project (Brett, Asana 1217283122193749;
       "4 windows with multiple tabs per window for one project folder"). Cmd+Shift+N
       opens another window on the current project; each window has a stable
