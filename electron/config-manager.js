@@ -378,13 +378,20 @@ export async function saveCheckpoints(projectPath, checkpoints) {
  * exact old default is touched, so a hand-edited value is preserved.
  */
 function migrateAutoResumeCap(cfg) {
-  if (!cfg || cfg.autoResumeCapMigrated) return false;
+  // Strict === true: this marker is only ever written by us, as a boolean. Any
+  // other value means it did not come from this code, and treating a truthy
+  // string like "false" as "already migrated" would pin that install at 80MB
+  // forever (Codex Medium).
+  if (!cfg || cfg.autoResumeCapMigrated === true) return false;
   // Record the marker even when nothing changes, so this runs exactly ONCE per
   // machine. Without it, 80 is indistinguishable from a value the user chose
   // and every launch would overwrite it again (Codex High). After this, a
   // deliberate 80 sticks forever.
   cfg.autoResumeCapMigrated = true;
-  if (cfg.autoResume?.skipOversizedMB === 80) {
+  // Coerced, not strict. A hand-edited config can hold the string "80", and a
+  // strict check would miss it while still burning the one-time marker, pinning
+  // that install at 80MB forever (Codex Medium).
+  if (Number(cfg.autoResume?.skipOversizedMB) === 80) {
     cfg.autoResume.skipOversizedMB = DEFAULT_CONFIG.autoResume.skipOversizedMB;
     console.log(`[config-manager] auto-resume cap 80MB -> ${DEFAULT_CONFIG.autoResume.skipOversizedMB}MB (stale default, one time)`);
   }
@@ -709,11 +716,49 @@ export function getImessageBridge() {
 }
 
 /**
+ * Coerce + clamp autoResume values to safe ranges. Shared by the getter and the
+ * writer: sanitizing only on WRITE left a hand-edited or legacy config.json
+ * feeding raw values straight to consumers. A string `staggerMs` of "50" used
+ * to be harmless because the old caller did `i * cfg.staggerMs`, which coerces;
+ * the size-scaled stagger accumulates with `+=`, which CONCATENATES, so the
+ * delays became "050100" and Node clamped the overflowed timeout to ~1ms,
+ * firing resumes out of order and all at once (Codex Medium).
+ */
+// `!!"false"` is true, so a hand-edited or legacy config storing the STRING
+// "false" would silently turn a disabled setting back on (Codex Medium).
+function toBool(value, fallback) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase();
+    if (s === 'false' || s === '0' || s === 'no' || s === '') return false;
+    if (s === 'true' || s === '1' || s === 'yes') return true;
+    return fallback;
+  }
+  return fallback;
+}
+
+function sanitizeAutoResume(raw) {
+  const out = { ...DEFAULT_CONFIG.autoResume, ...(raw && typeof raw === 'object' ? raw : {}) };
+  out.enabled = toBool(out.enabled, DEFAULT_CONFIG.autoResume.enabled);
+  out.cancelOnUserInput = toBool(out.cancelOnUserInput, DEFAULT_CONFIG.autoResume.cancelOnUserInput);
+  const stagger = Number(out.staggerMs);
+  out.staggerMs = Number.isFinite(stagger)
+    ? Math.max(10, Math.min(2000, stagger))
+    : DEFAULT_CONFIG.autoResume.staggerMs;
+  const cap = Number(out.skipOversizedMB);
+  out.skipOversizedMB = Number.isFinite(cap)
+    ? Math.max(1, Math.min(8000, cap))
+    : DEFAULT_CONFIG.autoResume.skipOversizedMB;
+  return out;
+}
+
+/**
  * Get autoResume config (the v1.0.30 staggered re-engage-on-launch feature).
+ * Always returns numbers for the numeric fields, whatever is on disk.
  */
 export function getAutoResume() {
-  const config = loadConfig();
-  return { ...DEFAULT_CONFIG.autoResume, ...(config.autoResume || {}) };
+  return sanitizeAutoResume(loadConfig().autoResume);
 }
 
 /**
@@ -727,20 +772,11 @@ export function updateAutoResume(updates) {
   for (const [key, value] of Object.entries(updates)) {
     if (!UNSAFE_KEYS.has(key)) sanitized[key] = value;
   }
-  // Coerce + clamp to safe ranges so a bad UI write can't make the queue toxic.
-  if ('enabled' in sanitized) sanitized.enabled = !!sanitized.enabled;
-  if ('staggerMs' in sanitized) {
-    const n = Number(sanitized.staggerMs);
-    sanitized.staggerMs = Number.isFinite(n) ? Math.max(10, Math.min(2000, n)) : 50;
-  }
-  if ('skipOversizedMB' in sanitized) {
-    const n = Number(sanitized.skipOversizedMB);
-    // Ceiling was 500, below real transcripts on this machine (725MB), so the
-    // setting could not even be raised past the problem.
-    sanitized.skipOversizedMB = Number.isFinite(n) ? Math.max(1, Math.min(8000, n)) : 4000;
-  }
-  if ('cancelOnUserInput' in sanitized) sanitized.cancelOnUserInput = !!sanitized.cancelOnUserInput;
-  config.autoResume = { ...DEFAULT_CONFIG.autoResume, ...(config.autoResume || {}), ...sanitized };
+  // One sanitizer for the write path and the read path, so a bad UI write and a
+  // hand-edited config.json are clamped identically. The skipOversizedMB
+  // ceiling was 500, below real transcripts on this machine (725MB), so the
+  // setting could not even be raised past the problem.
+  config.autoResume = sanitizeAutoResume({ ...(config.autoResume || {}), ...sanitized });
   saveConfig(config);
   return config.autoResume;
 }
