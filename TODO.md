@@ -10,11 +10,18 @@ the version or branch that shipped them. Sam triggers releases.
       16+ hours later. All five OK past the 16h mark = the invalid_rapt
       loop is closed for good; any DEAD account means a scope in the
       standard set still triggers session control and needs hunting.
-- [ ] Multi PRIMARY window per project (Brett, Asana 1217283122193749):
-      openProjectWindow focuses the existing window and lastOpenProjects
-      dedupes by path, so a project can only ever have one main window plus
-      tear-offs. Needs a real "New Window" feature if Brett wants two
-      independent primaries. Sized only after he confirms how he made his.
+- [ ] TRUE multiple primary windows per project (Brett, Asana 1217283122193749).
+      Diagnosed 8/24: openProjectWindow FOCUSES the existing window (never
+      makes a 2nd), primary tabs live in ONE config.projects[path].tabs
+      bucket, and restore dedupes lastOpenProjects by path. So a 2nd primary
+      window is impossible today and could not survive restart if it were.
+      Real fix = a "New Window" action + per-window tab buckets keyed by a
+      stable windowKey + restore reopening N windows per project. Sizable
+      schema change to the daily driver: do it as its OWN release after the
+      crash fix is out and proven, not bundled. Tear-off windows already
+      restore (their own per-tab buckets); if Brett's "two windows" are a
+      primary + tear-off, that path works and any restore flakiness there
+      should show in the new error.log.
 - [ ] Exclude headless `claude -p` transcripts (SamKnows.app, every ~40s)
       from continued-session resolution: accepted residual documented at
       resolveContinuedSessionId. Needs transcript-content inspection to spot
@@ -31,6 +38,13 @@ the version or branch that shipped them. Sam triggers releases.
       suspect a commit-phase exception around session relink and start here.
 
 ## Staged on main (unreleased, next ship = v1.0.65)
+
+- [x] Mobile board shows ALL tabs (Sam 8/24: "doesnt work with the mobile
+      dobius for all the tabs only some"). Idle project groups used to
+      auto-collapse and hide their tabs behind a header; on an account with
+      many idle tabs that read as missing. Groups are expanded by default
+      now; manual per-group collapse still works. Live-verified: 3 idle
+      tabs across 2 projects all visible with no tapping.
 
 - [x] Fixed the every-~2h whole-Mac crash (Sam 8/24 + crash logs: 23 node
       FatalProcessOutOfMemory aborts in 7 days). Root cause: the Voice

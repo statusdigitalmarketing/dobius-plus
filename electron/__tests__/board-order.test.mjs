@@ -62,20 +62,18 @@ assert.equal(summaryLabel(groupSummary([])), '');
 assert.equal(isGroupCollapsed('/p', [T('a', 'done')]), false);
 ok('done tabs are counted, labelled, and keep their group open');
 
-// 7. Auto-collapse: a project with nothing active hides by default.
+// 7. v1.0.65: groups are EXPANDED by default so every tab shows; an all-idle
+// group no longer auto-hides (Sam: "for all the tabs only some").
 const dormant = [T('a', 'idle'), T('b', 'idle')];
 const busy = [T('a', 'idle'), T('b', 'working')];
-assert.equal(isGroupCollapsed('/p', dormant), true);
+assert.equal(isGroupCollapsed('/p', dormant), false);
 assert.equal(isGroupCollapsed('/p', busy), false);
-ok('dormant projects collapse, active ones stay open');
+ok('all groups show by default, idle included');
 
-// 8. An EXPLICIT choice always wins, both ways. Without tracking expansion
-// separately, auto-collapse would re-hide a dormant group the moment the user
-// opened it, which is worse than never auto-collapsing at all.
-assert.equal(isGroupCollapsed('/p', dormant, { expanded: ['/p'] }), false);
-assert.equal(isGroupCollapsed('/p', busy, { collapsed: ['/p'] }), true);
-// Collapse wins if somehow both are recorded: hiding is the recoverable error.
+// 8. Only an EXPLICIT collapse hides a group; collapse wins if both recorded.
+assert.equal(isGroupCollapsed('/p', dormant, { collapsed: ['/p'] }), true);
+assert.equal(isGroupCollapsed('/p', busy, { expanded: ['/p'] }), false);
 assert.equal(isGroupCollapsed('/p', busy, { collapsed: ['/p'], expanded: ['/p'] }), true);
-ok('explicit expand/collapse overrides the default in both directions');
+ok('explicit collapse hides; collapse wins over expand');
 
 console.log(`board-order: ${pass} groups pass`);

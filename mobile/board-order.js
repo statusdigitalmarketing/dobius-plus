@@ -63,16 +63,18 @@ export function summaryLabel(summary) {
 }
 
 /**
- * Should this project's tabs be hidden by default?
+ * Should this project's tabs be hidden?
  *
- * A project with nothing active is noise until asked for, but an EXPLICIT
- * choice always wins in both directions: collapsing an active group stays
- * collapsed, and expanding a dormant one stays expanded. Without tracking
- * expansion separately from collapse, auto-collapse would silently re-hide a
- * group the user just opened, which is worse than never auto-collapsing.
+ * v1.0.65 (Sam 8/24: "doesnt work with the mobile dobius for all the tabs
+ * only some"): groups are EXPANDED by default now, so every tab is visible.
+ * The old rule auto-collapsed any all-idle group, which on an account with
+ * many idle tabs hid most of them behind headers and read as "missing." A
+ * group is hidden only when the user has explicitly collapsed it; collapse
+ * still wins over expand if both are somehow recorded (hiding is the
+ * recoverable error). `terms` is retained for signature stability.
  */
 export function isGroupCollapsed(projectPath, terms, { collapsed = [], expanded = [] } = {}) {
+  void terms;
   if (collapsed.includes(projectPath)) return true;
-  if (expanded.includes(projectPath)) return false;
-  return groupSummary(terms).active === 0;
+  return false;
 }
