@@ -126,3 +126,24 @@
 - **DETECTION**: `grep -n "renameSync\|symlinkSync\|rmdirSync\|rmSync" electron/*.js`
   then confirm each call site resolved its paths with `realpathSync` first.
 
+### [Process] - 2026-09-03
+- **MISTAKE**: Deleted a live session's transcript. After creating a test fork
+  with `claude --resume <id> --fork-session`, I identified "the fork" as
+  `ls -t *.jsonl | head -1` and deleted it. `ls -t` sorts by mtime, and the
+  CURRENTLY RUNNING session is always the most recently written file, so the
+  newest entry was the live session, not the fork. About 960KB of that
+  session's on-disk history was destroyed. Not recoverable: Claude Code appends
+  by path (it recreated an empty file immediately), no process held the deleted
+  inode, there is no Time Machine destination, and the only APFS local
+  snapshots are `com.apple.os.update-*`.
+- **FIX**: Never identify a file to delete by recency. Identify it by CONTENT.
+  For a fork, grep for the unique marker string the test prompt asked the model
+  to emit, and explicitly exclude the source session id:
+  `grep -l "MY_TEST_MARKER" *.jsonl` then skip the original. Also check
+  `$CLAUDE_CODE_SESSION_ID` before deleting anything under `~/.claude/projects`,
+  since that is the session doing the deleting.
+- **CONTEXT**: Applies to any cleanup of generated artifacts while the
+  generator is still running. The live process is always the freshest file.
+- **DETECTION**: `grep -n "ls -t\|sort -rn\|head -1" ` in any script that
+  then calls `rm`. Deleting whatever sorted first is the anti-pattern.
+
