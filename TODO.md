@@ -5,6 +5,35 @@ the version or branch that shipped them. Sam triggers releases.
 
 ## Queue
 
+- [x] SESSION RESTORE BROKEN (Sam, 9/3: "no conversation found with any of the
+      session ids"): v1.0.65 made the account Switch pointer real, so every
+      terminal launched with CLAUDE_CONFIG_DIR=<profile>. Claude Code scopes
+      transcripts to the config dir, so a stale pointer from the cosmetic-Switch
+      era went LIVE on update and hid all 3.9GB of history, while data-utils
+      reads ~/.claude unconditionally and kept LISTING those sessions. Fixed in
+      v1.0.66: an account is a LOGIN, not a machine. account-profile-share.js
+      symlinks projects, history.jsonl, settings.json, CLAUDE.md, skills,
+      plugins, commands, agents, plans and stats-cache.json from each profile
+      into ~/.claude; only .claude.json stays per-profile. Applied at boot, on
+      account create, on Switch, and at the terminal spawn choke point (the only
+      place CLAUDE_CONFIG_DIR is decided). Non-destructive: symlink + move only,
+      all-or-nothing merge, never deletes. scripts/repair-account-profiles.mjs
+      repairs a machine without waiting for the update. 5 Codex rounds, every
+      one found a real High (self-referential symlink/ELOOP over the whole
+      store, .pre-share overwrite, live-writer yank, per-project override gap,
+      partial-merge split tree), final clean. Verified live: the exact session
+      id that failed now returns RESUME_OK under the account profile.
+- [x] Auto-resume 80MB cap was measuring the wrong thing (v1.0.66). It skipped
+      10 of 24 tracked sessions and produced the "transcript too big" message on
+      exactly the sessions worth restoring. Measured instead of assumed: 106MB
+      resumes in 19s, 725MB in 10s (the CLI reconstructs from the tail). Cap now
+      4000MB with a one-time coerced migration off the stale 80, clamp ceiling
+      500 -> 8000, and the stagger scales with transcript size so the raise does
+      not fire two dozen heavy resumes at once. Codex found 6 in this path
+      (clobbered deliberate value, concurrency regression, string staggerMs
+      concatenating under +=, strict ===80 missing "80" while burning the
+      one-time marker, truthy marker, !!"false"), all fixed, final clean.
+
 - [x] RAPT fix verified (9/3): Sam reconnected all accounts; a mint check
       shows all 7 OK and NONE carry GCP scopes, so they are permanent. The
       invalid_rapt every-16h loop is closed.
