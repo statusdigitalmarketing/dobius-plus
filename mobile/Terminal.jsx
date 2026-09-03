@@ -17,16 +17,27 @@ function lastSeg(p) {
  * grouped by their cwd instead.
  */
 function parseTerminal(t) {
+  // Prefer the SERVER's parsed projectPath/projectName: it already splits the
+  // extra-window `~<wk>` marker so all windows of a project group under the
+  // real folder (v1.0.66). Only fall back to id parsing for old servers.
+  if (t.projectPath && t.projectPath !== 'mobile') {
+    return {
+      ...t,
+      projectName: t.projectName || lastSeg(t.projectPath),
+      tabLabel: t.label || 'Tab',
+    };
+  }
   const m = t.id.match(/^term-(.+)-(\d+)$/);
   if (m && m[1] !== 'mobile') {
-    const projectPath = m[1];
+    // Legacy fallback: right-anchor on the fixed `~w-<8>` window marker so a
+    // `~` inside a real folder name stays part of the project path.
+    const extra = t.id.match(/^term-(.+)~w-[a-z0-9]{8}-(\d+)$/);
+    const projectPath = extra ? extra[1] : m[1];
     return {
       ...t,
       projectPath,
       projectName: lastSeg(projectPath),
-      // Server sends the user's RENAMED desktop label ("Email"); the id-derived
-      // "Tab N" is only the fallback (Codex: this parser used to clobber it).
-      tabLabel: t.label || `Tab ${m[2]}`,
+      tabLabel: t.label || `Tab ${extra ? extra[2] : m[2]}`,
     };
   }
   const projectPath = t.cwd || 'mobile';

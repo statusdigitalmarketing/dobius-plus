@@ -12,6 +12,10 @@ export default function App() {
   const tearOffLabel = params.get('tearOffLabel') || undefined;
   // Restored tear-off (launch-time recreate): create a fresh PTY, don't claim.
   const tearOffRestore = params.get('tearOffRestore') === '1';
+  // windowKey (v1.0.66): only present for EXTRA primary windows on a project.
+  // Absent for the first window and for tear-offs, so their code paths are
+  // unchanged.
+  const windowKey = params.get('windowKey') || undefined;
   const isVisual = params.get('visual') === '1';
 
   // Handle file drag-and-drop globally.
@@ -73,7 +77,7 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      <ProjectView projectPath={projectPath} tearOffTabId={tearOffTabId} tearOffLabel={tearOffLabel} tearOffRestore={tearOffRestore} />
+      <ProjectView projectPath={projectPath} tearOffTabId={tearOffTabId} tearOffLabel={tearOffLabel} tearOffRestore={tearOffRestore} windowKey={windowKey} />
       <UpdateBanner />
     </ErrorBoundary>
   );

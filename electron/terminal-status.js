@@ -1,3 +1,4 @@
+import { parseTabId } from './tab-id-util.js';
 // Main-process terminal STATUS authority (v1.0.43, remote-control Phase 1).
 //
 // Today the tab status (working / done / needs-input) is derived in the
@@ -34,10 +35,12 @@ const live = new Map();
 const recentExits = [];
 
 function projectFromId(id, cwd) {
-  // Desktop ids are `term-<projectPath>-<n>`; phone ids are `term-mobile-<ts>`.
-  const m = typeof id === 'string' && id.match(/^term-(.+)-(\d+)$/);
-  if (m && m[1] !== 'mobile') {
-    const p = m[1];
+  // Desktop ids are `term-<projectPath>-<n>` or, for extra windows,
+  // `term-<path>~w-<8>-<n>`; phone ids are `term-mobile-<ts>`. Use the shared
+  // parser so the extra-window marker is stripped (v1.0.66).
+  const parsed = parseTabId(id);
+  if (parsed && parsed.projectPath !== 'mobile') {
+    const p = parsed.projectPath;
     return { projectPath: p, projectName: p.split('/').filter(Boolean).pop() || p };
   }
   const p = cwd || 'mobile';

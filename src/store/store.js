@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { THEMES, applyTheme } from '../lib/themes';
 import { groupByStage } from '../lib/stages';
+import { makeTabId } from '../lib/tab-id';
+
 
 // Drop any grid entries whose tab is no longer present. Returns null when the
 // grid would be left empty (i.e. grid mode turns off). gridSlots is a dense,
@@ -55,6 +57,12 @@ export const useStore = create((set, get) => ({
   terminalTabs: [],
   activeTabId: null,
   tabCounter: 0,
+  // windowKey (v1.0.66): identifies an EXTRA primary window so its tab ids are
+  // globally unique across windows of the same project. 'main'/null = the first
+  // window, which keeps the legacy `term-<path>-<n>` id (zero migration). Set
+  // once by ProjectView from the URL. See tabId() below.
+  windowKey: null,
+  setWindowKey: (windowKey) => set({ windowKey: windowKey || null }),
   splitTabId: null,
   splitRatio: 0.5,
 
@@ -123,7 +131,7 @@ export const useStore = create((set, get) => ({
   addTab: (projectPath) => {
     const state = get();
     const counter = state.tabCounter + 1;
-    const id = projectPath ? `term-${projectPath}-${counter}` : `term-main-${counter}`;
+    const id = makeTabId(projectPath, counter, state.windowKey);
     // kind:'terminal' is the default and (load-bearing) — every existing
     // tab persisted before v1.0.25 has no kind field, so the dispatcher in
     // ProjectView treats undefined as 'terminal' (backwards compatible).
@@ -142,7 +150,7 @@ export const useStore = create((set, get) => ({
   addBrowserTab: (projectPath, url) => {
     const state = get();
     const counter = state.tabCounter + 1;
-    const id = projectPath ? `term-${projectPath}-${counter}` : `term-main-${counter}`;
+    const id = makeTabId(projectPath, counter, state.windowKey);
     // Scheme guard: only http/https survive. javascript:/file:/data: would
     // otherwise be passed straight to <webview src>. PR#3 r1 LOW.
     const candidate = (typeof url === 'string' && url.trim()) ? url.trim() : '';
@@ -503,7 +511,7 @@ export const useStore = create((set, get) => ({
     // Persist to config
     const projectPath = s.currentProjectPath;
     if (projectPath && window.electronAPI?.terminalSaveClosedTabs) {
-      window.electronAPI.terminalSaveClosedTabs(projectPath, stack);
+      window.electronAPI.terminalSaveClosedTabs(projectPath, stack, s.windowKey || undefined);
     }
     return { recentlyClosedTabs: stack };
   }),
@@ -517,7 +525,7 @@ export const useStore = create((set, get) => ({
     const closed = state.recentlyClosedTabs[idx];
     const rest = state.recentlyClosedTabs.filter((_, i) => i !== idx);
     const counter = state.tabCounter + 1;
-    const id = closed.projectPath ? `term-${closed.projectPath}-${counter}` : `term-main-${counter}`;
+    const id = makeTabId(closed.projectPath, counter, state.windowKey);
     // Restore kind/url too. If the closed tab was a browser, reopening as a
     // terminal (which is what dropping these fields did) would be a clear
     // regression. Default to terminal when kind is missing (legacy pre-v1.0.25
@@ -539,7 +547,7 @@ export const useStore = create((set, get) => ({
     // Persist updated closed tabs list
     const projectPath = state.currentProjectPath;
     if (projectPath && window.electronAPI?.terminalSaveClosedTabs) {
-      window.electronAPI.terminalSaveClosedTabs(projectPath, rest);
+      window.electronAPI.terminalSaveClosedTabs(projectPath, rest, state.windowKey || undefined);
     }
     // Return the new tab + saved scrollback so the caller can restore it
     return { tab, scrollback: closed.scrollback };

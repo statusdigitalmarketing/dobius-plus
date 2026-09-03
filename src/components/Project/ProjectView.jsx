@@ -17,7 +17,7 @@ import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 
-export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, tearOffRestore = false }) {
+export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, tearOffRestore = false, windowKey = null }) {
   const activeView = useStore((s) => s.activeView);
   const setActiveView = useStore((s) => s.setActiveView);
   const sidebarVisible = useStore((s) => s.sidebarVisible);
@@ -39,6 +39,11 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
   const setActiveTab = useStore((s) => s.setActiveTab);
   const initTabs = useStore((s) => s.initTabs);
   const initClosedTabs = useStore((s) => s.initClosedTabs);
+  const setWindowKey = useStore((s) => s.setWindowKey);
+  // Extra primary window (v1.0.66): its tabs live in their own bucket, keyed by
+  // windowKey, and its tab ids are windowKey-scoped. isExtraWindow gates the
+  // few places that must diverge from the single-window path.
+  const isExtraWindow = !tearOffTabId && !!windowKey && windowKey !== 'main';
   // Split view + terminal grid state and actions
   const splitTabId = useStore((s) => s.splitTabId);
   const clearSplitTab = useStore((s) => s.clearSplitTab);
@@ -182,6 +187,36 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         const counter = (config?.tabCounter || 1) + Math.floor(Date.now() / 1000) % 10000;
         initTabs([tab], counter);
         setTabsInitialized(true);
+      });
+      return;
+    }
+
+    // Tell the store which window this is BEFORE any tab is created, so new
+    // tab ids are windowKey-scoped for an extra window (v1.0.66).
+    setWindowKey(isExtraWindow ? windowKey : null);
+
+    // EXTRA primary window: its tabs live in config.primaryWindows[windowKey],
+    // not config.projects[path].tabs, so N windows on one folder never clobber
+    // each other. Load from that bucket; start a fresh tab if empty. The theme
+    // still comes from the shared per-project config.
+    if (isExtraWindow && projectPath) {
+      window.electronAPI.configGetProject(projectPath).then(async (config) => {
+        if (config && typeof config.themeIndex === 'number') setThemeIndex(config.themeIndex);
+        const saved = await window.electronAPI.terminalLoadTabs?.(projectPath, windowKey).catch(() => null);
+        if (saved?.tabs?.length > 0 && saved.tabCounter > 0) {
+          initTabs(saved.tabs, saved.tabCounter);
+          if (typeof saved.activeTabId === 'string' && saved.tabs.some((t) => t.id === saved.activeTabId)) {
+            setActiveTab(saved.activeTabId);
+          }
+        } else {
+          addTab(projectPath);
+        }
+        setTabsInitialized(true);
+      });
+      // Extra windows load THEIR OWN recently-closed list (v1.0.66) so
+      // Cmd+Shift+T restores tabs closed in this window, not another's.
+      window.electronAPI.terminalLoadClosedTabs?.(projectPath, windowKey).then((closed) => {
+        if (closed?.length > 0) initClosedTabs(closed);
       });
       return;
     }
@@ -370,8 +405,14 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       return;
     }
     if (!window.electronAPI?.terminalSaveTabs) return;
-    window.electronAPI.terminalSaveTabs(projectPath, tabs, useStore.getState().tabCounter);
-  }, [tabs, tabsInitialized, projectPath, tearOffTabId]);
+    // Extra window: 4th arg windowKey routes to config.primaryWindows[key].
+    // First window: omitted, unchanged legacy write.
+    window.electronAPI.terminalSaveTabs(
+      projectPath, tabs, useStore.getState().tabCounter,
+      isExtraWindow ? windowKey : undefined,
+      isExtraWindow ? useStore.getState().activeTabId : undefined,
+    );
+  }, [tabs, tabsInitialized, projectPath, tearOffTabId, isExtraWindow, windowKey]);
 
   // Persist active tab id so quit-on-tab-4 returns to tab-4 instead of tab-1.
   // configSetProject is merge-only so this won't disturb other project state.
@@ -386,9 +427,16 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       }
       return;
     }
+    if (isExtraWindow) {
+      // Extra window persists its active tab into its own bucket, alongside its
+      // tabs, so a restore lands on the right tab (v1.0.66).
+      const s = useStore.getState();
+      window.electronAPI?.terminalSaveTabs?.(projectPath, s.terminalTabs, s.tabCounter, windowKey, activeTabId);
+      return;
+    }
     if (!window.electronAPI?.configSetProject) return;
     window.electronAPI.configSetProject(projectPath, { activeTabId });
-  }, [activeTabId, tabsInitialized, projectPath, tearOffTabId]);
+  }, [activeTabId, tabsInitialized, projectPath, tearOffTabId, isExtraWindow, windowKey]);
 
   // Persist grid layout per project (merged into project config, skip tear-offs).
   // Uses the gridPersistArmed ref pattern so the FIRST post-hydration call is
@@ -723,6 +771,14 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         } else {
           // In dashboard, switch to terminal
           setActiveView('terminal');
+        }
+      } else if (e.key === 'n' && e.shiftKey) {
+        // Cmd+Shift+N = open ANOTHER primary window on this same project folder
+        // (v1.0.66, Brett: ~4 windows on one project). Each gets its own tabs
+        // and survives restart. Only from a real project window.
+        if (projectPath) {
+          e.preventDefault();
+          window.electronAPI?.windowOpenNew?.(projectPath);
         }
       } else if (e.key === 'T' && e.shiftKey) {
         // Cmd+Shift+T = reopen last closed tab (in terminal view) or toggle to terminal (in dashboard)

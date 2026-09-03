@@ -138,6 +138,21 @@ function pruneOrphanTerminalStates(cfg) {
  * lastTearOffs (the only restore path) means nothing will ever read the entry
  * again. Called once on config load, next to the terminalStates prune.
  */
+function pruneOrphanPrimaryWindows(cfg) {
+  if (!cfg || typeof cfg !== 'object') return;
+  const bucket = cfg.primaryWindows;
+  if (!bucket || typeof bucket !== 'object') return;
+  const live = new Set((Array.isArray(cfg.lastPrimaryWindows) ? cfg.lastPrimaryWindows : [])
+    .map((e) => e?.windowKey).filter(Boolean));
+  let pruned = 0;
+  for (const key of Object.keys(bucket)) {
+    if (!live.has(key)) { delete bucket[key]; pruned += 1; }
+  }
+  if (pruned > 0) {
+    console.log(`[config-manager] pruned ${pruned} orphaned primaryWindows entries`);
+  }
+}
+
 function pruneOrphanTearOffWindows(cfg) {
   if (!cfg || typeof cfg !== 'object') return;
   const bucket = cfg.tearOffWindows;
@@ -245,8 +260,16 @@ export async function loadTerminalScrollback(projectPath, tabId) {
   // must NOT load the old tab's output into a blank terminal. Restored tabs are
   // already in configCache.projects[path].tabs, so they still load. Audit Medium.
   if (!configCache) loadConfig();
-  const tabs = configCache?.projects?.[projectPath]?.tabs;
-  if (!Array.isArray(tabs) || !tabs.some((t) => t && t.id === tabId)) return null;
+  // The tab may belong to the project's first window (config.projects[path].tabs)
+  // OR to any EXTRA primary window on the same project (config.primaryWindows[*]
+  // whose projectPath matches), v1.0.66. Accept either, else an extra window's
+  // scrollback would never load back.
+  const inFirst = Array.isArray(configCache?.projects?.[projectPath]?.tabs)
+    && configCache.projects[projectPath].tabs.some((t) => t && t.id === tabId);
+  const inExtra = !inFirst && configCache?.primaryWindows
+    && Object.values(configCache.primaryWindows).some((w) => w && w.projectPath === projectPath
+      && Array.isArray(w.tabs) && w.tabs.some((t) => t && t.id === tabId));
+  if (!inFirst && !inExtra) return null;
   try {
     const content = await fsp.readFile(getScrollbackPath(projectPath, tabId), 'utf8');
     return JSON.parse(content);
@@ -424,6 +447,7 @@ export function loadConfig() {
       configCache = { ...DEFAULT_CONFIG, ...loaded };
       pruneOrphanTerminalStates(configCache);
       pruneOrphanTearOffWindows(configCache);
+      pruneOrphanPrimaryWindows(configCache);
       const migratedScrollback = migrateScrollbackOutOfConfig(configCache);
       const migrated = migrateCheckpointsAndClosedTabs(configCache) || migratedScrollback;
       if (migrated) {
@@ -511,14 +535,26 @@ export function getProjectConfig(projectPath) {
  */
 export function getAllProjectsWithTabs() {
   const config = loadConfig();
-  const out = [];
+  const byPath = new Map();
   for (const [path, proj] of Object.entries(config.projects || {})) {
     if (UNSAFE_KEYS.has(path)) continue;
     const tabs = Array.isArray(proj?.tabs) ? proj.tabs : [];
     if (tabs.length === 0) continue;
-    out.push({ path, tabs, tabCounter: proj.tabCounter || 0 });
+    byPath.set(path, { path, tabs: [...tabs], tabCounter: proj.tabCounter || 0 });
   }
-  return out;
+  // Fold EXTRA primary windows' tabs into their project's entry (v1.0.66) so
+  // the cross-window "tabs by project" sidebar lists every window's tabs and
+  // configTabLabels picks up renamed extra-window tabs. Tab ids are globally
+  // unique, so concatenation never duplicates.
+  for (const w of Object.values(config.primaryWindows || {})) {
+    if (!w || typeof w.projectPath !== 'string' || !Array.isArray(w.tabs) || w.tabs.length === 0) continue;
+    const entry = byPath.get(w.projectPath)
+      || { path: w.projectPath, tabs: [], tabCounter: 0 };
+    entry.tabs = entry.tabs.concat(w.tabs);
+    entry.tabCounter = Math.max(entry.tabCounter, w.tabCounter || 0);
+    byPath.set(w.projectPath, entry);
+  }
+  return [...byPath.values()];
 }
 
 /**
@@ -567,6 +603,50 @@ export function setTearOffWindowState(tearOffTabId, state) {
     activeTabId: typeof state.activeTabId === 'string' ? state.activeTabId : null,
   };
   saveConfig(config);
+}
+
+/**
+ * Per-EXTRA-primary-window tab state (v1.0.66), keyed by a stable windowKey.
+ * A project's FIRST primary window keeps using config.projects[path].tabs
+ * (unchanged, zero migration). Additional primary windows on the SAME project
+ * folder (Brett runs ~4) each get their own bucket here, exactly like a
+ * tear-off window, so their tab sets never collide with the first window's or
+ * each other's and all survive restart/update. projectPath is stored so
+ * restore knows which folder to reopen the window on.
+ * Shape: { projectPath, tabs, tabCounter, activeTabId, closedTabs, bounds }.
+ */
+export function getPrimaryWindowState(windowKey) {
+  if (!windowKey || UNSAFE_KEYS.has(windowKey)) return null;
+  const config = loadConfig();
+  const entry = config.primaryWindows?.[windowKey];
+  return (entry && typeof entry === 'object') ? entry : null;
+}
+
+export function setPrimaryWindowState(windowKey, state) {
+  if (!windowKey || UNSAFE_KEYS.has(windowKey)) return;
+  if (!state || typeof state !== 'object') return;
+  const config = loadConfig();
+  if (!config.primaryWindows || typeof config.primaryWindows !== 'object') config.primaryWindows = {};
+  const prev = config.primaryWindows[windowKey] || {};
+  // Merge: saveTabs and saveClosedTabs and bounds land in separate calls.
+  const next = { ...prev };
+  if (typeof state.projectPath === 'string') next.projectPath = state.projectPath;
+  if (Array.isArray(state.tabs)) next.tabs = state.tabs;
+  if (typeof state.tabCounter === 'number') next.tabCounter = state.tabCounter;
+  if (typeof state.activeTabId === 'string' || state.activeTabId === null) next.activeTabId = state.activeTabId;
+  if (Array.isArray(state.closedTabs)) next.closedTabs = state.closedTabs;
+  if (state.bounds && typeof state.bounds === 'object') next.bounds = state.bounds;
+  config.primaryWindows[windowKey] = next;
+  saveConfig(config);
+}
+
+export function deletePrimaryWindowState(windowKey) {
+  if (!windowKey || UNSAFE_KEYS.has(windowKey)) return;
+  const config = loadConfig();
+  if (config.primaryWindows && config.primaryWindows[windowKey]) {
+    delete config.primaryWindows[windowKey];
+    saveConfig(config);
+  }
 }
 
 /**

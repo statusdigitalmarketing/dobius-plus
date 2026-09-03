@@ -47,7 +47,6 @@ let cachedSystemPrompt = '';
 let recycleTimer = null;
 let currentSub = null;
 let respawnTimes = [];
-let stoppedForCrashLoop = false;
 // Generation token: bumped by stopVoiceConductor and recycle. Every DELAYED
 // callback (respawn setTimeout, the 800ms launch write, the recycle respawn)
 // captures the generation it was scheduled in and no-ops if the generation
@@ -109,7 +108,6 @@ function spawnConductor() {
       respawnTimes = respawnTimes.filter((t) => now - t < RESPAWN_WINDOW_MS);
       respawnTimes.push(now);
       if (isCrashLooping(respawnTimes, now)) {
-        stoppedForCrashLoop = true;
         console.warn(`[voice-conductor] ${MAX_RESPAWNS} exits in ${RESPAWN_WINDOW_MS / 60000}min; stopping respawns until the next recycle`);
         return;
       }
@@ -146,7 +144,6 @@ function recycleConductor() {
   if (!enabled) return;
   console.log('[voice-conductor] scheduled recycle (heap hygiene)');
   respawnTimes = [];
-  stoppedForCrashLoop = false;
   clearCurrentSub(); // do NOT let the exit handler respawn; we respawn ourselves
   generation += 1; // invalidate any in-flight respawn/launch timers
   const gen = generation;
@@ -177,7 +174,6 @@ export function stopVoiceConductor() {
   if (recycleTimer) { clearInterval(recycleTimer); recycleTimer = null; }
   clearCurrentSub();
   respawnTimes = [];
-  stoppedForCrashLoop = false;
   try { killTerminal(CONDUCTOR_TAB_ID); } catch { /* may already be gone */ }
 }
 

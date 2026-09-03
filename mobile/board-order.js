@@ -73,7 +73,7 @@ export function summaryLabel(summary) {
  * still wins over expand if both are somehow recorded (hiding is the
  * recoverable error). `terms` is retained for signature stability.
  */
-export function isGroupCollapsed(projectPath, terms, { collapsed = [], expanded = [] } = {}) {
+export function isGroupCollapsed(projectPath, terms, { collapsed = [] } = {}) {
   void terms;
   if (collapsed.includes(projectPath)) return true;
   return false;

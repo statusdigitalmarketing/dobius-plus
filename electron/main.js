@@ -6,6 +6,7 @@ import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { getQuittingForUpdate, setQuitting, getQuitting } from './quit-state.js';
+import { projectPathFromTabId } from './tab-id-util.js';
 import { resolveTerminalAccount, claudeEnvForAccount } from './claude-account-env.js';
 import { installErrorLog, logLine, errorLogPath } from './error-log.js';
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
@@ -51,11 +52,12 @@ import {
   addManualProject, setProjectDisplayName, addHiddenProject,
   getAccounts, saveAccount, deleteAccount, getProjectAccount, setProjectAccount,
   getTearOffWindowState, setTearOffWindowState,
+  getPrimaryWindowState, setPrimaryWindowState,
 } from './config-manager.js';
 import {
   openProjectWindow, openTornOffWindow, getOpenProjects, getOpenProjectsForRestore, closeProjectWindow, closeAllProjectWindows,
-  getOpenTearOffsForRestore, restoreTornOffWindow, setRestoring, persistOpenProjectsNow,
-  markTearOffConfirmed, computeRestoreLists, focusTearOffWindowForTab, focusPrimaryWindowForProject,
+  getOpenTearOffsForRestore, getOpenPrimaryWindowsForRestore, restoreTornOffWindow, setRestoring, persistOpenProjectsNow,
+  markTearOffConfirmed, computeRestoreLists, focusTearOffWindowForTab, focusPrimaryWindowForProject, focusWindowForTab,
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
@@ -312,16 +314,14 @@ function setupTerminalHandlers() {
   const TAB_ID_RE = /^term-.+-\d+$/;
   ipcMain.handle('terminal:saveState', async (_event, id, state, _forceFlush) => {
     if (typeof id !== 'string' || !TAB_ID_RE.test(id)) return;
-    const match = id.match(/^term-(.+)-\d+$/);
-    const projectPath = match ? match[1] : null;
+    const projectPath = projectPathFromTabId(id);
     if (!projectPath) return;
     await saveTerminalScrollback(projectPath, id, state);
   });
 
   ipcMain.handle('terminal:loadState', async (_event, id) => {
     if (typeof id !== 'string' || !TAB_ID_RE.test(id)) return null;
-    const match = id.match(/^term-(.+)-\d+$/);
-    const projectPath = match ? match[1] : null;
+    const projectPath = projectPathFromTabId(id);
     if (!projectPath) return null;
     // Primary: per-tab file
     const fromFile = await loadTerminalScrollback(projectPath, id);
@@ -338,18 +338,43 @@ function setupTerminalHandlers() {
   });
 
   // Save/load tab metadata per project
-  ipcMain.handle('terminal:saveTabs', (_event, projectPath, tabs, counter) => {
+  // windowKey (v1.0.66): 'main'/absent = the project's first window, stored in
+  // config.projects[path] as before (unchanged path). Any other key = an extra
+  // primary window whose tabs live in its own config.primaryWindows[key]
+  // bucket, so N windows on one folder never clobber each other.
+  ipcMain.handle('terminal:saveTabs', (_event, projectPath, tabs, counter, windowKey, activeTabId) => {
     if (!projectPath) return;
-    setProjectConfig(projectPath, { tabs, tabCounter: counter });
+    if (windowKey && windowKey !== 'main') {
+      setPrimaryWindowState(windowKey, {
+        projectPath, tabs, tabCounter: counter,
+        activeTabId: typeof activeTabId === 'string' ? activeTabId : null,
+      });
+    } else {
+      setProjectConfig(projectPath, { tabs, tabCounter: counter });
+    }
   });
 
-  ipcMain.handle('terminal:loadTabs', (_event, projectPath) => {
+  ipcMain.handle('terminal:loadTabs', (_event, projectPath, windowKey) => {
     if (!projectPath) return null;
+    if (windowKey && windowKey !== 'main') {
+      const st = getPrimaryWindowState(windowKey);
+      if (st?.tabs?.length > 0) return { tabs: st.tabs, tabCounter: st.tabCounter || 0, activeTabId: st.activeTabId || null };
+      return null;
+    }
     const config = getProjectConfig(projectPath);
     if (config?.tabs?.length > 0) {
       return { tabs: config.tabs, tabCounter: config.tabCounter || 0 };
     }
     return null;
+  });
+
+  // Open ANOTHER primary window on a project folder (v1.0.66). Brett runs ~4
+  // windows on one project; this is the New Window action. projectPath comes
+  // from the requesting window's own project (renderer passes it).
+  ipcMain.handle('window:openNew', (_event, projectPath) => {
+    if (typeof projectPath !== 'string' || !projectPath) return { ok: false };
+    try { openProjectWindow(projectPath, { newWindow: true }); return { ok: true }; }
+    catch (err) { return { ok: false, error: err?.message || String(err) }; }
   });
 
   // Tear-off windows persist their tab set under config.tearOffWindows (keyed
@@ -368,7 +393,7 @@ function setupTerminalHandlers() {
   });
 
   // Save/load recently closed tabs per project (persisted across window sessions)
-  ipcMain.handle('terminal:saveClosedTabs', (_event, projectPath, closedTabs) => {
+  ipcMain.handle('terminal:saveClosedTabs', (_event, projectPath, closedTabs, windowKey) => {
     if (!projectPath || !Array.isArray(closedTabs)) return;
     // Keep max 10 closed tabs, strip scrollback over 200 lines to limit
     // config size (was 20 x 500: at ~200KB/project it was a top config.json
@@ -387,11 +412,21 @@ function setupTerminalHandlers() {
       if (typeof t.url === 'string' && /^https?:\/\//i.test(t.url)) out.url = t.url;
       return out;
     });
-    setProjectConfig(projectPath, { closedTabs: trimmed });
+    // Extra windows keep their OWN recently-closed list in their bucket, so
+    // Cmd+Shift+T in one window can't resurrect a tab closed in another and
+    // the first window's list isn't polluted (v1.0.66, Codex Medium).
+    if (windowKey && windowKey !== 'main') {
+      setPrimaryWindowState(windowKey, { projectPath, closedTabs: trimmed });
+    } else {
+      setProjectConfig(projectPath, { closedTabs: trimmed });
+    }
   });
 
-  ipcMain.handle('terminal:loadClosedTabs', (_event, projectPath) => {
+  ipcMain.handle('terminal:loadClosedTabs', (_event, projectPath, windowKey) => {
     if (!projectPath) return [];
+    if (windowKey && windowKey !== 'main') {
+      return getPrimaryWindowState(windowKey)?.closedTabs || [];
+    }
     const config = getProjectConfig(projectPath);
     return config?.closedTabs || [];
   });
@@ -456,6 +491,10 @@ function setupDataHandlers() {
   // a cross-window live session instead of resuming a duplicate. H3.
   ipcMain.handle('window:focusTabOwner', (_event, projectPath, tabId) => {
     if (typeof tabId === 'string' && focusTearOffWindowForTab(tabId)) return true;
+    // Reveal the exact primary window that owns this tab (v1.0.66): with N
+    // windows on one project, falling straight through to the first window
+    // landed the user in the wrong one (Codex Medium).
+    if (typeof tabId === 'string' && focusWindowForTab(tabId)) return true;
     if (typeof projectPath === 'string') return focusPrimaryWindowForProject(projectPath);
     return false;
   });
@@ -2457,7 +2496,21 @@ app.whenReady().then(() => {
   // mid-restore that snapshot is PARTIAL (only the windows opened so far), so
   // without this latch a crash between two window opens would persist a
   // truncated lastOpenProjects and drop the not-yet-reopened windows.
-  const willRestore = toRestore.length > 0 || tears.length > 0;
+  // Extra primary windows (v1.0.66) computed up here so the restore latch below
+  // accounts for an extra-only restore (e.g. the main window was closed but a
+  // second window on the same folder was left open). Opened further down,
+  // after tear-offs.
+  const savedExtras = Array.isArray(config.lastPrimaryWindows) ? config.lastPrimaryWindows : [];
+  const seenExtraKeys = new Set();
+  const extras = savedExtras.filter((e) => {
+    if (!e || typeof e.projectPath !== 'string' || !e.projectPath.startsWith('/')
+      || !fs.existsSync(e.projectPath) || typeof e.windowKey !== 'string'
+      || !e.windowKey || e.windowKey === 'main') return false;
+    if (seenExtraKeys.has(e.windowKey)) return false;
+    seenExtraKeys.add(e.windowKey);
+    return true;
+  });
+  const willRestore = toRestore.length > 0 || tears.length > 0 || extras.length > 0;
   if (willRestore) setRestoring(true);
   if (toRestore.length > 0) {
     const missing = savedProjects.length - toRestore.length;
@@ -2503,6 +2556,24 @@ app.whenReady().then(() => {
       }, base + i * 250);
     });
     restoreStaggerMs = base + (tears.length - 1) * 250;
+  }
+
+  // Reopen the EXTRA primary windows computed above (v1.0.66), after tear-offs,
+  // continuing the stagger. Each pulls its own config.primaryWindows[windowKey]
+  // bucket in the renderer and rebuilds exactly that window's tab set.
+  if (extras.length > 0) {
+    console.log(`[restore] lastPrimaryWindows=${savedExtras.length} reopening=${extras.length}`);
+    const base = restoreStaggerMs ? restoreStaggerMs + 250 : 500;
+    extras.forEach((e, i) => {
+      setTimeout(() => {
+        try {
+          openProjectWindow(e.projectPath, { windowKey: e.windowKey, bounds: e.bounds || null });
+        } catch (err) {
+          console.warn(`[restore] failed to reopen window ${e.windowKey}:`, err?.message || err);
+        }
+      }, base + i * 250);
+    });
+    restoreStaggerMs = base + (extras.length - 1) * 250;
   }
 
   // M2: lift the restore latch once the LAST staggered window has opened (plus a
@@ -2562,6 +2633,7 @@ app.on('before-quit', (e) => {
     // relaunched into a bare launcher with every window gone.
     const openForUpdate = getOpenProjectsForRestore();
     const tearOffsForUpdate = getOpenTearOffsForRestore(); // Brett's tear-off restore
+    const extrasForUpdate = getOpenPrimaryWindowsForRestore(); // extra primary windows (v1.0.66)
     setQuitting(true);
     // Best-effort scrollback flush; do NOT await, squirrel.mac needs a fast
     // exit or the bundle replace can corrupt. Tabs themselves are already
@@ -2582,7 +2654,7 @@ app.on('before-quit', (e) => {
       const cfgUp = loadConfig();
       // Merge-preserve missing-path entries (unmounted drive) like the live
       // persist does, so an update-restart doesn't drop them. Codex.
-      const mergedUp = computeRestoreLists(cfgUp, openForUpdate, tearOffsForUpdate);
+      const mergedUp = computeRestoreLists(cfgUp, openForUpdate, tearOffsForUpdate, extrasForUpdate);
       // An update restart must never REDUCE the restore snapshot to nothing.
       // If the install deferred and the user closed their windows while it was
       // pending, the live set is empty here and computeRestoreLists treats
@@ -2591,12 +2663,15 @@ app.on('before-quit', (e) => {
       // the previous non-empty snapshot restores too much at worst, which is
       // strictly the better failure. Codex blast-radius review.
       const hadSomething = (cfgUp.lastOpenProjects?.length || 0) > 0
-        || (cfgUp.lastTearOffs?.length || 0) > 0;
+        || (cfgUp.lastTearOffs?.length || 0) > 0
+        || (cfgUp.lastPrimaryWindows?.length || 0) > 0;
       const wouldWipe = mergedUp.lastOpenProjects.length === 0
-        && mergedUp.lastTearOffs.length === 0;
+        && mergedUp.lastTearOffs.length === 0
+        && mergedUp.lastPrimaryWindows.length === 0;
       if (!(hadSomething && wouldWipe)) {
         cfgUp.lastOpenProjects = mergedUp.lastOpenProjects;
         cfgUp.lastTearOffs = mergedUp.lastTearOffs;
+        cfgUp.lastPrimaryWindows = mergedUp.lastPrimaryWindows;
       }
       cfgUp.lastQuitAt = Date.now();
       saveConfig(cfgUp);
@@ -2625,6 +2700,7 @@ app.on('before-quit', (e) => {
     e.preventDefault();
     const openProjects = getOpenProjectsForRestore();
     const tearOffs = getOpenTearOffsForRestore(); // Brett's tear-off restore
+    const extras = getOpenPrimaryWindowsForRestore(); // extra primary windows (v1.0.66)
     // Freeze the live snapshot BEFORE closeAllProjectWindows() below: each
     // window 'closed' persists the open list, and that cascade would rewrite
     // it to [] and wipe the restore state. v1.0.38.
@@ -2632,9 +2708,10 @@ app.on('before-quit', (e) => {
     const config = loadConfig();
     // Merge-preserve missing-path entries (unmounted drive) like the live
     // persist does, so a normal quit doesn't drop them. Codex.
-    const merged = computeRestoreLists(config, openProjects, tearOffs);
+    const merged = computeRestoreLists(config, openProjects, tearOffs, extras);
     config.lastOpenProjects = merged.lastOpenProjects;
     config.lastTearOffs = merged.lastTearOffs;
+    config.lastPrimaryWindows = merged.lastPrimaryWindows;
     // Quit timestamp: auto-resume compares each link's lastRunningAt against
     // this to only revive sessions that were ACTUALLY running at quit
     // (v1.0.35 stale-link fix).

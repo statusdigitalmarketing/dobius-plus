@@ -21,12 +21,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   terminalSaveState: (id, state, forceFlush) => ipcRenderer.invoke('terminal:saveState', id, state, !!forceFlush),
   terminalLoadState: (id) => ipcRenderer.invoke('terminal:loadState', id),
-  terminalSaveTabs: (projectPath, tabs, counter) => ipcRenderer.invoke('terminal:saveTabs', projectPath, tabs, counter),
-  terminalLoadTabs: (projectPath) => ipcRenderer.invoke('terminal:loadTabs', projectPath),
+  terminalSaveTabs: (projectPath, tabs, counter, windowKey, activeTabId) => ipcRenderer.invoke('terminal:saveTabs', projectPath, tabs, counter, windowKey, activeTabId),
+  terminalLoadTabs: (projectPath, windowKey) => ipcRenderer.invoke('terminal:loadTabs', projectPath, windowKey),
+  // v1.0.66: open another primary window on the same project folder.
+  windowOpenNew: (projectPath) => ipcRenderer.invoke('window:openNew', projectPath),
   tearOffSaveTabs: (tearOffTabId, tabs, counter, activeTabId) => ipcRenderer.invoke('tearoff:saveTabs', tearOffTabId, tabs, counter, activeTabId),
   tearOffLoadTabs: (tearOffTabId) => ipcRenderer.invoke('tearoff:loadTabs', tearOffTabId),
-  terminalSaveClosedTabs: (projectPath, closedTabs) => ipcRenderer.invoke('terminal:saveClosedTabs', projectPath, closedTabs),
-  terminalLoadClosedTabs: (projectPath) => ipcRenderer.invoke('terminal:loadClosedTabs', projectPath),
+  terminalSaveClosedTabs: (projectPath, closedTabs, windowKey) => ipcRenderer.invoke('terminal:saveClosedTabs', projectPath, closedTabs, windowKey),
+  terminalLoadClosedTabs: (projectPath, windowKey) => ipcRenderer.invoke('terminal:loadClosedTabs', projectPath, windowKey),
   terminalRequestSaveNow: () => ipcRenderer.invoke('terminal:requestSaveNow'),
   onTerminalRequestSave: (callback) => {
     const handler = () => callback();

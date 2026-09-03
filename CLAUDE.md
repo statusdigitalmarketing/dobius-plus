@@ -91,6 +91,7 @@ See `RELEASING.md` for the full signed/notarized publish workflow (auto-update v
 
 ## Keyboard Shortcuts (Project Window)
 - `Cmd+T` — new terminal tab
+- `Cmd+Shift+N` — open ANOTHER window on the same project folder (v1.0.66; N windows per project, each with its own tabs, all restored on relaunch)
 - `Cmd+W` — close tab (won't close window if last tab)
 - `Cmd+1-9` — switch to tab N
 - `Cmd+Shift+[` — previous tab

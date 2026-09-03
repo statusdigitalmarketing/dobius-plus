@@ -36,6 +36,7 @@ import {
 } from './terminal-manager.js';
 import { getSessionSize } from './data-service.js';
 import { BrowserWindow } from 'electron';
+import { projectPathFromTabId } from './tab-id-util.js';
 
 // Per-tab queue entry: tabId -> { sessionId, projectPath, timer }
 // `timer` is the setTimeout handle so we can cancel before it fires.
@@ -67,9 +68,10 @@ function buildResumeCommand(projectPath, sessionId, tabId) {
   // out of any worktree/subdir their shell profile lands them in
   // (Sam-reported v1.0.35). cd only for cross-project links, where the
   // tab's project genuinely differs from the session's.
-  const tabProject = typeof tabId === 'string'
-    ? (tabId.match(/^term-(\/.+)-\d+$/) || [])[1]
-    : null;
+  // Shared parser so an extra-window id (term-<path>~w-<8>-<n>) yields the real
+  // project path; the legacy regex left the ~w- marker in and broke the
+  // same-project bare-resume shortcut (Codex).
+  const tabProject = projectPathFromTabId(tabId);
   if (tabProject && tabProject === projectPath) {
     return `claude --resume ${sessionId}\r`;
   }
@@ -345,7 +347,7 @@ export function cancelTabsForProject(projectPath) {
     // cancel by the window's project or the entry survives, its reservation
     // wedges the session, and the timer later types into whatever new shell
     // recycled the tab id (Codex High, round 11).
-    const tabProject = (tabId.match(/^term-(\/.+)-\d+$/) || [])[1] || null;
+    const tabProject = projectPathFromTabId(tabId);
     if (entry.projectPath !== projectPath && tabProject !== projectPath) continue;
     // But a project match is not proof the tab died with the closing window:
     // a TEAR-OFF of the same project can still own this PTY (this fires from

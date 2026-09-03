@@ -347,8 +347,17 @@ function claudeIsLive(id) {
 function parseTermLabel(id, cwd) {
   const m = typeof id === 'string' && id.match(/^term-(.+)-(\d+)$/);
   if (m && m[1] !== 'mobile') {
-    const projectPath = m[1];
-    return { projectPath, projectName: projectPath.split('/').filter(Boolean).pop() || projectPath, label: `Tab ${m[2]}` };
+    // Extra primary windows encode their windowKey as `<path>~w-<8>` (v1.0.66,
+    // Brett: ~4 windows on one folder). Right-anchor on the fixed marker so a
+    // `~` inside a real folder name is never mistaken for it. Split it out so
+    // all of a project's windows GROUP under the real project on the phone,
+    // each tab labelled with its window so they stay distinguishable.
+    const extra = id.match(/^term-(.+)~(w-[a-z0-9]{8})-(\d+)$/);
+    const projectPath = extra ? extra[1] : m[1];
+    const windowTag = extra ? extra[2].slice(2) : '';
+    const num = extra ? extra[3] : m[2];
+    const label = windowTag ? `Tab ${num} (win ${windowTag.slice(0, 4)})` : `Tab ${num}`;
+    return { projectPath, projectName: projectPath.split('/').filter(Boolean).pop() || projectPath, label };
   }
   const projectPath = cwd || 'mobile';
   return { projectPath, projectName: projectPath.split('/').filter(Boolean).pop() || 'mobile', label: 'new' };
@@ -1164,12 +1173,12 @@ export async function startMobileServer() {
     // when one exists (Codex round 2), else project + tab number from the id.
     const configLabels = configTabLabels();
     const tabs = listTerminals().map((t) => {
-      const m = t.id.match(/^term-(.+)-(\d+)$/);
-      const projectPath = m ? m[1] : '';
-      const tabNum = m ? m[2] : '';
-      const projName = projectPath.split('/').filter(Boolean).pop() || 'unknown';
+      // Reuse the shared parser so extra-window ids (`<path>~<wk>`) yield a
+      // clean project name here too (v1.0.66).
+      const meta = parseTermLabel(t.id, t.cwd);
+      const projName = meta.projectName || 'unknown';
       const renamed = configLabels.get(t.id);
-      return { id: t.id, label: renamed ? `${projName} / ${renamed}` : `${projName} • ${tabNum}`, cwd: t.cwd };
+      return { id: t.id, label: renamed ? `${projName} / ${renamed}` : `${projName} • ${meta.label}`, cwd: t.cwd };
     });
     res.json({ ok: true, tabs });
   });

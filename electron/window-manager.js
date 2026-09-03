@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { killTerminal, gracefulCloseTerminals, getTerminalsForProject, getTerminalWebContentsId, wasWindowOwned } from './terminal-manager.js';
 import { watchFiles } from './watcher-service.js';
-import { getProjectConfig, setProjectConfig, loadConfig, saveConfig, getTearOffWindowState } from './config-manager.js';
+import { getProjectConfig, setProjectConfig, loadConfig, saveConfig, getTearOffWindowState, setPrimaryWindowState, deletePrimaryWindowState } from './config-manager.js';
 import { getQuittingForUpdate, getQuitting } from './quit-state.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -43,6 +43,10 @@ export function setRestoring(v) { restoring = !!v; }
 // be dropped even if its path happens to be missing at close time (otherwise it
 // reopens on the next launch after the drive returns). Codex.
 const openedProjectPathsThisSession = new Set();
+// windowKeys of EXTRA primary windows opened this session, so computeRestoreLists
+// can tell a deliberately-closed extra window (drop) from a pending/failed
+// restore (preserve), mirroring openedProjectPathsThisSession. v1.0.66.
+const openedPrimaryWindowKeysThisSession = new Set();
 const openedTearOffTabIdsThisSession = new Set();
 
 /**
@@ -59,7 +63,7 @@ const openedTearOffTabIdsThisSession = new Set();
  * @param {string[]} openNow getOpenProjectsForRestore()
  * @param {Array} tearsNow getOpenTearOffsForRestore()
  */
-export function computeRestoreLists(config, openNow, tearsNow) {
+export function computeRestoreLists(config, openNow, tearsNow, extrasNow = []) {
   const prevProjects = Array.isArray(config?.lastOpenProjects) ? config.lastOpenProjects : [];
   const preservedProjects = prevProjects.filter((p) => typeof p === 'string'
     && !openNow.includes(p) && !openedProjectPathsThisSession.has(p));
@@ -67,7 +71,14 @@ export function computeRestoreLists(config, openNow, tearsNow) {
   const prevTears = Array.isArray(config?.lastTearOffs) ? config.lastTearOffs : [];
   const preservedTears = prevTears.filter((t) => t && t.tabId && t.projectPath
     && !openTearTabIds.has(t.tabId) && !openedTearOffTabIdsThisSession.has(t.tabId));
-  // Dedupe both lists so a pre-existing duplicate in config (or two windows that
+  // Extra primary windows: same preserve rule keyed by windowKey (an extra
+  // window opened this session and now closed is a deliberate close; one never
+  // opened this session is still pending/failed restore and is preserved).
+  const openKeys = new Set(extrasNow.map((e) => e.windowKey));
+  const prevExtras = Array.isArray(config?.lastPrimaryWindows) ? config.lastPrimaryWindows : [];
+  const preservedExtras = prevExtras.filter((e) => e && e.windowKey && e.projectPath
+    && !openKeys.has(e.windowKey) && !openedPrimaryWindowKeysThisSession.has(e.windowKey));
+  // Dedupe all lists so a pre-existing duplicate in config (or two windows that
   // briefly shared an id) can't persist twice and open two windows for one id on
   // restore. First occurrence wins. Codex.
   const seenPaths = new Set();
@@ -78,7 +89,11 @@ export function computeRestoreLists(config, openNow, tearsNow) {
   const lastTearOffs = [...tearsNow, ...preservedTears].filter((t) => {
     if (seenTabIds.has(t.tabId)) return false; seenTabIds.add(t.tabId); return true;
   });
-  return { lastOpenProjects, lastTearOffs };
+  const seenKeys = new Set();
+  const lastPrimaryWindows = [...extrasNow, ...preservedExtras].filter((e) => {
+    if (seenKeys.has(e.windowKey)) return false; seenKeys.add(e.windowKey); return true;
+  });
+  return { lastOpenProjects, lastTearOffs, lastPrimaryWindows };
 }
 
 function persistOpenProjects() {
@@ -95,9 +110,10 @@ function persistOpenProjects() {
   if (getQuitting() || restoring || getQuittingForUpdate()) return;
   try {
     const config = loadConfig();
-    const merged = computeRestoreLists(config, getOpenProjectsForRestore(), getOpenTearOffsForRestore());
+    const merged = computeRestoreLists(config, getOpenProjectsForRestore(), getOpenTearOffsForRestore(), getOpenPrimaryWindowsForRestore());
     config.lastOpenProjects = merged.lastOpenProjects;
     config.lastTearOffs = merged.lastTearOffs;
+    config.lastPrimaryWindows = merged.lastPrimaryWindows;
     saveConfig(config);
   } catch { /* best-effort */ }
 }
@@ -148,11 +164,36 @@ export function getOpenTearOffsForRestore() {
  * and the quit-path snapshots cannot disagree. Codex v1.0.38 r1 P2.
  */
 export function getOpenProjectsForRestore() {
+  // MAIN windows only (windowKey 'main' or legacy undefined). Extra primary
+  // windows are restored separately via getOpenPrimaryWindowsForRestore so
+  // each reopens with its own tab bucket. A legacy entry (no windowKey) is a
+  // main window. v1.0.66.
   const paths = new Set();
   for (const [, entry] of projectWindows) {
-    if (!entry.isTearOff && !entry.win.isDestroyed()) paths.add(entry.projectPath);
+    if (entry.isTearOff || entry.win.isDestroyed()) continue;
+    if (!entry.windowKey || entry.windowKey === 'main') paths.add(entry.projectPath);
   }
   return Array.from(paths);
+}
+
+/**
+ * Extra primary windows to recreate on next launch: [{ projectPath, windowKey,
+ * bounds }]. One per additional window on a project folder beyond the first
+ * (Brett runs ~4). Restored via openProjectWindow(path, { windowKey, bounds }),
+ * each pulling its own config.primaryWindows[windowKey] tab bucket. v1.0.66.
+ */
+export function getOpenPrimaryWindowsForRestore() {
+  const out = [];
+  for (const [, entry] of projectWindows) {
+    if (entry.isTearOff || entry.win.isDestroyed()) continue;
+    if (!entry.windowKey || entry.windowKey === 'main') continue;
+    out.push({
+      projectPath: entry.projectPath,
+      windowKey: entry.windowKey,
+      bounds: entry.bounds || entry.win.getBounds(),
+    });
+  }
+  return out;
 }
 
 /**
@@ -258,6 +299,26 @@ export function focusTearOffWindowForTab(tabId) {
 
 // Focus a project's already-open primary window (does NOT create one). Used when
 // a sidebar tab is live in another same-project primary window. Audit H3.
+// Focus the primary window that actually OWNS a tab's PTY (v1.0.66). With N
+// windows on one project, a sidebar click on a live tab must reveal the RIGHT
+// window, not just the first (Codex Medium). Matched by the owning webContents
+// id, so it lands on the exact window even for an extra window.
+export function focusWindowForTab(tabId) {
+  if (typeof tabId !== 'string' || !tabId) return false;
+  const ownerWcId = getTerminalWebContentsId(tabId);
+  if (ownerWcId == null) return false;
+  for (const [, entry] of projectWindows) {
+    if (entry.isTearOff || !entry.win || entry.win.isDestroyed()) continue;
+    if (entry.win.webContents.id === ownerWcId) {
+      if (entry.win.isMinimized()) entry.win.restore();
+      entry.win.show();
+      entry.win.focus();
+      return true;
+    }
+  }
+  return false;
+}
+
 export function focusPrimaryWindowForProject(projectPath) {
   const win = getWindowForProject(projectPath);
   if (win && !win.isDestroyed()) {
@@ -275,7 +336,11 @@ export function focusPrimaryWindowForProject(projectPath) {
  * @param {string} projectPath
  * @param {{ isTearOff?: boolean, tearOffTabId?: string }} options
  */
-function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId = null, tearOffLabel = null, tearOffConfirmed = false } = {}) {
+function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId = null, tearOffLabel = null, tearOffConfirmed = false, windowKey = 'main' } = {}) {
+  // An EXTRA primary window (windowKey !== 'main') stores its own tabs + bounds
+  // in config.primaryWindows[windowKey], so it must be restored and bounds-saved
+  // per window rather than under the shared per-project config.
+  const isExtraPrimary = !isTearOff && windowKey && windowKey !== 'main';
   // This window's webContents id, used to decide which PTYs it actually OWNS on
   // close. Ownership (entry.webContents.id, set on createTerminal + claim) is the
   // real predicate; registration ("a tear-off window exists for tab T") is not,
@@ -301,6 +366,10 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
       if (isTearOff) {
         const entry = projectWindows.get(win.id);
         if (entry) { entry.bounds = win.getBounds(); persistOpenProjects(); }
+      } else if (isExtraPrimary) {
+        // Extra window: bounds live in its own primaryWindows bucket so each
+        // of Brett's windows reopens where he left it (v1.0.66).
+        setPrimaryWindowState(windowKey, { projectPath, bounds: win.getBounds() });
       } else {
         const config = getProjectConfig(projectPath) || {};
         config.windowBounds = win.getBounds();
@@ -350,7 +419,13 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
       ? (getTerminalWebContentsId(tearOffTabId) === myWcId ? [tearOffTabId] : [])
       : (() => {
           const beingTornOff = getTearOffTabIdsForProject(projectPath);
-          return getTerminalsForProject(projectPath).filter((id) => !beingTornOff.has(id) && wasWindowOwned(id));
+          // Only THIS window's own terminals (v1.0.66): with N primary windows
+          // on one project, getTerminalsForProject returns every window's tabs,
+          // so an unscoped Ctrl+C here interrupted the OTHER windows' live
+          // Claude sessions (Codex High). Ownership (wc id) scopes it; at
+          // 'close' time this window's wc is still alive.
+          return getTerminalsForProject(projectPath).filter((id) => !beingTornOff.has(id)
+            && wasWindowOwned(id) && getTerminalWebContentsId(id) === myWcId);
         })();
 
     // Send Ctrl+C twice, wait for Claude to print resume ID, save scrollback, then close
@@ -371,6 +446,14 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
   // Clean up on close (runs after graceful close completes)
   win.on('closed', () => {
     projectWindows.delete(win.id);
+    // A DELIBERATELY closed extra window: drop its tab bucket now so the
+    // desktop sidebar + mobile aggregate stop showing its dead tabs
+    // immediately, instead of waiting for the next config-load prune (Codex
+    // Medium). Never during a quit/update (getQuitting/getQuittingForUpdate):
+    // there the window must be PRESERVED for restore.
+    if (isExtraPrimary && windowKey && !getQuitting() && !getQuittingForUpdate()) {
+      try { deletePrimaryWindowState(windowKey); } catch { /* best-effort */ }
+    }
     // Deliberately closed windows should NOT come back next launch. No-ops
     // during a quit (getQuitting), so the teardown cascade can't wipe the
     // restore list. v1.0.38.
@@ -405,13 +488,15 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
       return;
     }
 
-    // For primary windows: if ANOTHER PRIMARY window of this project is still
-    // open, leave the shared terminals alone (that other window owns/renders
-    // them). Audit H1.
-    const otherPrimaryIds = getPrimaryWindowIdsForProject(projectPath);
-    if (otherPrimaryIds.length > 0) return;
+    // v1.0.66: each primary window owns its OWN terminals (distinct tab ids +
+    // PTYs per window), so we no longer bail when another primary window of the
+    // project is still open. The ownership check below (=== null) already kills
+    // ONLY the terminals no live window owns: this closed window's now-ownerless
+    // PTYs get reaped while another open window's terminals (which read its live
+    // wc id, not null) are spared. Bailing here leaked the closed window's PTYs
+    // into main/mobile state (Codex High).
 
-    // Otherwise kill every project terminal that no LIVE window still owns
+    // Kill every project terminal that no LIVE window still owns
     // (getTerminalWebContentsId === null). At this point our webContents is
     // destroyed, so terminals we owned now read null and are killed; a terminal
     // a tear-off has CLAIMED reads that live window's id and is SPARED (H1); an
@@ -428,10 +513,17 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
   // Record that this project/tear-off actually opened a window this session, so
   // merge-preserve won't resurrect it after a deliberate close (see above). Codex.
   if (isTearOff) { if (tearOffTabId) openedTearOffTabIdsThisSession.add(tearOffTabId); }
-  else { openedProjectPathsThisSession.add(projectPath); }
+  else {
+    openedProjectPathsThisSession.add(projectPath);
+    if (windowKey && windowKey !== 'main') openedPrimaryWindowKeysThisSession.add(windowKey);
+  }
 
   projectWindows.set(win.id, {
     projectPath, win, isTearOff,
+    // windowKey identifies WHICH primary window this is: 'main' = the project's
+    // first window (legacy bucket), or a unique key for an extra window whose
+    // tabs live in config.primaryWindows[windowKey] (v1.0.66).
+    windowKey: isTearOff ? null : windowKey,
     // Tear-offs carry the torn tab + label so the tear-off restore can recreate
     // exactly this window (project + tab) after a restart/update. v1.0.46.
     tearOffTabId: isTearOff ? tearOffTabId : null,
@@ -454,16 +546,29 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
  * @param {string} projectPath
  * @returns {BrowserWindow}
  */
-export function openProjectWindow(projectPath) {
-  // If window already open for this project, focus it
-  const existing = getWindowForProject(projectPath);
-  if (existing) {
-    existing.focus();
-    return existing;
+export function openProjectWindow(projectPath, opts = {}) {
+  const { newWindow = false, windowKey: existingKey = null, bounds: restoreBounds = null } = opts;
+  // Default open focuses the project's FIRST primary window (unchanged
+  // behavior). A New Window request (newWindow) OR a restore of a saved extra
+  // window (existingKey) always creates a fresh keyed window instead (v1.0.66,
+  // Brett: 4 windows on one project folder).
+  if (!newWindow && !existingKey) {
+    const existing = getWindowForProject(projectPath);
+    if (existing) {
+      existing.focus();
+      return existing;
+    }
   }
+  // windowKey: 'main' for the first window (legacy config.projects[path].tabs
+  // bucket, zero migration); a unique key for every extra window (its own
+  // config.primaryWindows[key] bucket). A restore passes the saved key back.
+  const windowKey = existingKey || (newWindow ? randomKey() : 'main');
+  const isExtra = windowKey !== 'main';
 
   const projectConfig = getProjectConfig(projectPath) || {};
-  const bounds = projectConfig.windowBounds || {};
+  // Extra windows remember their own bounds (in the primaryWindows bucket);
+  // the first window keeps using the per-project windowBounds.
+  const bounds = restoreBounds || (isExtra ? {} : (projectConfig.windowBounds || {}));
   const folderName = path.basename(projectPath);
 
   const win = new BrowserWindow({
@@ -490,16 +595,30 @@ export function openProjectWindow(projectPath) {
 
   const isDev = !app.isPackaged;
   const encodedProject = encodeURIComponent(projectPath);
+  // Only extra windows carry a windowKey; the first window's URL is unchanged
+  // so its renderer code path is byte-identical to before.
+  const wkParam = isExtra ? `&windowKey=${encodeURIComponent(windowKey)}` : '';
   if (isDev) {
-    win.loadURL(`http://localhost:5173?project=${encodedProject}`);
+    win.loadURL(`http://localhost:5173?project=${encodedProject}${wkParam}`);
   } else {
-    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), {
-      query: { project: projectPath },
-    });
+    const query = { project: projectPath };
+    if (isExtra) query.windowKey = windowKey;
+    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query });
   }
 
-  setupWindowEvents(win, projectPath);
+  setupWindowEvents(win, projectPath, { windowKey });
   return win;
+}
+
+// Key for an extra primary window: EXACTLY `w-` + 8 lowercase alphanumerics.
+// The fixed shape lets every id parser (main scrollback, mobile) right-anchor
+// on `~w-XXXXXXXX-<counter>` so a `~` elsewhere in a real folder name can never
+// be mistaken for the window marker (Codex High). Padded so it is always 8.
+function randomKey() {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let s = '';
+  for (let i = 0; i < 8; i += 1) s += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return `w-${s}`;
 }
 
 /**

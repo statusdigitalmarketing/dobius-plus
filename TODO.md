@@ -10,18 +10,19 @@ the version or branch that shipped them. Sam triggers releases.
       16+ hours later. All five OK past the 16h mark = the invalid_rapt
       loop is closed for good; any DEAD account means a scope in the
       standard set still triggers session control and needs hunting.
-- [ ] TRUE multiple primary windows per project (Brett, Asana 1217283122193749).
-      Diagnosed 8/24: openProjectWindow FOCUSES the existing window (never
-      makes a 2nd), primary tabs live in ONE config.projects[path].tabs
-      bucket, and restore dedupes lastOpenProjects by path. So a 2nd primary
-      window is impossible today and could not survive restart if it were.
-      Real fix = a "New Window" action + per-window tab buckets keyed by a
-      stable windowKey + restore reopening N windows per project. Sizable
-      schema change to the daily driver: do it as its OWN release after the
-      crash fix is out and proven, not bundled. Tear-off windows already
-      restore (their own per-tab buckets); if Brett's "two windows" are a
-      primary + tear-off, that path works and any restore flakiness there
-      should show in the new error.log.
+- [x] TRUE multiple primary windows per project (Brett, Asana 1217283122193749;
+      "4 windows with multiple tabs per window for one project folder"). Cmd+Shift+N
+      opens another window on the current project; each window has a stable
+      windowKey and its own tab bucket (config.primaryWindows[key]); the first
+      window keeps the legacy path byte-for-byte (zero migration). Tab ids are
+      globally unique (term-<path>~w-<8>-<n> for extra windows) so N windows
+      never cross-wire; restore reopens every window with its own tabs +
+      bounds; mobile groups them under the real project; scrollback, closed
+      tabs, sidebar aggregate, focus-owning-window, and auto-resume all made
+      window-aware. One shared tab-id parser (electron/tab-id-util.js). Live
+      ship-tested: 3 windows on one folder set to 2/3/4 tabs each, restarted,
+      all 3 restored with exactly their own tab sets. 4 Codex rounds (1 High +
+      6 + 3 + 2 findings, all fixed, final clean).
 - [ ] Exclude headless `claude -p` transcripts (SamKnows.app, every ~40s)
       from continued-session resolution: accepted residual documented at
       resolveContinuedSessionId. Needs transcript-content inspection to spot
