@@ -7,9 +7,10 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { getQuittingForUpdate, setQuitting, getQuitting } from './quit-state.js';
 import { projectPathFromTabId } from './tab-id-util.js';
-import { resolveTerminalAccount, claudeEnvForAccount } from './claude-account-env.js';
+import { resolveTerminalAccount, claudeEnvForAccount, expandTilde } from './claude-account-env.js';
 import { installErrorLog, logLine, errorLogPath } from './error-log.js';
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
+import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser, ensureShim } from './gws-accounts.js';
@@ -246,6 +247,17 @@ function setupTerminalHandlers() {
       if (activeId) activeAccount = (cfgNow.accounts || []).find((a) => a.id === activeId && a.type === 'claude') || null;
     }
     const account = resolveTerminalAccount(projectAccount, activeAccount);
+    // The one choke point where CLAUDE_CONFIG_DIR is decided, so it is where
+    // the shared-setup invariant has to hold. Startup linking alone misses an
+    // account reached by a per-PROJECT override that was assigned while the
+    // app was already running (Codex High): that terminal would spawn against
+    // a profile with no transcripts and answer "No conversation found" for
+    // every session the Sessions tab lists. Idempotent, a few lstat calls once
+    // the links exist.
+    if (account?.type === 'claude' && account.claudeJsonPath) {
+      try { shareProfile(path.dirname(expandTilde(account.claudeJsonPath))); }
+      catch (err) { console.warn('[account-share] spawn-time link failed:', err?.message || err); }
+    }
     const accountEnv = claudeEnvForAccount(account);
     // gws token-broker shim (v1.0.41): put the shim first on PATH as `gws` and
     // tell it where the real gws is. Transparent passthrough until a caller sets
@@ -1680,6 +1692,11 @@ function setupConfigHandlers() {
     const account = (config.accounts || []).find((a) => a.id === accountId && a.type === 'claude');
     if (!account) return { ok: false, error: 'Account not found' };
     if (!account.claudeJsonPath) return { ok: false, error: 'No profile snapshot for this account' };
+    // Repair the shared links before the switch takes effect, so an account
+    // added by hand (or one whose links were removed) still sees your history
+    // on its first terminal rather than reporting no conversations found.
+    try { shareProfile(path.dirname(expandTilde(account.claudeJsonPath))); }
+    catch (err) { console.warn('[account-share] activate link failed:', err?.message || err); }
     config.activeClaudeAccountId = accountId;
     saveConfig(config);
     return { ok: true, isDefault: false };
@@ -1702,6 +1719,11 @@ function setupConfigHandlers() {
       const idDir = base.replace(/\.json$/i, '');
       const profileDir = path.join(os.homedir(), '.claude-profiles', idDir);
       await fs.promises.mkdir(profileDir, { recursive: true });
+      // Share the one setup immediately (v1.0.66), so a brand new account has
+      // your history, skills and hooks on its very first terminal instead of
+      // looking like a fresh Mac. Only the login stays per-profile.
+      try { shareProfile(profileDir); }
+      catch (err) { console.warn('[account-share] new profile link failed:', err?.message || err); }
       // claudeJsonPath stays the canonical pointer shape; the CLI creates
       // the file itself on first run in this dir.
       return { ok: true, path: path.join(profileDir, '.claude.json') };
@@ -2392,6 +2414,13 @@ app.whenReady().then(() => {
   setupCrashLogging();
   // Make sure node-pty can actually launch shells before any tab is created.
   ensureSpawnHelperExecutable();
+  // Account profiles share ONE setup: link every profile at ~/.claude before a
+  // terminal can spawn (v1.0.66). v1.0.65 made the Switch pointer real, and a
+  // profile dir with no transcripts made every `claude --resume` answer "No
+  // conversation found" while the Sessions tab kept listing those sessions
+  // (Sam, 9/3). Sync on purpose: this must hold before the first PTY.
+  try { shareConfiguredProfiles(loadConfig().accounts); }
+  catch (err) { console.warn('[account-share] startup link failed:', err?.message || err); }
   // Self-heal an existing Claude Desktop MCP install: the wrapper must track
   // the CURRENT app binary across moves/updates (never creates an install).
   healGwsMcpIfInstalled();

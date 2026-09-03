@@ -85,3 +85,44 @@
 - **FIX**: The correct predicate at `'closed'` is "kill iff NO live window still owns it": `if (getTerminalWebContentsId(tearOffTabId) === null) killTerminal(tearOffTabId)`. `getTerminalWebContentsId` returns `null` when the entry is gone OR `webContents.isDestroyed()`. This one check covers every case: normal close (owner destroyed, so null, so kill), aborted tear-off with the SOURCE window still open (source alive, non-null, spare it, so it never kills the source's live tab), and orphan (source also closed, null, kill). No `'close'` snapshot needed.
 - **CONTEXT**: Electron destroys a window's `webContents` by the time the `'closed'` event fires (confirmed by Codex web-search of Electron 40 docs). Any close-time logic that needs to read the closing window's own `webContents` must run in `'close'` (still alive), NOT `'closed'`. But `win.destroy()` skips `'close'`, so logic that MUST run on every teardown (including destroy) belongs in `'closed'` and must not depend on the closing window's live webContents. Also: "owns" a cross-window PTY means `entry.webContents.id`, set on both `createTerminal` and `reassignTerminal` (claim). Registration-based ownership (a tear-off window is registered before it has CLAIMED) is wrong: an in-flight/unclaimed tear-off does not yet own the PTY, so keying `getTearOffTabIdsForProject` exclusion on it let the primary skip killing an unclaimed torn tab and orphan it.
 - **DETECTION**: `grep -n "on('closed'" electron/window-manager.js` then check any `webContents` read inside a `'closed'` handler (it reads a destroyed object). For PTY ownership: `grep -n "getTerminalWebContentsId\|reassignTerminal" electron/*.js`.
+
+### [Architecture] - 2026-09-03
+- **MISTAKE**: v1.0.65 (`beb6191`) made `activeClaudeAccountId` a real pointer
+  that sets `CLAUDE_CONFIG_DIR` per terminal, without noticing that Claude Code
+  scopes session transcripts to the config dir. Users who had clicked the old
+  cosmetic Switch button had a stale pointer that went LIVE on update, orphaning
+  all session history. `claude --resume <id>` returned "No conversation found"
+  for every session, while `electron/data-utils.js:7` (`CLAUDE_DIR` hardcoded to
+  `~/.claude`) kept listing those same sessions in the Sessions tab and feeding
+  them to auto-resume.
+- **FIX**: Treat an account profile as a login boundary only. Symlink the shared
+  setup from each profile into `~/.claude` (`electron/account-profile-share.js`),
+  keeping only `.claude.json` per-profile. Call it at app start, at
+  `accounts:initProfileDir`, at `accounts:activateClaude`, and critically at the
+  terminal spawn choke point in `terminal:create` where `accountEnv` is built,
+  which is the ONLY place that decides `CLAUDE_CONFIG_DIR`.
+- **CONTEXT**: Whenever a feature changes which DIRECTORY a child process reads
+  its state from, audit every other module that reads the same state by a
+  hardcoded path. A split between "what the UI lists" and "what the CLI can
+  open" presents to the user as data loss even though nothing was lost.
+- **DETECTION**: `grep -rn "CLAUDE_CONFIG_DIR" electron/` and compare against
+  `grep -n "CLAUDE_DIR\|PROJECTS_DIR" electron/data-utils.js`. If a spawn sets
+  the config dir but a reader hardcodes `~/.claude`, they will disagree.
+
+### [Process] - 2026-09-03
+- **MISTAKE**: Wrote a filesystem migration whose guards used `path.resolve()`
+  and assumed two different path strings meant two different directories. A
+  profile dir that was a symlink into `~/.claude` would have had the real
+  `projects` dir renamed aside and replaced by a self-referential symlink,
+  making 3.9GB of transcripts unreachable with ELOOP.
+- **FIX**: Guard every destructive fs operation with `fs.realpathSync` on both
+  sides and bail when they resolve to the same inode. Pre-scan for collisions
+  (`countCollisions`) so a directory migration is all-or-nothing rather than
+  partially draining and leaving a split tree.
+- **CONTEXT**: Applies to any code that moves, links, or deletes under a
+  user-supplied or config-supplied path. Five Codex rounds were needed here and
+  each one found a real High; the first three rounds all missed the ones the
+  next round caught.
+- **DETECTION**: `grep -n "renameSync\|symlinkSync\|rmdirSync\|rmSync" electron/*.js`
+  then confirm each call site resolved its paths with `realpathSync` first.
+
