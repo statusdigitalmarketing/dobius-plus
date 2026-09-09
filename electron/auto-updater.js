@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import { setQuittingForUpdate } from './quit-state.js';
 import { drainConfigWrites, backupConfigForUpdate } from './config-manager.js';
+import { mapRelease } from './release-info.js';
 
 const { autoUpdater } = electronUpdater;
 
@@ -59,6 +60,78 @@ function isStrictlyNewer(nextVer, curVer) {
     if (x < y) return false;
   }
   return false; // equal
+}
+
+// Must match electron-builder.yml publish.owner/repo: the same release feed the
+// updater itself reads.
+const GITHUB_REPO = 'statusdigitalmarketing/dobius-plus';
+
+// GitHub's unauthenticated API is 60 requests/hour per IP. The Updates tab
+// refreshes on mount and on every manual check, and Sam runs a lot of windows,
+// so without this a busy session can rate-limit itself into the very "couldn't
+// reach GitHub" error this code exists to fix.
+const RELEASE_TTL_MS = 60_000;
+// `at` is when the value was STORED (drives the TTL). `startedAt` is when the
+// request that produced it BEGAN (drives ordering). They are different clocks
+// for different jobs: comparing a new request's start against the stored
+// completion time let a later, fresher request lose to an earlier one that
+// simply finished first (Codex P2).
+let releaseCache = { at: 0, startedAt: 0, release: null };
+// Concurrent windows share one request. Without this two windows race, and the
+// SLOWER response wins the cache, so a newly published release can be
+// overwritten by the older one the other window was already fetching, leaving a
+// third window told it is on the latest version when it is not (Codex P2).
+let inFlight = null;
+
+/**
+ * The RENDERER cannot do this itself. index.html sets
+ * `connect-src 'self' http://localhost:5173 ws://localhost:5173`, so a renderer
+ * fetch to api.github.com is blocked by CSP and fails with "Failed to fetch"
+ * every single time. That is what the Updates tab was reporting as "Couldn't
+ * reach GitHub", while the updater kept working fine and downloading releases,
+ * because it runs HERE and CSP does not apply to the main process.
+ */
+async function fetchLatestRelease({ force = false } = {}) {
+  if (!force && releaseCache.release && Date.now() - releaseCache.at < RELEASE_TTL_MS) {
+    return releaseCache.release;
+  }
+  // A manual "Check for updates" is an explicit request for a fresh answer, so
+  // it skips both the TTL and the shared request. Serving it the cache let the
+  // updater download a release the panel still called "latest" (Codex P2).
+  if (!force && inFlight) return inFlight;
+
+  const startedAt = Date.now();
+  const request = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+      const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`, {
+        headers: {
+          // GitHub asks API clients to identify themselves. Node's fetch does
+          // send a default agent, so this is not load-bearing; it just makes
+          // the caller legible in GitHub's logs and rate-limit accounting.
+          'User-Agent': `dobius-plus/${app.getVersion()}`,
+          Accept: 'application/vnd.github+json',
+        },
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(`GitHub API: ${res.status}`);
+      const release = mapRelease(await res.json());
+      // The request that STARTED last wins, whatever order the responses land
+      // in. A failed fetch throws before here and so never clears a good value.
+      if (startedAt >= releaseCache.startedAt) releaseCache = { at: Date.now(), startedAt, release };
+      return release;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+
+  if (!force) inFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (inFlight === request) inFlight = null;
+  }
 }
 
 async function safeCheck() {
@@ -179,6 +252,18 @@ export function initAutoUpdater() {
     return pendingUpdate;
   });
   ipcMain.handle('updater:getStatus', () => lastStatus);
+
+  ipcMain.handle('updater:getLatestRelease', async (_event, force = false) => {
+    try {
+      return { ok: true, release: await fetchLatestRelease({ force: force === true }) };
+    } catch (err) {
+      const message = err?.name === 'AbortError'
+        ? 'GitHub did not respond within 10s'
+        : String(err?.message || err);
+      console.warn('[updater] latest-release lookup failed:', message);
+      return { ok: false, error: message };
+    }
+  });
   ipcMain.handle('updater:getCurrentVersion', () => app.getVersion());
   ipcMain.handle('updater:dismiss', (_event, version) => {
     if (pendingUpdate && pendingUpdate.version === version) {

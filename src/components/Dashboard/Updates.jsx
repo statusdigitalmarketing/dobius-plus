@@ -1,6 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
-
-const REPO = 'statusdigitalmarketing/dobius-plus';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 export default function Updates() {
   const [currentVersion, setCurrentVersion] = useState('');
@@ -9,14 +7,27 @@ export default function Updates() {
   const [releaseError, setReleaseError] = useState('');
   const [pending, setPending] = useState(null);
 
-  const refreshRelease = useCallback(async () => {
+  // Asked of the MAIN process, not fetched here. index.html's CSP allows
+  // connect-src 'self' only, so a fetch to api.github.com from the renderer is
+  // blocked and always failed with "Failed to fetch", which the panel showed as
+  // "Couldn't reach GitHub" even while the updater was downloading releases
+  // perfectly well from the main process.
+  // Newest lookup wins. Clicking "Check for updates" while the mount lookup is
+  // still pending gave two overlapping requests, and the older one landing last
+  // reverted the panel to the release it had already replaced (Codex P2).
+  const releaseSeq = useRef(0);
+
+  const refreshRelease = useCallback(async ({ force = false } = {}) => {
+    const seq = ++releaseSeq.current;
     setReleaseError('');
     try {
-      const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`);
-      if (!res.ok) throw new Error(`GitHub API: ${res.status}`);
-      const data = await res.json();
-      setLatestRelease(data);
+      const res = await window.electronAPI?.updaterGetLatestRelease?.(force);
+      if (seq !== releaseSeq.current) return;
+      if (!res) throw new Error('updater bridge unavailable');
+      if (!res.ok) throw new Error(res.error || 'unknown error');
+      setLatestRelease(res.release);
     } catch (err) {
+      if (seq !== releaseSeq.current) return;
       setReleaseError(String(err?.message || err));
     }
   }, []);
@@ -39,7 +50,7 @@ export default function Updates() {
   const handleCheck = () => {
     setStatus({ state: 'checking' });
     window.electronAPI?.updaterCheck?.().catch(() => {});
-    refreshRelease();
+    refreshRelease({ force: true });
   };
 
   const handleInstall = () => {

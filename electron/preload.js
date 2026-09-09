@@ -230,6 +230,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updaterInstall: () => ipcRenderer.invoke('updater:install'),
   updaterGetPending: () => ipcRenderer.invoke('updater:getPending'),
   updaterGetStatus: () => ipcRenderer.invoke('updater:getStatus'),
+  updaterGetLatestRelease: (force) => ipcRenderer.invoke('updater:getLatestRelease', force === true),
   updaterGetCurrentVersion: () => ipcRenderer.invoke('updater:getCurrentVersion'),
   updaterDismiss: (version) => ipcRenderer.invoke('updater:dismiss', version),
   onUpdaterStatus: (callback) => {
