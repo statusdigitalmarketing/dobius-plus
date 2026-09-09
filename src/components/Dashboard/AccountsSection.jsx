@@ -1,4 +1,52 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+
+const badge = (color, bg) => ({
+  fontSize: 11,
+  padding: '1px 6px',
+  borderRadius: 4,
+  color,
+  backgroundColor: bg,
+  whiteSpace: 'nowrap',
+});
+
+/**
+ * The login behind the name. This row exists because the list used to show
+ * only a name someone typed, so two entries over ONE Claude account looked
+ * like a Switch that did nothing, and an account with no credential looked
+ * identical to a working one.
+ */
+function IdentityLine({ ident }) {
+  if (!ident) return null;
+  const { email, login, sameAs = [] } = ident;
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap mt-1">
+      {email ? (
+        <span className="text-xs" style={{ color: 'var(--fg)', fontFamily: 'monospace', opacity: 0.8 }}>
+          {email}
+        </span>
+      ) : (
+        // No readable address is not the same claim as no login. A profile
+        // whose directory was deleted while its credential survives still has
+        // a working login, and saying "never logged in here" there asserts a
+        // history we do not know (Codex P2). Say only what was observed.
+        <span className="text-xs" style={{ color: 'var(--dim)' }}>
+          {login === 'in' ? 'signed in, address unreadable' : 'no login found'}
+        </span>
+      )}
+      {login === 'out' && (
+        <span style={badge('#f87171', 'rgba(248,113,113,0.15)')}>no credential</span>
+      )}
+      {login === 'unknown' && (
+        <span style={badge('var(--dim)', 'rgba(148,163,184,0.15)')}>login unverified</span>
+      )}
+      {sameAs.length > 0 && (
+        <span style={badge('#fbbf24', 'rgba(251,191,36,0.15)')}>
+          same login as {sameAs.join(', ')}
+        </span>
+      )}
+    </div>
+  );
+}
 
 export default function AccountsSection() {
   const [accounts, setAccounts] = useState([]);
@@ -8,17 +56,59 @@ export default function AccountsSection() {
   const [form, setForm] = useState({ name: '', type: 'claude', apiKey: '', cliPath: '' });
   const [feedback, setFeedback] = useState('');
   const [activating, setActivating] = useState(null);
+  const [identities, setIdentities] = useState(null);
+
+  // A refresh that started BEFORE a Switch must never land after it. The
+  // identity probes make a reload slow enough to lose that race, and the older
+  // answer put the previous account's "active" badge back while new terminals
+  // ran as the new one: the same "Switch did nothing" illusion this whole
+  // panel exists to end (Codex P2). Newest read wins; older ones are dropped.
+  const reqSeq = useRef(0);
+  const mounted = useRef(true);
 
   const reload = async () => {
-    const [list, activeId] = await Promise.all([
+    const seq = ++reqSeq.current;
+    const [list, activeId, idents] = await Promise.all([
       window.electronAPI.accountsList(),
       window.electronAPI.accountsGetActiveClaude(),
+      // Optional-called so a renderer running against an older preload (app
+      // updated but window not reloaded) still shows the list instead of
+      // throwing on a bridge method that is not there yet.
+      window.electronAPI.accountsIdentities?.() ?? Promise.resolve(null),
     ]);
+    if (!mounted.current || seq !== reqSeq.current) return;
     setAccounts(list || []);
     setActiveClaudeId(activeId);
+    setIdentities(idents || null);
   };
 
-  useEffect(() => { reload(); }, []);
+  useEffect(() => {
+    reload();
+    // Logging in happens in a TERMINAL, not in this panel, so the moment the
+    // user does the thing the "no credential" badge told them to do, the badge
+    // is wrong. Re-read whenever the window comes back to the front, otherwise
+    // the warning outlives the problem it describes (Codex P2).
+    const refresh = () => { if (document.visibilityState === 'visible') reload(); };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      mounted.current = false;
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, []);
+
+  // identities.accounts is aligned 1:1 with `accounts`, so rows are read BY
+  // POSITION. Account ids are user-supplied: a map keyed by them let an id of
+  // __proto__ or __default__ corrupt the result, and a repeated id showed one
+  // account's login against another. The id check is a belt-and-braces guard
+  // in case the two lists were ever fetched a moment apart; on a mismatch the
+  // row shows nothing rather than somebody else's address.
+  const identAt = (index, acct) => {
+    const row = identities?.accounts?.[index];
+    if (!row) return null;
+    return row.id === acct.id ? row : null;
+  };
 
   const flash = (msg, isError = false) => {
     setFeedback({ msg, isError });
@@ -31,6 +121,7 @@ export default function AccountsSection() {
     setActivating(null);
     if (result.ok) {
       setActiveClaudeId(acct.id);
+      reload();
       flash(`Switched. NEW terminals everywhere now run as "${acct.name}" (open tabs keep their old account). First time in this account: run claude auth login once in a new tab, it sticks.`);
     } else {
       flash(`Failed to switch: ${result.error}`, true);
@@ -44,6 +135,7 @@ export default function AccountsSection() {
     setActivating(null);
     if (result?.ok) {
       setActiveClaudeId(null);
+      reload(); // invalidates any refresh started before this switch
       flash('Back to the default account. New terminals use this Mac\u2019s normal ~/.claude login and setup.');
     } else {
       flash(`Failed to switch: ${result?.error || 'unknown'}`, true);
@@ -129,6 +221,7 @@ export default function AccountsSection() {
             <div className="text-sm font-medium" style={{ color: 'var(--fg)' }}>
               Default (this Mac&rsquo;s ~/.claude){activeClaudeId === null ? ' · active' : ''}
             </div>
+            <IdentityLine ident={identities?.default} />
             <div className="text-xs mt-0.5" style={{ color: 'var(--dim)' }}>
               Your main login with all your settings, skills, and hooks. Switching applies to NEW terminals in every project; a project with an assigned account keeps its assignment.
             </div>
@@ -152,7 +245,7 @@ export default function AccountsSection() {
       )}
 
       <div className="space-y-2 mb-3">
-        {accounts.map((acct) => {
+        {accounts.map((acct, index) => {
           const isActive = acct.type === 'claude' && acct.id === activeClaudeId;
           return (
             <div
@@ -185,6 +278,7 @@ export default function AccountsSection() {
                       <span className="text-xs" style={{ color: 'var(--accent)' }}>active</span>
                     )}
                   </div>
+                  {acct.type === 'claude' && <IdentityLine ident={identAt(index, acct)} />}
                   {acct.type === 'codex' && acct.apiKey && (
                     <div className="text-xs mt-0.5" style={{ color: 'var(--dim)', fontFamily: 'monospace' }}>
                       {acct.apiKey.slice(0, 8)}…

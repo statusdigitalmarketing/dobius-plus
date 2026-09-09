@@ -172,6 +172,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Account management
   accountsList: () => ipcRenderer.invoke('accounts:list'),
+  accountsIdentities: () => ipcRenderer.invoke('accounts:identities'),
   accountsSave: (account) => ipcRenderer.invoke('accounts:save', account),
   accountsDelete: (accountId) => ipcRenderer.invoke('accounts:delete', accountId),
   accountsGetForProject: (projectPath) => ipcRenderer.invoke('accounts:getForProject', projectPath),

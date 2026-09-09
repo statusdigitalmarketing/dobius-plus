@@ -11,6 +11,7 @@ import { resolveTerminalAccount, claudeEnvForAccount, expandTilde } from './clau
 import { installErrorLog, logLine, errorLogPath } from './error-log.js';
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
+import { accountIdentities } from './account-identity.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser, ensureShim } from './gws-accounts.js';
@@ -1668,6 +1669,18 @@ function setupConfigHandlers() {
 
   // Account management
   ipcMain.handle('accounts:list', () => getAccounts());
+  // Who each account ACTUALLY is: the login behind the name, whether it still
+  // has a credential, and which other rows share that same login. Without this
+  // the list showed only a typed name, which is how two entries over one
+  // account looked like a broken Switch (Asana 1218250019314695).
+  ipcMain.handle('accounts:identities', async () => {
+    try {
+      return await accountIdentities(getAccounts());
+    } catch (err) {
+      console.warn('[accounts] identity lookup failed:', err?.message || err);
+      return { default: null, accounts: [] };
+    }
+  });
   ipcMain.handle('accounts:save', (_event, account) => saveAccount(account));
   ipcMain.handle('accounts:delete', (_event, accountId) => deleteAccount(accountId));
   ipcMain.handle('accounts:getForProject', (_event, projectPath) => getProjectAccount(projectPath));
