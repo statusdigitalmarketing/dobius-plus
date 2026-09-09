@@ -5,6 +5,19 @@ the version or branch that shipped them. Sam triggers releases.
 
 ## Queue
 
+- [x] Updates tab always said "Couldn't reach GitHub: Failed to fetch" (v1.0.68).
+      The tab fetched api.github.com from the RENDERER, and index.html's CSP is
+      `connect-src 'self' http://localhost:5173 ws://localhost:5173`, so it was
+      blocked 100% of the time, never intermittently. The auto-updater kept
+      working right above it because it runs in the MAIN process where CSP does
+      not apply, which is why the panel could claim GitHub was unreachable while
+      a release sat downloaded and ready. Lookup moved behind
+      updater:getLatestRelease. Because the panel refreshes on mount and on every
+      manual check against a 60/hour unauthenticated limit: 60s cache, a force
+      flag so a manual check is never served stale, single-flight across windows,
+      separate startedAt/stored-at clocks so the request that STARTED last wins,
+      and a renderer sequence guard. 4 Codex rounds, 5 findings, all fixed, final
+      clean. Ship-tested over CDP, screenshot read back.
 - [x] Account list said only a typed NAME, so Switch looked broken (v1.0.67,
       Asana 1218250019314695 "Switch doesnt actually siwtch"). Switching was
       never broken: activeClaudeAccountId is read at the spawn choke point and
