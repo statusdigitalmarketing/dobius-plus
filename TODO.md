@@ -5,6 +5,19 @@ the version or branch that shipped them. Sam triggers releases.
 
 ## Queue
 
+- [x] Account list said only a typed NAME, so Switch looked broken (v1.0.67,
+      Asana 1218250019314695 "Switch doesnt actually siwtch"). Switching was
+      never broken: activeClaudeAccountId is read at the spawn choke point and
+      the picked profile IS what new terminals get. But two rows were one login
+      (Bryan and Rich Wiggles both richwigglesworth@, Default and Axiom both
+      justinpatty.01@), which is one quota, so switching between them could not
+      change a limit message, and "Sam" had no credential at all. Every row now
+      shows its real login address, flags rows that share a login, and flags a
+      missing credential; it re-reads on window focus so it updates the moment
+      you log one in from a terminal. All read-only: `claude auth status --json`
+      is authoritative but WRITES to the config dir, so it is deliberately not
+      used. 13 Codex rounds, 24 findings, all fixed, final clean. 43 tests.
+      Ship-tested over CDP in an isolated instance, screenshot on the task.
 - [x] SESSION RESTORE BROKEN (Sam, 9/3: "no conversation found with any of the
       session ids"): v1.0.65 made the account Switch pointer real, so every
       terminal launched with CLAUDE_CONFIG_DIR=<profile>. Claude Code scopes
