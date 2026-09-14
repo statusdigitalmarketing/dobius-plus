@@ -5,6 +5,23 @@ the version or branch that shipped them. Sam triggers releases.
 
 ## Queue
 
+- [x] Mobile "works from my phone, errors from any other computer" (v1.0.69).
+      dist-mobile was served with express.static from INSIDE app.asar; Electron
+      copies each streamed asar file out to <T>/.com.statusdigital.dobius-plus.*
+      and caches that path for the process lifetime, and macOS purges temp files
+      untouched ~3 days, so a 6-day-old app answered ENOENT on every page load
+      while the phone's installed PWA ran off its service-worker cache. Now
+      asarUnpack'd and served from app.asar.unpacked/dist-mobile (spawn-helper
+      idiom). Proven in a packaged build over the tailnet IP: 200s everywhere and
+      zero new copy-outs; confirmed inside the shipped 1.0.69 DMG. Same release:
+      real favicons (16/32, 180 apple-touch-icon, 192 manifest) for the mobile
+      page, PWA home screen and desktop page. 3 Codex rounds (a YAML mid-list
+      insert that broke packaging, a 168MB artifact in the stage), final clean.
+- [ ] Main-thread stall watchdog: Sam hit a macOS "not responding" dialog on
+      2026-09-14 10:03 with no crash report, no hang report, nothing in the
+      unified log; the process (up 6d, 39 sessions) recovered. Async transcript
+      reads ruled out as the cause. Log a stack when the event loop blocks >2s so
+      the next one is attributable. Offered, not yet approved.
 - [x] Updates tab always said "Couldn't reach GitHub: Failed to fetch" (v1.0.68).
       The tab fetched api.github.com from the RENDERER, and index.html's CSP is
       `connect-src 'self' http://localhost:5173 ws://localhost:5173`, so it was
