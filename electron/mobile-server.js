@@ -1204,7 +1204,18 @@ export async function startMobileServer() {
   });
 
   // Serve the mobile PWA build if present (added in Phase 3), else a placeholder.
-  const mobileDist = path.join(__dirname, '..', 'dist-mobile');
+  //
+  // In a packaged app dist-mobile is asarUnpack'd (electron-builder.yml), so it
+  // is a real directory under app.asar.unpacked and is served from there. It
+  // used to be served from INSIDE app.asar: express/send then made Electron copy
+  // every file out to a temp file and cache that path for the process lifetime,
+  // and once macOS purged the temp dir (~3 days untouched) each page load was
+  // ENOENT on a file that no longer existed. A phone with the PWA installed kept
+  // working off its service-worker cache, a fresh browser got the error page.
+  const unpackedDist = path.join(process.resourcesPath || '', 'app.asar.unpacked', 'dist-mobile');
+  const mobileDist = fs.existsSync(path.join(unpackedDist, 'index.html'))
+    ? unpackedDist
+    : path.join(__dirname, '..', 'dist-mobile');
   if (fs.existsSync(path.join(mobileDist, 'index.html'))) {
     expApp.use(express.static(mobileDist));
   } else {

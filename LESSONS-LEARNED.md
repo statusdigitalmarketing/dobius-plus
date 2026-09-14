@@ -147,3 +147,30 @@
 - **DETECTION**: `grep -n "ls -t\|sort -rn\|head -1" ` in any script that
   then calls `rm`. Deleting whatever sorted first is the anti-pattern.
 
+### [Build] - 2026-09-14
+- **MISTAKE**: Added `asarUnpack:` to electron-builder.yml by string-replacing
+  on the first two entries of `files:` and appending after them. YAML has no
+  list terminator, so the remaining `files:` entries (`electron/**/*`,
+  `node_modules/node-pty/**/*`, `package.json`) became members of `asarUnpack`
+  and the package lost its entry point. The `--dir` build failed, and I did not
+  notice because `npx electron-builder ... | tail -25` reports tail's exit code.
+- **FIX**: Insert new top-level keys by anchoring on the NEXT top-level key
+  (`\npublish:\n`), then parse the file (`yaml.safe_load`) and assert the lists
+  you did not mean to touch. Never pipe a build into `tail` without
+  `set -o pipefail` or writing to a log and echoing `$?` separately.
+- **CONTEXT**: Any YAML/TOML config with lists; any background build whose
+  success is judged by a truncated tail.
+- **DETECTION**: `python3 -c "import yaml;d=yaml.safe_load(open('electron-builder.yml'));print(d['files'],d.get('asarUnpack'))"` and `grep -n "| tail" ` on build invocations.
+
+### [Git] - 2026-09-14
+- **MISTAKE**: Ran `git add -A` while a background packaged build was writing
+  into `dist-shiptest/` in the working tree, staging a 168MB Electron
+  Framework binary. Codex flagged it as a P1 before the push would have been
+  rejected by GitHub's 100MB limit.
+- **FIX**: Build outputs used for ship-tests live in a gitignored dir
+  (`dist-shiptest` now is). Stage explicit paths, or run `git add -A` only
+  when no build is in flight, and read `git diff --cached --name-only` before
+  committing.
+- **CONTEXT**: Any repo where ship-tests produce artifacts inside the tree.
+- **DETECTION**: `git diff --cached --name-only | grep -E "^dist|\.app/"`
+

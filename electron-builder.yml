@@ -36,6 +36,16 @@ files:
   - electron/**/*
   - node_modules/node-pty/**/*
   - package.json
+# dist-mobile MUST live on disk, not inside app.asar. express.static on an asar
+# path makes Electron copy each file out to a temp file
+# (<T>/.com.statusdigital.dobius-plus.XXXXXX) on first request and cache that
+# path for the life of the process. macOS purges temp files untouched for ~3
+# days, so on a long-running app every mobile page load turned into
+# "ENOENT .com.statusdigital.dobius-plus.mZ8je5" while the phone's installed
+# PWA kept working off its service-worker cache (found 2026-09-14, uptime 6d).
+asarUnpack:
+  - dist-mobile/**/*
+
 publish:
   provider: github
   owner: statusdigitalmarketing
