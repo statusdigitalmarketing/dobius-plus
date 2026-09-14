@@ -1,5 +1,7 @@
 import './dev-userdata.js'; // MUST stay first: userData override before config-manager loads
-import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents } from 'electron';
+import { createStallWatchdog } from './stall-watchdog.js';
+import { createOwnerCleanup } from './owner-cleanup.js';
+import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor } from 'electron';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
@@ -9,6 +11,12 @@ import { getQuittingForUpdate, setQuitting, getQuitting } from './quit-state.js'
 import { projectPathFromTabId } from './tab-id-util.js';
 import { resolveTerminalAccount, claudeEnvForAccount, expandTilde } from './claude-account-env.js';
 import { installErrorLog, logLine, errorLogPath } from './error-log.js';
+
+// Stall watchdog (v1.0.70). Wrapped here, at import time, so the very first
+// ipcMain.handle/on registration below is already tracked; armed in whenReady
+// once the error log exists to write to. See electron/stall-watchdog.js.
+const stallWatchdog = createStallWatchdog({ log: logLine });
+stallWatchdog.wrapIpc(ipcMain);
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities } from './account-identity.js';
@@ -197,6 +205,10 @@ const TERMINAL_WRITE_MAX_BYTES = 256 * 1024; // 256KB per write — plenty for a
 // IPC (they go through createTerminal directly), so they're naturally
 // excluded from renderer write access. Codex round-2 HIGH on main.js:118.
 const terminalOwners = new Map(); // id -> webContents.id
+// One 'destroyed' listener per window that sweeps this map, instead of one
+// closure per tab: 11 tabs at boot tripped MaxListeners on the window's
+// WebContents and the list grew with tab churn for the life of the window.
+const ownerCleanup = createOwnerCleanup(terminalOwners);
 
 // Settle tick for the main-process terminal status authority (v1.0.43).
 let statusSettleTimer = null;
@@ -231,10 +243,7 @@ function setupTerminalHandlers() {
     // the cleanup so it only removes when WE still own the id — a tear-off
     // claim may have transferred ownership to another window between the
     // create and the destroyed event.
-    const ownerId = event.sender.id;
-    event.sender.once('destroyed', () => {
-      if (terminalOwners.get(id) === ownerId) terminalOwners.delete(id);
-    });
+    ownerCleanup.hook(event.sender);
     // Per-account env (codex/claude). Resolution: the project's assigned
     // account wins (per-project override), else the globally ACTIVE Claude
     // account (what the Switch button sets: v1.0.65, this is what makes
@@ -2150,10 +2159,7 @@ function setupWindowHandlers() {
       // persisted to lastTearOffs (an unclaimed one never is). Match by the
       // claiming window's webContents id so the right window is confirmed. Codex.
       markTearOffConfirmed(tabId, event.sender.id);
-      const ownerId = event.sender.id;
-      event.sender.once('destroyed', () => {
-        if (terminalOwners.get(tabId) === ownerId) terminalOwners.delete(tabId);
-      });
+      ownerCleanup.hook(event.sender);
     } else {
       // Claim failed (the PTY exited between window creation and claim, so
       // reassignTerminal found no entry). Revoke the grant and close the now
@@ -2424,6 +2430,7 @@ function setupCrashLogging() {
 
 app.whenReady().then(() => {
   installErrorLog();
+  stallWatchdog.start({ powerMonitor });
   setupCrashLogging();
   // Make sure node-pty can actually launch shells before any tab is created.
   ensureSpawnHelperExecutable();

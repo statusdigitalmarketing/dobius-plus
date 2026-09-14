@@ -174,3 +174,34 @@
 - **CONTEXT**: Any repo where ship-tests produce artifacts inside the tree.
 - **DETECTION**: `git diff --cached --name-only | grep -E "^dist|\.app/"`
 
+### [Architecture] - 2026-09-14
+- **MISTAKE**: Wrapped `ipcMain.on` by registering a fresh closure and keeping
+  a `WeakMap<originalFn, wrapper>` so `off()` could translate. That breaks
+  EventEmitter's contract three ways: the same fn on two channels shares one
+  map slot, a duplicate registration overwrites the slot so the older one can
+  never be removed, and a pending `once(fn)` cannot be cancelled by `fn`
+  (the map holds Node's internal once-wrapper, not `fn`).
+- **FIX**: Do what EventEmitter does. Give the wrapper `.listener = fn`, and
+  implement removal as a per-channel scan of `rawListeners(channel)` from
+  newest to oldest matching `w === x || w.listener === x ||
+  w.listener?.listener === x`. Test with the REAL `node:events` EventEmitter:
+  on/off, on twice/off twice, once+emit x3, once+off+emit, `this` binding.
+- **CONTEXT**: Any monkeypatch of an EventEmitter's `on`. Electron's ipcMain
+  is one.
+- **DETECTION**: `grep -n "WeakMap" electron/*.js` near any `.on =` override.
+
+### [Architecture] - 2026-09-14
+- **MISTAKE**: An event-loop drift watchdog treated a Mac going to sleep as a
+  stall: an 8h nap logged "blocked ~28800s" AND consumed the 30s report
+  budget, so a real 3s stall right after wake went unrecorded. A 10-minute
+  plausibility cap did not fix the short-nap case, because powerMonitor's
+  'resume' is delivered asynchronously and the first tick after wake can run
+  before it.
+- **FIX**: Set a `suspended` flag on 'suspend' (which always precedes the
+  sleep), treat any tick while suspended, or any gap over the cap, as a clock
+  jump: log it under the watchdog's own kind, reset the baseline, and never
+  touch the report budget. Clear the flag on 'resume'.
+- **CONTEXT**: Any timer-drift heuristic on a laptop.
+- **DETECTION**: `grep -n "lastReportAt" electron/stall-watchdog.js` and
+  confirm a clock-jump path returns before it is written.
+

@@ -83,7 +83,9 @@ function rotateIfNeeded() {
 // console loop could otherwise exhaust the per-minute budget right before the
 // crash it was meant to preserve (Codex Medium). These kinds bypass the
 // throttle (they are rare and are the whole point of the log).
-const PRIORITY_RE = /^(crash\.|renderer\.gone|child\.gone|renderer\.preload-error)/;
+// main.stall joins them (v1.0.70): a stall report is written once the loop
+// recovers, which is exactly when a renderer error storm is most likely.
+const PRIORITY_RE = /^(crash\.|renderer\.gone|child\.gone|renderer\.preload-error|main\.stall)/;
 export function isPriorityKind(kind) {
   return PRIORITY_RE.test(String(kind || ''));
 }
