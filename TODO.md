@@ -17,7 +17,7 @@ the version or branch that shipped them. Sam triggers releases.
       real favicons (16/32, 180 apple-touch-icon, 192 manifest) for the mobile
       page, PWA home screen and desktop page. 3 Codex rounds (a YAML mid-list
       insert that broke packaging, a 168MB artifact in the stage), final clean.
-- [x] Main-thread stall watchdog (main, unreleased; ships in v1.0.70). Sam hit
+- [x] Main-thread stall watchdog (v1.0.70). Sam hit
       a macOS "not responding" dialog on 2026-09-14 with no crash report, hang
       report or log line to attribute it. electron/stall-watchdog.js now logs
       `main.stall` at recovery with duration, last IPC entered, handlers in
@@ -27,7 +27,7 @@ the version or branch that shipped them. Sam triggers releases.
 - [x] Listener leak: "11 destroyed listeners added to [WebContents]" once per
       launch. terminal:create added one closure per tab to the window's
       WebContents; electron/owner-cleanup.js registers one per window. Same
-      commit as the watchdog.
+      commit as the watchdog, shipped in v1.0.70.
 - [ ] account-share re-warns on every terminal spawn for the ACTIVE profile
       (acct-1789078666024 "Axiom"): its plugins dir has 447 entries that collide
       with the shared store, so it stays profile-local and the warning repeats
