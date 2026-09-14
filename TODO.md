@@ -17,11 +17,23 @@ the version or branch that shipped them. Sam triggers releases.
       real favicons (16/32, 180 apple-touch-icon, 192 manifest) for the mobile
       page, PWA home screen and desktop page. 3 Codex rounds (a YAML mid-list
       insert that broke packaging, a 168MB artifact in the stage), final clean.
-- [ ] Main-thread stall watchdog: Sam hit a macOS "not responding" dialog on
-      2026-09-14 10:03 with no crash report, no hang report, nothing in the
-      unified log; the process (up 6d, 39 sessions) recovered. Async transcript
-      reads ruled out as the cause. Log a stack when the event loop blocks >2s so
-      the next one is attributable. Offered, not yet approved.
+- [x] Main-thread stall watchdog (main, unreleased; ships in v1.0.70). Sam hit
+      a macOS "not responding" dialog on 2026-09-14 with no crash report, hang
+      report or log line to attribute it. electron/stall-watchdog.js now logs
+      `main.stall` at recovery with duration, last IPC entered, handlers in
+      flight, heap/rss. Sleep-safe (powerMonitor suspend flag + 10-min cap),
+      monotonic clock, EventEmitter removal contract preserved. Verified with a
+      3s SIGSTOP in an isolated instance. 4 Codex rounds, 7 findings, clean.
+- [x] Listener leak: "11 destroyed listeners added to [WebContents]" once per
+      launch. terminal:create added one closure per tab to the window's
+      WebContents; electron/owner-cleanup.js registers one per window. Same
+      commit as the watchdog.
+- [ ] account-share re-warns on every terminal spawn for the ACTIVE profile
+      (acct-1789078666024 "Axiom"): its plugins dir has 447 entries that collide
+      with the shared store, so it stays profile-local and the warning repeats
+      (22 times in the first 35 min of 1.0.69). Not data loss, by design, but
+      (a) that account does not see the shared plugins and (b) the log noise.
+      Decide: merge with a conflict policy, or warn once per boot.
 - [x] Updates tab always said "Couldn't reach GitHub: Failed to fetch" (v1.0.68).
       The tab fetched api.github.com from the RENDERER, and index.html's CSP is
       `connect-src 'self' http://localhost:5173 ws://localhost:5173`, so it was
