@@ -28,12 +28,18 @@ the version or branch that shipped them. Sam triggers releases.
       launch. terminal:create added one closure per tab to the window's
       WebContents; electron/owner-cleanup.js registers one per window. Same
       commit as the watchdog, shipped in v1.0.70.
-- [ ] account-share re-warns on every terminal spawn for the ACTIVE profile
-      (acct-1789078666024 "Axiom"): its plugins dir has 447 entries that collide
-      with the shared store, so it stays profile-local and the warning repeats
-      (22 times in the first 35 min of 1.0.69). Not data loss, by design, but
-      (a) that account does not see the shared plugins and (b) the log noise.
-      Decide: merge with a conflict policy, or warn once per boot.
+- [x] Plugins were broken on 4 of 5 accounts (main, unreleased; ships in v1.0.71).
+      ~/.claude/plugins was migrated from the old Mac: manifests pointed at
+      /Users/statusmacbook2024 and 15 of 19 caches were missing, so Default and
+      every symlinked profile had 0 working plugins; only the active account
+      (installed fresh) worked, which is why the share code refused to merge it.
+      Store repaired by hand 2026-09-14 (backups, atomic path rebase, 15
+      installs). Sharing now goes through CLAUDE_CODE_PLUGIN_CACHE_DIR pinned at
+      boot for every spawn (claude-account-env.js); `plugins` left the symlink
+      list because Claude validates marketplace locations by literal prefix
+      against the current config dir (#82272). All 5 accounts: 18/1/0. The
+      per-spawn account-share warning now emits once per profile+entry per
+      process. Codex design review + 3 rounds, 5 findings, clean.
 - [x] Updates tab always said "Couldn't reach GitHub: Failed to fetch" (v1.0.68).
       The tab fetched api.github.com from the RENDERER, and index.html's CSP is
       `connect-src 'self' http://localhost:5173 ws://localhost:5173`, so it was
