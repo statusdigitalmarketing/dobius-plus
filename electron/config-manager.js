@@ -1264,11 +1264,45 @@ export function saveAccount(account) {
   // this, a crafted accountsSave call could persist an arbitrary path (e.g.
   // /etc/passwd, ~/.ssh/id_rsa) and later activating the account would copy
   // that file over ~/.claude.json. Codex PR#3 r21 P2.
+  // Lexical containment (path.resolve) is string math, so a SYMLINKED path
+  // component can still escape the root at fs time (NOTES: "path.resolve is not
+  // a filesystem answer"). After the lexical check, realpath the nearest
+  // EXISTING ancestor and require it to stay within the real root, so a symlink
+  // pointing outside is rejected. The dir may not exist yet on a fresh profile,
+  // which is why we probe ancestors rather than the full path. Reviewer P2.
+  function realWithin(resolved, root) {
+    let realRoot;
+    // Root not created yet (fresh machine): no symlink can live under a
+    // nonexistent dir, so the lexical containment the caller already verified is
+    // sufficient. Accept.
+    try { realRoot = fs.realpathSync(root); } catch { return true; }
+    // Find the DEEPEST node that exists, using lstat so a final symlink is not
+    // followed. A path segment that does not exist yet is fine (it will be
+    // created as a real dir under a contained parent). But a segment that IS a
+    // symlink must resolve inside the real root: a DANGLING symlink (lstat says
+    // symlink, realpath throws) is REJECTED, because once its target is created
+    // it escapes the root (reviewer P1).
+    let probe = resolved;
+    for (;;) {
+      let lst;
+      try { lst = fs.lstatSync(probe); } catch { lst = null; }
+      if (lst) {
+        // probe exists (file, dir, or symlink). Resolve through symlinks.
+        let real;
+        try { real = fs.realpathSync(probe); } catch { return false; } // dangling symlink
+        return real === realRoot || real.startsWith(realRoot + path.sep);
+      }
+      const parent = path.dirname(probe);
+      if (parent === probe) return false;
+      probe = parent;
+    }
+  }
   const profilesRoot = path.join(os.homedir(), '.claude-profiles');
   function safeClaudeJsonPath(raw) {
     if (typeof raw !== 'string' || raw.length === 0 || raw.length > 500) return null;
     const resolved = path.resolve(raw);
     if (resolved !== profilesRoot && !resolved.startsWith(profilesRoot + path.sep)) return null;
+    if (!realWithin(resolved, profilesRoot)) return null;
     return resolved;
   }
   const claudeJsonPath = account.type === 'claude'
@@ -1282,6 +1316,7 @@ export function saveAccount(account) {
     if (typeof raw !== 'string' || raw.length === 0 || raw.length > 500) return null;
     const resolved = path.resolve(raw);
     if (resolved !== codexProfilesRoot && !resolved.startsWith(codexProfilesRoot + path.sep)) return null;
+    if (!realWithin(resolved, codexProfilesRoot)) return null;
     return resolved;
   }
   // Codex auth mode: 'chatgpt' (a login with its own CODEX_HOME) or 'apikey'.

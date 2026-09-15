@@ -90,6 +90,17 @@ const IDLE_BUFFER_BYTES = 512 * 1024;
  * @returns {{ pid: number }}
  */
 export function createTerminal(id, cwd, webContents, accountEnv = {}) {
+  // A respawn under an existing id (e.g. "Continue on switched account") must
+  // NOT strand what was attached to the old PTY. Carry over the live subscriber
+  // set so an attached phone keeps streaming (killing the old PTY would orphan
+  // it: its onExit is suppressed by the identity guard, so the mobile socket
+  // still thinks it is subscribed and receives nothing). Carry over the last
+  // known geometry so the resumed shell renders at the tab's real size instead
+  // of collapsing to 80x24 (reviewer P2 x2).
+  const prev = terminals.get(id);
+  const prevSubs = prev?.subscribers;
+  const prevCols = prev?.cols;
+  const prevRows = prev?.rows;
   // Kill existing terminal with this ID if any
   if (terminals.has(id)) {
     killTerminal(id);
@@ -154,8 +165,10 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   // would override its stored login. (A key re-exported by the login shell
   // profile is outside our reach; this clears the inherited case.)
   for (const [k, v] of Object.entries(termEnv)) { if (v === undefined) delete spawnEnv[k]; }
+  const spawnCols = (Number.isInteger(prevCols) && prevCols > 0) ? prevCols : 80;
+  const spawnRows = (Number.isInteger(prevRows) && prevRows > 0) ? prevRows : 24;
   const term = pty.spawn(shell, ['-l'], {
-    name: 'xterm-256color', cols: 80, rows: 24, cwd: safeCwd, env: spawnEnv,
+    name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: spawnEnv,
   });
 
   const dataSub = term.onData((data) => {
@@ -229,8 +242,14 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
     // only reaps WINDOW-owned PTYs, so closing a window never terminates a
     // deliberately-headless background agent. Audit High.
     everWindowOwned: !!webContents,
-    subscribers: new Set(),
+    // Reuse the SAME Set object so subscribe/unsubscribe closures captured
+    // against the old entry still target the live set after a respawn.
+    subscribers: prevSubs || new Set(),
     outputBuffer: '',
+    // Last known PTY geometry, seeded from the spawn size and updated on every
+    // resize, so a respawn can restore the tab's real dimensions.
+    cols: spawnCols,
+    rows: spawnRows,
     cwd: safeCwd,
     // Track the requested project path (pre-fallback) for exact-match lookup
     // in getTerminalsForProject. Carson's audit #2 (CRITICAL): the old
@@ -289,6 +308,9 @@ export function resizeTerminal(id, cols, rows) {
   if (entry) {
     try {
       entry.pty.resize(cols, rows);
+      // Remember the geometry so a later respawn restores it (reviewer P2).
+      if (Number.isInteger(cols) && cols > 0) entry.cols = cols;
+      if (Number.isInteger(rows) && rows > 0) entry.rows = rows;
     } catch (err) {
       console.error(`[terminal-manager] resize error for ${id}:`, err.message);
     }

@@ -33,6 +33,8 @@ import {
 import { parseSelector, parseSelectorFromScreen, stripAnsi, spinnerVerb } from './selector-parser.js';
 import { renderScreenLines } from './screen-render.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills } from './data-service.js';
+import { listCodexSessions } from './codex-sessions.js';
+import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { peekReply } from './voice-bridge.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
 import { snapshot as terminalStatusSnapshot } from './terminal-status.js';
@@ -571,6 +573,26 @@ async function isKnownProjectPath(pth) {
   return (await knownProjectList()).some((p) => p.path === pth);
 }
 
+// A path is a legitimate Codex project cwd if any Codex session on this machine
+// ran there. knownProjectList() only discovers Claude/manual/scanned projects,
+// so a Codex-only project produced "Unknown project" on resume (reviewer P2).
+// Bounded: projectFilter early-stops at the first match. includeExec casts the
+// widest net so any Codex activity in that dir counts.
+async function isKnownCodexProjectPath(pth) {
+  if (typeof pth !== 'string' || !pth.startsWith('/')) return false;
+  try {
+    const hits = await listCodexSessions({ limit: 1, includeExec: true, projectFilter: pth });
+    return hits.length > 0;
+  } catch { return false; }
+}
+// Like resolveCreateCwd, but also honors Codex-discovered project paths.
+async function resolveCreateCwdCodex(cwd) {
+  const v = typeof cwd === 'string' ? cwd : '';
+  if (HOME_SENTINELS.has(v)) return os.homedir();
+  if (v.startsWith('/') && (await isKnownProjectPath(v) || await isKnownCodexProjectPath(v))) return v;
+  return null;
+}
+
 // The ONLY non-path cwd values that map to the home dir: the desktop main tab
 // and phone-tab sentinels (and empty = no project). Everything else that is not
 // a known absolute project path is rejected, so `.`, `~`, `foo`, etc. cannot
@@ -782,7 +804,7 @@ function handleAuthedMessage(socket, msg, subs) {
         }
         const id = mobileTermId();
         try {
-          createTerminal(id, resolved, null);
+          createTerminal(id, resolved, null, resolveAccountEnvForCwd(resolved));
           socket._authedTabs.add(id); // the creator may drive its own PTY. Audit Medium.
           wsSend(socket, { type: 'terminalCreated', id, nonce: crNonce });
         } catch (err) {
@@ -811,8 +833,13 @@ function handleAuthedMessage(socket, msg, subs) {
     case 'listSessions': {
       // Default Claude-only (scans zero Codex files); the phone opts into Codex.
       const sources = Array.isArray(msg.sources) && msg.sources.length ? msg.sources : ['claude'];
+      // Echo the request's reqId (if any) so the phone can drop an OLDER
+      // same-source reply that arrives after a newer one (reviewer P2).
+      const reqId = typeof msg.reqId === 'number' ? msg.reqId : undefined;
       loadAllSessions(undefined, { sources })
-        .then((list) => wsSend(socket, { type: 'sessions', list: list || [] }))
+        // Echo the sources so the phone can drop a stale reply that arrives
+        // after the user switched the filter (reviewer P2).
+        .then((list) => wsSend(socket, { type: 'sessions', list: list || [], sources, reqId }))
         .catch((err) => wsSend(socket, { type: 'error', message: String(err?.message || err) }));
       break;
     }
@@ -821,11 +848,11 @@ function handleAuthedMessage(socket, msg, subs) {
       // open a phone terminal in the session's project and type `codex resume`.
       const { sessionId, projectPath } = msg;
       if (typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) break;
-      resolveCreateCwd(projectPath).then((cwd) => {
+      resolveCreateCwdCodex(projectPath).then((cwd) => {
         if (cwd === null) { wsSend(socket, { type: 'error', message: 'Unknown project' }); return; }
         const id = mobileTermId();
         try {
-          createTerminal(id, cwd, null);
+          createTerminal(id, cwd, null, resolveAccountEnvForCwd(cwd));
           wsSend(socket, { type: 'terminalCreated', id });
           setTimeout(() => writeTerminal(id, `codex resume ${sessionId}\r`), 700);
         } catch (err) {
@@ -938,7 +965,7 @@ function handleAuthedMessage(socket, msg, subs) {
         }
         const id = mobileTermId();
         try {
-          createTerminal(id, cwd, null);
+          createTerminal(id, cwd, null, resolveAccountEnvForCwd(cwd));
           wsSend(socket, { type: 'terminalCreated', id });
           // Attach the tab to the claim we already hold, so the reservation
           // lives as long as the tab does instead of lapsing while a slow shell

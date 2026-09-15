@@ -84,5 +84,13 @@ await check('codexIdentityFor: apikey-only auth.json counts as logged in', async
   assert.equal((await codexIdentityFor(home)).login, 'in');
 });
 
+await check('codexIdentityFor: a literal null auth.json does not throw (logged out)', async () => {
+  const home = path.join(tmp, 'nullauth'); fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'auth.json'), 'null'); // valid JSON that parses to null
+  const ident = await codexIdentityFor(home);
+  assert.equal(ident.login, 'out');
+  assert.equal(ident.email, null);
+});
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\nALL PASS  (${pass} passed)`);

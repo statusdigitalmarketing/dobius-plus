@@ -14,6 +14,7 @@
 // CLAUDE_CONFIG_DIR for Claude. auth.json is the credential and stays
 // per-profile (never shared), like .claude.json for Claude.
 
+import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { shareProfile } from './account-profile-share.js';
@@ -83,8 +84,37 @@ export function codexEnvForAccount(account) {
  */
 export function shareCodexProfile(profileDir, opts = {}) {
   if (typeof profileDir !== 'string' || !profileDir) return { skipped: 'no-path' };
+  const defaultDir = opts.defaultDir || codexDefaultDir();
+  // On a machine that has never run Codex, ~/.codex and its sessions dir do not
+  // exist yet, so shareProfile would skip ('no-default-dir', or 'sessions'
+  // absent-in-default) and this account would write sessions into a private
+  // home the Sessions tab never reads (it reads ~/.codex/sessions). Seed only
+  // the sessions DIRECTORY: a directory entry merges (moves any profile-local
+  // sessions into the shared store, then links), so nothing is displaced.
+  // Do NOT seed history.jsonl / session_index.jsonl as empty FILES: shareEntry
+  // treats a real file whose default copy exists as "preserve profile copy aside
+  // and link to default", so an empty seed would set a populated profile-local
+  // history/index aside and link to the empty one, hiding real history until the
+  // backup is restored (reviewer P2). Those files link on their own once a real
+  // one exists in the default dir.
+  //
+  // Seed the sessions DIRECTORY only when the profile has NO populated sessions
+  // of its own. When the profile IS populated, seeding an empty default and then
+  // failing to merge (e.g. a read-only profile sessions dir) makes shareEntry
+  // set the populated dir aside and link to the empty seed, hiding real
+  // transcripts (reviewer P2). Skipping the seed in that case leaves shareEntry
+  // at 'absent-in-default', which is non-destructive: the populated profile
+  // sessions stays exactly where it is, and links once a default store exists.
+  let profileHasSessions = false;
+  try { profileHasSessions = fs.readdirSync(path.join(profileDir, 'sessions')).length > 0; }
+  catch { /* absent/unreadable: treat as empty, safe to seed */ }
+  if (!profileHasSessions) {
+    try {
+      fs.mkdirSync(path.join(defaultDir, 'sessions'), { recursive: true });
+    } catch { /* best effort: shareProfile still guards on the default dir */ }
+  }
   return shareProfile(profileDir, {
-    defaultDir: codexDefaultDir(),
+    defaultDir,
     profilesRoot: codexProfilesRoot(),
     entries: SHARED_CODEX_ENTRIES,
     ...opts,

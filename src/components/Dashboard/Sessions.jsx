@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useStore } from '../../store/store';
 import { timeAgo } from '../../lib/time-ago';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
@@ -34,27 +34,54 @@ export default function Sessions() {
   const [sourceFilter, setSourceFilter] = useState('claude'); // 'claude' | 'codex' | 'all'
   const [hiddenCount, setHiddenCount] = useState(0); // hidden session sources (paths)
 
+  // The CURRENTLY selected source, tracked in a ref so an async load can tell
+  // whether the user has switched filters since it started. Gating on SOURCE
+  // (not a monotonic generation) is deliberate: a generation counter dropped
+  // the results of every same-source refresh when notifications arrived faster
+  // than a scan completed, leaving the skeleton up forever (reviewer P2). A
+  // source gate lets same-source refreshes render while still dropping a
+  // slow load whose source the user has since navigated away from.
+  const sourceFilterRef = useRef(sourceFilter);
+  useEffect(() => { sourceFilterRef.current = sourceFilter; }, [sourceFilter]);
+  // loadSeq stamps each load at START; renderedSeq is the highest that has been
+  // applied to the UI. A completed load renders only if its source still matches
+  // AND it is not OLDER than what is already shown. This is stronger than the
+  // source-only gate: it also stops a slow earlier same-source refresh from
+  // finishing last and RESTORING stale (e.g. pre-Hide) cards over a newer
+  // result (reviewer P2), while still letting the newest of a rapid refresh
+  // stream render (so the skeleton always clears).
+  const loadSeqRef = useRef(0);
+  const renderedSeqRef = useRef(0);
   const loadData = useCallback(async (source) => {
     if (!window.electronAPI?.dataLoadAllSessions) return;
     const src = source || sourceFilter;
     // Default is Claude-only, which scans zero Codex files. 'codex'/'all' opt
     // into the Codex scan; exec (headless review) runs stay hidden.
     const sources = src === 'codex' ? ['codex'] : src === 'all' ? ['claude', 'codex'] : ['claude'];
+    const seq = ++loadSeqRef.current;
     try {
       const [allSessions, sessionTags, cfgSettings] = await Promise.all([
         window.electronAPI.dataLoadAllSessions(undefined, { sources }),
         window.electronAPI.configGetSessionTags?.() || {},
         window.electronAPI.configGetSettings?.() || {},
       ]);
+      if (src !== sourceFilterRef.current || seq < renderedSeqRef.current) return;
+      renderedSeqRef.current = seq;
       setSessions(allSessions || []);
       setTags(sessionTags || {});
       const hp = cfgSettings?.hiddenSessionPaths;
       setHiddenCount(Array.isArray(hp) ? hp.length : 0);
     } catch {
+      if (src !== sourceFilterRef.current || seq < renderedSeqRef.current) return;
+      renderedSeqRef.current = seq;
       setSessions([]);
       setTags({});
     } finally {
-      setLoading(false);
+      // Clear the skeleton ONLY for a load that is current and not superseded.
+      // A rejected stale load (older seq, or a source the user left) must NOT
+      // drop loading, or the previously-shown source's cards would sit visible
+      // under the new filter until a fresh load finishes (reviewer P2).
+      if (src === sourceFilterRef.current && seq >= renderedSeqRef.current) setLoading(false);
     }
   }, [sourceFilter]);
 
@@ -70,7 +97,9 @@ export default function Sessions() {
   }, []);
 
   const changeSource = useCallback((src) => {
+    sourceFilterRef.current = src; // synchronous, so an in-flight load resolves against the new source
     setSourceFilter(src);
+    setSessions([]); // blank the previous source's cards immediately so none show under the new filter
     setLoading(true);
     loadData(src);
     try { window.electronAPI?.configUpdateSettings?.({ sessionSourceFilter: src }); } catch { /* best effort */ }

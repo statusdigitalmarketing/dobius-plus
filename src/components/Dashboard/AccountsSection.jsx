@@ -148,6 +148,22 @@ export default function AccountsSection() {
     }
   };
 
+  // Back to the Mac's default ~/.codex Codex login. The Claude default reset
+  // above did not touch Codex, so an active Codex account had no way back to
+  // default (reviewer P2).
+  const handleUseCodexDefault = async () => {
+    setActivating('__codex_default__');
+    const result = await window.electronAPI.accountsActivateCodex?.(null);
+    setActivating(null);
+    if (result?.ok) {
+      setActiveCodexId(null);
+      reload();
+      flash('Back to the default Codex login. New terminals run codex as this Mac’s normal ~/.codex account.');
+    } else {
+      flash(`Failed to switch Codex: ${result?.error || 'unknown'}`, true);
+    }
+  };
+
   const handleActivateCodex = async (acct) => {
     setActivating(acct.id);
     const result = await window.electronAPI.accountsActivateCodex?.(acct.id);
@@ -261,15 +277,28 @@ export default function AccountsSection() {
               Your main login with all your settings, skills, and hooks. Switching applies to NEW terminals in every project; a project with an assigned account keeps its assignment.
             </div>
           </div>
-          {activeClaudeId !== null && (
-            <button
-              style={btn('primary', { padding: '4px 10px', fontSize: 11, flexShrink: 0, marginLeft: 10 })}
-              disabled={activating === '__default__'}
-              onClick={handleUseDefault}
-            >
-              {activating === '__default__' ? 'Switching…' : 'Switch'}
-            </button>
-          )}
+          <div className="flex flex-col gap-1" style={{ flexShrink: 0, marginLeft: 10 }}>
+            {activeClaudeId !== null && (
+              <button
+                style={btn('primary', { padding: '4px 10px', fontSize: 11 })}
+                disabled={activating === '__default__'}
+                onClick={handleUseDefault}
+                title="Reset Claude to the default ~/.claude login"
+              >
+                {activating === '__default__' ? 'Switching…' : 'Use default (Claude)'}
+              </button>
+            )}
+            {activeCodexId !== null && accounts.some((a) => a.type === 'codex') && (
+              <button
+                style={btn('primary', { padding: '4px 10px', fontSize: 11 })}
+                disabled={activating === '__codex_default__'}
+                onClick={handleUseCodexDefault}
+                title="Reset Codex to the default ~/.codex login"
+              >
+                {activating === '__codex_default__' ? 'Switching…' : 'Use default (Codex)'}
+              </button>
+            )}
+          </div>
         </div>
       )}
 

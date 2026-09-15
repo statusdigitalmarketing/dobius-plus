@@ -42,7 +42,11 @@ export async function codexIdentityFor(codexHome) {
   let data;
   try { data = JSON.parse(raw); } catch { return { email: null, plan: null, login: 'unknown' }; }
   const tokens = data && typeof data === 'object' ? data.tokens : null;
-  const hasToken = !!(tokens && (tokens.id_token || tokens.access_token)) || !!data.OPENAI_API_KEY;
+  // Guard data itself: a literal `null` in auth.json parses to null, so
+  // data.OPENAI_API_KEY would throw and crash every Codex identity row
+  // (reviewer P3).
+  const hasToken = !!(tokens && (tokens.id_token || tokens.access_token))
+    || !!(data && typeof data === 'object' && data.OPENAI_API_KEY);
   const payload = tokens ? decodeJwtPayload(tokens.id_token) : null;
   const email = payload && typeof payload.email === 'string' ? payload.email : null;
   const authClaim = payload && payload['https://api.openai.com/auth'];

@@ -21,6 +21,7 @@
 // head), so it is unit-tested without touching the filesystem.
 
 import fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -76,6 +77,7 @@ export function parseCodexSessionHead(headText, { indexTitle = null } = {}) {
     if (!line.trim()) continue;
     let rec;
     try { rec = JSON.parse(line); } catch { continue; } // a clipped final line
+    if (!rec || typeof rec !== 'object') continue; // null / primitive line: skip, do not throw
     const p = rec.payload || {};
     const recTs = tsToMs(rec.timestamp) || tsToMs(p.timestamp);
     if (recTs > latestTs) latestTs = recTs;
@@ -143,7 +145,7 @@ export function sessionIdFromFilename(name) {
  *
  * @param {{ limit?: number, includeExec?: number|boolean, projectFilter?: string|null, timeAgo?: (ms:number)=>string, mapLimit?: Function }} opts
  */
-export async function listCodexSessions({ limit = 50, includeExec = false, projectFilter = null, timeAgo = null, hardFileCap = 12000 } = {}) {
+export async function listCodexSessions({ limit = 50, includeExec = false, projectFilter = null, timeAgo = null, hardFileCap = 12000, excludePaths = null } = {}) {
   // ponytail: interactive sessions buried under more than hardFileCap of the
   // newest headless `codex exec` files won't list. 12000 covers this machine's
   // exec:interactive ratio with margin; the walk still early-stops at `limit`
@@ -165,9 +167,19 @@ export async function listCodexSessions({ limit = 50, includeExec = false, proje
       try {
         const st = await fh.stat();
         sizeMB = st.size / (1024 * 1024);
-        const buf = Buffer.alloc(Math.min(65536, st.size));
-        await fh.read(buf, 0, buf.length, 0);
-        head = buf.toString('utf8');
+        // session_meta is line 0. Grow the read until we have a COMPLETE first
+        // line (so a large meta record is not clipped mid-line and the session
+        // silently dropped), or hit a hard cap. Common case reads 64KB once:
+        // meta and the first prompt sit well within it and a newline is present.
+        let readLen = Math.min(65536, st.size);
+        const CAP = Math.min(2 * 1024 * 1024, st.size);
+        for (;;) {
+          const buf = Buffer.alloc(readLen);
+          await fh.read(buf, 0, readLen, 0);
+          head = buf.toString('utf8');
+          if (head.indexOf('\n') !== -1 || readLen >= CAP) break;
+          readLen = Math.min(readLen * 4, CAP);
+        }
       } finally { await fh.close(); }
     } catch { return null; }
     const id = sessionIdFromFilename(path.basename(filePath));
@@ -205,6 +217,12 @@ export async function listCodexSessions({ limit = 50, includeExec = false, proje
       if (!it) continue;
       if (it.isExec && !includeExec) continue;
       if (projectFilter && it.projectPath !== projectFilter) continue;
+      // Skip user-hidden projects DURING the walk, not after the limit is
+      // applied: filtering after listCodexSessions returned its newest N let a
+      // page full of hidden sessions consume the whole cap and hide the visible
+      // ones (reviewer P2). An explicit projectFilter bypasses hide, matching
+      // the Claude scan.
+      if (!projectFilter && excludePaths && it.projectPath && excludePaths.has(it.projectPath)) continue;
       const { isExec: _isExec, ...item } = it;
       kept.push(item);
     }
@@ -272,6 +290,12 @@ export async function codexTranscript(sessionId, { limit = 0, maxFilesSearched =
         const dayDir = path.join(root, y, m, d);
         let names;
         try { names = (await fs.readdir(dayDir)).filter((n) => n.endsWith('.jsonl')); } catch { continue; }
+        // Search newest-first WITHIN the day, matching listCodexSessions'
+        // ordering. Without this the transcript walk searched raw readdir order
+        // while the listing searched newest-first, so on a day with more than
+        // maxFilesSearched rollouts a session that LISTS could still return an
+        // empty transcript when its file sorted past the cap (reviewer P2).
+        names.sort().reverse();
         for (const n of names) {
           searched += 1;
           if (sessionIdFromFilename(n) === sessionId) { filePath = path.join(dayDir, n); break outer; }
@@ -282,14 +306,20 @@ export async function codexTranscript(sessionId, { limit = 0, maxFilesSearched =
   }
   if (!filePath) return [];
 
-  let raw;
-  try { raw = await fs.readFile(filePath, 'utf8'); } catch { return []; }
-  const entries = [];
-  let bytes = 0;
-  for (const line of raw.split('\n')) {
-    if (!line.trim()) continue;
+  // Parse the message records out of a raw chunk into transcript entries,
+  // keeping the NEWEST within budget. A positive limit keeps the last N; no
+  // limit keeps a rolling ~12MB tail by bytes. Trimming from the front (not
+  // breaking) matters because the read is a tail: breaking early would hide the
+  // most recent turns the transcript view exists to show.
+  // Turn one raw JSONL line into a transcript entry, or null. Pure.
+  const entryFromLine = (line) => {
+    if (!line.trim()) return null;
     let rec;
-    try { rec = JSON.parse(line); } catch { continue; }
+    try { rec = JSON.parse(line); } catch { return null; }
+    // JSON.parse can yield null / a number / a string / an array. Guard before
+    // property access so a literal `null` line does not throw (which would abort
+    // the whole read and blank an otherwise valid transcript). Reviewer P1.
+    if (!rec || typeof rec !== 'object') return null;
     const pl = rec.payload || {};
     let role = null;
     let text = '';
@@ -300,21 +330,106 @@ export async function codexTranscript(sessionId, { limit = 0, maxFilesSearched =
     } else if (rec.type === 'event_msg' && pl.type === 'agent_message') {
       role = 'assistant'; text = typeof pl.message === 'string' ? pl.message : '';
     }
-    if (!role) continue;
-    text = String(text).trim();
-    if (!text) continue;
-    if (role === 'user' && looksInjected(text)) continue; // drop AGENTS.md/env preamble
+    if (!role) return null;
+    const raw = String(text);
+    text = raw.trim();
+    if (!text) return null;
+    if (role === 'user' && looksInjected(text)) return null; // drop AGENTS.md/env preamble
     if (text.length > 20000) text = text.slice(0, 20000);
-    entries.push({ role, content: text });
-    // A positive limit wants the TAIL: keep only the last N as we scan, so a
-    // >12MB transcript returns recent messages, not the first 12MB of old ones
-    // (reviewer LOW, latent). No limit = full read, byte-capped for the IPC.
+    // V8's String.trim and String.slice can return a SlicedString that keeps the
+    // FULL parent alive: 8MB of leading spaces trimmed to 24 chars, or a 20000-
+    // char preview of an 8MB record, both retain all 8MB, so a run of such
+    // records exhausts the heap (reviewer P2). Detach whenever the parent is
+    // more than DOUBLE the kept text: that bounds retained backing to <= 2x the
+    // kept content per entry (so the whole transcript's retained backing stays
+    // <= 2x its output), with no absolute-threshold hole where many
+    // just-under-threshold trims accumulate. Copy through utf16le, not the
+    // default utf8: a utf8 round-trip replaces a lone surrogate (valid in a JSON
+    // string) with U+FFFD and corrupts the preview; utf16le is a lossless
+    // code-unit copy. Normal messages (kept ~= original) skip the copy.
+    if (raw.length > text.length * 2) text = Buffer.from(text, 'utf16le').toString('utf16le');
+    return { role, content: text };
+  };
+
+  // STREAM the rollout line by line, keeping the newest within budget. Streaming
+  // (not a head/tail byte window) is what makes a message SANDWICHED between two
+  // records larger than any byte cap still parse: each complete line is handled
+  // wherever it sits, so the real prompt between two 129MB tool outputs is found
+  // (reviewer P1). A positive limit keeps the last N entries; no limit keeps a
+  // rolling ~12MB tail by content bytes.
+  //
+  // We do NOT use readline: it assembles a whole line before emitting, so a
+  // single record past V8's ~512MB string limit throws RangeError from inside
+  // its internals, outside this Promise's handlers, and Dobius's
+  // uncaught-exception handler then EXITS the app (reviewer P1). Instead, split
+  // on newlines manually and CAP the in-progress line at MAX_LINE: a record
+  // larger than that is skipped (it cannot be displayed anyway, text is capped
+  // to 20000 chars) rather than crashing, and every other record still parses.
+  // indexOf runs on each bounded chunk, so cost stays O(file size), not O(n^2).
+  const MAX_LINE = 64 * 1024 * 1024; // well under V8's string-length limit
+  const entries = [];
+  let bytes = 0;
+  const push = (e) => {
+    entries.push(e);
     if (typeof limit === 'number' && limit > 0) {
       if (entries.length > limit) entries.shift();
     } else {
-      bytes += text.length;
-      if (bytes > 12 * 1024 * 1024) break;
+      bytes += e.content.length;
+      while (bytes > 12 * 1024 * 1024 && entries.length > 1) {
+        bytes -= entries[0].content.length;
+        entries.shift();
+      }
     }
-  }
+  };
+  let pending = '';
+  let skipping = false; // inside a line that already exceeded MAX_LINE
+  const onChunk = (chunk) => {
+    let start = 0;
+    if (skipping) {
+      const nl = chunk.indexOf('\n');
+      if (nl === -1) return; // still inside the oversized line
+      skipping = false; pending = ''; start = nl + 1;
+    }
+    let nl;
+    while ((nl = chunk.indexOf('\n', start)) !== -1) {
+      // Honor MAX_LINE on the COMPLETING path too: a line whose terminating
+      // newline lands in this chunk must not be assembled if pending plus its
+      // final segment exceeds the cap, or a 64MB-plus record would slip past the
+      // skip that the incomplete-line path enforces (reviewer P3). Keeps the
+      // built string bounded and consistent with the skip behavior.
+      if (pending.length + (nl - start) > MAX_LINE) {
+        pending = '';
+        start = nl + 1;
+        continue;
+      }
+      const e = entryFromLine(pending + chunk.slice(start, nl));
+      pending = '';
+      if (e) push(e);
+      start = nl + 1;
+    }
+    pending += chunk.slice(start);
+    if (pending.length > MAX_LINE) { pending = ''; skipping = true; } // drop the giant record
+  };
+  try {
+    await new Promise((resolve, reject) => {
+      const stream = createReadStream(filePath, { encoding: 'utf8' });
+      stream.on('error', reject);
+      // Route ANY throw from the chunk splitter into the Promise (and close the
+      // stream) so it can never escape to the process uncaught-exception handler,
+      // which would exit the app. The splitter is written not to throw (line size
+      // is capped below V8's string limit), but this makes that guarantee
+      // enforced rather than assumed (reviewer P1 on the readline version).
+      stream.on('data', (chunk) => {
+        try { onChunk(chunk); }
+        catch (err) { stream.destroy(); reject(err); }
+      });
+      stream.on('close', () => {
+        try {
+          if (!skipping && pending) { const e = entryFromLine(pending); if (e) push(e); }
+          resolve();
+        } catch (err) { reject(err); }
+      });
+    });
+  } catch { return []; }
   return entries;
 }

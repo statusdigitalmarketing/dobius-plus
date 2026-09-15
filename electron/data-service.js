@@ -79,9 +79,15 @@ export async function loadAllSessions(projectFilter, opts = {}) {
   // Codex PR#3 r8 P2.
   const sessions = [];
   try {
-    if (!(await pathExists(PROJECTS_DIR))) return [];
-    const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
-    const projectDirs = dirents.filter((d) => d.isDirectory());
+    // Missing ~/.claude/projects is fine when only Codex sessions are wanted:
+    // skip the Claude scan but still run the Codex branch below. An early
+    // `return []` here dropped every Codex session on a Codex-only machine
+    // (reviewer P2).
+    let projectDirs = [];
+    if (await pathExists(PROJECTS_DIR)) {
+      const dirents = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+      projectDirs = dirents.filter((d) => d.isDirectory());
+    }
 
     // Build encoded→real path map using same logic as listProjects()
     const encodedToReal = new Map();
@@ -281,8 +287,16 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         includeExec: !!opts.includeCodexExec,
         projectFilter: projectFilter || null,
         timeAgo,
+        // Skip hidden projects DURING the walk so they do not consume the limit
+        // and starve visible sessions (reviewer P2). projectFilter bypasses hide.
+        excludePaths: projectFilter ? null : hiddenPaths,
       });
-      for (const it of codex) sessions.push(it);
+      // Belt-and-suspenders: listCodexSessions already excluded hidden projects,
+      // but keep the same Hide semantics as the Claude scan here too.
+      for (const it of codex) {
+        if (!projectFilter && it.projectPath && hiddenPaths.has(it.projectPath)) continue;
+        sessions.push(it);
+      }
     } catch (err) {
       console.warn('[data-service] Failed to load codex sessions:', err.message);
     }

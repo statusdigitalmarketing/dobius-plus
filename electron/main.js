@@ -9,7 +9,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { getQuittingForUpdate, setQuitting, getQuitting } from './quit-state.js';
 import { projectPathFromTabId } from './tab-id-util.js';
-import { resolveTerminalAccount, claudeEnvForAccount, expandTilde, pinPluginRoot } from './claude-account-env.js';
+import { claudeEnvForAccount, expandTilde, pinPluginRoot } from './claude-account-env.js';
 import { installErrorLog, logLine, errorLogPath } from './error-log.js';
 
 // Stall watchdog (v1.0.70). Wrapped here, at import time, so the very first
@@ -20,11 +20,12 @@ stallWatchdog.wrapIpc(ipcMain);
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities } from './account-identity.js';
-import { codexEnvForAccount, shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
+import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
+import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
-import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser, ensureShim } from './gws-accounts.js';
+import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
@@ -217,12 +218,6 @@ let statusSettleTimer = null;
 
 // gws shim, staged once and reused for every terminal's env. Lazy so it only
 // runs when the first terminal is created. v1.0.41.
-let _gwsShim = null;
-function getGwsShim() {
-  if (!_gwsShim) _gwsShim = ensureShim();
-  return _gwsShim;
-}
-
 function ownsTerminal(senderId, id) {
   if (!terminalOwners.has(id)) return false; // tab not created via IPC by ANY window
   return terminalOwners.get(id) === senderId;
@@ -246,59 +241,10 @@ function setupTerminalHandlers() {
     // claim may have transferred ownership to another window between the
     // create and the destroyed event.
     ownerCleanup.hook(event.sender);
-    // Per-account env (codex/claude). Resolution: the project's assigned
-    // account wins (per-project override), else the globally ACTIVE Claude
-    // account (what the Switch button sets: v1.0.65, this is what makes
-    // Switch real and global), else no env = the Mac's default ~/.claude
-    // identity with all its settings/skills/hooks.
-    const projectAccount = cwd ? getProjectAccount(cwd) : null;
-    let activeAccount = null;
-    let codexAccount = null;
-    {
-      const cfgNow = loadConfig();
-      const accts = cfgNow.accounts || [];
-      const activeId = cfgNow.activeClaudeAccountId;
-      if (activeId) activeAccount = accts.find((a) => a.id === activeId && a.type === 'claude') || null;
-      // Codex is an independent tool: a terminal carries BOTH the active Claude
-      // account (for `claude`) and the active Codex account (for `codex`). A
-      // per-project override applies to its OWN type; the other type keeps its
-      // global active. So a Claude override never disables the active Codex.
-      const activeCodexId = cfgNow.activeCodexAccountId;
-      if (projectAccount && projectAccount.type === 'codex') codexAccount = projectAccount;
-      else if (activeCodexId) codexAccount = accts.find((a) => a.id === activeCodexId && a.type === 'codex') || null;
-    }
-    // The Claude account is the project override only when it IS a Claude
-    // account; a Codex override must not become the Claude account.
-    const claudeProjectAccount = (projectAccount && projectAccount.type === 'claude') ? projectAccount : null;
-    const account = resolveTerminalAccount(claudeProjectAccount, activeAccount);
-    // The one choke point where CLAUDE_CONFIG_DIR is decided, so it is where
-    // the shared-setup invariant has to hold. Startup linking alone misses an
-    // account reached by a per-PROJECT override that was assigned while the
-    // app was already running (Codex High): that terminal would spawn against
-    // a profile with no transcripts and answer "No conversation found" for
-    // every session the Sessions tab lists. Idempotent, a few lstat calls once
-    // the links exist.
-    if (account?.type === 'claude' && account.claudeJsonPath) {
-      try { shareProfile(path.dirname(expandTilde(account.claudeJsonPath))); }
-      catch (err) { console.warn('[account-share] spawn-time link failed:', err?.message || err); }
-    }
-    // Codex account: share its profile (chatgpt homes symlink ~/.codex's
-    // sessions/history/config so history survives the switch) and add its env.
-    if (codexAccount?.type === 'codex' && codexAccount.authMode === 'chatgpt' && codexAccount.codexHome) {
-      try { shareCodexProfile(expandTilde(codexAccount.codexHome)); }
-      catch (err) { console.warn('[codex-share] spawn-time link failed:', err?.message || err); }
-    }
-    const accountEnv = { ...claudeEnvForAccount(account), ...codexEnvForAccount(codexAccount) };
-    // gws token-broker shim (v1.0.41): put the shim first on PATH as `gws` and
-    // tell it where the real gws is. Transparent passthrough until a caller sets
-    // DOBIUS_GWS_ACCOUNT=<email> (or a bound tab sets DOBIUS_GWS_ACCOUNT_ID), so
-    // ordinary `gws` is unchanged. This is what lets `DOBIUS_GWS_ACCOUNT=x@y.com
-    // gws ...` run as a chosen connected account.
-    const shim = getGwsShim();
-    if (shim.shimDir) {
-      accountEnv.DOBIUS_GWS_SHIM_DIR = shim.shimDir;
-      if (shim.realGws) accountEnv.DOBIUS_REAL_GWS = shim.realGws;
-    }
+    // Per-account env (codex/claude), resolved at the one spawn choke point.
+    // Shared with the mobile spawn paths via resolveAccountEnvForCwd so a phone
+    // terminal lands on the same active accounts as a desktop one (reviewer P2).
+    const accountEnv = resolveAccountEnvForCwd(cwd);
     return createTerminal(id, cwd, event.sender, accountEnv);
   });
 
@@ -1837,7 +1783,70 @@ function setupConfigHandlers() {
         return { ok: false, error: 'accountId must be a simple name' };
       }
       const profileDir = path.join(codexProfilesRoot(), base);
+      // Refuse a profile path that is (or resolves through) a symlink escaping
+      // the profiles root. mkdir-through-a-symlink and the auth.json rename
+      // below would otherwise mutate the DEFAULT ~/.codex login: a
+      // ~/.codex-profiles/<id> symlinked to ~/.codex would rename the real
+      // default credential aside and delete the default login (reviewer P1).
+      const preStat = await fs.promises.lstat(profileDir).catch(() => null);
+      if (preStat && preStat.isSymbolicLink()) {
+        return { ok: false, error: 'Profile path is a symlink; refusing to initialize' };
+      }
       await fs.promises.mkdir(profileDir, { recursive: true });
+      let realProfile;
+      let realRoot;
+      try {
+        realProfile = await fs.promises.realpath(profileDir);
+        realRoot = await fs.promises.realpath(codexProfilesRoot());
+      } catch (err) {
+        return { ok: false, error: `Could not resolve profile path: ${err.message}` };
+      }
+      if (realProfile !== realRoot && !realProfile.startsWith(realRoot + path.sep)) {
+        return { ok: false, error: 'Profile path escapes the profiles root; refusing' };
+      }
+      let realDefault = null;
+      try { realDefault = await fs.promises.realpath(codexDefaultDir()); } catch { /* default absent */ }
+      if (realDefault && realProfile === realDefault) {
+        return { ok: false, error: 'Profile path resolves to the default Codex home; refusing' };
+      }
+      // The realProfile/realRoot/realDefault checks above reject a profile dir
+      // that is ALREADY a symlink escaping the root at check time. A TOCTOU race
+      // (swapping the dir for a symlink BETWEEN this check and the rename below)
+      // is NOT closed here and is accepted: it requires a local attacker who can
+      // already write inside the user's home directory, and such an attacker can
+      // read or delete ~/.codex/auth.json directly, so the race grants no extra
+      // capability. Node's stdlib has no fd-relative rename to close it cleanly.
+      //
+      // Operate on and RETURN the original profileDir (under ~/.codex-profiles),
+      // not the realpath: when ~/.codex-profiles is itself a symlink (a
+      // relocated home), realProfile resolves outside ~/.codex-profiles and
+      // saveAccount's lexical containment check would then DISCARD codexHome, so
+      // the account could never activate (reviewer P2). profileDir stays under
+      // the expected root and still reaches the real dir through the root link.
+      //
+      // Enforce the "starts logged out" promise: a leftover auth.json would
+      // silently log this NEW account in as a previous ChatGPT login. Set it
+      // aside rather than adopt or delete it, so no credential is destroyed. A
+      // lstat or rename failure must SURFACE, not be swallowed: a suppressed
+      // EACCES (e.g. a 0600 dir) treated as "absent" would leave the stale
+      // credential and still report success (reviewer P2 x2). Only ENOENT is
+      // genuinely "no leftover login".
+      const authPath = path.join(profileDir, 'auth.json');
+      let authStat = null;
+      try {
+        authStat = await fs.promises.lstat(authPath);
+      } catch (err) {
+        if (err && err.code !== 'ENOENT') {
+          return { ok: false, error: `Could not check for a leftover login: ${err.message}` };
+        }
+      }
+      if (authStat) {
+        try {
+          await fs.promises.rename(authPath, `${authPath}.pre-init-${Date.now()}`);
+        } catch (err) {
+          return { ok: false, error: `Could not clear a leftover login: ${err.message}` };
+        }
+      }
       try { shareCodexProfile(profileDir); }
       catch (err) { console.warn('[codex-share] new profile link failed:', err?.message || err); }
       return { ok: true, path: profileDir };

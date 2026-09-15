@@ -5,10 +5,22 @@ import { useState, useEffect, useRef } from 'react';
  * shows its transcript. "Resume" spawns a terminal that runs
  * `claude --resume <id>` in that session's project.
  */
+// Monotonic across component REMOUNTS: the WebSocket connection outlives the
+// History component, so a reply sent before a remount can arrive after it. A
+// per-component counter would reset to 0 on remount and a stale high-numbered
+// reply would then outrank every fresh request and wedge the view on Loading
+// (reviewer P2). A module-level sequence keeps every new request's id above any
+// pre-remount reply's id.
+let historyReqSeq = 0;
+
 export default function History({ connection, onBack }) {
   const [sessions, setSessions] = useState(null);   // null = loading
   const [sourceFilter, setSourceFilter] = useState('claude'); // 'claude' | 'codex' | 'all'
   const sourceRef = useRef('claude');
+  // Highest reqId whose reply has been rendered, so an OLDER same-source reply
+  // arriving after a newer one is dropped instead of overwriting it. The request
+  // ids come from the module-level historyReqSeq so they survive remounts.
+  const renderedReqIdRef = useRef(0);
   const [openSession, setOpenSession] = useState(null);
   const [transcript, setTranscript] = useState(null);
   // Mirror of the open session so the onMessage handler (which closes over the
@@ -19,7 +31,8 @@ export default function History({ connection, onBack }) {
 
   const requestSessions = (src) => {
     sourceRef.current = src;
-    connection.send({ type: 'listSessions', sources: sourcesFor(src) });
+    const reqId = ++historyReqSeq;
+    connection.send({ type: 'listSessions', sources: sourcesFor(src), reqId });
   };
 
   const changeSource = (src) => { setSourceFilter(src); setSessions(null); requestSessions(src); };
@@ -30,12 +43,26 @@ export default function History({ connection, onBack }) {
         // Reconnect (iOS foreground kills the socket): re-issue our reads so a
         // request dropped during the ~1-2s reconnect window doesn't leave us
         // stuck on "Loading...". Matches Board/Terminal's re-issue-on-authed.
-        connection.send({ type: 'listSessions', sources: sourcesFor(sourceRef.current) });
+        requestSessions(sourceRef.current);
         const open = openSessionRef.current;
         if (open) {
           connection.send({ type: 'loadTranscript', sessionId: open.sessionId, projectPath: open.projectPath, source: open.source });
         }
       } else if (msg.type === 'sessions') {
+        // Drop a reply whose sources no longer match the selected filter: a
+        // slow Codex read arriving after the user switched back to Claude must
+        // not repaint Codex cards under the Claude tab (reviewer P2). Older
+        // servers omit msg.sources; treat that as a match.
+        const want = sourcesFor(sourceRef.current).join(',');
+        const got = Array.isArray(msg.sources) ? msg.sources.join(',') : null;
+        if (got !== null && got !== want) return;
+        // Drop an OLDER same-source reply: with two Codex requests in flight
+        // (Codex->Claude->Codex), the newer list can arrive first and the older
+        // one must not overwrite it (reviewer P2). Older servers omit reqId.
+        if (typeof msg.reqId === 'number') {
+          if (msg.reqId < renderedReqIdRef.current) return;
+          renderedReqIdRef.current = msg.reqId;
+        }
         const list = [...(msg.list || [])].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
         setSessions(list);
       } else if (msg.type === 'transcript') {
@@ -50,7 +77,7 @@ export default function History({ connection, onBack }) {
         }
       }
     });
-    connection.send({ type: 'listSessions', sources: sourcesFor(sourceRef.current) });
+    requestSessions(sourceRef.current);
     return off;
   }, [connection]);
 
