@@ -31,13 +31,18 @@ export default function Sessions() {
   const [searchText, setSearchText] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
   const [sortBy, setSortBy] = useState('recent'); // 'recent' | 'alpha'
+  const [sourceFilter, setSourceFilter] = useState('claude'); // 'claude' | 'codex' | 'all'
   const [hiddenCount, setHiddenCount] = useState(0); // hidden session sources (paths)
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (source) => {
     if (!window.electronAPI?.dataLoadAllSessions) return;
+    const src = source || sourceFilter;
+    // Default is Claude-only, which scans zero Codex files. 'codex'/'all' opt
+    // into the Codex scan; exec (headless review) runs stay hidden.
+    const sources = src === 'codex' ? ['codex'] : src === 'all' ? ['claude', 'codex'] : ['claude'];
     try {
       const [allSessions, sessionTags, cfgSettings] = await Promise.all([
-        window.electronAPI.dataLoadAllSessions(),
+        window.electronAPI.dataLoadAllSessions(undefined, { sources }),
         window.electronAPI.configGetSessionTags?.() || {},
         window.electronAPI.configGetSettings?.() || {},
       ]);
@@ -51,7 +56,25 @@ export default function Sessions() {
     } finally {
       setLoading(false);
     }
+  }, [sourceFilter]);
+
+  // Restore the saved source filter once, then reload under it.
+  useEffect(() => {
+    (async () => {
+      try {
+        const cfg = await window.electronAPI?.configGetSettings?.();
+        const saved = cfg?.sessionSourceFilter;
+        if (saved === 'codex' || saved === 'all' || saved === 'claude') setSourceFilter(saved);
+      } catch { /* default stays 'claude' */ }
+    })();
   }, []);
+
+  const changeSource = useCallback((src) => {
+    setSourceFilter(src);
+    setLoading(true);
+    loadData(src);
+    try { window.electronAPI?.configUpdateSettings?.({ sessionSourceFilter: src }); } catch { /* best effort */ }
+  }, [loadData]);
 
   // Hide every source path in a name-group from the global history list.
   // Reversible from Settings > Sessions > Hidden session sources.
@@ -209,6 +232,25 @@ export default function Sessions() {
             <option key={name} value={name}>{name}</option>
           ))}
         </select>
+        <div className="flex shrink-0 rounded overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+          {['claude', 'codex', 'all'].map((src) => (
+            <button
+              key={src}
+              onClick={() => changeSource(src)}
+              className="px-2 py-1.5 text-xs transition-colors duration-100"
+              style={{
+                backgroundColor: sourceFilter === src ? 'var(--accent)' : 'var(--surface)',
+                color: sourceFilter === src ? '#fff' : 'var(--dim)',
+                fontFamily: "'SF Mono', monospace",
+                cursor: 'pointer',
+                borderRight: src !== 'all' ? '1px solid var(--border)' : 'none',
+              }}
+              title={src === 'claude' ? 'Claude sessions' : src === 'codex' ? 'Codex sessions' : 'Claude + Codex'}
+            >
+              {src === 'claude' ? 'Claude' : src === 'codex' ? 'Codex' : 'All'}
+            </button>
+          ))}
+        </div>
         <button
           onClick={() => setSortBy((prev) => prev === 'recent' ? 'alpha' : 'recent')}
           className="px-2 py-1.5 text-xs rounded transition-colors duration-100 shrink-0"
@@ -230,7 +272,7 @@ export default function Sessions() {
         {sortedGroups.length === 0 ? (
           <div className="text-center py-12" style={{ color: 'var(--dim)' }}>
             <div className="text-2xl mb-2" style={{ opacity: 0.3 }}>&#x1F4AC;</div>
-            <div className="text-xs">No Claude sessions found</div>
+            <div className="text-xs">{sourceFilter === 'codex' ? 'No Codex sessions found' : sourceFilter === 'all' ? 'No sessions found' : 'No Claude sessions found'}</div>
             <div className="text-xs mt-1" style={{ fontSize: 10 }}>
               Start using Claude Code in a project directory to see sessions here
             </div>
@@ -336,6 +378,7 @@ const TAG_COLOR_NAMES = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', '
 
 function SessionCard({ session, tag, onTagsChanged, onDeleted }) {
   const resumeSession = useStore((s) => s.resumeSession);
+  const resumeCodexSession = useStore((s) => s.resumeCodexSession);
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const [editing, setEditing] = useState(false);
   const [tagLabel, setTagLabel] = useState(tag?.label || '');
@@ -415,6 +458,9 @@ function SessionCard({ session, tag, onTagsChanged, onDeleted }) {
             <span className="text-xs" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace", fontSize: 10 }}>
               {timeAgo(session.timestamp)}
             </span>
+            {session.source === 'codex' && (
+              <span className="text-xs px-1 rounded" style={{ fontSize: 9, color: '#10a37f', backgroundColor: 'rgba(16,163,127,0.14)' }}>Codex</span>
+            )}
             {tag && !editing && (
               <span onClick={handleTagClick} style={{ cursor: 'pointer' }}>
                 <TagBadge label={tag.label} color={tag.color} />
@@ -425,11 +471,9 @@ function SessionCard({ session, tag, onTagsChanged, onDeleted }) {
 
         {/* Action buttons */}
         <div className="flex items-center gap-1 shrink-0">
-          <CardBtn label="Resume" onClick={() => resumeSession({
-            sessionId: session.sessionId,
-            project: session.projectPath,
-            sizeMB: session.sizeMB,
-          })} accent />
+          <CardBtn label="Resume" onClick={() => (session.source === 'codex'
+            ? resumeCodexSession({ sessionId: session.sessionId, project: session.projectPath })
+            : resumeSession({ sessionId: session.sessionId, project: session.projectPath, sizeMB: session.sizeMB }))} accent />
           {isDifferentProject && (
             <CardBtn
               label="Open"
@@ -448,7 +492,9 @@ function SessionCard({ session, tag, onTagsChanged, onDeleted }) {
           {session.sessionId.slice(0, 8)}
         </span>
 
-        {/* Delete X */}
+        {/* Delete X. Hidden for Codex sessions: deleteSession only unlinks
+            under ~/.claude, so it would be a dead control (reviewer LOW). */}
+        {session.source !== 'codex' && (
         <button
           onClick={handleDelete}
           title={confirmDelete ? 'Click again to confirm delete' : 'Delete session'}
@@ -477,6 +523,7 @@ function SessionCard({ session, tag, onTagsChanged, onDeleted }) {
         >
           {confirmDelete ? 'del?' : '×'}
         </button>
+        )}
       </div>
 
       {/* Inline tag editor */}

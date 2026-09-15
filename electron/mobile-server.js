@@ -806,11 +806,32 @@ function handleAuthedMessage(socket, msg, subs) {
         .catch(() => wsSend(socket, { type: 'skills', list: [] }));
       break;
 
-    case 'listSessions':
-      loadAllSessions()
+    case 'listSessions': {
+      // Default Claude-only (scans zero Codex files); the phone opts into Codex.
+      const sources = Array.isArray(msg.sources) && msg.sources.length ? msg.sources : ['claude'];
+      loadAllSessions(undefined, { sources })
         .then((list) => wsSend(socket, { type: 'sessions', list: list || [] }))
         .catch((err) => wsSend(socket, { type: 'error', message: String(err?.message || err) }));
       break;
+    }
+    case 'resumeCodexSession': {
+      // Codex owns its own session lifecycle, so no Claude reservation applies:
+      // open a phone terminal in the session's project and type `codex resume`.
+      const { sessionId, projectPath } = msg;
+      if (typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) break;
+      resolveCreateCwd(projectPath).then((cwd) => {
+        if (cwd === null) { wsSend(socket, { type: 'error', message: 'Unknown project' }); return; }
+        const id = mobileTermId();
+        try {
+          createTerminal(id, cwd, null);
+          wsSend(socket, { type: 'terminalCreated', id });
+          setTimeout(() => writeTerminal(id, `codex resume ${sessionId}\r`), 700);
+        } catch (err) {
+          wsSend(socket, { type: 'error', message: String(err?.message || err) });
+        }
+      }).catch((err) => wsSend(socket, { type: 'error', message: String(err?.message || err) }));
+      break;
+    }
 
     // Work abandoned mid-flight. The board re-issues this on every re-auth
     // (iOS kills the socket whenever the PWA backgrounds), so it has to be
@@ -831,6 +852,15 @@ function handleAuthedMessage(socket, msg, subs) {
       // The Chat view is working with this tab and sends input to it without a
       // raw 'attach', so authorize it here. Audit Medium.
       if (typeof msg.tabId === 'string') socket._authedTabs.add(msg.tabId);
+      // Codex transcripts live outside ~/.claude, so the claude sig-cache below
+      // does not apply: load directly and send (reviewer MEDIUM).
+      if (msg.source === 'codex') {
+        const climit = typeof msg.limit === 'number' && msg.limit > 0 ? Math.min(msg.limit, 2000) : undefined;
+        loadTranscript(sessionId, projectPath, climit, 'codex')
+          .then((entries) => wsSend(socket, { type: 'transcript', sessionId, projectPath, entries: entries || [] }))
+          .catch((err) => wsSend(socket, { type: 'error', message: String(err?.message || err) }));
+        break;
+      }
       // A positive limit makes the server do a cheap tail read (the Chat view
       // polls this every few seconds); History omits it for the full transcript.
       const limit = typeof msg.limit === 'number' && msg.limit > 0 ? Math.min(msg.limit, 2000) : undefined;

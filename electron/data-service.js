@@ -7,6 +7,7 @@ import {
   HISTORY_PATH, STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PLUGINS_DIR, PROJECTS_DIR,
   parseJsonl, streamJsonl, timeAgo, pathExists, mapLimit,
 } from './data-utils.js';
+import { listCodexSessions, codexTranscript } from './codex-sessions.js';
 import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects, getAllProjectsWithTabs, getSessionTabMap } from './config-manager.js';
 
 /**
@@ -68,7 +69,8 @@ export async function loadHistory() {
  * sorted by recency, limited to 500. `status` is 'working' | 'needs' | 'done'
  * (same red/yellow/green meaning as the terminal tab dots).
  */
-export async function loadAllSessions(projectFilter) {
+export async function loadAllSessions(projectFilter, opts = {}) {
+  const sources = Array.isArray(opts.sources) && opts.sources.length ? opts.sources : ['claude'];
   // projectFilter (optional): when provided, restrict the scan to JSONL files
   // whose resolved projectPath matches this string. Critical for project-scoped
   // sidebar: without filtering BEFORE the global 500-cap, an older project on
@@ -122,7 +124,11 @@ export async function loadAllSessions(projectFilter) {
     // in parseJsonl, that OOM-crashed the main process on dashboards with large
     // ~/.claude histories. A cap of 24 keeps memory and fd usage flat.
     const fileTasks = [];
-    for (const dir of projectDirs) {
+    // Only scan Claude transcripts when Claude is a requested source. The
+    // Codex tab (sources=['codex']) must NOT return Claude sessions (reviewer
+    // HIGH: "Codex" and "All" were byte-identical). Empty fileTasks below makes
+    // the mapLimit a no-op.
+    if (sources.includes('claude')) for (const dir of projectDirs) {
       const projectDir = path.join(PROJECTS_DIR, dir.name);
       const realPath = encodedToReal.get(dir.name) || tryReconstructPath(dir.name);
       const projectPath = realPath || ('/' + dir.name.replace(/-/g, '/'));
@@ -259,11 +265,28 @@ export async function loadAllSessions(projectFilter) {
           age: timestamp ? timeAgo(timestamp) : 'unknown',
           status,
           sizeMB, // for the resume dead-session guard, Codex PR#3 r6 P2
+          source: 'claude',
         });
       } catch {
         void 0;
       }
     });
+  // Codex sessions (v1.0.72). Only scanned when the caller asks for them, so
+  // the Claude-default history costs zero Codex I/O. The filter lives in the
+  // UI; sources controls what this reads.
+  if (sources.includes('codex')) {
+    try {
+      const codex = await listCodexSessions({
+        limit: 60,
+        includeExec: !!opts.includeCodexExec,
+        projectFilter: projectFilter || null,
+        timeAgo,
+      });
+      for (const it of codex) sessions.push(it);
+    } catch (err) {
+      console.warn('[data-service] Failed to load codex sessions:', err.message);
+    }
+  }
   } catch (err) {
     console.warn('[data-service] Failed to load all sessions:', err.message);
     return [];
@@ -1171,8 +1194,15 @@ export async function getTranscriptSig(sessionId, projectPath) {
   }
 }
 
-export async function loadTranscript(sessionId, projectPath, limit) {
+export async function loadTranscript(sessionId, projectPath, limit, source) {
   try {
+    if (source === 'codex') {
+      // Codex transcripts live in ~/.codex/sessions, not ~/.claude/projects,
+      // so resolveTranscriptPath can't find them (reviewer MEDIUM: codex cards
+      // were tappable but showed "No messages"). codexTranscript finds the
+      // rollout by uuid and returns the same {role, content} shape.
+      return await codexTranscript(sessionId, { limit: typeof limit === 'number' ? limit : 0 });
+    }
     const p = await resolveTranscriptPath(sessionId, projectPath);
     if (!p) return [];
     // A positive limit does a cheap tail read (mobile Chat poll); no limit

@@ -615,6 +615,38 @@ export const useStore = create((set, get) => ({
   },
 
 
+  // Resume a Codex session in the active terminal tab. Separate from
+  // resumeSession because Codex owns its own session lifecycle (no Claude
+  // reservation map applies) and the command is `codex resume <id>`. Same tab
+  // targeting and cross-project cd rules as the Claude path.
+  resumeCodexSession: (arg) => {
+    const session = typeof arg === 'string' ? { sessionId: arg } : (arg || {});
+    const { sessionId } = session;
+    if (!sessionId || sessionId.length > 100 || !/^[a-zA-Z0-9][\w-]*$/.test(sessionId)) return;
+    set({ activeView: 'terminal' });
+    const termId = resolveActiveTerminalTabId(get());
+    if (typeof window === 'undefined' || !window.electronAPI || !termId) return;
+    if (termId !== get().activeTabId) set({ activeTabId: termId });
+    const projectPath = session.project || '';
+    const sameProject = projectPath && projectPath === get().currentProjectPath;
+    let cmd;
+    if (sameProject || !projectPath) {
+      cmd = `codex resume ${sessionId}`;
+    } else if (projectPath.startsWith('/') && !/[\x00-\x1F\x7F]/.test(projectPath)) {
+      cmd = `cd '${projectPath.replace(/'/g, "'\\''")}' && codex resume ${sessionId}`;
+    } else {
+      return;
+    }
+    const chars = `${cmd}\r`.split('');
+    let i = 0;
+    const sendNext = () => {
+      if (i >= chars.length) return;
+      window.electronAPI.terminalWrite(termId, chars[i]); i += 1;
+      if (i < chars.length) setTimeout(sendNext, 8);
+    };
+    setTimeout(sendNext, 15);
+  },
+
   resumeSession: (arg) => {
     const session = typeof arg === 'string' ? { sessionId: arg } : (arg || {});
     const { sessionId, sizeMB } = session;

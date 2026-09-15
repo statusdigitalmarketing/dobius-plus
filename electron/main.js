@@ -484,7 +484,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:loadTranscript', (_event, sessionId, projectPath) => loadTranscript(sessionId, projectPath));
   ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
   ipcMain.handle('data:listProjects', () => listProjects());
-  ipcMain.handle('data:loadAllSessions', (_event, projectFilter) => loadAllSessions(typeof projectFilter === 'string' ? projectFilter : undefined));
+  ipcMain.handle('data:loadAllSessions', (_event, projectFilter, opts) => loadAllSessions(typeof projectFilter === 'string' ? projectFilter : undefined, (opts && typeof opts === 'object') ? opts : {}));
   ipcMain.handle('data:getAllProjectTabs', () => {
     // Feed live-PTY ids (so the sidebar can tell a still-running cross-window tab
     // from a resumable one, H3) and open tear-off windows (so their torn tab,
