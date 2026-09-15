@@ -70,14 +70,17 @@ export function ensureSpawnHelperExecutable() {
 // attached mobile client so it has real scrollback, not just the last screen.
 // 1MB is roughly 10-15k lines of terminal text.
 const OUTPUT_BUFFER_BYTES = 1024 * 1024;
-// Smaller cap kept even when NO mobile client is subscribed, so the FIRST phone
-// attach to a desktop-only or idle tab replays a real screen instead of a blank
-// one (audit HIGH-3: a desktop tab never had a subscriber, so its buffer stayed
-// empty and the phone got nothing). A screenful+ is enough to show the current
-// state; full 1MB scrollback still accrues once a phone is actually attached.
-// This 64KB slice is strictly cheaper than the 1MB slice already accepted for
-// the subscribed case, so it stays within the existing hot-path budget.
-const IDLE_BUFFER_BYTES = 64 * 1024;
+// Cap kept even when NO mobile client is subscribed, so the FIRST phone attach
+// to a desktop-only or idle tab replays a real screen, not a blank one (audit
+// HIGH-3). Raised 64KB -> 512KB (v1.0.72): Claude Code repaints its live region
+// with cursor-up + column-positioning in the MAIN buffer (no alt-screen, no
+// clear-screen), so the phone can only reconstruct the screen if the replayed
+// tail contains a COMPLETE frame. During heavy reasoning a single frame can
+// exceed 64KB, so the 64KB tail started mid-frame and the phone painted a
+// partial grid: the "grey screen with only the cursor and a fragment" Sam
+// reported. 512KB holds several large frames. Still far under the 1MB
+// subscribed cap, and only idle tabs pay it.
+const IDLE_BUFFER_BYTES = 512 * 1024;
 
 /**
  * Create a new terminal session.

@@ -653,7 +653,9 @@ function handleAuthedMessage(socket, msg, subs) {
       subs.set(id, unsubscribe);
       socket._authedTabs.add(id); // attaching authorizes input/resize/kill. Audit Medium.
       // Replay recent output so the phone sees the current screen, not a blank.
-      if (buffer) wsSend(socket, { type: 'output', id, data: buffer, replay: true });
+      // Prefix an SGR reset so a tail that begins mid-styled-run cannot leave
+      // the phone's fresh xterm stuck in a stale color/attribute state.
+      if (buffer) wsSend(socket, { type: 'output', id, data: `\x1b[0m${buffer}`, replay: true });
       wsSend(socket, { type: 'attached', id });
       break;
     }
