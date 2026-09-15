@@ -9,7 +9,7 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { getQuittingForUpdate, setQuitting, getQuitting } from './quit-state.js';
 import { projectPathFromTabId } from './tab-id-util.js';
-import { resolveTerminalAccount, claudeEnvForAccount, expandTilde } from './claude-account-env.js';
+import { resolveTerminalAccount, claudeEnvForAccount, expandTilde, pinPluginRoot } from './claude-account-env.js';
 import { installErrorLog, logLine, errorLogPath } from './error-log.js';
 
 // Stall watchdog (v1.0.70). Wrapped here, at import time, so the very first
@@ -2430,6 +2430,9 @@ function setupCrashLogging() {
 
 app.whenReady().then(() => {
   installErrorLog();
+  // One plugin root for every Claude process this app spawns, Default terminals
+  // and agents included. See claude-account-env.js.
+  console.log(`[plugins] root pinned for all spawns: ${pinPluginRoot()}`);
   stallWatchdog.start({ powerMonitor });
   setupCrashLogging();
   // Make sure node-pty can actually launch shells before any tab is created.

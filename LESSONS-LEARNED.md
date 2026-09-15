@@ -205,3 +205,21 @@
 - **DETECTION**: `grep -n "lastReportAt" electron/stall-watchdog.js` and
   confirm a clock-jump path returns before it is written.
 
+### [Architecture] - 2026-09-14
+- **MISTAKE**: Reasoned about merging a profile's plugins INTO the shared
+  store (subset manifests, byte-identical collisions, "shared wins") without
+  first checking that the shared store worked. It did not: its manifests
+  pointed at a dead home directory and 15 caches were missing, so the
+  "identical" files were marketplace clones and the "superset" manifest was a
+  list of broken installs. The collision warning I was trying to silence was
+  protecting the only account whose plugins loaded.
+- **FIX**: Before designing a merge, run the consumer's own health check on
+  BOTH sides (`claude plugin list` under each config dir) and read the
+  literal paths in the manifests. A store that lists more is not a store that
+  works. Then ask whether a documented mechanism already does the sharing
+  (here `CLAUDE_CODE_PLUGIN_CACHE_DIR`) before building one.
+- **CONTEXT**: Any "make X available everywhere" request over state that was
+  migrated between machines or users.
+- **DETECTION**: `grep -c "/Users/" ~/.claude/plugins/*.json` and compare
+  against `$HOME`; `CLAUDE_CONFIG_DIR=<p> claude plugin list | grep -c failed`.
+

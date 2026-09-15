@@ -5,7 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
-  SHARED_ENTRIES, shareProfile, shareEntry, mergeInto, linksTo, shareConfiguredProfiles,
+  SHARED_ENTRIES, shareProfile, shareEntry, mergeInto, linksTo, shareConfiguredProfiles, resetShareWarnings,
   countCollisions,
 } from '../account-profile-share.js';
 
@@ -77,6 +77,36 @@ write(path.join(P3, 'projects', '-proj-a', 'sessA.jsonl'), 'DIFFERENT');
 write(path.join(P3, 'projects', '-proj-z', 'sessZ.jsonl'), 'Z');
 const r3 = shareProfile(P3, opts({ stamp: 7 }));
 check('a collision leaves the profile dir alone rather than linking', r3.projects, 'kept-not-shared');
+check('plugins are NOT symlink-shared: Claude keys marketplace validation to the literal config dir (#82272)',
+  SHARED_ENTRIES.includes('plugins'), false);
+// --- warn once per profile+entry, but keep checking and keep returning status.
+// Its OWN profile (P3 must keep its colliding state for the checks below).
+{
+  const P3B = path.join(ROOT, 'acct-3b');
+  write(path.join(P3B, 'projects', '-proj-a', 'sessA.jsonl'), 'DIFFERENT-B');
+  write(path.join(P3B, 'projects', '-proj-y', 'sessY.jsonl'), 'Y');
+  const warns = []; const origWarn = console.warn; console.warn = (m) => warns.push(String(m));
+  try {
+    resetShareWarnings();
+    shareProfile(P3B, opts({ stamp: 8 }));
+    const rB = shareProfile(P3B, opts({ stamp: 9 }));
+    check('a repeated collision still returns its status on every call', rB.projects, 'kept-not-shared');
+    check('but the collision warning is emitted once per profile+entry per process',
+      warns.filter((w) => w.includes('collide')).length, 1);
+    resetShareWarnings();
+    shareProfile(P3B, opts({ stamp: 10 }));
+    check('after a reset it warns again (so a new process gets one line)',
+      warns.filter((w) => w.includes('collide')).length, 2);
+    // Remove the collision: the later call must still be able to share.
+    fs.unlinkSync(path.join(P3B, 'projects', '-proj-a', 'sessA.jsonl'));
+    fs.rmdirSync(path.join(P3B, 'projects', '-proj-a'));
+    shareProfile(P3B, opts({ stamp: 11 }));
+    check('once the collision is gone a later call shares the entry (dedupe never caches the outcome)',
+      linksTo(path.join(P3B, 'projects'), path.join(DEF, 'projects')), true);
+    check('and the profile-only session reached the shared store',
+      fs.readFileSync(path.join(DEF, 'projects', '-proj-y', 'sessY.jsonl'), 'utf8'), 'Y');
+  } finally { console.warn = origWarn; }
+}
 check('the shared copy wins and is not overwritten',
   fs.readFileSync(path.join(DEF, 'projects', '-proj-a', 'sessA.jsonl'), 'utf8'), 'A');
 check('the colliding profile copy stays exactly where a live writer left it',

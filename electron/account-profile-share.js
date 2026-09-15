@@ -33,7 +33,11 @@ export const SHARED_ENTRIES = [
   'settings.json',    // hooks, env, mcpServers, permissions
   'CLAUDE.md',        // global house rules
   'skills',
-  'plugins',
+  // NOT 'plugins' (v1.0.71): Claude validates marketplace locations by literal
+  // path prefix against the current config dir (#82272), so a symlinked
+  // plugins dir breaks `plugin update` from every profile but one. Plugins are
+  // shared through CLAUDE_CODE_PLUGIN_CACHE_DIR instead (claude-account-env.js).
+  // Existing plugins symlinks in profiles are harmless and are left alone.
   'commands',
   'agents',
   'plans',
@@ -55,6 +59,21 @@ function lstatOrNull(p) {
 function realpathOrNull(p) {
   try { return fs.realpathSync(p); } catch { return null; }
 }
+
+// Steady-state conditions (a colliding entry, a link pointing elsewhere) are
+// re-checked at boot, on switch and at EVERY terminal spawn. Warning each time
+// put 22 identical lines in error.log in 35 minutes (Codex/TODO 2026-09-14).
+// The check still runs every call and the status is still returned; only the
+// line is deduplicated, per resolved profile + entry, for this process.
+const warnedOnce = new Set();
+function warnOnce(profileDir, name, message) {
+  const key = `${realpathOrNull(profileDir) || profileDir}|${name}`;
+  if (warnedOnce.has(key)) return;
+  warnedOnce.add(key);
+  console.warn(message);
+}
+/** Tests only: forget which warnings were already emitted. */
+export function resetShareWarnings() { warnedOnce.clear(); }
 
 /** A `.pre-share-` name nothing occupies, so setting a file aside never
  *  overwrites something already set aside by an earlier run (Codex High). */
@@ -166,7 +185,7 @@ export function shareEntry(profileDir, defaultDir, name, stamp = Date.now()) {
     // A link somebody deliberately pointed elsewhere is not ours to rewrite,
     // but it DOES mean this account resolves transcripts somewhere the
     // Sessions list is not reading, so say so loudly (Codex High).
-    console.warn(`[account-share] ${link} points at ${realLink}, not ${target}. Sessions listed in the app will not resume in terminals for this account.`);
+    warnOnce(profileDir, name, `[account-share] ${link} points at ${realLink}, not ${target}. Sessions listed in the app will not resume in terminals for this account.`);
     return 'foreign-symlink';
   }
 
@@ -182,7 +201,7 @@ export function shareEntry(profileDir, defaultDir, name, stamp = Date.now()) {
     // both stores, which effectively cannot happen.
     const collisions = countCollisions(link, target);
     if (collisions > 0) {
-      console.warn(`[account-share] ${link}: ${collisions} entr${collisions === 1 ? 'y' : 'ies'} collide with the shared store. Nothing moved, this one stays profile-local.`);
+      warnOnce(profileDir, name, `[account-share] ${link}: ${collisions} entr${collisions === 1 ? 'y' : 'ies'} collide with the shared store. Nothing moved, this one stays profile-local.`);
       return 'kept-not-shared';
     }
     let leftBehind = mergeInto(link, target);
