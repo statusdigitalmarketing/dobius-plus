@@ -97,6 +97,14 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
         if (cols > 0 && rows > 0) {
           window.electronAPI.terminalResize(id, cols, rows);
         }
+        // Force a full repaint of the visible rows. A fit that lands on the SAME
+        // cols/rows does not re-render, so a pane written to while hidden (every
+        // tab stays mounted with display:none) or whose renderer went stale can
+        // show a blank/grey grid with just the cursor until a manual reflow.
+        // refresh() IS that reflow, done automatically on every fit: tab show
+        // (the ResizeObserver fires on the display:none -> visible transition),
+        // window resize, and font change.
+        if (rows > 0) termRef.current.refresh(0, rows - 1);
       } catch (err) {
         console.warn('[useTerminal] fit error:', err.message);
       }

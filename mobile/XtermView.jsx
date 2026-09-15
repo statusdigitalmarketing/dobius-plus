@@ -40,6 +40,9 @@ export default function XtermView({ connection, activeId }) {
     const ro = new ResizeObserver(() => {
       try {
         fit.fit();
+        // Force a repaint: a refit onto the same geometry does not re-render, so
+        // a view that went stale stays blank until something reflows it.
+        if (term.rows > 0) term.refresh(0, term.rows - 1);
         if (prevIdRef.current) {
           connection.send({ type: 'resize', id: prevIdRef.current, cols: term.cols, rows: term.rows });
         }
@@ -47,9 +50,23 @@ export default function XtermView({ connection, activeId }) {
     });
     ro.observe(hostRef.current);
 
+    // Coming back to the foreground: iOS tears down the rendered view while the
+    // PWA is backgrounded and xterm does not repaint itself on return, which is
+    // the "grey screen with just the cursor until I reflow it" case. Repaint
+    // from the buffer we already hold; no server round trip needed.
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        fit.fit();
+        if (term.rows > 0) term.refresh(0, term.rows - 1);
+      } catch { /* noop */ }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
     return () => {
       dataSub.dispose();
       ro.disconnect();
+      document.removeEventListener('visibilitychange', onVisible);
       term.dispose();
     };
   }, [connection]);
@@ -64,6 +81,9 @@ export default function XtermView({ connection, activeId }) {
     if (fit && term) {
       try {
         fit.fit();
+        // Repaint what we already have straight away, so the view is correct
+        // even before the server's replay and the two-resize redraw land.
+        if (term.rows > 0) term.refresh(0, term.rows - 1);
         const { cols, rows } = term;
         connection.send({ type: 'resize', id: activeId, cols, rows: Math.max(1, rows - 1) });
         setTimeout(() => connection.send({ type: 'resize', id: activeId, cols, rows }), 80);
