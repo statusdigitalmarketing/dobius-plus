@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { THEMES, applyTheme } from '../lib/themes';
 import { groupByStage } from '../lib/stages';
 import { makeTabId } from '../lib/tab-id';
+import { latestSessionForTab } from '../../shared/session-tab.js';
 
 
 // Drop any grid entries whose tab is no longer present. Returns null when the
@@ -564,6 +565,55 @@ export const useStore = create((set, get) => ({
   // nearest terminal tab, else null). Used by resume/inject/restore so they
   // don't silently no-op when a browser tab is active. Audit Medium.
   getActiveTerminalTabId: () => resolveActiveTerminalTabId(get()),
+
+  // Continue the running conversation in THIS tab on the currently ACTIVE
+  // account. The reason this exists: switching accounts (Settings > Accounts)
+  // only changes NEW terminals, so hitting a session limit and switching left
+  // the current tab still bound to the maxed-out account (Sam: "stays on
+  // original account and says i still dont have credits left"). This respawns
+  // the tab's PTY, which re-reads the active account at the spawn choke point
+  // (CLAUDE_CONFIG_DIR), then resumes the same session from the shared
+  // transcript store, so the conversation continues on fresh quota.
+  continueTabOnActiveAccount: async (tabId) => {
+    const api = typeof window !== 'undefined' ? window.electronAPI : null;
+    if (!api || !tabId) return;
+    // The tab's REAL project, read from the live tab list (not the persisted
+    // map), so the lookup is project-guarded and the respawn's cwd is right for
+    // a worktree/subdir tab rather than the active project (reviewer MED-HIGH).
+    const tab = (get().terminalTabs || []).find((t) => t.id === tabId);
+    const tabProject = tab?.projectPath || get().currentProjectPath || null;
+    let sessionId = null;
+    try {
+      const map = (await api.configGetSessionTabMap?.()) || {};
+      sessionId = latestSessionForTab(map, tabId, tabProject)?.sessionId || null;
+    } catch { /* no map: still respawn to switch the account for a fresh session */ }
+    // Respawn HARD-kills whatever runs in this tab (build, editor, claude), so
+    // confirm first (reviewer MED). Non-interactive callers (tests) proceed.
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      const ok = window.confirm(
+        sessionId
+          ? 'Restart this tab on the switched account and resume the conversation? Whatever is running in this tab now will be stopped.'
+          : 'Restart this tab on the switched account? Whatever is running in this tab now will be stopped, and no linked session was found to resume.'
+      );
+      if (!ok) return;
+    }
+    set({ activeView: 'terminal', activeTabId: tabId });
+    // Respawn: main kills the old PTY and creates a new one, reading the live
+    // active account (CLAUDE_CONFIG_DIR) at the spawn choke point.
+    try { await api.terminalCreate?.(tabId, tabProject || undefined); } catch { return; }
+    if (!sessionId) return; // account switched; user continues fresh
+    // Delegate the actual resume to resumeSession, which owns the claim gate
+    // (refuses if the session runs on the phone/another window: reviewer HIGH),
+    // the worktree/cross-project cwd rules, and char-by-char typing. Wait first
+    // so the old claude has exited (claimSessionResume refuses while its process
+    // is still visible) and the new shell is ready.
+    setTimeout(() => {
+      if (!(get().terminalTabs || []).some((t) => t.id === tabId)) return; // tab closed (reviewer LOW)
+      set({ activeTabId: tabId }); // re-assert in case focus moved during the wait
+      get().resumeSession({ sessionId, project: tabProject || undefined });
+    }, 900);
+  },
+
 
   resumeSession: (arg) => {
     const session = typeof arg === 'string' ? { sessionId: arg } : (arg || {});

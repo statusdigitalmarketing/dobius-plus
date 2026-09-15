@@ -626,6 +626,14 @@ export default function TerminalTabBar() {
             toggleMonitor(contextMenu.tabId);
             setContextMenu(null);
           }}
+          onContinueAccount={() => {
+            const targetTabId = contextMenu.tabId;
+            setContextMenu(null);
+            // Respawns the tab on the account switched to in Settings and
+            // resumes its session. Solves "switch does nothing when I hit a
+            // limit" (the current tab kept the maxed-out account).
+            useStore.getState().continueTabOnActiveAccount?.(targetTabId);
+          }}
           onCopyLastResponse={async () => {
             const targetTabId = contextMenu.tabId;
             // Pin the target tab's projectPath up-front (read from the live
@@ -695,7 +703,7 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onDismiss }) {
+function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
 
@@ -706,6 +714,7 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored,
     { label: isSplit ? 'Unsplit' : 'Split View', onClick: onSplit, disabled: tabCount <= 1 },
     { type: 'divider' },
     { label: 'Copy Last Claude Response', onClick: onCopyLastResponse },
+    { label: 'Continue on switched account', onClick: onContinueAccount },
     { type: 'divider' },
     { label: 'Close', onClick: onClose, disabled: tabCount <= 1 },
     { label: 'Close Others', onClick: onCloseOthers, disabled: tabCount <= 1 },
