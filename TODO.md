@@ -28,7 +28,7 @@ the version or branch that shipped them. Sam triggers releases.
       launch. terminal:create added one closure per tab to the window's
       WebContents; electron/owner-cleanup.js registers one per window. Same
       commit as the watchdog, shipped in v1.0.70.
-- [x] Plugins were broken on 4 of 5 accounts (main, unreleased; ships in v1.0.71).
+- [x] Plugins were broken on 4 of 5 accounts (v1.0.71).
       ~/.claude/plugins was migrated from the old Mac: manifests pointed at
       /Users/statusmacbook2024 and 15 of 19 caches were missing, so Default and
       every symlinked profile had 0 working plugins; only the active account
