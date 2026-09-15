@@ -51,9 +51,11 @@ function IdentityLine({ ident }) {
 export default function AccountsSection() {
   const [accounts, setAccounts] = useState([]);
   const [activeClaudeId, setActiveClaudeId] = useState(null);
+  const [activeCodexId, setActiveCodexId] = useState(null);
+  const [codexIdents, setCodexIdents] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({ name: '', type: 'claude', apiKey: '', cliPath: '' });
+  const [form, setForm] = useState({ name: '', type: 'claude', authMode: 'chatgpt', apiKey: '', cliPath: '' });
   const [feedback, setFeedback] = useState('');
   const [activating, setActivating] = useState(null);
   const [identities, setIdentities] = useState(null);
@@ -68,18 +70,22 @@ export default function AccountsSection() {
 
   const reload = async () => {
     const seq = ++reqSeq.current;
-    const [list, activeId, idents] = await Promise.all([
+    const [list, activeId, idents, activeCodex, codexIds] = await Promise.all([
       window.electronAPI.accountsList(),
       window.electronAPI.accountsGetActiveClaude(),
       // Optional-called so a renderer running against an older preload (app
       // updated but window not reloaded) still shows the list instead of
       // throwing on a bridge method that is not there yet.
       window.electronAPI.accountsIdentities?.() ?? Promise.resolve(null),
+      window.electronAPI.accountsGetActiveCodex?.() ?? Promise.resolve(null),
+      window.electronAPI.accountsCodexIdentities?.() ?? Promise.resolve(null),
     ]);
     if (!mounted.current || seq !== reqSeq.current) return;
     setAccounts(list || []);
     setActiveClaudeId(activeId);
     setIdentities(idents || null);
+    setActiveCodexId(activeCodex || null);
+    setCodexIdents(codexIds || null);
   };
 
   useEffect(() => {
@@ -142,18 +148,47 @@ export default function AccountsSection() {
     }
   };
 
+  const handleActivateCodex = async (acct) => {
+    setActivating(acct.id);
+    const result = await window.electronAPI.accountsActivateCodex?.(acct.id);
+    setActivating(null);
+    if (result?.ok) {
+      setActiveCodexId(acct.id);
+      reload();
+      flash(`Switched Codex. NEW terminals run codex as "${acct.name}". First time in this account: run codex login once in a new tab.`);
+    } else {
+      flash(`Failed to switch Codex: ${result?.error || 'unknown'}`, true);
+    }
+  };
+
   const handleSave = async () => {
     if (!form.name.trim()) return flash('Name is required.', true);
-    if (form.type === 'codex' && !form.apiKey.trim()) return flash('OpenAI API key is required.', true);
+    const codexApiKey = form.type === 'codex' && form.authMode === 'apikey';
+    if (codexApiKey && !form.apiKey.trim()) return flash('OpenAI API key is required.', true);
 
     const payload = {
       ...(editing ? { id: editing.id } : {}),
       name: form.name.trim(),
       type: form.type,
-      ...(form.type === 'codex' ? { apiKey: form.apiKey.trim() } : {}),
+      ...(form.type === 'codex' ? { authMode: form.authMode } : {}),
+      ...(codexApiKey ? { apiKey: form.apiKey.trim() } : {}),
+      ...(form.type === 'codex' && form.authMode === 'chatgpt' && editing?.codexHome ? { codexHome: editing.codexHome } : {}),
       ...(form.type === 'claude' && editing?.claudeJsonPath ? { claudeJsonPath: editing.claudeJsonPath } : {}),
       ...(form.type === 'claude' && form.cliPath.trim() ? { cliPath: form.cliPath.trim() } : {}),
     };
+
+    // A NEW Codex ChatGPT account gets its own empty CODEX_HOME, bound by the
+    // first `codex login` run in it. Same posture as a new Claude profile.
+    if (form.type === 'codex' && form.authMode === 'chatgpt' && !editing) {
+      const id = `acct-${Date.now()}`;
+      payload.id = id;
+      const result = await window.electronAPI.accountsInitCodexProfileDir?.(id);
+      if (!result?.ok) {
+        flash(`Could not create the Codex profile: ${result?.error || 'unknown'}`, true);
+        return;
+      }
+      payload.codexHome = result.path;
+    }
 
     if (form.type === 'claude' && !editing) {
       const id = `acct-${Date.now()}`;
@@ -246,7 +281,8 @@ export default function AccountsSection() {
 
       <div className="space-y-2 mb-3">
         {accounts.map((acct, index) => {
-          const isActive = acct.type === 'claude' && acct.id === activeClaudeId;
+          const isActive = acct.type === 'claude' ? acct.id === activeClaudeId : acct.id === activeCodexId;
+          const codexIdent = acct.type === 'codex' ? ((codexIdents?.accounts || []).find((r) => r.id === acct.id) || null) : null;
           return (
             <div
               key={acct.id}
@@ -257,11 +293,9 @@ export default function AccountsSection() {
               }}
             >
               <div className="flex items-center gap-2 min-w-0">
-                {acct.type === 'claude' && (
-                  <span style={{ fontSize: 10, color: isActive ? 'var(--accent)' : 'var(--dim)' }}>
-                    {isActive ? '●' : '○'}
-                  </span>
-                )}
+                <span style={{ fontSize: 10, color: isActive ? 'var(--accent)' : 'var(--dim)' }}>
+                  {isActive ? '●' : '○'}
+                </span>
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
                     <span className="text-sm font-medium" style={{ color: 'var(--fg)' }}>{acct.name}</span>
@@ -279,9 +313,18 @@ export default function AccountsSection() {
                     )}
                   </div>
                   {acct.type === 'claude' && <IdentityLine ident={identAt(index, acct)} />}
-                  {acct.type === 'codex' && acct.apiKey && (
-                    <div className="text-xs mt-0.5" style={{ color: 'var(--dim)', fontFamily: 'monospace' }}>
-                      {acct.apiKey.slice(0, 8)}…
+                  {acct.type === 'codex' && (
+                    <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                      {(acct.authMode || (acct.apiKey ? 'apikey' : 'chatgpt')) === 'apikey' ? (
+                        <span className="text-xs" style={{ color: 'var(--dim)', fontFamily: 'monospace' }}>API key {acct.apiKey ? `${acct.apiKey.slice(0, 8)}…` : ''}</span>
+                      ) : codexIdent?.email ? (
+                        <span className="text-xs" style={{ color: 'var(--fg)', fontFamily: 'monospace', opacity: 0.8 }}>{codexIdent.email}{codexIdent.plan ? ` (${codexIdent.plan})` : ''}</span>
+                      ) : (
+                        <span className="text-xs" style={{ color: 'var(--dim)' }}>{codexIdent?.login === 'in' ? 'signed in' : 'run codex login in a new tab'}</span>
+                      )}
+                      {(acct.authMode || (acct.apiKey ? 'apikey' : 'chatgpt')) !== 'apikey' && codexIdent?.login === 'out' && (
+                        <span style={badge('#f87171', 'rgba(248,113,113,0.15)')}>not logged in</span>
+                      )}
                     </div>
                   )}
                   {acct.type === 'claude' && acct.cliPath && (
@@ -293,16 +336,16 @@ export default function AccountsSection() {
               </div>
 
               <div className="flex gap-1.5 shrink-0">
-                {acct.type === 'claude' && !isActive && (
+                {!isActive && (
                   <button
                     style={btn('primary', { padding: '4px 10px', fontSize: 11 })}
                     disabled={activating === acct.id}
-                    onClick={() => handleActivate(acct)}
+                    onClick={() => (acct.type === 'codex' ? handleActivateCodex(acct) : handleActivate(acct))}
                   >
                     {activating === acct.id ? 'Switching…' : 'Switch'}
                   </button>
                 )}
-                <button style={btn()} onClick={() => { setEditing(acct); setForm({ name: acct.name, type: acct.type, apiKey: acct.apiKey || '', cliPath: acct.cliPath || '' }); setShowForm(true); }}>
+                <button style={btn()} onClick={() => { setEditing(acct); setForm({ name: acct.name, type: acct.type, authMode: acct.authMode || (acct.apiKey ? 'apikey' : 'chatgpt'), apiKey: acct.apiKey || '', cliPath: acct.cliPath || '' }); setShowForm(true); }}>
                   Edit
                 </button>
                 <button
@@ -318,7 +361,7 @@ export default function AccountsSection() {
       </div>
 
       {!showForm && (
-        <button style={btn('primary')} onClick={() => { setEditing(null); setForm({ name: '', type: 'claude', apiKey: '', cliPath: '' }); setShowForm(true); }}>
+        <button style={btn('primary')} onClick={() => { setEditing(null); setForm({ name: '', type: 'claude', authMode: 'chatgpt', apiKey: '', cliPath: '' }); setShowForm(true); }}>
           + Add Account
         </button>
       )}
@@ -348,6 +391,17 @@ export default function AccountsSection() {
               <option value="codex">Codex / OpenAI</option>
             </select>
             {form.type === 'codex' && (
+              <select
+                style={{ ...inp, appearance: 'none' }}
+                value={form.authMode}
+                onChange={(e) => setForm((f) => ({ ...f, authMode: e.target.value }))}
+                disabled={!!editing}
+              >
+                <option value="chatgpt">ChatGPT login (its own session)</option>
+                <option value="apikey">OpenAI API key</option>
+              </select>
+            )}
+            {form.type === 'codex' && form.authMode === 'apikey' && (
               <input
                 style={inp}
                 type="password"
@@ -355,6 +409,11 @@ export default function AccountsSection() {
                 value={form.apiKey}
                 onChange={(e) => setForm((f) => ({ ...f, apiKey: e.target.value }))}
               />
+            )}
+            {form.type === 'codex' && form.authMode === 'chatgpt' && !editing && (
+              <div className="text-xs p-2 rounded" style={{ backgroundColor: 'rgba(16,163,127,0.08)', color: 'var(--dim)' }}>
+                Name the account and Save. It gets its own Codex home (history and settings shared): switch to it, open a new terminal, and run <code style={{ fontFamily: 'monospace' }}>codex login</code> once there to bind its login.
+              </div>
             )}
             {form.type === 'claude' && !editing && (
               <div className="text-xs p-2 rounded" style={{ backgroundColor: 'rgba(139,92,246,0.08)', color: 'var(--dim)', border: '1px solid rgba(139,92,246,0.2)' }}>

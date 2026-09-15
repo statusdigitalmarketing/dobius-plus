@@ -137,20 +137,22 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   const { DOBIUS_CLI_DIR: _ignored, DOBIUS_GWS_SHIM_DIR: _ignored2, ...termEnv } = accountEnv;
 
   const shell = process.env.SHELL || '/bin/zsh';
+  const spawnEnv = {
+    ...process.env,
+    PATH: fullPath,
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor',
+    DOBIUS_CWD: safeCwd,
+    ...extraEnv,
+    ...termEnv,
+  };
+  // A termEnv key set to undefined is a DELETION signal: e.g. a ChatGPT Codex
+  // account must not inherit an OPENAI_API_KEY from Dobius's environment, which
+  // would override its stored login. (A key re-exported by the login shell
+  // profile is outside our reach; this clears the inherited case.)
+  for (const [k, v] of Object.entries(termEnv)) { if (v === undefined) delete spawnEnv[k]; }
   const term = pty.spawn(shell, ['-l'], {
-    name: 'xterm-256color',
-    cols: 80,
-    rows: 24,
-    cwd: safeCwd,
-    env: {
-      ...process.env,
-      PATH: fullPath,
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor',
-      DOBIUS_CWD: safeCwd,
-      ...extraEnv,
-      ...termEnv,
-    },
+    name: 'xterm-256color', cols: 80, rows: 24, cwd: safeCwd, env: spawnEnv,
   });
 
   const dataSub = term.onData((data) => {

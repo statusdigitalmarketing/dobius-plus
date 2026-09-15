@@ -180,6 +180,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   accountsInitProfileDir: (destPath) => ipcRenderer.invoke('accounts:initProfileDir', destPath),
   accountsActivateClaude: (accountId) => ipcRenderer.invoke('accounts:activateClaude', accountId),
   accountsGetActiveClaude: () => ipcRenderer.invoke('accounts:getActiveClaude'),
+  accountsActivateCodex: (accountId) => ipcRenderer.invoke('accounts:activateCodex', accountId),
+  accountsGetActiveCodex: () => ipcRenderer.invoke('accounts:getActiveCodex'),
+  accountsInitCodexProfileDir: (accountId) => ipcRenderer.invoke('accounts:initCodexProfileDir', accountId),
+  accountsCodexIdentities: () => ipcRenderer.invoke('accounts:codexIdentities'),
 
   getHomeDirPath: () => ipcRenderer.invoke('utils:getHomeDirPath'),
 

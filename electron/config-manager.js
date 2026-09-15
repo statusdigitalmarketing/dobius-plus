@@ -1274,6 +1274,24 @@ export function saveAccount(account) {
   const claudeJsonPath = account.type === 'claude'
     ? safeClaudeJsonPath(account.claudeJsonPath)
     : null;
+  // Same containment guard as claudeJsonPath, for the Codex profile home: it
+  // must live under ~/.codex-profiles so a crafted save cannot point CODEX_HOME
+  // at an arbitrary directory.
+  const codexProfilesRoot = path.join(os.homedir(), '.codex-profiles');
+  function safeCodexHome(raw) {
+    if (typeof raw !== 'string' || raw.length === 0 || raw.length > 500) return null;
+    const resolved = path.resolve(raw);
+    if (resolved !== codexProfilesRoot && !resolved.startsWith(codexProfilesRoot + path.sep)) return null;
+    return resolved;
+  }
+  // Codex auth mode: 'chatgpt' (a login with its own CODEX_HOME) or 'apikey'.
+  // Legacy codex accounts (apiKey, no authMode) are treated as 'apikey'.
+  const authMode = account.type === 'codex'
+    ? (account.authMode === 'chatgpt' ? 'chatgpt' : 'apikey')
+    : null;
+  const codexHome = (account.type === 'codex' && authMode === 'chatgpt')
+    ? safeCodexHome(account.codexHome)
+    : null;
   const sanitized = {
     id,
     name: typeof account.name === 'string' ? account.name.slice(0, 100) : 'Unnamed',
@@ -1282,7 +1300,9 @@ export function saveAccount(account) {
     ...(account.type === 'claude' && account.cliPath
       ? { cliPath: String(account.cliPath).slice(0, 500) }
       : {}),
-    ...(account.type === 'codex' && account.apiKey
+    ...(account.type === 'codex' ? { authMode } : {}),
+    ...(codexHome ? { codexHome } : {}),
+    ...(account.type === 'codex' && authMode === 'apikey' && account.apiKey
       ? { apiKey: String(account.apiKey).slice(0, 200) }
       : {}),
   };
@@ -1303,6 +1323,7 @@ export function deleteAccount(accountId) {
   // the stale id makes the UI show nothing active while terminals silently
   // use default (Codex Low).
   if (config.activeClaudeAccountId === accountId) config.activeClaudeAccountId = null;
+  if (config.activeCodexAccountId === accountId) config.activeCodexAccountId = null;
   // Remove any project assignments pointing to this account
   if (config.projectAccounts) {
     for (const [k, v] of Object.entries(config.projectAccounts)) {

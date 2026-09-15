@@ -20,6 +20,8 @@ stallWatchdog.wrapIpc(ipcMain);
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities } from './account-identity.js';
+import { codexEnvForAccount, shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
+import { codexIdentityFor } from './codex-account-identity.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser, ensureShim } from './gws-accounts.js';
@@ -251,12 +253,24 @@ function setupTerminalHandlers() {
     // identity with all its settings/skills/hooks.
     const projectAccount = cwd ? getProjectAccount(cwd) : null;
     let activeAccount = null;
+    let codexAccount = null;
     {
       const cfgNow = loadConfig();
+      const accts = cfgNow.accounts || [];
       const activeId = cfgNow.activeClaudeAccountId;
-      if (activeId) activeAccount = (cfgNow.accounts || []).find((a) => a.id === activeId && a.type === 'claude') || null;
+      if (activeId) activeAccount = accts.find((a) => a.id === activeId && a.type === 'claude') || null;
+      // Codex is an independent tool: a terminal carries BOTH the active Claude
+      // account (for `claude`) and the active Codex account (for `codex`). A
+      // per-project override applies to its OWN type; the other type keeps its
+      // global active. So a Claude override never disables the active Codex.
+      const activeCodexId = cfgNow.activeCodexAccountId;
+      if (projectAccount && projectAccount.type === 'codex') codexAccount = projectAccount;
+      else if (activeCodexId) codexAccount = accts.find((a) => a.id === activeCodexId && a.type === 'codex') || null;
     }
-    const account = resolveTerminalAccount(projectAccount, activeAccount);
+    // The Claude account is the project override only when it IS a Claude
+    // account; a Codex override must not become the Claude account.
+    const claudeProjectAccount = (projectAccount && projectAccount.type === 'claude') ? projectAccount : null;
+    const account = resolveTerminalAccount(claudeProjectAccount, activeAccount);
     // The one choke point where CLAUDE_CONFIG_DIR is decided, so it is where
     // the shared-setup invariant has to hold. Startup linking alone misses an
     // account reached by a per-PROJECT override that was assigned while the
@@ -268,7 +282,13 @@ function setupTerminalHandlers() {
       try { shareProfile(path.dirname(expandTilde(account.claudeJsonPath))); }
       catch (err) { console.warn('[account-share] spawn-time link failed:', err?.message || err); }
     }
-    const accountEnv = claudeEnvForAccount(account);
+    // Codex account: share its profile (chatgpt homes symlink ~/.codex's
+    // sessions/history/config so history survives the switch) and add its env.
+    if (codexAccount?.type === 'codex' && codexAccount.authMode === 'chatgpt' && codexAccount.codexHome) {
+      try { shareCodexProfile(expandTilde(codexAccount.codexHome)); }
+      catch (err) { console.warn('[codex-share] spawn-time link failed:', err?.message || err); }
+    }
+    const accountEnv = { ...claudeEnvForAccount(account), ...codexEnvForAccount(codexAccount) };
     // gws token-broker shim (v1.0.41): put the shim first on PATH as `gws` and
     // tell it where the real gws is. Transparent passthrough until a caller sets
     // DOBIUS_GWS_ACCOUNT=<email> (or a bound tab sets DOBIUS_GWS_ACCOUNT_ID), so
@@ -1682,6 +1702,28 @@ function setupConfigHandlers() {
   // has a credential, and which other rows share that same login. Without this
   // the list showed only a typed name, which is how two entries over one
   // account looked like a broken Switch (Asana 1218250019314695).
+  // Codex account identities (email/plan/login) for the Accounts panel.
+  ipcMain.handle('accounts:codexIdentities', async () => {
+    try {
+      const accts = (loadConfig().accounts || []).filter((a) => a.type === 'codex');
+      // Array aligned by account, NOT an object keyed by id: account ids are
+      // user-influenced, and an id of __proto__/__default__ would pollute or
+      // collide an id-keyed object (same fix as the Claude accountIdentities).
+      const rows = [];
+      for (const a of accts) {
+        const effMode = a.authMode || (a.apiKey ? 'apikey' : 'chatgpt');
+        if (effMode === 'chatgpt' && a.codexHome) {
+          rows.push({ id: a.id, ...(await codexIdentityFor(expandTilde(a.codexHome))) });
+        } else {
+          rows.push({ id: a.id, email: null, plan: null, login: a.apiKey ? 'in' : 'out', apikey: true });
+        }
+      }
+      return { default: await codexIdentityFor(codexDefaultDir()), accounts: rows };
+    } catch (err) {
+      console.warn('[accounts] codex identity lookup failed:', err?.message || err);
+      return {};
+    }
+  });
   ipcMain.handle('accounts:identities', async () => {
     try {
       return await accountIdentities(getAccounts());
@@ -1757,6 +1799,51 @@ function setupConfigHandlers() {
   // Get active Claude account id
   ipcMain.handle('accounts:getActiveClaude', () => {
     return loadConfig().activeClaudeAccountId || null;
+  });
+
+  // Switch the active Codex account. Like Claude, this is a POINTER: new
+  // terminals get that account's CODEX_HOME (chatgpt) or OPENAI_API_KEY
+  // (apikey). null = back to the default ~/.codex login.
+  ipcMain.handle('accounts:activateCodex', async (_event, accountId) => {
+    const config = loadConfig();
+    if (accountId === null) {
+      config.activeCodexAccountId = null;
+      saveConfig(config);
+      return { ok: true, isDefault: true };
+    }
+    const account = (config.accounts || []).find((a) => a.id === accountId && a.type === 'codex');
+    if (!account) return { ok: false, error: 'Account not found' };
+    if (account.authMode === 'chatgpt') {
+      if (!account.codexHome) return { ok: false, error: 'No profile home for this account' };
+      try { shareCodexProfile(expandTilde(account.codexHome)); }
+      catch (err) { console.warn('[codex-share] activate link failed:', err?.message || err); }
+    }
+    config.activeCodexAccountId = accountId;
+    saveConfig(config);
+    return { ok: true, isDefault: false };
+  });
+  ipcMain.handle('accounts:getActiveCodex', () => {
+    return loadConfig().activeCodexAccountId || null;
+  });
+
+  // Create an empty per-account CODEX_HOME under ~/.codex-profiles and share
+  // the safe entries from ~/.codex. Starts logged out; one `codex login` in a
+  // tab running as this account binds it. Mirrors accounts:initProfileDir.
+  ipcMain.handle('accounts:initCodexProfileDir', async (_event, accountId) => {
+    try {
+      if (!accountId || typeof accountId !== 'string') return { ok: false, error: 'Invalid accountId' };
+      const base = path.basename(accountId);
+      if (!base || base.includes('/') || base.includes('\\') || base.startsWith('.')) {
+        return { ok: false, error: 'accountId must be a simple name' };
+      }
+      const profileDir = path.join(codexProfilesRoot(), base);
+      await fs.promises.mkdir(profileDir, { recursive: true });
+      try { shareCodexProfile(profileDir); }
+      catch (err) { console.warn('[codex-share] new profile link failed:', err?.message || err); }
+      return { ok: true, path: profileDir };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   });
 
 }
