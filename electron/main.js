@@ -1699,7 +1699,14 @@ function setupConfigHandlers() {
       saveConfig(config);
       return { ok: true, isDefault: true };
     }
-    const account = (config.accounts || []).find((a) => a.id === accountId && a.type === 'claude');
+    // find() takes the FIRST match, so with two rows sharing an id the switch
+    // would activate a different account than the row the user clicked while
+    // the UI names theirs. Refuse, matching save/delete (reviewer HIGH).
+    const claudeMatches = (config.accounts || []).filter((a) => a.id === accountId && a.type === 'claude');
+    if (claudeMatches.length > 1) {
+      return { ok: false, error: `${claudeMatches.length} accounts share the id ${accountId}; fix the duplicate before switching` };
+    }
+    const account = claudeMatches[0];
     if (!account) return { ok: false, error: 'Account not found' };
     if (!account.claudeJsonPath) return { ok: false, error: 'No profile snapshot for this account' };
     // Repair the shared links before the switch takes effect, so an account
@@ -1757,7 +1764,11 @@ function setupConfigHandlers() {
       saveConfig(config);
       return { ok: true, isDefault: true };
     }
-    const account = (config.accounts || []).find((a) => a.id === accountId && a.type === 'codex');
+    const codexMatches = (config.accounts || []).filter((a) => a.id === accountId && a.type === 'codex');
+    if (codexMatches.length > 1) {
+      return { ok: false, error: `${codexMatches.length} accounts share the id ${accountId}; fix the duplicate before switching` };
+    }
+    const account = codexMatches[0];
     if (!account) return { ok: false, error: 'Account not found' };
     if (account.authMode === 'chatgpt') {
       if (!account.codexHome) return { ok: false, error: 'No profile home for this account' };

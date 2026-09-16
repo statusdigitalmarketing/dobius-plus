@@ -30,7 +30,13 @@ function IdentityLine({ ident }) {
         // a working login, and saying "never logged in here" there asserts a
         // history we do not know (Codex P2). Say only what was observed.
         <span className="text-xs" style={{ color: 'var(--dim)' }}>
-          {login === 'in' ? 'signed in, address unreadable' : 'no login found'}
+          {login === 'in'
+            ? 'signed in, address unreadable'
+            : login === 'out'
+              ? 'no login found'
+              // 'unknown' means the probe failed. Saying "no login found"
+              // there asserts an absence we did not observe (reviewer LOW).
+              : 'could not check for a login'}
         </span>
       )}
       {login === 'out' && (
@@ -40,10 +46,144 @@ function IdentityLine({ ident }) {
         <span style={badge('var(--dim)', 'rgba(148,163,184,0.15)')}>login unverified</span>
       )}
       {sameAs.length > 0 && (
+        // "recorded email", not "login": this compares the address each profile
+        // has on file. A profile whose credential is missing or unverifiable
+        // can record the same address without being a usable, identical login,
+        // so the badge must not imply a shared quota (reviewer MEDIUM).
         <span style={badge('#fbbf24', 'rgba(251,191,36,0.15)')}>
-          same login as {sameAs.join(', ')}
+          same recorded email as {sameAs.join(', ')}
         </span>
       )}
+    </div>
+  );
+}
+
+/**
+ * The exact, profile-bound commands to put a login on ONE account, and the
+ * warnings that make it actually land on the account you meant.
+ *
+ * Why this is instructions and not a button that runs it for you: a login can
+ * only be created by a process running with that profile's CLAUDE_CONFIG_DIR
+ * (the credential is stored in the Keychain under a name derived from the
+ * config dir), so it has to happen in a terminal running as this account.
+ * Driving that automatically needs contracts this panel does not own yet, so
+ * for now it hands you the correct commands instead of guessing.
+ */
+function SignInHelp({ acct, isActive, recordedEmail, loginState, intendedEmail, setIntendedEmail, onClose, onCopied }) {
+  // Both of these end up in text the user PASTES INTO A SHELL, so quote them
+  // POSIX-style and strip anything that could end the line and start a second
+  // command. cliPath comes from the Edit form and the address is typed here.
+  const shellQuote = (v) => `'${String(v).replace(/[\r\n]+/g, ' ').replace(/'/g, "'\\''")}'`;
+  // A leading tilde must stay OUTSIDE the quotes or the shell will not expand
+  // it and the command fails with "no such file or directory" on a path that
+  // exists (reviewer MEDIUM). Covers ~/x and ~user/x. The unquoted prefix is
+  // allowed only when it is a plain tilde plus a conservative username charset,
+  // so nothing with shell meaning can escape the quoting; anything else is
+  // quoted whole.
+  const shellPath = (v) => {
+    const s = String(v).replace(/[\r\n]+/g, ' ');
+    const m = /^(~[A-Za-z0-9_.-]*)\/(.*)$/.exec(s);
+    if (m) return `${m[1]}/${shellQuote(m[2])}`;
+    return shellQuote(s);
+  };
+  const bin = acct.cliPath ? shellPath(acct.cliPath) : 'claude';
+  const email = (intendedEmail || '').trim();
+  // --email only pre-fills the login page. It is the defence against the
+  // browser approving whatever Google session is already signed in, which is
+  // how two entries end up on one account.
+  const loginCmd = `${bin} auth login${email ? ` --email ${shellQuote(email)}` : ''}`;
+  const commands = `${bin} auth logout\n${loginCmd}`;
+  const changing = !!recordedEmail && !!email && email.toLowerCase() !== recordedEmail.toLowerCase();
+
+  return (
+    <div
+      className="mt-2 pt-2 text-xs"
+      style={{ borderTop: '1px solid var(--border)', color: 'var(--fg)' }}
+    >
+      {!isActive && (
+        <div className="mb-1.5" style={{ color: '#fbbf24' }}>
+          Switch to this account first. The terminal has to be running as it, or you will
+          log in whichever account you are currently on instead.
+        </div>
+      )}
+      {/* This caveat applies even when the row IS the active account: a project
+          with its own assigned account keeps that assignment, so a terminal
+          opened there would re-authenticate THAT profile instead (reviewer
+          MEDIUM). Always shown. */}
+      <div className="mb-1.5" style={{ color: '#fbbf24' }}>
+        Check the terminal you use is actually running as this account. A project with its
+        own assigned account keeps that assignment and would be signed in instead.
+      </div>
+      <div className="mb-1.5" style={{ color: 'var(--dim)' }}>
+        {recordedEmail
+          ? <>This profile currently records <span style={{ fontFamily: 'monospace' }}>{recordedEmail}</span>. Signing out first is what forces the login page to appear again.</>
+          : loginState === 'in'
+            ? <>This profile has a saved login, but its address could not be read. Signing out first forces the login page to appear again.</>
+            : loginState === 'out'
+              ? <>This profile has no saved login yet.</>
+              // 'unknown' means the check itself failed. Do not claim there is no
+              // login (unobserved), and do not promise signing out is harmless:
+              // if a credential IS there, logout removes it, and offline you
+              // could not sign back in (reviewer MEDIUM).
+              : <>Could not check whether this profile has a login. Signing out will remove one if it is there, so only run it when you are ready to sign in again.</>}
+      </div>
+
+      <label className="block mb-1" style={{ color: 'var(--dim)' }}>
+        Account you intend to end up as (pre-fills the login page)
+      </label>
+      <input
+        value={intendedEmail}
+        onChange={(e) => setIntendedEmail(e.target.value)}
+        placeholder="you@example.com"
+        spellCheck={false}
+        style={{
+          backgroundColor: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--fg)',
+          borderRadius: 6, padding: '4px 8px', fontSize: 12, width: '100%', outline: 'none',
+          fontFamily: 'monospace', marginBottom: 6,
+        }}
+      />
+      {changing && (
+        <div className="mb-1.5" style={{ color: '#fbbf24' }}>
+          Your browser may already be signed in as {recordedEmail} and approve it without asking.
+          If the page does not offer {email}, sign out of Google there, or use a private window.
+        </div>
+      )}
+
+      <pre
+        style={{
+          backgroundColor: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6,
+          padding: '6px 8px', fontFamily: 'monospace', fontSize: 12, whiteSpace: 'pre-wrap',
+          wordBreak: 'break-all', margin: 0,
+        }}
+      >{commands}</pre>
+
+      <div className="flex gap-1.5 mt-1.5">
+        <button
+          style={{
+            padding: '4px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer',
+            backgroundColor: 'var(--accent)', color: '#fff', border: 'none',
+          }}
+          onClick={() => {
+            navigator.clipboard?.writeText(commands)
+              .then(() => onCopied?.())
+              .catch(() => { /* clipboard unavailable; the text is on screen */ });
+          }}
+        >
+          Copy commands
+        </button>
+        <button
+          style={{
+            padding: '4px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer',
+            backgroundColor: 'transparent', color: 'var(--dim)', border: '1px solid var(--border)',
+          }}
+          onClick={onClose}
+        >
+          Done
+        </button>
+      </div>
+      <div className="mt-1.5" style={{ color: 'var(--dim)' }}>
+        Come back here afterwards and this row will show the address it actually ended up on.
+      </div>
     </div>
   );
 }
@@ -59,6 +199,16 @@ export default function AccountsSection() {
   const [feedback, setFeedback] = useState('');
   const [activating, setActivating] = useState(null);
   const [identities, setIdentities] = useState(null);
+  // Which row has its sign-in instructions open, and the address the user
+  // INTENDS to end up as (passed to the CLI as --email so the login page is
+  // pre-filled with it instead of silently taking the signed-in Google session).
+  // { index, id } for the row whose sign-in helper is open. The INDEX
+  // disambiguates rows that somehow share an id; the ID invalidates the helper
+  // if the list shifts under it (deleting an earlier row would otherwise leave
+  // the panel open on a DIFFERENT account holding the previous intended
+  // address). Both must match for the helper to render.
+  const [signInFor, setSignInFor] = useState(null);
+  const [intendedEmail, setIntendedEmail] = useState('');
 
   // A refresh that started BEFORE a Switch must never land after it. The
   // identity probes make a reload slow enough to lose that race, and the older
@@ -116,6 +266,38 @@ export default function AccountsSection() {
     return row.id === acct.id ? row : null;
   };
 
+  // Group rows (including the synthetic Default) by the address each one has on
+  // file. Only groups of 2+ matter. Built from the SAME identities snapshot the
+  // rows render from, and keyed by the email rather than by account id, since
+  // ids are user-influenced.
+  const duplicateGroups = (() => {
+    const rows = identities?.accounts;
+    if (!Array.isArray(rows)) return [];
+    const byEmail = new Map();
+    const add = (email, label) => {
+      if (!email || !label) return;
+      // Key case-insensitively: the identity service compares addresses that
+      // way, so a case difference must not split a group and hide the banner
+      // while the per-row badges still show (reviewer LOW).
+      const key = String(email).toLowerCase();
+      if (!byEmail.has(key)) byEmail.set(key, { display: email, labels: [] });
+      byEmail.get(key).labels.push(label);
+    };
+    add(identities?.default?.email, 'Default');
+    // Read BY POSITION against the same snapshot (reload fetches accounts and
+    // identities together) with identAt's id equality guard. Rows are not
+    // skipped for a repeated id: suppressing them would hide a genuine
+    // duplicate group, which is exactly what this banner exists to show.
+    accounts.forEach((acct, i) => {
+      if (acct.type !== 'claude') return;
+      const row = identAt(i, acct);
+      add(row?.email, acct.name || row?.email || acct.id);
+    });
+    return [...byEmail.values()]
+      .filter((g) => g.labels.length > 1)
+      .map((g) => ({ email: g.display, labels: g.labels }));
+  })();
+
   const flash = (msg, isError = false) => {
     setFeedback({ msg, isError });
     setTimeout(() => setFeedback(''), 3000);
@@ -128,7 +310,7 @@ export default function AccountsSection() {
     if (result.ok) {
       setActiveClaudeId(acct.id);
       reload();
-      flash(`Switched. NEW terminals everywhere now run as "${acct.name}" (open tabs keep their old account). First time in this account: run claude auth login once in a new tab, it sticks.`);
+      flash(`Switched. NEW terminals run as "${acct.name}", except in a project that has its own assigned account. Open tabs keep the account they started on. No login on this account yet? Use Sign in on its row.`);
     } else {
       flash(`Failed to switch: ${result.error}`, true);
     }
@@ -142,7 +324,7 @@ export default function AccountsSection() {
     if (result?.ok) {
       setActiveClaudeId(null);
       reload(); // invalidates any refresh started before this switch
-      flash('Back to the default account. New terminals use this Mac\u2019s normal ~/.claude login and setup.');
+      flash('Back to the default account. New terminals use this Mac\u2019s normal ~/.claude login and setup, except in a project that has its own assigned account.');
     } else {
       flash(`Failed to switch: ${result?.error || 'unknown'}`, true);
     }
@@ -158,7 +340,7 @@ export default function AccountsSection() {
     if (result?.ok) {
       setActiveCodexId(null);
       reload();
-      flash('Back to the default Codex login. New terminals run codex as this Mac’s normal ~/.codex account.');
+      flash('Back to the default Codex login. New terminals run codex as this Mac’s normal ~/.codex account, except in a project that has its own assigned account.');
     } else {
       flash(`Failed to switch Codex: ${result?.error || 'unknown'}`, true);
     }
@@ -171,13 +353,20 @@ export default function AccountsSection() {
     if (result?.ok) {
       setActiveCodexId(acct.id);
       reload();
-      flash(`Switched Codex. NEW terminals run codex as "${acct.name}". First time in this account: run codex login once in a new tab.`);
+      flash((acct.authMode || (acct.apiKey ? 'apikey' : 'chatgpt')) === 'apikey'
+        ? `Switched Codex. NEW terminals run codex with "${acct.name}" API key, except in a project with its own assigned account.`
+        : `Switched Codex. NEW terminals run codex as "${acct.name}", except in a project with its own assigned account. First time in this account: run codex login once in a new tab.`);
     } else {
       flash(`Failed to switch Codex: ${result?.error || 'unknown'}`, true);
     }
   };
 
   const handleSave = async () => {
+    // Name stays REQUIRED. Making it optional left blank, indistinguishable
+    // entries in the per-project ACCOUNT menu, which renders the name only
+    // (reviewer MEDIUM). The fix for a name that drifts from the real login
+    // is that the row shows the recorded address underneath it, not an empty
+    // label.
     if (!form.name.trim()) return flash('Name is required.', true);
     const codexApiKey = form.type === 'codex' && form.authMode === 'apikey';
     if (codexApiKey && !form.apiKey.trim()) return flash('OpenAI API key is required.', true);
@@ -222,16 +411,65 @@ export default function AccountsSection() {
       payload.claudeJsonPath = result.path;
     }
 
-    await window.electronAPI.accountsSave(payload);
+    // saveAccount returns null when it refuses to write (e.g. more than one row
+    // shares this id, where writing would overwrite the wrong account). Do not
+    // report success for a save that did not happen.
+    const saved = await window.electronAPI.accountsSave(payload);
+    if (!saved) {
+      await reload();
+      flash('Could not save: this account id is duplicated in the config, so saving would overwrite the wrong entry.', true);
+      return;
+    }
     await reload();
     setShowForm(false);
-    flash(editing ? 'Account updated.' : 'Account saved. Switch to it, open a new terminal, and run claude auth login once there to bind its login.');
+    flash(editing
+      ? 'Account updated.'
+      : form.type === 'claude'
+        ? 'Account saved. Switch to it, then use Sign in on its row to put a login on it.'
+        : form.authMode === 'apikey'
+          ? 'Account saved. Switch to it and new terminals will run codex with this API key.'
+          : 'Account saved. Switch to it, open a new terminal, and run codex login once there.');
   };
 
+  // Removing a row has side effects beyond the row, so say ALL of them before
+  // asking, and say plainly what is NOT touched. Main refuses an ambiguous id
+  // rather than deleting every match (reviewer HIGH).
   const handleDelete = async (id) => {
-    await window.electronAPI.accountsDelete(id);
+    const acct = accounts.find((a) => a.id === id);
+    const label = acct?.name || id;
+    const storesKeyInRowAfter = acct?.type === 'codex'
+      && (acct.authMode || (acct.apiKey ? 'apikey' : 'chatgpt')) === 'apikey';
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      const storesKeyInRow = acct?.type === 'codex'
+        && (acct.authMode || (acct.apiKey ? 'apikey' : 'chatgpt')) === 'apikey';
+      const lines = [
+        `Remove "${label}" from this list?`,
+        '',
+        'This removes the list entry, clears any project assigned to it (those',
+        'projects fall back to whichever account is active), and if it is the',
+        'active account the active selection returns to Default.',
+        '',
+        storesKeyInRow
+          // The key IS the entry for an API-key account, so removing the row
+          // does remove that credential (reviewer MEDIUM).
+          ? 'This account\u2019s API key is stored in this entry, so removing it deletes the key. Terminals already open keep the account they started on.'
+          : 'It does NOT delete the profile folder, its transcripts, or its saved login. Terminals already open keep the account they started on.',
+      ];
+      if (!window.confirm(lines.join('\n'))) return;
+    }
+    const res = await window.electronAPI.accountsDelete(id);
     await reload();
-    flash('Account removed.');
+    if (res && res.ok === false) {
+      flash(`Could not remove: ${res.error}`, true);
+      return;
+    }
+    const freed = res?.unassignedProjects?.length || 0;
+    flash(
+      `Removed "${label}".`
+      + (freed ? ` ${freed} project${freed === 1 ? '' : 's'} unassigned.` : '')
+      + (res?.wasActive ? ' Active account is back to Default.' : '')
+      + (storesKeyInRowAfter ? ' Its API key was stored in that entry and is gone.' : ' The profile folder and its login were left alone.')
+    );
   };
 
   const inp = {
@@ -302,9 +540,37 @@ export default function AccountsSection() {
         </div>
       )}
 
+      {/* Entries recording the SAME address are the failure this panel kept
+          hiding behind a small chip: the browser silently approves whichever
+          Google account is already signed in, so "log out and log back in as
+          the other one" quietly re-binds the same one and you get a second row
+          that cannot change anything. Say it once, loudly, at the top. */}
+      {duplicateGroups.length > 0 && (
+        <div
+          className="px-3 py-2 rounded-lg mb-2 text-xs"
+          style={{ backgroundColor: 'rgba(251,191,36,0.10)', border: '1px solid rgba(251,191,36,0.35)', color: 'var(--fg)' }}
+        >
+          {duplicateGroups.map((g) => (
+            <div key={g.email} className="mb-1">
+              <strong>{g.labels.length} entries record the same email</strong>{' '}
+              (<span style={{ fontFamily: 'monospace' }}>{g.email}</span>): {g.labels.join(', ')}.
+            </div>
+          ))}
+          {/* Says "record the same account", not "share one quota": a recorded
+              address with a missing or unverifiable credential does not prove
+              two entries are the same usable login (reviewer MEDIUM). */}
+          <div style={{ color: 'var(--dim)' }}>
+            If these really are one account, they share one quota, so switching between
+            them will not hand you a fresh rate limit. To make one of them a different
+            account, use Sign in on that row and pick the other account in the browser.
+            To drop a redundant entry, use Remove on it.
+          </div>
+        </div>
+      )}
+
       {accounts.length === 0 && !showForm && (
         <p className="text-xs mb-3" style={{ color: 'var(--dim)' }}>
-          No accounts saved yet. Add an account, switch to it, open a new terminal, and run <code style={{ fontFamily: 'monospace' }}>claude auth login</code> once there: each account keeps its own login from then on.
+          No accounts saved yet. Add an account, then use <strong>Sign in</strong> on its row: each account keeps its own login from then on.
         </p>
       )}
 
@@ -315,12 +581,13 @@ export default function AccountsSection() {
           return (
             <div
               key={acct.id}
-              className="flex items-center justify-between px-3 py-2.5 rounded-lg"
+              className="px-3 py-2.5 rounded-lg"
               style={{
                 backgroundColor: 'var(--surface)',
                 border: `1px solid ${isActive ? 'var(--accent)' : 'var(--border)'}`,
               }}
             >
+             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 min-w-0">
                 <span style={{ fontSize: 10, color: isActive ? 'var(--accent)' : 'var(--dim)' }}>
                   {isActive ? '●' : '○'}
@@ -374,6 +641,23 @@ export default function AccountsSection() {
                     {activating === acct.id ? 'Switching…' : 'Switch'}
                   </button>
                 )}
+                {acct.type === 'claude' && (
+                  <button
+                    style={btn('default', { padding: '4px 10px', fontSize: 11 })}
+                    onClick={() => {
+                      const open = signInFor?.index === index && signInFor?.id === acct.id
+                        && signInFor?.path === (acct.claudeJsonPath || null);
+                      const next = open ? null : { index, id: acct.id, path: acct.claudeJsonPath || null };
+                      setSignInFor(next);
+                      // Seed with the address this profile already records, so
+                      // re-signing the SAME account is one click, and changing
+                      // it is an obvious edit.
+                      if (next) setIntendedEmail(identAt(index, acct)?.email || '');
+                    }}
+                  >
+                    {signInFor?.index === index && signInFor?.id === acct.id && signInFor?.path === (acct.claudeJsonPath || null) ? 'Hide' : 'Sign in'}
+                  </button>
+                )}
                 <button style={btn()} onClick={() => { setEditing(acct); setForm({ name: acct.name, type: acct.type, authMode: acct.authMode || (acct.apiKey ? 'apikey' : 'chatgpt'), apiKey: acct.apiKey || '', cliPath: acct.cliPath || '' }); setShowForm(true); }}>
                   Edit
                 </button>
@@ -384,6 +668,21 @@ export default function AccountsSection() {
                   Remove
                 </button>
               </div>
+             </div>
+
+              {acct.type === 'claude' && signInFor?.index === index && signInFor?.id === acct.id
+                && signInFor?.path === (acct.claudeJsonPath || null) && (
+                <SignInHelp
+                  acct={acct}
+                  isActive={isActive}
+                  recordedEmail={identAt(index, acct)?.email || null}
+                  loginState={identAt(index, acct)?.login || 'unknown'}
+                  intendedEmail={intendedEmail}
+                  setIntendedEmail={setIntendedEmail}
+                  onClose={() => setSignInFor(null)}
+                  onCopied={() => flash('Commands copied. Paste them into the new terminal.')}
+                />
+              )}
             </div>
           );
         })}
@@ -476,8 +775,16 @@ export default function AccountsSection() {
         </p>
       )}
 
+      {/* The old text here said to log out and log in BEFORE clicking Add
+          Account. That ordering is what produced several entries over one
+          login: logging out and back in with an already-signed-in browser
+          re-binds the same account, and Add Account then saved a second row
+          for it. The real order is: create the row, switch to it, and only
+          then sign in, so the login lands in THAT profile. */}
       <p className="text-xs mt-3" style={{ color: 'var(--dim)' }}>
-        <strong>To add a second Claude account:</strong> run <code style={{ fontFamily: 'monospace' }}>claude auth logout</code> in a terminal, log into the other account, then come back and click Add Account.
+        <strong>To add a second Claude account:</strong> click Add Account, then <strong>Switch</strong> to
+        the new row, then use <strong>Sign in</strong> on it. Each account keeps its own login from then on.
+        Signing in from the wrong row is a common way two entries end up on one account.
       </p>
     </div>
   );

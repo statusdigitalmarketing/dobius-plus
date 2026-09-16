@@ -1343,6 +1343,13 @@ export function saveAccount(account) {
   };
   const config = loadConfig();
   if (!Array.isArray(config.accounts)) config.accounts = [];
+  // findIndex takes the FIRST match, so if two rows somehow share an id (the
+  // config file is hand-editable), editing the second one would overwrite the
+  // first and leave the edited row untouched. Refuse instead, matching
+  // deleteAccount's ambiguity guard, which also keeps duplicate ids from
+  // persisting at all (reviewer HIGH).
+  const matches = config.accounts.filter((a) => a.id === id);
+  if (matches.length > 1) return null;
   const idx = config.accounts.findIndex((a) => a.id === id);
   if (idx >= 0) config.accounts[idx] = sanitized;
   else config.accounts.push(sanitized);
@@ -1351,21 +1358,37 @@ export function saveAccount(account) {
 }
 
 export function deleteAccount(accountId) {
-  if (!accountId || typeof accountId !== 'string') return;
+  if (!accountId || typeof accountId !== 'string') return { ok: false, error: 'Invalid account id' };
   const config = loadConfig();
+  // This filters out EVERY entry with this id, so a config that somehow holds
+  // two rows under one id would lose both from a single "remove this entry".
+  // Refuse rather than delete more than the row the user pointed at (reviewer
+  // HIGH). Ids are unique in practice; config.json is hand-editable, so check.
+  const matches = (config.accounts || []).filter((a) => a.id === accountId);
+  if (matches.length === 0) return { ok: false, error: 'Account not found' };
+  if (matches.length > 1) {
+    return { ok: false, error: `${matches.length} accounts share the id ${accountId}; refusing to remove them all` };
+  }
   config.accounts = (config.accounts || []).filter((a) => a.id !== accountId);
   // Deleting the ACTIVE account must fall back to the default identity, or
   // the stale id makes the UI show nothing active while terminals silently
   // use default (Codex Low).
+  const wasActive = config.activeClaudeAccountId === accountId
+    || config.activeCodexAccountId === accountId;
   if (config.activeClaudeAccountId === accountId) config.activeClaudeAccountId = null;
   if (config.activeCodexAccountId === accountId) config.activeCodexAccountId = null;
   // Remove any project assignments pointing to this account
+  const unassignedProjects = [];
   if (config.projectAccounts) {
     for (const [k, v] of Object.entries(config.projectAccounts)) {
-      if (v === accountId) delete config.projectAccounts[k];
+      if (v === accountId) { unassignedProjects.push(k); delete config.projectAccounts[k]; }
     }
   }
   saveConfig(config);
+  // Report what else changed so the UI can state it honestly. The profile
+  // DIRECTORY, its transcripts and its Keychain credential are deliberately
+  // left alone, and terminals already running keep the account they spawned on.
+  return { ok: true, name: matches[0].name || null, wasActive, unassignedProjects };
 }
 
 export function getProjectAccount(projectPath) {
