@@ -79,6 +79,9 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
   const containerRef = useRef(null);
   const termRef = useRef(null);
   const fitAddonRef = useRef(null);
+  // True while the pane has no layout box (its tab is hidden). Used so the
+  // repaint below runs once on becoming visible instead of on every fit.
+  const wasHiddenRef = useRef(true);
   const searchAddonRef = useRef(null);
 
   const fit = useCallback(() => {
@@ -90,21 +93,33 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       // and rewrapping whatever ran in it (Codex High, latent for every
       // font-SIZE change too; surfaced by the font-family effect). The tab
       // refits on becoming visible, so skipping here loses nothing.
-      if (!containerRef.current.offsetWidth || !containerRef.current.offsetHeight) return;
+      if (!containerRef.current.offsetWidth || !containerRef.current.offsetHeight) {
+        // Remember we were hidden, so the next successful fit knows it is the
+        // hidden -> visible transition and repaints once.
+        wasHiddenRef.current = true;
+        return;
+      }
       try {
         fitAddonRef.current.fit();
         const { cols, rows } = termRef.current;
         if (cols > 0 && rows > 0) {
           window.electronAPI.terminalResize(id, cols, rows);
         }
-        // Force a full repaint of the visible rows. A fit that lands on the SAME
-        // cols/rows does not re-render, so a pane written to while hidden (every
-        // tab stays mounted with display:none) or whose renderer went stale can
-        // show a blank/grey grid with just the cursor until a manual reflow.
-        // refresh() IS that reflow, done automatically on every fit: tab show
-        // (the ResizeObserver fires on the display:none -> visible transition),
-        // window resize, and font change.
-        if (rows > 0) termRef.current.refresh(0, rows - 1);
+        // Repaint ONLY on the hidden -> visible transition, never on an ordinary
+        // resize. A fit landing on the SAME cols/rows does not re-render, so a
+        // pane written to while hidden (every tab stays mounted with
+        // display:none) can show a stale or blank grid until something reflows
+        // it; this is that reflow.
+        //
+        // It must NOT run on every fit. refresh() re-renders every visible row
+        // into the DOM, and that write can change the container's measured size,
+        // which re-fires the ResizeObserver, which fits, which refreshes again:
+        // a debounced feedback loop that repaints ~20 times a second and makes
+        // the terminal visibly thrash (Sam, right after v1.0.73).
+        if (wasHiddenRef.current && rows > 0) {
+          termRef.current.refresh(0, rows - 1);
+        }
+        wasHiddenRef.current = false;
       } catch (err) {
         console.warn('[useTerminal] fit error:', err.message);
       }

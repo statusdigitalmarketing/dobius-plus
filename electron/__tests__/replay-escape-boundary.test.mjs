@@ -49,11 +49,23 @@ await check('a buffer shorter than the cap is returned untouched', () => {
   assert.equal(trimToEscapeBoundary('plain text', 1000), 'plain text');
 });
 
-await check('a cut landing mid sequence resyncs forward to the next ESC', () => {
-  const s = `abc\x1b[38;2;1;2;3mDEF\x1b[0mghi`;
-  // cap chosen so the cut lands inside the SGR parameters
-  const out = trimToEscapeBoundary(s, 14);
-  assert.ok(out.startsWith('\x1b'), `expected to start at ESC, got ${JSON.stringify(out.slice(0, 8))}`);
+await check('a cut landing mid sequence resyncs to an ESC, never emitting a fragment', () => {
+  const s1 = `X\x1b[31mRED\x1b[0m`;
+  const out = trimToEscapeBoundary(s1, 11); // cut lands just after the ESC
+  assert.equal(out[0], '\x1b', `started mid sequence: ${JSON.stringify(out.slice(0, 8))}`);
+  assert.ok(!out.startsWith('[31m'), 'a CSI fragment leaked into the replay');
+});
+
+await check('an OSC payload fragment is never emitted either', () => {
+  const s1 = `X\x1b]0;title\x07OK\x1b[0m`;
+  const out = trimToEscapeBoundary(s1, 12);
+  assert.ok(!out.startsWith('title'), `OSC payload leaked: ${JSON.stringify(out.slice(0, 8))}`);
+});
+
+await check('ordinary text that merely LOOKS like parameters is kept', () => {
+  // "123abc" is indistinguishable from CSI params plus a final byte. A pattern
+  // loose enough to strip fragments would eat it; resyncing to a real ESC does not.
+  assert.equal(trimToEscapeBoundary('prefix123abc', 6), '123abc');
 });
 
 await check('plain text with no escapes at all is kept as-is', () => {
@@ -61,26 +73,19 @@ await check('plain text with no escapes at all is kept as-is', () => {
   assert.equal(trimToEscapeBoundary(s, 10), 'x'.repeat(10));
 });
 
-await check('every cut of the real capture resyncs to an ESC (its escapes are dense)', () => {
-  // Contract: resync happens only within ESC_RESYNC_WINDOW (4096). These
-  // fixtures are dense TUI output, so a resync point is always close and
-  // every trimmed cut must begin at an ESC. Assert the distance too, so this
-  // cannot pass by accidentally falling into the far-away branch.
+await check('no cut of the real capture starts mid sequence', () => {
   for (let cap = 500; cap <= 8000; cap += 137) {
     const out = trimToEscapeBoundary(raw, cap);
-    if (out.length === raw.length) continue;      // shorter than cap
-    const plainCut = raw.slice(-cap);
-    const firstEsc = plainCut.indexOf('\x1b');
-    if (firstEsc === -1) continue;                // no escapes present
-    assert.ok(firstEsc <= 4096, `cap=${cap}: fixture escape density changed (first ESC at ${firstEsc})`);
-    if (firstEsc === 0) continue;                 // already at a boundary
+    if (out.length === raw.length) continue;          // shorter than cap
+    const firstEsc = raw.slice(-cap).indexOf('\x1b');
+    if (firstEsc <= 0) continue;                      // already safe
     assert.equal(out[0], '\x1b', `cap=${cap} did not resync to an ESC`);
   }
 });
 
-await check('a plain-text tail is NOT gutted when the nearest ESC is far away', () => {
-  // A build log: one escape 50k chars in. Resyncing to it would throw away the
-  // whole visible tail, so the resync only applies within a short window.
+await check('a plain-text tail is NOT gutted', () => {
+  // A build log with one escape far in. Only leftovers are stripped, so the
+  // visible output survives intact.
   const plain = `${'x'.repeat(50000)}\x1b[0mEND`;
   const out = trimToEscapeBoundary(plain, 20000);
   assert.equal(out.length, 20000, 'kept a full cap of real output');

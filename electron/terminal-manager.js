@@ -82,11 +82,12 @@ const OUTPUT_BUFFER_BYTES = 1024 * 1024;
 // subscribed cap, and only idle tabs pay it.
 const IDLE_BUFFER_BYTES = 512 * 1024;
 
-// How far trimToEscapeBoundary will scan for a resync point. A cut that lands
-// inside an escape sequence leaves only a few parameter bytes before the next
-// ESC, so a genuine resync is always nearby. Anything further means the cut
-// landed in ordinary text, which is already safe to start from.
-const ESC_RESYNC_WINDOW = 4096;
+// How far trimToEscapeBoundary will skip to reach a safe resync point. A cut
+// inside a sequence leaves only a few bytes before the next ESC, so a genuine
+// resync is close. Beyond this the cut landed in ordinary text, which is
+// already safe, and skipping would throw away real output.
+const ESC_RESYNC_WINDOW = 2048;
+
 
 /**
  * Create a new terminal session.
@@ -111,22 +112,29 @@ const ESC_RESYNC_WINDOW = 4096;
  * later frame lands on the wrong rows: the incremental frames pile up on
  * screen ("W Wa Wai Wait Waiti Waitin Waiting") instead of overwriting.
  *
- * An ESC byte is always a safe place to begin: it can only start a new
- * sequence, and a stray ST (`ESC \`) closing a cut-open OSC is ignored in
- * ground state. So after cutting, resync forward to the first ESC. A buffer
- * with no ESC at all is plain text and is already safe.
+ * You cannot tell from the bytes alone whether a cut landed inside a sequence:
+ * a pattern loose enough to catch the fragments also eats ordinary text
+ * ("prefix123abc" cut to "123abc" looks exactly like CSI parameters plus a
+ * final byte), and a pattern tight enough to spare text misses fragments like a
+ * bare "[31m" or an OSC payload tail. Both were measured.
+ *
+ * So do not guess: resync to a position that is safe BY CONSTRUCTION. An ESC
+ * can only begin a new sequence, so the parser is in a known state there. After
+ * cutting, skip forward to the first ESC. The cost is that the few characters
+ * between the cut and that ESC are dropped, which is the oldest end of a replay
+ * tail and not worth a garbled screen. The skip is bounded, so a long run of
+ * plain text (a build log) is left alone rather than discarded: with no escape
+ * nearby the cut is in ordinary text and is already safe to start from.
+ *
+ * Residual: a cut inside an OSC payload LONGER than the window still prints
+ * some payload text. OSC payloads are titles, they do not move the cursor, so
+ * that is cosmetic rather than the screen-destroying cursor desync above.
  */
 export function trimToEscapeBoundary(buf, cap) {
   if (buf.length <= cap) return buf;
   const cut = buf.slice(-cap);
-  // Only resync across a SHORT run. A truncated sequence's leftovers are a
-  // handful of parameter bytes, so a real resync point is always close by. If
-  // the nearest ESC is far away the cut landed in ordinary text (a build log,
-  // say), which is already a safe place to start, and skipping to it would
-  // throw away real output the phone should see.
-  const esc = cut.indexOf('\x1b', 0);
-  if (esc > 0 && esc <= ESC_RESYNC_WINDOW) return cut.slice(esc);
-  return cut;
+  const esc = cut.indexOf('\x1b');
+  return esc > 0 && esc <= ESC_RESYNC_WINDOW ? cut.slice(esc) : cut;
 }
 
 export function createTerminal(id, cwd, webContents, accountEnv = {}) {

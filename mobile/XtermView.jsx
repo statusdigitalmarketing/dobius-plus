@@ -40,9 +40,11 @@ export default function XtermView({ connection, activeId }) {
     const ro = new ResizeObserver(() => {
       try {
         fit.fit();
-        // Force a repaint: a refit onto the same geometry does not re-render, so
-        // a view that went stale stays blank until something reflows it.
-        if (term.rows > 0) term.refresh(0, term.rows - 1);
+        // Deliberately NO refresh here. Repainting re-renders every row into the
+        // DOM, which can change the observed element's size and re-fire this
+        // observer: a feedback loop that makes the terminal thrash. The repaint
+        // belongs on discrete events (attach, returning to the foreground), not
+        // on every resize.
         if (prevIdRef.current) {
           connection.send({ type: 'resize', id: prevIdRef.current, cols: term.cols, rows: term.rows });
         }
