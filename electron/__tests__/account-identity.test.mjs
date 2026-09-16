@@ -14,6 +14,7 @@ import {
   keychainServiceFor,
   claudeJsonCandidates,
   accountEmail,
+  accountMetadata,
   accountIdentities,
   loginState,
   defaultClaudeDir,
@@ -380,6 +381,63 @@ await check('every row carries all fields so the view never reads undefined', as
   const out = await accountIdentities([acct('sh', 'Shape', d)]);
   for (const row of [out.default, ...out.accounts.filter(Boolean)]) {
     assert.ok('email' in row && 'login' in row && 'label' in row && Array.isArray(row.sameAs));
+  }
+});
+
+// accountMetadata says WHY there is no address, which accountEmail cannot.
+// The account switch compares two metadata files for one credential, and it has
+// to treat a MISSING file as no opinion but an UNREADABLE one as a reason to
+// stop. Collapsing both into null was wrong in both directions: counting a
+// present-but-addressless file as disagreement made five live sessions
+// unmovable on this Mac, and counting an unreadable one as absence let a stale
+// file win and a live credential be skipped.
+await check('accountMetadata: no metadata file at all is absence', async () => {
+  const dir = path.join(tmp, 'meta-none');
+  fs.mkdirSync(dir, { recursive: true });
+  assert.deepEqual(await accountMetadata(dir), { email: null, state: 'none' });
+});
+
+await check('accountMetadata: a file naming an account is an opinion', async () => {
+  const dir = mkProfile('meta-addr', { oauthAccount: { emailAddress: 'sam@example.com' } });
+  assert.deepEqual(await accountMetadata(dir), { email: 'sam@example.com', state: 'address' });
+});
+
+await check('accountMetadata: a readable file with NO oauthAccount is no opinion', async () => {
+  // The ordinary shape of ~/.claude/.claude.json on a machine whose default
+  // login lives in the home-level file. Not a disagreement.
+  const dir = mkProfile('meta-noaddr', { firstStartTime: 1, userID: 'x' });
+  assert.deepEqual(await accountMetadata(dir), { email: null, state: 'no-address' });
+});
+
+await check('accountMetadata: an unparsable file is UNREADABLE, never absence', async () => {
+  assert.deepEqual(await accountMetadata(mkProfile('meta-bad', '{not json')), { email: null, state: 'unreadable' });
+});
+
+await check('accountMetadata: the SELECTED file decides, like Claude itself', async () => {
+  // .config.json wins over .claude.json by existence, and a selected file that
+  // records no address does not fall through to the next candidate.
+  const dir = mkProfile('meta-prec', { oauthAccount: { emailAddress: 'ignored@example.com' } });
+  fs.writeFileSync(path.join(dir, '.config.json'), JSON.stringify({ userID: 'x' }));
+  assert.deepEqual(await accountMetadata(dir), { email: null, state: 'no-address' });
+});
+
+await check('accountMetadata: an UNREACHABLE candidate does not fall through', async () => {
+  // A directory we cannot search is not an absent file. Letting it advance to
+  // the next candidate let a stale home-level record speak for a credential it
+  // does not own. Skipped when running as root, which ignores the mode bits.
+  const dir = path.join(tmp, 'meta-eacces');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'bob@example.com' } }));
+  fs.chmodSync(dir, 0o000);
+  try {
+    let reachable = true;
+    try { fs.readdirSync(dir); } catch { reachable = false; }
+    if (!reachable) {
+      const got = await accountMetadata(dir);
+      assert.equal(got.state, 'unreadable', 'an unreadable candidate is not absence');
+    }
+  } finally {
+    fs.chmodSync(dir, 0o700);
   }
 });
 

@@ -213,6 +213,25 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   // would override its stored login. (A key re-exported by the login shell
   // profile is outside our reach; this clears the inherited case.)
   for (const [k, v] of Object.entries(termEnv)) { if (v === undefined) delete spawnEnv[k]; }
+  // What this shell ACTUALLY launched with. Recorded from the FINAL spawn env,
+  // after the undefined-means-delete pass above, so it reflects reality rather
+  // than intent.
+  //
+  // It is recorded rather than recomputed later because resolveAccountEnvForCwd
+  // performs profile-sharing side effects (it creates, merges and symlinks
+  // files), so asking it "what would this tab use" just to render a badge or a
+  // count would MUTATE profiles as a display operation.
+  //
+  // ABSENT is meaningful and distinct from any profile: it means the CLI's own
+  // default dir. The CONFIGURED spelling is kept verbatim, never realpath'd,
+  // because the Keychain item is keyed by a hash of that exact string.
+  //
+  // Claude and Codex are recorded independently: one shell carries both
+  // bindings and they are selected separately.
+  const accountBinding = {
+    claudeConfigDir: typeof spawnEnv.CLAUDE_CONFIG_DIR === 'string' ? spawnEnv.CLAUDE_CONFIG_DIR : null,
+    codexHome: typeof spawnEnv.CODEX_HOME === 'string' ? spawnEnv.CODEX_HOME : null,
+  };
   const spawnCols = (Number.isInteger(prevCols) && prevCols > 0) ? prevCols : 80;
   const spawnRows = (Number.isInteger(prevRows) && prevRows > 0) ? prevRows : 24;
   const term = pty.spawn(shell, ['-l'], {
@@ -298,6 +317,10 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
     // resize, so a respawn can restore the tab's real dimensions.
     cols: spawnCols,
     rows: spawnRows,
+    // The account bindings this shell launched with. A respawn under the same
+    // id re-records them; tear-off and claim keep them, because the PTY and its
+    // environment are unchanged by either.
+    accountBinding,
     cwd: safeCwd,
     // Track the requested project path (pre-fallback) for exact-match lookup
     // in getTerminalsForProject. Carson's audit #2 (CRITICAL): the old
@@ -335,6 +358,11 @@ export function listTerminals() {
     id,
     pid: entry.pty.pid,
     cwd: entry.cwd,
+    // Non-secret account metadata only: the configured directories, never an
+    // API key or the spawn environment. Lets the app show which account a tab
+    // is on and group tabs by profile without recomputing (which would mutate).
+    claudeConfigDir: entry.accountBinding?.claudeConfigDir ?? null,
+    codexHome: entry.accountBinding?.codexHome ?? null,
   }));
 }
 

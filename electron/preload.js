@@ -175,6 +175,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   accountsIdentities: () => ipcRenderer.invoke('accounts:identities'),
   accountsSave: (account) => ipcRenderer.invoke('accounts:save', account),
   accountsDelete: (accountId) => ipcRenderer.invoke('accounts:delete', accountId),
+  accountsSwitchPlan: (targetEmail) => ipcRenderer.invoke('accounts:switchPlan', targetEmail),
+  accountsSwitchRun: (targetEmail, cliPath, allowKeys) => ipcRenderer.invoke('accounts:switchRun', targetEmail, cliPath, allowKeys),
+  accountsSwitchCancel: () => ipcRenderer.invoke('accounts:switchCancel'),
+  accountsSwitchRunning: () => ipcRenderer.invoke('accounts:switchRunning'),
+  accountsSwitchInterrupted: () => ipcRenderer.invoke('accounts:switchInterrupted'),
+  onAccountsSwitchProgress: (cb) => {
+    const h = (_e, ev) => cb(ev);
+    ipcRenderer.on('accounts:switchProgress', h);
+    return () => ipcRenderer.removeListener('accounts:switchProgress', h);
+  },
   accountsGetForProject: (projectPath) => ipcRenderer.invoke('accounts:getForProject', projectPath),
   accountsSetForProject: (projectPath, accountId) => ipcRenderer.invoke('accounts:setForProject', projectPath, accountId),
   accountsInitProfileDir: (destPath) => ipcRenderer.invoke('accounts:initProfileDir', destPath),

@@ -200,6 +200,54 @@ export async function loginState(configDir) {
  * The isFile() guard is not cosmetic: a FIFO reports size 0, sails past a size
  * check, and then blocks the read forever with no error to catch (Codex P2).
  */
+/**
+ * Like accountEmail, but says WHY there is no address.
+ *
+ * `state` is 'none' when no metadata file exists, 'address' when one names an
+ * account, 'no-address' when the selected file is readable but records no
+ * oauthAccount (an ordinary profile Claude has not logged into), and
+ * 'unreadable' when the file exists but could not be read or parsed.
+ *
+ * The distinction is not academic. A caller comparing two metadata files has to
+ * treat a MISSING file as no opinion and an UNREADABLE one as a reason to stop,
+ * and collapsing both into null let a stale file win and a live credential be
+ * skipped (Codex HIGH).
+ */
+export async function accountMetadata(configDir, opts) {
+  for (const candidate of claudeJsonCandidates(configDir, opts)) {
+    let st;
+    try {
+      st = await fs.stat(candidate);
+    } catch (err) {
+      // Only "it is not there" may advance to the next candidate. EACCES and
+      // friends mean a file we were not allowed to look at, and discarding that
+      // as absence let a stale candidate further down the list speak for a
+      // credential it does not own (Codex MEDIUM).
+      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) continue;
+      return { email: null, state: 'unreadable' };
+    }
+    if (!st.isFile()) continue;
+    if (st.size > MAX_CLAUDE_JSON) return { email: null, state: 'unreadable' };
+    let raw;
+    try {
+      raw = await fs.readFile(candidate, 'utf8');
+    } catch (err) {
+      console.warn(`[account-identity] cannot read ${candidate}: ${err.message}`);
+      return { email: null, state: 'unreadable' };
+    }
+    try {
+      const email = JSON.parse(raw)?.oauthAccount?.emailAddress;
+      return typeof email === 'string' && email.trim()
+        ? { email: email.trim(), state: 'address' }
+        : { email: null, state: 'no-address' };
+    } catch (err) {
+      console.warn(`[account-identity] ${candidate} is not valid JSON: ${err.message}`);
+      return { email: null, state: 'unreadable' };
+    }
+  }
+  return { email: null, state: 'none' };
+}
+
 export async function accountEmail(configDir, opts) {
   for (const candidate of claudeJsonCandidates(configDir, opts)) {
     // SELECTION. Only "this file is not here" may advance to the next

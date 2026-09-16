@@ -77,3 +77,103 @@ export function isClaudeCommand(command) {
   return false;
 }
 
+/**
+ * Interpreter flags that consume the NEXT token as their value. Without these,
+ * `node --require /tmp/boot.cjs /opt/homebrew/bin/claude` reads /tmp/boot.cjs as
+ * the entrypoint and a real session is missed (reviewer HIGH, two passes).
+ */
+const FLAGS_WITH_VALUE = new Set([
+  '-r', '--require', '--import', '--loader', '--experimental-loader',
+  '-C', '--conditions', '-e', '--eval', '-p', '--print',
+]);
+
+// With one of these, node executes a STRING and every path after it is just an
+// argument to it. `node -e 'setInterval(...)' /opt/homebrew/bin/claude` was
+// being called a live Claude and put that directory up for a logout (reviewer
+// HIGH).
+const EVAL_FLAGS = new Set(['-e', '--eval', '-p', '--print']);
+
+/**
+ * Three-way classification, for callers whose answer drives something
+ * DESTRUCTIVE.
+ *
+ * isClaudeCommand is deliberately generous because its caller only decides
+ * whether a tab looks alive: a false positive costs a stale tab name. The
+ * account switch signs a credential OUT, so there a false positive logs a real
+ * account out of a directory that never ran Claude, and a false NEGATIVE leaves
+ * a live session spending the old account while the UI reports full coverage.
+ * Both directions are damaging, so an unclear command line gets its own answer
+ * instead of being forced into one of them.
+ *
+ * @returns {{kind:'claude'|'maybe'|'not-claude', token:string|null}} 'maybe'
+ *   means a claude entrypoint appears but is not the thing being executed,
+ *   which is both `node --unknown-flag X /path/claude` and
+ *   `node /tmp/watcher.js /path/claude`. The caller must report those as
+ *   unidentified rather than act on them. `token` is the path the verdict rests
+ *   on, so a caller with filesystem access can confirm it really is an
+ *   executable file: a DIRECTORY named claude produced a 'claude' verdict for
+ *   `node '/tmp/claude tools/sleep.js'` (reviewer HIGH, twice).
+ */
+export function classifyClaudeProcess(command) {
+  if (!command) return { kind: 'not-claude', token: null };
+  const parts = command.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { kind: 'not-claude', token: null };
+  if (isClaudeEntrypoint(parts[0])) return { kind: 'claude', token: parts[0] };
+
+  const argv0 = parts[0].split('/').pop();
+  if (!SHIM_INTERPRETERS.has(argv0)) {
+    // An executable path containing spaces splits across tokens, so argv0 was
+    // `/Users/x/CLI` for `/Users/x/CLI Tools/claude` and a live session was
+    // dropped from discovery entirely (reviewer HIGH).
+    //
+    // But a rejoined prefix ALSO matches `vim /opt/homebrew/bin/claude`, whose
+    // last token merely names the CLI, and calling that one 'claude' put an
+    // unrelated profile up for a logout (reviewer HIGH). ps output cannot tell
+    // the two apart: both are "some tokens, then a path ending in claude". So
+    // this answers 'maybe' and the session is reported as unidentified rather
+    // than acted on or dropped.
+    let joined = parts[0];
+    for (const tok of parts.slice(1)) {
+      joined += ` ${tok}`;
+      if (isClaudeEntrypoint(joined)) return { kind: 'maybe', token: joined };
+    }
+    return { kind: 'not-claude', token: null };
+  }
+  // Only `env` and `npx` exec another PROGRAM, so only after those is a second
+  // interpreter token still part of the chain. Skipping it unconditionally let
+  // a watcher script literally named /tmp/node hide behind the rule and put an
+  // unrelated directory up for logout (reviewer HIGH, two passes).
+  const chains = argv0 === 'env' || argv0 === 'npx';
+  // ONLY `env` interprets leading NAME=value tokens as assignments. To `node` a
+  // token like `MODE=watch` is the script to run, and skipping it there let the
+  // next argument be read as the entrypoint, putting an unrelated credential up
+  // for a logout (reviewer HIGH).
+  const takesAssignments = argv0 === 'env';
+
+  const rest = parts.slice(1);
+  let entry = null;
+  let sawEval = false;
+  for (let i = 0; i < rest.length; i += 1) {
+    const tok = rest[i];
+    if (FLAGS_WITH_VALUE.has(tok)) { if (EVAL_FLAGS.has(tok)) sawEval = true; i += 1; continue; }
+    if (tok.startsWith('-')) {
+      // An eval flag can attach its value BOTH ways: `--eval=<code>` and the
+      // short `-e<code>`. Each shape in turn slipped past this guard and let
+      // the path after it be read as the entrypoint (reviewer HIGH, twice).
+      const eq = tok.indexOf('=');
+      if (eq > 0 && EVAL_FLAGS.has(tok.slice(0, eq))) sawEval = true;
+      else if (!tok.startsWith('--') && /^-[ep]./.test(tok)) sawEval = true;
+      continue;
+    }
+    if (takesAssignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) continue; // `env VAR=v node ...`
+    if (chains && SHIM_INTERPRETERS.has(tok.split('/').pop())) continue;
+    entry = tok;
+    break;
+  }
+  if (!sawEval && entry && isClaudeEntrypoint(entry)) return { kind: 'claude', token: entry };
+  // A claude path is present but is not what runs. Could be an interpreter flag
+  // we do not know, could be an argument. Not actionable either way.
+  const named = rest.find((t) => !t.startsWith('-') && isClaudeEntrypoint(t));
+  if (named) return { kind: 'maybe', token: named };
+  return { kind: 'not-claude', token: null };
+}

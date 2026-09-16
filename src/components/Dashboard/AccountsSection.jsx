@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import SwitchRunningSessions from './SwitchRunningSessions';
 
 const badge = (color, bg) => ({
   fontSize: 11,
@@ -539,6 +540,8 @@ export default function AccountsSection() {
           </div>
         </div>
       )}
+
+      <SwitchRunningSessions accounts={accounts} identities={identities} />
 
       {/* Entries recording the SAME address are the failure this panel kept
           hiding behind a small chip: the browser silently approves whichever

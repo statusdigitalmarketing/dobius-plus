@@ -22,6 +22,7 @@ import { shareConfiguredProfiles, shareProfile } from './account-profile-share.j
 import { accountIdentities } from './account-identity.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
+import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
@@ -1750,6 +1751,48 @@ function setupConfigHandlers() {
   });
 
   // Get active Claude account id
+  // Move every RUNNING Claude session to another account, by re-logging the
+  // config directories those sessions actually use. Grouped by PROCESS, not by
+  // tab: a shell profile or an inline CLAUDE_CONFIG_DIR can override what a tab
+  // launched with, and sessions started outside Dobius are not tabs at all, so
+  // grouping by the tab registry would miss live sessions and quietly leave
+  // them spending the old account.
+  ipcMain.handle('accounts:switchPlan', async (_event, targetEmail) => {
+    try { return { ok: true, plan: await planAccountSwitch(targetEmail) }; }
+    catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('accounts:switchRun', async (_event, targetEmail, cliPath, allowKeys) => {
+    try {
+      // BROADCAST, not a reply to the caller. The job outlives the panel that
+      // started it: close Settings mid-login and the invoke's resolution goes
+      // to an unmounted component, so a reopened panel sat on a stuck
+      // "Switching..." with a dead Cancel and no result (reviewer HIGH).
+      // Every window hears the progress, and the terminal 'finished' event
+      // carries the result itself.
+      return await runAccountSwitch({
+        targetEmail,
+        cliPath: cliPath || null,
+        // Only the credentials the user saw listed and approved.
+        allowKeys: Array.isArray(allowKeys) ? allowKeys.filter((k) => typeof k === 'string') : null,
+        onProgress: (ev) => {
+          for (const w of BrowserWindow.getAllWindows()) {
+            if (!w.isDestroyed() && !w.webContents.isDestroyed()) w.webContents.send('accounts:switchProgress', ev);
+          }
+        },
+      });
+    } catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('accounts:switchCancel', () => ({ ok: cancelAccountSwitch() }));
+  ipcMain.handle('accounts:switchRunning', () => ({
+    running: isSwitchRunning(), target: runningSwitchTarget(),
+    lastResult: lastSwitchResult(), output: runningSwitchOutput(),
+  }));
+  // Interrupted switches may have left directories logged out. Surfaced, never
+  // auto-resumed: re-running a login unasked would pop a browser at launch.
+  ipcMain.handle('accounts:switchInterrupted', async () => {
+    try { return await interruptedSwitches(); } catch { return []; }
+  });
+
   ipcMain.handle('accounts:getActiveClaude', () => {
     return loadConfig().activeClaudeAccountId || null;
   });
@@ -2837,6 +2880,7 @@ app.on('before-quit', (e) => {
       flushConfig();
     } catch { /* best-effort */ }
     try { stopSessionTabCapture(); } catch { /* best-effort shutdown */ }
+    try { killAuthChildren(); } catch { /* best-effort shutdown */ }
     try { killAll(); } catch { /* best-effort shutdown */ }
     try { stopWatching(); } catch { /* best-effort shutdown */ }
     try { stopAllBuildWatchers(); } catch { /* best-effort shutdown */ }
@@ -2879,6 +2923,7 @@ app.on('before-quit', (e) => {
     // Tear down listeners/servers in parallel with the config drain — none
     // of them depend on config writes finishing.
     closeAllProjectWindows();
+    try { killAuthChildren(); } catch { /* noop */ }
     killAll();
     stopWatching();
     stopAllBuildWatchers();
@@ -3038,6 +3083,10 @@ app.on('before-quit', (e) => {
   quitTimer = setTimeout(() => {
     quitConfirmed = false;
     savedBeforeQuit = false;
+    // The quit was cancelled, so lift the account-switch shutdown latch. Left
+    // set on a process that never exits, it answers "shutting down" to every
+    // later attempt to recover a credential that is still signed out.
+    try { resetAuthShutdown(); } catch { /* noop */ }
     BrowserWindow.getAllWindows().forEach((win) => {
       if (!win.isDestroyed()) win.webContents.send('app:quit-cancel');
     });
@@ -3052,6 +3101,7 @@ app.on('before-quit', (e) => {
 app.on('will-quit', (e) => {
   if (didTeardown) return;
   didTeardown = true;
+  try { killAuthChildren(); } catch { /* noop */ }
   killAll();
   stopWatching();
   stopAllBuildWatchers();
