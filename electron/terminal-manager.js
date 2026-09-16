@@ -82,6 +82,12 @@ const OUTPUT_BUFFER_BYTES = 1024 * 1024;
 // subscribed cap, and only idle tabs pay it.
 const IDLE_BUFFER_BYTES = 512 * 1024;
 
+// How far trimToEscapeBoundary will scan for a resync point. A cut that lands
+// inside an escape sequence leaves only a few parameter bytes before the next
+// ESC, so a genuine resync is always nearby. Anything further means the cut
+// landed in ordinary text, which is already safe to start from.
+const ESC_RESYNC_WINDOW = 4096;
+
 /**
  * Create a new terminal session.
  * @param {string} id — unique terminal ID
@@ -89,6 +95,40 @@ const IDLE_BUFFER_BYTES = 512 * 1024;
  * @param {Electron.WebContents} webContents — renderer to send data to
  * @returns {{ pid: number }}
  */
+/**
+ * Keep the last `cap` chars of the rolling replay buffer, but never let it
+ * BEGIN in the middle of an ANSI escape sequence.
+ *
+ * Why this matters (Sam, mobile: garbled terminal with stray digits inside
+ * words). The buffer is a raw byte log that a freshly attached phone replays
+ * into an empty xterm. A plain `.slice(-cap)` cuts at an arbitrary offset, so
+ * the replay can start inside a sequence like `ESC [ 38;2;211;218;255 m`. The
+ * parser starts in ground state, so the leftover parameters PRINT AS TEXT
+ * (this is the `backgro8` / `backgro30` / `a38;2;211;218;` the phone showed),
+ * and, worse, the truncated sequence never moves the cursor where the CLI
+ * believes it is. Claude Code positions its live region RELATIVELY (cursor-up
+ * N, then redraw), so one lost move desyncs the cursor permanently and every
+ * later frame lands on the wrong rows: the incremental frames pile up on
+ * screen ("W Wa Wai Wait Waiti Waitin Waiting") instead of overwriting.
+ *
+ * An ESC byte is always a safe place to begin: it can only start a new
+ * sequence, and a stray ST (`ESC \`) closing a cut-open OSC is ignored in
+ * ground state. So after cutting, resync forward to the first ESC. A buffer
+ * with no ESC at all is plain text and is already safe.
+ */
+export function trimToEscapeBoundary(buf, cap) {
+  if (buf.length <= cap) return buf;
+  const cut = buf.slice(-cap);
+  // Only resync across a SHORT run. A truncated sequence's leftovers are a
+  // handful of parameter bytes, so a real resync point is always close by. If
+  // the nearest ESC is far away the cut landed in ordinary text (a build log,
+  // say), which is already a safe place to start, and skipping to it would
+  // throw away real output the phone should see.
+  const esc = cut.indexOf('\x1b', 0);
+  if (esc > 0 && esc <= ESC_RESYNC_WINDOW) return cut.slice(esc);
+  return cut;
+}
+
 export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   // A respawn under an existing id (e.g. "Continue on switched account") must
   // NOT strand what was attached to the old PTY. Carry over the live subscriber
@@ -195,7 +235,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
     // allocation either way, and the idle 64KB case is cheaper than the 1MB case
     // that was already accepted for subscribed tabs.
     const cap = entry.subscribers.size > 0 ? OUTPUT_BUFFER_BYTES : IDLE_BUFFER_BYTES;
-    entry.outputBuffer = (entry.outputBuffer + data).slice(-cap);
+    entry.outputBuffer = trimToEscapeBoundary(entry.outputBuffer + data, cap);
     for (const sub of entry.subscribers) {
       try { sub.onData?.(id, data); } catch { /* drop bad subscriber silently */ }
     }
