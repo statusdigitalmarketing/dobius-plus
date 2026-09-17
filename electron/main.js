@@ -24,6 +24,12 @@ import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-a
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
+import { scanClaudeProcesses } from './claude-process-scan.js';
+import {
+  reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
+  readUsageRecords, aggregateUsage,
+  planStatusLineInstall, planStatusLineRemove, ownsStatusLine,
+} from './claude-usage.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
@@ -1448,7 +1454,7 @@ function setupFileHandlers() {
     Array.isArray(group?.hooks) &&
     group.hooks.some((h) => typeof h?.command === 'string' && h.command.includes(STATUS_MARKER));
 
-  // Returns { settings, mtime, exists }. The mtime travels with the read so
+  // Returns { settings, raw, mtime, exists }. The RAW text travels with the read so
   // writeClaudeSettings can detect a lost-update race against Claude itself
   // (it rewrites settings.json when the user changes permission rules, MCP,
   // plugins, etc.). settings = null means the file was unparseable — never
@@ -1456,39 +1462,62 @@ function setupFileHandlers() {
   // exist; the enable path uses this to refuse silent creation.
   function readClaudeSettings() {
     try {
-      if (!fs.existsSync(claudeSettingsPath)) return { settings: {}, mtime: 0, exists: false };
+      if (!fs.existsSync(claudeSettingsPath)) return { settings: {}, raw: null, mtime: 0, exists: false };
       const stat = fs.statSync(claudeSettingsPath);
-      const settings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8'));
-      return { settings, mtime: stat.mtimeMs, exists: true };
+      const raw = fs.readFileSync(claudeSettingsPath, 'utf8');
+      const settings = JSON.parse(raw);
+      // The RAW text travels with the parse. It is the conflict token: an mtime
+      // comparison needs a tolerance for filesystem granularity, and any
+      // tolerance is a window in which somebody else's save is accepted as
+      // "unchanged" and then overwritten (Codex HIGH). Bytes need no tolerance.
+      return { settings, raw, mtime: stat.mtimeMs, exists: true };
     } catch {
-      return { settings: null, mtime: 0, exists: true };
+      return { settings: null, raw: null, mtime: 0, exists: true };
     }
   }
 
-  // Atomic write (tmp + rename) — never leave the user's settings.json half-
-  // written. expectedMtime lets us detect a concurrent rewrite by Claude CLI
+  // Atomic write (tmp + rename): never leave the user's settings.json half
+  // written. expectedRaw lets us detect a concurrent rewrite by Claude CLI
   // between our read and rename; if it changed we abort instead of clobbering
   // Claude's update with our stale base. Mirrors config-manager's
   // atomicWriteSync but adds the optimistic-concurrency check.
-  function writeClaudeSettings(settings, expectedMtime) {
+  /**
+   * Write settings.json, refusing if it changed since `expectedRaw` was read.
+   *
+   * Compares CONTENT, not mtime. The old mtime check carried a 5ms tolerance to
+   * absorb filesystem timestamp granularity, and that tolerance was itself the
+   * bug: a save landing within it read as "unchanged" and was then overwritten
+   * (Codex HIGH). Bytes are exact and need no slack.
+   *
+   * The comparison is repeated immediately before the rename, because the first
+   * one happens before the temp file is written and Claude can save during it.
+   *
+   * RESIDUAL, accepted and stated plainly: check-then-rename is not an atomic
+   * compare-and-swap, so a write landing inside that final gap is still lost.
+   * Closing it needs a lock file the CLI would also have to honour.
+   */
+  function writeClaudeSettings(settings, expectedRaw) {
     fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
-    if (expectedMtime !== undefined && expectedMtime > 0) {
-      try {
-        const currentMtime = fs.statSync(claudeSettingsPath).mtimeMs;
-        // 5ms slack absorbs filesystem mtime precision (HFS+ is whole-second);
-        // anything bigger indicates a real external rewrite mid-edit.
-        if (Math.abs(currentMtime - expectedMtime) > 5) {
-          throw new Error('settings.json changed under us — retry');
-        }
-      } catch (err) {
-        if (err.message.includes('changed under us')) throw err;
-        // stat failed because file vanished — fall through to write (recreate)
-      }
-    }
+    // undefined means "no guard". null means "the file did NOT exist when I
+    // read it", which is a real claim and must be checked: treating it as no
+    // guard let a settings.json created in the meantime, carrying the user's
+    // own status line, be overwritten wholesale (Codex HIGH).
+    const unchanged = () => {
+      if (expectedRaw === undefined) return true;
+      let current = null;
+      try { current = fs.readFileSync(claudeSettingsPath, 'utf8'); }
+      catch { current = null; }
+      if (expectedRaw === null) return current === null;
+      if (current === null) return true; // vanished: recreate rather than refuse
+      return current === expectedRaw;
+    };
+    if (!unchanged()) throw new Error('settings.json changed under us, retry');
+
     const data = JSON.stringify(settings, null, 2) + '\n';
     const tmp = `${claudeSettingsPath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
     try {
       fs.writeFileSync(tmp, data, 'utf8');
+      if (!unchanged()) throw new Error('settings.json changed under us, retry');
       fs.renameSync(tmp, claudeSettingsPath);
     } catch (err) {
       try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
@@ -1520,7 +1549,7 @@ function setupFileHandlers() {
   });
 
   ipcMain.handle('claudeHooks:enable', (_evt, opts) => {
-    const { settings, mtime, exists } = readClaudeSettings();
+    const { settings, raw, exists } = readClaudeSettings();
     if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
     // Refuse silent file creation: if ~/.claude/settings.json doesn't exist
     // yet, the user has never opted into having one. Require explicit consent
@@ -1552,14 +1581,14 @@ function setupFileHandlers() {
     // Claude just made and recreate the lost-update bug the mtime check
     // was supposed to prevent.
     let toWrite = settings;
-    let mtimeForWrite = mtime;
+    let rawForWrite = raw;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        // ALWAYS pass mtimeForWrite — dropping the guard on retry would let a
+        // ALWAYS pass rawForWrite. Dropping the guard on retry would let a
         // SECOND concurrent Claude rewrite (between the fresh read and the
         // retry write) get silently clobbered. If the retry ALSO conflicts,
         // surface the error rather than retry indefinitely.
-        writeClaudeSettings(toWrite, mtimeForWrite);
+        writeClaudeSettings(toWrite, rawForWrite);
         return { ok: true, installed: true };
       } catch (err) {
         if (err.message.includes('changed under us') && attempt === 0) {
@@ -1574,7 +1603,7 @@ function setupFileHandlers() {
           add2('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
           add2('Stop', { hooks: [cmdEntry('done')] });
           toWrite = fresh.settings;
-          mtimeForWrite = fresh.mtime;
+          rawForWrite = fresh.raw;
           continue;
         }
         return { error: err.message.includes('changed under us')
@@ -1586,7 +1615,7 @@ function setupFileHandlers() {
   });
 
   ipcMain.handle('claudeHooks:disable', () => {
-    const { settings, mtime, exists } = readClaudeSettings();
+    const { settings, raw, exists } = readClaudeSettings();
     if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
     // No file = nothing to disable. Don't create an empty file just to remove
     // hooks that were never there.
@@ -1598,12 +1627,12 @@ function setupFileHandlers() {
     // from the old version was buggy: it deep-copied fresh's keys onto stale
     // `settings` but stale keys that fresh removed would still be present.
     let toWrite = settings;
-    let mtimeForWrite = mtime;
+    let rawForWrite = raw;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        // Same as enable: always pass mtimeForWrite so a second concurrent
+        // Same as enable: always pass rawForWrite so a second concurrent
         // Claude rewrite can't slip through the retry.
-        writeClaudeSettings(toWrite, mtimeForWrite);
+        writeClaudeSettings(toWrite, rawForWrite);
         return { ok: true, installed: false };
       } catch (err) {
         if (err.message.includes('changed under us') && attempt === 0) {
@@ -1612,7 +1641,7 @@ function setupFileHandlers() {
           fresh.settings.hooks = stripStatusHooks(fresh.settings.hooks);
           if (Object.keys(fresh.settings.hooks).length === 0) delete fresh.settings.hooks;
           toWrite = fresh.settings;
-          mtimeForWrite = fresh.mtime;
+          rawForWrite = fresh.raw;
           continue;
         }
         return { error: err.message.includes('changed under us')
@@ -1621,6 +1650,177 @@ function setupFileHandlers() {
       }
     }
     return { error: 'disable failed after retry' };
+  });
+
+  // --- Account usage reporting ----------------------------------------------
+  // Claude hands its statusLine command a payload carrying the real rate_limits
+  // (verified live on 2.1.274). We install a reporter as that statusLine and it
+  // publishes each session's numbers to <userData>/usage for the panel to read.
+  //
+  // statusLine is a SINGLE value, unlike hooks which are arrays we append to, so
+  // installing it REPLACES whatever the user had. The plan* helpers own that
+  // problem: they chain the user's command, refuse to wrap our own wrapper, and
+  // remember whether there was anything there at all so disable can put it back.
+  const PARSE_FAIL = 'Could not parse ~/.claude/settings.json, left untouched';
+
+  // WHERE THE RESTORE RECORD LIVES, and why it is not in Dobius's own config.
+  // It sits beside the file it describes, because two things broke when it did
+  // not. saveConfig is debounced by 500ms, so a crash between enabling and that
+  // flush lost the user's original status line for good. And a second Dobius
+  // with its own userData reads this same settings.json, recognises our marker,
+  // and would have "restored" from its own empty record, deleting the original
+  // (reviewer HIGH, twice). One record next to the settings file fixes both.
+  //
+  // ACCEPTED RESIDUAL, not fixed, and the reasoning matters. Two Dobius
+  // processes with DIFFERENT userData share this one settings.json, and their
+  // enable/disable can interleave such that one deletes or overwrites the
+  // other's restore record. Reviewer rated it HIGH twice and it is real.
+  //
+  // It is accepted because: reaching it needs a second Dobius with its own
+  // userData, which only the test harness creates; the damage is that a user's
+  // own custom status line is not put back, which they can simply set again;
+  // and the change that would close the whole class, carrying the original
+  // INSIDE the statusLine object so it moves atomically with the install,
+  // risks Claude rejecting the unknown key. A settings file that fails
+  // validation is silently ignored in its entirety, so that fix could disable
+  // every setting the user has, which is far worse than the thing it fixes,
+  // and it cannot be verified without writing to a real settings.json.
+  const statusLineBackupPath = path.join(homedir, '.claude', '.dobius-statusline-backup.json');
+  // Returns the parsed record AND the exact bytes it came from, so a later
+  // delete can prove it is removing the same record rather than one another
+  // instance wrote in between (Codex HIGH).
+  const readStatusLineBackup = () => {
+    try {
+      const raw = fs.readFileSync(statusLineBackupPath, 'utf8');
+      return { remember: JSON.parse(raw), raw };
+    } catch { return { remember: null, raw: null }; }
+  };
+  // Durable BEFORE it is needed: written and renamed before settings.json is
+  // touched, never after.
+  const writeStatusLineBackup = (remember) => {
+    const tmp = `${statusLineBackupPath}.${process.pid}.tmp`;
+    fs.mkdirSync(path.dirname(statusLineBackupPath), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(remember, null, 2));
+    fs.renameSync(tmp, statusLineBackupPath);
+  };
+  // Delete ONLY the record we read. If the bytes changed, another instance has
+  // since installed and this record is its live restore data, not ours.
+  const clearStatusLineBackup = (expectedRaw) => {
+    try {
+      if (expectedRaw != null && fs.readFileSync(statusLineBackupPath, 'utf8') !== expectedRaw) return;
+      fs.unlinkSync(statusLineBackupPath);
+    } catch { /* already gone */ }
+  };
+
+  ipcMain.handle('claudeUsage:getStatus', () => {
+    const { settings, exists } = readClaudeSettings();
+    if (settings === null) return { installed: false, error: 'settings.json is not valid JSON' };
+    const owned = ownsStatusLine(settings.statusLine);
+    // Owned by SOME Dobius is not the same as owned by THIS one. Two instances
+    // with different userData share this settings file, and the other one's
+    // reporter publishes into the other one's usage directory, so reporting
+    // here would look enabled and stay permanently empty (Codex MEDIUM).
+    const mine = owned && settings.statusLine.command === reporterCommand(app.getPath('userData'));
+    return { installed: mine, installedElsewhere: owned && !mine, exists };
+  });
+
+  ipcMain.handle('claudeUsage:enable', (_evt, opts) => {
+    const { settings, raw, exists } = readClaudeSettings();
+    if (settings === null) return { error: PARSE_FAIL };
+    // Same refusal as the status hooks: never create this file silently.
+    if (!exists && !opts?.confirmCreate) {
+      return { error: 'needs-confirm-create', message: '~/.claude/settings.json does not exist. Confirm creation to enable usage reporting.' };
+    }
+    const userData = app.getPath('userData');
+    const script = reporterScriptPath(userData);
+
+    const install = (base, baseRaw) => {
+      const plan = planStatusLineInstall(base.statusLine, reporterCommand(userData));
+      // Keep the ORIGINAL when we already own the value: re-running enable must
+      // never record our own wrapper as the thing to restore.
+      const remember = plan.remember ?? readStatusLineBackup().remember;
+      if (plan.remember) writeStatusLineBackup(plan.remember);
+      fs.mkdirSync(usageDirPath(userData), { recursive: true });
+      // Temp file then rename. Writing in place truncates the LIVE script
+      // first, so a failure here would leave settings.json pointing at a
+      // half-written file and every render would lose the user's status line
+      // (reviewer HIGH).
+      const tmp = `${script}.${process.pid}.tmp`;
+      try {
+        fs.writeFileSync(tmp, reporterScript(usageDirPath(userData), remember?.chain ?? null), { mode: 0o755 });
+        fs.renameSync(tmp, script);
+      } catch (err) {
+        try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+        throw err;
+      }
+      base.statusLine = plan.statusLine;
+      writeClaudeSettings(base, baseRaw);
+    };
+
+    try {
+      install(settings, raw);
+    } catch (err) {
+      if (!String(err.message).includes('changed under us')) {
+        return { error: `Could not enable usage reporting: ${err.message}` };
+      }
+      // Rebuild the edit from the FRESH read, so a concurrent Claude write to
+      // permissions or MCP is not discarded by replaying our stale copy.
+      const fresh = readClaudeSettings();
+      if (fresh.settings === null) return { error: 'settings.json changed and is now unparseable, left untouched' };
+      try { install(fresh.settings, fresh.raw); }
+      catch (err2) { return { error: `Could not update settings.json: ${err2.message}` }; }
+    }
+    return { ok: true, installed: true };
+  });
+
+  ipcMain.handle('claudeUsage:disable', () => {
+    const { settings, raw } = readClaudeSettings();
+    if (settings === null) return { error: PARSE_FAIL };
+    const backup = readStatusLineBackup();
+    const out = planStatusLineRemove(settings.statusLine, backup.remember);
+    if (out.action === 'leave') {
+      // Someone pointed statusLine elsewhere. Theirs stands; drop our record so
+      // a later disable cannot resurrect a long-dead original over it.
+      clearStatusLineBackup(backup.raw);
+      return { ok: true, installed: false, note: 'Your own status line was left in place' };
+    }
+    if (out.action === 'delete') delete settings.statusLine;
+    else settings.statusLine = out.statusLine;
+    try { writeClaudeSettings(settings, raw); }
+    catch (err) { return { error: `Could not update settings.json: ${err.message}` }; }
+    clearStatusLineBackup(backup.raw);
+    try { fs.unlinkSync(reporterScriptPath(app.getPath('userData'))); } catch { /* already gone */ }
+    return { ok: true, installed: false };
+  });
+
+  // Read-only. Liveness is reported as CONTEXT, never as precedence: a record
+  // names a session id and the scan names pids, and nothing links the two, so
+  // "which reading came from a live session" is not knowable. What IS knowable
+  // is how many sessions that credential has running, shown alongside.
+  ipcMain.handle('claudeUsage:read', async () => {
+    try {
+      const records = await readUsageRecords(app.getPath('userData'));
+      const rows = aggregateUsage(records);
+      let scan = null;
+      try { scan = await scanClaudeProcesses(); } catch { /* cannot prove liveness */ }
+      const liveByKey = new Map((scan?.groups || []).map((g) => [g.key, g.pids.length]));
+      // A process whose environment could not be read is UNRESOLVED, not
+      // absent. Calling a credential idle on that evidence would be the same
+      // confident wrong answer the scanner itself refuses to give
+      // (reviewer MEDIUM).
+      const coverageUnknown = !scan || !!scan.discoveryFailed || (scan.unresolved?.length || 0) > 0;
+      return {
+        ok: true,
+        scanFailed: coverageUnknown,
+        usage: rows.map((r) => ({
+          ...r,
+          sessionsRunning: liveByKey.get(r.key) ?? 0,
+          historical: coverageUnknown ? false : !liveByKey.has(r.key),
+        })),
+      };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   });
 }
 
