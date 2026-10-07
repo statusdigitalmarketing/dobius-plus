@@ -229,3 +229,9 @@
 - **CONTEXT**: Codex found three pre-existing races the retry made likely: a stop during the DNS await could not cancel the start, Settings and the retry could build two servers on one port (the second listen rejected and a leaked heartbeat then read `wss.clients` on null), and `ws` re-emits the HTTP server's 'error' on the WebSocketServer where an unhandled 'error' throws out of emit before our own listener runs, so a busy port 8420 was an uncaught exception rather than a failed start.
 - **DETECTION**: `grep -n "once('error'" electron/mobile-server.js` must be paired with a `wss.on('error'` listener; any `await` inside a start function must be followed by a `stillCurrent()` check before resources are created.
 
+### [Deployment] - 2026-10-06
+- **MISTAKE**: `./release.sh patch` bumped and pushed 1.0.77, then died inside electron-builder: notarytool HTTP 403 "A required agreement is missing or has expired". Apple had a new Developer Program License Agreement waiting for the account holder; nothing in the preflight checks for it, so the version bump landed on main with no release behind it.
+- **FIX**: Only the account holder can fix it: sign in at developer.apple.com (and App Store Connect) as sahil.nihal09@gmail.com, accept the pending agreement, then re-run `./release.sh patch` (a fresh bump; the unreleased bump commit is harmless, its tag was never pushed). Before a release, `xcrun notarytool history --apple-id "$APPLE_ID" --team-id Z349CC556Z --password "$APPLE_APP_SPECIFIC_PASSWORD" | head -3` is a cheap probe: it fails with the same 403 when an agreement is pending.
+- **CONTEXT**: v1.0.77 (mobile server auto-start). Users stayed on 1.0.76; the auto-updater saw nothing because no release was published.
+- **DETECTION**: `grep -n "agreement" dist-electron/builder-debug.yml` after a failed build; `gh release view v<version>` says "release not found".
+
