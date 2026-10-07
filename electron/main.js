@@ -83,7 +83,7 @@ import {
 import { initAutoUpdater } from './auto-updater.js';
 import { provisionCert } from './tailscale.js';
 import {
-  startMobileServer, stopMobileServer, getMobileServerStatus,
+  stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
   deriveDeviceId,
 } from './mobile-server.js';
@@ -2301,7 +2301,7 @@ function setupShellHandlers() {
 }
 
 function setupMobileServerHandlers() {
-  ipcMain.handle('mobileServer:start', () => startMobileServer());
+  ipcMain.handle('mobileServer:start', () => enableMobileServer());
   ipcMain.handle('mobileServer:stop', () => stopMobileServer({ persistDisabled: true }));
   ipcMain.handle('mobileServer:status', () => getMobileServerStatus());
   ipcMain.handle('mobileServer:regenerateCode', () => {
@@ -2315,7 +2315,7 @@ function setupMobileServerHandlers() {
     const res = await provisionCert();
     if (res.ok && getMobileServerStatus().running) {
       await stopMobileServer(); // await close so HTTPS restart doesn't hit EADDRINUSE
-      await startMobileServer();
+      await maybeAutoStartMobileServer(); // restart, and keep retrying if it fails
     }
     return { ...res, status: getMobileServerStatus() };
   });
@@ -3037,6 +3037,7 @@ app.on('before-quit', (e) => {
     const tearOffsForUpdate = getOpenTearOffsForRestore(); // Brett's tear-off restore
     const extrasForUpdate = getOpenPrimaryWindowsForRestore(); // extra primary windows (v1.0.66)
     setQuitting(true);
+    markMobileServerQuitting();
     // Best-effort scrollback flush; do NOT await, squirrel.mac needs a fast
     // exit or the bundle replace can corrupt. Tabs themselves are already
     // persisted on every change, so only the last <60s of scrollback is at
@@ -3143,10 +3144,18 @@ app.on('before-quit', (e) => {
     // then flush scrollback, then quit.
     e.preventDefault();
     savedBeforeQuit = true;
+    // The first press armed a 1s timer that un-confirms the quit and tells
+    // the windows to drop the prompt. Teardown below takes ~2s, so without
+    // clearing it the re-entrant app.quit() landed back on the first-press
+    // prompt with the app still open and the mobile server's quitting flag
+    // already set, leaving mobile dead for the rest of the session (Codex).
+    clearTimeout(quitTimer);
+    quitTimer = null;
     // Quit is committed here (second Cmd+Q). Freeze the open-projects
     // snapshot now so gracefulCloseAll's window teardown can't wipe the
     // restore list before Phase 3 writes it. v1.0.38.
     setQuitting(true);
+    markMobileServerQuitting();
     // Stop the Tier-2 capture BEFORE gracefulCloseAll: a 15s tick landing
     // mid-shutdown would observe the just-Ctrl-C'd tabs as idle and zero
     // their lastRunningAt, making auto-resume skip exactly the sessions
@@ -3310,6 +3319,7 @@ app.on('will-quit', (e) => {
   stopImessageBridge();
   stopScheduledTasks();
   stopAutoMode();
+  markMobileServerQuitting();
   stopMobileServer();
   stopSessionTabCapture();
   if (statusSettleTimer) { clearInterval(statusSettleTimer); statusSettleTimer = null; }

@@ -223,3 +223,9 @@
 - **DETECTION**: `grep -c "/Users/" ~/.claude/plugins/*.json` and compare
   against `$HOME`; `CLAUDE_CONFIG_DIR=<p> claude plugin list | grep -c failed`.
 
+### [Architecture] - 2026-10-06
+- **MISTAKE**: The mobile server's launch path was one `startMobileServer()` call with no retry and no log line. Tailscale assigns the 100.x address after login items start on a reboot, so the start answered "No Tailscale connection found", nothing tried again, and Sam's phone was dead until he opened Settings and flipped the switch (his task: "make sure the mobile server ALWAYS DEFAULTS TO ON"). The default was also `enabled: false`, so a fresh install started off.
+- **FIX**: Anything that depends on a network interface or another app being up must retry on a timer until it succeeds or the user says stop, and must log the first failure. `electron/mobile-autostart.js` (createAutoStart: 5s for two minutes, then 30s, unref'd timer; createStartGate: one shared in-flight start, stop bumps a lifecycle so a start still awaiting MagicDNS discards itself). Default on. The Settings switch binds to the preference (`status.enabled`), never to `running`, or the user cannot turn off something that is retrying.
+- **CONTEXT**: Codex found three pre-existing races the retry made likely: a stop during the DNS await could not cancel the start, Settings and the retry could build two servers on one port (the second listen rejected and a leaked heartbeat then read `wss.clients` on null), and `ws` re-emits the HTTP server's 'error' on the WebSocketServer where an unhandled 'error' throws out of emit before our own listener runs, so a busy port 8420 was an uncaught exception rather than a failed start.
+- **DETECTION**: `grep -n "once('error'" electron/mobile-server.js` must be paired with a `wss.on('error'` listener; any `await` inside a start function must be followed by a `stillCurrent()` check before resources are created.
+

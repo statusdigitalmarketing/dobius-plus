@@ -5,6 +5,18 @@ the version or branch that shipped them. Sam triggers releases.
 
 ## Queue
 
+- [x] Mobile server always defaults to on (v1.0.77, Asana 1215862050699018).
+      Launch called startMobileServer() once; with no 100.x address yet
+      (Tailscale after a reboot, a reconnect, an update restart) it answered
+      "No Tailscale connection found" and never tried again, and the default
+      was enabled:false. Now: default on; `electron/mobile-autostart.js`
+      retries every 5s for two minutes then every 30s until the server is up,
+      the switch is turned off, or the app stops; a start gate shares one
+      in-flight start between launch and Settings and lets a stop during the
+      MagicDNS await discard the start; a wss 'error' listener turns a busy
+      port from an uncaught exception into a failed attempt; the Settings
+      switch is the preference (status.enabled) with a waiting note while the
+      loop retries. Two Codex passes, 14 unit tests.
 - [x] Mobile "works from my phone, errors from any other computer" (v1.0.69).
       dist-mobile was served with express.static from INSIDE app.asar; Electron
       copies each streamed asar file out to <T>/.com.statusdigital.dobius-plus.*

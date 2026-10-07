@@ -14,7 +14,6 @@
  *    until the user regenerates it from the desktop.
  */
 import express from 'express';
-import { WebSocketServer } from 'ws';
 import http from 'http';
 import https from 'https';
 import os from 'os';
@@ -23,6 +22,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { app, powerSaveBlocker } from 'electron';
+import { createAutoStart, createStartGate, listenSettled, attachWebSocketServer } from './mobile-autostart.js';
 import { getMobileServerConfig, updateMobileServerConfig, setSessionTabLink, removePushSubscriptionsByToken, getSessionTabMap, getAllProjectsWithTabs, loadConfig } from './config-manager.js';
 import {
   listTerminals, subscribeTerminal, writeTerminal, terminalHasDesktopAttached,
@@ -1000,6 +1000,9 @@ function handleAuthedMessage(socket, msg, subs) {
 export function getMobileServerStatus() {
   return {
     running: !!httpServer,
+    // The user's preference, distinct from running: on by default, and while
+    // it is on and the server is down the launch loop is retrying (v1.0.77).
+    enabled: !!getMobileServerConfig().enabled,
     tailnetIp: getTailnetIp(),
     address: boundAddress,
     secure: serveInfo?.secure || false,
@@ -1009,9 +1012,26 @@ export function getMobileServerStatus() {
   };
 }
 
-/** Start the server. Resolves to a status object (with `error` set on failure). */
-export async function startMobileServer() {
+/**
+ * Start the server. Resolves to a status object (with `error` set on
+ * failure). One start at a time: a second caller (the launch retry and the
+ * Settings switch can overlap) gets the same in-flight promise, and a stop
+ * during the preparation phase discards that start.
+ */
+export function startMobileServer() {
+  // Through the gate even when a server object exists: during a pending bind
+  // httpServer is set but not yet listening, and answering "running" from
+  // outside the gate let a Settings enable accept a bind that then failed.
+  return startGate.run((stillCurrent) => doStartMobileServer(stillCurrent));
+}
+
+const startGate = createStartGate();
+// Quit committed: no start, retry or re-arm from here on (markMobileServerQuitting).
+let quitting = false;
+
+async function doStartMobileServer(stillCurrent) {
   if (httpServer) return getMobileServerStatus();
+  if (quitting) return { running: false, error: 'shutting down' };
 
   const cfg = getMobileServerConfig();
   // Tailscale-only: bind to the 100.x tailnet IP so the server is reachable
@@ -1297,6 +1317,9 @@ export async function startMobileServer() {
   let magicName;
   let secure = false;
   magicName = await getMagicDNSName();
+  // A stop (Settings off, quit, cert re-provision) landed while we waited:
+  // nothing has been created yet, so just step back.
+  if (quitting || !stillCurrent()) return { running: false, error: 'stopped during start' };
   if (magicName && hasCertFor(magicName)) {
     const cp = certPathsFor(magicName);
     try {
@@ -1315,7 +1338,9 @@ export async function startMobileServer() {
     url: secure ? `https://${magicName}:${port}/` : `http://${ip}:${port}/`,
   };
 
-  wss = new WebSocketServer({ server: httpServer, path: '/ws', maxPayload: MAX_WS_PAYLOAD });
+  // attachWebSocketServer installs the wss 'error' listener a failed bind
+  // needs (see mobile-autostart.js); the listen outcome is handled below.
+  wss = attachWebSocketServer(httpServer, { path: '/ws', maxPayload: MAX_WS_PAYLOAD });
   // Heartbeat: ping every client every HEARTBEAT_MS; a client that hasn't ponged
   // since the last ping is a dead/half-open socket (network dropped while OPEN)
   // and is terminated, so it stops accumulating a send buffer and its cleanup
@@ -1388,50 +1413,63 @@ export async function startMobileServer() {
   pairAttempts = 0;
   pairLockedUntil = 0;
 
-  return new Promise((resolve) => {
-    const onError = (err) => {
+  const thisServer = httpServer;
+  const thisWss = wss;
+  const discard = (error) => {
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    try { thisWss.close(); } catch { /* noop */ }
+    try { thisServer.close(); } catch { /* noop */ }
+    if (httpServer === thisServer) {
       httpServer = null;
       wss = null;
       boundAddress = null;
       serveInfo = null;
       pairingCode = null;
-      resolve({ running: false, error: String(err?.message || err) });
-    };
-    httpServer.once('error', onError);
-    httpServer.listen(port, ip, () => {
-      httpServer.removeListener('error', onError);
-      // Permanent handler so a later runtime socket error logs instead of crashing.
-      httpServer.on('error', (err) => console.warn('[mobile-server]', err?.message || err));
-      boundAddress = { host: ip, port };
-      serveInfo = pendingServeInfo;
-      // Push status changes to connected phones (change-driven, 1s poll of the
-      // status authority; only sends when the board-relevant signature moves).
-      lastTerminalsSig = null;
-      // Seed dedup state from the current snapshot so a (re)start does not blast
-      // stale needs/exit pushes for sessions that were already in that state
-      // before the server came up. Audit MED-6.
-      seedPushBaseline();
-      statusBroadcastTimer = setInterval(pollStatusTick, 1000);
-      // Context (model + ctx%) is transcript-derived, so recompute on a slow
-      // debounce, not every status tick. Runs once now, then every 20s.
-      refreshTabContexts();
-      contextRefreshTimer = setInterval(refreshTabContexts, 20000);
-      startPowerAssertion(); // keep the Mac awake for remote work while up
-      // Instant selector popups: watch every PTY's output and push the
-      // dialog when the drawing goes quiet, instead of waiting out the
-      // phone's poll.
-      selectorObserverOff = addTerminalObserver({
-        onData: (tid) => scheduleSelectorPush(tid),
-        onExit: (tid) => dropSelectorWatch(tid),
-      });
-      updateMobileServerConfig({ enabled: true });
-      resolve(getMobileServerStatus());
-    });
+    }
+    return { running: false, error };
+  };
+  // Always settles: listening, a bind error, or a stop that closed the
+  // server before it was listening (Node emits only 'close' for that one).
+  const outcome = await listenSettled(thisServer, port, ip);
+  if (!outcome.ok) return discard(outcome.error);
+  // A stop landed between listen() and here: it already closed and forgot
+  // this server, so do not wire it up or persist enabled:true.
+  if (quitting || !stillCurrent() || httpServer !== thisServer) return discard('stopped during start');
+  // Permanent handler so a later runtime socket error logs instead of crashing.
+  thisServer.on('error', (err) => console.warn('[mobile-server]', err?.message || err));
+  boundAddress = { host: ip, port };
+  serveInfo = pendingServeInfo;
+  // Push status changes to connected phones (change-driven, 1s poll of the
+  // status authority; only sends when the board-relevant signature moves).
+  lastTerminalsSig = null;
+  // Seed dedup state from the current snapshot so a (re)start does not blast
+  // stale needs/exit pushes for sessions that were already in that state
+  // before the server came up. Audit MED-6.
+  seedPushBaseline();
+  statusBroadcastTimer = setInterval(pollStatusTick, 1000);
+  // Context (model + ctx%) is transcript-derived, so recompute on a slow
+  // debounce, not every status tick. Runs once now, then every 20s.
+  refreshTabContexts();
+  contextRefreshTimer = setInterval(refreshTabContexts, 20000);
+  startPowerAssertion(); // keep the Mac awake for remote work while up
+  // Instant selector popups: watch every PTY's output and push the
+  // dialog when the drawing goes quiet, instead of waiting out the
+  // phone's poll.
+  selectorObserverOff = addTerminalObserver({
+    onData: (tid) => scheduleSelectorPush(tid),
+    onExit: (tid) => dropSelectorWatch(tid),
   });
+  updateMobileServerConfig({ enabled: true });
+  return getMobileServerStatus();
 }
 
 /** Stop the server. Resolves to a status object. */
 export function stopMobileServer({ persistDisabled = false } = {}) {
+  // Any stop (Settings off, quit, cert re-provision) ends a launch retry loop
+  // still waiting on Tailscale, and makes a start still in its preparation
+  // phase discard itself (startGate). A later explicit start needs neither.
+  if (autoStart) { autoStart.cancel(); autoStart = null; }
+  startGate.bump();
   // Close every authenticated client socket explicitly. wss.close() rejects
   // new connections but leaves existing ones alive until they drop on their
   // own — phones could keep streaming PTY data after stopMobileServer.
@@ -1524,10 +1562,50 @@ export function removeMobileDevice(idOrToken) {
   return getMobileServerStatus();
 }
 
-/** Start on launch if the user previously enabled it. */
+let autoStart = null;
+
+/**
+ * Start on launch unless the user turned the server off in Settings (on is
+ * the default). A failed start (Tailscale not up yet after a reboot, port
+ * busy) is retried on a timer until the server is running, the user turns it
+ * off, or the app stops: see mobile-autostart.js. Resolves after the first
+ * attempt with the status at that point.
+ */
 export async function maybeAutoStartMobileServer() {
-  if (getMobileServerConfig().enabled) {
-    return startMobileServer();
-  }
-  return getMobileServerStatus();
+  if (quitting || !getMobileServerConfig().enabled) return getMobileServerStatus();
+  if (autoStart) autoStart.cancel();
+  autoStart = createAutoStart({
+    start: startMobileServer,
+    enabled: () => !quitting && getMobileServerConfig().enabled,
+    log: (level, msg) => (level === 'warn' ? console.warn : console.log)('[mobile-server]', msg),
+  });
+  const first = await autoStart.run();
+  // The first attempt's error rides along so Settings can show why it is
+  // waiting (no tailnet address yet, port busy) while the loop keeps trying.
+  return { ...getMobileServerStatus(), ...(first?.error ? { error: first.error } : {}) };
+}
+
+/**
+ * The Settings switch turned ON: persist the preference, then start, and if
+ * that fails keep retrying exactly as launch does. Before v1.0.77 the switch
+ * was one plain start attempt, so with Tailscale down it failed and the
+ * preference was never recorded.
+ */
+export async function enableMobileServer() {
+  if (quitting) return getMobileServerStatus();
+  updateMobileServerConfig({ enabled: true });
+  return maybeAutoStartMobileServer();
+}
+
+/**
+ * Quit is committed (second Cmd+Q, updater restart, will-quit): end the
+ * retry loop, make any preparing start discard itself, and refuse every
+ * later start or re-arm (a cert re-provision whose stop finishes after the
+ * quit began would otherwise start a fresh server and timer after teardown).
+ * Does not persist anything: quit must not turn the preference off.
+ */
+export function markMobileServerQuitting() {
+  quitting = true;
+  if (autoStart) { autoStart.cancel(); autoStart = null; }
+  startGate.bump();
 }

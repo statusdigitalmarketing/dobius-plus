@@ -145,11 +145,13 @@ export default function Settings() {
   // current. The server rotates the pairing code on a wrong-guess flood (audit
   // MED-8 / Codex), so without this the desktop could keep showing a stale code
   // that the phone can no longer use. Cheap: one status read every 5s.
+  // Also poll while the server is enabled but not yet up (v1.0.77): the main
+  // process is retrying the start and this view has to notice when it lands.
   useEffect(() => {
-    if (!mobileStatus?.running) return undefined;
+    if (!mobileStatus?.running && !mobileStatus?.enabled) return undefined;
     const i = setInterval(refreshMobile, 5000);
     return () => clearInterval(i);
-  }, [mobileStatus?.running, refreshMobile]);
+  }, [mobileStatus?.running, mobileStatus?.enabled, refreshMobile]);
 
   const toggleMobileServer = useCallback(async (on) => {
     setMobileBusy(true);
@@ -535,10 +537,21 @@ export default function Settings() {
           description="Reach your terminals from your phone or iPad"
         >
           <Toggle
-            checked={!!mobileStatus?.running}
+            checked={!!mobileStatus?.enabled}
             onChange={(v) => { if (!mobileBusy) toggleMobileServer(v); }}
           />
         </SettingRow>
+
+        {mobileStatus?.enabled && !mobileStatus?.running && (
+          <div
+            className="text-xs px-3 py-2 rounded"
+            style={{ backgroundColor: 'var(--surface)', color: 'var(--dim)', border: '1px solid var(--border)' }}
+          >
+            {mobileStatus.tailnetIp
+              ? 'Starting... it retries by itself until the server is up. Turn the switch off to stop.'
+              : 'Waiting for Tailscale. The server starts on its own as soon as this Mac has a tailnet address. Turn the switch off to stop.'}
+          </div>
+        )}
 
         {mobileError && (
           <div

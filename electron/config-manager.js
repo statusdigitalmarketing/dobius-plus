@@ -42,7 +42,9 @@ const DEFAULT_CONFIG = {
     hiddenSessionPaths: [],
   },
   mobileServer: {
-    enabled: false,
+    // On by default (v1.0.77, Sam: "ALWAYS DEFAULTS TO ON"). Only an explicit
+    // Settings "off" persists enabled:false; launch, update and quit never do.
+    enabled: true,
     port: 8420,
     // Tailscale-only. LAN/plaintext mode was removed in v1.0.43: it bound to the
     // LAN IP over http/ws, exposing the device bearer token to any same-subnet
