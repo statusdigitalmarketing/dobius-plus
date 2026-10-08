@@ -5,11 +5,9 @@ the version or branch that shipped them. Sam triggers releases.
 
 ## Queue
 
-- [ ] Mobile server always defaults to on (committed on main as 1.0.77, Asana
-      1215862050699018; NOT RELEASED: notarytool answered 403 "A required
-      agreement is missing or has expired" on 2026-10-06, so Sam has to accept
-      the Apple Developer Program License Agreement at developer.apple.com as
-      sahil.nihal09@gmail.com, then `./release.sh patch` ships it as 1.0.78).
+- [x] Mobile server always defaults to on (v1.0.78, Asana 1215862050699018;
+      1.0.77 was bumped but never published: notarytool 403 until Sam accepted
+      the updated Apple Developer Program License Agreement on 2026-10-08).
       Launch called startMobileServer() once; with no 100.x address yet
       (Tailscale after a reboot, a reconnect, an update restart) it answered
       "No Tailscale connection found" and never tried again, and the default
