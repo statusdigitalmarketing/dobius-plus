@@ -213,6 +213,17 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       return false; // not ours (e.g. a real `notify` payload) — let xterm handle it
     });
 
+    // Automatic tab labels. Claude Code sets the terminal title (OSC 0/2) to
+    // the topic it is working on; `dobius-tab "<summary>"` run inside this tab
+    // arrives from main as an explicit agent label. The store applies both
+    // only when the user has not renamed the tab by hand (shared/tab-label.js).
+    const titleDisposable = term.onTitleChange((title) => {
+      useStore.getState().setAutoTabLabel(id, title, 'title');
+    });
+    const removeAutoLabelListener = window.electronAPI.onTerminalAutoLabel?.((termId, label) => {
+      if (termId === id) useStore.getState().setAutoTabLabel(id, label, 'agent');
+    });
+
     const removeDataListener = window.electronAPI.onTerminalData((termId, data) => {
       if (termId === id && termRef.current) {
         termRef.current.write(data);
@@ -327,6 +338,8 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       saveState();
       inputDisposable.dispose();
       oscDisposable.dispose();
+      titleDisposable.dispose();
+      removeAutoLabelListener?.();
       removeDataListener();
       removeExitListener();
       removeRequestSave?.();

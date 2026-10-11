@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { isLabelLocked, labelMeta } from '../../../shared/tab-label.js';
 import { useStore } from '../../store/store';
 import { markDoNotKill, unmarkDoNotKill } from '../../hooks/useTerminal';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
@@ -24,6 +25,7 @@ export default function TerminalTabBar() {
   const setActiveTab = useStore((s) => s.setActiveTab);
   const removeTab = useStore((s) => s.removeTab);
   const renameTab = useStore((s) => s.renameTab);
+  const unlockTabLabel = useStore((s) => s.unlockTabLabel);
   const addTab = useStore((s) => s.addTab);
   const addBrowserTab = useStore((s) => s.addBrowserTab);
   const reorderTabs = useStore((s) => s.reorderTabs);
@@ -48,6 +50,7 @@ export default function TerminalTabBar() {
   const [showLeftArrow, setShowLeftArrow] = useState(false);
   const [showRightArrow, setShowRightArrow] = useState(false);
   const editRef = useRef(null);
+  const editStartLabel = useRef('');
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -89,14 +92,24 @@ export default function TerminalTabBar() {
   const handleDoubleClick = useCallback((tab) => {
     setEditingId(tab.id);
     setEditValue(tab.label);
+    editStartLabel.current = tab.label;
   }, []);
 
+  // A typed name locks the label against automatic renames (terminal title,
+  // `dobius-tab`). Committing an EMPTY name hands the tab back to them.
   const commitRename = useCallback(() => {
-    if (editingId && editValue.trim()) {
-      renameTab(editingId, editValue.trim());
+    if (editingId) {
+      if (editValue.trim()) {
+        // Text unchanged since the editor OPENED is a no-op, so opening it and
+        // clicking away never locks (or reverts) an automatic label that
+        // updated while the editor was open.
+        if (editValue.trim() !== editStartLabel.current) renameTab(editingId, editValue.trim());
+      } else {
+        unlockTabLabel(editingId);
+      }
     }
     setEditingId(null);
-  }, [editingId, editValue, renameTab]);
+  }, [editingId, editValue, renameTab, unlockTabLabel]);
 
   const handleEditKeyDown = useCallback((e) => {
     if (e.key === 'Enter') {
@@ -143,7 +156,7 @@ export default function TerminalTabBar() {
     }
     if (tab) {
       // Carry kind/url so browser tabs reopen as browsers, not blank terminals.
-      pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url });
+      pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url });
     }
     await autoCheckpoint(tabId);
     if (window.electronAPI) window.electronAPI.terminalKill(tabId);
@@ -164,7 +177,7 @@ export default function TerminalTabBar() {
       }
       if (tab) {
         // Carry kind/url so browser tabs reopen as browsers, not blank terminals.
-      pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url });
+      pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url });
       }
       await autoCheckpoint(tabId);
       if (window.electronAPI) window.electronAPI.terminalKill(tabId);
@@ -289,12 +302,16 @@ export default function TerminalTabBar() {
       // here and closes normally later. H5.
       let ok = false;
       try {
+        // Read the tab FRESH: a label can land during the save delay above,
+        // and the handoff must carry it (Codex round 3).
+        const live = useStore.getState().terminalTabs.find((t) => t.id === tabId) || tab;
         const res = await window.electronAPI?.windowTearOffTab(
           currentProjectPath,
           tabId,
-          tab.label,
+          live.label,
           sx,
-          sy
+          sy,
+          labelMeta(live),
         );
         ok = !!res?.ok;
       } catch {
@@ -478,6 +495,7 @@ export default function TerminalTabBar() {
                   onChange={(e) => setEditValue(e.target.value)}
                   onBlur={commitRename}
                   onKeyDown={handleEditKeyDown}
+                  placeholder="Clear for auto name"
                   spellCheck={false}
                   style={{
                     backgroundColor: 'transparent',
@@ -491,7 +509,12 @@ export default function TerminalTabBar() {
                   }}
                 />
               ) : (
-                <span className="truncate">{tab.label}</span>
+                <span
+                  className="truncate"
+                  title={isLabelLocked(tab)
+                    ? `${tab.label} (named by you; clear the name to let Claude label it)`
+                    : tab.labelSource ? `${tab.label} (labeled automatically from what this tab is doing)` : tab.label}
+                >{tab.label}</span>
               )}
 
               {/* Close button — only visible on active tab to prevent accidental closes */}

@@ -235,3 +235,9 @@
 - **CONTEXT**: v1.0.77 (mobile server auto-start). Users stayed on 1.0.76; the auto-updater saw nothing because no release was published.
 - **DETECTION**: `grep -n "agreement" dist-electron/builder-debug.yml` after a failed build; `gh release view v<version>` says "release not found".
 
+
+### [Architecture] - 2026-10-11
+- **MISTAKE**: Added a startup "upgrade in place" that re-runs the managed Claude hook installer (`enableClaudeHooks` in `electron/main.js`) on launch. The installer's `stripStatusHooks` dropped any hook GROUP that contained a Dobius command, so a user command living in the same group (hand-merged, or added by another tool) would have been deleted from `~/.claude/settings.json` automatically, with no click. Codex rated it Critical.
+- **FIX**: Strip at the COMMAND level: keep the group, filter out only commands carrying a Dobius marker, drop the group only if it is left empty. Anything that edits a shared config file must remove exactly what it owns.
+- **CONTEXT**: A destructive path that was tolerable behind an explicit Settings click becomes dangerous the moment it runs automatically. Re-audit every helper an auto-run path calls.
+- **DETECTION**: `grep -n "groups.filter\|isStatusGroup" electron/main.js`; any filter that removes a whole group because one member matches is the anti-pattern.

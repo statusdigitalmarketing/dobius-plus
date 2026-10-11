@@ -405,6 +405,7 @@ function setupTerminalHandlers() {
       };
       if (typeof t.kind === 'string' && t.kind) out.kind = t.kind;
       if (typeof t.url === 'string' && /^https?:\/\//i.test(t.url)) out.url = t.url;
+      if (typeof t.labelLocked === 'boolean') out.labelLocked = t.labelLocked;
       return out;
     });
     // Extra windows keep their OWN recently-closed list in their bucket, so
@@ -1450,9 +1451,30 @@ function setupFileHandlers() {
   const statusCmd = (state) =>
     `printf '%s' '{"terminalSequence":"\\u001b]777;dobius;${state}\\u0007"}'`;
   const cmdEntry = (state) => ({ type: 'command', command: statusCmd(state) });
-  const isStatusGroup = (group) =>
-    Array.isArray(group?.hooks) &&
-    group.hooks.some((h) => typeof h?.command === 'string' && h.command.includes(STATUS_MARKER));
+  // SessionStart: tell Claude, only when it runs inside a Dobius tab, that it
+  // can label its tab. SessionStart stdout is added to the session's context.
+  // The trailing comment is the marker that identifies this group as ours.
+  const TAB_HINT_MARKER = 'dobius-tab-hint';
+  const tabHintEntry = {
+    type: 'command',
+    command: `[ -z "$DOBIUS_TAB_ID" ] || echo 'This session runs in a Dobius+ terminal tab. When you start a distinct task, run: dobius-tab "<3-6 word summary>" to label this tab.' # ${TAB_HINT_MARKER}`,
+  };
+  const isDobiusCommand = (h) => typeof h?.command === 'string'
+    && (h.command.includes(STATUS_MARKER) || h.command.includes(TAB_HINT_MARKER));
+  const isStatusGroup = (group) => Array.isArray(group?.hooks) && group.hooks.some(isDobiusCommand);
+  const hasTabHint = (hooks) => Array.isArray(hooks?.SessionStart)
+    && hooks.SessionStart.some((g) => g?.hooks?.some?.((h) => typeof h?.command === 'string' && h.command.includes(TAB_HINT_MARKER)));
+  // Append the whole Dobius block to an already-stripped hooks object.
+  const addDobiusHooks = (hooks) => {
+    const add = (event, group) => { hooks[event] = [...(hooks[event] || []), group]; };
+    add('UserPromptSubmit', { hooks: [cmdEntry('working')] });
+    add('PreToolUse', { hooks: [cmdEntry('working')] }); // no matcher = all tools
+    add('Notification', { matcher: 'permission_prompt', hooks: [cmdEntry('needs')] });
+    add('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
+    add('Stop', { hooks: [cmdEntry('done')] });
+    add('SessionStart', { hooks: [tabHintEntry] });
+    return hooks;
+  };
 
   // Returns { settings, raw, mtime, exists }. The RAW text travels with the read so
   // writeClaudeSettings can detect a lost-update race against Claude itself
@@ -1531,7 +1553,16 @@ function setupFileHandlers() {
     const out = {};
     for (const [event, groups] of Object.entries(hooks)) {
       if (!Array.isArray(groups)) { out[event] = groups; continue; }
-      const kept = groups.filter((g) => !isStatusGroup(g));
+      // Remove only OUR commands. A group the user added a command to (or
+      // merged by hand) keeps that command; only a group left empty goes.
+      // Removing whole groups deleted the user's hooks, which mattered once
+      // the tab-hint upgrade started running enable on launch (Codex Critical).
+      const kept = [];
+      for (const g of groups) {
+        if (!isStatusGroup(g)) { kept.push(g); continue; }
+        const rest = g.hooks.filter((h) => !isDobiusCommand(h));
+        if (rest.length) kept.push({ ...g, hooks: rest });
+      }
       if (kept.length) out[event] = kept;
     }
     return out;
@@ -1548,7 +1579,7 @@ function setupFileHandlers() {
     return { installed, exists: true };
   });
 
-  ipcMain.handle('claudeHooks:enable', (_evt, opts) => {
+  function enableClaudeHooks(opts) {
     const { settings, raw, exists } = readClaudeSettings();
     if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
     // Refuse silent file creation: if ~/.claude/settings.json doesn't exist
@@ -1559,13 +1590,7 @@ function setupFileHandlers() {
     }
     // Start from a clean slate (remove any stale Dobius groups) then add ours,
     // appending to the user's existing hooks for each event.
-    const hooks = stripStatusHooks(settings.hooks);
-    const add = (event, group) => { hooks[event] = [...(hooks[event] || []), group]; };
-    add('UserPromptSubmit', { hooks: [cmdEntry('working')] });
-    add('PreToolUse', { hooks: [cmdEntry('working')] }); // no matcher = all tools
-    add('Notification', { matcher: 'permission_prompt', hooks: [cmdEntry('needs')] });
-    add('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
-    add('Stop', { hooks: [cmdEntry('done')] });
+    const hooks = addDobiusHooks(stripStatusHooks(settings.hooks));
     // No-op if the file already has exactly these hooks. Avoids bumping mtime
     // on every "Enable" click and prevents any downstream file watchers from
     // re-firing when nothing actually changed.
@@ -1595,13 +1620,7 @@ function setupFileHandlers() {
           const fresh = readClaudeSettings();
           if (fresh.settings === null) return { error: 'settings.json became unparseable mid-edit' };
           // Reapply OUR hook block on top of Claude's just-written settings.
-          fresh.settings.hooks = stripStatusHooks(fresh.settings.hooks);
-          const add2 = (event, group) => { fresh.settings.hooks[event] = [...(fresh.settings.hooks[event] || []), group]; };
-          add2('UserPromptSubmit', { hooks: [cmdEntry('working')] });
-          add2('PreToolUse', { hooks: [cmdEntry('working')] });
-          add2('Notification', { matcher: 'permission_prompt', hooks: [cmdEntry('needs')] });
-          add2('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
-          add2('Stop', { hooks: [cmdEntry('done')] });
+          fresh.settings.hooks = addDobiusHooks(stripStatusHooks(fresh.settings.hooks));
           toWrite = fresh.settings;
           rawForWrite = fresh.raw;
           continue;
@@ -1612,7 +1631,24 @@ function setupFileHandlers() {
       }
     }
     return { error: 'enable failed after retry' };
-  });
+  }
+  ipcMain.handle('claudeHooks:enable', (_evt, opts) => enableClaudeHooks(opts));
+
+  // Upgrade in place: a status block installed before the tab-label hint
+  // existed gets the SessionStart hint on the next launch, without the user
+  // having to toggle the Settings switch. Only an ALREADY-installed block is
+  // touched (never a fresh opt-in), and the isolated ship-test instance never
+  // writes the real ~/.claude/settings.json.
+  if (!process.env.DOBIUS_USERDATA_DIR) {
+    const { settings, exists } = readClaudeSettings();
+    const hooks = settings?.hooks;
+    const installed = exists && settings && Object.values(hooks || {})
+      .some((groups) => Array.isArray(groups) && groups.some(isStatusGroup));
+    if (installed && !hasTabHint(hooks)) {
+      const r = enableClaudeHooks();
+      if (r?.error) console.warn(`[claudeHooks] tab hint upgrade skipped: ${r.error}`);
+    }
+  }
 
   ipcMain.handle('claudeHooks:disable', () => {
     const { settings, raw, exists } = readClaudeSettings();
@@ -2459,7 +2495,7 @@ function setupWindowHandlers() {
   // tear them off and claim them via the grant flow, gaining a wire-tap
   // into voice input/output or mobile-PTY traffic.
   // Codex round-5 HIGH on main.js:1047.
-  ipcMain.handle('window:tearOffTab', (event, projectPath, tabId, tabLabel, screenX, screenY) => {
+  ipcMain.handle('window:tearOffTab', (event, projectPath, tabId, tabLabel, screenX, screenY, labelMeta) => {
     if (!projectPath || !tabId) return { ok: false };
     if (!TERMINAL_ID_RE.test(tabId)) return { ok: false };
     if (terminalOwners.get(tabId) !== event.sender.id) return { ok: false };
@@ -2469,7 +2505,18 @@ function setupWindowHandlers() {
     // it from /A's real primary tabs. Codex.
     if (!getTerminalsForProject(projectPath).includes(tabId)) return { ok: false };
     const label = typeof tabLabel === 'string' ? tabLabel.slice(0, 100) : 'Tab';
-    const win = openTornOffWindow(projectPath, tabId, label, screenX || 200, screenY || 200);
+    // labelMeta carries the tab's automatic-label state (lock, source, the
+    // remembered auto label) so the torn-off copy behaves like the original.
+    // Rebuilt field by field: it becomes a URL param of a new window.
+    const meta = {};
+    if (labelMeta && typeof labelMeta === 'object') {
+      if (typeof labelMeta.labelLockedByUser === 'boolean') meta.labelLockedByUser = labelMeta.labelLockedByUser;
+      for (const k of ['labelSource', 'autoLabelSource']) {
+        if (labelMeta[k] === 'title' || labelMeta[k] === 'agent') meta[k] = labelMeta[k];
+      }
+      if (typeof labelMeta.autoLabel === 'string') meta.autoLabel = labelMeta.autoLabel.slice(0, 100);
+    }
+    const win = openTornOffWindow(projectPath, tabId, label, screenX || 200, screenY || 200, meta);
     // Record the grant against the new window's webContents.id. The new
     // window's renderer will call terminal:claimPty once it mounts.
     tearOffGrants.set(tabId, win.webContents.id);

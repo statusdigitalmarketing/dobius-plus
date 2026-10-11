@@ -40,6 +40,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('terminal:exit', handler);
     return () => ipcRenderer.removeListener('terminal:exit', handler);
   },
+  // `dobius-tab "<summary>"` run inside a tab (voice bridge /tabRename).
+  onTerminalAutoLabel: (callback) => {
+    const handler = (_event, id, label) => callback(id, label);
+    ipcRenderer.on('terminal:autoLabel', handler);
+    return () => ipcRenderer.removeListener('terminal:autoLabel', handler);
+  },
 
   // Agents
   agentsGetBuiltins: () => ipcRenderer.invoke('agents:getBuiltins'),
@@ -256,8 +262,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('updater:status', handler);
     return () => ipcRenderer.removeListener('updater:status', handler);
   },
-  windowTearOffTab: (projectPath, tabId, tabLabel, screenX, screenY) =>
-    ipcRenderer.invoke('window:tearOffTab', projectPath, tabId, tabLabel, screenX, screenY),
+  windowTearOffTab: (projectPath, tabId, tabLabel, screenX, screenY, labelMeta) =>
+    ipcRenderer.invoke('window:tearOffTab', projectPath, tabId, tabLabel, screenX, screenY, labelMeta),
   terminalClaimPty: (tabId) => ipcRenderer.invoke('terminal:claimPty', tabId),
 
   // Build Monitor

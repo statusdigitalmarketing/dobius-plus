@@ -633,7 +633,7 @@ function randomKey() {
 // Shared creator for a torn-off tab window at explicit bounds. Used by the
 // cursor-drag tear-off AND the launch-time tear-off restore (v1.0.46), so the
 // two can't drift.
-function createTornOffWindow(projectPath, tabId, tabLabel, bounds = {}, restore = false) {
+function createTornOffWindow(projectPath, tabId, tabLabel, bounds = {}, restore = false, labelMeta = null) {
   const folderName = path.basename(projectPath);
   // Count existing windows for this project to generate "folder (2)" style title
   const windowNumber = getWindowIdsForProject(projectPath).length + 1;
@@ -671,10 +671,12 @@ function createTornOffWindow(projectPath, tabId, tabLabel, bounds = {}, restore 
   if (isDev) {
     let query = `project=${encodeURIComponent(projectPath)}&tearOffTab=${encodeURIComponent(tabId)}&tearOffLabel=${encodeURIComponent(tabLabel)}`;
     if (restore) query += '&tearOffRestore=1';
+    if (labelMeta) query += `&tearOffLabelMeta=${encodeURIComponent(JSON.stringify(labelMeta))}`;
     win.loadURL(`http://localhost:5173?${query}`);
   } else {
     const query = { project: projectPath, tearOffTab: tabId, tearOffLabel: tabLabel };
     if (restore) query.tearOffRestore = '1';
+    if (labelMeta) query.tearOffLabelMeta = JSON.stringify(labelMeta);
     win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { query });
   }
 
@@ -690,12 +692,12 @@ function createTornOffWindow(projectPath, tabId, tabLabel, bounds = {}, restore 
  * projectPath, tabId (terminal tab id being torn off), tabLabel (display label),
  * screenX / screenY (cursor position in screen coords). Returns the window.
  */
-export function openTornOffWindow(projectPath, tabId, tabLabel, screenX, screenY) {
+export function openTornOffWindow(projectPath, tabId, tabLabel, screenX, screenY, labelMeta = null) {
   // Position window near the cursor, offset so the title bar is under the cursor.
   const display = screen.getDisplayNearestPoint({ x: screenX, y: screenY });
   const x = Math.max(display.bounds.x, screenX - 200);
   const y = Math.max(display.bounds.y, screenY - 30);
-  return createTornOffWindow(projectPath, tabId, tabLabel, { x, y, width: 1100, height: 720 });
+  return createTornOffWindow(projectPath, tabId, tabLabel, { x, y, width: 1100, height: 720 }, false, labelMeta);
 }
 
 /**

@@ -3,6 +3,7 @@ import { THEMES, applyTheme } from '../lib/themes';
 import { groupByStage } from '../lib/stages';
 import { makeTabId } from '../lib/tab-id';
 import { latestSessionForTab } from '../../shared/session-tab.js';
+import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.js';
 
 
 // Drop any grid entries whose tab is no longer present. Returns null when the
@@ -280,9 +281,31 @@ export const useStore = create((set, get) => ({
     return { activeTabId: tabId };
   }),
 
+  // A deliberate rename (tab bar edit, agent launch) locks the label so the
+  // automatic sources below never overwrite it.
   renameTab: (tabId, label) => set((s) => ({
-    terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? { ...t, label } : t),
+    terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? lockLabel(t, label) : t),
   })),
+
+  // The user cleared the name: hand the label back to the automatic sources.
+  unlockTabLabel: (tabId) => set((s) => ({
+    terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? unlockLabel(t) : t),
+  })),
+
+  // Automatic label from the terminal title ('title') or `dobius-tab`
+  // ('agent'). No-op (no store change, so no config write) when the label is
+  // unchanged or the user has locked it. See shared/tab-label.js.
+  setAutoTabLabel: (tabId, rawLabel, source) => set((s) => {
+    let changed = false;
+    const tabs = s.terminalTabs.map((t) => {
+      if (t.id !== tabId) return t;
+      const next = applyAutoLabel(t, rawLabel, source);
+      if (next !== t) changed = true;
+      return next;
+    });
+    // Returning the state itself makes zustand skip the update entirely.
+    return changed ? { terminalTabs: tabs } : s;
+  }),
 
   togglePinTab: (tabId) => set((s) => ({
     terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? { ...t, pinned: !t.pinned } : t),
@@ -534,6 +557,9 @@ export const useStore = create((set, get) => ({
     const tab = {
       id,
       label: closed.label,
+      // A reopened tab keeps the user's lock. A legacy entry saved without the
+      // flag gets no flag, so isLabelLocked's legacy rule protects a custom name.
+      ...(typeof closed.labelLocked === 'boolean' ? { labelLockedByUser: closed.labelLocked } : {}),
       projectPath: closed.projectPath,
       kind: closed.kind || 'terminal',
       ...(closed.url ? { url: closed.url } : {}),

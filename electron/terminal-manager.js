@@ -193,6 +193,8 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   if (accountEnv.DOBIUS_GWS_SHIM_DIR) {
     extraPaths.unshift(accountEnv.DOBIUS_GWS_SHIM_DIR);
   }
+  // Per-instance helper commands (`dobius-tab`), installed by voice-bridge.
+  extraPaths.push(tabBinDir());
   const fullPath = [...extraPaths, process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'].join(':');
 
   // These two are consumed here (into PATH), not passed as literal env vars.
@@ -205,6 +207,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
     TERM: 'xterm-256color',
     COLORTERM: 'truecolor',
     DOBIUS_CWD: safeCwd,
+    // Which tab this shell is, so `dobius-tab` (run by an agent's Bash tool,
+    // whose output never reaches the tty) can rename its own tab.
+    DOBIUS_TAB_ID: id,
     ...extraEnv,
     ...termEnv,
   };
@@ -852,6 +857,13 @@ export function reassignTerminal(id, newWebContents) {
   if (!entry) return false;
   entry.webContents = newWebContents;
   if (newWebContents) entry.everWindowOwned = true; // a window claim binds it. Audit High.
+  // Replay the last `dobius-tab` label to the claiming window: one that landed
+  // while a tear-off window was still loading went to the source tab, which is
+  // removed after the handoff (Codex round 4). The renderer's precedence rules
+  // make a repeat a no-op.
+  if (entry.lastAgentLabel && newWebContents && !newWebContents.isDestroyed()) {
+    newWebContents.send('terminal:autoLabel', id, entry.lastAgentLabel);
+  }
   return true;
 }
 
@@ -871,6 +883,25 @@ export function wasWindowOwned(id) {
  * never-claimed tear-off window closing can't kill a PTY still bound to the
  * source window. Codex.
  */
+/** Where per-instance helper commands live. On every tab's PATH. */
+export function tabBinDir() {
+  return path.join(app.getPath('userData'), 'bin');
+}
+
+/**
+ * Send an IPC message to the window that currently shows terminal `id`
+ * (follows tear-off reassignment). Returns 'sent', 'no-terminal' or
+ * 'no-window' (a headless PTY, or its window is gone).
+ */
+export function sendToTerminalWindow(id, channel, ...args) {
+  const entry = terminals.get(id);
+  if (!entry) return 'no-terminal';
+  if (channel === 'terminal:autoLabel') entry.lastAgentLabel = args[0];
+  if (!entry.webContents || entry.webContents.isDestroyed()) return 'no-window';
+  entry.webContents.send(channel, id, ...args);
+  return 'sent';
+}
+
 export function getTerminalWebContentsId(id) {
   const entry = terminals.get(id);
   const wc = entry?.webContents;

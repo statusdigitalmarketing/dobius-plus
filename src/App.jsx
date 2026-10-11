@@ -10,6 +10,8 @@ export default function App() {
   const projectPath = params.get('project') || undefined;
   const tearOffTabId = params.get('tearOffTab') || undefined;
   const tearOffLabel = params.get('tearOffLabel') || undefined;
+  // The torn tab's automatic-label state (absent on a launch restore).
+  const tearOffLabelMeta = params.get('tearOffLabelMeta') || undefined;
   // Restored tear-off (launch-time recreate): create a fresh PTY, don't claim.
   const tearOffRestore = params.get('tearOffRestore') === '1';
   // windowKey (v1.0.66): only present for EXTRA primary windows on a project.
@@ -77,7 +79,7 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      <ProjectView projectPath={projectPath} tearOffTabId={tearOffTabId} tearOffLabel={tearOffLabel} tearOffRestore={tearOffRestore} windowKey={windowKey} />
+      <ProjectView projectPath={projectPath} tearOffTabId={tearOffTabId} tearOffLabel={tearOffLabel} tearOffLabelMeta={tearOffLabelMeta} tearOffRestore={tearOffRestore} windowKey={windowKey} />
       <UpdateBanner />
     </ErrorBoundary>
   );

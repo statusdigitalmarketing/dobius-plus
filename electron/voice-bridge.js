@@ -10,6 +10,7 @@
  * Endpoints (all POST, body is JSON):
  *   /tabSend   { tabId: string, message: string }  -> writeTerminal(tabId, message + '\r')
  *   /tabList   {}                                  -> { tabs: listTerminals() }
+ *   /tabRename { tabId: string, label: string }    -> label that tab (dobius-tab)
  *   /setReply  { message: string }                 -> stores last conductor reply for /voice/reply
  *   /getReply  { since: number? }                  -> { reply, ts } if newer, else 204
  *
@@ -24,11 +25,14 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { app, BrowserWindow } from 'electron';
-import { writeTerminal, listTerminals } from './terminal-manager.js';
+import { writeTerminal, listTerminals, sendToTerminalWindow, tabBinDir } from './terminal-manager.js';
+import { validateTabRename, buildTabCliScript } from './tab-rename.js';
 import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
 import { STAGES } from './task-pipeline.js';
 
-const PORT = 8421;
+// DOBIUS_BRIDGE_PORT exists for the isolated ship-test harness (8421 belongs
+// to the live app); a packaged launch never sets it.
+const PORT = parseInt(process.env.DOBIUS_BRIDGE_PORT, 10) || 8421;
 const HOST = '127.0.0.1';
 const EXPECTED_HOST_HEADER = `${HOST}:${PORT}`;
 const MAX_BODY_BYTES = 64 * 1024; // 64KB is plenty for one message
@@ -110,6 +114,21 @@ async function handleTabSend(req, res) {
   }
   writeTerminal(tabId, '\r');
   return sendJson(res, 200, { ok: true, sent: message.length });
+}
+
+// `dobius-tab "<summary>"` from inside a tab: forward the label to the window
+// showing that tab. The renderer cleans it and skips it when the user has
+// renamed the tab by hand.
+async function handleTabRename(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  const v = validateTabRename(body, TAB_ID_RE);
+  if (v.error) return sendJson(res, 400, { ok: false, error: v.error });
+  const result = sendToTerminalWindow(v.tabId, 'terminal:autoLabel', v.label);
+  if (result === 'no-terminal') return sendJson(res, 404, { ok: false, error: 'no such tab' });
+  if (result === 'no-window') return sendJson(res, 409, { ok: false, error: 'tab is not open in a window' });
+  return sendJson(res, 200, { ok: true });
 }
 
 function handleTabList(_req, res) {
@@ -521,6 +540,7 @@ function handleRequest(req, res) {
   }
   if (req.url === '/tabSend') return handleTabSend(req, res);
   if (req.url === '/tabList') return handleTabList(req, res);
+  if (req.url === '/tabRename') return handleTabRename(req, res);
   if (req.url === '/setReply') return handleSetReply(req, res);
   if (req.url === '/getReply') return handleGetReply(req, res);
   if (req.url === '/trackWork') return handleTrackWork(req, res);
@@ -580,7 +600,23 @@ export function startVoiceBridge() {
     console.warn(`[voice-bridge] server error: ${err.message}`);
     server = null;
   });
-  installCliScript();
+  // The isolated ship-test instance must not rewrite ~/.local/bin: those
+  // scripts bake in THIS instance's token path, so the live app's dobius-*
+  // commands would 401 until it next restarted.
+  if (!process.env.DOBIUS_USERDATA_DIR) installCliScript();
+  installTabCli();
+}
+
+// dobius-tab lives in a PER-INSTANCE dir (<userData>/bin) that terminal-manager
+// puts on every tab's PATH, so it always talks to the instance that owns the
+// tab, with that instance's port and token.
+function installTabCli() {
+  try {
+    fs.mkdirSync(tabBinDir(), { recursive: true });
+    writeIfChanged(path.join(tabBinDir(), 'dobius-tab'), buildTabCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
+  } catch (err) {
+    console.warn(`[voice-bridge] dobius-tab install failed: ${err.message}`);
+  }
 }
 
 /**

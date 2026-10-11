@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { isLabelLocked, parseLabelMeta } from '../../../shared/tab-label.js';
 import { useStore } from '../../store/store';
 import { THEMES, applyTheme } from '../../lib/themes';
 import TopBar from '../shared/TopBar';
@@ -17,7 +18,7 @@ import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 
-export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, tearOffRestore = false, windowKey = null }) {
+export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, tearOffLabelMeta, tearOffRestore = false, windowKey = null }) {
   const activeView = useStore((s) => s.activeView);
   const setActiveView = useStore((s) => s.setActiveView);
   const sidebarVisible = useStore((s) => s.sidebarVisible);
@@ -180,6 +181,8 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
           label: tearOffLabel || 'Tab',
           projectPath,
           createdAt: Date.now(),
+          // Keep the source tab's automatic-label state (shared/tab-label.js).
+          ...parseLabelMeta(tearOffLabelMeta),
         };
         // Offset tabCounter for tear-off windows to avoid ID collisions with
         // the primary window (which shares the same project config counter).
@@ -262,7 +265,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       }
       setTabsInitialized(true);
     }
-  }, [projectPath, setThemeIndex, setSplitRatio, setGridColumnRatio, setGridRowRatios, tearOffTabId, tearOffLabel, tearOffRestore]);
+  }, [projectPath, setThemeIndex, setSplitRatio, setGridColumnRatio, setGridRowRatios, tearOffTabId, tearOffLabel, tearOffLabelMeta, tearOffRestore]);
 
   const startSplitResize = useCallback((e) => {
     e.preventDefault();
@@ -725,7 +728,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     if (tab) {
       // Preserve kind/url so a closed browser tab can be resurrected via
       // Cmd+Shift+T as a browser (not a blank terminal). Carson self-flag #4.
-      state.pushClosedTab({ label: tab.label, projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url });
+      state.pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url });
     }
     // Auto-checkpoint on close, matching the tab-bar X / middle-click / context-menu
     // paths (Cmd+W previously skipped this, so the same close produced no checkpoint).
