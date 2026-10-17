@@ -8,6 +8,17 @@ A Capacitor shell that loads the mobile PWA directly from the Mac over Tailscale
 
 **Scope limit:** this is a self-use TestFlight artifact. Apple App Store review will reject it as "a webview wrapper of a remote server" (Guideline 4.2). A follow-up build swaps the hardcoded Tailscale URL for a bundled PWA plus a first-run host-pairing screen, which is what gets submitted to the public App Store.
 
+### Security tradeoff we are taking today, explicit
+
+The WebView loads an **HTTP** URL. The deliberate reasons it is safe inside this scope and the exact ways it stops being safe outside it:
+
+- **At the network layer the transport is not cleartext.** Tailscale wraps every byte phone-to-Mac in WireGuard (ChaCha20-Poly1305). No observer on any Wi-Fi, cell, or ISP in between can read, modify, or MITM it. ATS exists to defend against the general-internet case, which does not apply inside a Tailnet.
+- **The IP is not spoofable.** `100.89.143.67` belongs to this Mac inside Sam's personal Tailnet. No node can claim that address without being admitted to the Tailnet, which requires his key.
+- **Residual risks that only the follow-up PR closes:**
+  - The pairing token is in `localStorage` scoped to the HTTP origin `100.89.143.67:8420`. If the WebView ever loaded a hostile page at that origin, that page would read the token. Follow-up moves the token to Keychain via a native plugin.
+  - If Tailscale fell off and the device fell back to a regular LAN that happened to use the same `100.x.x.x` address (near-zero but non-zero), the WebView would load that page as the same privileged origin. Follow-up removes `server.url`, serves the bundled PWA from `capacitor://localhost`, and connects out to the Mac only over `wss://<host>.<tailnet>.ts.net` with a Tailscale-issued Let's Encrypt cert.
+  - A public App Store build must never reuse this config. The follow-up is where that happens.
+
 **The Tailscale IP is baked into the build.** If your Mac's Tailscale IP changes, rebuild. Current value: `100.89.143.67` (sams-macbook-pro). Edit `capacitor.config.json` and `ios/App/App/Info.plist` ATS exception, then `npm run ios:sync`.
 
 ## Prerequisites checked at build time
