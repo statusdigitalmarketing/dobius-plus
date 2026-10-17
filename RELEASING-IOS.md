@@ -4,7 +4,9 @@ Companion to `RELEASING.md` (which covers the Mac side). This document is for th
 
 ## What this build is, exactly
 
-A Capacitor shell that loads the mobile PWA directly from the Mac over Tailscale (`http://100.89.143.67:8420`). Zero mobile code changes. The native iOS binary is a thin WebView wrapper around the same bundle you already use on your phone, just signed and distributable through TestFlight.
+A Capacitor shell that loads the mobile PWA directly from the Mac over Tailscale (`http://sams-macbook-pro.tail6addbf.ts.net:8420`, MagicDNS). Zero mobile code changes. The native iOS binary is a thin WebView wrapper around the same bundle you already use on your phone, just signed and distributable through TestFlight.
+
+Earlier builds pointed `server.url` at the raw Tailscale IP `100.89.143.67`. Apple's App Transport Security ignores `NSExceptionDomains` entries when the key is an IP address (per Apple's own docs, that key accepts DNS names only), so the WebView silently refused to connect even though Safari on the same phone loaded the exact URL fine. Switching to the MagicDNS hostname and declaring `ts.net` with `NSIncludesSubdomains` in `Info.plist` is what unblocked WKWebView.
 
 **Scope limit:** this is a self-use TestFlight artifact. Apple App Store review will reject it as "a webview wrapper of a remote server" (Guideline 4.2). A follow-up build swaps the hardcoded Tailscale URL for a bundled PWA plus a first-run host-pairing screen, which is what gets submitted to the public App Store.
 
@@ -19,7 +21,7 @@ The WebView loads an **HTTP** URL. The deliberate reasons it is safe inside this
   - If Tailscale fell off and the device fell back to a regular LAN that happened to use the same `100.x.x.x` address (near-zero but non-zero), the WebView would load that page as the same privileged origin. Follow-up removes `server.url`, serves the bundled PWA from `capacitor://localhost`, and connects out to the Mac only over `wss://<host>.<tailnet>.ts.net` with a Tailscale-issued Let's Encrypt cert.
   - A public App Store build must never reuse this config. The follow-up is where that happens.
 
-**The Tailscale IP is baked into the build.** If your Mac's Tailscale IP changes, rebuild. Current value: `100.89.143.67` (sams-macbook-pro). Edit `capacitor.config.json` and `ios/App/App/Info.plist` ATS exception, then `npm run ios:sync`.
+**The Tailscale MagicDNS hostname is baked into the build.** Current value: `sams-macbook-pro.tail6addbf.ts.net`. If the Mac's hostname or the tailnet suffix changes (rare), edit `capacitor.config.json`'s `server.url` and `RELEASING-IOS.md`, then `npm run ios:sync`. The `Info.plist` ATS exception is on `ts.net` with subdomains so any `.ts.net` host works without re-editing.
 
 ## Prerequisites checked at build time
 
@@ -67,7 +69,7 @@ In Xcode:
 
 ## What breaks and how to spot it
 
-- **Blank white screen on launch**: the Mac was unreachable from the phone over Tailscale when the WebView loaded. The app does NOT auto-recover when the Mac comes back, because `capacitor.config.json` has no `server.errorPath` and so Capacitor never falls back to the bundled PWA. Verify Tailscale is on, Mac is awake, Dobius+ is running, `mobile-server.js` is listening on `100.89.143.67:8420`, then force-quit Dobius+ on the phone and relaunch. The follow-up PR replaces this behavior with an in-app error page + retry.
+- **Blank black screen on launch**: the Mac was unreachable from the phone over Tailscale when the WebView loaded. The app does NOT auto-recover when the Mac comes back, because `capacitor.config.json` has no `server.errorPath` and so Capacitor never falls back to the bundled PWA. Verify Tailscale is on both devices, Mac is awake, Dobius+ is running, `mobile-server.js` is listening on `100.89.143.67:8420`, then force-quit Dobius+ on the phone and relaunch. The follow-up PR replaces this behavior with an in-app error page + retry. First-ever launch gotcha: if the screen stays pure black, open Safari on the phone and visit the same `http://sams-macbook-pro.tail6addbf.ts.net:8420` URL to confirm the Mac is actually reachable. If Safari loads it but Dobius+ stays black, the ATS exception is wrong (should be on `ts.net` with `NSIncludesSubdomains`, never on a raw IP).
 - **"Could not reach Dobius+" at pairing**: same cause. The webview did load, but fetch to `/pair` failed. Open Safari developer tools against the device to confirm.
 - **Terminal view renders but keyboard does nothing**: iOS keyboard focus for xterm.js canvas is finicky; falls back to the mobile `Terminal.jsx` path which uses a hidden textarea. If this breaks after an iOS update, start from `mobile/Terminal.jsx` and `mobile/XtermView.jsx`.
 - **"ITMS-90717: Invalid App Store Icon"**: alpha channel snuck back into `AppIcon-512@2x.png`. Reflatten:

@@ -68,8 +68,10 @@
 		<true/>
 		<key>NSExceptionDomains</key>
 		<dict>
-			<key>100.89.143.67</key>
+			<key>ts.net</key>
 			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
 				<key>NSExceptionAllowsInsecureHTTPLoads</key>
 				<true/>
 				<key>NSExceptionRequiresForwardSecrecy</key>

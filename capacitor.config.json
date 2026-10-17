@@ -1,10 +1,10 @@
 {
-  "_comment_security": "SELF-USE TESTFLIGHT ONLY. The WebView loads from a Tailscale IP over HTTP. The HTTP is cleartext at the socket level but Tailscale wraps every byte in WireGuard (ChaCha20-Poly1305), so no observer on Wi-Fi/cell/ISP can read it. The IP is pinned inside Sam's Tailnet and cannot be taken by any node he has not admitted. This file MUST NOT ship to the public App Store as-is: switch to bundled webDir + wss://<host>.<tailnet>.ts.net with a tailscale-issued cert, and move the pairing token to Keychain via a native plugin. See RELEASING-IOS.md 'Follow-up PR'.",
+  "_comment_security": "SELF-USE TESTFLIGHT ONLY. The WebView loads from Sam's Mac over Tailscale MagicDNS (sams-macbook-pro.tail6addbf.ts.net) using HTTP. The HTTP is cleartext at the socket level but Tailscale wraps every byte in WireGuard (ChaCha20-Poly1305), so no observer on Wi-Fi/cell/ISP can read it. The MagicDNS name only resolves inside Sam's Tailnet. This file MUST NOT ship to the public App Store as-is: switch to bundled webDir + wss://<host>.<tailnet>.ts.net with a tailscale-issued cert, and move the pairing token to Keychain via a native plugin. See RELEASING-IOS.md 'Follow-up PR'.",
   "appId": "com.statusdigital.dobiusplus",
   "appName": "Dobius+",
   "webDir": "dist-mobile",
   "server": {
-    "url": "http://100.89.143.67:8420",
+    "url": "http://sams-macbook-pro.tail6addbf.ts.net:8420",
     "cleartext": true
   },
   "ios": {
