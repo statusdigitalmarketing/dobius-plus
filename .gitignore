@@ -9,6 +9,22 @@ ios/App/build/
 ios/DerivedData/
 ios/App/Pods/
 ios/.sourcemaps
+
+# iOS signing material (never commit, repository-wide)
+*.p12
+*.p8
+AuthKey_*.p8
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.certSigningRequest
+ExportOptions.plist
+exportOptions.plist
+
+# Build output anywhere in the tree (not just under ios/)
+Pods/
+DerivedData/
+/build/
 dist/
 dist-mobile/
 dist-electron/

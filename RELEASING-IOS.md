@@ -63,11 +63,11 @@ In Xcode:
 7. For internal TestFlight (yourself): add your Apple ID as an internal tester. Build is available in ~5 minutes, no review.
 8. Install TestFlight on your iPhone, accept the invite from your email, install Dobius+.
 
-First-time only: Apple will ask for an **Export Compliance** answer. Dobius+ uses HTTPS/WSS to the Mac (over Tailscale, which is itself E2E encrypted), so the compliance answer is: Yes, uses encryption, Exempt (standard HTTPS/TLS only, no custom cryptography).
+**Export compliance:** `Info.plist` already carries `ITSAppUsesNonExemptEncryption=false`, which tells App Store Connect the app uses only exempt encryption (standard HTTPS/TLS/WireGuard, no custom crypto). TestFlight no longer prompts a question per build. If Apple ever asks on the first upload, the answer is: Yes, uses encryption, Exempt.
 
 ## What breaks and how to spot it
 
-- **Blank white screen on launch**: the Mac is unreachable from the phone over Tailscale. Verify Tailscale is on, Mac is awake, Dobius+ is running, `mobile-server.js` is listening on `100.89.143.67:8420`.
+- **Blank white screen on launch**: the Mac was unreachable from the phone over Tailscale when the WebView loaded. The app does NOT auto-recover when the Mac comes back, because `capacitor.config.json` has no `server.errorPath` and so Capacitor never falls back to the bundled PWA. Verify Tailscale is on, Mac is awake, Dobius+ is running, `mobile-server.js` is listening on `100.89.143.67:8420`, then force-quit Dobius+ on the phone and relaunch. The follow-up PR replaces this behavior with an in-app error page + retry.
 - **"Could not reach Dobius+" at pairing**: same cause. The webview did load, but fetch to `/pair` failed. Open Safari developer tools against the device to confirm.
 - **Terminal view renders but keyboard does nothing**: iOS keyboard focus for xterm.js canvas is finicky; falls back to the mobile `Terminal.jsx` path which uses a hidden textarea. If this breaks after an iOS update, start from `mobile/Terminal.jsx` and `mobile/XtermView.jsx`.
 - **"ITMS-90717: Invalid App Store Icon"**: alpha channel snuck back into `AppIcon-512@2x.png`. Reflatten:
@@ -82,7 +82,7 @@ First-time only: Apple will ask for an **Export Compliance** answer. Dobius+ use
 - `ios/App/App/Info.plist` - ATS exceptions for the Tailscale IP; local network usage description.
 - `ios/App/App/Assets.xcassets/AppIcon.appiconset/` - 1024x1024 icon (alpha stripped) + Contents.json.
 - `ios/App/App.xcodeproj/project.pbxproj` - bundle id, versions, team. Edit through Xcode, not by hand.
-- `dist-mobile/` - the bundled PWA Capacitor copies into the native app as a fallback (only reached if the Tailscale URL is unreachable at launch).
+- `dist-mobile/` - the mobile PWA bundle. Capacitor copies it into `ios/App/App/public/` on every `cap sync`. With `server.url` set this bundle is NOT loaded at runtime (not a fallback). It only becomes active once the follow-up PR removes `server.url` and switches to `capacitor://localhost`.
 
 ## Follow-up PR (public App Store, deferred from today's push)
 

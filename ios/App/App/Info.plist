@@ -47,10 +47,6 @@
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
-	<key>UIRequiredDeviceCapabilities</key>
-	<array>
-		<string>armv7</string>
-	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -83,10 +79,14 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Dobius+ connects to your own Mac over Tailscale so your phone can reach your terminals and Claude Code sessions.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_tailscale._tcp</string>
-	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Dobius+ uses the camera only when you tap the attach button in a chat and choose Take Photo or Video.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Dobius+ uses the microphone only when you record a video attachment with the camera from a chat.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Dobius+ accesses your photo library only when you attach an image or video to a chat.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
