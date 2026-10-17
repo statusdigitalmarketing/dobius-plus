@@ -82,7 +82,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Dobius+ uses the camera only when you tap the attach button in a chat and choose Take Photo or Video.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Dobius+ uses the microphone only when you record a video attachment with the camera from a chat.</string>
+	<string>Dobius+ uses the microphone when you speak to Claude with the voice button in a chat, and when you record a video attachment with the camera.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Dobius+ accesses your photo library only when you attach an image or video to a chat.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
