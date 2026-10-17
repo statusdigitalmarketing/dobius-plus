@@ -94,3 +94,21 @@ To get past Apple review for the public App Store:
 4. Make `./pair` fetch use the stored host as an absolute URL.
 5. On the Mac side, generate a QR code of `dobiusplus://pair?host=100.x.x.x:8420&code=123456` so the phone can set host + code in one scan.
 6. Submit with a demo mode or demo credentials so Apple's reviewer can exercise the app without being on Sam's Tailnet.
+7. Replace `server.errorPath`-less blank-screen behavior with a bundled `error.html` offering a Retry button, wired into `capacitor.config.json` as `server.errorPath`.
+8. Move the pairing token from `localStorage` (origin-scoped to the HTTP host) into the iOS Keychain via a native Capacitor plugin.
+
+## Also deferred: cosmetic Xcode rename `App` -> `DobiusPlus`
+
+The Capacitor template leaves everything developer-facing named "App": the Xcode project (`ios/App/App.xcodeproj`), the scheme, the target, and the CapApp-SPM Swift package. None of this is user-visible (home screen reads "Dobius+" from `CFBundleDisplayName`; TestFlight and the App Store listing read from App Store Connect), but the archive files and build logs show "App 1.0.79 (1)" which is sloppy.
+
+Rename plan (do this as the first commit of the follow-up PR, before any mobile code changes, so the rename does not tangle with product changes):
+
+1. Rename `ios/App/` directory to `ios/DobiusPlus/` and the `.xcodeproj` with it, via `xed` or by closing Xcode and doing a filesystem move.
+2. In the renamed `.xcodeproj/project.pbxproj`, rename the scheme "App" -> "DobiusPlus" and the target "App" -> "DobiusPlus".
+3. Rename `ios/App/CapApp-SPM/` to `ios/DobiusPlus/CapAppSPM/` (dash in a Swift package name is awkward; this also fixes that), update `Package.swift` and the `.swift` source file's module declaration.
+4. Update every path in `project.pbxproj` that still references `App/App/...` or `CapApp-SPM`.
+5. Update `capacitor.config.json` and anything in `electron/` that spawns iOS tooling to use the new path.
+6. Run `npm run build:mobile && npx cap sync ios` to re-sync into the renamed tree.
+7. Fresh Archive from the renamed project; archive now reads `DobiusPlus 1.0.80 (1)`.
+
+Risky because paths are strewn through the pbxproj. Must be its own commit, no mixed changes, verified by a round-trip Archive before merge.
