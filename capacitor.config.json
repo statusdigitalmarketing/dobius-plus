@@ -1,0 +1,13 @@
+{
+  "appId": "com.statusdigital.dobiusplus",
+  "appName": "Dobius+",
+  "webDir": "dist-mobile",
+  "server": {
+    "url": "http://100.89.143.67:8420",
+    "cleartext": true
+  },
+  "ios": {
+    "contentInset": "never",
+    "scrollEnabled": true
+  }
+}

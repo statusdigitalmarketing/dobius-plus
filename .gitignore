@@ -1,4 +1,14 @@
 node_modules/
+
+# iOS build artifacts (keep ios/App source, ignore user state and build output)
+ios/App/App/public/
+ios/App/App.xcodeproj/xcuserdata/
+ios/App/App.xcodeproj/project.xcworkspace/xcuserdata/
+ios/App/App.xcworkspace/xcuserdata/
+ios/App/build/
+ios/DerivedData/
+ios/App/Pods/
+ios/.sourcemaps
 dist/
 dist-mobile/
 dist-electron/
