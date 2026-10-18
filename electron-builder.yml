@@ -36,6 +36,11 @@ files:
   - electron/**/*
   - node_modules/node-pty/**/*
   - package.json
+  # scripts/kokoro-tts.py is spawned by voice-playback.js; without it in the
+  # allowlist the packaged app always falls back to `say`, even if the user ran
+  # scripts/install-kokoro-tts.sh. asarUnpack below also lifts it out of asar
+  # so python can read it from disk. (v1.0.80)
+  - scripts/**/*
 # dist-mobile MUST live on disk, not inside app.asar. express.static on an asar
 # path makes Electron copy each file out to a temp file
 # (<T>/.com.statusdigital.dobius-plus.XXXXXX) on first request and cache that
@@ -45,6 +50,9 @@ files:
 # PWA kept working off its service-worker cache (found 2026-09-14, uptime 6d).
 asarUnpack:
   - dist-mobile/**/*
+  # scripts/kokoro-tts.py is spawned by voice-playback.js; python cannot read
+  # from inside app.asar. (v1.0.80)
+  - scripts/**/*
 
 publish:
   provider: github
