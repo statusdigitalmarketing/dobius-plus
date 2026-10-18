@@ -1,362 +1,317 @@
-// Mobile Office page: same visual language as the desktop OfficeView.
-// Consumes the existing WS `terminals` push stream (one message every ~1s
-// or on relevant status change); no new poller. Smooth at 40+ tabs.
-//
-// Read-only: tapping a desk or roster row opens that tab in the chat view,
-// matching the Board's onOpen contract. Never types into a tab.
-//
-// Character art is duplicated from src/components/Dashboard/Office/Character.jsx
-// (not imported) because the mobile build is a separate Vite project rooted at
-// mobile/ (vite.mobile.config.js). Keeping the two in sync is cheap: the
-// palette and pose data are a dozen short constants.
-
-import { useEffect, useMemo, useRef, useState, useCallback, memo } from 'react';
+// Mobile Office: shares the canvas renderer with the desktop Office v2 by
+// importing ../src/components/Dashboard/Office/*. Vite's mobile config allows
+// FS access up to the project root, so the import graph is one bundled copy.
+// Consumes the existing WS `terminals` push stream (no new poller).
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { buildScene, buildRoomStates } from '../src/components/Dashboard/Office/scene.js';
+import { drawScene, hitTest } from '../src/components/Dashboard/Office/renderer.js';
+import { makeCamera, fit, zoomTo, tick, startAutoPan, stopAutoPan } from '../src/components/Dashboard/Office/camera.js';
 
 const PHASE_MS = 420;
-const STATUS_FIELDS = ['working', 'done', 'idle', 'needs'];
+const TICKER_CAP = 12;
 
-const PALETTES = {
-  claude: { H: '#2d1a0e', S: '#e8c9a8', T: '#c56a2e', P: '#5a3a28', Y: '#f0d8bc' },
-  codex:  { H: '#111111', S: '#dcc3a0', T: '#3f6d8e', P: '#1a2d3d', Y: '#edd5b4' },
-  shell:  { H: '#444444', S: '#d9c8ad', T: '#808080', P: '#404040', Y: '#e5d4b4' },
-};
-
-const BODY = [
-  '................', '......HHHH......', '.....HHHHHH.....', '....HSSSSSSH....',
-  '....HSSSSSSH....', '....HSS..SSH....', '....HSSSSSSH....', '....HSSSSSSH....',
-  '.....SSSSSS.....', '....TTTTTTTT....', '....TTTTTTTT....', '....TTTTTTTT....',
-  '....TTTTTTTT....', '....TTTTTTTT....', '....PPPPPPPP....', '....PPPPPPPP....',
-  '................', '................', '................', '................',
-];
-const A_WORK_A = { 10: 'Y..........Y...', 11: '.Y........Y....', 12: '..Y......Y.....' };
-const A_WORK_B = { 10: '..Y........Y..', 11: '...Y......Y...', 12: '....Y....Y.....' };
-const A_IDLE   = { 10: 'Y..........Y...', 11: 'Y..........Y...', 12: 'Y..........Y...' };
-const A_DONE   = { 10: 'Y.............Y', 11: '.Y............Y', 12: '..Y...........Y' };
-const A_NEEDS  = { 10: 'Y..........Y...', 11: 'Y..........Y...', 12: 'Y..........Y...' };
-const SLEEP_Z = ['.ZZZ', '...Z', '..Z.', '.Z..', 'ZZZZ'];
-const COFFEE = ['MMMM.', 'MGGMMH', 'MGGM.H', 'MGGM.H', 'MMMM..'];
-
-function overlay(rows, ov) {
-  if (!ov) return rows;
-  const out = rows.slice();
-  for (const r in ov) {
-    const chars = out[Number(r)].split('');
-    const s = ov[r];
-    for (let i = 0; i < s.length; i += 1) {
-      const c = s[i]; if (c === '-') chars[i] = '.'; else if (c !== '.') chars[i] = c;
-    }
-    out[Number(r)] = chars.join('');
-  }
-  return out;
-}
-
-function Character({ kind, state, phase }) {
-  const pal = PALETTES[kind] || PALETTES.claude;
-  let rows = BODY;
-  if (state === 'working') rows = overlay(rows, phase % 2 === 0 ? A_WORK_A : A_WORK_B);
-  else if (state === 'done') rows = overlay(rows, A_DONE);
-  else if (state === 'needs') rows = overlay(rows, A_NEEDS);
-  else rows = overlay(rows, A_IDLE);
-  const cells = [];
-  rows.forEach((row, y) => {
-    for (let x = 0; x < row.length; x += 1) {
-      const c = row[x];
-      if (c === '.' || !c) continue;
-      cells.push(<rect key={`b${x}-${y}`} x={x} y={y} width={1} height={1} fill={pal[c] || '#f0f'} />);
-    }
-  });
-  if (state === 'done') {
-    COFFEE.forEach((row, y) => {
-      for (let x = 0; x < row.length; x += 1) {
-        const c = row[x]; if (c === '.' || !c) continue;
-        const f = c === 'M' ? '#8a6a4c' : c === 'G' ? '#5a3a28' : c === 'H' ? '#8a6a4c' : '#333';
-        cells.push(<rect key={`c${x}-${y}`} x={x + 1} y={y + 10} width={1} height={1} fill={f} />);
-      }
-    });
-  }
-  if (state === 'idle') {
-    SLEEP_Z.forEach((row, y) => {
-      for (let x = 0; x < row.length; x += 1) if (row[x] === 'Z')
-        cells.push(<rect key={`z${x}-${y}`} x={x + 11} y={y} width={1} height={1} fill="#9db4c7" />);
-    });
-  }
-  return (
-    <svg viewBox="0 0 16 20" shapeRendering="crispEdges" width="100%" height="100%" preserveAspectRatio="xMidYMid meet">
-      {cells}
-    </svg>
-  );
-}
-
-// Same allowlist sanitization as the desktop (safeRecordingLabel in Desk.jsx):
-// drop any token containing a filesystem/code sigil, keep 3 tokens, cap 24
-// chars. Codex r1 P1-1 r2.
 const UNSAFE_TOKEN_RE = /[./~\\_`<>]/;
-function safeRecordingLabel(raw) {
+function safeLabel(raw) {
   if (!raw) return 'tab';
-  const words = String(raw)
-    .split(/\s+/)
-    .map((w) => w.trim())
+  const words = String(raw).split(/\s+/).map((w) => w.trim())
     .filter((w) => w && !UNSAFE_TOKEN_RE.test(w) && !/\d{2,}/.test(w))
     .slice(0, 3);
-  const compact = words.join(' ').slice(0, 24).trim();
-  return compact || 'working';
+  return (words.join(' ').slice(0, 24).trim()) || 'tab';
 }
 
-function Desk({ term, phase, onClick, recording }) {
-  const state = term.status || 'idle';
-  const rawLabel = term.label || 'tab';
-  const label = recording ? safeRecordingLabel(rawLabel) : rawLabel;
-  const verb = state === 'working' ? term.verb : '';
-  // Infer kind on the phone from the same heuristics as desktop: label hint
-  // and the model field exposed in the WS payload (shortModel yields 'opus',
-  // 'sonnet', 'haiku' for Claude; empty for shells). An explicit codex label
-  // wins.
-  const labelLower = (rawLabel || '').toLowerCase();
-  const kind = /codex/.test(labelLower) ? 'codex' : term.claudeLive === false && !term.model ? 'shell' : 'claude';
-  // The parent (Office below) passes phase=0 for non-working desks, which is
-  // what lets the memo comparator short-circuit on each animation tick.
-  const effectivePhase = phase;
-  const scale = recording ? 1.4 : 1;
-  const w = 88 * scale;
-  const h = 110 * scale;
-  // Desk + monitor drawn as pure HTML pixels so the whole scene is one visual.
-  const glow = state === 'working' ? '#4ec9b0' : state === 'done' ? '#2a4a3a' : '#1b2229';
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={`Open ${label} (${state})`}
-      style={{
-        position: 'relative', width: w, height: h + 24, background: 'transparent',
-        border: 'none', padding: 0, cursor: 'pointer', display: 'flex',
-        flexDirection: 'column', alignItems: 'center', gap: 4,
-      }}
-    >
-      <div style={{ position: 'relative', width: w, height: h }}>
-        <svg viewBox="0 0 16 20" shapeRendering="crispEdges" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" style={{ position: 'absolute', inset: 0 }}>
-          <rect x="0" y="14" width="16" height="1" fill="#8b6c4f" />
-          <rect x="0" y="15" width="16" height="1" fill="#5a4530" />
-          <rect x="11" y="7" width="5" height="6" fill="#1a1a1a" />
-          <rect x="12" y="8" width="3" height="4" fill={glow} />
-          <rect x="12" y="13" width="3" height="1" fill="#1a1a1a" />
-          <rect x="4" y="13" width="8" height="1" fill="#333" />
-        </svg>
-        <div style={{ position: 'absolute', inset: 0 }}>
-          <Character kind={kind} state={state} phase={effectivePhase} />
-        </div>
-        {verb && (
-          <div style={{
-            position: 'absolute', top: -6, left: '50%', transform: 'translateX(-50%)',
-            background: 'rgba(255,255,255,0.95)', color: '#111', fontSize: 10, fontWeight: 500,
-            padding: '2px 6px', borderRadius: 8, whiteSpace: 'nowrap', maxWidth: 140,
-            overflow: 'hidden', textOverflow: 'ellipsis', pointerEvents: 'none',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
-          }}>{verb}</div>
-        )}
-        {state === 'needs' && (
-          <div className="office-needs-bubble" style={{
-            position: 'absolute', top: -10, right: -6, width: 22, height: 22, borderRadius: '50%',
-            background: '#e23b3b', color: '#fff', fontSize: 16, fontWeight: 700, display: 'flex',
-            alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 2px 6px rgba(226,59,59,0.6)', pointerEvents: 'none',
-          }}>!</div>
-        )}
-      </div>
-      <div style={{
-        fontSize: recording ? 13 : 11, color: '#e8e8ea', maxWidth: w,
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        textAlign: 'center', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-      }} title={recording ? undefined : rawLabel}>{label}</div>
-    </button>
-  );
-}
-const MemoDesk = memo(Desk, (a, b) => (
-  a.term.id === b.term.id
-  && a.term.status === b.term.status
-  && a.term.verb === b.term.verb
-  && a.term.label === b.term.label
-  && a.term.model === b.term.model
-  && a.phase === b.phase
-  && a.recording === b.recording
-));
-
-const CHIP = {
-  working: { bg: '#3b2f12', fg: '#e4b43a', text: 'WORK' },
-  done:    { bg: '#13311f', fg: '#37c871', text: 'DONE' },
-  idle:    { bg: '#1f1f22', fg: '#8a8a93', text: 'IDLE' },
-  needs:   { bg: '#3b1414', fg: '#ff8a8a', text: 'NEEDS' },
-};
-
-function elapsed(fromMs) {
-  if (!fromMs) return '';
-  const s = Math.max(0, Math.floor((Date.now() - fromMs) / 1000));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  return `${Math.floor(s / 3600)}h`;
+function kindOf(term) {
+  const label = (term.label || '').toLowerCase();
+  if (/codex/.test(label)) return 'codex';
+  if (term.claudeLive === false && !term.model) return 'shell';
+  return 'claude';
 }
 
 export default function Office({ connection, onBack, onOpen }) {
   const [terminals, setTerminals] = useState([]);
   const [recording, setRecording] = useState(false);
   const [vertical, setVertical] = useState(false);
-  const [phase, setPhase] = useState(0);
-  const stateSinceRef = useRef(new Map());
-  const [tick, setTick] = useState(0);
+  const canvasRef = useRef(null);
+  const overlayRef = useRef(null);
+  const stateRef = useRef({
+    phase: 0, now: Date.now(),
+    statusByTab: {}, verbByTab: {}, kindByTab: {},
+    ticker: [], reduceMotion: false, recording: false,
+  });
+  const cameraRef = useRef(makeCamera());
+  const sceneRef = useRef(null);
+  const viewportRef = useRef({ w: 0, h: 0 });
+  const prevStatusRef = useRef({});
+
+  // Shim: scene builder expects { id, projectPath, projectName, label }. The
+  // WS payload gives us those plus status + verb + model. We split status/verb
+  // out to stateRef and pass the rest to buildScene.
+  const sceneTabs = useMemo(() => terminals.map((t) => ({
+    id: t.id,
+    projectPath: t.projectPath || t.projectName || 'other',
+    projectName: t.projectName,
+    label: t.label || 'tab',
+  })), [terminals]);
+  const tabStatus = useMemo(() => {
+    const out = {};
+    for (const t of terminals) out[t.id] = t.status || 'idle';
+    return out;
+  }, [terminals]);
+  const scene = useMemo(() => buildScene({
+    tabs: sceneTabs, tabStatus, projectName: '',
+  }), [sceneTabs, tabStatus]);
+
+  const didFirstFitRef = useRef(false);
+  useEffect(() => {
+    sceneRef.current = scene;
+    const cam = cameraRef.current;
+    const vp = viewportRef.current;
+    const populated = scene.desks && scene.desks.length > 0;
+    if (vp.w > 0 && populated && !didFirstFitRef.current) {
+      fit(cam, scene.bounds, vp, { padding: 20 });
+      cam.x = cam.tx; cam.y = cam.ty; cam.zoom = cam.tzoom;
+      didFirstFitRef.current = true;
+    }
+    if (cam.panMode === 'pan-lr') {
+      cam.panBounds = scene.bounds;
+      cam.viewportTilesW = vp.w / cam.zoom / 16;
+    }
+  }, [scene]);
+
+  // Status-only refresh of counts + door lights.
+  useEffect(() => {
+    const sc = sceneRef.current;
+    if (!sc) return;
+    sc.roomStates = buildRoomStates(sc.rooms, tabStatus);
+  }, [tabStatus]);
 
   useEffect(() => {
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-    if (reduce) return undefined;
-    const h = setInterval(() => setPhase((n) => (n + 1) & 0xff), PHASE_MS);
-    return () => clearInterval(h);
-  }, []);
+    const kindByTab = {};
+    const statusByTab = {};
+    const verbByTab = {};
+    for (const t of terminals) {
+      kindByTab[t.id] = kindOf(t);
+      statusByTab[t.id] = t.status || 'idle';
+      verbByTab[t.id] = t.verb || '';
+    }
+    const prev = prevStatusRef.current;
+    const now = Date.now();
+    const additions = [];
+    for (const t of terminals) {
+      const was = prev[t.id];
+      const cur = statusByTab[t.id];
+      if (was && was !== cur) {
+        const label = safeLabel(t.label);
+        if (cur === 'done')  additions.push(`${label} finished its turn`);
+        if (cur === 'needs') additions.push(`${label} needs you`);
+      }
+      prev[t.id] = cur;
+    }
+    for (const id of Object.keys(prev)) if (!statusByTab[id]) delete prev[id];
+    const ticker = (stateRef.current.ticker || []).concat(additions).slice(-TICKER_CAP);
+    stateRef.current = { ...stateRef.current, kindByTab, statusByTab, verbByTab, ticker, now };
+  }, [terminals]);
 
-  // Elapsed labels tick at 1 Hz regardless of connection activity.
-  useEffect(() => {
-    const h = setInterval(() => setTick((n) => (n + 1) & 0xffff), 1000);
-    return () => clearInterval(h);
-  }, []);
-
-  // Consume the existing WS push stream. One listener; no new poller.
-  // Also re-request the snapshot on every (re)auth, because the server
-  // suppresses unchanged broadcasts: without this, entering Office during
-  // reconnection while no status moved would show "No tabs yet" until the
-  // next change. Mirrors Board's own authed handling. Codex r1 P2-3.
   useEffect(() => {
     if (!connection?.onMessage) return undefined;
-    const requestSnapshot = () => { try { connection.send?.({ type: 'listTerminals' }); } catch { /* best effort */ } };
+    const req = () => { try { connection.send?.({ type: 'listTerminals' }); } catch { /* best effort */ } };
     const off = connection.onMessage((msg) => {
-      if (msg?.type === 'authed') { requestSnapshot(); return; }
-      if (msg?.type === 'terminals' && Array.isArray(msg.list)) {
-        setTerminals(msg.list);
-        // Update stateSince for each tab on status change.
-        const now = Date.now();
-        const map = stateSinceRef.current;
-        const live = new Set();
-        for (const t of msg.list) {
-          live.add(t.id);
-          const prev = map.get(t.id);
-          if (!prev || prev.status !== t.status) map.set(t.id, { status: t.status, at: now });
-        }
-        for (const id of map.keys()) if (!live.has(id)) map.delete(id);
-      }
+      if (msg?.type === 'authed') { req(); return; }
+      if (msg?.type === 'terminals' && Array.isArray(msg.list)) setTerminals(msg.list);
     });
-    // If already authed at mount (common path when the user navigates in from
-    // Board), request immediately; otherwise the authed handler above fires.
-    if (connection.status === 'authed') requestSnapshot();
+    if (connection.status === 'authed') req();
     return off;
   }, [connection]);
 
-  const rooms = useMemo(() => {
-    const by = new Map();
-    for (const t of terminals) {
-      const key = t.projectPath || t.projectName || 'other';
-      if (!by.has(key)) by.set(key, { projectPath: key, projectName: t.projectName || 'project', tabs: [] });
-      by.get(key).tabs.push(t);
-    }
-    return [...by.values()];
-  }, [terminals]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const stage = canvas.parentElement;
+    if (!stage) return undefined;
+    const update = () => {
+      const r = stage.getBoundingClientRect();
+      const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+      canvas.width = Math.max(1, Math.floor(r.width * dpr));
+      canvas.height = Math.max(1, Math.floor(r.height * dpr));
+      canvas.style.width = `${r.width}px`;
+      canvas.style.height = `${r.height}px`;
+      viewportRef.current = { w: canvas.width, h: canvas.height };
+      cameraRef.current.viewportPx = canvas.width;
+      if (sceneRef.current) {
+        fit(cameraRef.current, sceneRef.current.bounds, viewportRef.current, { padding: 20 * dpr });
+        if ((sceneRef.current.desks?.length || 0) > 0) didFirstFitRef.current = true;
+      }
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(stage);
+    window.addEventListener('resize', update);
+    return () => { ro.disconnect(); window.removeEventListener('resize', update); };
+  }, []);
 
-  const handleOpen = useCallback((id) => { if (onOpen) onOpen(id); }, [onOpen]);
+  // Reduce-motion reactive media query listener.
+  useEffect(() => {
+    const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    if (!mq) return undefined;
+    const update = () => {
+      stateRef.current.reduceMotion = mq.matches;
+      if (mq.matches) stopAutoPan(cameraRef.current);
+    };
+    update();
+    if (mq.addEventListener) mq.addEventListener('change', update);
+    else if (mq.addListener) mq.addListener(update);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener('change', update);
+      else if (mq.removeListener) mq.removeListener(update);
+    };
+  }, []);
+
+  useEffect(() => {
+    let rafId = 0;
+    let lastT = performance.now();
+    const loop = (t) => {
+      const dt = Math.min(0.1, (t - lastT) / 1000);
+      lastT = t;
+      stateRef.current.now = Date.now();
+      if (!stateRef.current.reduceMotion) {
+        stateRef.current.phase += dt * (1000 / PHASE_MS);
+        stateRef.current.phase %= 256;
+      }
+      tick(cameraRef.current, dt);
+      const canvas = canvasRef.current;
+      const sc = sceneRef.current;
+      if (canvas && sc) {
+        const ctx = canvas.getContext('2d');
+        stateRef.current.recording = recording;
+        const stateForFrame = { ...stateRef.current, phase: Math.floor(stateRef.current.phase) };
+        drawScene(ctx, sc, cameraRef.current, stateForFrame);
+      }
+      rafId = requestAnimationFrame(loop);
+    };
+    rafId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafId);
+  }, [recording]);
+
+  const onClick = useCallback((e) => {
+    const canvas = canvasRef.current;
+    const sc = sceneRef.current;
+    if (!canvas || !sc) return;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const px = (e.clientX - rect.left) * dpr;
+    const py = (e.clientY - rect.top) * dpr;
+    const hit = hitTest(sc, cameraRef.current, viewportRef.current, px, py, stateRef.current.statusByTab);
+    if (!hit) { fit(cameraRef.current, sc.bounds, viewportRef.current, { padding: 20 }); return; }
+    if (hit.type === 'char') { onOpen?.(hit.tabId); return; }
+    if (hit.type === 'room') {
+      zoomTo(cameraRef.current, { x: hit.room.x, y: hit.room.y, w: hit.room.w, h: hit.room.h }, viewportRef.current, { padding: 36 });
+    }
+  }, [onOpen]);
+
+  useEffect(() => {
+    const cam = cameraRef.current;
+    if (recording) {
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      if (!reduce && sceneRef.current) startAutoPan(cam, sceneRef.current.bounds, viewportRef.current.w / cam.zoom / 16, viewportRef.current.w);
+    } else {
+      stopAutoPan(cam);
+    }
+  }, [recording]);
+
+  // Focus trap: when recording is on, Tab cycles only through recording
+  // controls inside this view. Mobile keyboard users (hardware kbd on iPad)
+  // could otherwise tab out to hidden chrome. Codex r1 P2-10.
+  useEffect(() => {
+    if (!recording) return undefined;
+    const el = overlayRef.current;
+    const onKey = (e) => { if (e.key === 'Escape') setRecording(false); };
+    window.addEventListener('keydown', onKey);
+    const focusables = () => Array.from(el?.querySelectorAll('button:not([disabled])') || [])
+      .filter((n) => n.offsetParent !== null);
+    const first = focusables()[0];
+    if (first) first.focus();
+    const trap = (e) => {
+      if (e.key !== 'Tab') return;
+      const items = focusables();
+      if (!items.length) return;
+      const idx = items.indexOf(document.activeElement);
+      if (e.shiftKey && idx <= 0) { e.preventDefault(); items[items.length - 1].focus(); }
+      else if (!e.shiftKey && idx === items.length - 1) { e.preventDefault(); items[0].focus(); }
+    };
+    el?.addEventListener('keydown', trap);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      el?.removeEventListener('keydown', trap);
+    };
+  }, [recording]);
 
   return (
-    <div className={`screen office-screen ${recording ? 'rec' : ''}`} style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+    <div
+      ref={overlayRef}
+      style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#07070a', color: '#e8e8ea' }}
+      role={recording ? 'dialog' : undefined}
+      aria-modal={recording ? 'true' : undefined}
+    >
       {!recording && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', borderBottom: '1px solid #26262c' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderBottom: '1px solid #26262c' }}>
           <button type="button" onClick={onBack} style={{ fontSize: 13, background: 'transparent', border: 'none', color: '#8a8a93' }}>Back</button>
           <div style={{ fontSize: 13, color: '#e8e8ea', fontWeight: 500 }}>Office</div>
           <button type="button" onClick={() => setRecording(true)} style={{ fontSize: 12, padding: '4px 10px', background: '#141418', color: '#e8e8ea', border: '1px solid #26262c', borderRadius: 6 }}>Record</button>
         </div>
       )}
       {recording && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: '#0b0b0d' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: '#0b0b0d' }}>
           <button type="button" onClick={() => setVertical((v) => !v)} style={{ fontSize: 12, padding: '4px 10px', background: '#141418', color: '#e8e8ea', border: '1px solid #26262c', borderRadius: 6 }}>{vertical ? '16:9' : '9:16'}</button>
           <button type="button" onClick={() => setRecording(false)} style={{ fontSize: 12, padding: '4px 10px', background: '#141418', color: '#e8e8ea', border: '1px solid #26262c', borderRadius: 6 }}>Exit</button>
         </div>
       )}
-
       <div style={{
-        flex: 1, overflowY: 'auto', padding: '16px', background: '#0b0b0d',
+        flex: 1,
+        position: 'relative',
+        overflow: 'hidden',
         maxWidth: vertical && recording ? 'calc(100vh * 9 / 16)' : '100%',
         margin: vertical && recording ? '0 auto' : 0,
       }}>
-        {rooms.map((room) => {
-          const counts = STATUS_FIELDS.reduce((a, s) => ({ ...a, [s]: room.tabs.filter((t) => t.status === s).length }), {});
-          return (
-            <section key={room.projectPath} style={{ marginBottom: 24 }}>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
-                <h2 style={{ margin: 0, fontSize: 15, color: '#e8e8ea', fontWeight: 500 }}>{room.projectName}</h2>
-                <div style={{ display: 'inline-flex', gap: 8, fontSize: 11, color: '#8a8a93', fontFamily: 'ui-monospace, Menlo, monospace' }}>
-                  <span><span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#e4b43a', marginRight: 4 }} />{counts.working}</span>
-                  <span><span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#37c871', marginRight: 4 }} />{counts.done}</span>
-                  <span><span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#6b6b73', marginRight: 4 }} />{counts.idle}</span>
-                  <span><span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#e23b3b', marginRight: 4 }} />{counts.needs}</span>
-                </div>
-              </div>
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: recording ? 'repeat(auto-fill, minmax(140px, 1fr))' : 'repeat(auto-fill, minmax(100px, 1fr))',
-                gap: recording ? '28px 14px' : '18px 10px',
-                padding: '14px 6px',
-                background: '#141418',
-                border: '1px solid #26262c',
-                borderRadius: 10,
-              }}>
-                {room.tabs.map((t) => (
-                  <MemoDesk
-                    key={t.id}
-                    term={t}
-                    // Narrow memo re-render to working desks only.
-                    phase={t.status === 'working' ? phase : 0}
-                    recording={recording}
-                    onClick={() => handleOpen(t.id)}
-                  />
-                ))}
-              </div>
-            </section>
-          );
-        })}
-
-        {!recording && terminals.length > 0 && (
-          <section style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 11, color: '#8a8a93', margin: '0 4px 8px' }}>Roster</div>
-            {terminals.map((t) => {
-              const chip = CHIP[t.status] || CHIP.idle;
-              const since = stateSinceRef.current.get(t.id)?.at;
-              const key = tick; /* eslint-disable-line no-unused-vars */
-              return (
-                <button
-                  type="button"
-                  key={t.id}
-                  onClick={() => handleOpen(t.id)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 8, padding: '7px 8px',
-                    borderRadius: 6, cursor: 'pointer', width: '100%', background: 'transparent',
-                    border: '1px solid transparent', color: '#e8e8ea', textAlign: 'left',
-                  }}
-                >
-                  <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 10, textTransform: 'uppercase', letterSpacing: '0.03em', fontWeight: 500, background: chip.bg, color: chip.fg }}>{chip.text}</span>
-                  <span style={{ flex: 1, minWidth: 0, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'ui-monospace, Menlo, monospace' }}>{t.label}</span>
-                  <span style={{ fontSize: 10, color: '#8a8a93', fontVariantNumeric: 'tabular-nums' }}>{elapsed(since)}</span>
-                </button>
-              );
-            })}
-          </section>
-        )}
-
-        {terminals.length === 0 && (
-          <div style={{ fontSize: 13, color: '#8a8a93', textAlign: 'center', padding: '40px 20px' }}>No tabs yet.</div>
-        )}
+        <canvas ref={canvasRef} onClick={onClick} style={{ display: 'block', cursor: 'pointer' }} />
       </div>
-
-      <style>{`
-        @media (prefers-reduced-motion: no-preference) {
-          .office-needs-bubble { animation: office-pulse 900ms ease-in-out infinite; }
-        }
-        @keyframes office-pulse {
-          0%,100% { transform: scale(1); box-shadow: 0 2px 6px rgba(226,59,59,0.45); }
-          50% { transform: scale(1.14); box-shadow: 0 2px 14px rgba(226,59,59,0.85); }
-        }
-      `}</style>
+      {/* Keyboard-only terminal list for mobile (hardware keyboard on iPad or
+       * assistive tech). Hidden until focused; surfaces in the toolbar area.
+       * Removed during recording so the focus trap cycles only recording
+       * controls. Codex r2 P2-6. */}
+      {!recording && (
+        <ul aria-label="Tabs (keyboard list)" style={{
+          position: 'absolute', left: 8, top: 48, zIndex: 2,
+          listStyle: 'none', margin: 0, padding: 0,
+          width: 0, height: 0, overflow: 'hidden',
+        }}
+          onFocus={(e) => {
+            const u = e.currentTarget;
+            u.style.width = 'auto'; u.style.height = 'auto'; u.style.overflow = 'visible';
+            u.style.background = '#141418'; u.style.border = '1px solid #4ec9b0';
+            u.style.borderRadius = '6px'; u.style.padding = '6px 8px';
+          }}
+          onBlur={(e) => {
+            const u = e.currentTarget;
+            if (!u.contains(document.activeElement)) {
+              u.style.width = '0'; u.style.height = '0'; u.style.overflow = 'hidden';
+              u.style.background = ''; u.style.border = ''; u.style.padding = '';
+            }
+          }}
+        >
+          {terminals.map((t) => {
+            const st = t.status || 'idle';
+            const aria = `Open ${t.label || 'tab'}, ${st}${st === 'needs' ? ' attention' : ''}`;
+            return (
+              <li key={t.id}>
+                <button type="button" onClick={() => onOpen?.(t.id)} aria-label={aria} style={{
+                  fontSize: 12, padding: '3px 8px', background: 'transparent', color: '#e8e8ea',
+                  border: '1px solid transparent', borderRadius: 4, textAlign: 'left',
+                  fontFamily: 'ui-monospace, Menlo, monospace', cursor: 'pointer',
+                }}>Open {t.label || 'tab'} <span style={{ opacity: 0.6 }}>({st})</span></button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

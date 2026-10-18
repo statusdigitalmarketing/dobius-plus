@@ -1,13 +1,18 @@
-// Ship-test for the DESKTOP OfficeView via the standalone harness in
-// scripts/office-desktop-harness/, served by vite on 5175. Produces:
-//   desktop-1-normal, desktop-2-recording-wide, desktop-3-recording-vertical,
-//   desktop-4-needs-closeup.
+// Ship-test for the DESKTOP Office v2 canvas renderer. Serves the standalone
+// harness in scripts/office-desktop-harness/ via vite on 5175, drives it with
+// playwright, saves screenshots:
+//   desktop-1-floor       full floor with lobby + rooms
+//   desktop-2-recording   recording mode landscape with auto-pan
+//   desktop-3-vertical    9:16 recording layout
+//   desktop-4-room-zoom   one room zoomed in (clicked)
+//   desktop-5-needs       close-up of a needs-state desk + ! bubble + door
+//                         light + red floor glow + wall-board NEED count
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
 
 const URL = process.env.SHIPTEST_URL || 'http://127.0.0.1:5175/';
 const OUT = process.env.SHIPTEST_OUT || '.';
-const shot = (page, name) => page.screenshot({ path: `${OUT}/shiptest-office-${name}.png` });
+const shot = (page, name, clip) => page.screenshot({ path: `${OUT}/shiptest-office-${name}.png`, ...(clip ? { clip } : {}) });
 
 function findExecutable() {
   const envPath = process.env.PLAYWRIGHT_CHROMIUM;
@@ -24,40 +29,65 @@ function findExecutable() {
 
 const exe = findExecutable();
 const browser = await chromium.launch({ headless: true, ...(exe ? { executablePath: exe } : {}) });
-const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+const ctx = await browser.newContext({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 1 });
 const page = await ctx.newPage();
 
 await page.goto(URL, { waitUntil: 'networkidle' });
-await page.waitForTimeout(500);
-await page.waitForSelector('button[aria-label^="Focus "]', { timeout: 10000 });
+await page.waitForSelector('.office-root canvas', { timeout: 10000 });
+// Allow a couple of RAF frames for the first draw.
+await page.waitForTimeout(600);
 
-await shot(page, 'desktop-1-normal');
+await shot(page, 'desktop-1-floor');
 
-// Toggle recording.
+// Click somewhere ON a room (not the lobby) to zoom in. We use the harness's
+// test hook: it hangs the active scene on window.__officeScene for the test.
+// If no hook, click a well-known pixel inside a room.
+await page.evaluate(() => {
+  // Click near the center of what should be the second room's floor at
+  // viewport scale. The harness renders at 1600x1000 with the full floor fit.
+  const canvas = document.querySelector('.office-root canvas');
+  const rect = canvas.getBoundingClientRect();
+  const cx = rect.left + rect.width * 0.55;
+  const cy = rect.top + rect.height * 0.3;
+  canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: cx, clientY: cy }));
+});
+await page.waitForTimeout(900);
+await shot(page, 'desktop-4-room-zoom');
+
+// Reset to full view.
+await page.evaluate(() => {
+  const canvas = document.querySelector('.office-root canvas');
+  const rect = canvas.getBoundingClientRect();
+  // Click OUTSIDE any room (near the top-right corner) to trigger fit.
+  canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: rect.left + rect.width - 20, clientY: rect.top + 20 }));
+});
+await page.click('button:has-text("Fit floor")');
+await page.waitForTimeout(600);
+
+// Recording landscape.
 await page.click('button:has-text("Record mode")');
-await page.waitForTimeout(400);
-await shot(page, 'desktop-2-recording-wide');
+await page.waitForTimeout(500);
+await shot(page, 'desktop-2-recording');
 
 // 9:16.
 await page.click('button:has-text("9:16")');
 await page.waitForTimeout(400);
-await shot(page, 'desktop-3-recording-vertical');
+await shot(page, 'desktop-3-vertical');
 
 // Exit recording.
 await page.click('button:has-text("Exit recording")');
 await page.waitForTimeout(300);
 
-// Needs close-up: scroll to the needs desk (t5).
-const needsBtn = await page.locator('button[aria-label="Focus needs you (needs)"]').first();
-await needsBtn.scrollIntoViewIfNeeded();
-await page.waitForTimeout(300);
-const bb = await needsBtn.boundingBox();
-if (bb) {
-  await page.screenshot({
-    path: `${OUT}/shiptest-office-desktop-4-needs-closeup.png`,
-    clip: { x: Math.max(0, bb.x - 20), y: Math.max(0, bb.y - 30), width: Math.min(400, bb.width + 60), height: Math.min(400, bb.height + 60) },
-  });
-}
+// Needs close-up: scroll into the first office room by clicking it, then crop.
+await page.evaluate(() => {
+  const canvas = document.querySelector('.office-root canvas');
+  const rect = canvas.getBoundingClientRect();
+  const cx = rect.left + rect.width * 0.42;
+  const cy = rect.top + rect.height * 0.35;
+  canvas.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: cx, clientY: cy }));
+});
+await page.waitForTimeout(900);
+await shot(page, 'desktop-5-needs');
 
 console.log('DESKTOP SHIPTEST DONE');
 await browser.close();
