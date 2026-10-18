@@ -84,12 +84,19 @@ function TaskInput() {
       const availableAgents = agents.filter((a) => selectedAgents.has(a.id));
       const agentList = availableAgents.map((a) => `- ${a.name}: ${a.description}`).join('\n');
 
-      const systemPrompt = `You are a task decomposition assistant. Given a user's task description and a list of available specialist agents, break the task into 2-5 independent sub-tasks. Each sub-task should be assignable to one specialist agent.
+      const systemPrompt = `You are the planner for Dobius+, a multi-agent orchestrator for Claude Code. Given a user's task and a list of specialist agents, output a JSON plan that splits the task into 2 to 5 subtasks that CAN run in parallel.
+
+Rules:
+1. Each subtask names exactly one specialist agent from the list below. Match by capability, not by alphabetical order or availability.
+2. Subtasks must be TRULY independent: if subtask B needs the output of subtask A, DO NOT split them, combine or chain them under one agent instead. The orchestrator runs all subtasks in parallel at the same time, so an ordering dependency makes the plan wrong.
+3. Each description is a complete instruction the specialist can act on without reading the others. Name files, functions, repos, URLs. Avoid "the above", "the user's task", or "see the parent description".
+4. If the user's task is small enough for one agent, return a single-subtask plan rather than inventing filler subtasks.
+5. Each description is at most 2000 characters. Each title is at most 200 characters.
 
 Available agents:
 ${agentList}
 
-Respond with ONLY valid JSON (no markdown, no explanation):
+Respond with ONLY valid JSON (no markdown, no explanation, no preamble):
 {
   "subtasks": [
     { "title": "...", "description": "...", "agentName": "..." }

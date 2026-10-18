@@ -990,9 +990,14 @@ function setupOrchestrationHandlers() {
 
     return new Promise((resolve, reject) => {
       const claudePath = resolveActiveCliPath();
+      // Opus for decomposition. Haiku was too shallow at matching subtasks to
+      // the right specialist agent and produced flat 1-sentence descriptions
+      // the launched agent couldn't act on. Opus takes ~5-15s to decompose
+      // vs. ~2-5s for Haiku, worth it for a planning step that gates N tabs
+      // of work. v1.0.80 Phase 3.
       const proc = spawn(claudePath, [
         '-p', userPrompt,
-        '--model', 'claude-haiku-4-5-20251001',
+        '--model', 'claude-opus-4-8',
         '--system-prompt-file', sysPath,
       ], {
         env: { ...process.env, ...activeClaudeAccountEnv(), PATH: (process.env.PATH || '') + ':/usr/local/bin:/opt/homebrew/bin' },
@@ -1019,7 +1024,7 @@ function setupOrchestrationHandlers() {
         resolve(out.trim() + (truncated ? '\n\n[output truncated at 512KB]' : ''));
       });
       proc.on('error', (e) => { try { fs.unlinkSync(sysPath); } catch { /* temp file already gone */ } reject(e); });
-      setTimeout(() => { proc.kill(); reject(new Error('Decomposition timed out after 60s')); }, 60000);
+      setTimeout(() => { proc.kill(); reject(new Error('Decomposition timed out after 120s')); }, 120000);
     });
   });
 
