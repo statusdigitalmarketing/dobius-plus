@@ -21,6 +21,10 @@ import Settings from './Settings';
 import BoardView from './Board/BoardView';
 import KanbanView from './Kanban/KanbanView';
 import OrchestratorView from './Orchestrator/OrchestratorView';
+// Lazy: the Office view bundles its own SVG character art and animations and
+// most dashboard sessions do not visit it. Keeping it off the main bundle lets
+// every window boot without paying for pixel art it will not render.
+const OfficeView = lazy(() => import('./Office/OfficeView'));
 import Updates from './Updates';
 import Prompts from './Prompts';
 import Notes from './Notes';
@@ -46,6 +50,7 @@ const TABS = [
   { id: 'board', label: 'Board' },
   { id: 'pipeline', label: 'Pipeline' },
   { id: 'orchestrator', label: 'Orchestrator' },
+  { id: 'office', label: 'Office' },
   { id: 'builds', label: 'Builds' },
   { id: 'git', label: 'Git' },
   { id: 'changes', label: 'Changes' },
@@ -73,6 +78,11 @@ const TAB_CONTENT = {
   board: () => <BoardView />,
   pipeline: () => <KanbanView />,
   orchestrator: () => <OrchestratorView />,
+  office: () => (
+    <Suspense fallback={<div className="p-6 text-xs" style={{ color: 'var(--dim)' }}>Loading office...</div>}>
+      <OfficeView />
+    </Suspense>
+  ),
   plans: (props) => <Plans plans={props.plans} />,
   prompts: () => <Prompts />,
   notes: () => <Notes />,
