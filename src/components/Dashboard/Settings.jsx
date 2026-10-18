@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import { useStore } from '../../store/store';
 import { CURATED_TERMINAL_FONTS, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
@@ -624,6 +625,29 @@ export default function Settings() {
               </div>
             </SettingRow>
 
+            {mobileStatus.pairingCode && (mobileStatus.address || mobileStatus.url) && (
+              <div
+                className="flex items-center gap-3 px-3 py-3 rounded"
+                style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
+              >
+                <div style={{ background: '#fff', padding: 8, borderRadius: 6, lineHeight: 0 }}>
+                  <QRCodeSVG
+                    value={buildPairingDeepLink(mobileStatus)}
+                    size={120}
+                    level="M"
+                    includeMargin={false}
+                  />
+                </div>
+                <div className="text-xs" style={{ color: 'var(--dim)' }}>
+                  <div style={{ color: 'var(--fg)', marginBottom: 4, fontWeight: 500 }}>
+                    Scan with Dobius+ on your phone
+                  </div>
+                  Opens the app and pre-fills the Mac address plus this code so you only
+                  tap &ldquo;Pair this device.&rdquo; The code rotates on regenerate.
+                </div>
+              </div>
+            )}
+
             {mobileDevices.length > 0 && (
               <div>
                 <div className="text-xs mb-1.5" style={{ color: 'var(--dim)', fontSize: 10 }}>
@@ -797,6 +821,31 @@ export default function Settings() {
       </Section>
     </div>
   );
+}
+
+// Build the dobiusplus:// deep link encoded into the QR code shown on the
+// Mac. The mobile app's @capacitor/app URL handler reads `host` and `code`
+// off this and skips the first-run host entry step. Includes the SCHEME in
+// the host param (http:// or https://) so an HTTPS-enabled Mac pairs with
+// its TLS listener, not plaintext.
+function buildPairingDeepLink(mobileStatus) {
+  if (!mobileStatus?.pairingCode) return '';
+  // mobileStatus.url is `https://my-mac.ts.net:8420/` when HTTPS is on, or
+  // `http://100.x.x.x:8420/` when HTTP-only (see mobile-server.js). Strip the
+  // trailing slash and keep everything else so Pairing.jsx's normaliseHost
+  // round-trips scheme-preserved.
+  let origin = '';
+  try {
+    if (mobileStatus.url) {
+      const u = new URL(mobileStatus.url);
+      origin = `${u.protocol}//${u.host}`;
+    } else if (mobileStatus.address) {
+      origin = `http://${mobileStatus.address.host}:${mobileStatus.address.port}`;
+    }
+  } catch { origin = ''; }
+  if (!origin) return '';
+  const params = new URLSearchParams({ host: origin, code: String(mobileStatus.pairingCode) });
+  return `dobiusplus://pair?${params.toString()}`;
 }
 
 function Section({ title, children }) {

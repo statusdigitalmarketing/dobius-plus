@@ -16,8 +16,15 @@ const QUEUEABLE = new Set(['input', 'submitPrompt', 'kill', 'resumeSession', 'cr
  * kills WebSockets while a PWA is backgrounded).
  */
 export class Connection {
-  constructor(token) {
+  constructor(token, origin) {
     this.token = token;
+    // The Mac's origin (scheme + host + port) as stored by Pairing.jsx.
+    // In the TestFlight self-use build this was implicit via location.host
+    // (server.url pointed WKWebView at the Mac). The public App Store build
+    // ships a bundled PWA served from capacitor://localhost, so every WS and
+    // REST call needs the stored origin explicitly. Empty string = browser
+    // dev fallback: use location.host like the pre-App-Store flow.
+    this.origin = origin || '';
     this.ws = null;
     this.listeners = new Set();
     this.statusListeners = new Set();
@@ -65,10 +72,21 @@ export class Connection {
     clearTimeout(this._probeTimer);
     this._probeTimer = null;
     this._setStatus('connecting');
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    // Native build: this.origin is the stored Mac origin (http[s]://host:port);
+    // the WebView origin is capacitor://localhost so location.host would
+    // resolve to that and never reach the Mac. Browser dev build:
+    // this.origin is empty, fall back to location.host like the pre-App-Store
+    // flow. ws:// pairs with http://, wss:// with https://.
+    let url;
+    if (this.origin) {
+      url = this.origin.replace(/^http(s?):\/\//i, (_m, s) => `ws${s}://`).replace(/\/+$/, '') + '/ws';
+    } else {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      url = `${proto}://${location.host}/ws`;
+    }
     let ws;
     try {
-      ws = new WebSocket(`${proto}://${location.host}/ws`);
+      ws = new WebSocket(url);
     } catch {
       this._scheduleReconnect();
       return;

@@ -1,0 +1,14 @@
+{
+  "_comment_security": "PUBLIC APP STORE BUILD. The bundled PWA is served from capacitor://localhost; there is NO server.url. First-run pairing stores the user's own Mac host (Tailscale IP, MagicDNS, or any reachable hostname) in @capacitor/preferences, and every WebSocket + REST call targets that stored host. The remote connection to the user's Mac is HTTP on their Tailnet (cleartext at the socket level, wrapped in WireGuard by Tailscale per RELEASING-IOS.md). ATS exceptions in Info.plist still permit HTTP under *.ts.net, which is the only transport we document today. See RELEASING-IOS.md 'Follow-up PR' and 'App Store submission'.",
+  "appId": "com.statusdigital.dobiusplus",
+  "appName": "Dobius+",
+  "webDir": "dist-mobile",
+  "server": {
+    "cleartext": true,
+    "errorPath": "error.html"
+  },
+  "ios": {
+    "contentInset": "never",
+    "scrollEnabled": true
+  }
+}
