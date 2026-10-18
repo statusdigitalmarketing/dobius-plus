@@ -11,7 +11,7 @@ import Intro from './Intro';
  * capacitor.config.json's server.url; that is removed in this PR so the
  * app can ship to users who are not on Sam's Tailnet.
  */
-export default function Pairing({ initialHost = '', initialCode = '', scanNonce = 0, onPaired }) {
+export default function Pairing({ initialHost = '', initialCode = '', scanNonce = 0, requireConfirm = false, onPaired }) {
   const [step, setStep] = useState(initialHost ? 'code' : 'host');
   const [host, setHost] = useState(initialHost || '');
   const [code, setCode] = useState(initialCode || '');
@@ -147,22 +147,21 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
     if (!initialHost) return;
     const requestKey = `${initialHost}|${initialCode || ''}`;
     const sameAsInflight = inFlightKeyRef.current && inFlightKeyRef.current === requestKey;
-    const willSubmit = !sameAsInflight && !!initialCode && initialCode.length === 6;
+    // A deep-linked host is NEVER auto-submitted: no network-observable
+    // property establishes that it is actually the user's own Mac (CGNAT
+    // ranges are shared with other networks, .ts.net is per-tenant and
+    // reachable publicly through Funnel). Every scan therefore routes to
+    // the 'confirm' step for an explicit user tap, even when the deep
+    // link had no code (user types the code there if they must).
+    const willSubmit = false;
     if (!sameAsInflight) {
       generationRef.current += 1;
-      // Always clear inFlightKeyRef when invalidating via gen bump: the
-      // superseded request is dead whether a replacement submit is coming
-      // or not, and leaving a stale key makes a later rescan of the SAME
-      // (now-dead) payload dedupe against nothing real. The replacement
-      // submit, if any, resets inFlightKeyRef when it starts. busy stays
-      // true across the handoff when a replacement submit is scheduled,
-      // and is cleared here only when nothing is replacing the request.
       inFlightKeyRef.current = '';
-      if (!willSubmit) setBusy(false);
+      setBusy(false);
     }
     setHost(initialHost);
     if (initialCode) setCode(initialCode);
-    setStep('code');
+    setStep(requireConfirm ? 'confirm' : 'code');
     if (willSubmit) {
       // Defer the actual submit so React commits the step change first.
       // submit reads the host arg explicitly so a race on the host state
@@ -177,7 +176,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
       }, 0);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialHost, initialCode, scanNonce, showIntro]);
+  }, [initialHost, initialCode, scanNonce, requireConfirm, showIntro]);
 
   useEffect(() => {
     if (showIntro) return;
@@ -191,7 +190,66 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
     <div className="screen pairing">
       <div className="pairing-card">
         <h1>Dobius+</h1>
-        {step === 'host' ? (
+        {step === 'confirm' ? (
+          <>
+            <p className="muted">Pair with this Mac?</p>
+            <div
+              style={{
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 10,
+                padding: '14px 16px',
+                margin: '12px 0 16px',
+                fontFamily: "'SF Mono', monospace",
+                fontSize: 14,
+                wordBreak: 'break-all',
+                textAlign: 'left',
+              }}
+            >
+              {host || '(no address)'}
+            </div>
+            <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>
+              Only continue if this is YOUR Mac. Scanned addresses are not verified: a .ts.net name
+              can be served publicly through Tailscale Funnel, and CGNAT addresses are shared with
+              other networks.
+            </p>
+            <input
+              ref={codeRef}
+              className="code-input"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={6}
+              autoComplete="one-time-code"
+              placeholder="000000"
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              onKeyDown={(e) => { if (e.key === 'Enter' && code.length === 6 && !busy) submit(code, host); }}
+            />
+            <button
+              className="primary"
+              onClick={() => submit(code, host)}
+              disabled={busy || !host || code.length !== 6}
+            >
+              {busy ? 'Pairing...' : 'Pair this device'}
+            </button>
+            <button
+              className="link-button"
+              onClick={() => {
+                generationRef.current += 1;
+                inFlightKeyRef.current = '';
+                setBusy(false);
+                setStep('host');
+                setCode('');
+                setError('');
+              }}
+              disabled={busy}
+              style={{ marginTop: 12, background: 'none', border: 'none', opacity: 0.7, fontSize: 14 }}
+            >
+              Cancel
+            </button>
+            {error && <p className="error">{error}</p>}
+          </>
+        ) : step === 'host' ? (
           <>
             <p className="muted">Enter your Mac's Tailscale address or hostname. Open Dobius+ on your Mac &rsaquo; Settings &rsaquo; Mobile Access to see it.</p>
             <input

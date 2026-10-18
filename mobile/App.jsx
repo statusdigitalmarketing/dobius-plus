@@ -7,6 +7,30 @@ import { Connection } from './connection';
 import { get, set, remove } from './storage';
 import { HOST_KEY, TOKEN_KEY, normaliseHost, initHost } from './host';
 
+// Deep-link pairing targets MUST be inside the user's own Tailnet. A
+// `dobiusplus://pair?host=...&code=...` from any other host would
+// otherwise auto-pair the app with an attacker-controlled server (the
+// user's "paired" app would then route every chat / voice / fetch
+// through the attacker). Tailscale addresses are the 100.64.0.0/10 CGNAT
+// range (100.64.0.0 to 100.127.255.255), the fd7a:115c:a1e0::/48 ULA
+// range on IPv6, and *.ts.net MagicDNS names (the user's own tailnet
+// suffix is a subdomain of that). Manual host entry in the Pairing UI
+// still accepts anything (an advanced user who knows what they are
+// doing); only the drive-by deep-link path is locked down.
+// Every deep-link pair goes through the Pairing 'confirm' step so the user
+// sees the exact host and taps Pair. Earlier revisions auto-submitted when
+// the host was in a "trusted" range, but that trust was unverifiable from
+// the device:
+//   - .ts.net is shared across all Tailscale tenants
+//   - Tailscale Funnel exposes arbitrary .ts.net names to the public
+//     internet
+//   - CGNAT (100.64.0.0/10) is NOT exclusive to Tailscale: a hostile
+//     Wi-Fi gateway can serve http://100.64.0.1:8420 to a phone that is
+//     off its tailnet (per Tailscale's own CGNAT-conflicts docs)
+// So no network-visible property establishes "this host is YOUR Mac". The
+// only trustworthy signal is a human seeing the host on screen and
+// explicitly confirming.
+
 export default function App() {
   // null = loading from async storage, '' = empty (needs pairing), string = present
   const [token, setToken] = useState(null);
@@ -62,7 +86,8 @@ export default function App() {
             if (u.hostname !== 'pair' && u.pathname.replace(/^\/+/, '').split('/')[0] !== 'pair') return;
             const h = normaliseHost(u.searchParams.get('host') || '');
             const c = (u.searchParams.get('code') || '').replace(/\D/g, '').slice(0, 6);
-            if (h || c) setDeepLink((prev) => ({ host: h, code: c, nonce: prev.nonce + 1 }));
+            if (!h && !c) return;
+            setDeepLink((prev) => ({ host: h, code: c, nonce: prev.nonce + 1 }));
           } catch { /* malformed URL: ignore */ }
         });
         handle = next;
@@ -151,6 +176,9 @@ export default function App() {
         initialHost={deepLink.host || host}
         initialCode={deepLink.code}
         scanNonce={deepLink.nonce}
+        // A nonzero nonce means the host/code came from a deep link, so
+        // the user must confirm the destination before submission.
+        requireConfirm={deepLink.nonce > 0 && !!deepLink.host}
         onPaired={handlePaired}
       />
     );

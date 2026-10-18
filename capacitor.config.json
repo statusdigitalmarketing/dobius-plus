@@ -5,11 +5,7 @@
   "webDir": "dist-mobile",
   "server": {
     "cleartext": true,
-    "errorPath": "error.html",
-    "allowNavigation": [
-      "*.ts.net",
-      "*.tailscale.net"
-    ]
+    "errorPath": "error.html"
   },
   "ios": {
     "contentInset": "never",

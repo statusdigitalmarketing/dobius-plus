@@ -1052,17 +1052,46 @@ async function doStartMobileServer(stillCurrent) {
   // CORS: the public App Store Capacitor build serves the PWA from
   // capacitor://localhost and hits this server cross-origin. Mobile-server is
   // only reachable inside the user's own Tailnet (every byte wrapped in
-  // WireGuard), so a permissive `*` origin is safe here: bearerOk + the
-  // pairing-code flow are the real auth boundary, CORS is only the browser's
-  // same-origin gate. The reflected-origin alternative would need credentials:
-  // true, which we don't use. OPTIONS preflights for /pair, /upload, /voice/*,
-  // and /push/* all pass through this one middleware.
+  // WireGuard) and bearerOk + the pairing-code flow are the real auth
+  // boundary, but we still allowlist a known set of client origins rather
+  // than wildcarding: an allowlist is tighter than `*` and does not weaken
+  // anything we need. Browser-origin same-tab access to the PWA served
+  // from this server is same-origin so does not go through this path.
+  // capacitor://localhost = iOS Capacitor WKWebView default. ionic://localhost
+  // = legacy Capacitor / Ionic scheme. http://localhost = Android Capacitor
+  // default (per-port variants add themselves below via startsWith).
+  // Exact origins we accept wholesale (no port). Protocols are also
+  // constrained so an Origin like "capacitor://localhost@attacker.com"
+  // cannot pass through the port-matcher below.
+  const CORS_ALLOWED_ORIGINS = new Set([
+    'capacitor://localhost',
+    'ionic://localhost',
+    'http://localhost',
+    'https://localhost',
+  ]);
+  const CORS_ALLOWED_PROTOCOLS = new Set(['capacitor:', 'ionic:', 'http:', 'https:']);
+  const isAllowedOrigin = (o) => {
+    if (!o) return false;
+    if (CORS_ALLOWED_ORIGINS.has(o)) return true;
+    let u;
+    try { u = new URL(o); } catch { return false; }
+    // Match hostname EXACTLY (so "localhost.attacker.com" is rejected) and
+    // require a known protocol. The port is allowed to vary: Android
+    // Capacitor and dev loaders use http://localhost:PORT.
+    return u.hostname === 'localhost' && CORS_ALLOWED_PROTOCOLS.has(u.protocol);
+  };
   expApp.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.setHeader('Access-Control-Max-Age', '600');
-    if (req.method === 'OPTIONS') return res.status(204).end();
+    const origin = req.headers.origin;
+    if (isAllowedOrigin(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader('Access-Control-Max-Age', '600');
+    }
+    if (req.method === 'OPTIONS') {
+      return res.status(isAllowedOrigin(origin) ? 204 : 403).end();
+    }
     return next();
   });
 
