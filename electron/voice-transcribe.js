@@ -82,11 +82,15 @@ const RETIRE_KILL_MS = 2000;
 // otherwise mark the port ready and route uploads at an unrelated service.
 // Whisper's httplib backend sends `Server: whisper.cpp` on every response; that
 // header is the reliable identity signal, independent of status code or body.
-function probeOnce(port) {
+// The probePath is the random per-start secret prefix also used by requests
+// (security review MEDIUM-1): it means an unprivileged local process cannot
+// just POST to /inference blind, raising the bar from unauthenticated to
+// "guess a 128-bit path first".
+function probeOnce(port, probePath) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => { if (settled) return; settled = true; try { req.destroy(); } catch { /* noop */ } resolve(v); };
-    const req = http.request({ host: SERVER_HOST, port, path: '/inference', method: 'GET', timeout: 800 }, (res) => {
+    const req = http.request({ host: SERVER_HOST, port, path: probePath, method: 'GET', timeout: 800 }, (res) => {
       res.resume(); // drain the small body so the socket can close
       const server = String(res.headers.server || '').toLowerCase();
       done(server.includes('whisper') ? 'ok' : 'other-http');
@@ -97,7 +101,7 @@ function probeOnce(port) {
   });
 }
 
-async function waitForReady(child, port, deadline) {
+async function waitForReady(child, port, probePath, deadline) {
   // Loop until one of: (a) a probe says this is our whisper-server, (b) the
   // child exits (someone else owns the port, model missing, bad args), (c) the
   // overall deadline passes. The single-shot probe above drops its own socket
@@ -105,7 +109,7 @@ async function waitForReady(child, port, deadline) {
   // double-fire) cannot happen.
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) return 'child-exited';
-    const r = await probeOnce(port);
+    const r = await probeOnce(port, probePath);
     if (r === 'ok') return 'ok';
     if (r === 'other-http') return 'other-http'; // definitive, don't keep polling
     // 'refused' or 'timeout': keep waiting
@@ -164,15 +168,17 @@ function retireChild(child) {
   child.once('exit', () => { retiring.delete(child); clearTimeout(t); });
 }
 
-async function tryStartServer(bin, model, port, tmpDir) {
+async function tryStartServer(bin, model, port, tmpDir, requestPath) {
   // --convert tells whisper-server to run ffmpeg itself on non-WAV uploads, so
   // we can POST the phone's raw webm/opus blob unchanged. --flash-attn is the
   // default on recent builds but keep it explicit. --tmp-dir points at a
   // dedicated per-session directory under os.tmpdir() so the server's
   // conversion leftovers are bounded to our own dir and cleaned on shutdown
   // (Codex r2 P2-3). cwd is the same dir so a relative "." in server code also
-  // writes there.
-  const args = ['--model', model, '--host', SERVER_HOST, '--port', String(port), '--convert', '--flash-attn', '--tmp-dir', tmpDir];
+  // writes there. --request-path adds a per-start random path prefix that
+  // only this process knows (security review MEDIUM-1), so a local
+  // unprivileged process cannot blindly POST to /inference.
+  const args = ['--model', model, '--host', SERVER_HOST, '--port', String(port), '--request-path', requestPath, '--convert', '--flash-attn', '--tmp-dir', tmpDir];
   const ffmpegBin = firstExecutable(FFMPEG_CANDIDATES);
   const extraPath = ffmpegBin ? [path.dirname(ffmpegBin)] : ['/opt/homebrew/bin', '/usr/local/bin'];
   const env = { ...process.env, PATH: [...extraPath, process.env.PATH || ''].filter(Boolean).join(':') };
@@ -191,7 +197,8 @@ async function tryStartServer(bin, model, port, tmpDir) {
   child.stderr.on('data', (b) => { tail = (tail + b.toString('utf8')).slice(-4096); });
   child.on('error', () => { /* readiness outcome handles it */ });
 
-  const outcome = await waitForReady(child, port, Date.now() + READY_TIMEOUT_MS);
+  const probePath = `${requestPath}/inference`;
+  const outcome = await waitForReady(child, port, probePath, Date.now() + READY_TIMEOUT_MS);
   if (startingChild === child) startingChild = null;
   // Post-await exit check (Codex r2 P1-1 race).
   if (outcome === 'ok' && (exitEver || child.exitCode !== null || child.signalCode !== null)) {
@@ -199,18 +206,22 @@ async function tryStartServer(bin, model, port, tmpDir) {
     console.warn(`[voice-transcribe] whisper-server :${port} probe-ok but child exited: ignoring to avoid hijack. tail=${tail.split('\n').slice(-3).join(' | ')}`);
     return { child: null, outcome: 'child-exited' };
   }
-  // Ownership check (Codex r3 P1-1 race): a competitor could have bound the
-  // port between our tryBind close and whisper's own bind. Confirm the port's
-  // actual LISTEN pid is this child, else retire and move on.
+  // Ownership check (Codex r3 P1-1 race, security review MEDIUM-2): a
+  // competitor could have bound the port between our tryBind close and
+  // whisper's own bind. Fail CLOSED: if lsof cannot confirm this child owns
+  // the LISTEN socket on this port, retire the child and move on. Trusting
+  // the header probe alone would let a forged `Server: whisper.cpp` response
+  // hijack the ownership verdict. On macOS lsof is a system tool at
+  // /usr/sbin/lsof; the only time this fails is a hardened sandbox denying
+  // the subprocess, in which case CLI fallback is the safe answer.
   if (outcome === 'ok') {
     const owners = await listenerPidOnPort(port);
-    if (owners && owners.length && !owners.includes(child.pid)) {
+    if (!owners || owners.length === 0 || !owners.includes(child.pid)) {
       retireChild(child);
-      console.warn(`[voice-transcribe] whisper-server :${port} probe-ok but LISTEN owned by pid(s) ${owners.join(',')} != ${child.pid}; rejecting`);
+      const reason = !owners ? 'lsof failed' : owners.length === 0 ? 'no LISTEN owner reported' : `LISTEN owned by pid(s) ${owners.join(',')} != ${child.pid}`;
+      console.warn(`[voice-transcribe] whisper-server :${port} probe-ok but ${reason}; rejecting`);
       return { child: null, outcome: 'other-http' };
     }
-    // If lsof is unavailable or returned empty, fall through and trust the
-    // header probe. On macOS lsof is a system tool and should always be present.
   }
   if (outcome === 'ok') return { child, outcome };
   retireChild(child);
@@ -229,18 +240,21 @@ async function startServerLocked() {
   const tmpDir = path.join(os.tmpdir(), `dobius-whisper-${process.pid}`);
   try { fsSync.mkdirSync(tmpDir, { recursive: true }); } catch { /* existing is fine */ }
   serverTmpDir = tmpDir;
+  // Per-start random path prefix: 32 hex chars = 128 bits of entropy; no
+  // local process can POST uploads blind without guessing it first.
+  const requestPath = `/dobius-${randomBytes(16).toString('hex')}`;
   for (const port of SERVER_PORT_CANDIDATES) {
     // Skip ports that fail a pre-bind check; this moves the "port in use" race
     // out of band and prevents the probe from accepting a response from an
     // unrelated service while our bind failed (Codex r2 P2-1).
     if (!(await tryBind(port))) continue;
-    const { child, outcome } = await tryStartServer(bin, model, port, tmpDir);
+    const { child, outcome } = await tryStartServer(bin, model, port, tmpDir, requestPath);
     if (myGen !== serverGeneration) {
       try { child?.kill('SIGTERM'); } catch { /* noop */ }
       return null;
     }
     if (child) {
-      const state = { child, port, generation: myGen };
+      const state = { child, port, generation: myGen, requestPath };
       serverState = state;
       child.on('exit', () => {
         if (serverState?.child === child) {
@@ -304,7 +318,7 @@ function buildMultipart(buffer, mimeType) {
   return { body: Buffer.concat(parts), boundary };
 }
 
-function postToServer(port, buffer, mimeType, signal) {
+function postToServer(port, requestPath, buffer, mimeType, signal) {
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve({ error: 'aborted' });
     const { body, boundary } = buildMultipart(buffer, mimeType);
@@ -317,7 +331,7 @@ function postToServer(port, buffer, mimeType, signal) {
     const req = http.request({
       host: SERVER_HOST,
       port,
-      path: '/inference',
+      path: `${requestPath}/inference`,
       method: 'POST',
       headers: {
         'Content-Type': `multipart/form-data; boundary=${boundary}`,
@@ -425,7 +439,7 @@ export async function transcribeAudio(buffer, mimeType, signal) {
 
   const srv = await ensureServer();
   if (srv?.child && !srv.child.killed) {
-    const result = await postToServer(srv.port, buffer, mimeType, signal);
+    const result = await postToServer(srv.port, srv.requestPath, buffer, mimeType, signal);
     if (!result.error) return result;
     // Codex r2 P2-2: a hung whisper-server (child alive, inference wedged) is
     // not self-healing. If we hit ETIMEDOUT or ECONNRESET on it, retire the
