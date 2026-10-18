@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import SpecialKeys from './SpecialKeys';
 import remarkGfm from 'remark-gfm';
+import { absUrl } from './host';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -413,7 +414,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       for (const f of [...files].slice(0, 5)) {
         // Always octet-stream: the server's raw parser accepts everything, and
         // a real JSON mime would otherwise be consumed by express.json (Codex).
-        const res = await fetch(`./upload?name=${encodeURIComponent(f.name || 'upload')}`, {
+        const res = await fetch(`${absUrl('/upload')}?name=${encodeURIComponent(f.name || 'upload')}`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${connection.token}`, 'Content-Type': 'application/octet-stream' },
           body: f,

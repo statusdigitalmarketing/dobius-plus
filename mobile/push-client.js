@@ -1,7 +1,8 @@
 // Web Push subscription flow for the mobile app (v1.0.43 Phase 5b). Needs a
 // secure context (Phase 4 HTTPS) + an installed PWA on iOS. Fetches the VAPID
 // public key, subscribes, and registers the subscription with the Mac.
-const TOKEN_KEY = 'dobius-mobile-token';
+import { absUrl, TOKEN_KEY } from './host';
+import { get as storageGet } from './storage';
 
 function urlB64ToUint8Array(base64) {
   const padding = '='.repeat((4 - (base64.length % 4)) % 4);
@@ -43,10 +44,10 @@ export async function enablePush() {
   if (perm !== 'granted') perm = await Notification.requestPermission();
   if (perm !== 'granted') return { ok: false, error: 'Notification permission denied' };
 
-  const token = localStorage.getItem(TOKEN_KEY) || '';
+  const token = (await storageGet(TOKEN_KEY)) || '';
   try {
     const reg = await navigator.serviceWorker.ready;
-    const vres = await fetch('./push/vapid', { headers: { Authorization: `Bearer ${token}` } });
+    const vres = await fetch(absUrl('/push/vapid'), { headers: { Authorization: `Bearer ${token}` } });
     const vj = await vres.json();
     if (!vj.ok || !vj.publicKey) return { ok: false, error: 'Server has no push key' };
 
@@ -57,7 +58,7 @@ export async function enablePush() {
         applicationServerKey: urlB64ToUint8Array(vj.publicKey),
       });
     }
-    const sres = await fetch('./push/subscribe', {
+    const sres = await fetch(absUrl('/push/subscribe'), {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ subscription: sub.toJSON() }),

@@ -1,11 +1,15 @@
 {
-  "_comment_security": "SELF-USE TESTFLIGHT ONLY. The WebView loads from Sam's Mac over Tailscale MagicDNS (sams-macbook-pro.tail6addbf.ts.net) using HTTP. The HTTP is cleartext at the socket level but Tailscale wraps every byte in WireGuard (ChaCha20-Poly1305), so no observer on Wi-Fi/cell/ISP can read it. The MagicDNS name only resolves inside Sam's Tailnet. This file MUST NOT ship to the public App Store as-is: switch to bundled webDir + wss://<host>.<tailnet>.ts.net with a tailscale-issued cert, and move the pairing token to Keychain via a native plugin. See RELEASING-IOS.md 'Follow-up PR'.",
+  "_comment_security": "PUBLIC APP STORE BUILD. The bundled PWA is served from capacitor://localhost; there is NO server.url. First-run pairing stores the user's own Mac host (Tailscale IP, MagicDNS, or any reachable hostname) in @capacitor/preferences, and every WebSocket + REST call targets that stored host. The remote connection to the user's Mac is HTTP on their Tailnet (cleartext at the socket level, wrapped in WireGuard by Tailscale per RELEASING-IOS.md). ATS exceptions in Info.plist still permit HTTP under *.ts.net, which is the only transport we document today. See RELEASING-IOS.md 'Follow-up PR' and 'App Store submission'.",
   "appId": "com.statusdigital.dobiusplus",
   "appName": "Dobius+",
   "webDir": "dist-mobile",
   "server": {
-    "url": "http://sams-macbook-pro.tail6addbf.ts.net:8420",
-    "cleartext": true
+    "cleartext": true,
+    "errorPath": "error.html",
+    "allowNavigation": [
+      "*.ts.net",
+      "*.tailscale.net"
+    ]
   },
   "ios": {
     "contentInset": "never",

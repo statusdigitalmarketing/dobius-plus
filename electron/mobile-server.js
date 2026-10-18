@@ -1049,6 +1049,23 @@ async function doStartMobileServer(stillCurrent) {
 
   const expApp = express();
 
+  // CORS: the public App Store Capacitor build serves the PWA from
+  // capacitor://localhost and hits this server cross-origin. Mobile-server is
+  // only reachable inside the user's own Tailnet (every byte wrapped in
+  // WireGuard), so a permissive `*` origin is safe here: bearerOk + the
+  // pairing-code flow are the real auth boundary, CORS is only the browser's
+  // same-origin gate. The reflected-origin alternative would need credentials:
+  // true, which we don't use. OPTIONS preflights for /pair, /upload, /voice/*,
+  // and /push/* all pass through this one middleware.
+  expApp.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Max-Age', '600');
+    if (req.method === 'OPTIONS') return res.status(204).end();
+    return next();
+  });
+
   // POST /upload?name=<filename>  (raw file body; Bearer auth). v1.0.53.
   // Registered BEFORE the json middleware: a JSON-typed file (someone attaches
   // a package.json) must reach the raw parser, not get consumed/413'd by

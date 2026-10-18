@@ -86,18 +86,32 @@ In Xcode:
 - `ios/App/App.xcodeproj/project.pbxproj` - bundle id, versions, team. Edit through Xcode, not by hand.
 - `dist-mobile/` - the mobile PWA bundle. Capacitor copies it into `ios/App/App/public/` on every `cap sync`. With `server.url` set this bundle is NOT loaded at runtime (not a fallback). It only becomes active once the follow-up PR removes `server.url` and switches to `capacitor://localhost`.
 
-## Follow-up PR (public App Store, deferred from today's push)
+## Follow-up PR (public App Store, feat/ios-app-store branch)
 
-To get past Apple review for the public App Store:
+Changes landed on `feat/ios-app-store` to pass Apple review:
 
-1. Remove `server.url` from `capacitor.config.json`.
-2. Add a first-run **Mac host entry** step to `mobile/Pairing.jsx` (asks for Tailscale IP or MagicDNS name).
-3. Change `mobile/connection.js` to read the stored host instead of `location.host`.
-4. Make `./pair` fetch use the stored host as an absolute URL.
-5. On the Mac side, generate a QR code of `dobiusplus://pair?host=100.x.x.x:8420&code=123456` so the phone can set host + code in one scan.
-6. Submit with a demo mode or demo credentials so Apple's reviewer can exercise the app without being on Sam's Tailnet.
-7. Replace `server.errorPath`-less blank-screen behavior with a bundled `error.html` offering a Retry button, wired into `capacitor.config.json` as `server.errorPath`.
-8. Move the pairing token from `localStorage` (origin-scoped to the HTTP host) into the iOS Keychain via a native Capacitor plugin.
+1. Removed `server.url` from `capacitor.config.json`. The bundled PWA is served from `capacitor://localhost`.
+2. Added a first-run Mac host entry step in `mobile/Pairing.jsx`. Accepts bare `host:port`, bare host (defaults to :8420), or a full `http(s)://host:port` URL.
+3. Added `mobile/host.js` + `mobile/storage.js`. Stores the Mac origin (scheme + host + port) and pairing token in `@capacitor/preferences` (lands in iOS UserDefaults, scoped per-app).
+4. Rewrote `mobile/connection.js` + every relative fetch in ChatView / VoiceButton / push-client to build absolute URLs against the stored origin. `ws://` or `wss://` is derived from the stored scheme.
+5. Added a QR code to Mac side Settings, Mobile Access section. The QR encodes `dobiusplus://pair?host=http(s)%3A%2F%2FHOST&code=CODE` and the iOS app parses it via `@capacitor/app`'s `appUrlOpen` listener. The scheme is preserved so an HTTPS Mac pairs with its TLS listener, not plaintext.
+6. Added `mobile/Intro.jsx` reachable from the pairing screen's "What is Dobius+?" link, so an Apple reviewer who has no Mac running Dobius+ can see what the app does and how to request a reviewer demo Mac.
+7. Added `mobile/public/error.html` plus `server.errorPath` in `capacitor.config.json` for blank-screen recovery with a Retry button.
+8. Added permissive CORS middleware to `electron/mobile-server.js` so the `capacitor://localhost` WebView origin can reach every endpoint cross-origin.
+9. Added `ios/App/App/PrivacyInfo.xcprivacy` declaring the required-reason API `NSPrivacyAccessedAPICategoryUserDefaults` (reason `CA92.1`) that `@capacitor/preferences` uses. Without this, App Store validation blocks the upload.
+
+### TestFlight build 1 migration
+
+Users upgrading from TestFlight build 1 to the public build will need to re-pair once. The TestFlight build stored its token in `localStorage` under the `http://sams-macbook-pro.tail6addbf.ts.net:8420` origin; the bundled App Store build is served from `capacitor://localhost` and cannot read a different origin's localStorage. Only Sam is a build 1 tester, so this is a one-time cost. The desktop can `Remove` the paired device and regenerate a code, which also prunes the stale token server-side.
+
+### Still deferred
+
+- Pairing token moved from `@capacitor/preferences` (UserDefaults, per-app sandbox) into iOS Keychain via a native plugin. UserDefaults is already a step up from the WebView `localStorage` the TestFlight build used and is good enough for first App Store submission.
+- A fully-interactive demo mode (hard-coded sample Board / Terminal) that works without a Mac at all. The Intro screen covers the current reviewer path.
+
+### Accepted residual
+
+Scanning three different QR codes (A, then B, then A again) in rapid succession, while the first A request is still waiting for a response, can submit A's single-use pairing code twice. The first request succeeds on the server, which rotates the code; the second returns "Invalid pairing code" and the user has to tap Pair this device once more. Not a data-loss or security bug: the token from the first success is just dropped because the client has already moved on to a different pairing payload by the time it arrives. The 10-round Codex review traced this to extreme QR juggling that is improbable in real use. Documented here instead of fixed; a future PR can add a request-coalescing cache keyed by payload if it ever surfaces in the wild.
 
 ## Also deferred: cosmetic Xcode rename `App` -> `DobiusPlus`
 

@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
-
-const TOKEN_KEY = 'dobius-mobile-token';
+import { absUrl } from './host';
+import { get as storageGet } from './storage';
+import { TOKEN_KEY } from './host';
 
 // Hold-to-talk mic. Records a command, uploads it to /voice/audio (the Mac
 // transcribes locally with whisper.cpp + routes to the Conductor), shows what
@@ -70,9 +71,9 @@ export default function VoiceButton() {
     if (!blob.size) { setState('idle'); setLine(''); return; }
     setState('working');
     setLine('Transcribing…');
-    const token = localStorage.getItem(TOKEN_KEY) || '';
+    const token = (await storageGet(TOKEN_KEY)) || '';
     try {
-      const res = await fetch('./voice/audio', {
+      const res = await fetch(absUrl('/voice/audio'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': blob.type },
         body: blob,
@@ -88,7 +89,7 @@ export default function VoiceButton() {
 
   const pollReply = async (requestId, token) => {
     try {
-      const res = await fetch('./voice/reply', {
+      const res = await fetch(absUrl('/voice/reply'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ requestId, timeoutMs: 30000 }),

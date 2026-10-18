@@ -75,9 +75,11 @@
     "url": "git+https://github.com/statusdigitalmarketing/dobius-plus.git"
   },
   "dependencies": {
+    "@capacitor/app": "^8.1.2",
     "@capacitor/cli": "^8.5.3",
     "@capacitor/core": "^8.5.3",
     "@capacitor/ios": "^8.5.3",
+    "@capacitor/preferences": "^8.0.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/addon-web-links": "^0.12.0",
@@ -89,6 +91,7 @@
     "express": "^5.2.1",
     "framer-motion": "^12.34.3",
     "node-pty": "^1.1.0",
+    "qrcode.react": "^4.2.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-markdown": "^10.1.0",

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#1F1E1D" />
+    <title>Dobius+</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; padding: 0; height: 100%; background: #1F1E1D; color: #ECECEB; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; }
+      body { display: flex; align-items: center; justify-content: center; padding: 24px; -webkit-font-smoothing: antialiased; }
+      .card { max-width: 420px; width: 100%; text-align: center; }
+      h1 { font-size: 28px; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.5px; }
+      p { color: #B4B2AE; line-height: 1.5; margin: 0 0 24px; }
+      button { background: #D97757; color: #fff; border: 0; border-radius: 10px; font-size: 17px; font-weight: 600; padding: 14px 28px; width: 100%; -webkit-tap-highlight-color: transparent; cursor: pointer; }
+      button:active { opacity: 0.85; }
+      .muted { color: #76726B; font-size: 13px; margin-top: 20px; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Dobius+ couldn't load</h1>
+      <p>Something went wrong starting the app. Make sure Tailscale is on, your Mac is awake, and Dobius+ is running on it.</p>
+      <button onclick="location.href='index.html'">Try again</button>
+      <p class="muted">If this keeps happening, force-quit and reopen the app.</p>
+    </div>
+  </body>
+</html>
