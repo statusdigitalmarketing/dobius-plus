@@ -24,8 +24,44 @@
   flex: 0 0 auto;
 }
 .office-recording-active .office-toolbar {
-  background: rgba(7, 7, 10, 0.9);
-  border-bottom-color: transparent;
+  display: none;
+}
+
+/* Recording controls hidden by default; a thin strip at the top that
+ * reveals its contents only on hover. Clean frame for screen capture. */
+.office-recording-reveal {
+  position: fixed; top: 0; left: 0; right: 0; height: 6px; z-index: 1001;
+  background: transparent;
+}
+.office-recording-reveal:hover {
+  height: auto;
+  background: rgba(7, 7, 10, 0.92);
+  padding: 6px 10px;
+}
+.office-recording-reveal-inner {
+  /* visibility:hidden instead of display:none keeps the controls in the
+   * keyboard-focus order so a Tab from the canvas reaches them. On hover
+   * they animate visible; focus-within also reveals so a Tab-triggered focus
+   * surfaces its target. */
+  visibility: hidden;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.office-recording-reveal:hover .office-recording-reveal-inner,
+.office-recording-reveal:focus-within .office-recording-reveal-inner {
+  visibility: visible;
+}
+/* After a click the focused button retains focus and :focus-within kept the
+ * toolbar visible. Blur the button on mouseleave so leaving the strip hides
+ * everything again. (JS blurs the active button; this just styles it.) */
+.office-recording-reveal:not(:hover):not(:focus-within) {
+  height: 6px;
+  background: transparent;
+  padding: 0;
+}
+.office-recording-reveal:not(:hover):not(:focus-within) .office-recording-reveal-inner {
+  visibility: hidden;
 }
 
 .office-tool-btn {

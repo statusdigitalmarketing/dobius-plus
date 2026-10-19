@@ -338,14 +338,23 @@ export default function OfficeView() {
             <button type="button" className="office-tool-btn" onClick={() => setRecording(true)}>Record mode</button>
           </>
         )}
-        {recording && (
-          <>
-            <button type="button" className="office-tool-btn" onClick={() => setVertical((v) => !v)}>{vertical ? '16:9' : '9:16'}</button>
-            <span style={{ fontSize: 11, color: '#8a8a93' }}>Auto-pan on, Escape to exit</span>
-            <button type="button" className="office-tool-btn" onClick={() => setRecording(false)}>Exit recording</button>
-          </>
-        )}
       </div>
+      {recording && (
+        // Hidden recording controls: a thin invisible strip at the top that
+        // reveals the controls on hover; otherwise the recording frame is
+        // completely clean. Escape still works even without the strip visible.
+        // Clicking blurs so :focus-within does not keep the strip pinned open.
+        <div
+          className="office-recording-reveal"
+          aria-label="Recording controls"
+          onMouseLeave={() => { if (document.activeElement instanceof HTMLButtonElement) document.activeElement.blur(); }}
+        >
+          <div className="office-recording-reveal-inner">
+            <button type="button" className="office-tool-btn" onClick={(e) => { setVertical((v) => !v); e.currentTarget.blur(); }}>{vertical ? '16:9' : '9:16'}</button>
+            <button type="button" className="office-tool-btn" onClick={(e) => { setRecording(false); e.currentTarget.blur(); }}>Exit (Esc)</button>
+          </div>
+        </div>
+      )}
       <div className={`office-stage ${vertical ? 'vertical' : ''}`}>
         <canvas ref={canvasRef} onClick={onClick} style={{ display: 'block' }} />
       </div>

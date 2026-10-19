@@ -64,18 +64,23 @@ await page.evaluate(() => {
 await page.click('button:has-text("Fit floor")');
 await page.waitForTimeout(600);
 
-// Recording landscape.
+// Recording landscape. The chrome auto-hides; shoot a frame right after
+// entering so Sam sees exactly what a reel capture would look like.
 await page.click('button:has-text("Record mode")');
 await page.waitForTimeout(500);
 await shot(page, 'desktop-2-recording');
 
-// 9:16.
+// 9:16. Reveal the hidden toolbar by hovering the top strip first.
+await page.hover('.office-recording-reveal');
+await page.waitForTimeout(200);
 await page.click('button:has-text("9:16")');
 await page.waitForTimeout(400);
 await shot(page, 'desktop-3-vertical');
 
 // Exit recording.
-await page.click('button:has-text("Exit recording")');
+await page.hover('.office-recording-reveal');
+await page.waitForTimeout(200);
+await page.click('button:has-text("Exit")');
 await page.waitForTimeout(300);
 
 // Needs close-up: scroll into the first office room by clicking it, then crop.

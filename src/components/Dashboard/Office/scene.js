@@ -10,16 +10,20 @@
 const DESK_W = 3;     // tiles wide
 const DESK_H = 2;     // tiles tall (desk + bench behind the chair)
 const CHAIR_OFFSET = 2; // the chair + character sits CHAIR_OFFSET tiles south of the desk's top row
-const DESKS_PER_ROW = 4;
+const DESKS_PER_ROW = 3;
 const DESK_COL_GAP = 1;
 const DESK_ROW_GAP = 2;
 const ROOM_MARGIN = 2;
 const CORRIDOR_H = 3;
-const ROOM_MIN_W = 14;
+const ROOM_MIN_W = 12;
 const ROOM_MIN_H = 10;
-const LOBBY_W = 20;
+const LOBBY_W = 16;
 const LOBBY_H = 10;
-const INTER_ROOM_GAP = 2;
+const INTER_ROOM_GAP = 3;    // horizontal gap used as corridor between rooms
+const INTER_ROW_GAP = 4;     // vertical gap used as corridor between room rows
+
+// Rotate through plain floor tiles so each project has a distinct tint.
+const FLOOR_PALETTE = ['floor-office', 'floor-office-beige', 'floor-office-tan', 'floor-office-pink'];
 
 // Deterministically assign one of the four corners to the coffee machine, the
 // couch, a plant, and a window so neighboring rooms are not visually identical.
@@ -109,7 +113,12 @@ export function buildScene({ tabs, tabStatus, projectName }) {
     groups.get(key).tabs.push(t);
   }
 
-  // Lobby in top-left; project rooms to the right, in insertion order.
+  // Layout: lobby on top-left of row 0, then project rooms in a two-column
+  // grid starting at row 0. Project rows fill horizontally first, then wrap.
+  // Corridor runs along the south edge of each row of rooms AND vertically
+  // down the gap between columns, so every door opens into shared hallway.
+  const projectEntries = [...groups.values()];
+  const ROOMS_PER_ROW = 3;
   const rooms = [];
   const lobby = {
     kind: 'lobby',
@@ -118,34 +127,63 @@ export function buildScene({ tabs, tabStatus, projectName }) {
     projectPath: '__lobby__',
     tabs: [],
     doorAt: { x: Math.floor(LOBBY_W / 2), y: LOBBY_H - 1 },
-    boardAt: { x: 2, y: 1, w: 6, h: 2 },
+    boardAt: { x: 2, y: 1, w: 12, h: 6 },
+    floorTile: 'floor-lobby',
     seed: 0,
   };
   rooms.push(lobby);
 
-  let cursorX = LOBBY_W + INTER_ROOM_GAP;
-  for (const g of groups.values()) {
+  // Row 0 has the lobby + up to (ROOMS_PER_ROW-1) project rooms beside it.
+  // Rows after that are full rows of project rooms. Each row's height is set
+  // by the tallest room in it.
+  const rowSizes = []; // {y, h, rooms[]}
+  let rowY = 0;
+  let rowH = LOBBY_H;
+  let colX = LOBBY_W + INTER_ROOM_GAP;
+  let colsLeft = ROOMS_PER_ROW - 1;
+  let rowRooms = [lobby];
+  for (let i = 0; i < projectEntries.length; i += 1) {
+    const g = projectEntries[i];
     const sz = roomSizeForTabs(g.tabs.length);
     const room = {
       kind: 'office',
-      x: cursorX, y: 0, w: sz.w, h: sz.h,
+      x: colX, y: rowY, w: sz.w, h: sz.h,
       projectName: g.projectName,
       projectPath: g.projectPath,
       tabs: g.tabs,
       doorAt: { x: Math.floor(sz.w / 2), y: sz.h - 1 },
+      floorTile: FLOOR_PALETTE[i % FLOOR_PALETTE.length],
       seed: stringHash(g.projectPath),
     };
     rooms.push(room);
-    cursorX += sz.w + INTER_ROOM_GAP;
+    rowRooms.push(room);
+    colX += sz.w + INTER_ROOM_GAP;
+    if (sz.h > rowH) rowH = sz.h;
+    colsLeft -= 1;
+    if (colsLeft === 0 && i < projectEntries.length - 1) {
+      rowSizes.push({ y: rowY, h: rowH, rooms: rowRooms });
+      rowY += rowH + INTER_ROW_GAP;
+      rowH = 0;
+      colX = 0;
+      colsLeft = ROOMS_PER_ROW;
+      rowRooms = [];
+    }
   }
+  rowSizes.push({ y: rowY, h: rowH, rooms: rowRooms });
 
-  // Corridor runs along the south edge of all rooms.
-  const corridor = {
+  // Corridor segments: one horizontal strip south of every row, spanning the
+  // full width used by any row. The rendered corridor fills these strips
+  // with floor and bounds them with wall tiles.
+  const floorWidth = Math.max(
+    ...rowSizes.map((r) => r.rooms.reduce((acc, room) => Math.max(acc, room.x + room.w), 0)),
+  );
+  const corridorStrips = rowSizes.map((r) => ({
     x: 0,
-    y: Math.max(...rooms.map((r) => r.y + r.h)),
-    w: cursorX,
+    y: r.y + r.h,
+    w: floorWidth,
     h: CORRIDOR_H,
-  };
+  }));
+  const corridor = corridorStrips[corridorStrips.length - 1];
 
   // Per-tab desk+chair+character positions.
   const desks = [];
@@ -160,11 +198,11 @@ export function buildScene({ tabs, tabStatus, projectName }) {
   const bounds = {
     x: 0,
     y: 0,
-    w: cursorX,
-    h: corridor.y + corridor.h,
+    w: floorWidth,
+    h: corridorStrips[corridorStrips.length - 1].y + CORRIDOR_H,
   };
 
-  return { rooms, roomStates, corridor, desks, bounds };
+  return { rooms, roomStates, corridor, corridorStrips, desks, bounds };
 }
 
 export const LAYOUT = { DESK_W, DESK_H, CHAIR_OFFSET, DESKS_PER_ROW, ROOM_MIN_W, ROOM_MIN_H, LOBBY_W, LOBBY_H };

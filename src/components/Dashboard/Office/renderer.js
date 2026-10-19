@@ -27,7 +27,7 @@ function fillTiles(ctx, name, tx, ty, tw, th) {
 
 // Draw the shell of a room: floor across interior, wall tiles around perimeter.
 function drawRoom(ctx, room) {
-  const floor = room.kind === 'lobby' ? 'floor-lobby' : 'floor-office';
+  const floor = room.floorTile || (room.kind === 'lobby' ? 'floor-lobby' : 'floor-office');
   fillTiles(ctx, floor, room.x + 1, room.y + 1, room.w - 2, room.h - 2);
   // Perimeter walls.
   SPRITES.draw(ctx, 'wall-corner-nw', room.x * T, room.y * T);
@@ -154,8 +154,10 @@ function drawDesks(ctx, scene, state) {
   }
 }
 
-// Characters, sorted north-to-south so southern bodies overlay desks of the
-// row below them.
+// Characters. Working/idle characters are SEATED: positioned at the desk row
+// itself so the SPRITE OVERLAPS the desk and the top half (head + shoulders)
+// sticks up above the monitor. Standing characters (done, needs) move to the
+// stand position one tile south of the desk.
 function drawCharacters(ctx, scene, state) {
   const ordered = scene.desks.slice().sort((a, b) => a.charY - b.charY);
   for (const d of ordered) {
@@ -164,19 +166,40 @@ function drawCharacters(ctx, scene, state) {
     let poseName;
     let drawX = d.charX;
     let drawY = d.charY;
+    const seated = status === 'working' || status === 'idle';
     if (status === 'working') poseName = state.phase % 2 === 0 ? `char-${kind}-work-a` : `char-${kind}-work-b`;
-    else if (status === 'done') { poseName = `char-${kind}-stand`; drawX = d.standX - 1; drawY = d.standY; }
-    else if (status === 'needs') { poseName = `char-${kind}-stand`; drawX = d.standX - 1; drawY = d.standY; }
-    else poseName = `char-${kind}-idle`;
+    else if (status === 'idle') poseName = `char-${kind}-idle`;
+    else if (status === 'done')  { poseName = `char-${kind}-stand`; drawX = d.standX - 1; drawY = d.standY; }
+    else                         { poseName = `char-${kind}-stand`; drawX = d.standX - 1; drawY = d.standY; }
+    if (seated) {
+      // Seat position: at the desk row with a small vertical nudge so the
+      // sprite OVERLAPS the desk tile. The desk renders BEFORE the character
+      // but we draw the TOP HALF of the sprite via a sub-rect so the desk
+      // front edge visibly occludes the character's torso + legs.
+      drawX = d.deskX + 1;
+      drawY = d.deskY;
+      // Draw the character as a cropped top half (10px of a 16px sprite) so
+      // only the head and shoulders show above the monitor row.
+      const idx = SPRITES.tileIndex(poseName);
+      if (idx != null) {
+        const col = idx % 27;
+        const row = Math.floor(idx / 27);
+        ctx.drawImage(SPRITES.atlas(), col * T, row * T, T, 10, drawX * T, (drawY - 1) * T, T, 10);
+      }
+      continue; // skip the full-sprite blit below
+    }
     if (status === 'needs') {
+      // Much more obvious red floor glow (large radial, stronger alpha) so
+      // the room reads as alarming at fit-floor zoom.
       ctx.save();
       const cx = drawX * T + T / 2;
       const cy = drawY * T + T;
-      const g = ctx.createRadialGradient(cx, cy, 2, cx, cy, 24);
-      g.addColorStop(0, 'rgba(226,59,59,0.6)');
+      const g = ctx.createRadialGradient(cx, cy, 4, cx, cy, 56);
+      g.addColorStop(0, 'rgba(226,59,59,0.85)');
+      g.addColorStop(0.5, 'rgba(226,59,59,0.35)');
       g.addColorStop(1, 'rgba(226,59,59,0)');
       ctx.fillStyle = g;
-      ctx.fillRect(drawX * T - 12, drawY * T - 2, 32, 28);
+      ctx.fillRect(drawX * T - 48, drawY * T - 20, 112, 80);
       ctx.restore();
     }
     SPRITES.draw(ctx, poseName, drawX * T, drawY * T);
@@ -229,15 +252,26 @@ function drawRoomPlaques(ctx, scene, state) {
     label(ctx, r.projectName.slice(0, 24), px, py, { size: 6, color: '#e8e8ea', bg: '#141418' });
     const color = DOOR_LIGHT_COLORS[rs.light] || DOOR_LIGHT_COLORS.off;
     ctx.save();
+    // Larger door light bulb + a bigger halo so the state reads from across
+    // the floor at fit-floor zoom. Red doors glow and pulse brightly.
     ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.arc(px, py - 6, 3, 0, Math.PI * 2);
+    ctx.arc(px, py - 8, 5, 0, Math.PI * 2);
     ctx.fill();
     if (rs.light === 'red') {
-      const alpha = state.reduceMotion ? 0.4 : 0.3 + 0.3 * Math.sin(state.now / 240);
+      const alpha = state.reduceMotion ? 0.6 : 0.4 + 0.4 * Math.sin(state.now / 240);
       ctx.globalAlpha = alpha;
       ctx.beginPath();
-      ctx.arc(px, py - 6, 6, 0, Math.PI * 2);
+      ctx.arc(px, py - 8, 14, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = Math.max(0.2, alpha * 0.5);
+      ctx.beginPath();
+      ctx.arc(px, py - 8, 20, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (rs.light === 'green') {
+      ctx.globalAlpha = 0.35;
+      ctx.beginPath();
+      ctx.arc(px, py - 8, 9, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.restore();
@@ -247,33 +281,70 @@ function drawRoomPlaques(ctx, scene, state) {
 function drawLobbyBoard(ctx, scene, state) {
   const lobby = scene.rooms[0];
   if (!lobby || lobby.kind !== 'lobby') return;
-  const totals = { working: 0, done: 0, idle: 0, needs: 0 };
-  for (const rs of scene.roomStates) {
-    if (rs.room.kind !== 'office') continue;
-    for (const k of ['working', 'done', 'idle', 'needs']) totals[k] += rs.counts[k];
+  // Blit the wall-board tile across the full area so the board is a real
+  // wall panel, not a tiny patch. Dimensions in tiles from lobby.boardAt.
+  for (let yy = 0; yy < lobby.boardAt.h; yy += 1) {
+    for (let xx = 0; xx < lobby.boardAt.w; xx += 1) {
+      SPRITES.draw(ctx, 'wall-board', (lobby.x + lobby.boardAt.x + xx) * T, (lobby.y + lobby.boardAt.y + yy) * T);
+    }
   }
   const bx = (lobby.x + lobby.boardAt.x) * T;
   const by = (lobby.y + lobby.boardAt.y) * T;
-  const bw = 48; // three 16-px tiles wide
-  const bh = 16;
-  // Dim overlay on the board tiles so the text pops.
+  const bw = lobby.boardAt.w * T;
+  const bh = lobby.boardAt.h * T;
   ctx.save();
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(bx + 1, by + 1, bw - 2, bh - 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.78)';
+  ctx.fillRect(bx + 2, by + 2, bw - 4, bh - 4);
   ctx.restore();
-  label(ctx, 'OFFICE STATUS', bx + bw / 2, by + 1, { size: 4, color: '#4ec9b0' });
-  const slots = [
-    { k: 'working', color: '#e4b43a', label: 'W' },
-    { k: 'done',    color: '#37c871', label: 'D' },
-    { k: 'idle',    color: '#6b6b73', label: 'I' },
-    { k: 'needs',   color: '#e23b3b', label: 'N' },
+  label(ctx, 'FLEET STATUS', bx + bw / 2, by + 4, { size: 7, color: '#4ec9b0' });
+  const projCol = bx + 8;
+  const dataLeft = bx + Math.floor(bw * 0.4);
+  const dataW = bw - (dataLeft - bx) - 8;
+  const headers = [
+    { k: 'working', color: '#e4b43a', label: 'WORK' },
+    { k: 'done',    color: '#37c871', label: 'DONE' },
+    { k: 'idle',    color: '#6b6b73', label: 'IDLE' },
+    { k: 'needs',   color: '#e23b3b', label: 'NEED' },
   ];
-  const colW = bw / 4;
-  for (let i = 0; i < slots.length; i += 1) {
-    const s = slots[i];
-    const cx = bx + i * colW + colW / 2;
-    label(ctx, String(totals[s.k]), cx, by + 6, { size: 6, color: s.color });
-    label(ctx, s.label, cx, by + bh - 5, { size: 3, color: '#8a8a93' });
+  const colW = dataW / headers.length;
+  for (let i = 0; i < headers.length; i += 1) {
+    const s = headers[i];
+    label(ctx, s.label, dataLeft + i * colW + colW / 2, by + 16, { size: 5, color: s.color });
+  }
+  const officeRooms = scene.roomStates.filter((rs) => rs.room.kind === 'office');
+  const rowTop = by + 26;
+  const availH = bh - 26 - 10;
+  const rowH = Math.max(7, Math.floor(availH / Math.max(1, officeRooms.length)));
+  for (let i = 0; i < officeRooms.length; i += 1) {
+    const rs = officeRooms[i];
+    const ry = rowTop + i * rowH;
+    label(ctx, rs.room.projectName.slice(0, 14), projCol, ry, { size: 5, color: '#e8e8ea', align: 'left' });
+    for (let j = 0; j < headers.length; j += 1) {
+      const h = headers[j];
+      const v = rs.counts[h.k];
+      label(ctx, String(v), dataLeft + j * colW + colW / 2, ry, { size: 6, color: v > 0 ? h.color : '#2a2a2f' });
+    }
+  }
+  const events = state.ticker || [];
+  if (events.length > 0) {
+    const full = events.map((e) => `  * ${e}  `).join('   ');
+    const scrollSpeed = state.reduceMotion ? 0 : 24;
+    const tickerTop = by + bh - 9;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(bx + 4, tickerTop - 1, bw - 8, 8);
+    ctx.clip();
+    ctx.fillStyle = '#141418';
+    ctx.fillRect(bx + 4, tickerTop - 1, bw - 8, 8);
+    if (state.reduceMotion) {
+      label(ctx, full, bx + 6, tickerTop, { size: 5, color: '#9feecf', align: 'left' });
+    } else {
+      ctx.font = '5px ui-monospace, SFMono-Regular, Menlo, monospace';
+      const totalW = ctx.measureText(full).width;
+      const off = (state.now / 1000 * scrollSpeed) % Math.max(1, totalW + bw);
+      label(ctx, full, bx + bw - 4 - off, tickerTop, { size: 5, color: '#9feecf', align: 'left' });
+    }
+    ctx.restore();
   }
 }
 
@@ -287,8 +358,11 @@ const STATUS_CHIP = {
 function drawCharacterOverlays(ctx, scene, state) {
   for (const d of scene.desks) {
     const status = state.statusByTab[d.tab.id] || 'idle';
-    const cx = (status === 'working' || status === 'idle') ? d.charX : d.standX - 1;
-    const cy = (status === 'working' || status === 'idle') ? d.charY : d.standY;
+    const seated = status === 'working' || status === 'idle';
+    // Overlay position must match where drawCharacters drew the sprite:
+    // seated = (deskX+1, deskY-1) top half; standing = (standX-1, standY).
+    const cx = seated ? d.deskX + 1 : d.standX - 1;
+    const cy = seated ? d.deskY - 1 : d.standY;
     const headTop = (cy - 1) * T + 8;
     // Always-on status chip + tab label stacked above the character. Reads at
     // a glance across the floor so the viewer can tell what each person is
@@ -310,18 +384,23 @@ function drawCharacterOverlays(ctx, scene, state) {
       ctx.fillText('z', cx * T + 12, headTop - 7 + bob);
       ctx.restore();
     } else if (status === 'needs') {
-      const scale = state.reduceMotion ? 1 : 1 + 0.12 * Math.sin(state.now / 180);
-      const bx = cx * T + 7;
-      const by = headTop - 7;
+      // Much larger pulsing red "!" bubble so it is unmissable at fit-floor
+      // zoom. White stroke around the circle for contrast against the floor.
+      const scale = state.reduceMotion ? 1.5 : 1.3 + 0.25 * Math.sin(state.now / 180);
+      const bx = cx * T + 8;
+      const by = headTop - 10;
       ctx.save();
       ctx.translate(bx, by);
       ctx.scale(scale, scale);
       ctx.fillStyle = '#e23b3b';
       ctx.beginPath();
-      ctx.arc(0, 0, 5, 0, Math.PI * 2);
+      ctx.arc(0, 0, 7, 0, Math.PI * 2);
       ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
       ctx.fillStyle = '#fff';
-      ctx.font = 'bold 7px ui-monospace, Menlo, monospace';
+      ctx.font = 'bold 10px ui-monospace, Menlo, monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('!', 0, 0);
@@ -337,10 +416,19 @@ function drawCharacterOverlays(ctx, scene, state) {
   }
 }
 
+// Draw every corridor strip as a proper hallway: floor tiles + a wall tile
+// along the south edge so the corridor reads as an enclosed space, not an
+// open gray bar. Each room's south door already punctuates the north edge.
 function drawCorridor(ctx, scene) {
-  const c = scene.corridor;
-  if (!c || c.w <= 0 || c.h <= 0) return;
-  fillTiles(ctx, 'floor-corridor', c.x, c.y, c.w, c.h);
+  const strips = scene.corridorStrips || (scene.corridor ? [scene.corridor] : []);
+  for (const c of strips) {
+    if (!c || c.w <= 0 || c.h <= 0) continue;
+    fillTiles(ctx, 'floor-corridor', c.x, c.y, c.w, c.h);
+    // South wall across the full strip width.
+    for (let x = 0; x < c.w; x += 1) {
+      SPRITES.draw(ctx, 'wall-front', (c.x + x) * T, (c.y + c.h) * T);
+    }
+  }
 }
 
 export function drawScene(ctx, scene, camera, state) {
@@ -378,10 +466,14 @@ export function hitTest(scene, camera, viewport, px, py, statusByTab = {}) {
   const tileX = sx / T;
   const tileY = sy / T;
   for (const d of scene.desks) {
-    const standing = statusByTab[d.tab.id] === 'needs' || statusByTab[d.tab.id] === 'done';
-    const cx = standing ? (d.standX - 1) + 0.5 : d.charX + 0.5;
-    const cy = (standing ? d.standY : d.charY) + 0.5;
-    const inSeat = Math.abs(tileX - cx) < 1 && Math.abs(tileY - cy) < 2;
+    const st = statusByTab[d.tab.id];
+    const standing = st === 'needs' || st === 'done';
+    // Seated characters now draw at (deskX+1, deskY-1), standing at
+    // (standX-1, standY). Hit-test both so a click near the character sprite
+    // opens the tab regardless of pose.
+    const cx = standing ? (d.standX - 1) + 0.5 : d.deskX + 1.5;
+    const cy = (standing ? d.standY : d.deskY - 1) + 0.5;
+    const inSeat = Math.abs(tileX - cx) < 2 && Math.abs(tileY - cy) < 2;
     if (inSeat) return { type: 'char', tabId: d.tab.id };
   }
   for (const r of scene.rooms) {

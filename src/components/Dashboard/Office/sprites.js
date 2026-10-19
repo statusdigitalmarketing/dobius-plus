@@ -24,10 +24,15 @@ const ATLAS_COLS = 27;
 // by-one shift because the debug index image used a 17px stride; see the
 // commit log for the regenerate.
 export const TILES = {
-  // --- Floors ---
-  'floor-office':   152,  // orange wooden plank floor (warm office)
-  'floor-corridor': 36,   // gray tile floor
-  'floor-lobby':    90,   // large gray lobby tile
+  // --- Floors. Picked for genuine plain fill with no horizontal border, so a
+  //     repeating pattern reads as open floor, not shelving. Each project
+  //     gets a tint via scene.room.floorTile. ---
+  'floor-office':      28,   // plain green carpet (clean mid-row)
+  'floor-office-beige': 83,  // plain beige carpet (clean mid-row)
+  'floor-office-tan':  127,  // plain tan floor (clean mid-row)
+  'floor-office-pink': 110,  // plain pink/lilac floor (clean mid-row)
+  'floor-corridor':    37,   // plain gray tile for the hallway
+  'floor-lobby':       91,   // plain light gray lobby tile
   // --- Walls: red brick upper, with wood trim lower front ---
   'wall-top':         44,
   'wall-front':       98,
