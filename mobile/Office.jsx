@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { buildScene, buildRoomStates } from '../src/components/Dashboard/Office/scene.js';
 import { drawScene, hitTest } from '../src/components/Dashboard/Office/renderer.js';
 import { makeCamera, fit, zoomTo, tick, startAutoPan, stopAutoPan } from '../src/components/Dashboard/Office/camera.js';
+import { loadAtlas } from '../src/components/Dashboard/Office/sprites.js';
 
 const PHASE_MS = 420;
 const TICKER_CAP = 12;
@@ -41,6 +42,8 @@ export default function Office({ connection, onBack, onOpen }) {
   const sceneRef = useRef(null);
   const viewportRef = useRef({ w: 0, h: 0 });
   const prevStatusRef = useRef({});
+
+  useEffect(() => { loadAtlas().catch((e) => console.warn('[office] atlas load failed:', e)); }, []);
 
   // Shim: scene builder expects { id, projectPath, projectName, label }. The
   // WS payload gives us those plus status + verb + model. We split status/verb

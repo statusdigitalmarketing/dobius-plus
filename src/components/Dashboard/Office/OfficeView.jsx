@@ -9,6 +9,7 @@ import { useStore } from '../../../store/store';
 import { buildScene, buildRoomStates } from './scene.js';
 import { drawScene, hitTest } from './renderer.js';
 import { makeCamera, fit, zoomTo, tick, startAutoPan, stopAutoPan } from './camera.js';
+import { loadAtlas } from './sprites.js';
 import './office.css';
 
 const PHASE_MS = 420;
@@ -67,6 +68,10 @@ export default function OfficeView() {
     if (!window.electronAPI?.agentsList) return;
     window.electronAPI.agentsList().then((list) => setAgents(Array.isArray(list) ? list : []));
   }, []);
+
+  // Preload the Kenney tile atlas before the RAF loop tries to draw.
+  // The renderer gracefully draws a "loading" placeholder until this resolves.
+  useEffect(() => { loadAtlas().catch((e) => console.warn('[office] atlas load failed:', e)); }, []);
 
   const agentIdByTabId = useMemo(() => {
     const map = new Map();
