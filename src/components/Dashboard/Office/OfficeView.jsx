@@ -272,7 +272,21 @@ export default function OfficeView() {
     const cam = cameraRef.current;
     if (recording) {
       const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-      if (!reduce && sceneRef.current) startAutoPan(cam, sceneRef.current.bounds, viewportRef.current.w / cam.zoom / 16, viewportRef.current.w);
+      if (!reduce && sceneRef.current) {
+        // Pan at a readable zoom (one room's height visible at once) rather
+        // than fit-the-whole-floor, which shrank characters to invisible dots.
+        // Pick a zoom that makes a room about 1/3 of the viewport width so
+        // the camera has room to drift and the viewer can still read status
+        // chips + character sprites.
+        const vp = viewportRef.current;
+        const firstRoom = sceneRef.current.rooms.find((r) => r.kind === 'office') || sceneRef.current.rooms[0];
+        if (firstRoom && vp.w > 0) {
+          const targetZoom = Math.min(vp.h / (firstRoom.h * 16 + 64), vp.w / (firstRoom.w * 16 * 1.6));
+          cam.tzoom = Math.max(1.5, targetZoom);
+          cam.zoom = cam.tzoom;
+        }
+        startAutoPan(cam, sceneRef.current.bounds, vp.w / cam.zoom / 16, vp.w);
+      }
     } else {
       stopAutoPan(cam);
     }

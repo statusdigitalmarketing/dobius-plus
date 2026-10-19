@@ -45,7 +45,30 @@ await page.waitForTimeout(500);
 
 // Enter recording mode so chrome is hidden and auto-pan is on.
 await page.click('button:has-text("Record mode")');
-await page.waitForTimeout(DURATION_MS);
+
+// Script state transitions so the recording actually shows action: tabs
+// going from working to done, idle tabs waking up, a tab flipping to needs
+// (red bubble + door light turning red). The harness exposes a tiny setter
+// at window.__officeHarness.setStatus(id, status).
+const timeline = [
+  { at: 1500, id: 'b1', status: 'done' },
+  { at: 2800, id: 'd4', status: 'working' },
+  { at: 4100, id: 'd2', status: 'needs' },
+  { at: 5300, id: 's1', status: 'done' },
+  { at: 6700, id: 'h2', status: 'working' },
+  { at: 8000, id: 'b4', status: 'needs' },
+  { at: 9000, id: 'd5', status: 'working' },
+];
+const started = Date.now();
+for (const step of timeline) {
+  const now = Date.now() - started;
+  const wait = Math.max(0, step.at - now);
+  if (wait) await page.waitForTimeout(wait);
+  await page.evaluate(({ id, status }) => window.__officeHarness?.setStatus(id, status), step);
+}
+// Hold the last state for the remainder of the clip.
+const remaining = DURATION_MS - (Date.now() - started);
+if (remaining > 0) await page.waitForTimeout(remaining);
 
 await ctx.close();
 await browser.close();

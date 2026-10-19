@@ -277,12 +277,28 @@ function drawLobbyBoard(ctx, scene, state) {
   }
 }
 
+const STATUS_CHIP = {
+  working: { bg: '#3b2f12', fg: '#e4b43a', text: 'WORK' },
+  done:    { bg: '#13311f', fg: '#37c871', text: 'DONE' },
+  idle:    { bg: '#1f1f22', fg: '#8a8a93', text: 'IDLE' },
+  needs:   { bg: '#3b1414', fg: '#ff8a8a', text: 'NEEDS YOU' },
+};
+
 function drawCharacterOverlays(ctx, scene, state) {
   for (const d of scene.desks) {
     const status = state.statusByTab[d.tab.id] || 'idle';
     const cx = (status === 'working' || status === 'idle') ? d.charX : d.standX - 1;
     const cy = (status === 'working' || status === 'idle') ? d.charY : d.standY;
     const headTop = (cy - 1) * T + 8;
+    // Always-on status chip + tab label stacked above the character. Reads at
+    // a glance across the floor so the viewer can tell what each person is
+    // doing without hovering.
+    const chip = STATUS_CHIP[status] || STATUS_CHIP.idle;
+    const chipX = cx * T + T / 2;
+    const chipY = (cy - 2) * T + 4;
+    label(ctx, chip.text, chipX, chipY, { size: 4, color: chip.fg, bg: chip.bg });
+    const labelText = String(d.tab.label || '').slice(0, 18);
+    if (labelText) label(ctx, labelText, chipX, chipY + 6, { size: 4, color: '#e8e8ea', bg: '#141418' });
     if (status === 'idle') {
       ctx.save();
       ctx.fillStyle = '#9db4c7';
