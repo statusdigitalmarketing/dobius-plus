@@ -241,3 +241,15 @@
 - **FIX**: Strip at the COMMAND level: keep the group, filter out only commands carrying a Dobius marker, drop the group only if it is left empty. Anything that edits a shared config file must remove exactly what it owns.
 - **CONTEXT**: A destructive path that was tolerable behind an explicit Settings click becomes dangerous the moment it runs automatically. Re-audit every helper an auto-run path calls.
 - **DETECTION**: `grep -n "groups.filter\|isStatusGroup" electron/main.js`; any filter that removes a whole group because one member matches is the anti-pattern.
+
+### UI/UX: 2026-10-20
+- **MISTAKE**: The History hover card's rAF "follow the row" loop called `setHoverAnchor(rect)` in the same frame that a scroll handler had already called `setHoverAnchor(null)`. React had not committed the close and the effect cleanup had not cancelled the rAF yet, so the plain set reopened the card at the new position and it stayed stuck open (`src/components/Project/ConversationCard.jsx`). Found only by the ship-test, not by review.
+- **FIX**: A background loop that only UPDATES an open overlay must use a functional update that keeps a closed state closed: `setHoverAnchor((prev) => (prev ? r : prev))`.
+- **CONTEXT**: Any rAF/interval/observer that writes state an event handler can also clear. Effect cleanup runs after commit, so for one frame both writers are live.
+- **DETECTION**: `grep -n "requestAnimationFrame" -A8 src/components`; a non-functional set inside a rAF loop next to a close path is the pattern.
+
+### Security: 2026-10-20
+- **MISTAKE**: `encodePathLikeClaude('..')` returned `'..'`, so every `path.join(PROJECTS_DIR, enc, id + '.jsonl')` with a renderer-supplied projectPath could escape to `~/.claude` (deleteSession, loadTranscript, lastAssistantMessage, context, hover). All three Codex lenses flagged it on the new hover IPC; it predated that IPC.
+- **FIX**: `safeProjectSegment` in both encoders and in resolveTranscriptPath's stripped form: a dots-only segment gets a `-` prefix and can never name a real dir.
+- **CONTEXT**: Validating the sessionId regex is not containment. The projectPath half of the join needs it too.
+- **DETECTION**: `grep -n "path.join(PROJECTS_DIR, enc" electron/data-service.js`; each enc must come from an encoder that calls safeProjectSegment.

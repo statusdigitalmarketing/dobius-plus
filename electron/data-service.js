@@ -763,7 +763,7 @@ export async function getSessionSize(sessionId, projectPath) {
 // transcripts even when the new encoder doesn't match the directory Claude
 // actually wrote.
 function encodePathLikeClaudeLegacy(p) {
-  return p.replace(/\//g, '-');
+  return safeProjectSegment(p.replace(/\//g, '-'));
 }
 
 // Parse a timestamp value the transcript might store as ISO string OR epoch
@@ -807,9 +807,15 @@ function isSyntheticUserText(text) {
 // Replace any such path with "[image]" so a paste reads as an image, keeping
 // whatever real text the user typed alongside it. v1.0.40 (Sam-reported).
 const CLIPBOARD_IMG_RE = /\S*dobius-clipboard[/\\]clipboard-\d+\.[A-Za-z0-9]+/g;
+// Every caller truncates the result to a few hundred chars, so only the head
+// matters. Capping first keeps CLIPBOARD_IMG_RE's unanchored \S* from
+// backtracking quadratically across a multi-MB prompt on the main thread.
+const PREVIEW_INPUT_MAX = 4000;
 export function sanitizePreviewText(text) {
   if (!text) return text;
-  return text.replace(CLIPBOARD_IMG_RE, '[image]').replace(/\s+/g, ' ').trim();
+  // Collapse whitespace BEFORE the cap (linear, unlike CLIPBOARD_IMG_RE), or
+  // text behind a long run of spaces would be cut away.
+  return text.replace(/\s+/g, ' ').trim().slice(0, PREVIEW_INPUT_MAX).replace(CLIPBOARD_IMG_RE, '[image]').trim();
 }
 
 function tsToEpochMs(v) {
@@ -1200,14 +1206,24 @@ async function resolveTranscriptPath(sessionId, projectPath) {
   const encodings = [
     encodePathLikeClaude(projectPath),
     encodePathLikeClaudeLegacy(projectPath),
-    projectPath.replace(/\//g, '-').replace(/^-/, ''),
+    // '/..' strips to '..' here, so this form needs the guard too.
+    safeProjectSegment(projectPath.replace(/\//g, '-').replace(/^-/, '')),
   ];
   const seen = new Set();
   for (const enc of encodings) {
     if (!enc || seen.has(enc)) continue;
     seen.add(enc);
     const p = path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`);
-    if (await pathExists(p)) return p;
+    if (!(await pathExists(p))) continue;
+    // The encoders keep the join lexically inside, but a symlinked dir or
+    // file would still be followed out of it. Compare REAL paths on both
+    // sides (path.resolve is string math; see NOTES 2026-09-03). No transcript
+    // on this Mac is a symlink (6372 checked), so this hides nothing real.
+    // Regular files only: opening a FIFO blocks a libuv pool thread forever.
+    try {
+      const [real, root] = await Promise.all([fs.realpath(p), fs.realpath(PROJECTS_DIR)]);
+      if (real.startsWith(root + path.sep) && (await fs.stat(real)).isFile()) return real;
+    } catch { /* vanished between exists and realpath */ }
   }
   return null;
 }
@@ -1569,7 +1585,17 @@ export function getActiveProcesses() {
  * Every non-alphanumeric character (except . and -) becomes a dash.
  */
 function encodePathLikeClaude(p) {
-  return p.replace(/[^a-zA-Z0-9.-]/g, '-');
+  return safeProjectSegment(p.replace(/[^a-zA-Z0-9.-]/g, '-'));
+}
+
+// Every encoded dir is joined under PROJECTS_DIR, and several of those joins
+// take a renderer-supplied projectPath (delete, transcript, hover, context).
+// An encoding of '.' or '..' would resolve to projects/ itself or to ~/.claude,
+// so deleteSession(id, '..') could unlink ~/.claude/<id>.jsonl. A real project
+// path is absolute and always encodes with a leading '-', so a dots-only
+// segment never names a real dir: prefix it to keep it inside.
+function safeProjectSegment(enc) {
+  return /^\.*$/.test(enc) ? `-${enc}` : enc;
 }
 
 /**
@@ -2133,7 +2159,10 @@ export function windowForModel(model, observedTokens = 0) {
 }
 
 async function estimateContextFromFile(filePath) {
-  const entries = await parseJsonl(filePath, 200); // chronological (readTail): oldest -> newest
+  return contextFromEntries(await parseJsonl(filePath, 200)); // chronological (readTail): oldest -> newest
+}
+
+function contextFromEntries(entries) {
   let lastInputTokens = 0;
   let lastModel = '';
   // A compact that happened AFTER the newest turn. Between /compact and the
@@ -2151,6 +2180,8 @@ async function estimateContextFromFile(filePath) {
   // pinned at 100% for a tab that was no longer full (Sam-reported). The latest
   // assistant turn's input total IS the current window occupancy.
   for (const entry of entries) {
+    // A JSONL line can parse to null or a number; skip it, not the whole read.
+    if (!entry || typeof entry !== 'object') continue;
     if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
       const post = entry.compactMetadata?.postTokens;
       // Older CLIs wrote boundaries without postTokens (this session's
@@ -2161,10 +2192,13 @@ async function estimateContextFromFile(filePath) {
     }
     const usage = entry.message?.usage;
     if (!usage) continue;
+    // Numbers only: a string count would CONCATENATE here (and ride along
+    // into the hover cache unbounded).
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
     const total =
-      (usage.input_tokens || 0) +
-      (usage.cache_read_input_tokens || 0) +
-      (usage.cache_creation_input_tokens || 0);
+      num(usage.input_tokens) +
+      num(usage.cache_read_input_tokens) +
+      num(usage.cache_creation_input_tokens);
     if (total > 0) {
       lastInputTokens = total; // last assignment wins = newest turn
       pendingCompactTokens = 0; // a real turn after the boundary supersedes it
@@ -2219,6 +2253,130 @@ export async function estimateContextForSession(sessionId, projectPath) {
   }
 }
 
+// History hover card. Keyed by transcript path, reused while the file's stat
+// signature is unchanged, so hovering back and forth over a list costs one
+// tail read each. inode + ctime catch a same-size, same-mtime replacement.
+const hoverInfoCache = new Map(); // filePath -> { sig, info }
+const HOVER_CACHE_MAX = 200;
+const HOVER_SNIPPET_MAX = 280;
+
+// Bounded and DETACHED: a slice of a multi-MB transcript string is a V8
+// SlicedString that keeps the whole parent alive, and these sit in the cache
+// (see .dobius/NOTES.md 2026-09-15). The utf16le copy is lossless.
+function oneLineSnippet(text, max = HOVER_SNIPPET_MAX) {
+  const t = String(text || '').slice(0, max * 4).trim().replace(/\s+/g, ' ');
+  const out = t.length > max ? `${t.slice(0, max)}...` : t;
+  return Buffer.from(out, 'utf16le').toString('utf16le');
+}
+
+/**
+ * What the hover card shows for one Claude session: its AI title, the last
+ * thing you typed, the last thing Claude said, how it ended, branch, model and
+ * context use. Tail-read only (same 200-entry window as the context bar).
+ * Returns null when the transcript cannot be found.
+ */
+// One read per transcript signature at a time: overlapping requests for the
+// same uncached file (a slow read outliving the card's 3s refresh) share it
+// instead of each holding its own parsed tail.
+const hoverInFlight = new Map(); // `${filePath}|${sig}` -> Promise<info|null>
+
+export async function getSessionHoverInfo(sessionId, projectPath) {
+  try {
+    const filePath = await resolveTranscriptPath(sessionId, projectPath);
+    if (!filePath) return null;
+    const st = await fs.stat(filePath);
+    const sig = `${st.size}:${st.mtimeMs}:${st.ino}:${st.ctimeMs}`;
+    const cached = hoverInfoCache.get(filePath);
+    if (cached && cached.sig === sig) return cached.info;
+    const key = `${filePath}|${sig}`;
+    let pending = hoverInFlight.get(key);
+    if (!pending) {
+      pending = readHoverInfo(filePath, st, sig).finally(() => hoverInFlight.delete(key));
+      hoverInFlight.set(key, pending);
+    }
+    return await pending;
+  } catch (err) {
+    console.warn('[data-service] hover info failed:', err.message);
+    return null;
+  }
+}
+
+async function readHoverInfo(filePath, st, sig) {
+  try {
+    // Everything the card shows, from ONE snapshot of the tail.
+    const fieldsFrom = (list) => {
+      const f = { title: '', branch: '', cwd: '', lastPrompt: '' };
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        const e = list[i];
+        if (!e || typeof e !== 'object') continue;
+        if (!f.title && e.type === 'ai-title' && typeof e.aiTitle === 'string') f.title = e.aiTitle;
+        if (!f.branch && typeof e.gitBranch === 'string') f.branch = e.gitBranch;
+        if (!f.cwd && typeof e.cwd === 'string') f.cwd = e.cwd;
+        if (!f.lastPrompt && e.message?.role === 'user' && !contentTypes(e).has('tool_result')) {
+          const text = entryText(e).trim();
+          if (text && !isSyntheticUserText(text) && !INTERRUPT_RE.test(text)) {
+            f.lastPrompt = oneLineSnippet(sanitizePreviewText(text));
+          }
+        }
+        if (f.title && f.branch && f.cwd && f.lastPrompt) break;
+      }
+      f.reply = lastAssistantSnippet(list, HOVER_SNIPPET_MAX);
+      f.context = contextFromEntries(list);
+      f.ending = classifySessionEnding(list);
+      return f;
+    };
+    let entries = await parseJsonl(filePath, 200);
+    let f = fieldsFrom(entries);
+    // A long tool-heavy turn pushes the prompt that started it, or the last
+    // reply and usage, past 200 records (seen live on this Mac). One wider
+    // read, same bound as getLastAssistantMessage, when any of them is
+    // missing. If it sees more, EVERY field comes from it, never a mix of two
+    // snapshots taken at different moments.
+    let cacheable = true;
+    if (!f.lastPrompt || !f.reply || !f.context) {
+      const wide = await parseJsonl(filePath, 1000);
+      // [] here is a read error (the first read just succeeded): answer with
+      // what we have, but do not pin it in the cache.
+      if (wide.length === 0) cacheable = false;
+      else if (wide.length > entries.length) {
+        entries = wide;
+        f = fieldsFrom(wide);
+      }
+    }
+    // parseJsonl returns [] on a read error (EMFILE, EACCES). Caching that
+    // would pin an empty card until the file changes; answer null this once.
+    if (entries.length === 0 && st.size > 0) return null;
+    const info = {
+      title: oneLineSnippet(f.title, 120),
+      lastPrompt: f.lastPrompt,
+      // Replies are markdown; the card is plain text, so drop the bold, code
+      // and heading markers that would otherwise show as literal ** and #.
+      // Not __ : that would turn `__init__.py` into init.py.
+      lastReply: oneLineSnippet(
+        f.reply.replace(/\*\*|`+/g, '').replace(/(^|\s)#{1,6}\s/g, '$1'),
+        HOVER_SNIPPET_MAX + 3,
+      ),
+      ending: f.ending,
+      // 'HEAD' is what Claude records outside a branch (detached or no repo).
+      branch: f.branch && f.branch !== 'HEAD' ? oneLineSnippet(f.branch, 120) : '',
+      cwd: oneLineSnippet(f.cwd, 400),
+      model: oneLineSnippet(f.context?.model, 80),
+      tokens: f.context?.tokens || 0,
+      maxTokens: f.context?.maxTokens || 0,
+      sizeBytes: st.size,
+      lastWriteAt: st.mtimeMs,
+    };
+    if (!cacheable) return info;
+    hoverInfoCache.delete(filePath);
+    hoverInfoCache.set(filePath, { sig, info });
+    if (hoverInfoCache.size > HOVER_CACHE_MAX) hoverInfoCache.delete(hoverInfoCache.keys().next().value);
+    return info;
+  } catch (err) {
+    console.warn('[data-service] hover info failed:', err.message);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Loose ends (v1.0.61): work you started and never came back to.
 //
@@ -2234,7 +2392,10 @@ export async function estimateContextForSession(sessionId, projectPath) {
 // ---------------------------------------------------------------------------
 
 const LOOSE_END_TAIL_BYTES = 64 * 1024; // enough for the closing turns
-const INTERRUPT_RE = /\[Request interrupted by user/i;
+// The WHOLE row: Claude Code writes the marker as the entire text of its own
+// user row, in exactly these two forms. Anything less strict let a reply or
+// prompt that merely quotes it read as an interrupt.
+const INTERRUPT_RE = /^\s*\[Request interrupted by user(?: for tool use)?\]\s*$/i;
 
 /**
  * The last entry that is a real conversational turn, ignoring meta rows AND

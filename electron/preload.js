@@ -144,6 +144,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // v1.0.29 feature: Copy last Claude response from a tab (via TerminalTabBar
   // right-click). Returns the raw content of the most recent assistant turn.
   dataLastAssistantMessage: (sessionId, projectPath) => ipcRenderer.invoke('data:lastAssistantMessage', sessionId, projectPath),
+  dataSessionHoverInfo: (sessionId, projectPath) => ipcRenderer.invoke('data:sessionHoverInfo', sessionId, projectPath),
   onDataUpdated: (callback) => {
     const handler = (_event, changedPath) => callback(changedPath);
     ipcRenderer.on('data:updated', handler);

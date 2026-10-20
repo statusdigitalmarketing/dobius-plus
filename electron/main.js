@@ -42,7 +42,7 @@ import {
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, findLooseEnds,
   loadProjectTokens, searchTranscripts, deleteSession,
-  getLastAssistantMessage, getAllProjectTabs,
+  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo,
 } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
@@ -613,6 +613,12 @@ function setupDataHandlers() {
   ipcMain.handle('data:lastAssistantMessage', (_event, sessionId, projectPath) => {
     if (typeof sessionId !== 'string') return null;
     return getLastAssistantMessage(sessionId, projectPath);
+  });
+  // History hover card. Read-only tail read; resolveTranscriptPath validates
+  // the id and only ever opens <projects>/<encoded>/<id>.jsonl.
+  ipcMain.handle('data:sessionHoverInfo', (_event, sessionId, projectPath) => {
+    if (typeof sessionId !== 'string' || typeof projectPath !== 'string') return null;
+    return getSessionHoverInfo(sessionId, projectPath);
   });
 }
 

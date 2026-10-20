@@ -1,5 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { timeAgo } from '../../lib/time-ago';
+import SessionHoverCard from './SessionHoverCard';
+
+// Long enough that sweeping the pointer down the list does not flash a card
+// per row, short enough to feel like a tooltip.
+const HOVER_DELAY_MS = 450;
 
 /**
  * Sidebar card for one Claude session.
@@ -33,6 +38,54 @@ export default function ConversationCard({
   // Tracks whether the most recent edit ended via Escape so onBlur doesn't
   // commit the stale draft when the input loses focus immediately after.
   const cancelledRef = useRef(false);
+  const [hoverAnchor, setHoverAnchor] = useState(null);
+  const hoverTimerRef = useRef(null);
+  const rowRef = useRef(null);
+  const hoverOpen = !!hoverAnchor;
+
+  const hideHover = useCallback(() => {
+    clearTimeout(hoverTimerRef.current);
+    setHoverAnchor(null);
+  }, []);
+  useEffect(() => () => clearTimeout(hoverTimerRef.current), []);
+  useEffect(() => { if (editing) hideHover(); }, [editing, hideHover]);
+  // While open: close when the app loses focus or the row's own list scrolls
+  // (a scroll elsewhere, like the Changes feed following events, is not ours),
+  // and follow the row if the layout moves it (a Closed Tabs header appearing,
+  // a window resize) without a mouseleave ever firing.
+  useEffect(() => {
+    if (!hoverOpen) return undefined;
+    const onScroll = (e) => {
+      const t = e.target;
+      if (t === document || (t instanceof Node && t.contains(rowRef.current))) hideHover();
+    };
+    let raf = 0;
+    let last = '';
+    const follow = () => {
+      const el = rowRef.current;
+      // Re-checked every frame because the listeners below only exist once
+      // this effect runs: a blur, or a scroll that carried the row off the
+      // pointer, landing before then would otherwise be missed for good.
+      if (!el?.isConnected || !document.hasFocus() || !el.matches(':hover')) { hideHover(); return; }
+      const r = el.getBoundingClientRect();
+      const key = `${r.left}|${r.top}|${r.right}|${r.bottom}|${window.innerWidth}|${window.innerHeight}`;
+      // Runs on the first frame too: the row may have moved between the
+      // delay capturing its rect and this loop starting.
+      // Functional: a hide queued earlier in this frame (scroll, blur) has not
+      // committed yet, and a plain set would reopen the card it just closed.
+      if (key !== last) setHoverAnchor((prev) => (prev ? r : prev));
+      last = key;
+      raf = requestAnimationFrame(follow);
+    };
+    raf = requestAnimationFrame(follow);
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('blur', hideHover);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('blur', hideHover);
+    };
+  }, [hoverOpen, hideHover]);
 
   useEffect(() => {
     if (!editing) setDraft(session.displayName || '');
@@ -108,11 +161,23 @@ export default function ConversationCard({
       onMouseEnter={(e) => {
         if (!selected) e.currentTarget.style.backgroundColor = 'var(--surface-hover)';
         if (!selected) e.currentTarget.style.borderLeftColor = 'var(--border)';
+        if (editing) return;
+        const el = e.currentTarget;
+        rowRef.current = el;
+        clearTimeout(hoverTimerRef.current);
+        hoverTimerRef.current = setTimeout(() => {
+          // Cmd+Tab away, or a scroll that carried the row off the pointer,
+          // during the delay must not pop a card.
+          if (el.isConnected && document.hasFocus() && el.matches(':hover')) setHoverAnchor(el.getBoundingClientRect());
+        }, HOVER_DELAY_MS);
       }}
       onMouseLeave={(e) => {
         if (!selected) e.currentTarget.style.backgroundColor = 'transparent';
         if (!selected) e.currentTarget.style.borderLeftColor = 'transparent';
+        hideHover();
       }}
+      // Clicking (select, resume, rename) means the preview has done its job.
+      onMouseDown={hideHover}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
@@ -226,6 +291,15 @@ export default function ConversationCard({
           </span>
         </div>
       </div>
+      {hoverAnchor && (
+        // Rows are keyed by session id only; the project can change under one.
+        <SessionHoverCard
+          key={`${session.sessionId}|${session.project}|${session.source}`}
+          session={session}
+          anchor={hoverAnchor}
+          tabLabel={tabLabel}
+        />
+      )}
     </div>
   );
 }
