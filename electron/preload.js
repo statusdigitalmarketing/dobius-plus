@@ -212,6 +212,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Window management
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),
   windowFocusTabOwner: (projectPath, tabId) => ipcRenderer.invoke('window:focusTabOwner', projectPath, tabId),
+  windowIsFocused: () => ipcRenderer.invoke('window:isFocused'),
+  onWindowFocusChanged: (callback) => {
+    const handler = (_event, focused) => callback(!!focused);
+    ipcRenderer.on('window:focusChanged', handler);
+    return () => ipcRenderer.removeListener('window:focusChanged', handler);
+  },
   windowGetOpen: () => ipcRenderer.invoke('window:getOpen'),
   windowClose: (projectPath) => ipcRenderer.invoke('window:close', projectPath),
   windowSetTitle: (title) => ipcRenderer.invoke('window:setTitle', title),

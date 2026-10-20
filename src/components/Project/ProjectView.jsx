@@ -21,6 +21,8 @@ import ResumeBanner from './ResumeBanner';
 import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
+import { onScreenTabIds } from '../../lib/tab-unread';
+import { windowFocused, onWindowFocus } from '../../lib/window-focus';
 
 export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, tearOffLabelMeta, tearOffRestore = false, windowKey = null }) {
   const activeView = useStore((s) => s.activeView);
@@ -420,6 +422,30 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     const id = requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
     return () => cancelAnimationFrame(id);
   }, [splitTabId, gridSlots, tabsInitialized]);
+
+  // Unread tabs (a turn finished off screen) clear once they are on screen in
+  // a focused window: on any layout/view change, on new unread marks, and
+  // when the window regains focus. Two frames later, reading the store fresh:
+  // the split/grid guard effects below briefly point activeTabId at a pane
+  // that never paints (a split collision picks a fallback, then re-picks),
+  // and clearing inside that window marked an unseen tab read.
+  const unreadTabs = useStore((s) => s.unreadTabs);
+  useEffect(() => {
+    const markSeen = () => {
+      if (!windowFocused()) return;
+      const s = useStore.getState();
+      if (Object.keys(s.unreadTabs).length === 0) return;
+      s.markTabsSeen(onScreenTabIds(s));
+    };
+    let inner = 0;
+    const outer = requestAnimationFrame(() => { inner = requestAnimationFrame(markSeen); });
+    const offFocus = onWindowFocus(markSeen);
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+      offFocus();
+    };
+  }, [activeView, activeTabId, splitTabId, gridSlots, tabs, unreadTabs]);
 
   // Defensive guard: paneStyleFor renders splitTabId on the right and
   // activeTabId on the left. If those collide (Cmd+number activated the

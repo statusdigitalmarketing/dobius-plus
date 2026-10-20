@@ -41,6 +41,7 @@ export default function TerminalTabBar() {
   const clearSplitTab = useStore((s) => s.clearSplitTab);
   const setDraggingTabId = useStore((s) => s.setDraggingTabId);
   const tabStatus = useStore((s) => s.tabStatus);
+  const unreadTabs = useStore((s) => s.unreadTabs);
 
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
@@ -75,6 +76,10 @@ export default function TerminalTabBar() {
     el.addEventListener('scroll', checkOverflow);
     const observer = new ResizeObserver(checkOverflow);
     observer.observe(el);
+    // Each tab too: a tab can grow without the bar resizing (an unread
+    // marker, a bold label, an automatic label), and the right arrow must
+    // still appear. The effect re-runs on tab count, covering new tabs.
+    for (const child of el.children) observer.observe(child);
     return () => {
       el.removeEventListener('scroll', checkOverflow);
       observer.disconnect();
@@ -511,10 +516,24 @@ export default function TerminalTabBar() {
               ) : (
                 <span
                   className="truncate"
+                  // Unread: brighter, heavier label, like an unread mail row.
+                  style={unreadTabs[tab.id] ? { color: 'var(--fg)', fontWeight: 600 } : undefined}
                   title={isLabelLocked(tab)
                     ? `${tab.label} (named by you; clear the name to let Claude label it)`
                     : tab.labelSource ? `${tab.label} (labeled automatically from what this tab is doing)` : tab.label}
                 >{tab.label}</span>
+              )}
+
+              {/* Unread: Claude finished a turn here while you were looking
+                  elsewhere. Clears once the tab is on screen in a focused
+                  window (ProjectView markTabsSeen). */}
+              {unreadTabs[tab.id] && editingId !== tab.id && (
+                <span
+                  data-testid="tab-unread"
+                  title="Finished while you were away"
+                  className="shrink-0"
+                  style={{ width: 5, height: 5, borderRadius: '50%', backgroundColor: 'var(--accent)', marginLeft: 2 }}
+                />
               )}
 
               {/* Close button — only visible on active tab to prevent accidental closes */}

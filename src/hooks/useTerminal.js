@@ -203,7 +203,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       const parts = String(payload).split(';');
       if (parts[0] === 'dobius' && TAB_STATUS_VALUES.has(parts[1])) {
         const store = useStore.getState();
-        store.setTabStatus(id, parts[1]);
+        store.setTabStatus(id, parts[1], { fromHook: true });
         // Claim hook-ownership so useTabActivity's silence settler doesn't
         // flip this tab to 'done' during a long quiet tool call. 'done' or
         // unknown payload releases the claim back to output-flow inference.

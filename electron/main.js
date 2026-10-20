@@ -485,6 +485,19 @@ function setupDataHandlers() {
   // Focus the window that currently owns a live tab (a tear-off window if the id
   // is torn off, otherwise the project's primary window). Lets the sidebar reveal
   // a cross-window live session instead of resuming a duplicate. H3.
+  // Native window focus for the renderer. document.hasFocus() reads false
+  // while a <webview> pane inside the window has focus, which made a visible
+  // terminal beside a focused browser pane count as unseen (unread tabs).
+  // Focus moving into a webview does not blur the native window.
+  ipcMain.handle('window:isFocused', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    return !!win && !win.isDestroyed() && win.isFocused();
+  });
+  for (const [evt, focused] of [['browser-window-focus', true], ['browser-window-blur', false]]) {
+    app.on(evt, (_e, win) => {
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('window:focusChanged', focused);
+    });
+  }
   ipcMain.handle('window:focusTabOwner', (_event, projectPath, tabId) => {
     if (typeof tabId === 'string' && focusTearOffWindowForTab(tabId)) return true;
     // Reveal the exact primary window that owns this tab (v1.0.66): with N

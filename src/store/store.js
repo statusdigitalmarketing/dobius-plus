@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import { THEMES, applyTheme } from '../lib/themes';
 import { groupByStage } from '../lib/stages';
 import { makeTabId } from '../lib/tab-id';
+import { onScreenTabIds, becomesUnread, clearSeen } from '../lib/tab-unread';
+import { windowFocused } from '../lib/window-focus';
 import { latestSessionForTab } from '../../shared/session-tab.js';
 import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.js';
 
@@ -101,9 +103,28 @@ export const useStore = create((set, get) => ({
   // without this guard the quiet settler would then turn the tab gray. Genuine
   // plain-shell activity after the window still flows yellow -> gray.
   recentHookDone: {},
-  setTabStatus: (tabId, status) => set((s) => {
-    if (!tabId || s.tabStatus[tabId] === status) return {};
-    return { tabStatus: { ...s.tabStatus, [tabId]: status } };
+  // tabId -> true: Claude finished a turn there while it was off screen or the
+  // window was unfocused. Cleared by markTabsSeen (ProjectView) once the tab is
+  // on screen in a focused window. Ephemeral, like tabStatus.
+  unreadTabs: {},
+  // opts.fromHook: the status came from the Claude hook's OSC marker
+  // (useTerminal), the only source whose 'done' means a turn finished.
+  setTabStatus: (tabId, status, opts) => set((s) => {
+    if (!tabId) return {};
+    // Decided BEFORE the unchanged-status early return: another writer may
+    // already show 'done'. hookOwnedTabs is still set here for a real turn:
+    // the OSC handler calls setTabStatus('done') BEFORE markHookOwned('done')
+    // releases it.
+    const seen = windowFocused() && onScreenTabIds(s).has(tabId);
+    const unread = !s.unreadTabs[tabId] && becomesUnread(status, seen, s.hookOwnedTabs[tabId], opts?.fromHook);
+    const out = {};
+    if (s.tabStatus[tabId] !== status) out.tabStatus = { ...s.tabStatus, [tabId]: status };
+    if (unread) out.unreadTabs = { ...s.unreadTabs, [tabId]: true };
+    return out;
+  }),
+  markTabsSeen: (seenIds) => set((s) => {
+    const next = clearSeen(s.unreadTabs, seenIds);
+    return next === s.unreadTabs ? {} : { unreadTabs: next };
   }),
   // OSC handler calls this. Hook-owned 'working' / 'needs' survive quiet
   // output; hook-owned 'done' releases ownership so the next inferred working
@@ -205,6 +226,7 @@ export const useStore = create((set, get) => ({
     delete hot[tabId];
     const rhd = { ...state.recentHookDone };
     delete rhd[tabId];
+    const unread = clearSeen(state.unreadTabs, new Set([tabId]));
     set({
       terminalTabs: tabs,
       activeTabId: newActive,
@@ -213,6 +235,7 @@ export const useStore = create((set, get) => ({
       tabStatus: ts,
       hookOwnedTabs: hot,
       recentHookDone: rhd,
+      unreadTabs: unread,
       splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
       gridSlots: pruneGrid(state.gridSlots, new Set(tabs.map((t) => t.id))),
       monitoredTabs: state.monitoredTabs.filter((id) => id !== tabId),
@@ -358,6 +381,7 @@ export const useStore = create((set, get) => ({
       agentActivity: aa,
       tabStatus: pruneByTabId(s.tabStatus),
       hookOwnedTabs: pruneByTabId(s.hookOwnedTabs),
+      unreadTabs: pruneByTabId(s.unreadTabs),
       monitoredTabs: (s.monitoredTabs || []).filter((id) => liveIds.has(id)),
     };
   }),
@@ -390,7 +414,7 @@ export const useStore = create((set, get) => ({
     // stays stuck in split mode pointing at a dead tab and the surviving
     // active terminal is constrained to half-width with no header to exit.
     const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
-    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, unreadTabs: clearSeen(state.unreadTabs, removedIds), gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {
@@ -418,7 +442,7 @@ export const useStore = create((set, get) => ({
     // Same split-cleanup as closeOtherTabs — kill the split pointer if the
     // tab it referenced just got removed.
     const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
-    set({ terminalTabs: allKept, activeTabId: newActive, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: allKept, activeTabId: newActive, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, unreadTabs: clearSeen(state.unreadTabs, removedIds), gridSlots: pruneGrid(state.gridSlots, new Set(allKept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   // Actions
