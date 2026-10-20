@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { isLabelLocked, parseLabelMeta } from '../../../shared/tab-label.js';
 import { useStore } from '../../store/store';
 import { THEMES, applyTheme } from '../../lib/themes';
@@ -13,6 +13,7 @@ import Sidebar from './Sidebar';
 import DashboardView from '../Dashboard/DashboardView';
 import GitSidePanel from '../shared/GitSidePanel';
 import QuitOverlay from '../shared/QuitOverlay';
+import CommandPalette from '../shared/CommandPalette';
 import ResumeBanner from './ResumeBanner';
 import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
@@ -752,11 +753,55 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     removeTab(tabId);
   }, [removeTab, projectPath]);
 
+  const reopenLastClosedTab = useCallback(() => {
+    const result = useStore.getState().reopenClosedTab();
+    if (result?.tab && result?.scrollback?.length > 0) {
+      // Restore scrollback as dimmed text after terminal initializes
+      setTimeout(() => {
+        if (window.electronAPI?.terminalSaveState) {
+          window.electronAPI.terminalSaveState(result.tab.id, {
+            scrollback: result.scrollback,
+            cols: 80,
+            rows: 24,
+            savedAt: Date.now(),
+          });
+        }
+      }, 100);
+    }
+  }, []);
+
+  const clearActiveTerminal = useCallback(() => {
+    const termId = useStore.getState().activeTabId;
+    if (window.electronAPI && termId) {
+      window.electronAPI.terminalWrite(termId, 'clear\r');
+    }
+  }, []);
+
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteCommands = useMemo(() => ({
+    newTab: () => addTab(projectPath),
+    newWindow: () => window.electronAPI?.windowOpenNew?.(projectPath),
+    reopenClosedTab: reopenLastClosedTab,
+    closeTab: closeActiveTab,
+    clearTerminal: clearActiveTerminal,
+    resumeLatest: doResumeLatest,
+    toggleSidebar,
+    toggleGitPanel,
+  }), [addTab, projectPath, reopenLastClosedTab, closeActiveTab, clearActiveTerminal, doResumeLatest, toggleSidebar, toggleGitPanel]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
+
+      if (e.key === 'p' && !e.shiftKey && !e.altKey) {
+        // Cmd+P = command palette, from any field. Only opens: the palette
+        // handles Cmd+P itself to close, so focus is restored on the way out.
+        e.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
 
       // When focus is in one of the app's OWN text fields (the command bar or a
       // tab-rename input) — but NOT the xterm terminal, which uses a hidden
@@ -788,20 +833,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         e.preventDefault();
         const state = useStore.getState();
         if (state.activeView === 'terminal' && state.recentlyClosedTabs.length > 0) {
-          const result = state.reopenClosedTab();
-          if (result?.tab && result?.scrollback?.length > 0) {
-            // Restore scrollback as dimmed text after terminal initializes
-            setTimeout(() => {
-              if (window.electronAPI?.terminalSaveState) {
-                window.electronAPI.terminalSaveState(result.tab.id, {
-                  scrollback: result.scrollback,
-                  cols: 80,
-                  rows: 24,
-                  savedAt: Date.now(),
-                });
-              }
-            }, 100);
-          }
+          reopenLastClosedTab();
         } else {
           const current = state.activeView;
           setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
@@ -825,10 +857,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       } else if (e.key === 'k') {
         if (inAppField) return;
         e.preventDefault();
-        const termId = useStore.getState().activeTabId;
-        if (window.electronAPI && termId) {
-          window.electronAPI.terminalWrite(termId, 'clear\r');
-        }
+        clearActiveTerminal();
       } else if (e.key === 'r' && !e.shiftKey) {
         // Cmd+R = resume last Claude session. Skip if user is typing in a
         // form field (e.g. URL bar in Visual editor, CLAUDE.md editor),
@@ -871,7 +900,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab, doResumeLatest]);
+  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab, doResumeLatest, reopenLastClosedTab, clearActiveTerminal]);
 
   // Menu bar events
   useEffect(() => {
@@ -1206,6 +1235,12 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       </div>
 
       <StatusBar />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        projectPath={projectPath}
+        commands={paletteCommands}
+      />
       <QuitOverlay />
     </div>
   );

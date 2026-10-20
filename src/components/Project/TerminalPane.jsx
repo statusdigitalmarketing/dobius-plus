@@ -278,6 +278,8 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     const windowPasteHandler = async (e) => {
       // Only handle for the active tab
       if (useStore.getState().activeTabId !== id) return;
+      // A paste into a modal (e.g. the command palette) belongs to the modal.
+      if (e.target?.closest?.('[role="dialog"]')) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       for (const item of items) {

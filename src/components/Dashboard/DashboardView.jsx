@@ -29,7 +29,7 @@ import ChangeFeed from './ChangeFeed';
 import Search from './Search';
 import BrowserProfiles from './BrowserProfiles';
 
-const TABS = [
+export const TABS = [
   { id: 'overview', label: 'Overview' },
   { id: 'mcp', label: 'MCP' },
   { id: 'skills', label: 'Skills' },
