@@ -19,6 +19,18 @@ import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 
+// Cmd+Shift+[ / ] direction: -1, +1, or 0 when it is neither. By character
+// first, so layouts that type a bracket on another key (AZERTY: Option+Shift
+// +5) work; by physical key when the character is not a bracket, because with
+// Shift a US layout reports '{' and '}' (and other layouts something else).
+function bracketDirection(e) {
+  if (e.key === '[' || e.key === '{') return -1;
+  if (e.key === ']' || e.key === '}') return 1;
+  if (e.code === 'BracketLeft') return -1;
+  if (e.code === 'BracketRight') return 1;
+  return 0;
+}
+
 export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, tearOffLabelMeta, tearOffRestore = false, windowKey = null }) {
   const activeView = useStore((s) => s.activeView);
   const setActiveView = useStore((s) => s.setActiveView);
@@ -872,18 +884,20 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         // Doesn't matter which view we're in, this is global.
         e.preventDefault();
         window.electronAPI?.autoResumeCancelAll?.();
-      } else if (e.key === '[' && e.shiftKey) {
+      } else if (e.shiftKey && bracketDirection(e)) {
+        // showTab, not setActiveTab: it leaves split or grid when the target
+        // is not visible there (see store.showTab). From the Dashboard it
+        // also switches to the terminal, as Cmd+1-9 does, so the layout never
+        // changes out of sight.
         if (inAppField) return;
         e.preventDefault();
         const state = useStore.getState();
         const idx = state.terminalTabs.findIndex((t) => t.id === state.activeTabId);
-        if (idx > 0) setActiveTab(state.terminalTabs[idx - 1].id);
-      } else if (e.key === ']' && e.shiftKey) {
-        if (inAppField) return;
-        e.preventDefault();
-        const state = useStore.getState();
-        const idx = state.terminalTabs.findIndex((t) => t.id === state.activeTabId);
-        if (idx < state.terminalTabs.length - 1) setActiveTab(state.terminalTabs[idx + 1].id);
+        const next = state.terminalTabs[idx + bracketDirection(e)];
+        if (idx >= 0 && next) {
+          state.showTab(next.id);
+          if (state.activeView !== 'terminal') setActiveView('terminal');
+        }
       } else if (e.key >= '1' && e.key <= '9') {
         // Cmd+1-9 = switch to tab N. Don't hijack while user is typing in
         // a form field (number entry in inputs would be eaten otherwise).
@@ -892,7 +906,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         const state = useStore.getState();
         const tabIdx = parseInt(e.key, 10) - 1;
         if (tabIdx < state.terminalTabs.length) {
-          setActiveTab(state.terminalTabs[tabIdx].id);
+          state.showTab(state.terminalTabs[tabIdx].id);
           if (state.activeView !== 'terminal') setActiveView('terminal');
         }
       }
