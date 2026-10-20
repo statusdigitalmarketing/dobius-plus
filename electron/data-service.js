@@ -200,6 +200,7 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         // parseable timestamp + a role signal.
         for (let i = entries.length - 1; i >= 0; i -= 1) {
           const entry = entries[i];
+          if (!entry || typeof entry !== 'object') continue;
           const tsMs = typeof entry.timestamp === 'number'
             ? entry.timestamp
             : (entry.timestamp ? new Date(entry.timestamp).getTime() : 0);
@@ -250,6 +251,21 @@ export async function loadAllSessions(projectFilter, opts = {}) {
           }
           if (preview && timestamp && lastRole) break;
         }
+        // Claude Code's own name for the conversation ("Fix login bug"),
+        // rewritten as the chat goes; the newest one wins. History rows lead
+        // with it because the newest prompt is often a tool echo or missing.
+        // A SEPARATE type-only pass: extending the walk above to find it moved
+        // timestamp/status off records the old early exit never reached.
+        let title = '';
+        for (let i = entries.length - 1; i >= 0; i -= 1) {
+          const e = entries[i];
+          if (e?.type === 'ai-title' && typeof e.aiTitle === 'string') {
+            // Detached copy: a slice of a huge parsed string keeps the whole
+            // parent alive in each of up to 500 cached session objects.
+            title = Buffer.from(sanitizePreviewText(e.aiTitle).slice(0, 120), 'utf16le').toString('utf16le');
+            break;
+          }
+        }
 
         const automated = AUTOMATED_ENTRYPOINTS.has(entrypoint);
         // Dropped before the push so the 500-cap below counts only the
@@ -286,6 +302,7 @@ export async function loadAllSessions(projectFilter, opts = {}) {
           projectPath,
           projectName,
           preview: preview || 'No preview available',
+          title,
           timestamp,
           age: timestamp ? timeAgo(timestamp) : 'unknown',
           status,

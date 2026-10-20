@@ -41,15 +41,42 @@ await write('newest-unmarked', [
 // A trailing non-message record with sdk-py after a cli turn is irrelevant.
 await write('trailing-meta', [rec('user', 'cli', 'real question', now - 8500), JSON.stringify({ type: 'system', entrypoint: 'sdk-py', timestamp: new Date(now - 8400).toISOString() })]);
 
+// Titles: Claude rewrites ai-title as a chat goes, so the newest wins, and it
+// may sit behind more records than the preview/role signals need.
+await write('titled', [
+  JSON.stringify({ type: 'ai-title', aiTitle: 'Old name' }),
+  rec('user', 'cli', 'first ask', now - 9500),
+  JSON.stringify({ type: 'ai-title', aiTitle: '  Fix the\nlogin bug ' }),
+  rec('user', 'cli', 'second ask', now - 9400),
+  rec('assistant', 'cli', 'done', now - 9300),
+  'null',
+]);
+
+// Clock moved back: an OLDER record carries a LATER stamp. The title lookup
+// must not drag the session's timestamp onto it (the walk used to stop at the
+// newest user/assistant pair; it still must).
+await write('clock-skew', [
+  rec('user', 'cli', 'from the future', now + 3_600_000),
+  rec('user', 'cli', 'latest ask', now - 600_000),
+  rec('assistant', 'cli', 'done', now - 599_000),
+]);
+
 const all = await loadAllSessions();
 const ids = (arr) => arr.map((s) => s.sessionId).sort();
-const ALL = ['cli-chat', 'newest-unmarked', 'no-entrypoint', 'remote-control', 'sdk-review', 'sdk-then-cli', 'trailing-meta'];
+const ALL = ['cli-chat', 'clock-skew', 'newest-unmarked', 'no-entrypoint', 'remote-control', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta'];
+const skew = all.find((s) => s.sessionId === 'clock-skew');
+check('untitled session keeps the newest pair\'s timestamp and status', [skew?.timestamp === now - 599_000, skew?.status], [true, 'done']);
+const titled = all.find((s) => s.sessionId === 'titled');
+check('newest ai-title wins, whitespace collapsed', titled?.title, 'Fix the login bug');
+check('preview is still the newest prompt', titled?.preview, 'second ask');
+check('a null line does not drop the session', !!titled, true);
+check('no ai-title gives an empty title', all.find((s) => s.sessionId === 'cli-chat')?.title, '');
 check('default includes everything', ids(all), ALL);
 check('automated flag comes from the newest user/assistant record only',
   Object.fromEntries(all.map((s) => [s.sessionId, s.automated]).sort(([a], [b]) => a.localeCompare(b))),
   {
-    'cli-chat': false, 'newest-unmarked': false, 'no-entrypoint': false, 'remote-control': false,
-    'sdk-review': true, 'sdk-then-cli': false, 'trailing-meta': false,
+    'cli-chat': false, 'clock-skew': false, 'newest-unmarked': false, 'no-entrypoint': false, 'remote-control': false,
+    'sdk-review': true, 'sdk-then-cli': false, 'titled': false, 'trailing-meta': false,
   });
 
 const real = await loadAllSessions(undefined, { excludeAutomated: true });

@@ -70,11 +70,11 @@ export function useSessions({ projectFilter = null, excludeAutomated = false } =
       const data = (raw || []).map((s) => ({
         ...s,
         project: s.projectPath || s.project,
-        // Prefer preview (session-specific first message) over projectName.
-        // Using projectName as primary made every session card in a single
-        // project's sidebar identical, which is the opposite of useful.
-        // Codex PR#3 r4 P2.
-        display: s.preview || s.projectName || 'Untitled',
+        // Claude Code's own title first, then the newest prompt, then the
+        // project. The prompt alone left most rows reading "No preview
+        // available" or a pasted tool echo. Using projectName as primary made
+        // every card in one project identical (Codex PR#3 r4 P2).
+        display: s.title || s.preview || s.projectName || 'Untitled',
       }));
       setSessions(data);
       setSessionTabMap(tabMap || {});
@@ -116,8 +116,10 @@ export function useSessions({ projectFilter = null, excludeAutomated = false } =
   const filtered = useMemo(() => {
     if (!search) return scoped;
     const q = search.toLowerCase();
+    // The prompt stays searchable now that the title is what the row shows.
     return scoped.filter((s) =>
-      s.displayName?.toLowerCase().includes(q) || s.project?.toLowerCase().includes(q));
+      s.displayName?.toLowerCase().includes(q) || s.project?.toLowerCase().includes(q)
+      || s.preview?.toLowerCase().includes(q));
   }, [scoped, search]);
 
   // Optimistic local update + persist. On persist failure, ROLL BACK to the

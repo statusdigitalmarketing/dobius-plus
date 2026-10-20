@@ -253,3 +253,9 @@
 - **FIX**: `safeProjectSegment` in both encoders and in resolveTranscriptPath's stripped form: a dots-only segment gets a `-` prefix and can never name a real dir.
 - **CONTEXT**: Validating the sessionId regex is not containment. The projectPath half of the join needs it too.
 - **DETECTION**: `grep -n "path.join(PROJECTS_DIR, enc" electron/data-service.js`; each enc must come from an encoder that calls safeProjectSegment.
+
+### Git: 2026-10-20
+- **MISTAKE**: Used `git stash push <file>` then `git stash pop` to test old code. Pop restored the file's working-tree changes but not its STAGED state, so the index silently reverted to HEAD. A later `git show :<file>` "round-1 version" was really HEAD, and a regression test looked like it failed for the wrong reason.
+- **FIX**: To run a test against an older version, copy the file aside (`cp f /scratch/f.cur`), write the old version in, run, copy back. Or `git stash pop --index`. Then check `git diff HEAD --stat`, not `git diff --stat`.
+- **CONTEXT**: Matters whenever you prove a new test catches the old bug.
+- **DETECTION**: `git diff HEAD --stat` after any stash dance; compare against what you expect changed.
