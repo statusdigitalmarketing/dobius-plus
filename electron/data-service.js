@@ -63,6 +63,13 @@ export async function loadHistory() {
     .slice(0, 100);
 }
 
+// Transcript entrypoints that mean "a script drove the Agent SDK" (review
+// hooks, worktree agents). Deliberately an allowlist: 'sdk-cli' is ALSO
+// written for human `claude remote-control` chats, and hiding a real chat is
+// worse than showing a bot run. On 2026-10-20, 2961 of the 3000 newest
+// transcripts on Sam's Mac were sdk-py, 38 were cli, none were sdk-cli.
+const AUTOMATED_ENTRYPOINTS = new Set(['sdk-py', 'sdk-ts']);
+
 /**
  * Load ALL sessions across all projects by scanning ~/.claude/projects/.
  * Returns array of { sessionId, projectPath, projectName, preview, timestamp, age, status }
@@ -185,6 +192,9 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         let timestamp = 0;
         // lastRole drives the cross-session status dot.
         let lastRole = '';
+        // entrypoint of the NEWEST user/assistant record (set with lastRole
+        // below, never inherited from an older record). See AUTOMATED_ENTRYPOINTS.
+        let entrypoint = '';
         // Walk from newest to oldest so the FIRST user message we find is the
         // most recent one, and we stop as soon as we have both preview + a
         // parseable timestamp + a role signal.
@@ -234,9 +244,18 @@ export async function loadAllSessions(projectFilter, opts = {}) {
             }
           }
           // lastRole is the newest role we saw (tail walk, first match wins).
-          if (role && !lastRole) lastRole = role;
+          if (role && !lastRole) {
+            lastRole = role;
+            entrypoint = typeof entry.entrypoint === 'string' ? entry.entrypoint : '';
+          }
           if (preview && timestamp && lastRole) break;
         }
+
+        const automated = AUTOMATED_ENTRYPOINTS.has(entrypoint);
+        // Dropped before the push so the 500-cap below counts only the
+        // sessions the caller wants. On this machine 375 of the newest 400
+        // transcripts were SDK runs, which buried every real chat.
+        if (automated && opts.excludeAutomated) return;
 
         if (!timestamp) {
           try {
@@ -272,6 +291,7 @@ export async function loadAllSessions(projectFilter, opts = {}) {
           status,
           sizeMB, // for the resume dead-session guard, Codex PR#3 r6 P2
           source: 'claude',
+          automated,
         });
       } catch {
         void 0;

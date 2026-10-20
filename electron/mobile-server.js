@@ -836,7 +836,10 @@ function handleAuthedMessage(socket, msg, subs) {
       // Echo the request's reqId (if any) so the phone can drop an OLDER
       // same-source reply that arrives after a newer one (reviewer P2).
       const reqId = typeof msg.reqId === 'number' ? msg.reqId : undefined;
-      loadAllSessions(undefined, { sources })
+      // SDK-driven runs follow the desktop History/Sessions "bots" toggle.
+      let excludeAutomated = true;
+      try { excludeAutomated = loadConfig()?.settings?.showAutomatedSessions !== true; } catch { /* default: hide */ }
+      loadAllSessions(undefined, { sources, excludeAutomated })
         // Echo the sources so the phone can drop a stale reply that arrives
         // after the user switched the filter (reviewer P2).
         .then((list) => wsSend(socket, { type: 'sessions', list: list || [], sources, reqId }))

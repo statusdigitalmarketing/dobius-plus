@@ -36,7 +36,7 @@ import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccou
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
-import { estimateContextForTabId } from './tab-context.js';
+import { estimateContextForTabId, liveSessionsForTabs } from './tab-context.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -584,6 +584,14 @@ function setupDataHandlers() {
     // (shared with the mobile board, v1.0.43 Phase 3b).
     if (typeof tabId !== 'string' || !ownsTerminal(event.sender.id, tabId)) return null;
     return estimateContextForTabId(tabId);
+  });
+  // History "Needs you" / "Working": which session each of this window's tabs
+  // is running now, with main's own hook status. Read-only; same ownership
+  // boundary as above, so a window only learns about its own terminals.
+  ipcMain.handle('tabs:liveSessions', async (event, tabIds) => {
+    if (!Array.isArray(tabIds)) return [];
+    const owned = tabIds.filter((id) => typeof id === 'string' && ownsTerminal(event.sender.id, id));
+    return liveSessionsForTabs(owned);
   });
   ipcMain.handle('data:deleteSession', async (_event, sessionId, projectPath) => {
     const result = await deleteSession(sessionId, projectPath);

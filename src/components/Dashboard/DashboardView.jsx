@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { useStore } from '../../store/store';
 import { useStats } from '../../hooks/useStats';
+import { SHOW_AUTOMATED_EVENT } from '../../hooks/useSessions';
 import { AnimatePresence, motion } from 'framer-motion';
 import Overview from './Overview';
 import MCPServers from './MCPServers';
@@ -110,11 +111,32 @@ export default function DashboardView() {
     }
   }, [dashboardTab, boardNotification, clearBoardNotification]);
 
+  // Count what the Sessions page lists: automated runs follow the shared
+  // toggle. Only the newest count may land; a toggle beats the initial read.
   useEffect(() => {
     if (!window.electronAPI?.dataLoadAllSessions) return;
-    window.electronAPI.dataLoadAllSessions().then((sessions) => {
-      setSessionCount(sessions?.length || 0);
-    });
+    let alive = true;
+    let seq = 0;
+    let toggled = false;
+    let counting = null; // the value the latest count was asked for
+    const count = (show) => {
+      if (show === counting) return;
+      counting = show;
+      const mine = ++seq;
+      window.electronAPI.dataLoadAllSessions(undefined, { excludeAutomated: !show })
+        .then((sessions) => { if (alive && mine === seq) setSessionCount(sessions?.length || 0); })
+        .catch((err) => console.warn('[DashboardView] session count failed:', err?.message));
+    };
+    Promise.resolve(window.electronAPI.configGetSettings?.())
+      .catch(() => ({}))
+      .then((s) => { if (alive && !toggled) count(s?.showAutomatedSessions === true); });
+    const onChange = (e) => {
+      if (typeof e.detail !== 'boolean') return;
+      toggled = true;
+      count(e.detail);
+    };
+    window.addEventListener(SHOW_AUTOMATED_EVENT, onChange);
+    return () => { alive = false; window.removeEventListener(SHOW_AUTOMATED_EVENT, onChange); };
   }, []);
 
   if (loading) {

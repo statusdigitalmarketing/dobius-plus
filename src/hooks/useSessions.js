@@ -15,7 +15,11 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 // optimistic UI would show a longer label than the persisted truth.
 const MAX_LABEL_LEN = 50;
 
-export function useSessions({ projectFilter = null } = {}) {
+// Same-window broadcast so the History sidebar, the Sessions page and its tab
+// badge agree on settings.showAutomatedSessions. detail: boolean.
+export const SHOW_AUTOMATED_EVENT = 'dobius:show-automated-changed';
+
+export function useSessions({ projectFilter = null, excludeAutomated = false } = {}) {
   const [sessions, setSessions] = useState([]);
   const [sessionTabMap, setSessionTabMap] = useState({});
   const [sessionTags, setSessionTags] = useState({});
@@ -25,9 +29,23 @@ export function useSessions({ projectFilter = null } = {}) {
   // close over a stale snapshot — otherwise rapid setLabel calls could
   // overwrite a color a sibling render had just set.
   const tagsRef = useRef({});
+  // Apply a reply only if it was asked with the CURRENT options and is not
+  // older than the last one applied. A slow reply from before a toggle must
+  // not overwrite the toggled list (the Sessions.jsx ordering race).
+  const paramsKey = `${projectFilter || ''}|${excludeAutomated ? 1 : 0}`;
+  const paramsRef = useRef(paramsKey);
+  paramsRef.current = paramsKey;
+  const reqIdRef = useRef(0);
+  const appliedIdRef = useRef(0);
+  const appliedKeyRef = useRef(null);
 
   const loadSessions = useCallback(async () => {
     if (!window.electronAPI) return;
+    const reqId = ++reqIdRef.current;
+    const key = `${projectFilter || ''}|${excludeAutomated ? 1 : 0}`;
+    const isCurrent = () => key === paramsRef.current && reqId >= appliedIdRef.current;
+    // New options: show loading rather than the previous options' rows.
+    if (key !== appliedKeyRef.current) setLoading(true);
     try {
       // Use dataLoadAllSessions (reads transcript files directly from
       // ~/.claude/projects/) instead of dataLoadHistory (reads
@@ -38,10 +56,13 @@ export function useSessions({ projectFilter = null } = {}) {
       // machine with more than 500 newer sessions in other projects would
       // appear empty. Codex PR#3 r8 P2.
       const [raw, tabMap, tags] = await Promise.all([
-        window.electronAPI.dataLoadAllSessions(projectFilter || undefined),
+        window.electronAPI.dataLoadAllSessions(projectFilter || undefined, { excludeAutomated }),
         window.electronAPI.configGetSessionTabMap?.() ?? {},
         window.electronAPI.configGetSessionTags?.() ?? {},
       ]);
+      if (!isCurrent()) return;
+      appliedIdRef.current = reqId;
+      appliedKeyRef.current = key;
       // dataLoadAllSessions returns { sessionId, projectPath, projectName,
       // preview, timestamp, age, status }. The sidebar consumes the older
       // { sessionId, project, display, timestamp } shape that dataLoadHistory
@@ -63,9 +84,10 @@ export function useSessions({ projectFilter = null } = {}) {
     } catch (err) {
       console.warn('[useSessions] Failed to load:', err.message);
     } finally {
-      setLoading(false);
+      // A discarded stale reply must not end the loading state of a newer one.
+      if (isCurrent()) setLoading(false);
     }
-  }, [projectFilter]);
+  }, [projectFilter, excludeAutomated]);
 
   useEffect(() => {
     loadSessions();

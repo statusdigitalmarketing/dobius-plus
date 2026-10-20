@@ -117,6 +117,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataLoadProjectTokens: () => ipcRenderer.invoke('data:loadProjectTokens'),
   dataSearchTranscripts: (query) => ipcRenderer.invoke('data:searchTranscripts', query),
   dataEstimateContextForTab: (tabId) => ipcRenderer.invoke('data:estimateContextForTab', tabId),
+  tabsLiveSessions: (tabIds) => ipcRenderer.invoke('tabs:liveSessions', tabIds),
   // Chrome profile launcher (v1.0.41)
   chromeListProfiles: () => ipcRenderer.invoke('chrome:listProfiles'),
   chromeOpenUrl: (profileDir, url) => ipcRenderer.invoke('chrome:openUrl', profileDir, url),
