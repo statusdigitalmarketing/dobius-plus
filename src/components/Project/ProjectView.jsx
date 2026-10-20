@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useLayoutEffect, useState, useCallback, useRef } from 'react';
 import { isLabelLocked, parseLabelMeta } from '../../../shared/tab-label.js';
 import { useStore } from '../../store/store';
 import { THEMES, applyTheme } from '../../lib/themes';
@@ -10,6 +10,10 @@ import TerminalTabBar from './TerminalTabBar';
 import FilesPanel from './FilesPanel';
 import GitTreePanel from './GitTreePanel';
 import Sidebar from './Sidebar';
+import SidebarResizeHandle from './SidebarResizeHandle';
+import {
+  SIDEBAR_DEFAULT, SIDEBAR_MIN, SIDEBAR_MAX, clampSidebarWidth, sidebarCap,
+} from '../../lib/sidebar-width';
 import DashboardView from '../Dashboard/DashboardView';
 import GitSidePanel from '../shared/GitSidePanel';
 import QuitOverlay from '../shared/QuitOverlay';
@@ -141,10 +145,60 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
   // Honor the "Sidebar Default" setting on mount (it was persisted but never
   // read, so the toggle did nothing). One-shot: the user can still toggle it
   // afterward with Cmd+B. Audit Medium.
+  // Sidebar width (drag handle on its right edge). A drag or key nudge that
+  // lands before the settings read must win over it.
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
+  const sidebarWidthTouched = useRef(false);
+  const changeSidebarWidth = useCallback((w) => {
+    sidebarWidthTouched.current = true;
+    setSidebarWidth(w);
+  }, []);
+  // The widest the sidebar may render right now. Measured, because the Git,
+  // Files and Git Tree panels open and close independently of the sidebar:
+  // a 600px preference must not leave the terminal 0px when they open.
+  // Observes the row and every child, so a panel mounting (which resizes the
+  // terminal column) re-measures; settling on the same cap does not re-render.
+  const mainRowRef = useRef(null);
+  const [sidebarMax, setSidebarMax] = useState(SIDEBAR_MAX);
+  useLayoutEffect(() => {
+    const row = mainRowRef.current;
+    if (!row) return undefined;
+    const measure = () => {
+      const sidebar = row.querySelector(':scope > [data-testid="project-sidebar"]');
+      const terminal = sidebar ? sidebar.nextElementSibling : null;
+      let others = 0;
+      for (const child of row.children) {
+        if (child !== sidebar && child !== terminal) others += child.getBoundingClientRect().width;
+      }
+      setSidebarMax(sidebarCap(row.getBoundingClientRect().width, others));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(row);
+    for (const child of row.children) ro.observe(child);
+    // Panels mount and unmount as children; observe newcomers too.
+    const mo = new MutationObserver(() => {
+      for (const child of row.children) ro.observe(child);
+      measure();
+    });
+    mo.observe(row, { childList: true });
+    return () => { ro.disconnect(); mo.disconnect(); };
+  }, []);
+
+  const commitSidebarWidth = useCallback((w) => {
+    window.electronAPI?.configUpdateSettings?.({ sidebarWidth: w })
+      ?.catch?.((err) => console.warn('[ProjectView] persist sidebar width failed:', err.message));
+  }, []);
+
   useEffect(() => {
     if (!window.electronAPI?.configGetSettings) return;
     window.electronAPI.configGetSettings()
-      .then((settings) => { if (settings?.sidebarDefaultOpen) setSidebarVisible(true); })
+      .then((settings) => {
+        if (settings?.sidebarDefaultOpen) setSidebarVisible(true);
+        if (settings?.sidebarWidth !== undefined && !sidebarWidthTouched.current) {
+          setSidebarWidth(clampSidebarWidth(settings.sidebarWidth));
+        }
+      })
       .catch(() => {});
   }, [setSidebarVisible]);
 
@@ -900,20 +954,34 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     <div className="h-full w-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>
       <TopBar projectName={projectName} />
 
-      <div className="flex-1 flex min-h-0">
+      <div ref={mainRowRef} className="flex-1 flex min-h-0">
         {sidebarVisible && (
           <div
-            className="w-70 shrink-0 overflow-hidden"
+            className="relative"
+            data-testid="project-sidebar"
             style={{
+              // The saved width is a preference, rendered no wider than
+              // sidebarMax (what leaves the terminal TERMINAL_MIN beside the
+              // open Git/Files panels). No min-width on the terminal itself:
+              // with those panels open that pushed their close buttons
+              // offscreen.
+              width: Math.min(sidebarWidth, sidebarMax),
+              flexShrink: 1,
+              minWidth: SIDEBAR_MIN,
               backgroundColor: 'var(--surface)',
               borderRight: '1px solid var(--border)',
             }}
           >
-            <Sidebar
-              pinnedIds={pinnedIds}
-              onTogglePin={handleTogglePin}
-              onResumeSession={handleResumeSession}
-            />
+            {/* overflow-hidden lives on an inner box so the handle can sit
+                across the border without being clipped. */}
+            <div className="h-full overflow-hidden">
+              <Sidebar
+                pinnedIds={pinnedIds}
+                onTogglePin={handleTogglePin}
+                onResumeSession={handleResumeSession}
+              />
+            </div>
+            <SidebarResizeHandle width={sidebarWidth} onChange={changeSidebarWidth} onCommit={commitSidebarWidth} />
           </div>
         )}
 

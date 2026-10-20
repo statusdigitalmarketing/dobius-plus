@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { timeAgo } from '../../lib/time-ago';
+import { projectMonogram } from '../../lib/project-color';
 import SessionHoverCard from './SessionHoverCard';
 
 // Long enough that sweeping the pointer down the list does not flash a card
@@ -32,6 +33,7 @@ export default function ConversationCard({
   hasCustomLabel,
 }) {
   const projectName = session.project?.split('/').filter(Boolean).pop() || 'Unknown';
+  const monogram = useMemo(() => projectMonogram(session.project), [session.project]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.displayName || '');
   const inputRef = useRef(null);
@@ -180,6 +182,18 @@ export default function ConversationCard({
       onMouseDown={hideHover}
     >
       <div className="flex items-start justify-between gap-2">
+        <span
+          aria-hidden="true"
+          data-testid="project-monogram"
+          className="shrink-0 inline-flex items-center justify-center"
+          style={{
+            width: 18, height: 18, marginTop: 1, borderRadius: 4,
+            backgroundColor: monogram.background, color: '#fff',
+            fontSize: 10, fontWeight: 700, fontFamily: "'SF Mono', monospace",
+          }}
+        >
+          {monogram.letter}
+        </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1 min-w-0">
             {editing ? (
@@ -211,11 +225,13 @@ export default function ConversationCard({
                 >
                   {session.displayName || 'Untitled'}
                 </span>
+                {/* Out of layout until hover or keyboard focus (not just
+                    transparent): at narrow widths they took the title's room. */}
                 <button
                   type="button"
                   onClick={startEdit}
                   title="Rename"
-                  className="opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="hidden group-hover:inline-block group-focus-within:inline-block"
                   style={{
                     background: 'none',
                     border: 'none',
@@ -234,7 +250,7 @@ export default function ConversationCard({
                     type="button"
                     onClick={(e) => { e.stopPropagation(); onClearRename?.(session.sessionId); }}
                     title="Reset to default name"
-                    className="opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="hidden group-hover:inline-block group-focus-within:inline-block"
                     style={{
                       background: 'none',
                       border: 'none',
@@ -271,7 +287,9 @@ export default function ConversationCard({
                 padding: '1px 5px',
                 fontSize: '9px',
                 fontFamily: "'SF Mono', monospace",
-                maxWidth: 90,
+                // 72, not 90: the monogram took room from the title, and the
+                // hover card names the tab in full.
+                maxWidth: 72,
               }}
             >
               {tabLabel}
