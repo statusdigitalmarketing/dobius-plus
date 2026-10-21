@@ -259,3 +259,15 @@
 - **FIX**: To run a test against an older version, copy the file aside (`cp f /scratch/f.cur`), write the old version in, run, copy back. Or `git stash pop --index`. Then check `git diff HEAD --stat`, not `git diff --stat`.
 - **CONTEXT**: Matters whenever you prove a new test catches the old bug.
 - **DETECTION**: `git diff HEAD --stat` after any stash dance; compare against what you expect changed.
+
+### Testing: 2026-10-21
+- **MISTAKE**: Harness teardown sent SIGTERM to the dev Electron on port 9224 and assumed it died. Two dev Electrons ignored it and kept running, so the next harness could not bind 9224 and the probe silently drove the OLD instance (its userData dir already deleted, its in-memory config still live), which looked like a new bug.
+- **FIX**: After teardown, verify with `pgrep -fl "dobius-plus/node_modules/electron/dist"` (must print nothing) and `kill -9` those PIDs if needed. The pattern only matches the dev Electron in node_modules, never /Applications/Dobius+.app.
+- **CONTEXT**: Any harness run. A probe that "fails" on state it did not create is talking to a stale instance.
+- **DETECTION**: `pgrep -fl "dobius-plus/node_modules/electron/dist"`
+
+### UI/UX: 2026-10-21
+- **MISTAKE**: Every folder picker used `properties: ['openDirectory']` with no parent window. macOS then shows no New Folder button, so on a fresh Mac (only Desktop/Documents/Downloads) "New Project" had nothing sensible to pick; and the projects folder (settings.projectScanDir) was settable only from Settings inside a project window, which a fresh Mac cannot reach.
+- **FIX**: `pickFolder(event, opts)` in electron/main.js: sheet on the sender window, `openDirectory` + `createDirectory`. The launcher has its own projects-folder button (IPC window:pickProjectsFolder) and an empty state offering both actions.
+- **CONTEXT**: Test first-run flows with an empty HOME: `HOME=<scratch>/home DOBIUS_USERDATA_DIR=... npx electron --inspect=9239 .` and stub `dialog.showOpenDialog` over the main inspector (Runtime.evaluate with includeCommandLineAPI for `require`) so no native dialog steals Sam's focus.
+- **DETECTION**: `grep -n "showOpenDialog" electron/*.js` (all should go through pickFolder)

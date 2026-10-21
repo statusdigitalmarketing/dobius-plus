@@ -223,6 +223,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   windowSetTitle: (title) => ipcRenderer.invoke('window:setTitle', title),
   windowShowLauncher: () => ipcRenderer.invoke('window:showLauncher'),
   windowPickAndOpenProject: () => ipcRenderer.invoke('window:pickAndOpenProject'),
+  windowPickProjectsFolder: () => ipcRenderer.invoke('window:pickProjectsFolder'),
 
   // Mobile server
   mobileServerStart: () => ipcRenderer.invoke('mobileServer:start'),

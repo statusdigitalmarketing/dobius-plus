@@ -2298,14 +2298,29 @@ export function stopSessionTabCapture() {
   }
 }
 
+// Folder pickers open as a sheet on the window that asked, so one can never
+// land behind other windows. createDirectory adds macOS's New Folder button:
+// without it a fresh Mac (only Desktop, Documents, Downloads) has nothing to
+// pick for a brand new project.
+function pickFolder(event, options) {
+  const opts = { ...options, properties: ['openDirectory', 'createDirectory'] };
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return win && !win.isDestroyed() ? dialog.showOpenDialog(win, opts) : dialog.showOpenDialog(opts);
+}
+
+// settings.projectScanDir, absolute, or '' when unset.
+function projectsFolder() {
+  const dir = getSettings().projectScanDir || '';
+  return dir.replace(/^~(?=$|\/)/, os.homedir());
+}
+
 function setupBuildMonitorHandlers() {
   ipcMain.handle('buildMonitor:loadProgress', (_event, projectDir) => loadBuildProgress(projectDir));
   ipcMain.handle('buildMonitor:loadSupervisorLog', (_event, projectDir) => loadSupervisorLog(projectDir));
   ipcMain.handle('buildMonitor:loadHandoff', (_event, projectDir) => loadHandoff(projectDir));
   ipcMain.handle('buildMonitor:detectActive', () => detectActiveBuilds());
-  ipcMain.handle('buildMonitor:pickDirectory', async () => {
-    const result = await dialog.showOpenDialog({
-      properties: ['openDirectory'],
+  ipcMain.handle('buildMonitor:pickDirectory', async (event) => {
+    const result = await pickFolder(event, {
       title: 'Select project directory to monitor',
     });
     if (result.canceled || result.filePaths.length === 0) return null;
@@ -2457,10 +2472,11 @@ function setupWindowHandlers() {
     return { ok: true, id: win.id };
   });
 
-  ipcMain.handle('window:pickAndOpenProject', async () => {
-    const result = await dialog.showOpenDialog({
-      properties: ['openDirectory'],
-      title: 'Select a project folder',
+  ipcMain.handle('window:pickAndOpenProject', async (event) => {
+    const result = await pickFolder(event, {
+      title: 'Choose or create a project folder',
+      buttonLabel: 'Open Project',
+      defaultPath: projectsFolder() || os.homedir(),
     });
     if (result.canceled || result.filePaths.length === 0) return { ok: false };
     const projectPath = result.filePaths[0];
@@ -2470,6 +2486,24 @@ function setupWindowHandlers() {
       mainWindow.webContents.send('data:updated', projectPath);
     }
     return { ok: true, path: projectPath };
+  });
+
+  // The launcher lists every folder inside this one. It used to be settable
+  // only from Settings inside a project window, which a fresh Mac has no way
+  // to reach.
+  ipcMain.handle('window:pickProjectsFolder', async (event) => {
+    const result = await pickFolder(event, {
+      title: 'Choose the folder your projects live in',
+      buttonLabel: 'Use This Folder',
+      defaultPath: projectsFolder() || os.homedir(),
+    });
+    if (result.canceled || result.filePaths.length === 0) return { ok: false };
+    const dir = result.filePaths[0];
+    updateSettings({ projectScanDir: dir });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('data:updated', dir);
+    }
+    return { ok: true, path: dir };
   });
 
   ipcMain.handle('window:showLauncher', () => {
