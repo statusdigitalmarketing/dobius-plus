@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { isLabelLocked, parseLabelMeta } from '../../../shared/tab-label.js';
 import { useStore } from '../../store/store';
 import { THEMES, applyTheme } from '../../lib/themes';
@@ -13,10 +13,23 @@ import Sidebar from './Sidebar';
 import DashboardView from '../Dashboard/DashboardView';
 import GitSidePanel from '../shared/GitSidePanel';
 import QuitOverlay from '../shared/QuitOverlay';
+import CommandPalette from '../shared/CommandPalette';
 import ResumeBanner from './ResumeBanner';
 import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
+
+// Cmd+Shift+[ / ] direction: -1, +1, or 0 when it is neither. By character
+// first, so layouts that type a bracket on another key (AZERTY: Option+Shift
+// +5) work; by physical key when the character is not a bracket, because with
+// Shift a US layout reports '{' and '}' (and other layouts something else).
+function bracketDirection(e) {
+  if (e.key === '[' || e.key === '{') return -1;
+  if (e.key === ']' || e.key === '}') return 1;
+  if (e.code === 'BracketLeft') return -1;
+  if (e.code === 'BracketRight') return 1;
+  return 0;
+}
 
 export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, tearOffLabelMeta, tearOffRestore = false, windowKey = null }) {
   const activeView = useStore((s) => s.activeView);
@@ -752,11 +765,55 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     removeTab(tabId);
   }, [removeTab, projectPath]);
 
+  const reopenLastClosedTab = useCallback(() => {
+    const result = useStore.getState().reopenClosedTab();
+    if (result?.tab && result?.scrollback?.length > 0) {
+      // Restore scrollback as dimmed text after terminal initializes
+      setTimeout(() => {
+        if (window.electronAPI?.terminalSaveState) {
+          window.electronAPI.terminalSaveState(result.tab.id, {
+            scrollback: result.scrollback,
+            cols: 80,
+            rows: 24,
+            savedAt: Date.now(),
+          });
+        }
+      }, 100);
+    }
+  }, []);
+
+  const clearActiveTerminal = useCallback(() => {
+    const termId = useStore.getState().activeTabId;
+    if (window.electronAPI && termId) {
+      window.electronAPI.terminalWrite(termId, 'clear\r');
+    }
+  }, []);
+
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const paletteCommands = useMemo(() => ({
+    newTab: () => addTab(projectPath),
+    newWindow: () => window.electronAPI?.windowOpenNew?.(projectPath),
+    reopenClosedTab: reopenLastClosedTab,
+    closeTab: closeActiveTab,
+    clearTerminal: clearActiveTerminal,
+    resumeLatest: doResumeLatest,
+    toggleSidebar,
+    toggleGitPanel,
+  }), [addTab, projectPath, reopenLastClosedTab, closeActiveTab, clearActiveTerminal, doResumeLatest, toggleSidebar, toggleGitPanel]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
+
+      if (e.key === 'p' && !e.shiftKey && !e.altKey) {
+        // Cmd+P = command palette, from any field. Only opens: the palette
+        // handles Cmd+P itself to close, so focus is restored on the way out.
+        e.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
 
       // When focus is in one of the app's OWN text fields (the command bar or a
       // tab-rename input) — but NOT the xterm terminal, which uses a hidden
@@ -788,20 +845,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         e.preventDefault();
         const state = useStore.getState();
         if (state.activeView === 'terminal' && state.recentlyClosedTabs.length > 0) {
-          const result = state.reopenClosedTab();
-          if (result?.tab && result?.scrollback?.length > 0) {
-            // Restore scrollback as dimmed text after terminal initializes
-            setTimeout(() => {
-              if (window.electronAPI?.terminalSaveState) {
-                window.electronAPI.terminalSaveState(result.tab.id, {
-                  scrollback: result.scrollback,
-                  cols: 80,
-                  rows: 24,
-                  savedAt: Date.now(),
-                });
-              }
-            }, 100);
-          }
+          reopenLastClosedTab();
         } else {
           const current = state.activeView;
           setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
@@ -825,10 +869,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       } else if (e.key === 'k') {
         if (inAppField) return;
         e.preventDefault();
-        const termId = useStore.getState().activeTabId;
-        if (window.electronAPI && termId) {
-          window.electronAPI.terminalWrite(termId, 'clear\r');
-        }
+        clearActiveTerminal();
       } else if (e.key === 'r' && !e.shiftKey) {
         // Cmd+R = resume last Claude session. Skip if user is typing in a
         // form field (e.g. URL bar in Visual editor, CLAUDE.md editor),
@@ -843,18 +884,20 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         // Doesn't matter which view we're in, this is global.
         e.preventDefault();
         window.electronAPI?.autoResumeCancelAll?.();
-      } else if (e.key === '[' && e.shiftKey) {
+      } else if (e.shiftKey && bracketDirection(e)) {
+        // showTab, not setActiveTab: it leaves split or grid when the target
+        // is not visible there (see store.showTab). From the Dashboard it
+        // also switches to the terminal, as Cmd+1-9 does, so the layout never
+        // changes out of sight.
         if (inAppField) return;
         e.preventDefault();
         const state = useStore.getState();
         const idx = state.terminalTabs.findIndex((t) => t.id === state.activeTabId);
-        if (idx > 0) setActiveTab(state.terminalTabs[idx - 1].id);
-      } else if (e.key === ']' && e.shiftKey) {
-        if (inAppField) return;
-        e.preventDefault();
-        const state = useStore.getState();
-        const idx = state.terminalTabs.findIndex((t) => t.id === state.activeTabId);
-        if (idx < state.terminalTabs.length - 1) setActiveTab(state.terminalTabs[idx + 1].id);
+        const next = state.terminalTabs[idx + bracketDirection(e)];
+        if (idx >= 0 && next) {
+          state.showTab(next.id);
+          if (state.activeView !== 'terminal') setActiveView('terminal');
+        }
       } else if (e.key >= '1' && e.key <= '9') {
         // Cmd+1-9 = switch to tab N. Don't hijack while user is typing in
         // a form field (number entry in inputs would be eaten otherwise).
@@ -863,7 +906,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         const state = useStore.getState();
         const tabIdx = parseInt(e.key, 10) - 1;
         if (tabIdx < state.terminalTabs.length) {
-          setActiveTab(state.terminalTabs[tabIdx].id);
+          state.showTab(state.terminalTabs[tabIdx].id);
           if (state.activeView !== 'terminal') setActiveView('terminal');
         }
       }
@@ -871,7 +914,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab, doResumeLatest]);
+  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab, doResumeLatest, reopenLastClosedTab, clearActiveTerminal]);
 
   // Menu bar events
   useEffect(() => {
@@ -1206,6 +1249,12 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       </div>
 
       <StatusBar />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        projectPath={projectPath}
+        commands={paletteCommands}
+      />
       <QuitOverlay />
     </div>
   );

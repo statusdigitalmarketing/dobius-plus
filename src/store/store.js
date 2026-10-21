@@ -281,6 +281,16 @@ export const useStore = create((set, get) => ({
     return { activeTabId: tabId };
   }),
 
+  // "I want to see this tab": leave split if it is the split's right pane and
+  // leave grid if it is not a grid cell, otherwise the split guard reverts the
+  // selection or the tab activates while display:none.
+  showTab: (tabId) => {
+    const s = get();
+    if (tabId === s.splitTabId) s.clearSplitTab();
+    if (s.gridSlots && !s.gridSlots.includes(tabId)) s.setGridSlots(null);
+    get().setActiveTab(tabId);
+  },
+
   // A deliberate rename (tab bar edit, agent launch) locks the label so the
   // automatic sources below never overwrite it.
   renameTab: (tabId, label) => set((s) => ({

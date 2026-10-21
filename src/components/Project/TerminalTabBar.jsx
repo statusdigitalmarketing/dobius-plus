@@ -394,19 +394,7 @@ export default function TerminalTabBar() {
           return (
             <button
               key={tab.id}
-              onClick={() => {
-                const state = useStore.getState();
-                if (tab.id === splitTabId) clearSplitTab();
-                // If grid mode is on and the clicked tab isn't currently a
-                // grid cell, exit grid mode — otherwise paneStyleFor returns
-                // display:none for the just-activated tab and input/paste/git
-                // polling would route to an invisible terminal. Matches the
-                // user's intent: "I want to see this tab".
-                if (state.gridSlots && !state.gridSlots.includes(tab.id)) {
-                  state.setGridSlots(null);
-                }
-                setActiveTab(tab.id);
-              }}
+              onClick={() => useStore.getState().showTab(tab.id)}
               onDoubleClick={() => handleDoubleClick(tab)}
               onMouseDown={(e) => handleMouseDown(e, tab.id)}
               onContextMenu={(e) => handleContextMenu(e, tab.id)}
