@@ -25,7 +25,18 @@ export default function ProjectList() {
   const [contextMenu, setContextMenu] = useState(null); // { x, y, project }
   const [renaming, setRenaming] = useState(null); // { project, value }
   const [projectAccounts, setProjectAccounts] = useState({}); // projectPath → account
+  const [scanDir, setScanDir] = useState(''); // settings.projectScanDir
+  const [pickError, setPickError] = useState(null);
   const renameInputRef = useRef(null);
+  // Project scans can overlap (focus, data updates, a folder change) and an
+  // older, slower one must not overwrite a newer result.
+  const loadSeqRef = useRef(0);
+  const reloadProjects = useCallback(() => {
+    const seq = ++loadSeqRef.current;
+    window.electronAPI.dataListProjects()
+      .then((list) => { if (seq === loadSeqRef.current) setProjects(list); })
+      .catch((err) => console.warn('[launcher] project list failed:', err?.message));
+  }, []);
 
   // Auto-focus the search input when the launcher opens, so typing goes straight
   // to the search without clicking. Fires on mount (first launch) AND on the
@@ -43,13 +54,19 @@ export default function ProjectList() {
       return;
     }
 
+    const firstSeq = ++loadSeqRef.current;
     Promise.all([
       window.electronAPI.dataListProjects(),
       window.electronAPI.windowGetOpen(),
       window.electronAPI.configGetPinnedProjects?.() || [],
       window.electronAPI.accountsList?.() || [],
-    ]).then(([projectList, openList, pinned, accounts]) => {
-      setProjects(projectList);
+      window.electronAPI.configGetSettings?.() || {},
+    ]).then(([projectList, openList, pinned, accounts, settings]) => {
+      // A refresh that started later already set both; keep its answer.
+      if (firstSeq === loadSeqRef.current) {
+        setProjects(projectList);
+        setScanDir(settings?.projectScanDir || '');
+      }
       setOpenProjects(openList);
       setPinnedPaths(pinned || []);
       setLoading(false);
@@ -68,21 +85,33 @@ export default function ProjectList() {
           setProjectAccounts(map);
         });
       }
+    }).catch((err) => {
+      // Never leave the launcher on its skeleton: that hides New Project too.
+      console.error('[launcher] initial load failed:', err);
+      setLoading(false);
     });
 
     const interval = setInterval(() => {
       window.electronAPI.windowGetOpen().then(setOpenProjects);
     }, 3000);
 
-    const removeWatcher = window.electronAPI.onDataUpdated(() => {
-      window.electronAPI.dataListProjects().then(setProjects);
-    });
+    // The projects folder can also change from Settings in a project window,
+    // which sends no update here, so re-read it on focus too.
+    const refresh = () => {
+      reloadProjects();
+      window.electronAPI.configGetSettings?.()
+        .then((s) => setScanDir(s?.projectScanDir || ''))
+        .catch((err) => console.warn('[launcher] settings refresh failed:', err?.message));
+    };
+    const removeWatcher = window.electronAPI.onDataUpdated(refresh);
+    window.addEventListener('focus', refresh);
 
     return () => {
       clearInterval(interval);
       removeWatcher();
+      window.removeEventListener('focus', refresh);
     };
-  }, []);
+  }, [reloadProjects]);
 
   const handleTogglePin = useCallback((projectPath) => {
     setPinnedPaths((prev) => {
@@ -92,6 +121,22 @@ export default function ProjectList() {
       window.electronAPI?.configSetPinnedProjects?.(next);
       return next;
     });
+  }, []);
+
+  // Both pickers are native sheets; a rejection used to vanish, so the button
+  // looked dead. Say what went wrong instead.
+  const handleNewProject = useCallback(() => {
+    setPickError(null);
+    window.electronAPI?.windowPickAndOpenProject?.()
+      .then((res) => { if (res?.ok) window.electronAPI.windowGetOpen().then(setOpenProjects); })
+      .catch((err) => setPickError(`Could not open the project: ${err?.message || err}`));
+  }, []);
+
+  const handlePickProjectsFolder = useCallback(() => {
+    setPickError(null);
+    window.electronAPI?.windowPickProjectsFolder?.()
+      .then((res) => { if (res?.ok) setScanDir(res.path); })
+      .catch((err) => setPickError(`Could not set the projects folder: ${err?.message || err}`));
   }, []);
 
   const handleOpenProject = (project) => {
@@ -117,14 +162,14 @@ export default function ProjectList() {
     setRenaming(null);
     if (!value.trim() || !project.decodedPath) return;
     await window.electronAPI?.projectSetDisplayName?.(project.decodedPath, value.trim());
-    window.electronAPI.dataListProjects().then(setProjects);
-  }, [renaming]);
+    reloadProjects();
+  }, [renaming, reloadProjects]);
 
   const handleRemoveProject = useCallback(async (project) => {
     if (!project.decodedPath) return;
     await window.electronAPI?.projectRemoveFromList?.(project.decodedPath);
-    window.electronAPI.dataListProjects().then(setProjects);
-  }, []);
+    reloadProjects();
+  }, [reloadProjects]);
 
   const { pinned, unpinned } = useMemo(() => {
     const q = search.toLowerCase().trim();
@@ -240,10 +285,31 @@ export default function ProjectList() {
             {projects.length} project{projects.length !== 1 ? 's' : ''}
           </span>
           <button
-            onClick={() => window.electronAPI?.windowPickAndOpenProject?.().then((res) => {
-              if (res?.ok) window.electronAPI.windowGetOpen().then(setOpenProjects);
-            })}
-            title="Open a folder as a new project"
+            onClick={handlePickProjectsFolder}
+            title={scanDir ? `Projects folder: ${scanDir}\nClick to change` : 'Choose the folder your projects live in'}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              maxWidth: 200,
+              padding: '3px 9px',
+              fontSize: 11,
+              fontFamily: "'SF Mono', monospace",
+              color: 'var(--fg)',
+              backgroundColor: 'var(--surface)',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              cursor: 'pointer',
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}>
+              <path strokeLinejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+            </svg>
+            <span className="truncate">{scanDir ? scanDir.split('/').filter(Boolean).pop() || scanDir : 'Projects folder'}</span>
+          </button>
+          <button
+            onClick={handleNewProject}
+            title="Open a folder as a new project, or create one"
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -268,6 +334,12 @@ export default function ProjectList() {
           </button>
         </div>
       </div>
+
+      {pickError && (
+        <div className="px-6 pt-3 text-xs" role="alert" style={{ color: 'var(--danger)' }}>
+          {pickError}
+        </div>
+      )}
 
       {/* Search + filters */}
       <div className="px-6 pt-4 pb-2 shrink-0 space-y-2">
@@ -341,9 +413,29 @@ export default function ProjectList() {
               {search ? 'No matching projects' : filter !== 'all' ? `No ${filter} projects` : 'No projects found'}
             </div>
             {!search && filter === 'all' && (
-              <div className="text-xs" style={{ color: 'var(--dim)' }}>
-                Start using Claude Code in a project directory to see it here
-              </div>
+              <>
+                <div className="text-xs text-center" style={{ color: 'var(--dim)', maxWidth: 360 }}>
+                  {scanDir
+                    ? 'No folders in your projects folder yet. Start a new project, or pick a different folder.'
+                    : 'Choose the folder your projects live in, and every folder inside it shows up here. Or start a new project.'}
+                </div>
+                <div className="flex gap-2 mt-2">
+                  <button
+                    onClick={handlePickProjectsFolder}
+                    className="px-3 py-1.5 text-xs rounded"
+                    style={{ backgroundColor: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)', cursor: 'pointer', fontFamily: "'SF Mono', monospace" }}
+                  >
+                    {scanDir ? 'Change projects folder' : 'Choose projects folder'}
+                  </button>
+                  <button
+                    onClick={handleNewProject}
+                    className="px-3 py-1.5 text-xs rounded"
+                    style={{ backgroundColor: 'var(--accent)', color: 'var(--bg)', border: 'none', cursor: 'pointer', fontFamily: "'SF Mono', monospace", fontWeight: 600 }}
+                  >
+                    New Project
+                  </button>
+                </div>
+              </>
             )}
           </div>
         ) : (
