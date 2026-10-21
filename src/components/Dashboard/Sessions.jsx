@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useStore } from '../../store/store';
 import { timeAgo } from '../../lib/time-ago';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
+import { SHOW_AUTOMATED_EVENT } from '../../hooks/useSessions';
 
 const SESSION_CAP = 500; // mirrors loadAllSessions() — surface when we hit it
 
@@ -33,6 +34,11 @@ export default function Sessions() {
   const [sortBy, setSortBy] = useState('recent'); // 'recent' | 'alpha'
   const [sourceFilter, setSourceFilter] = useState('claude'); // 'claude' | 'codex' | 'all'
   const [hiddenCount, setHiddenCount] = useState(0); // hidden session sources (paths)
+  // SDK-driven Claude runs (review hooks, worktree agents) hidden by default.
+  // Shared with the sidebar History toggle via settings.showAutomatedSessions.
+  const [showAutomated, setShowAutomated] = useState(false);
+  const showAutomatedRef = useRef(false);
+  const automatedTouchedRef = useRef(false); // a click beats a late settings restore
 
   // The CURRENTLY selected source, tracked in a ref so an async load can tell
   // whether the user has switched filters since it started. Gating on SOURCE
@@ -52,27 +58,29 @@ export default function Sessions() {
   // stream render (so the skeleton always clears).
   const loadSeqRef = useRef(0);
   const renderedSeqRef = useRef(0);
-  const loadData = useCallback(async (source) => {
+  const loadData = useCallback(async (source, automatedOverride) => {
     if (!window.electronAPI?.dataLoadAllSessions) return;
-    const src = source || sourceFilter;
+    const src = typeof source === 'string' ? source : sourceFilter;
+    const auto = typeof automatedOverride === 'boolean' ? automatedOverride : showAutomated;
+    const stale = () => src !== sourceFilterRef.current || auto !== showAutomatedRef.current;
     // Default is Claude-only, which scans zero Codex files. 'codex'/'all' opt
     // into the Codex scan; exec (headless review) runs stay hidden.
     const sources = src === 'codex' ? ['codex'] : src === 'all' ? ['claude', 'codex'] : ['claude'];
     const seq = ++loadSeqRef.current;
     try {
       const [allSessions, sessionTags, cfgSettings] = await Promise.all([
-        window.electronAPI.dataLoadAllSessions(undefined, { sources }),
+        window.electronAPI.dataLoadAllSessions(undefined, { sources, excludeAutomated: !auto }),
         window.electronAPI.configGetSessionTags?.() || {},
         window.electronAPI.configGetSettings?.() || {},
       ]);
-      if (src !== sourceFilterRef.current || seq < renderedSeqRef.current) return;
+      if (stale() || seq < renderedSeqRef.current) return;
       renderedSeqRef.current = seq;
       setSessions(allSessions || []);
       setTags(sessionTags || {});
       const hp = cfgSettings?.hiddenSessionPaths;
       setHiddenCount(Array.isArray(hp) ? hp.length : 0);
     } catch {
-      if (src !== sourceFilterRef.current || seq < renderedSeqRef.current) return;
+      if (stale() || seq < renderedSeqRef.current) return;
       renderedSeqRef.current = seq;
       setSessions([]);
       setTags({});
@@ -81,20 +89,55 @@ export default function Sessions() {
       // A rejected stale load (older seq, or a source the user left) must NOT
       // drop loading, or the previously-shown source's cards would sit visible
       // under the new filter until a fresh load finishes (reviewer P2).
-      if (src === sourceFilterRef.current && seq >= renderedSeqRef.current) setLoading(false);
+      if (!stale() && seq >= renderedSeqRef.current) setLoading(false);
     }
-  }, [sourceFilter]);
+  }, [sourceFilter, showAutomated]);
 
-  // Restore the saved source filter once, then reload under it.
+  // Restore the saved filters once, then reload under them.
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         const cfg = await window.electronAPI?.configGetSettings?.();
+        // An unmounted page must not broadcast a value read before a newer toggle.
+        if (cancelled) return;
         const saved = cfg?.sessionSourceFilter;
         if (saved === 'codex' || saved === 'all' || saved === 'claude') setSourceFilter(saved);
-      } catch { /* default stays 'claude' */ }
+        if (typeof cfg?.showAutomatedSessions === 'boolean' && !automatedTouchedRef.current) {
+          showAutomatedRef.current = cfg.showAutomatedSessions;
+          setShowAutomated(cfg.showAutomatedSessions);
+          // Bring same-window peers (History, the badge) to the saved value:
+          // another window may have changed it since they read it.
+          window.dispatchEvent(new CustomEvent(SHOW_AUTOMATED_EVENT, { detail: cfg.showAutomatedSessions }));
+        }
+      } catch { /* defaults stay */ }
     })();
+    return () => { cancelled = true; };
   }, []);
+
+  const applyAutomated = useCallback((next) => {
+    automatedTouchedRef.current = true;
+    if (next === showAutomatedRef.current) return;
+    showAutomatedRef.current = next; // synchronous, same reason as changeSource
+    setShowAutomated(next);
+    setSessions([]);
+    setLoading(true);
+    loadData(sourceFilterRef.current, next);
+  }, [loadData]);
+
+  const toggleAutomated = useCallback(() => {
+    const next = !showAutomatedRef.current;
+    applyAutomated(next);
+    window.dispatchEvent(new CustomEvent(SHOW_AUTOMATED_EVENT, { detail: next }));
+    try { window.electronAPI?.configUpdateSettings?.({ showAutomatedSessions: next }); } catch { /* best effort */ }
+  }, [applyAutomated]);
+
+  // Follow the History sidebar's toggle in this window.
+  useEffect(() => {
+    const onChange = (e) => { if (typeof e.detail === 'boolean') applyAutomated(e.detail); };
+    window.addEventListener(SHOW_AUTOMATED_EVENT, onChange);
+    return () => window.removeEventListener(SHOW_AUTOMATED_EVENT, onChange);
+  }, [applyAutomated]);
 
   const changeSource = useCallback((src) => {
     sourceFilterRef.current = src; // synchronous, so an in-flight load resolves against the new source
@@ -293,6 +336,23 @@ export default function Sessions() {
           title={sortBy === 'recent' ? 'Sorted by recent' : 'Sorted A-Z'}
         >
           {sortBy === 'recent' ? 'Recent' : 'A-Z'}
+        </button>
+        <button
+          onClick={toggleAutomated}
+          data-testid="sessions-toggle-automated"
+          className="px-2 py-1.5 text-xs rounded transition-colors duration-100 shrink-0"
+          style={{
+            backgroundColor: showAutomated ? 'var(--surface-hover)' : 'var(--surface)',
+            color: showAutomated ? 'var(--accent)' : 'var(--dim)',
+            border: '1px solid var(--border)',
+            fontFamily: "'SF Mono', monospace",
+            cursor: 'pointer',
+          }}
+          title={showAutomated
+            ? 'Showing Agent SDK runs (review hooks, scripted agents), click to hide them'
+            : 'Automated runs are hidden, click to show them'}
+        >
+          {showAutomated ? 'Bots shown' : 'Bots hidden'}
         </button>
       </div>
 

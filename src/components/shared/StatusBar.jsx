@@ -1,12 +1,31 @@
 import { useStore } from '../../store/store';
 import { useState, useEffect } from 'react';
 import { modelLabel } from '../../lib/model-label';
+import { compactTokens } from '../../lib/compact-tokens';
 
 function ctxColor(pct) {
   if (pct >= 95) return '#f85149';
   if (pct >= 80) return '#f0883e';
   if (pct >= 50) return '#e3b341';
   return '#3FB950';
+}
+
+// Context use as a small ring that fills clockwise from 12 o'clock, colored
+// by ctxColor. Same geometry idea as t3code's ContextWindowMeter.
+function ContextRing({ pct, color }) {
+  const r = 5;
+  const c = 2 * Math.PI * r;
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" style={{ transform: 'rotate(-90deg)', flexShrink: 0 }}>
+      <circle cx="7" cy="7" r={r} fill="none" stroke="var(--border)" strokeWidth="2.5" />
+      <circle
+        cx="7" cy="7" r={r} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round"
+        strokeDasharray={c}
+        strokeDashoffset={c * (1 - pct / 100)}
+        style={{ transition: 'stroke-dashoffset 0.4s, stroke 0.4s' }}
+      />
+    </svg>
+  );
 }
 
 const SHELLS = ['zsh', '-zsh', 'bash', '-bash', 'sh', '-sh', 'login', 'fish', '-fish'];
@@ -198,7 +217,13 @@ export default function StatusBar() {
           return (
             <span
               className="flex items-center gap-1.5"
-              title={`This tab's Claude session\nContext window: ~${ctx.tokens.toLocaleString()} / ${ctx.maxTokens.toLocaleString()} tokens (${pct}%)\nModel: ${ctx.model || 'unknown'}`}
+              data-testid="context-ring"
+              role="meter"
+              aria-label="Context window used"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={pct}
+              title={`This tab's Claude session\nContext window: ~${compactTokens(ctx.tokens)} of ${compactTokens(ctx.maxTokens)} tokens (${pct}%)\n${ctx.tokens.toLocaleString()} / ${ctx.maxTokens.toLocaleString()}\nModel: ${ctx.model || 'unknown'}`}
               style={{ cursor: 'default' }}
             >
               {ctx.model && (
@@ -212,15 +237,7 @@ export default function StatusBar() {
                 </span>
               )}
               <span style={{ color, fontSize: 9 }}>ctx</span>
-              <span
-                className="relative h-1.5 rounded-full overflow-hidden"
-                style={{ width: 40, backgroundColor: 'var(--border)' }}
-              >
-                <span
-                  className="absolute inset-y-0 left-0 rounded-full"
-                  style={{ width: `${pct}%`, backgroundColor: color, transition: 'width 0.4s, background-color 0.4s' }}
-                />
-              </span>
+              <ContextRing pct={pct} color={color} />
               <span style={{ color, fontSize: 9, fontFamily: "'SF Mono', monospace" }}>{pct}%</span>
             </span>
           );

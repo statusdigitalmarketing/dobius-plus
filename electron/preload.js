@@ -117,6 +117,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataLoadProjectTokens: () => ipcRenderer.invoke('data:loadProjectTokens'),
   dataSearchTranscripts: (query) => ipcRenderer.invoke('data:searchTranscripts', query),
   dataEstimateContextForTab: (tabId) => ipcRenderer.invoke('data:estimateContextForTab', tabId),
+  tabsLiveSessions: (tabIds) => ipcRenderer.invoke('tabs:liveSessions', tabIds),
   // Chrome profile launcher (v1.0.41)
   chromeListProfiles: () => ipcRenderer.invoke('chrome:listProfiles'),
   chromeOpenUrl: (profileDir, url) => ipcRenderer.invoke('chrome:openUrl', profileDir, url),
@@ -143,6 +144,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // v1.0.29 feature: Copy last Claude response from a tab (via TerminalTabBar
   // right-click). Returns the raw content of the most recent assistant turn.
   dataLastAssistantMessage: (sessionId, projectPath) => ipcRenderer.invoke('data:lastAssistantMessage', sessionId, projectPath),
+  dataSessionHoverInfo: (sessionId, projectPath) => ipcRenderer.invoke('data:sessionHoverInfo', sessionId, projectPath),
   onDataUpdated: (callback) => {
     const handler = (_event, changedPath) => callback(changedPath);
     ipcRenderer.on('data:updated', handler);
@@ -210,6 +212,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Window management
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),
   windowFocusTabOwner: (projectPath, tabId) => ipcRenderer.invoke('window:focusTabOwner', projectPath, tabId),
+  windowIsFocused: () => ipcRenderer.invoke('window:isFocused'),
+  onWindowFocusChanged: (callback) => {
+    const handler = (_event, focused) => callback(!!focused);
+    ipcRenderer.on('window:focusChanged', handler);
+    return () => ipcRenderer.removeListener('window:focusChanged', handler);
+  },
   windowGetOpen: () => ipcRenderer.invoke('window:getOpen'),
   windowClose: (projectPath) => ipcRenderer.invoke('window:close', projectPath),
   windowSetTitle: (title) => ipcRenderer.invoke('window:setTitle', title),

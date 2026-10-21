@@ -36,13 +36,13 @@ import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccou
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
-import { estimateContextForTabId } from './tab-context.js';
+import { estimateContextForTabId, liveSessionsForTabs } from './tab-context.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, findLooseEnds,
   loadProjectTokens, searchTranscripts, deleteSession,
-  getLastAssistantMessage, getAllProjectTabs,
+  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo,
 } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
@@ -485,6 +485,19 @@ function setupDataHandlers() {
   // Focus the window that currently owns a live tab (a tear-off window if the id
   // is torn off, otherwise the project's primary window). Lets the sidebar reveal
   // a cross-window live session instead of resuming a duplicate. H3.
+  // Native window focus for the renderer. document.hasFocus() reads false
+  // while a <webview> pane inside the window has focus, which made a visible
+  // terminal beside a focused browser pane count as unseen (unread tabs).
+  // Focus moving into a webview does not blur the native window.
+  ipcMain.handle('window:isFocused', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    return !!win && !win.isDestroyed() && win.isFocused();
+  });
+  for (const [evt, focused] of [['browser-window-focus', true], ['browser-window-blur', false]]) {
+    app.on(evt, (_e, win) => {
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('window:focusChanged', focused);
+    });
+  }
   ipcMain.handle('window:focusTabOwner', (_event, projectPath, tabId) => {
     if (typeof tabId === 'string' && focusTearOffWindowForTab(tabId)) return true;
     // Reveal the exact primary window that owns this tab (v1.0.66): with N
@@ -585,6 +598,14 @@ function setupDataHandlers() {
     if (typeof tabId !== 'string' || !ownsTerminal(event.sender.id, tabId)) return null;
     return estimateContextForTabId(tabId);
   });
+  // History "Needs you" / "Working": which session each of this window's tabs
+  // is running now, with main's own hook status. Read-only; same ownership
+  // boundary as above, so a window only learns about its own terminals.
+  ipcMain.handle('tabs:liveSessions', async (event, tabIds) => {
+    if (!Array.isArray(tabIds)) return [];
+    const owned = tabIds.filter((id) => typeof id === 'string' && ownsTerminal(event.sender.id, id));
+    return liveSessionsForTabs(owned);
+  });
   ipcMain.handle('data:deleteSession', async (_event, sessionId, projectPath) => {
     const result = await deleteSession(sessionId, projectPath);
     // Broadcast data:updated so other open windows refresh their session
@@ -605,6 +626,12 @@ function setupDataHandlers() {
   ipcMain.handle('data:lastAssistantMessage', (_event, sessionId, projectPath) => {
     if (typeof sessionId !== 'string') return null;
     return getLastAssistantMessage(sessionId, projectPath);
+  });
+  // History hover card. Read-only tail read; resolveTranscriptPath validates
+  // the id and only ever opens <projects>/<encoded>/<id>.jsonl.
+  ipcMain.handle('data:sessionHoverInfo', (_event, sessionId, projectPath) => {
+    if (typeof sessionId !== 'string' || typeof projectPath !== 'string') return null;
+    return getSessionHoverInfo(sessionId, projectPath);
   });
 }
 
