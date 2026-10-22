@@ -45,7 +45,7 @@ const loadList = (key) => {
 };
 const saveList = (key, list) => { try { localStorage.setItem(key, JSON.stringify(list)); } catch { /* private mode */ } };
 
-export default function Board({ connection, status, onOpen, onShowHistory }) {
+export default function Board({ connection, status, onOpen, onShowHistory, onShowOffice }) {
   const [terminals, setTerminals] = useState([]);
   const [recentExits, setRecentExits] = useState([]);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -189,6 +189,9 @@ export default function Board({ connection, status, onOpen, onShowHistory }) {
               >🔔</button>
             )}
             <button className="icon-btn" onClick={onShowHistory} aria-label="Chat history">☷</button>
+            {onShowOffice && (
+              <button className="icon-btn" onClick={onShowOffice} aria-label="Office view" title="Office view">▦</button>
+            )}
             <button
               className="icon-btn"
               onClick={() => { setPickerOpen(true); connection.send({ type: 'listProjects' }); }}

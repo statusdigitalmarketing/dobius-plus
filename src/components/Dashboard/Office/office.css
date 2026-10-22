@@ -1,0 +1,124 @@
+/* Office v2 styles. The pixel-art world is drawn to canvas by renderer.js,
+ * so this file only styles the surrounding React chrome. All animations
+ * (door-light pulse, needs-bubble pulse, monitor flicker, auto-pan) happen
+ * inside the RAF loop and respect prefers-reduced-motion in state.reduceMotion
+ * rather than here. */
+
+.office-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg, #0b0b0d);
+  color: var(--fg, #e8e8ea);
+  overflow: hidden;
+}
+
+.office-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border, #26262c);
+  flex: 0 0 auto;
+}
+.office-recording-active .office-toolbar {
+  display: none;
+}
+
+/* Recording controls hidden by default; a thin strip at the top that
+ * reveals its contents only on hover. Clean frame for screen capture. */
+.office-recording-reveal {
+  position: fixed; top: 0; left: 0; right: 0; height: 6px; z-index: 1001;
+  background: transparent;
+}
+.office-recording-reveal:hover {
+  height: auto;
+  background: rgba(7, 7, 10, 0.92);
+  padding: 6px 10px;
+}
+.office-recording-reveal-inner {
+  /* visibility:hidden instead of display:none keeps the controls in the
+   * keyboard-focus order so a Tab from the canvas reaches them. On hover
+   * they animate visible; focus-within also reveals so a Tab-triggered focus
+   * surfaces its target. */
+  visibility: hidden;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.office-recording-reveal:hover .office-recording-reveal-inner,
+.office-recording-reveal:focus-within .office-recording-reveal-inner {
+  visibility: visible;
+}
+/* After a click the focused button retains focus and :focus-within kept the
+ * toolbar visible. Blur the button on mouseleave so leaving the strip hides
+ * everything again. (JS blurs the active button; this just styles it.) */
+.office-recording-reveal:not(:hover):not(:focus-within) {
+  height: 6px;
+  background: transparent;
+  padding: 0;
+}
+.office-recording-reveal:not(:hover):not(:focus-within) .office-recording-reveal-inner {
+  visibility: hidden;
+}
+
+.office-tool-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  background: var(--panel, #141418);
+  color: var(--fg, #e8e8ea);
+  border: 1px solid var(--border, #26262c);
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.office-tool-btn:hover { border-color: #4ec9b0; }
+
+.office-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+.office-stage canvas {
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+
+/* 9:16 reel layout: center the stage inside a 9/16 aspect-ratio content box
+ * so a screen capture of the window window gives a vertical-usable frame. */
+.office-recording-active[data-ratio='vertical'] .office-stage {
+  margin: 0 auto;
+  max-width: calc(100vh * 9 / 16);
+}
+
+/* Keyboard-only tab list: visually hidden, but if a button inside gets focus
+ * (sighted keyboard user tabbing to open a terminal), surface it in the
+ * toolbar area so the selection is actually visible. */
+.office-kbd-list {
+  position: absolute; left: 8px; top: 44px; z-index: 2;
+  list-style: none; margin: 0; padding: 0;
+  width: 0; height: 0; overflow: hidden;
+}
+.office-kbd-list:focus-within {
+  width: auto; height: auto; overflow: visible;
+  background: var(--panel, #141418);
+  border: 1px solid var(--accent, #4ec9b0);
+  border-radius: 6px; padding: 6px 8px;
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 60vh; overflow-y: auto;
+}
+.office-kbd-list button {
+  font-size: 12px; padding: 3px 8px;
+  background: transparent; color: var(--fg, #e8e8ea);
+  border: 1px solid transparent; border-radius: 4px;
+  text-align: left; cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.office-kbd-list button:focus-visible {
+  border-color: var(--accent, #4ec9b0);
+  outline: none;
+}

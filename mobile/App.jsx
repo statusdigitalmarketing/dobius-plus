@@ -3,6 +3,7 @@ import Pairing from './Pairing';
 import Board from './Board';
 import TerminalScreen from './Terminal';
 import History from './History';
+import Office from './Office';
 import { Connection } from './connection';
 import { get, set, remove } from './storage';
 import { HOST_KEY, TOKEN_KEY, normaliseHost, initHost } from './host';
@@ -189,6 +190,15 @@ export default function App() {
   if (view === 'history') {
     return <History connection={conn} onBack={() => setView('board')} />;
   }
+  if (view === 'office') {
+    return (
+      <Office
+        connection={conn}
+        onBack={() => setView('board')}
+        onOpen={(id) => { setOpenTabId(id); setView('terminal'); }}
+      />
+    );
+  }
   if (view === 'terminal') {
     return (
       <TerminalScreen
@@ -207,6 +217,7 @@ export default function App() {
       status={status}
       onOpen={(id) => { setOpenTabId(id); setView('terminal'); }}
       onShowHistory={() => setView('history')}
+      onShowOffice={() => setView('office')}
     />
   );
 }

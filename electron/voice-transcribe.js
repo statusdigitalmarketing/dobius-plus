@@ -248,7 +248,7 @@ async function startServerLocked() {
     // out of band and prevents the probe from accepting a response from an
     // unrelated service while our bind failed (Codex r2 P2-1).
     if (!(await tryBind(port))) continue;
-    const { child, outcome } = await tryStartServer(bin, model, port, tmpDir, requestPath);
+    const { child } = await tryStartServer(bin, model, port, tmpDir, requestPath);
     if (myGen !== serverGeneration) {
       try { child?.kill('SIGTERM'); } catch { /* noop */ }
       return null;
