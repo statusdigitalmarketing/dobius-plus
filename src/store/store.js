@@ -11,6 +11,21 @@ import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.j
 // Drop any grid entries whose tab is no longer present. Returns null when the
 // grid would be left empty (i.e. grid mode turns off). gridSlots is a dense,
 // ordered list of tabIds (1–6) — no gaps — so the layout auto-fits the count.
+// The next tab number whose id is not already a tab here. A tab docked back
+// from a tear-off keeps its id, which a tear-off numbers from a random offset
+// in this same id space.
+function nextFreeCounter(state, projectPath) {
+  let counter = state.tabCounter + 1;
+  while (state.terminalTabs.some((t) => t.id === makeTabId(projectPath, counter, idSpace(state)))) counter += 1;
+  return counter;
+}
+
+// The id space new tabs are numbered in: an extra window's key, or a
+// tear-off's own key (so its tabs never collide with a primary's).
+function idSpace(state) {
+  return state.tabIdSpace || state.windowKey;
+}
+
 function pruneGrid(gridSlots, keptIds) {
   if (!gridSlots) return null;
   const pruned = gridSlots.filter((id) => keptIds.has(id));
@@ -67,6 +82,10 @@ export const useStore = create((set, get) => ({
   // once by ProjectView from the URL. See tabId() below.
   windowKey: null,
   setWindowKey: (windowKey) => set({ windowKey: windowKey || null }),
+  // Tear-off windows only: numbers their new tabs apart from every primary
+  // window. Ids only, never a persistence key (that stays windowKey).
+  tabIdSpace: null,
+  setTabIdSpace: (key) => set({ tabIdSpace: key || null }),
   splitTabId: null,
   splitRatio: 0.5,
 
@@ -153,8 +172,8 @@ export const useStore = create((set, get) => ({
   // Tab actions
   addTab: (projectPath) => {
     const state = get();
-    const counter = state.tabCounter + 1;
-    const id = makeTabId(projectPath, counter, state.windowKey);
+    const counter = nextFreeCounter(state, projectPath);
+    const id = makeTabId(projectPath, counter, idSpace(state));
     // kind:'terminal' is the default and (load-bearing) — every existing
     // tab persisted before v1.0.25 has no kind field, so the dispatcher in
     // ProjectView treats undefined as 'terminal' (backwards compatible).
@@ -172,8 +191,8 @@ export const useStore = create((set, get) => ({
   // uniformly except for which component renders inside the pane.
   addBrowserTab: (projectPath, url) => {
     const state = get();
-    const counter = state.tabCounter + 1;
-    const id = makeTabId(projectPath, counter, state.windowKey);
+    const counter = nextFreeCounter(state, projectPath);
+    const id = makeTabId(projectPath, counter, idSpace(state));
     // Scheme guard: only http/https survive. javascript:/file:/data: would
     // otherwise be passed straight to <webview src>. PR#3 r1 LOW.
     const candidate = (typeof url === 'string' && url.trim()) ? url.trim() : '';
@@ -200,6 +219,22 @@ export const useStore = create((set, get) => ({
     terminalTabs: s.terminalTabs.map((t) =>
       t.id === tabId && t.kind === 'browser' ? { ...t, url } : t),
   })),
+
+  // A tab docked back from a tear-off window, keeping its id (its PTY, session
+  // links and scrollback are keyed by it). Returns false for a duplicate.
+  adoptTab: (tab, status, hookOwned) => {
+    const state = get();
+    if (!tab?.id || state.terminalTabs.some((t) => t.id === tab.id)) return false;
+    // Its id is in this window's id space only if it was born here (so below
+    // the counter), else in a tear-off's own space: never handed out here.
+    set({
+      terminalTabs: [...state.terminalTabs, tab],
+      tabStatus: status ? { ...state.tabStatus, [tab.id]: status } : state.tabStatus,
+      hookOwnedTabs: hookOwned ? { ...state.hookOwnedTabs, [tab.id]: true } : state.hookOwnedTabs,
+    });
+    get().showTab(tab.id);
+    return true;
+  },
 
   removeTab: (tabId) => {
     const state = get();
@@ -582,8 +617,8 @@ export const useStore = create((set, get) => ({
     const idx = Math.min(index, state.recentlyClosedTabs.length - 1);
     const closed = state.recentlyClosedTabs[idx];
     const rest = state.recentlyClosedTabs.filter((_, i) => i !== idx);
-    const counter = state.tabCounter + 1;
-    const id = makeTabId(closed.projectPath, counter, state.windowKey);
+    const counter = nextFreeCounter(state, closed.projectPath);
+    const id = makeTabId(closed.projectPath, counter, idSpace(state));
     // Restore kind/url too. If the closed tab was a browser, reopening as a
     // terminal (which is what dropping these fields did) would be a clear
     // regression. Default to terminal when kind is missing (legacy pre-v1.0.25

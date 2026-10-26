@@ -19,7 +19,7 @@ const tearingOffTabs = new Set();
 // places that render the same status dot (tab bar, grid pane, sessions
 // dashboard) cannot drift apart.
 
-export default function TerminalTabBar() {
+export default function TerminalTabBar({ tearOffTabId = null }) {
   const tabs = useStore((s) => s.terminalTabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const setActiveTab = useStore((s) => s.setActiveTab);
@@ -249,6 +249,63 @@ export default function TerminalTabBar() {
     setDraggingTabId(null);
   }, [dragTabId, tabs, reorderTabs, setDraggingTabId]);
 
+  // Docking: put tabs of THIS tear-off window back into the project's main
+  // window, keeping their running terminals (window:dockTab in main).
+  // point = where a drag ended, so the tab lands in the window it was dropped
+  // on; null = the project's main window. Resolves 'ok', 'no-target', or 'failed'.
+  const dockOne = useCallback(async (tabId, point) => {
+    if (tearingOffTabs.has(tabId)) return 'failed';
+    tearingOffTabs.add(tabId);
+    markDoNotKill(tabId);
+    let result = 'failed';
+    try {
+      await window.electronAPI?.terminalRequestSaveNow?.();
+      await new Promise((r) => setTimeout(r, 200));
+      const s = useStore.getState();
+      const live = s.terminalTabs.find((t) => t.id === tabId);
+      if (!live) return 'failed';
+      const res = await window.electronAPI?.windowDockTab?.(
+        tabId, live.label, labelMeta(live),
+        { status: s.tabStatus[tabId], hookOwned: !!s.hookOwnedTabs[tabId] },
+        point?.x, point?.y,
+      );
+      result = res?.ok ? 'ok' : (res?.reason === 'no-target' ? 'no-target' : 'failed');
+      return result;
+    } catch (err) {
+      console.warn('[TerminalTabBar] dock failed:', err?.message);
+      return 'failed';
+    } finally {
+      if (result !== 'ok') unmarkDoNotKill(tabId);
+      tearingOffTabs.delete(tabId);
+    }
+  }, []);
+
+  // A docked tab leaves this window; the window closes once no terminal tab
+  // is left (read fresh: a tab can be opened while a dock is in flight).
+  const afterDocked = useCallback((tabId) => {
+    const left = useStore.getState().terminalTabs.filter((t) => t.id !== tabId && (!t.kind || t.kind === 'terminal'));
+    if (left.length === 0) window.close();
+    else removeTab(tabId);
+    return left.length;
+  }, [removeTab]);
+
+  // Dock every terminal tab, the torn-off one last, re-reading the list each
+  // step so a tab opened mid-move goes too. Stops at the first failure.
+  const dockWindow = useCallback(async (point) => {
+    let at = point;
+    for (;;) {
+      const terms = useStore.getState().terminalTabs.filter((t) => !t.kind || t.kind === 'terminal');
+      if (terms.length === 0) return 'ok';
+      const next = terms.find((t) => t.id !== tearOffTabId) || terms[0];
+      const r = await dockOne(next.id, at);
+      if (r !== 'ok') return r;
+      if (afterDocked(next.id) === 0) return 'ok';
+      // Once a tab has moved, the rest must follow even if the drop target
+      // went away (minimized, moved): they go to the main window instead.
+      at = null;
+    }
+  }, [dockOne, afterDocked, tearOffTabId]);
+
   const handleDragEnd = useCallback(async (e) => {
     const tabId = dragTabId;
     // Capture screen coordinates before any async work (event may be recycled)
@@ -265,13 +322,27 @@ export default function TerminalTabBar() {
     // Rely on the dragleave tracker — Electron zeros clientX/clientY for
     // out-of-window drops which would cause false positives with coordinate checks.
     if (!dragLeftWindow.current) return;
-    if (tabs.length <= 1) return; // Don't tear off the last tab
 
     const tab = tabs.find((t) => t.id === tabId);
     if (!tab) return;
     // Only terminal tabs have a PTY to hand to a new window; browser tabs have
     // no owner and the main-process tear-off would reject them anyway. H5.
     if (tab.kind && tab.kind !== 'terminal') return;
+
+    // From a tear-off window, a drop onto the project's main window docks the
+    // tab back. Dragging the torn-off tab itself takes the whole window back.
+    if (tearOffTabId) {
+      const point = { x: sx, y: sy };
+      // The torn-off tab is the window's restore identity, so it always goes
+      // through dockWindow, which re-reads the tabs and never leaves the
+      // window open without it.
+      const wholeWindow = tabId === tearOffTabId;
+      const r = wholeWindow ? await dockWindow(point) : await dockOne(tabId, point);
+      if (r === 'ok' && !wholeWindow) afterDocked(tabId);
+      if (r !== 'no-target') return;
+    }
+
+    if (tabs.length <= 1) return; // Don't tear off the last tab
 
     // Drop a duplicate tear-off gesture for a tab already being torn off. Codex.
     if (tearingOffTabs.has(tabId)) return;
@@ -331,7 +402,7 @@ export default function TerminalTabBar() {
     } finally {
       tearingOffTabs.delete(tabId);
     }
-  }, [dragTabId, tabs, currentProjectPath, removeTab, setDraggingTabId]);
+  }, [dragTabId, tabs, currentProjectPath, removeTab, setDraggingTabId, tearOffTabId, dockOne, dockWindow, afterDocked]);
 
   // Poll active process for each tab (for status badges)
   const [tabProcesses, setTabProcesses] = useState({});
@@ -627,6 +698,10 @@ export default function TerminalTabBar() {
             closeTabsToRight(contextMenu.tabId);
             setContextMenu(null);
           }}
+          onDock={tearOffTabId ? () => {
+            setContextMenu(null);
+            dockWindow(null);
+          } : null}
           onPin={() => {
             togglePinTab(contextMenu.tabId);
             setContextMenu(null);
@@ -733,11 +808,12 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDismiss }) {
+function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
 
   const items = [
+    ...(onDock ? [{ label: 'Move back to main window', onClick: onDock }, { type: 'divider' }] : []),
     { label: isMonitored ? 'Stop Monitoring' : 'Monitor this Terminal', onClick: onMonitor },
     { label: isPinned ? 'Unpin Tab' : 'Pin Tab', onClick: onPin },
     { label: 'Rename', onClick: onRename },
