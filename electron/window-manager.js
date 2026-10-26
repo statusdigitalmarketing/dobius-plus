@@ -367,6 +367,16 @@ export function markTearOffIdentityDocked(wcId) {
   }
 }
 
+// Is a live tear-off window saved under this tab id? A docked tear-off keeps
+// its key after the tab itself left, and a second tear-off of that tab would
+// write the same tearOffWindows bucket and lastTearOffs entry.
+export function tearOffKeyInUse(tabId) {
+  for (const [, entry] of projectWindows) {
+    if (entry.isTearOff && entry.tearOffTabId === tabId && entry.win && !entry.win.isDestroyed()) return true;
+  }
+  return false;
+}
+
 // Tabs mid-dock. A tear-off closing while its tab is being handed over must
 // not Ctrl+C it: the tab is moving, not closing.
 export const dockingTabs = new Set();

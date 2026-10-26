@@ -78,7 +78,7 @@ import {
   openProjectWindow, openTornOffWindow, getOpenProjects, getOpenProjectsForRestore, closeProjectWindow, closeAllProjectWindows,
   getOpenTearOffsForRestore, getOpenPrimaryWindowsForRestore, restoreTornOffWindow, setRestoring, persistOpenProjectsNow,
   markTearOffConfirmed, computeRestoreLists, focusTearOffWindowForTab, focusPrimaryWindowForProject, focusWindowForTab,
-  getWindowEntryByWcId, primaryDockTarget, dockingTabs, markTearOffIdentityDocked,
+  getWindowEntryByWcId, primaryDockTarget, dockingTabs, markTearOffIdentityDocked, tearOffKeyInUse,
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
@@ -2579,6 +2579,11 @@ function setupWindowHandlers() {
     // the tear-off is persisted + restored under the wrong project and H4 strips
     // it from /A's real primary tabs. Codex.
     if (!getTerminalsForProject(projectPath).includes(tabId)) return { ok: false };
+    // ponytail: a window still saved under this id (its tab docked back
+    // while it stayed open) would share one restore bucket with the new
+    // tear-off and lose its own tabs on relaunch, so this tab cannot be torn
+    // off until that window closes. Upgrade path: key tear-offs by their own id.
+    if (tearOffKeyInUse(tabId)) return { ok: false };
     const label = typeof tabLabel === 'string' ? tabLabel.slice(0, 100) : 'Tab';
     // labelMeta carries the tab's automatic-label state (lock, source, the
     // remembered auto label) so the torn-off copy behaves like the original.
