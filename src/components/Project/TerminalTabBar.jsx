@@ -252,9 +252,10 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
   // Docking: put tabs of THIS tear-off window back into the project's main
   // window, keeping their running terminals (window:dockTab in main).
   // point = where a drag ended, so the tab lands in the window it was dropped
-  // on; null = the project's main window. Resolves 'ok', 'no-target', or 'failed'.
-  const dockOne = useCallback(async (tabId, point) => {
-    if (tearingOffTabs.has(tabId)) return 'failed';
+  // on; null = the project's main window; windowId = exactly that window.
+  // Resolves { r: 'ok' | 'gone' | 'no-target' | 'failed', windowId }.
+  const dockOne = useCallback(async (tabId, point, windowId = null) => {
+    if (tearingOffTabs.has(tabId)) return { r: 'failed' };
     tearingOffTabs.add(tabId);
     markDoNotKill(tabId);
     let result = 'failed';
@@ -263,19 +264,21 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
       await new Promise((r) => setTimeout(r, 200));
       const s = useStore.getState();
       const live = s.terminalTabs.find((t) => t.id === tabId);
-      if (!live) return 'failed';
+      if (!live) return { r: 'failed' };
       const res = await window.electronAPI?.windowDockTab?.(
         tabId, live.label, labelMeta(live),
         { status: s.tabStatus[tabId], hookOwned: !!s.hookOwnedTabs[tabId] },
-        point?.x, point?.y,
+        point?.x, point?.y, windowId,
       );
-      result = res?.ok ? 'ok' : (res?.reason === 'no-target' ? 'no-target' : 'failed');
-      return result;
+      // 'gone': its shell already exited, so there is nothing to move and it
+      // simply leaves this window like a docked tab.
+      result = res?.ok ? 'ok' : (['no-target', 'gone'].includes(res?.reason) ? res.reason : 'failed');
+      return { r: result, windowId: res?.id ?? null };
     } catch (err) {
       console.warn('[TerminalTabBar] dock failed:', err?.message);
-      return 'failed';
+      return { r: 'failed' };
     } finally {
-      if (result !== 'ok') unmarkDoNotKill(tabId);
+      if (result !== 'ok' && result !== 'gone') unmarkDoNotKill(tabId);
       tearingOffTabs.delete(tabId);
     }
   }, []);
@@ -293,16 +296,21 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
   // step so a tab opened mid-move goes too. Stops at the first failure.
   const dockWindow = useCallback(async (point) => {
     let at = point;
+    let into = null;
     for (;;) {
       const terms = useStore.getState().terminalTabs.filter((t) => !t.kind || t.kind === 'terminal');
       if (terms.length === 0) return 'ok';
       const next = terms.find((t) => t.id !== tearOffTabId) || terms[0];
-      const r = await dockOne(next.id, at);
-      if (r !== 'ok') return r;
+      const { r, windowId } = await dockOne(next.id, at, into);
+      if (r !== 'ok' && r !== 'gone') return r;
       if (afterDocked(next.id) === 0) return 'ok';
-      // Once a tab has moved, the rest must follow even if the drop target
-      // went away (minimized, moved): they go to the main window instead.
-      at = null;
+      if (r === 'ok') {
+        // Once a tab has moved the rest follow it into the SAME window, even
+        // if the drop point no longer hits it (main falls back to the main
+        // window only when that one is gone).
+        at = null;
+        into = windowId;
+      }
     }
   }, [dockOne, afterDocked, tearOffTabId]);
 
@@ -337,8 +345,8 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
       // through dockWindow, which re-reads the tabs and never leaves the
       // window open without it.
       const wholeWindow = tabId === tearOffTabId;
-      const r = wholeWindow ? await dockWindow(point) : await dockOne(tabId, point);
-      if (r === 'ok' && !wholeWindow) afterDocked(tabId);
+      const r = wholeWindow ? await dockWindow(point) : (await dockOne(tabId, point)).r;
+      if ((r === 'ok' || r === 'gone') && !wholeWindow) afterDocked(tabId);
       if (r !== 'no-target') return;
     }
 

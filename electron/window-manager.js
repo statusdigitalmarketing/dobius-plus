@@ -330,13 +330,16 @@ export function getWindowEntryByWcId(wcId) {
   return null;
 }
 
-// The primary window under a screen point, or with no point the project's
-// first ('main') window, else any primary. null when there is none.
-export function primaryDockTarget(projectPath, point) {
+// The primary window to dock into: the one with windowId if it is still a
+// usable primary of this project, else the one under a screen point, else
+// (no point) the project's first ('main') window, else any primary.
+export function primaryDockTarget(projectPath, point, windowId = null) {
   const prims = [];
-  for (const [, entry] of projectWindows) {
-    if (entry.projectPath === projectPath && !entry.isTearOff && !entry.closing && entry.win && !entry.win.isDestroyed()) prims.push(entry);
+  for (const [id, entry] of projectWindows) {
+    if (entry.projectPath === projectPath && !entry.isTearOff && !entry.closing && entry.win && !entry.win.isDestroyed()) prims.push({ windowId: id, ...entry });
   }
+  const named = windowId != null && prims.find((e) => e.windowId === windowId);
+  if (named) return named;
   if (!point) return prims.find((e) => e.windowKey === 'main') || prims[0] || null;
   const hits = prims.filter(({ win }) => {
     if (!win.isVisible() || win.isMinimized()) return false;

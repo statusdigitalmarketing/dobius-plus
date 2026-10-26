@@ -2627,6 +2627,10 @@ function setupWindowHandlers() {
     if (!tearOffGrants.has(tabId) && terminalOwners.get(tabId) === event.sender.id
       && getTerminalWebContentsId(tabId) === event.sender.id) return { ok: true };
     if (tearOffGrants.get(tabId) !== event.sender.id) return { ok: false };
+    // A dock target mid-reload: this claim comes from the page being torn
+    // down, which would take the PTY and then restart it. The dock offers
+    // the tab again to the new page.
+    if (tearOffClaimWaiters.get(tabId)?.dock && !dockReadyWc.has(event.sender.id)) return { ok: false };
     // A window already closing would take the PTY and then kill it.
     const success = !getWindowEntryByWcId(event.sender.id)?.closing && reassignTerminal(tabId, event.sender);
     if (success) {
@@ -2704,7 +2708,7 @@ function setupWindowHandlers() {
   // under the drop point (reason 'no-target' when there is none); without
   // them it goes to the project's main window, opened if needed. Reuses the
   // tear-off grant + claim handshake, so the PTY changes owner exactly once.
-  ipcMain.handle('window:dockTab', async (event, tabId, tabLabel, labelMeta, state, screenX, screenY) => {
+  ipcMain.handle('window:dockTab', async (event, tabId, tabLabel, labelMeta, state, screenX, screenY, windowId) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
     const src = getWindowEntryByWcId(event.sender.id);
     if (!src?.isTearOff || src.closing) return { ok: false };
@@ -2717,6 +2721,11 @@ function setupWindowHandlers() {
       return (o === srcId || (o === undefined && event.sender.isDestroyed()))
         && getTerminalsForProject(projectPath).includes(tabId);
     };
+    // Its shell exited: nothing to move. The source just drops the tab
+    // instead of letting it block the rest of a whole-window move.
+    if (terminalOwners.get(tabId) === srcId && !getTerminalsForProject(projectPath).includes(tabId)) {
+      return { ok: false, reason: 'gone' };
+    }
     const busy = () => tearOffClaimWaiters.has(tabId) || tearOffGrants.has(tabId) || dockingTabs.has(tabId);
     if (!owned()) return { ok: false };
     if (busy()) return { ok: false, reason: 'busy' };
@@ -2725,7 +2734,7 @@ function setupWindowHandlers() {
     dockingTabs.add(tabId);
     let result = { ok: false };
     try {
-      result = await dockInto(event, src, tabId, tabLabel, labelMeta, state, screenX, screenY, owned);
+      result = await dockInto(event, src, tabId, tabLabel, labelMeta, state, screenX, screenY, windowId, owned);
       return result;
     } finally {
       dockingTabs.delete(tabId);
@@ -2735,12 +2744,19 @@ function setupWindowHandlers() {
     }
   });
 
-  const dockInto = async (event, src, tabId, tabLabel, labelMeta, state, screenX, screenY, owned) => {
+  const waitDockReady = async (wc) => {
+    for (let i = 0; i < 100 && !dockReadyWc.has(wc.id) && !wc.isDestroyed(); i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return !wc.isDestroyed() && dockReadyWc.has(wc.id);
+  };
+
+  const dockInto = async (event, src, tabId, tabLabel, labelMeta, state, screenX, screenY, windowId, owned) => {
     const projectPath = src.projectPath;
     const busy = () => tearOffClaimWaiters.has(tabId) || tearOffGrants.has(tabId);
 
     const point = Number.isFinite(screenX) && Number.isFinite(screenY) ? { x: screenX, y: screenY } : null;
-    let target = primaryDockTarget(projectPath, point);
+    let target = primaryDockTarget(projectPath, point, Number.isInteger(windowId) ? windowId : null);
     if (!target) {
       if (point) return { ok: false, reason: 'no-target' };
       openProjectWindow(projectPath);
@@ -2748,10 +2764,7 @@ function setupWindowHandlers() {
       if (!target) return { ok: false };
     }
     const twc = target.win.webContents;
-    for (let i = 0; i < 100 && !dockReadyWc.has(twc.id) && !twc.isDestroyed(); i += 1) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    if (twc.isDestroyed() || !dockReadyWc.has(twc.id)) return { ok: false };
+    if (!(await waitDockReady(twc))) return { ok: false };
     // Re-check after the wait: the tab may have closed or started another
     // move, and either window may have started closing.
     if (!owned()) return { ok: false };
@@ -2781,20 +2794,35 @@ function setupWindowHandlers() {
 
     tearOffGrants.set(tabId, twc.id);
     const token = {};
+    const payload = { tab, status, hookOwned: state?.hookOwned === true };
     return new Promise((resolve) => {
+      let settled = false;
       const fail = () => {
         if (tearOffGrants.get(tabId) === twc.id) tearOffGrants.delete(tabId);
         if (!twc.isDestroyed() && terminalOwners.get(tabId) !== twc.id) twc.send('tab:adoptFailed', tabId);
         settleTearOff(tabId, { ok: false }, token);
       };
-      const timer = setTimeout(fail, 10000);
-      twc.once('destroyed', fail);
-      tearOffClaimWaiters.set(tabId, {
-        timer,
+      // The target reloading drops its adopt listener and any claim it had
+      // in flight (claimPty refuses a not-ready claimant). Take the grant
+      // back, wait for the new page, and offer the tab again: the new page
+      // replaces the dead copy it restored from disk with a claiming one.
+      const onReload = async () => {
+        if (tearOffGrants.get(tabId) === twc.id) tearOffGrants.delete(tabId);
+        clearTimeout(waiter.timer);
+        waiter.timer = setTimeout(fail, 15000);
+        if (!(await waitDockReady(twc)) || settled) return; // the timer fails it
+        tearOffGrants.set(tabId, twc.id);
+        twc.send('tab:adopt', payload);
+      };
+      const waiter = {
+        timer: setTimeout(fail, 10000),
         id: target.windowId,
         token,
+        dock: true,
         resolve: (r) => {
+          settled = true;
           twc.removeListener('destroyed', fail);
+          twc.removeListener('did-start-loading', onReload);
           if (r.ok) {
             // The source's saved tab set no longer holds it, even if the
             // source never gets to save again.
@@ -2811,8 +2839,11 @@ function setupWindowHandlers() {
           }
           resolve(r);
         },
-      });
-      twc.send('tab:adopt', { tab, status, hookOwned: state?.hookOwned === true });
+      };
+      twc.once('destroyed', fail);
+      twc.on('did-start-loading', onReload);
+      tearOffClaimWaiters.set(tabId, waiter);
+      twc.send('tab:adopt', payload);
     });
   };
 }
