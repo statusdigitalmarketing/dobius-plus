@@ -78,7 +78,7 @@ import {
   openProjectWindow, openTornOffWindow, getOpenProjects, getOpenProjectsForRestore, closeProjectWindow, closeAllProjectWindows,
   getOpenTearOffsForRestore, getOpenPrimaryWindowsForRestore, restoreTornOffWindow, setRestoring, persistOpenProjectsNow,
   markTearOffConfirmed, computeRestoreLists, focusTearOffWindowForTab, focusPrimaryWindowForProject, focusWindowForTab,
-  getWindowEntryByWcId, primaryDockTarget, dockingTabs,
+  getWindowEntryByWcId, primaryDockTarget, dockingTabs, markTearOffIdentityDocked,
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
@@ -2830,6 +2830,9 @@ function setupWindowHandlers() {
             if (bucket?.tabs?.some((t) => t?.id === tabId)) {
               setTearOffWindowState(src.tearOffTabId, { ...bucket, tabs: bucket.tabs.filter((t) => t?.id !== tabId) });
             }
+            // Its torn tab left: if the window stays (a later tab of it does
+            // not follow), restore must not strip that tab from the primary.
+            if (tabId === src.tearOffTabId && !event.sender.isDestroyed()) markTearOffIdentityDocked(event.sender.id);
             if (!target.win.isDestroyed()) {
               if (target.win.isMinimized()) target.win.restore();
               target.win.focus();
@@ -3181,7 +3184,8 @@ app.whenReady().then(() => {
   // tear-off owns the id, so strip it from every primary project's persisted
   // tabs before restoring, guaranteeing each id is created exactly once.
   if (Array.isArray(config.lastTearOffs) && config.lastTearOffs.length > 0) {
-    const tornIds = new Set(config.lastTearOffs.map((t) => t && t.tabId).filter(Boolean));
+    // A docked entry's torn tab now lives in a primary window: keep it there.
+    const tornIds = new Set(config.lastTearOffs.filter((t) => t && !t.docked).map((t) => t.tabId).filter(Boolean));
     if (tornIds.size > 0) {
       let changed = false;
       for (const proj of Object.values(config.projects || {})) {
@@ -3213,6 +3217,9 @@ app.whenReady().then(() => {
       || !fs.existsSync(t.projectPath) || typeof t.tabId !== 'string' || !t.tabId) return false;
     if (seenTearIds.has(t.tabId)) return false; // dedupe: one window per torn tab id. Codex
     seenTearIds.add(t.tabId);
+    // A docked tear-off reopens only with its saved tabs. With none it would
+    // fall back to recreating its torn tab, which the primary already has.
+    if (t.docked && !(getTearOffWindowState(t.tabId)?.tabs?.length > 0)) return false;
     return true;
   });
   // M2: freeze the open-projects snapshot for the duration of the staggered
@@ -3273,7 +3280,7 @@ app.whenReady().then(() => {
     tears.forEach((t, i) => {
       setTimeout(() => {
         try {
-          restoreTornOffWindow(t.projectPath, t.tabId, t.label || '', t.bounds || null);
+          restoreTornOffWindow(t.projectPath, t.tabId, t.label || '', t.bounds || null, t.docked === true);
         } catch (err) {
           console.warn(`[restore] failed to reopen tear-off ${t.tabId}:`, err?.message || err);
         }
