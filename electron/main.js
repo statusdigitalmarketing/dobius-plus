@@ -2769,14 +2769,6 @@ function setupWindowHandlers() {
       if (!target) return { ok: false };
     }
     const twc = target.win.webContents;
-    if (!(await waitDockReady(twc))) return { ok: false };
-    // Re-check after the wait: the tab may have closed or started another
-    // move, and either window may have started closing.
-    if (!owned()) return { ok: false };
-    if (busy()) return { ok: false, reason: 'busy' };
-    // A source that started closing meanwhile still hands over: moving the
-    // tab out is what saves it from that close.
-    if (getWindowEntryByWcId(twc.id)?.closing) return { ok: false };
 
     const meta = {};
     if (labelMeta && typeof labelMeta === 'object') {
@@ -2795,7 +2787,24 @@ function setupWindowHandlers() {
       ...meta,
     };
     const status = DOCK_STATUSES.has(state?.status) ? state.status : null;
+    // Recorded BEFORE waiting for the target, so that if the source closes
+    // and the app dies in the wait, the tab is still in some window's saved
+    // state. A target that restores it from disk meanwhile gets a dead copy
+    // (terminal:create refuses a docking id), which tab:adopt replaces.
     const recorded = recordDockedTab(target, tab);
+    const abort = (r) => {
+      if (recorded) writeDockBucket(target, dockBucketTabs(target).filter((t) => t?.id !== tabId));
+      if (!twc.isDestroyed() && terminalOwners.get(tabId) !== twc.id) twc.send('tab:adoptFailed', tabId);
+      return r;
+    };
+
+    if (!(await waitDockReady(twc))) return abort({ ok: false });
+    // Re-check after the wait: the tab may have closed or started another
+    // move, and the target may have started closing. A source that started
+    // closing meanwhile still hands over: moving the tab out saves it.
+    if (!owned()) return abort({ ok: false });
+    if (busy()) return abort({ ok: false, reason: 'busy' });
+    if (getWindowEntryByWcId(twc.id)?.closing) return abort({ ok: false });
 
     tearOffGrants.set(tabId, twc.id);
     const token = {};
