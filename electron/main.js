@@ -2582,6 +2582,9 @@ function setupWindowHandlers() {
     // The id itself must name this project too: scrollback, restore buckets
     // and the docking read exception are all keyed by the project in the id.
     if (projectPathFromTabId(tabId) !== projectPath) return { ok: false };
+    // ...and be the project of the window asking, not only what it claims.
+    const srcEntry = getWindowEntryByWcId(event.sender.id);
+    if (!srcEntry || srcEntry.projectPath !== projectPath) return { ok: false };
     // Already moving (a dock, or another tear-off of it).
     if (dockingTabs.has(tabId) || tearOffClaimWaiters.has(tabId)) return { ok: false };
     // ponytail: a window still saved under this id (its tab docked back
@@ -2618,6 +2621,19 @@ function setupWindowHandlers() {
       const resolve = (r) => {
         dockingTabs.delete(tabId);
         if (!r.ok && srcWc.isDestroyed() && getTerminalWebContentsId(tabId) === null) killTerminal(tabId);
+        // Moved: drop it from the source window's saved tabs here too. A
+        // source that closed mid-move never saves again, and reopening it
+        // would restore a dead copy of a tab the tear-off now owns.
+        if (r.ok) {
+          if (srcEntry.isTearOff) {
+            const bucket = getTearOffWindowState(srcEntry.tearOffTabId);
+            if (bucket?.tabs?.some((t) => t?.id === tabId)) {
+              setTearOffWindowState(srcEntry.tearOffTabId, { ...bucket, tabs: bucket.tabs.filter((t) => t?.id !== tabId) });
+            }
+          } else if (dockBucketTabs(srcEntry).some((t) => t?.id === tabId)) {
+            writeDockBucket(srcEntry, dockBucketTabs(srcEntry).filter((t) => t?.id !== tabId));
+          }
+        }
         done(r);
       };
       const timer = setTimeout(() => {
