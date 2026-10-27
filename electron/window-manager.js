@@ -536,9 +536,9 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
     try {
       import('./auto-resume.js').then((m) => {
         if (isTearOff && tearOffTabId) {
-          // Docked back into a primary window: that window owns it now, so
-          // its queued resume must survive this close.
-          if (getTerminalWebContentsId(tearOffTabId) !== null) return;
+          // Docked back into a primary window (or still moving there): that
+          // window owns it, so its queued resume must survive this close.
+          if (getTerminalWebContentsId(tearOffTabId) !== null || dockingTabs.has(tearOffTabId)) return;
           if (m?.cancelTabIfPending) m.cancelTabIfPending(tearOffTabId);
           else if (m?.cancelTabsForProject && getPrimaryWindowIdsForProject(projectPath).length === 0) m.cancelTabsForProject(projectPath);
         } else if (m?.cancelTabsForProject) {
