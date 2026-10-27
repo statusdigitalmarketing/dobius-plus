@@ -2688,15 +2688,21 @@ function setupWindowHandlers() {
   // Record the docked tab in the target window's saved tab list BEFORE the
   // handoff: terminal:loadState only returns scrollback for a tab a window
   // owns on disk, and a crash mid-move then leaves it recoverable.
-  const dockBucketTabs = (target) => {
+  const dockBucket = (target) => {
     const wk = target.windowKey;
-    const st = wk && wk !== 'main' ? getPrimaryWindowState(wk) : getProjectConfig(target.projectPath);
-    return Array.isArray(st?.tabs) ? st.tabs : [];
+    return (wk && wk !== 'main' ? getPrimaryWindowState(wk) : getProjectConfig(target.projectPath)) || {};
   };
+  const dockBucketTabs = (target) => {
+    const st = dockBucket(target);
+    return Array.isArray(st.tabs) ? st.tabs : [];
+  };
+  // Restore needs a positive tabCounter next to the tabs (ProjectView), which
+  // a window that never saved yet does not have.
   const writeDockBucket = (target, tabs) => {
     const wk = target.windowKey;
-    if (wk && wk !== 'main') setPrimaryWindowState(wk, { projectPath: target.projectPath, tabs });
-    else setProjectConfig(target.projectPath, { tabs });
+    const tabCounter = Math.max(Number(dockBucket(target).tabCounter) || 0, 1);
+    if (wk && wk !== 'main') setPrimaryWindowState(wk, { projectPath: target.projectPath, tabs, tabCounter });
+    else setProjectConfig(target.projectPath, { tabs, tabCounter });
   };
   // Returns true when it added the tab, so a failed dock removes only that.
   const recordDockedTab = (target, tab) => {
@@ -2792,8 +2798,14 @@ function setupWindowHandlers() {
     // state. A target that restores it from disk meanwhile gets a dead copy
     // (terminal:create refuses a docking id), which tab:adopt replaces.
     const recorded = recordDockedTab(target, tab);
+    // Undo the record only while the source still holds the tab. Once the
+    // source is gone this record is the only saved copy: keep it, so a
+    // relaunch recreates the tab and auto-resume picks its session back up.
+    const unrecord = () => {
+      if (recorded && !event.sender.isDestroyed()) writeDockBucket(target, dockBucketTabs(target).filter((t) => t?.id !== tabId));
+    };
     const abort = (r) => {
-      if (recorded) writeDockBucket(target, dockBucketTabs(target).filter((t) => t?.id !== tabId));
+      unrecord();
       if (!twc.isDestroyed() && terminalOwners.get(tabId) !== twc.id) twc.send('tab:adoptFailed', tabId);
       return r;
     };
@@ -2825,6 +2837,9 @@ function setupWindowHandlers() {
         clearTimeout(waiter.timer);
         waiter.timer = setTimeout(fail, 15000);
         if (!(await waitDockReady(twc)) || settled) return; // the timer fails it
+        // The new page may have saved its list without the tab (it drops the
+        // dead copy before re-adding): put the record back first.
+        recordDockedTab(target, tab);
         tearOffGrants.set(tabId, twc.id);
         twc.send('tab:adopt', payload);
       };
@@ -2851,8 +2866,8 @@ function setupWindowHandlers() {
               if (target.win.isMinimized()) target.win.restore();
               target.win.focus();
             }
-          } else if (recorded) {
-            writeDockBucket(target, dockBucketTabs(target).filter((t) => t?.id !== tabId));
+          } else {
+            unrecord();
           }
           resolve(r);
         },
