@@ -37,6 +37,7 @@ import {
 import { getSessionSize } from './data-service.js';
 import { BrowserWindow } from 'electron';
 import { projectPathFromTabId } from './tab-id-util.js';
+import { dockingTabs } from './docking-state.js';
 
 // Per-tab queue entry: tabId -> { sessionId, projectPath, timer }
 // `timer` is the setTimeout handle so we can cancel before it fires.
@@ -363,6 +364,8 @@ export function cancelTabsForProject(projectPath) {
     // then would silently drop a legitimate queued resume into a tab that is
     // alive and well. Codex Medium, round 12.
     if (getTerminalWebContentsId(tabId) !== null) continue;
+    // Same for a tab moving into another window right now (docking).
+    if (dockingTabs.has(tabId)) continue;
     {
       entry.cancelled = true;
       clearTimeout(entry.timer);

@@ -5,6 +5,7 @@ import { killTerminal, gracefulCloseTerminals, getTerminalsForProject, getTermin
 import { watchFiles } from './watcher-service.js';
 import { getProjectConfig, setProjectConfig, loadConfig, saveConfig, getTearOffWindowState, setPrimaryWindowState, deletePrimaryWindowState } from './config-manager.js';
 import { getQuittingForUpdate, getQuitting } from './quit-state.js';
+import { dockingTabs } from './docking-state.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -384,7 +385,7 @@ export function tearOffKeyInUse(tabId) {
 
 // Tabs mid-dock. A tear-off closing while its tab is being handed over must
 // not Ctrl+C it: the tab is moving, not closing.
-export const dockingTabs = new Set();
+export { dockingTabs };
 
 export function focusPrimaryWindowForProject(projectPath) {
   const win = getWindowForProject(projectPath);
