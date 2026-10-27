@@ -78,7 +78,7 @@ import {
   openProjectWindow, openTornOffWindow, getOpenProjects, getOpenProjectsForRestore, closeProjectWindow, closeAllProjectWindows,
   getOpenTearOffsForRestore, getOpenPrimaryWindowsForRestore, restoreTornOffWindow, setRestoring, persistOpenProjectsNow,
   markTearOffConfirmed, computeRestoreLists, focusTearOffWindowForTab, focusPrimaryWindowForProject, focusWindowForTab,
-  getWindowEntryByWcId, primaryDockTarget, dockingTabs, markTearOffIdentityDocked, tearOffKeyInUse,
+  getWindowEntryByWcId, primaryDockTarget, dockingTabs, markTearOffIdentityDocked, tearOffKeyInUse, reserveTearOffKey,
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
@@ -3282,6 +3282,9 @@ app.whenReady().then(() => {
   if (tears.length > 0) {
     console.log(`[restore] lastTearOffs=${savedTears.length} reopening=${tears.length}`);
     const base = restoreStaggerMs ? restoreStaggerMs + 250 : 500;
+    // Reserved until each opens, so a tab cannot be torn off under a key a
+    // queued window is about to restore with (tearOffKeyInUse).
+    tears.forEach((t) => reserveTearOffKey(t.tabId));
     tears.forEach((t, i) => {
       setTimeout(() => {
         try {

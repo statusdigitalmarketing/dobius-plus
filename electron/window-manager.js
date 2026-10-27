@@ -370,7 +370,12 @@ export function markTearOffIdentityDocked(wcId) {
 // Is a live tear-off window saved under this tab id? A docked tear-off keeps
 // its key after the tab itself left, and a second tear-off of that tab would
 // write the same tearOffWindows bucket and lastTearOffs entry.
+// Keys of tear-offs queued in the staggered launch restore but not open yet.
+const pendingTearOffKeys = new Set();
+export function reserveTearOffKey(tabId) { if (tabId) pendingTearOffKeys.add(tabId); }
+
 export function tearOffKeyInUse(tabId) {
+  if (pendingTearOffKeys.has(tabId)) return true;
   for (const [, entry] of projectWindows) {
     if (entry.isTearOff && entry.tearOffTabId === tabId && entry.win && !entry.win.isDestroyed()) return true;
   }
@@ -778,6 +783,7 @@ export function openTornOffWindow(projectPath, tabId, tabLabel, screenX, screenY
  * terminal for tabId and auto-resume revives the session via the sessionTabMap.
  */
 export function restoreTornOffWindow(projectPath, tabId, tabLabel, bounds, identityDocked = false) {
+  pendingTearOffKeys.delete(tabId); // registered by createTornOffWindow from here on
   return createTornOffWindow(projectPath, tabId, tabLabel, bounds || {}, true, null, identityDocked);
 }
 
