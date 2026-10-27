@@ -3,6 +3,7 @@ import fsp from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { app } from 'electron';
+import { dockingTabs } from './docking-state.js';
 
 const CONFIG_DIR = path.join(app.getPath('userData'));
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
@@ -277,7 +278,10 @@ export async function loadTerminalScrollback(projectPath, tabId) {
   const inExtra = !inFirst && configCache?.primaryWindows
     && Object.values(configCache.primaryWindows).some((w) => w && w.projectPath === projectPath
       && Array.isArray(w.tabs) && w.tabs.some((t) => t && t.id === tabId));
-  if (!inFirst && !inExtra) return null;
+  // A tab mid-dock is moving its live scrollback into a window whose saved
+  // list can briefly not hold it (the target swaps a restored dead copy for
+  // a claiming one). The id is main's own, not a reused one.
+  if (!inFirst && !inExtra && !dockingTabs.has(tabId)) return null;
   try {
     const content = await fsp.readFile(getScrollbackPath(projectPath, tabId), 'utf8');
     return JSON.parse(content);
