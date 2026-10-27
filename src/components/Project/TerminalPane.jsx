@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useStore } from '../../store/store';
-import { useTerminal } from '../../hooks/useTerminal';
+import { useTerminal, takeAdopting } from '../../hooks/useTerminal';
 import '@xterm/xterm/css/xterm.css';
 
 /** Escape a file path for safe shell usage (wraps in single quotes). */
@@ -23,7 +23,10 @@ function arrayBufferToBase64(buffer) {
  * TerminalPane — renders an xterm.js terminal with an editable command input bar.
  * @param {{ id: string, cwd: string, theme?: object, className?: string }} props
  */
-export default function TerminalPane({ id, cwd, theme, className = '', claimExisting = false }) {
+export default function TerminalPane({ id, cwd, theme, className = '', claimExisting: claimProp = false }) {
+  // Frozen at mount: flipping it later would rerun the terminal effect and
+  // spawn a fresh PTY over the live one.
+  const [claimExisting] = useState(() => claimProp || takeAdopting(id));
   const [termFontSize, setTermFontSize] = useState(13);
   const [termFontFamily, setTermFontFamily] = useState('');
   const [scrollbackLines, setScrollbackLines] = useState(1000);

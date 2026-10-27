@@ -16,6 +16,12 @@ const doNotKillSet = new Set();
 export function markDoNotKill(id) { doNotKillSet.add(id); }
 export function unmarkDoNotKill(id) { doNotKillSet.delete(id); }
 
+// Tabs docked into this window from a tear-off: their pane claims the running
+// PTY instead of spawning a new one. Read once at pane mount (TerminalPane).
+const adoptingSet = new Set();
+export function markAdopting(id) { adoptingSet.add(id); }
+export function takeAdopting(id) { return adoptingSet.delete(id); }
+
 const DEFAULT_THEME = {
   background: '#0D1117',
   foreground: '#E6EDF3',
@@ -126,14 +132,19 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     }
   }, [id]);
 
+  // Read through a ref: the setting arrives after mount, and a new saveState
+  // identity would rerun the terminal effect below, re-creating or
+  // re-claiming the PTY.
+  const maxLinesRef = useRef(maxScrollbackLines);
+  maxLinesRef.current = maxScrollbackLines;
   const saveState = useCallback((forceFlush = false) => {
     if (!termRef.current || !window.electronAPI?.terminalSaveState) return;
-    const state = getScrollback(termRef.current, maxScrollbackLines);
+    const state = getScrollback(termRef.current, maxLinesRef.current);
     if (state.scrollback.length > 0) {
       state.savedAt = Date.now();
       window.electronAPI.terminalSaveState(id, state, forceFlush);
     }
-  }, [id, maxScrollbackLines]);
+  }, [id]);
 
   useEffect(() => {
     if (!containerRef.current || !window.electronAPI) return;
@@ -187,7 +198,8 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
             const safeLine = String(line).replace(/\x1b/g, '');
             termRef.current.write('\x1b[2m' + safeLine + '\x1b[0m\r\n');
           }
-          termRef.current.write('\x1b[2m\x1b[38;5;240m── previous session ──\x1b[0m\r\n\r\n');
+          // A moved tab (tear-off or dock) keeps its live session: no divider.
+          if (!claimExisting) termRef.current.write('\x1b[2m\x1b[38;5;240m── previous session ──\x1b[0m\r\n\r\n');
         }
       }).catch(() => {});
     }
@@ -243,7 +255,17 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       // ghost output that nothing renders.
       if (cancelled) return;
       if (claimExisting) {
-        window.electronAPI.terminalClaimPty(id);
+        // Size the PTY to this pane once it is ours: resizes sent before the
+        // claim lands are refused by main's owner check.
+        Promise.resolve(window.electronAPI.terminalClaimPty(id))
+          .then((res) => {
+            if (cancelled) return;
+            if (res?.ok) fit();
+            // A refused claim leaves this pane with no terminal behind it;
+            // the window holding it decides what to do (ProjectView).
+            else window.dispatchEvent(new CustomEvent('dobius:claim-refused', { detail: id }));
+          })
+          .catch((err) => console.warn('[useTerminal] claim failed:', err?.message));
       } else {
         window.electronAPI.terminalCreate(id, cwd);
       }

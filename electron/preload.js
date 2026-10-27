@@ -273,6 +273,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   windowTearOffTab: (projectPath, tabId, tabLabel, screenX, screenY, labelMeta) =>
     ipcRenderer.invoke('window:tearOffTab', projectPath, tabId, tabLabel, screenX, screenY, labelMeta),
+  windowDockTab: (tabId, tabLabel, labelMeta, state, screenX, screenY, windowId) =>
+    ipcRenderer.invoke('window:dockTab', tabId, tabLabel, labelMeta, state, screenX, screenY, windowId),
+  windowTabsReady: () => ipcRenderer.invoke('window:tabsReady'),
+  onTabAdopt: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('tab:adopt', handler);
+    return () => ipcRenderer.removeListener('tab:adopt', handler);
+  },
+  onTabAdoptFailed: (callback) => {
+    const handler = (_event, tabId) => callback(tabId);
+    ipcRenderer.on('tab:adoptFailed', handler);
+    return () => ipcRenderer.removeListener('tab:adoptFailed', handler);
+  },
   terminalClaimPty: (tabId) => ipcRenderer.invoke('terminal:claimPty', tabId),
 
   // Build Monitor

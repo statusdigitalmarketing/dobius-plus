@@ -24,6 +24,7 @@ import { useTabActivity } from '../../hooks/useTabActivity';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 import { onScreenTabIds } from '../../lib/tab-unread';
 import { windowFocused, onWindowFocus } from '../../lib/window-focus';
+import { markAdopting, takeAdopting, markDoNotKill } from '../../hooks/useTerminal';
 
 // Cmd+Shift+[ / ] direction: -1, +1, or 0 when it is neither. By character
 // first, so layouts that type a bracket on another key (AZERTY: Option+Shift
@@ -229,6 +230,11 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     // 1217079763770509). A fresh drag tear-off always starts with just the
     // torn tab (any same-id saved state is stale by definition).
     if (tearOffTabId && projectPath) {
+      // Its own id space for tabs opened here, in the extra-window id format
+      // (`w-` + 8 [a-z0-9], what parseTabId strips), so they can never collide
+      // with a primary window's tabs, before or after docking back.
+      const rnd = crypto.getRandomValues(new Uint8Array(8));
+      useStore.getState().setTabIdSpace(`w-${Array.from(rnd, (b) => 'abcdefghijklmnopqrstuvwxyz0123456789'[b % 36]).join('')}`);
       window.electronAPI.configGetProject(projectPath).then(async (config) => {
         if (config && typeof config.themeIndex === 'number') {
           setThemeIndex(config.themeIndex);
@@ -253,11 +259,8 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
           // Keep the source tab's automatic-label state (shared/tab-label.js).
           ...parseLabelMeta(tearOffLabelMeta),
         };
-        // Offset tabCounter for tear-off windows to avoid ID collisions with
-        // the primary window (which shares the same project config counter).
-        // Using timestamp-based offset ensures uniqueness across windows.
-        const counter = (config?.tabCounter || 1) + Math.floor(Date.now() / 1000) % 10000;
-        initTabs([tab], counter);
+        // New tabs here are numbered in this window's own id space (above).
+        initTabs([tab], 1);
         setTabsInitialized(true);
       });
       return;
@@ -335,6 +338,55 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       setTabsInitialized(true);
     }
   }, [projectPath, setThemeIndex, setSplitRatio, setGridColumnRatio, setGridRowRatios, tearOffTabId, tearOffLabel, tearOffLabelMeta, tearOffRestore]);
+
+  // A primary window takes tabs docked back from this project's tear-offs,
+  // once its own tabs are restored (an earlier adopt would be overwritten).
+  useEffect(() => {
+    if (!tabsInitialized || tearOffTabId || !projectPath) return undefined;
+    // A tab with a docking id that is not ours yet is never a live terminal
+    // here: main grants that PTY to one window, and the source still owns it.
+    const dropDead = (tabId) => {
+      if (!useStore.getState().terminalTabs.some((t) => t.id === tabId)) return;
+      markDoNotKill(tabId);
+      const st = useStore.getState();
+      // removeTab keeps a window's last tab; give it a fresh one first.
+      if (st.terminalTabs.length === 1) st.addTab(projectPath);
+      useStore.getState().removeTab(tabId);
+    };
+    const pending = new Map(); // tabId -> timer for an adopt not added yet
+    const offAdopt = window.electronAPI?.onTabAdopt?.(({ tab, status, hookOwned }) => {
+      if (!tab || tab.projectPath !== projectPath) return;
+      // Already listed (this window reloaded mid-dock and restored it from
+      // disk): main only docks a tab the SOURCE owns, so that pane could not
+      // create its PTY. Replace it with one that claims it; the removal must
+      // render before the re-add.
+      const exists = useStore.getState().terminalTabs.some((t) => t.id === tab.id);
+      if (exists) dropDead(tab.id);
+      clearTimeout(pending.get(tab.id));
+      pending.set(tab.id, setTimeout(() => {
+        pending.delete(tab.id);
+        markAdopting(tab.id);
+        if (!useStore.getState().adoptTab(tab, status, hookOwned)) takeAdopting(tab.id);
+      }, exists ? 50 : 0));
+    });
+    const giveUp = (tabId) => {
+      clearTimeout(pending.get(tabId));
+      pending.delete(tabId);
+      takeAdopting(tabId);
+      dropDead(tabId);
+    };
+    const offFailed = window.electronAPI?.onTabAdoptFailed?.(giveUp);
+    // A claiming pane whose claim was refused (a late adopt after a timeout)
+    // has no terminal at all.
+    const onRefused = (e) => giveUp(e.detail);
+    window.addEventListener('dobius:claim-refused', onRefused);
+    window.electronAPI?.windowTabsReady?.();
+    return () => {
+      offAdopt?.(); offFailed?.();
+      window.removeEventListener('dobius:claim-refused', onRefused);
+      for (const t of pending.values()) clearTimeout(t);
+    };
+  }, [tabsInitialized, tearOffTabId, projectPath]);
 
   const startSplitResize = useCallback((e) => {
     e.preventDefault();
@@ -1060,7 +1112,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
             className="flex-1 flex flex-col min-h-0"
             style={{ display: activeView === 'terminal' ? 'flex' : 'none' }}
           >
-            <TerminalTabBar />
+            <TerminalTabBar tearOffTabId={tearOffTabId || null} />
             <ResumeBanner projectPath={projectPath} />
             {(() => {
               // Single layout engine for all modes. Every TerminalPane mounts ONCE

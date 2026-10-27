@@ -34,7 +34,7 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject } from './terminal-manager.js';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs } from './tab-context.js';
 import {
@@ -78,6 +78,7 @@ import {
   openProjectWindow, openTornOffWindow, getOpenProjects, getOpenProjectsForRestore, closeProjectWindow, closeAllProjectWindows,
   getOpenTearOffsForRestore, getOpenPrimaryWindowsForRestore, restoreTornOffWindow, setRestoring, persistOpenProjectsNow,
   markTearOffConfirmed, computeRestoreLists, focusTearOffWindowForTab, focusPrimaryWindowForProject, focusWindowForTab,
+  getWindowEntryByWcId, primaryDockTarget, dockingTabs, markTearOffIdentityDocked, tearOffKeyInUse, reserveTearOffKey,
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
@@ -215,6 +216,9 @@ const TERMINAL_WRITE_MAX_BYTES = 256 * 1024; // 256KB per write — plenty for a
 // IPC (they go through createTerminal directly), so they're naturally
 // excluded from renderer write access. Codex round-2 HIGH on main.js:118.
 const terminalOwners = new Map(); // id -> webContents.id
+// Pending tear-off / dock grants, tabId -> the webContents.id allowed to claim
+// the PTY (see window:tearOffTab).
+const tearOffGrants = new Map();
 // One 'destroyed' listener per window that sweeps this map, instead of one
 // closure per tab: 11 tabs at boot tripped MaxListeners on the window's
 // WebContents and the list grew with tab churn for the life of the window.
@@ -240,6 +244,9 @@ function setupTerminalHandlers() {
     // Codex round-3 HIGH on main.js:135.
     const existingOwner = terminalOwners.get(id);
     if (existingOwner !== undefined && existingOwner !== event.sender.id) return null;
+    // Mid-handoff (tear-off or dock), the PTY is spoken for even when its
+    // owner entry is gone (source closed): creating would kill and replace it.
+    if (tearOffGrants.has(id) || dockingTabs.has(id)) return null;
     terminalOwners.set(id, event.sender.id);
     // If this sender goes away (window close, navigation), drop ownership so
     // the id can be re-created by a new sender later. terminal-manager kills
@@ -2539,15 +2546,17 @@ function setupWindowHandlers() {
   // a live tab id could claim its PTY (stealing output + becoming owner).
   // Codex round-4 HIGH on main.js:1039.
   // Map cleared once the grant is consumed (or its target window is destroyed).
-  const tearOffGrants = new Map(); // tabId -> webContents.id
+  // tearOffGrants lives at module level (next to terminalOwners): terminal:create reads it too.
   // tabId -> { resolve, timer } for an in-flight tear-off whose new window has
   // not yet confirmed it claimed the PTY. window:tearOffTab resolves ok:true
   // ONLY once terminal:claimPty succeeds, so the source window never removes the
   // tab while the PTY is unowned (which orphaned the session). Codex High.
   const tearOffClaimWaiters = new Map();
-  const settleTearOff = (tabId, result) => {
+  // A token settles only ITS transfer: a window destroyed after its own
+  // transfer finished must not fail a later transfer of the same tab.
+  const settleTearOff = (tabId, result, token) => {
     const w = tearOffClaimWaiters.get(tabId);
-    if (!w) return;
+    if (!w || (token && w.token !== token)) return;
     tearOffClaimWaiters.delete(tabId);
     clearTimeout(w.timer);
     w.resolve(result);
@@ -2570,6 +2579,22 @@ function setupWindowHandlers() {
     // the tear-off is persisted + restored under the wrong project and H4 strips
     // it from /A's real primary tabs. Codex.
     if (!getTerminalsForProject(projectPath).includes(tabId)) return { ok: false };
+    // The id itself must name this project too: scrollback, restore buckets
+    // and the docking read exception are all keyed by the project in the id.
+    if (projectPathFromTabId(tabId) !== projectPath) return { ok: false };
+    // ...and be the project of the window asking, not only what it claims.
+    const srcEntry = getWindowEntryByWcId(event.sender.id);
+    if (!srcEntry || srcEntry.projectPath !== projectPath) return { ok: false };
+    // A closing source has already started Ctrl+C-ing its terminals; handing
+    // one over now would carry that interrupt into the new window.
+    if (srcEntry.closing) return { ok: false };
+    // Already moving (a dock, or another tear-off of it).
+    if (dockingTabs.has(tabId) || tearOffClaimWaiters.has(tabId)) return { ok: false };
+    // ponytail: a window still saved under this id (its tab docked back
+    // while it stayed open) would share one restore bucket with the new
+    // tear-off and lose its own tabs on relaunch, so this tab cannot be torn
+    // off until that window closes. Upgrade path: key tear-offs by their own id.
+    if (tearOffKeyInUse(tabId)) return { ok: false };
     const label = typeof tabLabel === 'string' ? tabLabel.slice(0, 100) : 'Tab';
     // labelMeta carries the tab's automatic-label state (lock, source, the
     // remembered auto label) so the torn-off copy behaves like the original.
@@ -2589,7 +2614,31 @@ function setupWindowHandlers() {
     // Resolve ok:true ONLY after the new window actually claims the PTY. If it
     // never mounts, crashes, or the claim fails (PTY exited in the gap), resolve
     // ok:false so the source keeps the tab instead of orphaning the PTY. Codex.
-    return new Promise((resolve) => {
+    const token = {};
+    // Moving: a closing source (primary or tear-off) spares it from its
+    // ownerless sweep until the new window claims it. If the move then fails
+    // with the source gone, nothing else owns it, so reap it here.
+    dockingTabs.add(tabId);
+    const srcWc = event.sender;
+    return new Promise((done) => {
+      const resolve = (r) => {
+        dockingTabs.delete(tabId);
+        if (!r.ok && srcWc.isDestroyed() && getTerminalWebContentsId(tabId) === null) killTerminal(tabId);
+        // Moved: drop it from the source window's saved tabs here too. A
+        // source that closed mid-move never saves again, and reopening it
+        // would restore a dead copy of a tab the tear-off now owns.
+        if (r.ok) {
+          if (srcEntry.isTearOff) {
+            const bucket = getTearOffWindowState(srcEntry.tearOffTabId);
+            if (bucket?.tabs?.some((t) => t?.id === tabId)) {
+              setTearOffWindowState(srcEntry.tearOffTabId, { ...bucket, tabs: bucket.tabs.filter((t) => t?.id !== tabId) });
+            }
+          } else if (dockBucketTabs(srcEntry).some((t) => t?.id === tabId)) {
+            writeDockBucket(srcEntry, dockBucketTabs(srcEntry).filter((t) => t?.id !== tabId));
+          }
+        }
+        done(r);
+      };
       const timer = setTimeout(() => {
         // Timed out waiting for the claim. REVOKE the grant so a late claim
         // can't later reassign the PTY into a window the source no longer
@@ -2598,13 +2647,13 @@ function setupWindowHandlers() {
         // PTY. Codex.
         if (tearOffGrants.get(tabId) === win.webContents.id) tearOffGrants.delete(tabId);
         if (win && !win.isDestroyed()) win.destroy();
-        settleTearOff(tabId, { ok: false });
+        settleTearOff(tabId, { ok: false }, token);
       }, 10000);
-      tearOffClaimWaiters.set(tabId, { resolve, timer, id: win.id });
+      tearOffClaimWaiters.set(tabId, { resolve, timer, id: win.id, token });
       win.webContents.once('destroyed', () => {
         // If the target never claimed, drop the grant and fail the tear-off.
         if (tearOffGrants.get(tabId) === win.webContents.id) tearOffGrants.delete(tabId);
-        settleTearOff(tabId, { ok: false });
+        settleTearOff(tabId, { ok: false }, token);
       });
     });
   });
@@ -2613,8 +2662,16 @@ function setupWindowHandlers() {
   // an active grant for THIS tab issued to THIS webContents.
   ipcMain.handle('terminal:claimPty', (event, tabId) => {
     if (!tabId || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
+    // A repeat claim by the window that already owns it is a no-op success.
+    if (!tearOffGrants.has(tabId) && terminalOwners.get(tabId) === event.sender.id
+      && getTerminalWebContentsId(tabId) === event.sender.id) return { ok: true };
     if (tearOffGrants.get(tabId) !== event.sender.id) return { ok: false };
-    const success = reassignTerminal(tabId, event.sender);
+    // A dock target mid-reload: this claim comes from the page being torn
+    // down, which would take the PTY and then restart it. The dock offers
+    // the tab again to the new page.
+    if (tearOffClaimWaiters.get(tabId)?.dock && !dockReadyWc.has(event.sender.id)) return { ok: false };
+    // A window already closing would take the PTY and then kill it.
+    const success = !getWindowEntryByWcId(event.sender.id)?.closing && reassignTerminal(tabId, event.sender);
     if (success) {
       tearOffGrants.delete(tabId);
       terminalOwners.set(tabId, event.sender.id);
@@ -2629,14 +2686,233 @@ function setupWindowHandlers() {
       // blank/dead tear-off window so it doesn't linger. The source keeps the
       // tab (ok:false below). Codex.
       if (tearOffGrants.get(tabId) === event.sender.id) tearOffGrants.delete(tabId);
-      const deadWin = BrowserWindow.fromWebContents(event.sender);
-      if (deadWin && !deadWin.isDestroyed()) deadWin.destroy();
+      // Only a tear-off window exists just for this tab. A primary window
+      // that was docking it keeps everything else and only drops the tab.
+      if (getWindowEntryByWcId(event.sender.id)?.isTearOff) {
+        const deadWin = BrowserWindow.fromWebContents(event.sender);
+        if (deadWin && !deadWin.isDestroyed()) deadWin.destroy();
+      } else {
+        event.sender.send('tab:adoptFailed', tabId);
+      }
     }
     // Tell window:tearOffTab whether the claim landed; only ok:true lets the
     // source window drop the tab. A failed claim leaves the source owner intact.
     settleTearOff(tabId, { ok: success, id: tearOffClaimWaiters.get(tabId)?.id });
     return { ok: success };
   });
+
+  // Putting a torn-off tab back. A primary window reports once it has
+  // restored its own tabs; a docked tab delivered before that would be
+  // overwritten by the restore.
+  // A reload keeps the webContents but loses the adopt listener, so it
+  // clears readiness until the new page reports again.
+  const dockReadyWc = new Set();
+  const dockReadyHooked = new WeakSet();
+  ipcMain.handle('window:tabsReady', (event) => {
+    const wc = event.sender;
+    dockReadyWc.add(wc.id);
+    if (!dockReadyHooked.has(wc)) {
+      dockReadyHooked.add(wc);
+      wc.on('did-start-loading', () => dockReadyWc.delete(wc.id));
+      wc.once('destroyed', () => dockReadyWc.delete(wc.id));
+    }
+    return { ok: true };
+  });
+
+  // Record the docked tab in the target window's saved tab list BEFORE the
+  // handoff: terminal:loadState only returns scrollback for a tab a window
+  // owns on disk, and a crash mid-move then leaves it recoverable.
+  const dockBucket = (target) => {
+    const wk = target.windowKey;
+    return (wk && wk !== 'main' ? getPrimaryWindowState(wk) : getProjectConfig(target.projectPath)) || {};
+  };
+  const dockBucketTabs = (target) => {
+    const st = dockBucket(target);
+    return Array.isArray(st.tabs) ? st.tabs : [];
+  };
+  // Restore needs a positive tabCounter next to the tabs (ProjectView), which
+  // a window that never saved yet does not have.
+  const writeDockBucket = (target, tabs) => {
+    const wk = target.windowKey;
+    const tabCounter = Math.max(Number(dockBucket(target).tabCounter) || 0, 1);
+    if (wk && wk !== 'main') setPrimaryWindowState(wk, { projectPath: target.projectPath, tabs, tabCounter });
+    else setProjectConfig(target.projectPath, { tabs, tabCounter });
+  };
+  // Returns true when it added the tab, so a failed dock removes only that.
+  const recordDockedTab = (target, tab) => {
+    const tabs = dockBucketTabs(target);
+    if (tabs.some((t) => t?.id === tab.id)) return false;
+    writeDockBucket(target, [...tabs, tab]);
+    return true;
+  };
+
+  const DOCK_STATUSES = new Set(['idle', 'working', 'done', 'needs']);
+
+  // Move a tab from a tear-off window into a primary window of the same
+  // project, keeping its running terminal. screenX/screenY pick the primary
+  // under the drop point (reason 'no-target' when there is none); without
+  // them it goes to the project's main window, opened if needed. Reuses the
+  // tear-off grant + claim handshake, so the PTY changes owner exactly once.
+  ipcMain.handle('window:dockTab', async (event, tabId, tabLabel, labelMeta, state, screenX, screenY, windowId) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
+    const src = getWindowEntryByWcId(event.sender.id);
+    if (!src?.isTearOff || src.closing) return { ok: false };
+    const projectPath = src.projectPath;
+    if (projectPathFromTabId(tabId) !== projectPath) return { ok: false };
+    const srcId = event.sender.id;
+    // Still the source's tab. If the source closed mid-dock its ownership
+    // entry is gone, and the tab still moves: that is what saves it.
+    const owned = () => {
+      const o = terminalOwners.get(tabId);
+      return (o === srcId || (o === undefined && event.sender.isDestroyed()))
+        && getTerminalsForProject(projectPath).includes(tabId);
+    };
+    // Its shell exited: nothing to move. The source just drops the tab
+    // instead of letting it block the rest of a whole-window move.
+    if (terminalOwners.get(tabId) === srcId && !getTerminalsForProject(projectPath).includes(tabId)) {
+      return { ok: false, reason: 'gone' };
+    }
+    const busy = () => tearOffClaimWaiters.has(tabId) || tearOffGrants.has(tabId) || dockingTabs.has(tabId);
+    if (!owned()) return { ok: false };
+    if (busy()) return { ok: false, reason: 'busy' };
+    // Marked from the start: the source closing while we wait for the target
+    // must not Ctrl+C a tab that is about to move.
+    dockingTabs.add(tabId);
+    let result = { ok: false };
+    try {
+      result = await dockInto(event, src, tabId, tabLabel, labelMeta, state, screenX, screenY, windowId, owned);
+      return result;
+    } finally {
+      dockingTabs.delete(tabId);
+      // The source closed while this dock was pending (its close spared the
+      // tab for us) and the dock failed: nothing owns the PTY now, reap it.
+      if (!result.ok && event.sender.isDestroyed() && getTerminalWebContentsId(tabId) === null) killTerminal(tabId);
+    }
+  });
+
+  const waitDockReady = async (wc) => {
+    for (let i = 0; i < 100 && !dockReadyWc.has(wc.id) && !wc.isDestroyed(); i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return !wc.isDestroyed() && dockReadyWc.has(wc.id);
+  };
+
+  const dockInto = async (event, src, tabId, tabLabel, labelMeta, state, screenX, screenY, windowId, owned) => {
+    const projectPath = src.projectPath;
+    const busy = () => tearOffClaimWaiters.has(tabId) || tearOffGrants.has(tabId);
+
+    const point = Number.isFinite(screenX) && Number.isFinite(screenY) ? { x: screenX, y: screenY } : null;
+    let target = primaryDockTarget(projectPath, point, Number.isInteger(windowId) ? windowId : null);
+    if (!target) {
+      if (point) return { ok: false, reason: 'no-target' };
+      openProjectWindow(projectPath);
+      target = primaryDockTarget(projectPath, null);
+      if (!target) return { ok: false };
+    }
+    const twc = target.win.webContents;
+
+    const meta = {};
+    if (labelMeta && typeof labelMeta === 'object') {
+      if (typeof labelMeta.labelLockedByUser === 'boolean') meta.labelLockedByUser = labelMeta.labelLockedByUser;
+      for (const k of ['labelSource', 'autoLabelSource']) {
+        if (labelMeta[k] === 'title' || labelMeta[k] === 'agent') meta[k] = labelMeta[k];
+      }
+      if (typeof labelMeta.autoLabel === 'string') meta.autoLabel = labelMeta.autoLabel.slice(0, 100);
+    }
+    const tab = {
+      id: tabId,
+      label: typeof tabLabel === 'string' ? tabLabel.slice(0, 100) : 'Tab',
+      projectPath,
+      kind: 'terminal',
+      createdAt: Date.now(),
+      ...meta,
+    };
+    const status = DOCK_STATUSES.has(state?.status) ? state.status : null;
+    // Recorded BEFORE waiting for the target, so that if the source closes
+    // and the app dies in the wait, the tab is still in some window's saved
+    // state. A target that restores it from disk meanwhile gets a dead copy
+    // (terminal:create refuses a docking id), which tab:adopt replaces.
+    const recorded = recordDockedTab(target, tab);
+    // Undo the record only while the source still holds the tab. Once the
+    // source is gone this record is the only saved copy: keep it, so a
+    // relaunch recreates the tab and auto-resume picks its session back up.
+    const unrecord = () => {
+      if (recorded && !event.sender.isDestroyed()) writeDockBucket(target, dockBucketTabs(target).filter((t) => t?.id !== tabId));
+    };
+    const abort = (r) => {
+      unrecord();
+      if (!twc.isDestroyed() && terminalOwners.get(tabId) !== twc.id) twc.send('tab:adoptFailed', tabId);
+      return r;
+    };
+
+    if (!(await waitDockReady(twc))) return abort({ ok: false });
+    // Re-check after the wait: the tab may have closed or started another
+    // move, and the target may have started closing. A source that started
+    // closing meanwhile still hands over: moving the tab out saves it.
+    if (!owned()) return abort({ ok: false });
+    if (busy()) return abort({ ok: false, reason: 'busy' });
+    if (getWindowEntryByWcId(twc.id)?.closing) return abort({ ok: false });
+
+    tearOffGrants.set(tabId, twc.id);
+    const token = {};
+    const payload = { tab, status, hookOwned: state?.hookOwned === true };
+    return new Promise((resolve) => {
+      let settled = false;
+      const fail = () => {
+        if (tearOffGrants.get(tabId) === twc.id) tearOffGrants.delete(tabId);
+        if (!twc.isDestroyed() && terminalOwners.get(tabId) !== twc.id) twc.send('tab:adoptFailed', tabId);
+        settleTearOff(tabId, { ok: false }, token);
+      };
+      // The target reloading drops its adopt listener and any claim it had
+      // in flight (claimPty refuses a not-ready claimant). Take the grant
+      // back, wait for the new page, and offer the tab again: the new page
+      // replaces the dead copy it restored from disk with a claiming one.
+      const onReload = async () => {
+        if (tearOffGrants.get(tabId) === twc.id) tearOffGrants.delete(tabId);
+        clearTimeout(waiter.timer);
+        waiter.timer = setTimeout(fail, 15000);
+        if (!(await waitDockReady(twc)) || settled) return; // the timer fails it
+        // The new page may have saved its list without the tab (it drops the
+        // dead copy before re-adding): put the record back first.
+        recordDockedTab(target, tab);
+        tearOffGrants.set(tabId, twc.id);
+        twc.send('tab:adopt', payload);
+      };
+      const waiter = {
+        timer: setTimeout(fail, 10000),
+        id: target.windowId,
+        token,
+        dock: true,
+        resolve: (r) => {
+          settled = true;
+          twc.removeListener('destroyed', fail);
+          twc.removeListener('did-start-loading', onReload);
+          if (r.ok) {
+            // The source's saved tab set no longer holds it, even if the
+            // source never gets to save again.
+            const bucket = getTearOffWindowState(src.tearOffTabId);
+            if (bucket?.tabs?.some((t) => t?.id === tabId)) {
+              setTearOffWindowState(src.tearOffTabId, { ...bucket, tabs: bucket.tabs.filter((t) => t?.id !== tabId) });
+            }
+            // Its torn tab left: if the window stays (a later tab of it does
+            // not follow), restore must not strip that tab from the primary.
+            if (tabId === src.tearOffTabId && !event.sender.isDestroyed()) markTearOffIdentityDocked(event.sender.id);
+            if (!target.win.isDestroyed()) {
+              if (target.win.isMinimized()) target.win.restore();
+              target.win.focus();
+            }
+          } else {
+            unrecord();
+          }
+          resolve(r);
+        },
+      };
+      twc.once('destroyed', fail);
+      twc.on('did-start-loading', onReload);
+      tearOffClaimWaiters.set(tabId, waiter);
+      twc.send('tab:adopt', payload);
+    });
+  };
 }
 
 function setupGitHandlers() {
@@ -2972,7 +3248,8 @@ app.whenReady().then(() => {
   // tear-off owns the id, so strip it from every primary project's persisted
   // tabs before restoring, guaranteeing each id is created exactly once.
   if (Array.isArray(config.lastTearOffs) && config.lastTearOffs.length > 0) {
-    const tornIds = new Set(config.lastTearOffs.map((t) => t && t.tabId).filter(Boolean));
+    // A docked entry's torn tab now lives in a primary window: keep it there.
+    const tornIds = new Set(config.lastTearOffs.filter((t) => t && !t.docked).map((t) => t.tabId).filter(Boolean));
     if (tornIds.size > 0) {
       let changed = false;
       for (const proj of Object.values(config.projects || {})) {
@@ -3004,6 +3281,9 @@ app.whenReady().then(() => {
       || !fs.existsSync(t.projectPath) || typeof t.tabId !== 'string' || !t.tabId) return false;
     if (seenTearIds.has(t.tabId)) return false; // dedupe: one window per torn tab id. Codex
     seenTearIds.add(t.tabId);
+    // A docked tear-off reopens only with its saved tabs. With none it would
+    // fall back to recreating its torn tab, which the primary already has.
+    if (t.docked && !(getTearOffWindowState(t.tabId)?.tabs?.length > 0)) return false;
     return true;
   });
   // M2: freeze the open-projects snapshot for the duration of the staggered
@@ -3061,10 +3341,13 @@ app.whenReady().then(() => {
   if (tears.length > 0) {
     console.log(`[restore] lastTearOffs=${savedTears.length} reopening=${tears.length}`);
     const base = restoreStaggerMs ? restoreStaggerMs + 250 : 500;
+    // Reserved until each opens, so a tab cannot be torn off under a key a
+    // queued window is about to restore with (tearOffKeyInUse).
+    tears.forEach((t) => reserveTearOffKey(t.tabId));
     tears.forEach((t, i) => {
       setTimeout(() => {
         try {
-          restoreTornOffWindow(t.projectPath, t.tabId, t.label || '', t.bounds || null);
+          restoreTornOffWindow(t.projectPath, t.tabId, t.label || '', t.bounds || null, t.docked === true);
         } catch (err) {
           console.warn(`[restore] failed to reopen tear-off ${t.tabId}:`, err?.message || err);
         }

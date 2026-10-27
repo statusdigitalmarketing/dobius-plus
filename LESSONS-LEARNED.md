@@ -271,3 +271,15 @@
 - **FIX**: `pickFolder(event, opts)` in electron/main.js: sheet on the sender window, `openDirectory` + `createDirectory`. The launcher has its own projects-folder button (IPC window:pickProjectsFolder) and an empty state offering both actions.
 - **CONTEXT**: Test first-run flows with an empty HOME: `HOME=<scratch>/home DOBIUS_USERDATA_DIR=... npx electron --inspect=9239 .` and stub `dialog.showOpenDialog` over the main inspector (Runtime.evaluate with includeCommandLineAPI for `require`) so no native dialog steals Sam's focus.
 - **DETECTION**: `grep -n "showOpenDialog" electron/*.js` (all should go through pickFolder)
+
+### Git: 2026-10-26
+- **MISTAKE**: Ran a ship-test probe with no arguments (`node probe.mjs`), so its `${OUT}/x.png` became `undefined/x.png` inside the repo; `git add -A` in the next commit shipped it (4535cb0, pushed with v1.0.81).
+- **FIX**: Probe scripts must exit when their output arg is missing, and before any `git add -A` run `git status --short` and read every `??` line. Prefer `git add <paths>`.
+- **CONTEXT**: Any scratchpad script that writes screenshots relative to a CLI arg.
+- **DETECTION**: `git ls-files undefined/ && git status --short | grep '^??'`
+
+### Testing: 2026-10-26
+- **MISTAKE**: Seeded harness tabs without `projectPath`, so their PTYs spawned in `~` and main's tear-off guard (`getTerminalsForProject(projectPath).includes(tabId)`) refused every tear-off. It looked like the tear-off was broken.
+- **FIX**: Seed tabs as `{ id, label, labelLockedByUser: true, projectPath: repo, kind: 'terminal' }`. This is also why "seeded tabs open in ~".
+- **CONTEXT**: Any harness test of tear-off, dock, or per-project terminal logic.
+- **DETECTION**: `grep -n "projectPath" <seed script>`

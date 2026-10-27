@@ -5,6 +5,7 @@ import { killTerminal, gracefulCloseTerminals, getTerminalsForProject, getTermin
 import { watchFiles } from './watcher-service.js';
 import { getProjectConfig, setProjectConfig, loadConfig, saveConfig, getTearOffWindowState, setPrimaryWindowState, deletePrimaryWindowState } from './config-manager.js';
 import { getQuittingForUpdate, getQuitting } from './quit-state.js';
+import { dockingTabs } from './docking-state.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -147,6 +148,9 @@ export function getOpenTearOffsForRestore() {
       tabId: entry.tearOffTabId,
       label: entry.tearOffLabel || '',
       bounds: entry.bounds || entry.win.getBounds(),
+      // Its torn tab went back to a primary window: tabId is now only the key
+      // of its saved tab set, not a tab it owns (see main.js restore).
+      ...(entry.identityDocked ? { docked: true } : {}),
     });
   }
   return out;
@@ -252,7 +256,7 @@ function getPrimaryWindowIdsForProject(projectPath) {
 function getTearOffTabIdsForProject(projectPath) {
   const ids = new Set();
   for (const [, entry] of projectWindows) {
-    if (entry.isTearOff && entry.projectPath === projectPath && entry.tearOffTabId && !entry.win.isDestroyed()) {
+    if (entry.isTearOff && entry.projectPath === projectPath && entry.tearOffTabId && !entry.identityDocked && !entry.win.isDestroyed()) {
       ids.add(entry.tearOffTabId);
     }
   }
@@ -284,7 +288,7 @@ export function focusTearOffWindowForTab(tabId) {
     // persisted bucket). Without the bucket check, sidebar clicks on a live
     // extra tear-off tab fell through to the primary window or no-op'd
     // (Codex integration round, High).
-    const owns = entry.tearOffTabId === tabId
+    const owns = (entry.tearOffTabId === tabId && !entry.identityDocked)
       || (entry.tearOffTabId
           && (getTearOffWindowState(entry.tearOffTabId)?.tabs || []).some((t) => t.id === tabId));
     if (owns) {
@@ -318,6 +322,70 @@ export function focusWindowForTab(tabId) {
   }
   return false;
 }
+
+// Tab docking (putting a torn-off tab back). Only a tear-off window docks,
+// and only into a PRIMARY window of the same project: a primary's close
+// cleanup already covers every terminal it owns, a tear-off's covers only its
+// own tab, and a tear-off's restore identity is its torn tab id.
+export function getWindowEntryByWcId(wcId) {
+  for (const [windowId, entry] of projectWindows) {
+    if (entry.win && !entry.win.isDestroyed() && entry.win.webContents.id === wcId) return { windowId, ...entry };
+  }
+  return null;
+}
+
+// The primary window to dock into: the one with windowId if it is still a
+// usable primary of this project, else the one under a screen point, else
+// (no point) the project's first ('main') window, else any primary.
+export function primaryDockTarget(projectPath, point, windowId = null) {
+  const prims = [];
+  for (const [id, entry] of projectWindows) {
+    if (entry.projectPath === projectPath && !entry.isTearOff && !entry.closing && entry.win && !entry.win.isDestroyed()) prims.push({ windowId: id, ...entry });
+  }
+  const named = windowId != null && prims.find((e) => e.windowId === windowId);
+  if (named) return named;
+  if (!point) return prims.find((e) => e.windowKey === 'main') || prims[0] || null;
+  const hits = prims.filter(({ win }) => {
+    if (!win.isVisible() || win.isMinimized()) return false;
+    const b = win.getBounds();
+    return point.x >= b.x && point.x < b.x + b.width && point.y >= b.y && point.y < b.y + b.height;
+  });
+  // ponytail: Electron exposes no z-order, so overlapping primaries resolve to
+  // the 'main' one, then the first. The menu item is the unambiguous path.
+  return hits.find((e) => e.windowKey === 'main') || hits[0] || null;
+}
+
+// A tear-off whose torn tab was docked back while the window stayed open
+// (another tab of it did not follow). It keeps its restore key but no longer
+// owns that tab, so restore must not take the tab away from the primary.
+export function markTearOffIdentityDocked(wcId) {
+  for (const [, entry] of projectWindows) {
+    if (entry.isTearOff && entry.win && !entry.win.isDestroyed() && entry.win.webContents.id === wcId) {
+      entry.identityDocked = true;
+      persistOpenProjects();
+      return;
+    }
+  }
+}
+
+// Is a live tear-off window saved under this tab id? A docked tear-off keeps
+// its key after the tab itself left, and a second tear-off of that tab would
+// write the same tearOffWindows bucket and lastTearOffs entry.
+// Keys of tear-offs queued in the staggered launch restore but not open yet.
+const pendingTearOffKeys = new Set();
+export function reserveTearOffKey(tabId) { if (tabId) pendingTearOffKeys.add(tabId); }
+
+export function tearOffKeyInUse(tabId) {
+  if (pendingTearOffKeys.has(tabId)) return true;
+  for (const [, entry] of projectWindows) {
+    if (entry.isTearOff && entry.tearOffTabId === tabId && entry.win && !entry.win.isDestroyed()) return true;
+  }
+  return false;
+}
+
+// Tabs mid-dock. A tear-off closing while its tab is being handed over must
+// not Ctrl+C it: the tab is moving, not closing.
+export { dockingTabs };
 
 export function focusPrimaryWindowForProject(projectPath) {
   const win = getWindowForProject(projectPath);
@@ -396,6 +464,10 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
     // Phase 1, intercept and do graceful shutdown
     e.preventDefault();
     closingGracefully = true;
+    // A closing window can neither send nor receive a docked tab: it would
+    // kill the tab it just took, or Ctrl+C the one it is handing over.
+    const self = projectWindows.get(win.id);
+    if (self) self.closing = true;
 
     // Request scrollback save from renderer
     if (!win.isDestroyed()) {
@@ -416,7 +488,7 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
     // background agents, phone-spawned terminals) so closing a window never
     // Ctrl+C's a mid-task headless agent. Audit High.
     const termIds = isTearOff && tearOffTabId
-      ? (getTerminalWebContentsId(tearOffTabId) === myWcId ? [tearOffTabId] : [])
+      ? (getTerminalWebContentsId(tearOffTabId) === myWcId && !dockingTabs.has(tearOffTabId) ? [tearOffTabId] : [])
       : (() => {
           const beingTornOff = getTearOffTabIdsForProject(projectPath);
           // Only THIS window's own terminals (v1.0.66): with N primary windows
@@ -465,6 +537,9 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
     try {
       import('./auto-resume.js').then((m) => {
         if (isTearOff && tearOffTabId) {
+          // Docked back into a primary window (or still moving there): that
+          // window owns it, so its queued resume must survive this close.
+          if (getTerminalWebContentsId(tearOffTabId) !== null || dockingTabs.has(tearOffTabId)) return;
           if (m?.cancelTabIfPending) m.cancelTabIfPending(tearOffTabId);
           else if (m?.cancelTabsForProject && getPrimaryWindowIdsForProject(projectPath).length === 0) m.cancelTabsForProject(projectPath);
         } else if (m?.cancelTabsForProject) {
@@ -484,8 +559,10 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
     //    no live owner -> null -> kill, so an in-flight tear-off + source-close
     //    race can't leak a windowless PTY. Codex.
     if (isTearOff && tearOffTabId) {
-      if (getTerminalWebContentsId(tearOffTabId) === null) killTerminal(tearOffTabId);
-      return;
+      if (getTerminalWebContentsId(tearOffTabId) === null && !dockingTabs.has(tearOffTabId)) killTerminal(tearOffTabId);
+      // No early return: a tear-off can also own tabs opened inside it (or one
+      // opened while it closed after a dock). The ownerless sweep below reaps
+      // those and spares anything a live window owns, the docked tab included.
     }
 
     // v1.0.66: each primary window owns its OWN terminals (distinct tab ids +
@@ -506,7 +583,7 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
     // background agents, phone-spawned terminals) that were never bound to a
     // window, so closing a window can't reap a live background agent. Audit High.
     for (const id of getTerminalsForProject(projectPath)) {
-      if (getTerminalWebContentsId(id) === null && wasWindowOwned(id)) killTerminal(id);
+      if (getTerminalWebContentsId(id) === null && wasWindowOwned(id) && !dockingTabs.has(id)) killTerminal(id);
     }
   });
 
@@ -633,7 +710,7 @@ function randomKey() {
 // Shared creator for a torn-off tab window at explicit bounds. Used by the
 // cursor-drag tear-off AND the launch-time tear-off restore (v1.0.46), so the
 // two can't drift.
-function createTornOffWindow(projectPath, tabId, tabLabel, bounds = {}, restore = false, labelMeta = null) {
+function createTornOffWindow(projectPath, tabId, tabLabel, bounds = {}, restore = false, labelMeta = null, identityDocked = false) {
   const folderName = path.basename(projectPath);
   // Count existing windows for this project to generate "folder (2)" style title
   const windowNumber = getWindowIdsForProject(projectPath).length + 1;
@@ -684,6 +761,7 @@ function createTornOffWindow(projectPath, tabId, tabLabel, bounds = {}, restore 
   // the start (confirmed). A drag tear-off must claim the source's PTY first, so
   // it stays unconfirmed until markTearOffConfirmed() on a successful claim. Codex.
   setupWindowEvents(win, projectPath, { isTearOff: true, tearOffTabId: tabId, tearOffLabel: tabLabel, tearOffConfirmed: restore });
+  if (identityDocked) { const e = projectWindows.get(win.id); if (e) e.identityDocked = true; }
   return win;
 }
 
@@ -705,8 +783,9 @@ export function openTornOffWindow(projectPath, tabId, tabLabel, screenX, screenY
  * "Fix updating"). Positioned at its saved bounds. The renderer creates a fresh
  * terminal for tabId and auto-resume revives the session via the sessionTabMap.
  */
-export function restoreTornOffWindow(projectPath, tabId, tabLabel, bounds) {
-  return createTornOffWindow(projectPath, tabId, tabLabel, bounds || {}, true);
+export function restoreTornOffWindow(projectPath, tabId, tabLabel, bounds, identityDocked = false) {
+  pendingTearOffKeys.delete(tabId); // registered by createTornOffWindow from here on
+  return createTornOffWindow(projectPath, tabId, tabLabel, bounds || {}, true, null, identityDocked);
 }
 
 /** Single Visual preview window (phone-shaped, its own window so it never covers the terminal). */
