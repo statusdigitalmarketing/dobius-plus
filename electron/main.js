@@ -2579,6 +2579,11 @@ function setupWindowHandlers() {
     // the tear-off is persisted + restored under the wrong project and H4 strips
     // it from /A's real primary tabs. Codex.
     if (!getTerminalsForProject(projectPath).includes(tabId)) return { ok: false };
+    // The id itself must name this project too: scrollback, restore buckets
+    // and the docking read exception are all keyed by the project in the id.
+    if (projectPathFromTabId(tabId) !== projectPath) return { ok: false };
+    // Already moving (a dock, or another tear-off of it).
+    if (dockingTabs.has(tabId) || tearOffClaimWaiters.has(tabId)) return { ok: false };
     // ponytail: a window still saved under this id (its tab docked back
     // while it stayed open) would share one restore bucket with the new
     // tear-off and lose its own tabs on relaunch, so this tab cannot be torn
@@ -2604,7 +2609,17 @@ function setupWindowHandlers() {
     // never mounts, crashes, or the claim fails (PTY exited in the gap), resolve
     // ok:false so the source keeps the tab instead of orphaning the PTY. Codex.
     const token = {};
-    return new Promise((resolve) => {
+    // Moving: a closing source (primary or tear-off) spares it from its
+    // ownerless sweep until the new window claims it. If the move then fails
+    // with the source gone, nothing else owns it, so reap it here.
+    dockingTabs.add(tabId);
+    const srcWc = event.sender;
+    return new Promise((done) => {
+      const resolve = (r) => {
+        dockingTabs.delete(tabId);
+        if (!r.ok && srcWc.isDestroyed() && getTerminalWebContentsId(tabId) === null) killTerminal(tabId);
+        done(r);
+      };
       const timer = setTimeout(() => {
         // Timed out waiting for the claim. REVOKE the grant so a late claim
         // can't later reassign the PTY into a window the source no longer
@@ -2724,6 +2739,7 @@ function setupWindowHandlers() {
     const src = getWindowEntryByWcId(event.sender.id);
     if (!src?.isTearOff || src.closing) return { ok: false };
     const projectPath = src.projectPath;
+    if (projectPathFromTabId(tabId) !== projectPath) return { ok: false };
     const srcId = event.sender.id;
     // Still the source's tab. If the source closed mid-dock its ownership
     // entry is gone, and the tab still moves: that is what saves it.
