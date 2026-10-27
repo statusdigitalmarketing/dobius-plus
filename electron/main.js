@@ -2585,6 +2585,9 @@ function setupWindowHandlers() {
     // ...and be the project of the window asking, not only what it claims.
     const srcEntry = getWindowEntryByWcId(event.sender.id);
     if (!srcEntry || srcEntry.projectPath !== projectPath) return { ok: false };
+    // A closing source has already started Ctrl+C-ing its terminals; handing
+    // one over now would carry that interrupt into the new window.
+    if (srcEntry.closing) return { ok: false };
     // Already moving (a dock, or another tear-off of it).
     if (dockingTabs.has(tabId) || tearOffClaimWaiters.has(tabId)) return { ok: false };
     // ponytail: a window still saved under this id (its tab docked back
