@@ -233,6 +233,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mobileServerListDevices: () => ipcRenderer.invoke('mobileServer:listDevices'),
   mobileServerRemoveDevice: (token) => ipcRenderer.invoke('mobileServer:removeDevice', token),
   mobileServerProvisionCert: () => ipcRenderer.invoke('mobileServer:provisionCert'),
+  mobileServerTextPairing: () => ipcRenderer.invoke('mobileServer:textPairingToSelf'),
 
   // Auto-resume queue (v1.0.30): re-engage previously-active Claude sessions
   // on app launch, staggered. Settings UI + Cmd+Shift+R cancel hook.

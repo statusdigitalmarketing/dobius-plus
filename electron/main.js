@@ -94,6 +94,7 @@ import {
   startImessageBridge, stopImessageBridge, restartImessageBridge,
   sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus,
 } from './imessage-bridge.js';
+import { pairingText } from '../shared/pairing-link.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
@@ -2399,6 +2400,18 @@ function setupMobileServerHandlers() {
     return getMobileServerStatus();
   });
   ipcMain.handle('mobileServer:removeDevice', (_event, token) => removeMobileDevice(token));
+  // iMessage the pairing details to the user's own handle. Built here from the
+  // live status, never from renderer text, so it can only ever send this.
+  ipcMain.handle('mobileServer:textPairingToSelf', async () => {
+    const text = pairingText(getMobileServerStatus());
+    if (!text) return { ok: false, error: 'Mobile server is not running.' };
+    try {
+      await sendImessageToSelf(text);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
   // Provision the tailnet HTTPS cert (Phase 4): enables service-worker install
   // and Web Push. If the server is running, restart it so it picks up HTTPS.
   ipcMain.handle('mobileServer:provisionCert', async () => {

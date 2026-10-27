@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
+import { buildPairingDeepLink } from '../../../shared/pairing-link.js';
 import { useStore } from '../../store/store';
 import { CURATED_TERMINAL_FONTS, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
@@ -168,6 +169,22 @@ export default function Settings() {
       refreshMobile();
     }
   }, [refreshMobile]);
+
+  // Text the Mac address, code and pair link to the user's own iMessage, so a
+  // phone signed in to the same Apple ID gets it without retyping. main builds
+  // the message from the live server state; nothing here supplies the text.
+  const [pairTextMsg, setPairTextMsg] = useState('');
+  const [pairTextBusy, setPairTextBusy] = useState(false);
+  const textPairingToSelf = useCallback(async () => {
+    setPairTextBusy(true);
+    setPairTextMsg('Sending...');
+    try {
+      const r = await window.electronAPI.mobileServerTextPairing();
+      setPairTextMsg(r?.ok ? 'Sent. Check Messages on your phone.' : `Failed: ${r?.error || 'unknown error'}`);
+    } finally {
+      setPairTextBusy(false);
+    }
+  }, []);
 
   const regenMobileCode = useCallback(async () => {
     const status = await window.electronAPI.mobileServerRegenerateCode();
@@ -648,6 +665,29 @@ export default function Settings() {
               </div>
             )}
 
+            {mobileStatus.pairingCode && (mobileStatus.address || mobileStatus.url) && (
+              <SettingRow
+                label="Text it to yourself"
+                description={pairTextMsg || (imsgCfg?.selfHandle
+                  ? `iMessages the address, code and a pair link to ${imsgCfg.selfHandle}`
+                  : 'Set your iMessage handle under iMessage Bridge below first')}
+              >
+                <button
+                  disabled={pairTextBusy || !imsgCfg?.selfHandle}
+                  onClick={textPairingToSelf}
+                  style={{
+                    padding: '4px 10px', fontSize: 11, fontFamily: "'SF Mono', monospace",
+                    color: 'var(--fg)', backgroundColor: 'var(--surface)',
+                    border: '1px solid var(--border)', borderRadius: 6,
+                    opacity: (pairTextBusy || !imsgCfg?.selfHandle) ? 0.5 : 1,
+                    cursor: (pairTextBusy || !imsgCfg?.selfHandle) ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  Text myself the IP URL and the PIN
+                </button>
+              </SettingRow>
+            )}
+
             {mobileDevices.length > 0 && (
               <div>
                 <div className="text-xs mb-1.5" style={{ color: 'var(--dim)', fontSize: 10 }}>
@@ -821,31 +861,6 @@ export default function Settings() {
       </Section>
     </div>
   );
-}
-
-// Build the dobiusplus:// deep link encoded into the QR code shown on the
-// Mac. The mobile app's @capacitor/app URL handler reads `host` and `code`
-// off this and skips the first-run host entry step. Includes the SCHEME in
-// the host param (http:// or https://) so an HTTPS-enabled Mac pairs with
-// its TLS listener, not plaintext.
-function buildPairingDeepLink(mobileStatus) {
-  if (!mobileStatus?.pairingCode) return '';
-  // mobileStatus.url is `https://my-mac.ts.net:8420/` when HTTPS is on, or
-  // `http://100.x.x.x:8420/` when HTTP-only (see mobile-server.js). Strip the
-  // trailing slash and keep everything else so Pairing.jsx's normaliseHost
-  // round-trips scheme-preserved.
-  let origin = '';
-  try {
-    if (mobileStatus.url) {
-      const u = new URL(mobileStatus.url);
-      origin = `${u.protocol}//${u.host}`;
-    } else if (mobileStatus.address) {
-      origin = `http://${mobileStatus.address.host}:${mobileStatus.address.port}`;
-    }
-  } catch { origin = ''; }
-  if (!origin) return '';
-  const params = new URLSearchParams({ host: origin, code: String(mobileStatus.pairingCode) });
-  return `dobiusplus://pair?${params.toString()}`;
 }
 
 function Section({ title, children }) {

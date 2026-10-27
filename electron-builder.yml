@@ -34,6 +34,8 @@ files:
   - dist/**/*
   - dist-mobile/**/*
   - electron/**/*
+  # shared/ holds modules both main and the renderer import (pairing-link.js).
+  - shared/**/*
   - node_modules/node-pty/**/*
   - package.json
   # scripts/kokoro-tts.py is spawned by voice-playback.js; without it in the
