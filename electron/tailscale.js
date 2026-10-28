@@ -123,7 +123,6 @@ export async function provisionCert() {
   if (!name) return { ok: false, error: 'Could not read your Tailscale MagicDNS name. Is Tailscale running?' };
   const p = certPathsFor(name);
   if (!p) return { ok: false, error: 'Invalid MagicDNS name.' };
-  const prior = certValidTo(name);
   // Ask for 30 days of life so a cached cert near expiry is renewed; an older
   // tailscale without the flag gets the plain call.
   const args = ['cert', '--cert-file', p.certFile, '--key-file', p.keyFile];
@@ -143,6 +142,5 @@ export async function provisionCert() {
       : (stderr.trim().split('\n').pop() || 'tailscale cert failed').slice(0, 200);
     return { ok: false, error: hint };
   }
-  // changed: false when tailscale handed back the cert already on disk.
-  return { ok: true, name, changed: certValidTo(name) !== prior };
+  return { ok: true, name };
 }

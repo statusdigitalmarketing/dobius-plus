@@ -414,7 +414,9 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       for (const f of [...files].slice(0, 5)) {
         // Always octet-stream: the server's raw parser accepts everything, and
         // a real JSON mime would otherwise be consumed by express.json (Codex).
-        const res = await fetch(`${absUrl('/upload')}?name=${encodeURIComponent(f.name || 'upload')}`, {
+        // The connection's own origin, never the cached one: a re-pair to another
+        // Mac mid-upload must not send this Mac's token there.
+        const res = await fetch(`${absUrl(connection.origin, '/upload')}?name=${encodeURIComponent(f.name || 'upload')}`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${connection.token}`, 'Content-Type': 'application/octet-stream' },
           body: f,

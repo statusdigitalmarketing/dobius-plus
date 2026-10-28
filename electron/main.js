@@ -2441,10 +2441,12 @@ let certJob = null;
 function provisionCertAndRestart() {
   certJob ||= (async () => {
     const res = await provisionCert();
-    // Restart only for a new cert or a server not yet on HTTPS: tailscale can
-    // return the same cert, and a pointless restart drops every phone.
+    // Restart only onto a NEWER cert than the one loaded, or off plain HTTP:
+    // tailscale can return the same cert, and a pointless restart drops every
+    // phone.
     const st = getMobileServerStatus();
-    if (res.ok && st.running && (res.changed || !st.secure)) await restartMobileServer();
+    const disk = res.ok && certValidTo(res.name);
+    if (disk && st.running && (!st.secure || disk > (st.certValidTo || 0))) await restartMobileServer();
     return res;
   })().finally(() => { certJob = null; });
   return certJob;

@@ -302,7 +302,7 @@ export default function Board({ connection, status, onOpen, onShowHistory, onRep
         )}
       </main>
 
-      <VoiceButton />
+      <VoiceButton connection={connection} />
 
       {pickerOpen && (
         <div className="sheet-backdrop" onClick={() => setPickerOpen(false)}>

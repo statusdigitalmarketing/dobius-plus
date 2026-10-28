@@ -1,13 +1,11 @@
 import { useState, useRef } from 'react';
 import { absUrl } from './host';
-import { get as storageGet } from './storage';
-import { TOKEN_KEY } from './host';
 
 // Hold-to-talk mic. Records a command, uploads it to /voice/audio (the Mac
 // transcribes locally with whisper.cpp + routes to the Conductor), shows what
 // was heard, then the Conductor's spoken reply. Needs a secure context for the
 // mic, so it disables itself on plain HTTP with a hint. v1.0.43 Phase 5.
-export default function VoiceButton() {
+export default function VoiceButton({ connection }) {
   const [state, setState] = useState('idle'); // idle | recording | working | done | error
   const [line, setLine] = useState('');
   const mrRef = useRef(null);
@@ -71,25 +69,27 @@ export default function VoiceButton() {
     if (!blob.size) { setState('idle'); setLine(''); return; }
     setState('working');
     setLine('Transcribing…');
-    const token = (await storageGet(TOKEN_KEY)) || '';
+    // Token and origin from the one connection, so a re-pair to another Mac
+    // mid-request cannot pair this Mac's token with that Mac's address.
+    const { token, origin } = connection;
     try {
-      const res = await fetch(absUrl('/voice/audio'), {
+      const res = await fetch(absUrl(origin, '/voice/audio'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': blob.type },
         body: blob,
       });
       const j = await res.json();
       if (!j.ok) { setState('error'); setLine(j.error || 'Transcription failed'); resetSoon(5000); return; }
-      if (j.requestId) { setLine(`“${j.transcript}”`); setState('working'); pollReply(j.requestId, token); }
+      if (j.requestId) { setLine(`“${j.transcript}”`); setState('working'); pollReply(j.requestId, token, origin); }
       else { setState('done'); setLine(`“${j.transcript}”\n(Conductor offline, not sent)`); resetSoon(8000); }
     } catch {
       setState('error'); setLine('Upload failed'); resetSoon(4000);
     }
   };
 
-  const pollReply = async (requestId, token) => {
+  const pollReply = async (requestId, token, origin) => {
     try {
-      const res = await fetch(absUrl('/voice/reply'), {
+      const res = await fetch(absUrl(origin, '/voice/reply'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ requestId, timeoutMs: 30000 }),
