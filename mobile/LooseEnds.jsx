@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { timeAgo } from './format';
+import { pairingKey } from './pairings';
 import { parseDismissed, visibleLooseEnds, withDismissal } from '../shared/loose-dismiss.js';
 
 /**
@@ -20,14 +21,16 @@ const DISMISSED_KEY = 'dobius-mobile-loose-dismissed';
 // Dismissals are device-local, matching pins and collapsed groups. The rule
 // for what a dismissal covers lives in shared/loose-dismiss.js so the desktop
 // tab and this one cannot drift.
-const loadDismissed = () => {
-  try { return parseDismissed(localStorage.getItem(DISMISSED_KEY)); } catch { return {}; }
+const loadDismissed = (key) => {
+  try { return parseDismissed(localStorage.getItem(key)); } catch { return {}; }
 };
 
 export default function LooseEnds({ connection }) {
+  const openKey = pairingKey(connection.pairing, OPEN_KEY);
+  const dismissedKey = pairingKey(connection.pairing, DISMISSED_KEY);
   const [items, setItems] = useState([]);
-  const [open, setOpen] = useState(() => localStorage.getItem(OPEN_KEY) === '1');
-  const [dismissed, setDismissed] = useState(loadDismissed);
+  const [open, setOpen] = useState(() => { try { return localStorage.getItem(openKey) === '1'; } catch { return false; } });
+  const [dismissed, setDismissed] = useState(() => loadDismissed(dismissedKey));
   // One resume per mount. A second tap during the Tailscale round-trip would
   // spawn a second terminal running `claude --resume` on the SAME session, so
   // the guard is not cosmetic. Board navigates away on `terminalCreated`.
@@ -72,7 +75,7 @@ export default function LooseEnds({ connection }) {
   const dismiss = (item) => {
     setDismissed((cur) => {
       const next = withDismissal(cur, item);
-      try { localStorage.setItem(DISMISSED_KEY, JSON.stringify(next)); } catch { /* private mode */ }
+      try { localStorage.setItem(dismissedKey, JSON.stringify(next)); } catch { /* private mode */ }
       return next;
     });
   };
@@ -110,7 +113,7 @@ export default function LooseEnds({ connection }) {
   const toggle = () => {
     const next = !open;
     setOpen(next);
-    try { localStorage.setItem(OPEN_KEY, next ? '1' : '0'); } catch { /* private mode */ }
+    try { localStorage.setItem(openKey, next ? '1' : '0'); } catch { /* private mode */ }
   };
 
   return (

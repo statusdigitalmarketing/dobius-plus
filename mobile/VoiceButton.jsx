@@ -1,20 +1,37 @@
-import { useState, useRef } from 'react';
-import { absUrl } from './host';
-import { get as storageGet } from './storage';
-import { TOKEN_KEY } from './host';
+import { useState, useRef, useEffect } from 'react';
 
 // Hold-to-talk mic. Records a command, uploads it to /voice/audio (the Mac
 // transcribes locally with whisper.cpp + routes to the Conductor), shows what
 // was heard, then the Conductor's spoken reply. Needs a secure context for the
 // mic, so it disables itself on plain HTTP with a hint. v1.0.43 Phase 5.
-export default function VoiceButton() {
+export default function VoiceButton({ connection }) {
   const [state, setState] = useState('idle'); // idle | recording | working | done | error
   const [line, setLine] = useState('');
   const mrRef = useRef(null);
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
   const resetRef = useRef(null);
+  const startingRef = useRef(false);
   const wantStopRef = useRef(false); // set if released before the recorder started
+
+  const aliveRef = useRef(false);
+  const abortRef = useRef(null);
+  useEffect(() => {
+    aliveRef.current = true;
+    abortRef.current = new AbortController();
+    return () => {
+      aliveRef.current = false;
+      abortRef.current.abort();
+      clearTimeout(resetRef.current);
+      const mr = mrRef.current;
+      if (mr) {
+        mr.onstop = null;
+        mr.ondataavailable = null;
+        if (mr.state === 'recording') { try { mr.stop(); } catch { /* noop */ } }
+      }
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
 
   const secure = typeof window !== 'undefined' && window.isSecureContext;
   const supported = secure
@@ -23,17 +40,20 @@ export default function VoiceButton() {
     && typeof MediaRecorder !== 'undefined';
 
   const resetSoon = (ms) => {
+    if (!aliveRef.current || connection.closed) return;
     clearTimeout(resetRef.current);
     resetRef.current = setTimeout(() => { setState('idle'); setLine(''); }, ms);
   };
 
   const start = async () => {
-    if (!supported || state === 'working') return;
+    if (!supported || state === 'working' || startingRef.current) return;
     if (mrRef.current && mrRef.current.state === 'recording') return;
     clearTimeout(resetRef.current);
     wantStopRef.current = false;
+    startingRef.current = true;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!aliveRef.current || connection.closed) { stream.getTracks().forEach((t) => t.stop()); return; }
       streamRef.current = stream;
       chunksRef.current = [];
       const mr = new MediaRecorder(stream);
@@ -47,10 +67,12 @@ export default function VoiceButton() {
       // if so, stop immediately so we don't leave the recorder running.
       if (wantStopRef.current) stop();
     } catch {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      if (!aliveRef.current || connection.closed) return;
       setState('error');
       setLine('Microphone permission denied');
       resetSoon(4000);
-    }
+    } finally { startingRef.current = false; }
   };
 
   // Stop based on the RECORDER's own state, not React state, so a release that
@@ -64,6 +86,7 @@ export default function VoiceButton() {
   };
 
   const upload = async () => {
+    if (!aliveRef.current || connection.closed) return;
     const stream = streamRef.current;
     if (stream) stream.getTracks().forEach((t) => t.stop());
     const type = mrRef.current?.mimeType || 'audio/webm';
@@ -71,34 +94,39 @@ export default function VoiceButton() {
     if (!blob.size) { setState('idle'); setLine(''); return; }
     setState('working');
     setLine('Transcribing…');
-    const token = (await storageGet(TOKEN_KEY)) || '';
     try {
-      const res = await fetch(absUrl('/voice/audio'), {
+      const res = await connection.request('/voice/audio', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': blob.type },
+        signal: abortRef.current.signal,
+        headers: { 'Content-Type': blob.type },
         body: blob,
       });
       const j = await res.json();
+      if (!aliveRef.current || connection.closed) return;
       if (!j.ok) { setState('error'); setLine(j.error || 'Transcription failed'); resetSoon(5000); return; }
-      if (j.requestId) { setLine(`“${j.transcript}”`); setState('working'); pollReply(j.requestId, token); }
+      if (j.requestId) { setLine(`“${j.transcript}”`); setState('working'); pollReply(j.requestId); }
       else { setState('done'); setLine(`“${j.transcript}”\n(Conductor offline, not sent)`); resetSoon(8000); }
     } catch {
+      if (!aliveRef.current || connection.closed) return;
       setState('error'); setLine('Upload failed'); resetSoon(4000);
     }
   };
 
-  const pollReply = async (requestId, token) => {
+  const pollReply = async (requestId) => {
     try {
-      const res = await fetch(absUrl('/voice/reply'), {
+      const res = await connection.request('/voice/reply', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        signal: abortRef.current.signal,
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requestId, timeoutMs: 30000 }),
       });
       const j = await res.json();
+      if (!aliveRef.current || connection.closed) return;
       setState('done');
       if (j.ok && j.reply) setLine(j.reply);
       resetSoon(10000);
     } catch {
+      if (!aliveRef.current || connection.closed) return;
       setState('done'); resetSoon(7000);
     }
   };

@@ -16,7 +16,7 @@ const { Connection } = await import('../../mobile/connection.js');
 let pass = 0, fail = 0;
 const check = (label, cond) => { cond ? pass++ : fail++; console.log(`${cond ? 'PASS' : 'FAIL'}  ${label}`); };
 
-const c = new Connection('tok');
+const c = new Connection({ id: 'a', origin: 'http://x', token: 'tok' });
 
 // 1. Before any socket: user input is queued, ephemeral is dropped.
 c.send({ type: 'input', id: 't1', data: 'ls\r' });
@@ -34,7 +34,7 @@ check('submitPrompt queued while disconnected', c._queue.some((m) => m.type === 
 
 // 1b. One-shot write actions queue too (audit HIGH-5), but reads (re-issued by
 // screens on authed) do not, so they can't double-fire.
-const q = new Connection('tok');
+const q = new Connection({ id: 'a', origin: 'http://x', token: 'tok' });
 q.send({ type: 'resumeSession', sessionId: 's', projectPath: '/p' });
 q.send({ type: 'createTerminal', cwd: '/p' });
 q.send({ type: 'loadTranscript', sessionId: 's', projectPath: '/p' });
@@ -61,7 +61,7 @@ c.send({ type: 'input', id: 't1', data: 'pwd\r' });
 check('live input sent immediately when authed', ws.sent.filter((m) => m.type === 'input').length === 2);
 
 // 5. Queue is bounded.
-const c2 = new Connection('tok');
+const c2 = new Connection({ id: 'a', origin: 'http://x', token: 'tok' });
 for (let i = 0; i < 500; i++) c2.send({ type: 'input', id: 't', data: `${i}` });
 check('queue bounded at 200', c2._queue.length === 200);
 check('bounded queue keeps the NEWEST', c2._queue[c2._queue.length - 1].data === '499');
@@ -71,7 +71,7 @@ check('bounded queue keeps the NEWEST', c2._queue[c2._queue.length - 1].data ===
 // queueable sends until the path proves itself, so a message typed right
 // after foregrounding can never vanish into a zombie socket.
 {
-  const c3 = new Connection('tok');
+  const c3 = new Connection({ id: 'a', origin: 'http://x', token: 'tok' });
   c3.connect();
   const w = instances[instances.length - 1];
   w.readyState = 1;
@@ -99,7 +99,7 @@ check('bounded queue keeps the NEWEST', c2._queue[c2._queue.length - 1].data ===
   // Zombie case: probe times out silently. Force the timer's callback path by
   // waiting it out with fake time is overkill here; instead verify the timer
   // is armed and the state is suspect until something arrives.
-  const c4 = new Connection('tok');
+  const c4 = new Connection({ id: 'a', origin: 'http://x', token: 'tok' });
   c4.connect();
   const w2 = instances[instances.length - 1];
   w2.readyState = 1;

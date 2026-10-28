@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import SpecialKeys from './SpecialKeys';
 import remarkGfm from 'remark-gfm';
-import { absUrl } from './host';
+import { pairingKey } from './pairings';
 import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 
@@ -15,17 +15,17 @@ import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } fr
 // never eats typed-but-unsent text (Sam's report). One localStorage key holds
 // a { tabId: { text, at } } map, pruned to 40 entries / 7 days on write.
 const DRAFTS_KEY = 'dobius-mobile-drafts';
-function loadDraft(tabId) {
+function loadDraft(draftsKey, tabId) {
   if (!tabId) return '';
   try {
-    const map = JSON.parse(localStorage.getItem(DRAFTS_KEY) || '{}');
+    const map = JSON.parse(localStorage.getItem(draftsKey) || '{}');
     return typeof map[tabId]?.text === 'string' ? map[tabId].text : '';
   } catch { return ''; }
 }
-function storeDraft(tabId, text) {
+function storeDraft(draftsKey, tabId, text) {
   if (!tabId) return;
   try {
-    const map = JSON.parse(localStorage.getItem(DRAFTS_KEY) || '{}');
+    const map = JSON.parse(localStorage.getItem(draftsKey) || '{}');
     if (text) map[tabId] = { text, at: Date.now() };
     else delete map[tabId];
     const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
@@ -33,7 +33,7 @@ function storeDraft(tabId, text) {
       .filter(([, v]) => v && typeof v.text === 'string' && (v.at || 0) > cutoff)
       .sort((a, b) => (b[1].at || 0) - (a[1].at || 0))
       .slice(0, 40);
-    localStorage.setItem(DRAFTS_KEY, JSON.stringify(Object.fromEntries(entries)));
+    localStorage.setItem(draftsKey, JSON.stringify(Object.fromEntries(entries)));
   } catch { /* private mode / quota: drafts just stay session-local */ }
 }
 
@@ -275,17 +275,18 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const projectPath = tab?.sessionProject || null;
   const tabId = tab?.id || null;
   const [messages, setMessages] = useState(null); // null = loading
-  const [input, setInput] = useState(() => loadDraft(tabId));
+  const draftsKey = pairingKey(connection.pairing, DRAFTS_KEY);
+  const [input, setInput] = useState(() => loadDraft(draftsKey, tabId));
   // Draft-aware setter: accepts a value or updater fn, mirrors to localStorage.
   const setDraft = useCallback((next) => {
     setInput((cur) => {
       const v = typeof next === 'function' ? next(cur) : next;
-      storeDraft(tabId, v);
+      storeDraft(draftsKey, tabId, v);
       return v;
     });
-  }, [tabId]);
+  }, [draftsKey, tabId]);
   // Rehydrate when this view is reused for a DIFFERENT tab (tabId prop swap).
-  useEffect(() => { setInput(loadDraft(tabId)); }, [tabId]);
+  useEffect(() => { setInput(loadDraft(draftsKey, tabId)); }, [draftsKey, tabId]);
   // Interactive selector Claude is currently showing (permission prompt, plan
   // approval, AskUserQuestion). null = none. Detected server-side from the live
   // PTY buffer because these TUI prompts are NOT in the transcript. Display is
@@ -370,7 +371,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     // input/kill on the socket's touched-tab set, and the Chat view never
     // attaches). Audit Medium.
     connection.send({ type: 'loadTranscript', sessionId, projectPath, tabId, limit: 200, blocks: 1, sig: sigRef.current || undefined });
-  }, [connection, sessionId, projectPath]);
+  }, [connection, sessionId, projectPath, tabId]);
 
   // Ask the server whether the tab's live PTY is showing a selection prompt.
   const probeSelector = useCallback(() => {
@@ -720,16 +721,16 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       for (const f of [...files].slice(0, 5)) {
         // Always octet-stream: the server's raw parser accepts everything, and
         // a real JSON mime would otherwise be consumed by express.json (Codex).
-        const res = await fetch(`${absUrl('/upload')}?name=${encodeURIComponent(f.name || 'upload')}`, {
+        const res = await connection.request(`/upload?name=${encodeURIComponent(f.name || 'upload')}`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${connection.token}`, 'Content-Type': 'application/octet-stream' },
+          headers: { 'Content-Type': 'application/octet-stream' },
           body: f,
         });
         const data = await res.json().catch(() => null);
         if (data?.ok && data.path) paths.push(data.path);
         else setUploadMsg(data?.error || `Upload failed (${res.status})`);
       }
-      if (paths.length) setDraft((cur) => `${cur}${cur && !cur.endsWith(' ') ? ' ' : ''}${paths.join(' ')} `);
+      if (!connection.closed && paths.length) setDraft((cur) => `${cur}${cur && !cur.endsWith(' ') ? ' ' : ''}${paths.join(' ')} `);
     } catch {
       setUploadMsg('Upload failed (offline?)');
     } finally {

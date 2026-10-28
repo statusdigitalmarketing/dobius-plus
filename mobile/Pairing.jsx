@@ -1,18 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
-import { absUrl, normaliseHost, setHost as persistHost } from './host';
+import { absUrl, normaliseHost, mixedContent, reachabilityMessage } from './host';
 import Intro from './Intro';
 
-/**
- * First-run pairing. Two steps when there's no stored Mac host (public App
- * Store build): host entry, then the 6-digit code. On the second launch the
- * host is already stored and the user only sees the code step. A
- * `dobiusplus://pair?host=...&code=...` deep link pre-fills both fields and
- * skips the host step. The TestFlight self-use build hardcoded the host via
- * capacitor.config.json's server.url; that is removed in this PR so the
- * app can ship to users who are not on Sam's Tailnet.
- */
-export default function Pairing({ initialHost = '', initialCode = '', scanNonce = 0, requireConfirm = false, onPaired }) {
-  const [step, setStep] = useState(initialHost ? 'code' : 'host');
+/** Pair a first or additional Mac. Scans always require a human confirmation. */
+export default function Pairing({ initialHost = '', initialCode = '', scanNonce = 0, requireConfirm = false, addMode = false, onCancel, onPaired }) {
+  const [step, setStep] = useState(requireConfirm ? 'confirm' : initialHost ? 'code' : 'host');
   const [host, setHost] = useState(initialHost || '');
   const [code, setCode] = useState(initialCode || '');
   const [busy, setBusy] = useState(false);
@@ -36,18 +28,30 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
   // otherwise re-run the deep-link effect on every unrelated re-render
   // (showIntro flipping, state changes), overwriting whatever the user
   // typed on the host step with a stale initialHost / initialCode. Null
-  // sentinel so the FIRST run always applies (a scan that completed before
-  // Pairing mounted, for example, still fires the effect with its scheduled
-  // submit).
+  // sentinel so a scan received before Pairing mounted is still applied.
   const appliedNonceRef = useRef(null);
+  const requestRef = useRef(null);
+  useEffect(() => () => {
+    generationRef.current += 1;
+    requestRef.current?.abort();
+  }, []);
 
-  // submit() is declared BEFORE the deep-link useEffect so the useEffect's
-  // closure captures an initialized binding even on renders that return
-  // early (showIntro). If submit lived below the early return it would be
-  // in the Temporal Dead Zone when the deep-link scheduled callback fired.
+  const request = async (origin, path, options = {}) => {
+    if (mixedContent(origin, window.location.origin)) throw new Error(reachabilityMessage(origin, window.location.origin));
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+      const res = await fetch(absUrl(origin, path), { ...options, signal: controller.signal, credentials: 'omit', redirect: 'error', cache: 'no-store' });
+      return { res, data: await res.json() };
+    } finally { clearTimeout(timer); }
+  };
+
   const submit = async (c, hArg) => {
     const codeToSend = (c ?? code).replace(/\D/g, '');
-    const hostToUse = hArg ?? host;
+    const hostToUse = normaliseHost(hArg ?? host);
+    if (!hostToUse) return;
     if (codeToSend.length !== 6) return;
     const requestKey = `${hostToUse}|${codeToSend}`;
     if (inFlightKeyRef.current === requestKey) return; // dedupe duplicate taps
@@ -59,22 +63,21 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
     setBusy(true);
     setError('');
     try {
-      const res = await fetch(absUrl(hostToUse, '/pair'), {
+      const { data } = await request(hostToUse, '/pair', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code: codeToSend, deviceName: navigator.userAgent.includes('iPad') ? 'iPad' : 'Phone' }),
       });
-      const data = await res.json();
       if (generation !== generationRef.current) return; // superseded
       if (data.ok && data.token) {
-        onPaired({ token: data.token, host: hostToUse });
+        await onPaired({ token: data.token, host: hostToUse });
       } else {
         setError(data.error || 'Pairing failed.');
         setCode('');
       }
-    } catch {
+    } catch (e) {
       if (generation !== generationRef.current) return; // superseded
-      setError('Could not reach Dobius+. Check Tailscale is on and the Mac is awake.');
+      setError(e?.message?.startsWith('Could not save') ? e.message : reachabilityMessage(hostToUse, window.location.origin));
     } finally {
       if (generation === generationRef.current) {
         inFlightKeyRef.current = '';
@@ -86,11 +89,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
   const continueFromHost = async () => {
     const normalised = normaliseHost(host);
     if (!normalised) { setError('Enter a host like 100.89.143.67:8420 or my-mac.ts.net.'); return; }
-    // Share the generation counter with submit() so a scan or Change Mac
-    // Address tap during the slow /health probe invalidates this attempt:
-    // its continuation would otherwise call persistHost() for Mac A after
-    // the user has already paired Mac B, overwriting the stored origin
-    // while keeping B's token.
+    // A scan or Change Mac Address tap invalidates the pending health probe.
     const generation = ++generationRef.current;
     const stillCurrent = () => generation === generationRef.current;
     // Also take over cleanup for any pending submit that this generation
@@ -103,26 +102,23 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
     }
     setError('');
     try {
-      const probe = await fetch(absUrl(normalised, '/health'));
+      const { res: probe, data } = await request(normalised, '/health');
       if (!stillCurrent()) return;
       if (!probe.ok) throw new Error('bad');
-      const data = await probe.json();
       if (!stillCurrent()) return;
       if (!data || data.app !== 'dobius-plus') throw new Error('wrong app');
     } catch {
       if (!stillCurrent()) return;
-      setError('Could not reach that address. Check Tailscale is on, the Mac is awake, and Dobius+ is running.');
+      setError(reachabilityMessage(normalised, window.location.origin));
       return;
     }
-    if (!stillCurrent()) return;
-    await persistHost(normalised);
     if (!stillCurrent()) return;
     setHost(normalised);
     setStep('code');
   };
 
   // Deep-link sync: whenever App.jsx receives a dobiusplus://pair?host&code
-  // URL (cold or warm start), update state and auto-submit. scanNonce is a
+  // URL (cold or warm start), update state and require confirmation. scanNonce is a
   // monotonic counter so a RESCAN of an identical QR (after a transient
   // pairing failure, say) still fires this effect: dep equality on host/code
   // alone would see no change and silently drop the retry. The appliedNonce
@@ -132,10 +128,9 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
   //
   // Supersession and dedupe are governed by inFlightKeyRef. If the scan's
   // (host, code) differs from any pending in-flight request, we bump
-  // generation BEFORE the deferred submit runs so an older response that
-  // settles in the gap cannot still complete pairing against the Mac the
-  // scan is replacing. If the scan is the SAME payload as what is in
-  // flight, we skip both bump and submit: the original request's response
+  // generation so an older response cannot complete pairing against the
+  // Mac the scan is replacing. For the SAME payload already in flight,
+  // keep its generation: the original request's response
   // completes normally. Host-only scans (no code) still bump generation,
   // and because no replacement submit runs, THIS effect takes
   // responsibility for clearing busy and inFlightKeyRef so the UI does
@@ -153,29 +148,16 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
     // reachable publicly through Funnel). Every scan therefore routes to
     // the 'confirm' step for an explicit user tap, even when the deep
     // link had no code (user types the code there if they must).
-    const willSubmit = false;
     if (!sameAsInflight) {
       generationRef.current += 1;
+      requestRef.current?.abort();
       inFlightKeyRef.current = '';
       setBusy(false);
     }
     setHost(initialHost);
-    if (initialCode) setCode(initialCode);
+    setCode(initialCode || '');
+    setError('');
     setStep(requireConfirm ? 'confirm' : 'code');
-    if (willSubmit) {
-      // Defer the actual submit so React commits the step change first.
-      // submit reads the host arg explicitly so a race on the host state
-      // does not matter. Capture generation at scheduling time: if a later
-      // scan supersedes before this timer fires, the pending submission
-      // self-cancels so a response for the old selection cannot complete
-      // pairing against the Mac the user just replaced.
-      const scheduledGeneration = generationRef.current;
-      setTimeout(() => {
-        if (scheduledGeneration !== generationRef.current) return;
-        submit(initialCode, initialHost);
-      }, 0);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialHost, initialCode, scanNonce, requireConfirm, showIntro]);
 
   useEffect(() => {
@@ -189,7 +171,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
   return (
     <div className="screen pairing">
       <div className="pairing-card">
-        <h1>Dobius+</h1>
+        <h1>{addMode ? 'Add a Mac' : 'Dobius+'}</h1>
         {step === 'confirm' ? (
           <>
             <p className="muted">Pair with this Mac?</p>
@@ -297,10 +279,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
             <button
               className="link-button"
               onClick={() => {
-                // Bump generation so any pending deferred submit from a
-                // scan self-cancels, and clear in-flight bookkeeping so a
-                // later same-payload action does not dedupe against a dead
-                // request.
+                // Invalidate requests for the previous address.
                 generationRef.current += 1;
                 inFlightKeyRef.current = '';
                 setBusy(false);
@@ -316,6 +295,8 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
             {error && <p className="error">{error}</p>}
           </>
         )}
+        {error && normaliseHost(host) && <a className="mac-direct" href={normaliseHost(host)} target="_blank" rel="noreferrer">Open this Mac directly</a>}
+        {onCancel && <button className="mac-cancel" onClick={onCancel} disabled={busy}>Back to your Macs</button>}
       </div>
     </div>
   );

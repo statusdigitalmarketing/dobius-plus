@@ -1,212 +1,232 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Pairing from './Pairing';
 import Board from './Board';
 import TerminalScreen from './Terminal';
 import History from './History';
+import MacSwitcher from './MacSwitcher';
 import { Connection } from './connection';
-import { get, set, remove } from './storage';
-import { HOST_KEY, TOKEN_KEY, normaliseHost, initHost } from './host';
+import * as storage from './storage';
+import { normaliseHost, mixedContent, reachabilityMessage } from './host';
+import { activePairing, loadPairings, savePairings, upsertPairing, switchPairing, renamePairing, removePairing } from './pairings';
 
-// Deep-link pairing targets MUST be inside the user's own Tailnet. A
-// `dobiusplus://pair?host=...&code=...` from any other host would
-// otherwise auto-pair the app with an attacker-controlled server (the
-// user's "paired" app would then route every chat / voice / fetch
-// through the attacker). Tailscale addresses are the 100.64.0.0/10 CGNAT
-// range (100.64.0.0 to 100.127.255.255), the fd7a:115c:a1e0::/48 ULA
-// range on IPv6, and *.ts.net MagicDNS names (the user's own tailnet
-// suffix is a subdomain of that). Manual host entry in the Pairing UI
-// still accepts anything (an advanced user who knows what they are
-// doing); only the drive-by deep-link path is locked down.
-// Every deep-link pair goes through the Pairing 'confirm' step so the user
-// sees the exact host and taps Pair. Earlier revisions auto-submitted when
-// the host was in a "trusted" range, but that trust was unverifiable from
-// the device:
-//   - .ts.net is shared across all Tailscale tenants
-//   - Tailscale Funnel exposes arbitrary .ts.net names to the public
-//     internet
-//   - CGNAT (100.64.0.0/10) is NOT exclusive to Tailscale: a hostile
-//     Wi-Fi gateway can serve http://100.64.0.1:8420 to a phone that is
-//     off its tailnet (per Tailscale's own CGNAT-conflicts docs)
-// So no network-visible property establishes "this host is YOUR Mac". The
-// only trustworthy signal is a human seeing the host on screen and
-// explicitly confirming.
+// A keyed tree owns all state for one connection lifetime, including terminal,
+// selector, transcript, History and skills state. Rename does not remount it.
+function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
+  const [connection, setConnection] = useState(null);
+  const [status, setStatus] = useState('connecting');
+  const [problem, setProblem] = useState('');
+  const [authFailed, setAuthFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [view, setView] = useState('board');
+  const [openTabId, setOpenTabId] = useState(null);
+  const { id, origin, token } = pairing;
+
+  useEffect(() => {
+    const c = new Connection({ id, origin, token });
+    connectionRef.current = c;
+    let cancelled = false;
+    let ready = false;
+    setConnection(null);
+    setProblem('');
+    setAuthFailed(false);
+    setStatus('connecting');
+    const offStatus = c.onStatus(setStatus);
+    const offMessage = c.onMessage((msg) => {
+      if (msg.type === 'authFailed') {
+        setAuthFailed(true);
+        setProblem('This Mac no longer accepts this pairing. Pair it again with a new code.');
+      }
+    });
+    let timeout;
+    (async () => {
+      if (mixedContent(origin, window.location.origin)) {
+        setProblem(reachabilityMessage(origin, window.location.origin));
+        return;
+      }
+      try {
+        timeout = setTimeout(() => c.abortController.abort(), 10000);
+        const res = await c.request('/health', { cache: 'no-store' });
+        const data = await res.json();
+        if (!res.ok || data.app !== 'dobius-plus') throw new Error('Not Dobius+');
+        if (cancelled) return;
+        clearTimeout(timeout);
+        ready = true;
+        setConnection(c);
+        c.connect();
+      } catch {
+        if (!cancelled) setProblem(reachabilityMessage(origin, window.location.origin));
+      } finally { clearTimeout(timeout); }
+    })();
+    const onVisible = () => { if (ready && document.visibilityState === 'visible' && !c.abortController.signal.aborted) c.wake(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+      document.removeEventListener('visibilitychange', onVisible);
+      offStatus(); offMessage(); c.close();
+      if (connectionRef.current === c) connectionRef.current = null;
+    };
+  }, [id, origin, token, attempt, connectionRef]);
+
+  useEffect(() => {
+    if (openRequest?.pairingId === id) { setOpenTabId(openRequest.id); setView('terminal'); }
+  }, [id, openRequest]);
+
+  const openTab = useCallback((tabId) => { setOpenTabId(tabId); setView('terminal'); }, []);
+
+  if (problem || !connection) return (
+    <div className="screen board-screen">
+      <header className="board-header"><button className="mac-title" onClick={onMacs}>{pairing.name} ▾</button></header>
+      <main className="mac-problem">
+        <p className="mac-origin">{origin}</p>
+        <p role="status">{problem || 'Connecting to this Mac…'}</p>
+        {problem && <>
+          <a href={origin} target="_blank" rel="noreferrer">Open this Mac directly</a>
+          {!authFailed && <button onClick={() => setAttempt((n) => n + 1)}>Retry</button>}
+          <button onClick={onRepair}>Pair this Mac again</button>
+        </>}
+      </main>
+    </div>
+  );
+  if (view === 'history') return <History connection={connection} onBack={() => setView('board')} />;
+  if (view === 'terminal') return <TerminalScreen connection={connection} status={status} initialId={openTabId} onBack={() => setView('board')} onShowHistory={() => setView('history')} />;
+  return <Board connection={connection} status={status} macName={pairing.name} onMacs={onMacs}
+    onOpen={openTab} onShowHistory={() => setView('history')} />;
+}
 
 export default function App() {
-  // null = loading from async storage, '' = empty (needs pairing), string = present
-  const [token, setToken] = useState(null);
-  const [host, setHost] = useState(null);
-  // deepLink carries a monotonically-incrementing `nonce` so Pairing's effect
-  // fires on every scan, including rescans of an identical QR after a
-  // transient failure. Without the nonce, React dep-equality on primitive
-  // host/code would see no change and the rescan would silently drop.
-  const [deepLink, setDeepLink] = useState({ host: '', code: '', nonce: 0 });
-  const [conn, setConn] = useState(null);
-  const [status, setStatus] = useState('disconnected');
-  const [view, setView] = useState('board'); // 'board' | 'terminal' | 'history'
-  const [openTabId, setOpenTabId] = useState(null); // terminal opened from the board
+  const [state, setState] = useState(null);
+  const stateRef = useRef(null);
+  const connectionRef = useRef(null);
+  const writes = useRef(Promise.resolve());
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [switcher, setSwitcher] = useState(false);
+  const [pairingUI, setPairingUI] = useState(null);
+  const pairingUIRef = useRef(null);
+  const [openRequest, setOpenRequest] = useState(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
-  // Load persisted host + token on mount. @capacitor/preferences is async
-  // so we render a brief Connecting state until this resolves. Falls back to
-  // legacy localStorage keys so a user upgrading from the self-use TestFlight
-  // build keeps their pairing (there was no host there, so the stored null
-  // forces the first-run host entry; that's correct for the ATS-removed
-  // bundled WebView).
+  const showPairing = (payload) => {
+    connectionRef.current?.close();
+    pairingUIRef.current = payload;
+    setPairingUI(payload);
+    setSwitcher(false);
+  };
+
   useEffect(() => {
-    (async () => {
-      try {
-        const [t, h] = await Promise.all([get(TOKEN_KEY), initHost()]);
-        setToken(t || '');
-        setHost(h || '');
-      } catch {
-        setToken(''); setHost('');
-      }
-    })();
-  }, []);
+    let cancelled = false;
+    setError('');
+    loadPairings(storage, window.location.origin).then((loaded) => {
+      if (cancelled) return;
+      stateRef.current = loaded;
+      setState(loaded);
+    }).catch(() => { if (!cancelled) setError('Could not read or save your paired Macs. Check device storage and try again.'); });
+    return () => { cancelled = true; };
+  }, [loadAttempt]);
 
-  // Deep-link listener: dobiusplus://pair?host=HOST&code=CODE. Both the Mac
-  // QR flow and a shared link land here. Dynamically imports @capacitor/app
-  // so the browser dev build (which has no native listener) doesn't blow up
-  // in listenerHandler.remove().
-  //
-  // Cancellation is explicit so a Strict-Mode mount-unmount-mount cycle (or
-  // any unmount that races the async addListener) does not leak a listener:
-  // if cleanup fired before addListener resolved, we remove the handle as
-  // soon as we have it.
   useEffect(() => {
     let cancelled = false;
     let handle;
+    let received = false;
+    const receive = ({ url }) => {
+      if (cancelled) return;
+      try {
+        const u = new URL(url);
+        if (u.protocol !== 'dobiusplus:') return;
+        if (u.hostname !== 'pair' && u.pathname.replace(/^\/+/, '').split('/')[0] !== 'pair') return;
+        const host = normaliseHost(u.searchParams.get('host') || '');
+        const code = (u.searchParams.get('code') || '').replace(/\D/g, '').slice(0, 6);
+        if (!host && !code) return;
+        received = true;
+        // Every scan requires the existing human confirmation, even for a
+        // Tailscale address. That address alone cannot establish ownership.
+        showPairing({ host, code, nonce: (pairingUIRef.current?.nonce || 0) + 1, confirm: !!host });
+      } catch { /* malformed link */ }
+    };
     (async () => {
       try {
-        const mod = await import('@capacitor/app');
+        const { App: NativeApp } = await import('@capacitor/app');
         if (cancelled) return;
-        const next = await mod.App.addListener('appUrlOpen', ({ url }) => {
-          try {
-            const u = new URL(url);
-            if (u.protocol !== 'dobiusplus:') return;
-            if (u.hostname !== 'pair' && u.pathname.replace(/^\/+/, '').split('/')[0] !== 'pair') return;
-            const h = normaliseHost(u.searchParams.get('host') || '');
-            const c = (u.searchParams.get('code') || '').replace(/\D/g, '').slice(0, 6);
-            if (!h && !c) return;
-            setDeepLink((prev) => ({ host: h, code: c, nonce: prev.nonce + 1 }));
-          } catch { /* malformed URL: ignore */ }
-        });
-        handle = next;
-        if (cancelled) { try { await handle.remove(); } catch { /* noop */ } handle = undefined; }
-      } catch { /* not on native: ignore */ }
+        handle = await NativeApp.addListener('appUrlOpen', receive);
+        if (cancelled) { await handle.remove(); return; }
+        const launch = await NativeApp.getLaunchUrl();
+        if (launch && !received) receive(launch);
+      } catch { /* browser has no native listener */ }
     })();
-    return () => {
-      cancelled = true;
-      try { handle?.remove?.(); } catch { /* noop */ }
-    };
+    return () => { cancelled = true; handle?.remove(); };
   }, []);
 
-  useEffect(() => {
-    if (!token) { setConn(null); return undefined; }
-
-    const c = new Connection(token, host);
-    const offStatus = c.onStatus(setStatus);
-    const offMsg = c.onMessage((msg) => {
-      if (msg.type === 'authFailed') {
-        // The stored token was rejected, so wipe it and drop back to pairing.
-        // Host stays: the pairing code UI should remember the Mac even after a
-        // token revoke on the desktop.
-        remove(TOKEN_KEY).catch(() => {});
-        setToken('');
-      }
+  const update = (change) => {
+    const work = writes.current.then(async () => {
+      setBusy(true);
+      setError('');
+      try {
+        const next = change(stateRef.current);
+        await savePairings(storage, next);
+        const before = activePairing(stateRef.current);
+        const after = activePairing(next);
+        if (before?.id !== after?.id || before?.token !== after?.token) {
+          connectionRef.current?.close();
+          setOpenRequest(null);
+        }
+        stateRef.current = next;
+        setState(next);
+        return true;
+      } catch {
+        setError('Could not save your paired Macs. Check device storage and try again.');
+        return false;
+      } finally { setBusy(false); }
     });
-    c.connect();
-    setConn(c);
-
-    // iOS kills the WebSocket while the PWA is backgrounded; reconnect on return.
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') c.wake();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-
-    return () => {
-      document.removeEventListener('visibilitychange', onVisible);
-      offStatus();
-      offMsg();
-      c.close();
-    };
-  }, [token, host]);
-
-  // Deep-link from a push tap: a cold start lands on ?open=<id>, and a warm app
-  // gets a postMessage {type:'open-session'} from the service worker. Either way,
-  // jump to that session instead of the last-shown screen. Audit MED-12.
-  useEffect(() => {
-    const openSession = (id) => { if (id) { setOpenTabId(id); setView('terminal'); } };
-    try {
-      const p = new URLSearchParams(window.location.search).get('open');
-      if (p) {
-        openSession(p);
-        window.history.replaceState(null, '', window.location.pathname); // don't re-trigger on refresh
-      }
-    } catch { /* noop */ }
-    const onSwMsg = (e) => { if (e.data?.type === 'open-session') openSession(e.data.id); };
-    navigator.serviceWorker?.addEventListener('message', onSwMsg);
-    return () => navigator.serviceWorker?.removeEventListener('message', onSwMsg);
-  }, []);
-
-  const handlePaired = async ({ token: newToken, host: newHost }) => {
-    // Consume the deep-link payload SYNCHRONOUSLY, before any await: a
-    // scan that arrives during the storage writes below would otherwise
-    // be clobbered when the stale reset lands seconds later. The token
-    // set also runs synchronously so Pairing unmounts immediately and
-    // any further scans fall through to the Board (which ignores them).
-    setDeepLink({ host: '', code: '', nonce: 0 });
-    setToken(newToken);
-    if (newHost) setHost(newHost);
-    // Backend persistence (async). The UI has already transitioned.
-    try {
-      await set(TOKEN_KEY, newToken);
-      if (newHost) await set(HOST_KEY, newHost);
-      // Also update the module-level cached host so absUrl() picks it up
-      // without waiting for the next initHost().
-      if (newHost) await initHost();
-    } catch { /* storage write failed; token still kept in-memory for this session */ }
+    writes.current = work;
+    return work;
   };
 
-  if (token === null || host === null) {
-    return <div className="screen center"><p className="muted">Loading...</p></div>;
-  }
-  if (!token) {
-    return (
-      <Pairing
-        initialHost={deepLink.host || host}
-        initialCode={deepLink.code}
-        scanNonce={deepLink.nonce}
-        // A nonzero nonce means the host/code came from a deep link, so
-        // the user must confirm the destination before submission.
-        requireConfirm={deepLink.nonce > 0 && !!deepLink.host}
-        onPaired={handlePaired}
-      />
-    );
-  }
-  if (!conn) {
-    return <div className="screen center"><p className="muted">Connecting...</p></div>;
-  }
-  if (view === 'history') {
-    return <History connection={conn} onBack={() => setView('board')} />;
-  }
-  if (view === 'terminal') {
-    return (
-      <TerminalScreen
-        connection={conn}
-        status={status}
-        initialId={openTabId}
-        onBack={() => setView('board')}
-        onShowHistory={() => setView('history')}
-      />
-    );
-  }
-  // Home: the session board.
-  return (
-    <Board
-      connection={conn}
-      status={status}
-      onOpen={(id) => { setOpenTabId(id); setView('terminal'); }}
-      onShowHistory={() => setView('history')}
-    />
-  );
+  useEffect(() => {
+    if (!state) return undefined;
+    const openSession = async ({ id, pairingId, origin }) => {
+      const current = stateRef.current;
+      const target = pairingId ? current.pairings.find((p) => p.id === pairingId)
+        : current.pairings.find((p) => p.origin === normaliseHost(origin || window.location.origin));
+      if (!id || !target) return;
+      if (target.id !== current.activeId && !await update((s) => switchPairing(s, target.id, Date.now()))) return;
+      setOpenRequest({ pairingId: target.id, id });
+    };
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('open')) {
+      openSession({ id: params.get('open'), pairingId: params.get('mac') });
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+    const onMessage = (e) => { if (e.data?.type === 'open-session') openSession(e.data); };
+    navigator.serviceWorker?.addEventListener('message', onMessage);
+    return () => navigator.serviceWorker?.removeEventListener('message', onMessage);
+    // The listener reads current state through stateRef.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!state]);
+
+  if (!state) return <div className="screen center"><p className="mac-error">{error || 'Loading…'}</p>{error && <button onClick={() => setLoadAttempt((n) => n + 1)}>Retry</button>}</div>;
+  const active = activePairing(state);
+  const cancelPairing = () => { pairingUIRef.current = null; setPairingUI(null); };
+  const handlePaired = async ({ token, host }) => {
+    const shown = pairingUI;
+    const ok = await update((s) => upsertPairing(s, { origin: host, token }, { id: crypto.randomUUID?.() || `mac-${Date.now()}-${Math.random().toString(36).slice(2)}`, now: Date.now() }));
+    if (!ok) throw new Error('Could not save this pairing. Check device storage and get a new pairing code.');
+    const current = pairingUIRef.current;
+    // A scan can arrive during the storage write, or before React commits its
+    // new props. Only dismiss the form that actually submitted this pairing.
+    if (shown === current || (shown && current && shown.host === current.host && shown.code === current.code)) cancelPairing();
+  };
+
+  if (pairingUI || !active) return <Pairing initialHost={pairingUI?.host || ''} initialCode={pairingUI?.code || ''}
+    scanNonce={pairingUI?.nonce || 0} requireConfirm={pairingUI?.confirm || false} addMode={!!active}
+    onCancel={active ? cancelPairing : undefined} onPaired={handlePaired} />;
+  return <>
+    <MacSession key={`${active.id}:${active.token}`} pairing={active} connectionRef={connectionRef} openRequest={openRequest}
+      onMacs={() => { setError(''); setSwitcher(true); }} onRepair={() => showPairing({ host: active.origin })} />
+    {switcher && <MacSwitcher state={state} busy={busy} error={error} onClose={() => setSwitcher(false)}
+      onSwitch={async (id) => { if (await update((s) => switchPairing(s, id, Date.now()))) setSwitcher(false); }}
+      onRename={(id, name) => update((s) => renamePairing(s, id, name))}
+      onRemove={(id) => update((s) => removePairing(s, id))}
+      onAdd={() => showPairing({ host: '' })} />}
+  </>;
 }

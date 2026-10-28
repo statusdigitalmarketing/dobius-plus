@@ -1,3 +1,4 @@
+import { isAllowedMobileOrigin } from './mobile-cors.js';
 /**
  * Mobile server: embedded HTTP + WebSocket server that bridges Dobius+ to a
  * phone PWA over the user's Tailscale tailnet.
@@ -1124,40 +1125,11 @@ async function doStartMobileServer(stillCurrent) {
 
   const expApp = express();
 
-  // CORS: the public App Store Capacitor build serves the PWA from
-  // capacitor://localhost and hits this server cross-origin. Mobile-server is
-  // only reachable inside the user's own Tailnet (every byte wrapped in
-  // WireGuard) and bearerOk + the pairing-code flow are the real auth
-  // boundary, but we still allowlist a known set of client origins rather
-  // than wildcarding: an allowlist is tighter than `*` and does not weaken
-  // anything we need. Browser-origin same-tab access to the PWA served
-  // from this server is same-origin so does not go through this path.
-  // capacitor://localhost = iOS Capacitor WKWebView default. ionic://localhost
-  // = legacy Capacitor / Ionic scheme. http://localhost = Android Capacitor
-  // default (per-port variants add themselves below via startsWith).
-  // Exact origins we accept wholesale (no port). Protocols are also
-  // constrained so an Origin like "capacitor://localhost@attacker.com"
-  // cannot pass through the port-matcher below.
-  const CORS_ALLOWED_ORIGINS = new Set([
-    'capacitor://localhost',
-    'ionic://localhost',
-    'http://localhost',
-    'https://localhost',
-  ]);
-  const CORS_ALLOWED_PROTOCOLS = new Set(['capacitor:', 'ionic:', 'http:', 'https:']);
-  const isAllowedOrigin = (o) => {
-    if (!o) return false;
-    if (CORS_ALLOWED_ORIGINS.has(o)) return true;
-    let u;
-    try { u = new URL(o); } catch { return false; }
-    // Match hostname EXACTLY (so "localhost.attacker.com" is rejected) and
-    // require a known protocol. The port is allowed to vary: Android
-    // Capacitor and dev loaders use http://localhost:PORT.
-    return u.hostname === 'localhost' && CORS_ALLOWED_PROTOCOLS.has(u.protocol);
-  };
+  // Native clients and PWAs served by another Mac. Authentication remains
+  // explicit bearer-only; never enable Access-Control-Allow-Credentials.
   expApp.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (isAllowedOrigin(origin)) {
+    if (isAllowedMobileOrigin(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
@@ -1165,7 +1137,7 @@ async function doStartMobileServer(stillCurrent) {
       res.setHeader('Access-Control-Max-Age', '600');
     }
     if (req.method === 'OPTIONS') {
-      return res.status(isAllowedOrigin(origin) ? 204 : 403).end();
+      return res.status(isAllowedMobileOrigin(origin) ? 204 : 403).end();
     }
     return next();
   });
@@ -1243,7 +1215,7 @@ async function doStartMobileServer(stillCurrent) {
     }
     const token = crypto.randomBytes(32).toString('hex');
     // Stable opaque device id used by the UI for listing + removal targeting.
-    // Tokens stay server-side only — Codex v1.0.28 HIGH (main.js:987).
+    // Tokens stay server-side only, Codex v1.0.28 HIGH (main.js:987).
     const deviceId = crypto.randomBytes(8).toString('hex');
     const cfg = getMobileServerConfig();
     const devices = [...cfg.devices, {
@@ -1279,7 +1251,7 @@ async function doStartMobileServer(stillCurrent) {
   //   1. Conductor (default): omit tabId. Routes through the Voice Conductor
   //      (Opus) which decides what to do. Smart but slower (~3-5s).
   //   2. Direct: pass tabId of any live Dobius+ terminal tab. The transcript
-  //      is typed straight into that tab — no Conductor involved, no req-id
+  //      is typed straight into that tab, no Conductor involved, no req-id
   //      tagging, no reply expected. Fast and dumb. Useful when you already
   //      know exactly which tab you want to talk to.
   expApp.post('/voice/intent', (req, res) => {
@@ -1289,7 +1261,7 @@ async function doStartMobileServer(stillCurrent) {
     if (typeof transcript !== 'string' || !transcript.trim()) {
       return res.status(400).json({ ok: false, error: 'transcript required' });
     }
-    // Direct mode — write straight into the named tab, skip Conductor.
+    // Direct mode, write straight into the named tab, skip Conductor.
     if (typeof directTabId === 'string' && directTabId) {
       if (!/^term-.+-\d+$/.test(directTabId)) {
         return res.status(400).json({ ok: false, error: 'tabId malformed' });
@@ -1301,7 +1273,7 @@ async function doStartMobileServer(stillCurrent) {
       const CHUNK = 256;
       for (let i = 0; i < text.length; i += CHUNK) writeTerminal(directTabId, text.slice(i, i + CHUNK));
       writeTerminal(directTabId, '\r');
-      // No requestId for direct mode — there's no Conductor to reply.
+      // No requestId for direct mode, there's no Conductor to reply.
       return res.json({ ok: true, mode: 'direct', tabId: directTabId });
     }
     // Conductor mode (default): route via the shared helper, tagged with a
@@ -1594,7 +1566,7 @@ export function stopMobileServer({ persistDisabled = false } = {}) {
   startGate.bump();
   // Close every authenticated client socket explicitly. wss.close() rejects
   // new connections but leaves existing ones alive until they drop on their
-  // own — phones could keep streaming PTY data after stopMobileServer.
+  // own, phones could keep streaming PTY data after stopMobileServer.
   // Codex v1.0.28 round-1 MED.
   for (const sockets of activeSocketsByToken.values()) {
     for (const s of sockets) {

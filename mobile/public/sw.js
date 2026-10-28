@@ -4,6 +4,9 @@
 // control should show fresh content when online, and the cached shell when the
 // link is down. Never touches cross-origin requests or the WebSocket.
 const CACHE = 'dobius-mobile-v1';
+const APP_BASE = new URL('./', self.location.href);
+const scopeMatch = new URL(self.registration.scope).pathname.match(/\/__dobius_push__\/([^/]+)\/$/);
+const PAIRING_ID = scopeMatch ? decodeURIComponent(scopeMatch[1]) : null;
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
@@ -14,10 +17,16 @@ self.addEventListener('push', (e) => {
   let data;
   try { data = e.data ? e.data.json() : {}; } catch { data = {}; }
   const title = data.title || 'Dobius+';
+  const url = new URL('./', APP_BASE);
+  try {
+    const id = new URL(data.url || './', APP_BASE).searchParams.get('open');
+    if (id) url.searchParams.set('open', id);
+  } catch { /* malformed notification URL */ }
+  if (PAIRING_ID) url.searchParams.set('mac', PAIRING_ID);
   e.waitUntil(self.registration.showNotification(title, {
     body: data.body || '',
-    tag: data.tag || undefined,
-    data: { url: data.url || './' },
+    tag: data.tag ? `${PAIRING_ID || APP_BASE.origin}:${data.tag}` : undefined,
+    data: { url: url.href, pairingId: PAIRING_ID, origin: APP_BASE.origin },
     icon: './icon.png',
     badge: './icon.png',
   }));
@@ -34,8 +43,9 @@ self.addEventListener('notificationclick', (e) => {
   e.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const c of all) {
+      if (!c.url.startsWith(APP_BASE.href)) continue;
       if ('focus' in c) {
-        if (openId) { try { c.postMessage({ type: 'open-session', id: openId }); } catch { /* noop */ } }
+        if (openId) { try { c.postMessage({ type: 'open-session', id: openId, pairingId: e.notification.data?.pairingId, origin: e.notification.data?.origin || APP_BASE.origin }); } catch { /* noop */ } }
         return c.focus();
       }
     }
@@ -47,7 +57,7 @@ self.addEventListener('notificationclick', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const req = e.request;
-  if (req.method !== 'GET') return;
+  if (req.method !== 'GET' || req.headers.has('Authorization')) return;
   let url;
   try { url = new URL(req.url); } catch { return; }
   if (url.origin !== self.location.origin) return; // leave cross-origin alone

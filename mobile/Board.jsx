@@ -5,6 +5,7 @@ import { sortTermsByAttention, groupSummary, summaryLabel, isGroupCollapsed } fr
 import VoiceButton from './VoiceButton';
 import { pushSupported, pushActive, enablePush } from './push-client';
 import { timeAgo } from './format';
+import { pairingKey } from './pairings';
 
 // Group terminals by project PATH, preserving first-seen order. Keyed on path,
 // not name, so two projects that share a folder name (Sam runs several
@@ -45,23 +46,26 @@ const loadList = (key) => {
 };
 const saveList = (key, list) => { try { localStorage.setItem(key, JSON.stringify(list)); } catch { /* private mode */ } };
 
-export default function Board({ connection, status, onOpen, onShowHistory }) {
+export default function Board({ connection, status, onOpen, onShowHistory, macName, onMacs }) {
+  const pinsKey = pairingKey(connection.pairing, PINS_KEY);
+  const collapsedKey = pairingKey(connection.pairing, COLLAPSED_KEY);
+  const expandedKey = pairingKey(connection.pairing, EXPANDED_KEY);
   const [terminals, setTerminals] = useState([]);
   const [recentExits, setRecentExits] = useState([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [projects, setProjects] = useState([]);
-  const [pins, setPins] = useState(() => loadList(PINS_KEY));
-  const [collapsed, setCollapsed] = useState(() => loadList(COLLAPSED_KEY));
+  const [pins, setPins] = useState(() => loadList(pinsKey));
+  const [collapsed, setCollapsed] = useState(() => loadList(collapsedKey));
   // Explicit EXPANSIONS are tracked separately from collapses. Dormant
   // projects hide themselves by default (32 of 39 tabs on this account are
   // idle shells), and without this a group the user just opened would be
   // re-hidden on the next render. isGroupCollapsed resolves the three-way.
-  const [expanded, setExpanded] = useState(() => loadList(EXPANDED_KEY));
+  const [expanded, setExpanded] = useState(() => loadList(expandedKey));
 
   const togglePin = (id) => {
     setPins((cur) => {
       const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
-      saveList(PINS_KEY, next);
+      saveList(pinsKey, next);
       return next;
     });
   };
@@ -77,8 +81,8 @@ export default function Board({ connection, status, onOpen, onShowHistory }) {
     const nextExpanded = showingNow
       ? expanded.filter((x) => x !== projectPath)
       : [...expanded.filter((x) => x !== projectPath), projectPath];
-    setCollapsed(nextCollapsed); saveList(COLLAPSED_KEY, nextCollapsed);
-    setExpanded(nextExpanded); saveList(EXPANDED_KEY, nextExpanded);
+    setCollapsed(nextCollapsed); saveList(collapsedKey, nextCollapsed);
+    setExpanded(nextExpanded); saveList(expandedKey, nextExpanded);
   };
   const [alerts, setAlerts] = useState('off'); // off | on | error
   const [alertMsg, setAlertMsg] = useState('');
@@ -93,13 +97,14 @@ export default function Board({ connection, status, onOpen, onShowHistory }) {
   // removal can revoke it). enablePush is idempotent and won't re-prompt.
   useEffect(() => {
     let cancelled = false;
-    pushActive().then((active) => {
+    pushActive(connection).then((active) => {
       if (cancelled || !active) return;
-      setAlerts('on');
-      enablePush().catch(() => { /* best-effort token rebind */ });
+      enablePush(connection).then((result) => {
+        if (!cancelled) { setAlerts(result.ok ? 'on' : 'error'); setAlertMsg(result.error || ''); }
+      });
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [connection]);
   // Tick so relative times ("3m") refresh on quiet sessions: the server omits
   // lastActivityAt from its change signature, so without this the board only
   // re-renders on a status change and a time could stay "just now". Codex P3.
@@ -145,7 +150,7 @@ export default function Board({ connection, status, onOpen, onShowHistory }) {
     });
     if (connection.status === 'authed') connection.send({ type: 'listTerminals' });
     return off;
-  }, [connection]);
+  }, [connection, onOpen]);
 
   const groups = useMemo(() => {
     const g = groupByProject(terminals);
@@ -173,13 +178,13 @@ export default function Board({ connection, status, onOpen, onShowHistory }) {
     <div className="screen board-screen">
       <header className="board-header">
         <div className="board-title-row">
-          <h1 className="board-title">Sessions</h1>
+          <h1 className="board-title"><button className="mac-title" onClick={onMacs} aria-label={`Switch Mac, current Mac: ${macName}`}>{macName} ▾</button></h1>
           <div className="board-actions">
             {pushSupported() && alerts !== 'on' && (
               <button
                 className="icon-btn"
                 onClick={async () => {
-                  const r = await enablePush();
+                  const r = await enablePush(connection);
                   setAlerts(r.ok ? 'on' : 'error');
                   setAlertMsg(r.ok ? '' : (r.error || 'Could not enable alerts'));
                   if (!r.ok) setTimeout(() => setAlertMsg(''), 5000);
@@ -299,7 +304,7 @@ export default function Board({ connection, status, onOpen, onShowHistory }) {
         )}
       </main>
 
-      <VoiceButton />
+      <VoiceButton connection={connection} />
 
       {pickerOpen && (
         <div className="sheet-backdrop" onClick={() => setPickerOpen(false)}>

@@ -42,6 +42,9 @@ const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
 const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-fakebin-'));
 const fakeClaude = path.join(binDir, 'claude');
 fs.symlinkSync('/bin/sh', fakeClaude);
+// PTYs start in os.tmpdir(). A relative argv[0] also works when TMPDIR has
+// spaces, which ps cannot quote unambiguously for the process-name parser.
+const fakeClaudeCommand = `./${path.basename(binDir)}/claude`;
 
 // Unconditional teardown. This suite spawns real PTYs with real sleeping
 // children, so a FAILING run must not leave them (or its temp dirs) behind.
@@ -66,8 +69,8 @@ for (const id of [SHELL_TAB, FRESH_TAB, ARGV_TAB]) {
 await new Promise((r) => setTimeout(r, 1800));
 // A fresh claude generates its session id at runtime, so nothing in its argv
 // names it. Only the saved map can.
-tm.writeTerminal(FRESH_TAB, `'${fakeClaude}' -c 'sleep 25; true'\r`);
-tm.writeTerminal(ARGV_TAB, `'${fakeClaude}' -c 'sleep 25; true' --resume argv-session-0003\r`);
+tm.writeTerminal(FRESH_TAB, `'${fakeClaudeCommand}' -c 'sleep 25; true'\r`);
+tm.writeTerminal(ARGV_TAB, `'${fakeClaudeCommand}' -c 'sleep 25; true' --resume argv-session-0003\r`);
 // Let the shells actually exec their children before inspecting them.
 await new Promise((r) => setTimeout(r, 2000));
 
@@ -124,7 +127,7 @@ ok('killing the tab frees its session without destroying the link');
   const TAB = 'term-/tmp/livetest-4';
   tm.createTerminal(TAB, os.tmpdir(), null);
   await new Promise((r) => setTimeout(r, 1800));
-  tm.writeTerminal(TAB, `'${fakeClaude}' -c 'sleep 25; true'\r`);
+  tm.writeTerminal(TAB, `'${fakeClaudeCommand}' -c 'sleep 25; true'\r`);
   await new Promise((r) => setTimeout(r, 2000));
   // Backdate the link to well before this process started.
   cfg.setSessionTabLink('sess-predates-0006', TAB, os.tmpdir());

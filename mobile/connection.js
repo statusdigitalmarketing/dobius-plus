@@ -1,3 +1,6 @@
+import { pairingRequest } from './pairings.js';
+import { wsUrl } from './host.js';
+
 // Deliberate one-shot actions that must survive a reconnect blip. Deliberately
 // excludes read requests (list*/loadTranscript), which screens re-issue on
 // `authed` themselves, so queuing them too would double-fire. Audit HIGH-5.
@@ -8,6 +11,23 @@
 // 90s echo pruner eventually erased the evidence.
 // selectorKey is safe to hold across a reconnect: it carries the token its
 // card was read with, so the Mac refuses it if anything moved meanwhile.
+// iOS 15 supports AbortController but not AbortSignal.any. Voice requests
+// need both the connection lifetime and the recording screen's lifetime.
+function combinedSignal(first, second) {
+  if (!second) return first;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([first, second]);
+  const controller = new AbortController();
+  const abort = () => {
+    controller.abort();
+    first.removeEventListener('abort', abort);
+    second.removeEventListener('abort', abort);
+  };
+  first.addEventListener('abort', abort, { once: true });
+  second.addEventListener('abort', abort, { once: true });
+  if (first.aborted || second.aborted) abort();
+  return controller.signal;
+}
+
 const QUEUEABLE = new Set(['input', 'submitPrompt', 'kill', 'resumeSession', 'createTerminal', 'selectorKey']);
 
 /**
@@ -18,15 +38,12 @@ const QUEUEABLE = new Set(['input', 'submitPrompt', 'kill', 'resumeSession', 'cr
  * kills WebSockets while a PWA is backgrounded).
  */
 export class Connection {
-  constructor(token, origin) {
-    this.token = token;
-    // The Mac's origin (scheme + host + port) as stored by Pairing.jsx.
-    // In the TestFlight self-use build this was implicit via location.host
-    // (server.url pointed WKWebView at the Mac). The public App Store build
-    // ships a bundled PWA served from capacitor://localhost, so every WS and
-    // REST call needs the stored origin explicitly. Empty string = browser
-    // dev fallback: use location.host like the pre-App-Store flow.
-    this.origin = origin || '';
+  constructor(pairing) {
+    this.pairing = Object.freeze({ ...pairing });
+    this.token = this.pairing.token;
+    this.origin = this.pairing.origin;
+    this.closed = false;
+    this.abortController = new AbortController();
     this.ws = null;
     this.listeners = new Set();
     this.statusListeners = new Set();
@@ -49,6 +66,12 @@ export class Connection {
     this._probeTimer = null;
   }
 
+  async request(path, options = {}) {
+    if (this.closed) throw new Error('Connection closed');
+    const request = pairingRequest(this.pairing, path, options);
+    return fetch(request.url, { ...request.options, signal: combinedSignal(this.abortController.signal, options.signal) });
+  }
+
   onMessage(cb) { this.listeners.add(cb); return () => this.listeners.delete(cb); }
   onStatus(cb) { this.statusListeners.add(cb); return () => this.statusListeners.delete(cb); }
 
@@ -62,11 +85,16 @@ export class Connection {
   }
 
   connect() {
+    if (this.closed) return;
     this.shouldReconnect = true;
     this._open();
   }
 
   _open() {
+    if (this.closed) return;
+    const previous = this.ws;
+    this.ws = null;
+    if (previous) { try { previous.close(); } catch { /* noop */ } }
     clearTimeout(this._reconnectTimer);
     this._stopPing();
     // Fresh socket: any pending liveness probe belonged to the old one.
@@ -74,18 +102,7 @@ export class Connection {
     clearTimeout(this._probeTimer);
     this._probeTimer = null;
     this._setStatus('connecting');
-    // Native build: this.origin is the stored Mac origin (http[s]://host:port);
-    // the WebView origin is capacitor://localhost so location.host would
-    // resolve to that and never reach the Mac. Browser dev build:
-    // this.origin is empty, fall back to location.host like the pre-App-Store
-    // flow. ws:// pairs with http://, wss:// with https://.
-    let url;
-    if (this.origin) {
-      url = this.origin.replace(/^http(s?):\/\//i, (_m, s) => `ws${s}://`).replace(/\/+$/, '') + '/ws';
-    } else {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      url = `${proto}://${location.host}/ws`;
-    }
+    const url = wsUrl(this.origin);
     let ws;
     try {
       ws = new WebSocket(url);
@@ -166,6 +183,7 @@ export class Connection {
 
   /** Force an immediate reconnect (e.g. on PWA foreground). */
   wake() {
+    if (this.closed || !this.shouldReconnect) return;
     if (this.status === 'connecting') return;
     if (this.status === 'authed') {
       // The socket LOOKS open, but after an iOS backgrounding the network
@@ -203,6 +221,7 @@ export class Connection {
   }
 
   send(obj) {
+    if (this.closed) return;
     const open = this.ws && this.ws.readyState === WebSocket.OPEN;
     // Send once authed, and let the `auth` handshake through while merely
     // connected (else we'd deadlock: auth is sent before we are authed).
@@ -237,12 +256,24 @@ export class Connection {
   }
 
   close() {
+    this.closed = true;
+    this.abortController.abort();
+    this._queue = [];
+    this.listeners.clear();
+    this.statusListeners.clear();
     this.shouldReconnect = false;
     clearTimeout(this._reconnectTimer);
+    this._reconnectTimer = null;
     clearTimeout(this._probeTimer);
     this._probeTimer = null;
     this._suspect = false;
     this._stopPing();
-    if (this.ws) { try { this.ws.close(); } catch { /* noop */ } }
+    const ws = this.ws;
+    this.ws = null;
+    this.status = 'disconnected';
+    if (ws) {
+      ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+      try { ws.close(); } catch { /* noop */ }
+    }
   }
 }

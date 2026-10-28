@@ -258,7 +258,7 @@ button.primary:disabled { opacity: 0.4; }
   text-align: left;
   cursor: pointer;
   /* Manipulation tells iOS this button only handles tap + double-tap, not
-   * pan gestures — so vertical drags pass through to the .session-list
+   * pan gestures, so vertical drags pass through to the .session-list
    * scroll container instead of being eaten as a tap-with-no-movement. */
   touch-action: manipulation;
 }
@@ -843,3 +843,34 @@ button.primary:disabled { opacity: 0.4; }
   .chat-activity, .chat-jump, .chat-act-verb, .chat-step-dot.running { animation: none; }
   .chat-act-verb { color: var(--accent); background: none; }
 }
+
+/* Paired Macs share the board's header and bottom-sheet patterns. */
+.board-title-row { gap: 8px; min-width: 0; }
+.board-title { min-width: 0; flex: 1; }
+.board-actions { flex-shrink: 0; }
+.mac-title {
+  display: block; width: 100%; min-width: 0; padding: 6px 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border: 0; background: none; color: var(--fg); font: inherit;
+  font-size: 22px; font-weight: 700; text-align: left; cursor: pointer;
+}
+.mac-sheet { min-width: 0; max-width: 100vw; }
+.mac-sheet-heading { display: flex; align-items: center; justify-content: space-between; padding-right: 12px; }
+.mac-item { min-width: 0; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.mac-name { font-weight: 600; overflow-wrap: anywhere; }
+.mac-name .summary-chip { display: inline-block; margin-left: 8px; }
+.mac-origin { color: var(--dim); font-size: 13px; overflow-wrap: anywhere; margin: 6px 0 12px; }
+.mac-item-actions, .mac-rename { display: flex; flex-wrap: wrap; gap: 8px; }
+.mac-item button, .mac-problem button, .mac-cancel {
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  background: var(--surface-2); color: var(--fg); font-size: 14px;
+}
+.mac-item button:disabled { opacity: 0.4; }
+.mac-rename input { min-width: 0; width: 100%; padding: 10px; font-size: 16px; border: 1px solid var(--border); border-radius: 8px; color: var(--fg); background: var(--bg); }
+.mac-remove { margin-top: 12px; color: var(--danger); overflow-wrap: anywhere; }
+.mac-remove button { margin: 8px 8px 0 0; }
+.mac-add { padding: 16px 20px; }
+.mac-error { padding: 12px 20px; overflow-wrap: anywhere; }
+.mac-problem { padding: 24px; display: flex; flex-direction: column; gap: 16px; line-height: 1.5; }
+.mac-problem a, .mac-direct { color: var(--accent); overflow-wrap: anywhere; }
+.mac-direct, .mac-cancel { display: block; margin: 16px auto 0; }

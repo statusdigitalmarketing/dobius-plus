@@ -1,6 +1,6 @@
 // Mobile persistent storage. Capacitor @capacitor/preferences on iOS/Android
 // (which lands in NSUserDefaults on iOS: per-app sandbox, not world-readable),
-// localStorage in the browser-dev build. The host and token both live here,
+// localStorage in the browser build. Complete pairing records live here,
 // so a bundled Capacitor PWA keeps them across launches without relying on
 // WebView localStorage (which iOS can purge under memory pressure for a
 // cross-origin bundled WebView). The returned API is intentionally thin and
@@ -25,7 +25,7 @@ export async function get(key) {
     const { value } = await Preferences.get({ key });
     return value ?? null;
   }
-  try { return window.localStorage.getItem(key); } catch { return null; }
+  return window.localStorage.getItem(key);
 }
 
 export async function set(key, value) {
@@ -33,7 +33,7 @@ export async function set(key, value) {
     await Preferences.set({ key, value: String(value) });
     return;
   }
-  try { window.localStorage.setItem(key, String(value)); } catch { /* quota */ }
+  window.localStorage.setItem(key, String(value));
 }
 
 export async function remove(key) {

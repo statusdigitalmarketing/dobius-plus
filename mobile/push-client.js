@@ -1,70 +1,95 @@
-// Web Push subscription flow for the mobile app (v1.0.43 Phase 5b). Needs a
-// secure context (Phase 4 HTTPS) + an installed PWA on iOS. Fetches the VAPID
-// public key, subscribes, and registers the subscription with the Mac.
-import { absUrl, TOKEN_KEY } from './host';
-import { get as storageGet } from './storage';
-
+// VAPID keys belong to Macs. Separate worker scopes let one PWA retain a
+// subscription for each Mac without replacing another Mac's subscription.
 function urlB64ToUint8Array(base64) {
   const padding = '='.repeat((4 - (base64.length % 4)) % 4);
-  const b64 = (base64 + padding).replace(/-/g, '+').replace(/_/g, '/');
-  const raw = atob(b64);
-  const out = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i += 1) out[i] = raw.charCodeAt(i);
-  return out;
+  const raw = atob((base64 + padding).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
 }
 
 export function pushSupported() {
-  return typeof navigator !== 'undefined'
-    && 'serviceWorker' in navigator
-    && typeof window !== 'undefined'
-    && 'PushManager' in window
-    && window.isSecureContext;
+  return typeof navigator !== 'undefined' && 'serviceWorker' in navigator
+    && typeof window !== 'undefined' && 'PushManager' in window && window.isSecureContext;
 }
 
 export function pushGranted() {
   return typeof Notification !== 'undefined' && Notification.permission === 'granted';
 }
 
-// True only if there is an ACTUAL active push subscription (permission alone is
-// not enough: it may have been cleared/pruned). Async. Codex Phase 5b P2.
-export async function pushActive() {
-  if (!pushSupported() || !pushGranted()) return false;
-  try {
-    const reg = await navigator.serviceWorker.ready;
-    return !!(await reg.pushManager.getSubscription());
-  } catch {
-    return false;
-  }
+function workerUrls(connection) {
+  const base = new URL('./', window.location.href);
+  return { script: new URL('sw.js', base).href, scope: new URL(`__dobius_push__/${encodeURIComponent(connection.pairing.id)}/`, base).href, base: base.href };
 }
 
-/** Request permission (user gesture), subscribe, and register with the Mac. */
-export async function enablePush() {
+async function existingRegistration(connection) {
+  const { scope, base } = workerUrls(connection);
+  const scoped = await navigator.serviceWorker.getRegistration(scope);
+  if (scoped?.scope === scope) return scoped;
+  // Preserve the pre-switcher subscription on the Mac that serves this PWA.
+  if (connection.origin === window.location.origin) {
+    const legacy = await navigator.serviceWorker.getRegistration(base);
+    if (legacy?.scope === base && await legacy.pushManager.getSubscription()) return legacy;
+  }
+  return null;
+}
+
+export async function pushActive(connection) {
+  if (!pushSupported() || !pushGranted() || connection.closed) return false;
+  try {
+    const reg = await existingRegistration(connection);
+    return !!(reg && await reg.pushManager.getSubscription());
+  } catch { return false; }
+}
+
+async function activated(reg) {
+  if (reg.active) return;
+  const worker = reg.installing || reg.waiting;
+  if (!worker) throw new Error('Notification worker is unavailable');
+  await new Promise((resolve, reject) => {
+    const finish = (error) => {
+      clearTimeout(timer);
+      worker.removeEventListener('statechange', check);
+      if (error) reject(error); else resolve();
+    };
+    const check = () => {
+      if (worker.state === 'activated') finish();
+      else if (worker.state === 'redundant') finish(new Error('Notification worker could not start'));
+    };
+    const timer = setTimeout(() => finish(new Error('Notification worker timed out')), 10000);
+    worker.addEventListener('statechange', check);
+    check();
+  });
+}
+
+export async function enablePush(connection) {
   if (!pushSupported()) return { ok: false, error: 'Notifications need HTTPS (enable it in Dobius Settings) and an installed app.' };
   let perm = Notification.permission;
   if (perm !== 'granted') perm = await Notification.requestPermission();
   if (perm !== 'granted') return { ok: false, error: 'Notification permission denied' };
-
-  const token = (await storageGet(TOKEN_KEY)) || '';
   try {
-    const reg = await navigator.serviceWorker.ready;
-    const vres = await fetch(absUrl('/push/vapid'), { headers: { Authorization: `Bearer ${token}` } });
+    const vres = await connection.request('/push/vapid', { cache: 'no-store' });
     const vj = await vres.json();
-    if (!vj.ok || !vj.publicKey) return { ok: false, error: 'Server has no push key' };
-
+    if (!vres.ok || !vj.ok || !vj.publicKey) return { ok: false, error: 'This Mac has no push key. Pair it again if access was revoked.' };
+    const key = urlB64ToUint8Array(vj.publicKey);
+    let reg = await existingRegistration(connection);
+    const { script, scope } = workerUrls(connection);
+    if (!reg) reg = await navigator.serviceWorker.register(script, { scope });
+    await activated(reg);
+    if (connection.closed) return { ok: false, error: 'Mac switched' };
     let sub = await reg.pushManager.getSubscription();
-    if (!sub) {
-      sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlB64ToUint8Array(vj.publicKey),
-      });
+    if (sub) {
+      const existingKey = new Uint8Array(sub.options.applicationServerKey || []);
+      if (existingKey.length !== key.length || existingKey.some((b, i) => b !== key[i])) {
+        return { ok: false, error: 'This Mac changed its notification key. Its existing subscription has been kept. Reset notification permissions for this app to enable it again.' };
+      }
+    } else {
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
     }
-    const sres = await fetch(absUrl('/push/subscribe'), {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    const sres = await connection.request('/push/subscribe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ subscription: sub.toJSON() }),
     });
     const sj = await sres.json();
-    return sj.ok ? { ok: true } : { ok: false, error: sj.error || 'Could not register for notifications' };
+    return sres.ok && sj.ok ? { ok: true } : { ok: false, error: sj.error || 'Could not register for notifications' };
   } catch (e) {
     return { ok: false, error: e?.message || 'Could not enable notifications' };
   }
