@@ -679,9 +679,12 @@ function setupDataHandlers() {
     // Stamp the read BEFORE rendering: any input that lands meanwhile (from
     // any surface) makes these buttons stale, and chat:key refuses them.
     const token = selectorToken(tabId);
+    // No repaint since the last input: the screen cannot be trusted yet, which
+    // is not the same as "no prompt" (the card waits instead of vanishing).
+    if (!token) return terminalInstance(tabId) ? { unsettled: true } : null;
     let selector;
     try { selector = await liveSelectorForTab(tabId); } catch { selector = null; }
-    if (!token || selectorToken(tabId) !== token || !ownsTerminal(senderId, tabId)) return null;
+    if (selectorToken(tabId) !== token || !ownsTerminal(senderId, tabId)) return null;
     return selector ? { selector, token: `${token}|${selectorFingerprint(selector)}` } : null;
   });
   // Answer a selector read: delivered only while no input has reached the tab

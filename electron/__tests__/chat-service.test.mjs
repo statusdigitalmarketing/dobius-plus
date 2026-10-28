@@ -209,6 +209,12 @@ p = submitPromptToTab('a', 'x', undefined, () => { strandedC += 1; });
 ptys.set('a', { gen: 2 });
 assert.equal(await p, false);
 assert.equal(strandedC, 0);
+reset(); ptys.set('a', {});
+let strandedD = 0;
+p = submitPromptToTab('a', 'y', undefined, () => { strandedD += 1; });
+writeRawInput('a', '\x03'); // Ctrl+C erases the pasted line: nothing is left behind
+assert.equal(await p, false);
+assert.equal(strandedD, 0);
 ok('a withheld Enter reports the paste as stranded');
 
 console.log(`\n${pass} passed`);

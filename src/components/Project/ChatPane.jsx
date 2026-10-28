@@ -29,7 +29,7 @@ function deliverDraft(tabId, update, notice) {
 // A message that did not go out joins whatever is in the composer instead of
 // losing to it. Failures resolve in send order, so appending keeps several
 // cancelled sends in the order they were written.
-const withUnsent = (text) => (cur) => (!cur ? text : cur.includes(text) ? cur : `${cur}\n\n${text}`);
+const withUnsent = (text) => (cur) => (!cur ? text : cur.split('\n\n').includes(text) ? cur : `${cur}\n\n${text}`);
 const NOT_SENT = 'Not sent. The tab was interrupted, closed or moved to another window.';
 const STRANDED = 'Typed into the terminal but not sent: other input reached it first. Open the terminal to send or clear it.';
 const SELECTOR_POLL_MS = 2500;
@@ -171,15 +171,19 @@ function normEcho(t) {
 // the cut; only a message cut that way is matched by prefix, so two long
 // messages that merely start alike never stand in for each other.
 const TRUNCATED_RE = /\n\n\[message truncated at \d+ chars\]$/;
-function transcriptHas(userMessages) {
-  const full = new Set();
-  const cut = [];
-  for (const m of userMessages) {
+// How many user messages in the transcript are this text. Counted, not
+// tested: "yes" sent again must not be matched by the "yes" already there.
+function countInTranscript(messages, text) {
+  if (!Array.isArray(messages)) return 0;
+  const k = normEcho(text);
+  let n = 0;
+  for (const m of messages) {
+    if (m.role !== 'user') continue;
     const c = String(m.content);
-    if (TRUNCATED_RE.test(c)) cut.push(normEcho(c.replace(TRUNCATED_RE, '')));
-    else full.add(normEcho(c));
+    if (TRUNCATED_RE.test(c)) { const p = normEcho(c.replace(TRUNCATED_RE, '')); if (p && k.startsWith(p)) n += 1; }
+    else if (normEcho(c) === k) n += 1;
   }
-  return (text) => { const k = normEcho(text); return full.has(k) || cut.some((p) => p && k.startsWith(p)); };
+  return n;
 }
 
 const STATUS_TEXT = { working: 'Working', needs: 'Needs you', done: 'Ready' };
@@ -233,6 +237,8 @@ export default function ChatPane({ tabId, visible }) {
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const sessionIdRef = useRef(undefined);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
 
@@ -276,9 +282,8 @@ export default function ChatPane({ tabId, visible }) {
     setShellText(typeof r.shellText === 'string' ? r.shellText : null);
     setEchoes((cur) => {
       if (cur.length === 0) return cur;
-      const seen = transcriptHas(next.filter((m) => m.role === 'user'));
       const now = Date.now();
-      const kept = cur.filter((e) => !seen(e.content) && now - e.at < ECHO_TTL_MS);
+      const kept = cur.filter((e) => countInTranscript(next, e.content) <= e.base && now - e.at < ECHO_TTL_MS);
       return kept.length === cur.length ? cur : kept;
     });
     if (next.length > 0) {
@@ -306,12 +311,20 @@ export default function ChatPane({ tabId, visible }) {
     if (r.unchanged && !haveRef.current && mountedRef.current) await pollOnce();
   }, [tabId, apply]);
 
-  const pollSelector = useCallback(async () => {
+  const pollSelector = useCallback(async (retries = 0) => {
     const seq = ++selSeqRef.current;
     let sel;
     try { sel = await window.electronAPI?.chatSelector?.(tabId); } catch { sel = null; }
     if (seq < selAppliedRef.current) return;
     selAppliedRef.current = seq;
+    // Not repainted since the last key: unknown, not "no prompt". Keep the
+    // card, disabled (no token), and look again shortly instead of dropping
+    // it until the next tick (an arrow click made it blink out).
+    if (sel?.unsettled) {
+      setSelector((cur) => (cur ? { ...cur, token: '' } : cur));
+      if (retries > 0) setTimeout(() => { if (mountedRef.current && visibleRef.current) pollSelector(retries - 1); }, 150);
+      return;
+    }
     const s2 = sel?.selector;
     setSelector(s2 && Array.isArray(s2.options) && s2.options.length > 0 ? { ...s2, token: sel.token } : null);
   }, [tabId]);
@@ -403,11 +416,13 @@ export default function ChatPane({ tabId, visible }) {
 
   const submit = async (text, { echo = true } = {}) => {
     const sid = sessionId;
+    const base = countInTranscript(messagesRef.current, text); // copies already there
     const r = await window.electronAPI?.chatSubmit?.(tabId, text);
     const ok = r === true;
-    // Only if the conversation it went into is still the one on screen.
-    if (ok && echo && sid && sessionIdRef.current === sid) {
-      setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid }]);
+    // Only if the conversation it went into is still the one on screen, and
+    // the transcript has not already shown it while the Enter was pending.
+    if (ok && echo && sid && sessionIdRef.current === sid && countInTranscript(messagesRef.current, text) <= base) {
+      setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid, base }]);
     }
     if (ok) refreshSoon();
     return r === 'stranded' ? 'stranded' : ok;
@@ -445,7 +460,7 @@ export default function ChatPane({ tabId, visible }) {
     // An arrow or space leaves no usable token until Claude redraws the
     // prompt (main refuses reads of a screen not yet repainted): the buttons
     // wait, disabled, for a quick re-read instead of failing as stale.
-    if (!closes && !r.token) setTimeout(() => { if (mountedRef.current) pollSelector(); }, 150);
+    if (!closes && !r.token) setTimeout(() => { if (mountedRef.current) pollSelector(20); }, 150);
     refreshSoon();
   };
 

@@ -123,7 +123,8 @@ export function writeRawInput(id, data, stillOk = () => true) {
   if (!stillOk()) return;
   const q = submitQueues.get(id);
   if (isCancelKey(data)) {
-    if (q) q.gen += 1;
+    // Ctrl+C and Ctrl+U erase the input line; a bare Esc leaves it as typed.
+    if (q) { q.gen += 1; q.lineCleared = data !== '\x1b'; }
     writeTerminal(id, data);
     return;
   }
@@ -159,7 +160,8 @@ async function drainSubmits(id, q) {
     // Withheld, the pasted text stays in the prompt's input line: tell the
     // caller, so it says so instead of offering the text back to send twice.
     if (terminalInstance(id) !== it.pty || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalClosing(id)) {
-      if (terminalInstance(id) === it.pty && !terminalClosing(id)) it.onStranded();
+      const erased = it.gen !== q.gen && q.lineCleared;
+      if (terminalInstance(id) === it.pty && !terminalClosing(id) && !erased) it.onStranded();
       it.resolve(false);
       continue;
     }
