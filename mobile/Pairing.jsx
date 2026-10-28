@@ -70,7 +70,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
       });
       if (generation !== generationRef.current) return; // superseded
       if (data.ok && data.token) {
-        await onPaired({ token: data.token, host: hostToUse });
+        await onPaired({ token: data.token, host: hostToUse, name: typeof data.name === 'string' ? data.name : '' });
       } else {
         setError(data.error || 'Pairing failed.');
         setCode('');
@@ -288,7 +288,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
                 setError('');
               }}
               disabled={busy}
-              style={{ marginTop: 12, background: 'none', border: 'none', opacity: 0.7, fontSize: 14 }}
+              style={{ marginTop: 12, background: 'none', border: 'none', color: 'var(--fg)', opacity: 0.7, fontSize: 14 }}
             >
               Change Mac address
             </button>

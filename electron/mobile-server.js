@@ -40,7 +40,7 @@ import { peekReply } from './voice-bridge.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
 import { snapshot as terminalStatusSnapshot } from './terminal-status.js';
 import { estimateContextForTabId } from './tab-context.js';
-import { getMagicDNSName, certPathsFor, hasCertFor } from './tailscale.js';
+import { getMagicDNSName, certPathsFor, hasCertFor, getTailnetHosts } from './tailscale.js';
 import { transcribeAudio, transcribeAvailable } from './voice-transcribe.js';
 import { getVapidPublicKey, subscribePush, sendPush, hasPushSubscribers } from './push.js';
 
@@ -150,6 +150,9 @@ const HEARTBEAT_MS = 30000;           // ping every 30s; a client that misses a 
 const MAX_VOICE_INFLIGHT = 2;
 
 let httpServer = null;
+// This tailnet's own hosts, for CORS (see mobile-cors.js). null = unknown.
+let corsHosts = null;
+let corsHostsTimer = null;
 let wss = null;
 let pairingCode = null;   // ephemeral, regenerated on each start
 let pairAttempts = 0;
@@ -1125,11 +1128,15 @@ async function doStartMobileServer(stillCurrent) {
 
   const expApp = express();
 
-  // Native clients and PWAs served by another Mac. Authentication remains
-  // explicit bearer-only; never enable Access-Control-Allow-Credentials.
+  // Native clients and PWAs served by another of this tailnet's own machines.
+  // Authentication remains explicit bearer-only; never enable
+  // Access-Control-Allow-Credentials. The host list is read before the server
+  // listens and refreshed every minute (machines join, the tailnet can be
+  // renamed); until it is known only native and localhost origins pass.
+  const corsOk = (origin) => isAllowedMobileOrigin(origin, { hosts: corsHosts });
   expApp.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (isAllowedMobileOrigin(origin)) {
+    if (corsOk(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
@@ -1137,7 +1144,7 @@ async function doStartMobileServer(stillCurrent) {
       res.setHeader('Access-Control-Max-Age', '600');
     }
     if (req.method === 'OPTIONS') {
-      return res.status(isAllowedMobileOrigin(origin) ? 204 : 403).end();
+      return res.status(corsOk(origin) ? 204 : 403).end();
     }
     return next();
   });
@@ -1229,7 +1236,10 @@ async function doStartMobileServer(stillCurrent) {
     pairingCode = genPairingCode();
     pairAttempts = 0;
     pairLockedUntil = 0;
-    res.json({ ok: true, token });
+    // The Mac's own name, so a phone holding several Macs can tell them apart
+    // without the user typing one (an address alone is unreadable). Only a
+    // caller that just proved the pairing code sees it.
+    res.json({ ok: true, token, name: os.hostname().replace(/\.local$/i, '').slice(0, 80) });
   });
 
   // ----- Voice Conductor endpoints (Siri / glasses entry point) -----
@@ -1410,6 +1420,13 @@ async function doStartMobileServer(stillCurrent) {
   let magicName;
   let secure = false;
   magicName = await getMagicDNSName();
+  corsHosts = await getTailnetHosts();
+  if (quitting || !stillCurrent()) return { running: false, error: 'stopped during start' };
+  if (corsHostsTimer) clearInterval(corsHostsTimer);
+  corsHostsTimer = setInterval(() => {
+    getTailnetHosts().then((h) => { if (h) corsHosts = h; }).catch(() => { /* keep the last list */ });
+  }, 60_000);
+  corsHostsTimer.unref?.();
   // A stop (Settings off, quit, cert re-provision) landed while we waited:
   // nothing has been created yet, so just step back.
   if (quitting || !stillCurrent()) return { running: false, error: 'stopped during start' };
@@ -1577,6 +1594,8 @@ export function stopMobileServer({ persistDisabled = false } = {}) {
   if (statusBroadcastTimer) { clearInterval(statusBroadcastTimer); statusBroadcastTimer = null; }
   if (contextRefreshTimer) { clearInterval(contextRefreshTimer); contextRefreshTimer = null; }
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  if (corsHostsTimer) { clearInterval(corsHostsTimer); corsHostsTimer = null; }
+  corsHosts = null;
   if (selectorObserverOff) { selectorObserverOff(); selectorObserverOff = null; }
   for (const id of [...selectorWatch.keys()]) dropSelectorWatch(id);
   selectorInterest.clear();

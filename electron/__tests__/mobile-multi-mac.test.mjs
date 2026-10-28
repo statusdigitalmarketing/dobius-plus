@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { activePairing, emptyPairings, loadPairings, savePairings, upsertPairing, switchPairing, renamePairing, removePairing, pairingRequest, pairingKey, PAIRINGS_KEY } from '../../mobile/pairings.js';
+import { activePairing, emptyPairings, loadPairings, savePairings, upsertPairing, switchPairing, renamePairing, removePairing, pairingRequest, pairingKey, PAIRINGS_KEY, readPairings } from '../../mobile/pairings.js';
 import { HOST_KEY, TOKEN_KEY, normaliseHost, mixedContent, reachabilityMessage } from '../../mobile/host.js';
 import { isAllowedMobileOrigin } from '../mobile-cors.js';
+import { tailnetHostsFrom } from '../tailscale.js';
 import { Connection } from '../../mobile/connection.js';
 
 const a = { id: 'a', origin: 'https://a.tail.ts.net:8420', token: 'token-a', name: 'Work Mac', addedAt: 1, lastUsedAt: 1 };
@@ -10,23 +11,103 @@ const b = { id: 'b', origin: 'https://b.tail.ts.net:8420', token: 'token-b', nam
 const initial = () => ({ version: 1, pairings: [{ ...a }, { ...b }], activeId: 'a' });
 function memoryStorage(entries = []) {
   const values = new Map(entries);
-  return { values, get: async (key) => values.get(key) ?? null, set: async (key, value) => { values.set(key, value); } };
+  return { values, get: async (key) => values.get(key) ?? null, set: async (key, value) => { values.set(key, value); }, remove: async (key) => { values.delete(key); } };
 }
 
-test('legacy migration writes one complete record and retains both legacy keys', async () => {
+test('legacy migration writes one complete record, then removes the legacy keys', async () => {
   const storage = memoryStorage([[HOST_KEY, 'HTTPS://WORK.TAIL.TS.NET:443/'], [TOKEN_KEY, 'original-token']]);
-  const expected = { version: 1, activeId: 'legacy', pairings: [{ id: 'legacy', origin: 'https://work.tail.ts.net', token: 'original-token', name: 'work.tail.ts.net', addedAt: 100, lastUsedAt: 100 }] };
-  assert.deepEqual(await loadPairings(storage, 'capacitor://localhost', 100), expected);
+  const expected = { version: 1, activeId: 'legacy', pairings: [{ id: 'legacy', origin: 'https://work.tail.ts.net', token: 'original-token', name: 'work.tail.ts.net', addedAt: 100, lastUsedAt: 100 }], legacyMigrated: true };
+  assert.deepEqual(await loadPairings(storage, 'capacitor://localhost', 100, null), expected);
   assert.deepEqual(JSON.parse(storage.values.get(PAIRINGS_KEY)), expected);
-  assert.equal(storage.values.get(HOST_KEY), 'HTTPS://WORK.TAIL.TS.NET:443/');
-  assert.equal(storage.values.get(TOKEN_KEY), 'original-token');
-  assert.deepEqual(await loadPairings(storage, 'capacitor://localhost', 200), expected);
+  // An older build (a downgrade) must not find a stale single-Mac token.
+  assert.equal(storage.values.has(HOST_KEY), false);
+  assert.equal(storage.values.has(TOKEN_KEY), false);
+  assert.deepEqual(await loadPairings(storage, 'capacitor://localhost', 200, null), expected);
+});
+
+test('a migration interrupted after its commit point removes the legacy keys on the next load', async () => {
+  const storage = memoryStorage([[HOST_KEY, a.origin], [TOKEN_KEY, a.token]]);
+  const noRemove = { ...storage, remove: async () => { throw new Error('killed before cleanup'); } };
+  await loadPairings(noRemove, 'capacitor://localhost', 1, null);
+  assert.equal(storage.values.get(TOKEN_KEY), a.token);
+  const state = await loadPairings(storage, 'capacitor://localhost', 2, null);
+  assert.equal(activePairing(state).token, a.token);
+  assert.equal(storage.values.has(HOST_KEY), false);
+  assert.equal(storage.values.has(TOKEN_KEY), false);
+  // A hostless browser migration interrupted before cleanup: the document
+  // holds the Mac, so the leftover token goes on the next load.
+  const hostless = memoryStorage([[PAIRINGS_KEY, JSON.stringify(initial())], [TOKEN_KEY, 'leftover']]);
+  await loadPairings(hostless, a.origin, 3, null);
+  assert.equal(hostless.values.has(TOKEN_KEY), false);
+  // Cleanup still finishes after the migrated Mac was removed (the marker).
+  const removed = memoryStorage([[HOST_KEY, a.origin], [TOKEN_KEY, a.token]]);
+  const migrated = await loadPairings({ ...removed, remove: async () => { throw new Error('killed'); } }, 'capacitor://localhost', 4, null);
+  await savePairings(removed, removePairing(migrated, 'legacy'));
+  removed.values.delete(HOST_KEY);
+  await loadPairings(removed, 'capacitor://localhost', 5, null);
+  assert.equal(removed.values.has(TOKEN_KEY), false);
+  // A hostless native token was never migrated: it stays for the pairing prompt.
+  const native = memoryStorage([[PAIRINGS_KEY, JSON.stringify(emptyPairings())], [TOKEN_KEY, 'orphan']]);
+  await loadPairings(native, 'capacitor://localhost', 3, null);
+  assert.equal(native.values.get(TOKEN_KEY), 'orphan');
+});
+
+test('migration carries the single Mac\'s drafts, pins and dismissals into its namespace', async () => {
+  const local = new Map([['dobius-mobile-drafts', '{"t":"half typed"}'], ['dobius-mobile-pins', '["/p"]'], ['dobius-mobile-loose-dismissed', '{"x":1}'], ['dobius-mobile-collapsed:legacy', '["kept"]'], ['dobius-mobile-collapsed', '["old"]']]);
+  const ls = { getItem: (k) => (local.has(k) ? local.get(k) : null), setItem: (k, v) => local.set(k, v) };
+  await loadPairings(memoryStorage([[HOST_KEY, a.origin], [TOKEN_KEY, a.token]]), 'capacitor://localhost', 1, ls);
+  assert.equal(local.get('dobius-mobile-drafts:legacy'), '{"t":"half typed"}');
+  assert.equal(local.get('dobius-mobile-pins:legacy'), '["/p"]');
+  assert.equal(local.get('dobius-mobile-loose-dismissed:legacy'), '{"x":1}');
+  assert.deepEqual(JSON.parse(local.get('dobius-mobile-collapsed:legacy')), ['old', 'kept']);
+  assert.equal(local.has('dobius-mobile-expanded:legacy'), false);
+});
+
+test('the pairing document is saved before UI state can use up storage', async () => {
+  const order = [];
+  const storage = memoryStorage([[HOST_KEY, a.origin], [TOKEN_KEY, a.token]]);
+  const tracked = { ...storage, set: async (k, v) => { order.push(k); await storage.set(k, v); } };
+  const ls = { getItem: (k) => (k === 'dobius-mobile-pins' ? '["/p"]' : null), setItem: (k) => { order.push(k); } };
+  await loadPairings(tracked, 'capacitor://localhost', 1, ls);
+  assert.equal(order[0], PAIRINGS_KEY);
+  assert.equal(order.indexOf('dobius-mobile-pins:legacy') > 0, true);
+});
+
+test('a UI-state copy that failed at migration is retried on the next launch', async () => {
+  const local = new Map([['dobius-mobile-drafts', '{"t":"half typed"}'], ['dobius-mobile-pins', '["/big"]']]);
+  let full = true;
+  // Only the pins copy fails (storage nearly full); the drafts copy succeeds.
+  const ls = { getItem: (k) => (local.has(k) ? local.get(k) : null), setItem: (k, v) => { if (full && k.startsWith('dobius-mobile-pins')) throw new Error('QuotaExceededError'); local.set(k, v); } };
+  const storage = memoryStorage([[HOST_KEY, a.origin], [TOKEN_KEY, a.token]]);
+  const first = await loadPairings(storage, 'capacitor://localhost', 1, ls);
+  assert.deepEqual(first.uiMigrationPending, ['dobius-mobile-pins']);
+  assert.equal(local.get('dobius-mobile-drafts:legacy'), '{"t":"half typed"}');
+  // The user sends that draft (it leaves the map) before the next launch.
+  local.set('dobius-mobile-drafts:legacy', '{}');
+  full = false;
+  const second = await loadPairings(storage, 'capacitor://localhost', 2, ls);
+  assert.equal(local.get('dobius-mobile-drafts:legacy'), '{}'); // not resurrected
+  assert.equal(local.get('dobius-mobile-pins:legacy'), '["/big"]');
+  assert.equal(second.uiMigrationPending, undefined);
+  assert.equal(JSON.parse(storage.values.get(PAIRINGS_KEY)).uiMigrationPending, undefined);
+});
+
+test('a change starts from the saved document, so a stale copy cannot erase a pairing', async () => {
+  const storage = memoryStorage();
+  const tab1 = upsertPairing(emptyPairings(), a, { id: 'a', now: 1 });
+  await savePairings(storage, tab1);
+  const tab2Stale = tab1; // a second tab loaded before B was added
+  await savePairings(storage, upsertPairing(tab1, b, { id: 'b', now: 2 }));
+  const fromSaved = renamePairing(await readPairings(storage) || tab2Stale, 'a', 'Work');
+  assert.deepEqual(fromSaved.pairings.map((p) => p.id), ['a', 'b']);
+  assert.equal(await readPairings(memoryStorage()), null);
 });
 
 test('an interrupted migration before commit retries without losing origin or token', async () => {
   const storage = memoryStorage([[HOST_KEY, a.origin], [TOKEN_KEY, a.token]]);
   const failing = { ...storage, set: async () => { throw new Error('interrupted'); } };
-  await assert.rejects(loadPairings(failing, 'capacitor://localhost', 1), { message: 'interrupted' });
+  await assert.rejects(loadPairings(failing, 'capacitor://localhost', 1, null), { message: 'interrupted' });
+  assert.equal(storage.values.get(TOKEN_KEY), a.token);
   assert.equal(storage.values.has(PAIRINGS_KEY), false);
   const state = await loadPairings(storage, 'capacitor://localhost', 2);
   assert.deepEqual(activePairing(state), { ...a, id: 'legacy', name: 'a.tail.ts.net', addedAt: 2, lastUsedAt: 2 });
@@ -39,7 +120,7 @@ test('an interrupted migration after commit reads the document and never resurre
   const state = await loadPairings(storage, 'capacitor://localhost', 2);
   assert.equal(activePairing(state).addedAt, 1);
   await savePairings(storage, removePairing(state, 'legacy'));
-  assert.deepEqual(await loadPairings(storage, a.origin, 3), emptyPairings());
+  assert.deepEqual(await loadPairings(storage, a.origin, 3), { ...emptyPairings(), legacyMigrated: true });
 });
 
 test('new store wins over partially remaining legacy keys, corrupt stores are not overwritten', async () => {
@@ -160,11 +241,27 @@ test('close invalidates late socket frames, timers, queued commands and in-fligh
   } finally { first.close(); second.close(); globalThis.WebSocket = oldWebSocket; globalThis.fetch = oldFetch; }
 });
 
-test('CORS accepts only supported native, localhost and Tailscale origins', () => {
-  const allowed = ['capacitor://localhost', 'ionic://localhost', 'http://localhost', 'http://localhost:5173', 'https://localhost:8420', 'http://100.64.0.0:8420', 'https://100.127.255.255', 'https://mac.tail.ts.net:8420', 'http://mac.ts.net', 'http://[fd7a:115c:a1e0::1]:8420'];
-  const denied = ['', null, 'null', 'https://100.63.255.255', 'http://100.128.0.0', 'http://192.168.1.1', 'http://100.64.0.256', 'http://localhost.evil.test', 'https://evilts.net', 'https://ts.net', 'https://a.ts.net.evil.test', 'https://a..ts.net', 'https://user@a.ts.net', 'https://localhost@evil.test', 'capacitor://localhost@evil.test', 'capacitor://a.ts.net', 'ionic://100.64.0.1', 'file://localhost', 'ftp://mac.ts.net', 'https://a.ts.net/path', 'https://a.ts.net/', 'https://a.ts.net?x=1', 'https://a.ts.net#x', 'http://[fd7a:115c:a1e1::1]', 'https://a.ts.net https://b.ts.net', 'http://localhost\\evil', 'https://a.ts.net\n'];
-  for (const origin of allowed) assert.equal(isAllowedMobileOrigin(origin), true, origin);
-  for (const origin of denied) assert.equal(isAllowedMobileOrigin(origin), false, String(origin));
+test('CORS accepts native, localhost and this tailnet\'s own machines only', () => {
+  const status = {
+    MagicDNSSuffix: 'tail1234.ts.net',
+    Self: { DNSName: 'mac-a.tail1234.ts.net.', TailscaleIPs: ['100.89.143.67', 'fd7a:115c:a1e0::1'] },
+    Peer: {
+      b: { DNSName: 'mac-b.tail1234.ts.net.', TailscaleIPs: ['100.86.110.13'] },
+      shared: { DNSName: 'their-box.other-tail.ts.net.', TailscaleIPs: ['100.80.0.9'] },
+      sharee: { DNSName: 'guest.tail1234.ts.net.', TailscaleIPs: ['100.70.0.1'], ShareeNode: true },
+    },
+  };
+  const hosts = tailnetHostsFrom(status);
+  assert.deepEqual([...hosts].sort(), ['100.86.110.13', '100.89.143.67', '[fd7a:115c:a1e0::1]', 'mac-a.tail1234.ts.net', 'mac-b.tail1234.ts.net']);
+  const allowed = ['capacitor://localhost', 'ionic://localhost', 'http://localhost', 'http://localhost:5173', 'https://localhost:8420', 'http://100.89.143.67:8420', 'https://mac-b.tail1234.ts.net:8420', 'http://100.86.110.13:8420', 'http://[fd7a:115c:a1e0::1]:8420', 'https://MAC-B.tail1234.ts.net'];
+  const denied = ['', null, 'null', 'http://100.80.0.9:8080', 'http://100.70.0.1', 'https://their-box.other-tail.ts.net', 'https://helper.attacker-tail.ts.net', 'https://guest.tail1234.ts.net', 'https://tail1234.ts.net', 'http://100.64.0.1', 'http://192.168.1.1', 'http://localhost.evil.test', 'https://user@mac-b.tail1234.ts.net', 'https://localhost@evil.test', 'capacitor://localhost@evil.test', 'capacitor://mac-b.tail1234.ts.net', 'ionic://100.89.143.67', 'file://localhost', 'ftp://mac-b.tail1234.ts.net', 'https://mac-b.tail1234.ts.net/path', 'https://mac-b.tail1234.ts.net/', 'https://mac-b.tail1234.ts.net?x=1', 'https://mac-b.tail1234.ts.net#x', 'http://localhost\\evil', 'https://mac-b.tail1234.ts.net\n'];
+  for (const origin of allowed) assert.equal(isAllowedMobileOrigin(origin, { hosts }), true, origin);
+  for (const origin of denied) assert.equal(isAllowedMobileOrigin(origin, { hosts }), false, String(origin));
+  // Hosts unknown (Tailscale not answering yet): native and localhost only.
+  assert.equal(isAllowedMobileOrigin('http://100.89.143.67:8420'), false);
+  assert.equal(isAllowedMobileOrigin('capacitor://localhost'), true);
+  assert.equal(tailnetHostsFrom({}).size, 0);
+  assert.equal(tailnetHostsFrom({ MagicDNSSuffix: 'example.com', Self: { DNSName: 'a.example.com.' } }).size, 0);
 });
 
 test('transport diagnostics distinguish mixed content and describe possible older-Mac CORS rejection', () => {

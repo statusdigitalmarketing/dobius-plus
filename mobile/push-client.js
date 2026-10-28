@@ -24,12 +24,32 @@ async function existingRegistration(connection) {
   const { scope, base } = workerUrls(connection);
   const scoped = await navigator.serviceWorker.getRegistration(scope);
   if (scoped?.scope === scope) return scoped;
-  // Preserve the pre-switcher subscription on the Mac that serves this PWA.
-  if (connection.origin === window.location.origin) {
+  // The pre-switcher root subscription belongs to the single Mac that was
+  // migrated (pairing 'legacy'), whichever Mac serves this page (Codex).
+  if (connection.pairing.id === 'legacy') {
     const legacy = await navigator.serviceWorker.getRegistration(base);
     if (legacy?.scope === base && await legacy.pushManager.getSubscription()) return legacy;
   }
   return null;
+}
+
+/**
+ * Stop a removed Mac's notifications on this device: its own worker scope is
+ * unregistered; the migrated Mac ('legacy') lives on the root worker, which
+ * also serves the app shell, so only its subscription is dropped.
+ */
+export async function forgetPush(pairingId) {
+  if (typeof navigator === 'undefined' || !navigator.serviceWorker) return;
+  const base = new URL('./', window.location.href);
+  if (pairingId === 'legacy') {
+    // Its subscription may be the pre-upgrade root one OR, when alerts were
+    // first enabled after the upgrade, a scoped one: drop both (Codex).
+    const root = await navigator.serviceWorker.getRegistration(base.href);
+    if (root?.scope === base.href) await (await root.pushManager.getSubscription())?.unsubscribe();
+  }
+  const scope = new URL(`__dobius_push__/${encodeURIComponent(pairingId)}/`, base).href;
+  const reg = await navigator.serviceWorker.getRegistration(scope);
+  if (reg?.scope === scope) await reg.unregister();
 }
 
 export async function pushActive(connection) {

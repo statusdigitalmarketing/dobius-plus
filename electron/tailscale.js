@@ -47,6 +47,42 @@ export async function getMagicDNSName() {
   return null;
 }
 
+/**
+ * Pure: the hosts that are THIS tailnet's own machines, from `tailscale status
+ * --json`: this Mac plus every peer whose MagicDNS name is under the tailnet's
+ * own suffix, as lowercase URL hostnames (DNS names without the trailing dot,
+ * IPv4, and IPv6 in brackets). A machine shared INTO this tailnet keeps its
+ * owner's suffix, and a ShareeNode is someone else's, so neither is listed:
+ * the mobile server's CORS allows exactly these (Codex High, two rounds).
+ */
+export function tailnetHostsFrom(status) {
+  const hosts = new Set();
+  const suffix = String(status?.MagicDNSSuffix || status?.CurrentTailnet?.MagicDNSSuffix || '').toLowerCase().replace(/\.$/, '');
+  if (!/^[a-z0-9-]+\.ts\.net$/.test(suffix)) return hosts;
+  const add = (node) => {
+    const name = String(node?.DNSName || '').toLowerCase().replace(/\.$/, '');
+    if (!name.endsWith(`.${suffix}`) || node?.ShareeNode === true) return;
+    hosts.add(name);
+    for (const ip of Array.isArray(node?.TailscaleIPs) ? node.TailscaleIPs : []) {
+      const v = String(ip).toLowerCase();
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(v)) hosts.add(v);
+      else if (/^[0-9a-f:]+$/.test(v)) hosts.add(`[${v}]`);
+    }
+  };
+  add(status?.Self);
+  for (const peer of Object.values(status?.Peer || {})) add(peer);
+  return hosts;
+}
+
+/** This tailnet's own hosts (see tailnetHostsFrom), or null when unknown. */
+export async function getTailnetHosts() {
+  const bin = tailscaleBin();
+  if (!bin) return null;
+  const { err, stdout } = await run(bin, ['status', '--json']);
+  if (err) return null;
+  try { return tailnetHostsFrom(JSON.parse(stdout)); } catch { return null; }
+}
+
 /** Where Dobius keeps the tailnet TLS cert/key (0700 dir). */
 export function certDir() {
   const d = path.join(app.getPath('userData'), 'tls');

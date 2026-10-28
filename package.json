@@ -78,7 +78,7 @@
     "test:sidebarpolish": "node --test ./electron/__tests__/sidebar-polish.test.mjs",
     "test:tabunread": "node --test ./electron/__tests__/tab-unread.test.mjs",
     "test:winfocus": "node ./electron/__tests__/window-focus.test.mjs",
-    "test:multimac": "node --test ./electron/__tests__/mobile-multi-mac.test.mjs"
+    "test:multimac": "node --import ./electron/__tests__/register.mjs --test ./electron/__tests__/mobile-multi-mac.test.mjs"
   },
   "keywords": [],
   "author": "Status Digital Marketing",

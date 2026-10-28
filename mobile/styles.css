@@ -874,3 +874,14 @@ button.primary:disabled { opacity: 0.4; }
 .mac-problem { padding: 24px; display: flex; flex-direction: column; gap: 16px; line-height: 1.5; }
 .mac-problem a, .mac-direct { color: var(--accent); overflow-wrap: anywhere; }
 .mac-direct, .mac-cancel { display: block; margin: 16px auto 0; }
+
+/* Covers the screen while a notification tap switches Macs, so nothing can
+ * be typed or confirmed into the Mac being left. */
+.mac-switching {
+  position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center;
+  padding: 24px; text-align: center; background: var(--bg);
+  color: var(--fg); font-size: 17px; font-weight: 600; touch-action: none;
+}
+
+/* Wraps the session so it can be made inert while switching Macs; adds no box. */
+.mac-session-wrap { display: contents; }

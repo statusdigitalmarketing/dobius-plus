@@ -6,7 +6,10 @@
 const CACHE = 'dobius-mobile-v1';
 const APP_BASE = new URL('./', self.location.href);
 const scopeMatch = new URL(self.registration.scope).pathname.match(/\/__dobius_push__\/([^/]+)\/$/);
-const PAIRING_ID = scopeMatch ? decodeURIComponent(scopeMatch[1]) : null;
+// A root-scope worker predates multi-Mac: its subscription belongs to the
+// single Mac that was migrated to the pairing id 'legacy', whichever origin
+// served this page (Codex High).
+const PAIRING_ID = scopeMatch ? decodeURIComponent(scopeMatch[1]) : 'legacy';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
@@ -22,10 +25,10 @@ self.addEventListener('push', (e) => {
     const id = new URL(data.url || './', APP_BASE).searchParams.get('open');
     if (id) url.searchParams.set('open', id);
   } catch { /* malformed notification URL */ }
-  if (PAIRING_ID) url.searchParams.set('mac', PAIRING_ID);
+  url.searchParams.set('mac', PAIRING_ID);
   e.waitUntil(self.registration.showNotification(title, {
     body: data.body || '',
-    tag: data.tag ? `${PAIRING_ID || APP_BASE.origin}:${data.tag}` : undefined,
+    tag: data.tag ? `${PAIRING_ID}:${data.tag}` : undefined,
     data: { url: url.href, pairingId: PAIRING_ID, origin: APP_BASE.origin },
     icon: './icon.png',
     badge: './icon.png',
@@ -45,7 +48,9 @@ self.addEventListener('notificationclick', (e) => {
     for (const c of all) {
       if (!c.url.startsWith(APP_BASE.href)) continue;
       if ('focus' in c) {
-        if (openId) { try { c.postMessage({ type: 'open-session', id: openId, pairingId: e.notification.data?.pairingId, origin: e.notification.data?.origin || APP_BASE.origin }); } catch { /* noop */ } }
+        // Always route to the notification's Mac, even with no session to
+        // open (a failure notice): focus() alone stays on whichever Mac is shown.
+        try { c.postMessage({ type: 'open-session', id: openId, pairingId: e.notification.data?.pairingId, origin: e.notification.data?.origin || APP_BASE.origin }); } catch { /* noop */ }
         return c.focus();
       }
     }
