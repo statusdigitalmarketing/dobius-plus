@@ -927,3 +927,10 @@ export function getTerminalBuffer(id) {
   const entry = terminals.get(id);
   return entry ? entry.outputBuffer : '';
 }
+
+// The live pty object behind a tab id, or null. Identity, not a handle to
+// write through: a caller that waits between two writes compares it to tell
+// "same shell" from "the tab id now names a respawned PTY".
+export function terminalInstance(id) {
+  return terminals.get(id)?.pty || null;
+}

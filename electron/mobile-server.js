@@ -30,8 +30,8 @@ import {
   liveClaudeSessionIds, claimSessionResume, bindReservationTab, releaseSessionResume,
   addTerminalObserver,
 } from './terminal-manager.js';
-import { parseSelector, parseSelectorFromScreen, stripAnsi, spinnerVerb } from './selector-parser.js';
-import { renderScreenLines } from './screen-render.js';
+import { stripAnsi, spinnerVerb } from './selector-parser.js';
+import { liveSelectorForTab, terminalTextTail, submitPromptToTab } from './chat-service.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
@@ -44,21 +44,6 @@ import { transcribeAudio, transcribeAvailable } from './voice-transcribe.js';
 import { getVapidPublicKey, subscribePush, sendPush, hasPushSubscribers } from './push.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// The live selector for a tab, via the headless-xterm SCREEN render (v1.0.62).
-// The old strip-and-regex path missed Ink's incremental repaints entirely: on
-// a multi-question AskUserQuestion, question two never formed complete lines
-// in a linear strip, so its popup never appeared on the phone (Sam, 8/14).
-// The emulator's verdict is authoritative when it renders (including "no
-// selector": it honors the erase sequences that REMOVE answered prompts, so
-// it also kills the stale-popup class); the regex path remains only for a
-// render failure.
-async function liveSelectorForTab(id) {
-  const raw = getTerminalBuffer(id) || '';
-  const lines = await renderScreenLines(raw.slice(-262144));
-  if (lines) return parseSelectorFromScreen(lines);
-  return parseSelector(raw);
-}
 
 // Push selector popups the moment they appear instead of waiting out the
 // phone's 2.5s poll (Sam, 8/16: "did you get rid of the poll latency?").
@@ -717,13 +702,10 @@ function handleAuthedMessage(socket, msg, subs) {
       if (typeof msg.id !== 'string' || !socket._authedTabs.has(msg.id)) break;
       if (typeof msg.text !== 'string' || !msg.text.trim()
           || Buffer.byteLength(msg.text, 'utf8') > MAX_INPUT_BYTES) break; // real BYTE cap (Codex: .length undercounts multibyte)
-      // Strip control chars except \t and \n (multi-line paste is legitimate);
-      // \r is stripped so the only Enter is the discrete one we send.
-      const text = msg.text.replace(/[\x00-\x08\x0B-\x1F\x7F]/g, '');
+      // chat-service strips control chars and serializes per tab.
       const id = msg.id;
       invalidateSelectorPush(id); // the phone may have cleared a popup for this
-      writeTerminal(id, `\x1b[200~${text}\x1b[201~`);
-      setTimeout(() => { writeTerminal(id, '\r'); }, 250);
+      submitPromptToTab(id, msg.text);
       // If this answered a selector (or started Claude), refresh selector state.
       setTimeout(async () => {
         wsSend(socket, { type: 'selector', id, selector: await liveSelectorForTab(id) || null });
@@ -754,12 +736,8 @@ function handleAuthedMessage(socket, msg, subs) {
       // what the text is"). Read-only, same auth posture as selectorSnapshot.
       if (typeof msg.id !== 'string') break;
       socket._authedTabs.add(msg.id);
-      const raw = stripAnsi(getTerminalBuffer(msg.id) || '');
-      // Trim trailing blank padding per line, drop the all-blank tail, keep the
-      // last ~60 lines so the payload stays small on a 1s-ish poll.
-      const lines = raw.split('\n').map((l) => l.replace(/\s+$/, ''));
-      while (lines.length && !lines[lines.length - 1]) lines.pop();
-      wsSend(socket, { type: 'terminalText', id: msg.id, text: lines.slice(-60).join('\n') });
+      // Last ~60 lines so the payload stays small on a 1s-ish poll.
+      wsSend(socket, { type: 'terminalText', id: msg.id, text: terminalTextTail(msg.id) });
       break;
     }
 

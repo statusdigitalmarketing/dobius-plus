@@ -36,11 +36,12 @@ import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccou
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
-import { estimateContextForTabId, liveSessionsForTabs } from './tab-context.js';
+import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
+import { liveSelectorForTab, terminalTextTail, submitPromptToTab } from './chat-service.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, findLooseEnds,
+  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
   getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo,
 } from './data-service.js';
@@ -612,6 +613,56 @@ function setupDataHandlers() {
     if (!Array.isArray(tabIds)) return [];
     const owned = tabIds.filter((id) => typeof id === 'string' && ownsTerminal(event.sender.id, id));
     return liveSessionsForTabs(owned);
+  });
+  // Desktop Chat view (src/components/Project/ChatPane.jsx): the transcript,
+  // live selector and paste-then-Enter submit the phone's Chat view gets over
+  // the WS, behind the same terminal ownership boundary as every other
+  // terminal IPC. Ownership is checked again after each await: a tear-off or
+  // dock can move the tab to another window in between.
+  ipcMain.handle('chat:poll', async (event, tabId, have) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return null;
+    const senderId = event.sender.id;
+    if (!ownsTerminal(senderId, tabId)) return null;
+    const status = terminalStatus.snapshot().live[tabId]?.status || null;
+    const resolved = await resolveSessionForTab(tabId);
+    const projectPath = resolved ? (resolved.sessionProject || await getTerminalCwd(tabId)) : null;
+    if (!resolved || !projectPath) {
+      const claudeLive = !!resolved || !!(await getTerminalClaudeInfo(tabId));
+      if (!ownsTerminal(senderId, tabId)) return null;
+      return { sessionId: null, claudeLive, status, shellText: terminalTextTail(tabId) };
+    }
+    const { sessionId } = resolved;
+    const sig = await getTranscriptSig(sessionId, projectPath);
+    // The renderer echoes the sig of what it holds; an identical file is not
+    // re-parsed or re-shipped. The sig only ever came from this main process.
+    if (sig && have && have.sig === sig && have.sessionId === sessionId && have.projectPath === projectPath) {
+      if (!ownsTerminal(senderId, tabId)) return null;
+      return { sessionId, projectPath, sig, claudeLive: true, status, unchanged: true };
+    }
+    const entries = (await loadTranscript(sessionId, projectPath, 200)) || [];
+    if (!ownsTerminal(senderId, tabId)) return null;
+    return {
+      sessionId, projectPath, sig, claudeLive: true, status, entries,
+      // A linked session with nothing parsed yet still shows what is on screen.
+      ...(entries.length === 0 ? { shellText: terminalTextTail(tabId) } : {}),
+    };
+  });
+  ipcMain.handle('chat:selector', async (event, tabId) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return null;
+    const senderId = event.sender.id;
+    if (!ownsTerminal(senderId, tabId)) return null;
+    let selector = null;
+    try { selector = await liveSelectorForTab(tabId); } catch { selector = null; }
+    return ownsTerminal(senderId, tabId) ? (selector || null) : null;
+  });
+  ipcMain.handle('chat:submit', async (event, tabId, text) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return false;
+    if (typeof text !== 'string' || !text.trim()) return false;
+    if (Buffer.byteLength(text, 'utf8') > TERMINAL_WRITE_MAX_BYTES) return false;
+    const senderId = event.sender.id;
+    if (!ownsTerminal(senderId, tabId)) return false;
+    cancelAutoResumeTab(tabId); // user input wins over a queued resume, as in terminal:write
+    return submitPromptToTab(tabId, text, () => ownsTerminal(senderId, tabId));
   });
   ipcMain.handle('data:deleteSession', async (_event, sessionId, projectPath) => {
     const result = await deleteSession(sessionId, projectPath);
@@ -2606,6 +2657,7 @@ function setupWindowHandlers() {
         if (labelMeta[k] === 'title' || labelMeta[k] === 'agent') meta[k] = labelMeta[k];
       }
       if (typeof labelMeta.autoLabel === 'string') meta.autoLabel = labelMeta.autoLabel.slice(0, 100);
+      if (labelMeta.viewMode === 'chat') meta.viewMode = 'chat';
     }
     const win = openTornOffWindow(projectPath, tabId, label, screenX || 200, screenY || 200, meta);
     // Record the grant against the new window's webContents.id. The new
@@ -2818,6 +2870,7 @@ function setupWindowHandlers() {
         if (labelMeta[k] === 'title' || labelMeta[k] === 'agent') meta[k] = labelMeta[k];
       }
       if (typeof labelMeta.autoLabel === 'string') meta.autoLabel = labelMeta.autoLabel.slice(0, 100);
+      if (labelMeta.viewMode === 'chat') meta.viewMode = 'chat';
     }
     const tab = {
       id: tabId,

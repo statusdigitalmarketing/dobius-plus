@@ -121,12 +121,16 @@ export function unlockLabel(tab) {
   return next;
 }
 
-/** The automatic-label fields of a tab, for carrying it into a tear-off window. */
+/**
+ * The automatic-label fields of a tab, plus its Terminal/Chat view mode, for
+ * carrying it into a tear-off window.
+ */
 export function labelMeta(tab) {
   const meta = { labelLockedByUser: isLabelLocked(tab) };
   for (const k of ['labelSource', 'autoLabel', 'autoLabelSource']) {
     if (typeof tab?.[k] === 'string') meta[k] = tab[k];
   }
+  if (tab?.viewMode === 'chat') meta.viewMode = 'chat';
   return meta;
 }
 
@@ -142,5 +146,6 @@ export function parseLabelMeta(json) {
     if (raw[k] === 'title' || raw[k] === 'agent') out[k] = raw[k];
   }
   if (typeof raw.autoLabel === 'string') out.autoLabel = cleanLabel(raw.autoLabel);
+  if (raw.viewMode === 'chat') out.viewMode = 'chat';
   return out;
 }

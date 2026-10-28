@@ -355,6 +355,17 @@ export const useStore = create((set, get) => ({
     terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? lockLabel(t, label) : t),
   })),
 
+  // Terminal or Chat (the readable transcript view over the same PTY). Stored
+  // on the tab so it survives a restart, tear-off, dock and reopen.
+  setTabViewMode: (tabId, mode) => set((s) => ({
+    terminalTabs: s.terminalTabs.map((t) => {
+      if (t.id !== tabId) return t;
+      if (mode === 'chat') return { ...t, viewMode: 'chat' };
+      const { viewMode: _drop, ...rest } = t;
+      return rest;
+    }),
+  })),
+
   // The user cleared the name: hand the label back to the automatic sources.
   unlockTabLabel: (tabId) => set((s) => ({
     terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? unlockLabel(t) : t),
@@ -632,6 +643,7 @@ export const useStore = create((set, get) => ({
       projectPath: closed.projectPath,
       kind: closed.kind || 'terminal',
       ...(closed.url ? { url: closed.url } : {}),
+      ...(closed.viewMode === 'chat' ? { viewMode: 'chat' } : {}),
       createdAt: Date.now(),
     };
     set({

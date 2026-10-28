@@ -2,21 +2,11 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { useStore } from '../../store/store';
 import { useTerminal, takeAdopting } from '../../hooks/useTerminal';
 import '@xterm/xterm/css/xterm.css';
+import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
 
-/** Escape a file path for safe shell usage (wraps in single quotes). */
-function shellEscape(filePath) {
-  return "'" + filePath.replace(/'/g, "'\\''") + "'";
-}
 
-/** Convert ArrayBuffer to base64 without blowing the call stack on large images. */
-function arrayBufferToBase64(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const chunk = 8192;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
+function isChatTab(id) {
+  return useStore.getState().terminalTabs.find((t) => t.id === id)?.viewMode === 'chat';
 }
 
 /**
@@ -75,8 +65,11 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   const activeTabId = useStore((s) => s.activeTabId);
   const activeView = useStore((s) => s.activeView);
   const setActiveTab = useStore((s) => s.setActiveTab);
+  // A tab showing Chat (ChatPane over this pane) owns focus, paste, drops and
+  // Cmd+F itself; this pane stands down until it is back to Terminal.
+  const inChat = useStore((s) => s.terminalTabs.find((t) => t.id === id)?.viewMode === 'chat');
   useEffect(() => {
-    if (activeTabId === id && activeView === 'terminal') {
+    if (activeTabId === id && activeView === 'terminal' && !inChat) {
       if (suppressNextAutoFocusRef.current) {
         suppressNextAutoFocusRef.current = false;
         return;
@@ -84,7 +77,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       // Use rAF to ensure DOM is ready after display:none→flex switch
       requestAnimationFrame(() => inputRef.current?.focus());
     }
-  }, [activeTabId, activeView, id]);
+  }, [activeTabId, activeView, id, inChat]);
 
   const activatePane = useCallback((preserveFocus = true) => {
     if (useStore.getState().activeTabId === id) return;
@@ -96,6 +89,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   useEffect(() => {
     const handler = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+        if (isChatTab(id)) return;
         e.preventDefault();
         setSearchVisible((v) => {
           if (!v) {
@@ -110,7 +104,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [searchAddonRef]);
+  }, [searchAddonRef, id]);
 
   const handleSearch = useCallback((query) => {
     setSearchQuery(query);
@@ -279,8 +273,8 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   // Window-level paste handler — catches image/file pastes even when xterm has focus
   useEffect(() => {
     const windowPasteHandler = async (e) => {
-      // Only handle for the active tab
-      if (useStore.getState().activeTabId !== id) return;
+      // Only handle for the active tab, and not while it shows Chat
+      if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
       // A paste into a modal (e.g. the command palette) belongs to the modal.
       if (e.target?.closest?.('[role="dialog"]')) return;
       const items = e.clipboardData?.items;
@@ -328,8 +322,8 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   // Listen for file drops relayed by App.jsx via custom event
   useEffect(() => {
     const handler = (e) => {
-      // Only the active tab handles the drop
-      if (useStore.getState().activeTabId !== id) return;
+      // Only the active tab handles the drop (ChatPane does, in Chat)
+      if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
       const paths = e.detail?.paths;
       if (!paths || paths.length === 0) return;
       const escaped = paths.map((p) => shellEscape(p)).join(' ');
@@ -347,7 +341,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   // Listen for text/URL drops relayed by App.jsx
   useEffect(() => {
     const handler = (e) => {
-      if (useStore.getState().activeTabId !== id) return;
+      if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
       const text = e.detail?.text;
       if (!text) return;
       setInput((prev) => {

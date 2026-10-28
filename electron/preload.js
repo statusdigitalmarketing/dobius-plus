@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Terminal
   terminalCreate: (id, cwd) => ipcRenderer.invoke('terminal:create', id, cwd),
   terminalWrite: (id, data) => ipcRenderer.send('terminal:write', id, data),
+  chatPoll: (id, have) => ipcRenderer.invoke('chat:poll', id, have),
+  chatSelector: (id) => ipcRenderer.invoke('chat:selector', id),
+  chatSubmit: (id, text) => ipcRenderer.invoke('chat:submit', id, text),
   terminalResize: (id, cols, rows) => ipcRenderer.send('terminal:resize', id, cols, rows),
   terminalKill: (id) => ipcRenderer.send('terminal:kill', id),
   terminalGetProcess: (id) => ipcRenderer.invoke('terminal:getProcess', id),

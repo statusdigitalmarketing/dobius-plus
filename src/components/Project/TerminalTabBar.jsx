@@ -161,7 +161,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
     }
     if (tab) {
       // Carry kind/url so browser tabs reopen as browsers, not blank terminals.
-      pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url });
+      pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode });
     }
     await autoCheckpoint(tabId);
     if (window.electronAPI) window.electronAPI.terminalKill(tabId);
@@ -182,7 +182,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
       }
       if (tab) {
         // Carry kind/url so browser tabs reopen as browsers, not blank terminals.
-      pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url });
+      pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode });
       }
       await autoCheckpoint(tabId);
       if (window.electronAPI) window.electronAPI.terminalKill(tabId);

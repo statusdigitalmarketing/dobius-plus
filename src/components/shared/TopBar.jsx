@@ -119,6 +119,7 @@ export default function TopBar({ projectName }) {
 
       {/* Right: visual + tasks dropdown + theme picker */}
       <div className="no-drag flex items-center gap-2">
+        <ViewModeToggle />
         <button
           onClick={() => currentProjectPath && window.electronAPI?.visualOpenWindow?.(currentProjectPath)}
           disabled={!currentProjectPath}
@@ -155,6 +156,53 @@ export default function TopBar({ projectName }) {
       </div>
     </div>
     </>
+  );
+}
+
+/**
+ * Terminal / Chat switch for the active tab (Cmd+Shift+C). Chat reads the
+ * running Claude session as messages over the same PTY; the choice is per tab.
+ */
+function ViewModeToggle() {
+  const activeView = useStore((s) => s.activeView);
+  const tab = useStore((s) => s.terminalTabs.find((t) => t.id === s.activeTabId));
+  const setTabViewMode = useStore((s) => s.setTabViewMode);
+  if (activeView !== 'terminal' || !tab || tab.kind === 'browser') return null;
+  const mode = tab.viewMode === 'chat' ? 'chat' : 'terminal';
+  const seg = (value, label) => {
+    const on = mode === value;
+    return (
+      <button
+        key={value}
+        onClick={() => setTabViewMode(tab.id, value)}
+        aria-pressed={on}
+        title={`${label} view for this tab (Cmd+Shift+C)`}
+        style={{
+          padding: '2px 9px',
+          fontSize: 11,
+          fontFamily: "'SF Mono', monospace",
+          color: on ? 'var(--fg)' : 'var(--dim)',
+          backgroundColor: on ? 'var(--surface-hover)' : 'transparent',
+          border: 'none',
+          borderRadius: 4,
+          cursor: on ? 'default' : 'pointer',
+          transition: 'all 150ms',
+        }}
+      >
+        {label}
+      </button>
+    );
+  };
+  return (
+    <div
+      className="no-drag"
+      role="group"
+      aria-label="Tab view"
+      style={{ display: 'flex', gap: 2, padding: 2, border: '1px solid var(--border)', borderRadius: 6 }}
+    >
+      {seg('terminal', 'Terminal')}
+      {seg('chat', 'Chat')}
+    </div>
   );
 }
 

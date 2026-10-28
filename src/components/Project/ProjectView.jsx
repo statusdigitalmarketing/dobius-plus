@@ -5,6 +5,7 @@ import { THEMES, applyTheme } from '../../lib/themes';
 import TopBar from '../shared/TopBar';
 import StatusBar from '../shared/StatusBar';
 import TerminalPane from './TerminalPane';
+import ChatPane from './ChatPane';
 import BrowserPane from './BrowserPane';
 import TerminalTabBar from './TerminalTabBar';
 import FilesPanel from './FilesPanel';
@@ -873,7 +874,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     if (tab) {
       // Preserve kind/url so a closed browser tab can be resurrected via
       // Cmd+Shift+T as a browser (not a blank terminal). Carson self-flag #4.
-      state.pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url });
+      state.pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode });
     }
     // Auto-checkpoint on close, matching the tab-bar X / middle-click / context-menu
     // paths (Cmd+W previously skipped this, so the same close produced no checkpoint).
@@ -982,6 +983,14 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
           const current = state.activeView;
           setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
         }
+      } else if ((e.key === 'c' || e.key === 'C') && e.shiftKey && !e.altKey) {
+        // Cmd+Shift+C = flip the active tab between Terminal and Chat.
+        const state = useStore.getState();
+        if (state.activeView !== 'terminal') return;
+        const tab = state.terminalTabs.find((t) => t.id === state.activeTabId);
+        if (!tab || tab.kind === 'browser') return;
+        e.preventDefault();
+        state.setTabViewMode(tab.id, tab.viewMode === 'chat' ? 'terminal' : 'chat');
       } else if (e.key === 'w' && !e.shiftKey) {
         // Cmd+W = close tab (with process confirmation)
         if (inAppField) return;
@@ -1202,6 +1211,17 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
                           claimExisting={tab.id === tearOffTabId && !tearOffRestore}
                         />
                       )}
+                      {/* Chat view: drawn OVER the still-mounted terminal, below
+                          any grid/split header padding, so the PTY and xterm
+                          buffer are untouched. */}
+                      {tab.kind !== 'browser' && tab.viewMode === 'chat' && (() => {
+                        const st = paneStyleFor(tab);
+                        return (
+                          <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, top: st.paddingTop || 0, zIndex: 8 }}>
+                            <ChatPane tabId={tab.id} visible={activeView === 'terminal' && st.display !== 'none'} />
+                          </div>
+                        );
+                      })()}
                     </div>
                   ))}
 
