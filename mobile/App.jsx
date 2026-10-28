@@ -185,6 +185,7 @@ export default function App() {
     // any further scans fall through to the Board (which ignores them).
     setDeepLink({ host: '', code: '', nonce: 0 });
     setRepairing(false);
+    setView('board'); // the board rebinds push to the new token
     setToken(newToken);
     if (newHost) setHost(newHost);
     // Backend persistence (async). The UI has already transitioned.
