@@ -1,8 +1,7 @@
 // Web Push subscription flow for the mobile app (v1.0.43 Phase 5b). Needs a
 // secure context (Phase 4 HTTPS) + an installed PWA on iOS. Fetches the VAPID
 // public key, subscribes, and registers the subscription with the Mac.
-import { absUrl, TOKEN_KEY } from './host';
-import { get as storageGet } from './storage';
+import { absUrl } from './host';
 
 function urlB64ToUint8Array(base64) {
   const padding = '='.repeat((4 - (base64.length % 4)) % 4);
@@ -37,17 +36,20 @@ export async function pushActive() {
   }
 }
 
-/** Request permission (user gesture), subscribe, and register with the Mac. */
-export async function enablePush() {
+/**
+ * Request permission (user gesture), subscribe, and register with the Mac.
+ * Token and origin come from the one Connection, so a re-pair to another Mac
+ * mid-request cannot send this Mac's token to that Mac's address.
+ */
+export async function enablePush({ token, origin }) {
   if (!pushSupported()) return { ok: false, error: 'Notifications need HTTPS (enable it in Dobius Settings) and an installed app.' };
   let perm = Notification.permission;
   if (perm !== 'granted') perm = await Notification.requestPermission();
   if (perm !== 'granted') return { ok: false, error: 'Notification permission denied' };
 
-  const token = (await storageGet(TOKEN_KEY)) || '';
   try {
     const reg = await navigator.serviceWorker.ready;
-    const vres = await fetch(absUrl('/push/vapid'), { headers: { Authorization: `Bearer ${token}` } });
+    const vres = await fetch(absUrl(origin, '/push/vapid'), { headers: { Authorization: `Bearer ${token}` } });
     const vj = await vres.json();
     if (!vj.ok || !vj.publicKey) return { ok: false, error: 'Server has no push key' };
 
@@ -58,7 +60,7 @@ export async function enablePush() {
         applicationServerKey: urlB64ToUint8Array(vj.publicKey),
       });
     }
-    const sres = await fetch(absUrl('/push/subscribe'), {
+    const sres = await fetch(absUrl(origin, '/push/subscribe'), {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ subscription: sub.toJSON() }),

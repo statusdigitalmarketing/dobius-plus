@@ -83,9 +83,12 @@ export async function clearHost() { cachedHost = ''; await remove(HOST_KEY); }
 // Build an absolute URL for `path` using the given origin, or (one-arg form)
 // the cached stored origin from syncHost(). `path` can be `./pair`, `/pair`,
 // `pair`, or already absolute (returned unchanged). If no origin is set
-// (browser dev), returns the relative path so Vite's proxy still works.
+// (browser dev), returns the relative path so Vite's proxy still works. An
+// explicit empty origin stays relative and never borrows the cached host: a
+// re-pair changes that, and a request bound to the old Mac's token must not
+// follow it.
 export function absUrl(hostOrPath, maybePath) {
-  const origin = maybePath === undefined ? cachedHost : (hostOrPath || cachedHost);
+  const origin = maybePath === undefined ? cachedHost : hostOrPath;
   const path = maybePath === undefined ? hostOrPath : maybePath;
   if (!path) return '';
   if (/^https?:\/\//i.test(path)) return path;

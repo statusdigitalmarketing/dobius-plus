@@ -96,7 +96,7 @@ export default function Board({ connection, status, onOpen, onShowHistory, onRep
     pushActive().then((active) => {
       if (cancelled || !active) return;
       setAlerts('on');
-      enablePush().catch(() => { /* best-effort token rebind */ });
+      enablePush(connection).catch(() => { /* best-effort token rebind */ });
     });
     return () => { cancelled = true; };
   }, []);
@@ -179,7 +179,7 @@ export default function Board({ connection, status, onOpen, onShowHistory, onRep
               <button
                 className="icon-btn"
                 onClick={async () => {
-                  const r = await enablePush();
+                  const r = await enablePush(connection);
                   setAlerts(r.ok ? 'on' : 'error');
                   setAlertMsg(r.ok ? '' : (r.error || 'Could not enable alerts'));
                   if (!r.ok) setTimeout(() => setAlertMsg(''), 5000);
