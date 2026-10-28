@@ -50,3 +50,12 @@ test('garbage cert is null, not a throw', () => {
   fs.copyFileSync(a.key, p.keyFile);
   assert.equal(certValidTo(NAME), null);
 });
+
+test('a leaf followed by a truncated chain is rejected', () => {
+  const p = certPathsFor(NAME);
+  const leaf = fs.readFileSync(a.crt, 'utf8');
+  const cut = fs.readFileSync(b.crt, 'utf8');
+  fs.writeFileSync(p.certFile, leaf + cut.slice(0, Math.floor(cut.length / 2)));
+  fs.copyFileSync(a.key, p.keyFile);
+  assert.equal(certValidTo(NAME), null);
+});

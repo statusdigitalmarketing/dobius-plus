@@ -2468,7 +2468,7 @@ async function autoEnableMobileHttps() {
   // Any cert with life left, renewable or not: a start that could not read the
   // MagicDNS name came up on plain HTTP, so move it onto HTTPS.
   const st = getMobileServerStatus();
-  if (validTo && validTo - Date.now() > 86_400_000 && st.running && !st.secure && !certJob) {
+  if (validTo && validTo > Date.now() && st.running && !st.secure && !certJob) {
     certJob = restartMobileServer().then(() => ({ ok: true, name })).finally(() => { certJob = null; });
     await certJob;
   }

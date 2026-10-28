@@ -10,7 +10,8 @@
 import fsSync from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
-import { X509Certificate, createPrivateKey } from 'crypto';
+import { X509Certificate } from 'crypto';
+import tls from 'tls';
 import { app } from 'electron';
 
 const TS_CANDIDATES = [
@@ -75,9 +76,11 @@ export function certValidTo(name) {
   const p = certPathsFor(name);
   if (!p) return null;
   try {
-    const x509 = new X509Certificate(fsSync.readFileSync(p.certFile));
-    if (!x509.checkPrivateKey(createPrivateKey(fsSync.readFileSync(p.keyFile)))) return null;
-    const t = Date.parse(x509.validTo);
+    const cert = fsSync.readFileSync(p.certFile);
+    // The same load the HTTPS server does: parses the whole chain (X509 alone
+    // reads only the leaf) and throws when the key does not match.
+    tls.createSecureContext({ cert, key: fsSync.readFileSync(p.keyFile) });
+    const t = Date.parse(new X509Certificate(cert).validTo);
     return Number.isFinite(t) ? t : null;
   } catch {
     return null;
