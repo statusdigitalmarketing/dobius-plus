@@ -1010,6 +1010,7 @@ export function getMobileServerStatus() {
     address: boundAddress,
     secure: serveInfo?.secure || false,
     certValidTo: serveInfo?.certValidTo || null,
+    certName: serveInfo?.certName || null,
     url: serveInfo?.url || null,
     pairingCode: httpServer ? pairingCode : null,
     deviceCount: getMobileServerConfig().devices.length,
@@ -1386,6 +1387,7 @@ async function doStartMobileServer(stillCurrent) {
   const pendingServeInfo = {
     secure,
     certValidTo,
+    certName: secure ? magicName : null,
     url: secure ? `https://${magicName}:${port}/` : `http://${ip}:${port}/`,
   };
 

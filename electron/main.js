@@ -2430,6 +2430,10 @@ function setupMobileServerHandlers() {
   });
 }
 
+// The running server is on plain HTTP, on another MagicDNS name's cert (the
+// Mac was renamed), or on an older cert than the one on disk for `name`.
+const servingOlder = (st, name, disk) => !st.secure || st.certName !== name || disk > (st.certValidTo || 0);
+
 async function restartMobileServer() {
   await stopMobileServer(); // await close so HTTPS restart doesn't hit EADDRINUSE
   await maybeAutoStartMobileServer(); // restart, and keep retrying if it fails
@@ -2446,7 +2450,7 @@ function provisionCertAndRestart() {
     // phone.
     const st = getMobileServerStatus();
     const disk = res.ok && certValidTo(res.name);
-    if (disk && st.running && (!st.secure || disk > (st.certValidTo || 0))) await restartMobileServer();
+    if (disk && st.running && servingOlder(st, res.name, disk)) await restartMobileServer();
     return res;
   })().finally(() => { certJob = null; });
   return certJob;
@@ -2472,7 +2476,7 @@ async function autoEnableMobileHttps() {
   // HTTP, or a renewal wrote a new cert but failed (timeout) before restarting.
   const disk = certValidTo(name);
   const st = getMobileServerStatus();
-  if (disk && disk > Date.now() && st.running && (!st.secure || disk > (st.certValidTo || 0)) && !certJob) {
+  if (disk && disk > Date.now() && st.running && servingOlder(st, name, disk) && !certJob) {
     certJob = restartMobileServer().then(() => ({ ok: true, name })).finally(() => { certJob = null; });
     await certJob;
   }

@@ -99,7 +99,7 @@ export default function Board({ connection, status, onOpen, onShowHistory, onRep
       enablePush(connection).catch(() => { /* best-effort token rebind */ });
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [connection]); // a re-pair brings a new connection: rebind to its token
   // Tick so relative times ("3m") refresh on quiet sessions: the server omits
   // lastActivityAt from its change signature, so without this the board only
   // re-renders on a status change and a time could stay "just now". Codex P3.
