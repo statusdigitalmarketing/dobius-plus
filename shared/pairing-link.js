@@ -15,6 +15,20 @@ export function pairingOrigin(mobileStatus) {
   return '';
 }
 
+// What the QR code holds: the Mac's own mobile page, which any scanner opens
+// in Safari. (The dobiusplus:// link below only opens when the iPhone app is
+// installed; every other scanner reports "no usable data".) The code rides in
+// the fragment only over HTTPS: on plain HTTP a phone off Tailscale can be
+// served an impostor page by the local network that reads the fragment, so
+// there the link prefills the Mac and the user types the code.
+export function buildPairingWebLink(mobileStatus) {
+  if (!mobileStatus?.pairingCode) return '';
+  const origin = pairingOrigin(mobileStatus);
+  if (!origin) return '';
+  if (!origin.startsWith('https://')) return `${origin}/#pair`;
+  return `${origin}/#pair=${encodeURIComponent(String(mobileStatus.pairingCode))}`;
+}
+
 // The dobiusplus:// deep link: the mobile app's @capacitor/app URL handler
 // reads `host` and `code` off it and pre-fills the pairing screen.
 export function buildPairingDeepLink(mobileStatus) {
@@ -35,6 +49,7 @@ export function pairingText(mobileStatus) {
     'Dobius+ pairing',
     `Mac address: ${origin}`,
     `Pairing code: ${mobileStatus.pairingCode}`,
-    `Tap to pair: ${buildPairingDeepLink(mobileStatus)}`,
+    `Tap to pair: ${buildPairingWebLink(mobileStatus)}`,
+    `In the Dobius+ iPhone app: ${buildPairingDeepLink(mobileStatus)}`,
   ].join('\n');
 }

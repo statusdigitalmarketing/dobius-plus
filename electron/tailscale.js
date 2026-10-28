@@ -25,26 +25,49 @@ export function tailscaleBin() {
   return null;
 }
 
+// Tailscale.app's binary is the CLI only when TERM is set. Without it (any
+// app opened from the Dock or Finder) it tries to launch the GUI instead,
+// prints "The Tailscale GUI failed to start" and EXITS 0, which is why
+// "Enable HTTPS" used to report success and write no certificate.
+const CLI_ENV = { ...process.env, TERM: process.env.TERM || 'dumb' };
+
 function run(bin, args, timeout = 20000) {
   return new Promise((resolve) => {
-    execFile(bin, args, { timeout }, (err, stdout, stderr) => {
+    execFile(bin, args, { timeout, env: CLI_ENV }, (err, stdout, stderr) => {
       resolve({ err, stdout: stdout || '', stderr: stderr || '' });
     });
   });
 }
 
-/** The Mac's MagicDNS name (no trailing dot), or null. */
-export async function getMagicDNSName() {
+async function statusJson() {
   const bin = tailscaleBin();
   if (!bin) return null;
   const { err, stdout } = await run(bin, ['status', '--json']);
   if (err) return null;
-  try {
-    const j = JSON.parse(stdout);
-    const name = j?.Self?.DNSName;
-    if (typeof name === 'string' && name) return name.replace(/\.$/, '');
-  } catch { /* fall through */ }
-  return null;
+  try { return JSON.parse(stdout); } catch { return null; }
+}
+
+/** The Mac's MagicDNS name (no trailing dot), or null. */
+export async function getMagicDNSName() {
+  const name = (await statusJson())?.Self?.DNSName;
+  return typeof name === 'string' && name ? name.replace(/\.$/, '') : null;
+}
+
+/**
+ * The MagicDNS name when the tailnet can issue it a certificate (HTTPS
+ * Certificates on in the admin console), else null.
+ */
+export async function certCapableName() {
+  const j = await statusJson();
+  const name = typeof j?.Self?.DNSName === 'string' ? j.Self.DNSName.replace(/\.$/, '') : '';
+  const domains = Array.isArray(j?.CertDomains) ? j.CertDomains : [];
+  return name && domains.includes(name) ? name : null;
+}
+
+/** Days since the cert file was written (tailscale issues 90-day certs). */
+export function certAgeDays(name) {
+  const p = certPathsFor(name);
+  try { return (Date.now() - fsSync.statSync(p.certFile).mtimeMs) / 86_400_000; } catch { return Infinity; }
 }
 
 /** Where Dobius keeps the tailnet TLS cert/key (0700 dir). */
@@ -83,7 +106,14 @@ export async function provisionCert() {
   if (!name) return { ok: false, error: 'Could not read your Tailscale MagicDNS name. Is Tailscale running?' };
   const p = certPathsFor(name);
   if (!p) return { ok: false, error: 'Invalid MagicDNS name.' };
-  const { err, stderr } = await run(bin, ['cert', '--cert-file', p.certFile, '--key-file', p.keyFile, name], 60000);
+  const startedAt = Date.now();
+  const { err, stdout, stderr } = await run(bin, ['cert', '--cert-file', p.certFile, '--key-file', p.keyFile, name], 60000);
+  // Success is a cert file written by THIS run, never the exit code (see
+  // CLI_ENV); an older file from a previous provision does not count.
+  if (!err && !(hasCertFor(name) && certAgeDays(name) * 86_400_000 <= Date.now() - startedAt + 2000)) {
+    const said = `${stdout}\n${stderr}`.trim().split('\n').filter(Boolean).pop() || '';
+    return { ok: false, error: `tailscale cert wrote no certificate. ${said}`.trim().slice(0, 240) };
+  }
   if (err) {
     const hint = /HTTPS|not enabled|feature/i.test(stderr)
       ? 'Enable HTTPS Certificates for your tailnet in the Tailscale admin console, then retry.'

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { buildPairingDeepLink } from '../../../shared/pairing-link.js';
+import { buildPairingWebLink } from '../../../shared/pairing-link.js';
 import { useStore } from '../../store/store';
 import { CURATED_TERMINAL_FONTS, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
@@ -598,8 +598,8 @@ export default function Settings() {
             <SettingRow
               label="HTTPS"
               description={mobileStatus.secure
-                ? 'Secure: notifications and install are available'
-                : 'HTTP only: terminal works, but push notifications and installing the app need HTTPS'}
+                ? 'Secure: notifications and install are available. A phone paired before HTTPS came on needs one re-pair: scan the code below'
+                : 'HTTP only: push notifications and installing the app need HTTPS. It turns on by itself at launch once HTTPS Certificates are enabled for your tailnet'}
             >
               {mobileStatus.secure ? (
                 <span className="text-xs px-2 py-1 rounded" style={{ color: 'var(--accent)', backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}>
@@ -649,7 +649,7 @@ export default function Settings() {
               >
                 <div style={{ background: '#fff', padding: 8, borderRadius: 6, lineHeight: 0 }}>
                   <QRCodeSVG
-                    value={buildPairingDeepLink(mobileStatus)}
+                    value={buildPairingWebLink(mobileStatus)}
                     size={120}
                     level="M"
                     includeMargin={false}
@@ -657,10 +657,12 @@ export default function Settings() {
                 </div>
                 <div className="text-xs" style={{ color: 'var(--dim)' }}>
                   <div style={{ color: 'var(--fg)', marginBottom: 4, fontWeight: 500 }}>
-                    Scan with Dobius+ on your phone
+                    Scan with your iPhone camera
                   </div>
-                  Opens the app and pre-fills the Mac address plus this code so you only
-                  tap &ldquo;Pair this device.&rdquo; The code rotates on regenerate.
+                  Opens Dobius+ in Safari with this Mac filled in{mobileStatus.url?.startsWith('https://')
+                    ? ' and this code too, so you only tap “Pair this device.”'
+                    : '; type this code there. With HTTPS on, the code is filled in too.'}
+                  {' '}Needs Tailscale on the phone. The code rotates on regenerate.
                 </div>
               </div>
             )}

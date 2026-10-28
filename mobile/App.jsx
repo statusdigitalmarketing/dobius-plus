@@ -45,6 +45,30 @@ export default function App() {
   const [view, setView] = useState('board'); // 'board' | 'terminal' | 'history'
   const [openTabId, setOpenTabId] = useState(null); // terminal opened from the board
 
+  // Scanned the Mac's QR code (shared/pairing-link.js buildPairingWebLink):
+  // this page was opened at <origin>/#pair=<code>. Read the code, take it out
+  // of the address bar, and route it through the same pairing path as a deep
+  // link, CONFIRM STEP INCLUDED: being served from an origin does not prove it
+  // is the user's own Mac (anyone can host this bundle and text the link).
+  // Kept even when a token is stored, so a revoked token falls back to a
+  // pre-filled pairing screen. Native builds take deep links instead.
+  useEffect(() => {
+    if (window.Capacitor?.isNativePlatform?.() === true) return undefined;
+    // Never inside a frame: a page that frames this one could lay the Pair
+    // button under its own and hide the address shown for confirmation.
+    if (window.top !== window.self) return undefined;
+    const consume = () => {
+      // `#pair=<code>` over HTTPS, bare `#pair` (address only) over HTTP.
+      const m = /^#pair(?:=(\d{6}))?$/.exec(window.location.hash || '');
+      if (!m) return;
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      setDeepLink((prev) => ({ host: window.location.origin, code: m[1] || '', nonce: prev.nonce + 1 }));
+    };
+    consume();
+    window.addEventListener('hashchange', consume); // a second scan in the same tab
+    return () => window.removeEventListener('hashchange', consume);
+  }, []);
+
   // Load persisted host + token on mount. @capacitor/preferences is async
   // so we render a brief Connecting state until this resolves. Falls back to
   // legacy localStorage keys so a user upgrading from the self-use TestFlight

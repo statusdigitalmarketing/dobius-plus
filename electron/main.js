@@ -82,7 +82,7 @@ import {
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
-import { provisionCert } from './tailscale.js';
+import { provisionCert, certCapableName, hasCertFor, certAgeDays } from './tailscale.js';
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
@@ -2415,11 +2415,7 @@ function setupMobileServerHandlers() {
   // Provision the tailnet HTTPS cert (Phase 4): enables service-worker install
   // and Web Push. If the server is running, restart it so it picks up HTTPS.
   ipcMain.handle('mobileServer:provisionCert', async () => {
-    const res = await provisionCert();
-    if (res.ok && getMobileServerStatus().running) {
-      await stopMobileServer(); // await close so HTTPS restart doesn't hit EADDRINUSE
-      await maybeAutoStartMobileServer(); // restart, and keep retrying if it fails
-    }
+    const res = await provisionCertAndRestart();
     return { ...res, status: getMobileServerStatus() };
   });
   // Device list — opaque deviceId only. Tokens stay server-side.
@@ -2432,6 +2428,28 @@ function setupMobileServerHandlers() {
       pairedAt: d.pairedAt,
     }));
   });
+}
+
+async function provisionCertAndRestart() {
+  const res = await provisionCert();
+  if (res.ok && getMobileServerStatus().running) {
+    await stopMobileServer(); // await close so HTTPS restart doesn't hit EADDRINUSE
+    await maybeAutoStartMobileServer(); // restart, and keep retrying if it fails
+  }
+  return res;
+}
+
+// HTTPS turns itself on: when the tailnet can issue this Mac a certificate
+// and there is none yet (or it is past day 60 of its 90), provision it and
+// restart the mobile server on it. ponytail: checked once per launch; a Mac
+// left running past day 90 renews on its next launch.
+async function autoEnableMobileHttps() {
+  if (!getMobileServerConfig().enabled) return;
+  const name = await certCapableName();
+  if (!name || (hasCertFor(name) && certAgeDays(name) < 60)) return;
+  const res = await provisionCertAndRestart();
+  if (res.ok) console.log(`[mobile-server] HTTPS enabled automatically for ${name}`);
+  else console.warn('[mobile-server] automatic HTTPS failed:', res.error);
 }
 
 function setupAutoResumeHandlers() {
@@ -3220,7 +3238,9 @@ app.whenReady().then(() => {
   setupMenu();
   createWindow();
   initAutoUpdater();
-  maybeAutoStartMobileServer();
+  maybeAutoStartMobileServer()
+    .then(() => autoEnableMobileHttps())
+    .catch((err) => console.warn('[mobile-server] start / automatic HTTPS:', err?.message || err));
   setupSessionTabCapture();
   // Main-process terminal status authority (v1.0.43, remote Phase 1): observe
   // every PTY's output/exit so tab status (working/done/needs) + recent exits
