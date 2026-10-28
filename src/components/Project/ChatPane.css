@@ -8,7 +8,7 @@
   color: var(--fg);
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
   font-size: 14px;
-
+  overflow: hidden;
 }
 .chatp-head {
   display: flex;
@@ -123,7 +123,7 @@
 .chatp-shell pre { white-space: pre-wrap; word-break: break-word; max-height: 55vh; overflow-y: auto; }
 .chatp-start { display: flex; gap: 10px; margin: 6px 0 16px; }
 
-.chatp-dock { padding-bottom: 14px; flex-shrink: 0; }
+.chatp-dock { padding-bottom: 14px; flex-shrink: 0; max-height: 65%; overflow-y: auto; }
 .chatp-selector {
   border: 1px solid var(--accent);
   background: var(--accent-muted);

@@ -3,9 +3,9 @@
 // this, so a regression here types into someone's live shell.
 // Run: node --import ./electron/__tests__/chat-service-register.mjs ./electron/__tests__/chat-service.test.mjs
 import assert from 'node:assert/strict';
-import { writes, ptys } from './fake-terminal-manager.mjs';
+import { writes, ptys, writeTerminal } from './fake-terminal-manager.mjs';
 
-const { submitPromptToTab, noteRawInput } = await import('../chat-service.js');
+const { submitPromptToTab, noteRawInput, selectorToken } = await import('../chat-service.js');
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
 const reset = () => { writes.length = 0; ptys.clear(); };
@@ -37,14 +37,17 @@ assert.deepEqual(r, [false, false]);
 assert.deepEqual(writes.map((w) => w[1]), [PASTE('first')]);
 ok('replaced PTY: no Enter, queued submit dropped');
 
-// 4. The caller's check runs before the Enter too.
+// 4. The caller's check gates the paste; a paste that went out always gets
+// its Enter (a phone that drops mid-submit must not leave half-typed text to
+// be glued onto the next message).
 reset(); ptys.set('a', {});
 let allowed = true;
 p = submitPromptToTab('a', 'x', () => allowed);
+const p4 = submitPromptToTab('a', 'y', () => allowed);
 allowed = false;
-assert.equal(await p, false);
-assert.deepEqual(writes.map((w) => w[1]), [PASTE('x')]);
-ok('stillOk false at Enter time: Enter withheld');
+assert.deepEqual(await Promise.all([p, p4]), [true, false]);
+assert.deepEqual(writes.map((w) => w[1]), [PASTE('x'), '\r']);
+ok('stillOk gates the paste, never strands one without its Enter');
 
 // 5. Rejected up front: no PTY, or not allowed.
 reset();
@@ -86,5 +89,18 @@ const pb = submitPromptToTab('b', 'B');
 assert.deepEqual(writes.map((w) => w.join(':')), [`a:${PASTE('A')}`, `b:${PASTE('B')}`]);
 await Promise.all([p, pb]);
 ok('tabs are independent');
+
+// 10. Selector token: same PTY and no input since, or it is stale.
+reset(); ptys.set('a', {});
+const t1 = selectorToken('a');
+assert.equal(selectorToken('a'), t1);
+writeTerminal('a', '1'); // the phone answered
+assert.notEqual(selectorToken('a'), t1);
+const t2 = selectorToken('a');
+ptys.set('a', {}); // replaced PTY, same id
+assert.notEqual(selectorToken('a'), t2);
+ptys.clear();
+assert.equal(selectorToken('a'), '');
+ok('selector token goes stale on any input or a new PTY');
 
 console.log(`\n${pass} passed`);

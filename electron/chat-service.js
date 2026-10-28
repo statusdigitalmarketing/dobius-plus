@@ -2,7 +2,7 @@
 // the live selector popup, a plain-text tail of the screen, and the
 // paste-then-Enter submit. Main-process only.
 
-import { getTerminalBuffer, writeTerminal, terminalInstance } from './terminal-manager.js';
+import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq } from './terminal-manager.js';
 import { parseSelector, parseSelectorFromScreen, stripAnsi } from './selector-parser.js';
 import { renderScreenLines } from './screen-render.js';
 
@@ -31,6 +31,21 @@ export function terminalTextTail(id, maxLines = 60) {
   return lines.slice(-maxLines).join('\n');
 }
 
+// A selector read is stamped with the PTY and the count of writes it has
+// received (from any surface: desktop terminal, Chat, phone, auto-resume). An
+// answer is only delivered while both still match, so a prompt answered
+// elsewhere can never be "answered" again into whatever prompt replaced it.
+const ptySerials = new WeakMap();
+let nextPtySerial = 1;
+
+/** `<pty serial>:<input count>` for the tab right now, or '' with no PTY. */
+export function selectorToken(id) {
+  const pty = terminalInstance(id);
+  if (!pty) return '';
+  if (!ptySerials.has(pty)) ptySerials.set(pty, nextPtySerial++);
+  return `${ptySerials.get(pty)}:${terminalInputSeq(id)}`;
+}
+
 const SUBMIT_ENTER_DELAY_MS = 250;
 // tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
 // under an older gen is dropped instead of pasted.
@@ -50,7 +65,9 @@ const submitQueues = new Map();
  * (a Ctrl+U in the same WebSocket read) still lands after the paste, as it
  * always did. The PTY is captured when the submit is ACCEPTED: nothing is
  * pasted or confirmed into a shell that replaced it meanwhile, and nothing is
- * sent once `stillOk()` (the caller's ownership or connection check) says no.
+ * pasted once `stillOk()` (the caller's ownership or connection check) says
+ * no. A paste that went out is always followed by its Enter: leaving the text
+ * half-typed would glue it onto the next message.
  *
  * @returns {Promise<boolean>} whether the Enter was sent
  */
@@ -72,11 +89,10 @@ async function drainSubmits(id, q) {
   q.running = true;
   while (q.items.length > 0) {
     const it = q.items.shift();
-    const live = () => terminalInstance(id) === it.pty && it.stillOk();
-    if (it.gen !== q.gen || !live()) { it.resolve(false); continue; }
+    if (it.gen !== q.gen || terminalInstance(id) !== it.pty || !it.stillOk()) { it.resolve(false); continue; }
     writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
     await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
-    if (!live()) { it.resolve(false); continue; }
+    if (terminalInstance(id) !== it.pty) { it.resolve(false); continue; }
     writeTerminal(id, '\r');
     it.resolve(true);
   }

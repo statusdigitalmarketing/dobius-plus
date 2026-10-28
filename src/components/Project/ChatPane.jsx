@@ -7,7 +7,14 @@ import './ChatPane.css';
 
 const POLL_MS = 1500;
 // Unsent drafts outlive the pane: switching a tab to Terminal unmounts it.
+// A tab that leaves this window (closed, torn off) takes nothing with it, and
+// must not find an old draft here if it is ever docked back.
 const drafts = new Map(); // tabId -> text
+useStore.subscribe((s, prev) => {
+  if (s.terminalTabs === prev.terminalTabs || drafts.size === 0) return;
+  const ids = new Set(s.terminalTabs.map((t) => t.id));
+  for (const id of drafts.keys()) if (!ids.has(id)) drafts.delete(id);
+});
 const SELECTOR_POLL_MS = 2500;
 const ECHO_TTL_MS = 90_000;
 
@@ -107,6 +114,11 @@ const mdComponents = {
         e.preventDefault();
         if (href) window.electronAPI?.openExternal?.(href);
       }}
+      // Middle-click fires auxclick, not click, and would open an app window.
+      onAuxClick={(e) => {
+        e.preventDefault();
+        if (e.button === 1 && href) window.electronAPI?.openExternal?.(href);
+      }}
     >
       {children}
     </a>
@@ -162,16 +174,12 @@ export default function ChatPane({ tabId, visible }) {
   const [shellText, setShellText] = useState(null);
   const [claudeLive, setClaudeLive] = useState(false);
   const [status, setStatus] = useState(null);
-  const [selector, setSelector] = useState(null);
+  const [selector, setSelector] = useState(null); // { prompt, options, token }
   const [echoes, setEchoes] = useState([]);
-  const [draft, setDraftState] = useState(() => drafts.get(tabId) || '');
-  const setDraft = useCallback((next) => {
-    setDraftState((prev) => {
-      const v = typeof next === 'function' ? next(prev) : next;
-      if (v) drafts.set(tabId, v); else drafts.delete(tabId);
-      return v;
-    });
-  }, [tabId]);
+  const [draft, setDraft] = useState(() => drafts.get(tabId) || '');
+  useEffect(() => {
+    if (draft) drafts.set(tabId, draft); else drafts.delete(tabId);
+  }, [draft, tabId]);
   const [notice, setNotice] = useState('');
 
   const haveRef = useRef(null); // { sessionId, projectPath, sig } of the messages we hold
@@ -185,10 +193,22 @@ export default function ChatPane({ tabId, visible }) {
   const inputRef = useRef(null);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
+  const sessionIdRef = useRef(undefined);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
+
+  // Any selector read in flight describes the screen before now; discard it.
+  const dropPendingSelector = useCallback(() => { selAppliedRef.current = ++selSeqRef.current; }, []);
 
   const apply = useCallback((r) => {
     setStatus(r.status || null);
     setClaudeLive(!!r.claudeLive);
+    if (sessionIdRef.current !== r.sessionId) {
+      // A different conversation (or none): the old prompt's buttons go.
+      sessionIdRef.current = r.sessionId;
+      dropPendingSelector();
+      setSelector(null);
+    }
     // Optimistic bubbles belong to the session they were sent into.
     setEchoes((cur) => {
       const kept = cur.filter((e) => e.sid === r.sessionId);
@@ -233,7 +253,7 @@ export default function ChatPane({ tabId, visible }) {
       haveRef.current = null;
       setMessages((prev) => (!sameSession || !prev || prev.length === 0 || emptyStreakRef.current >= 2 ? [] : prev));
     }
-  }, []);
+  }, [dropPendingSelector]);
 
   const pollOnce = useCallback(async () => {
     const seq = ++pollSeqRef.current;
@@ -242,6 +262,9 @@ export default function ChatPane({ tabId, visible }) {
     if (!r || seq < appliedSeqRef.current) return;
     appliedSeqRef.current = seq;
     apply(r);
+    // "Unchanged" against a cache a newer reply already dropped: fetch it now
+    // instead of sitting on "Loading" until the next tick.
+    if (r.unchanged && !haveRef.current && mountedRef.current) await pollOnce();
   }, [tabId, apply]);
 
   const pollSelector = useCallback(async () => {
@@ -250,7 +273,8 @@ export default function ChatPane({ tabId, visible }) {
     try { sel = await window.electronAPI?.chatSelector?.(tabId); } catch { sel = null; }
     if (seq < selAppliedRef.current) return;
     selAppliedRef.current = seq;
-    setSelector(sel && Array.isArray(sel.options) && sel.options.length > 0 ? sel : null);
+    const s2 = sel?.selector;
+    setSelector(s2 && Array.isArray(s2.options) && s2.options.length > 0 ? { ...s2, token: sel.token } : null);
   }, [tabId]);
 
   // Transcript + status poll, only while this pane is on screen.
@@ -270,7 +294,7 @@ export default function ChatPane({ tabId, visible }) {
     if (!visible) {
       // Off screen the prompt can be answered elsewhere (the phone, the
       // terminal); never show a remembered one when coming back.
-      selAppliedRef.current = ++selSeqRef.current;
+      dropPendingSelector();
       setSelector(null);
       return undefined;
     }
@@ -282,7 +306,7 @@ export default function ChatPane({ tabId, visible }) {
     };
     tick();
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [visible, pollSelector]);
+  }, [visible, pollSelector, dropPendingSelector]);
 
   // Coming on screen: jump to the newest message.
   useEffect(() => {
@@ -302,9 +326,11 @@ export default function ChatPane({ tabId, visible }) {
 
   // Clicking, focusing or dragging over this pane makes its tab the active
   // one, so window-level drops and shortcuts target what the user is using.
+  // Not for split's right pane: the split guard would hand activity (and
+  // focus) straight back to the left tab.
   const activate = () => {
     const st = useStore.getState();
-    if (st.activeTabId !== tabId) st.setActiveTab(tabId);
+    if (st.activeTabId !== tabId && st.splitTabId !== tabId) st.setActiveTab(tabId);
   };
 
   useEffect(() => {
@@ -323,7 +349,7 @@ export default function ChatPane({ tabId, visible }) {
     if (!ta) return;
     ta.style.height = 'auto';
     ta.style.height = `${Math.min(ta.scrollHeight, 220)}px`;
-  }, [draft]);
+  }, [draft, visible]); // a pane mounted hidden measured 0; measure again when shown
 
   const flash = (msg) => {
     setNotice(msg);
@@ -339,7 +365,10 @@ export default function ChatPane({ tabId, visible }) {
   const submit = async (text, { echo = true } = {}) => {
     const sid = sessionId;
     const ok = await window.electronAPI?.chatSubmit?.(tabId, text);
-    if (ok && echo && sid) setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid }]);
+    // Only if the conversation it went into is still the one on screen.
+    if (ok && echo && sid && sessionIdRef.current === sid) {
+      setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid }]);
+    }
     if (ok) refreshSoon();
     return !!ok;
   };
@@ -350,35 +379,52 @@ export default function ChatPane({ tabId, visible }) {
     setDraft('');
     atBottomRef.current = true;
     const ok = await submit(text, { echo: !!sessionId });
-    if (!ok) {
+    if (!ok && mountedRef.current) {
       // Keep what they wrote: put it back unless they already started a new one.
       setDraft((cur) => (cur ? cur : text));
       flash('Could not send. The tab may have closed or moved to another window.');
     }
   };
 
-  // Any read already in flight describes the screen BEFORE this input, so
-  // its answer is discarded rather than redrawing a prompt we just answered.
-  const dropPendingSelector = () => { selAppliedRef.current = ++selSeqRef.current; };
-
-  const sendKeys = (seq, closes = false) => {
-    window.electronAPI?.terminalWrite?.(tabId, seq);
+  // Answer the prompt on screen. Main delivers the key only if nothing has
+  // typed into the tab since this card was read (the phone, the terminal),
+  // so these buttons can never land on a prompt the user has not seen.
+  const selectorKey = async (seq, closes = false) => {
+    const token = selector?.token;
     dropPendingSelector();
     if (closes) setSelector(null);
-    refreshSoon();
     inputRef.current?.focus(); // a clicked key button must not keep focus
+    const r = await window.electronAPI?.chatKey?.(tabId, seq, token);
+    if (!mountedRef.current) return;
+    if (!r?.ok) {
+      setSelector(null);
+      if (r?.stale) flash('That prompt changed. Showing the current one.');
+      pollSelector();
+      return;
+    }
+    if (!closes) setSelector((cur) => (cur && cur.token === token ? { ...cur, token: r.token } : cur));
+    refreshSoon();
   };
 
   const chooseOption = (num) => {
     // The absolute option digit, never relative arrows: a misparsed cursor
     // position then cannot pick a different option than the label shown.
-    sendKeys(String(num), true);
+    selectorKey(String(num), true);
     atBottomRef.current = true;
+  };
+
+  const interrupt = () => {
+    window.electronAPI?.terminalWrite?.(tabId, '\x1b');
+    dropPendingSelector();
+    setSelector(null);
+    refreshSoon();
+    inputRef.current?.focus();
   };
 
   const insertText = (text) => {
     setDraft((prev) => prev + (prev && !/\s$/.test(prev) ? ' ' : '') + text);
-    inputRef.current?.focus();
+    // A slow image save must not pull focus back from a pane used since.
+    if (useStore.getState().activeTabId === tabId) inputRef.current?.focus();
   };
 
   const onPaste = async (e) => {
@@ -467,7 +513,7 @@ export default function ChatPane({ tabId, visible }) {
         {messages.map((m, i) => (
           <Message key={i} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued} />
         ))}
-        {echoes.map((e) => (
+        {echoes.filter((e) => e.sid === sessionId).map((e) => (
           <Message key={`echo-${e.at}`} role="user" content={e.content} timestamp={e.at} sending />
         ))}
         {working && (
@@ -504,7 +550,7 @@ export default function ChatPane({ tabId, visible }) {
             ))}
             <div className="chatp-keys">
               {SELECTOR_KEYS.map(([label, seq, closes]) => (
-                <button type="button" key={label} className="chatp-key" onClick={() => sendKeys(seq, closes)}>{label}</button>
+                <button type="button" key={label} className="chatp-key" onClick={() => selectorKey(seq, closes)}>{label}</button>
               ))}
             </div>
           </div>
@@ -526,7 +572,7 @@ export default function ChatPane({ tabId, visible }) {
             }}
           />
           {working && (
-            <button type="button" className="chatp-btn stop" onClick={() => sendKeys('\x1b', true)} title="Interrupt Claude (Esc)">Stop</button>
+            <button type="button" className="chatp-btn stop" onClick={interrupt} title="Interrupt Claude (Esc)">Stop</button>
           )}
           <button type="button" className="chatp-btn primary" onClick={send} disabled={!draft.trim()} title="Send (Enter). Shift+Enter for a new line">
             Send

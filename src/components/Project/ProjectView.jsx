@@ -1217,7 +1217,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
                       {tab.kind !== 'browser' && tab.viewMode === 'chat' && (() => {
                         const st = paneStyleFor(tab);
                         return (
-                          <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, top: st.paddingTop || 0, zIndex: 8 }}>
+                          <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, top: st.paddingTop || 0, zIndex: 8, overflow: 'hidden' }}>
                             <ChatPane tabId={tab.id} visible={activeView === 'terminal' && st.display !== 'none'} />
                           </div>
                         );

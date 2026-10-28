@@ -377,8 +377,16 @@ export function listTerminals() {
 export function writeTerminal(id, data) {
   const entry = terminals.get(id);
   if (entry) {
+    entry.inputSeq = (entry.inputSeq || 0) + 1; // see terminalInputSeq
     entry.pty.write(data);
   }
+}
+
+// How many writes this tab's terminal has received, from every source. The
+// Chat view stamps a selector read with it so an answer is refused once
+// anything else has typed into the tab since.
+export function terminalInputSeq(id) {
+  return terminals.get(id)?.inputSeq || 0;
 }
 
 /**

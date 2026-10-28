@@ -37,7 +37,7 @@ import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-in
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
-import { liveSelectorForTab, terminalTextTail, submitPromptToTab, noteRawInput } from './chat-service.js';
+import { liveSelectorForTab, terminalTextTail, submitPromptToTab, noteRawInput, selectorToken } from './chat-service.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -625,12 +625,21 @@ function setupDataHandlers() {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return null;
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return null;
+    // Everything below describes THIS shell; a reply about a PTY that was
+    // replaced during the awaits is dropped (the next poll reads the new one).
+    const pty = terminalInstance(tabId);
+    const stillSame = () => !!pty && terminalInstance(tabId) === pty && ownsTerminal(senderId, tabId);
     const status = terminalStatus.snapshot().live[tabId]?.status || null;
     const resolved = await resolveSessionForTab(tabId);
-    const projectPath = resolved ? (resolved.sessionProject || await getTerminalCwd(tabId)) : null;
+    const cwd = await getTerminalCwd(tabId);
+    // The mapped project wins only while the tab is still inside it (a resume
+    // from a subdir keeps the transcript under the project root). A tab that
+    // has moved elsewhere is reading a transcript of ITS project.
+    let projectPath = resolved?.sessionProject || null;
+    if (!projectPath || (cwd && cwd !== projectPath && !cwd.startsWith(`${projectPath}/`))) projectPath = cwd;
     if (!resolved || !projectPath) {
       const claudeLive = !!resolved || !!(await getTerminalClaudeInfo(tabId));
-      if (!ownsTerminal(senderId, tabId)) return null;
+      if (!stillSame()) return null;
       return { sessionId: null, claudeLive, status, shellText: terminalTextTail(tabId) };
     }
     const { sessionId } = resolved;
@@ -638,11 +647,11 @@ function setupDataHandlers() {
     // The renderer echoes the sig of what it holds; an identical file is not
     // re-parsed or re-shipped. The sig only ever came from this main process.
     if (sig && have && have.sig === sig && have.sessionId === sessionId && have.projectPath === projectPath) {
-      if (!ownsTerminal(senderId, tabId)) return null;
+      if (!stillSame()) return null;
       return { sessionId, projectPath, sig, claudeLive: true, status, unchanged: true };
     }
     const entries = (await loadTranscript(sessionId, projectPath, 200)) || [];
-    if (!ownsTerminal(senderId, tabId)) return null;
+    if (!stillSame()) return null;
     return {
       sessionId, projectPath, sig, claudeLive: true, status, entries,
       // A linked session with nothing parsed yet still shows what is on screen.
@@ -653,13 +662,26 @@ function setupDataHandlers() {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return null;
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return null;
-    // Buttons drawn from one shell must never be answered into its
-    // replacement: drop the read if the PTY changed during the render.
-    const pty = terminalInstance(tabId);
+    // Stamp the read BEFORE rendering: any input that lands meanwhile (from
+    // any surface) makes these buttons stale, and chat:key refuses them.
+    const token = selectorToken(tabId);
     let selector;
     try { selector = await liveSelectorForTab(tabId); } catch { selector = null; }
-    if (!pty || terminalInstance(tabId) !== pty || !ownsTerminal(senderId, tabId)) return null;
-    return selector || null;
+    if (!token || selectorToken(tabId) !== token || !ownsTerminal(senderId, tabId)) return null;
+    return selector ? { selector, token } : null;
+  });
+  // Answer a selector read: delivered only while no input has reached the tab
+  // since that read. Returns the fresh token so arrow/space keys can continue
+  // on the same prompt.
+  ipcMain.handle('chat:key', (event, tabId, data, token) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
+    if (typeof data !== 'string' || !data || data.length > 16 || typeof token !== 'string') return { ok: false };
+    if (!ownsTerminal(event.sender.id, tabId)) return { ok: false };
+    if (!token || selectorToken(tabId) !== token) return { ok: false, stale: true };
+    cancelAutoResumeTab(tabId);
+    noteRawInput(tabId, data);
+    writeTerminal(tabId, data);
+    return { ok: true, token: selectorToken(tabId) };
   });
   ipcMain.handle('chat:submit', async (event, tabId, text) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return false;
