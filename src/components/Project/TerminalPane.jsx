@@ -421,6 +421,8 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       ref={wrapperRef}
       className={`w-full h-full flex flex-col ${className}`}
       style={{ backgroundColor: bg, position: 'relative' }}
+      // Under the Chat overlay: no Tab-key focus, no clicks, no hidden Run.
+      inert={inChat}
       onMouseDownCapture={() => activatePane(true)}
       onFocusCapture={() => activatePane(true)}
       onDragEnterCapture={() => activatePane(true)}

@@ -6,6 +6,8 @@ import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
 import './ChatPane.css';
 
 const POLL_MS = 1500;
+// Unsent drafts outlive the pane: switching a tab to Terminal unmounts it.
+const drafts = new Map(); // tabId -> text
 const SELECTOR_POLL_MS = 2500;
 const ECHO_TTL_MS = 90_000;
 
@@ -138,8 +140,11 @@ function normEcho(t) {
 }
 
 const STATUS_TEXT = { working: 'Working', needs: 'Needs you', done: 'Ready' };
+// [label, bytes, closes]: Esc and Enter end the prompt, so the card goes at
+// once and a second click cannot land on whatever prompt comes next.
 const SELECTOR_KEYS = [
-  ['Up', '\x1b[A'], ['Down', '\x1b[B'], ['Space', ' '], ['Esc', '\x1b'], ['Enter', '\r'],
+  ['Up', '\x1b[A', false], ['Down', '\x1b[B', false], ['Space', ' ', false],
+  ['Esc', '\x1b', true], ['Enter', '\r', true],
 ];
 
 /**
@@ -151,6 +156,7 @@ const SELECTOR_KEYS = [
  */
 export default function ChatPane({ tabId, visible }) {
   const setTabViewMode = useStore((s) => s.setTabViewMode);
+  const isActive = useStore((s) => s.activeTabId === tabId);
   const [messages, setMessages] = useState(null); // null = not loaded yet
   const [sessionId, setSessionId] = useState(undefined); // undefined = first poll pending
   const [shellText, setShellText] = useState(null);
@@ -158,7 +164,14 @@ export default function ChatPane({ tabId, visible }) {
   const [status, setStatus] = useState(null);
   const [selector, setSelector] = useState(null);
   const [echoes, setEchoes] = useState([]);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraftState] = useState(() => drafts.get(tabId) || '');
+  const setDraft = useCallback((next) => {
+    setDraftState((prev) => {
+      const v = typeof next === 'function' ? next(prev) : next;
+      if (v) drafts.set(tabId, v); else drafts.delete(tabId);
+      return v;
+    });
+  }, [tabId]);
   const [notice, setNotice] = useState('');
 
   const haveRef = useRef(null); // { sessionId, projectPath, sig } of the messages we hold
@@ -176,6 +189,11 @@ export default function ChatPane({ tabId, visible }) {
   const apply = useCallback((r) => {
     setStatus(r.status || null);
     setClaudeLive(!!r.claudeLive);
+    // Optimistic bubbles belong to the session they were sent into.
+    setEchoes((cur) => {
+      const kept = cur.filter((e) => e.sid === r.sessionId);
+      return kept.length === cur.length ? cur : kept;
+    });
     if (!r.sessionId) {
       haveRef.current = null;
       emptyStreakRef.current = 0;
@@ -249,7 +267,13 @@ export default function ChatPane({ tabId, visible }) {
   }, [visible, pollOnce]);
 
   useEffect(() => {
-    if (!visible) return undefined;
+    if (!visible) {
+      // Off screen the prompt can be answered elsewhere (the phone, the
+      // terminal); never show a remembered one when coming back.
+      selAppliedRef.current = ++selSeqRef.current;
+      setSelector(null);
+      return undefined;
+    }
     let cancelled = false;
     let timer = null;
     const tick = async () => {
@@ -260,16 +284,28 @@ export default function ChatPane({ tabId, visible }) {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [visible, pollSelector]);
 
-  // Coming on screen: jump to the newest message and take focus.
+  // Coming on screen: jump to the newest message.
   useEffect(() => {
     if (!visible) return;
     atBottomRef.current = true;
     requestAnimationFrame(() => {
       const el = bodyRef.current;
       if (el) el.scrollTop = el.scrollHeight;
-      inputRef.current?.focus();
     });
   }, [visible]);
+
+  // Take focus only as THE active tab: in a grid every chat pane is visible,
+  // and the last one to grab focus would receive typing meant for another.
+  useEffect(() => {
+    if (visible && isActive) requestAnimationFrame(() => inputRef.current?.focus());
+  }, [visible, isActive]);
+
+  // Clicking, focusing or dragging over this pane makes its tab the active
+  // one, so window-level drops and shortcuts target what the user is using.
+  const activate = () => {
+    const st = useStore.getState();
+    if (st.activeTabId !== tabId) st.setActiveTab(tabId);
+  };
 
   useEffect(() => {
     const el = bodyRef.current;
@@ -301,8 +337,9 @@ export default function ChatPane({ tabId, visible }) {
   };
 
   const submit = async (text, { echo = true } = {}) => {
+    const sid = sessionId;
     const ok = await window.electronAPI?.chatSubmit?.(tabId, text);
-    if (ok && echo) setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
+    if (ok && echo && sid) setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid }]);
     if (ok) refreshSoon();
     return !!ok;
   };
@@ -320,8 +357,14 @@ export default function ChatPane({ tabId, visible }) {
     }
   };
 
-  const sendKeys = (seq) => {
+  // Any read already in flight describes the screen BEFORE this input, so
+  // its answer is discarded rather than redrawing a prompt we just answered.
+  const dropPendingSelector = () => { selAppliedRef.current = ++selSeqRef.current; };
+
+  const sendKeys = (seq, closes = false) => {
     window.electronAPI?.terminalWrite?.(tabId, seq);
+    dropPendingSelector();
+    if (closes) setSelector(null);
     refreshSoon();
     inputRef.current?.focus(); // a clicked key button must not keep focus
   };
@@ -329,8 +372,7 @@ export default function ChatPane({ tabId, visible }) {
   const chooseOption = (num) => {
     // The absolute option digit, never relative arrows: a misparsed cursor
     // position then cannot pick a different option than the label shown.
-    sendKeys(String(num));
-    setSelector(null);
+    sendKeys(String(num), true);
     atBottomRef.current = true;
   };
 
@@ -436,7 +478,7 @@ export default function ChatPane({ tabId, visible }) {
   }
 
   return (
-    <div className="chatp">
+    <div className="chatp" onMouseDownCapture={activate} onFocusCapture={activate} onDragEnterCapture={activate}>
       <div className="chatp-head">
         <span className={`chatp-status ${status || 'idle'}`} />
         <span className="chatp-head-text">
@@ -461,8 +503,8 @@ export default function ChatPane({ tabId, visible }) {
               </button>
             ))}
             <div className="chatp-keys">
-              {SELECTOR_KEYS.map(([label, seq]) => (
-                <button type="button" key={label} className="chatp-key" onClick={() => sendKeys(seq)}>{label}</button>
+              {SELECTOR_KEYS.map(([label, seq, closes]) => (
+                <button type="button" key={label} className="chatp-key" onClick={() => sendKeys(seq, closes)}>{label}</button>
               ))}
             </div>
           </div>
@@ -484,7 +526,7 @@ export default function ChatPane({ tabId, visible }) {
             }}
           />
           {working && (
-            <button type="button" className="chatp-btn stop" onClick={() => sendKeys('\x1b')} title="Interrupt Claude (Esc)">Stop</button>
+            <button type="button" className="chatp-btn stop" onClick={() => sendKeys('\x1b', true)} title="Interrupt Claude (Esc)">Stop</button>
           )}
           <button type="button" className="chatp-btn primary" onClick={send} disabled={!draft.trim()} title="Send (Enter). Shift+Enter for a new line">
             Send

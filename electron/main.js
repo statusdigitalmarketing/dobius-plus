@@ -34,10 +34,10 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId } from './terminal-manager.js';
+import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
-import { liveSelectorForTab, terminalTextTail, submitPromptToTab } from './chat-service.js';
+import { liveSelectorForTab, terminalTextTail, submitPromptToTab, noteRawInput } from './chat-service.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -276,6 +276,7 @@ function setupTerminalHandlers() {
     // orchestrator itself, which is the desired behavior: if anything
     // touches the tab first, the queued resume defers to that.
     cancelAutoResumeTab(id);
+    noteRawInput(id, data);
     writeTerminal(id, data);
   });
 
@@ -414,6 +415,7 @@ function setupTerminalHandlers() {
       if (typeof t.kind === 'string' && t.kind) out.kind = t.kind;
       if (typeof t.url === 'string' && /^https?:\/\//i.test(t.url)) out.url = t.url;
       if (typeof t.labelLocked === 'boolean') out.labelLocked = t.labelLocked;
+      if (t.viewMode === 'chat') out.viewMode = 'chat';
       return out;
     });
     // Extra windows keep their OWN recently-closed list in their bucket, so
@@ -651,9 +653,13 @@ function setupDataHandlers() {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return null;
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return null;
-    let selector = null;
+    // Buttons drawn from one shell must never be answered into its
+    // replacement: drop the read if the PTY changed during the render.
+    const pty = terminalInstance(tabId);
+    let selector;
     try { selector = await liveSelectorForTab(tabId); } catch { selector = null; }
-    return ownsTerminal(senderId, tabId) ? (selector || null) : null;
+    if (!pty || terminalInstance(tabId) !== pty || !ownsTerminal(senderId, tabId)) return null;
+    return selector || null;
   });
   ipcMain.handle('chat:submit', async (event, tabId, text) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return false;

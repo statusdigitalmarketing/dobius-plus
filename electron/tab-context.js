@@ -26,12 +26,15 @@ export async function resolveSessionForTab(tabId) {
   // A `--resume` tab names its session in argv (read live). A fresh `claude`
   // has no argv id; fall back to the newest ACTIVELY-RUNNING map link.
   let sessionId = info.sessionId;
-  let sessionProject = null;
+  let sessionProject;
   if (sessionId) {
     // The transcript lives under the SESSION's project, not necessarily the
     // tab's live cwd (a same-project resume from a subdir keeps it under the
-    // original project). Prefer the mapped project, fall back to cwd.
-    sessionProject = map[sessionId]?.projectPath || null;
+    // original project). Prefer the mapped project, fall back to cwd. Only
+    // a link to THIS tab counts: the same id can exist under two projects,
+    // and another tab's link would name the other project's transcript.
+    const link = map[sessionId];
+    sessionProject = link?.tabId === tabId ? (link.projectPath || null) : null;
   } else {
     // Only trust a link whose session is currently running, and only if it
     // was stamped at/after this process started (a link stamped earlier

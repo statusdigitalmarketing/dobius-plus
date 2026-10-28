@@ -32,7 +32,9 @@ export function terminalTextTail(id, maxLines = 60) {
 }
 
 const SUBMIT_ENTER_DELAY_MS = 250;
-const submitChains = new Map(); // tabId -> tail promise of queued submits
+// tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
+// under an older gen is dropped instead of pasted.
+const submitQueues = new Map();
 
 /**
  * Type a chat message into a tab the way a human would: bracketed-paste the
@@ -43,10 +45,12 @@ const submitChains = new Map(); // tabId -> tail promise of queued submits
  * how "Start Claude" launches.
  *
  * Submits to one tab run one at a time: two overlapping ones would land both
- * pastes before the first Enter and send them as a single message. The Enter
- * is withheld when the tab's PTY was replaced meanwhile or `stillOk()` (the
- * caller's ownership recheck) now says no, so a message can never be
- * confirmed into a different shell than the one it was pasted into.
+ * pastes before the first Enter and send them as a single message. An idle
+ * tab is pasted into synchronously, so raw input that arrives right after
+ * (a Ctrl+U in the same WebSocket read) still lands after the paste, as it
+ * always did. The PTY is captured when the submit is ACCEPTED: nothing is
+ * pasted or confirmed into a shell that replaced it meanwhile, and nothing is
+ * sent once `stillOk()` (the caller's ownership or connection check) says no.
  *
  * @returns {Promise<boolean>} whether the Enter was sent
  */
@@ -54,18 +58,41 @@ export function submitPromptToTab(id, text, stillOk = () => true) {
   // Strip control chars except \t and \n (multi-line paste is legitimate); \r
   // goes too so the only Enter is the discrete one sent below.
   const clean = String(text).replace(/[\x00-\x08\x0B-\x1F\x7F]/g, '');
-  const prev = submitChains.get(id) || Promise.resolve();
-  const run = prev.then(async () => {
-    const pty = terminalInstance(id);
-    if (!pty || !stillOk()) return false;
-    writeTerminal(id, `\x1b[200~${clean}\x1b[201~`);
-    await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
-    if (terminalInstance(id) !== pty || !stillOk()) return false;
-    writeTerminal(id, '\r');
-    return true;
+  const pty = terminalInstance(id);
+  if (!pty || !stillOk()) return Promise.resolve(false);
+  let q = submitQueues.get(id);
+  if (!q) { q = { running: false, items: [], gen: 0 }; submitQueues.set(id, q); }
+  return new Promise((resolve) => {
+    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve });
+    if (!q.running) drainSubmits(id, q);
   });
-  const tail = run.catch(() => false);
-  submitChains.set(id, tail);
-  tail.then(() => { if (submitChains.get(id) === tail) submitChains.delete(id); });
-  return run;
+}
+
+async function drainSubmits(id, q) {
+  q.running = true;
+  while (q.items.length > 0) {
+    const it = q.items.shift();
+    const live = () => terminalInstance(id) === it.pty && it.stillOk();
+    if (it.gen !== q.gen || !live()) { it.resolve(false); continue; }
+    writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
+    await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
+    if (!live()) { it.resolve(false); continue; }
+    writeTerminal(id, '\r');
+    it.resolve(true);
+  }
+  q.running = false;
+  if (submitQueues.get(id) === q) submitQueues.delete(id);
+}
+
+/**
+ * Raw input that cancels (Ctrl+C, Ctrl+U, a bare Esc) also drops submits that
+ * are still queued behind another one, as it would have when every paste went
+ * out at once. The submit already pasted is left to the shell or TUI, which
+ * the same key just cleared.
+ */
+export function noteRawInput(id, data) {
+  if (typeof data !== 'string') return;
+  if (data !== '\x1b' && !data.includes('\x03') && !data.includes('\x15')) return;
+  const q = submitQueues.get(id);
+  if (q) q.gen += 1;
 }
