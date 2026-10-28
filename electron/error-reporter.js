@@ -45,6 +45,11 @@ const MAX_GH_FAILURES = 3; // in a row: GitHub is down or rate limiting, back of
 // renderer.gone / child.gone (both handlers log the same event).
 // main.stall-watchdog is the watchdog's own status (armed, clock jumped over a
 // sleep), not a stall; main.stall is the real one.
+// Error codes Node and libuv report after a path (`/Users/sid: EACCES`).
+const ERRNO = new Set(['EACCES', 'EPERM', 'ENOENT', 'EEXIST', 'EMFILE', 'ENFILE', 'EBUSY', 'ENOTDIR', 'EISDIR',
+  'ENOSPC', 'EROFS', 'ELOOP', 'ENAMETOOLONG', 'ENOTEMPTY', 'EXDEV', 'EINVAL', 'EIO', 'EAGAIN', 'ETIMEDOUT',
+  'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ENOTSUP', 'EBADF', 'ECANCELED']);
+
 // guest.* is a <webview> pane's third-party page (error-log.js): never ours.
 const SKIP_KIND = /^(app|error-log|main\.warn|main\.stall-watchdog|crash\.render-process-gone|crash\.child-process-gone|guest\..*)$/;
 
@@ -158,7 +163,9 @@ export function scrub(text, home = os.homedir()) {
       // path and an error, not a credential: `/Users/sid: EACCES` (Codex).
       // Any other value after a slash-qualified key is still a secret
       // (`database/password=hunter2`).
-      /[/\\]$/.test(all.slice(Math.max(0, at - 1), at)) && /^E[A-Z0-9]{2,}$/.test(value) ? m : `${key}[redacted]`));
+      // Only a ':' separator and a KNOWN errno name: a value merely shaped
+      // like one (`database/password=EASTER2026`) is a secret (Codex).
+      /[/\\]$/.test(all.slice(Math.max(0, at - 1), at)) && /:\s*$/.test(key) && ERRNO.has(value) ? m : `${key}[redacted]`));
   // Home and user paths only AFTER the credentials: a user-name rule that may
   // span spaces would otherwise eat `/Users/sam password` and strand the
   // value (Codex).

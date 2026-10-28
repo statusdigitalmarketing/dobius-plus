@@ -181,6 +181,8 @@ check('a home path cannot eat the key of a following credential', R.scrub('Error
 check('a very long credential key still redacts its value', R.scrub('Error: login failed SPRING_DATASOURCE_HIKARI_DATA_SOURCE_PROPERTIES_PASSWORD=hunter2', '/h').includes('hunter2'), false);
 check('a home dir named like a credential word is not a key', R.signatureFor('main.error', 'Error: open /Users/sid: EACCES') === R.signatureFor('main.error', 'Error: open /Users/sid: EMFILE'), false);
 check('a slash-qualified credential key still redacts its value', R.scrub('Error: invalid config database/password=hunter2', '/h').includes('hunter2'), false);
+check('an errno-shaped password is still a secret', R.scrub('Error: invalid config database/password=EASTER2026', '/h').includes('EASTER2026'), false);
+check('an errno-shaped value after a colon is still a secret unless it is a real errno', R.scrub('Error: database/password: EASTER2026', '/h').includes('EASTER2026'), false);
 check('a slash-qualified key with a non-errno value is still a secret', R.scrub('Error: open /Users/sid: hunter2', '/h').includes('hunter2'), false);
 check('"tokens: 5" is not a credential', R.scrub('used tokens: 5', '/h'), 'used tokens: 5');
 check('a frame in a path with parentheses is still a frame',
