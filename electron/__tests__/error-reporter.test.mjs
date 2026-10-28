@@ -177,6 +177,14 @@ check('EACCES and EMFILE after a home path stay apart', R.signatureFor('main.err
 check('an apostrophe in a cookie value cannot become a quote', R.scrub('Error: rejected "row\nCookie: theme=O\'Brien\nClient Orion', '/h').includes('Orion'), false);
 check('an apostrophe in a URL password cannot hide the @', R.scrub("Error: GET https://alice:Hunter2!'x@example.com/ failed", '/h').includes('Hunter2'), false);
 check("can't read and can't write stay apart", R.signatureFor('main.error', "Error: can't read 'id'") === R.signatureFor('main.error', "Error: can't write 'id'"), false);
+check('a webview page error is never reported', R.isReportable('guest.error', 'boom'), false);
+check('a title cannot mention anyone', R.issueTitle('main.error', 'boom @octocat #12').includes('@octocat'), false);
+{
+  const t0 = Date.now();
+  const hostile = ['a-'.repeat(4000), 'term-'.repeat(1600), 'at x ('.repeat(1300), '"\''.repeat(4000), 'password'.repeat(1000) + '=x', ('x '.repeat(10) + '\n').repeat(400)];
+  for (const h of hostile) { R.scrub(h, '/h'); R.signatureFor('main.error', h); R.signatureFor('crash.uncaughtException', 'E\n' + h); R.issueTitle('main.error', h); }
+  check('adversarial inputs scrub and sign quickly', Date.now() - t0 < 1500, true);
+}
 check('a NUL is stripped', R.scrub('bad\u0000record', '/h'), 'badrecord');
 check('two failures between two paths stay apart',
   R.signatureFor('main.error', "[tasks] Failed to read tasks for /Users/sam/Client: EACCES: permission denied, open '/Users/sam/tasks.json'") === R.signatureFor('main.error', "[tasks] Failed to read tasks for /Users/sam/Client: EMFILE: too many open files, open '/Users/sam/tasks.json'"), false);

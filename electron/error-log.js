@@ -156,17 +156,24 @@ export function installErrorLog() {
 
   // Renderer coverage for EVERY window, present and future.
   app.on('web-contents-created', (_event, wc) => {
+    // A <webview> pane shows third-party pages: their errors are kept in the
+    // local log as guest.* (useful when a pane misbehaves) but are not the
+    // app's faults, and a page must never be able to write into the issue
+    // tracker (error-reporter skips guest.*).
+    let guest = false;
+    try { guest = wc.getType?.() === 'webview'; } catch { /* treat as app */ }
+    const k = (kind) => (guest ? kind.replace(/^renderer\./, 'guest.') : kind);
     wc.on('console-message', (_e, level, message, line, sourceId) => {
       // Electron levels: 0 verbose, 1 info, 2 warning, 3 error.
-      if (level >= 3) logLine('renderer.error', `${message} (${sourceId}:${line})`);
+      if (level >= 3) logLine(k('renderer.error'), `${message} (${sourceId}:${line})`);
     });
     wc.on('render-process-gone', (_e, details) => {
-      logLine('renderer.gone', `reason=${details?.reason} exitCode=${details?.exitCode}`);
+      logLine(k('renderer.gone'), `reason=${details?.reason} exitCode=${details?.exitCode}`);
     });
     wc.on('preload-error', (_e, preloadPath, error) => {
-      logLine('renderer.preload-error', `${preloadPath}: ${error?.stack || error}`);
+      logLine(k('renderer.preload-error'), `${preloadPath}: ${error?.stack || error}`);
     });
-    wc.on('unresponsive', () => logLine('renderer.unresponsive', wc.getURL?.() || ''));
+    wc.on('unresponsive', () => logLine(k('renderer.unresponsive'), guest ? '' : (wc.getURL?.() || '')));
   });
 
   app.on('child-process-gone', (_event, details) => {

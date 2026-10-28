@@ -45,7 +45,8 @@ const MAX_GH_FAILURES = 3; // in a row: GitHub is down or rate limiting, back of
 // renderer.gone / child.gone (both handlers log the same event).
 // main.stall-watchdog is the watchdog's own status (armed, clock jumped over a
 // sleep), not a stall; main.stall is the real one.
-const SKIP_KIND = /^(app|error-log|main\.warn|main\.stall-watchdog|crash\.render-process-gone|crash\.child-process-gone)$/;
+// guest.* is a <webview> pane's third-party page (error-log.js): never ours.
+const SKIP_KIND = /^(app|error-log|main\.warn|main\.stall-watchdog|crash\.render-process-gone|crash\.child-process-gone|guest\..*)$/;
 
 /** Pure: should this log entry be reported? */
 export function isReportable(kind, detail) {
@@ -157,7 +158,7 @@ export function scrub(text, home = os.homedir()) {
     .replace(/\b([a-z][\w+.-]{0,20}:\/\/)([^\s/@]{1,256})@/gi, (m, scheme, info) => `${scheme}${info.replace(/(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_])/gu, '').replace(/[^"'`]+/g, '[credentials]')}@`)
     // Any key ENDING in a credential word (access_token, refresh_token,
     // x-api-key) and any value, punctuation included (`#Hunter2!`).
-    .replace(/\b([\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|session(?:[_-]?id)?|sid|cookie|auth)['"`]?\s*[=:]\s*['"`]?)(?:[^\s"'`]|(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_]))*[^\s"'`)\]},;]/giu, '$1[redacted]');
+    .replace(/\b([\w-]{0,32}(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|session(?:[_-]?id)?|sid|cookie|auth)['"`]?\s*[=:]\s*['"`]?)(?:[^\s"'`]|(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_]))*[^\s"'`)\]},;]/giu, '$1[redacted]');
   // Then quoted values: a secret pattern run earlier could swallow a quote.
   s = redactQuotes(s, truncated);
   s = s
@@ -205,7 +206,14 @@ export function normalizeMessage(text) {
     // what the fault is (Codex).
     .replace(/["'`]\[…\]/g, 'Q') // an unclosed value runs to the end
     .replace(/(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_])/gu, '') // can't is a word, not a quote
-    .replace(/["'`].*["'`]/g, 'Q')
+    // Per line, first quote to last by index (a regex `["'`].*["'`]` is
+    // quadratic on a line full of quotes).
+    .split('\n').map((line) => {
+      const a = line.search(/["'`]/);
+      if (a < 0) return line;
+      const b = Math.max(line.lastIndexOf('"'), line.lastIndexOf("'"), line.lastIndexOf('`'));
+      return b > a ? `${line.slice(0, a)}Q${line.slice(b + 1)}` : line;
+    }).join('\n')
     // A window's random id inside a tab id (term-<path>~w-abcdefgh-1).
     .replace(/\bw-[A-Za-z0-9]{8}\b/g, 'w-W')
     .replace(/0x[0-9a-f]+/gi, '0x')
@@ -224,7 +232,7 @@ function headOf(detail) {
   // A real V8 frame (`at fn (file:1:2)` or `at file:1:2`), not quoted text
   // that happens to start with "at" (Codex). ACCEPTED: frame-shaped text inside
   // quoted data can still be picked; that only splits grouping, nothing leaks.
-  const frame = lines.find((l, i) => i > 0 && /^at (?:.+ \(.+:\d+:\d+\)|\S+:\d+:\d+)$/.test(l)) || '';
+  const frame = lines.find((l, i) => i > 0 && /^at (?:[^()\n]{1,300} \([^()\n]{1,500}:\d+:\d+\)|\S{1,500}:\d+:\d+)$/.test(l)) || '';
   return { first, frame };
 }
 
@@ -235,7 +243,7 @@ export function signatureFor(kind, detail) {
   // id names its project (term-<path>-1, the path may hold spaces and inner
   // "-1" segments): it is collapsed on the RAW text, up to its last -N before
   // a colon, before scrubbing could cut it (Codex).
-  const raw = String(detail ?? '').slice(0, SCAN_CHARS * 2).replace(/\bterm-[^\n:]*-\d+/g, 'term-T');
+  const raw = String(detail ?? '').slice(0, SCAN_CHARS * 2).replace(/\bterm-[^\n:]{0,300}-\d+/g, 'term-T');
   // The first stack frame comes from the RAW text: it is only hashed, never
   // sent, and quote redaction could otherwise swallow it for one variant of a
   // message and not another (Codex).
@@ -253,7 +261,8 @@ export function issueTitle(kind, detail) {
   // Scrub the WHOLE detail, then take its first line: scrubbing only a cut
   // prefix would miss that the cap truncated a quoted value (Codex).
   const first = headOf(scrub(detail)).first.replace(/\s+/g, ' ');
-  const t = `[${tag}] ${kind}: ${first}`;
+  // No @mentions or #refs from logged text into a title (zero-width break).
+  const t = `[${tag}] ${kind}: ${first.replace(/([@#])(?=\w)/g, '$1\u200b')}`;
   return t.length > 120 ? `${t.slice(0, 117)}...` : t;
 }
 
