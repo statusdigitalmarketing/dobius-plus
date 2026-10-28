@@ -2462,13 +2462,15 @@ async function autoEnableMobileHttps() {
   // Renew under 30 days, but only where this tailnet can issue certificates.
   if (!(validTo && validTo - Date.now() > 30 * 86_400_000) && (await certCapableName()) === name) {
     const res = await provisionCertAndRestart();
-    if (res.ok) return console.log(`[mobile-server] HTTPS enabled automatically for ${name}`);
-    console.warn('[mobile-server] automatic HTTPS failed:', res.error);
+    if (res.ok) console.log(`[mobile-server] HTTPS certificate ready for ${name}`);
+    else console.warn('[mobile-server] automatic HTTPS failed:', res.error);
   }
-  // Any cert with life left, renewable or not: a start that could not read the
-  // MagicDNS name came up on plain HTTP, so move it onto HTTPS.
+  // Any cert with life left, renewable or not, that the running server is not
+  // serving: a start that could not read the MagicDNS name came up on plain
+  // HTTP, or a renewal wrote a new cert but failed (timeout) before restarting.
+  const disk = certValidTo(name);
   const st = getMobileServerStatus();
-  if (validTo && validTo > Date.now() && st.running && !st.secure && !certJob) {
+  if (disk && disk > Date.now() && st.running && (!st.secure || st.certValidTo !== disk) && !certJob) {
     certJob = restartMobileServer().then(() => ({ ok: true, name })).finally(() => { certJob = null; });
     await certJob;
   }

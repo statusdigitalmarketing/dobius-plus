@@ -1009,6 +1009,7 @@ export function getMobileServerStatus() {
     tailnetIp: getTailnetIp(),
     address: boundAddress,
     secure: serveInfo?.secure || false,
+    certValidTo: serveInfo?.certValidTo || null,
     url: serveInfo?.url || null,
     pairingCode: httpServer ? pairingCode : null,
     deviceCount: getMobileServerConfig().devices.length,
@@ -1365,6 +1366,7 @@ async function doStartMobileServer(stillCurrent) {
   // to a same-subnet sniffer the way the removed LAN/plaintext mode exposed it.
   let magicName;
   let secure = false;
+  let certValidTo = null; // expiry of the cert this server loaded (ms)
   magicName = await getMagicDNSName();
   // A stop (Settings off, quit, cert re-provision) landed while we waited:
   // nothing has been created yet, so just step back.
@@ -1372,11 +1374,10 @@ async function doStartMobileServer(stillCurrent) {
   if (magicName && hasCertFor(magicName)) {
     const cp = certPathsFor(magicName);
     try {
-      httpServer = https.createServer(
-        { cert: fs.readFileSync(cp.certFile), key: fs.readFileSync(cp.keyFile) },
-        expApp,
-      );
+      const cert = fs.readFileSync(cp.certFile);
+      httpServer = https.createServer({ cert, key: fs.readFileSync(cp.keyFile) }, expApp);
       secure = true;
+      certValidTo = Date.parse(new crypto.X509Certificate(cert).validTo) || null;
     } catch (e) {
       console.warn('[mobile-server] cert unreadable, falling back to HTTP:', e?.message || e);
     }
@@ -1384,6 +1385,7 @@ async function doStartMobileServer(stillCurrent) {
   if (!httpServer) httpServer = http.createServer(expApp);
   const pendingServeInfo = {
     secure,
+    certValidTo,
     url: secure ? `https://${magicName}:${port}/` : `http://${ip}:${port}/`,
   };
 
