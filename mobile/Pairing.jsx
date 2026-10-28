@@ -246,7 +246,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
                 setError('');
               }}
               disabled={busy}
-              style={{ marginTop: 12, background: 'none', border: 'none', opacity: 0.7, fontSize: 14 }}
+              style={{ marginTop: 12, background: 'none', border: 'none', color: 'inherit', opacity: 0.7, fontSize: 14 }}
             >
               Cancel
             </button>
@@ -312,7 +312,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
                 setError('');
               }}
               disabled={busy}
-              style={{ marginTop: 12, background: 'none', border: 'none', opacity: 0.7, fontSize: 14 }}
+              style={{ marginTop: 12, background: 'none', border: 'none', color: 'inherit', opacity: 0.7, fontSize: 14 }}
             >
               Change Mac address
             </button>
