@@ -227,4 +227,28 @@ assert.equal(entryToMessage({ type: 'user', message: { role: 'user', content: '<
 assert.ok(entryToMessage({ type: 'user', message: { role: 'user', content: 'the <bash-input> tag is neat' } }).content.includes('tag is neat'));
 
 fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true });
-console.log('queued-messages: 20 groups pass');
+// 21. api-request-blob records (API request snapshots, role user/assistant)
+// are never conversation: both JSONL readers drop them, in either key order.
+{
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { parseJsonl, streamJsonl } = await import('../data-utils.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blob-'));
+  const f = path.join(dir, 't.jsonl');
+  fs.writeFileSync(f, [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'real question' } }),
+    JSON.stringify({ type: 'api-request-blob', hash: 'h', sessionId: 's', message: { role: 'assistant', content: 'old turn' } }),
+    JSON.stringify({ hash: 'h2', type: 'api-request-blob', message: { role: 'user', content: 'Tool loaded.' } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'real answer' } }),
+  ].join('\n') + '\n');
+  const types = (list) => list.map((e) => e.type);
+  assert.deepEqual(types(await parseJsonl(f)), ['user', 'assistant']);
+  assert.deepEqual(types(await parseJsonl(f, 10)), ['user', 'assistant']);
+  const streamed = [];
+  await streamJsonl(f, (e) => streamed.push(e));
+  assert.deepEqual(types(streamed), ['user', 'assistant']);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('queued-messages: 21 groups pass');

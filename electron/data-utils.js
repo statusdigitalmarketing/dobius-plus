@@ -73,6 +73,16 @@ async function readTail(filePath, minLines) {
   }
 }
 
+// Claude Code also writes `api-request-blob` records: snapshots of the API
+// request, carrying message.role user/assistant. Every reader here classifies
+// entries by role, so they surfaced as chat turns (224 duplicate messages and
+// leaked "<system-reminder>" text in one 31k-line transcript) and as search
+// hits, previews and "last message" copies. They are never conversation, so
+// both readers drop them; the prefix check skips parsing lines that can run
+// to hundreds of KB, the type check covers any other key order.
+const REQUEST_BLOB_PREFIX = '{"type":"api-request-blob"';
+const isRequestBlob = (obj) => obj?.type === 'api-request-blob';
+
 /**
  * Parse a JSONL file asynchronously, skipping malformed lines.
  * When `limit > 0`, only the last `limit` parsed entries are returned, and the
@@ -89,8 +99,10 @@ export async function parseJsonl(filePath, limit = 0) {
     // entries, so the truncation never reaches a caller.
     const parsedLines = [];
     for (const line of lines) {
+      if (line.startsWith(REQUEST_BLOB_PREFIX)) continue;
       try {
-        parsedLines.push(JSON.parse(line));
+        const obj = JSON.parse(line);
+        if (!isRequestBlob(obj)) parsedLines.push(obj);
       } catch {
         continue;
       }
@@ -127,9 +139,10 @@ export async function streamJsonl(filePath, onEntry) {
     let count = 0;
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     rl.on('line', (line) => {
-      if (!line) return;
+      if (!line || line.startsWith(REQUEST_BLOB_PREFIX)) return;
       try {
         const obj = JSON.parse(line);
+        if (isRequestBlob(obj)) return;
         onEntry(obj);
         count += 1;
       } catch { /* skip malformed */ }
