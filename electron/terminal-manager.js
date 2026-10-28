@@ -1,4 +1,5 @@
 import pty from 'node-pty';
+import { isTerminalReply } from './terminal-reply.js';
 import { isClaudeCommand } from './claude-argv.js';
 import fs from 'fs';
 import path from 'path';
@@ -378,8 +379,13 @@ export function listTerminals() {
 export function writeTerminal(id, data) {
   const entry = terminals.get(id);
   if (entry) {
-    entry.inputSeq = (entry.inputSeq || 0) + 1; // see terminalInputSeq
-    entry.outputSeqAtInput = entry.outputSeq || 0;
+    // The terminal's own replies (focus in/out, cursor position, device
+    // attributes, OSC answers) are not someone typing: they must not mark a
+    // prompt on screen stale, or a click into the Chat pane would.
+    if (!isTerminalReply(data)) {
+      entry.inputSeq = (entry.inputSeq || 0) + 1; // see terminalInputSeq
+      entry.outputSeqAtInput = entry.outputSeq || 0;
+    }
     entry.pty.write(data);
   }
 }
