@@ -136,13 +136,6 @@ export function scrub(text, home = os.homedir()) {
   // Control characters (a NUL in a logged value) cannot even be passed to gh.
   const truncated = String(text ?? '').length > SCAN_CHARS;
   let s = String(text ?? '').slice(0, SCAN_CHARS).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
-  // The home dir only as a whole path component, never inside a longer word
-  // or URL (`/h` must not touch `https://hooks...`).
-  if (home && home.length > 1) s = s.replace(new RegExp(`${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=/)`, 'g'), '~');
-  // A user name never contains ? # & = : stopping there keeps a URL's
-  // "?token=" context intact for the secret pass below (Codex).
-  // ...and may contain spaces (`/Users/sam Archive/...`): up to the next slash.
-  s = s.replace(/file:\/\/(?=\/)/gi, '').replace(/\/Users\/[^/\n'"`)?#&=:]+/g, '~');
   // Named credentials first, while a quoted key (`{"password":123456}`) is
   // still readable; the value may start with anything, `[` included (Codex).
   s = s
@@ -158,7 +151,20 @@ export function scrub(text, home = os.homedir()) {
     .replace(/\b([a-z][\w+.-]{0,20}:\/\/)([^\s/@]{1,256})@/gi, (m, scheme, info) => `${scheme}${info.replace(/(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_])/gu, '').replace(/[^"'`]+/g, '[credentials]')}@`)
     // Any key ENDING in a credential word (access_token, refresh_token,
     // x-api-key) and any value, punctuation included (`#Hunter2!`).
-    .replace(/\b([\w-]{0,32}(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|session(?:[_-]?id)?|sid|cookie|auth)['"`]?\s*[=:]\s*['"`]?)(?:[^\s"'`]|(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_]))*[^\s"'`)\]},;]/giu, '$1[redacted]');
+    // No prefix quantifier at all: the credential word is found wherever it
+    // ends a key, however long the key (SPRING_..._PASSWORD=, Codex).
+    .replace(/((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|session(?:[_-]?id)?|sid|cookie|auth)['"`]?\s*[=:]\s*['"`]?)(?:[^\s"'`]|(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_]))*[^\s"'`)\]},;]/giu, '$1[redacted]');
+  // Home and user paths only AFTER the credentials: a user-name rule that may
+  // span spaces would otherwise eat `/Users/sam password` and strand the
+  // value (Codex).
+  // The home dir only as a whole path component, never inside a longer word
+  // or URL (`/h` must not touch `https://hooks...`).
+  if (home && home.length > 1) s = s.replace(new RegExp(`${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=/)`, 'g'), '~');
+  // A user name never contains ? # & = : stopping there keeps a URL's
+  // "?token=" context intact for the secret pass below (Codex).
+  // ...and may contain spaces (`/Users/sam Archive/...`): up to the next slash.
+  s = s.replace(/file:\/\/(?=\/)/gi, '').replace(/\/Users\/[^/\n'"`)?#&=:]+/g, '~');
+
   // Then quoted values: a secret pattern run earlier could swallow a quote.
   s = redactQuotes(s, truncated);
   s = s
@@ -231,8 +237,10 @@ function headOf(detail) {
   const first = lines[0] || '';
   // A real V8 frame (`at fn (file:1:2)` or `at file:1:2`), not quoted text
   // that happens to start with "at" (Codex). ACCEPTED: frame-shaped text inside
-  // quoted data can still be picked; that only splits grouping, nothing leaks.
-  const frame = lines.find((l, i) => i > 0 && /^at (?:[^()\n]{1,300} \([^()\n]{1,500}:\d+:\d+\)|\S{1,500}:\d+:\d+)$/.test(l)) || '';
+  // quoted data can still be picked, and a project name inside a logged path
+  // can split one failure per project; both only affect grouping, nothing
+  // leaks, and the daily cap still holds.
+  const frame = lines.find((l, i) => i > 0 && /^at (?:[^()\n]{1,300} \([^\n]{1,500}:\d+:\d+\)|\S{1,500}:\d+:\d+)$/.test(l)) || '';
   return { first, frame };
 }
 
@@ -243,7 +251,7 @@ export function signatureFor(kind, detail) {
   // id names its project (term-<path>-1, the path may hold spaces and inner
   // "-1" segments): it is collapsed on the RAW text, up to its last -N before
   // a colon, before scrubbing could cut it (Codex).
-  const raw = String(detail ?? '').slice(0, SCAN_CHARS * 2).replace(/\bterm-[^\n:]{0,300}-\d+/g, 'term-T');
+  const raw = String(detail ?? '').slice(0, SCAN_CHARS * 2).replace(/\bterm-[^\n:]{0,2000}-\d+/g, 'term-T');
   // The first stack frame comes from the RAW text: it is only hashed, never
   // sent, and quote redaction could otherwise swallow it for one variant of a
   // message and not another (Codex).

@@ -177,6 +177,15 @@ check('EACCES and EMFILE after a home path stay apart', R.signatureFor('main.err
 check('an apostrophe in a cookie value cannot become a quote', R.scrub('Error: rejected "row\nCookie: theme=O\'Brien\nClient Orion', '/h').includes('Orion'), false);
 check('an apostrophe in a URL password cannot hide the @', R.scrub("Error: GET https://alice:Hunter2!'x@example.com/ failed", '/h').includes('Hunter2'), false);
 check("can't read and can't write stay apart", R.signatureFor('main.error', "Error: can't read 'id'") === R.signatureFor('main.error', "Error: can't write 'id'"), false);
+check('a home path cannot eat the key of a following credential', R.scrub('Error: login failed for /Users/sam password=hunter2', '/Users/sam').includes('hunter2'), false);
+check('a very long credential key still redacts its value', R.scrub('Error: login failed SPRING_DATASOURCE_HIKARI_DATA_SOURCE_PROPERTIES_PASSWORD=hunter2', '/h').includes('hunter2'), false);
+check('"tokens: 5" is not a credential', R.scrub('used tokens: 5', '/h'), 'used tokens: 5');
+check('a frame in a path with parentheses is still a frame',
+  R.signatureFor('crash.uncaughtException', 'Error: boom\n    at foo (/Applications/Dobius+ (copy).app/Contents/Resources/app.asar/main.js:10:1)') === R.signatureFor('crash.uncaughtException', 'Error: boom\n    at bar (/Applications/Dobius+ (copy).app/Contents/Resources/app.asar/main.js:10:1)'), false);
+{
+  const P = '/Users/sam/' + 'nested/'.repeat(45);
+  check('a long terminal path still normalizes', R.signatureFor('main.error', `[terminal-manager] resize error for term-${P}alpha-1: ioctl failed`), R.signatureFor('main.error', `[terminal-manager] resize error for term-${P}beta-1: ioctl failed`));
+}
 check('a webview page error is never reported', R.isReportable('guest.error', 'boom'), false);
 check('a title cannot mention anyone', R.issueTitle('main.error', 'boom @octocat #12').includes('@octocat'), false);
 {
