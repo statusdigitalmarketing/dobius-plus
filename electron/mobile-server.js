@@ -1133,7 +1133,11 @@ async function doStartMobileServer(stillCurrent) {
   // Access-Control-Allow-Credentials. The host list is read before the server
   // listens and refreshed every minute (machines join, the tailnet can be
   // renamed); until it is known only native and localhost origins pass.
-  const corsOk = (origin) => isAllowedMobileOrigin(origin, { hosts: corsHosts });
+  // This server's port and the 8420 default (every Mac's unless changed).
+  // DOBIUS_MOBILE_CORS_PORTS adds more, e.g. for a harness running two
+  // isolated instances on one IP.
+  const corsPorts = [...new Set([port, 8420, ...String(process.env.DOBIUS_MOBILE_CORS_PORTS || '').split(',').map(Number).filter((n) => n > 0 && n < 65536)])];
+  const corsOk = (origin) => isAllowedMobileOrigin(origin, { hosts: corsHosts, ports: corsPorts });
   expApp.use((req, res, next) => {
     const origin = req.headers.origin;
     if (corsOk(origin)) {

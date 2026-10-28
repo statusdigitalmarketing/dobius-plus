@@ -77,7 +77,7 @@ test('a UI-state copy that failed at migration is retried on the next launch', a
   const local = new Map([['dobius-mobile-drafts', '{"t":"half typed"}'], ['dobius-mobile-pins', '["/big"]']]);
   let full = true;
   // Only the pins copy fails (storage nearly full); the drafts copy succeeds.
-  const ls = { getItem: (k) => (local.has(k) ? local.get(k) : null), setItem: (k, v) => { if (full && k.startsWith('dobius-mobile-pins')) throw new Error('QuotaExceededError'); local.set(k, v); } };
+  const ls = { getItem: (k) => (local.has(k) ? local.get(k) : null), setItem: (k, v) => { if (full && k.startsWith('dobius-mobile-pins')) throw new Error('QuotaExceededError'); local.set(k, v); }, removeItem: (k) => local.delete(k) };
   const storage = memoryStorage([[HOST_KEY, a.origin], [TOKEN_KEY, a.token]]);
   const first = await loadPairings(storage, 'capacitor://localhost', 1, ls);
   assert.deepEqual(first.uiMigrationPending, ['dobius-mobile-pins']);
@@ -87,6 +87,7 @@ test('a UI-state copy that failed at migration is retried on the next launch', a
   full = false;
   const second = await loadPairings(storage, 'capacitor://localhost', 2, ls);
   assert.equal(local.get('dobius-mobile-drafts:legacy'), '{}'); // not resurrected
+  assert.equal(local.has('dobius-mobile-drafts'), false); // the copied legacy key is gone
   assert.equal(local.get('dobius-mobile-pins:legacy'), '["/big"]');
   assert.equal(second.uiMigrationPending, undefined);
   assert.equal(JSON.parse(storage.values.get(PAIRINGS_KEY)).uiMigrationPending, undefined);
@@ -257,6 +258,12 @@ test('CORS accepts native, localhost and this tailnet\'s own machines only', () 
   const denied = ['', null, 'null', 'http://100.80.0.9:8080', 'http://100.70.0.1', 'https://their-box.other-tail.ts.net', 'https://helper.attacker-tail.ts.net', 'https://guest.tail1234.ts.net', 'https://tail1234.ts.net', 'http://100.64.0.1', 'http://192.168.1.1', 'http://localhost.evil.test', 'https://user@mac-b.tail1234.ts.net', 'https://localhost@evil.test', 'capacitor://localhost@evil.test', 'capacitor://mac-b.tail1234.ts.net', 'ionic://100.89.143.67', 'file://localhost', 'ftp://mac-b.tail1234.ts.net', 'https://mac-b.tail1234.ts.net/path', 'https://mac-b.tail1234.ts.net/', 'https://mac-b.tail1234.ts.net?x=1', 'https://mac-b.tail1234.ts.net#x', 'http://localhost\\evil', 'https://mac-b.tail1234.ts.net\n'];
   for (const origin of allowed) assert.equal(isAllowedMobileOrigin(origin, { hosts }), true, origin);
   for (const origin of denied) assert.equal(isAllowedMobileOrigin(origin, { hosts }), false, String(origin));
+  // Only the Dobius+ phone-server port of an approved machine, not its other servers.
+  const ports = [8420];
+  assert.equal(isAllowedMobileOrigin('https://mac-b.tail1234.ts.net:8420', { hosts, ports }), true);
+  assert.equal(isAllowedMobileOrigin('https://mac-b.tail1234.ts.net:8443', { hosts, ports }), false);
+  assert.equal(isAllowedMobileOrigin('http://100.86.110.13:3000', { hosts, ports }), false);
+  assert.equal(isAllowedMobileOrigin('capacitor://localhost', { hosts, ports }), true);
   // Hosts unknown (Tailscale not answering yet): native and localhost only.
   assert.equal(isAllowedMobileOrigin('http://100.89.143.67:8420'), false);
   assert.equal(isAllowedMobileOrigin('capacitor://localhost'), true);

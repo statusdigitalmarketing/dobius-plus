@@ -9,7 +9,11 @@
 // else gets a 100.x address too. POST /pair answers with a full-control
 // token, so either would let an attacker's page read one once the user typed
 // a pairing code into it (Codex High, two rounds).
-export function isAllowedMobileOrigin(origin, { hosts = null } = {}) {
+// A tailnet machine also runs other servers (a project preview on :8443):
+// only its Dobius+ phone server is an approved app origin, so the port must
+// be the Dobius+ mobile port too (this server's own, or the 8420 default),
+// not any port on an approved host (Codex High).
+export function isAllowedMobileOrigin(origin, { hosts = null, ports = null } = {}) {
   if (typeof origin !== 'string' || !origin) return false;
   let u;
   try { u = new URL(origin); } catch { return false; }
@@ -18,5 +22,7 @@ export function isAllowedMobileOrigin(origin, { hosts = null } = {}) {
   if (u.protocol === 'capacitor:' || u.protocol === 'ionic:') return u.hostname === 'localhost';
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
   if (u.hostname === 'localhost') return true;
-  return !!hosts && hosts.has(u.hostname.toLowerCase());
+  if (!hosts || !hosts.has(u.hostname.toLowerCase())) return false;
+  const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+  return !ports || ports.includes(port);
 }

@@ -87,6 +87,9 @@ function migrateUiKeys(local, id, todo = LEGACY_UI_KEYS) {
       const cur = local.getItem(`${key}:${id}`);
       const next = cur === null ? v : mergeUiValue(v, cur);
       if (next !== cur) local.setItem(`${key}:${id}`, next);
+      // Copied: the legacy key goes, so a retry (its pending marker failed to
+      // clear) finds nothing to merge back over a sent or cleared draft (Codex).
+      local.removeItem?.(key);
     } catch { left.push(key); /* full or private storage: retried on the next launch */ }
   }
   return left;
