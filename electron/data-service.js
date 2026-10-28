@@ -1266,7 +1266,7 @@ export async function getTranscriptSig(sessionId, projectPath) {
   }
 }
 
-export async function loadTranscript(sessionId, projectPath, limit, source) {
+export async function loadTranscript(sessionId, projectPath, limit, source, opts = {}) {
   try {
     if (source === 'codex') {
       // Codex transcripts live in ~/.codex/sessions, not ~/.claude/projects,
@@ -1279,7 +1279,8 @@ export async function loadTranscript(sessionId, projectPath, limit, source) {
     if (!p) return [];
     // A positive limit does a cheap tail read (mobile Chat poll); no limit
     // streams the full transcript (History view). Codex.
-    return (typeof limit === 'number' && limit > 0) ? parseTranscriptTail(p, limit) : parseTranscriptFile(p);
+    const blocks = opts.blocks === true;
+    return (typeof limit === 'number' && limit > 0) ? parseTranscriptTail(p, limit, blocks) : parseTranscriptFile(p, blocks);
   } catch (err) {
     console.warn('[data-service] Failed to load transcript:', err.message);
     return [];
@@ -1437,7 +1438,16 @@ export function commandDetail(text) {
   const nl = body.indexOf('\n');
   body = nl === -1 ? '' : body.slice(nl + 1).trim();
   if (!body) return null;
-  return body.length > MAX_MESSAGE_CHARS ? body.slice(0, MAX_MESSAGE_CHARS) + `\n\n[skill truncated at ${MAX_MESSAGE_CHARS} chars]` : body;
+  return capText(body, MAX_MESSAGE_CHARS, 'skill');
+}
+
+// Cut to `max` chars with a note, and DETACH the result: a slice of a
+// multi-MB tool result is a V8 SlicedString that keeps the whole parent alive
+// in the transcript caches (see .dobius/NOTES.md 2026-09-15).
+function capText(s, max, what = 'text') {
+  const t = String(s ?? '');
+  if (t.length <= max) return t;
+  return Buffer.from(`${t.slice(0, max)}\n\n[${what} truncated at ${max} chars]`, 'utf16le').toString('utf16le');
 }
 
 // Minimal ANSI escape strip for chat text (CSI + OSC + single ESC forms).
@@ -1450,7 +1460,122 @@ function stripAnsiText(s) {
     .replace(/\u001b./g, '');
 }
 
-export function entryToMessage(entry) {
+// --- Typed blocks (opt-in, `{ blocks: true }`) ------------------------------
+// One message format for both chat clients. Without the option every caller
+// gets exactly the old { role, content } rows, which is what the App Store
+// iOS build (it bundles its own copy of the mobile UI) understands. With it,
+// an assistant row also carries `blocks` in order: { type: 'text', text },
+// { type: 'thinking', text }, { type: 'tool', id, name, summary, input?,
+// diff?, result?, isError? }. A tool result arrives in a LATER user record,
+// so entryToMessage emits a hidden { toolResults } marker and mergeTurns
+// attaches it to its tool by id, folding a turn's assistant records into one
+// row the way Claude Desktop shows a turn.
+// Kept small on purpose: a busy turn holds ~150 tool calls and the phone
+// re-fetches the tail every few seconds while Claude works. These rows are
+// collapsed by default; the terminal still has everything.
+const TOOL_INPUT_MAX = 1000;
+const TOOL_DIFF_MAX = 3000;
+const TOOL_RESULT_MAX = 1200;
+const THINKING_MAX = 3000;
+const TOOL_SUMMARY_MAX = 160;
+
+function firstLine(s) {
+  const t = String(s ?? '').trim();
+  const nl = t.indexOf('\n');
+  return capText(nl === -1 ? t : `${t.slice(0, nl)} ...`, TOOL_SUMMARY_MAX, 'line');
+}
+
+function toolSummary(name, input) {
+  const i = input && typeof input === 'object' ? input : {};
+  const str = (v) => (typeof v === 'string' ? v : '');
+  switch (name) {
+    case 'Bash': return firstLine(str(i.command));
+    case 'Read': case 'Write': case 'Edit': case 'MultiEdit': return firstLine(str(i.file_path));
+    case 'NotebookEdit': return firstLine(str(i.notebook_path) || str(i.file_path));
+    case 'Grep': return firstLine(str(i.pattern) + (str(i.path) ? ` in ${str(i.path)}` : ''));
+    case 'Glob': return firstLine(str(i.pattern));
+    case 'WebFetch': return firstLine(str(i.url));
+    case 'WebSearch': case 'ToolSearch': return firstLine(str(i.query));
+    case 'Agent': case 'Task': return firstLine(str(i.description) || str(i.prompt));
+    case 'Skill': return firstLine(str(i.skill));
+    case 'TodoWrite': return Array.isArray(i.todos) ? `${i.todos.length} todos` : '';
+    default: {
+      const v = Object.values(i).find((x) => typeof x === 'string' && x.trim());
+      return v ? firstLine(v) : '';
+    }
+  }
+}
+
+function toolBlock(b) {
+  const name = typeof b.name === 'string' ? b.name : 'tool';
+  const input = b.input && typeof b.input === 'object' ? b.input : {};
+  const block = { type: 'tool', id: typeof b.id === 'string' ? b.id : '', name, summary: toolSummary(name, input) };
+  const str = (v) => (typeof v === 'string' ? v : '');
+  if (name === 'Edit') {
+    block.diff = { old: capText(str(input.old_string), TOOL_DIFF_MAX, 'diff'), new: capText(str(input.new_string), TOOL_DIFF_MAX, 'diff') };
+  } else if (name === 'Write') {
+    block.diff = { old: '', new: capText(str(input.content), TOOL_DIFF_MAX, 'file') };
+  } else if (name === 'MultiEdit' && Array.isArray(input.edits)) {
+    const edits = input.edits.filter((e) => e && typeof e === 'object');
+    block.diff = {
+      old: capText(edits.map((e) => str(e.old_string)).join('\n...\n'), TOOL_DIFF_MAX, 'diff'),
+      new: capText(edits.map((e) => str(e.new_string)).join('\n...\n'), TOOL_DIFF_MAX, 'diff'),
+    };
+  } else if (name === 'Bash') {
+    block.input = capText(str(input.command), TOOL_INPUT_MAX, 'command');
+  } else if (Object.keys(input).length) {
+    let json;
+    try { json = JSON.stringify(input, null, 2); } catch { json = ''; }
+    if (json) block.input = capText(json, TOOL_INPUT_MAX, 'input');
+  }
+  return block;
+}
+
+function toolResultText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.map((c) => {
+    if (c?.type === 'text' && typeof c.text === 'string') return c.text;
+    if (c?.type === 'image') return '[image]';
+    return '';
+  }).filter(Boolean).join('\n');
+}
+
+// Fold a turn into one assistant row and attach tool results. Runs AFTER
+// dedupeQueuedMessages (a queued row would otherwise split a turn) and before
+// the tail is cut, so the window counts rows the user actually sees. Mutates
+// copies only: every merged row is a fresh object.
+export function mergeTurns(messages) {
+  const out = [];
+  const toolsById = new Map();
+  for (const m of messages) {
+    if (m.toolResults) {
+      for (const r of m.toolResults) {
+        const t = toolsById.get(r.id);
+        if (t) { t.result = r.text; if (r.isError) t.isError = true; }
+      }
+      continue;
+    }
+    if (m.role !== 'assistant') { out.push(m); continue; }
+    const blocks = (m.blocks || (m.content ? [{ type: 'text', text: m.content }] : [])).map((b) => ({ ...b }));
+    for (const b of blocks) if (b.type === 'tool' && b.id) toolsById.set(b.id, b);
+    const prev = out[out.length - 1];
+    if (prev && prev.role === 'assistant') {
+      prev.blocks.push(...blocks);
+      if (m.content) prev.content = prev.content ? `${prev.content}\n\n${m.content}` : m.content;
+      continue;
+    }
+    out.push({ ...m, blocks });
+  }
+  // A plain reply with nothing but text keeps the old shape.
+  for (const m of out) {
+    if (m.role === 'assistant' && m.blocks && m.blocks.every((b) => b.type === 'text')) delete m.blocks;
+  }
+  return out;
+}
+
+export function entryToMessage(entry, opts = {}) {
+  const wantBlocks = opts.blocks === true;
   // A message sent while Claude is mid-turn is recorded as a queue-operation
   // enqueue, NOT as a user message, until the turn ends and it is actually
   // submitted. Surfacing it (flagged `queued`) is what makes a mid-turn send
@@ -1483,8 +1608,35 @@ export function entryToMessage(entry) {
   if (entry.type === 'human' || entry.role === 'user' || entry.message?.role === 'user') role = 'user';
   else if (entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant') role = 'assistant';
   if (!role) return null;
-  let content = '';
   const msgContent = entry.message?.content;
+  if (wantBlocks && Array.isArray(msgContent)) {
+    if (role === 'user' && msgContent.some((c) => c?.type === 'tool_result')) {
+      const toolResults = msgContent.filter((c) => c?.type === 'tool_result' && typeof c.tool_use_id === 'string').map((c) => ({
+        id: c.tool_use_id,
+        text: capText(stripAnsiText(toolResultText(c.content)).trim(), TOOL_RESULT_MAX, 'output'),
+        isError: c.is_error === true,
+      }));
+      return toolResults.length ? { role, content: '', toolResults } : null;
+    }
+    if (role === 'assistant') {
+      const blocks = [];
+      const texts = [];
+      for (const c of msgContent) {
+        if (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) {
+          texts.push(c.text);
+          blocks.push({ type: 'text', text: capText(c.text, MAX_MESSAGE_CHARS) });
+        } else if (c?.type === 'thinking' && typeof c.thinking === 'string' && c.thinking.trim()) {
+          blocks.push({ type: 'thinking', text: capText(c.thinking.trim(), THINKING_MAX, 'thinking') });
+        } else if (c?.type === 'tool_use') {
+          blocks.push(toolBlock(c));
+        }
+      }
+      if (!blocks.length) return null;
+      const content = capText(texts.join('\n'), MAX_MESSAGE_CHARS, 'message');
+      return blocks.every((b) => b.type === 'text') ? { role, content } : { role, content, blocks };
+    }
+  }
+  let content = '';
   if (typeof msgContent === 'string') {
     content = msgContent;
   } else if (Array.isArray(msgContent)) {
@@ -1504,6 +1656,11 @@ export function entryToMessage(entry) {
     // "breakdowns of things I traditionally wouldn't see" leaking into the
     // phone chat: the human never typed them, the terminal never shows them.
     if (tp.startsWith('<system-reminder>')) return null;
+    // Context compaction: Claude Code's summary of the conversation so far,
+    // recorded as a 20KB "user" turn nobody typed. One chip, summary behind it.
+    if (entry.isCompactSummary === true) {
+      return { role, content: 'Conversation compacted', command: true, detail: capText(content.trim(), MAX_MESSAGE_CHARS, 'summary'), detailLabel: 'summary' };
+    }
     const collapsed = collapseCommandContent(content);
     if (collapsed !== null) {
       // Empty after collapse (e.g. blank command stdout): nothing to render.
@@ -1512,9 +1669,7 @@ export function entryToMessage(entry) {
       return detail ? { role, content: collapsed, command: true, detail } : { role, content: collapsed, command: true };
     }
   }
-  if (content.length > MAX_MESSAGE_CHARS) {
-    content = content.slice(0, MAX_MESSAGE_CHARS) + `\n\n[message truncated at ${MAX_MESSAGE_CHARS} chars]`;
-  }
+  if (content.length > MAX_MESSAGE_CHARS) content = capText(content, MAX_MESSAGE_CHARS, 'message');
   return { role, content };
 }
 
@@ -1554,15 +1709,24 @@ export function dedupeQueuedMessages(messages) {
   return messages;
 }
 
-async function parseTranscriptFile(filePath) {
+// Rough wire size of one row: its text, any blocks, and the wrapper object.
+function messageBytes(m) {
+  let n = m.content.length + 64;
+  if (m.blocks) for (const b of m.blocks) n += (b.text?.length || 0) + (b.input?.length || 0) + (b.result?.length || 0) + (b.diff ? b.diff.old.length + b.diff.new.length : 0) + 64;
+  if (m.detail) n += m.detail.length;
+  if (m.toolResults) for (const r of m.toolResults) n += r.text.length + 64;
+  return n;
+}
+
+async function parseTranscriptFile(filePath, blocks = false) {
   const messages = [];
   let payloadBytes = 0;
   let truncated = false;
   await streamJsonl(filePath, (entry) => {
     if (truncated) return;
-    const m = entryToMessage(entry);
+    const m = entryToMessage(entry, { blocks });
     if (!m) return;
-    payloadBytes += m.content.length + 64; // rough overhead for the wrapper object
+    payloadBytes += messageBytes(m);
     if (payloadBytes > MAX_PAYLOAD_BYTES) {
       truncated = true;
       messages.push({ role: 'system', content: `[transcript preview truncated: payload exceeded ${MAX_PAYLOAD_BYTES} bytes]`, timestamp: null });
@@ -1570,7 +1734,8 @@ async function parseTranscriptFile(filePath) {
     }
     messages.push({ ...m, timestamp: entry.timestamp || null });
   });
-  return dedupeQueuedMessages(messages);
+  const deduped = dedupeQueuedMessages(messages);
+  return blocks ? mergeTurns(deduped) : deduped;
 }
 
 // Bounded tail read for the mobile Chat poll: reads only the tail of the JSONL
@@ -1581,20 +1746,20 @@ async function parseTranscriptFile(filePath) {
 // few or zero messages (Codex). The same aggregate payload cap as the full path
 // is enforced by trimming oldest-first, so a tail of huge pasted turns can't blow
 // past MAX_PAYLOAD_BYTES per poll (Codex).
-async function parseTranscriptTail(filePath, messageLimit) {
+async function parseTranscriptTail(filePath, messageLimit, blocks = false) {
   const want = Math.max(1, Math.min(messageLimit, 500));
   const rawBudget = Math.min(want * 8, 8000); // overscan raw lines to find enough visible turns
   const entries = await parseJsonl(filePath, rawBudget);
   const msgs = [];
   for (const entry of entries) {
-    const m = entryToMessage(entry);
+    const m = entryToMessage(entry, { blocks });
     if (m) msgs.push({ ...m, timestamp: entry.timestamp || null });
   }
-  dedupeQueuedMessages(msgs);
-  let tail = msgs.slice(-want);
-  let bytes = tail.reduce((n, m) => n + m.content.length + 64, 0);
+  const deduped = dedupeQueuedMessages(msgs);
+  let tail = (blocks ? mergeTurns(deduped) : deduped).slice(-want);
+  let bytes = tail.reduce((n, m) => n + messageBytes(m), 0);
   while (tail.length > 1 && bytes > MAX_PAYLOAD_BYTES) {
-    bytes -= tail[0].content.length + 64;
+    bytes -= messageBytes(tail[0]);
     tail = tail.slice(1);
   }
   return tail;

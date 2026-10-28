@@ -58,11 +58,11 @@ function legacyCopy(text) {
 
 // A copy affordance on code boxes (Sam, 8/14: "anything that shows up in this
 // box ... I need a little copy button so I can just copy that line").
-function CopyBtn({ text }) {
+function CopyBtn({ text, className = 'md-copy' }) {
   const [done, setDone] = useState(false);
   return (
     <button
-      className={`md-copy${done ? ' done' : ''}`}
+      className={`${className}${done ? ' done' : ''}`}
       onClick={async (e) => {
         e.stopPropagation();
         const ok = await copyText(text);
@@ -100,18 +100,108 @@ function isLong(text) {
 
 // The body of a skill behind a "/name" row: a few dim lines, tap to read the
 // whole skill. Sam wants the preview kept, just out of the way.
-function SkillPreview({ detail }) {
+function SkillPreview({ detail, label = 'skill' }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="chat-skill">
       <div className={open ? 'chat-skill-full' : 'chat-skill-peek'}>{detail}</div>
-      <button className="chat-more" onClick={() => setOpen((o) => !o)}>{open ? 'Hide skill' : 'Show skill'}</button>
+      <button className="chat-more" onClick={() => setOpen((o) => !o)}>{open ? `Hide ${label}` : `Show ${label}`}</button>
     </div>
   );
 }
 
-const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, command, detail, startOpen }) {
-  const long = !command && isLong(String(content ?? ''));
+// Markdown overrides for Claude's text, shared by plain replies and the text
+// blocks of a typed turn.
+const mdComponents = {
+  // Wide tables scroll inside their own container on a phone.
+  table: ({ node: _node, ...props }) => (
+    <div className="md-table-wrap"><table {...props} /></div>
+  ),
+  // Fenced blocks get a copy button; the box scrolls sideways instead of
+  // truncating a long one-liner.
+  pre: ({ node: _node, children, ...props }) => (
+    <div className="md-pre-wrap">
+      <CopyBtn text={nodeText(children)} />
+      <pre {...props}>{children}</pre>
+    </div>
+  ),
+  // Inline code deliberately gets NO chip: react-markdown v10 exposes no
+  // reliable inline test (a no-language fenced block also has no className,
+  // and wrapping it doubled the copy button inside its own pre: Codex High).
+  // Long inline spans scroll via CSS instead; fenced blocks carry the button.
+};
+
+// --- Typed transcript blocks (main's opt-in { blocks } rows) ----------------
+// Tool calls and thinking render as quiet one-line steps that open on tap, so
+// a turn reads like the reply, not like the terminal. Same shapes as desktop.
+function DiffView({ diff }) {
+  const lines = (s, sign) => (s ? s.split('\n').map((l, i) => <div key={sign + i} className={`chat-diff-${sign === '-' ? 'del' : 'add'}`}>{sign} {l}</div>) : null);
+  return <div className="chat-diff">{lines(diff.old, '-')}{lines(diff.new, '+')}</div>;
+}
+
+function StepRow({ block }) {
+  const [open, setOpen] = useState(false);
+  const isTool = block.type === 'tool';
+  const state = !isTool ? 'think' : block.isError ? 'err' : block.result !== undefined ? 'ok' : 'pending';
+  return (
+    <div className="chat-step">
+      <button className="chat-step-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <span className={`chat-step-dot ${state}`} />
+        <span className="chat-step-name">{isTool ? block.name : 'Thinking'}</span>
+        {isTool && block.summary && <span className="chat-step-sum">{block.summary}</span>}
+        <span className="chat-step-caret">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="chat-step-body">
+          {!isTool && <div className="chat-step-think">{block.text}</div>}
+          {block.diff && <DiffView diff={block.diff} />}
+          {block.input && <pre className="chat-step-pre">{block.input}</pre>}
+          {isTool && block.result !== undefined && (
+            <pre className={`chat-step-pre out${block.isError ? ' err' : ''}`}>{block.result || '(no output)'}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// More than three steps in a row fold into one "N steps" row.
+function StepGroup({ steps }) {
+  const [open, setOpen] = useState(false);
+  if (steps.length <= 3) return <div className="chat-steps">{steps.map((b, i) => <StepRow key={i} block={b} />)}</div>;
+  const counts = {};
+  for (const b of steps) { const n = b.type === 'tool' ? b.name : 'Thinking'; counts[n] = (counts[n] || 0) + 1; }
+  const label = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(', ');
+  return (
+    <div className="chat-steps">
+      <button className="chat-step-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <span className={`chat-step-dot ${steps.some((b) => b.isError) ? 'err' : 'ok'}`} />
+        <span className="chat-step-name">{steps.length} steps</span>
+        <span className="chat-step-sum">{label}</span>
+        <span className="chat-step-caret">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && steps.map((b, i) => <StepRow key={i} block={b} />)}
+    </div>
+  );
+}
+
+function Blocks({ blocks }) {
+  const parts = [];
+  let run = [];
+  const flush = () => { if (run.length) { parts.push(<StepGroup key={`s${parts.length}`} steps={run} />); run = []; } };
+  for (const b of blocks) {
+    if (b.type === 'text') {
+      flush();
+      parts.push(<ReactMarkdown key={`t${parts.length}`} remarkPlugins={[remarkGfm]} components={mdComponents}>{b.text}</ReactMarkdown>);
+    } else run.push(b);
+  }
+  flush();
+  return parts;
+}
+
+const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, command, detail, detailLabel, blocks, startOpen }) {
+  const text = String(content ?? '');
+  const long = !command && isLong(text);
   const [open, setOpen] = useState(!long || !!startOpen);
   return (
     <div className={`chat-msg ${role === 'assistant' ? 'assistant' : 'user'}${sending ? ' chat-echo' : ''}`}>
@@ -120,36 +210,14 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
         {timestamp != null && <span className="chat-time">{fmtMsgTime(timestamp)}</span>}
         {queued && <span className="chat-queued">queued</span>}
         {sending && <span className="chat-queued">sending…</span>}
+        {text && !sending && <CopyBtn text={text} className="chat-msg-copy" />}
       </div>
       <div className={`chat-content${open ? '' : ' clamped'}${command ? ' chat-cmd' : ''}`}>
-        {role === 'assistant' ? (
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={{
-              // Wide tables scroll inside their own container on a phone.
-              table: ({ node: _node, ...props }) => (
-                <div className="md-table-wrap"><table {...props} /></div>
-              ),
-              // Fenced blocks get a copy button; the box scrolls sideways
-              // instead of truncating a long one-liner.
-              pre: ({ node: _node, children, ...props }) => (
-                <div className="md-pre-wrap">
-                  <CopyBtn text={nodeText(children)} />
-                  <pre {...props}>{children}</pre>
-                </div>
-              ),
-              // Inline code deliberately gets NO chip: react-markdown v10
-              // exposes no reliable inline test (a no-language fenced block
-              // also has no className, and wrapping it doubled the copy
-              // button inside its own pre: Codex High). Long inline spans
-              // scroll via CSS instead; fenced blocks carry the button.
-            }}
-          >
-            {content}
-          </ReactMarkdown>
-        ) : content}
+        {role === 'assistant'
+          ? (blocks ? <Blocks blocks={blocks} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
+          : text}
       </div>
-      {command && detail && <SkillPreview detail={detail} />}
+      {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
       {long && <button className="chat-more" onClick={() => setOpen((o) => !o)}>{open ? 'Show less' : 'Show more'}</button>}
     </div>
   );
@@ -223,7 +291,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     // tabId authorizes this socket to send input to the tab (server gates
     // input/kill on the socket's touched-tab set, and the Chat view never
     // attaches). Audit Medium.
-    connection.send({ type: 'loadTranscript', sessionId, projectPath, tabId, limit: 200, sig: sigRef.current || undefined });
+    connection.send({ type: 'loadTranscript', sessionId, projectPath, tabId, limit: 200, blocks: 1, sig: sigRef.current || undefined });
   }, [connection, sessionId, projectPath]);
 
   // Ask the server whether the tab's live PTY is showing a selection prompt.
@@ -655,12 +723,17 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           <Bubble
             key={i} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued}
             command={!!m.command} detail={typeof m.detail === 'string' ? m.detail : null}
+            detailLabel={typeof m.detailLabel === 'string' ? m.detailLabel : null}
+            blocks={Array.isArray(m.blocks) && m.blocks.length ? m.blocks : null}
             startOpen={i === lastClaude}
           />
         ))}
         {echoes.map((e) => (
           <Bubble key={`echo-${e.at}`} role="user" content={e.content} timestamp={e.at} sending />
         ))}
+        {sessionId && tab?.status === 'working' && (
+          <div className="chat-working"><span className="chat-dots"><i /><i /><i /></span>Claude is working</div>
+        )}
       </main>
       {selectorPopup}
       {inputRow}

@@ -251,4 +251,59 @@ fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true });
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-console.log('queued-messages: 21 groups pass');
+// 22. Typed blocks (opt-in). One assistant turn written as Claude Code
+// writes it: text, then a tool call, its result in a USER record, more text.
+{
+  const { mergeTurns } = await import('../data-service.js');
+  const A = (content) => ({ type: 'assistant', message: { role: 'assistant', content } });
+  const U = (content) => ({ type: 'user', message: { role: 'user', content } });
+  const thinkText = A([{ type: 'thinking', thinking: 'weighing it' }, { type: 'text', text: 'Let me look.' }]);
+  // Legacy callers (the App Store iOS UI) get exactly the old row.
+  assert.deepEqual(entryToMessage(thinkText), { role: 'assistant', content: 'weighing it\nLet me look.' });
+  assert.equal(entryToMessage(U([{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }])), null);
+  // Blocks mode: thinking is its own block, never in the reply text.
+  const b1 = entryToMessage(thinkText, { blocks: true });
+  assert.deepEqual(b1, { role: 'assistant', content: 'Let me look.', blocks: [{ type: 'thinking', text: 'weighing it' }, { type: 'text', text: 'Let me look.' }] });
+  // Redacted thinking (empty text, signature only: 94% of real blocks) is dropped.
+  assert.deepEqual(entryToMessage(A([{ type: 'thinking', thinking: '', signature: 'x' }, { type: 'text', text: 'hi' }]), { blocks: true }), { role: 'assistant', content: 'hi' });
+  const edit = entryToMessage(A([{ type: 'tool_use', id: 't1', name: 'Edit', input: { file_path: '/r/a.js', old_string: 'a = 1', new_string: 'a = 2' } }]), { blocks: true });
+  assert.deepEqual(edit.blocks, [{ type: 'tool', id: 't1', name: 'Edit', summary: '/r/a.js', diff: { old: 'a = 1', new: 'a = 2' } }]);
+  assert.equal(edit.content, '');
+  const bash = entryToMessage(A([{ type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'npm test\nnpm run build', description: 'x' } }]), { blocks: true });
+  assert.deepEqual(bash.blocks[0], { type: 'tool', id: 't2', name: 'Bash', summary: 'npm test ...', input: 'npm test\nnpm run build' });
+  const res = entryToMessage(U([{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: 'edited' }] }, { type: 'tool_result', tool_use_id: 't2', content: `${String.fromCharCode(27)}[31mfail${String.fromCharCode(27)}[0m`, is_error: true }]), { blocks: true });
+  assert.deepEqual(res, { role: 'user', content: '', toolResults: [{ id: 't1', text: 'edited', isError: false }, { id: 't2', text: 'fail', isError: true }] });
+  const done = entryToMessage(A([{ type: 'text', text: 'Fixed.' }]), { blocks: true });
+  const ask = { role: 'user', content: 'thanks, now deploy' };
+  const merged = mergeTurns([{ role: 'user', content: 'fix a' }, b1, edit, bash, res, done, ask, { ...done }]);
+  assert.equal(merged.length, 4, 'one row per turn, the result marker dropped');
+  assert.equal(merged[1].content, 'Let me look.\n\nFixed.');
+  assert.deepEqual(merged[1].blocks.map((b) => b.type), ['thinking', 'text', 'tool', 'tool', 'text']);
+  assert.equal(merged[1].blocks[2].result, 'edited');
+  assert.equal(merged[1].blocks[3].isError, true);
+  assert.equal(merged[1].blocks[3].result, 'fail');
+  // A user message ends the turn; a plain text-only reply keeps the old shape.
+  assert.deepEqual(merged[3], { role: 'assistant', content: 'Fixed.' });
+  // Inputs are never mutated (the tail cache holds them).
+  assert.equal(edit.blocks[0].result, undefined);
+  // A result whose tool fell outside the window is simply dropped.
+  assert.equal(mergeTurns([res]).length, 0);
+  // Write shows the new file as an all-added diff.
+  const write = entryToMessage(A([{ type: 'tool_use', id: 't3', name: 'Write', input: { file_path: '/r/b.md', content: '# hi' } }]), { blocks: true });
+  assert.deepEqual(write.blocks[0].diff, { old: '', new: '# hi' });
+  // A huge result is capped.
+  const big = entryToMessage(U([{ type: 'tool_result', tool_use_id: 't9', content: 'y'.repeat(50000) }]), { blocks: true });
+  assert.ok(big.toolResults[0].text.length < 1300 && big.toolResults[0].text.endsWith('chars]'));
+}
+
+// 23. A context-compaction summary is a chip with the summary behind it, in
+// both modes (it was a 20KB "You" bubble nobody typed).
+{
+  const summary = entryToMessage({ type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued from a previous conversation.\n\nSummary: ...' } });
+  assert.equal(summary.content, 'Conversation compacted');
+  assert.equal(summary.command, true);
+  assert.equal(summary.detailLabel, 'summary');
+  assert.ok(summary.detail.startsWith('This session is being continued'));
+}
+
+console.log('queued-messages: 23 groups pass');

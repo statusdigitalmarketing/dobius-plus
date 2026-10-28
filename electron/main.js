@@ -664,7 +664,7 @@ function setupDataHandlers() {
       if (!stillSame()) return null;
       return { sessionId, projectPath, sig, claudeLive: true, status, unchanged: true };
     }
-    const entries = (await loadTranscript(sessionId, projectPath, 200)) || [];
+    const entries = (await loadTranscript(sessionId, projectPath, 200, undefined, { blocks: true })) || [];
     if (!stillSame()) return null;
     return {
       sessionId, projectPath, sig, claudeLive: true, status, entries,

@@ -885,7 +885,10 @@ function handleAuthedMessage(socket, msg, subs) {
       // per (sessionId + projectPath + limit): two projects can hold the same
       // sessionId (and could coincidentally share an mtime+size signature), and
       // History's no-limit full read must not be served a limited cache. Codex.
-      const cacheKey = `${sessionId}:${projectPath}:${limit || 0}`;
+      // Typed blocks are opt-in: the App Store iOS build bundles an older UI
+      // that never asks and keeps getting plain { role, content } rows.
+      const blocks = msg.blocks === 1;
+      const cacheKey = `${sessionId}:${projectPath}:${limit || 0}:${blocks ? 'b' : ''}`;
       const txCache = socket._txCache || (socket._txCache = new Map());
       getTranscriptSig(sessionId, projectPath)
         .then(async (sig) => {
@@ -905,7 +908,7 @@ function handleAuthedMessage(socket, msg, subs) {
             return null;
           }
           if (sig && hit && hit.sig === sig) return { entries: hit.entries, sig };
-          const entries = (await loadTranscript(sessionId, projectPath, limit)) || [];
+          const entries = (await loadTranscript(sessionId, projectPath, limit, undefined, { blocks })) || [];
           if (sig) txCache.set(cacheKey, { sig, entries });
           return { entries, sig };
         })

@@ -156,19 +156,89 @@ function isLong(text) {
 
 // The body of a skill behind a "/name" row: a few dim lines, expandable to the
 // whole skill. Sam wants the preview kept, just out of the way.
-function SkillPreview({ detail }) {
+function SkillPreview({ detail, label = 'skill' }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="chatp-skill">
       {open
         ? <div className="chatp-skill-full"><ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{detail}</ReactMarkdown></div>
         : <div className="chatp-skill-peek">{detail}</div>}
-      <button type="button" className="chatp-more" onClick={() => setOpen((o) => !o)}>{open ? 'Hide skill' : 'Show skill'}</button>
+      <button type="button" className="chatp-more" onClick={() => setOpen((o) => !o)}>{open ? `Hide ${label}` : `Show ${label}`}</button>
     </div>
   );
 }
 
-const Message = memo(function Message({ role, content, timestamp, queued, sending, command, detail, startOpen }) {
+// --- Typed transcript blocks (main's opt-in { blocks } rows) ----------------
+// Tool calls and thinking render as quiet one-line steps that open on click,
+// so a turn reads like the reply, not like the terminal.
+function DiffView({ diff }) {
+  const lines = (s, sign) => (s ? s.split('\n').map((l, i) => <div key={sign + i} className={`chatp-diff-${sign === '-' ? 'del' : 'add'}`}>{sign} {l}</div>) : null);
+  return <div className="chatp-diff">{lines(diff.old, '-')}{lines(diff.new, '+')}</div>;
+}
+
+function StepRow({ block }) {
+  const [open, setOpen] = useState(false);
+  const isTool = block.type === 'tool';
+  const state = !isTool ? 'think' : block.isError ? 'err' : block.result !== undefined ? 'ok' : 'pending';
+  return (
+    <div className={`chatp-step${open ? ' open' : ''}`}>
+      <button type="button" className="chatp-step-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <span className={`chatp-step-dot ${state}`} />
+        <span className="chatp-step-name">{isTool ? block.name : 'Thinking'}</span>
+        {isTool && block.summary && <span className="chatp-step-sum">{block.summary}</span>}
+        <span className="chatp-step-caret">{open ? '\u25be' : '\u25b8'}</span>
+      </button>
+      {open && (
+        <div className="chatp-step-body">
+          {!isTool && <div className="chatp-step-think">{block.text}</div>}
+          {block.diff && <DiffView diff={block.diff} />}
+          {block.input && <pre className="chatp-step-pre">{block.input}</pre>}
+          {isTool && block.result !== undefined && (
+            <pre className={`chatp-step-pre out${block.isError ? ' err' : ''}`}>{block.result || '(no output)'}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A run of more than three steps folds into one "N steps" row: a busy turn can
+// hold a hundred tool calls between two sentences.
+function StepGroup({ steps }) {
+  const [open, setOpen] = useState(false);
+  if (steps.length <= 3) return <div className="chatp-steps">{steps.map((b, i) => <StepRow key={i} block={b} />)}</div>;
+  const counts = {};
+  for (const b of steps) { const n = b.type === 'tool' ? b.name : 'Thinking'; counts[n] = (counts[n] || 0) + 1; }
+  const label = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => (c > 1 ? `${n} \u00d7${c}` : n)).join(', ');
+  const failed = steps.some((b) => b.isError);
+  return (
+    <div className="chatp-steps">
+      <button type="button" className="chatp-step-head group" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <span className={`chatp-step-dot ${failed ? 'err' : 'ok'}`} />
+        <span className="chatp-step-name">{steps.length} steps</span>
+        <span className="chatp-step-sum">{label}</span>
+        <span className="chatp-step-caret">{open ? '\u25be' : '\u25b8'}</span>
+      </button>
+      {open && steps.map((b, i) => <StepRow key={i} block={b} />)}
+    </div>
+  );
+}
+
+function Blocks({ blocks }) {
+  const parts = [];
+  let run = [];
+  const flush = () => { if (run.length) { parts.push(<StepGroup key={`s${parts.length}`} steps={run} />); run = []; } };
+  for (const b of blocks) {
+    if (b.type === 'text') {
+      flush();
+      parts.push(<ReactMarkdown key={`t${parts.length}`} remarkPlugins={[remarkGfm]} components={mdComponents}>{b.text}</ReactMarkdown>);
+    } else run.push(b);
+  }
+  flush();
+  return parts;
+}
+
+const Message = memo(function Message({ role, content, timestamp, queued, sending, command, detail, detailLabel, blocks, startOpen }) {
   const isClaude = role === 'assistant';
   const text = String(content ?? '');
   const long = !command && isLong(text);
@@ -180,13 +250,13 @@ const Message = memo(function Message({ role, content, timestamp, queued, sendin
         {timestamp != null && <span className="chatp-time">{fmtTime(timestamp)}</span>}
         {queued && <span className="chatp-tag">queued</span>}
         {sending && <span className="chatp-tag">sending</span>}
-        <CopyButton text={String(content ?? '')} className="chatp-msg-copy" label="Copy message" />
+        {text && <CopyButton text={text} className="chatp-msg-copy" label="Copy message" />}
       </div>
       <div className={`chatp-body${open ? '' : ' clamped'}`}>
         {isClaude
-          ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>
+          ? (blocks ? <Blocks blocks={blocks} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
           : <div className={`chatp-plain${command ? ' chatp-cmd' : ''}`}>{text}</div>}
-        {command && detail && <SkillPreview detail={detail} />}
+        {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
       </div>
       {long && <button type="button" className="chatp-more" onClick={() => setOpen((o) => !o)}>{open ? 'Show less' : 'Show more'}</button>}
     </div>
@@ -617,6 +687,8 @@ export default function ChatPane({ tabId, visible }) {
           <Message
             key={i} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued}
             command={!!m.command} detail={typeof m.detail === 'string' ? m.detail : null}
+            detailLabel={typeof m.detailLabel === 'string' ? m.detailLabel : null}
+            blocks={Array.isArray(m.blocks) && m.blocks.length ? m.blocks : null}
             startOpen={i === lastClaude}
           />
         ))}
