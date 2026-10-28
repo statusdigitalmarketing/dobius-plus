@@ -45,11 +45,6 @@ const MAX_GH_FAILURES = 3; // in a row: GitHub is down or rate limiting, back of
 // renderer.gone / child.gone (both handlers log the same event).
 // main.stall-watchdog is the watchdog's own status (armed, clock jumped over a
 // sleep), not a stall; main.stall is the real one.
-// Error codes Node and libuv report after a path (`/Users/sid: EACCES`).
-const ERRNO = new Set(['EACCES', 'EPERM', 'ENOENT', 'EEXIST', 'EMFILE', 'ENFILE', 'EBUSY', 'ENOTDIR', 'EISDIR',
-  'ENOSPC', 'EROFS', 'ELOOP', 'ENAMETOOLONG', 'ENOTEMPTY', 'EXDEV', 'EINVAL', 'EIO', 'EAGAIN', 'ETIMEDOUT',
-  'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ENOTSUP', 'EBADF', 'ECANCELED']);
-
 // guest.* is a <webview> pane's third-party page (error-log.js): never ours.
 const SKIP_KIND = /^(app|error-log|main\.warn|main\.stall-watchdog|crash\.render-process-gone|crash\.child-process-gone|guest\..*)$/;
 
@@ -158,14 +153,12 @@ export function scrub(text, home = os.homedir()) {
     // x-api-key) and any value, punctuation included (`#Hunter2!`).
     // No prefix quantifier at all: the credential word is found wherever it
     // ends a key, however long the key (SPRING_..._PASSWORD=, Codex).
-    .replace(/((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|session(?:[_-]?id)?|sid|cookie|auth)['"`]?\s*[=:]\s*['"`]?)((?:[^\s"'`]|(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_]))*[^\s"'`)\]},;])/giu, (m, key, value, at, all) => (
-      // A path component (a home dir named sid) followed by an errno code is a
-      // path and an error, not a credential: `/Users/sid: EACCES` (Codex).
-      // Any other value after a slash-qualified key is still a secret
-      // (`database/password=hunter2`).
-      // Only a ':' separator and a KNOWN errno name: a value merely shaped
-      // like one (`database/password=EASTER2026`) is a secret (Codex).
-      /[/\\]$/.test(all.slice(Math.max(0, at - 1), at)) && /:\s*$/.test(key) && ERRNO.has(value) ? m : `${key}[redacted]`));
+    .replace(/((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|session(?:[_-]?id)?|sid|cookie|auth)['"`]?\s*[=:]\s*['"`]?)((?:[^\s"'`]|(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_]))*[^\s"'`)\]},;])/giu, '$1[redacted]');
+  // ACCEPTED (Codex): a path component named like a credential word (a home
+  // dir called sid or token) is redacted too, which can merge two errors that
+  // follow it (EACCES, EMFILE) into one issue. Every exception tried leaked a
+  // real secret (database/password=EASTER2026, a password that IS an errno
+  // name), and a secret always outranks grouping.
   // Home and user paths only AFTER the credentials: a user-name rule that may
   // span spaces would otherwise eat `/Users/sam password` and strand the
   // value (Codex).

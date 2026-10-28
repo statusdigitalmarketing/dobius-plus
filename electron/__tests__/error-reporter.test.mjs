@@ -179,7 +179,7 @@ check('an apostrophe in a URL password cannot hide the @', R.scrub("Error: GET h
 check("can't read and can't write stay apart", R.signatureFor('main.error', "Error: can't read 'id'") === R.signatureFor('main.error', "Error: can't write 'id'"), false);
 check('a home path cannot eat the key of a following credential', R.scrub('Error: login failed for /Users/sam password=hunter2', '/Users/sam').includes('hunter2'), false);
 check('a very long credential key still redacts its value', R.scrub('Error: login failed SPRING_DATASOURCE_HIKARI_DATA_SOURCE_PROPERTIES_PASSWORD=hunter2', '/h').includes('hunter2'), false);
-check('a home dir named like a credential word is not a key', R.signatureFor('main.error', 'Error: open /Users/sid: EACCES') === R.signatureFor('main.error', 'Error: open /Users/sid: EMFILE'), false);
+check('a password that is an errno name is still redacted', R.scrub('Error: database/password: EACCES', '/h').includes('EACCES'), false);
 check('a slash-qualified credential key still redacts its value', R.scrub('Error: invalid config database/password=hunter2', '/h').includes('hunter2'), false);
 check('an errno-shaped password is still a secret', R.scrub('Error: invalid config database/password=EASTER2026', '/h').includes('EASTER2026'), false);
 check('an errno-shaped value after a colon is still a secret unless it is a real errno', R.scrub('Error: database/password: EASTER2026', '/h').includes('EASTER2026'), false);
