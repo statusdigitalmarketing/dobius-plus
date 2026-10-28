@@ -31,6 +31,7 @@
 }
 .chatp-link:hover { border-color: var(--border); color: var(--fg); }
 
+.chatp-scroll-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .chatp-scroll { flex: 1; overflow-y: auto; min-height: 0; }
 .chatp-column { width: 100%; max-width: 860px; margin: 0 auto; padding: 0 24px; }
 .chatp-scroll .chatp-column { padding-top: 18px; padding-bottom: 12px; }
@@ -131,12 +132,6 @@
 .chatp-inline:hover { border-color: var(--accent); }
 .chatp-inline.done { border-color: #3fb950; color: #3fb950; }
 
-.chatp-working { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 13px; margin: 4px 0 12px; }
-.chatp-dots { display: inline-flex; gap: 4px; }
-.chatp-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: chatp-bounce 1.2s infinite ease-in-out; }
-.chatp-dots i:nth-child(2) { animation-delay: 0.15s; }
-.chatp-dots i:nth-child(3) { animation-delay: 0.3s; }
-@keyframes chatp-bounce { 0%, 80%, 100% { opacity: 0.25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
 @keyframes chatp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 .chatp-shell-intro { color: var(--dim); font-size: 12px; margin-bottom: 8px; }
@@ -225,3 +220,61 @@
 }
 .chatp-diff-del { background: rgba(248, 81, 73, 0.12); color: var(--fg); padding: 0 10px; }
 .chatp-diff-add { background: rgba(63, 185, 80, 0.12); color: var(--fg); padding: 0 10px; }
+
+/* --- Live activity: Claude's spinner line, as the terminal shows it ------- */
+.chatp-activity {
+  display: inline-flex; align-items: center; gap: 10px;
+  margin: 2px 0 14px; padding: 8px 14px 8px 12px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface) 92%, var(--accent) 8%), var(--surface));
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent) inset, 0 6px 18px -12px color-mix(in srgb, var(--accent) 60%, transparent);
+  font-size: 13px; line-height: 1; max-width: 100%;
+  animation: chatp-act-in 220ms ease-out both;
+}
+.chatp-act-glyph {
+  width: 14px; text-align: center; font-size: 15px; color: var(--accent);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.chatp-act-text { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.chatp-act-verb {
+  display: inline-block; font-weight: 600; letter-spacing: 0.01em;
+  background: linear-gradient(100deg, var(--accent) 0%, var(--accent) 35%, color-mix(in srgb, var(--accent) 35%, var(--fg) 65%) 50%, var(--accent) 65%, var(--accent) 100%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: chatp-shimmer 2.4s linear infinite, chatp-verb-in 320ms cubic-bezier(.2,.8,.2,1) both;
+}
+.chatp-act-meta {
+  color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums;
+  padding-left: 10px; border-left: 1px solid var(--border); white-space: nowrap;
+}
+@keyframes chatp-shimmer { from { background-position: 100% 0; } to { background-position: -150% 0; } }
+@keyframes chatp-verb-in { from { opacity: 0; transform: translateY(5px); filter: blur(2px); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes chatp-act-in { from { opacity: 0; transform: translateY(4px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+/* A step still running in the turn Claude is on now. */
+.chatp-step-dot.running {
+  background: var(--accent); opacity: 1;
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent);
+  animation: chatp-ping 1.4s ease-out infinite;
+}
+@keyframes chatp-ping { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 7px transparent; } }
+
+/* "N new messages" while scrolled up. */
+.chatp-jump {
+  position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 14px; border-radius: 999px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%);
+  color: var(--fg); font: inherit; font-size: 12px; font-weight: 500;
+  box-shadow: 0 8px 24px -10px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  animation: chatp-act-in 200ms ease-out both;
+}
+.chatp-jump:hover { border-color: var(--accent); }
+.chatp-jump span { color: var(--accent); font-size: 13px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chatp-activity, .chatp-jump, .chatp-act-verb, .chatp-step-dot.running { animation: none; }
+  .chatp-act-verb { color: var(--accent); background: none; }
+}

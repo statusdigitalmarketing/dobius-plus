@@ -1,8 +1,10 @@
-import { useState, useEffect, useRef, useCallback, memo, createContext, useContext } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard } from '../../../shared/chat-rows.js';
+import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import './ChatPane.css';
 
 const POLL_MS = 1500;
@@ -176,10 +178,12 @@ function DiffView({ diff }) {
   return <div className="chatp-diff">{lines(diff.old, '-')}{lines(diff.new, '+')}</div>;
 }
 
-function StepRow({ block }) {
+function StepRow({ block, live }) {
   const [open, setOpen] = useState(false);
   const isTool = block.type === 'tool';
-  const state = !isTool ? 'think' : block.isError ? 'err' : block.result !== undefined ? 'ok' : 'pending';
+  // A step with no result yet is running only in the turn Claude is on now;
+  // in an older turn its result simply fell outside the window.
+  const state = !isTool ? 'think' : block.isError ? 'err' : block.result !== undefined ? 'ok' : live ? 'running' : 'pending';
   return (
     <div className={`chatp-step${open ? ' open' : ''}`}>
       <button type="button" className="chatp-step-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
@@ -204,44 +208,89 @@ function StepRow({ block }) {
 
 // A run of more than three steps folds into one "N steps" row: a busy turn can
 // hold a hundred tool calls between two sentences.
-function StepGroup({ steps }) {
+function StepGroup({ steps, live }) {
   const [open, setOpen] = useState(false);
-  if (steps.length <= 3) return <div className="chatp-steps">{steps.map((b, i) => <StepRow key={i} block={b} />)}</div>;
+  // Claude can run several tools in parallel, so every step of the live run
+  // that has no result yet is running, not only the last one (Codex).
+  if (steps.length <= 3) return <div className="chatp-steps">{steps.map((b, i) => <StepRow key={i} block={b} live={live} />)}</div>;
   const counts = {};
   for (const b of steps) { const n = b.type === 'tool' ? b.name : 'Thinking'; counts[n] = (counts[n] || 0) + 1; }
   const label = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => (c > 1 ? `${n} \u00d7${c}` : n)).join(', ');
   const failed = steps.some((b) => b.isError);
+  const running = live && steps.some((b) => b.type === 'tool' && b.result === undefined);
   return (
     <div className="chatp-steps">
       <button type="button" className="chatp-step-head group" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <span className={`chatp-step-dot ${failed ? 'err' : 'ok'}`} />
+        <span className={`chatp-step-dot ${running ? 'running' : failed ? 'err' : 'ok'}`} />
         <span className="chatp-step-name">{steps.length} steps</span>
         <span className="chatp-step-sum">{label}</span>
         <span className="chatp-step-caret">{open ? '\u25be' : '\u25b8'}</span>
       </button>
-      {open && steps.map((b, i) => <StepRow key={i} block={b} />)}
+      {open && steps.map((b, i) => <StepRow key={i} block={b} live={live} />)}
     </div>
   );
 }
 
-function Blocks({ blocks }) {
+function Blocks({ blocks, live }) {
   const parts = [];
   let run = [];
-  const flush = () => { if (run.length) { parts.push(<StepGroup key={`s${parts.length}`} steps={run} />); run = []; } };
+  // Only the run of steps that ENDS the turn can still be running.
+  const flush = (atEnd) => { if (run.length) { parts.push(<StepGroup key={`s${parts.length}`} steps={run} live={live && atEnd} />); run = []; } };
   for (const b of blocks) {
     if (b.type === 'text') {
-      flush();
+      flush(false);
       parts.push(<ReactMarkdown key={`t${parts.length}`} remarkPlugins={[remarkGfm]} components={mdComponents}>{b.text}</ReactMarkdown>);
     } else run.push(b);
   }
-  flush();
+  flush(true);
   return parts;
 }
 
-const Message = memo(function Message({ role, content, timestamp, queued, sending, command, detail, detailLabel, blocks, startOpen }) {
+// Claude's spinner line, live: the glyph cycle, the gerund it picked for this
+// turn ("Whirlpooling"), and the clock + token meter. The clock ticks here
+// between polls. Without a line from the screen (an older Mac, a frame not
+// parsed yet) it still shows the glyph and counts from when the turn was seen.
+function useReducedMotion() {
+  const [reduce, setReduce] = useState(() => !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+  useEffect(() => {
+    const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    if (!mq) return undefined;
+    const on = () => setReduce(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+  return reduce;
+}
+
+const Activity = memo(function Activity({ activity }) {
+  const reduce = useReducedMotion();
+  const [tick, setTick] = useState(0);
+  const sec = activity?.seconds ?? null;
+  const [anchor, setAnchor] = useState(() => ({ at: Date.now(), seconds: sec }));
+  useEffect(() => { if (sec != null) setAnchor({ at: Date.now(), seconds: sec }); }, [sec]);
+  useEffect(() => {
+    const iv = setInterval(() => setTick((t) => t + 1), reduce ? 1000 : SPIN_MS);
+    return () => clearInterval(iv);
+  }, [reduce]);
+  const verb = activity?.verb || 'Working';
+  const meta = activityMeta(liveSeconds(anchor, Date.now()), activity);
+  return (
+    <div className="chatp-activity">
+      <span className="chatp-act-glyph" aria-hidden="true">{reduce ? '\u273b' : SPIN_FRAMES[tick % SPIN_FRAMES.length]}</span>
+      <span className="chatp-act-text" role="status">
+        <span key={verb} className="chatp-act-verb">{`${verb}\u2026`}</span>
+      </span>
+      {meta && <span className="chatp-act-meta" aria-hidden="true">{meta}</span>}
+    </div>
+  );
+});
+
+const Message = memo(function Message({ role, content, timestamp, queued, sending, command, detail, detailLabel, blocks: rawBlocks, startOpen, live }) {
   const isClaude = role === 'assistant';
+  const blocks = useMemo(() => (isClaude ? normalizeBlocks(rawBlocks) : null), [isClaude, rawBlocks]);
   const text = String(content ?? '');
-  const long = !command && isLong(text);
+  const shown = rowText(text, blocks); // what the reader sees, and what Copy copies
+  const long = !command && isLong(shown);
   const [open, setOpen] = useState(!long || !!startOpen);
   return (
     <div className={`chatp-msg ${isClaude ? 'claude' : 'you'}${sending ? ' sending' : ''}`}>
@@ -250,11 +299,11 @@ const Message = memo(function Message({ role, content, timestamp, queued, sendin
         {timestamp != null && <span className="chatp-time">{fmtTime(timestamp)}</span>}
         {queued && <span className="chatp-tag">queued</span>}
         {sending && <span className="chatp-tag">sending</span>}
-        {text && <CopyButton text={text} className="chatp-msg-copy" label="Copy message" />}
+        {shown && <CopyButton text={shown} className="chatp-msg-copy" label="Copy message" />}
       </div>
-      <div className={`chatp-body${open ? '' : ' clamped'}`}>
+      <div className={`chatp-body${long && !open ? ' clamped' : ''}`}>
         {isClaude
-          ? (blocks ? <Blocks blocks={blocks} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
+          ? (blocks ? <Blocks blocks={blocks} live={!!live} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
           : <div className={`chatp-plain${command ? ' chatp-cmd' : ''}`}>{text}</div>}
         {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
       </div>
@@ -310,8 +359,33 @@ export default function ChatPane({ tabId, visible }) {
   const [shellText, setShellText] = useState(null);
   const [claudeLive, setClaudeLive] = useState(false);
   const [status, setStatus] = useState(null);
-  const [selector, setSelector] = useState(null); // { prompt, options, token }
+  const [activity, setActivity] = useState(null);
+  const [selector, setSelector] = useState(null); // { prompt, options, token, fp }
+  // Which card each pointer / key press began on (see createPressGuard).
+  const pressGuard = useRef(null);
+  if (!pressGuard.current) pressGuard.current = createPressGuard();
+  // Releases are watched on the window: a press can end outside the card.
+  useEffect(() => {
+    const g = pressGuard.current;
+    const onUp = (e) => g.pointerUp(e);
+    const onKeyUp = (e) => g.keyUp(e);
+    const onBlur = () => g.reset();
+    window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onUp, true);
+    window.addEventListener('keyup', onKeyUp, true);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('pointerup', onUp, true);
+      window.removeEventListener('pointercancel', onUp, true);
+      window.removeEventListener('keyup', onKeyUp, true);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
   const [echoes, setEchoes] = useState([]);
+  const echoesRef = useRef(echoes);
+  useEffect(() => { echoesRef.current = echoes; }, [echoes]);
+  // Identical sends still waiting on main, by normalized text (see submit).
+  const inflightRef = useRef(new Map());
   const [draft, setDraft] = useState(() => drafts.get(tabId) || '');
   useEffect(() => {
     if (draft) drafts.set(tabId, draft); else drafts.delete(tabId);
@@ -334,6 +408,15 @@ export default function ChatPane({ tabId, visible }) {
   const selAppliedRef = useRef(0);
   const bodyRef = useRef(null);
   const atBottomRef = useRef(true);
+  // Rows that arrived (or a live turn that grew) while scrolled up, for the
+  // "new messages" pill. The mark is the newest row seen at the bottom (the
+  // window slides, so a plain length cannot count them).
+  const [unseen, setUnseen] = useState(0);
+  const seenKeyRef = useRef(null);
+  const jumpingRef = useRef(false); // a smooth jump to the latest is in flight
+  const lastTopRef = useRef(0);
+  const jumpGenRef = useRef(0);
+  const preJumpMarkRef = useRef(null); // the reading mark before the last jump
   const inputRef = useRef(null);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
@@ -348,12 +431,19 @@ export default function ChatPane({ tabId, visible }) {
 
   const apply = useCallback((r) => {
     setStatus(r.status || null);
+    setActivity(r.status === 'working' ? normalizeActivity(r.activity) : null);
     setClaudeLive(!!r.claudeLive);
     if (sessionIdRef.current !== r.sessionId) {
-      // A different conversation (or none): the old prompt's buttons go.
+      // A different conversation (or none): the old prompt's buttons go. Not
+      // on the FIRST reply: the card read on entering Chat belongs to this
+      // session, and clearing it blinked the card out until the next poll
+      // (and cancelled a press begun in that window).
+      const known = sessionIdRef.current !== undefined;
       sessionIdRef.current = r.sessionId;
-      dropPendingSelector();
-      setSelector(null);
+      if (known) {
+        dropPendingSelector();
+        setSelector(null);
+      }
     }
     // Optimistic bubbles belong to the session they were sent into.
     setEchoes((cur) => {
@@ -427,7 +517,7 @@ export default function ChatPane({ tabId, visible }) {
       return;
     }
     const s2 = sel?.selector;
-    setSelector(s2 && Array.isArray(s2.options) && s2.options.length > 0 ? { ...s2, token: sel.token } : null);
+    setSelector(s2 && Array.isArray(s2.options) && s2.options.length > 0 ? { ...s2, token: sel.token, fp: tokenFingerprint(sel.token) } : null);
   }, [tabId]);
 
   // Transcript + status poll, only while this pane is on screen.
@@ -454,7 +544,9 @@ export default function ChatPane({ tabId, visible }) {
     let cancelled = false;
     let timer = null;
     const tick = async () => {
-      await pollSelector();
+      // A read raced by output comes back unsettled: re-read shortly instead
+      // of leaving the card disabled until the next tick.
+      await pollSelector(3);
       if (!cancelled) timer = setTimeout(tick, SELECTOR_POLL_MS);
     };
     tick();
@@ -488,12 +580,82 @@ export default function ChatPane({ tabId, visible }) {
 
   useEffect(() => {
     const el = bodyRef.current;
-    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+    if (el && atBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+      // This instant write lands the jump (it cancels a smooth scroll), and
+      // the reader's next scroll must be measured from HERE, or a scroll up
+      // from the bottom reads as "down" against an older position (Codex).
+      jumpingRef.current = false;
+      lastTopRef.current = el.scrollTop;
+    }
+    const rows = messages || [];
+    const keys = rowKeys(rows);
+    if (atBottomRef.current || !keys.length) {
+      seenKeyRef.current = markLatest(rows, keys);
+      setUnseen(0);
+      return;
+    }
+    // No mark (a new session loaded in this tab while the reader was scrolled
+    // up): none of it was seen, so say so until they reach the bottom
+    // (Codex Medium, twice: a null mark used to hide the pill for good).
+    setUnseen(seenKeyRef.current ? unseenSince(rows, keys, seenKeyRef.current) : -1);
   }, [messages, echoes, shellText, status, selector]);
 
   const onScroll = () => {
     const el = bodyRef.current;
-    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    // A smooth jump passes through scroll positions above the bottom; they
+    // must not count as the reader scrolling back up. The hold ends when the
+    // jump lands or the reader scrolls UP during it (a timer alone kept a
+    // real upward scroll counted as "at bottom": Codex Medium).
+    if (jumpingRef.current && (near || el.scrollTop < lastTopRef.current)) {
+      jumpingRef.current = false;
+      // Cut short by the reader before it reached the new rows: they were
+      // never seen, so the pill comes back (Codex Medium).
+      if (!near) {
+        seenKeyRef.current = preJumpMarkRef.current;
+        setUnseen(preJumpMarkRef.current ? unseenSince(messages || [], rowKeys(messages || []), preJumpMarkRef.current) : -1);
+      }
+    }
+    lastTopRef.current = el.scrollTop;
+    atBottomRef.current = jumpingRef.current || near;
+    if (atBottomRef.current && unseen !== 0) {
+      seenKeyRef.current = markLatest(messages || [], rowKeys(messages || []));
+      setUnseen(0);
+    }
+  };
+
+  const jumpToLatest = () => {
+    const el = bodyRef.current;
+    if (!el) return;
+    atBottomRef.current = true;
+    // Seen on the tap itself: waiting for the scroll to land left the pill up
+    // when the reply grew during the animation (Codex).
+    preJumpMarkRef.current = seenKeyRef.current;
+    seenKeyRef.current = markLatest(messages || [], rowKeys(messages || []));
+    setUnseen(0);
+    const smooth = !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    // Only a smooth jump needs the hold; an instant one lands in one event.
+    // If the animation is cut short with no further scroll events, re-read
+    // the position rather than holding forever.
+    jumpingRef.current = smooth;
+    const gen = ++jumpGenRef.current;
+    lastTopRef.current = el.scrollTop;
+    if (smooth) {
+      setTimeout(() => {
+        // Only this jump's own hold: a later jump owns its own timer.
+        if (gen !== jumpGenRef.current || !jumpingRef.current || !bodyRef.current) return;
+        jumpingRef.current = false;
+        const b = bodyRef.current;
+        atBottomRef.current = b.scrollHeight - b.scrollTop - b.clientHeight < 80;
+        if (!atBottomRef.current) {
+          seenKeyRef.current = preJumpMarkRef.current;
+          setUnseen(preJumpMarkRef.current ? unseenSince(messagesRef.current || [], rowKeys(messagesRef.current || []), preJumpMarkRef.current) : -1);
+        }
+      }, 1500);
+    }
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
   };
 
   // Grow the composer with its content, up to a cap.
@@ -517,15 +679,28 @@ export default function ChatPane({ tabId, visible }) {
 
   const submit = async (text, { echo = true } = {}) => {
     const sid = sessionId;
-    const base = countInTranscript(messagesRef.current, text); // copies already there
-    const r = await window.electronAPI?.chatSubmit?.(tabId, text);
+    const key = normEcho(text);
+    // Copies already there, plus identical sends ahead of this one that have
+    // not landed yet (an echo waiting, or a send still in flight): otherwise
+    // the first "yes" to land would count as this one too and either clear
+    // its echo or never show it (Codex Low).
+    const inflight = inflightRef.current;
+    const base = countInTranscript(messagesRef.current, text)
+      + echoesRef.current.filter((e) => e.sid === sid && normEcho(e.content) === key).length
+      + (inflight.get(key) || 0);
+    inflight.set(key, (inflight.get(key) || 0) + 1);
+    let r;
+    try {
+      r = await window.electronAPI?.chatSubmit?.(tabId, text);
+    } finally {
+      const n = (inflight.get(key) || 1) - 1;
+      if (n > 0) inflight.set(key, n); else inflight.delete(key);
+    }
     const ok = r === true;
     // Only if the conversation it went into is still the one on screen, and
     // the transcript has not already shown it while the Enter was pending.
     if (ok && echo && sid && sessionIdRef.current === sid && countInTranscript(messagesRef.current, text) <= base) {
-      // An identical message still waiting to land counts as one more copy, or
-      // the first "yes" to land would clear both echoes.
-      setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid, base: base + cur.filter((e) => normEcho(e.content) === normEcho(text)).length }]);
+      setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid, base }]);
     }
     if (ok) refreshSoon();
     return r === 'stranded' ? 'stranded' : ok;
@@ -546,8 +721,13 @@ export default function ChatPane({ tabId, visible }) {
   // Answer the prompt on screen. Main delivers the key only if nothing has
   // typed into the tab since this card was read (the phone, the terminal),
   // so these buttons can never land on a prompt the user has not seen.
-  const selectorKey = async (seq, closes = false) => {
+  const selectorKey = async (seq, closes = false, e = null) => {
     const token = selector?.token;
+    // A press must END on the card it began on (shared createPressGuard).
+    if (!pressGuard.current.take(e, selector)) {
+      flash('The prompt changed while you were clicking. Nothing was sent, check the card again.');
+      return;
+    }
     dropPendingSelector();
     if (closes) setSelector(null);
     inputRef.current?.focus(); // a clicked key button must not keep focus
@@ -556,7 +736,7 @@ export default function ChatPane({ tabId, visible }) {
     if (!r?.ok) {
       setSelector(null);
       if (r?.stale) flash('That prompt changed. Showing the current one.');
-      pollSelector();
+      pollSelector(5);
       return;
     }
     if (!closes) setSelector((cur) => (cur && cur.token === token ? { ...cur, token: r.token } : cur));
@@ -567,10 +747,10 @@ export default function ChatPane({ tabId, visible }) {
     refreshSoon();
   };
 
-  const chooseOption = (num) => {
+  const chooseOption = (num, e) => {
     // The absolute option digit, never relative arrows: a misparsed cursor
     // position then cannot pick a different option than the label shown.
-    selectorKey(String(num), true);
+    selectorKey(String(num), true, e);
     atBottomRef.current = true;
   };
 
@@ -680,24 +860,24 @@ export default function ChatPane({ tabId, visible }) {
   } else {
     // The newest Claude reply stays open even when long: it is what you came to read.
     const lastClaude = messages.findLastIndex((m) => m.role === 'assistant');
+    const keys = rowKeys(messages);
     body = (
       <>
         {messages.length === 0 && shellBlock('No messages yet. Live terminal:')}
         {messages.map((m, i) => (
           <Message
-            key={i} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued}
+            key={keys[i]} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued}
             command={!!m.command} detail={typeof m.detail === 'string' ? m.detail : null}
             detailLabel={typeof m.detailLabel === 'string' ? m.detailLabel : null}
-            blocks={Array.isArray(m.blocks) && m.blocks.length ? m.blocks : null}
+            blocks={m.blocks}
             startOpen={i === lastClaude}
+            live={working && i === lastClaude && i === messages.length - 1}
           />
         ))}
         {echoes.filter((e) => e.sid === sessionId).map((e) => (
           <Message key={`echo-${e.at}`} role="user" content={e.content} timestamp={e.at} sending />
         ))}
-        {working && (
-          <div className="chatp-working"><span className="chatp-dots"><i /><i /><i /></span>Claude is working</div>
-        )}
+        {working && visible && <Activity activity={activity} />}
       </>
     );
   }
@@ -714,15 +894,28 @@ export default function ChatPane({ tabId, visible }) {
           Show terminal
         </button>
       </div>
-      <div className="chatp-scroll" ref={bodyRef} onScroll={onScroll}>
-        <div className="chatp-column">{body}</div>
+      <div className="chatp-scroll-wrap">
+        <div className="chatp-scroll" ref={bodyRef} onScroll={onScroll}>
+          <div className="chatp-column">{body}</div>
+        </div>
+        {unseen !== 0 && (
+          <button type="button" className="chatp-jump" onClick={jumpToLatest}>
+            <span aria-hidden="true">{'\u2193'}</span>
+            {unseen > 0 ? `${unseen} new ${unseen === 1 ? 'message' : 'messages'}` : 'New messages'}
+          </button>
+        )}
       </div>
       <div className="chatp-column chatp-dock">
         {selector && (
-          <div className="chatp-selector">
+          <div
+            className="chatp-selector"
+            key={selectorCardKey(selector)}
+            onPointerDownCapture={(e) => pressGuard.current.pointerDown(e, selector)}
+            onKeyDownCapture={(e) => pressGuard.current.keyDown(e, selector)}
+          >
             <div className="chatp-selector-title">{selector.prompt || 'Claude is waiting for you to choose:'}</div>
             {selector.options.map((opt) => (
-              <button type="button" key={opt.num} className="chatp-option" disabled={!selector.token} onClick={() => chooseOption(opt.num)}>
+              <button type="button" key={opt.num} className="chatp-option" disabled={!selector.token} onClick={(e) => chooseOption(opt.num, e)}>
                 <span className="chatp-option-num">{opt.num}</span>
                 <span className="chatp-option-text">
                   {opt.label}
@@ -732,7 +925,7 @@ export default function ChatPane({ tabId, visible }) {
             ))}
             <div className="chatp-keys">
               {SELECTOR_KEYS.map(([label, seq, closes]) => (
-                <button type="button" key={label} className="chatp-key" disabled={!selector.token} onClick={() => selectorKey(seq, closes)}>{label}</button>
+                <button type="button" key={label} className="chatp-key" disabled={!selector.token} onClick={(e) => selectorKey(seq, closes, e)}>{label}</button>
               ))}
             </div>
           </div>

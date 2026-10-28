@@ -6,7 +6,9 @@
 // silently dropped. That is Sam's "it swallows up messages once in a while":
 // the echo bubble appeared (local state), the send went nowhere, and the
 // 90s echo pruner eventually erased the evidence.
-const QUEUEABLE = new Set(['input', 'submitPrompt', 'kill', 'resumeSession', 'createTerminal']);
+// selectorKey is safe to hold across a reconnect: it carries the token its
+// card was read with, so the Mac refuses it if anything moved meanwhile.
+const QUEUEABLE = new Set(['input', 'submitPrompt', 'kill', 'resumeSession', 'createTerminal', 'selectorKey']);
 
 /**
  * WebSocket client for the Dobius+ mobile bridge.

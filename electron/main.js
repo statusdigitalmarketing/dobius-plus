@@ -34,10 +34,10 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, terminalOutputSeq, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
-import { liveSelectorForTab, terminalTextTail, submitPromptToTab, writeRawInput, selectorToken, selectorFingerprint, submitPending } from './chat-service.js';
+import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -621,7 +621,7 @@ function setupDataHandlers() {
   // the WS, behind the same terminal ownership boundary as every other
   // terminal IPC. Ownership is checked again after each await: a tear-off or
   // dock can move the tab to another window in between.
-  ipcMain.handle('chat:poll', async (event, tabId, have) => {
+  const chatPoll = async (event, tabId, have) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return null;
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return null;
@@ -671,46 +671,31 @@ function setupDataHandlers() {
       // A linked session with nothing parsed yet still shows what is on screen.
       ...(entries.length === 0 ? { shellText: terminalTextTail(tabId) } : {}),
     };
+  };
+  ipcMain.handle('chat:poll', async (event, tabId, have) => {
+    const r = await chatPoll(event, tabId, have);
+    // The live spinner line ("Whirlpooling… 1m 12s"), only while working.
+    if (r && r.status === 'working') r.activity = await activityForTab(tabId);
+    return r;
   });
   ipcMain.handle('chat:selector', async (event, tabId) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return null;
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return null;
-    // Stamp the read BEFORE rendering: any input that lands meanwhile (from
-    // any surface) makes these buttons stale, and chat:key refuses them.
-    const token = selectorToken(tabId);
-    // No repaint since the last input: the screen cannot be trusted yet, which
-    // is not the same as "no prompt" (the card waits instead of vanishing).
-    if (!token) return terminalInstance(tabId) ? { unsettled: true } : null;
-    let selector;
-    try { selector = await liveSelectorForTab(tabId); } catch { selector = null; }
-    if (selectorToken(tabId) !== token || !ownsTerminal(senderId, tabId)) return null;
-    return selector ? { selector, token: `${token}|${selectorFingerprint(selector)}` } : null;
+    // Shared with the phone (chat-service): stamped before the render, and
+    // unsettled rather than answerable when anything reached the tab meanwhile.
+    return readSelectorForAnswer(tabId, () => ownsTerminal(senderId, tabId));
   });
-  // Answer a selector read: delivered only while no input has reached the tab
-  // since that read AND the screen still shows the prompt the card showed.
+  // Answer a selector read: delivered only while neither input nor output has
+  // reached the tab since that read (the token carries both counts) AND the
+  // screen still shows the prompt the card showed.
   // Returns the fresh token so arrow/space keys can continue on that prompt.
   ipcMain.handle('chat:key', async (event, tabId, data, token) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
     if (typeof data !== 'string' || !data || data.length > 16 || typeof token !== 'string') return { ok: false };
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return { ok: false };
-    const [base, fp] = token.split('|');
-    // A submit still typing into the tab will change the screen: the read is stale.
-    const unchanged = () => !!base && !!fp && selectorToken(tabId) === base && !submitPending(tabId) && ownsTerminal(senderId, tabId);
-    if (!unchanged()) return { ok: false, stale: true };
-    // No input since the read does not mean the same screen: Claude draws its
-    // next prompt without any (a status repaint can make a card read from the
-    // old one look current, then prompt B arrives). Read the screen again and
-    // deliver only onto the prompt the card showed, with no output between.
-    const outAt = terminalOutputSeq(tabId);
-    let live;
-    try { live = await liveSelectorForTab(tabId); } catch { live = null; }
-    if (!unchanged() || terminalOutputSeq(tabId) !== outAt || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
-    cancelAutoResumeTab(tabId);
-    writeRawInput(tabId, data);
-    const next = selectorToken(tabId);
-    return { ok: true, token: next ? `${next}|${fp}` : '' };
+    return answerSelector(tabId, data, token, () => ownsTerminal(senderId, tabId), () => cancelAutoResumeTab(tabId));
   });
   ipcMain.handle('chat:submit', async (event, tabId, text) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return false;

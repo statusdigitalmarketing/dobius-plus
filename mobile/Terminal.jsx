@@ -77,6 +77,8 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
   // Guards a createTerminal round-trip so a double-tap over Tailscale latency
   // can't spawn two orphan PTYs. Reset on the reply. Audit MED-10.
   const creatingRef = useRef(false);
+  // tab id -> { sig, at }: when each tab's current spinner reading first arrived.
+  const activityRxRef = useRef(new Map());
   // 'chat' (responsive transcript, default) vs 'terminal' (raw PTY mirror). The
   // raw mirror is width-locked to the desktop and unreadable for wide TUIs, so
   // Chat is the default; the toggle is persisted.
@@ -106,7 +108,23 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
       if (msg.type === 'authed') {
         refreshList();
       } else if (msg.type === 'terminals') {
-        setTerminals(msg.list || []);
+        // Stamp when each spinner reading arrived: the Chat view's clock
+        // counts on from it. The list is re-sent whenever ANY tab changes, so
+        // an unchanged reading keeps its first stamp; restamping it would
+        // rewind that tab's clock to the old reading (Codex).
+        const rx = Date.now();
+        const prevRx = activityRxRef.current;
+        const nextRx = new Map();
+        setTerminals((msg.list || []).map((t) => {
+          if (!t || !t.activity) return t;
+          const a = t.activity;
+          const sig = `${a.verb}|${a.seconds}|${a.tokens}|${a.dir}`;
+          const was = prevRx.get(t.id);
+          const at = was && was.sig === sig ? was.at : rx;
+          nextRx.set(t.id, { sig, at });
+          return { ...t, activity: { ...a, rxAt: at } };
+        }));
+        activityRxRef.current = nextRx;
         setActiveId((cur) => {
           if (cur && (msg.list || []).some((t) => t.id === cur)) return cur;
           return (msg.list || [])[0]?.id || null;

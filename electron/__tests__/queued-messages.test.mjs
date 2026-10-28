@@ -296,14 +296,109 @@ fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true });
   assert.ok(big.toolResults[0].text.length < 1300 && big.toolResults[0].text.endsWith('chars]'));
 }
 
-// 23. A context-compaction summary is a chip with the summary behind it, in
-// both modes (it was a 20KB "You" bubble nobody typed).
+// 23. A context-compaction summary is a chip with the summary behind it in
+// blocks mode (it was a 20KB "You" bubble nobody typed). The legacy shape the
+// App Store build reads is unchanged.
 {
-  const summary = entryToMessage({ type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued from a previous conversation.\n\nSummary: ...' } });
+  const rec = { type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued from a previous conversation.\n\nSummary: ...' } };
+  const summary = entryToMessage(rec, { blocks: true });
   assert.equal(summary.content, 'Conversation compacted');
   assert.equal(summary.command, true);
   assert.equal(summary.detailLabel, 'summary');
   assert.ok(summary.detail.startsWith('This session is being continued'));
+  assert.deepEqual(entryToMessage(rec), { role: 'user', content: rec.message.content });
 }
 
-console.log('queued-messages: 23 groups pass');
+// 24. A user record carrying text beside its tool results (a message typed
+// mid-turn) keeps the text as its own row, which ends the turn; the result
+// still lands on its tool.
+{
+  const { mergeTurns } = await import('../data-service.js');
+  const mixed = { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'm1', content: 'ok' }, { type: 'text', text: 'also check the logs' }] } };
+  assert.deepEqual(entryToMessage(mixed), { role: 'user', content: 'also check the logs' });
+  const m = entryToMessage(mixed, { blocks: true });
+  assert.equal(m.content, 'also check the logs');
+  const call = entryToMessage({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'm1', name: 'Bash', input: { command: 'ls' } }] } }, { blocks: true });
+  const after = entryToMessage({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Looking.' }] } }, { blocks: true });
+  const rows = mergeTurns([call, m, after]);
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].blocks[0].result, 'ok');
+  assert.deepEqual(rows[1], { role: 'user', content: 'also check the logs' });
+  assert.deepEqual(rows[2], { role: 'assistant', content: 'Looking.' });
+  // Filters still apply to that text (a reminder rides along, nothing typed).
+  const reminder = { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'm2', content: 'x' }, { type: 'text', text: '<system-reminder>noise</system-reminder>' }] } };
+  assert.equal(entryToMessage(reminder, { blocks: true }).content, '');
+}
+
+// 25. One huge tool-heavy turn is split into rows of bounded size instead of
+// one row the payload trim can only keep or drop whole; content stays capped.
+{
+  const { mergeTurns } = await import('../data-service.js');
+  const step = (i) => ({ role: 'assistant', content: 'z'.repeat(15000), blocks: [{ type: 'text', text: 'z'.repeat(15000) }, { type: 'tool', id: `r${i}`, name: 'Bash', summary: 'x', input: 'q'.repeat(400000) }] });
+  const rows = mergeTurns(Array.from({ length: 12 }, (_, i) => step(i)));
+  assert.ok(rows.length >= 2 && rows.length < 12, `split into a few rows, got ${rows.length}`);
+  for (const r of rows) assert.ok(r.content.length <= 20000 + 64, 'content capped');
+  assert.equal(rows.reduce((n, r) => n + r.blocks.filter((b) => b.type === 'tool').length, 0), 12, 'no step lost');
+}
+
+// 26. Blocks-mode rows carry the record uuid as a stable id (collapse state is
+// keyed by it); legacy rows do not grow a field.
+{
+  const { parseTranscriptTail } = await import('../data-service.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ids-'));
+  const f = path.join(dir, 't.jsonl');
+  fs.writeFileSync(f, [
+    JSON.stringify({ type: 'user', uuid: 'u-1', timestamp: 't1', message: { role: 'user', content: 'go' } }),
+    JSON.stringify({ type: 'assistant', uuid: 'a-1', timestamp: 't2', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'k', name: 'Bash', input: { command: 'ls' } }] } }),
+    JSON.stringify({ type: 'assistant', uuid: 'a-2', timestamp: 't3', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } }),
+  ].join('\n') + '\n');
+  const withIds = await parseTranscriptTail(f, 50, true);
+  assert.deepEqual(withIds.map((m) => m.id), ['u-1', 'a-1'], 'a merged turn keeps its first record id');
+  const legacy = await parseTranscriptTail(f, 50, false);
+  assert.ok(legacy.every((m) => !('id' in m)));
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// 27. Text merged past the content cap is never lost: the text blocks stay,
+// so both chat views still render and copy the end of the reply.
+{
+  const { mergeTurns } = await import('../data-service.js');
+  const rows = mergeTurns([{ role: 'assistant', content: 'a'.repeat(20000) }, { role: 'assistant', content: 'Final answer: stop the deploy.' }]);
+  assert.equal(rows.length, 1);
+  assert.ok(Array.isArray(rows[0].blocks), 'blocks kept when content was cut');
+  assert.equal(rows[0].blocks[1].text, 'Final answer: stop the deploy.');
+  // Short merged text still collapses to the old plain shape.
+  assert.deepEqual(mergeTurns([{ role: 'assistant', content: 'one' }, { role: 'assistant', content: 'two' }]), [{ role: 'assistant', content: 'one\n\ntwo' }]);
+}
+
+// 28. Results attached after the merge respect the row cap too.
+{
+  const { mergeTurns } = await import('../data-service.js');
+  const call = (i) => ({ role: 'assistant', content: '', blocks: [{ type: 'tool', id: `e${i}`, name: 'Edit', summary: 'f', diff: { old: 'o'.repeat(3000), new: 'n'.repeat(3000) } }] });
+  const msgs = [];
+  for (let i = 0; i < 340; i += 1) msgs.push(call(i));
+  for (let i = 0; i < 340; i += 1) msgs.push({ role: 'user', content: '', toolResults: [{ id: `e${i}`, text: 'r'.repeat(1200), isError: false }] });
+  const rows = mergeTurns(msgs);
+  const size = (r) => r.blocks.reduce((n, b) => n + (b.diff ? b.diff.old.length + b.diff.new.length : 0) + (b.result?.length || 0) + 64, 64);
+  for (const r of rows) assert.ok(size(r) <= 2 * 1024 * 1024 + 64, `row ${size(r)} over the cap`);
+  const all = rows.flatMap((r) => r.blocks);
+  assert.equal(all.length, 340);
+  assert.ok(all.every((b) => typeof b.result === 'string'), 'every call still shows a result or the omitted note');
+  assert.ok(all.some((b) => b.result.startsWith('[output not shown')));
+}
+
+// 29. A row with less room than the omitted notice gets an empty result, not
+// a notice that pushes it past the cap; a result that fits still lands.
+{
+  const { mergeTurns } = await import('../data-service.js');
+  const big = 2 * 1024 * 1024 - 192 - 10; // leaves 10 bytes of room
+  const rows = mergeTurns([
+    { role: 'assistant', content: '', blocks: [{ type: 'tool', id: 'a', name: 'Bash', summary: 'x', input: 'q'.repeat(big) }, { type: 'tool', id: 'b', name: 'Bash', summary: 'y' }] },
+    { role: 'user', content: '', toolResults: [{ id: 'a', text: 'r'.repeat(100), isError: false }, { id: 'b', text: 'ok', isError: false }] },
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].blocks[0].result, '', 'no room for the notice');
+  assert.equal(rows[0].blocks[1].result, 'ok', 'a result that fits still lands');
+}
+
+console.log('queued-messages: 29 groups pass');

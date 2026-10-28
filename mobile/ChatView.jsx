@@ -1,8 +1,10 @@
-import { useState, useEffect, useRef, useCallback, memo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import SpecialKeys from './SpecialKeys';
 import remarkGfm from 'remark-gfm';
 import { absUrl } from './host';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard } from '../shared/chat-rows.js';
+import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -139,10 +141,12 @@ function DiffView({ diff }) {
   return <div className="chat-diff">{lines(diff.old, '-')}{lines(diff.new, '+')}</div>;
 }
 
-function StepRow({ block }) {
+function StepRow({ block, live }) {
   const [open, setOpen] = useState(false);
   const isTool = block.type === 'tool';
-  const state = !isTool ? 'think' : block.isError ? 'err' : block.result !== undefined ? 'ok' : 'pending';
+  // No result yet: running only in the turn Claude is on now; in an older
+  // turn the result simply fell outside the window.
+  const state = !isTool ? 'think' : block.isError ? 'err' : block.result !== undefined ? 'ok' : live ? 'running' : 'pending';
   return (
     <div className="chat-step">
       <button className="chat-step-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
@@ -166,42 +170,77 @@ function StepRow({ block }) {
 }
 
 // More than three steps in a row fold into one "N steps" row.
-function StepGroup({ steps }) {
+function StepGroup({ steps, live }) {
   const [open, setOpen] = useState(false);
-  if (steps.length <= 3) return <div className="chat-steps">{steps.map((b, i) => <StepRow key={i} block={b} />)}</div>;
+  // Claude can run several tools in parallel, so every step of the live run
+  // that has no result yet is running, not only the last one (Codex).
+  if (steps.length <= 3) return <div className="chat-steps">{steps.map((b, i) => <StepRow key={i} block={b} live={live} />)}</div>;
+  const running = live && steps.some((b) => b.type === 'tool' && b.result === undefined);
   const counts = {};
   for (const b of steps) { const n = b.type === 'tool' ? b.name : 'Thinking'; counts[n] = (counts[n] || 0) + 1; }
   const label = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(', ');
   return (
     <div className="chat-steps">
       <button className="chat-step-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <span className={`chat-step-dot ${steps.some((b) => b.isError) ? 'err' : 'ok'}`} />
+        <span className={`chat-step-dot ${running ? 'running' : steps.some((b) => b.isError) ? 'err' : 'ok'}`} />
         <span className="chat-step-name">{steps.length} steps</span>
         <span className="chat-step-sum">{label}</span>
         <span className="chat-step-caret">{open ? '▾' : '▸'}</span>
       </button>
-      {open && steps.map((b, i) => <StepRow key={i} block={b} />)}
+      {open && steps.map((b, i) => <StepRow key={i} block={b} live={live} />)}
     </div>
   );
 }
 
-function Blocks({ blocks }) {
+function Blocks({ blocks, live }) {
   const parts = [];
   let run = [];
-  const flush = () => { if (run.length) { parts.push(<StepGroup key={`s${parts.length}`} steps={run} />); run = []; } };
+  // Only the run of steps that ENDS the turn can still be running.
+  const flush = (atEnd) => { if (run.length) { parts.push(<StepGroup key={`s${parts.length}`} steps={run} live={live && atEnd} />); run = []; } };
   for (const b of blocks) {
     if (b.type === 'text') {
-      flush();
+      flush(false);
       parts.push(<ReactMarkdown key={`t${parts.length}`} remarkPlugins={[remarkGfm]} components={mdComponents}>{b.text}</ReactMarkdown>);
     } else run.push(b);
   }
-  flush();
+  flush(true);
   return parts;
 }
 
-const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, command, detail, detailLabel, blocks, startOpen }) {
+// Claude's spinner line, live, as the terminal shows it: the glyph cycle, the
+// gerund it picked for this turn ("Whirlpooling"), then the clock and token
+// meter. The clock counts on from when the reading arrived. An older Mac sends
+// no activity: the glyph still spins and the clock counts from first sight.
+const REDUCE_MQ = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+const Activity = memo(function Activity({ activity }) {
+  const reduce = !!REDUCE_MQ?.matches;
+  const [tick, setTick] = useState(0);
+  const sec = activity?.seconds ?? null;
+  const rx = activity?.rxAt ?? null;
+  const [anchor, setAnchor] = useState(() => ({ at: rx || Date.now(), seconds: sec }));
+  useEffect(() => { if (sec != null) setAnchor({ at: rx || Date.now(), seconds: sec }); }, [sec, rx]);
+  useEffect(() => {
+    const iv = setInterval(() => setTick((t) => t + 1), reduce ? 1000 : SPIN_MS);
+    return () => clearInterval(iv);
+  }, [reduce]);
+  const verb = activity?.verb || 'Working';
+  const meta = activityMeta(liveSeconds(anchor, Date.now()), activity);
+  return (
+    <div className="chat-activity">
+      <span className="chat-act-glyph" aria-hidden="true">{reduce ? '\u273b' : SPIN_FRAMES[tick % SPIN_FRAMES.length]}</span>
+      <span className="chat-act-text" role="status">
+        <span key={verb} className="chat-act-verb">{`${verb}\u2026`}</span>
+      </span>
+      {meta && <span className="chat-act-meta" aria-hidden="true">{meta}</span>}
+    </div>
+  );
+});
+
+const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, command, detail, detailLabel, blocks: rawBlocks, startOpen, live }) {
+  const blocks = useMemo(() => (role === 'assistant' ? normalizeBlocks(rawBlocks) : null), [role, rawBlocks]);
   const text = String(content ?? '');
-  const long = !command && isLong(text);
+  const shown = rowText(text, blocks); // what the reader sees, and what Copy copies
+  const long = !command && isLong(shown);
   const [open, setOpen] = useState(!long || !!startOpen);
   return (
     <div className={`chat-msg ${role === 'assistant' ? 'assistant' : 'user'}${sending ? ' chat-echo' : ''}`}>
@@ -210,11 +249,11 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
         {timestamp != null && <span className="chat-time">{fmtMsgTime(timestamp)}</span>}
         {queued && <span className="chat-queued">queued</span>}
         {sending && <span className="chat-queued">sending…</span>}
-        {text && !sending && <CopyBtn text={text} className="chat-msg-copy" />}
+        {shown && !sending && <CopyBtn text={shown} className="chat-msg-copy" />}
       </div>
-      <div className={`chat-content${open ? '' : ' clamped'}${command ? ' chat-cmd' : ''}`}>
+      <div className={`chat-content${long && !open ? ' clamped' : ''}${command ? ' chat-cmd' : ''}`}>
         {role === 'assistant'
-          ? (blocks ? <Blocks blocks={blocks} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
+          ? (blocks ? <Blocks blocks={blocks} live={!!live} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
           : text}
       </div>
       {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
@@ -256,6 +295,37 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // parser's job (trailing-prose rejection) plus the server's post-answer
   // re-push and the optimistic clear in chooseOption.
   const [selector, setSelector] = useState(null);
+  // The card carries the token it was read with (`selector.token`): the Mac
+  // answers a tap only while nothing reached the tab since that read. A tap
+  // reads the token from the card it was rendered with, never from a ref a
+  // newer card has already overwritten (Codex Critical: a tap on card A sent
+  // with prompt B's valid token). null = an older Mac with no tokens: taps
+  // fall back to a bare 'input' write. selBusy disables the card while a tap
+  // is in flight or the screen is still moving.
+  const [selBusy, setSelBusy] = useState(false);
+  const tappedRef = useRef(null); // the card object the in-flight tap came from
+  const selRetryRef = useRef(null); // the one pending unsettled re-probe
+  // Which card each tap / key press began on (see createPressGuard).
+  const pressGuard = useRef(null);
+  if (!pressGuard.current) pressGuard.current = createPressGuard();
+  // Releases are watched on the window: a press can end outside the card.
+  useEffect(() => {
+    const g = pressGuard.current;
+    const onUp = (e) => g.pointerUp(e);
+    const onKeyUp = (e) => g.keyUp(e);
+    const onBlur = () => g.reset();
+    window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onUp, true);
+    window.addEventListener('keyup', onKeyUp, true);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('pointerup', onUp, true);
+      window.removeEventListener('pointercancel', onUp, true);
+      window.removeEventListener('keyup', onKeyUp, true);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
+  const [selNote, setSelNote] = useState('');
   // Sessionless tabs only: plain-text tail of the live PTY (null = loading).
   const [shellText, setShellText] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -271,6 +341,14 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const fileInputRef = useRef(null);
   const bodyRef = useRef(null);
   const atBottomRef = useRef(true);
+  // Rows that arrived (or a live turn that grew) while scrolled up, for the
+  // "new" pill; the mark is the newest row seen at the bottom.
+  const [unseen, setUnseen] = useState(0);
+  const seenKeyRef = useRef(null);
+  const jumpingRef = useRef(false); // a smooth jump to the latest is in flight
+  const lastTopRef = useRef(0);
+  const jumpGenRef = useRef(0);
+  const preJumpMarkRef = useRef(null); // the reading mark before the last jump
   // Track the session we asked for so an out-of-order reply for a different
   // session (or a stale poll after switching tabs) can't render here.
   const wantRef = useRef(null);
@@ -314,10 +392,17 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // switch so another tab's buttons never flash here.
   useEffect(() => {
     setSelector(null);
+    tappedRef.current = null;
+    setSelBusy(false);
+    setSelNote('');
     if (!tabId) return undefined;
     probeSelector();
     const iv = setInterval(probeSelector, 2500);
-    return () => clearInterval(iv);
+    return () => {
+      clearInterval(iv);
+      clearTimeout(selRetryRef.current);
+      selRetryRef.current = null;
+    };
   }, [tabId, probeSelector]);
 
   // Poll a plain-text tail of the live PTY whenever we have no conversation to
@@ -327,6 +412,12 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const needShell = !sessionId || (messages !== null && messages.length === 0);
   // The newest Claude reply stays open even when long: it is what you came to read.
   const lastClaude = messages ? messages.findLastIndex((m) => m.role === 'assistant') : -1;
+  const messageKeys = useMemo(() => (messages ? rowKeys(messages) : []), [messages]);
+  const messagesRef = useRef(messages); // the rows now, for timers
+  messagesRef.current = messages;
+  const working = tab?.status === 'working';
+  const activity = working ? normalizeActivity(tab?.activity) : null;
+  if (activity && typeof tab?.activity?.rxAt === 'number') activity.rxAt = tab.activity.rxAt;
   useEffect(() => {
     setShellText(null);
     if (!needShell || !tabId) return undefined;
@@ -359,7 +450,10 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           connection.send({ type: 'listSkills' });
         }
       } else if (msg.type === 'transcript' && msg.sessionId === wantRef.current
-          && (msg.projectPath == null || msg.projectPath === projectPath)) {
+          && (msg.projectPath == null || msg.projectPath === projectPath)
+          // A History reply for this session (plain rows) shares the socket
+          // and the sig; only a blocks reply is ours. Older Macs omit the key.
+          && (!('blocks' in msg) || msg.blocks === true)) {
         if (msg.unchanged) {
           // File identical to what we hold: keep messages as-is, but still
           // age out echo bubbles (their 90s TTL must not depend on the
@@ -408,7 +502,33 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           setMessages((prev) => (!prev || prev.length === 0 || emptyStreakRef.current >= 2 ? [] : prev));
         }
       } else if (msg.type === 'selector' && msg.id === tabId) {
-        setSelector(msg.selector || null);
+        if (msg.unsettled) {
+          // The tab is mid-repaint: keep the card, disabled, and ask again,
+          // with at most one re-probe pending (the 2.5s poll keeps going too).
+          setSelBusy(true);
+          if (!selRetryRef.current) {
+            selRetryRef.current = setTimeout(() => {
+              selRetryRef.current = null;
+              connection.send({ type: 'selectorSnapshot', id: tabId });
+            }, 600);
+          }
+        } else {
+          const sel = msg.selector && Array.isArray(msg.selector.options) ? msg.selector : null;
+          setSelector(sel ? { ...sel, token: 'token' in msg ? (msg.token || '') : null, fp: tokenFingerprint(msg.token) } : null);
+          setSelBusy(false);
+        }
+      } else if (msg.type === 'selectorKeyResult' && msg.id === tabId) {
+        if (msg.ok) {
+          // The next key on THIS prompt (an arrow, then Enter) uses the fresh
+          // token, but only if the card on screen is still the one tapped.
+          const tapped = tappedRef.current;
+          setSelector((cur) => (cur && cur === tapped ? { ...cur, token: msg.token || '' } : cur));
+        } else {
+          setSelNote(msg.stale ? 'The prompt changed before your tap landed. Nothing was sent, check the card again.' : 'Could not send that. Nothing was sent.');
+          setTimeout(() => setSelNote(''), 4000);
+        }
+        // Either way the server's follow-up read (or the next probe) re-arms it.
+        setTimeout(() => connection.send({ type: 'selectorSnapshot', id: tabId }), msg.ok ? 700 : 0);
       } else if (msg.type === 'terminalText' && msg.id === tabId) {
         setShellText(typeof msg.text === 'string' ? msg.text : '');
       }
@@ -420,13 +540,81 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // bottom (don't yank them up while they scroll back through history).
   useEffect(() => {
     const el = bodyRef.current;
-    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages, echoes, shellText]);
+    if (el && atBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+      // This instant write lands the jump (it cancels a smooth scroll), and
+      // the reader's next scroll must be measured from HERE, or a scroll up
+      // from the bottom reads as "down" against an older position (Codex).
+      jumpingRef.current = false;
+      lastTopRef.current = el.scrollTop;
+    }
+    const rows = messages || [];
+    if (atBottomRef.current || !messageKeys.length) {
+      seenKeyRef.current = markLatest(rows, messageKeys);
+      setUnseen(0);
+      return;
+    }
+    // No mark (a new session loaded in this tab while the reader was scrolled
+    // up): none of it was seen, so say so until they reach the bottom
+    // (Codex Medium, twice: a null mark used to hide the pill for good).
+    setUnseen(seenKeyRef.current ? unseenSince(rows, messageKeys, seenKeyRef.current) : -1);
+  }, [messages, messageKeys, echoes, shellText]);
 
   const onScroll = () => {
     const el = bodyRef.current;
     if (!el) return;
-    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    // A smooth jump passes through scroll positions above the bottom; they
+    // must not count as the reader scrolling back up. The hold ends when the
+    // jump lands or the reader scrolls UP during it (a timer alone kept a
+    // real upward scroll counted as "at bottom": Codex Medium).
+    if (jumpingRef.current && (near || el.scrollTop < lastTopRef.current)) {
+      jumpingRef.current = false;
+      // Cut short by the reader before it reached the new rows: they were
+      // never seen, so the pill comes back (Codex Medium).
+      if (!near) {
+        seenKeyRef.current = preJumpMarkRef.current;
+        setUnseen(preJumpMarkRef.current ? unseenSince(messages || [], messageKeys, preJumpMarkRef.current) : -1);
+      }
+    }
+    lastTopRef.current = el.scrollTop;
+    atBottomRef.current = jumpingRef.current || near;
+    if (atBottomRef.current && unseen !== 0) {
+      seenKeyRef.current = markLatest(messages || [], messageKeys);
+      setUnseen(0);
+    }
+  };
+
+  const jumpToLatest = () => {
+    const el = bodyRef.current;
+    if (!el) return;
+    atBottomRef.current = true;
+    // Seen on the tap itself: waiting for the scroll to land left the pill up
+    // when the reply grew during the animation (Codex).
+    preJumpMarkRef.current = seenKeyRef.current;
+    seenKeyRef.current = markLatest(messages || [], messageKeys);
+    setUnseen(0);
+    const smooth = !REDUCE_MQ?.matches;
+    // Only a smooth jump needs the hold; an instant one lands in one event.
+    // If the animation is cut short with no further scroll events, re-read
+    // the position rather than holding forever.
+    jumpingRef.current = smooth;
+    const gen = ++jumpGenRef.current;
+    lastTopRef.current = el.scrollTop;
+    if (smooth) {
+      setTimeout(() => {
+        // Only this jump's own hold: a later jump owns its own timer.
+        if (gen !== jumpGenRef.current || !jumpingRef.current || !bodyRef.current) return;
+        jumpingRef.current = false;
+        const b = bodyRef.current;
+        atBottomRef.current = b.scrollHeight - b.scrollTop - b.clientHeight < 60;
+        if (!atBottomRef.current) {
+          seenKeyRef.current = preJumpMarkRef.current;
+          setUnseen(preJumpMarkRef.current ? unseenSince(messagesRef.current || [], rowKeys(messagesRef.current || []), preJumpMarkRef.current) : -1);
+        }
+      }, 1500);
+    }
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
   };
 
   // `/` skill autocomplete (v1.0.62): while the input is exactly a slash
@@ -478,10 +666,31 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // so a parse error in the cursor position can't select a DIFFERENT option than
   // the label. No trailing Enter, so a stray newline can't confirm a chained
   // prompt. Optimistically clear; the next probe reflects the real state.
-  const chooseOption = (num) => {
-    if (!tabId) return;
-    connection.send({ type: 'input', id: tabId, data: String(num) });
-    setSelector(null);
+  // Sends through the token guard when the Mac supports it, else the old bare
+  // write. Returns false when the card is not answerable right now.
+  const sendSelector = (card, data, e = null) => {
+    if (!tabId || !card || selBusy) return false;
+    const { token } = card;
+    // A tap must END on the card it began on (shared createPressGuard).
+    if (!pressGuard.current.take(e, card)) {
+      setSelNote('The prompt changed while you were tapping. Nothing was sent, check the card again.');
+      setTimeout(() => setSelNote(''), 4000);
+      return false;
+    }
+    if (token === null || token === undefined) {
+      connection.send({ type: 'input', id: tabId, data });
+      return true;
+    }
+    if (!token) return false;
+    tappedRef.current = card;
+    setSelBusy(true);
+    connection.send({ type: 'selectorKey', id: tabId, data, token });
+    return true;
+  };
+
+  const chooseOption = (card, num, e) => {
+    if (!sendSelector(card, String(num), e)) return;
+    if (card.token == null) setSelector(null);
     atBottomRef.current = true;
   };
 
@@ -493,10 +702,9 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     ['↑', '\x1b[A', false], ['↓', '\x1b[B', false], ['space', ' ', false],
     ['esc', '\x1b', true], ['enter', '\r', true],
   ];
-  const sendSelectorKey = (seq, closes) => {
-    if (!tabId) return;
-    connection.send({ type: 'input', id: tabId, data: seq });
-    if (closes) setSelector(null);
+  const sendSelectorKey = (card, seq, closes, e) => {
+    if (!sendSelector(card, seq, e)) return;
+    if (closes && card.token == null) setSelector(null);
   };
 
   // Upload a screenshot / file from the phone: POST the bytes, get back an
@@ -547,7 +755,12 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // tab that just ran `claude` immediately shows the trust-folder prompt, so
   // the selector buttons must work there too.
   const selectorPopup = selector && selector.options && selector.options.length > 0 && (
-        <div className="chat-selector">
+        <div
+          className="chat-selector"
+          key={selectorCardKey(selector)}
+          onPointerDownCapture={(e) => pressGuard.current.pointerDown(e, selector)}
+          onKeyDownCapture={(e) => pressGuard.current.keyDown(e, selector)}
+        >
           <div className="chat-selector-title">
             {selector.prompt || 'Claude is waiting for you to choose:'}
           </div>
@@ -555,7 +768,8 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
             <button
               key={opt.num}
               className="chat-selector-opt"
-              onClick={() => chooseOption(opt.num)}
+              disabled={selBusy || selector.token === ''}
+              onClick={(e) => chooseOption(selector, opt.num, e)}
             >
               <span className="chat-selector-num">{opt.num}</span>
               <span className="chat-selector-label">
@@ -568,11 +782,12 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
               enter/esc to confirm/cancel, without leaving Chat. v1.0.53. */}
           <div className="chat-selector-keys">
             {SELECTOR_KEYS.map(([label, seq, closes]) => (
-              <button key={label} className="chat-selector-key" onClick={() => sendSelectorKey(seq, closes)}>
+              <button key={label} className="chat-selector-key" disabled={selBusy || selector.token === ''} onClick={(e) => sendSelectorKey(selector, seq, closes, e)}>
                 {label}
               </button>
             ))}
           </div>
+          {selNote && <div className="chat-selector-note">{selNote}</div>}
           {onOpenTerminal && (
             <button className="chat-selector-term" onClick={onOpenTerminal}>
               Open terminal to answer manually
@@ -700,6 +915,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
 
   return (
     <div className="chat-view">
+      <div className="chat-body-wrap">
       <main className="chat-body" ref={bodyRef} onScroll={onScroll}>
         {messages === null && <p className="muted pad">Loading conversation...</p>}
         {messages && messages.length === 0 && (
@@ -721,20 +937,26 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         )}
         {messages && messages.map((m, i) => (
           <Bubble
-            key={i} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued}
+            key={messageKeys[i]} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued}
             command={!!m.command} detail={typeof m.detail === 'string' ? m.detail : null}
             detailLabel={typeof m.detailLabel === 'string' ? m.detailLabel : null}
-            blocks={Array.isArray(m.blocks) && m.blocks.length ? m.blocks : null}
+            blocks={m.blocks}
             startOpen={i === lastClaude}
+            live={working && i === lastClaude && i === messages.length - 1}
           />
         ))}
         {echoes.map((e) => (
           <Bubble key={`echo-${e.at}`} role="user" content={e.content} timestamp={e.at} sending />
         ))}
-        {sessionId && tab?.status === 'working' && (
-          <div className="chat-working"><span className="chat-dots"><i /><i /><i /></span>Claude is working</div>
-        )}
+        {sessionId && working && <Activity activity={activity} />}
       </main>
+      {unseen !== 0 && (
+        <button type="button" className="chat-jump" onClick={jumpToLatest}>
+          <span aria-hidden="true">{'\u2193'}</span>
+          {unseen > 0 ? `${unseen} new` : 'New messages'}
+        </button>
+      )}
+      </div>
       {selectorPopup}
       {inputRow}
     </div>

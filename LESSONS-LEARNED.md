@@ -301,3 +301,21 @@
 - **FIX**: Keep pure helpers in the pure module (`selectorFingerprint` now lives in selector-parser.js, re-exported by chat-service). Always confirm with `npm test`, not just the single suite with a stub loader.
 - **CONTEXT**: Which suites get the electron stub is decided per script in package.json, not by the test file.
 - **DETECTION**: `grep -n "test:selector\|test:chat" package.json` and check the imports of a bare-run suite for anything that reaches `electron`.
+
+### UI/UX: 2026-10-28
+- **MISTAKE**: The phone selector card kept its answer token in a ref (`selTokenRef`) that the WS handler overwrote the moment a new prompt arrived, while React had not yet rendered the new card. A tap on the still-visible card A was sent with prompt B's valid token and would have approved a command the user never saw (Codex round 9, Critical, three lenses).
+- **FIX**: Keep the token ON the state object that renders the card (`selector.token`) and have each button pass the card it was rendered with (`chooseOption(selector, n)`). A result updates the token only if the card on screen is still the one tapped.
+- **CONTEXT**: Any value that authorizes an action on what is DISPLAYED must travel with the render, never in a ref written ahead of it. Desktop ChatPane already did this; the phone port did not.
+- **DETECTION**: `grep -n "Ref.current = .*token\|TokenRef" mobile/*.jsx src/components/**/*.jsx`
+
+### Process: 2026-10-28
+- **MISTAKE**: Waited for this session's Codex lenses with `until [ $(pgrep -f "codex exec ...") -eq 0 ]`. Other Claude sessions on the machine run `codex exec` too, so the loop never ended after this session's four lenses had finished.
+- **FIX**: Have each lens write a done marker (`...; echo done > rN-lX.done`) and wait on those files.
+- **CONTEXT**: Every parallel Codex run on this Mac; several projects' sessions run Codex at once.
+- **DETECTION**: `grep -rn "pgrep -f \"codex exec" <scratchpad>`
+
+### Architecture: 2026-10-28
+- **MISTAKE**: To keep a 64KB replay tail from starting inside an escape sequence, `activityForTab` (electron/chat-service.js) first skipped FORWARD to the next ESC. That ESC was the `\x1b[0m` AFTER the spinner text, so the spinner itself was dropped. The first version of the test also put the cut in the filler, not in the escape, so it passed against the broken code.
+- **FIX**: Back the cut up to the ESC that starts the sequence (`raw.lastIndexOf('\x1b', start)` within 512 chars). Assert the test geometry itself (`raw.slice(-65536).slice(0,3) === '31m'`) before asserting the behaviour, then sabotage the guard to confirm the test fails without it.
+- **CONTEXT**: Any "start at a safe boundary" fix on a byte tail. Skipping forward discards real content; backing up only replays a little more.
+- **DETECTION**: `grep -n "indexOf('\\\\x1b')" electron/*.js`

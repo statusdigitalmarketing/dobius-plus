@@ -238,6 +238,23 @@ sv('non-gerund status yields nothing', '\u2733 Compacting conversation\u2026 (3s
 sv('ansi-wrapped spinner', '\u001b[38;5;174m\u2733\u001b[39m \u001b[1mGallivanting\u001b[22m\u2026 \u001b[2m(4s)\u001b[22m', 'Gallivanting');
 sv('empty and junk are safe', '', '');
 
+// spinnerStatus: the same line, read as a live meter for the chat views.
+import { spinnerStatus } from '../selector-parser.js';
+const ss = (name, raw, want) => {
+  const got = JSON.stringify(spinnerStatus(raw));
+  if (got === JSON.stringify(want)) { console.log(`PASS  ${name}`); pass += 1; }
+  else { console.log(`FAIL  ${name}: got ${got} want ${JSON.stringify(want)}`); fail += 1; }
+};
+ss('meter: real frame', 'haiku text above\n\u2733 Proofing\u2026 (3s \u00b7 \u2193 95 tokens)\n  esc to interrupt\n', { verb: 'Proofing', seconds: 3, tokens: 95, dir: 'down' });
+ss('meter: minutes and k tokens', '\u273b Whirlpooling\u2026 (1m 12s \u00b7 \u2191 2.3k tokens \u00b7 thinking)', { verb: 'Whirlpooling', seconds: 72, tokens: 2300, dir: 'up' });
+ss('meter: hours, no tokens', '\u2736 Discombobulating\u2026 (1h 2m 3s \u00b7 esc to interrupt)', { verb: 'Discombobulating', seconds: 3723, tokens: null, dir: null });
+ss('meter: comma tokens', '\u2722 Herding\u2026 (12s \u00b7 \u2193 1,204 tokens)', { verb: 'Herding', seconds: 12, tokens: 1204, dir: 'down' });
+ss('meter: bare verb', '\u00b7 Burrowing\u2026', { verb: 'Burrowing', seconds: null, tokens: null, dir: null });
+ss('meter: hint only is not a time', '\u273b Flibbertigibbeting\u2026 (esc to interrupt)', { verb: 'Flibbertigibbeting', seconds: null, tokens: null, dir: null });
+// The parenthetical must be on the SAME line: the next row's "(shift+tab ...)" is not it.
+ss('meter: next-line parens ignored', '\u2733 Noodling\u2026\n(4s \u00b7 \u2193 9 tokens)', { verb: 'Noodling', seconds: null, tokens: null, dir: null });
+ss('meter: no spinner', 'I kept processing\u2026 (3s)', null);
+
 // --- parseSelectorFromScreen on REAL captured multi-question frames ---------
 // Fixtures captured live from Claude Code 2.1.233 over the mobile attach
 // stream (fix/mobile-chat-bugs): a two-question AskUserQuestion call. The old

@@ -251,6 +251,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
     // must not be routed as the replacement's output. Audit High.
     if (!entry || entry.pty !== term) return;
     if (entry.visibleScan(data)) entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
+    entry.rawOutputSeq = (entry.rawOutputSeq || 0) + 1; // see terminalRawOutputSeq
     // Global observers (main-process status authority, v1.0.43): see EVERY
     // terminal's output regardless of whether a window or mobile client is
     // attached, so tab status is tracked centrally. Cheap: observers do a
@@ -386,6 +387,7 @@ export function writeTerminal(id, data) {
     if (!isTerminalReply(data)) {
       entry.inputSeq = (entry.inputSeq || 0) + 1; // see terminalInputSeq
       entry.outputSeqAtInput = entry.outputSeq || 0;
+      entry.inputAt = Date.now();
     }
     entry.pty.write(data);
   }
@@ -398,9 +400,21 @@ export function terminalInputSeq(id) {
   return terminals.get(id)?.inputSeq || 0;
 }
 
-/** Count of output chunks that drew something; moves whenever the screen may have changed. */
-export function terminalOutputSeq(id) {
-  return terminals.get(id)?.outputSeq || 0;
+// Milliseconds since this tab last received input (Infinity if never). A key
+// the program ignored draws nothing, so "settled since input" alone would
+// wait forever; the Chat view's selector read also accepts a long quiet.
+export function terminalInputAgeMs(id) {
+  const at = terminals.get(id)?.inputAt;
+  return at ? Date.now() - at : Infinity;
+}
+
+/**
+ * Count of ALL output chunks, escape-only ones included. A clear-screen plus
+ * cursor moves can replace one prompt with another without a printable byte,
+ * so a selector answer is only safe while this has not moved since the read.
+ */
+export function terminalRawOutputSeq(id) {
+  return terminals.get(id)?.rawOutputSeq || 0;
 }
 
 /** The tab is being closed (gracefulCloseTerminals): nothing more is typed into it. */

@@ -71,7 +71,10 @@ export default function History({ connection, onBack }) {
         // header over A's messages. Match sessionId (+ projectPath, since ids
         // could repeat across projects). Audit MED-13.
         const open = openSessionRef.current;
-        if (open && msg.sessionId === open.sessionId
+        // A Chat view poll for the same session shares this socket: its
+        // "unchanged" reply carries no entries and its rows are blocks-shaped,
+        // so neither is History's.
+        if (open && msg.sessionId === open.sessionId && !msg.unchanged && msg.blocks !== true
             && (msg.projectPath == null || msg.projectPath === open.projectPath)) {
           setTranscript(msg.entries || []);
         }

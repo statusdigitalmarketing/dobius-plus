@@ -1441,14 +1441,20 @@ export function commandDetail(text) {
   return capText(body, MAX_MESSAGE_CHARS, 'skill');
 }
 
-// Cut to `max` chars with a note, and DETACH the result: a slice of a
-// multi-MB tool result is a V8 SlicedString that keeps the whole parent alive
-// in the transcript caches (see .dobius/NOTES.md 2026-09-15).
+// Cut to `max` chars with a note, and DETACH the result, short or not: a
+// slice of a multi-MB tool result, or a .trim() of one with a little padding,
+// is a V8 SlicedString that keeps the whole parent alive in the transcript
+// caches (see .dobius/NOTES.md 2026-09-15). The copy is bounded by `max`.
 function capText(s, max, what = 'text') {
   const t = String(s ?? '');
-  if (t.length <= max) return t;
-  return Buffer.from(`${t.slice(0, max)}\n\n[${what} truncated at ${max} chars]`, 'utf16le').toString('utf16le');
+  const out = t.length <= max ? t : `${t.slice(0, max)}\n\n[${what} truncated at ${max} chars]`;
+  return Buffer.from(out, 'utf16le').toString('utf16le');
 }
+
+// A merged turn stops growing past this and continues in a new row, so one
+// tool-heavy turn cannot become a single multi-MB row the payload trim can
+// only keep or drop whole.
+const ROW_MAX_BYTES = 2 * 1024 * 1024;
 
 // Minimal ANSI escape strip for chat text (CSI + OSC + single ESC forms).
 // The transcript records what the terminal PRINTED, escapes included; a chat
@@ -1545,31 +1551,64 @@ function toolResultText(content) {
 // dedupeQueuedMessages (a queued row would otherwise split a turn) and before
 // the tail is cut, so the window counts rows the user actually sees. Mutates
 // copies only: every merged row is a fresh object.
+const RESULT_OMITTED = '[output not shown: this turn is too large]';
+
 export function mergeTurns(messages) {
   const out = [];
-  const toolsById = new Map();
+  const toolsById = new Map(); // tool id -> { block, row }
+  // Running size of each merged row: results attach AFTER the merge decision,
+  // so the cap is enforced on both paths (Codex Medium: a row of calls under
+  // the cap grew past it once their results landed).
+  const bytes = new Map();
+  // Rows whose plain `content` no longer holds all their text: their text
+  // blocks are the only full copy and must not be dropped below.
+  const cut = new Set();
   for (const m of messages) {
     if (m.toolResults) {
       for (const r of m.toolResults) {
-        const t = toolsById.get(r.id);
-        if (t) { t.result = r.text; if (r.isError) t.isError = true; }
+        const hit = toolsById.get(r.id);
+        if (!hit) continue;
+        const { block: t, row } = hit;
+        const was = t.result ? t.result.length : 0;
+        const room = ROW_MAX_BYTES - ((bytes.get(row) || 0) - was);
+        // The notice itself must fit too, or a row already at the cap grows
+        // by one notice per oversized result (Codex Medium).
+        t.result = r.text.length <= room ? r.text : RESULT_OMITTED.length <= room ? RESULT_OMITTED : '';
+        bytes.set(row, (bytes.get(row) || 0) - was + t.result.length);
+        if (r.isError) t.isError = true;
       }
+      // A user record can carry text beside its tool results (a message typed
+      // mid-turn rides in with them): that text is a real row and ends the turn.
+      if (m.content) { const { toolResults: _r, ...row } = m; out.push(row); }
       continue;
     }
     if (m.role !== 'assistant') { out.push(m); continue; }
     const blocks = (m.blocks || (m.content ? [{ type: 'text', text: m.content }] : [])).map((b) => ({ ...b }));
-    for (const b of blocks) if (b.type === 'tool' && b.id) toolsById.set(b.id, b);
     const prev = out[out.length - 1];
-    if (prev && prev.role === 'assistant') {
-      prev.blocks.push(...blocks);
-      if (m.content) prev.content = prev.content ? `${prev.content}\n\n${m.content}` : m.content;
-      continue;
+    const size = messageBytes(m);
+    let row;
+    if (prev && prev.role === 'assistant' && bytes.has(prev) && bytes.get(prev) + size <= ROW_MAX_BYTES) {
+      row = prev;
+      row.blocks.push(...blocks);
+      bytes.set(row, bytes.get(row) + size);
+      // content stays a bounded plain-text copy (legacy clients, search); the
+      // blocks are the full turn.
+      if (m.content) {
+        const joined = row.content ? `${row.content}\n\n${m.content}` : m.content;
+        if (row.content.length >= MAX_MESSAGE_CHARS || joined.length > MAX_MESSAGE_CHARS) cut.add(row);
+        if (row.content.length < MAX_MESSAGE_CHARS) row.content = capText(joined, MAX_MESSAGE_CHARS, 'message');
+      }
+    } else {
+      row = { ...m, blocks };
+      out.push(row);
+      bytes.set(row, size);
     }
-    out.push({ ...m, blocks });
+    for (const b of blocks) if (b.type === 'tool' && b.id) toolsById.set(b.id, { block: b, row });
   }
-  // A plain reply with nothing but text keeps the old shape.
+  // A plain reply with nothing but text keeps the old shape, unless its
+  // content was cut: then the text blocks are the only whole copy.
   for (const m of out) {
-    if (m.role === 'assistant' && m.blocks && m.blocks.every((b) => b.type === 'text')) delete m.blocks;
+    if (m.role === 'assistant' && m.blocks && !cut.has(m) && m.blocks.every((b) => b.type === 'text')) delete m.blocks;
   }
   return out;
 }
@@ -1616,7 +1655,12 @@ export function entryToMessage(entry, opts = {}) {
         text: capText(stripAnsiText(toolResultText(c.content)).trim(), TOOL_RESULT_MAX, 'output'),
         isError: c.is_error === true,
       }));
-      return toolResults.length ? { role, content: '', toolResults } : null;
+      // Any text beside the results goes through the ordinary user path (and
+      // its filters), exactly as the legacy shape shows it (Codex High).
+      const rest = msgContent.filter((c) => c?.type !== 'tool_result');
+      const text = rest.length ? entryToMessage({ ...entry, message: { ...entry.message, content: rest } }, opts) : null;
+      if (!toolResults.length) return text;
+      return text ? { ...text, toolResults } : { role, content: '', toolResults };
     }
     if (role === 'assistant') {
       const blocks = [];
@@ -1658,7 +1702,8 @@ export function entryToMessage(entry, opts = {}) {
     if (tp.startsWith('<system-reminder>')) return null;
     // Context compaction: Claude Code's summary of the conversation so far,
     // recorded as a 20KB "user" turn nobody typed. One chip, summary behind it.
-    if (entry.isCompactSummary === true) {
+    // Blocks mode only: the legacy shape (App Store build, search) is unchanged.
+    if (wantBlocks && entry.isCompactSummary === true) {
       return { role, content: 'Conversation compacted', command: true, detail: capText(content.trim(), MAX_MESSAGE_CHARS, 'summary'), detailLabel: 'summary' };
     }
     const collapsed = collapseCommandContent(content);
@@ -1718,6 +1763,15 @@ function messageBytes(m) {
   return n;
 }
 
+// Timestamp, plus (blocks mode) the record's uuid as a stable row id: the chat
+// clients key collapse state by it, so a sliding 200-row window does not move
+// one row's open/closed state onto another (Codex).
+function withMeta(m, entry, blocks) {
+  const row = { ...m, timestamp: entry.timestamp || null };
+  if (blocks && typeof entry.uuid === 'string' && entry.uuid) row.id = entry.uuid;
+  return row;
+}
+
 async function parseTranscriptFile(filePath, blocks = false) {
   const messages = [];
   let payloadBytes = 0;
@@ -1732,7 +1786,7 @@ async function parseTranscriptFile(filePath, blocks = false) {
       messages.push({ role: 'system', content: `[transcript preview truncated: payload exceeded ${MAX_PAYLOAD_BYTES} bytes]`, timestamp: null });
       return;
     }
-    messages.push({ ...m, timestamp: entry.timestamp || null });
+    messages.push(withMeta(m, entry, blocks));
   });
   const deduped = dedupeQueuedMessages(messages);
   return blocks ? mergeTurns(deduped) : deduped;
@@ -1746,14 +1800,14 @@ async function parseTranscriptFile(filePath, blocks = false) {
 // few or zero messages (Codex). The same aggregate payload cap as the full path
 // is enforced by trimming oldest-first, so a tail of huge pasted turns can't blow
 // past MAX_PAYLOAD_BYTES per poll (Codex).
-async function parseTranscriptTail(filePath, messageLimit, blocks = false) {
+export async function parseTranscriptTail(filePath, messageLimit, blocks = false) {
   const want = Math.max(1, Math.min(messageLimit, 500));
   const rawBudget = Math.min(want * 8, 8000); // overscan raw lines to find enough visible turns
   const entries = await parseJsonl(filePath, rawBudget);
   const msgs = [];
   for (const entry of entries) {
     const m = entryToMessage(entry, { blocks });
-    if (m) msgs.push({ ...m, timestamp: entry.timestamp || null });
+    if (m) msgs.push(withMeta(m, entry, blocks));
   }
   const deduped = dedupeQueuedMessages(msgs);
   let tail = (blocks ? mergeTurns(deduped) : deduped).slice(-want);

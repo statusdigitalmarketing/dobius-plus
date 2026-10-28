@@ -3,12 +3,13 @@
 // this, so a regression here types into someone's live shell.
 // Run: node --import ./electron/__tests__/chat-service-register.mjs ./electron/__tests__/chat-service.test.mjs
 import assert from 'node:assert/strict';
-import { writes, ptys, writeTerminal, emitOutput, closing } from './fake-terminal-manager.mjs';
+import { readFileSync } from 'node:fs';
+import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges } from './fake-terminal-manager.mjs';
 
-const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint } = await import('../chat-service.js');
+const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector } = await import('../chat-service.js');
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
-const reset = () => { writes.length = 0; ptys.clear(); closing.clear(); };
+const reset = () => { writes.length = 0; ptys.clear(); closing.clear(); buffers.clear(); inputAges.clear(); };
 const PASTE = (t) => `\x1b[200~${t}\x1b[201~`;
 
 // 1. An idle tab is pasted into synchronously; Enter follows on its own.
@@ -226,5 +227,103 @@ writeRawInput('a', '\x1b');
 assert.equal(await p, false);
 assert.equal(strandedE, 0);
 ok('an erasing cancel followed by Esc is not stranded');
+// 21. Another writer's Enter during the delay may have SENT the paste before a
+// Ctrl+U arrived: the line being cleared afterwards does not prove it unsent,
+// so it is reported stranded (check the terminal), never "not sent".
+reset(); ptys.set('a', {});
+let strandedF = 0;
+p = submitPromptToTab('a', 'ship it', undefined, () => { strandedF += 1; });
+writeTerminal('a', '\r'); // e.g. the desktop terminal or /tabSend pressed Enter
+writeRawInput('a', '\x15');
+assert.equal(await p, false);
+assert.equal(strandedF, 1);
+ok('a foreign write before the erase is stranded, not unsent');
+// 22. The shared answer path: a card read off a real prompt answers it once;
+// any output after the read, even one that draws nothing printable, makes the
+// card stale and nothing is written (Codex Critical: two prompts can look the
+// same, so only "nothing reached the tab since" proves it is the same one).
+{
+  const ASKQ = readFileSync(new URL('./fixtures/askq-2.1.224-raw.txt', import.meta.url), 'utf8');
+  reset(); ptys.set('a', {}); buffers.set('a', ASKQ); emitOutput('a');
+  const r = await readSelectorForAnswer('a');
+  assert.ok(r && r.selector && r.selector.options.length > 1, 'fixture parses as a selector');
+  assert.equal(typeof r.token, 'string');
+  emitRawOutput('a'); // a repaint after the read
+  assert.deepEqual(await answerSelector('a', '1', r.token), { ok: false, stale: true });
+  assert.deepEqual([...writes], []);
+  const r2 = await readSelectorForAnswer('a');
+  const done = await answerSelector('a', '1', r2.token);
+  assert.equal(done.ok, true);
+  assert.deepEqual([...writes], [['a', '1']]);
+  assert.equal(done.token, ''); // not repainted since that key: no next token
+  // The same token cannot answer twice.
+  emitOutput('a');
+  assert.deepEqual(await answerSelector('a', '1', r2.token), { ok: false, stale: true });
+  assert.deepEqual([...writes], [['a', '1']]);
+  // Not settled since input: the card stays, unanswerable, and the prompt
+  // comes along for display only (an older phone keeps showing it).
+  writeTerminal('a', 'x');
+  const u = await readSelectorForAnswer('a');
+  assert.equal(u.unsettled, true);
+  assert.equal(u.token, undefined);
+  assert.ok(u.selector.options.length > 1);
+  // A key that drew nothing: after a long quiet the screen counts as current.
+  inputAges.set('a', 3000);
+  const q = await readSelectorForAnswer('a');
+  assert.equal(typeof q.token, 'string');
+  emitRawOutput('a'); // ...but a late repaint still makes that card stale
+  assert.deepEqual(await answerSelector('a', '1', q.token), { ok: false, stale: true });
+  inputAges.delete('a');
+  // A revoked caller gets nothing back and writes nothing.
+  emitOutput('a');
+  assert.equal(await readSelectorForAnswer('a', () => false), null);
+  const r3 = await readSelectorForAnswer('a');
+  assert.deepEqual(await answerSelector('a', '1', r3.token, () => false), { ok: false, stale: true });
+  assert.deepEqual(await answerSelector('a', '1'.repeat(17), r3.token), { ok: false });
+  assert.equal(writes.length, 2);
+}
+ok('a card answers once, and never after the tab moved');
+
+// 23. One frame holding Enter AND Ctrl+U (an Enter that sent the paste, then
+// an erase) is another writer's input, so the paste is stranded, not unsent.
+reset(); ptys.set('a', {});
+let strandedG = 0;
+p = submitPromptToTab('a', 'echo once', undefined, () => { strandedG += 1; });
+writeRawInput('a', '\r\x15');
+assert.equal(await p, false);
+assert.equal(strandedG, 1);
+ok('an Enter riding with a cancel key is not counted as our own erase');
+
+// 24. The activity read replays a 64KB tail through the screen emulator. A cut
+// inside an escape sequence must not print its leftover bytes in front of the
+// spinner (the anchored parse then finds nothing).
+{
+  const { activityForTab } = await import('../chat-service.js');
+  reset(); ptys.set('a', {});
+  const spin = '\r\x1b[2K\x1b[31m\u2733 Proofing\u2026 (40s \u00b7 \u2193 900 tokens)\x1b[0m';
+  // Put the 64KB cut two characters into "\x1b[31m" (just after "\x1b["),
+  // padding after the spinner with BEL, which prints nothing.
+  const head = 'x'.repeat(100) + spin;
+  const cut = 100 + spin.indexOf('\x1b[31m') + 2;
+  const raw = head + '\x07'.repeat(65536 - (head.length - cut));
+  assert.equal(raw.slice(-65536).slice(0, 3), '31m', 'the cut lands inside the escape');
+  buffers.set('a', raw);
+  const act = await activityForTab('a');
+  assert.equal(act?.verb, 'Proofing');
+  assert.equal(act?.seconds, 40);
+  assert.equal(act?.tokens, 900);
+  ok('an activity read cut inside an escape still finds the spinner');
+}
+
+// 25. A restart must never reissue a token from before it: two module
+// instances (two app processes) with identical counters mint different tokens.
+{
+  reset(); ptys.set('a', {}); emitOutput('a');
+  const a = (await import('../chat-service.js?boot=a')).selectorToken('a');
+  const b = (await import('../chat-service.js?boot=b')).selectorToken('a');
+  assert.ok(a && b, 'both settled');
+  assert.notEqual(a, b, 'same counters, different process');
+  ok('tokens from another app process never match');
+}
 
 console.log(`\n${pass} passed`);

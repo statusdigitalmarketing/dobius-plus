@@ -2,9 +2,10 @@
 // the live selector popup, a plain-text tail of the screen, and the
 // paste-then-Enter submit. Main-process only.
 
-import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalSettledSinceInput, terminalClosing } from './terminal-manager.js';
-import { parseSelector, parseSelectorFromScreen, stripAnsi } from './selector-parser.js';
-export { selectorFingerprint } from './selector-parser.js';
+import { randomBytes } from 'node:crypto';
+import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalInputAgeMs, terminalRawOutputSeq, terminalSettledSinceInput, terminalClosing } from './terminal-manager.js';
+import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, spinnerStatus } from './selector-parser.js';
+export { selectorFingerprint };
 import { renderScreenLines } from './screen-render.js';
 
 // The live selector for a tab, via the headless-xterm SCREEN render (v1.0.62).
@@ -22,6 +23,33 @@ export async function liveSelectorForTab(id) {
   return parseSelector(raw);
 }
 
+
+// What Claude's spinner says right now ("Whirlpooling…", 1m 12s, 2.3k
+// tokens), or null. Callers ask only while the tab is working: the line lingers
+// in scrollback after the turn ends. Read off the emulated SCREEN: Claude
+// repaints only the cells that changed ("\r\x1b[13G(40s ...)"), so a stripped
+// byte stream keeps showing the first full line it drew (Codex Medium). The
+// strip path is the fallback when the render fails. ~7ms for the 64KB tail.
+const ACTIVITY_TAIL_CHARS = 65536;
+// Longest escape sequence the cut is backed up over (OSC titles run long).
+const ESC_BACKUP_CHARS = 512;
+export async function activityForTab(id) {
+  const raw = getTerminalBuffer(id) || '';
+  // A cut inside an escape sequence would print its leftover bytes ("31m")
+  // in front of the spinner and every counter-only repaint keeps them there,
+  // so the anchored parse fails (Codex Medium). Back the cut up to the ESC
+  // that starts the sequence it lands in. Never skip FORWARD to the next ESC:
+  // that one can sit after the spinner text and drop it.
+  let start = Math.max(0, raw.length - ACTIVITY_TAIL_CHARS);
+  if (start > 0) {
+    const esc = raw.lastIndexOf('\x1b', start);
+    if (esc !== -1 && start - esc <= ESC_BACKUP_CHARS) start = esc;
+  }
+  const tail = raw.slice(start);
+  let lines;
+  try { lines = await renderScreenLines(tail); } catch { lines = null; }
+  return spinnerStatus(lines ? lines.join('\n') : raw);
+}
 
 // Plain-text tail of the tab's output for tabs with no transcript to show
 // (plain shells, a Claude that has not linked its session yet). Trailing blank
@@ -41,16 +69,75 @@ const ptySerials = new WeakMap();
 let nextPtySerial = 1;
 
 /**
- * `<pty serial>:<input count>` for the tab right now, or '' with no PTY, or
+ * `<pty serial>:<input count>:<output count>` for the tab right now, or '' with no PTY, or
  * while the tab has produced no output since its last input: the screen may
  * still show a prompt that input already answered, and a fresh token on that
  * stale screen would let its option answer whatever prompt comes next.
  */
+// A key that drew nothing (Claude ignored it) never "settles" the tab; after
+// this long with no output the screen is taken as current. Safe because the
+// token still carries the output count: a late repaint makes it stale.
+const QUIET_SETTLE_MS = 3000;
+
+// Every counter in a token restarts with the app, so a token queued on the
+// phone before a restart could match the new process's counters exactly
+// (Codex Critical, round 13). This process's own random id rules that out.
+const BOOT_NONCE = randomBytes(6).toString('hex');
+
 export function selectorToken(id) {
   const pty = terminalInstance(id);
-  if (!pty || !terminalSettledSinceInput(id)) return '';
+  if (!pty || !(terminalSettledSinceInput(id) || terminalInputAgeMs(id) >= QUIET_SETTLE_MS)) return '';
   if (!ptySerials.has(pty)) ptySerials.set(pty, nextPtySerial++);
-  return `${ptySerials.get(pty)}:${terminalInputSeq(id)}`;
+  // Output is part of it: Claude can draw its NEXT prompt with no input at all
+  // (another surface answered, or the screen was cleared and redrawn), and two
+  // prompts can look identical on screen (Codex Critical, three lenses). So a
+  // card is answerable only while neither input nor output reached the tab
+  // since it was read. Idle Claude Code is silent, which is also what the
+  // tab-status settler relies on.
+  return `${BOOT_NONCE}:${ptySerials.get(pty)}:${terminalInputSeq(id)}:${terminalRawOutputSeq(id)}`;
+}
+
+/**
+ * Read the live selector for a card that can answer it: null (no prompt),
+ * { unsettled: true } (the screen cannot be trusted right now: not repainted
+ * since the last input, or something reached the tab during the read), or
+ * { selector, token }. Shared by the desktop Chat pane and the phone, so both
+ * answer prompts under the same rules. `stillOk` re-checks the caller's right
+ * to the tab after the render await.
+ */
+export async function readSelectorForAnswer(id, stillOk = () => true) {
+  // Stamp BEFORE rendering: anything that lands meanwhile makes the read stale.
+  const token = selectorToken(id);
+  let selector;
+  try { selector = await liveSelectorForTab(id); } catch { selector = null; }
+  if (!stillOk()) return null;
+  // No token, or the tab moved during the read: { unsettled } keeps the card
+  // on screen, disabled. It carries the prompt for DISPLAY only (an older
+  // phone shows it, as it always did); nothing can answer it without a token.
+  // A read that found no prompt hides the card, which is always safe.
+  if (!token || selectorToken(id) !== token) return selector && terminalInstance(id) ? { unsettled: true, selector } : null;
+  return selector ? { selector, token: `${token}|${selectorFingerprint(selector)}` } : null;
+}
+
+/**
+ * Answer a card read by readSelectorForAnswer: `data` is written only while
+ * neither input nor output has reached the tab since that read, no submit is
+ * typing into it, and a fresh parse still shows the prompt the card showed.
+ * `beforeWrite` runs after every check passes (main cancels a queued resume).
+ * Returns { ok, stale?, token? } with the token for the next key on this prompt.
+ */
+export async function answerSelector(id, data, token, stillOk = () => true, beforeWrite = () => {}) {
+  if (typeof data !== 'string' || !data || data.length > 16 || typeof token !== 'string') return { ok: false };
+  const [base, fp] = token.split('|');
+  const unchanged = () => !!base && !!fp && selectorToken(id) === base && !submitPending(id) && stillOk();
+  if (!unchanged()) return { ok: false, stale: true };
+  let live;
+  try { live = await liveSelectorForTab(id); } catch { live = null; }
+  if (!unchanged() || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
+  beforeWrite();
+  writeRawInput(id, data, stillOk);
+  const next = selectorToken(id);
+  return { ok: true, token: next ? `${next}|${fp}` : '' };
 }
 
 const SUBMIT_ENTER_DELAY_MS = 250;
@@ -114,7 +201,16 @@ export function writeRawInput(id, data, stillOk = () => true) {
   const q = submitQueues.get(id);
   if (isCancelKey(data)) {
     // Ctrl+C and Ctrl+U erase the input line; a bare Esc leaves it as typed.
-    if (q) { q.gen += 1; if (data !== '\x1b') q.clearedGen = q.gen; }
+    // cancelWrites counts the queue's own writes, so the Enter check below can
+    // tell them apart from another writer's input.
+    // Only a frame of nothing but cancel keys counts as the queue's own: one
+    // that also carries an Enter ("\r\x15") may have sent the paste first
+    // (Codex High), so it counts as another writer.
+    if (q) {
+      q.gen += 1;
+      if (/^[\x03\x15\x1b]+$/.test(data)) q.cancelWrites = (q.cancelWrites || 0) + 1;
+      if (data !== '\x1b') q.clearedGen = q.gen;
+    }
     writeTerminal(id, data);
     return;
   }
@@ -143,6 +239,7 @@ async function drainSubmits(id, q) {
     }
     writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
     const pastedAt = terminalInputSeq(id);
+    const cancelsAt = q.cancelWrites || 0;
     await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
     // No stillOk() here on purpose: a paste that went out gets its Enter even
     // if the phone that sent it dropped, or its text would sit half-typed and
@@ -151,8 +248,13 @@ async function drainSubmits(id, q) {
     // caller, so it says so instead of offering the text back to send twice.
     if (terminalInstance(id) !== it.pty || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalClosing(id)) {
       // Any Ctrl+C/Ctrl+U since this item queued erased the pasted line, even if
-      // a later Esc was the most recent cancel.
-      const erased = (q.clearedGen ?? -1) > it.gen;
+      // a later Esc was the most recent cancel. Only when nothing ELSE wrote to
+      // the tab: another writer's Enter (a terminal, /tabSend) may have sent
+      // the paste before the erase, and reporting it unsent would offer the
+      // text back to be sent twice (Codex High). Then it is stranded: check
+      // the terminal.
+      const foreign = (terminalInputSeq(id) - pastedAt) - ((q.cancelWrites || 0) - cancelsAt);
+      const erased = foreign === 0 && (q.clearedGen ?? -1) > it.gen;
       if (terminalInstance(id) === it.pty && !terminalClosing(id) && !erased) it.onStranded();
       it.resolve(false);
       continue;

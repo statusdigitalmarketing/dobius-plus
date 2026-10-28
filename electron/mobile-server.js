@@ -30,8 +30,8 @@ import {
   liveClaudeSessionIds, claimSessionResume, bindReservationTab, releaseSessionResume,
   addTerminalObserver,
 } from './terminal-manager.js';
-import { stripAnsi, spinnerVerb } from './selector-parser.js';
-import { liveSelectorForTab, terminalTextTail, submitPromptToTab, writeRawInput } from './chat-service.js';
+import { stripAnsi, spinnerStatus } from './selector-parser.js';
+import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
@@ -99,6 +99,20 @@ function socketsForTab(id) {
   return out;
 }
 
+// The phone's selector message: the prompt plus the token a tap must carry to
+// be answered (chat-service readSelectorForAnswer, same rules as desktop).
+// `unsettled` = the tab is moving: the phone keeps its card, disabled, and
+// re-asks. A phone app too old to know tokens ignores both new fields.
+async function selectorMessage(id, stillOk = () => true) {
+  let r;
+  try { r = await readSelectorForAnswer(id, stillOk); } catch { r = null; }
+  // Unsettled keeps the card disabled on a current phone; the prompt rides
+  // along for an older phone, which ignores `unsettled` and would otherwise
+  // drop the card (it answers with bare input, as it always has).
+  if (r?.unsettled) return { type: 'selector', id, unsettled: true, selector: r.selector || null };
+  return { type: 'selector', id, selector: r?.selector || null, token: r?.token || '' };
+}
+
 function scheduleSelectorPush(id) {
   const at = selectorInterest.get(id);
   if (!at || Date.now() - at > SELECTOR_INTEREST_MS) return; // no open popup surface
@@ -110,12 +124,11 @@ function scheduleSelectorPush(id) {
     w.timer = null;
     const targets = socketsForTab(id);
     if (targets.length === 0) return;
-    let sel;
-    try { sel = await liveSelectorForTab(id); } catch { sel = null; }
-    const j = JSON.stringify(sel || null);
+    const msg = await selectorMessage(id);
+    const j = JSON.stringify(msg);
     if (j === w.lastPushedJson) return; // same popup state already pushed
     w.lastPushedJson = j;
-    for (const s of targets) wsSend(s, { type: 'selector', id, selector: sel || null });
+    for (const s of targets) wsSend(s, msg);
   }, SELECTOR_PUSH_QUIET_MS);
 }
 
@@ -385,6 +398,26 @@ function shortModel(model) {
 // The status-rich terminals payload for the mobile board: live terminals merged
 // with the main-process status authority + the context cache + the recent-exit
 // cache. v1.0.43.
+// Spinner readings per working tab, rendered off the screen in the background
+// (activityForTab) so the 1s board push stays synchronous and cheap. A tab
+// with no reading yet falls back to the plain strip.
+const activityCache = new Map(); // id -> { act, at, busy }
+const ACTIVITY_REFRESH_MS = 1500;
+function refreshActivities(workingIds) {
+  for (const id of activityCache.keys()) if (!workingIds.has(id)) activityCache.delete(id);
+  const now = Date.now();
+  for (const id of workingIds) {
+    const c = activityCache.get(id) || { act: null, at: 0, busy: false };
+    if (c.busy || now - c.at < ACTIVITY_REFRESH_MS) continue;
+    c.busy = true;
+    activityCache.set(id, c);
+    activityForTab(id)
+      .then((act) => { c.act = act; })
+      .catch(() => { /* keep the last reading */ })
+      .finally(() => { c.at = Date.now(); c.busy = false; });
+  }
+}
+
 function buildTerminalsPayload() {
   const snap = terminalStatusSnapshot();
   // Reverse the session<->tab map (cheap, sync) so each tab carries its linked
@@ -403,6 +436,10 @@ function buildTerminalsPayload() {
     const meta = parseTermLabel(t.id, t.cwd);
     const st = snap.live[t.id];
     const ctx = tabContextCache.get(t.id);
+    // Only read for tabs that are actually working (the line lingers in
+    // scrollback after a turn); one strip of a 4KB tail per working tab.
+    const act = st?.status !== 'working' ? null
+      : (activityCache.get(t.id)?.at ? activityCache.get(t.id).act : spinnerStatus(getTerminalBuffer(t.id)));
     const link = sessionByTab.get(t.id);
     return {
       id: t.id,
@@ -416,7 +453,10 @@ function buildTerminalsPayload() {
       // it is the most alive thing on the desktop screen and the phone showed
       // a flat "working" instead. Only read for tabs that are actually
       // working; one strip of a 4KB tail per working tab per push is cheap.
-      verb: st?.status === 'working' ? spinnerVerb(getTerminalBuffer(t.id)) : '',
+      verb: act?.verb || '',
+      // The rest of the spinner line for the Chat view's live meter. The
+      // phone ticks the clock itself between pushes, from when it got one.
+      activity: act,
       lastActivityAt: st?.lastActivityAt || 0,
       model: ctx?.model || '',
       ctxPct: typeof ctx?.ctxPct === 'number' ? ctx.ctxPct : null,
@@ -433,11 +473,25 @@ function buildTerminalsPayload() {
 // status, recent exits) but NOT lastActivityAt, so an actively-printing tab
 // does not trigger a push every second. We only push when this changes.
 // Codex remote-plan #2 (send deltas only when serialized status changes).
+function activitySig(t) {
+  const a = t.activity;
+  if (!a) return '';
+  const src = activityCache.get(t.id)?.at ? 'c' : 'r';
+  const tok = a.tokens ? Math.round(Math.log2(a.tokens) * 2) : '';
+  const sec = a.seconds != null ? Math.floor(Math.log2(a.seconds + 1)) : '';
+  return `${src}${tok}/${sec}`;
+}
+
 function terminalsSignature(payload) {
   // Bucket ctx% to 5% so a slowly-growing context does not push every refresh,
   // but a meaningful move (and model changes) still updates the ring.
   const tabs = payload.list
-    .map((t) => `${t.id}:${t.label}:${t.status}:${t.verb}:${t.model}:${t.sessionId || ''}:${t.claudeLive ? 1 : 0}:${t.ctxPct == null ? '' : Math.round(t.ctxPct / 5)}`)
+    // Tokens in coarse steps (a new step every ~40%): a streaming turn still
+    // pushes now and then, not every second. The clock ticks on the phone.
+    // The source flag pushes once when the rendered-screen reading replaces
+    // the raw-stream fallback, which can be stale (Codex Medium); a seconds
+    // bucket that doubles bounds any remaining drift without per-second pushes.
+    .map((t) => `${t.id}:${t.label}:${t.status}:${t.verb}:${activitySig(t)}:${t.model}:${t.sessionId || ''}:${t.claudeLive ? 1 : 0}:${t.ctxPct == null ? '' : Math.round(t.ctxPct / 5)}`)
     .sort().join('|');
   const exits = payload.recentExits.map((e) => `${e.id}:${e.exitCode}:${e.at}`).join('|');
   return `${tabs}#${exits}`;
@@ -526,6 +580,12 @@ function seedPushBaseline() {
 
 function pollStatusTick() {
   const payload = buildTerminalsPayload();
+  // Readings for the NEXT tick, only while a phone could be looking.
+  // With no phone connected nothing refreshes or prunes the cache, so drop
+  // it: a reading kept from a finished turn would be served to the next one
+  // (Codex Medium, round 12).
+  if (activeSocketsByToken.size > 0) refreshActivities(new Set(payload.list.filter((t) => t.status === 'working').map((t) => t.id)));
+  else activityCache.clear();
   // Push events fire regardless of connected sockets (phone may be closed).
   try { firePushForEvents(payload); } catch { /* best effort */ }
   // WS broadcast only when a phone is connected and the board-relevant state moved.
@@ -686,7 +746,7 @@ function handleAuthedMessage(socket, msg, subs) {
         if (msg.data.length <= 4) {
           const id = msg.id;
           setTimeout(async () => {
-            wsSend(socket, { type: 'selector', id, selector: await liveSelectorForTab(id) || null });
+            wsSend(socket, await selectorMessage(id, () => knownToken(socket._authToken)));
           }, 700);
         }
       }
@@ -712,7 +772,7 @@ function handleAuthedMessage(socket, msg, subs) {
       submitPromptToTab(id, msg.text, () => knownToken(socket._authToken));
       // If this answered a selector (or started Claude), refresh selector state.
       setTimeout(async () => {
-        wsSend(socket, { type: 'selector', id, selector: await liveSelectorForTab(id) || null });
+        wsSend(socket, await selectorMessage(id, () => knownToken(socket._authToken)));
       }, 900);
       break;
     }
@@ -726,9 +786,33 @@ function handleAuthedMessage(socket, msg, subs) {
       if (typeof msg.id !== 'string') break;
       socket._authedTabs.add(msg.id); // the Chat view probes its own tab. Audit Medium.
       noteSelectorInterest(msg.id); // fresh probe = an open popup surface: enable pushes
-      liveSelectorForTab(msg.id)
-        .then((selector) => wsSend(socket, { type: 'selector', id: msg.id, selector: selector || null }))
+      selectorMessage(msg.id, () => knownToken(socket._authToken))
+        .then((m) => wsSend(socket, m))
         .catch(() => wsSend(socket, { type: 'selector', id: msg.id, selector: null }));
+      break;
+    }
+
+    case 'selectorKey': {
+      // Answer a selector card with the token it was read with (a digit, an
+      // arrow, space, Enter or Esc). Refused as stale when anything reached
+      // the tab since the read, so a tap can never land on a different prompt
+      // than the one the phone showed (Codex Critical). Older phone apps still
+      // send a bare 'input' digit; that path is unchanged.
+      // Not gated on _authedTabs: a tap queued while reconnecting arrives on a
+      // NEW socket whose set is empty if the Chat view unmounted meanwhile, and
+      // dropping it left the card waiting forever (Codex High). The token is
+      // the authorization: it only exists for a tab this phone read, and it
+      // goes stale on any input or output since.
+      if (typeof msg.id !== 'string') break;
+      const id = msg.id;
+      answerSelector(id, msg.data, msg.token, () => knownToken(socket._authToken))
+        .then((r) => {
+          wsSend(socket, { type: 'selectorKeyResult', id, ok: !!r.ok, stale: !!r.stale, token: r.token || '' });
+          if (!r.ok) return;
+          invalidateSelectorPush(id);
+          setTimeout(async () => { wsSend(socket, await selectorMessage(id, () => knownToken(socket._authToken))); }, 700);
+        })
+        .catch(() => wsSend(socket, { type: 'selectorKeyResult', id, ok: false, stale: false, token: '' }));
       break;
     }
 
@@ -871,7 +955,7 @@ function handleAuthedMessage(socket, msg, subs) {
       if (msg.source === 'codex') {
         const climit = typeof msg.limit === 'number' && msg.limit > 0 ? Math.min(msg.limit, 2000) : undefined;
         loadTranscript(sessionId, projectPath, climit, 'codex')
-          .then((entries) => wsSend(socket, { type: 'transcript', sessionId, projectPath, entries: entries || [] }))
+          .then((entries) => wsSend(socket, { type: 'transcript', sessionId, projectPath, blocks: false, entries: entries || [] }))
           .catch((err) => wsSend(socket, { type: 'error', message: String(err?.message || err) }));
         break;
       }
@@ -904,7 +988,7 @@ function handleAuthedMessage(socket, msg, subs) {
           // the server never verified (Codex Medium).
           const hit = txCache.get(cacheKey);
           if (sig && typeof msg.sig === 'string' && msg.sig === sig && hit && hit.sig === sig) {
-            wsSend(socket, { type: 'transcript', sessionId, projectPath, sig, unchanged: true });
+            wsSend(socket, { type: 'transcript', sessionId, projectPath, blocks, sig, unchanged: true });
             return null;
           }
           if (sig && hit && hit.sig === sig) return { entries: hit.entries, sig };
@@ -914,7 +998,10 @@ function handleAuthedMessage(socket, msg, subs) {
         })
         .then((res) => {
           if (!res) return; // unchanged reply already sent
-          wsSend(socket, { type: 'transcript', sessionId, projectPath, sig: res.sig || null, entries: res.entries || [] });
+          // `blocks` names the shape, so a History reply (plain rows) for the
+          // same session can never land in the Chat view or vice versa: both
+          // share this socket and the same sig (Codex Medium).
+          wsSend(socket, { type: 'transcript', sessionId, projectPath, blocks, sig: res.sig || null, entries: res.entries || [] });
         })
         .catch((err) => wsSend(socket, { type: 'error', message: String(err?.message || err) }));
       break;

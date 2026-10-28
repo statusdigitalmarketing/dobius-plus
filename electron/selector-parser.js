@@ -267,16 +267,44 @@ export function parseSelector(rawBuf) {
  * @param raw ANSI terminal buffer (tail is enough; caller slices)
  * @returns the gerund ("Flibbertigibbeting") or '' when no spinner is on screen
  */
-const SPINNER_LINE_RE = /^\s*[·✢✳✶✻✽*]\s+([A-Z][A-Za-zÀ-ɏ' -]{1,40}ing)(?:…|\.\.\.)/gm;
+const SPINNER_LINE_RE = /^\s*[·✢✳✶✻✽*]\s+([A-Z][A-Za-zÀ-ɏ' -]{1,40}ing)(?:…|\.\.\.)[ \t]*(?:\(([^)\n]{0,160})\))?/gm;
 export function spinnerVerb(raw) {
-  if (!raw) return '';
+  return spinnerStatus(raw)?.verb || '';
+}
+
+/**
+ * The whole spinner line: the gerund plus what the parenthetical after it
+ * says, so a chat view can show the same live meter the terminal does.
+ *
+ *     ✳ Proofing… (3s · ↓ 95 tokens)
+ *     ✻ Whirlpooling… (1m 12s · ↑ 2.3k tokens · thinking)
+ *
+ * @returns null with no spinner on screen, else { verb, seconds, tokens, dir }
+ *   where seconds/tokens are numbers or null and dir is 'up' | 'down' | null.
+ */
+export function spinnerStatus(raw) {
+  if (!raw) return null;
   // Strip first, then window: a repainting TUI is mostly escape bytes, so a
   // raw slice holds almost no text (the claudeTuiPresent lesson, v1.0.56).
   const tail = stripAnsi(String(raw).slice(-65536)).slice(-4096);
-  let verb = '';
+  let last = null;
   SPINNER_LINE_RE.lastIndex = 0;
-  for (const m of tail.matchAll(SPINNER_LINE_RE)) verb = m[1];
-  return verb.trim();
+  for (const m of tail.matchAll(SPINNER_LINE_RE)) last = m;
+  if (!last) return null;
+  const detail = last[2] || '';
+  // Elapsed leads the parenthetical: "3s", "1m 12s", "1h 2m 3s".
+  const t = /^\s*(?:(\d+)h\s*)?(?:(\d+)m\s*)?(?:(\d+)s)?(?=\s*(?:·|$))/.exec(detail);
+  const seconds = t && (t[1] || t[2] || t[3])
+    ? (Number(t[1] || 0) * 3600) + (Number(t[2] || 0) * 60) + Number(t[3] || 0)
+    : null;
+  const k = /([↑↓])\s*([\d.,]+)\s*([kKmM])?\s*tokens/.exec(detail);
+  let tokens = null;
+  if (k) {
+    const n = Number(k[2].replace(/,/g, ''));
+    const mult = { k: 1e3, K: 1e3, m: 1e6, M: 1e6 }[k[3]] || 1;
+    if (Number.isFinite(n)) tokens = Math.round(n * mult);
+  }
+  return { verb: last[1].trim(), seconds, tokens, dir: k ? (k[1] === '↑' ? 'up' : 'down') : null };
 }
 
 /**
