@@ -319,3 +319,15 @@
 - **FIX**: Back the cut up to the ESC that starts the sequence (`raw.lastIndexOf('\x1b', start)` within 512 chars). Assert the test geometry itself (`raw.slice(-65536).slice(0,3) === '31m'`) before asserting the behaviour, then sabotage the guard to confirm the test fails without it.
 - **CONTEXT**: Any "start at a safe boundary" fix on a byte tail. Skipping forward discards real content; backing up only replays a little more.
 - **DETECTION**: `grep -n "indexOf('\\\\x1b')" electron/*.js`
+
+### Git: 2026-10-28
+- **MISTAKE**: Ran `git stash -q && npx eslint ...; git stash pop` to compare lint against HEAD while new files were marked intent-to-add (`git add -N`). `git stash` FAILED on the intent-to-add entries ("not uptodate. Cannot merge"), so it created nothing, and the unconditional `git stash pop` then tried to pop an OLD, unrelated stash (`pre-release-untracked-ios`). It refused only because those untracked iOS files already existed.
+- **FIX**: Never stash to get a baseline. Lint or test the HEAD version directly: `git show HEAD:<file> | npx eslint --stdin --stdin-filename <file>`. If a stash is ever unavoidable, chain the pop on the stash's success and check `git stash list` first.
+- **CONTEXT**: The repo carries old stashes, so a pop after a failed push silently targets someone else's work. `git add -N` (used to put new files in `git diff` for Codex) is what makes stash fail.
+- **DETECTION**: `git stash list` before and after; grep scripts for `git stash.*;.*git stash pop`
+
+### Security: 2026-10-28
+- **MISTAKE**: Built the error reporter's privacy layer (`electron/error-reporter.js` scrub) as a blocklist over free-text error messages: pair the quotes, strip paths, match secret shapes. Codex Bugbot broke it in every one of 18 rounds (nested V8 JSON quotes, escapes, apostrophes in names, truncation, a secret pass swallowing a quote, a cookie header erased by the quote span, home paths eating `: password=`), and each fix created the next hole.
+- **FIX**: For free text, prefer rules that are safe BY CONSTRUCTION over parsers: one span from the first quote character to the last (to the end if odd or truncated) instead of pairing; replace a credential's content but KEEP its quote characters so later passes see the same boundaries; set aside "safe" tokens only when nothing else could be their edge. Order passes so no pass can destroy context another needs (credentials before quotes; paths last). Decide the residual policy up front (what is accepted, where the data goes) and state it in the code, or the review loop never converges.
+- **CONTEXT**: Anything that uploads logs leaves the machine. Here it goes to a private org repo via the user's own gh login, which is why file names and single code words are accepted residuals.
+- **DETECTION**: `grep -n "redactQuotes\|ACCEPTED" electron/error-reporter.js`

@@ -90,6 +90,14 @@ export function isPriorityKind(kind) {
   return PRIORITY_RE.test(String(kind || ''));
 }
 
+// Something that also wants each written entry (error-reporter.js). Called
+// only for entries that were written, so the throttle bounds it too.
+let sink = null;
+export function setLogSink(fn) { sink = typeof fn === 'function' ? fn : null; }
+function toSink(kind, detail) {
+  try { sink?.(kind, detail); } catch { /* a sink must never break logging */ }
+}
+
 /** Append one entry. Never throws; logging must never take the app down. */
 export function logLine(kind, detail) {
   if (!logFile) return;
@@ -97,6 +105,7 @@ export function logLine(kind, detail) {
     if (isPriorityKind(kind)) {
       rotateIfNeeded();
       fs.appendFileSync(logFile, formatLine(kind, detail));
+      toSink(kind, detail);
       return;
     }
     const verdict = throttleCheck(throttleState, Date.now());
@@ -107,6 +116,7 @@ export function logLine(kind, detail) {
       return;
     }
     fs.appendFileSync(logFile, formatLine(kind, detail));
+    toSink(kind, detail);
   } catch { /* never throw */ }
 }
 

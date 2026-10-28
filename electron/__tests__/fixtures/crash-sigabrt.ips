@@ -1,0 +1,93 @@
+{"app_name": "Dobius+", "app_version": "1.0.79", "bundleID": "com.statusdigital.dobius-plus", "os_version": "macOS 26.5.1 (25F80)", "name": "Dobius+", "timestamp": "2026-10-22 12:50:28.00 -0400", "bug_type": "309"}
+{
+ "procName": "Dobius+",
+ "cpuType": "ARM-64",
+ "translated": false,
+ "exception": {
+  "codes": "0x0000000000000000, 0x0000000000000000",
+  "rawCodes": [
+   0,
+   0
+  ],
+  "type": "EXC_CRASH",
+  "signal": "SIGABRT"
+ },
+ "termination": {
+  "indicator": "Abort trap: 6"
+ },
+ "faultingThread": 0,
+ "threads": [
+  {
+   "frames": [
+    {
+     "imageIndex": 1,
+     "symbol": "__pthread_kill"
+    },
+    {
+     "imageIndex": 2,
+     "symbol": "pthread_kill"
+    },
+    {
+     "imageIndex": 3,
+     "symbol": "abort"
+    },
+    {
+     "imageIndex": 4,
+     "symbol": "__abort_message"
+    },
+    {
+     "imageIndex": 4,
+     "symbol": "demangling_terminate_handler()"
+    },
+    {
+     "imageIndex": 5,
+     "symbol": "_objc_terminate()"
+    },
+    {
+     "imageIndex": 4,
+     "symbol": "std::__terminate(void (*)())"
+    },
+    {
+     "imageIndex": 4,
+     "symbol": "__cxxabiv1::failed_throw(__cxxabiv1::__cxa_exception*)"
+    },
+    {
+     "imageIndex": 4,
+     "symbol": "__cxa_throw"
+    },
+    {
+     "imageIndex": 0,
+     "symbol": "Napi::Error::ThrowAsJavaScriptException() const"
+    },
+    {
+     "imageIndex": 0,
+     "symbol": "void Napi::details::WrapVoidCallback<Napi::ThreadSafeFunction::CallJS(napi_env__*, napi_value__*, void*, void*)::'lambda'()>(Napi::ThreadSafeFunction::CallJS(napi_env__*, napi_value__*, void*, void*)::'lambda'())"
+    },
+    {
+     "imageIndex": 0,
+     "symbol": "Napi::ThreadSafeFunction::CallJS(napi_env__*, napi_value__*, void*, void*)"
+    }
+   ]
+  }
+ ],
+ "usedImages": [
+  {
+   "name": "pty.node"
+  },
+  {
+   "name": "libsystem_kernel.dylib"
+  },
+  {
+   "name": "libsystem_pthread.dylib"
+  },
+  {
+   "name": "libsystem_c.dylib"
+  },
+  {
+   "name": "libc++abi.dylib"
+  },
+  {
+   "name": "libobjc.A.dylib"
+  }
+ ]
+}

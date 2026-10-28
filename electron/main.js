@@ -10,7 +10,8 @@ import { fileURLToPath } from 'url';
 import { getQuittingForUpdate, setQuitting, getQuitting } from './quit-state.js';
 import { projectPathFromTabId } from './tab-id-util.js';
 import { claudeEnvForAccount, expandTilde, pinPluginRoot } from './claude-account-env.js';
-import { installErrorLog, logLine, errorLogPath } from './error-log.js';
+import { installErrorLog, logLine, errorLogPath, setLogSink } from './error-log.js';
+import { startErrorReporter, noteFault, isReportable } from './error-reporter.js';
 
 // Stall watchdog (v1.0.70). Wrapped here, at import time, so the very first
 // ipcMain.handle/on registration below is already tracked; armed in whenReady
@@ -3270,6 +3271,10 @@ function setupCrashLogging() {
 
 app.whenReady().then(() => {
   installErrorLog();
+  // Faults (and native crash reports from the last run) become GitHub issues
+  // in the private reports repo, filed with this Mac's own gh login.
+  startErrorReporter({ userDataDir: app.getPath('userData'), version: app.getVersion(), isPackaged: app.isPackaged, getSettings });
+  setLogSink((kind, detail) => { if (isReportable(kind, detail)) noteFault(kind, detail); });
   // One plugin root for every Claude process this app spawns, Default terminals
   // and agents included. See claude-account-env.js.
   console.log(`[plugins] root pinned for all spawns: ${pinPluginRoot()}`);
