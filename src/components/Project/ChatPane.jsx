@@ -31,7 +31,7 @@ function deliverDraft(tabId, update, notice) {
 // cancelled sends in the order they were written.
 const withUnsent = (text) => (cur) => (!cur ? text : cur.split('\n\n').includes(text) ? cur : `${cur}\n\n${text}`);
 const NOT_SENT = 'Not sent. The tab was interrupted, closed or moved to another window.';
-const STRANDED = 'Typed into the terminal but not sent: other input reached it first. Open the terminal to send or clear it.';
+const STRANDED = 'Other input reached the terminal while this was being sent, so Chat cannot tell whether it went through. Check the terminal.';
 const SELECTOR_POLL_MS = 2500;
 const ECHO_TTL_MS = 90_000;
 
@@ -422,7 +422,9 @@ export default function ChatPane({ tabId, visible }) {
     // Only if the conversation it went into is still the one on screen, and
     // the transcript has not already shown it while the Enter was pending.
     if (ok && echo && sid && sessionIdRef.current === sid && countInTranscript(messagesRef.current, text) <= base) {
-      setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid, base }]);
+      // An identical message still waiting to land counts as one more copy, or
+      // the first "yes" to land would clear both echoes.
+      setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid, base: base + cur.filter((e) => normEcho(e.content) === normEcho(text)).length }]);
     }
     if (ok) refreshSoon();
     return r === 'stranded' ? 'stranded' : ok;
@@ -613,7 +615,10 @@ export default function ChatPane({ tabId, visible }) {
             {selector.options.map((opt) => (
               <button type="button" key={opt.num} className="chatp-option" disabled={!selector.token} onClick={() => chooseOption(opt.num)}>
                 <span className="chatp-option-num">{opt.num}</span>
-                <span>{opt.label}</span>
+                <span className="chatp-option-text">
+                  {opt.label}
+                  {opt.detail && <span className="chatp-option-detail">{opt.detail}</span>}
+                </span>
               </button>
             ))}
             <div className="chatp-keys">

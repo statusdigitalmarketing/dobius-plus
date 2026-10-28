@@ -14,6 +14,8 @@
 // error in the cursor position can never select a DIFFERENT option than the
 // label. selectedIndex is returned for display only.
 
+import { createHash } from 'node:crypto';
+
 const CSI_RE = /^\x1b\[([0-9;?]*)([ -/]*)([@-~])/;
 
 // Linear scanner, not regex passes: Ink lays text out with CURSOR MOTION, not
@@ -332,21 +334,27 @@ export function parseSelectorFromScreen(lines) {
   // above the escape-hatch options), and desc lines sit under their option.
   const options = [];
   let blockTop = -1;
+  // Indented rows under an option: its description, or the rest of a label
+  // too long for one row. Read bottom-up, so they arrive before their option.
+  let pendingDetail = [];
   for (let i = hintIdx - 1; i >= 0; i -= 1) {
     const line = lines[i];
     const t = line.trim();
     if (t === '' || SCREEN_RULE_RE.test(t)) continue;
     const m = line.match(SCREEN_OPTION_RE);
     if (m) {
-      options.unshift({ num: Number(m[2]), label: m[3].trim() });
+      const opt = { num: Number(m[2]), label: m[3].trim() };
+      if (pendingDetail.length) opt.detail = pendingDetail.reverse().join('\n');
+      pendingDetail = [];
+      options.unshift(opt);
       blockTop = i;
       continue;
     }
     // Non-numbered line: a description under an option (indented) keeps the
     // walk going while we are inside the block; anything else above the
     // topmost option ends the block.
-    if (options.length === 0) continue; // hint chrome between hint and block
-    if (/^\s{3,}\S/.test(line)) continue; // option description
+    if (/^\s{3,}\S/.test(line)) { pendingDetail.push(t); continue; } // option description
+    if (options.length === 0) { pendingDetail = []; continue; } // hint chrome between hint and block
     break;
   }
   if (options.length === 0) return null;
@@ -366,14 +374,55 @@ export function parseSelectorFromScreen(lines) {
   }
   if (sel === -1) return null;
 
-  // Prompt: nearest meaningful line above the block, skipping rules, blanks,
-  // and the multi-question tab bar.
-  let prompt = '';
-  for (let i = blockTop - 1; i >= 0; i -= 1) {
+  const out = { prompt: screenPrompt(lines, blockTop), options, selectedIndex: sel };
+  // For selectorFingerprint only: the uncapped screen above the block, so two
+  // same-worded prompts for different commands or edits never match. Not
+  // enumerable, so it stays out of every JSON payload and card.
+  Object.defineProperty(out, 'context', {
+    value: lines.slice(Math.max(0, blockTop - SCREEN_CONTEXT_ROWS), blockTop).map((l) => l.trimEnd()).join('\n'),
+  });
+  return out;
+}
+
+/**
+ * The question above a selector block, ALL of it: a permission prompt draws
+ * the tool and its command above "Do you want to proceed?", and a long
+ * question wraps over several rows. Taking only the nearest row cut both
+ * (Sam: "the interactive messages sometimes get cutoff"). Rows run from the
+ * rule or tab bar the prompt is drawn under; with neither close above, only
+ * the paragraph touching the block, so transcript prose is never swept in.
+ */
+const PROMPT_MAX_ROWS = 15;
+const SCREEN_CONTEXT_ROWS = 40;
+const PROMPT_MAX_CHARS = 1500;
+function screenPrompt(lines, blockTop) {
+  const paragraphs = [[]];
+  let bounded = false;
+  for (let i = blockTop - 1; i >= 0 && i >= blockTop - 30; i -= 1) {
     const t = lines[i].trim();
-    if (!t || SCREEN_RULE_RE.test(t) || SCREEN_CHROME_RE.test(t)) continue;
-    prompt = t;
-    break;
+    if (SCREEN_RULE_RE.test(t) || SCREEN_CHROME_RE.test(t)) { bounded = true; break; }
+    if (!t) { if (paragraphs[0].length) paragraphs.unshift([]); continue; }
+    if (!/[\p{L}\p{N}]/u.test(t)) continue; // a lone glyph or border
+    paragraphs[0].unshift(t);
   }
-  return { prompt, options, selectedIndex: sel };
+  const kept = (bounded ? paragraphs : paragraphs.slice(-1)).filter((p) => p.length);
+  let rows = kept.flat();
+  if (rows.length > PROMPT_MAX_ROWS) rows = rows.slice(-PROMPT_MAX_ROWS); // the question sits last
+  let text = rows.join('\n');
+  if (text.length > PROMPT_MAX_CHARS) text = text.slice(-PROMPT_MAX_CHARS);
+  return text;
+}
+
+/**
+ * What a selector card shows: the question and its numbered options, not
+ * which option the cursor is on (arrow keys move that without changing the
+ * prompt). '' for no selector.
+ */
+export function selectorFingerprint(sel) {
+  if (!sel || !Array.isArray(sel.options)) return '';
+  const opts = sel.options.map((o) => `${o?.num}.${o?.label}\n${o?.detail || ''}`);
+  // context: the raw rows above the options (non-enumerable, never sent to a
+  // client). Two Bash prompts both read "Do you want to proceed?" with the
+  // same labels; the command above them is what tells them apart.
+  return createHash('sha1').update(JSON.stringify([sel.prompt || '', opts, sel.context || ''])).digest('hex').slice(0, 16);
 }

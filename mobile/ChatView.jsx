@@ -460,7 +460,10 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
               onClick={() => chooseOption(opt.num)}
             >
               <span className="chat-selector-num">{opt.num}</span>
-              <span className="chat-selector-label">{opt.label}</span>
+              <span className="chat-selector-label">
+                {opt.label}
+                {opt.detail && <span className="chat-selector-detail">{opt.detail}</span>}
+              </span>
             </button>
           ))}
           {/* Fine-control row: arrows/space for multiSelect movement + toggle,

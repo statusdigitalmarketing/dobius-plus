@@ -283,3 +283,21 @@
 - **FIX**: Seed tabs as `{ id, label, labelLockedByUser: true, projectPath: repo, kind: 'terminal' }`. This is also why "seeded tabs open in ~".
 - **CONTEXT**: Any harness test of tear-off, dock, or per-project terminal logic.
 - **DETECTION**: `grep -n "projectPath" <seed script>`
+
+### Testing: 2026-10-28
+- **MISTAKE**: Fixing Codex's "queued raw key skips stillOk after the gap", I also added `!it.stillOk()` to the delayed Enter in `electron/chat-service.js` drainSubmits. That broke chat-service test 4, which pins the opposite rule on purpose: a paste that already went out must get its Enter even if the phone that sent it dropped, or its text sits half-typed and gets glued onto the next message.
+- **FIX**: Gate the paste and raw keys on stillOk. Never gate the Enter of a paste that already went out (comment at the check says why).
+- **CONTEXT**: Any change to the submit queue guards. Read the test names before adding a guard: several encode deliberate asymmetries.
+- **DETECTION**: `node --import ./electron/__tests__/chat-service-register.mjs ./electron/__tests__/chat-service.test.mjs`
+
+### Process: 2026-10-28
+- **MISTAKE**: Ran three Codex lenses in parallel with no fallback plan. The only Codex login on this Mac (`~/.codex/auth.json`, promax) hit its usage limit mid-run; two lenses died with "You've hit your usage limit" and the output files still looked like normal runs until the tail was read.
+- **FIX**: Read each lens output's TAIL for `ERROR: You've hit your usage limit` before treating a lens as clean. When Codex is out, run the unfinished lenses with independent Claude reviewers (same brief file) and record in the commit that Codex still owes the pass before release.
+- **CONTEXT**: Every Codex bugbot round. `~/.codex-profiles` does not exist here, so there is no second login to switch to.
+- **DETECTION**: `grep -l "usage limit" <scratchpad>/codex-chat/*.out`
+
+### Testing: 2026-10-28
+- **MISTAKE**: Added a test to `electron/__tests__/selector-parser.test.mjs` that imported `selectorFingerprint` from `../chat-service.js`. It passed when run with `--import ./electron/__tests__/register.mjs`, but `npm test` runs that suite BARE (`test:selector`), and chat-service pulls in terminal-manager -> config-manager -> `electron`, so the whole gate failed with "does not provide an export named 'app'".
+- **FIX**: Keep pure helpers in the pure module (`selectorFingerprint` now lives in selector-parser.js, re-exported by chat-service). Always confirm with `npm test`, not just the single suite with a stub loader.
+- **CONTEXT**: Which suites get the electron stub is decided per script in package.json, not by the test file.
+- **DETECTION**: `grep -n "test:selector\|test:chat" package.json` and check the imports of a bare-run suite for anything that reaches `electron`.

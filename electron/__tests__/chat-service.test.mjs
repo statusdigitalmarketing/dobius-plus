@@ -216,5 +216,15 @@ writeRawInput('a', '\x03'); // Ctrl+C erases the pasted line: nothing is left be
 assert.equal(await p, false);
 assert.equal(strandedD, 0);
 ok('a withheld Enter reports the paste as stranded');
+// 20. Ctrl+U then Esc: the Esc is the latest cancel, but the line was still
+// erased, so the paste must not be reported as sitting in the terminal.
+reset(); ptys.set('a', {});
+let strandedE = 0;
+p = submitPromptToTab('a', 'deploy notes', undefined, () => { strandedE += 1; });
+writeRawInput('a', '\x15');
+writeRawInput('a', '\x1b');
+assert.equal(await p, false);
+assert.equal(strandedE, 0);
+ok('an erasing cancel followed by Esc is not stranded');
 
 console.log(`\n${pass} passed`);

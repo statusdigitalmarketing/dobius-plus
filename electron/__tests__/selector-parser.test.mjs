@@ -259,19 +259,56 @@ const sv2 = (name, got, want) => {
 
 sv2('screen: multi-question Q1', await screenSel('askq-multi-q1-2.1.233-raw.bin'), {
   prompt: 'Pick a color',
-  options: [{ num: 1, label: 'Red' }, { num: 2, label: 'Blue' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }],
+  options: [{ num: 1, label: 'Red', detail: 'The color red.' }, { num: 2, label: 'Blue', detail: 'The color blue.' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }],
   selectedIndex: 0,
 });
 sv2('screen: multi-question Q2 (the bug)', await screenSel('askq-multi-q2-2.1.233-raw.bin'), {
   prompt: 'Pick a size',
-  options: [{ num: 1, label: 'Small' }, { num: 2, label: 'Large' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }],
+  options: [{ num: 1, label: 'Small', detail: 'The small size.' }, { num: 2, label: 'Large', detail: 'The large size.' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }],
   selectedIndex: 0,
 });
 sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1.233-raw.bin'), {
-  prompt: 'Ready to submit your answers?',
+  // The whole review, not just its last row (Sam: prompts "get cutoff").
+  prompt: 'Review your answers\n● Pick a color\n→ Red\n● Pick a size\n→ Small\nReady to submit your answers?',
   options: [{ num: 1, label: 'Submit answers' }, { num: 2, label: 'Cancel' }],
   selectedIndex: 0,
 });
+// A permission prompt: the tool and its command sit above the question, and a
+// long option wraps onto an indented row. All of it must reach the card.
+sv2('screen: permission prompt keeps the command and wrapped option', parseSelectorFromScreen([
+  'previous transcript text that must not leak in',
+  '─'.repeat(40),
+  ' Bash command',
+  '',
+  '   git push origin main',
+  '   Push the branch',
+  '',
+  ' Do you want to proceed?',
+  ' ❯ 1. Yes',
+  '   2. Yes, and don\'t ask again for git push commands in',
+  '      /Users/sam/Projects (Code)/dobius-plus',
+  '   3. No, and tell Claude what to do differently (esc)',
+  '',
+  ' Esc to cancel',
+]), {
+  prompt: 'Bash command\ngit push origin main\nPush the branch\nDo you want to proceed?',
+  options: [
+    { num: 1, label: 'Yes' },
+    { num: 2, label: "Yes, and don't ask again for git push commands in", detail: '/Users/sam/Projects (Code)/dobius-plus' },
+    { num: 3, label: 'No, and tell Claude what to do differently (esc)' },
+  ],
+  selectedIndex: 0,
+});
+// No rule or tab bar above: only the paragraph touching the block, so the
+// transcript above it is never swept into the question.
+sv2('screen: unbounded prompt stops at the paragraph', parseSelectorFromScreen([
+  'Some earlier reply from Claude.',
+  '',
+  'Pick one',
+  ' ❯ 1. A',
+  '   2. B',
+  'Enter to select',
+]), { prompt: 'Pick one', options: [{ num: 1, label: 'A' }, { num: 2, label: 'B' }], selectedIndex: 0 });
 // Erase honored: a screen with NO hint footer (nothing live) yields null,
 // whatever numbered prose is lying around.
 sv2('screen: no hint footer means no popup',
@@ -287,6 +324,28 @@ sv2('screen: quoted selector prose is not a popup',
 sv2('screen: numbered prose + hint-like sentence is not a popup',
   parseSelectorFromScreen(['Claude says:', '1. Run tests', '2. Deploy', 'Press Enter to confirm when ready']), null);
 sv2('screen: null input safe', parseSelectorFromScreen(null), null);
+
+// The chat:key guard: two Bash prompts with identical wording and options must
+// not share a fingerprint (one click would approve the command never shown),
+// and moving the cursor must not change it. context stays out of JSON.
+{
+  const { selectorFingerprint } = await import('../selector-parser.js');
+  const bash = (cmd, cur) => parseSelectorFromScreen([
+    '─'.repeat(40), ' Bash command', '', `   ${cmd}`, '', ' Do you want to proceed?',
+    `${cur === 1 ? ' ❯' : '  '} 1. Yes`, `${cur === 2 ? ' ❯' : '  '} 2. No`, '', ' Esc to cancel',
+  ]);
+  const a = bash('rm -rf build', 1), b = bash('rm -rf ~/src', 1), a2 = bash('rm -rf build', 2);
+  sv2('fingerprint: different commands differ', selectorFingerprint(a) === selectorFingerprint(b), false);
+  sv2('fingerprint: cursor move keeps it', selectorFingerprint(a) === selectorFingerprint(a2), true);
+  sv2('fingerprint: context not serialized', 'context' in JSON.parse(JSON.stringify(a)), false);
+  // Same prompt text and options, differing only ABOVE a rule (e.g. two edits
+  // to one file whose diffs sit outside the prompt paragraph).
+  const edit = (line) => parseSelectorFromScreen([
+    `+ ${line}`, '─'.repeat(40), ' Do you want to make this edit to main.js?',
+    ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel',
+  ]);
+  sv2('fingerprint: diff above the rule counts', selectorFingerprint(edit('a = 1')) === selectorFingerprint(edit('a = 2')), false);
+}
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);
 process.exit(fail === 0 ? 0 : 1);

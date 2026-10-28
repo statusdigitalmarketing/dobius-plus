@@ -3,8 +3,8 @@
 // paste-then-Enter submit. Main-process only.
 
 import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalSettledSinceInput, terminalClosing } from './terminal-manager.js';
-import { createHash } from 'node:crypto';
 import { parseSelector, parseSelectorFromScreen, stripAnsi } from './selector-parser.js';
+export { selectorFingerprint } from './selector-parser.js';
 import { renderScreenLines } from './screen-render.js';
 
 // The live selector for a tab, via the headless-xterm SCREEN render (v1.0.62).
@@ -22,16 +22,6 @@ export async function liveSelectorForTab(id) {
   return parseSelector(raw);
 }
 
-/**
- * What a selector card shows: the question and its numbered options, not
- * which option the cursor is on (arrow keys move that without changing the
- * prompt). '' for no selector.
- */
-export function selectorFingerprint(sel) {
-  if (!sel || !Array.isArray(sel.options)) return '';
-  const opts = sel.options.map((o) => `${o?.num}.${o?.label}`);
-  return createHash('sha1').update(JSON.stringify([sel.prompt || '', opts])).digest('hex').slice(0, 16);
-}
 
 // Plain-text tail of the tab's output for tabs with no transcript to show
 // (plain shells, a Claude that has not linked its session yet). Trailing blank
@@ -124,7 +114,7 @@ export function writeRawInput(id, data, stillOk = () => true) {
   const q = submitQueues.get(id);
   if (isCancelKey(data)) {
     // Ctrl+C and Ctrl+U erase the input line; a bare Esc leaves it as typed.
-    if (q) { q.gen += 1; q.lineCleared = data !== '\x1b'; }
+    if (q) { q.gen += 1; if (data !== '\x1b') q.clearedGen = q.gen; }
     writeTerminal(id, data);
     return;
   }
@@ -160,7 +150,9 @@ async function drainSubmits(id, q) {
     // Withheld, the pasted text stays in the prompt's input line: tell the
     // caller, so it says so instead of offering the text back to send twice.
     if (terminalInstance(id) !== it.pty || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalClosing(id)) {
-      const erased = it.gen !== q.gen && q.lineCleared;
+      // Any Ctrl+C/Ctrl+U since this item queued erased the pasted line, even if
+      // a later Esc was the most recent cancel.
+      const erased = (q.clearedGen ?? -1) > it.gen;
       if (terminalInstance(id) === it.pty && !terminalClosing(id) && !erased) it.onStranded();
       it.resolve(false);
       continue;
