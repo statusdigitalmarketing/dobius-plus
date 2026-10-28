@@ -1009,7 +1009,12 @@ export function getSessionTabMap() {
  *           separates them. Good enough to NAME a tab, never good enough to
  *           TYPE `claude --resume <id>` into a live terminal. See auto-resume.js.
  */
-export function setSessionTabLink(sessionId, tabId, projectPath, resolvedBy = 'argv') {
+function stampFrom(observedAt) {
+  const now = Date.now();
+  return Number.isFinite(observedAt) && observedAt > 0 && observedAt <= now ? observedAt : now;
+}
+
+export function setSessionTabLink(sessionId, tabId, projectPath, resolvedBy = 'argv', observedAt = Date.now()) {
   if (!sessionId || typeof sessionId !== 'string' || UNSAFE_KEYS.has(sessionId)) return;
   if (sessionId.length > 100) return;
   if (!tabId || typeof tabId !== 'string' || !TAB_ID_RE.test(tabId)) return;
@@ -1026,7 +1031,7 @@ export function setSessionTabLink(sessionId, tabId, projectPath, resolvedBy = 'a
     // ACTIVELY running in the tab. Auto-resume only trusts links whose
     // lastRunningAt is near lastQuitAt, which kills the stale-link class of
     // bug (v1.0.35: 19-28 day old links were auto-resumed into fresh tabs).
-    lastRunningAt: Date.now(),
+    lastRunningAt: stampFrom(observedAt),
   };
   saveConfig(config);
 }
@@ -1035,13 +1040,17 @@ export function setSessionTabLink(sessionId, tabId, projectPath, resolvedBy = 'a
  * Refresh the lastRunningAt stamp on an existing link WITHOUT resetting
  * capturedAt. Called by the Tier-2 capture loop each 15s tick for every
  * session it observes actively running. Cheap no-op if the link is gone.
+ * `observedAt` is when the process was SEEN, not when the loop got here: the
+ * loop probes every tab first and writes afterwards, and a stamp taken at
+ * write time could postdate a newer claude's start in the same tab, which
+ * resolveSessionForTab would then accept as that claude's session.
  */
-export function touchSessionTabLink(sessionId) {
+export function touchSessionTabLink(sessionId, observedAt = Date.now()) {
   if (!sessionId || typeof sessionId !== 'string' || UNSAFE_KEYS.has(sessionId)) return;
   const config = loadConfig();
   const entry = config.sessionTabMap?.[sessionId];
   if (!entry) return;
-  entry.lastRunningAt = Date.now();
+  entry.lastRunningAt = stampFrom(observedAt);
   saveConfig(config);
 }
 

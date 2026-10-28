@@ -15,9 +15,21 @@ useStore.subscribe((s, prev) => {
   const ids = new Set(s.terminalTabs.map((t) => t.id));
   for (const id of drafts.keys()) if (!ids.has(id)) drafts.delete(id);
 });
-// A send that failed after its pane closed goes back to the pane showing
-// that tab now (one may have mounted meanwhile), else to the saved draft.
-const draftRestorers = new Map(); // tabId -> (text) => void
+// Text that reaches a composer late (a failed send, a slow image save) goes
+// to the pane showing that tab NOW (it may have remounted meanwhile), else to
+// the saved draft, and nowhere once the tab has left this window.
+const draftRestorers = new Map(); // tabId -> (update, notice) => void
+function deliverDraft(tabId, update, notice) {
+  const restore = draftRestorers.get(tabId);
+  if (restore) { restore(update, notice); return; }
+  if (!useStore.getState().terminalTabs.some((t) => t.id === tabId)) return;
+  const next = update(drafts.get(tabId) || '');
+  if (next) drafts.set(tabId, next);
+}
+// A message that did not go out joins whatever is in the composer instead of
+// losing to it: several cancelled sends all come back, oldest first.
+const withUnsent = (text) => (cur) => (!cur ? text : cur.includes(text) ? cur : `${text}\n\n${cur}`);
+const NOT_SENT = 'Not sent. The tab was interrupted, closed or moved to another window.';
 const SELECTOR_POLL_MS = 2500;
 const ECHO_TTL_MS = 90_000;
 
@@ -149,11 +161,23 @@ const Message = memo(function Message({ role, content, timestamp, queued, sendin
 });
 
 // The transcript records `!cmd` as "! cmd"; compare both sides normalized.
-// Compared by prefix: the transcript side is capped (20000 chars), so a long
-// message would otherwise never match its own echo.
 function normEcho(t) {
   const s = String(t).trim();
-  return (s.startsWith('!') ? `! ${s.slice(1).trim()}` : s).slice(0, 4000);
+  return s.startsWith('!') ? `! ${s.slice(1).trim()}` : s;
+}
+// The transcript caps a message (data-service MAX_MESSAGE_CHARS) and marks
+// the cut; only a message cut that way is matched by prefix, so two long
+// messages that merely start alike never stand in for each other.
+const TRUNCATED_RE = /\n\n\[message truncated at \d+ chars\]$/;
+function transcriptHas(userMessages) {
+  const full = new Set();
+  const cut = [];
+  for (const m of userMessages) {
+    const c = String(m.content);
+    if (TRUNCATED_RE.test(c)) cut.push(normEcho(c.replace(TRUNCATED_RE, '')));
+    else full.add(normEcho(c));
+  }
+  return (text) => { const k = normEcho(text); return full.has(k) || cut.some((p) => p && k.startsWith(p)); };
 }
 
 const STATUS_TEXT = { working: 'Working', needs: 'Needs you', done: 'Ready' };
@@ -187,9 +211,9 @@ export default function ChatPane({ tabId, visible }) {
   }, [draft, tabId]);
   const [notice, setNotice] = useState('');
   useEffect(() => {
-    const restore = (text) => {
-      setDraft((cur) => (cur ? cur : text));
-      setNotice('Not sent. The tab was interrupted, closed or moved to another window.');
+    const restore = (update, notice) => {
+      setDraft(update);
+      if (notice) flash(notice);
     };
     draftRestorers.set(tabId, restore);
     return () => { if (draftRestorers.get(tabId) === restore) draftRestorers.delete(tabId); };
@@ -250,9 +274,9 @@ export default function ChatPane({ tabId, visible }) {
     setShellText(typeof r.shellText === 'string' ? r.shellText : null);
     setEchoes((cur) => {
       if (cur.length === 0) return cur;
-      const seen = new Set(next.filter((m) => m.role === 'user').map((m) => normEcho(m.content)));
+      const seen = transcriptHas(next.filter((m) => m.role === 'user'));
       const now = Date.now();
-      const kept = cur.filter((e) => !seen.has(normEcho(e.content)) && now - e.at < ECHO_TTL_MS);
+      const kept = cur.filter((e) => !seen(e.content) && now - e.at < ECHO_TTL_MS);
       return kept.length === cur.length ? cur : kept;
     });
     if (next.length > 0) {
@@ -392,15 +416,7 @@ export default function ChatPane({ tabId, visible }) {
     setDraft('');
     atBottomRef.current = true;
     const ok = await submit(text, { echo: !!sessionId });
-    if (!ok && mountedRef.current) {
-      // Keep what they wrote: put it back unless they already started a new one.
-      setDraft((cur) => (cur ? cur : text));
-      flash('Not sent. The tab was interrupted, closed or moved to another window.');
-    } else if (!ok) {
-      const restore = draftRestorers.get(tabId);
-      if (restore) restore(text);
-      else if (!drafts.has(tabId)) drafts.set(tabId, text); // kept for the pane's return
-    }
+    if (!ok) deliverDraft(tabId, withUnsent(text), NOT_SENT); // keep what they wrote
   };
 
   // Answer the prompt on screen. Main delivers the key only if nothing has
@@ -443,7 +459,7 @@ export default function ChatPane({ tabId, visible }) {
   };
 
   const insertText = (text) => {
-    setDraft((prev) => prev + (prev && !/\s$/.test(prev) ? ' ' : '') + text);
+    deliverDraft(tabId, (prev) => prev + (prev && !/\s$/.test(prev) ? ' ' : '') + text);
     // A slow image save must not pull focus back from a pane used since.
     if (useStore.getState().activeTabId === tabId) inputRef.current?.focus();
   };

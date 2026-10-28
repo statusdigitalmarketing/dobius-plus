@@ -159,4 +159,17 @@ assert.deepEqual(writes.map((w) => w[1]), [PASTE('one'), '\r', 'o', 'k', '\r']);
 for (let i = 2; i < stamps.length; i++) assert.ok(stamps[i] - stamps[i - 1] >= 15, `gap ${stamps[i] - stamps[i - 1]}ms`);
 ok('queued keys are paced, not one burst');
 
+// 16. A queued key whose sender lost its pairing during the pacing gap is
+// dropped: the check runs again after the wait, not only before it.
+reset(); ptys.set('a', {});
+writes.push = Array.prototype.push;
+let keyOk = true;
+p = submitPromptToTab('a', 'one');
+writeRawInput('a', 'k', () => keyOk);
+await p; // the drain has taken 'k' and is waiting out the gap
+keyOk = false;
+await new Promise((r) => setTimeout(r, 100));
+assert.deepEqual(writes.map((w) => w[1]), [PASTE('one'), '\r']);
+ok('queued key rechecks its sender after the gap');
+
 console.log(`\n${pass} passed`);

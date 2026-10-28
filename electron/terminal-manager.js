@@ -1,5 +1,5 @@
 import pty from 'node-pty';
-import { isTerminalReply, hasVisibleOutput } from './terminal-reply.js';
+import { isTerminalReply, createVisibleOutputScanner } from './terminal-reply.js';
 import { isClaudeCommand } from './claude-argv.js';
 import fs from 'fs';
 import path from 'path';
@@ -250,7 +250,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
     // PTY and spawned a new one under the same id), the OLD pty's late onData
     // must not be routed as the replacement's output. Audit High.
     if (!entry || entry.pty !== term) return;
-    if (hasVisibleOutput(data)) entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
+    if (entry.visibleScan(data)) entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
     // Global observers (main-process status authority, v1.0.43): see EVERY
     // terminal's output regardless of whether a window or mobile client is
     // attached, so tab status is tracked centrally. Cheap: observers do a
@@ -299,6 +299,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
 
   terminals.set(id, {
     pty: term,
+    visibleScan: createVisibleOutputScanner(), // escape state spans chunks
     // node-pty routes onData/onExit through a NAPI ThreadSafeFunction. If a
     // callback lands while Node is freeing its environment at quit, the throw
     // has no handler and the process dies with SIGABRT ("Dobius+ quit
@@ -520,7 +521,7 @@ export async function getTerminalClaudeInfo(id) {
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
-      return { sessionId: m ? m[1] : null, startedAt };
+      return { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid) };
     }
     return null;
   } catch {

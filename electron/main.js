@@ -634,8 +634,14 @@ function setupDataHandlers() {
     const cwd = await getTerminalCwd(tabId);
     // The session and the cwd are two reads; a Claude that exited and was
     // replaced in between would pair one session with another's project.
-    // Resolve again and drop the poll if it moved (the next one reads fresh).
-    if ((await resolveSessionForTab(tabId))?.sessionId !== resolved?.sessionId) return null;
+    // Resolve again and drop the poll unless the SAME process answered both
+    // times: a restart with the same `--resume` id (say, now in a worktree)
+    // keeps the id, never the pid. The next poll reads fresh.
+    const again = await resolveSessionForTab(tabId);
+    if (again?.sessionId !== resolved?.sessionId || again?.pid !== resolved?.pid || again?.startedAt !== resolved?.startedAt) return null;
+    // A failed cwd read is not "still in the mapped project": with no cwd
+    // there is no telling which transcript the tab is on, so wait for one.
+    if (resolved && !cwd) return null;
     // The mapped project wins only while the tab is still inside it (a resume
     // from a subdir keeps the transcript under the project root). A tab that
     // has moved elsewhere is reading a transcript of ITS project.
@@ -2312,7 +2318,9 @@ function setupSessionTabCapture() {
       // Codex v1.0.39 r4 P2.
       const liveTabs = listTerminals();
       const infoByTab = new Map();
+      const probedAt = new Map(); // when each tab was looked at: the link stamp
       for (const t of liveTabs) {
+        probedAt.set(t.id, Date.now());
         infoByTab.set(t.id, await getTerminalClaudeInfo(t.id));
       }
       // cwd per tab, only needed for tabs running a fresh (unidentified) claude.
@@ -2353,12 +2361,12 @@ function setupSessionTabCapture() {
           // `claude` and reruns it as `claude --resume <same-id>`.
           // Codex v1.0.39 r12 P2.
           if (claudeInfo?.sessionId && fresh[runningSessionId]?.resolvedBy === 'fresh') {
-            setSessionTabLink(runningSessionId, t.id, t.cwd, 'argv');
+            setSessionTabLink(runningSessionId, t.id, t.cwd, 'argv', probedAt.get(t.id));
             continue;
           }
           // Still running: refresh the lastRunningAt stamp so auto-resume
           // can tell "was live at quit" from "linked weeks ago" (v1.0.35).
-          touchSessionTabLink(runningSessionId);
+          touchSessionTabLink(runningSessionId, probedAt.get(t.id));
           continue;
         }
         // Tab is running a different (or new) session than the map says.
@@ -2377,7 +2385,7 @@ function setupSessionTabCapture() {
           // copy/speak last response) looked in the wrong place.
           // Codex v1.0.39 r11 P2.
           const linkPath = how === 'fresh' ? (cwdByTab.get(t.id) || t.cwd) : t.cwd;
-          setSessionTabLink(runningSessionId, t.id, linkPath, how);
+          setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
         }
       }
     } catch { /* best-effort */ }

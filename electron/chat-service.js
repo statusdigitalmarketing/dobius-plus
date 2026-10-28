@@ -130,7 +130,7 @@ async function drainSubmits(id, q) {
       // Keys that waited behind a submit go out as separate keystrokes, not
       // one burst Claude would read as a paste (an Enter in it becomes a newline).
       await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
-      if (it.gen !== q.gen || terminalInstance(id) !== it.pty || terminalClosing(id)) { it.resolve(false); continue; }
+      if (it.gen !== q.gen || terminalInstance(id) !== it.pty || terminalClosing(id) || !it.stillOk()) { it.resolve(false); continue; }
       writeTerminal(id, it.raw);
       it.resolve(true);
       continue;
@@ -138,6 +138,9 @@ async function drainSubmits(id, q) {
     writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
     const pastedAt = terminalInputSeq(id);
     await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
+    // No stillOk() here on purpose: a paste that went out gets its Enter even
+    // if the phone that sent it dropped, or its text would sit half-typed and
+    // be glued onto the next message (test 4).
     if (terminalInstance(id) !== it.pty || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalClosing(id)) { it.resolve(false); continue; }
     writeTerminal(id, '\r');
     it.resolve(true);

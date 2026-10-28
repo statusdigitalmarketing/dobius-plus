@@ -15,7 +15,9 @@ const FUTURE_SLACK_MS = 60 * 1000;
 
 /**
  * Which Claude session is running in this tab RIGHT NOW.
- * @returns {Promise<{sessionId:string, sessionProject:string|null} | null>}
+ * `pid` and `startedAt` name the claude process the answer was read from, so
+ * a caller doing other reads in between can tell whether it is still the same run.
+ * @returns {Promise<{sessionId:string, sessionProject:string|null, pid:number, startedAt:number|null} | null>}
  */
 export async function resolveSessionForTab(tabId) {
   if (!tabId || typeof tabId !== 'string') return null;
@@ -56,7 +58,7 @@ export async function resolveSessionForTab(tabId) {
     sessionProject = best?.projectPath || null;
   }
   if (!sessionId) return null;
-  return { sessionId, sessionProject };
+  return { sessionId, sessionProject, pid: info.pid, startedAt: info.startedAt ?? null };
 }
 
 /**
