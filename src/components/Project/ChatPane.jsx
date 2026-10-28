@@ -27,9 +27,11 @@ function deliverDraft(tabId, update, notice) {
   if (next) drafts.set(tabId, next);
 }
 // A message that did not go out joins whatever is in the composer instead of
-// losing to it: several cancelled sends all come back, oldest first.
-const withUnsent = (text) => (cur) => (!cur ? text : cur.includes(text) ? cur : `${text}\n\n${cur}`);
+// losing to it. Failures resolve in send order, so appending keeps several
+// cancelled sends in the order they were written.
+const withUnsent = (text) => (cur) => (!cur ? text : cur.includes(text) ? cur : `${cur}\n\n${text}`);
 const NOT_SENT = 'Not sent. The tab was interrupted, closed or moved to another window.';
+const STRANDED = 'Typed into the terminal but not sent: other input reached it first. Open the terminal to send or clear it.';
 const SELECTOR_POLL_MS = 2500;
 const ECHO_TTL_MS = 90_000;
 
@@ -401,13 +403,14 @@ export default function ChatPane({ tabId, visible }) {
 
   const submit = async (text, { echo = true } = {}) => {
     const sid = sessionId;
-    const ok = await window.electronAPI?.chatSubmit?.(tabId, text);
+    const r = await window.electronAPI?.chatSubmit?.(tabId, text);
+    const ok = r === true;
     // Only if the conversation it went into is still the one on screen.
     if (ok && echo && sid && sessionIdRef.current === sid) {
       setEchoes((cur) => [...cur, { content: text, at: Date.now(), sid }]);
     }
     if (ok) refreshSoon();
-    return !!ok;
+    return r === 'stranded' ? 'stranded' : ok;
   };
 
   const send = async () => {
@@ -416,7 +419,10 @@ export default function ChatPane({ tabId, visible }) {
     setDraft('');
     atBottomRef.current = true;
     const ok = await submit(text, { echo: !!sessionId });
-    if (!ok) deliverDraft(tabId, withUnsent(text), NOT_SENT); // keep what they wrote
+    // Typed but not entered: the text is already in the terminal's input
+    // line, so handing it back here would send it twice.
+    if (ok === 'stranded') deliverDraft(tabId, (cur) => cur, STRANDED);
+    else if (!ok) deliverDraft(tabId, withUnsent(text), NOT_SENT); // keep what they wrote
   };
 
   // Answer the prompt on screen. Main delivers the key only if nothing has

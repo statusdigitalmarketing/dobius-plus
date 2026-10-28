@@ -34,10 +34,10 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, terminalOutputSeq, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
-import { liveSelectorForTab, terminalTextTail, submitPromptToTab, writeRawInput, selectorToken, submitPending } from './chat-service.js';
+import { liveSelectorForTab, terminalTextTail, submitPromptToTab, writeRawInput, selectorToken, selectorFingerprint, submitPending } from './chat-service.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -631,7 +631,8 @@ function setupDataHandlers() {
     const stillSame = () => !!pty && terminalInstance(tabId) === pty && ownsTerminal(senderId, tabId);
     const status = terminalStatus.snapshot().live[tabId]?.status || null;
     const resolved = await resolveSessionForTab(tabId);
-    const cwd = await getTerminalCwd(tabId);
+    // Claude's own cwd when it runs: the shell's can differ (a subshell `cd`).
+    const cwd = resolved?.pid ? await getProcessCwd(resolved.pid) : await getTerminalCwd(tabId);
     // The session and the cwd are two reads; a Claude that exited and was
     // replaced in between would pair one session with another's project.
     // Resolve again and drop the poll unless the SAME process answered both
@@ -681,20 +682,32 @@ function setupDataHandlers() {
     let selector;
     try { selector = await liveSelectorForTab(tabId); } catch { selector = null; }
     if (!token || selectorToken(tabId) !== token || !ownsTerminal(senderId, tabId)) return null;
-    return selector ? { selector, token } : null;
+    return selector ? { selector, token: `${token}|${selectorFingerprint(selector)}` } : null;
   });
   // Answer a selector read: delivered only while no input has reached the tab
-  // since that read. Returns the fresh token so arrow/space keys can continue
-  // on the same prompt.
-  ipcMain.handle('chat:key', (event, tabId, data, token) => {
+  // since that read AND the screen still shows the prompt the card showed.
+  // Returns the fresh token so arrow/space keys can continue on that prompt.
+  ipcMain.handle('chat:key', async (event, tabId, data, token) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
     if (typeof data !== 'string' || !data || data.length > 16 || typeof token !== 'string') return { ok: false };
-    if (!ownsTerminal(event.sender.id, tabId)) return { ok: false };
+    const senderId = event.sender.id;
+    if (!ownsTerminal(senderId, tabId)) return { ok: false };
+    const [base, fp] = token.split('|');
     // A submit still typing into the tab will change the screen: the read is stale.
-    if (!token || selectorToken(tabId) !== token || submitPending(tabId)) return { ok: false, stale: true };
+    const unchanged = () => !!base && !!fp && selectorToken(tabId) === base && !submitPending(tabId) && ownsTerminal(senderId, tabId);
+    if (!unchanged()) return { ok: false, stale: true };
+    // No input since the read does not mean the same screen: Claude draws its
+    // next prompt without any (a status repaint can make a card read from the
+    // old one look current, then prompt B arrives). Read the screen again and
+    // deliver only onto the prompt the card showed, with no output between.
+    const outAt = terminalOutputSeq(tabId);
+    let live;
+    try { live = await liveSelectorForTab(tabId); } catch { live = null; }
+    if (!unchanged() || terminalOutputSeq(tabId) !== outAt || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
     cancelAutoResumeTab(tabId);
     writeRawInput(tabId, data);
-    return { ok: true, token: selectorToken(tabId) };
+    const next = selectorToken(tabId);
+    return { ok: true, token: next ? `${next}|${fp}` : '' };
   });
   ipcMain.handle('chat:submit', async (event, tabId, text) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return false;
@@ -703,7 +716,11 @@ function setupDataHandlers() {
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return false;
     cancelAutoResumeTab(tabId); // user input wins over a queued resume, as in terminal:write
-    return submitPromptToTab(tabId, text, () => ownsTerminal(senderId, tabId));
+    // true, false, or 'stranded': pasted, but the Enter was withheld because
+    // other input reached the tab first, so the text sits in its input line.
+    let stranded = false;
+    const ok = await submitPromptToTab(tabId, text, () => ownsTerminal(senderId, tabId), () => { stranded = true; });
+    return ok ? true : (stranded ? 'stranded' : false);
   });
   ipcMain.handle('data:deleteSession', async (_event, sessionId, projectPath) => {
     const result = await deleteSession(sessionId, projectPath);

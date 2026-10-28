@@ -15,7 +15,7 @@ process.env.HOME = TMP_HOME;
 const { resolveFreshSessionsForTabs } = await import('../data-service.js');
 
 // Real fixture: real transcript files whose birth times are real, created 15s
-// apart so they sit outside the resolver's 10s clock slack and each start time
+// apart so they sit well outside the resolver's 1s clock slack and each start time
 // maps to exactly one candidate. All of it lives under TMP_HOME.
 const PROJ = '/private/tmp/dobius-freshtest-proj';
 const enc = PROJ.replace(/[^a-zA-Z0-9.-]/g, '-');
@@ -95,6 +95,18 @@ try {
     );
     const vals = [...r.values()];
     check('no two tabs share one transcript', new Set(vals).size, vals.length);
+  }
+
+  // CASE 5a (desktop Chat r6): tab A's link names X, the transcript of the
+  // claude that ran there BEFORE. X was born 5s before A's current claude
+  // started, which a process cannot have written. The new claude's own
+  // transcript is Y; it must win, not the predecessor's X every tick.
+  {
+    const { info, cwd } = mk({ A: bx + 5000 });
+    const r = await resolveFreshSessionsForTabs(
+      tabs(['A']), info, cwd, new Map([['A', X]]), new Set([X]),
+    );
+    check('r6 chat: a predecessor transcript is not the new claude\'s', r.get('A'), Y);
   }
 
   // CASE 5 (Codex r7): tab A carries a STALE link to X (X was born BEFORE A's

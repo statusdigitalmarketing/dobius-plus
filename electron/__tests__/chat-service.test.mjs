@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { writes, ptys, writeTerminal, emitOutput, closing } from './fake-terminal-manager.mjs';
 
-const { submitPromptToTab, writeRawInput, selectorToken, submitPending } = await import('../chat-service.js');
+const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint } = await import('../chat-service.js');
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
 const reset = () => { writes.length = 0; ptys.clear(); closing.clear(); };
@@ -171,5 +171,44 @@ keyOk = false;
 await new Promise((r) => setTimeout(r, 100));
 assert.deepEqual(writes.map((w) => w[1]), [PASTE('one'), '\r']);
 ok('queued key rechecks its sender after the gap');
+
+// 17. A revoked sender's raw frame is dropped outright, even a cancel key
+// (which would otherwise also discard another surface's pending submit).
+reset(); ptys.set('a', {});
+writeRawInput('a', 'ls', () => false);
+p = submitPromptToTab('a', 'desk');
+writeRawInput('a', '\x03', () => false);
+assert.equal(await p, true);
+assert.deepEqual(writes.map((w) => w[1]), [PASTE('desk'), '\r']);
+ok('revoked sender: no raw write, no cancel');
+
+// 18. A selector's fingerprint is its question and options, not its cursor:
+// an arrow key keeps it, a different prompt (even with equal labels) does not.
+{
+  const A = { prompt: 'Pick a color', options: [{ num: 1, label: 'Red' }, { num: 2, label: 'Blue' }], selectedIndex: 0 };
+  assert.equal(selectorFingerprint(A), selectorFingerprint({ ...A, selectedIndex: 1 }));
+  assert.notEqual(selectorFingerprint(A), selectorFingerprint({ ...A, prompt: 'Delete these files?' }));
+  assert.notEqual(selectorFingerprint(A), selectorFingerprint({ ...A, options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'Blue' }] }));
+  assert.equal(selectorFingerprint(null), '');
+  assert.equal(selectorFingerprint(A).length, 16);
+}
+ok('selector fingerprint tracks the prompt, not the cursor');
+
+// 19. A paste whose Enter is withheld reports itself stranded (its text sits
+// in the input line); one dropped before pasting, or into a gone PTY, does not.
+reset(); ptys.set('a', {});
+let strandedA = 0, strandedB = 0;
+p = submitPromptToTab('a', 'one', undefined, () => { strandedA += 1; });
+const pB = submitPromptToTab('a', 'two', undefined, () => { strandedB += 1; });
+writeRawInput('a', '\x1b'); // a cancel key during the Enter delay
+assert.deepEqual(await Promise.all([p, pB]), [false, false]);
+assert.deepEqual([strandedA, strandedB], [1, 0]);
+reset(); ptys.set('a', { gen: 1 });
+let strandedC = 0;
+p = submitPromptToTab('a', 'x', undefined, () => { strandedC += 1; });
+ptys.set('a', { gen: 2 });
+assert.equal(await p, false);
+assert.equal(strandedC, 0);
+ok('a withheld Enter reports the paste as stranded');
 
 console.log(`\n${pass} passed`);

@@ -398,6 +398,11 @@ export function terminalInputSeq(id) {
   return terminals.get(id)?.inputSeq || 0;
 }
 
+/** Count of output chunks that drew something; moves whenever the screen may have changed. */
+export function terminalOutputSeq(id) {
+  return terminals.get(id)?.outputSeq || 0;
+}
+
 /** The tab is being closed (gracefulCloseTerminals): nothing more is typed into it. */
 export function terminalClosing(id) {
   return !!terminals.get(id)?.closing;
@@ -758,9 +763,16 @@ export function bindReservationTab(sessionId, tabId) {
 export async function getTerminalCwd(id) {
   const entry = terminals.get(id);
   if (!entry) return null;
+  return getProcessCwd(entry.pty.pid);
+}
+
+/**
+ * Working directory of one process (the shell, or a claude running under it:
+ * `(cd wt && exec claude)` leaves the shell elsewhere).
+ */
+export async function getProcessCwd(pid) {
   try {
-    const pid = entry.pty.pid;
-    if (typeof pid !== 'number' || pid <= 0) return null;
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return null;
     // -Fn prints a "p<pid>" line then an "n<cwd>" line. Parse the n-prefixed one.
     const { stdout } = await execFileP('/usr/sbin/lsof', ['-a', '-d', 'cwd', '-p', String(pid), '-Fn'], {
       timeout: 1500,

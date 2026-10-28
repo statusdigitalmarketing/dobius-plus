@@ -36,6 +36,8 @@ test('a sequence split across chunks is still not a repaint', () => {
     ['\x1b[', '3A'],
     ['\x1b', '[12G'],
     ['\x1bP1$r', 'q\x1b\\'],
+    ['\x1bPq\x07hidden', '\x1b\\'],
+    ['\x1b_app\x07payload\x1b\\'],
   ];
   for (const chunks of cases) {
     const scan = createVisibleOutputScanner();

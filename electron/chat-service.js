@@ -3,6 +3,7 @@
 // paste-then-Enter submit. Main-process only.
 
 import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalSettledSinceInput, terminalClosing } from './terminal-manager.js';
+import { createHash } from 'node:crypto';
 import { parseSelector, parseSelectorFromScreen, stripAnsi } from './selector-parser.js';
 import { renderScreenLines } from './screen-render.js';
 
@@ -19,6 +20,17 @@ export async function liveSelectorForTab(id) {
   const lines = await renderScreenLines(raw.slice(-262144));
   if (lines) return parseSelectorFromScreen(lines);
   return parseSelector(raw);
+}
+
+/**
+ * What a selector card shows: the question and its numbered options, not
+ * which option the cursor is on (arrow keys move that without changing the
+ * prompt). '' for no selector.
+ */
+export function selectorFingerprint(sel) {
+  if (!sel || !Array.isArray(sel.options)) return '';
+  const opts = sel.options.map((o) => `${o?.num}.${o?.label}`);
+  return createHash('sha1').update(JSON.stringify([sel.prompt || '', opts])).digest('hex').slice(0, 16);
 }
 
 // Plain-text tail of the tab's output for tabs with no transcript to show
@@ -85,7 +97,7 @@ function queueFor(id) {
  *
  * @returns {Promise<boolean>} whether the Enter was sent
  */
-export function submitPromptToTab(id, text, stillOk = () => true) {
+export function submitPromptToTab(id, text, stillOk = () => true, onStranded = () => {}) {
   // Strip control chars except \t and \n (multi-line paste is legitimate); \r
   // goes too so the only Enter is the discrete one sent below.
   const clean = String(text).replace(/[\x00-\x08\x0B-\x1F\x7F]/g, '');
@@ -93,7 +105,7 @@ export function submitPromptToTab(id, text, stillOk = () => true) {
   if (!pty || terminalClosing(id) || !stillOk()) return Promise.resolve(false);
   const q = queueFor(id);
   return new Promise((resolve) => {
-    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve });
+    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded });
     if (!q.running) drainSubmits(id, q);
   });
 }
@@ -106,6 +118,9 @@ export function submitPromptToTab(id, text, stillOk = () => true) {
  */
 export function writeRawInput(id, data, stillOk = () => true) {
   if (typeof data !== 'string' || !data) return;
+  // A frame already in flight when its phone was revoked: not even a cancel
+  // key, which would also throw away the desktop's pending submit.
+  if (!stillOk()) return;
   const q = submitQueues.get(id);
   if (isCancelKey(data)) {
     if (q) q.gen += 1;
@@ -141,7 +156,13 @@ async function drainSubmits(id, q) {
     // No stillOk() here on purpose: a paste that went out gets its Enter even
     // if the phone that sent it dropped, or its text would sit half-typed and
     // be glued onto the next message (test 4).
-    if (terminalInstance(id) !== it.pty || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalClosing(id)) { it.resolve(false); continue; }
+    // Withheld, the pasted text stays in the prompt's input line: tell the
+    // caller, so it says so instead of offering the text back to send twice.
+    if (terminalInstance(id) !== it.pty || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalClosing(id)) {
+      if (terminalInstance(id) === it.pty && !terminalClosing(id)) it.onStranded();
+      it.resolve(false);
+      continue;
+    }
     writeTerminal(id, '\r');
     it.resolve(true);
   }

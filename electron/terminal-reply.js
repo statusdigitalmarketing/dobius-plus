@@ -24,6 +24,7 @@ export function isTerminalReply(data) {
 export function createVisibleOutputScanner() {
   // ground | esc (after ESC) | csi | str (OSC/DCS/APC/PM/SOS body) | strEsc (ESC inside str)
   let state = 'ground';
+  let belEnds = false; // BEL terminates an OSC only; DCS/APC/PM/SOS end on ST alone
   return (data) => {
     if (typeof data !== 'string' || !data) return false;
     let visible = false;
@@ -33,12 +34,12 @@ export function createVisibleOutputScanner() {
         case 'ground':
           if (c === 0x1b) state = 'esc';
           else if (c === 0x9b) state = 'csi';
-          else if (c === 0x9d || c === 0x90 || c === 0x98 || c === 0x9e || c === 0x9f) state = 'str';
+          else if (c === 0x9d || c === 0x90 || c === 0x98 || c === 0x9e || c === 0x9f) { state = 'str'; belEnds = c === 0x9d; }
           else if (c >= 0x20 && c !== 0x7f && !(c >= 0x80 && c <= 0x9f)) visible = true;
           break;
         case 'esc':
           if (c === 0x5b) state = 'csi'; // [
-          else if (c === 0x5d || c === 0x50 || c === 0x58 || c === 0x5e || c === 0x5f) state = 'str'; // ] P X ^ _
+          else if (c === 0x5d || c === 0x50 || c === 0x58 || c === 0x5e || c === 0x5f) { state = 'str'; belEnds = c === 0x5d; } // ] P X ^ _
           else if (c === 0x1b) state = 'esc';
           else if (c >= 0x20 && c <= 0x2f) state = 'esc'; // intermediate, e.g. ESC ( B
           else state = 'ground'; // final byte (or a control that cancels)
@@ -49,7 +50,7 @@ export function createVisibleOutputScanner() {
           else if (c === 0x18 || c === 0x1a) state = 'ground'; // CAN / SUB abort
           break;
         case 'str':
-          if (c === 0x07 || c === 0x9c) state = 'ground';
+          if (c === 0x9c || (c === 0x07 && belEnds)) state = 'ground';
           else if (c === 0x1b) state = 'strEsc';
           else if (c === 0x18 || c === 0x1a) state = 'ground';
           break;

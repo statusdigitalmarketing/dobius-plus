@@ -496,7 +496,12 @@ export async function getAllProjectTabs({ liveTabIds = null, tearOffTabs = [] } 
  */
 // (No upper bound on transcript birth: Claude writes it on the first message,
 // which may be hours after boot. See the delta check below.)
-const FRESH_CLOCK_SLACK_MS = 10 * 1000;     // ps lstart is second-resolution
+// ps lstart TRUNCATES to the second, so the reported start is never later
+// than the real one and a process's own transcript is never born before it.
+// The slack only absorbs clock noise. It was 10s, which let a PREDECESSOR's
+// transcript (born seconds before a new claude started in the same tab) win as
+// the earliest candidate on every tick (Codex, desktop Chat round 6).
+const FRESH_CLOCK_SLACK_MS = 1000;
 export async function resolveFreshSessionId(projectPath, startedAt, claimed = new Set(), otherFreshStarts = []) {
   if (!projectPath || typeof projectPath !== 'string') return null;
   if (!Number.isFinite(startedAt) || startedAt <= 0) return null;
