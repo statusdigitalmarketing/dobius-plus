@@ -2470,7 +2470,7 @@ async function autoEnableMobileHttps() {
   // HTTP, or a renewal wrote a new cert but failed (timeout) before restarting.
   const disk = certValidTo(name);
   const st = getMobileServerStatus();
-  if (disk && disk > Date.now() && st.running && (!st.secure || st.certValidTo !== disk) && !certJob) {
+  if (disk && disk > Date.now() && st.running && (!st.secure || disk > (st.certValidTo || 0)) && !certJob) {
     certJob = restartMobileServer().then(() => ({ ok: true, name })).finally(() => { certJob = null; });
     await certJob;
   }
