@@ -82,7 +82,7 @@ import {
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
-import { provisionCert, certCapableName, certValidTo } from './tailscale.js';
+import { provisionCert, certCapableName, certValidTo, getMagicDNSName } from './tailscale.js';
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
@@ -2455,20 +2455,21 @@ function provisionCertAndRestart() {
 // restart the mobile server on it. Runs at launch and every 30 minutes, which
 // catches Tailscale coming up after launch and renews on a Mac left running.
 async function autoEnableMobileHttps() {
-  if (!getMobileServerConfig().enabled) return;
-  const name = await certCapableName();
-  if (!name || certJob) return;
+  if (!getMobileServerConfig().enabled || certJob) return;
+  const name = await getMagicDNSName();
+  if (!name) return;
   const validTo = certValidTo(name);
   if (validTo && validTo - Date.now() > 30 * 86_400_000) {
     // Good cert, but a start that could not read the MagicDNS name came up
-    // on plain HTTP: move it onto HTTPS.
+    // on plain HTTP: move it onto HTTPS. Needs no issuing, so no CertDomains.
     const st = getMobileServerStatus();
-    if (st.running && !st.secure) {
-      certJob = restartMobileServer().finally(() => { certJob = null; });
+    if (st.running && !st.secure && !certJob) {
+      certJob = restartMobileServer().then(() => ({ ok: true, name })).finally(() => { certJob = null; });
       await certJob;
     }
     return;
   }
+  if ((await certCapableName()) !== name) return; // HTTPS Certificates off for this tailnet
   const res = await provisionCertAndRestart();
   if (res.ok) console.log(`[mobile-server] HTTPS enabled automatically for ${name}`);
   else console.warn('[mobile-server] automatic HTTPS failed:', res.error);
