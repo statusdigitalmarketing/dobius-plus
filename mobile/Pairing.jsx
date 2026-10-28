@@ -325,7 +325,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
           <button
             className="link-button"
             onClick={() => { generationRef.current += 1; inFlightKeyRef.current = ''; setBusy(false); onCancel(); }}
-            style={{ marginTop: 12, background: 'none', border: 'none', opacity: 0.7, fontSize: 14 }}
+            style={{ display: 'block', margin: '20px auto 0', background: 'none', border: 'none', color: 'inherit', opacity: 0.7, fontSize: 14, cursor: 'pointer' }}
           >
             Keep current pairing
           </button>
