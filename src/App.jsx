@@ -36,7 +36,7 @@ export default function App() {
           try { return window.electronAPI?.getPathForFile?.(f); } catch { return ''; }
         }).filter(Boolean);
         if (paths.length > 0) {
-          window.dispatchEvent(new CustomEvent('dobius:drop-files', { detail: { paths } }));
+          window.dispatchEvent(new CustomEvent('dobius:drop-files', { detail: { paths, target: e.target } }));
           return;
         }
       }
@@ -46,7 +46,7 @@ export default function App() {
       if (text) {
         const trimmed = text.split('\n').filter((l) => l && !l.startsWith('#')).join(' ').trim();
         if (trimmed) {
-          window.dispatchEvent(new CustomEvent('dobius:drop-text', { detail: { text: trimmed } }));
+          window.dispatchEvent(new CustomEvent('dobius:drop-text', { detail: { text: trimmed, target: e.target } }));
         }
       }
     };

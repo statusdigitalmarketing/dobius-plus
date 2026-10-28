@@ -34,10 +34,10 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
-import { liveSelectorForTab, terminalTextTail, submitPromptToTab, noteRawInput, selectorToken } from './chat-service.js';
+import { liveSelectorForTab, terminalTextTail, submitPromptToTab, writeRawInput, selectorToken, submitPending } from './chat-service.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -276,8 +276,8 @@ function setupTerminalHandlers() {
     // orchestrator itself, which is the desired behavior: if anything
     // touches the tab first, the queued resume defers to that.
     cancelAutoResumeTab(id);
-    noteRawInput(id, data);
-    writeTerminal(id, data);
+    // Waits behind a pending Chat submit so keys land in the order typed.
+    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id));
   });
 
   ipcMain.on('terminal:resize', (event, id, cols, rows) => {
@@ -632,6 +632,10 @@ function setupDataHandlers() {
     const status = terminalStatus.snapshot().live[tabId]?.status || null;
     const resolved = await resolveSessionForTab(tabId);
     const cwd = await getTerminalCwd(tabId);
+    // The session and the cwd are two reads; a Claude that exited and was
+    // replaced in between would pair one session with another's project.
+    // Resolve again and drop the poll if it moved (the next one reads fresh).
+    if ((await resolveSessionForTab(tabId))?.sessionId !== resolved?.sessionId) return null;
     // The mapped project wins only while the tab is still inside it (a resume
     // from a subdir keeps the transcript under the project root). A tab that
     // has moved elsewhere is reading a transcript of ITS project.
@@ -677,10 +681,10 @@ function setupDataHandlers() {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
     if (typeof data !== 'string' || !data || data.length > 16 || typeof token !== 'string') return { ok: false };
     if (!ownsTerminal(event.sender.id, tabId)) return { ok: false };
-    if (!token || selectorToken(tabId) !== token) return { ok: false, stale: true };
+    // A submit still typing into the tab will change the screen: the read is stale.
+    if (!token || selectorToken(tabId) !== token || submitPending(tabId)) return { ok: false, stale: true };
     cancelAutoResumeTab(tabId);
-    noteRawInput(tabId, data);
-    writeTerminal(tabId, data);
+    writeRawInput(tabId, data);
     return { ok: true, token: selectorToken(tabId) };
   });
   ipcMain.handle('chat:submit', async (event, tabId, text) => {

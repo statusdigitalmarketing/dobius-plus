@@ -249,6 +249,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
     // PTY and spawned a new one under the same id), the OLD pty's late onData
     // must not be routed as the replacement's output. Audit High.
     if (!entry || entry.pty !== term) return;
+    entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
     // Global observers (main-process status authority, v1.0.43): see EVERY
     // terminal's output regardless of whether a window or mobile client is
     // attached, so tab status is tracked centrally. Cheap: observers do a
@@ -378,6 +379,7 @@ export function writeTerminal(id, data) {
   const entry = terminals.get(id);
   if (entry) {
     entry.inputSeq = (entry.inputSeq || 0) + 1; // see terminalInputSeq
+    entry.outputSeqAtInput = entry.outputSeq || 0;
     entry.pty.write(data);
   }
 }
@@ -387,6 +389,14 @@ export function writeTerminal(id, data) {
 // anything else has typed into the tab since.
 export function terminalInputSeq(id) {
   return terminals.get(id)?.inputSeq || 0;
+}
+
+// True once the tab has produced output since its last write. Until then the
+// screen may still show what was there BEFORE that input (a prompt already
+// answered, not yet repainted), so a selector read from it is not trusted.
+export function terminalSettledSinceInput(id) {
+  const e = terminals.get(id);
+  return !!e && (!e.inputSeq || (e.outputSeq || 0) > (e.outputSeqAtInput || 0));
 }
 
 /**

@@ -31,7 +31,7 @@ import {
   addTerminalObserver,
 } from './terminal-manager.js';
 import { stripAnsi, spinnerVerb } from './selector-parser.js';
-import { liveSelectorForTab, terminalTextTail, submitPromptToTab, noteRawInput } from './chat-service.js';
+import { liveSelectorForTab, terminalTextTail, submitPromptToTab, writeRawInput } from './chat-service.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
@@ -676,8 +676,8 @@ function handleAuthedMessage(socket, msg, subs) {
     case 'input':
       if (typeof msg.id === 'string' && socket._authedTabs.has(msg.id)
           && typeof msg.data === 'string' && msg.data.length <= MAX_INPUT_BYTES) {
-        noteRawInput(msg.id, msg.data);
-        writeTerminal(msg.id, msg.data);
+        // Waits behind a pending submit so keys land in the order sent.
+        writeRawInput(msg.id, msg.data, () => knownToken(socket._authToken));
         invalidateSelectorPush(msg.id); // the phone cleared its popup on tap
         // A short write is how the Chat view answers a selector (a bare option
         // digit). Re-parse after the TUI repaints and push the (likely cleared)
@@ -706,8 +706,10 @@ function handleAuthedMessage(socket, msg, subs) {
       // chat-service strips control chars and serializes per tab.
       const id = msg.id;
       invalidateSelectorPush(id); // the phone may have cleared a popup for this
-      // Stops if this phone disconnects or is revoked before its turn.
-      submitPromptToTab(id, msg.text, () => socket.readyState === 1 && socket._authedTabs.has(id));
+      // Stops if this phone is revoked before its turn. A dropped socket does
+      // not stop it: the phone already cleared the message, so a reconnect
+      // would never resend it.
+      submitPromptToTab(id, msg.text, () => knownToken(socket._authToken));
       // If this answered a selector (or started Claude), refresh selector state.
       setTimeout(async () => {
         wsSend(socket, { type: 'selector', id, selector: await liveSelectorForTab(id) || null });
@@ -1406,6 +1408,7 @@ async function doStartMobileServer(stillCurrent) {
         if (msg.type === 'auth' && knownToken(msg.token)) {
           authed = true;
           authedToken = msg.token;
+          socket._authToken = msg.token; // queued writes re-check it (chat-service)
           clearTimeout(authTimer);
           // Register so removeMobileDevice can force-disconnect us if revoked.
           let set = activeSocketsByToken.get(authedToken);

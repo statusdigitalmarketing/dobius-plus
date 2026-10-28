@@ -275,8 +275,9 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     const windowPasteHandler = async (e) => {
       // Only handle for the active tab, and not while it shows Chat
       if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
-      // A paste into a modal (e.g. the command palette) belongs to the modal.
-      if (e.target?.closest?.('[role="dialog"]')) return;
+      // A paste into a modal (e.g. the command palette) or another tab's chat
+      // pane (split view) belongs there.
+      if (e.target?.closest?.('[role="dialog"], [data-chat-tab]')) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       for (const item of items) {
@@ -324,6 +325,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     const handler = (e) => {
       // Only the active tab handles the drop (ChatPane does, in Chat)
       if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
+      if (e.detail?.target?.closest?.('[data-chat-tab]')) return; // dropped on a chat pane
       const paths = e.detail?.paths;
       if (!paths || paths.length === 0) return;
       const escaped = paths.map((p) => shellEscape(p)).join(' ');
@@ -342,6 +344,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   useEffect(() => {
     const handler = (e) => {
       if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
+      if (e.detail?.target?.closest?.('[data-chat-tab]')) return; // dropped on a chat pane
       const text = e.detail?.text;
       if (!text) return;
       setInput((prev) => {

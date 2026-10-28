@@ -382,7 +382,9 @@ export default function ChatPane({ tabId, visible }) {
     if (!ok && mountedRef.current) {
       // Keep what they wrote: put it back unless they already started a new one.
       setDraft((cur) => (cur ? cur : text));
-      flash('Could not send. The tab may have closed or moved to another window.');
+      flash('Not sent. The tab was interrupted, closed or moved to another window.');
+    } else if (!ok && !drafts.has(tabId)) {
+      drafts.set(tabId, text); // the pane closed meanwhile: keep it for its return
     }
   };
 
@@ -448,16 +450,22 @@ export default function ChatPane({ tabId, visible }) {
     }
   };
 
-  // Drops are relayed window-wide by App.jsx; take them while this tab shows Chat.
+  // Drops are relayed window-wide by App.jsx; take them while this tab shows
+  // Chat. A drop ON a chat pane belongs to that pane (split's right pane is
+  // never the active tab); anywhere else, to the active tab.
   useEffect(() => {
     if (!visible) return undefined;
+    const dropIsMine = (target) => {
+      const pane = target?.closest?.('[data-chat-tab]');
+      return pane ? pane.dataset.chatTab === tabId : useStore.getState().activeTabId === tabId;
+    };
     const onFiles = (e) => {
-      if (useStore.getState().activeTabId !== tabId) return;
+      if (!dropIsMine(e.detail?.target)) return;
       const paths = e.detail?.paths;
       if (paths?.length) insertText(paths.map((p) => shellEscape(p)).join(' '));
     };
     const onText = (e) => {
-      if (useStore.getState().activeTabId !== tabId) return;
+      if (!dropIsMine(e.detail?.target)) return;
       if (e.detail?.text) insertText(e.detail.text);
     };
     window.addEventListener('dobius:drop-files', onFiles);
@@ -524,7 +532,7 @@ export default function ChatPane({ tabId, visible }) {
   }
 
   return (
-    <div className="chatp" onMouseDownCapture={activate} onFocusCapture={activate} onDragEnterCapture={activate}>
+    <div className="chatp" data-chat-tab={tabId} onMouseDownCapture={activate} onFocusCapture={activate} onDragEnterCapture={activate}>
       <div className="chatp-head">
         <span className={`chatp-status ${status || 'idle'}`} />
         <span className="chatp-head-text">

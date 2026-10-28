@@ -3,9 +3,9 @@
 // this, so a regression here types into someone's live shell.
 // Run: node --import ./electron/__tests__/chat-service-register.mjs ./electron/__tests__/chat-service.test.mjs
 import assert from 'node:assert/strict';
-import { writes, ptys, writeTerminal } from './fake-terminal-manager.mjs';
+import { writes, ptys, writeTerminal, emitOutput } from './fake-terminal-manager.mjs';
 
-const { submitPromptToTab, noteRawInput, selectorToken } = await import('../chat-service.js');
+const { submitPromptToTab, writeRawInput, selectorToken, submitPending } = await import('../chat-service.js');
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
 const reset = () => { writes.length = 0; ptys.clear(); };
@@ -61,19 +61,20 @@ ok('no PTY / not allowed: nothing written');
 reset(); ptys.set('a', {});
 p = submitPromptToTab('a', 'echo first');
 const p2 = submitPromptToTab('a', 'touch /tmp/second');
-noteRawInput('a', '\x03');
+writeRawInput('a', '\x03');
 r = await Promise.all([p, p2]);
-assert.deepEqual(r, [true, false]);
-assert.deepEqual(writes.map((w) => w[1]), [PASTE('echo first'), '\r']);
-ok('Ctrl+C drops queued submits');
+assert.deepEqual(r, [false, false]);
+assert.deepEqual(writes.map((w) => w[1]), [PASTE('echo first'), '\x03']);
+ok('Ctrl+C goes at once, drops queued submits and withholds the pending Enter');
 
 // 7. Ordinary keys and escape sequences do not cancel anything.
 reset(); ptys.set('a', {});
 p = submitPromptToTab('a', 'one');
 const p3 = submitPromptToTab('a', 'two');
-for (const k of ['a', '\x1b[A', '\x1b[I', ' ']) noteRawInput('a', k);
+for (const k of ['a', '\x1b[A', '\x1b[I', ' ']) writeRawInput('a', k);
 assert.deepEqual(await Promise.all([p, p3]), [true, true]);
-ok('arrows, focus reports and letters do not cancel');
+assert.deepEqual(writes.map((w) => w[1]), [PASTE('one'), '\r', PASTE('two'), '\r', 'a', '\x1b[A', '\x1b[I', ' ']);
+ok('ordinary keys do not cancel, and wait behind the pending submits');
 
 // 8. Control characters are stripped except tab and newline, so the paste
 // cannot end its own bracket or carry an Enter.
@@ -92,9 +93,11 @@ ok('tabs are independent');
 
 // 10. Selector token: same PTY and no input since, or it is stale.
 reset(); ptys.set('a', {});
+emitOutput('a');
 const t1 = selectorToken('a');
 assert.equal(selectorToken('a'), t1);
 writeTerminal('a', '1'); // the phone answered
+emitOutput('a');
 assert.notEqual(selectorToken('a'), t1);
 const t2 = selectorToken('a');
 ptys.set('a', {}); // replaced PTY, same id
@@ -102,5 +105,34 @@ assert.notEqual(selectorToken('a'), t2);
 ptys.clear();
 assert.equal(selectorToken('a'), '');
 ok('selector token goes stale on any input or a new PTY');
+
+// 11. No token until the screen has repainted since the last input: a read
+// taken before Claude redraws still shows the prompt that input answered.
+reset(); ptys.set('a', {});
+writeTerminal('a', '1');
+assert.equal(selectorToken('a'), '');
+emitOutput('a');
+assert.notEqual(selectorToken('a'), '');
+ok('no token on a screen not yet repainted after input');
+
+// 12. Another writer during the Enter delay: the Enter is withheld, so it
+// cannot run whatever is now on the line.
+reset(); ptys.set('a', {});
+p = submitPromptToTab('a', 'echo safe');
+writeTerminal('a', 'touch /tmp/unreviewed');
+assert.equal(await p, false);
+assert.deepEqual(writes.map((w) => w[1]), [PASTE('echo safe'), 'touch /tmp/unreviewed']);
+ok('input during the delay withholds the Enter');
+
+// 13. Idle tab: raw keys go straight through; submitPending tracks the queue.
+reset(); ptys.set('a', {});
+writeRawInput('a', 'ls');
+assert.deepEqual(writes.map((w) => w[1]), ['ls']);
+assert.equal(submitPending('a'), false);
+p = submitPromptToTab('a', 'x');
+assert.equal(submitPending('a'), true);
+await p;
+assert.equal(submitPending('a'), false);
+ok('idle raw input is immediate; submitPending follows the queue');
 
 console.log(`\n${pass} passed`);
