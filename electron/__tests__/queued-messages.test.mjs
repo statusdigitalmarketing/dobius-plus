@@ -164,7 +164,15 @@ assert.equal(cmdArgs.content, '/model fable');
 // giant user bubble on mobile (Sam's report). Collapses to "/name (skill)".
 const skill = entryToMessage({ type: 'user', message: { role: 'user', content:
   'Base directory for this skill: /Users/x/.claude/skills/review-audit\n\n# review-audit\n\nTwo independent reviewers catch what one misses.\n'.repeat(50) } });
-assert.deepEqual(skill, { role: 'user', content: '/review-audit (skill)', command: true });
+assert.equal(skill.content, '/review-audit (skill)');
+assert.equal(skill.command, true);
+// ...but the body stays available as a collapsed preview (Sam, 10/28: "still
+// have the skills preview"), without the "Base directory" plumbing line.
+assert.ok(skill.detail.startsWith('# review-audit\n\nTwo independent reviewers'));
+// A runaway skill body is capped like any message.
+const huge = entryToMessage({ type: 'user', message: { role: 'user', content:
+  'Base directory for this skill: /s/big\n\n' + 'x'.repeat(300000) } });
+assert.ok(huge.detail.length < 300000 && huge.detail.endsWith('chars]'));
 
 // 19. local-command-stdout keeps only its inner text; blank stdout renders
 // nothing at all. Assistant turns are never collapsed even if they quote tags.
@@ -191,7 +199,10 @@ const pastedAtZero = entryToMessage({ type: 'user', message: { role: 'user', con
 assert.ok(pastedAtZero.content.endsWith('What happened?'));
 const skillCombined = entryToMessage({ type: 'user', message: { role: 'user', content:
   '<command-message>machine</command-message>\n<command-name>/machine</command-name>\nBase directory for this skill: /Users/x/.claude/skills/machine\n\n# machine\n\nbody\n' } });
-assert.deepEqual(skillCombined, { role: 'user', content: '/machine', command: true });
+assert.deepEqual(skillCombined, { role: 'user', content: '/machine', command: true, detail: '# machine\n\nbody' });
+// A bare "Base directory" line with no body has nothing to preview.
+assert.equal(entryToMessage({ type: 'user', message: { role: 'user', content:
+  'Base directory for this skill: /s/empty' } }).detail, undefined);
 
 
 // --- v1.0.62 chat-noise batch (Sam's mobile bug list, 8/14) -----------------

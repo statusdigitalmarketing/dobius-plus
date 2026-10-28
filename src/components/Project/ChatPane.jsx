@@ -142,8 +142,37 @@ const mdComponents = {
   ),
 };
 
-const Message = memo(function Message({ role, content, timestamp, queued, sending }) {
+// A message this long starts clamped with "Show more" (Sam: "no way to
+// collapse long ass chat messages"). Counted from the text, not measured, so
+// the decision is made before paint and never flickers.
+const LONG_CHARS = 2000;
+const LONG_LINES = 20;
+function isLong(text) {
+  if (text.length > LONG_CHARS) return true;
+  let lines = 1;
+  for (let i = text.indexOf('\n'); i !== -1 && lines <= LONG_LINES; i = text.indexOf('\n', i + 1)) lines += 1;
+  return lines > LONG_LINES;
+}
+
+// The body of a skill behind a "/name" row: a few dim lines, expandable to the
+// whole skill. Sam wants the preview kept, just out of the way.
+function SkillPreview({ detail }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="chatp-skill">
+      {open
+        ? <div className="chatp-skill-full"><ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{detail}</ReactMarkdown></div>
+        : <div className="chatp-skill-peek">{detail}</div>}
+      <button type="button" className="chatp-more" onClick={() => setOpen((o) => !o)}>{open ? 'Hide skill' : 'Show skill'}</button>
+    </div>
+  );
+}
+
+const Message = memo(function Message({ role, content, timestamp, queued, sending, command, detail, startOpen }) {
   const isClaude = role === 'assistant';
+  const text = String(content ?? '');
+  const long = !command && isLong(text);
+  const [open, setOpen] = useState(!long || !!startOpen);
   return (
     <div className={`chatp-msg ${isClaude ? 'claude' : 'you'}${sending ? ' sending' : ''}`}>
       <div className="chatp-meta">
@@ -153,11 +182,13 @@ const Message = memo(function Message({ role, content, timestamp, queued, sendin
         {sending && <span className="chatp-tag">sending</span>}
         <CopyButton text={String(content ?? '')} className="chatp-msg-copy" label="Copy message" />
       </div>
-      <div className="chatp-body">
+      <div className={`chatp-body${open ? '' : ' clamped'}`}>
         {isClaude
-          ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{String(content ?? '')}</ReactMarkdown>
-          : <div className="chatp-plain">{content}</div>}
+          ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>
+          : <div className={`chatp-plain${command ? ' chatp-cmd' : ''}`}>{text}</div>}
+        {command && detail && <SkillPreview detail={detail} />}
       </div>
+      {long && <button type="button" className="chatp-more" onClick={() => setOpen((o) => !o)}>{open ? 'Show less' : 'Show more'}</button>}
     </div>
   );
 });
@@ -577,11 +608,17 @@ export default function ChatPane({ tabId, visible }) {
   } else if (messages === null) {
     body = <div className="chatp-dim chatp-center">Loading conversation...</div>;
   } else {
+    // The newest Claude reply stays open even when long: it is what you came to read.
+    const lastClaude = messages.findLastIndex((m) => m.role === 'assistant');
     body = (
       <>
         {messages.length === 0 && shellBlock('No messages yet. Live terminal:')}
         {messages.map((m, i) => (
-          <Message key={i} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued} />
+          <Message
+            key={i} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued}
+            command={!!m.command} detail={typeof m.detail === 'string' ? m.detail : null}
+            startOpen={i === lastClaude}
+          />
         ))}
         {echoes.filter((e) => e.sid === sessionId).map((e) => (
           <Message key={`echo-${e.at}`} role="user" content={e.content} timestamp={e.at} sending />

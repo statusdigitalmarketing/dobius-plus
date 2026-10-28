@@ -1421,6 +1421,25 @@ export function collapseCommandContent(text) {
   return null;
 }
 
+// The skill body behind a collapsed command row, for the chat's expandable
+// preview (Sam: keep "the skills preview or / commands preview"), minus the
+// "Base directory for this skill:" line. null when the turn carries none.
+// Call only on text collapseCommandContent already accepted.
+export function commandDetail(text) {
+  const t0 = text.trimStart();
+  let body = null;
+  if (t0.startsWith('Base directory for this skill:')) body = t0;
+  else if (t0.startsWith('<command-name>') || t0.startsWith('<command-message>')) {
+    const rest = text.replace(/<command-(name|message|args)>[\s\S]*?<\/command-\1>/g, '').trim();
+    if (rest.startsWith('Base directory for this skill:')) body = rest;
+  }
+  if (body === null) return null;
+  const nl = body.indexOf('\n');
+  body = nl === -1 ? '' : body.slice(nl + 1).trim();
+  if (!body) return null;
+  return body.length > MAX_MESSAGE_CHARS ? body.slice(0, MAX_MESSAGE_CHARS) + `\n\n[skill truncated at ${MAX_MESSAGE_CHARS} chars]` : body;
+}
+
 // Minimal ANSI escape strip for chat text (CSI + OSC + single ESC forms).
 // The transcript records what the terminal PRINTED, escapes included; a chat
 // bubble is not a terminal.
@@ -1488,7 +1507,9 @@ export function entryToMessage(entry) {
     const collapsed = collapseCommandContent(content);
     if (collapsed !== null) {
       // Empty after collapse (e.g. blank command stdout): nothing to render.
-      return collapsed ? { role, content: collapsed, command: true } : null;
+      if (!collapsed) return null;
+      const detail = commandDetail(content);
+      return detail ? { role, content: collapsed, command: true, detail } : { role, content: collapsed, command: true };
     }
   }
   if (content.length > MAX_MESSAGE_CHARS) {

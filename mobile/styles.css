@@ -587,6 +587,22 @@ button.primary:disabled { opacity: 0.4; }
 .chat-msg.user .chat-role { color: var(--accent); }
 .chat-msg.assistant .chat-role { color: var(--dim); }
 .chat-content { font-size: 14px; line-height: 1.5; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Long messages start clamped; the fade says there is more. */
+.chat-content.clamped {
+  max-height: 20em; overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent);
+  mask-image: linear-gradient(to bottom, #000 72%, transparent);
+}
+.chat-more { background: none; border: none; color: var(--accent); font-size: 13px; font-family: inherit; padding: 6px 0 0; cursor: pointer; }
+.chat-cmd { font-family: 'SF Mono', ui-monospace, monospace; font-size: 13px; }
+.chat-skill { margin-top: 4px; border-left: 2px solid var(--border); padding-left: 8px; }
+.chat-skill-peek, .chat-skill-full { font-size: 12px; line-height: 1.45; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-skill-peek {
+  max-height: 4.4em; overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
+  mask-image: linear-gradient(to bottom, #000 55%, transparent);
+}
+.chat-skill-full { max-height: 55dvh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 /* "Start Claude" launcher in the sessionless state (v1.0.51 bug 2). */
 .chat-start {
   display: inline-block; margin: 14px auto 10px;

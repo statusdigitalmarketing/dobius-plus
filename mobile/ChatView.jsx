@@ -86,7 +86,33 @@ function nodeText(node) {
   return '';
 }
 
-const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending }) {
+// A message this long starts clamped with "Show more" (Sam: "no way to
+// collapse long ass chat messages"). Counted from the text, not measured, so
+// the decision is made before paint and never flickers.
+const LONG_CHARS = 1500;
+const LONG_LINES = 16;
+function isLong(text) {
+  if (text.length > LONG_CHARS) return true;
+  let lines = 1;
+  for (let i = text.indexOf('\n'); i !== -1 && lines <= LONG_LINES; i = text.indexOf('\n', i + 1)) lines += 1;
+  return lines > LONG_LINES;
+}
+
+// The body of a skill behind a "/name" row: a few dim lines, tap to read the
+// whole skill. Sam wants the preview kept, just out of the way.
+function SkillPreview({ detail }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="chat-skill">
+      <div className={open ? 'chat-skill-full' : 'chat-skill-peek'}>{detail}</div>
+      <button className="chat-more" onClick={() => setOpen((o) => !o)}>{open ? 'Hide skill' : 'Show skill'}</button>
+    </div>
+  );
+}
+
+const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending, command, detail, startOpen }) {
+  const long = !command && isLong(String(content ?? ''));
+  const [open, setOpen] = useState(!long || !!startOpen);
   return (
     <div className={`chat-msg ${role === 'assistant' ? 'assistant' : 'user'}${sending ? ' chat-echo' : ''}`}>
       <div className="chat-role">
@@ -95,7 +121,7 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending 
         {queued && <span className="chat-queued">queued</span>}
         {sending && <span className="chat-queued">sending…</span>}
       </div>
-      <div className="chat-content">
+      <div className={`chat-content${open ? '' : ' clamped'}${command ? ' chat-cmd' : ''}`}>
         {role === 'assistant' ? (
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
@@ -123,6 +149,8 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending 
           </ReactMarkdown>
         ) : content}
       </div>
+      {command && detail && <SkillPreview detail={detail} />}
+      {long && <button className="chat-more" onClick={() => setOpen((o) => !o)}>{open ? 'Show less' : 'Show more'}</button>}
     </div>
   );
 });
@@ -229,6 +257,8 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // live but whose transcript we cannot resolve (Brett v1.0.56: "No messages
   // yet" on tabs that clearly had chats). Stops once messages exist.
   const needShell = !sessionId || (messages !== null && messages.length === 0);
+  // The newest Claude reply stays open even when long: it is what you came to read.
+  const lastClaude = messages ? messages.findLastIndex((m) => m.role === 'assistant') : -1;
   useEffect(() => {
     setShellText(null);
     if (!needShell || !tabId) return undefined;
@@ -622,7 +652,11 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           </>
         )}
         {messages && messages.map((m, i) => (
-          <Bubble key={i} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued} />
+          <Bubble
+            key={i} role={m.role} content={m.content} timestamp={m.timestamp || null} queued={!!m.queued}
+            command={!!m.command} detail={typeof m.detail === 'string' ? m.detail : null}
+            startOpen={i === lastClaude}
+          />
         ))}
         {echoes.map((e) => (
           <Bubble key={`echo-${e.at}`} role="user" content={e.content} timestamp={e.at} sending />
