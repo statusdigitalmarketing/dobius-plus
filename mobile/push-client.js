@@ -41,7 +41,9 @@ export async function pushActive() {
  * Token and origin come from the one Connection, so a re-pair to another Mac
  * mid-request cannot send this Mac's token to that Mac's address.
  */
+let pushGen = 0; // newest registration wins; see the check before /push/subscribe
 export async function enablePush({ token, origin }) {
+  const gen = ++pushGen;
   if (!pushSupported()) return { ok: false, error: 'Notifications need HTTPS (enable it in Dobius Settings) and an installed app.' };
   let perm = Notification.permission;
   if (perm !== 'granted') perm = await Notification.requestPermission();
@@ -60,6 +62,9 @@ export async function enablePush({ token, origin }) {
         applicationServerKey: urlB64ToUint8Array(vj.publicKey),
       });
     }
+    // A newer registration (a re-pair's rebind) started meanwhile: it owns the
+    // binding, and this one must not overwrite it with the old token.
+    if (gen !== pushGen) return { ok: true };
     const sres = await fetch(absUrl(origin, '/push/subscribe'), {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },

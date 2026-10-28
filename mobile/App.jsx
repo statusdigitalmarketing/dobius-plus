@@ -186,9 +186,16 @@ export default function App() {
     setToken(newToken);
     if (newHost) setHost(newHost);
     // Backend persistence (async). The UI has already transitioned.
+    // Token and host are two writes, so order them to fail safe: drop the old
+    // token, save the host, then the token. Killed anywhere in between, the
+    // next launch finds no token rather than one Mac's token beside another
+    // Mac's address.
     try {
+      if (newHost) {
+        await remove(TOKEN_KEY);
+        await set(HOST_KEY, newHost);
+      }
       await set(TOKEN_KEY, newToken);
-      if (newHost) await set(HOST_KEY, newHost);
       // Also update the module-level cached host so absUrl() picks it up
       // without waiting for the next initHost().
       if (newHost) await initHost();
