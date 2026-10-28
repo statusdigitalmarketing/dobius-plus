@@ -45,7 +45,7 @@ const loadList = (key) => {
 };
 const saveList = (key, list) => { try { localStorage.setItem(key, JSON.stringify(list)); } catch { /* private mode */ } };
 
-export default function Board({ connection, status, onOpen, onShowHistory }) {
+export default function Board({ connection, status, onOpen, onShowHistory, onRepair }) {
   const [terminals, setTerminals] = useState([]);
   const [recentExits, setRecentExits] = useState([]);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -201,6 +201,9 @@ export default function Board({ connection, status, onOpen, onShowHistory }) {
             <span className="status-dot" style={{ backgroundColor: dotColor }} />
             {status === 'authed' ? 'connected' : status === 'connecting' ? 'connecting' : 'offline'}
           </span>
+          {status !== 'authed' && onRepair && (
+            <button className="summary-chip" onClick={onRepair}>Pair again</button>
+          )}
           {needsCount > 0 && <span className="summary-chip chip-needs">{needsCount} needs you</span>}
           {workingCount > 0 && <span className="summary-chip chip-working">{workingCount} working</span>}
           {/* With every project dormant the board is nothing but collapsed

@@ -11,7 +11,7 @@ import Intro from './Intro';
  * capacitor.config.json's server.url; that is removed in this PR so the
  * app can ship to users who are not on Sam's Tailnet.
  */
-export default function Pairing({ initialHost = '', initialCode = '', scanNonce = 0, requireConfirm = false, onPaired }) {
+export default function Pairing({ initialHost = '', initialCode = '', scanNonce = 0, requireConfirm = false, onPaired, onCancel }) {
   const [step, setStep] = useState(initialHost ? 'code' : 'host');
   const [host, setHost] = useState(initialHost || '');
   const [code, setCode] = useState(initialCode || '');
@@ -315,6 +315,17 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
             </button>
             {error && <p className="error">{error}</p>}
           </>
+        )}
+        {/* Already paired (a re-pair from the board, or a new pairing link):
+            leave without touching the current pairing. */}
+        {onCancel && (
+          <button
+            className="link-button"
+            onClick={() => { generationRef.current += 1; inFlightKeyRef.current = ''; setBusy(false); onCancel(); }}
+            style={{ marginTop: 12, background: 'none', border: 'none', opacity: 0.7, fontSize: 14 }}
+          >
+            Keep current pairing
+          </button>
         )}
       </div>
     </div>

@@ -82,7 +82,7 @@ import {
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
-import { provisionCert, certCapableName, hasCertFor, certAgeDays } from './tailscale.js';
+import { provisionCert, certCapableName, certValidTo } from './tailscale.js';
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
@@ -2430,27 +2430,36 @@ function setupMobileServerHandlers() {
   });
 }
 
-async function provisionCertAndRestart() {
-  const res = await provisionCert();
-  if (res.ok && getMobileServerStatus().running) {
-    await stopMobileServer(); // await close so HTTPS restart doesn't hit EADDRINUSE
-    await maybeAutoStartMobileServer(); // restart, and keep retrying if it fails
-  }
-  return res;
+// One provision at a time: Settings' button and the automatic check share the
+// running job, so two restarts never race and regenerate the pairing code twice.
+let certJob = null;
+function provisionCertAndRestart() {
+  certJob ||= (async () => {
+    const res = await provisionCert();
+    if (res.ok && getMobileServerStatus().running) {
+      await stopMobileServer(); // await close so HTTPS restart doesn't hit EADDRINUSE
+      await maybeAutoStartMobileServer(); // restart, and keep retrying if it fails
+    }
+    return res;
+  })().finally(() => { certJob = null; });
+  return certJob;
 }
 
 // HTTPS turns itself on: when the tailnet can issue this Mac a certificate
-// and there is none yet (or it is past day 60 of its 90), provision it and
-// restart the mobile server on it. ponytail: checked once per launch; a Mac
-// left running past day 90 renews on its next launch.
+// and there is no usable one, or it has under 30 days left, provision it and
+// restart the mobile server on it. Runs at launch and every 30 minutes, which
+// catches Tailscale coming up after launch and renews on a Mac left running.
 async function autoEnableMobileHttps() {
   if (!getMobileServerConfig().enabled) return;
   const name = await certCapableName();
-  if (!name || (hasCertFor(name) && certAgeDays(name) < 60)) return;
+  const validTo = name && certValidTo(name);
+  if (!name || (validTo && validTo - Date.now() > 30 * 86_400_000)) return;
   const res = await provisionCertAndRestart();
   if (res.ok) console.log(`[mobile-server] HTTPS enabled automatically for ${name}`);
   else console.warn('[mobile-server] automatic HTTPS failed:', res.error);
 }
+const runAutoHttps = () => autoEnableMobileHttps()
+  .catch((err) => console.warn('[mobile-server] automatic HTTPS:', err?.message || err));
 
 function setupAutoResumeHandlers() {
   // Cmd+Shift+R cancellation entry point: cancels every pending tab. Returns
@@ -3239,8 +3248,9 @@ app.whenReady().then(() => {
   createWindow();
   initAutoUpdater();
   maybeAutoStartMobileServer()
-    .then(() => autoEnableMobileHttps())
-    .catch((err) => console.warn('[mobile-server] start / automatic HTTPS:', err?.message || err));
+    .catch((err) => console.warn('[mobile-server] start:', err?.message || err))
+    .then(runAutoHttps);
+  setInterval(runAutoHttps, 30 * 60_000).unref();
   setupSessionTabCapture();
   // Main-process terminal status authority (v1.0.43, remote Phase 1): observe
   // every PTY's output/exit so tab status (working/done/needs) + recent exits

@@ -44,6 +44,9 @@ export default function App() {
   const [status, setStatus] = useState('disconnected');
   const [view, setView] = useState('board'); // 'board' | 'terminal' | 'history'
   const [openTabId, setOpenTabId] = useState(null); // terminal opened from the board
+  // Re-pairing while a token exists: the Mac moved (HTTP to HTTPS changes its
+  // address) and the old pairing can no longer reach it.
+  const [repairing, setRepairing] = useState(false);
 
   // Scanned the Mac's QR code (shared/pairing-link.js buildPairingWebLink):
   // this page was opened at <origin>/#pair=<code>. Read the code, take it out
@@ -179,6 +182,7 @@ export default function App() {
     // set also runs synchronously so Pairing unmounts immediately and
     // any further scans fall through to the Board (which ignores them).
     setDeepLink({ host: '', code: '', nonce: 0 });
+    setRepairing(false);
     setToken(newToken);
     if (newHost) setHost(newHost);
     // Backend persistence (async). The UI has already transitioned.
@@ -194,7 +198,9 @@ export default function App() {
   if (token === null || host === null) {
     return <div className="screen center"><p className="muted">Loading...</p></div>;
   }
-  if (!token) {
+  // A fresh pairing link opens the confirm step even when already paired, or a
+  // phone paired to the Mac's old address could never be moved to its new one.
+  if (!token || repairing || deepLink.nonce > 0) {
     return (
       <Pairing
         initialHost={deepLink.host || host}
@@ -204,6 +210,7 @@ export default function App() {
         // the user must confirm the destination before submission.
         requireConfirm={deepLink.nonce > 0 && !!deepLink.host}
         onPaired={handlePaired}
+        onCancel={token ? () => { setRepairing(false); setDeepLink({ host: '', code: '', nonce: 0 }); } : undefined}
       />
     );
   }
@@ -231,6 +238,7 @@ export default function App() {
       status={status}
       onOpen={(id) => { setOpenTabId(id); setView('terminal'); }}
       onShowHistory={() => setView('history')}
+      onRepair={() => setRepairing(true)}
     />
   );
 }
