@@ -31,6 +31,8 @@ import { HOST_KEY, TOKEN_KEY, normaliseHost, initHost } from './host';
 // only trustworthy signal is a human seeing the host on screen and
 // explicitly confirming.
 
+let saveChain = Promise.resolve();
+
 export default function App() {
   // null = loading from async storage, '' = empty (needs pairing), string = present
   const [token, setToken] = useState(null);
@@ -190,7 +192,9 @@ export default function App() {
     // token, save the host, then the token. Killed anywhere in between, the
     // next launch finds no token rather than one Mac's token beside another
     // Mac's address.
-    try {
+    // Saves run one after another (saveChain), so a second pairing finishing
+    // mid-save cannot interleave its writes with this one's.
+    const save = saveChain.then(async () => {
       if (newHost) {
         await remove(TOKEN_KEY);
         await set(HOST_KEY, newHost);
@@ -199,7 +203,9 @@ export default function App() {
       // Also update the module-level cached host so absUrl() picks it up
       // without waiting for the next initHost().
       if (newHost) await initHost();
-    } catch { /* storage write failed; token still kept in-memory for this session */ }
+    });
+    saveChain = save.catch(() => {});
+    try { await save; } catch { /* storage write failed; token still kept in-memory for this session */ }
   };
 
   if (token === null || host === null) {
