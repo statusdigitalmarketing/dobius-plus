@@ -46,7 +46,10 @@ export async function resolveSessionForTab(tabId) {
       if (entry?.tabId !== tabId) continue;
       const ran = entry.lastRunningAt || 0;
       if (ran <= 0 || (now - ran) > RECENT_MS || ran > now + FUTURE_SLACK_MS) continue;
-      if (info.startedAt && ran < info.startedAt) continue;
+      // ps reports start times to the whole second, so a stamp from the
+      // previous Claude in the same second as this one started is not proof:
+      // require a second of margin (the live session is re-stamped soon).
+      if (info.startedAt && ran < info.startedAt + 1000) continue;
       if (!best || ran > best.ran) best = { sid, ran, projectPath: entry.projectPath };
     }
     sessionId = best?.sid || null;

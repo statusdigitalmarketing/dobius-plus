@@ -16,3 +16,5 @@ export function terminalSettledSinceInput(id) {
 export function terminalInputSeq(id) { return seqs.get(id) || 0; }
 export function terminalInstance(id) { return ptys.get(id) || null; }
 export function getTerminalBuffer() { return ''; }
+export const closing = new Set();
+export function terminalClosing(id) { return closing.has(id); }

@@ -3,12 +3,12 @@
 // this, so a regression here types into someone's live shell.
 // Run: node --import ./electron/__tests__/chat-service-register.mjs ./electron/__tests__/chat-service.test.mjs
 import assert from 'node:assert/strict';
-import { writes, ptys, writeTerminal, emitOutput } from './fake-terminal-manager.mjs';
+import { writes, ptys, writeTerminal, emitOutput, closing } from './fake-terminal-manager.mjs';
 
 const { submitPromptToTab, writeRawInput, selectorToken, submitPending } = await import('../chat-service.js');
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
-const reset = () => { writes.length = 0; ptys.clear(); };
+const reset = () => { writes.length = 0; ptys.clear(); closing.clear(); };
 const PASTE = (t) => `\x1b[200~${t}\x1b[201~`;
 
 // 1. An idle tab is pasted into synchronously; Enter follows on its own.
@@ -73,6 +73,7 @@ p = submitPromptToTab('a', 'one');
 const p3 = submitPromptToTab('a', 'two');
 for (const k of ['a', '\x1b[A', '\x1b[I', ' ']) writeRawInput('a', k);
 assert.deepEqual(await Promise.all([p, p3]), [true, true]);
+await new Promise((r) => setTimeout(r, 200)); // the queued keys are paced
 assert.deepEqual(writes.map((w) => w[1]), [PASTE('one'), '\r', PASTE('two'), '\r', 'a', '\x1b[A', '\x1b[I', ' ']);
 ok('ordinary keys do not cancel, and wait behind the pending submits');
 
@@ -134,5 +135,28 @@ assert.equal(submitPending('a'), true);
 await p;
 assert.equal(submitPending('a'), false);
 ok('idle raw input is immediate; submitPending follows the queue');
+
+// 14. A tab being closed: the pending Enter and the queued submit are dropped.
+reset(); ptys.set('a', {});
+p = submitPromptToTab('a', 'echo first');
+const pl = submitPromptToTab('a', 'touch /tmp/late');
+closing.add('a');
+assert.deepEqual(await Promise.all([p, pl]), [false, false]);
+assert.deepEqual(writes.map((w) => w[1]), [PASTE('echo first')]);
+assert.equal(await submitPromptToTab('a', 'x'), false);
+ok('closing tab: no Enter, nothing more pasted');
+
+// 15. Keys that waited behind a submit go out as separate writes with a gap.
+reset(); ptys.set('a', {});
+p = submitPromptToTab('a', 'one');
+for (const k of ['o', 'k', '\r']) writeRawInput('a', k);
+const stamps = [];
+const origPush = writes.push.bind(writes);
+writes.push = (w) => { stamps.push(Date.now()); return origPush(w); };
+await p; await new Promise((r) => setTimeout(r, 200));
+writes.push = origPush;
+assert.deepEqual(writes.map((w) => w[1]), [PASTE('one'), '\r', 'o', 'k', '\r']);
+for (let i = 2; i < stamps.length; i++) assert.ok(stamps[i] - stamps[i - 1] >= 15, `gap ${stamps[i] - stamps[i - 1]}ms`);
+ok('queued keys are paced, not one burst');
 
 console.log(`\n${pass} passed`);

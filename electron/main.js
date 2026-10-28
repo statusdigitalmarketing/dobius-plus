@@ -641,6 +641,9 @@ function setupDataHandlers() {
     // has moved elsewhere is reading a transcript of ITS project.
     let projectPath = resolved?.sessionProject || null;
     if (!projectPath || (cwd && cwd !== projectPath && !cwd.startsWith(`${projectPath}/`))) projectPath = cwd;
+    // A tab inside the mapped project that has its OWN copy of the session
+    // (a git worktree under the repo) is reading that copy, not the parent's.
+    else if (cwd && cwd !== projectPath && resolved && await getTranscriptSig(resolved.sessionId, cwd)) projectPath = cwd;
     if (!resolved || !projectPath) {
       const claudeLive = !!resolved || !!(await getTerminalClaudeInfo(tabId));
       if (!stillSame()) return null;

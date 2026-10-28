@@ -2,7 +2,7 @@
 // the live selector popup, a plain-text tail of the screen, and the
 // paste-then-Enter submit. Main-process only.
 
-import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalSettledSinceInput } from './terminal-manager.js';
+import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalSettledSinceInput, terminalClosing } from './terminal-manager.js';
 import { parseSelector, parseSelectorFromScreen, stripAnsi } from './selector-parser.js';
 import { renderScreenLines } from './screen-render.js';
 
@@ -52,6 +52,7 @@ export function selectorToken(id) {
 }
 
 const SUBMIT_ENTER_DELAY_MS = 250;
+const RAW_KEY_GAP_MS = 20;
 // tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
 // under an older gen is dropped instead of written.
 const submitQueues = new Map();
@@ -89,7 +90,7 @@ export function submitPromptToTab(id, text, stillOk = () => true) {
   // goes too so the only Enter is the discrete one sent below.
   const clean = String(text).replace(/[\x00-\x08\x0B-\x1F\x7F]/g, '');
   const pty = terminalInstance(id);
-  if (!pty || !stillOk()) return Promise.resolve(false);
+  if (!pty || terminalClosing(id) || !stillOk()) return Promise.resolve(false);
   const q = queueFor(id);
   return new Promise((resolve) => {
     q.items.push({ clean, pty, stillOk, gen: q.gen, resolve });
@@ -124,12 +125,20 @@ async function drainSubmits(id, q) {
   q.running = true;
   while (q.items.length > 0) {
     const it = q.items.shift();
-    if (it.gen !== q.gen || terminalInstance(id) !== it.pty || !it.stillOk()) { it.resolve(false); continue; }
-    if (it.raw !== undefined) { writeTerminal(id, it.raw); it.resolve(true); continue; }
+    if (it.gen !== q.gen || terminalInstance(id) !== it.pty || terminalClosing(id) || !it.stillOk()) { it.resolve(false); continue; }
+    if (it.raw !== undefined) {
+      // Keys that waited behind a submit go out as separate keystrokes, not
+      // one burst Claude would read as a paste (an Enter in it becomes a newline).
+      await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
+      if (it.gen !== q.gen || terminalInstance(id) !== it.pty || terminalClosing(id)) { it.resolve(false); continue; }
+      writeTerminal(id, it.raw);
+      it.resolve(true);
+      continue;
+    }
     writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
     const pastedAt = terminalInputSeq(id);
     await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
-    if (terminalInstance(id) !== it.pty || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt) { it.resolve(false); continue; }
+    if (terminalInstance(id) !== it.pty || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalClosing(id)) { it.resolve(false); continue; }
     writeTerminal(id, '\r');
     it.resolve(true);
   }

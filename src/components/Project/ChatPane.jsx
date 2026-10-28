@@ -15,6 +15,9 @@ useStore.subscribe((s, prev) => {
   const ids = new Set(s.terminalTabs.map((t) => t.id));
   for (const id of drafts.keys()) if (!ids.has(id)) drafts.delete(id);
 });
+// A send that failed after its pane closed goes back to the pane showing
+// that tab now (one may have mounted meanwhile), else to the saved draft.
+const draftRestorers = new Map(); // tabId -> (text) => void
 const SELECTOR_POLL_MS = 2500;
 const ECHO_TTL_MS = 90_000;
 
@@ -146,9 +149,11 @@ const Message = memo(function Message({ role, content, timestamp, queued, sendin
 });
 
 // The transcript records `!cmd` as "! cmd"; compare both sides normalized.
+// Compared by prefix: the transcript side is capped (20000 chars), so a long
+// message would otherwise never match its own echo.
 function normEcho(t) {
   const s = String(t).trim();
-  return s.startsWith('!') ? `! ${s.slice(1).trim()}` : s;
+  return (s.startsWith('!') ? `! ${s.slice(1).trim()}` : s).slice(0, 4000);
 }
 
 const STATUS_TEXT = { working: 'Working', needs: 'Needs you', done: 'Ready' };
@@ -181,6 +186,14 @@ export default function ChatPane({ tabId, visible }) {
     if (draft) drafts.set(tabId, draft); else drafts.delete(tabId);
   }, [draft, tabId]);
   const [notice, setNotice] = useState('');
+  useEffect(() => {
+    const restore = (text) => {
+      setDraft((cur) => (cur ? cur : text));
+      setNotice('Not sent. The tab was interrupted, closed or moved to another window.');
+    };
+    draftRestorers.set(tabId, restore);
+    return () => { if (draftRestorers.get(tabId) === restore) draftRestorers.delete(tabId); };
+  }, [tabId]);
 
   const haveRef = useRef(null); // { sessionId, projectPath, sig } of the messages we hold
   const emptyStreakRef = useRef(0);
@@ -383,8 +396,10 @@ export default function ChatPane({ tabId, visible }) {
       // Keep what they wrote: put it back unless they already started a new one.
       setDraft((cur) => (cur ? cur : text));
       flash('Not sent. The tab was interrupted, closed or moved to another window.');
-    } else if (!ok && !drafts.has(tabId)) {
-      drafts.set(tabId, text); // the pane closed meanwhile: keep it for its return
+    } else if (!ok) {
+      const restore = draftRestorers.get(tabId);
+      if (restore) restore(text);
+      else if (!drafts.has(tabId)) drafts.set(tabId, text); // kept for the pane's return
     }
   };
 
@@ -405,6 +420,10 @@ export default function ChatPane({ tabId, visible }) {
       return;
     }
     if (!closes) setSelector((cur) => (cur && cur.token === token ? { ...cur, token: r.token } : cur));
+    // An arrow or space leaves no usable token until Claude redraws the
+    // prompt (main refuses reads of a screen not yet repainted): the buttons
+    // wait, disabled, for a quick re-read instead of failing as stale.
+    if (!closes && !r.token) setTimeout(() => { if (mountedRef.current) pollSelector(); }, 150);
     refreshSoon();
   };
 
@@ -457,7 +476,11 @@ export default function ChatPane({ tabId, visible }) {
     if (!visible) return undefined;
     const dropIsMine = (target) => {
       const pane = target?.closest?.('[data-chat-tab]');
-      return pane ? pane.dataset.chatTab === tabId : useStore.getState().activeTabId === tabId;
+      if (!pane) return useStore.getState().activeTabId === tabId;
+      // Dropped right here: type into this composer next, even as split's
+      // right pane (never the active tab), not the terminal that had focus.
+      if (pane.dataset.chatTab === tabId) { requestAnimationFrame(() => inputRef.current?.focus()); return true; }
+      return false;
     };
     const onFiles = (e) => {
       if (!dropIsMine(e.detail?.target)) return;
@@ -551,14 +574,14 @@ export default function ChatPane({ tabId, visible }) {
           <div className="chatp-selector">
             <div className="chatp-selector-title">{selector.prompt || 'Claude is waiting for you to choose:'}</div>
             {selector.options.map((opt) => (
-              <button type="button" key={opt.num} className="chatp-option" onClick={() => chooseOption(opt.num)}>
+              <button type="button" key={opt.num} className="chatp-option" disabled={!selector.token} onClick={() => chooseOption(opt.num)}>
                 <span className="chatp-option-num">{opt.num}</span>
                 <span>{opt.label}</span>
               </button>
             ))}
             <div className="chatp-keys">
               {SELECTOR_KEYS.map(([label, seq, closes]) => (
-                <button type="button" key={label} className="chatp-key" onClick={() => selectorKey(seq, closes)}>{label}</button>
+                <button type="button" key={label} className="chatp-key" disabled={!selector.token} onClick={() => selectorKey(seq, closes)}>{label}</button>
               ))}
             </div>
           </div>

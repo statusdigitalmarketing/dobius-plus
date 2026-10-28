@@ -1,5 +1,5 @@
 import pty from 'node-pty';
-import { isTerminalReply } from './terminal-reply.js';
+import { isTerminalReply, hasVisibleOutput } from './terminal-reply.js';
 import { isClaudeCommand } from './claude-argv.js';
 import fs from 'fs';
 import path from 'path';
@@ -250,7 +250,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
     // PTY and spawned a new one under the same id), the OLD pty's late onData
     // must not be routed as the replacement's output. Audit High.
     if (!entry || entry.pty !== term) return;
-    entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
+    if (hasVisibleOutput(data)) entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
     // Global observers (main-process status authority, v1.0.43): see EVERY
     // terminal's output regardless of whether a window or mobile client is
     // attached, so tab status is tracked centrally. Cheap: observers do a
@@ -395,6 +395,11 @@ export function writeTerminal(id, data) {
 // anything else has typed into the tab since.
 export function terminalInputSeq(id) {
   return terminals.get(id)?.inputSeq || 0;
+}
+
+/** The tab is being closed (gracefulCloseTerminals): nothing more is typed into it. */
+export function terminalClosing(id) {
+  return !!terminals.get(id)?.closing;
 }
 
 // True once the tab has produced output since its last write. Until then the
@@ -799,6 +804,9 @@ export async function gracefulCloseTerminals(ids) {
     ? ids.map((id) => terminals.get(id)).filter(Boolean)
     : Array.from(terminals.values());
   if (entries.length === 0) return;
+  // Closing: queued Chat submits must not paste or press Enter from here on
+  // (terminalClosing), and the Ctrl+C below counts as input like any other.
+  for (const entry of entries) { entry.closing = true; entry.inputSeq = (entry.inputSeq || 0) + 1; }
   // First Ctrl+C — interrupts any running command
   for (const entry of entries) {
     try { entry.pty.write('\x03'); } catch { void 0; }

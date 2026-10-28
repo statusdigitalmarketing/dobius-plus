@@ -168,3 +168,4 @@
 .chatp-btn:disabled { opacity: 0.4; cursor: default; }
 .chatp-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
 .chatp-btn.stop { border-color: var(--danger); color: var(--danger); }
+.chatp-option:disabled, .chatp-key:disabled { opacity: 0.5; cursor: default; }
