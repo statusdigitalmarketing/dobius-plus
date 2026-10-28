@@ -153,9 +153,12 @@ export function scrub(text, home = os.homedir()) {
     // x-api-key) and any value, punctuation included (`#Hunter2!`).
     // No prefix quantifier at all: the credential word is found wherever it
     // ends a key, however long the key (SPRING_..._PASSWORD=, Codex).
-    // ...but not right after a slash: that is a path component (a home dir
-    // named sid, `/Users/sid: EACCES`), not a key (Codex).
-    .replace(/(?<![/\\])((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|session(?:[_-]?id)?|sid|cookie|auth)['"`]?\s*[=:]\s*['"`]?)(?:[^\s"'`]|(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_]))*[^\s"'`)\]},;]/giu, '$1[redacted]');
+    .replace(/((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|session(?:[_-]?id)?|sid|cookie|auth)['"`]?\s*[=:]\s*['"`]?)((?:[^\s"'`]|(?<=[\p{L}\p{N}_])'(?=[\p{L}\p{N}_]))*[^\s"'`)\]},;])/giu, (m, key, value, at, all) => (
+      // A path component (a home dir named sid) followed by an errno code is a
+      // path and an error, not a credential: `/Users/sid: EACCES` (Codex).
+      // Any other value after a slash-qualified key is still a secret
+      // (`database/password=hunter2`).
+      /[/\\]$/.test(all.slice(Math.max(0, at - 1), at)) && /^E[A-Z0-9]{2,}$/.test(value) ? m : `${key}[redacted]`));
   // Home and user paths only AFTER the credentials: a user-name rule that may
   // span spaces would otherwise eat `/Users/sam password` and strand the
   // value (Codex).

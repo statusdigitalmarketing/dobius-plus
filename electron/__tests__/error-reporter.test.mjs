@@ -180,6 +180,8 @@ check("can't read and can't write stay apart", R.signatureFor('main.error', "Err
 check('a home path cannot eat the key of a following credential', R.scrub('Error: login failed for /Users/sam password=hunter2', '/Users/sam').includes('hunter2'), false);
 check('a very long credential key still redacts its value', R.scrub('Error: login failed SPRING_DATASOURCE_HIKARI_DATA_SOURCE_PROPERTIES_PASSWORD=hunter2', '/h').includes('hunter2'), false);
 check('a home dir named like a credential word is not a key', R.signatureFor('main.error', 'Error: open /Users/sid: EACCES') === R.signatureFor('main.error', 'Error: open /Users/sid: EMFILE'), false);
+check('a slash-qualified credential key still redacts its value', R.scrub('Error: invalid config database/password=hunter2', '/h').includes('hunter2'), false);
+check('a slash-qualified key with a non-errno value is still a secret', R.scrub('Error: open /Users/sid: hunter2', '/h').includes('hunter2'), false);
 check('"tokens: 5" is not a credential', R.scrub('used tokens: 5', '/h'), 'used tokens: 5');
 check('a frame in a path with parentheses is still a frame',
   R.signatureFor('crash.uncaughtException', 'Error: boom\n    at foo (/Applications/Dobius+ (copy).app/Contents/Resources/app.asar/main.js:10:1)') === R.signatureFor('crash.uncaughtException', 'Error: boom\n    at bar (/Applications/Dobius+ (copy).app/Contents/Resources/app.asar/main.js:10:1)'), false);
