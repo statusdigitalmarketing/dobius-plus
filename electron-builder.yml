@@ -3,9 +3,20 @@ productName: "Dobius+"
 afterPack: build/after-pack.cjs
 mac:
   category: public.app-category.developer-tools
+  # Universal: one app that runs natively on Apple Silicon AND Intel. Builds
+  # before 1.0.84 were arm64 only, and an Intel Mac refused to open them.
   target:
-    - dmg
-    - zip
+    - target: dmg
+      arch: universal
+    - target: zip
+      arch: universal
+  # The universal merge lipos each native module that differs between the x64
+  # and arm64 builds (node-pty build/Release, better-sqlite3). node-pty also
+  # ships per-arch prebuilds (and a stale bin/<arch>-<abi> dir) that are
+  # IDENTICAL in both builds; @electron/universal refuses an identical Mach-O
+  # unless it is listed here. They are already single-arch files and are only
+  # a fallback: node-pty loads build/Release first.
+  x64ArchFiles: "Contents/Resources/app.asar.unpacked/node_modules/node-pty/{prebuilds,bin}/**"
   darkModeSupport: true
   identity: "Status Consulting Firm LLC (Z349CC556Z)"
   hardenedRuntime: true
