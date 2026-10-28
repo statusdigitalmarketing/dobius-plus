@@ -2430,16 +2430,21 @@ function setupMobileServerHandlers() {
   });
 }
 
+async function restartMobileServer() {
+  await stopMobileServer(); // await close so HTTPS restart doesn't hit EADDRINUSE
+  await maybeAutoStartMobileServer(); // restart, and keep retrying if it fails
+}
+
 // One provision at a time: Settings' button and the automatic check share the
 // running job, so two restarts never race and regenerate the pairing code twice.
 let certJob = null;
 function provisionCertAndRestart() {
   certJob ||= (async () => {
     const res = await provisionCert();
-    if (res.ok && getMobileServerStatus().running) {
-      await stopMobileServer(); // await close so HTTPS restart doesn't hit EADDRINUSE
-      await maybeAutoStartMobileServer(); // restart, and keep retrying if it fails
-    }
+    // Restart only for a new cert or a server not yet on HTTPS: tailscale can
+    // return the same cert, and a pointless restart drops every phone.
+    const st = getMobileServerStatus();
+    if (res.ok && st.running && (res.changed || !st.secure)) await restartMobileServer();
     return res;
   })().finally(() => { certJob = null; });
   return certJob;
@@ -2452,8 +2457,18 @@ function provisionCertAndRestart() {
 async function autoEnableMobileHttps() {
   if (!getMobileServerConfig().enabled) return;
   const name = await certCapableName();
-  const validTo = name && certValidTo(name);
-  if (!name || (validTo && validTo - Date.now() > 30 * 86_400_000)) return;
+  if (!name || certJob) return;
+  const validTo = certValidTo(name);
+  if (validTo && validTo - Date.now() > 30 * 86_400_000) {
+    // Good cert, but a start that could not read the MagicDNS name came up
+    // on plain HTTP: move it onto HTTPS.
+    const st = getMobileServerStatus();
+    if (st.running && !st.secure) {
+      certJob = restartMobileServer().finally(() => { certJob = null; });
+      await certJob;
+    }
+    return;
+  }
   const res = await provisionCertAndRestart();
   if (res.ok) console.log(`[mobile-server] HTTPS enabled automatically for ${name}`);
   else console.warn('[mobile-server] automatic HTTPS failed:', res.error);

@@ -115,7 +115,10 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
       return;
     }
     if (!stillCurrent()) return;
-    await persistHost(normalised);
+    // Already paired (onCancel): the stored address stays the paired Mac's
+    // until a new pairing succeeds, or backing out would send the old token
+    // to this one. handlePaired saves the new address on success.
+    if (!onCancel) await persistHost(normalised);
     if (!stillCurrent()) return;
     setHost(normalised);
     setStep('code');
