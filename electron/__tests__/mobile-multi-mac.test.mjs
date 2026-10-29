@@ -161,19 +161,21 @@ test('a Mac proven to be the same at a new address keeps ONE record, moved there
   assert.equal(unproven.pairings.length, 3, 'without proof it is a separate Mac');
 });
 
-test('a proven merge keeps whichever record was used last, at the new address', () => {
+test('a proven merge keeps whichever PROVEN record was used last', () => {
   const before = initial();
   const dup = upsertPairing(before, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-old' }, { id: 'dup', now: 8 });
   assert.equal(dup.pairings.length, 3);
-  const next = upsertPairing(dup, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'unused', now: 9, replaceIds: ['a'] });
+  // Both proved (the record at the new address is probed too): the newer wins.
+  const next = upsertPairing(dup, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'unused', now: 9, replaceIds: ['a', 'dup'] });
   assert.deepEqual(next.pairings.map((p) => p.id).sort(), ['b', 'dup'], 'one record: the duplicate does not survive a Remove');
   assert.equal(next.pairings.find((p) => p.id === 'dup').token, 'tls-a');
   assert.equal(next.activeId, 'dup');
-  // The other way round: the proven old address was used last, so it wins.
-  const used = { ...dup, pairings: dup.pairings.map((p) => p.id === 'a' ? { ...p, lastUsedAt: 20 } : p) };
-  const kept = upsertPairing(used, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'unused', now: 21, replaceIds: ['a'] });
-  assert.deepEqual(kept.pairings.map((p) => p.id).sort(), ['a', 'b']);
-  assert.equal(kept.pairings.find((p) => p.id === 'a').origin, 'https://a-new.tail.ts.net:8420');
+  // The record at the new address did NOT prove (another Mac used to live
+  // there): the proven one keeps its identity, however recent the other is.
+  const other = upsertPairing(dup, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'unused', now: 9, replaceIds: ['a'] });
+  assert.deepEqual(other.pairings.map((p) => p.id).sort(), ['a', 'b']);
+  assert.equal(other.pairings.find((p) => p.id === 'a').origin, 'https://a-new.tail.ts.net:8420');
+  assert.equal(other.pairings.find((p) => p.id === 'a').name, a.name);
 });
 
 test('every proven record folds into the most recently used one', () => {

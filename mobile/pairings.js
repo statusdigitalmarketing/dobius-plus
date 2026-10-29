@@ -8,9 +8,10 @@ export const pairingKey = (pairing, key) => `${key}:${pairing.id}`;
 /**
  * Add or update a Mac. `replaceIds` name records at OTHER addresses proven to
  * be this same Mac (App.jsx sameMacAs: each holds its saved token and issued
- * this new one). The most recently used of them, or of the record already at
- * the new address, moves there and keeps its name and settings; the rest fold
- * into it rather than surviving to reconnect after a Remove.
+ * this new one; the record already at the new address is probed too). The
+ * most recently used of them moves there and keeps its name and settings; the
+ * rest, and an unproven record at that address, fold into it rather than
+ * surviving to reconnect after a Remove.
  * `activate: false` (the user switched Macs while this pairing was still
  * proving) saves it without taking over the active Mac, unless the active one
  * was folded into it.
@@ -19,10 +20,13 @@ export function upsertPairing(state, { origin, token, name }, { id, now, replace
   origin = normaliseHost(origin);
   if (!origin || typeof token !== 'string' || !token) throw new Error('Invalid pairing');
   const atOrigin = state.pairings.find((p) => p.origin === origin);
-  // The one the user touched last keeps its id, so its name and drafts survive.
-  const same = state.pairings.filter((p) => replaceIds.includes(p.id) || p === atOrigin).sort((a, b) => b.lastUsedAt - a.lastUsedAt);
-  const existing = same[0] || null;
-  const folded = new Set(same.slice(1).map((p) => p.id));
+  // Of the PROVEN records, the one the user touched last keeps its id, so its
+  // name and drafts survive. A record at the new address that did not prove
+  // is another Mac that used to live there: it never wins over a proven one
+  // (Codex P2), and with none proven it is updated in place, as before.
+  const proven = state.pairings.filter((p) => replaceIds.includes(p.id)).sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+  const existing = proven[0] || atOrigin || null;
+  const folded = new Set([...proven, atOrigin].filter((p) => p && p !== existing).map((p) => p.id));
   const record = existing
     ? { ...existing, origin, token, lastUsedAt: now }
     : { id, origin, token, name: name?.trim() || new URL(origin).hostname, addedAt: now, lastUsedAt: now };
