@@ -578,13 +578,13 @@ const WRAP_SLACK = 4; // the TUI may wrap a few columns inside the frame's edge
 // word is an intentional newline as often as a wrap, and joining it could
 // hide a second command (Codex P2). Ambiguous rows keep their break.
 const WRAP_REACH = 10;
-function reflow(rows, ends, frameW) {
+function reflow(rows, ends, frameW, hard) {
   let out = '';
   rows.forEach((r, k) => {
     if (!k) { out = r; return; }
     const end = ends?.[k - 1];
     const line = out.slice(out.lastIndexOf('\n') + 1);
-    const wrapped = r !== '' && !SCREEN_RULE_RE.test(r) && typeof end === 'number' && frameW > 0 && end < frameW && end >= frameW - WRAP_REACH
+    const wrapped = r !== '' && !hard?.[k] && !SCREEN_RULE_RE.test(r) && typeof end === 'number' && frameW > 0 && end < frameW && end >= frameW - WRAP_REACH
       && end + 1 + rowWidth(r.split(' ')[0]) > frameW - WRAP_SLACK;
     const dotted = (w) => /\.\w/.test(w);
     const pathy = line.includes('/') || r.includes('/') || dotted(line.split(' ').pop()) || dotted(r.split(' ')[0]) || !line.includes(' ');
@@ -601,15 +601,17 @@ function screenPrompt(lines, blockTop, prose = false, frameW = 0) {
     if (SCREEN_RULE_RE.test(t) || SCREEN_CHROME_RE.test(t)) { bounded = true; break; }
     if (!t) { if (paragraphs[0].length) paragraphs.unshift([]); continue; }
     // A lone glyph or border is not shown, but it still separated what is
-    // around it: a paragraph break, never something reflow joins across
-    // (`***` between two commands, Codex P2).
-    if (!/[\p{L}\p{N}]/u.test(t)) { if (paragraphs[0].length) paragraphs.unshift([]); continue; }
+    // around it: the row below it gets a hard break that reflow never joins
+    // across (`***` between two commands, Codex P2). NOT a paragraph break:
+    // without a frame rule only the last paragraph is kept, and a paragraph
+    // break here would hide the text above it (security review).
+    if (!/[\p{L}\p{N}]/u.test(t)) { if (paragraphs[0].length) paragraphs[0][0].hard = true; continue; }
     const row = { t, end: colOf(lines, i) };
     paragraphs[0].unshift(row);
   }
   const kept = (bounded ? paragraphs : paragraphs.slice(-1)).filter((p) => p.length);
   if (prose) {
-    let text = kept.map((p) => reflow(p.map((x) => x.t), p.map((x) => x.end), frameW)).join('\n');
+    let text = kept.map((p) => reflow(p.map((x) => x.t), p.map((x) => x.end), frameW, p.map((x) => !!x.hard))).join('\n');
     if (text.length > PROMPT_MAX_CHARS) text = text.slice(-PROMPT_MAX_CHARS);
     return text;
   }
