@@ -121,7 +121,10 @@ function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
             if (!cell) break;
             const w = cell.getWidth();
             if (w === 0) continue; // the second half of a wide glyph
-            const blank = (cell.getChars() || ' ') === ' ';
+            // A cell's BASE character decides: zero-width marks attach to the
+            // cell before them, so a space can read " \u200E" (Codex P2).
+            const chars = cell.getChars();
+            const blank = !chars || chars[0] === ' ';
             if (!blank) {
               end = x + w;
               if (start === -1) start = x;

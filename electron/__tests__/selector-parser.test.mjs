@@ -315,6 +315,10 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   const zwLines = await renderScreenLines(new TextEncoder().encode(`${E}[2J${E}[H` + zw));
   sv2('screen: the emulator gives each row\'s first-word width', zwLines.firstWords.slice(2, 4), [4, 2]);
   sv2('screen: through the emulator, a zero-width filler cannot join two commands', parseSelectorFromScreen(zwLines)?.prompt?.includes('\nrm'), true);
+  const lrmSp = '─'.repeat(80) + '\r\n←  ☐ Cleanup  ✔ Submit  →\r\necho ' + 'x'.repeat(65) + '\r\nrm \u200E-rf build\r\n❯ 1. Yes\r\n  2. No\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n';
+  const lrmLines = await renderScreenLines(new TextEncoder().encode(`${E}[2J${E}[H` + lrmSp));
+  sv2('screen: a mark attached to a space does not lengthen the first word', lrmLines.firstWords[3], 2);
+  sv2('screen: through the emulator, a marked space cannot join two commands', parseSelectorFromScreen(lrmLines)?.prompt?.includes('\nrm'), true);
   // A long question Claude wrapped over several rows reads as one paragraph.
   const wrapped = parseSelectorFromScreen([
     '─'.repeat(80),
