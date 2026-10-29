@@ -5,7 +5,7 @@ import { buildTerminalFontFamily } from '../lib/terminal-font';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import { useStore } from '../store/store';
-import { takePendingScrollback } from '../lib/pending-scrollback';
+import { takePendingScrollback, drawableLine } from '../lib/pending-scrollback';
 
 // States carried by the Dobius status marker (OSC 777;dobius;<state>), emitted by
 // the managed Claude Notification/Stop hook. Anything else is ignored.
@@ -198,7 +198,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
         if (cancelled) return;
         if (state?.scrollback?.length > 0 && termRef.current) {
           for (const line of state.scrollback) {
-            const safeLine = String(line).replace(/\x1b/g, '');
+            const safeLine = drawableLine(line);
             termRef.current.write('\x1b[2m' + safeLine + '\x1b[0m\r\n');
           }
           // A moved tab (tear-off or dock) keeps its live session: no divider.

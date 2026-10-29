@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
-import { setPendingScrollback } from '../../lib/pending-scrollback';
+import { setPendingScrollback, drawableLine } from '../../lib/pending-scrollback';
 
 export default function Checkpoints() {
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const addTab = useStore((s) => s.addTab);
   const setActiveView = useStore((s) => s.setActiveView);
   const setActiveTab = useStore((s) => s.setActiveTab);
+  const setTabViewMode = useStore((s) => s.setTabViewMode);
   const activeTabId = useStore((s) => s.activeTabId);
   const getActiveTerminalTabId = useStore((s) => s.getActiveTerminalTabId);
 
@@ -69,17 +70,18 @@ export default function Checkpoints() {
     const termId = getActiveTerminalTabId();
     if (!window.electronAPI || !termId) return;
     setActiveTab(termId);
+    setTabViewMode(termId, 'terminal'); // a tab in Chat view would hide it (Codex P2)
     // Draw the checkpoint as dimmed text on the terminal's SCREEN. It used to
     // go through terminalWrite, which is PTY input: each line plus \r was
     // typed into whatever ran in the tab, so a running Claude got every saved
     // line as a prompt (Codex P1).
     if (cp.scrollback?.length > 0) {
-      const text = cp.scrollback.map((line) => '\x1b[2m' + String(line).replace(/\x1b/g, '') + '\x1b[0m\r\n').join('')
+      const text = cp.scrollback.map((line) => '\x1b[2m' + drawableLine(line) + '\x1b[0m\r\n').join('')
         + '\x1b[2m\x1b[38;5;240m── restored checkpoint ──\x1b[0m\r\n\r\n';
       window.dispatchEvent(new CustomEvent('dobius:terminal-print', { detail: { id: termId, text } }));
     }
     setActiveView('terminal');
-  }, [getActiveTerminalTabId, setActiveTab, setActiveView]);
+  }, [getActiveTerminalTabId, setActiveTab, setTabViewMode, setActiveView]);
 
   const handleFork = useCallback((cp) => {
     if (!currentProjectPath || !window.electronAPI) return;
