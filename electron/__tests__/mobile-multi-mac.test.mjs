@@ -148,6 +148,19 @@ test('hostless browser legacy pairing uses serving origin; native never invents 
   assert.equal(native.values.get(TOKEN_KEY), a.token);
 });
 
+test('a Mac proven to be the same at a new address keeps ONE record, moved there', () => {
+  const before = initial();
+  const next = upsertPairing(before, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'unused', now: 9, replaceId: 'a' });
+  assert.equal(next.pairings.length, 2, 'no second entry for the same Mac');
+  const moved = next.pairings.find((p) => p.id === 'a');
+  assert.equal(moved.origin, 'https://a-new.tail.ts.net:8420');
+  assert.equal(moved.token, 'tls-a');
+  assert.equal(moved.name, before.pairings.find((p) => p.id === 'a').name, 'keeps its name');
+  assert.equal(next.activeId, 'a');
+  const unproven = upsertPairing(before, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'c', now: 9 });
+  assert.equal(unproven.pairings.length, 3, 'without proof it is a separate Mac');
+});
+
 test('re-pair deduplicates normalized origins and retains identity and name', () => {
   const before = initial();
   const next = upsertPairing(before, { origin: 'HTTPS://A.TAIL.TS.NET:8420/path?x=1', token: 'new-a' }, { id: 'unused', now: 9 });

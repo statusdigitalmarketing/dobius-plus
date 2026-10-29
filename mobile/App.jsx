@@ -118,6 +118,27 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
     onOpen={openTab} onShowHistory={() => setView('history')} />;
 }
 
+// The id of a paired Mac, at an address other than `origin`, that is the same
+// server as the one just paired: one of the addresses that server reported
+// for itself, and it accepts the token it just issued. The token only goes to
+// addresses the new Mac named, so a Mac that lies can only leak its own token.
+// null when there is none or it cannot be reached (both records then stay).
+async function sameMacAs(state, origin, token, hosts) {
+  const own = new Set(hosts.map((h) => String(h).toLowerCase().replace(/\.$/, '')));
+  const hostOf = (o) => { try { return new URL(o).hostname.toLowerCase(); } catch { return ''; } };
+  const target = normaliseHost(origin);
+  for (const p of state?.pairings || []) {
+    if (p.origin === target || !own.has(hostOf(p.origin))) continue;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 3000);
+    try {
+      const res = await fetch(`${p.origin}/push/vapid`, { headers: { Authorization: `Bearer ${token}` }, signal: ctl.signal, cache: 'no-store', credentials: 'omit', redirect: 'error' });
+      if (res.status !== 401 && res.status !== 403 && res.status !== 421 && res.status < 500) return p.id;
+    } catch { /* unreachable from here (mixed content, offline): keep both */ } finally { clearTimeout(timer); }
+  }
+  return null;
+}
+
 export default function App() {
   const [state, setState] = useState(null);
   const stateRef = useRef(null);
@@ -224,8 +245,6 @@ export default function App() {
     consume();
     window.addEventListener('hashchange', consume); // a second scan in the same tab
     return () => window.removeEventListener('hashchange', consume);
-    // showPairing only touches refs and setters.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Show a document as the current one, ending the old Mac's connection when
@@ -361,9 +380,13 @@ export default function App() {
   if (!state) return <div className="screen center"><p className="mac-error">{error || 'Loading…'}</p>{error && <button onClick={() => setLoadAttempt((n) => n + 1)}>Retry</button>}</div>;
   const active = activePairing(state);
   const cancelPairing = () => { pairingUIRef.current = null; setPairingUI(null); };
-  const handlePaired = async ({ token, host, name }) => {
+  const handlePaired = async ({ token, host, name, hosts = [] }) => {
     const shown = pairingUI;
-    const ok = await update((s) => upsertPairing(s, { origin: host, token, name }, { id: crypto.randomUUID?.() || `mac-${Date.now()}-${Math.random().toString(36).slice(2)}`, now: Date.now() }));
+    // Already paired with this Mac at another of its addresses (HTTP before
+    // HTTPS came on)? Keep ONE record, but only when proven: that address must
+    // accept the token just issued here, which only the same server can.
+    const replaceId = await sameMacAs(stateRef.current, host, token, hosts);
+    const ok = await update((s) => upsertPairing(s, { origin: host, token, name }, { id: crypto.randomUUID?.() || `mac-${Date.now()}-${Math.random().toString(36).slice(2)}`, now: Date.now(), replaceId }));
     if (!ok) throw new Error('Could not save this pairing. Check device storage and get a new pairing code.');
     const current = pairingUIRef.current;
     // A scan can arrive during the storage write, or before React commits its

@@ -38,11 +38,16 @@ export function isAllowedMobileOrigin(origin, { hosts = null, ports = null } = {
  * drop a default port from Host. `name` may be null while the MagicDNS lookup
  * is unknown; the IP still works.
  */
-export function isOwnHost(host, { ip, name = null, port }) {
+export function isOwnHost(host, { ip, name = null, port, strict = false }) {
   if (typeof host !== 'string' || !host) return false;
   const h = host.trim().toLowerCase().replace(/\.(:\d+)?$/, '$1'); // a trailing-dot FQDN is the same name
   const full = name ? String(name).toLowerCase().replace(/\.$/, '') : '';
-  const names = [ip && String(ip).toLowerCase(), full, full.split('.')[0]].filter(Boolean);
+  // strict (for /pair, the one route that MINTS a token): no short name. A
+  // short name resolves through the phone's search domain, which an attacker
+  // can control (or a switch of tailnets can repoint), so a rebinding page at
+  // http://my-mac:8420 could pair (Codex P1, two lenses). Every other route
+  // needs a bearer token such a page never has.
+  const names = [ip && String(ip).toLowerCase(), full, !strict && full.split('.')[0]].filter(Boolean);
   const own = names.map((x) => `${x}:${port}`);
   if (port === 80 || port === 443) own.push(...names);
   return own.includes(h);

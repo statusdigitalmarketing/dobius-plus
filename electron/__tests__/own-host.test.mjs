@@ -26,4 +26,8 @@ assert.equal(isOwnHost('sams-macbook-pro.tail6addbf.ts.net:443', std), true);
 assert.equal(isOwnHost('100.89.143.67', { ...mac, port: 80 }), true); ok('on 80 the IP without a port');
 assert.equal(isOwnHost('evil.example', std), false); ok('a foreign name is refused on 443 too');
 assert.equal(isOwnHost('sams-macbook-pro.tail6addbf.ts.net.', std), true); ok('a trailing dot with no port');
+const strict = { ...mac, strict: true };
+assert.equal(isOwnHost('sams-macbook-pro:8420', strict), false); ok('/pair refuses the short name (a search domain can repoint it)');
+assert.equal(isOwnHost('sams-macbook-pro.tail6addbf.ts.net:8420', strict), true);
+assert.equal(isOwnHost('100.89.143.67:8420', strict), true); ok('/pair takes the full name and the IP');
 console.log(`own-host: ${pass} pass`);

@@ -1161,9 +1161,9 @@ async function doStartMobileServer(stillCurrent) {
   const corsOk = (origin) => isAllowedMobileOrigin(origin, { hosts: corsHosts, ports: corsPorts });
   // Only requests addressed to this Mac (mobile-cors.js isOwnHost): a foreign
   // Host is a DNS-rebinding page calling us from its own origin.
-  const hostOk = (host) => isOwnHost(host, { ip, name: ownName || magicName, port });
+  const hostOk = (host, strict = false) => isOwnHost(host, { ip, name: ownName || magicName, port, strict });
   expApp.use((req, res, next) => {
-    if (!hostOk(req.headers.host)) return res.status(421).end();
+    if (!hostOk(req.headers.host, req.path === '/pair')) return res.status(421).end();
     return next();
   });
   expApp.use((req, res, next) => {
@@ -1271,7 +1271,10 @@ async function doStartMobileServer(stillCurrent) {
     // The Mac's own name, so a phone holding several Macs can tell them apart
     // without the user typing one (an address alone is unreadable). Only a
     // caller that just proved the pairing code sees it.
-    res.json({ ok: true, token, name: os.hostname().replace(/\.local$/i, '').slice(0, 80) });
+    // hosts: this Mac's own addresses, so a phone that already has it at
+    // another one (HTTP before HTTPS came on) can prove it is the same Mac by
+    // this token and keep ONE record (mobile/pairings.js).
+    res.json({ ok: true, token, name: os.hostname().replace(/\.local$/i, '').slice(0, 80), hosts: [ip, ownName || magicName].filter(Boolean) });
   });
 
   // ----- Voice Conductor endpoints (Siri / glasses entry point) -----

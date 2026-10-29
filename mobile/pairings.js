@@ -5,12 +5,19 @@ export const emptyPairings = () => ({ version: 1, pairings: [], activeId: null }
 export const activePairing = (state) => state.pairings.find((p) => p.id === state.activeId) || null;
 export const pairingKey = (pairing, key) => `${key}:${pairing.id}`;
 
-export function upsertPairing(state, { origin, token, name }, { id, now }) {
+/**
+ * Add or update a Mac. `replaceId` names a record at ANOTHER address that was
+ * proven to be this same Mac (App.jsx sameMac: it accepted this new token), so
+ * that record moves to the new address and keeps its name and settings rather
+ * than leaving two entries for one Mac.
+ */
+export function upsertPairing(state, { origin, token, name }, { id, now, replaceId = null }) {
   origin = normaliseHost(origin);
   if (!origin || typeof token !== 'string' || !token) throw new Error('Invalid pairing');
-  const existing = state.pairings.find((p) => p.origin === origin);
+  const existing = state.pairings.find((p) => p.origin === origin)
+    || (replaceId ? state.pairings.find((p) => p.id === replaceId) : null);
   const record = existing
-    ? { ...existing, token, lastUsedAt: now }
+    ? { ...existing, origin, token, lastUsedAt: now }
     : { id, origin, token, name: name?.trim() || new URL(origin).hostname, addedAt: now, lastUsedAt: now };
   if (!record.id) throw new Error('Missing pairing id');
   return {

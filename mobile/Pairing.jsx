@@ -70,7 +70,8 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
       });
       if (generation !== generationRef.current) return; // superseded
       if (data.ok && data.token) {
-        await onPaired({ token: data.token, host: hostToUse, name: typeof data.name === 'string' ? data.name : '' });
+        const hosts = Array.isArray(data.hosts) ? data.hosts.filter((h) => typeof h === 'string' && h.length < 256).slice(0, 4) : [];
+        await onPaired({ token: data.token, host: hostToUse, name: typeof data.name === 'string' ? data.name : '', hosts });
       } else {
         setError(data.error || 'Pairing failed.');
         setCode('');
