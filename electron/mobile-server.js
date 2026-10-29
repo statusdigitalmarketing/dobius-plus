@@ -1278,7 +1278,7 @@ async function doStartMobileServer(stillCurrent) {
     // hosts: this Mac's own addresses, so a phone that already has it at
     // another one (HTTP before HTTPS came on) can prove it is the same Mac by
     // this token and keep ONE record (mobile/pairings.js).
-    res.json({ ok: true, token, name: os.hostname().replace(/\.local$/i, '').slice(0, 80), hosts: [ip, ownName || magicName].filter(Boolean) });
+    res.json({ ok: true, token, name: os.hostname().replace(/\.local$/i, '').slice(0, 80), hosts: [ip, ownName || magicName, (ownName || magicName || '').split('.')[0]].filter(Boolean) });
   });
 
   // ----- Voice Conductor endpoints (Siri / glasses entry point) -----
@@ -1294,6 +1294,24 @@ async function doStartMobileServer(stillCurrent) {
     const m = (req.headers.authorization || '').match(/^Bearer\s+([0-9a-f]{64})$/i);
     return m ? m[1] : null;
   }
+
+  // POST /same-mac { tokenHash, nonce }  (Bearer: the token just issued by the
+  // Mac the phone paired). Lets a phone prove an older saved address is THIS
+  // Mac without sending that address's token anywhere: it sends sha256(old
+  // token) and a nonce, and only a server holding that token can answer with
+  // HMAC(old token, nonce). A different Mac at a reused tailnet IP cannot, and
+  // one that relays to the real Mac fails the bearer check there (Codex P1).
+  expApp.post('/same-mac', (req, res) => {
+    if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
+    const { tokenHash, nonce } = req.body || {};
+    const hex64 = (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
+    if (!hex64(tokenHash) || !hex64(nonce)) return res.status(400).json({ ok: false, error: 'bad request' });
+    const want = Buffer.from(tokenHash, 'hex');
+    const old = getMobileServerConfig().devices.find((d) => typeof d.token === 'string' && d.token
+      && crypto.timingSafeEqual(crypto.createHash('sha256').update(d.token).digest(), want));
+    if (!old) return res.status(404).json({ ok: false, error: 'unknown' });
+    res.json({ ok: true, proof: crypto.createHmac('sha256', old.token).update(nonce).digest('hex') });
+  });
 
   // POST /voice/intent  { transcript: string, tabId?: string }
   // Two modes:

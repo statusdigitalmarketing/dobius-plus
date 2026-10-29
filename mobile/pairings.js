@@ -7,8 +7,8 @@ export const pairingKey = (pairing, key) => `${key}:${pairing.id}`;
 
 /**
  * Add or update a Mac. `replaceId` names a record at ANOTHER address that was
- * proven to be this same Mac (App.jsx sameMacAs: it accepted its old token
- * AND this new one), so that record moves to the new address and keeps its
+ * proven to be this same Mac (App.jsx sameMacAs: it holds the saved token and
+ * accepts this new one), so that record moves to the new address and keeps its
  * name and settings rather than leaving two entries for one Mac.
  */
 export function upsertPairing(state, { origin, token, name }, { id, now, replaceId = null }) {

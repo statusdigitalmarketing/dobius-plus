@@ -119,31 +119,38 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
 }
 
 // The id of a paired Mac, at an address other than `origin`, that is the same
-// server as the one just paired. Proof: that address accepts BOTH the record's
-// own token and the token just issued, and tokens are only valid on the server
-// that minted them. Accepting only the new one is not enough: a different Mac
-// on another tailnet can hold the same IP. The new token only goes to
-// addresses the new Mac named, so a Mac that lies can only leak its own token.
-// null when there is none or it cannot be reached (both records then stay).
+// server as the one just paired. Proof: that address answers POST /same-mac
+// with HMAC(record's token, nonce), which only the server holding that token
+// can make, while accepting the token just issued. The saved token itself is
+// never sent (a different Mac can hold the same tailnet IP: Codex P1), only
+// its hash. The new token only goes to addresses the new Mac named itself.
+// null when there is none, it cannot be reached, or WebCrypto is missing (a
+// plain-HTTP browser page): both records then stay.
 async function sameMacAs(state, origin, token, hosts) {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return null;
   const own = new Set(hosts.map((h) => String(h).toLowerCase().replace(/\.$/, '')));
   const hostOf = (o) => { try { return new URL(o).hostname.toLowerCase(); } catch { return ''; } };
   const target = normaliseHost(origin);
-  // Only a real answer counts: a 2xx carrying this Mac's push key. An error
-  // (a 431 for an oversized header) is readable same-origin and proves nothing.
-  const accepts = async (base, bearer) => {
+  const enc = new TextEncoder();
+  const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  for (const p of state?.pairings || []) {
+    if (p.origin === target || !own.has(hostOf(p.origin))) continue;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 3000);
     try {
-      const res = await fetch(`${base}/push/vapid`, { headers: { Authorization: `Bearer ${bearer}` }, signal: ctl.signal, cache: 'no-store', credentials: 'omit', redirect: 'error' });
+      const nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
+      const key = await subtle.importKey('raw', enc.encode(p.token), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      const want = hex(await subtle.sign('HMAC', key, enc.encode(nonce)));
+      const tokenHash = hex(await subtle.digest('SHA-256', enc.encode(p.token)));
+      const res = await fetch(`${p.origin}/same-mac`, {
+        method: 'POST', body: JSON.stringify({ tokenHash, nonce }), signal: ctl.signal,
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        cache: 'no-store', credentials: 'omit', redirect: 'error',
+      });
       const body = res.ok ? await res.json().catch(() => null) : null;
-      return body?.ok === true && typeof body.publicKey === 'string' && body.publicKey ? body.publicKey : null;
-    } catch { return null; /* unreachable from here (mixed content, offline): keep both */ } finally { clearTimeout(timer); }
-  };
-  for (const p of state?.pairings || []) {
-    if (p.origin === target || !own.has(hostOf(p.origin))) continue;
-    const mine = await accepts(p.origin, p.token);
-    if (mine && await accepts(p.origin, token) === mine) return p.id;
+      if (body?.ok === true && body.proof === want) return p.id;
+    } catch { /* unreachable from here (mixed content, offline): keep both */ } finally { clearTimeout(timer); }
   }
   return null;
 }
