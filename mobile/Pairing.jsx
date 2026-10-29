@@ -225,7 +225,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
                 setError('');
               }}
               disabled={busy}
-              style={{ marginTop: 12, background: 'none', border: 'none', opacity: 0.7, fontSize: 14 }}
+              style={{ marginTop: 12, background: 'none', border: 'none', color: 'var(--fg)', opacity: 0.7, fontSize: 14 }}
             >
               Cancel
             </button>
