@@ -358,6 +358,7 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: a path with a space broken before its slash keeps the break', wrapAt(['Edits /Users/sam/Library/Application Supp', 'ort/config.json now.']), 'Edits /Users/sam/Library/Application Supp\nort/config.json now.');
   sv2('screen: a file name broken mid-word keeps the break', wrapAt(['Edits /Users/sam/Desktop/Quarterly Rep', 'ort.pdf today.']), 'Edits /Users/sam/Desktop/Quarterly Rep\nort.pdf today.');
   sv2('screen: a slashless file name broken mid-word keeps the break', wrapAt(['Renames the Quarterly Rep', 'ort.pdf today.']), 'Renames the Quarterly Rep\nort.pdf today.');
+  sv2('screen: an extension broken mid-word keeps the break', wrapAt(['Renames Quarterly Report.p', 'df today.']), 'Renames Quarterly Report.p\ndf today.');
   sv2('screen: ordinary prose still re-flows with a space', wrapAt(['Writes the main config file', 'and nothing else.']), 'Writes the main config file and nothing else.');
   // A crafted row cannot freeze the parser (it backtracked exponentially once).
   { const t0 = Date.now(); parseSelectorFromScreen(['─'.repeat(40), '☐ A '.repeat(2000) + '←', 'Q', '❯ 1. x', '  2. y', 'Enter to select · Esc to cancel']); sv2('screen: a hostile tab-like row parses quickly', Date.now() - t0 < 200, true); }
@@ -374,6 +375,10 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   const heredoc = parseSelectorFromScreen(['─'.repeat(40), ' Bash command', "   cat <<'EOF' > notes.md", '←  ☐ A  ☐ B  ✔ Submit  →', '   EOF', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel']);
   sv2('screen: a bar inside a permission prompt\'s heredoc is not a tab bar', heredoc?.steps, undefined);
   const checked = parseSelectorFromScreen(['─'.repeat(40), '←  ☐ ✔ Check  ☐ Deploy  ✔ Submit  →', 'Run the check?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const boxHeader = parseSelectorFromScreen(['─'.repeat(40), ' ☐ Use ☐ box ', 'Which box?', '❯ 1. This', '  2. That', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  sv2('screen: a checkbox inside a single question\'s header is one question', boxHeader?.steps, { labels: ['Use ☐ box'], answered: [false], current: 0, total: 1 });
+  const ruled = parseSelectorFromScreen(['─'.repeat(40), ' Bash command', "   cat <<'EOF' > notes.md", '   ──────────', '   ←  ☐ A  ☐ B  ✔ Submit  →', '   EOF', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel']);
+  sv2('screen: a rule and bar inside a heredoc give a permission prompt no steps', ruled?.steps, undefined);
   sv2('screen: a checkmark inside a header is part of that header', checked?.steps, { labels: ['✔ Check', 'Deploy'], answered: [false, false], current: 0, total: 2 });
   // Plain lines (no highlight information): the first unanswered one.
   sv2('screen: without highlights, steps fall back to the first unanswered', parseSelectorFromScreen([...lines])?.steps,

@@ -142,7 +142,15 @@ function ToolImages({ images }) {
 // a selector card behind it, Codex), Escape/Enter or a click/tap closes it.
 function Lightbox({ url, onClose }) {
   const ref = useRef(null);
-  useEffect(() => { ref.current?.focus(); }, []);
+  // Modal for real: anything that grabs focus while it is open (a new tab's
+  // terminal in the other split pane) hands it straight back, so typing and
+  // Enter never reach a pane hidden under the image (Codex P2).
+  useEffect(() => {
+    ref.current?.focus();
+    const keep = (e) => { if (ref.current && !ref.current.contains(e.target)) ref.current.focus(); };
+    document.addEventListener('focusin', keep);
+    return () => document.removeEventListener('focusin', keep);
+  }, []);
   // Rendered on <body>: inside a collapsed message, the clamp's mask would
   // crop a fixed overlay to the message (Codex P2).
   return createPortal(

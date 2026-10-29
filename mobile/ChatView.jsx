@@ -25,7 +25,9 @@ const MULTI_OPTION = /^(\[[ x✓✔]\]|[☐☒])\s/;
 function promptParts(text) {
   const rows = String(text || '').split('\n').map((r) => r.trim()).filter(Boolean);
   const question = rows.pop() || '';
-  const tool = rows.length > 1 && /^[A-Z][\w ]{0,30}$/.test(rows[0]) && /(command|file|edit|write|read|fetch|search|tool)$/i.test(rows[0]) ? rows.shift() : '';
+  // A tool label is one or two words ending in a tool noun ("Bash command",
+  // "Edit file"); "Delete the existing Makefile" is a question (Codex P2).
+  const tool = rows.length > 1 && /^[A-Z]\w*( \w+)?$/.test(rows[0]) && /\b(command|file|edit|write|read|fetch|search|tool)$/i.test(rows[0]) ? rows.shift() : '';
   return { tool, context: rows, question, code: /command$/i.test(tool) };
 }
 function AskPrompt({ text }) {
