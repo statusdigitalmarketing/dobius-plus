@@ -384,7 +384,7 @@ export function parseSelectorFromScreen(lines) {
     // Non-numbered line: a description under an option (indented) keeps the
     // walk going while we are inside the block; anything else above the
     // topmost option ends the block.
-    if (/^\s{3,}\S/.test(line)) { pendingDetail.push(t); pendingEnds.push(rowWidth(line)); continue; } // option description
+    if (/^\s{3,}\S/.test(line)) { pendingDetail.push(t); pendingEnds.push(colOf(lines, i)); continue; } // option description
     if (options.length === 0) { pendingDetail = []; pendingEnds = []; continue; } // hint chrome between hint and block
     break;
   }
@@ -412,7 +412,7 @@ export function parseSelectorFromScreen(lines) {
   // rows (a command, its description, the question; answers one per line).
   const prose = !!steps && steps.current < steps.total;
   // The terminal's width, as wide as its widest row (the frame's rule).
-  const frameW = lines.reduce((w, l) => Math.max(w, rowWidth(l)), 0);
+  const frameW = lines.reduce((w, l, i) => Math.max(w, colOf(lines, i)), 0);
   // Option descriptions likewise (Claude wrapped them at the terminal width).
   const opts = prose ? options.map((o) => (o.detail ? { ...o, detail: reflow(o.detail.split('\n'), detailEnds.get(o), frameW) } : o)) : options;
   const out = { prompt: screenPrompt(lines, blockTop, prose, frameW), options: opts, selectedIndex: sel };
@@ -447,11 +447,18 @@ function isTabBar(line) {
 // characters take none (security review), and East Asian wide glyphs and
 // emoji take two (Codex P2: counted as one, a CJK row looked narrower than
 // a short quoted rule above it). Overcounting only ever drops a stepper.
+// An ESTIMATE: real screens use the emulator's exact columns (colOf).
 const WIDE_RE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u;
 function rowWidth(s) {
   let w = 0;
   for (const ch of s.trimEnd().replace(/[\p{M}\u200B-\u200D\u2060\uFEFF]/gu, '')) w += WIDE_RE.test(ch) ? 2 : 1;
   return w;
+}
+// The column row i ends at: the emulator's own answer when screen-render gave
+// one (exact), else this estimate (plain string arrays, tests).
+function colOf(lines, i) {
+  const e = Array.isArray(lines.ends) ? lines.ends[i] : undefined;
+  return typeof e === 'number' ? e : rowWidth(lines[i]);
 }
 function screenSteps(lines, blockTop, hintIdx = blockTop) {
   // The tab bar sits between the frame's rule and the question: never look
@@ -468,9 +475,9 @@ function screenSteps(lines, blockTop, hintIdx = blockTop) {
   // Every row of the frame counts, the options and hint too, not only the
   // rows above them (Codex P2).
   let widest = 0;
-  for (let i = blockTop; i <= hintIdx && i < lines.length; i += 1) widest = Math.max(widest, rowWidth(lines[i]));
+  for (let i = blockTop; i <= hintIdx && i < lines.length; i += 1) widest = Math.max(widest, colOf(lines, i));
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
-    const len = rowWidth(lines[i]);
+    const len = colOf(lines, i);
     if (/^─/.test(lines[i]) && SCREEN_RULE_RE.test(lines[i].trim()) && len >= widest) { bounded = true; break; }
     widest = Math.max(widest, len);
     if (i === 0) bounded = true;
@@ -491,9 +498,13 @@ function screenSteps(lines, blockTop, hintIdx = blockTop) {
   // linear, the two parts cannot overlap.
   const items = [];
   const row = lines[tb];
-  for (const m of row.matchAll(/\S+(?: \S+)*/g)) {
+  const runs = [...row.matchAll(/\S+(?: \S+)*/g)];
+  // Only the bar's own ends are navigation: an arrow anywhere else is header
+  // text ("Deploy  →" is a header, Codex P2).
+  if (runs[0]?.[0] === '←') runs.shift();
+  if (runs[runs.length - 1]?.[0] === '→') runs.pop();
+  for (const m of runs) {
     const run = m[0];
-    if (run === '←' || run === '→') continue;
     const prev = items[items.length - 1];
     // A run with no mark of its own continues the header before it: "Deploy
     // prod" with two spaces is one header, not "Deploy" (Codex P2).
@@ -552,13 +563,17 @@ const PROMPT_MAX_CHARS = 1500;
  * that only ever keeps a break.
  */
 const WRAP_SLACK = 4; // the TUI may wrap a few columns inside the frame's edge
+// A wrapped row also REACHES near the edge: a short row followed by a long
+// word is an intentional newline as often as a wrap, and joining it could
+// hide a second command (Codex P2). Ambiguous rows keep their break.
+const WRAP_REACH = 10;
 function reflow(rows, ends, frameW) {
   let out = '';
   rows.forEach((r, k) => {
     if (!k) { out = r; return; }
     const end = ends?.[k - 1];
     const line = out.slice(out.lastIndexOf('\n') + 1);
-    const wrapped = typeof end === 'number' && frameW > 0 && end < frameW
+    const wrapped = typeof end === 'number' && frameW > 0 && end < frameW && end >= frameW - WRAP_REACH
       && end + 1 + rowWidth(r.split(' ')[0]) > frameW - WRAP_SLACK;
     const dotted = (w) => /\.\w/.test(w);
     const pathy = line.includes('/') || r.includes('/') || dotted(line.split(' ').pop()) || dotted(r.split(' ')[0]) || !line.includes(' ');
@@ -575,7 +590,7 @@ function screenPrompt(lines, blockTop, prose = false, frameW = 0) {
     if (SCREEN_RULE_RE.test(t) || SCREEN_CHROME_RE.test(t)) { bounded = true; break; }
     if (!t) { if (paragraphs[0].length) paragraphs.unshift([]); continue; }
     if (!/[\p{L}\p{N}]/u.test(t)) continue; // a lone glyph or border
-    const row = { t, end: rowWidth(lines[i]) };
+    const row = { t, end: colOf(lines, i) };
     paragraphs[0].unshift(row);
   }
   const kept = (bounded ? paragraphs : paragraphs.slice(-1)).filter((p) => p.length);

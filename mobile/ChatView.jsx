@@ -460,8 +460,12 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     // is still full of the last one, so parallel requests refused each other
     // in lockstep until their retries ran out (Codex P2).
     let queue = Promise.resolve();
+    // Leaving the chat (or switching session) kills the queue: requests not
+    // yet sent are dropped, so abandoned images never share the socket with
+    // what the user is looking at now (Codex P2).
+    let dead = false;
     const one = (ref) => new Promise((resolve) => {
-      if (connection.closed) { resolve(null); return; }
+      if (dead || connection.closed) { resolve(null); return; }
       const reqId = ++imageReqSeq;
       let off = () => {};
       const t = setTimeout(() => { off(); resolve(null); }, 20000);
@@ -473,12 +477,15 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       });
       connection.send({ type: 'chatImage', sessionId, projectPath, ref, reqId });
     });
-    return createImageCache((ref) => {
+    const fetcher = createImageCache((ref) => {
       const run = queue.then(() => one(ref));
       queue = run.then(() => undefined, () => undefined);
       return run;
     });
+    fetcher.kill = () => { dead = true; };
+    return fetcher;
   }, [connection, sessionId, projectPath, authEpoch]); // eslint-disable-line react-hooks/exhaustive-deps -- authEpoch only renews the cache
+  useEffect(() => () => imageFetch?.kill(), [imageFetch]);
   const [messages, setMessages] = useState(null); // null = loading
   const draftsKey = pairingKey(connection.pairing, DRAFTS_KEY);
   const [input, setInput] = useState(() => loadDraft(draftsKey, tabId));

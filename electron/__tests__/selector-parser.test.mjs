@@ -301,6 +301,14 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   const lines = await renderScreenLines(new TextEncoder().encode(raw));
   sv2('screen: steps follow the highlighted tab back to an answered question', parseSelectorFromScreen(lines)?.steps,
     { labels: ['Color', 'Size'], answered: [true, false], current: 0, total: 2 });
+  // The emulator reports each row's true end column: wide glyphs and the
+  // angle brackets a hand-written table missed (Codex P2) are exact.
+  const wideRaw = `${E}[2J${E}[Habc\r\n漢字\r\nab\u2329x\u232A\r\n`;
+  const wideLines = await renderScreenLines(new TextEncoder().encode(wideRaw));
+  sv2('screen: the emulator gives exact row end columns', wideLines.ends.slice(0, 3), [3, 4, 7]);
+  const q = '─'.repeat(80) + '\r\n ☐ Layout\r\nLike this?\r\n' + '─'.repeat(60) + '\r\n←  ☐ A  ☐ B  ✔ Submit  →\r\nThe vector bracket should remain visible in the output: \u2329x\u232A\r\n❯ 1. Yes\r\n  2. No\r\nEnter to select · ↑/↓ to navigate · Esc to cancel\r\n';
+  const qLines = await renderScreenLines(new TextEncoder().encode(`${E}[2J${E}[H` + q));
+  sv2('screen: through the emulator, a short quoted rule cannot bound the frame', parseSelectorFromScreen(qLines)?.steps?.total, 1);
   // A long question Claude wrapped over several rows reads as one paragraph.
   const wrapped = parseSelectorFromScreen([
     '─'.repeat(80),
@@ -364,6 +372,7 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: a long uppercase extension after the dot keeps the break', wrapAt(['Renames backup.', 'SQLITE3 today.']), 'Renames backup.\nSQLITE3 today.');
   sv2('screen: a sentence ending a full row still re-flows', wrapAt(['Writes the file, then it reads the whole tree back to check each entry.', 'Then it stops.']), 'Writes the file, then it reads the whole tree back to check each entry. Then it stops.');
   sv2('screen: a full row of prose re-flows with a space', wrapAt(['Writes the main config file for this project and each workspace under', 'it and nothing else.']), 'Writes the main config file for this project and each workspace under it and nothing else.');
+  sv2('screen: a short row and a long next word stay two lines', wrapAt(['echo checking production resources', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build']), 'echo checking production resources\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build');
   sv2('screen: two short rows are two lines, never one (separate commands)', wrapAt(['echo cleanup', 'rm -rf build']), 'echo cleanup\nrm -rf build');
   sv2('screen: a row cut at the very last column keeps the break', wrapAt(['x'.repeat(70) + ' abcd', 'efgh tail']), 'x'.repeat(70) + ' abcd\nefgh tail');
   // A crafted row cannot freeze the parser (it backtracked exponentially once).
@@ -397,6 +406,8 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   const cjk = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Like this?', '─'.repeat(60), '←  ☐ A  ☐ B  ✔ Submit  →', '漢'.repeat(35), '❯ 1. Yes', '  2. No', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
   sv2('screen: wide characters count two columns, so a short quoted rule cannot bound', cjk?.steps?.total, 1);
   const arrows = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Dev→Prod  ☐ Prod→Dev  ✔ Submit  →', 'Proceed?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const ends = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Deploy  →  ☐ Deploy  ←  ✔ Submit  →', 'Proceed?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: a standalone arrow inside a header is header text', ends?.steps?.labels, ['Deploy  →', 'Deploy  ←']);
   sv2('screen: arrows inside headers keep the bar', arrows?.steps?.labels, ['Dev→Prod', 'Prod→Dev']);
   sv2('screen: a checkbox inside a multi-question header stays in that header', multiBox?.steps?.labels, ['Use ☐ box', 'Deploy']);
   sv2('screen: a checkmark inside a header is part of that header', checked?.steps, { labels: ['✔ Check', 'Deploy'], answered: [false, false], current: 0, total: 2 });

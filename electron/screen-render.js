@@ -101,6 +101,23 @@ function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
           if (runs.length) highlights[i] = runs;
         }
         Object.defineProperty(out, 'highlights', { value: highlights });
+        // The column each row's last visible cell ends at, as the emulator
+        // laid it out: exact for wide glyphs, combining marks and zero-width
+        // characters alike, where counting the string's characters is not
+        // (Codex P2, twice). Non-enumerable, like highlights.
+        const ends = [];
+        for (let i = 0; i < ROWS; i += 1) {
+          const line = buf.getLine(i);
+          let end = 0;
+          for (let x = 0; x < COLS; x += 1) {
+            const cell = line?.getCell(x);
+            if (!cell) break;
+            const w = cell.getWidth();
+            if (w > 0 && (cell.getChars() || ' ') !== ' ') end = x + w;
+          }
+          ends.push(end);
+        }
+        Object.defineProperty(out, 'ends', { value: ends });
         resolve(out);
       } catch {
         resolve(null);
