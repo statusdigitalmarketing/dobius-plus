@@ -362,8 +362,10 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: a name broken right after its dot keeps the break', wrapAt(['Renames Quarterly Report.', 'pdf today.']), 'Renames Quarterly Report.\npdf today.');
   sv2('screen: an uppercase extension after the dot keeps the break', wrapAt(['Renames Quarterly Report.', 'PDF today.']), 'Renames Quarterly Report.\nPDF today.');
   sv2('screen: a long uppercase extension after the dot keeps the break', wrapAt(['Renames backup.', 'SQLITE3 today.']), 'Renames backup.\nSQLITE3 today.');
-  sv2('screen: a sentence ending a row still re-flows', wrapAt(['Writes the file.', 'Then it stops.']), 'Writes the file. Then it stops.');
-  sv2('screen: ordinary prose still re-flows with a space', wrapAt(['Writes the main config file', 'and nothing else.']), 'Writes the main config file and nothing else.');
+  sv2('screen: a sentence ending a full row still re-flows', wrapAt(['Writes the file, then it reads the whole tree back to check each entry.', 'Then it stops.']), 'Writes the file, then it reads the whole tree back to check each entry. Then it stops.');
+  sv2('screen: a full row of prose re-flows with a space', wrapAt(['Writes the main config file for this project and each workspace under', 'it and nothing else.']), 'Writes the main config file for this project and each workspace under it and nothing else.');
+  sv2('screen: two short rows are two lines, never one (separate commands)', wrapAt(['echo cleanup', 'rm -rf build']), 'echo cleanup\nrm -rf build');
+  sv2('screen: a row cut at the very last column keeps the break', wrapAt(['x'.repeat(70) + ' abcd', 'efgh tail']), 'x'.repeat(70) + ' abcd\nefgh tail');
   // A crafted row cannot freeze the parser (it backtracked exponentially once).
   { const t0 = Date.now(); parseSelectorFromScreen(['─'.repeat(80), '☐ A '.repeat(2000) + '←', 'Q', '❯ 1. x', '  2. y', 'Enter to select · Esc to cancel']); sv2('screen: a hostile tab-like row parses quickly', Date.now() - t0 < 200, true); }
   // Prose with a checkbox under the real bar does not hide the bar.
@@ -392,6 +394,10 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: a rule narrower than the footer does not bound the frame', shortRule?.steps?.total, 1);
   const spaced = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Deploy  prod  ☐ Deploy  test  ✔ Submit  →', 'Deploy now?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
   sv2('screen: a header with a double space keeps all of its text', spaced?.steps?.labels, ['Deploy  prod', 'Deploy  test']);
+  const cjk = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Like this?', '─'.repeat(60), '←  ☐ A  ☐ B  ✔ Submit  →', '漢'.repeat(35), '❯ 1. Yes', '  2. No', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  sv2('screen: wide characters count two columns, so a short quoted rule cannot bound', cjk?.steps?.total, 1);
+  const arrows = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Dev→Prod  ☐ Prod→Dev  ✔ Submit  →', 'Proceed?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: arrows inside headers keep the bar', arrows?.steps?.labels, ['Dev→Prod', 'Prod→Dev']);
   sv2('screen: a checkbox inside a multi-question header stays in that header', multiBox?.steps?.labels, ['Use ☐ box', 'Deploy']);
   sv2('screen: a checkmark inside a header is part of that header', checked?.steps, { labels: ['✔ Check', 'Deploy'], answered: [false, false], current: 0, total: 2 });
   // Plain lines (no highlight information): the first unanswered one.

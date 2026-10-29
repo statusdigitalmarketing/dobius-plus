@@ -456,7 +456,11 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const [authEpoch, setAuthEpoch] = useState(0);
   const imageFetch = useMemo(() => {
     if (!sessionId || !projectPath) return null;
-    return createImageCache((ref) => new Promise((resolve) => {
+    // One request at a time: the Mac refuses an image while its send buffer
+    // is still full of the last one, so parallel requests refused each other
+    // in lockstep until their retries ran out (Codex P2).
+    let queue = Promise.resolve();
+    const one = (ref) => new Promise((resolve) => {
       if (connection.closed) { resolve(null); return; }
       const reqId = ++imageReqSeq;
       let off = () => {};
@@ -468,7 +472,12 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         resolve(msg.ok && typeof msg.data === 'string' ? { mime: msg.mime, data: msg.data } : null);
       });
       connection.send({ type: 'chatImage', sessionId, projectPath, ref, reqId });
-    }));
+    });
+    return createImageCache((ref) => {
+      const run = queue.then(() => one(ref));
+      queue = run.then(() => undefined, () => undefined);
+      return run;
+    });
   }, [connection, sessionId, projectPath, authEpoch]); // eslint-disable-line react-hooks/exhaustive-deps -- authEpoch only renews the cache
   const [messages, setMessages] = useState(null); // null = loading
   const draftsKey = pairingKey(connection.pairing, DRAFTS_KEY);
