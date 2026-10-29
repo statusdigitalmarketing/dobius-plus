@@ -174,15 +174,37 @@ export default function Board({ connection, status, onOpen, onShowHistory, macNa
   const dotColor = status === 'authed' ? 'var(--status-done)'
     : status === 'connecting' ? 'var(--status-working)' : 'var(--status-needs)';
 
+  // One status line, most urgent first: on a 320px phone the end is what gets
+  // clipped, so "needs you" leads and "connected" only shows when nothing
+  // else is worth saying (Codex P2).
+  const statusRest = [
+    status === 'connecting' ? 'connecting' : status !== 'authed' ? 'offline' : '',
+    workingCount > 0 ? `${workingCount} working` : '',
+    terminals.length > 0 && totals.active === 0 ? 'all quiet' : '',
+    totals.done > 0 && totals.needs === 0 && totals.working === 0 ? `${totals.done} just finished` : '',
+  ].filter(Boolean).join(' · ') || (needsCount > 0 ? '' : 'connected');
+  const statusLine = [needsCount > 0 ? `${needsCount} needs you` : '', statusRest].filter(Boolean).join(' · ');
   return (
     <div className="screen board-screen">
-      <header className="board-header">
+      {/* The Claude app's home header: a round button (your Macs), the Mac's
+          name over a quiet status line, and a pill of actions. */}
+      <header className="board-header elevated">
         <div className="board-title-row">
-          <h1 className="board-title"><button className="mac-title" onClick={onMacs} aria-label={`Switch Mac, current Mac: ${macName}`}>{macName} ▾</button></h1>
-          <div className="board-actions">
+          <button className="tb-round" onClick={onMacs} aria-label={`Switch Mac, current Mac: ${macName}`}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2" /><path d="M2.5 19h19" /></svg>
+          </button>
+          <button className="board-title-mid" onClick={onMacs} aria-label={`${macName}: ${statusLine}. Switch Mac`}>
+            <span className="board-title-main">{macName}</span>
+            <span className="board-title-sub">
+              {status !== 'authed' && <span className="status-dot" style={{ backgroundColor: dotColor }} />}
+              {needsCount > 0 && <span className="board-title-needs">{`${needsCount} needs you`}</span>}
+              {needsCount > 0 && statusRest ? ' · ' : ''}
+              {statusRest}
+            </span>
+          </button>
+          <div className="tb-pill">
             {pushSupported() && alerts !== 'on' && (
               <button
-                className="icon-btn"
                 onClick={async () => {
                   const r = await enablePush(connection);
                   setAlerts(r.ok ? 'on' : 'error');
@@ -191,32 +213,16 @@ export default function Board({ connection, status, onOpen, onShowHistory, macNa
                 }}
                 aria-label="Enable notifications"
                 title="Get notified when a session needs you"
-              >🔔</button>
+              ><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z" /><path d="M10 20.5a2 2 0 0 0 4 0" /></svg></button>
             )}
-            <button className="icon-btn" onClick={onShowHistory} aria-label="Chat history">☷</button>
+            <button onClick={onShowHistory} aria-label="Chat history">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></svg>
+            </button>
             <button
-              className="icon-btn"
               onClick={() => { setPickerOpen(true); connection.send({ type: 'listProjects' }); }}
               aria-label="New session"
-            >+</button>
+            ><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
           </div>
-        </div>
-        <div className="board-summary">
-          <span className="conn-pill">
-            <span className="status-dot" style={{ backgroundColor: dotColor }} />
-            {status === 'authed' ? 'connected' : status === 'connecting' ? 'connecting' : 'offline'}
-          </span>
-          {needsCount > 0 && <span className="summary-chip chip-needs">{needsCount} needs you</span>}
-          {workingCount > 0 && <span className="summary-chip chip-working">{workingCount} working</span>}
-          {/* With every project dormant the board is nothing but collapsed
-              headers, which reads as broken rather than as "all quiet". Say
-              so explicitly. */}
-          {terminals.length > 0 && totals.active === 0 && (
-            <span className="summary-chip">all quiet · {totals.idle} idle</span>
-          )}
-          {totals.done > 0 && totals.needs === 0 && totals.working === 0 && (
-            <span className="summary-chip">{totals.done} just finished</span>
-          )}
         </div>
         {alertMsg && <div className="board-alert">{alertMsg}</div>}
       </header>
@@ -310,7 +316,12 @@ export default function Board({ connection, status, onOpen, onShowHistory, macNa
         <div className="sheet-backdrop" onClick={() => setPickerOpen(false)}>
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
             <div className="sheet-handle" aria-hidden="true" />
-            <div className="sheet-title">New session in…</div>
+            <div className="sheet-heading">
+              <button className="tb-round" onClick={() => setPickerOpen(false)} aria-label="Close">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+              </button>
+              <div className="sheet-title">New session in…</div>
+            </div>
             <div className="sheet-list">
               {projects.length === 0 && <div className="sheet-empty">Loading projects…</div>}
               {projects.map((p) => (

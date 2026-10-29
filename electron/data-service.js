@@ -1547,6 +1547,180 @@ function toolResultText(content) {
   }).filter(Boolean).join('\n');
 }
 
+// --- Images in tool results ------------------------------------------------
+// A tool can return pictures (Read of a screenshot returns the image itself).
+// Rows carry only REFERENCES (`<record uuid>:<result #>:<image #>` plus its
+// type): the picture is fetched on demand by loadTranscriptImage, so a
+// chat poll never re-ships megabytes of base64.
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const IMAGE_MAX_BASE64 = 12 * 1024 * 1024;
+const IMAGES_PER_RESULT = 6;
+const UUID_RE = /^[0-9a-fA-F-]{8,64}$/;
+export const IMAGE_REF_RE = /^([0-9a-fA-F-]{8,64}):(\d{1,3}):(\d{1,2})$/;
+
+function resultImages(content) {
+  return Array.isArray(content) ? content.filter((x) => x?.type === 'image') : [];
+}
+function usableImage(x) {
+  return x?.source?.type === 'base64' && IMAGE_TYPES.has(x.source.media_type) && typeof x.source.data === 'string'
+    && x.source.data.length > 0 && x.source.data.length <= IMAGE_MAX_BASE64;
+}
+function resultImageRefs(uuid, resultIndex, content) {
+  if (typeof uuid !== 'string' || !UUID_RE.test(uuid)) return [];
+  const out = [];
+  resultImages(content).forEach((x, j) => {
+    if (out.length < IMAGES_PER_RESULT && usableImage(x)) {
+      out.push({ ref: `${uuid}:${resultIndex}:${j}`, mime: x.source.media_type });
+    }
+  });
+  return out;
+}
+
+/**
+ * One image from a transcript, by the reference a row carried: { mime, data }
+ * (base64), or null. Streams the file and parses only the line holding that
+ * record (a cheap substring test first); lines past LINE_MAX are skipped, never
+ * assembled (a huge record must not exhaust memory, see NOTES 2026-09-15).
+ */
+const IMAGE_LINE_MAX = 64 * 1024 * 1024;
+export async function loadTranscriptImage(sessionId, projectPath, ref) {
+  const m = typeof ref === 'string' ? IMAGE_REF_RE.exec(ref) : null;
+  if (!m || typeof sessionId !== 'string' || !/^[\w-]{1,128}$/.test(sessionId) || typeof projectPath !== 'string') return null;
+  let p;
+  try { p = await resolveTranscriptPath(sessionId, projectPath); } catch { return null; }
+  return p ? readTranscriptImage(p, ref) : null;
+}
+
+/**
+ * Where each image-bearing record sits in a transcript: uuid -> byte range,
+ * built by ONE streaming pass and extended as the file grows. A chat with
+ * many thumbnails then costs one scan, not one per image (Codex: dozens of
+ * parallel full scans could exhaust the heap), and a fetch reads just its
+ * record. Lines are split on raw bytes; only a line that mentions an image is
+ * ever turned into a string, and a line past IMAGE_LINE_MAX is skipped. A
+ * repeated uuid keeps its LAST record, the one a chat's tail window shows.
+ */
+const imageIndexes = new Map(); // path -> { ino, size, mtimeMs, resume, skipping, tail, map }
+const IMAGE_MARK = Buffer.from('"image"');
+const TAIL_PROBE = 64;
+// Scans [from, end) only: `end` is the size stat saw, so a writer appending
+// faster than we read cannot keep the scan (and the queue behind it) going.
+// Resolves { resume, skipping }: normally the start of an unterminated last
+// line, which is still indexed if it already parses (a stopped session's
+// final record often has no newline) and is re-read once the file grows. A
+// last line already past IMAGE_LINE_MAX resumes at the END with skipping
+// set, so a huge record still being written is never re-read (Codex P2).
+function scanImageIndex(p, from, end, map, skipFirst = false) {
+  return new Promise((resolve) => {
+    if (from >= end) { resolve({ resume: from, skipping: skipFirst }); return; }
+    let stream;
+    try { stream = fsSync.createReadStream(p, { start: from, end: end - 1 }); } catch { resolve({ resume: from, skipping: skipFirst, failed: true }); return; }
+    let parts = [];
+    let partLen = 0;
+    let lineStart = from;
+    let pos = from;
+    let skipping = skipFirst;
+    const indexLine = (endPos) => {
+      if (skipping || !partLen) return;
+      const line = parts.length === 1 ? parts[0] : Buffer.concat(parts, partLen);
+      if (line.indexOf(IMAGE_MARK) === -1) return;
+      let entry;
+      try { entry = JSON.parse(line.toString('utf8')); } catch { entry = null; }
+      if (entry && typeof entry.uuid === 'string' && UUID_RE.test(entry.uuid)) map.set(entry.uuid, { start: lineStart, end: endPos });
+    };
+    stream.on('data', (chunk) => {
+      let at = 0;
+      let nl;
+      while ((nl = chunk.indexOf(10, at)) !== -1) {
+        if (!skipping) { parts.push(chunk.subarray(at, nl)); partLen += nl - at; }
+        indexLine(pos + nl);
+        parts = []; partLen = 0; skipping = false; lineStart = pos + nl + 1;
+        at = nl + 1;
+      }
+      if (!skipping && at < chunk.length) {
+        parts.push(chunk.subarray(at)); partLen += chunk.length - at;
+        if (partLen > IMAGE_LINE_MAX) { parts = []; partLen = 0; skipping = true; }
+      }
+      pos += chunk.length;
+    });
+    stream.on('end', () => {
+      if (skipping) { resolve({ resume: pos, skipping: true }); return; }
+      indexLine(pos);
+      resolve({ resume: lineStart, skipping: false });
+    });
+    // A failed read records nothing as scanned, so the next fetch retries it
+    // (a permission fixed later must not leave the index empty: Codex P2).
+    stream.on('error', () => resolve({ resume: from, skipping: skipFirst, failed: true }));
+  });
+}
+// The bytes just before `at`: if they changed, the file was rewritten rather
+// than appended to, and every offset in the index is suspect.
+async function tailBytes(p, at) {
+  const len = Math.min(TAIL_PROBE, at);
+  if (!len) return '';
+  let fh;
+  try {
+    fh = await fs.open(p, 'r');
+    const buf = Buffer.alloc(len);
+    const { bytesRead } = await fh.read(buf, 0, len, at - len);
+    return buf.subarray(0, bytesRead).toString('hex');
+  } catch { return null; } finally { await fh?.close().catch(() => {}); }
+}
+let imageChain = Promise.resolve();
+async function imageRecordRange(p, uuid) {
+  let st;
+  try { st = await fs.stat(p); } catch { return null; }
+  let idx = imageIndexes.get(p);
+  // ponytail: a rewrite is caught by inode, shrink, an mtime change at the
+  // same size, or the bytes before the resume point changing. A rewrite that
+  // grows the file AND leaves those 64 bytes intact is not.
+  const stale = !idx || idx.ino !== st.ino || st.size < idx.size
+    || (st.size === idx.size && st.mtimeMs !== idx.mtimeMs)
+    || (st.size > idx.size && (await tailBytes(p, idx.resume)) !== idx.tail);
+  if (stale) idx = { ino: st.ino, size: 0, mtimeMs: 0, resume: 0, skipping: false, tail: '', map: new Map() };
+  if (st.size > idx.size) {
+    const r = await scanImageIndex(p, idx.resume, st.size, idx.map, idx.skipping);
+    if (r.failed) return idx.map.get(uuid) || null; // not cached: retried next time
+    ({ resume: idx.resume, skipping: idx.skipping } = r);
+    idx.size = st.size;
+    idx.mtimeMs = st.mtimeMs;
+    idx.tail = await tailBytes(p, idx.resume);
+  }
+  imageIndexes.set(p, idx);
+  if (imageIndexes.size > 32) imageIndexes.delete(imageIndexes.keys().next().value);
+  return idx.map.get(uuid) || null;
+}
+
+/** loadTranscriptImage on a known transcript file (exported for tests). */
+export function readTranscriptImage(p, ref) {
+  const m = typeof ref === 'string' ? IMAGE_REF_RE.exec(ref) : null;
+  if (!m) return Promise.resolve(null);
+  const [, uuid, ri, ii] = m;
+  // One fetch at a time across the app: a record can be tens of MB, so
+  // parallel reads multiply memory.
+  const run = imageChain.then(async () => {
+    const range = await imageRecordRange(p, uuid);
+    if (!range || range.end - range.start > IMAGE_LINE_MAX) return null;
+    let fh;
+    try {
+      fh = await fs.open(p, 'r');
+      const buf = Buffer.alloc(range.end - range.start);
+      await fh.read(buf, 0, buf.length, range.start);
+      const entry = JSON.parse(buf.toString('utf8'));
+      if (!entry || entry.uuid !== uuid || !Array.isArray(entry.message?.content)) return null;
+      const results = entry.message.content.filter((c) => c?.type === 'tool_result' && typeof c.tool_use_id === 'string');
+      const img = resultImages(results[Number(ri)]?.content)[Number(ii)];
+      return usableImage(img) ? { mime: img.source.media_type, data: img.source.data } : null;
+    } catch {
+      return null;
+    } finally {
+      await fh?.close().catch(() => {});
+    }
+  });
+  imageChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 // Fold a turn into one assistant row and attach tool results. Runs AFTER
 // dedupeQueuedMessages (a queued row would otherwise split a turn) and before
 // the tail is cut, so the window counts rows the user actually sees. Mutates
@@ -1576,6 +1750,7 @@ export function mergeTurns(messages) {
         t.result = r.text.length <= room ? r.text : RESULT_OMITTED.length <= room ? RESULT_OMITTED : '';
         bytes.set(row, (bytes.get(row) || 0) - was + t.result.length);
         if (r.isError) t.isError = true;
+        if (r.images) t.images = r.images; // references only: a few bytes each
       }
       // A user record can carry text beside its tool results (a message typed
       // mid-turn rides in with them): that text is a real row and ends the turn.
@@ -1650,11 +1825,16 @@ export function entryToMessage(entry, opts = {}) {
   const msgContent = entry.message?.content;
   if (wantBlocks && Array.isArray(msgContent)) {
     if (role === 'user' && msgContent.some((c) => c?.type === 'tool_result')) {
-      const toolResults = msgContent.filter((c) => c?.type === 'tool_result' && typeof c.tool_use_id === 'string').map((c) => ({
-        id: c.tool_use_id,
-        text: capText(stripAnsiText(toolResultText(c.content)).trim(), TOOL_RESULT_MAX, 'output'),
-        isError: c.is_error === true,
-      }));
+      const toolResults = msgContent.filter((c) => c?.type === 'tool_result' && typeof c.tool_use_id === 'string').map((c, i) => {
+        const r = {
+          id: c.tool_use_id,
+          text: capText(stripAnsiText(toolResultText(c.content)).trim(), TOOL_RESULT_MAX, 'output'),
+          isError: c.is_error === true,
+        };
+        const images = resultImageRefs(entry.uuid, i, c.content);
+        if (images.length) r.images = images;
+        return r;
+      });
       // Any text beside the results goes through the ordinary user path (and
       // its filters), exactly as the legacy shape shows it (Codex High).
       const rest = msgContent.filter((c) => c?.type !== 'tool_result');

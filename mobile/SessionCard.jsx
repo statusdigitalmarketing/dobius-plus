@@ -20,7 +20,7 @@ export default function SessionCard({ term, onOpen, pinned, onTogglePin, titlePr
   return (
     <div className="session-card-wrap">
       <button className={`session-card led-${s.cls}${onTogglePin ? ' has-pin' : ''}`} onClick={() => onOpen(term.id)}>
-        <span className="card-led" aria-hidden="true" />
+        <span className="card-led" aria-hidden="true">{s.cls === 'done' ? '✓' : null}</span>
         <span className="card-main">
           <span className="card-title">
             {titlePrefix ? <span className="card-proj">{titlePrefix} / </span> : null}

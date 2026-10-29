@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext } from 'react';
+import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import SpecialKeys from './SpecialKeys';
 import remarkGfm from 'remark-gfm';
 import { pairingKey } from './pairings';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard } from '../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
@@ -15,6 +16,69 @@ import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } fr
 // never eats typed-but-unsent text (Sam's report). One localStorage key holds
 // a { tabId: { text, at } } map, pruned to 40 entries / 7 days on write.
 const DRAFTS_KEY = 'dobius-mobile-drafts';
+
+// A multi-select option row ("[ ] Foo", "☐ Foo"): its keys row stays open.
+const MULTI_OPTION = /^(\[[ x✓✔]\]|[☐☒])\s/;
+// A permission prompt reads "Bash command / <command> / <description> / Do you
+// want to proceed?": the tool goes in the eyebrow, the command in a code box,
+// the description under it, and only the question is the heading.
+function promptParts(text) {
+  const rows = String(text || '').split('\n').map((r) => r.trim()).filter(Boolean);
+  const question = rows.pop() || '';
+  // A tool label is one or two words ending in a tool noun ("Bash command",
+  // "Edit file"); "Delete the existing Makefile" is a question (Codex P2).
+  const tool = rows.length > 1 && /^[A-Z]\w*( \w+)?$/.test(rows[0]) && /\b(command|file|edit|write|read|fetch|search|tool)$/i.test(rows[0]) ? rows.shift() : '';
+  return { tool, context: rows, question, code: /command$/i.test(tool) };
+}
+function AskPrompt({ text }) {
+  const { context, question, code } = promptParts(text);
+  return (
+    <>
+      {context.length > 0 && (
+        <div className="ask-context">
+          {context.map((r, i) => <div key={i} className={code && i === 0 ? 'ask-code' : 'ask-context-row'}>{r}</div>)}
+        </div>
+      )}
+      <div className="ask-question">{question || 'Claude is waiting for you to choose:'}</div>
+    </>
+  );
+}
+
+// Claude's "Review your answers" step: each question (● row) with its answer
+// (→ row) as a quiet list, and the closing question as the card's heading.
+function AskReview({ text }) {
+  const rows = text.split('\n').map((r) => r.trim()).filter(Boolean);
+  const heading = rows.length && !/^[●→]/.test(rows[rows.length - 1]) ? rows.pop() : 'Ready to submit your answers?';
+  let kind = null; // the marked row a wrapped continuation belongs to
+  return (
+    <>
+      <div className="ask-review">
+        {rows.map((r, i) => {
+          if (r.startsWith('●')) { kind = 'q'; return <div key={i} className="ask-review-q">{r.replace(/^●\s*/, '')}</div>; }
+          if (r.startsWith('→')) { kind = 'a'; return <div key={i} className="ask-review-a">{r.replace(/^→\s*/, '')}</div>; }
+          // A row after a question or answer continues it: shown as written,
+          // never as an eyebrow (that would uppercase a path: Codex P2, twice).
+          if (kind) return <div key={i} className={`ask-review-${kind} ask-review-more`}>{r}</div>;
+          return <div key={i} className="ask-eyebrow">{r}</div>;
+        })}
+      </div>
+      <div className="ask-question">{heading}</div>
+    </>
+  );
+}
+
+// The question tabs a newer Mac sends ({ labels, answered, current, total }),
+// checked field by field: an older or newer Mac may send something else.
+function askSteps(st) {
+  if (!st || typeof st !== 'object' || !Array.isArray(st.labels) || !st.labels.length) return null;
+  // All or nothing: dropping one bad label would shift every index after it.
+  if (!st.labels.every((l) => typeof l === 'string')) return null;
+  const labels = st.labels.map((l) => l.slice(0, 60));
+  const total = labels.length;
+  if (st.total !== undefined && st.total !== total) return null; // inconsistent: trust none of it
+  if (!Number.isInteger(st.current) || st.current < 0 || st.current > total) return null;
+  return { labels, total, current: st.current };
+}
 function loadDraft(draftsKey, tabId) {
   if (!tabId) return '';
   try {
@@ -60,7 +124,17 @@ function legacyCopy(text) {
 
 // A copy affordance on code boxes (Sam, 8/14: "anything that shows up in this
 // box ... I need a little copy button so I can just copy that line").
-function CopyBtn({ text, className = 'md-copy' }) {
+// The copy glyph the Claude app uses under a reply (two overlapping sheets).
+const COPY_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true">
+    <rect x="8" y="8" width="12" height="12" rx="2.5" /><path d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8" />
+  </svg>
+);
+const CHECK_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+);
+
+function CopyBtn({ text, className = 'md-copy', icon = false }) {
   const [done, setDone] = useState(false);
   return (
     <button
@@ -71,9 +145,9 @@ function CopyBtn({ text, className = 'md-copy' }) {
         setDone(!!ok);
         setTimeout(() => setDone(false), 1500);
       }}
-      aria-label="Copy"
+      aria-label={done ? 'Copied' : 'Copy'}
     >
-      {done ? 'copied' : 'copy'}
+      {icon ? (done ? CHECK_ICON : COPY_ICON) : done ? 'copied' : 'copy'}
     </button>
   );
 }
@@ -169,26 +243,108 @@ function StepRow({ block, live }) {
   );
 }
 
-// More than three steps in a row fold into one "N steps" row.
+// A run of steps reads as one line, the way the Claude app shows it:
+// "Created a file, ran a command  +12 -0  >". Tap to see each step.
 function StepGroup({ steps, live }) {
   const [open, setOpen] = useState(false);
   // Claude can run several tools in parallel, so every step of the live run
   // that has no result yet is running, not only the last one (Codex).
-  if (steps.length <= 3) return <div className="chat-steps">{steps.map((b, i) => <StepRow key={i} block={b} live={live} />)}</div>;
   const running = live && steps.some((b) => b.type === 'tool' && b.result === undefined);
-  const counts = {};
-  for (const b of steps) { const n = b.type === 'tool' ? b.name : 'Thinking'; counts[n] = (counts[n] || 0) + 1; }
-  const label = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(', ');
+  const failed = steps.some((b) => b.isError);
+  const sum = useMemo(() => stepSummary(steps), [steps]);
   return (
-    <div className="chat-steps">
-      <button className="chat-step-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <span className={`chat-step-dot ${running ? 'running' : steps.some((b) => b.isError) ? 'err' : 'ok'}`} />
-        <span className="chat-step-name">{steps.length} steps</span>
-        <span className="chat-step-sum">{label}</span>
-        <span className="chat-step-caret">{open ? '▾' : '▸'}</span>
+    <div className={`chat-steps${open ? ' open' : ''}`}>
+      <button className="chat-run" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <span className={`chat-run-icon${running ? ' running' : failed ? ' err' : ''}`} aria-hidden="true">
+          {running ? '' : failed ? '!' : <span className="chat-run-list"><i /><i /><i /></span>}
+        </span>
+        <span className="chat-run-text">{running ? `${sum.text}…` : sum.text}</span>
+        {(sum.added > 0 || sum.removed > 0) && (
+          <span className="chat-run-diff"><span className="add">+{sum.added}</span><span className="del">-{sum.removed}</span></span>
+        )}
+        <span className="chat-run-caret" aria-hidden="true">›</span>
       </button>
-      {open && steps.map((b, i) => <StepRow key={i} block={b} live={live} />)}
+      {open && <div className="chat-run-steps">{steps.map((b, i) => <StepRow key={i} block={b} live={live} />)}</div>}
     </div>
+  );
+}
+
+// The chat's image fetch (ref -> Promise<data URL | null>), over the socket.
+const ImageFetch = createContext(null);
+// Called when a thumbnail finishes loading: it is taller than its placeholder,
+// so a reader pinned to the bottom is kept there (Codex P2).
+const ImageLoaded = createContext(null);
+let imageReqSeq = 0; // module-scoped: survives remounts, ids never repeat on a connection
+
+// Thumbnails of the images a run of steps returned (a screenshot Claude read),
+// shown even while the steps are folded; tap for full screen.
+function ToolImages({ images }) {
+  const fetchImage = useContext(ImageFetch);
+  const onLoaded = useContext(ImageLoaded);
+  const [urls, setUrls] = useState({});
+  const [failed, setFailed] = useState({});
+  const [big, setBig] = useState(null);
+  // What is shown is never fetched again (a poll hands in new arrays, and the
+  // cache may have evicted it: Codex), and a miss retries a few times (a
+  // reconnect can swallow a reply) before it says so.
+  const loaded = useRef({});
+  const tries = useRef({});
+  const fetcherRef = useRef(null);
+  useEffect(() => {
+    let live = true;
+    const timers = [];
+    if (!fetchImage) return undefined;
+    const releases = images.map((i) => fetchImage.want?.(i.ref));
+    // A new fetcher (a reconnect) gets a fresh retry budget.
+    if (fetcherRef.current !== fetchImage) { fetcherRef.current = fetchImage; tries.current = {}; setFailed({}); }
+    const get = (ref) => {
+      if (loaded.current[ref]) return;
+      fetchImage(ref).then((url) => {
+        if (!live) return;
+        if (url) { loaded.current[ref] = true; setUrls((cur) => ({ ...cur, [ref]: url })); return; }
+        tries.current[ref] = (tries.current[ref] || 0) + 1;
+        if (tries.current[ref] < 3) timers.push(setTimeout(() => get(ref), 4000 * tries.current[ref]));
+        else setFailed((cur) => ({ ...cur, [ref]: true }));
+      });
+    };
+    for (const i of images) get(i.ref);
+    return () => { live = false; timers.forEach(clearTimeout); releases.forEach((r) => r?.()); };
+  }, [images, fetchImage]);
+  return (
+    <div className="chat-imgs">
+      {images.map((i) => (urls[i.ref]
+        ? <button key={i.ref} type="button" className="chat-img" onClick={(e) => setBig({ url: urls[i.ref], from: e.currentTarget })} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" onLoad={onLoaded || undefined} /></button>
+        : <div key={i.ref} className={`chat-img ${failed[i.ref] ? 'failed' : 'loading'}`}>{failed[i.ref] ? 'Image unavailable' : null}</div>))}
+      {big && <Lightbox url={big.url} onClose={() => { const from = big.from; setBig(null); from?.focus?.(); }} />}
+    </div>
+  );
+}
+
+// Full size, modal: it takes focus and keeps it (Tab cannot reach the chat or
+// a selector card behind it, Codex), Escape/Enter or a click/tap closes it.
+function Lightbox({ url, onClose }) {
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.focus(); }, []);
+  // Rendered on <body>: inside a collapsed message, the clamp's mask would
+  // crop a fixed overlay to the message (Codex P2).
+  return createPortal(
+    <div
+      ref={ref}
+      className="chat-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image"
+      tabIndex={-1}
+      onClick={onClose}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); onClose(); } else if (e.key === 'Tab') e.preventDefault();
+      }}
+    >
+      <img src={url} alt="Tool output, full size" />
+      <span className="chat-lightbox-close">✕</span>
+    </div>,
+    document.body,
   );
 }
 
@@ -196,7 +352,13 @@ function Blocks({ blocks, live }) {
   const parts = [];
   let run = [];
   // Only the run of steps that ENDS the turn can still be running.
-  const flush = (atEnd) => { if (run.length) { parts.push(<StepGroup key={`s${parts.length}`} steps={run} live={live && atEnd} />); run = []; } };
+  const flush = (atEnd) => {
+    if (!run.length) return;
+    parts.push(<StepGroup key={`s${parts.length}`} steps={run} live={live && atEnd} />);
+    const images = stepImages(run);
+    if (images.length) parts.push(<ToolImages key={`i${parts.length}`} images={images} />);
+    run = [];
+  };
   for (const b of blocks) {
     if (b.type === 'text') {
       flush(false);
@@ -227,11 +389,12 @@ const Activity = memo(function Activity({ activity }) {
   const meta = activityMeta(liveSeconds(anchor, Date.now()), activity);
   return (
     <div className="chat-activity">
-      <span className="chat-act-glyph" aria-hidden="true">{reduce ? '\u273b' : SPIN_FRAMES[tick % SPIN_FRAMES.length]}</span>
+      <span className="chat-act-dots" aria-hidden="true"><i /><i /><i /></span>
+      {meta && <span className="chat-act-meta" aria-hidden="true">{meta} ·</span>}
       <span className="chat-act-text" role="status">
-        <span key={verb} className="chat-act-verb">{`${verb}\u2026`}</span>
+        <span key={verb} className="chat-act-verb">{`${verb.toLowerCase()}\u2026`}</span>
       </span>
-      {meta && <span className="chat-act-meta" aria-hidden="true">{meta}</span>}
+      <span className="chat-act-glyph" aria-hidden="true">{reduce ? '\u273b' : SPIN_FRAMES[tick % SPIN_FRAMES.length]}</span>
     </div>
   );
 });
@@ -242,22 +405,35 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
   const shown = rowText(text, blocks); // what the reader sees, and what Copy copies
   const long = !command && isLong(shown);
   const [open, setOpen] = useState(!long || !!startOpen);
+  const body = (
+    <div className={`chat-content${long && !open ? ' clamped' : ''}${command ? ' chat-cmd' : ''}`}>
+      {role === 'assistant'
+        ? (blocks ? <Blocks blocks={blocks} live={!!live} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
+        : text}
+    </div>
+  );
+  const more = long && <button className="chat-more" onClick={() => setOpen((o) => !o)}>{open ? 'Show less' : 'Show more'}</button>;
+  if (role !== 'assistant') {
+    // Yours: a right-aligned bubble, its state (queued, sending) underneath.
+    return (
+      <div className={`chat-msg user${sending ? ' chat-echo' : ''}`}>
+        <div className="chat-bubble">{body}{more}</div>
+        {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
+        {(queued || sending) && <div className="chat-msg-state">{sending ? 'Sending…' : 'Queued for after this turn'}</div>}
+      </div>
+    );
+  }
   return (
-    <div className={`chat-msg ${role === 'assistant' ? 'assistant' : 'user'}${sending ? ' chat-echo' : ''}`}>
-      <div className="chat-role">
-        {role === 'assistant' ? 'Claude' : 'You'}
-        {timestamp != null && <span className="chat-time">{fmtMsgTime(timestamp)}</span>}
-        {queued && <span className="chat-queued">queued</span>}
-        {sending && <span className="chat-queued">sending…</span>}
-        {shown && !sending && <CopyBtn text={shown} className="chat-msg-copy" />}
-      </div>
-      <div className={`chat-content${long && !open ? ' clamped' : ''}${command ? ' chat-cmd' : ''}`}>
-        {role === 'assistant'
-          ? (blocks ? <Blocks blocks={blocks} live={!!live} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
-          : text}
-      </div>
-      {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
-      {long && <button className="chat-more" onClick={() => setOpen((o) => !o)}>{open ? 'Show less' : 'Show more'}</button>}
+    <div className="chat-msg assistant">
+      {body}
+      {more}
+      {/* Quiet actions under a reply, like the Claude app: copy, and the time. */}
+      {(shown || timestamp != null) && (
+        <div className="chat-msg-actions">
+          {shown && <CopyBtn text={shown} className="chat-msg-copy" icon />}
+          {timestamp != null && <span className="chat-time">{fmtMsgTime(timestamp)}</span>}
+        </div>
+      )}
     </div>
   );
 });
@@ -274,6 +450,52 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const sessionId = tab?.sessionId || null;
   const projectPath = tab?.sessionProject || null;
   const tabId = tab?.id || null;
+  // Tool images: requested over the socket only when a thumbnail shows, cached
+  // per session. A Mac too old to answer just leaves the placeholder.
+  // A fresh cache per (re)connection: images that failed while the socket was
+  // down get fetched again once it is back (Codex P2).
+  const [authEpoch, setAuthEpoch] = useState(0);
+  const imageFetch = useMemo(() => {
+    if (!sessionId || !projectPath) return null;
+    // One request at a time: the Mac refuses an image while its send buffer
+    // is still full of the last one, so parallel requests refused each other
+    // in lockstep until their retries ran out (Codex P2).
+    let queue = Promise.resolve();
+    // Leaving the chat (or switching session) kills the queue: requests not
+    // yet sent are dropped, so abandoned images never share the socket with
+    // what the user is looking at now (Codex P2).
+    let dead = false;
+    // Refs some mounted thumbnail still shows: a request whose thumbnail left
+    // the transcript window is skipped when its turn comes (Codex P2), so the
+    // queue only ever holds what is on screen.
+    const wanted = new Map();
+    const one = (ref) => new Promise((resolve) => {
+      if (dead || connection.closed || !wanted.get(ref)) { resolve(null); return; }
+      const reqId = ++imageReqSeq;
+      let off = () => {};
+      const t = setTimeout(() => { off(); resolve(null); }, 20000);
+      off = connection.onMessage((msg) => {
+        if (msg?.type !== 'chatImage' || msg.reqId !== reqId) return;
+        off();
+        clearTimeout(t);
+        resolve(msg.ok && typeof msg.data === 'string' ? { mime: msg.mime, data: msg.data } : null);
+      });
+      connection.send({ type: 'chatImage', sessionId, projectPath, ref, reqId });
+    });
+    const fetcher = createImageCache((ref) => {
+      const run = queue.then(() => one(ref));
+      queue = run.then(() => undefined, () => undefined);
+      return run;
+    });
+    fetcher.kill = () => { dead = true; };
+    fetcher.revive = () => { dead = false; }; // StrictMode replays the effect
+    fetcher.want = (ref) => {
+      wanted.set(ref, (wanted.get(ref) || 0) + 1);
+      return () => { const n = (wanted.get(ref) || 1) - 1; if (n) wanted.set(ref, n); else wanted.delete(ref); };
+    };
+    return fetcher;
+  }, [connection, sessionId, projectPath, authEpoch]); // eslint-disable-line react-hooks/exhaustive-deps -- authEpoch only renews the cache
+  useEffect(() => { imageFetch?.revive(); return () => imageFetch?.kill(); }, [imageFetch]);
   const [messages, setMessages] = useState(null); // null = loading
   const draftsKey = pairingKey(connection.pairing, DRAFTS_KEY);
   const [input, setInput] = useState(() => loadDraft(draftsKey, tabId));
@@ -327,6 +549,23 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     };
   }, []);
   const [selNote, setSelNote] = useState('');
+  // Question card: the fine-control key row is folded away unless asked for
+  // (or the prompt is a multi-select), and the close button needs a second
+  // tap, because Esc cancels Claude's whole question.
+  const [askKeys, setAskKeys] = useState(false);
+  // The card key the cancel was armed on: a different card is never armed
+  // (the Mac can answer and show another question inside the 3s window).
+  const [cancelArmedKey, setCancelArmedKey] = useState(null);
+  // Arming ends the moment the phone sees anything but the card it was armed
+  // on (no card, or another one): on a Mac that sends no tokens a LATER card
+  // that reads the same would otherwise inherit it (Codex P1, twice).
+  useEffect(() => {
+    const key = selector ? `${selectorCardKey(selector)}|${selector.token ?? ''}` : null;
+    setCancelArmedKey((armed) => (armed && armed !== key ? null : armed));
+  }, [selector]);
+  // Stop takes Send's place the moment a message goes out while Claude works,
+  // so a double tap on Send would land on Stop and interrupt (Codex P1).
+  const sentAtRef = useRef(0);
   // Sessionless tabs only: plain-text tail of the live PTY (null = loading).
   const [shellText, setShellText] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -342,6 +581,10 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const fileInputRef = useRef(null);
   const bodyRef = useRef(null);
   const atBottomRef = useRef(true);
+  const keepBottom = useCallback(() => {
+    const el = bodyRef.current;
+    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, []);
   // Rows that arrived (or a live turn that grew) while scrolled up, for the
   // "new" pill; the mark is the newest row seen at the bottom.
   const [unseen, setUnseen] = useState(0);
@@ -436,6 +679,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   useEffect(() => {
     const off = connection.onMessage((msg) => {
       if (msg.type === 'authed') {
+        setAuthEpoch((n) => n + 1);
         // Reconnect (iOS kills the socket on every backgrounding). Two jobs,
         // both BEFORE the connection's queued-send flush (emit runs listeners
         // synchronously, then flushes):
@@ -657,6 +901,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     // chunk made Claude's Ink TUI treat the \r as pasted newline, so messages
     // sat in the input box unsubmitted (Sam's v1.0.51 bug 3).
     connection.send({ type: 'submitPrompt', id: tabId, text });
+    sentAtRef.current = Date.now();
     setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
     setDraft('');
     atBottomRef.current = true;
@@ -755,47 +1000,110 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // Selector popup + input row are shared by BOTH states below: a sessionless
   // tab that just ran `claude` immediately shows the trust-folder prompt, so
   // the selector buttons must work there too.
-  const selectorPopup = selector && selector.options && selector.options.length > 0 && (
-        <div
-          className="chat-selector"
-          key={selectorCardKey(selector)}
-          onPointerDownCapture={(e) => pressGuard.current.pointerDown(e, selector)}
-          onKeyDownCapture={(e) => pressGuard.current.keyDown(e, selector)}
-        >
-          <div className="chat-selector-title">
-            {selector.prompt || 'Claude is waiting for you to choose:'}
-          </div>
-          {selector.options.map((opt) => (
-            <button
-              key={opt.num}
-              className="chat-selector-opt"
-              disabled={selBusy || selector.token === ''}
-              onClick={(e) => chooseOption(selector, opt.num, e)}
-            >
-              <span className="chat-selector-num">{opt.num}</span>
-              <span className="chat-selector-label">
-                {opt.label}
-                {opt.detail && <span className="chat-selector-detail">{opt.detail}</span>}
-              </span>
+  const selectorPopup = selector && selector.options && selector.options.length > 0 && (() => {
+    const steps = askSteps(selector.steps);
+    const cannotAnswer = selBusy || selector.token === '';
+    // Claude's escape hatches are its exact tail: "Type something." then
+    // optionally "Chat about this", last, with no description. Anything else
+    // that shares a label is a real answer (Codex, twice).
+    const opts = selector.options;
+    const isHatch = (o, label) => o && !o.detail && o.label.toLowerCase() === label;
+    let cut = opts.length;
+    if (isHatch(opts[cut - 1], 'chat about this') && isHatch(opts[cut - 2], 'type something.')) cut -= 2;
+    else if (isHatch(opts[cut - 1], 'type something.')) cut -= 1;
+    const main = selector.options.slice(0, cut);
+    const extra = selector.options.slice(cut);
+    const multi = selector.options.some((o) => MULTI_OPTION.test(o.label));
+    const onReview = steps && steps.current >= steps.total;
+    // Armed for THIS card at THIS token: the token changes whenever anything
+    // reaches the screen (moving to another question that reads the same,
+    // a repaint), so the arming never carries over (Codex P1).
+    const cardKey = `${selectorCardKey(selector)}|${selector.token ?? ''}`;
+    const cancelArmed = cancelArmedKey === cardKey;
+    const cancel = (e) => {
+      if (!cancelArmed) {
+        // Arming is a press too: it must end on the card it began on (Codex P1).
+        if (!pressGuard.current.take(e, selector)) {
+          setSelNote('The prompt changed while you were tapping. Nothing was sent, check the card again.');
+          setTimeout(() => setSelNote(''), 4000);
+          return;
+        }
+        setCancelArmedKey(cardKey);
+        setTimeout(() => setCancelArmedKey((k) => (k === cardKey ? null : k)), 3000);
+        return;
+      }
+      setCancelArmedKey(null);
+      sendSelectorKey(selector, '\x1b', true, e);
+    };
+    return (
+      <div
+        className="ask-card"
+        key={selectorCardKey(selector)}
+        onPointerDownCapture={(e) => pressGuard.current.pointerDown(e, selector)}
+        onKeyDownCapture={(e) => {
+          // A held Enter auto-repeats as clicks: it must never confirm the
+          // cancel or re-answer by itself (Codex P1).
+          if (e.repeat && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); return; }
+          pressGuard.current.keyDown(e, selector);
+        }}
+      >
+        <div className="ask-head">
+          {steps && steps.total > 1 ? (
+            <div className="ask-stepper">
+              {/* Claude's own question tabs: left/right arrows move between them. */}
+              <button className="ask-nav" aria-label="Previous question" disabled={cannotAnswer || steps.current === 0}
+                onClick={(e) => sendSelectorKey(selector, '\x1b[D', false, e)}>‹</button>
+              <span className="ask-count">{onReview ? 'Review' : `${steps.current + 1} of ${steps.total}`}</span>
+              <button className="ask-nav" aria-label="Next question" disabled={cannotAnswer || onReview}
+                onClick={(e) => sendSelectorKey(selector, '\x1b[C', false, e)}>›</button>
+            </div>
+          ) : (
+            <span className="ask-eyebrow">{steps?.labels[0] || promptParts(selector.prompt).tool || 'Claude needs your answer'}</span>
+          )}
+          <button className={`ask-close${cancelArmed ? ' armed' : ''}`} aria-label="Cancel this question"
+            disabled={selector.token === ''} onClick={cancel}>{cancelArmed ? 'Cancel?' : '✕'}</button>
+        </div>
+        {steps && steps.total > 1 && !onReview && <div className="ask-eyebrow ask-topic">{steps.labels[steps.current]}</div>}
+        {onReview ? <AskReview text={selector.prompt || ''} /> : steps ? (
+          <div className="ask-question">{selector.prompt || 'Claude is waiting for you to choose:'}</div>
+        ) : <AskPrompt text={selector.prompt} />}
+        <div className="ask-options">
+          {main.map((opt) => (
+            <button key={opt.num} className="ask-opt" disabled={cannotAnswer} onClick={(e) => chooseOption(selector, opt.num, e)}>
+              <span className="ask-opt-label">{opt.label}</span>
+              {opt.detail && <span className="ask-opt-detail">{opt.detail}</span>}
             </button>
           ))}
-          {/* Fine-control row: arrows/space for multiSelect movement + toggle,
-              enter/esc to confirm/cancel, without leaving Chat. v1.0.53. */}
-          <div className="chat-selector-keys">
+        </div>
+        {extra.length > 0 && (
+          <div className="ask-extra">
+            {extra.map((opt) => (
+              <button key={opt.num} className="ask-extra-opt" disabled={cannotAnswer} onClick={(e) => chooseOption(selector, opt.num, e)}>
+                {opt.label.replace(/\.$/, '')}
+              </button>
+            ))}
+          </div>
+        )}
+        {(askKeys || multi) && (
+          // Fine-control row: arrows/space for multiSelect movement + toggle,
+          // enter/esc to confirm/cancel, without leaving Chat. v1.0.53.
+          <div className="ask-keys">
             {SELECTOR_KEYS.map(([label, seq, closes]) => (
-              <button key={label} className="chat-selector-key" disabled={selBusy || selector.token === ''} onClick={(e) => sendSelectorKey(selector, seq, closes, e)}>
+              <button key={label} className="ask-key" disabled={cannotAnswer} onClick={(e) => sendSelectorKey(selector, seq, closes, e)}>
                 {label}
               </button>
             ))}
           </div>
-          {selNote && <div className="chat-selector-note">{selNote}</div>}
-          {onOpenTerminal && (
-            <button className="chat-selector-term" onClick={onOpenTerminal}>
-              Open terminal to answer manually
-            </button>
-          )}
-    </div>
-  );
+        )}
+        {cancelArmed && <div className="ask-note">Tap again to cancel Claude's question.</div>}
+        {selNote && <div className="ask-note">{selNote}</div>}
+        <div className="ask-foot">
+          {!multi && <button className="ask-link" onClick={() => setAskKeys((v) => !v)}>{askKeys ? 'Hide keys' : 'Keys'}</button>}
+          {onOpenTerminal && <button className="ask-link" onClick={onOpenTerminal}>Open terminal</button>}
+        </div>
+      </div>
+    );
+  })();
 
   const inputRow = (
     <>
@@ -815,27 +1123,11 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       {showKeys && tabId && (
         <SpecialKeys onKey={(seq) => connection.send({ type: 'input', id: tabId, data: seq })} />
       )}
-      <div className="chat-input-row">
-        <button
-          className={`chat-keys-toggle${showKeys ? ' on' : ''}`}
-          onClick={() => setShowKeys((v) => !v)}
-          aria-label="Toggle terminal keys"
-          title="Arrow/Enter/Esc/Tab keys for interactive dialogs like /permissions"
-        >
-          ⌨
-        </button>
-        {/* Interrupt/cancel from Chat (v1.0.53, Sam: "no way to cancel").
-            One tap = ESC to the TUI: interrupts the running turn AND pops any
-            queued messages back into Claude's input (the popAll op); a second
-            tap clears that input. Red while the tab is actively working. */}
-        <button
-          className={`chat-esc${tab?.status === 'working' ? ' working' : ''}`}
-          onClick={() => { if (tabId) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
-          aria-label="Interrupt Claude (escape)"
-          title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
-        >
-          esc
-        </button>
+      {/* One rounded composer, like the Claude app: the message on top, the
+          tools underneath, and on the right Send, or Stop while Claude works
+          and nothing is typed (Stop is Esc to the TUI: it interrupts the turn
+          and pops queued messages back, v1.0.53). */}
+      <div className="chat-composer">
         <input
           ref={fileInputRef}
           type="file"
@@ -843,15 +1135,6 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           style={{ display: 'none' }}
           onChange={(e) => { uploadFiles(e.target.files); e.target.value = ''; }}
         />
-        <button
-          className="chat-attach"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-          aria-label="Attach a screenshot or file"
-          title="Attach a screenshot or file (uploads to the Mac, path goes into the prompt)"
-        >
-          {uploading ? '…' : '+'}
-        </button>
         {/* Placeholder truth: a session-linked chat whose Claude has EXITED
             still sends input to the underlying shell, where it executes as a
             command (observed live 8/15: a prompt ran in zsh as `Reply ...`).
@@ -871,11 +1154,42 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           placeholder={sessionId
             ? (tab && !tab.claudeLive
               ? 'Claude exited. Input goes to the terminal...'
-              : 'Message Claude...')
+              : tab?.status === 'working' ? 'Queue for after this turn...' : 'Message Claude...')
             : 'Type into the terminal...'}
           rows={1}
         />
-        <button className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
+        <div className="chat-composer-bar">
+          <button
+            className="chat-attach"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            aria-label="Attach a screenshot or file"
+            title="Attach a screenshot or file (uploads to the Mac, path goes into the prompt)"
+          >
+            {uploading ? '…' : '+'}
+          </button>
+          <button
+            className={`chat-keys-toggle${showKeys ? ' on' : ''}`}
+            onClick={() => setShowKeys((v) => !v)}
+            aria-label="Toggle terminal keys"
+            title="Arrow/Enter/Esc/Tab keys for interactive dialogs like /permissions"
+          >
+            ⌨
+          </button>
+          <span className="chat-composer-spacer" />
+          {tab?.status === 'working' && !input.trim() ? (
+            <button
+              key="stop"
+              className="chat-stop"
+              onKeyDown={(e) => { if (e.repeat) e.preventDefault(); }}
+              onClick={() => { if (tabId && Date.now() - sentAtRef.current > 800) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
+              aria-label="Stop Claude (escape)"
+              title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
+            ><span /></button>
+          ) : (
+            <button key="send" className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
+          )}
+        </div>
       </div>
     </>
   );
@@ -915,6 +1229,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   }
 
   return (
+    <ImageFetch.Provider value={imageFetch}><ImageLoaded.Provider value={keepBottom}>
     <div className="chat-view">
       <div className="chat-body-wrap">
       <main className="chat-body" ref={bodyRef} onScroll={onScroll}>
@@ -961,6 +1276,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       {selectorPopup}
       {inputRow}
     </div>
+    </ImageLoaded.Provider></ImageFetch.Provider>
   );
 }
 

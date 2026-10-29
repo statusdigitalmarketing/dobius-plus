@@ -365,15 +365,33 @@ export function parseSelectorFromScreen(lines) {
   // Indented rows under an option: its description, or the rest of a label
   // too long for one row. Read bottom-up, so they arrive before their option.
   let pendingDetail = [];
+  let pendingEnds = []; // the column each detail row ends at, for reflow
+  let pendingFirst = []; // and the columns its first word takes
+  const detailEnds = new Map();
+  const detailFirst = new Map();
   for (let i = hintIdx - 1; i >= 0; i -= 1) {
     const line = lines[i];
     const t = line.trim();
-    if (t === '' || SCREEN_RULE_RE.test(t)) continue;
+    if (t === '' || SCREEN_RULE_RE.test(t)) {
+      // A blank or rule row INSIDE a description is a real separator: kept
+      // as written, so two commands around it can never be joined into one
+      // (Codex P2, twice). End column 0 means "never a wrap".
+      if (pendingDetail.length) { pendingDetail.push(t); pendingEnds.push(0); pendingFirst.push(0); }
+      continue;
+    }
     const m = line.match(SCREEN_OPTION_RE);
     if (m) {
       const opt = { num: Number(m[2]), label: m[3].trim() };
-      if (pendingDetail.length) opt.detail = pendingDetail.reverse().join('\n');
+      // Blank or rule rows between the option and its description: chrome.
+      while (pendingDetail.length && (pendingDetail[pendingDetail.length - 1] === '' || SCREEN_RULE_RE.test(pendingDetail[pendingDetail.length - 1]))) { pendingDetail.pop(); pendingEnds.pop(); pendingFirst.pop(); }
+      if (pendingDetail.length) {
+        opt.detail = pendingDetail.reverse().join('\n');
+        detailEnds.set(opt, pendingEnds.reverse());
+        detailFirst.set(opt, pendingFirst.reverse());
+      }
       pendingDetail = [];
+      pendingEnds = [];
+      pendingFirst = [];
       options.unshift(opt);
       blockTop = i;
       continue;
@@ -381,8 +399,8 @@ export function parseSelectorFromScreen(lines) {
     // Non-numbered line: a description under an option (indented) keeps the
     // walk going while we are inside the block; anything else above the
     // topmost option ends the block.
-    if (/^\s{3,}\S/.test(line)) { pendingDetail.push(t); continue; } // option description
-    if (options.length === 0) { pendingDetail = []; continue; } // hint chrome between hint and block
+    if (/^\s{3,}\S/.test(line)) { pendingDetail.push(t); pendingEnds.push(colOf(lines, i)); pendingFirst.push(firstWordOf(lines, i)); continue; } // option description
+    if (options.length === 0) { pendingDetail = []; pendingEnds = []; pendingFirst = []; continue; } // hint chrome between hint and block
     break;
   }
   if (options.length === 0) return null;
@@ -402,7 +420,18 @@ export function parseSelectorFromScreen(lines) {
   }
   if (sel === -1) return null;
 
-  const out = { prompt: screenPrompt(lines, blockTop), options, selectedIndex: sel };
+  // The terminal's width, as wide as its widest row (the frame's rule).
+  const frameW = lines.reduce((w, l, i) => Math.max(w, colOf(lines, i)), 0);
+  const steps = screenSteps(lines, blockTop, hintIdx, frameW);
+  // An AskUserQuestion question is prose that Claude wrapped at the terminal
+  // width: re-flow its rows into one paragraph, or a phone card shows it
+  // broken mid-sentence. Permission prompts and the review step keep their
+  // rows (a command, its description, the question; answers one per line).
+  const prose = !!steps && steps.current < steps.total;
+  // Option descriptions likewise (Claude wrapped them at the terminal width).
+  const opts = prose ? options.map((o) => (o.detail ? { ...o, detail: reflow(o.detail.split('\n'), detailEnds.get(o), frameW, null, detailFirst.get(o)) } : o)) : options;
+  const out = { prompt: screenPrompt(lines, blockTop, prose, frameW), options: opts, selectedIndex: sel };
+  if (steps) out.steps = steps;
   // For selectorFingerprint only: the uncapped screen above the block, so two
   // same-worded prompts for different commands or edits never match. Not
   // enumerable, so it stays out of every JSON payload and card.
@@ -410,6 +439,130 @@ export function parseSelectorFromScreen(lines) {
     value: lines.slice(Math.max(0, blockTop - SCREEN_CONTEXT_ROWS), blockTop).map((l) => l.trimEnd()).join('\n'),
   });
   return out;
+}
+
+/**
+ * The AskUserQuestion tab bar above a block (`← ☐ Color ☐ Size ✔ Submit →`)
+ * as { labels, answered, current, total }: `labels`/`answered` per question,
+ * `current` the question showing (0-based), or `total` on the "Ready to
+ * submit" review step. The showing tab is the one drawn with a background
+ * colour (screen-render's `highlights`); without that information (an older
+ * caller, a plain string array) the first unanswered question is assumed.
+ * null when there is no tab bar.
+ */
+// A tab bar row starts with a tab item once its ← → arrows are set aside: a
+// line of prose with checkboxes in it ("Todo: ☐ Cleanup ☐ Verify") is not
+// one (Codex). Arrows INSIDE a header ("Dev→Prod") are allowed (Codex P2). A plain linear test: a regex here backtracked exponentially on a
+// crafted row and froze the main process (Codex P1).
+function isTabBar(line) {
+  const t = line.trim().replace(/^←\s*/, '').replace(/\s*→$/, '');
+  return /^[☐☒✔]/.test(t);
+}
+// Columns a row takes, not UTF-16 units: combining marks and zero-width
+// characters take none (security review), and East Asian wide glyphs and
+// emoji take two (Codex P2: counted as one, a CJK row looked narrower than
+// a short quoted rule above it). Overcounting only ever drops a stepper.
+// An ESTIMATE: real screens use the emulator's exact columns (colOf).
+const WIDE_RE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u;
+function rowWidth(s) {
+  let w = 0;
+  // \p{Cf} is every format character (direction marks, zero-width space and
+  // joiners, BOM): the emulator gives them no column (Codex P2).
+  for (const ch of s.trimEnd().replace(/[\p{M}\p{Cf}]/gu, '')) w += WIDE_RE.test(ch) ? 2 : 1;
+  return w;
+}
+// The column row i ends at: the emulator's own answer when screen-render gave
+// one (exact), else this estimate (plain string arrays, tests).
+function colOf(lines, i) {
+  const e = Array.isArray(lines.ends) ? lines.ends[i] : undefined;
+  return typeof e === 'number' ? e : rowWidth(lines[i]);
+}
+// The columns row i's first word takes, the emulator's answer when given.
+function firstWordOf(lines, i) {
+  const w = Array.isArray(lines.firstWords) ? lines.firstWords[i] : undefined;
+  return typeof w === 'number' ? w : rowWidth(lines[i].trim().split(' ')[0]);
+}
+function screenSteps(lines, blockTop, hintIdx = blockTop, frameW = 0) {
+  // The tab bar sits between the frame's rule and the question: never look
+  // past a rule (a permission prompt's border), so text above it can't count.
+  // The bar is the FIRST row of the frame, right under its rule (or the top
+  // of the screen). Anything below it is the question: a line starting with
+  // a checkbox, a quoted bar, a heredoc in a permission prompt. Choosing
+  // among rows that merely look like bars lost three rounds (Codex P2). The
+  // frame's rule starts at column 0 and spans the terminal, so it is at least
+  // as long as every row under it: a permission prompt's indented heredoc, or
+  // a short rule quoted in a question, never bounds the frame.
+  let top = -1;
+  let bounded = false;
+  // Every row of the frame counts, the options and hint too, not only the
+  // rows above them (Codex P2).
+  let widest = 0;
+  for (let i = blockTop; i <= hintIdx && i < lines.length; i += 1) widest = Math.max(widest, colOf(lines, i));
+  for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
+    const len = colOf(lines, i);
+    // The frame's rule spans the terminal: as wide as the WHOLE screen's
+    // widest row, not just the rows under it (a 60-column rule quoted above
+    // short rows is not one: Codex P2).
+    if (/^─/.test(lines[i]) && SCREEN_RULE_RE.test(lines[i].trim()) && len >= widest && len >= frameW) { bounded = true; break; }
+    widest = Math.max(widest, len);
+    if (i === 0) bounded = true;
+    if (lines[i].trim()) top = i;
+  }
+  if (!bounded || top === -1 || !/[☐☒]/.test(lines[top]) || !isTabBar(lines[top])) return null;
+  const tb = top;
+  // A bare tab (no arrows) is Claude's single-question header, and all of it
+  // is the label: a header "Use ☐ box" is not two questions (Codex P2).
+  if (!/^\s*←/.test(lines[tb])) {
+    const label = lines[tb].trim().replace(/^[☐☒]\s*/, '').slice(0, 60);
+    return label ? { labels: [label], answered: [lines[tb].trim().startsWith('☒')], current: 0, total: 1 } : null;
+  }
+  // Claude separates tabs by two or more spaces (`←  ☐ Color  ☐ Size  ✔
+  // Submit  →`); a header may hold single-spaced marks of its own ("Use ☐
+  // box", "✔ Check"), so items are the 2+-space runs, never every mark
+  // (Codex P2, three rounds). Runs of non-space joined by single spaces:
+  // linear, the two parts cannot overlap.
+  const items = [];
+  const row = lines[tb];
+  const runs = [...row.matchAll(/\S+(?: \S+)*/g)];
+  // Only the bar's own ends are navigation: an arrow anywhere else is header
+  // text ("Deploy  →" is a header, Codex P2).
+  if (runs[0]?.[0] === '←') runs.shift();
+  if (runs[runs.length - 1]?.[0] === '→') runs.pop();
+  for (const m of runs) {
+    const run = m[0];
+    const prev = items[items.length - 1];
+    // A run with no mark of its own continues the header before it: "Deploy
+    // prod" with two spaces is one header, not "Deploy" (Codex P2).
+    if (!/^[☐☒✔]/.test(run)) { if (prev) prev.label = row.slice(prev.col + 1, m.index + run.length).trim().slice(0, 60); continue; }
+    items.push({ mark: run[0], label: run.slice(1).trim().slice(0, 60), col: m.index });
+  }
+  // Only the LAST ✔ run is the review step.
+  for (let k = items.length - 2; k >= 0; k -= 1) if (items[k].mark === '✔') items.splice(k, 1);
+  for (let k = items.length - 1; k >= 0; k -= 1) if (items[k].mark !== '✔' && !items[k].label) items.splice(k, 1);
+  const questions = items.filter((t) => t.mark !== '✔');
+  if (!questions.length) return null;
+  const labels = questions.map((t) => t.label);
+  const answered = questions.map((t) => t.mark === '☒');
+  const total = labels.length;
+  let current = -1;
+  // The highlighted run is matched to a tab by POSITION (labels can repeat,
+  // a question can be named "Submit"); the ✔ item is the review step.
+  const hl = lines.highlights?.[tb];
+  if (Array.isArray(hl)) {
+    for (const h of hl) {
+      if (!h || typeof h.col !== 'number') continue;
+      const end = h.col + String(h.text).length;
+      const hit = items.find((t) => t.col >= h.col - 1 && t.col < end);
+      if (!hit) continue;
+      current = hit.mark === '✔' ? total : questions.indexOf(hit);
+      break;
+    }
+  }
+  if (current === -1) {
+    const open = answered.indexOf(false);
+    current = open === -1 ? total : open;
+  }
+  return { labels, answered, current, total };
 }
 
 /**
@@ -423,18 +576,60 @@ export function parseSelectorFromScreen(lines) {
 const PROMPT_MAX_ROWS = 15;
 const SCREEN_CONTEXT_ROWS = 40;
 const PROMPT_MAX_CHARS = 1500;
-function screenPrompt(lines, blockTop) {
-  const paragraphs = [[]];
+/**
+ * Rows Claude wrapped, back into one line. Claude's TUI breaks a row only at
+ * a space, and only when the next word would not fit, so WIDTH tells a wrap
+ * from a real newline: a row ending near the frame's edge whose successor's
+ * first word could not have fit was wrapped, and gets its space back. A
+ * shorter row ended on purpose (two command rows, `echo cleanup` + `rm -rf
+ * build`, must stay two), and a row filling the whole width was cut
+ * mid-word by the terminal: both keep the break. Guessing from the words
+ * instead lost seven Codex rounds. The path/dot checks are a second guard
+ * that only ever keeps a break.
+ */
+const WRAP_SLACK = 4; // the TUI may wrap a few columns inside the frame's edge
+// A wrapped row also REACHES near the edge: a short row followed by a long
+// word is an intentional newline as often as a wrap, and joining it could
+// hide a second command (Codex P2). Ambiguous rows keep their break.
+const WRAP_REACH = 10;
+function reflow(rows, ends, frameW, hard, firsts) {
+  let out = '';
+  rows.forEach((r, k) => {
+    if (!k) { out = r; return; }
+    const end = ends?.[k - 1];
+    const line = out.slice(out.lastIndexOf('\n') + 1);
+    const wrapped = r !== '' && !hard?.[k] && !SCREEN_RULE_RE.test(r) && typeof end === 'number' && frameW > 0 && end < frameW && end >= frameW - WRAP_REACH
+      && end + 1 + (typeof firsts?.[k] === 'number' ? firsts[k] : rowWidth(r.split(' ')[0])) > frameW - WRAP_SLACK;
+    const dotted = (w) => /\.\w/.test(w);
+    const pathy = line.includes('/') || r.includes('/') || dotted(line.split(' ').pop()) || dotted(r.split(' ')[0]) || !line.includes(' ');
+    out += wrapped && !pathy ? ` ${r}` : `\n${r}`;
+  });
+  return out;
+}
+
+function screenPrompt(lines, blockTop, prose = false, frameW = 0) {
+  const paragraphs = [[]]; // rows as { t, end }: the text and the column it ends at
   let bounded = false;
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 30; i -= 1) {
     const t = lines[i].trim();
     if (SCREEN_RULE_RE.test(t) || SCREEN_CHROME_RE.test(t)) { bounded = true; break; }
     if (!t) { if (paragraphs[0].length) paragraphs.unshift([]); continue; }
-    if (!/[\p{L}\p{N}]/u.test(t)) continue; // a lone glyph or border
-    paragraphs[0].unshift(t);
+    // A lone glyph or border is not shown, but it still separated what is
+    // around it: the row below it gets a hard break that reflow never joins
+    // across (`***` between two commands, Codex P2). NOT a paragraph break:
+    // without a frame rule only the last paragraph is kept, and a paragraph
+    // break here would hide the text above it (security review).
+    if (!/[\p{L}\p{N}]/u.test(t)) { if (paragraphs[0].length) paragraphs[0][0].hard = true; continue; }
+    const row = { t, end: colOf(lines, i), first: firstWordOf(lines, i) };
+    paragraphs[0].unshift(row);
   }
   const kept = (bounded ? paragraphs : paragraphs.slice(-1)).filter((p) => p.length);
-  let rows = kept.flat();
+  if (prose) {
+    let text = kept.map((p) => reflow(p.map((x) => x.t), p.map((x) => x.end), frameW, p.map((x) => !!x.hard), p.map((x) => x.first))).join('\n');
+    if (text.length > PROMPT_MAX_CHARS) text = text.slice(-PROMPT_MAX_CHARS);
+    return text;
+  }
+  let rows = kept.flat().map((x) => x.t);
   if (rows.length > PROMPT_MAX_ROWS) rows = rows.slice(-PROMPT_MAX_ROWS); // the question sits last
   let text = rows.join('\n');
   if (text.length > PROMPT_MAX_CHARS) text = text.slice(-PROMPT_MAX_CHARS);

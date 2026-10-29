@@ -8,7 +8,12 @@ export default function MacSwitcher({ state, busy, error, onSwitch, onRename, on
     <div className="sheet-backdrop" onClick={onClose}>
       <section className="sheet mac-sheet" role="dialog" aria-modal="true" aria-label="Paired Macs" onClick={(e) => e.stopPropagation()}>
         <div className="sheet-handle" aria-hidden="true" />
-        <div className="mac-sheet-heading"><h2 className="sheet-title">Your Macs</h2><button className="icon-btn" onClick={onClose} aria-label="Close Mac switcher">×</button></div>
+        <div className="sheet-heading">
+          <button className="tb-round" onClick={onClose} aria-label="Close Mac switcher">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+          <h2 className="sheet-title">Your Macs</h2>
+        </div>
         {error && <p className="error mac-error" role="alert">{error}</p>}
         <div className="sheet-list">
           {state.pairings.map((p) => (

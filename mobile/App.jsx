@@ -89,7 +89,18 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
 
   if (problem || !connection) return (
     <div className="screen board-screen">
-      <header className="board-header"><button className="mac-title" onClick={onMacs}>{pairing.name} ▾</button></header>
+      <header className="board-header elevated">
+        <div className="board-title-row">
+          <button className="tb-round" onClick={onMacs} aria-label={`Switch Mac, current Mac: ${pairing.name}`}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2" /><path d="M2.5 19h19" /></svg>
+          </button>
+          <button className="board-title-mid" onClick={onMacs} aria-label={`Switch Mac, current Mac: ${pairing.name}`}>
+            <span className="board-title-main">{pairing.name}</span>
+            <span className="board-title-sub">{problem ? 'offline' : 'connecting'}</span>
+          </button>
+          <span className="tb-spacer" aria-hidden="true" />
+        </div>
+      </header>
       <main className="mac-problem">
         <p className="mac-origin">{origin}</p>
         <p role="status">{problem || 'Connecting to this Mac…'}</p>

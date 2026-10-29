@@ -28,7 +28,67 @@ function normBlock(b) {
   }
   if (str(b.result) !== undefined) out.result = b.result;
   if (b.isError === true) out.isError = true;
+  const images = toolImages(b.images);
+  if (images.length) out.images = images;
   return out;
+}
+
+// Image references a tool result carried (main sends refs, never pixels).
+const IMAGE_REF = /^[0-9a-fA-F-]{8,64}:\d{1,3}:\d{1,2}$/;
+const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
+function toolImages(list) {
+  if (!Array.isArray(list)) return [];
+  return list.filter((i) => i && typeof i.ref === 'string' && IMAGE_REF.test(i.ref) && typeof i.mime === 'string' && IMAGE_MIME.test(i.mime))
+    .slice(0, 6).map((i) => ({ ref: i.ref, mime: i.mime }));
+}
+
+/**
+ * Every tool image in a run of steps, in order: what a chat view shows as
+ * thumbnails beside the (possibly folded) steps.
+ */
+export function stepImages(steps) {
+  const out = [];
+  for (const b of steps || []) for (const i of b.images || []) if (out.length < 8) out.push(i);
+  return out;
+}
+
+/**
+ * A small cache in front of a view's image fetch(ref) -> Promise<{mime,data}>,
+ * so a re-render or a poll never fetches a picture twice. Bounded: the oldest
+ * SETTLED entries go past `max`; a pending one is never evicted, or a page of
+ * more thumbnails than `max` re-requests every one on each poll and none
+ * ever lands (Codex P2). Pending entries are bounded by what is on screen.
+ */
+export function createImageCache(fetchOne, max = 24) {
+  const cache = new Map();
+  const pending = new Set();
+  const evict = () => {
+    for (const [k, v] of cache) {
+      if (cache.size <= max) return;
+      if (!pending.has(v)) cache.delete(k);
+    }
+  };
+  return (ref) => {
+    if (cache.has(ref)) {
+      const hit = cache.get(ref);
+      cache.delete(ref);
+      cache.set(ref, hit);
+      return hit;
+    }
+    const p = Promise.resolve().then(() => fetchOne(ref)).then(
+      (img) => (img && IMAGE_MIME.test(img.mime) && typeof img.data === 'string' ? `data:${img.mime};base64,${img.data}` : null),
+      () => null,
+    );
+    cache.set(ref, p);
+    pending.add(p);
+    p.then((url) => {
+      pending.delete(p);
+      if (!url && cache.get(ref) === p) cache.delete(ref); // a miss may succeed later
+      evict();
+    });
+    evict();
+    return p;
+  };
 }
 
 /** The row's usable blocks, or null to render `content` as before. */
@@ -222,3 +282,55 @@ export function createPressGuard({ defer = (fn) => setTimeout(fn, RELEASE_MS), n
     },
   };
 }
+
+// --- One line for a run of steps --------------------------------------------
+// The Claude app reads a run of tool calls as a sentence ("Created a file, ran
+// a command +12 -0", "Used 4 tools"); so do both chat views.
+const STEP_PHRASES = {
+  Write: ['created a file', 'created {n} files'],
+  Edit: ['edited a file', 'edited {n} files'],
+  MultiEdit: ['edited a file', 'edited {n} files'],
+  NotebookEdit: ['edited a notebook', 'edited {n} notebooks'],
+  Read: ['read a file', 'read {n} files'],
+  Bash: ['ran a command', 'ran {n} commands'],
+  Grep: ['searched the code', 'searched the code {n} times'],
+  Glob: ['looked for files', 'looked for files {n} times'],
+  WebFetch: ['fetched a page', 'fetched {n} pages'],
+  WebSearch: ['searched the web', 'searched the web {n} times'],
+  Task: ['ran an agent', 'ran {n} agents'],
+  Agent: ['ran an agent', 'ran {n} agents'],
+  TodoWrite: ['updated the plan', 'updated the plan'],
+  Skill: ['used a skill', 'used {n} skills'],
+};
+const lineCount = (t) => (t ? String(t).split('\n').length : 0);
+
+/**
+ * { text, added, removed } for a run of step blocks: up to two kinds of tool
+ * as a phrase ("Created a file, ran a command"), more than that as "Used N
+ * tools"; thinking alone is "Thought". added/removed: lines across the run's
+ * edits and writes (an edit's old and new text, so a rough count).
+ */
+export function stepSummary(steps) {
+  const tools = (steps || []).filter((b) => b && b.type === 'tool');
+  if (!tools.length) return { text: 'Thought', added: 0, removed: 0 };
+  const counts = new Map();
+  let added = 0;
+  let removed = 0;
+  for (const b of tools) {
+    const key = STEP_PHRASES[b.name] ? (b.name === 'MultiEdit' ? 'Edit' : b.name === 'Agent' ? 'Task' : b.name) : b.name;
+    counts.set(key, (counts.get(key) || 0) + 1);
+    if (b.diff) { added += lineCount(b.diff.new); removed += lineCount(b.diff.old); }
+  }
+  let text;
+  if (counts.size > 2) text = `Used ${tools.length} tools`;
+  else {
+    text = [...counts].map(([name, n]) => {
+      const ph = STEP_PHRASES[name];
+      if (!ph) return n > 1 ? `used ${name} ${n} times` : `used ${name}`;
+      return (n > 1 ? ph[1] : ph[0]).replace('{n}', String(n));
+    }).join(', ');
+    text = text.charAt(0).toUpperCase() + text.slice(1);
+  }
+  return { text, added, removed };
+}
+

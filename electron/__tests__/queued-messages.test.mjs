@@ -401,4 +401,89 @@ fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true });
   assert.equal(rows[0].blocks[1].result, 'ok', 'a result that fits still lands');
 }
 
-console.log('queued-messages: 29 groups pass');
+// 30. Images a tool returned travel as references, never pixels, and come
+// back exactly by reference; anything else is refused.
+{
+  const { parseTranscriptTail, readTranscriptImage } = await import('../data-service.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'img-'));
+  const f = path.join(dir, 't.jsonl');
+  const png = Buffer.from('fake-png-bytes').toString('base64');
+  const jpg = Buffer.from('fake-jpg-bytes').toString('base64');
+  const uuid = '0a1b2c3d-1111-2222-3333-444455556666';
+  fs.writeFileSync(f, [
+    JSON.stringify({ type: 'user', uuid: 'u-0', message: { role: 'user', content: 'x'.repeat(70 * 1024 * 1024 / 64) } }),
+    JSON.stringify({ type: 'assistant', uuid: 'a-1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'k1', name: 'Read', input: { file_path: '/tmp/shot.png' } }, { type: 'tool_use', id: 'k2', name: 'Read', input: { file_path: '/tmp/b.jpg' } }] } }),
+    JSON.stringify({ type: 'user', uuid, message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'k1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }] },
+      { type: 'tool_result', tool_use_id: 'k2', content: [{ type: 'text', text: 'here' }, { type: 'image', source: { type: 'base64', media_type: 'image/svg+xml', data: png } }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: jpg } }] },
+    ] } }),
+  ].join('\n') + '\n');
+  const rows = await parseTranscriptTail(f, 50, true);
+  const tools = rows.flatMap((r) => r.blocks || []).filter((b) => b.type === 'tool');
+  assert.deepEqual(tools[0].images, [{ ref: `${uuid}:0:0`, mime: 'image/png' }], 'a reference, not the pixels');
+  assert.deepEqual(tools[1].images, [{ ref: `${uuid}:1:1`, mime: 'image/jpeg' }], 'an svg is skipped, the jpeg keeps its own index');
+  assert.ok(!JSON.stringify(rows).includes(png), 'no base64 in the payload');
+  assert.deepEqual(await readTranscriptImage(f, `${uuid}:0:0`), { mime: 'image/png', data: png });
+  assert.deepEqual(await readTranscriptImage(f, `${uuid}:1:1`), { mime: 'image/jpeg', data: jpg });
+  assert.equal(await readTranscriptImage(f, `${uuid}:1:0`), null, 'an svg is never served');
+  assert.equal(await readTranscriptImage(f, `${uuid}:5:0`), null, 'no such result');
+  assert.equal(await readTranscriptImage(f, 'a-1:0:0'), null, 'not a uuid-shaped ref');
+  assert.equal(await readTranscriptImage(f, '../../etc/passwd'), null);
+  assert.equal(await readTranscriptImage(f, `0a1b2c3d-9999-2222-3333-444455556666:0:0`), null, 'another record');
+  // Spaced JSON (any writer, not only Claude's compact form) is found too.
+  const g = path.join(dir, 'spaced.jsonl');
+  fs.writeFileSync(g, fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.stringify(JSON.parse(l), null, 1).replace(/\n\s*/g, ' ')).join('\n') + '\n');
+  assert.deepEqual(await readTranscriptImage(g, `${uuid}:0:0`), { mime: 'image/png', data: png }, 'spacing does not matter');
+  // A repeated uuid serves its LAST record (the one a chat's tail window shows),
+  // and the index grows with the file.
+  const dupe = (data) => JSON.stringify({ type: 'user', uuid, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'k1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data } }] }] } });
+  const h = path.join(dir, 'dupe.jsonl');
+  const first = Buffer.from('first').toString('base64');
+  const later = Buffer.from('later').toString('base64');
+  fs.writeFileSync(h, dupe(first) + '\n');
+  assert.equal((await readTranscriptImage(h, `${uuid}:0:0`))?.data, first);
+  fs.appendFileSync(h, dupe(later) + '\n');
+  assert.equal((await readTranscriptImage(h, `${uuid}:0:0`))?.data, later, 'appended record found, last one wins');
+  // Many parallel fetches all resolve, each to its own image.
+  const got = await Promise.all(Array.from({ length: 30 }, (_, k) => readTranscriptImage(f, `${uuid}:${k % 2}:${k % 2 ? 1 : 0}`)));
+  assert.ok(got.every((g, k) => g && g.data === (k % 2 ? jpg : png)), 'parallel fetches are each correct');
+  // A stopped session's last record often has no newline: it still loads.
+  const t = path.join(dir, 'unterminated.jsonl');
+  fs.writeFileSync(t, JSON.stringify({ type: 'user', uuid: 'u-0', message: { role: 'user', content: 'hi' } }) + '\n' + dupe(first));
+  assert.equal((await readTranscriptImage(t, `${uuid}:0:0`))?.data, first, 'unterminated final record is indexed');
+  fs.appendFileSync(t, '\n' + dupe(later) + '\n');
+  assert.equal((await readTranscriptImage(t, `${uuid}:0:0`))?.data, later, 'then grows normally');
+  // A record over the line cap still being written: earlier images load, it is
+  // skipped across appends (never re-read whole), and what follows it loads.
+  const big = path.join(dir, 'growing.jsonl');
+  fs.writeFileSync(big, dupe(first) + '\n' + '{"type":"user","uuid":"u-big","message":{"content":"' + 'z'.repeat(65 * 1024 * 1024));
+  assert.equal((await readTranscriptImage(big, `${uuid}:0:0`))?.data, first, 'image before a huge unfinished record');
+  fs.appendFileSync(big, 'z'.repeat(1024));
+  assert.equal((await readTranscriptImage(big, `${uuid}:0:0`))?.data, first, 'still found while it grows');
+  const other = '0a1b2c3d-7777-2222-3333-444455556666';
+  fs.appendFileSync(big, '"}}\n' + dupe(later).replace(uuid, other) + '\n');
+  assert.equal((await readTranscriptImage(big, `${other}:0:0`))?.data, later, 'the record after it is indexed');
+  // A scan that fails (unreadable) is not cached: once readable, it loads.
+  const locked = path.join(dir, 'locked.jsonl');
+  fs.writeFileSync(locked, dupe(first) + '\n');
+  fs.chmodSync(locked, 0o000);
+  if (process.getuid?.() !== 0) assert.equal(await readTranscriptImage(locked, `${uuid}:0:0`), null, 'unreadable');
+  fs.chmodSync(locked, 0o644);
+  assert.equal((await readTranscriptImage(locked, `${uuid}:0:0`))?.data, first, 'readable again, found');
+  // Rewritten in place at the SAME size, the record moved: the index notices.
+  const r = path.join(dir, 'rewrite.jsonl');
+  const pad = (n) => JSON.stringify({ type: 'user', uuid: 'u-p', message: { role: 'user', content: 'p'.repeat(n) } });
+  fs.writeFileSync(r, dupe(first) + '\n' + pad(40) + '\n');
+  assert.equal((await readTranscriptImage(r, `${uuid}:0:0`))?.data, first);
+  const before = fs.statSync(r);
+  fs.writeFileSync(r, pad(40) + '\n' + dupe(later) + '\n');
+  assert.equal(fs.statSync(r).size, before.size, 'same size');
+  fs.utimesSync(r, before.atime, new Date(before.mtimeMs + 5000));
+  assert.equal((await readTranscriptImage(r, `${uuid}:0:0`))?.data, later, 'same-size rewrite is rescanned');
+  // Rewritten to something LONGER: the bytes before the old resume point changed.
+  fs.writeFileSync(r, pad(10) + '\n' + dupe(first) + '\n' + pad(200) + '\n');
+  assert.equal((await readTranscriptImage(r, `${uuid}:0:0`))?.data, first, 'growing rewrite is rescanned');
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('queued-messages: 30 groups pass');

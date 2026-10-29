@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext } from 'react';
+import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard } from '../../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import './ChatPane.css';
 
@@ -89,6 +90,94 @@ function nodeText(node) {
 // with no language looks the same), so `pre` tells its children they are in a
 // block through context.
 const InPre = createContext(false);
+// The current chat's image fetch (ref -> Promise<data URL | null>).
+const ImageFetch = createContext(null);
+// Called when a thumbnail finishes loading: it is taller than its placeholder,
+// so a reader pinned to the bottom is kept there (Codex P2).
+const ImageLoaded = createContext(null);
+// Whether the pane is on screen: an open image (on <body>) closes with it.
+const PaneVisible = createContext(true);
+
+// Thumbnails of the images a run of steps returned, shown even while the steps
+// are folded: a screenshot is the point of the step. Click opens it full size.
+function ToolImages({ images }) {
+  const fetchImage = useContext(ImageFetch);
+  const onLoaded = useContext(ImageLoaded);
+  const [urls, setUrls] = useState({});
+  const [failed, setFailed] = useState({});
+  const [big, setBig] = useState(null);
+  // The lightbox lives on <body>, so a hidden tab's would cover whatever is
+  // showing now and swallow its keys (Codex P2): it closes with the pane.
+  const shown = useContext(PaneVisible);
+  useEffect(() => { if (!shown) setBig(null); }, [shown]);
+  // What is shown is never fetched again (a poll hands in new arrays, and the
+  // cache may have evicted it: Codex), and a miss retries a few times (a
+  // reconnect can swallow a reply) before it says so.
+  const loaded = useRef({});
+  const tries = useRef({});
+  useEffect(() => {
+    let live = true;
+    const timers = [];
+    if (!fetchImage) return undefined;
+    const get = (ref) => {
+      if (loaded.current[ref]) return;
+      fetchImage(ref).then((url) => {
+        if (!live) return;
+        if (url) { loaded.current[ref] = true; setUrls((cur) => ({ ...cur, [ref]: url })); return; }
+        tries.current[ref] = (tries.current[ref] || 0) + 1;
+        if (tries.current[ref] < 3) timers.push(setTimeout(() => get(ref), 4000 * tries.current[ref]));
+        else setFailed((cur) => ({ ...cur, [ref]: true }));
+      });
+    };
+    for (const i of images) get(i.ref);
+    return () => { live = false; timers.forEach(clearTimeout); };
+  }, [images, fetchImage]);
+  return (
+    <div className="chatp-imgs">
+      {images.map((i) => (urls[i.ref]
+        ? <button key={i.ref} type="button" className="chatp-img" onClick={(e) => setBig({ url: urls[i.ref], from: e.currentTarget })} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" onLoad={onLoaded || undefined} /></button>
+        : <div key={i.ref} className={`chatp-img ${failed[i.ref] ? 'failed' : 'loading'}`}>{failed[i.ref] ? 'Image unavailable' : null}</div>))}
+      {/* Back to the thumbnail AFTER the lightbox (and its focus guard) is
+          gone, or the guard pulls focus back and it lands on <body>. */}
+      {big && <Lightbox url={big.url} onClose={() => { const from = big.from; setBig(null); requestAnimationFrame(() => from?.focus?.()); }} />}
+    </div>
+  );
+}
+
+// Full size, modal: it takes focus and keeps it (Tab cannot reach the chat or
+// a selector card behind it, Codex), Escape/Enter or a click/tap closes it.
+function Lightbox({ url, onClose }) {
+  const ref = useRef(null);
+  // Modal for real: anything that grabs focus while it is open (a new tab's
+  // terminal in the other split pane) hands it straight back, so typing and
+  // Enter never reach a pane hidden under the image (Codex P2).
+  useEffect(() => {
+    ref.current?.focus();
+    const keep = (e) => { if (ref.current && !ref.current.contains(e.target)) ref.current.focus(); };
+    document.addEventListener('focusin', keep);
+    return () => document.removeEventListener('focusin', keep);
+  }, []);
+  // Rendered on <body>: inside a collapsed message, the clamp's mask would
+  // crop a fixed overlay to the message (Codex P2).
+  return createPortal(
+    <div
+      ref={ref}
+      className="chatp-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image"
+      tabIndex={-1}
+      onClick={onClose}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); onClose(); } else if (e.key === 'Tab') e.preventDefault();
+      }}
+    >
+      <img src={url} alt="Tool output, full size" />
+    </div>,
+    document.body,
+  );
+}
 
 function InlineCode({ children, ...props }) {
   const [done, setDone] = useState(false);
@@ -235,7 +324,13 @@ function Blocks({ blocks, live }) {
   const parts = [];
   let run = [];
   // Only the run of steps that ENDS the turn can still be running.
-  const flush = (atEnd) => { if (run.length) { parts.push(<StepGroup key={`s${parts.length}`} steps={run} live={live && atEnd} />); run = []; } };
+  const flush = (atEnd) => {
+    if (!run.length) return;
+    parts.push(<StepGroup key={`s${parts.length}`} steps={run} live={live && atEnd} />);
+    const images = stepImages(run);
+    if (images.length) parts.push(<ToolImages key={`i${parts.length}`} images={images} />);
+    run = [];
+  };
   for (const b of blocks) {
     if (b.type === 'text') {
       flush(false);
@@ -408,6 +503,10 @@ export default function ChatPane({ tabId, visible }) {
   const selAppliedRef = useRef(0);
   const bodyRef = useRef(null);
   const atBottomRef = useRef(true);
+  const keepBottom = useCallback(() => {
+    const el = bodyRef.current;
+    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, []);
   // Rows that arrived (or a live turn that grew) while scrolled up, for the
   // "new messages" pill. The mark is the newest row seen at the bottom (the
   // window slides, so a plain length cannot count them).
@@ -421,6 +520,12 @@ export default function ChatPane({ tabId, visible }) {
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const sessionIdRef = useRef(undefined);
+  // Tool images (a screenshot Claude read): fetched by reference only when a
+  // thumbnail shows, cached per session.
+  const imageFetch = useMemo(() => createImageCache((ref) => {
+    const h = haveRef.current;
+    return h?.sessionId && h.projectPath ? window.electronAPI.chatImage?.(h.sessionId, h.projectPath, ref) : null;
+  }), [sessionId]);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const mountedRef = useRef(true);
@@ -565,9 +670,15 @@ export default function ChatPane({ tabId, visible }) {
 
   // Take focus only as THE active tab: in a grid every chat pane is visible,
   // and the last one to grab focus would receive typing meant for another.
+  // An open image (in ANY pane: split shows two) stays on top and keeps
+  // focus, so coming back from Dashboard never puts Enter on a draft hidden
+  // behind it (Codex P2, twice).
+  const focusInput = useCallback(() => {
+    (document.querySelector('.chatp-lightbox') || inputRef.current)?.focus();
+  }, []);
   useEffect(() => {
-    if (visible && isActive) requestAnimationFrame(() => inputRef.current?.focus());
-  }, [visible, isActive]);
+    if (visible && isActive) requestAnimationFrame(focusInput);
+  }, [visible, isActive, focusInput]);
 
   // Clicking, focusing or dragging over this pane makes its tab the active
   // one, so window-level drops and shortcuts target what the user is using.
@@ -799,7 +910,7 @@ export default function ChatPane({ tabId, visible }) {
       if (!pane) return useStore.getState().activeTabId === tabId;
       // Dropped right here: type into this composer next, even as split's
       // right pane (never the active tab), not the terminal that had focus.
-      if (pane.dataset.chatTab === tabId) { requestAnimationFrame(() => inputRef.current?.focus()); return true; }
+      if (pane.dataset.chatTab === tabId) { requestAnimationFrame(focusInput); return true; }
       return false;
     };
     const onFiles = (e) => {
@@ -817,7 +928,7 @@ export default function ChatPane({ tabId, visible }) {
       window.removeEventListener('dobius:drop-files', onFiles);
       window.removeEventListener('dobius:drop-text', onText);
     };
-  }, [visible, tabId]);
+  }, [visible, tabId, focusInput]);
 
   const working = status === 'working';
   const placeholder = sessionId
@@ -883,6 +994,7 @@ export default function ChatPane({ tabId, visible }) {
   }
 
   return (
+    <ImageFetch.Provider value={imageFetch}><ImageLoaded.Provider value={keepBottom}><PaneVisible.Provider value={visible}>
     <div className="chatp" data-chat-tab={tabId} onMouseDownCapture={activate} onFocusCapture={activate} onDragEnterCapture={activate}>
       <div className="chatp-head">
         <span className={`chatp-status ${status || 'idle'}`} />
@@ -955,6 +1067,7 @@ export default function ChatPane({ tabId, visible }) {
         </div>
       </div>
     </div>
+    </PaneVisible.Provider></ImageLoaded.Provider></ImageFetch.Provider>
   );
 }
 

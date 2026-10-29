@@ -2,7 +2,7 @@
 // A malformed row must degrade to its plain text, never throw.
 // Run: node ./electron/__tests__/chat-rows.test.mjs
 import assert from 'node:assert/strict';
-import { normalizeBlocks, rowText, rowKeys } from '../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, createImageCache } from '../../shared/chat-rows.js';
 
 // 1. Junk blocks are dropped field by field; nothing usable means null.
 assert.equal(normalizeBlocks(undefined), null);
@@ -200,4 +200,36 @@ console.log('PASS  row keys survive a sliding window');
   clock += 10000;
   assert.equal(g.take(kclick, B), true, 'the orphan expired: assistive tech works again');
   console.log('PASS  press guard');
+}
+
+// --- stepSummary: a run of steps as one line ---
+{
+  const { stepSummary } = await import('../../shared/chat-rows.js');
+  const t = (name, extra = {}) => ({ type: 'tool', name, ...extra });
+  assert.deepEqual(stepSummary([t('Write', { diff: { old: '', new: 'a\nb\nc' } }), t('Bash')]), { text: 'Created a file, ran a command', added: 3, removed: 0 });
+  assert.deepEqual(stepSummary([t('Bash'), t('Bash'), t('Bash')]).text, 'Ran 3 commands');
+  assert.deepEqual(stepSummary([t('Edit', { diff: { old: 'x\ny', new: 'z' } })]), { text: 'Edited a file', added: 1, removed: 2 });
+  assert.deepEqual(stepSummary([t('Read'), t('Grep'), t('Bash'), t('Bash')]).text, 'Used 4 tools');
+  assert.deepEqual(stepSummary([t('mcp__x__y')]).text, 'Used mcp__x__y');
+  assert.deepEqual(stepSummary([{ type: 'thinking', text: 'hm' }]).text, 'Thought');
+  assert.deepEqual(stepSummary([t('Edit'), t('MultiEdit')]).text, 'Edited 2 files');
+  console.log('PASS  step summaries');
+}
+
+// The image cache never evicts a request still in flight: a page with more
+// thumbnails than its size would otherwise re-request every one on each poll.
+{
+  const calls = [];
+  const fetchOne = (ref) => new Promise((resolve) => calls.push({ ref, resolve }));
+  const get = createImageCache(fetchOne, 2);
+  const ps = ['a', 'b', 'c', 'd'].map((r) => get(r));
+  await new Promise((r) => setTimeout(r, 0));
+  ['a', 'b', 'c', 'd'].forEach((r) => assert.equal(get(r), ps[['a', 'b', 'c', 'd'].indexOf(r)], `pending ${r} is reused`));
+  assert.equal(calls.length, 4, 'each image fetched once while pending');
+  calls.forEach((c) => c.resolve({ mime: 'image/png', data: 'QUJD' }));
+  await Promise.all(ps);
+  get('e'); await new Promise((r) => setTimeout(r, 0));
+  get('a'); await new Promise((r) => setTimeout(r, 0));
+  assert.equal(calls.filter((c) => c.ref === 'a').length, 2, 'settled entries past the cap are evicted');
+  console.log('PASS  image cache keeps pending requests');
 }

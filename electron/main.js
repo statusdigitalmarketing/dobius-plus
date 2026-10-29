@@ -44,8 +44,7 @@ import {
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
-  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo,
-} from './data-service.js';
+  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
 } from './build-monitor-service.js';
@@ -678,6 +677,12 @@ function setupDataHandlers() {
     // The live spinner line ("Whirlpooling… 1m 12s"), only while working.
     if (r && r.status === 'working') r.activity = await activityForTab(tabId);
     return r;
+  });
+  // One image a tool returned (a screenshot Claude read), by the reference its
+  // row carries. Fetched only when the thumbnail is shown.
+  ipcMain.handle('chat:image', async (_event, sessionId, projectPath, ref) => {
+    if (typeof sessionId !== 'string' || typeof projectPath !== 'string' || typeof ref !== 'string') return null;
+    return loadTranscriptImage(sessionId, projectPath, ref);
   });
   ipcMain.handle('chat:selector', async (event, tabId) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return null;

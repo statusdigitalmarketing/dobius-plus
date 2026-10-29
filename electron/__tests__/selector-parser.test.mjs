@@ -278,23 +278,172 @@ sv2('screen: multi-question Q1', await screenSel('askq-multi-q1-2.1.233-raw.bin'
   prompt: 'Pick a color',
   options: [{ num: 1, label: 'Red', detail: 'The color red.' }, { num: 2, label: 'Blue', detail: 'The color blue.' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }],
   selectedIndex: 0,
+  steps: { labels: ['Color', 'Size'], answered: [false, false], current: 0, total: 2 },
 });
 sv2('screen: multi-question Q2 (the bug)', await screenSel('askq-multi-q2-2.1.233-raw.bin'), {
   prompt: 'Pick a size',
   options: [{ num: 1, label: 'Small', detail: 'The small size.' }, { num: 2, label: 'Large', detail: 'The large size.' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }],
   selectedIndex: 0,
+  steps: { labels: ['Color', 'Size'], answered: [true, false], current: 1, total: 2 },
 });
 sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1.233-raw.bin'), {
   // The whole review, not just its last row (Sam: prompts "get cutoff").
   prompt: 'Review your answers\n● Pick a color\n→ Red\n● Pick a size\n→ Small\nReady to submit your answers?',
   options: [{ num: 1, label: 'Submit answers' }, { num: 2, label: 'Cancel' }],
   selectedIndex: 0,
+  steps: { labels: ['Color', 'Size'], answered: [true, true], current: 2, total: 2 },
 });
+// Steps: the SHOWING question is the tab drawn with a background colour, not
+// merely the first unanswered one (the user went back to an answered one).
+{
+  const E = '\x1b';
+  const raw = `${E}[2J${E}[H←  ${E}[48;2;177;185;249m${E}[38;2;0;0;0m ☒ Color ${E}[39m${E}[49m  ☐ Size  ✔ Submit  →\r\nPick a color\r\n❯ 1. Red\r\n  2. Blue\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n`;
+  const lines = await renderScreenLines(new TextEncoder().encode(raw));
+  sv2('screen: steps follow the highlighted tab back to an answered question', parseSelectorFromScreen(lines)?.steps,
+    { labels: ['Color', 'Size'], answered: [true, false], current: 0, total: 2 });
+  // The emulator reports each row's true end column: wide glyphs and the
+  // angle brackets a hand-written table missed (Codex P2) are exact.
+  const wideRaw = `${E}[2J${E}[Habc\r\n漢字\r\nab\u2329x\u232A\r\n`;
+  const wideLines = await renderScreenLines(new TextEncoder().encode(wideRaw));
+  sv2('screen: the emulator gives exact row end columns', wideLines.ends.slice(0, 3), [3, 4, 7]);
+  const q = '─'.repeat(80) + '\r\n ☐ Layout\r\nLike this?\r\n' + '─'.repeat(60) + '\r\n←  ☐ A  ☐ B  ✔ Submit  →\r\nThe vector bracket should remain visible in the output: \u2329x\u232A\r\n❯ 1. Yes\r\n  2. No\r\nEnter to select · ↑/↓ to navigate · Esc to cancel\r\n';
+  const qLines = await renderScreenLines(new TextEncoder().encode(`${E}[2J${E}[H` + q));
+  sv2('screen: through the emulator, a short quoted rule cannot bound the frame', parseSelectorFromScreen(qLines)?.steps?.total, 1);
+  // Characters the emulator draws in zero columns (U+1160) must not make the
+  // next word look too wide to have fit: its width comes from the cells.
+  const zw = '─'.repeat(80) + '\r\n←  ☐ Cleanup  ✔ Submit  →\r\necho ' + 'x'.repeat(65) + '\r\nrm' + '\u1160'.repeat(8) + ' -rf build\r\n❯ 1. Yes\r\n  2. No\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n';
+  const zwLines = await renderScreenLines(new TextEncoder().encode(`${E}[2J${E}[H` + zw));
+  sv2('screen: the emulator gives each row\'s first-word width', zwLines.firstWords.slice(2, 4), [4, 2]);
+  sv2('screen: through the emulator, a zero-width filler cannot join two commands', parseSelectorFromScreen(zwLines)?.prompt?.includes('\nrm'), true);
+  const lrmSp = '─'.repeat(80) + '\r\n←  ☐ Cleanup  ✔ Submit  →\r\necho ' + 'x'.repeat(65) + '\r\nrm \u200E-rf build\r\n❯ 1. Yes\r\n  2. No\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n';
+  const lrmLines = await renderScreenLines(new TextEncoder().encode(`${E}[2J${E}[H` + lrmSp));
+  sv2('screen: a mark attached to a space does not lengthen the first word', lrmLines.firstWords[3], 2);
+  sv2('screen: through the emulator, a marked space cannot join two commands', parseSelectorFromScreen(lrmLines)?.prompt?.includes('\nrm'), true);
+  // A long question Claude wrapped over several rows reads as one paragraph.
+  const wrapped = parseSelectorFromScreen([
+    '─'.repeat(80),
+    '←  ☐ Rate  ☐ Payout  ✔ Submit  →',
+    'What should Trybe pay creators? Trybe needs a commission program before we',
+    'can invite anyone, and the rate is visible to every creator.',
+    '❯ 1. 20% of sales (Recommended)',
+    "     Trybe's recommended type. Below our 25% affiliate rate, since Trybe also",
+    '     takes its cut and runs the ads.',
+    '  2. 25% of sales',
+    'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+  ]);
+  sv2('screen: a wrapped option description re-flows too', wrapped?.options?.[0]?.detail,
+    "Trybe's recommended type. Below our 25% affiliate rate, since Trybe also takes its cut and runs the ads.");
+  sv2('screen: a wrapped question re-flows into one paragraph', wrapped?.prompt,
+    'What should Trybe pay creators? Trybe needs a commission program before we can invite anyone, and the rate is visible to every creator.');
+  // A checklist in the transcript above a permission prompt's border is not a
+  // tab bar: no steps, so no arrow keys reach a Bash prompt.
+  const perm = parseSelectorFromScreen([
+    'Todo: ☐ Cleanup ☐ Verify',
+    '─'.repeat(80),
+    ' Bash command',
+    '   rm -rf build',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ]);
+  sv2('screen: a checklist above a permission prompt is not a tab bar', perm?.steps, undefined);
+  // Repeated tab labels, and a question named Submit: matched by POSITION.
+  const at = async (bar, hlText) => {
+    const pre = bar.slice(0, bar.indexOf(hlText));
+    const raw = `${E}[2J${E}[H${pre}${E}[48;2;177;185;249m${hlText}${E}[49m${bar.slice(pre.length + hlText.length)}\r\nPick\r\n❯ 1. A\r\n  2. B\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n`;
+    return parseSelectorFromScreen(await renderScreenLines(new TextEncoder().encode(raw)))?.steps?.current;
+  };
+  sv2('screen: the second of two same-named tabs is question 2', await at('←  ☒ Scope  ☐ Scope   ✔ Submit  →', '☐ Scope'), 1);
+  sv2('screen: a question named Submit is not the review step', await at('←  ☒ Color  ☐ Submit   ✔ Submit  →', '☐ Submit'), 1);
+  sv2('screen: the real Submit tab is the review step', await at('←  ☒ Color  ☒ Size   ✔ Submit  →', '✔ Submit'), 2);
+  // A path Claude wrapped mid-token is re-joined without a space.
+  const pathy = parseSelectorFromScreen([
+    '─'.repeat(80),
+    '←  ☐ Target  ✔ Submit  →',
+    'Which config should change?',
+    '❯ 1. Project config',
+    '     Edits /Users/sam/Projects/dobius-',
+    '     plus/config.json and nothing else.',
+    '  2. Global config',
+    'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+  ]);
+  sv2('screen: a path wrapped mid-token keeps the terminal break, not a guess', pathy?.options?.[0]?.detail, 'Edits /Users/sam/Projects/dobius-\nplus/config.json and nothing else.');
+  const wrapAt = (detail) => parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Target  ✔ Submit  →', 'Which file?', '❯ 1. That one', ...detail.map((d) => '     ' + d), '  2. Neither', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel'])?.options?.[0]?.detail;
+  sv2('screen: a path broken after a letter keeps the break', wrapAt(['Writes /srv/production/confi', 'g.json today.']), 'Writes /srv/production/confi\ng.json today.');
+  const longName = 'a'.repeat(60);
+  sv2('screen: a token that filled the row keeps the break', wrapAt(['Writes /tmp/' + longName.slice(0, 20), longName, 'aaa.json now.']), `Writes /tmp/${longName.slice(0, 20)}\n${longName}\naaa.json now.`);
+  sv2('screen: a path with a space broken before its slash keeps the break', wrapAt(['Edits /Users/sam/Library/Application Supp', 'ort/config.json now.']), 'Edits /Users/sam/Library/Application Supp\nort/config.json now.');
+  sv2('screen: a file name broken mid-word keeps the break', wrapAt(['Edits /Users/sam/Desktop/Quarterly Rep', 'ort.pdf today.']), 'Edits /Users/sam/Desktop/Quarterly Rep\nort.pdf today.');
+  sv2('screen: a slashless file name broken mid-word keeps the break', wrapAt(['Renames the Quarterly Rep', 'ort.pdf today.']), 'Renames the Quarterly Rep\nort.pdf today.');
+  sv2('screen: an extension broken mid-word keeps the break', wrapAt(['Renames Quarterly Report.p', 'df today.']), 'Renames Quarterly Report.p\ndf today.');
+  sv2('screen: a name broken right after its dot keeps the break', wrapAt(['Renames Quarterly Report.', 'pdf today.']), 'Renames Quarterly Report.\npdf today.');
+  sv2('screen: an uppercase extension after the dot keeps the break', wrapAt(['Renames Quarterly Report.', 'PDF today.']), 'Renames Quarterly Report.\nPDF today.');
+  sv2('screen: a long uppercase extension after the dot keeps the break', wrapAt(['Renames backup.', 'SQLITE3 today.']), 'Renames backup.\nSQLITE3 today.');
+  sv2('screen: a sentence ending a full row still re-flows', wrapAt(['Writes the file, then it reads the whole tree back to check each entry.', 'Then it stops.']), 'Writes the file, then it reads the whole tree back to check each entry. Then it stops.');
+  sv2('screen: a full row of prose re-flows with a space', wrapAt(['Writes the main config file for this project and each workspace under', 'it and nothing else.']), 'Writes the main config file for this project and each workspace under it and nothing else.');
+  sv2('screen: a short row and a long next word stay two lines', wrapAt(['echo checking production resources', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build']), 'echo checking production resources\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build');
+  const longEcho = 'echo this is a deliberately long status line for the production cleanup';
+  sv2('screen: a blank row between two commands is kept', wrapAt([longEcho, '', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build']), `${longEcho}\n\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build`);
+  const starred = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Cleanup  ✔ Submit  →', 'echo this is a deliberately long status line for the production cleanup here', '***', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: a glyph-only row in the question still separates', starred?.prompt, 'echo this is a deliberately long status line for the production cleanup here\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build');
+  // ...and it does not split the paragraph: with no frame rule above, only the
+  // paragraph touching the options is kept, so a split would hide the rows
+  // above the glyph (security review).
+  const unbounded = parseSelectorFromScreen(['Bash command', '   rm -rf build/cache', '***', '   && echo done', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel']);
+  sv2('screen: a glyph row never hides the prompt rows above it', unbounded?.prompt?.includes('rm -rf build/cache'), true);
+  const lrm = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Cleanup  ✔ Submit  →', 'echo ' + 'x'.repeat(65), 'rm' + '\u200E'.repeat(8) + ' -rf build', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: zero-width marks do not make the next word look too wide to fit', lrm?.prompt, 'echo ' + 'x'.repeat(65) + '\nrm' + '\u200E'.repeat(8) + ' -rf build');
+  sv2('screen: a rule row between two commands is kept', wrapAt([longEcho, '------', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build']), `${longEcho}\n------\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build`);
+  sv2('screen: two short rows are two lines, never one (separate commands)', wrapAt(['echo cleanup', 'rm -rf build']), 'echo cleanup\nrm -rf build');
+  sv2('screen: a row cut at the very last column keeps the break', wrapAt(['x'.repeat(70) + ' abcd', 'efgh tail']), 'x'.repeat(70) + ' abcd\nefgh tail');
+  // A crafted row cannot freeze the parser (it backtracked exponentially once).
+  { const t0 = Date.now(); parseSelectorFromScreen(['─'.repeat(80), '☐ A '.repeat(2000) + '←', 'Q', '❯ 1. x', '  2. y', 'Enter to select · Esc to cancel']); sv2('screen: a hostile tab-like row parses quickly', Date.now() - t0 < 200, true); }
+  // Prose with a checkbox under the real bar does not hide the bar.
+  const proseBox = parseSelectorFromScreen(['─'.repeat(80), '←  ☒ A  ☐ B  ✔ Submit  →', 'Should ☐ mean disabled?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: a checkbox in the question does not hide the tabs', proseBox?.steps?.total, 2);
+  // ...nor does a question line that STARTS with a checkbox (Codex P2).
+  const leadBox = parseSelectorFromScreen(['─'.repeat(80), '←  ☒ Scope  ☐ Deploy  ✔ Submit  →', '☐ means disabled. Should deployment stay disabled?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: a checkbox-led question line does not replace the tabs', leadBox?.steps?.total, 2);
+  const quoteBox = parseSelectorFromScreen(['─'.repeat(80), '←  ☒ Scope  ☐ Deploy  ✔ Submit  →', 'Should the bar read like this?', '←  ☐ Preview  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: a quoted bar below the real one does not replace it', quoteBox?.steps?.labels, ['Scope', 'Deploy']);
+  const single = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Should the bar read like this?', '←  ☐ A  ☐ B  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · Esc to cancel']);
+  sv2('screen: a quoted multi-question bar does not override a single question', single?.steps?.total, 1);
+  const heredoc = parseSelectorFromScreen(['─'.repeat(80), ' Bash command', "   cat <<'EOF' > notes.md", '←  ☐ A  ☐ B  ✔ Submit  →', '   EOF', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel']);
+  sv2('screen: a bar inside a permission prompt\'s heredoc is not a tab bar', heredoc?.steps, undefined);
+  const checked = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ ✔ Check  ☐ Deploy  ✔ Submit  →', 'Run the check?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const boxHeader = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Use ☐ box ', 'Which box?', '❯ 1. This', '  2. That', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  sv2('screen: a checkbox inside a single question\'s header is one question', boxHeader?.steps, { labels: ['Use ☐ box'], answered: [false], current: 0, total: 1 });
+  const ruled = parseSelectorFromScreen(['─'.repeat(80), ' Bash command', "   cat <<'EOF' > notes.md", '   ──────────', '   ←  ☐ A  ☐ B  ✔ Submit  →', '   EOF', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel']);
+  sv2('screen: a rule and bar inside a heredoc give a permission prompt no steps', ruled?.steps, undefined);
+  const quotedRule = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Should it look like this?', '──────', '←  ☐ A  ☐ B  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  sv2('screen: a short rule and bar quoted in a question do not replace its tab', quotedRule?.steps, { labels: ['Layout'], answered: [false], current: 0, total: 1 });
+  const multiBox = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Use ☐ box  ☐ Deploy  ✔ Submit  →', 'Which box?', '❯ 1. This', '  2. That', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const marks = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Café  ☐ Size  ✔ Submit  →', 'Pick one for the cafe' + 'e\u0301'.repeat(30), '❯ 1. This', '  2. That', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: combining marks do not make a row look wider than the frame', marks?.steps?.total, 2);
+  const shortRule = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Like this?', '─'.repeat(30), '←  ☐ A  ☐ B  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  sv2('screen: a rule narrower than the footer does not bound the frame', shortRule?.steps?.total, 1);
+  const spaced = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Deploy  prod  ☐ Deploy  test  ✔ Submit  →', 'Deploy now?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: a header with a double space keeps all of its text', spaced?.steps?.labels, ['Deploy  prod', 'Deploy  test']);
+  const cjk = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Like this?', '─'.repeat(60), '←  ☐ A  ☐ B  ✔ Submit  →', '漢'.repeat(35), '❯ 1. Yes', '  2. No', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  sv2('screen: wide characters count two columns, so a short quoted rule cannot bound', cjk?.steps?.total, 1);
+  const arrows = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Dev→Prod  ☐ Prod→Dev  ✔ Submit  →', 'Proceed?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const ends = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Deploy  →  ☐ Deploy  ←  ✔ Submit  →', 'Proceed?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const shortQuoted = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Like this?', '─'.repeat(60), '←  ☐ A  ☐ B  ✔ Submit  →', 'Use this layout?', '❯ 1. Yes', '  2. No', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  sv2('screen: a rule narrower than the screen does not bound the frame', shortQuoted?.steps?.labels, ['Layout']);
+  sv2('screen: a standalone arrow inside a header is header text', ends?.steps?.labels, ['Deploy  →', 'Deploy  ←']);
+  sv2('screen: arrows inside headers keep the bar', arrows?.steps?.labels, ['Dev→Prod', 'Prod→Dev']);
+  sv2('screen: a checkbox inside a multi-question header stays in that header', multiBox?.steps?.labels, ['Use ☐ box', 'Deploy']);
+  sv2('screen: a checkmark inside a header is part of that header', checked?.steps, { labels: ['✔ Check', 'Deploy'], answered: [false, false], current: 0, total: 2 });
+  // Plain lines (no highlight information): the first unanswered one.
+  sv2('screen: without highlights, steps fall back to the first unanswered', parseSelectorFromScreen([...lines])?.steps,
+    { labels: ['Color', 'Size'], answered: [true, false], current: 1, total: 2 });
+}
 // A permission prompt: the tool and its command sit above the question, and a
 // long option wraps onto an indented row. All of it must reach the card.
 sv2('screen: permission prompt keeps the command and wrapped option', parseSelectorFromScreen([
   'previous transcript text that must not leak in',
-  '─'.repeat(40),
+  '─'.repeat(80),
   ' Bash command',
   '',
   '   git push origin main',
@@ -348,7 +497,7 @@ sv2('screen: null input safe', parseSelectorFromScreen(null), null);
 {
   const { selectorFingerprint } = await import('../selector-parser.js');
   const bash = (cmd, cur) => parseSelectorFromScreen([
-    '─'.repeat(40), ' Bash command', '', `   ${cmd}`, '', ' Do you want to proceed?',
+    '─'.repeat(80), ' Bash command', '', `   ${cmd}`, '', ' Do you want to proceed?',
     `${cur === 1 ? ' ❯' : '  '} 1. Yes`, `${cur === 2 ? ' ❯' : '  '} 2. No`, '', ' Esc to cancel',
   ]);
   const a = bash('rm -rf build', 1), b = bash('rm -rf ~/src', 1), a2 = bash('rm -rf build', 2);
@@ -358,7 +507,7 @@ sv2('screen: null input safe', parseSelectorFromScreen(null), null);
   // Same prompt text and options, differing only ABOVE a rule (e.g. two edits
   // to one file whose diffs sit outside the prompt paragraph).
   const edit = (line) => parseSelectorFromScreen([
-    `+ ${line}`, '─'.repeat(40), ' Do you want to make this edit to main.js?',
+    `+ ${line}`, '─'.repeat(80), ' Do you want to make this edit to main.js?',
     ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel',
   ]);
   sv2('fingerprint: diff above the rule counts', selectorFingerprint(edit('a = 1')) === selectorFingerprint(edit('a = 2')), false);
