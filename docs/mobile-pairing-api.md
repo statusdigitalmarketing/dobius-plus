@@ -19,10 +19,10 @@ Exchanges the six-digit pairing code shown in Settings for a device token.
 - Response `200`:
 
 ```json
-{ "ok": true, "token": "<64 hex>", "name": "Sams-MacBook-Pro", "hosts": ["100.89.143.67", "sams-macbook-pro.tail6addbf.ts.net", "sams-macbook-pro"] }
+{ "ok": true, "token": "<64 hex>", "name": "Sams-MacBook-Pro" }
 ```
 
-`hosts` lists this Mac's own addresses. The phone only runs the same-Mac check below against saved pairings at one of them.
+After pairing, the phone asks every OTHER Mac it has saved whether it is this same one (POST /same-mac below).
 
 - Errors: `403` wrong code or pairing locked, `429` cooling down, `421` foreign or short-name Host.
 - Side effects: adds a device to `config.mobileServer.devices`.

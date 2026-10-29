@@ -71,8 +71,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
       if (generation !== generationRef.current) return; // superseded
       // A real token is 64 hex chars; an oversized one could only be a lie.
       if (data.ok && typeof data.token === 'string' && data.token && data.token.length <= 512) {
-        const hosts = Array.isArray(data.hosts) ? data.hosts.filter((h) => typeof h === 'string' && h.length < 256).slice(0, 4) : [];
-        await onPaired({ token: data.token, host: hostToUse, name: typeof data.name === 'string' ? data.name : '', hosts });
+        await onPaired({ token: data.token, host: hostToUse, name: typeof data.name === 'string' ? data.name : '' });
       } else {
         setError(data.error || 'Pairing failed.');
         setCode('');

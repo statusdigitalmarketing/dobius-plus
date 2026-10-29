@@ -122,22 +122,20 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
 // server as the one just paired. Proof: that address answers POST /same-mac
 // with HMAC(saved token, nonce:hash of the new token), which only a server
 // that holds the saved token AND issued the new one can make. No token is sent
-// anywhere, only domain-separated hashes: a different Mac can hold the same
-// tailnet IP, and a short name can resolve anywhere (Codex P1, security
-// review). null when there is none, it cannot be reached, or WebCrypto is
-// missing (a plain-HTTP browser page): both records then stay.
-async function sameMacAs(state, origin, token, hosts) {
+// anywhere, only domain-separated hashes, so every saved Mac can be asked: a
+// different Mac can hold the same tailnet IP or short name, and a shared Mac
+// is saved under an address it cannot know is its own (Codex). null when
+// none is, none can be reached, or WebCrypto is missing (a plain-HTTP browser
+// page): both records then stay.
+async function sameMacAs(state, origin, token) {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) return null;
-  const own = new Set(hosts.map((h) => String(h).toLowerCase().replace(/\.$/, '')));
-  const hostOf = (o) => { try { return new URL(o).hostname.toLowerCase(); } catch { return ''; } };
   const target = normaliseHost(origin);
   const enc = new TextEncoder();
   const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
   const hashOf = async (t) => hex(await subtle.digest('SHA-256', enc.encode(`dobius-same-mac:${t}`)));
   const newTokenHash = await hashOf(token);
-  for (const p of state?.pairings || []) {
-    if (p.origin === target || !own.has(hostOf(p.origin))) continue;
+  const proves = async (p) => {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 3000);
     try {
@@ -149,10 +147,13 @@ async function sameMacAs(state, origin, token, hosts) {
         headers: { 'Content-Type': 'application/json' }, cache: 'no-store', credentials: 'omit', redirect: 'error',
       });
       const body = res.ok ? await res.json().catch(() => null) : null;
-      if (body?.ok === true && body.proof === want) return p.id;
-    } catch { /* unreachable from here (mixed content, offline): keep both */ } finally { clearTimeout(timer); }
-  }
-  return null;
+      return body?.ok === true && body.proof === want;
+    } catch { return false; /* unreachable from here (mixed content, offline): keep both */ } finally { clearTimeout(timer); }
+  };
+  // In parallel: each unreachable Mac costs up to 3s, and they must not add up.
+  const others = (state?.pairings || []).filter((p) => p.origin !== target);
+  const results = await Promise.all(others.map(proves));
+  return others.find((_, i) => results[i])?.id || null;
 }
 
 export default function App() {
@@ -396,12 +397,12 @@ export default function App() {
   if (!state) return <div className="screen center"><p className="mac-error">{error || 'Loading…'}</p>{error && <button onClick={() => setLoadAttempt((n) => n + 1)}>Retry</button>}</div>;
   const active = activePairing(state);
   const cancelPairing = () => { pairingUIRef.current = null; setPairingUI(null); };
-  const handlePaired = async ({ token, host, name, hosts = [] }) => {
+  const handlePaired = async ({ token, host, name }) => {
     const shown = pairingUI;
     // Already paired with this Mac at another of its addresses (HTTP before
-    // HTTPS came on)? Keep ONE record, but only when proven: that address must
-    // accept the token just issued here, which only the same server can.
-    const replaceId = await sameMacAs(stateRef.current, host, token, hosts);
+    // HTTPS came on)? Keep ONE record, but only when proven: the server at
+    // that address must hold its saved token AND have issued this new one.
+    const replaceId = await sameMacAs(stateRef.current, host, token);
     const ok = await update((s) => upsertPairing(s, { origin: host, token, name }, { id: crypto.randomUUID?.() || `mac-${Date.now()}-${Math.random().toString(36).slice(2)}`, now: Date.now(), replaceId }));
     if (!ok) throw new Error('Could not save this pairing. Check device storage and get a new pairing code.');
     const current = pairingUIRef.current;

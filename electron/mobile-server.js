@@ -1278,7 +1278,7 @@ async function doStartMobileServer(stillCurrent) {
     // hosts: this Mac's own addresses, so a phone that already has it at
     // another one (HTTP before HTTPS came on) can prove it is the same Mac by
     // this token and keep ONE record (mobile/pairings.js).
-    res.json({ ok: true, token, name: os.hostname().replace(/\.local$/i, '').slice(0, 80), hosts: [ip, ownName || magicName, (ownName || magicName || '').split('.')[0]].filter(Boolean) });
+    res.json({ ok: true, token, name: os.hostname().replace(/\.local$/i, '').slice(0, 80) });
   });
 
   // ----- Voice Conductor endpoints (Siri / glasses entry point) -----
