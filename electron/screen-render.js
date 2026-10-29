@@ -73,6 +73,28 @@ function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
         const out = [];
         const buf = term.buffer.active;
         for (let i = 0; i < ROWS; i += 1) out.push(buf.getLine(i)?.translateToString(true) ?? '');
+        // The multi-question tab bar (`← ☐ Color ☐ Size ✔ Submit →`) marks
+        // the CURRENT question with a background colour, which plain text
+        // loses. Report, per tab-bar row, the runs of highlighted text, so
+        // the parser knows which question is showing. Non-enumerable: it
+        // never rides along in a payload.
+        const highlights = {};
+        for (let i = 0; i < ROWS; i += 1) {
+          if (!/[☐☒✔]/.test(out[i])) continue;
+          const line = buf.getLine(i);
+          const runs = [];
+          let run = '';
+          for (let x = 0; x < COLS; x += 1) {
+            const cell = line?.getCell(x);
+            if (!cell) break;
+            if (cell.getWidth() === 0) continue; // second half of a wide char
+            if (!cell.isBgDefault()) run += cell.getChars() || ' ';
+            else if (run) { runs.push(run.trim()); run = ''; }
+          }
+          if (run) runs.push(run.trim());
+          if (runs.length) highlights[i] = runs.filter(Boolean);
+        }
+        Object.defineProperty(out, 'highlights', { value: highlights });
         resolve(out);
       } catch {
         resolve(null);

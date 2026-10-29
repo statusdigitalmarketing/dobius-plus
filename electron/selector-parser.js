@@ -402,7 +402,16 @@ export function parseSelectorFromScreen(lines) {
   }
   if (sel === -1) return null;
 
-  const out = { prompt: screenPrompt(lines, blockTop), options, selectedIndex: sel };
+  const steps = screenSteps(lines, blockTop);
+  // An AskUserQuestion question is prose that Claude wrapped at the terminal
+  // width: re-flow its rows into one paragraph, or a phone card shows it
+  // broken mid-sentence. Permission prompts and the review step keep their
+  // rows (a command, its description, the question; answers one per line).
+  const prose = !!steps && steps.current < steps.total;
+  // Option descriptions likewise (Claude wrapped them at the terminal width).
+  const opts = prose ? options.map((o) => (o.detail ? { ...o, detail: o.detail.replace(/\n/g, ' ') } : o)) : options;
+  const out = { prompt: screenPrompt(lines, blockTop, prose), options: opts, selectedIndex: sel };
+  if (steps) out.steps = steps;
   // For selectorFingerprint only: the uncapped screen above the block, so two
   // same-worded prompts for different commands or edits never match. Not
   // enumerable, so it stays out of every JSON payload and card.
@@ -410,6 +419,50 @@ export function parseSelectorFromScreen(lines) {
     value: lines.slice(Math.max(0, blockTop - SCREEN_CONTEXT_ROWS), blockTop).map((l) => l.trimEnd()).join('\n'),
   });
   return out;
+}
+
+/**
+ * The AskUserQuestion tab bar above a block (`← ☐ Color ☐ Size ✔ Submit →`)
+ * as { labels, answered, current, total }: `labels`/`answered` per question,
+ * `current` the question showing (0-based), or `total` on the "Ready to
+ * submit" review step. The showing tab is the one drawn with a background
+ * colour (screen-render's `highlights`); without that information (an older
+ * caller, a plain string array) the first unanswered question is assumed.
+ * null when there is no tab bar.
+ */
+const TAB_ITEM_RE = /([☐☒✔])\s*([^☐☒✔←→]*?)\s*(?=[☐☒✔→]|$)/g;
+function screenSteps(lines, blockTop) {
+  let tb = -1;
+  for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
+    if (/[☐☒]/.test(lines[i])) { tb = i; break; }
+  }
+  if (tb === -1) return null;
+  const labels = [];
+  const answered = [];
+  let hasSubmit = false;
+  for (const m of lines[tb].matchAll(TAB_ITEM_RE)) {
+    if (m[1] === '✔') { hasSubmit = true; continue; }
+    if (!m[2]) continue;
+    labels.push(m[2].slice(0, 60));
+    answered.push(m[1] === '☒');
+  }
+  if (!labels.length) return null;
+  const total = labels.length;
+  let current = -1;
+  const hl = lines.highlights?.[tb];
+  if (Array.isArray(hl)) {
+    for (const h of hl) {
+      const name = h.replace(/[☐☒✔]/g, '').trim();
+      if (hasSubmit && /^Submit$/i.test(name)) { current = total; break; }
+      const k = labels.indexOf(name);
+      if (k !== -1) { current = k; break; }
+    }
+  }
+  if (current === -1) {
+    const open = answered.indexOf(false);
+    current = open === -1 ? total : open;
+  }
+  return { labels, answered, current, total };
 }
 
 /**
@@ -423,7 +476,7 @@ export function parseSelectorFromScreen(lines) {
 const PROMPT_MAX_ROWS = 15;
 const SCREEN_CONTEXT_ROWS = 40;
 const PROMPT_MAX_CHARS = 1500;
-function screenPrompt(lines, blockTop) {
+function screenPrompt(lines, blockTop, prose = false) {
   const paragraphs = [[]];
   let bounded = false;
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 30; i -= 1) {
@@ -434,6 +487,11 @@ function screenPrompt(lines, blockTop) {
     paragraphs[0].unshift(t);
   }
   const kept = (bounded ? paragraphs : paragraphs.slice(-1)).filter((p) => p.length);
+  if (prose) {
+    let text = kept.map((p) => p.join(' ')).join('\n');
+    if (text.length > PROMPT_MAX_CHARS) text = text.slice(-PROMPT_MAX_CHARS);
+    return text;
+  }
   let rows = kept.flat();
   if (rows.length > PROMPT_MAX_ROWS) rows = rows.slice(-PROMPT_MAX_ROWS); // the question sits last
   let text = rows.join('\n');

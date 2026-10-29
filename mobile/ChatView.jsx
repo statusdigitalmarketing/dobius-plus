@@ -15,6 +15,63 @@ import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } fr
 // never eats typed-but-unsent text (Sam's report). One localStorage key holds
 // a { tabId: { text, at } } map, pruned to 40 entries / 7 days on write.
 const DRAFTS_KEY = 'dobius-mobile-drafts';
+
+// Claude's escape hatches under every question: shown as quiet chips, not as
+// answers.
+const ESCAPE_OPTION = /^(Type something\.?|Chat about this)$/i;
+// A multi-select option row ("[ ] Foo", "☐ Foo"): its keys row stays open.
+const MULTI_OPTION = /^(\[[ x✓✔]\]|[☐☒])\s/;
+// A permission prompt reads "Bash command / <command> / <description> / Do you
+// want to proceed?": the tool goes in the eyebrow, the command in a code box,
+// the description under it, and only the question is the heading.
+function promptParts(text) {
+  const rows = String(text || '').split('\n').map((r) => r.trim()).filter(Boolean);
+  const question = rows.pop() || '';
+  const tool = rows.length > 1 && /^[A-Z][\w ]{0,30}$/.test(rows[0]) && /(command|file|edit|write|read|fetch|search|tool)$/i.test(rows[0]) ? rows.shift() : '';
+  return { tool, context: rows, question, code: /command$/i.test(tool) };
+}
+function AskPrompt({ text }) {
+  const { context, question, code } = promptParts(text);
+  return (
+    <>
+      {context.length > 0 && (
+        <div className="ask-context">
+          {context.map((r, i) => <div key={i} className={code && i === 0 ? 'ask-code' : 'ask-context-row'}>{r}</div>)}
+        </div>
+      )}
+      <div className="ask-question">{question || 'Claude is waiting for you to choose:'}</div>
+    </>
+  );
+}
+
+// Claude's "Review your answers" step: each question (● row) with its answer
+// (→ row) as a quiet list, and the closing question as the card's heading.
+function AskReview({ text }) {
+  const rows = text.split('\n').map((r) => r.trim()).filter(Boolean);
+  const heading = rows.length && !/^[●→]/.test(rows[rows.length - 1]) ? rows.pop() : 'Ready to submit your answers?';
+  return (
+    <>
+      <div className="ask-review">
+        {rows.map((r, i) => {
+          if (r.startsWith('●')) return <div key={i} className="ask-review-q">{r.replace(/^●\s*/, '')}</div>;
+          if (r.startsWith('→')) return <div key={i} className="ask-review-a">{r.replace(/^→\s*/, '')}</div>;
+          return <div key={i} className="ask-eyebrow">{r}</div>;
+        })}
+      </div>
+      <div className="ask-question">{heading}</div>
+    </>
+  );
+}
+
+// The question tabs a newer Mac sends ({ labels, answered, current, total }),
+// checked field by field: an older or newer Mac may send something else.
+function askSteps(st) {
+  if (!st || typeof st !== 'object' || !Array.isArray(st.labels)) return null;
+  const labels = st.labels.filter((l) => typeof l === 'string').map((l) => l.slice(0, 60));
+  const total = labels.length;
+  const current = Number.isInteger(st.current) && st.current >= 0 && st.current <= total ? st.current : 0;
+  return total ? { labels, total, current } : null;
+}
 function loadDraft(draftsKey, tabId) {
   if (!tabId) return '';
   try {
@@ -327,6 +384,11 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     };
   }, []);
   const [selNote, setSelNote] = useState('');
+  // Question card: the fine-control key row is folded away unless asked for
+  // (or the prompt is a multi-select), and the close button needs a second
+  // tap, because Esc cancels Claude's whole question.
+  const [askKeys, setAskKeys] = useState(false);
+  const [cancelArmed, setCancelArmed] = useState(false);
   // Sessionless tabs only: plain-text tail of the live PTY (null = loading).
   const [shellText, setShellText] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -755,47 +817,86 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // Selector popup + input row are shared by BOTH states below: a sessionless
   // tab that just ran `claude` immediately shows the trust-folder prompt, so
   // the selector buttons must work there too.
-  const selectorPopup = selector && selector.options && selector.options.length > 0 && (
-        <div
-          className="chat-selector"
-          key={selectorCardKey(selector)}
-          onPointerDownCapture={(e) => pressGuard.current.pointerDown(e, selector)}
-          onKeyDownCapture={(e) => pressGuard.current.keyDown(e, selector)}
-        >
-          <div className="chat-selector-title">
-            {selector.prompt || 'Claude is waiting for you to choose:'}
-          </div>
-          {selector.options.map((opt) => (
-            <button
-              key={opt.num}
-              className="chat-selector-opt"
-              disabled={selBusy || selector.token === ''}
-              onClick={(e) => chooseOption(selector, opt.num, e)}
-            >
-              <span className="chat-selector-num">{opt.num}</span>
-              <span className="chat-selector-label">
-                {opt.label}
-                {opt.detail && <span className="chat-selector-detail">{opt.detail}</span>}
-              </span>
+  const selectorPopup = selector && selector.options && selector.options.length > 0 && (() => {
+    const steps = askSteps(selector.steps);
+    const cannotAnswer = selBusy || selector.token === '';
+    const main = selector.options.filter((o) => !ESCAPE_OPTION.test(o.label));
+    const extra = selector.options.filter((o) => ESCAPE_OPTION.test(o.label));
+    const multi = selector.options.some((o) => MULTI_OPTION.test(o.label));
+    const onReview = steps && steps.current >= steps.total;
+    const cancel = (e) => {
+      if (!cancelArmed) {
+        setCancelArmed(true);
+        setTimeout(() => setCancelArmed(false), 3000);
+        return;
+      }
+      setCancelArmed(false);
+      sendSelectorKey(selector, '\x1b', true, e);
+    };
+    return (
+      <div
+        className="ask-card"
+        key={selectorCardKey(selector)}
+        onPointerDownCapture={(e) => pressGuard.current.pointerDown(e, selector)}
+        onKeyDownCapture={(e) => pressGuard.current.keyDown(e, selector)}
+      >
+        <div className="ask-head">
+          {steps && steps.total > 1 ? (
+            <div className="ask-stepper">
+              {/* Claude's own question tabs: left/right arrows move between them. */}
+              <button className="ask-nav" aria-label="Previous question" disabled={cannotAnswer || steps.current === 0}
+                onClick={(e) => sendSelectorKey(selector, '\x1b[D', false, e)}>‹</button>
+              <span className="ask-count">{onReview ? 'Review' : `${steps.current + 1} of ${steps.total}`}</span>
+              <button className="ask-nav" aria-label="Next question" disabled={cannotAnswer || onReview}
+                onClick={(e) => sendSelectorKey(selector, '\x1b[C', false, e)}>›</button>
+            </div>
+          ) : (
+            <span className="ask-eyebrow">{steps?.labels[0] || promptParts(selector.prompt).tool || 'Claude needs your answer'}</span>
+          )}
+          <button className={`ask-close${cancelArmed ? ' armed' : ''}`} aria-label="Cancel this question"
+            disabled={selector.token === ''} onClick={cancel}>{cancelArmed ? 'Cancel?' : '✕'}</button>
+        </div>
+        {steps && steps.total > 1 && !onReview && <div className="ask-eyebrow ask-topic">{steps.labels[steps.current]}</div>}
+        {onReview ? <AskReview text={selector.prompt || ''} /> : steps ? (
+          <div className="ask-question">{selector.prompt || 'Claude is waiting for you to choose:'}</div>
+        ) : <AskPrompt text={selector.prompt} />}
+        <div className="ask-options">
+          {main.map((opt) => (
+            <button key={opt.num} className="ask-opt" disabled={cannotAnswer} onClick={(e) => chooseOption(selector, opt.num, e)}>
+              <span className="ask-opt-label">{opt.label}</span>
+              {opt.detail && <span className="ask-opt-detail">{opt.detail}</span>}
             </button>
           ))}
-          {/* Fine-control row: arrows/space for multiSelect movement + toggle,
-              enter/esc to confirm/cancel, without leaving Chat. v1.0.53. */}
-          <div className="chat-selector-keys">
+        </div>
+        {extra.length > 0 && (
+          <div className="ask-extra">
+            {extra.map((opt) => (
+              <button key={opt.num} className="ask-extra-opt" disabled={cannotAnswer} onClick={(e) => chooseOption(selector, opt.num, e)}>
+                {opt.label.replace(/\.$/, '')}
+              </button>
+            ))}
+          </div>
+        )}
+        {(askKeys || multi) && (
+          // Fine-control row: arrows/space for multiSelect movement + toggle,
+          // enter/esc to confirm/cancel, without leaving Chat. v1.0.53.
+          <div className="ask-keys">
             {SELECTOR_KEYS.map(([label, seq, closes]) => (
-              <button key={label} className="chat-selector-key" disabled={selBusy || selector.token === ''} onClick={(e) => sendSelectorKey(selector, seq, closes, e)}>
+              <button key={label} className="ask-key" disabled={cannotAnswer} onClick={(e) => sendSelectorKey(selector, seq, closes, e)}>
                 {label}
               </button>
             ))}
           </div>
-          {selNote && <div className="chat-selector-note">{selNote}</div>}
-          {onOpenTerminal && (
-            <button className="chat-selector-term" onClick={onOpenTerminal}>
-              Open terminal to answer manually
-            </button>
-          )}
-    </div>
-  );
+        )}
+        {cancelArmed && <div className="ask-note">Tap again to cancel Claude's question.</div>}
+        {selNote && <div className="ask-note">{selNote}</div>}
+        <div className="ask-foot">
+          {!multi && <button className="ask-link" onClick={() => setAskKeys((v) => !v)}>{askKeys ? 'Hide keys' : 'Keys'}</button>}
+          {onOpenTerminal && <button className="ask-link" onClick={onOpenTerminal}>Open terminal</button>}
+        </div>
+      </div>
+    );
+  })();
 
   const inputRow = (
     <>

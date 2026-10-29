@@ -638,29 +638,7 @@ button.primary:disabled { opacity: 0.4; }
 /* Selector prompt (permission / plan / pick-one) surfaced above the input. */
 /* Capped and scrollable: a long permission prompt or AskUserQuestion used to
    push its options off the bottom of the phone with no way to reach them. */
-.chat-selector { border-top: 1px solid var(--border); background: var(--surface); padding: 10px 8px 4px; display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; max-height: 60dvh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-.chat-selector-title { font-size: 12px; color: var(--dim); padding: 0 4px 2px; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }
-.chat-selector-detail { display: block; font-size: 12px; color: var(--dim); margin-top: 2px; white-space: pre-wrap; }
-.chat-selector-opt {
-  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-  background: var(--bg); color: var(--fg); border: 1px solid var(--border);
-  border-radius: 10px; padding: 11px 12px; font-size: 14px; font-family: inherit; cursor: pointer;
-}
-.chat-selector-opt:active { border-color: var(--accent); }
-.chat-selector-num {
-  flex-shrink: 0; width: 22px; height: 22px; border-radius: 6px;
-  background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 700;
-  display: flex; align-items: center; justify-content: center;
-}
-.chat-selector-label { flex: 1; line-height: 1.35; overflow-wrap: anywhere; }
-.chat-selector-term { margin-top: 2px; background: transparent; color: var(--dim); border: none; font-size: 12px; text-decoration: underline; padding: 6px 4px; cursor: pointer; text-align: center; }
 /* Selector fine-control keys (arrows / space / esc / enter). v1.0.53. */
-.chat-selector-keys { display: flex; gap: 6px; padding: 2px 4px; }
-.chat-selector-key {
-  flex: 1; background: var(--bg); color: var(--dim); border: 1px solid var(--border);
-  border-radius: 8px; padding: 8px 0; font-size: 12px; font-family: inherit; cursor: pointer;
-}
-.chat-selector-key:active { border-color: var(--accent); color: var(--fg); }
 /* Timestamp beside the role label on each bubble. v1.0.53. */
 .chat-time { margin-left: 8px; font-size: 10px; color: var(--dim); font-weight: 400; }
 /* Queued/sending chip + local-echo bubble (mid-turn sends). v1.0.53. */
@@ -796,8 +774,6 @@ button.primary:disabled { opacity: 0.4; }
 .chat-diff-del { background: rgba(248, 81, 73, 0.14); padding: 0 8px; }
 .chat-diff-add { background: rgba(63, 185, 80, 0.14); padding: 0 8px; }
 
-.chat-selector-note { font-size: 13px; color: var(--danger); margin: 6px 2px; }
-.chat-selector-opt:disabled, .chat-selector-key:disabled { opacity: 0.5; }
 
 /* --- Live activity: Claude's spinner line, as the terminal shows it ------- */
 .chat-activity {
@@ -885,3 +861,75 @@ button.primary:disabled { opacity: 0.4; }
 
 /* Wraps the session so it can be made inert while switching Macs; adds no box. */
 .mac-session-wrap { display: contents; }
+
+/* The question card (Claude's AskUserQuestion, permission prompts, any
+ * numbered selector): one question at a time, the question as a heading,
+ * options as flat rows of a label and a muted description. Claude's own
+ * question tabs become a "1 of 3" stepper. */
+.ask-card {
+  margin: 8px 10px 6px; padding: 14px 18px 10px; flex-shrink: 0;
+  display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 22px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  max-height: 64dvh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+.ask-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 38px; }
+.ask-stepper { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: 15px; font-variant-numeric: tabular-nums; }
+.ask-nav {
+  width: 34px; height: 34px; border: 0; border-radius: 17px; background: transparent;
+  color: var(--fg); font-size: 24px; line-height: 1; padding: 0 0 3px; cursor: pointer;
+}
+.ask-nav:active { background: var(--surface-2); }
+.ask-nav:disabled { opacity: 0.3; }
+.ask-count { min-width: 52px; text-align: center; }
+.ask-close {
+  min-width: 38px; height: 38px; padding: 0 12px; border: 0; border-radius: 19px;
+  background: var(--surface-2); color: var(--fg); font-size: 15px; cursor: pointer; flex-shrink: 0;
+}
+.ask-close.armed { background: var(--danger); color: #fff; font-weight: 600; }
+.ask-close:disabled { opacity: 0.45; }
+.ask-eyebrow { font-size: 12px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--dim); overflow-wrap: anywhere; }
+.ask-topic { margin-top: 6px; }
+.ask-question {
+  margin: 8px 0 10px; font-size: 19px; font-weight: 600; line-height: 1.32; color: var(--fg);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.ask-options { display: flex; flex-direction: column; }
+.ask-opt {
+  display: flex; flex-direction: column; gap: 3px; text-align: left;
+  padding: 13px 6px; margin: 0 -6px; width: calc(100% + 12px);
+  background: transparent; border: 0; border-radius: 10px; color: var(--fg); cursor: pointer;
+  touch-action: manipulation;
+}
+.ask-opt + .ask-opt { border-top: 1px solid var(--border); border-radius: 0 0 10px 10px; }
+.ask-opt:active { background: var(--surface-2); }
+.ask-opt:disabled { opacity: 0.5; }
+.ask-opt-label { font-size: 16px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.ask-opt-detail { font-size: 14px; color: var(--dim); line-height: 1.42; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-extra { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--border); }
+.ask-extra-opt {
+  padding: 7px 13px; border: 1px solid var(--border); border-radius: 999px;
+  background: transparent; color: var(--dim); font-size: 13px; cursor: pointer;
+}
+.ask-extra-opt:active { background: var(--surface-2); color: var(--fg); }
+.ask-extra-opt:disabled { opacity: 0.5; }
+.ask-keys { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.ask-key {
+  flex: 1; min-width: 48px; padding: 8px 0; border: 1px solid var(--border); border-radius: 10px;
+  background: transparent; color: var(--dim); font-size: 13px; cursor: pointer;
+}
+.ask-key:active { border-color: var(--accent); color: var(--fg); }
+.ask-key:disabled { opacity: 0.5; }
+.ask-note { margin: 8px 2px 0; font-size: 13px; color: var(--danger); }
+.ask-foot { display: flex; justify-content: space-between; margin-top: 6px; }
+.ask-link { padding: 6px 2px; border: 0; background: none; color: var(--dim); font-size: 13px; cursor: pointer; }
+.ask-link:only-child { margin-left: auto; }
+
+.ask-review { display: flex; flex-direction: column; margin: 8px 0 4px; padding: 12px 14px; border-radius: 14px; background: var(--surface-2); }
+.ask-review .ask-eyebrow { margin-bottom: 4px; }
+.ask-review-q { margin-top: 8px; font-size: 13px; color: var(--dim); line-height: 1.35; overflow-wrap: anywhere; }
+.ask-review-q:first-of-type { margin-top: 4px; }
+.ask-review-a { font-size: 15px; font-weight: 600; color: var(--fg); line-height: 1.35; overflow-wrap: anywhere; }
+.ask-context { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 2px; padding: 12px 14px; border-radius: 14px; background: var(--surface-2); }
+.ask-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; color: var(--fg); line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-context-row { font-size: 14px; color: var(--dim); line-height: 1.4; overflow-wrap: anywhere; }

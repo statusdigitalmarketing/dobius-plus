@@ -278,18 +278,49 @@ sv2('screen: multi-question Q1', await screenSel('askq-multi-q1-2.1.233-raw.bin'
   prompt: 'Pick a color',
   options: [{ num: 1, label: 'Red', detail: 'The color red.' }, { num: 2, label: 'Blue', detail: 'The color blue.' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }],
   selectedIndex: 0,
+  steps: { labels: ['Color', 'Size'], answered: [false, false], current: 0, total: 2 },
 });
 sv2('screen: multi-question Q2 (the bug)', await screenSel('askq-multi-q2-2.1.233-raw.bin'), {
   prompt: 'Pick a size',
   options: [{ num: 1, label: 'Small', detail: 'The small size.' }, { num: 2, label: 'Large', detail: 'The large size.' }, { num: 3, label: 'Type something.' }, { num: 4, label: 'Chat about this' }],
   selectedIndex: 0,
+  steps: { labels: ['Color', 'Size'], answered: [true, false], current: 1, total: 2 },
 });
 sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1.233-raw.bin'), {
   // The whole review, not just its last row (Sam: prompts "get cutoff").
   prompt: 'Review your answers\n● Pick a color\n→ Red\n● Pick a size\n→ Small\nReady to submit your answers?',
   options: [{ num: 1, label: 'Submit answers' }, { num: 2, label: 'Cancel' }],
   selectedIndex: 0,
+  steps: { labels: ['Color', 'Size'], answered: [true, true], current: 2, total: 2 },
 });
+// Steps: the SHOWING question is the tab drawn with a background colour, not
+// merely the first unanswered one (the user went back to an answered one).
+{
+  const E = '\x1b';
+  const raw = `${E}[2J${E}[H←  ${E}[48;2;177;185;249m${E}[38;2;0;0;0m ☒ Color ${E}[39m${E}[49m  ☐ Size  ✔ Submit  →\r\nPick a color\r\n❯ 1. Red\r\n  2. Blue\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n`;
+  const lines = await renderScreenLines(new TextEncoder().encode(raw));
+  sv2('screen: steps follow the highlighted tab back to an answered question', parseSelectorFromScreen(lines)?.steps,
+    { labels: ['Color', 'Size'], answered: [true, false], current: 0, total: 2 });
+  // A long question Claude wrapped over several rows reads as one paragraph.
+  const wrapped = parseSelectorFromScreen([
+    '─'.repeat(40),
+    '←  ☐ Rate  ☐ Payout  ✔ Submit  →',
+    'What should Trybe pay creators? Trybe needs a commission program before we',
+    'can invite anyone, and the rate is visible to every creator.',
+    '❯ 1. 20% of sales (Recommended)',
+    "     Trybe's recommended type. Below our 25% affiliate rate, since Trybe also",
+    '     takes its cut and runs the ads.',
+    '  2. 25% of sales',
+    'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+  ]);
+  sv2('screen: a wrapped option description re-flows too', wrapped?.options?.[0]?.detail,
+    "Trybe's recommended type. Below our 25% affiliate rate, since Trybe also takes its cut and runs the ads.");
+  sv2('screen: a wrapped question re-flows into one paragraph', wrapped?.prompt,
+    'What should Trybe pay creators? Trybe needs a commission program before we can invite anyone, and the rate is visible to every creator.');
+  // Plain lines (no highlight information): the first unanswered one.
+  sv2('screen: without highlights, steps fall back to the first unanswered', parseSelectorFromScreen([...lines])?.steps,
+    { labels: ['Color', 'Size'], answered: [true, false], current: 1, total: 2 });
+}
 // A permission prompt: the tool and its command sit above the question, and a
 // long option wraps onto an indented row. All of it must reach the card.
 sv2('screen: permission prompt keeps the command and wrapped option', parseSelectorFromScreen([
