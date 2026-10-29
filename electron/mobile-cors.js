@@ -32,12 +32,18 @@ export function isAllowedMobileOrigin(origin, { hosts = null, ports = null } = {
  * IP or its MagicDNS name, at its port. Anything else is refused before any
  * route runs. Without it, a page at http://evil.example:8420 could rebind
  * that name to this Mac's tailnet IP and call /pair from its own origin, where
- * CORS never applies (DNS rebinding: Codex P1). `name` may be null while the
- * MagicDNS lookup is unknown; the IP still works.
+ * CORS never applies (DNS rebinding: Codex P1). Accepted names: the tailnet
+ * IP, the full MagicDNS name and its short machine name (Tailscale resolves
+ * both), each at the port; on port 80 or 443 also without it, since browsers
+ * drop a default port from Host. `name` may be null while the MagicDNS lookup
+ * is unknown; the IP still works.
  */
 export function isOwnHost(host, { ip, name = null, port }) {
   if (typeof host !== 'string' || !host) return false;
-  const h = host.trim().toLowerCase().replace(/\.(:\d+)$/, '$1'); // a trailing-dot FQDN is the same name
-  const own = [ip, name].filter(Boolean).map((x) => `${String(x).toLowerCase().replace(/\.$/, '')}:${port}`);
+  const h = host.trim().toLowerCase().replace(/\.(:\d+)?$/, '$1'); // a trailing-dot FQDN is the same name
+  const full = name ? String(name).toLowerCase().replace(/\.$/, '') : '';
+  const names = [ip && String(ip).toLowerCase(), full, full.split('.')[0]].filter(Boolean);
+  const own = names.map((x) => `${x}:${port}`);
+  if (port === 80 || port === 443) own.push(...names);
   return own.includes(h);
 }

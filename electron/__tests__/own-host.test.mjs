@@ -18,4 +18,12 @@ assert.equal(isOwnHost('', mac), false); assert.equal(isOwnHost(undefined, mac),
 assert.equal(isOwnHost('sams-macbook-pro.tail6addbf.ts.net:8420', { ...mac, name: null }), false); ok('the name is refused while unknown, the IP still works');
 assert.equal(isOwnHost('100.89.143.67:8420', { ...mac, name: null }), true);
 
+assert.equal(isOwnHost('sams-macbook-pro:8420', mac), true); ok('the short machine name (MagicDNS resolves it)');
+assert.equal(isOwnHost('sams-macbook-pro', mac), false); ok('the short name without the port is refused on 8420');
+const std = { ...mac, port: 443 };
+assert.equal(isOwnHost('sams-macbook-pro.tail6addbf.ts.net', std), true); ok('on 443 the name without a port (browsers drop it)');
+assert.equal(isOwnHost('sams-macbook-pro.tail6addbf.ts.net:443', std), true);
+assert.equal(isOwnHost('100.89.143.67', { ...mac, port: 80 }), true); ok('on 80 the IP without a port');
+assert.equal(isOwnHost('evil.example', std), false); ok('a foreign name is refused on 443 too');
+assert.equal(isOwnHost('sams-macbook-pro.tail6addbf.ts.net.', std), true); ok('a trailing dot with no port');
 console.log(`own-host: ${pass} pass`);

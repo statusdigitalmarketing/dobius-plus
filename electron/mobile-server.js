@@ -1145,6 +1145,7 @@ async function doStartMobileServer(stillCurrent) {
   }
   const port = cfg.port || 8420;
   let magicName = null; // read below, before the server listens
+  let ownName = null; // the same name, refreshed every minute for the Host check
 
   const expApp = express();
 
@@ -1160,7 +1161,7 @@ async function doStartMobileServer(stillCurrent) {
   const corsOk = (origin) => isAllowedMobileOrigin(origin, { hosts: corsHosts, ports: corsPorts });
   // Only requests addressed to this Mac (mobile-cors.js isOwnHost): a foreign
   // Host is a DNS-rebinding page calling us from its own origin.
-  const hostOk = (host) => isOwnHost(host, { ip, name: magicName, port });
+  const hostOk = (host) => isOwnHost(host, { ip, name: ownName || magicName, port });
   expApp.use((req, res, next) => {
     if (!hostOk(req.headers.host)) return res.status(421).end();
     return next();
@@ -1461,6 +1462,10 @@ async function doStartMobileServer(stillCurrent) {
   if (corsHostsTimer) clearInterval(corsHostsTimer);
   corsHostsTimer = setInterval(() => {
     getTailnetHosts().then((h) => { if (h) corsHosts = h; }).catch(() => { /* keep the last list */ });
+    // This Mac's own name for the Host check, refreshed too: a lookup that
+    // failed at start would otherwise refuse phones paired by name until a
+    // restart (Codex P1, three lenses).
+    getMagicDNSName().then((n) => { if (n) ownName = n; }).catch(() => { /* keep the last name */ });
   }, 60_000);
   corsHostsTimer.unref?.();
   // A stop (Settings off, quit, cert re-provision) landed while we waited:
