@@ -1016,8 +1016,13 @@ function handleAuthedMessage(socket, msg, subs) {
       // it is shown, never inside the polled transcript.
       const { sessionId, projectPath, ref, reqId } = msg;
       if (typeof reqId !== 'number' || typeof sessionId !== 'string' || typeof projectPath !== 'string' || typeof ref !== 'string') break;
+      // One message per image, so keep it well under wsSend's 8MB backlog
+      // limit: a bigger picture, or a socket already backed up, gets a refusal
+      // instead of a dropped connection (Codex).
       loadTranscriptImage(sessionId, projectPath, ref)
-        .then((img) => wsSend(socket, img ? { type: 'chatImage', reqId, ok: true, mime: img.mime, data: img.data } : { type: 'chatImage', reqId, ok: false }))
+        .then((img) => wsSend(socket, img && img.data.length <= 6 * 1024 * 1024 && socket.bufferedAmount < 1024 * 1024
+          ? { type: 'chatImage', reqId, ok: true, mime: img.mime, data: img.data }
+          : { type: 'chatImage', reqId, ok: false, tooBig: !!img }))
         .catch(() => wsSend(socket, { type: 'chatImage', reqId, ok: false }));
       break;
     }

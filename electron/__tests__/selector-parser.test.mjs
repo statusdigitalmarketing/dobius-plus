@@ -350,7 +350,12 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
     '  2. Global config',
     'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
   ]);
-  sv2('screen: a wrapped path keeps its exact spelling', pathy?.options?.[0]?.detail, 'Edits /Users/sam/Projects/dobius-plus/config.json and nothing else.');
+  sv2('screen: a path wrapped mid-token keeps the terminal break, not a guess', pathy?.options?.[0]?.detail, 'Edits /Users/sam/Projects/dobius-\nplus/config.json and nothing else.');
+  // A crafted row cannot freeze the parser (it backtracked exponentially once).
+  { const t0 = Date.now(); parseSelectorFromScreen(['─'.repeat(40), '☐ A '.repeat(2000) + '←', 'Q', '❯ 1. x', '  2. y', 'Enter to select · Esc to cancel']); sv2('screen: a hostile tab-like row parses quickly', Date.now() - t0 < 200, true); }
+  // Prose with a checkbox under the real bar does not hide the bar.
+  const proseBox = parseSelectorFromScreen(['─'.repeat(40), '←  ☒ A  ☐ B  ✔ Submit  →', 'Should ☐ mean disabled?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: a checkbox in the question does not hide the tabs', proseBox?.steps?.total, 2);
   // Plain lines (no highlight information): the first unanswered one.
   sv2('screen: without highlights, steps fall back to the first unanswered', parseSelectorFromScreen([...lines])?.steps,
     { labels: ['Color', 'Size'], answered: [true, false], current: 1, total: 2 });

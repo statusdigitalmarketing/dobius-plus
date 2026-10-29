@@ -16,9 +16,6 @@ import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } fr
 // a { tabId: { text, at } } map, pruned to 40 entries / 7 days on write.
 const DRAFTS_KEY = 'dobius-mobile-drafts';
 
-// Claude's escape hatches under every question: shown as quiet chips, not as
-// answers.
-const ESCAPE_OPTION = /^(Type something\.?|Chat about this)$/i;
 // A multi-select option row ("[ ] Foo", "☐ Foo"): its keys row stays open.
 const MULTI_OPTION = /^(\[[ x✓✔]\]|[☐☒])\s/;
 // A permission prompt reads "Bash command / <command> / <description> / Do you
@@ -71,6 +68,7 @@ function askSteps(st) {
   if (!st.labels.every((l) => typeof l === 'string')) return null;
   const labels = st.labels.map((l) => l.slice(0, 60));
   const total = labels.length;
+  if (st.total !== undefined && st.total !== total) return null; // inconsistent: trust none of it
   if (!Number.isInteger(st.current) || st.current < 0 || st.current > total) return null;
   return { labels, total, current: st.current };
 }
@@ -273,26 +271,61 @@ let imageReqSeq = 0; // module-scoped: survives remounts, ids never repeat on a 
 function ToolImages({ images }) {
   const fetchImage = useContext(ImageFetch);
   const [urls, setUrls] = useState({});
+  const [failed, setFailed] = useState({});
   const [big, setBig] = useState(null);
+  // What is shown is never fetched again (a poll hands in new arrays, and the
+  // cache may have evicted it: Codex), and a miss retries a few times (a
+  // reconnect can swallow a reply) before it says so.
+  const loaded = useRef({});
+  const tries = useRef({});
   useEffect(() => {
     let live = true;
+    const timers = [];
     if (!fetchImage) return undefined;
-    for (const i of images) {
-      fetchImage(i.ref).then((url) => { if (live && url) setUrls((cur) => (cur[i.ref] ? cur : { ...cur, [i.ref]: url })); });
-    }
-    return () => { live = false; };
+    const get = (ref) => {
+      if (loaded.current[ref]) return;
+      fetchImage(ref).then((url) => {
+        if (!live) return;
+        if (url) { loaded.current[ref] = true; setUrls((cur) => ({ ...cur, [ref]: url })); return; }
+        tries.current[ref] = (tries.current[ref] || 0) + 1;
+        if (tries.current[ref] < 3) timers.push(setTimeout(() => get(ref), 4000 * tries.current[ref]));
+        else setFailed((cur) => ({ ...cur, [ref]: true }));
+      });
+    };
+    for (const i of images) get(i.ref);
+    return () => { live = false; timers.forEach(clearTimeout); };
   }, [images, fetchImage]);
   return (
     <div className="chat-imgs">
       {images.map((i) => (urls[i.ref]
-        ? <button key={i.ref} className="chat-img" onClick={() => setBig(urls[i.ref])} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" /></button>
-        : <div key={i.ref} className="chat-img loading" />))}
-      {big && (
-        <div className="chat-lightbox" role="dialog" aria-label="Image" onClick={() => setBig(null)}>
-          <img src={big} alt="Tool output, full size" />
-          <span className="chat-lightbox-close">✕</span>
-        </div>
-      )}
+        ? <button key={i.ref} type="button" className="chat-img" onClick={(e) => setBig({ url: urls[i.ref], from: e.currentTarget })} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" /></button>
+        : <div key={i.ref} className={`chat-img ${failed[i.ref] ? 'failed' : 'loading'}`}>{failed[i.ref] ? 'Image unavailable' : null}</div>))}
+      {big && <Lightbox url={big.url} onClose={() => { const from = big.from; setBig(null); from?.focus?.(); }} />}
+    </div>
+  );
+}
+
+// Full size, modal: it takes focus and keeps it (Tab cannot reach the chat or
+// a selector card behind it, Codex), Escape/Enter or a click/tap closes it.
+function Lightbox({ url, onClose }) {
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.focus(); }, []);
+  return (
+    <div
+      ref={ref}
+      className="chat-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image"
+      tabIndex={-1}
+      onClick={onClose}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); onClose(); } else if (e.key === 'Tab') e.preventDefault();
+      }}
+    >
+      <img src={url} alt="Tool output, full size" />
+      <span className="chat-lightbox-close">✕</span>
     </div>
   );
 }
@@ -908,18 +941,31 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const selectorPopup = selector && selector.options && selector.options.length > 0 && (() => {
     const steps = askSteps(selector.steps);
     const cannotAnswer = selBusy || selector.token === '';
-    // Claude's escape hatches are always the LAST options and carry no
-    // description; a real answer that happens to share the label is not one.
-    let cut = selector.options.length;
-    while (cut > 0 && ESCAPE_OPTION.test(selector.options[cut - 1].label) && !selector.options[cut - 1].detail) cut -= 1;
+    // Claude's escape hatches are its exact tail: "Type something." then
+    // optionally "Chat about this", last, with no description. Anything else
+    // that shares a label is a real answer (Codex, twice).
+    const opts = selector.options;
+    const isHatch = (o, label) => o && !o.detail && o.label.toLowerCase() === label;
+    let cut = opts.length;
+    if (isHatch(opts[cut - 1], 'chat about this') && isHatch(opts[cut - 2], 'type something.')) cut -= 2;
+    else if (isHatch(opts[cut - 1], 'type something.')) cut -= 1;
     const main = selector.options.slice(0, cut);
     const extra = selector.options.slice(cut);
     const multi = selector.options.some((o) => MULTI_OPTION.test(o.label));
     const onReview = steps && steps.current >= steps.total;
-    const cardKey = selectorCardKey(selector);
+    // Armed for THIS card at THIS token: the token changes whenever anything
+    // reaches the screen (moving to another question that reads the same,
+    // a repaint), so the arming never carries over (Codex P1).
+    const cardKey = `${selectorCardKey(selector)}|${selector.token ?? ''}`;
     const cancelArmed = cancelArmedKey === cardKey;
     const cancel = (e) => {
       if (!cancelArmed) {
+        // Arming is a press too: it must end on the card it began on (Codex P1).
+        if (!pressGuard.current.take(e, selector)) {
+          setSelNote('The prompt changed while you were tapping. Nothing was sent, check the card again.');
+          setTimeout(() => setSelNote(''), 4000);
+          return;
+        }
         setCancelArmedKey(cardKey);
         setTimeout(() => setCancelArmedKey((k) => (k === cardKey ? null : k)), 3000);
         return;

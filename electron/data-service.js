@@ -1591,48 +1591,97 @@ export async function loadTranscriptImage(sessionId, projectPath, ref) {
   return p ? readTranscriptImage(p, ref) : null;
 }
 
+/**
+ * Where each image-bearing record sits in a transcript: uuid -> byte range,
+ * built by ONE streaming pass and extended as the file grows. A chat with
+ * many thumbnails then costs one scan, not one per image (Codex: dozens of
+ * parallel full scans could exhaust the heap), and a fetch reads just its
+ * record. Lines are split on raw bytes; only a line that mentions an image is
+ * ever turned into a string, and a line past IMAGE_LINE_MAX is skipped. A
+ * repeated uuid keeps its LAST record, the one a chat's tail window shows.
+ */
+const imageIndexes = new Map(); // path -> { ino, size, map }
+const IMAGE_MARK = Buffer.from('"image"');
+function scanImageIndex(p, from, map) {
+  return new Promise((resolve) => {
+    let stream;
+    try { stream = fsSync.createReadStream(p, { start: from }); } catch { resolve(from); return; }
+    let parts = [];
+    let partLen = 0;
+    let lineStart = from;
+    let pos = from;
+    let skipping = false;
+    const endLine = (endPos) => {
+      if (!skipping && partLen) {
+        const line = parts.length === 1 ? parts[0] : Buffer.concat(parts, partLen);
+        if (line.indexOf(IMAGE_MARK) !== -1) {
+          let entry;
+          try { entry = JSON.parse(line.toString('utf8')); } catch { entry = null; }
+          if (entry && typeof entry.uuid === 'string' && UUID_RE.test(entry.uuid)) map.set(entry.uuid, { start: lineStart, end: endPos });
+        }
+      }
+      parts = []; partLen = 0; skipping = false; lineStart = endPos + 1;
+    };
+    stream.on('data', (chunk) => {
+      let at = 0;
+      let nl;
+      while ((nl = chunk.indexOf(10, at)) !== -1) {
+        if (!skipping) { parts.push(chunk.subarray(at, nl)); partLen += nl - at; }
+        endLine(pos + nl);
+        at = nl + 1;
+      }
+      if (!skipping && at < chunk.length) {
+        parts.push(chunk.subarray(at)); partLen += chunk.length - at;
+        if (partLen > IMAGE_LINE_MAX) { parts = []; partLen = 0; skipping = true; }
+      }
+      pos += chunk.length;
+    });
+    // A last line without its newline may still be being written: index only
+    // up to the last complete line, and rescan the rest next time.
+    stream.on('end', () => resolve(lineStart));
+    stream.on('error', () => resolve(lineStart));
+  });
+}
+let imageChain = Promise.resolve();
+async function imageRecordRange(p, uuid) {
+  let st;
+  try { st = await fs.stat(p); } catch { return null; }
+  let idx = imageIndexes.get(p);
+  if (!idx || idx.ino !== st.ino || st.size < idx.size) idx = { ino: st.ino, size: 0, map: new Map() };
+  if (st.size > idx.size) idx.size = await scanImageIndex(p, idx.size, idx.map);
+  imageIndexes.set(p, idx);
+  if (imageIndexes.size > 32) imageIndexes.delete(imageIndexes.keys().next().value);
+  return idx.map.get(uuid) || null;
+}
+
 /** loadTranscriptImage on a known transcript file (exported for tests). */
 export function readTranscriptImage(p, ref) {
   const m = typeof ref === 'string' ? IMAGE_REF_RE.exec(ref) : null;
   if (!m) return Promise.resolve(null);
   const [, uuid, ri, ii] = m;
-  // A cheap pre-filter on the id itself (spacing-agnostic: `"uuid": "x"` and
-  // `"uuid":"x"` both pass); the parse below checks it is THE record's uuid.
-  const marker = `"${uuid}"`;
-  const pick = (line) => {
-    let entry;
-    try { entry = JSON.parse(line); } catch { return null; }
-    if (!entry || typeof entry !== 'object' || entry.uuid !== uuid || !Array.isArray(entry.message?.content)) return null;
-    const results = entry.message.content.filter((c) => c?.type === 'tool_result' && typeof c.tool_use_id === 'string');
-    const img = resultImages(results[Number(ri)]?.content)[Number(ii)];
-    return usableImage(img) ? { mime: img.source.media_type, data: img.source.data } : null;
-  };
-  return new Promise((resolve) => {
-    let stream;
-    try { stream = fsSync.createReadStream(p, { encoding: 'utf8' }); } catch { resolve(null); return; }
-    let buf = '';
-    let skipping = false;
-    let done = false;
-    const finish = (v) => { if (done) return; done = true; try { stream.destroy(); } catch { /* closed */ } resolve(v); };
-    stream.on('data', (chunk) => {
-      let start = 0;
-      let nl;
-      while ((nl = chunk.indexOf('\n', start)) !== -1) {
-        const piece = chunk.slice(start, nl);
-        start = nl + 1;
-        if (skipping) { skipping = false; buf = ''; continue; }
-        const line = buf ? buf + piece : piece;
-        buf = '';
-        if (line.includes(marker)) { const hit = pick(line); if (hit) { finish(hit); return; } }
-      }
-      if (!skipping) {
-        buf += chunk.slice(start);
-        if (buf.length > IMAGE_LINE_MAX) { buf = ''; skipping = true; }
-      }
-    });
-    stream.on('end', () => finish(buf && !skipping && buf.includes(marker) ? pick(buf) : null));
-    stream.on('error', () => finish(null));
+  // One fetch at a time across the app: a record can be tens of MB, so
+  // parallel reads multiply memory.
+  const run = imageChain.then(async () => {
+    const range = await imageRecordRange(p, uuid);
+    if (!range || range.end - range.start > IMAGE_LINE_MAX) return null;
+    let fh;
+    try {
+      fh = await fs.open(p, 'r');
+      const buf = Buffer.alloc(range.end - range.start);
+      await fh.read(buf, 0, buf.length, range.start);
+      const entry = JSON.parse(buf.toString('utf8'));
+      if (!entry || entry.uuid !== uuid || !Array.isArray(entry.message?.content)) return null;
+      const results = entry.message.content.filter((c) => c?.type === 'tool_result' && typeof c.tool_use_id === 'string');
+      const img = resultImages(results[Number(ri)]?.content)[Number(ii)];
+      return usableImage(img) ? { mime: img.source.media_type, data: img.source.data } : null;
+    } catch {
+      return null;
+    } finally {
+      await fh?.close().catch(() => {});
+    }
   });
+  imageChain = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 // Fold a turn into one assistant row and attach tool results. Runs AFTER

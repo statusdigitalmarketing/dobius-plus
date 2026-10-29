@@ -295,3 +295,5 @@
 }
 .chatp-lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
 @media (prefers-reduced-motion: reduce) { .chatp-img.loading { animation: none; } }
+.chatp-img.failed { display: flex; align-items: center; justify-content: center; width: 140px; height: 90px; color: var(--muted, #8b8b8b); font-size: 12px; cursor: default; animation: none; }
+.chatp-lightbox:focus { outline: none; }

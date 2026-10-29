@@ -432,15 +432,21 @@ export function parseSelectorFromScreen(lines) {
  */
 const TAB_ITEM_RE = /([☐☒✔])\s*([^☐☒✔←→]*?)\s*(?=[☐☒✔→]|$)/g;
 // A tab bar row holds NOTHING but tab items (and the ← → arrows): a line of
-// prose with checkboxes in it ("Todo: ☐ Cleanup ☐ Verify") is not one (Codex).
-const TAB_BAR_RE = /^\s*(?:←\s*)?(?:[☐☒✔]\s*[^☐☒✔←→]+?\s*)+(?:→\s*)?$/;
+// prose with checkboxes in it ("Todo: ☐ Cleanup ☐ Verify") is not one
+// (Codex). A plain linear test: a regex here backtracked exponentially on a
+// crafted row and froze the main process (Codex P1).
+function isTabBar(line) {
+  const t = line.trim().replace(/^←\s*/, '').replace(/\s*→$/, '');
+  return /^[☐☒✔]/.test(t) && !/[←→]/.test(t);
+}
 function screenSteps(lines, blockTop) {
   // The tab bar sits between the frame's rule and the question: never look
   // past a rule (a permission prompt's border), so text above it can't count.
   let tb = -1;
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
     if (SCREEN_RULE_RE.test(lines[i].trim())) break;
-    if (/[☐☒]/.test(lines[i])) { if (TAB_BAR_RE.test(lines[i])) tb = i; break; }
+    // Prose with a checkbox in it is not the bar; keep looking above it.
+    if (/[☐☒]/.test(lines[i]) && isTabBar(lines[i])) { tb = i; break; }
   }
   if (tb === -1) return null;
   const items = [];
@@ -486,16 +492,18 @@ const PROMPT_MAX_ROWS = 15;
 const SCREEN_CONTEXT_ROWS = 40;
 const PROMPT_MAX_CHARS = 1500;
 /**
- * Rows Claude wrapped, back into one line: a space between rows, except where
- * the break fell inside a path (the row's last word holds a '/' and ends in
- * '/', '-', '_' or '.'), which a space would turn into a different path.
+ * Rows Claude wrapped, back into one line with spaces. Where the break may
+ * have fallen inside a path (the row's last word holds a '/' and ends in '/',
+ * '-', '_' or '.'), neither a space nor no space is safe to guess
+ * (`dobius-` + `plus/x` vs `/tmp/cache/` + `after`): the terminal's own line
+ * break is kept, so the card shows exactly what the terminal did (Codex).
  */
 function reflow(rows) {
   let out = '';
   for (const r of rows) {
     if (!out) { out = r; continue; }
-    const last = out.split(' ').pop();
-    out += /\//.test(last) && /[/\-_.]$/.test(last) ? r : ` ${r}`;
+    const last = out.split(/[ \n]/).pop();
+    out += /\//.test(last) && /[/\-_.]$/.test(last) ? `\n${r}` : ` ${r}`;
   }
   return out;
 }

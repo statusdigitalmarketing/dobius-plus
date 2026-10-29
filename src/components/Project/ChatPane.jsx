@@ -97,31 +97,61 @@ const ImageFetch = createContext(null);
 function ToolImages({ images }) {
   const fetchImage = useContext(ImageFetch);
   const [urls, setUrls] = useState({});
+  const [failed, setFailed] = useState({});
   const [big, setBig] = useState(null);
+  // What is shown is never fetched again (a poll hands in new arrays, and the
+  // cache may have evicted it: Codex), and a miss retries a few times (a
+  // reconnect can swallow a reply) before it says so.
+  const loaded = useRef({});
+  const tries = useRef({});
   useEffect(() => {
     let live = true;
+    const timers = [];
     if (!fetchImage) return undefined;
-    for (const i of images) {
-      fetchImage(i.ref).then((url) => { if (live && url) setUrls((cur) => (cur[i.ref] ? cur : { ...cur, [i.ref]: url })); });
-    }
-    return () => { live = false; };
+    const get = (ref) => {
+      if (loaded.current[ref]) return;
+      fetchImage(ref).then((url) => {
+        if (!live) return;
+        if (url) { loaded.current[ref] = true; setUrls((cur) => ({ ...cur, [ref]: url })); return; }
+        tries.current[ref] = (tries.current[ref] || 0) + 1;
+        if (tries.current[ref] < 3) timers.push(setTimeout(() => get(ref), 4000 * tries.current[ref]));
+        else setFailed((cur) => ({ ...cur, [ref]: true }));
+      });
+    };
+    for (const i of images) get(i.ref);
+    return () => { live = false; timers.forEach(clearTimeout); };
   }, [images, fetchImage]);
-  useEffect(() => {
-    if (!big) return undefined;
-    const onKey = (e) => { if (e.key === 'Escape') setBig(null); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [big]);
   return (
     <div className="chatp-imgs">
       {images.map((i) => (urls[i.ref]
-        ? <button key={i.ref} type="button" className="chatp-img" onClick={() => setBig(urls[i.ref])} title="Open image"><img src={urls[i.ref]} alt="Tool output" /></button>
-        : <div key={i.ref} className="chatp-img loading" />))}
-      {big && (
-        <div className="chatp-lightbox" role="dialog" aria-label="Image" onClick={() => setBig(null)}>
-          <img src={big} alt="Tool output, full size" />
-        </div>
-      )}
+        ? <button key={i.ref} type="button" className="chatp-img" onClick={(e) => setBig({ url: urls[i.ref], from: e.currentTarget })} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" /></button>
+        : <div key={i.ref} className={`chatp-img ${failed[i.ref] ? 'failed' : 'loading'}`}>{failed[i.ref] ? 'Image unavailable' : null}</div>))}
+      {big && <Lightbox url={big.url} onClose={() => { const from = big.from; setBig(null); from?.focus?.(); }} />}
+    </div>
+  );
+}
+
+// Full size, modal: it takes focus and keeps it (Tab cannot reach the chat or
+// a selector card behind it, Codex), Escape/Enter or a click/tap closes it.
+function Lightbox({ url, onClose }) {
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.focus(); }, []);
+  return (
+    <div
+      ref={ref}
+      className="chatp-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Image"
+      tabIndex={-1}
+      onClick={onClose}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); onClose(); } else if (e.key === 'Tab') e.preventDefault();
+      }}
+    >
+      <img src={url} alt="Tool output, full size" />
+      
     </div>
   );
 }

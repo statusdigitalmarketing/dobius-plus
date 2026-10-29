@@ -434,6 +434,19 @@ fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true });
   const g = path.join(dir, 'spaced.jsonl');
   fs.writeFileSync(g, fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.stringify(JSON.parse(l), null, 1).replace(/\n\s*/g, ' ')).join('\n') + '\n');
   assert.deepEqual(await readTranscriptImage(g, `${uuid}:0:0`), { mime: 'image/png', data: png }, 'spacing does not matter');
+  // A repeated uuid serves its LAST record (the one a chat's tail window shows),
+  // and the index grows with the file.
+  const dupe = (data) => JSON.stringify({ type: 'user', uuid, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'k1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data } }] }] } });
+  const h = path.join(dir, 'dupe.jsonl');
+  const first = Buffer.from('first').toString('base64');
+  const later = Buffer.from('later').toString('base64');
+  fs.writeFileSync(h, dupe(first) + '\n');
+  assert.equal((await readTranscriptImage(h, `${uuid}:0:0`))?.data, first);
+  fs.appendFileSync(h, dupe(later) + '\n');
+  assert.equal((await readTranscriptImage(h, `${uuid}:0:0`))?.data, later, 'appended record found, last one wins');
+  // Many parallel fetches all resolve, each to its own image.
+  const got = await Promise.all(Array.from({ length: 30 }, (_, k) => readTranscriptImage(f, `${uuid}:${k % 2}:${k % 2 ? 1 : 0}`)));
+  assert.ok(got.every((g, k) => g && g.data === (k % 2 ? jpg : png)), 'parallel fetches are each correct');
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
