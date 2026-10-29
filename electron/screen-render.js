@@ -105,19 +105,34 @@ function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
         // laid it out: exact for wide glyphs, combining marks and zero-width
         // characters alike, where counting the string's characters is not
         // (Codex P2, twice). Non-enumerable, like highlights.
+        // And the columns its FIRST word takes (from its first visible cell
+        // to the next blank one): reflow asks whether that word could have
+        // fit on the row above, and characters the emulator draws in zero
+        // columns (U+1160, direction marks) made a string count say no.
         const ends = [];
+        const firstWords = [];
         for (let i = 0; i < ROWS; i += 1) {
           const line = buf.getLine(i);
           let end = 0;
+          let start = -1;
+          let wordEnd = -1;
           for (let x = 0; x < COLS; x += 1) {
             const cell = line?.getCell(x);
             if (!cell) break;
             const w = cell.getWidth();
-            if (w > 0 && (cell.getChars() || ' ') !== ' ') end = x + w;
+            if (w === 0) continue; // the second half of a wide glyph
+            const blank = (cell.getChars() || ' ') === ' ';
+            if (!blank) {
+              end = x + w;
+              if (start === -1) start = x;
+              if (wordEnd === -1) continue;
+            } else if (start !== -1 && wordEnd === -1) wordEnd = x;
           }
           ends.push(end);
+          firstWords.push(start === -1 ? 0 : (wordEnd === -1 ? end : wordEnd) - start);
         }
         Object.defineProperty(out, 'ends', { value: ends });
+        Object.defineProperty(out, 'firstWords', { value: firstWords });
         resolve(out);
       } catch {
         resolve(null);

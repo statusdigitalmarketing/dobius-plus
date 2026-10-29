@@ -309,6 +309,12 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   const q = '─'.repeat(80) + '\r\n ☐ Layout\r\nLike this?\r\n' + '─'.repeat(60) + '\r\n←  ☐ A  ☐ B  ✔ Submit  →\r\nThe vector bracket should remain visible in the output: \u2329x\u232A\r\n❯ 1. Yes\r\n  2. No\r\nEnter to select · ↑/↓ to navigate · Esc to cancel\r\n';
   const qLines = await renderScreenLines(new TextEncoder().encode(`${E}[2J${E}[H` + q));
   sv2('screen: through the emulator, a short quoted rule cannot bound the frame', parseSelectorFromScreen(qLines)?.steps?.total, 1);
+  // Characters the emulator draws in zero columns (U+1160) must not make the
+  // next word look too wide to have fit: its width comes from the cells.
+  const zw = '─'.repeat(80) + '\r\n←  ☐ Cleanup  ✔ Submit  →\r\necho ' + 'x'.repeat(65) + '\r\nrm' + '\u1160'.repeat(8) + ' -rf build\r\n❯ 1. Yes\r\n  2. No\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n';
+  const zwLines = await renderScreenLines(new TextEncoder().encode(`${E}[2J${E}[H` + zw));
+  sv2('screen: the emulator gives each row\'s first-word width', zwLines.firstWords.slice(2, 4), [4, 2]);
+  sv2('screen: through the emulator, a zero-width filler cannot join two commands', parseSelectorFromScreen(zwLines)?.prompt?.includes('\nrm'), true);
   // A long question Claude wrapped over several rows reads as one paragraph.
   const wrapped = parseSelectorFromScreen([
     '─'.repeat(80),

@@ -366,7 +366,9 @@ export function parseSelectorFromScreen(lines) {
   // too long for one row. Read bottom-up, so they arrive before their option.
   let pendingDetail = [];
   let pendingEnds = []; // the column each detail row ends at, for reflow
+  let pendingFirst = []; // and the columns its first word takes
   const detailEnds = new Map();
+  const detailFirst = new Map();
   for (let i = hintIdx - 1; i >= 0; i -= 1) {
     const line = lines[i];
     const t = line.trim();
@@ -374,17 +376,22 @@ export function parseSelectorFromScreen(lines) {
       // A blank or rule row INSIDE a description is a real separator: kept
       // as written, so two commands around it can never be joined into one
       // (Codex P2, twice). End column 0 means "never a wrap".
-      if (pendingDetail.length) { pendingDetail.push(t); pendingEnds.push(0); }
+      if (pendingDetail.length) { pendingDetail.push(t); pendingEnds.push(0); pendingFirst.push(0); }
       continue;
     }
     const m = line.match(SCREEN_OPTION_RE);
     if (m) {
       const opt = { num: Number(m[2]), label: m[3].trim() };
       // Blank or rule rows between the option and its description: chrome.
-      while (pendingDetail.length && (pendingDetail[pendingDetail.length - 1] === '' || SCREEN_RULE_RE.test(pendingDetail[pendingDetail.length - 1]))) { pendingDetail.pop(); pendingEnds.pop(); }
-      if (pendingDetail.length) { opt.detail = pendingDetail.reverse().join('\n'); detailEnds.set(opt, pendingEnds.reverse()); }
+      while (pendingDetail.length && (pendingDetail[pendingDetail.length - 1] === '' || SCREEN_RULE_RE.test(pendingDetail[pendingDetail.length - 1]))) { pendingDetail.pop(); pendingEnds.pop(); pendingFirst.pop(); }
+      if (pendingDetail.length) {
+        opt.detail = pendingDetail.reverse().join('\n');
+        detailEnds.set(opt, pendingEnds.reverse());
+        detailFirst.set(opt, pendingFirst.reverse());
+      }
       pendingDetail = [];
       pendingEnds = [];
+      pendingFirst = [];
       options.unshift(opt);
       blockTop = i;
       continue;
@@ -392,8 +399,8 @@ export function parseSelectorFromScreen(lines) {
     // Non-numbered line: a description under an option (indented) keeps the
     // walk going while we are inside the block; anything else above the
     // topmost option ends the block.
-    if (/^\s{3,}\S/.test(line)) { pendingDetail.push(t); pendingEnds.push(colOf(lines, i)); continue; } // option description
-    if (options.length === 0) { pendingDetail = []; pendingEnds = []; continue; } // hint chrome between hint and block
+    if (/^\s{3,}\S/.test(line)) { pendingDetail.push(t); pendingEnds.push(colOf(lines, i)); pendingFirst.push(firstWordOf(lines, i)); continue; } // option description
+    if (options.length === 0) { pendingDetail = []; pendingEnds = []; pendingFirst = []; continue; } // hint chrome between hint and block
     break;
   }
   if (options.length === 0) return null;
@@ -422,7 +429,7 @@ export function parseSelectorFromScreen(lines) {
   // rows (a command, its description, the question; answers one per line).
   const prose = !!steps && steps.current < steps.total;
   // Option descriptions likewise (Claude wrapped them at the terminal width).
-  const opts = prose ? options.map((o) => (o.detail ? { ...o, detail: reflow(o.detail.split('\n'), detailEnds.get(o), frameW) } : o)) : options;
+  const opts = prose ? options.map((o) => (o.detail ? { ...o, detail: reflow(o.detail.split('\n'), detailEnds.get(o), frameW, null, detailFirst.get(o)) } : o)) : options;
   const out = { prompt: screenPrompt(lines, blockTop, prose, frameW), options: opts, selectedIndex: sel };
   if (steps) out.steps = steps;
   // For selectorFingerprint only: the uncapped screen above the block, so two
@@ -469,6 +476,11 @@ function rowWidth(s) {
 function colOf(lines, i) {
   const e = Array.isArray(lines.ends) ? lines.ends[i] : undefined;
   return typeof e === 'number' ? e : rowWidth(lines[i]);
+}
+// The columns row i's first word takes, the emulator's answer when given.
+function firstWordOf(lines, i) {
+  const w = Array.isArray(lines.firstWords) ? lines.firstWords[i] : undefined;
+  return typeof w === 'number' ? w : rowWidth(lines[i].trim().split(' ')[0]);
 }
 function screenSteps(lines, blockTop, hintIdx = blockTop, frameW = 0) {
   // The tab bar sits between the frame's rule and the question: never look
@@ -580,14 +592,14 @@ const WRAP_SLACK = 4; // the TUI may wrap a few columns inside the frame's edge
 // word is an intentional newline as often as a wrap, and joining it could
 // hide a second command (Codex P2). Ambiguous rows keep their break.
 const WRAP_REACH = 10;
-function reflow(rows, ends, frameW, hard) {
+function reflow(rows, ends, frameW, hard, firsts) {
   let out = '';
   rows.forEach((r, k) => {
     if (!k) { out = r; return; }
     const end = ends?.[k - 1];
     const line = out.slice(out.lastIndexOf('\n') + 1);
     const wrapped = r !== '' && !hard?.[k] && !SCREEN_RULE_RE.test(r) && typeof end === 'number' && frameW > 0 && end < frameW && end >= frameW - WRAP_REACH
-      && end + 1 + rowWidth(r.split(' ')[0]) > frameW - WRAP_SLACK;
+      && end + 1 + (typeof firsts?.[k] === 'number' ? firsts[k] : rowWidth(r.split(' ')[0])) > frameW - WRAP_SLACK;
     const dotted = (w) => /\.\w/.test(w);
     const pathy = line.includes('/') || r.includes('/') || dotted(line.split(' ').pop()) || dotted(r.split(' ')[0]) || !line.includes(' ');
     out += wrapped && !pathy ? ` ${r}` : `\n${r}`;
@@ -608,12 +620,12 @@ function screenPrompt(lines, blockTop, prose = false, frameW = 0) {
     // without a frame rule only the last paragraph is kept, and a paragraph
     // break here would hide the text above it (security review).
     if (!/[\p{L}\p{N}]/u.test(t)) { if (paragraphs[0].length) paragraphs[0][0].hard = true; continue; }
-    const row = { t, end: colOf(lines, i) };
+    const row = { t, end: colOf(lines, i), first: firstWordOf(lines, i) };
     paragraphs[0].unshift(row);
   }
   const kept = (bounded ? paragraphs : paragraphs.slice(-1)).filter((p) => p.length);
   if (prose) {
-    let text = kept.map((p) => reflow(p.map((x) => x.t), p.map((x) => x.end), frameW, p.map((x) => !!x.hard))).join('\n');
+    let text = kept.map((p) => reflow(p.map((x) => x.t), p.map((x) => x.end), frameW, p.map((x) => !!x.hard), p.map((x) => x.first))).join('\n');
     if (text.length > PROMPT_MAX_CHARS) text = text.slice(-PROMPT_MAX_CHARS);
     return text;
   }
