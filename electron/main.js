@@ -2556,7 +2556,6 @@ function provisionCertAndRestart() {
     const st = getMobileServerStatus();
     const disk = res.ok && certValidTo(res.name);
     if (disk && st.running && servingOlder(st, res.name, disk)) await restartMobileServer();
-    retryHttpsSoon();
     return res;
   })().finally(() => { certJob = null; });
   return certJob;
@@ -2571,7 +2570,7 @@ function provisionCertAndRestart() {
 async function autoEnableMobileHttps() {
   if (!getMobileServerConfig().enabled || certJob) return;
   const name = await getMagicDNSName();
-  if (!name) { retryHttpsSoon(); return; } // a failed lookup keeps the short retry going (Codex P1)
+  if (!name) return; // the one-minute watch below tries again
   const validTo = certValidTo(name);
   // Renew under 30 days, but only where this tailnet can issue certificates.
   if (!(validTo && validTo - Date.now() > 30 * 86_400_000) && (await certCapableName()) === name) {
@@ -2588,19 +2587,16 @@ async function autoEnableMobileHttps() {
     certJob = restartMobileServer().then(() => ({ ok: true, name })).finally(() => { certJob = null; });
     await certJob;
   }
-  retryHttpsSoon();
 }
 
-// A start that could not read the MagicDNS name (a lookup timed out during a
-// restart, say) comes up on plain HTTP only, while phones paired over HTTPS
-// wait at that address. When this Mac has a certificate, try again in a
-// minute rather than at the next 30-minute check.
-let httpsRetry = null;
-function retryHttpsSoon() {
+// HTTPS lost while a certificate exists (a start or restart that could not
+// read the MagicDNS name, a failed restart that a later auto-start brought
+// back on HTTP only): checked every minute from every path, rather than
+// re-armed by each caller, which three Codex rounds showed misses some path.
+// Cheap: one status read and a directory listing.
+function watchMobileHttps() {
   const st = getMobileServerStatus();
-  if (!st.running || st.secure || httpsRetry || !hasAnyCert()) return;
-  httpsRetry = setTimeout(() => { httpsRetry = null; runAutoHttps(); }, 60_000);
-  httpsRetry.unref?.();
+  if (st.running && !st.secure && !certJob && hasAnyCert()) runAutoHttps();
 }
 const runAutoHttps = () => autoEnableMobileHttps()
   .catch((err) => console.warn('[mobile-server] automatic HTTPS:', err?.message || err));
@@ -3401,6 +3397,7 @@ app.whenReady().then(() => {
     .catch((err) => console.warn('[mobile-server] start:', err?.message || err))
     .then(runAutoHttps);
   setInterval(runAutoHttps, 30 * 60_000).unref();
+  setInterval(watchMobileHttps, 60_000).unref();
   setupSessionTabCapture();
   // Main-process terminal status authority (v1.0.43, remote Phase 1): observe
   // every PTY's output/exit so tab status (working/done/needs) + recent exits

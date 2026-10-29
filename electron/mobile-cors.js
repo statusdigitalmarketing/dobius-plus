@@ -26,3 +26,18 @@ export function isAllowedMobileOrigin(origin, { hosts = null, ports = null } = {
   const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
   return !ports || ports.includes(port);
 }
+
+/**
+ * Whether a request's Host header names THIS Mac's phone server: its tailnet
+ * IP or its MagicDNS name, at its port. Anything else is refused before any
+ * route runs. Without it, a page at http://evil.example:8420 could rebind
+ * that name to this Mac's tailnet IP and call /pair from its own origin, where
+ * CORS never applies (DNS rebinding: Codex P1). `name` may be null while the
+ * MagicDNS lookup is unknown; the IP still works.
+ */
+export function isOwnHost(host, { ip, name = null, port }) {
+  if (typeof host !== 'string' || !host) return false;
+  const h = host.trim().toLowerCase().replace(/\.(:\d+)$/, '$1'); // a trailing-dot FQDN is the same name
+  const own = [ip, name].filter(Boolean).map((x) => `${String(x).toLowerCase().replace(/\.$/, '')}:${port}`);
+  return own.includes(h);
+}

@@ -1,4 +1,4 @@
-import { isAllowedMobileOrigin } from './mobile-cors.js';
+import { isAllowedMobileOrigin, isOwnHost } from './mobile-cors.js';
 /**
  * Mobile server: embedded HTTP + WebSocket server that bridges Dobius+ to a
  * phone PWA over the user's Tailscale tailnet.
@@ -1144,6 +1144,7 @@ async function doStartMobileServer(stillCurrent) {
     };
   }
   const port = cfg.port || 8420;
+  let magicName = null; // read below, before the server listens
 
   const expApp = express();
 
@@ -1157,6 +1158,13 @@ async function doStartMobileServer(stillCurrent) {
   // isolated instances on one IP.
   const corsPorts = [...new Set([port, 8420, ...String(process.env.DOBIUS_MOBILE_CORS_PORTS || '').split(',').map(Number).filter((n) => n > 0 && n < 65536)])];
   const corsOk = (origin) => isAllowedMobileOrigin(origin, { hosts: corsHosts, ports: corsPorts });
+  // Only requests addressed to this Mac (mobile-cors.js isOwnHost): a foreign
+  // Host is a DNS-rebinding page calling us from its own origin.
+  const hostOk = (host) => isOwnHost(host, { ip, name: magicName, port });
+  expApp.use((req, res, next) => {
+    if (!hostOk(req.headers.host)) return res.status(421).end();
+    return next();
+  });
   expApp.use((req, res, next) => {
     const origin = req.headers.origin;
     if (corsOk(origin)) {
@@ -1323,6 +1331,10 @@ async function doStartMobileServer(stillCurrent) {
   // heard) plus a requestId to poll /voice/reply. Audio never leaves the Mac.
   expApp.post('/voice/audio', express.raw({ type: () => true, limit: '8mb' }), async (req, res) => {
     if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
+    // Authenticated, and transcription can be silent for minutes (a cold
+    // Whisper start, then its own 120s deadline and the CLI fallback): the
+    // stalled-request timeout is for unauthenticated sockets only (Codex P2).
+    req.socket.setTimeout(0);
     if (!transcribeAvailable()) {
       return res.status(503).json({ ok: false, error: 'Local transcription is not set up on the Mac (whisper-cli / ffmpeg missing).' });
     }
@@ -1393,6 +1405,7 @@ async function doStartMobileServer(stillCurrent) {
   // the specific requestId. Returns the spoken message when it lands.
   expApp.post('/voice/reply', async (req, res) => {
     if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
+    req.socket.setTimeout(0); // authenticated; holds up to 60s by design
     const requestId = req.body?.requestId;
     if (typeof requestId !== 'string') {
       return res.status(400).json({ ok: false, error: 'requestId required' });
@@ -1440,7 +1453,6 @@ async function doStartMobileServer(stillCurrent) {
   // push/install). That HTTP fallback is safe here BECAUSE it rides the tailnet:
   // WireGuard already encrypts the transport, so the bearer token is not exposed
   // to a same-subnet sniffer the way the removed LAN/plaintext mode exposed it.
-  let magicName;
   let secure = false;
   let certValidTo = null; // expiry of the cert this server loaded (ms)
   magicName = await getMagicDNSName();
@@ -1486,7 +1498,7 @@ async function doStartMobileServer(stillCurrent) {
 
   // attachWebSocketServer installs the wss 'error' listener a failed bind
   // needs (see mobile-autostart.js); the listen outcome is handled below.
-  wss = attachWebSocketServer(httpServer, { path: '/ws', maxPayload: MAX_WS_PAYLOAD });
+  wss = attachWebSocketServer(httpServer, { path: '/ws', maxPayload: MAX_WS_PAYLOAD, verifyClient: ({ req }) => hostOk(req.headers.host) });
   // Heartbeat: ping every client every HEARTBEAT_MS; a client that hasn't ponged
   // since the last ping is a dead/half-open socket (network dropped while OPEN)
   // and is terminated, so it stops accumulating a send buffer and its cleanup
