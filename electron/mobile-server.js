@@ -1298,8 +1298,8 @@ async function doStartMobileServer(stillCurrent) {
   // POST /same-mac { tokenHash, newTokenHash, nonce }  (no auth). Lets a phone
   // prove an older saved address is THIS Mac without sending any token: both
   // hashes must name tokens this Mac issued, and the reply is
-  // HMAC(old token, nonce:newTokenHash), which only a server holding the old
-  // token can make. A different Mac at a reused tailnet IP cannot answer, and
+  // HMAC(old token + ':' + new token, nonce), which only a server holding both
+  // can make. A different Mac at a reused tailnet IP cannot answer, and
   // one that relays to the real Mac gets a 404 there, since the real Mac never
   // issued the relayer's new token (Codex P1 + security review). The hash is
   // domain-separated so it never matches another hash of a token.
@@ -1313,8 +1313,10 @@ async function doStartMobileServer(stillCurrent) {
       return getMobileServerConfig().devices.find((d) => typeof d.token === 'string' && d.token && crypto.timingSafeEqual(sameMacHash(d.token), want));
     };
     const old = issued(tokenHash);
-    if (!old || !issued(newTokenHash)) return res.status(404).json({ ok: false, error: 'unknown' });
-    res.json({ ok: true, proof: crypto.createHmac('sha256', old.token).update(`${nonce}:${newTokenHash}`).digest('hex') });
+    const fresh = issued(newTokenHash);
+    if (!old || !fresh) return res.status(404).json({ ok: false, error: 'unknown' });
+    // Keyed by BOTH tokens, so the proof itself (not only this lookup) needs both.
+    res.json({ ok: true, proof: crypto.createHmac('sha256', `${old.token}:${fresh.token}`).update(nonce).digest('hex') });
   });
 
   // POST /voice/intent  { transcript: string, tabId?: string }

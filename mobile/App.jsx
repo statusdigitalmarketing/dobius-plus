@@ -120,8 +120,8 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
 
 // The id of a paired Mac, at an address other than `origin`, that is the same
 // server as the one just paired. Proof: that address answers POST /same-mac
-// with HMAC(saved token, nonce:hash of the new token), which only a server
-// that holds the saved token AND issued the new one can make. No token is sent
+// with HMAC keyed by the saved token AND the new one, which only a server
+// holding both can make. No token is sent
 // anywhere, only domain-separated hashes, so every saved Mac can be asked: a
 // different Mac can hold the same tailnet IP or short name, and a shared Mac
 // is saved under an address it cannot know is its own (Codex). null when
@@ -140,8 +140,8 @@ async function sameMacAs(state, origin, token) {
     const timer = setTimeout(() => ctl.abort(), 3000);
     try {
       const nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
-      const key = await subtle.importKey('raw', enc.encode(p.token), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-      const want = hex(await subtle.sign('HMAC', key, enc.encode(`${nonce}:${newTokenHash}`)));
+      const key = await subtle.importKey('raw', enc.encode(`${p.token}:${token}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      const want = hex(await subtle.sign('HMAC', key, enc.encode(nonce)));
       const res = await fetch(`${p.origin}/same-mac`, {
         method: 'POST', body: JSON.stringify({ tokenHash: await hashOf(p.token), newTokenHash, nonce }), signal: ctl.signal,
         headers: { 'Content-Type': 'application/json' }, cache: 'no-store', credentials: 'omit', redirect: 'error',

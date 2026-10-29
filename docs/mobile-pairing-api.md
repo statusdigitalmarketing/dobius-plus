@@ -37,11 +37,11 @@ Lets a phone prove that an older saved address (for example the HTTP IP it paire
 
 - Auth: none. No token is sent, only hashes: `hash(t) = sha256("dobius-same-mac:" + t)`, hex.
 - Request: `{ "tokenHash": "<hash(old saved token)>", "newTokenHash": "<hash(token just issued by /pair)>", "nonce": "<64 hex, random>" }`
-- Response `200`: `{ "ok": true, "proof": "<HMAC-SHA256(key = old token, msg = nonce + ':' + newTokenHash) hex>" }`. The phone computes the same HMAC itself and merges only on an exact match.
+- Response `200`: `{ "ok": true, "proof": "<HMAC-SHA256(key = old token + ':' + new token, msg = nonce) hex>" }`. The phone computes the same HMAC itself and merges only on an exact match.
 - Errors: `400` malformed field, `404` this Mac did not issue both tokens (a different Mac at a reused IP, or a relay to the real Mac, lands here).
 - Side effects: none.
 
-Only a server that holds the old token can make the proof, and it only answers when it also issued the new token, so relaying the request to the real Mac fails there.
+Only a server that holds both tokens can make the proof (it is keyed by both), and it only answers when it issued both, so relaying the request to the real Mac fails there.
 
 ```bash
 h() { printf 'dobius-same-mac:%s' "$1" | shasum -a 256 | cut -d' ' -f1; }
