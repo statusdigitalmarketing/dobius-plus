@@ -371,15 +371,17 @@ export function parseSelectorFromScreen(lines) {
     const line = lines[i];
     const t = line.trim();
     if (t === '' || SCREEN_RULE_RE.test(t)) {
-      // A blank row INSIDE a description is a real separator: kept, so two
-      // commands around it can never be joined into one (Codex P2).
-      if (t === '' && pendingDetail.length) { pendingDetail.push(''); pendingEnds.push(0); }
+      // A blank or rule row INSIDE a description is a real separator: kept
+      // as written, so two commands around it can never be joined into one
+      // (Codex P2, twice). End column 0 means "never a wrap".
+      if (pendingDetail.length) { pendingDetail.push(t); pendingEnds.push(0); }
       continue;
     }
     const m = line.match(SCREEN_OPTION_RE);
     if (m) {
       const opt = { num: Number(m[2]), label: m[3].trim() };
-      while (pendingDetail[pendingDetail.length - 1] === '') { pendingDetail.pop(); pendingEnds.pop(); } // blank rows above it
+      // Blank or rule rows between the option and its description: chrome.
+      while (pendingDetail.length && (pendingDetail[pendingDetail.length - 1] === '' || SCREEN_RULE_RE.test(pendingDetail[pendingDetail.length - 1]))) { pendingDetail.pop(); pendingEnds.pop(); }
       if (pendingDetail.length) { opt.detail = pendingDetail.reverse().join('\n'); detailEnds.set(opt, pendingEnds.reverse()); }
       pendingDetail = [];
       pendingEnds = [];
@@ -582,7 +584,7 @@ function reflow(rows, ends, frameW) {
     if (!k) { out = r; return; }
     const end = ends?.[k - 1];
     const line = out.slice(out.lastIndexOf('\n') + 1);
-    const wrapped = r !== '' && typeof end === 'number' && frameW > 0 && end < frameW && end >= frameW - WRAP_REACH
+    const wrapped = r !== '' && !SCREEN_RULE_RE.test(r) && typeof end === 'number' && frameW > 0 && end < frameW && end >= frameW - WRAP_REACH
       && end + 1 + rowWidth(r.split(' ')[0]) > frameW - WRAP_SLACK;
     const dotted = (w) => /\.\w/.test(w);
     const pathy = line.includes('/') || r.includes('/') || dotted(line.split(' ').pop()) || dotted(r.split(' ')[0]) || !line.includes(' ');
