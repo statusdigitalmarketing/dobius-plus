@@ -5,6 +5,7 @@ import { buildTerminalFontFamily } from '../lib/terminal-font';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import { useStore } from '../store/store';
+import { takePendingScrollback } from '../lib/pending-scrollback';
 
 // States carried by the Dobius status marker (OSC 777;dobius;<state>), emitted by
 // the managed Claude Notification/Stop hook. Anything else is ignored.
@@ -188,10 +189,12 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       fit();
     });
 
-    // Restore saved scrollback before creating pty
+    // Restore saved scrollback before creating pty. A checkpoint fork hands
+    // its scrollback over in memory, so it never races the disk save.
     let restorePromise = Promise.resolve();
-    if (window.electronAPI.terminalLoadState) {
-      restorePromise = window.electronAPI.terminalLoadState(id).then((state) => {
+    const forked = takePendingScrollback(id);
+    if (forked || window.electronAPI.terminalLoadState) {
+      restorePromise = (forked ? Promise.resolve(forked) : window.electronAPI.terminalLoadState(id)).then((state) => {
         if (cancelled) return;
         if (state?.scrollback?.length > 0 && termRef.current) {
           for (const line of state.scrollback) {
@@ -241,6 +244,14 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
         termRef.current.write(data);
       }
     });
+
+    // Text for this terminal's SCREEN only (a restored checkpoint). It is
+    // drawn like the previous-session scrollback above and never reaches the
+    // PTY: typed into a running Claude, every saved line became a prompt.
+    const onPrint = (e) => {
+      if (e.detail?.id === id && termRef.current && typeof e.detail.text === 'string') termRef.current.write(e.detail.text);
+    };
+    window.addEventListener('dobius:terminal-print', onPrint);
 
     const removeExitListener = window.electronAPI.onTerminalExit((termId, exitCode) => {
       if (termId === id && termRef.current) {
@@ -364,6 +375,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       removeAutoLabelListener?.();
       removeDataListener();
       removeExitListener();
+      window.removeEventListener('dobius:terminal-print', onPrint);
       removeRequestSave?.();
       // Don't kill PTY if: (a) this is a claimed terminal, or (b) it was marked
       // as do-not-kill by the tear-off handler (old window unmounting torn-off tab)

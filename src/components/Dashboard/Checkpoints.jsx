@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
+import { setPendingScrollback } from '../../lib/pending-scrollback';
 
 export default function Checkpoints() {
   const currentProjectPath = useStore((s) => s.currentProjectPath);
@@ -68,24 +69,27 @@ export default function Checkpoints() {
     const termId = getActiveTerminalTabId();
     if (!window.electronAPI || !termId) return;
     setActiveTab(termId);
-    // Write checkpoint scrollback as dimmed text to the terminal
+    // Draw the checkpoint as dimmed text on the terminal's SCREEN. It used to
+    // go through terminalWrite, which is PTY input: each line plus \r was
+    // typed into whatever ran in the tab, so a running Claude got every saved
+    // line as a prompt (Codex P1).
     if (cp.scrollback?.length > 0) {
-      for (const line of cp.scrollback) {
-        const safeLine = String(line).replace(/\x1b/g, '');
-        window.electronAPI.terminalWrite(termId, '\x1b[2m' + safeLine + '\x1b[0m\r\n');
-      }
-      window.electronAPI.terminalWrite(termId, '\x1b[2m\x1b[38;5;240m── restored checkpoint ──\x1b[0m\r\n\r\n');
+      const text = cp.scrollback.map((line) => '\x1b[2m' + String(line).replace(/\x1b/g, '') + '\x1b[0m\r\n').join('')
+        + '\x1b[2m\x1b[38;5;240m── restored checkpoint ──\x1b[0m\r\n\r\n';
+      window.dispatchEvent(new CustomEvent('dobius:terminal-print', { detail: { id: termId, text } }));
     }
     setActiveView('terminal');
   }, [getActiveTerminalTabId, setActiveTab, setActiveView]);
 
   const handleFork = useCallback((cp) => {
     if (!currentProjectPath || !window.electronAPI) return;
-    // Create new tab, then write checkpoint data to its terminal after a delay
+    // A new tab whose terminal opens showing the checkpoint.
     const tab = addTab(currentProjectPath);
     setActiveView('terminal');
-    // Save checkpoint scrollback as the new tab's state so useTerminal restores it
+    // Hand the scrollback to the new tab in memory (it mounts after this
+    // handler returns), and also save it so a relaunch still has it.
     if (cp.scrollback?.length > 0) {
+      setPendingScrollback(tab.id, { scrollback: cp.scrollback, cols: cp.cols, rows: cp.rows });
       window.electronAPI.terminalSaveState(tab.id, {
         scrollback: cp.scrollback,
         cols: cp.cols,
