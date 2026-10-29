@@ -201,3 +201,17 @@ console.log('PASS  row keys survive a sliding window');
   assert.equal(g.take(kclick, B), true, 'the orphan expired: assistive tech works again');
   console.log('PASS  press guard');
 }
+
+// --- stepSummary: a run of steps as one line ---
+{
+  const { stepSummary } = await import('../../shared/chat-rows.js');
+  const t = (name, extra = {}) => ({ type: 'tool', name, ...extra });
+  assert.deepEqual(stepSummary([t('Write', { diff: { old: '', new: 'a\nb\nc' } }), t('Bash')]), { text: 'Created a file, ran a command', added: 3, removed: 0 });
+  assert.deepEqual(stepSummary([t('Bash'), t('Bash'), t('Bash')]).text, 'Ran 3 commands');
+  assert.deepEqual(stepSummary([t('Edit', { diff: { old: 'x\ny', new: 'z' } })]), { text: 'Edited a file', added: 1, removed: 2 });
+  assert.deepEqual(stepSummary([t('Read'), t('Grep'), t('Bash'), t('Bash')]).text, 'Used 4 tools');
+  assert.deepEqual(stepSummary([t('mcp__x__y')]).text, 'Used mcp__x__y');
+  assert.deepEqual(stepSummary([{ type: 'thinking', text: 'hm' }]).text, 'Thought');
+  assert.deepEqual(stepSummary([t('Edit'), t('MultiEdit')]).text, 'Edited 2 files');
+  console.log('PASS  step summaries');
+}

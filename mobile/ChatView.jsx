@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import SpecialKeys from './SpecialKeys';
 import remarkGfm from 'remark-gfm';
 import { pairingKey } from './pairings';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache } from '../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
@@ -119,7 +119,17 @@ function legacyCopy(text) {
 
 // A copy affordance on code boxes (Sam, 8/14: "anything that shows up in this
 // box ... I need a little copy button so I can just copy that line").
-function CopyBtn({ text, className = 'md-copy' }) {
+// The copy glyph the Claude app uses under a reply (two overlapping sheets).
+const COPY_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true">
+    <rect x="8" y="8" width="12" height="12" rx="2.5" /><path d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8" />
+  </svg>
+);
+const CHECK_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+);
+
+function CopyBtn({ text, className = 'md-copy', icon = false }) {
   const [done, setDone] = useState(false);
   return (
     <button
@@ -130,9 +140,9 @@ function CopyBtn({ text, className = 'md-copy' }) {
         setDone(!!ok);
         setTimeout(() => setDone(false), 1500);
       }}
-      aria-label="Copy"
+      aria-label={done ? 'Copied' : 'Copy'}
     >
-      {done ? 'copied' : 'copy'}
+      {icon ? (done ? CHECK_ICON : COPY_ICON) : done ? 'copied' : 'copy'}
     </button>
   );
 }
@@ -228,25 +238,28 @@ function StepRow({ block, live }) {
   );
 }
 
-// More than three steps in a row fold into one "N steps" row.
+// A run of steps reads as one line, the way the Claude app shows it:
+// "Created a file, ran a command  +12 -0  >". Tap to see each step.
 function StepGroup({ steps, live }) {
   const [open, setOpen] = useState(false);
   // Claude can run several tools in parallel, so every step of the live run
   // that has no result yet is running, not only the last one (Codex).
-  if (steps.length <= 3) return <div className="chat-steps">{steps.map((b, i) => <StepRow key={i} block={b} live={live} />)}</div>;
   const running = live && steps.some((b) => b.type === 'tool' && b.result === undefined);
-  const counts = {};
-  for (const b of steps) { const n = b.type === 'tool' ? b.name : 'Thinking'; counts[n] = (counts[n] || 0) + 1; }
-  const label = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(', ');
+  const failed = steps.some((b) => b.isError);
+  const sum = useMemo(() => stepSummary(steps), [steps]);
   return (
-    <div className="chat-steps">
-      <button className="chat-step-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <span className={`chat-step-dot ${running ? 'running' : steps.some((b) => b.isError) ? 'err' : 'ok'}`} />
-        <span className="chat-step-name">{steps.length} steps</span>
-        <span className="chat-step-sum">{label}</span>
-        <span className="chat-step-caret">{open ? '▾' : '▸'}</span>
+    <div className={`chat-steps${open ? ' open' : ''}`}>
+      <button className="chat-run" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <span className={`chat-run-icon${running ? ' running' : failed ? ' err' : ''}`} aria-hidden="true">
+          {running ? '' : failed ? '!' : <span className="chat-run-list"><i /><i /><i /></span>}
+        </span>
+        <span className="chat-run-text">{running ? `${sum.text}…` : sum.text}</span>
+        {(sum.added > 0 || sum.removed > 0) && (
+          <span className="chat-run-diff"><span className="add">+{sum.added}</span><span className="del">-{sum.removed}</span></span>
+        )}
+        <span className="chat-run-caret" aria-hidden="true">›</span>
       </button>
-      {open && steps.map((b, i) => <StepRow key={i} block={b} live={live} />)}
+      {open && <div className="chat-run-steps">{steps.map((b, i) => <StepRow key={i} block={b} live={live} />)}</div>}
     </div>
   );
 }
@@ -325,11 +338,12 @@ const Activity = memo(function Activity({ activity }) {
   const meta = activityMeta(liveSeconds(anchor, Date.now()), activity);
   return (
     <div className="chat-activity">
-      <span className="chat-act-glyph" aria-hidden="true">{reduce ? '\u273b' : SPIN_FRAMES[tick % SPIN_FRAMES.length]}</span>
+      <span className="chat-act-dots" aria-hidden="true"><i /><i /><i /></span>
+      {meta && <span className="chat-act-meta" aria-hidden="true">{meta} ·</span>}
       <span className="chat-act-text" role="status">
-        <span key={verb} className="chat-act-verb">{`${verb}\u2026`}</span>
+        <span key={verb} className="chat-act-verb">{`${verb.toLowerCase()}\u2026`}</span>
       </span>
-      {meta && <span className="chat-act-meta" aria-hidden="true">{meta}</span>}
+      <span className="chat-act-glyph" aria-hidden="true">{reduce ? '\u273b' : SPIN_FRAMES[tick % SPIN_FRAMES.length]}</span>
     </div>
   );
 });
@@ -340,22 +354,35 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
   const shown = rowText(text, blocks); // what the reader sees, and what Copy copies
   const long = !command && isLong(shown);
   const [open, setOpen] = useState(!long || !!startOpen);
+  const body = (
+    <div className={`chat-content${long && !open ? ' clamped' : ''}${command ? ' chat-cmd' : ''}`}>
+      {role === 'assistant'
+        ? (blocks ? <Blocks blocks={blocks} live={!!live} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
+        : text}
+    </div>
+  );
+  const more = long && <button className="chat-more" onClick={() => setOpen((o) => !o)}>{open ? 'Show less' : 'Show more'}</button>;
+  if (role !== 'assistant') {
+    // Yours: a right-aligned bubble, its state (queued, sending) underneath.
+    return (
+      <div className={`chat-msg user${sending ? ' chat-echo' : ''}`}>
+        <div className="chat-bubble">{body}{more}</div>
+        {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
+        {(queued || sending) && <div className="chat-msg-state">{sending ? 'Sending…' : 'Queued for after this turn'}</div>}
+      </div>
+    );
+  }
   return (
-    <div className={`chat-msg ${role === 'assistant' ? 'assistant' : 'user'}${sending ? ' chat-echo' : ''}`}>
-      <div className="chat-role">
-        {role === 'assistant' ? 'Claude' : 'You'}
-        {timestamp != null && <span className="chat-time">{fmtMsgTime(timestamp)}</span>}
-        {queued && <span className="chat-queued">queued</span>}
-        {sending && <span className="chat-queued">sending…</span>}
-        {shown && !sending && <CopyBtn text={shown} className="chat-msg-copy" />}
-      </div>
-      <div className={`chat-content${long && !open ? ' clamped' : ''}${command ? ' chat-cmd' : ''}`}>
-        {role === 'assistant'
-          ? (blocks ? <Blocks blocks={blocks} live={!!live} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
-          : text}
-      </div>
-      {command && detail && <SkillPreview detail={detail} label={detailLabel || 'skill'} />}
-      {long && <button className="chat-more" onClick={() => setOpen((o) => !o)}>{open ? 'Show less' : 'Show more'}</button>}
+    <div className="chat-msg assistant">
+      {body}
+      {more}
+      {/* Quiet actions under a reply, like the Claude app: copy, and the time. */}
+      {(shown || timestamp != null) && (
+        <div className="chat-msg-actions">
+          {shown && <CopyBtn text={shown} className="chat-msg-copy" icon />}
+          {timestamp != null && <span className="chat-time">{fmtMsgTime(timestamp)}</span>}
+        </div>
+      )}
     </div>
   );
 });
@@ -983,27 +1010,11 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       {showKeys && tabId && (
         <SpecialKeys onKey={(seq) => connection.send({ type: 'input', id: tabId, data: seq })} />
       )}
-      <div className="chat-input-row">
-        <button
-          className={`chat-keys-toggle${showKeys ? ' on' : ''}`}
-          onClick={() => setShowKeys((v) => !v)}
-          aria-label="Toggle terminal keys"
-          title="Arrow/Enter/Esc/Tab keys for interactive dialogs like /permissions"
-        >
-          ⌨
-        </button>
-        {/* Interrupt/cancel from Chat (v1.0.53, Sam: "no way to cancel").
-            One tap = ESC to the TUI: interrupts the running turn AND pops any
-            queued messages back into Claude's input (the popAll op); a second
-            tap clears that input. Red while the tab is actively working. */}
-        <button
-          className={`chat-esc${tab?.status === 'working' ? ' working' : ''}`}
-          onClick={() => { if (tabId) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
-          aria-label="Interrupt Claude (escape)"
-          title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
-        >
-          esc
-        </button>
+      {/* One rounded composer, like the Claude app: the message on top, the
+          tools underneath, and on the right Send, or Stop while Claude works
+          and nothing is typed (Stop is Esc to the TUI: it interrupts the turn
+          and pops queued messages back, v1.0.53). */}
+      <div className="chat-composer">
         <input
           ref={fileInputRef}
           type="file"
@@ -1011,15 +1022,6 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           style={{ display: 'none' }}
           onChange={(e) => { uploadFiles(e.target.files); e.target.value = ''; }}
         />
-        <button
-          className="chat-attach"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-          aria-label="Attach a screenshot or file"
-          title="Attach a screenshot or file (uploads to the Mac, path goes into the prompt)"
-        >
-          {uploading ? '…' : '+'}
-        </button>
         {/* Placeholder truth: a session-linked chat whose Claude has EXITED
             still sends input to the underlying shell, where it executes as a
             command (observed live 8/15: a prompt ran in zsh as `Reply ...`).
@@ -1039,11 +1041,40 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           placeholder={sessionId
             ? (tab && !tab.claudeLive
               ? 'Claude exited. Input goes to the terminal...'
-              : 'Message Claude...')
+              : tab?.status === 'working' ? 'Queue for after this turn...' : 'Message Claude...')
             : 'Type into the terminal...'}
           rows={1}
         />
-        <button className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
+        <div className="chat-composer-bar">
+          <button
+            className="chat-attach"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            aria-label="Attach a screenshot or file"
+            title="Attach a screenshot or file (uploads to the Mac, path goes into the prompt)"
+          >
+            {uploading ? '…' : '+'}
+          </button>
+          <button
+            className={`chat-keys-toggle${showKeys ? ' on' : ''}`}
+            onClick={() => setShowKeys((v) => !v)}
+            aria-label="Toggle terminal keys"
+            title="Arrow/Enter/Esc/Tab keys for interactive dialogs like /permissions"
+          >
+            ⌨
+          </button>
+          <span className="chat-composer-spacer" />
+          {tab?.status === 'working' && !input.trim() ? (
+            <button
+              className="chat-stop"
+              onClick={() => { if (tabId) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
+              aria-label="Stop Claude (escape)"
+              title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
+            ><span /></button>
+          ) : (
+            <button className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
+          )}
+        </div>
       </div>
     </>
   );

@@ -74,6 +74,8 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
   // later activeId change (exit / reordered payload) can't make Stop kill the
   // wrong terminal. { id, label } or null. Codex Phase 3a P2.
   const [confirmStop, setConfirmStop] = useState(null);
+  // The header's "..." menu: view toggle, history, new tab, stop.
+  const [menuOpen, setMenuOpen] = useState(false);
   // Guards a createTerminal round-trip so a double-tap over Tailscale latency
   // can't spawn two orphan PTYs. Reset on the reply. Audit MED-10.
   const creatingRef = useRef(false);
@@ -205,37 +207,47 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
 
   return (
     <div className="screen terminal-screen">
-      <header className="top-bar">
+      {/* The Claude app's header: back, the conversation's topic over its
+          project (tap to switch tabs), Claude's working spinner, and "..." for
+          everything else. */}
+      <header className="top-bar elevated">
         {onBack && (
-          <button className="icon-btn back-btn" onClick={onBack} aria-label="Back to sessions">‹</button>
-        )}
-        <button className="terminal-pick" onClick={() => setSwitcherOpen((v) => !v)}>
-          <span className="status-dot" style={{ backgroundColor: statusColor }} />
-          <span className="terminal-name">
-            {active ? `${active.projectName} / ${active.tabLabel}` : 'No terminal'}
-          </span>
-          <span className="chevron">{switcherOpen ? '▴' : '▾'}</span>
-        </button>
-        {activeId && (
-          <button
-            className="icon-btn stop-btn"
-            onClick={() => setConfirmStop({ id: activeId, label: active ? `${active.projectName} / ${active.tabLabel}` : 'this session' })}
-            aria-label="Stop session"
-          >■</button>
-        )}
-        {activeId && (
-          <button
-            className="icon-btn view-toggle"
-            onClick={toggleMode}
-            title={mode === 'chat' ? 'Switch to raw Terminal view' : 'Switch to Chat view'}
-            aria-label="Toggle chat/terminal view"
-          >
-            {mode === 'chat' ? 'Term' : 'Chat'}
+          <button className="tb-round" onClick={onBack} aria-label="Back to sessions">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
           </button>
         )}
-        <button className="icon-btn" onClick={onShowHistory} aria-label="Chat history">☷</button>
-        <button className="icon-btn" onClick={newTerminalHere} aria-label="New terminal">+</button>
+        <button className="tb-title" onClick={() => { setMenuOpen(false); setSwitcherOpen((v) => !v); }} aria-label="Switch tab" aria-expanded={switcherOpen}>
+          <span className="tb-title-main">
+            {status !== 'authed' && <span className="status-dot" style={{ backgroundColor: statusColor }} />}
+            {active ? active.tabLabel : 'No terminal'}
+          </span>
+          {active && <span className="tb-title-sub">{active.projectName}</span>}
+        </button>
+        {active?.status === 'working' && <span className="tb-spinner" role="status" aria-label="Claude is working" />}
+        <button className="tb-round" onClick={() => { setSwitcherOpen(false); setMenuOpen((v) => !v); }} aria-label="More" aria-expanded={menuOpen}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="18.5" cy="12" r="1.6" /></svg>
+        </button>
       </header>
+
+      {menuOpen && (
+        <div className="tb-menu-backdrop" onClick={() => setMenuOpen(false)}>
+          <div className="tb-menu" role="menu" onClick={(e) => e.stopPropagation()}>
+            {activeId && (
+              <button role="menuitem" onClick={() => { setMenuOpen(false); toggleMode(); }}>
+                {mode === 'chat' ? 'Show terminal' : 'Show chat'}
+              </button>
+            )}
+            <button role="menuitem" onClick={() => { setMenuOpen(false); onShowHistory(); }}>Chat history</button>
+            <button role="menuitem" onClick={() => { setMenuOpen(false); newTerminalHere(); }}>New tab here</button>
+            {activeId && (
+              <button role="menuitem" className="danger" onClick={() => {
+                setMenuOpen(false);
+                setConfirmStop({ id: activeId, label: active ? `${active.projectName} / ${active.tabLabel}` : 'this session' });
+              }}>Stop session</button>
+            )}
+          </div>
+        </div>
+      )}
 
       {confirmStop && (
         <div className="confirm-bar">
