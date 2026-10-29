@@ -294,6 +294,7 @@ function ToolImages({ images }) {
     let live = true;
     const timers = [];
     if (!fetchImage) return undefined;
+    const releases = images.map((i) => fetchImage.want?.(i.ref));
     // A new fetcher (a reconnect) gets a fresh retry budget.
     if (fetcherRef.current !== fetchImage) { fetcherRef.current = fetchImage; tries.current = {}; setFailed({}); }
     const get = (ref) => {
@@ -307,7 +308,7 @@ function ToolImages({ images }) {
       });
     };
     for (const i of images) get(i.ref);
-    return () => { live = false; timers.forEach(clearTimeout); };
+    return () => { live = false; timers.forEach(clearTimeout); releases.forEach((r) => r?.()); };
   }, [images, fetchImage]);
   return (
     <div className="chat-imgs">
@@ -464,8 +465,12 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     // yet sent are dropped, so abandoned images never share the socket with
     // what the user is looking at now (Codex P2).
     let dead = false;
+    // Refs some mounted thumbnail still shows: a request whose thumbnail left
+    // the transcript window is skipped when its turn comes (Codex P2), so the
+    // queue only ever holds what is on screen.
+    const wanted = new Map();
     const one = (ref) => new Promise((resolve) => {
-      if (dead || connection.closed) { resolve(null); return; }
+      if (dead || connection.closed || !wanted.get(ref)) { resolve(null); return; }
       const reqId = ++imageReqSeq;
       let off = () => {};
       const t = setTimeout(() => { off(); resolve(null); }, 20000);
@@ -483,9 +488,14 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       return run;
     });
     fetcher.kill = () => { dead = true; };
+    fetcher.revive = () => { dead = false; }; // StrictMode replays the effect
+    fetcher.want = (ref) => {
+      wanted.set(ref, (wanted.get(ref) || 0) + 1);
+      return () => { const n = (wanted.get(ref) || 1) - 1; if (n) wanted.set(ref, n); else wanted.delete(ref); };
+    };
     return fetcher;
   }, [connection, sessionId, projectPath, authEpoch]); // eslint-disable-line react-hooks/exhaustive-deps -- authEpoch only renews the cache
-  useEffect(() => () => imageFetch?.kill(), [imageFetch]);
+  useEffect(() => { imageFetch?.revive(); return () => imageFetch?.kill(); }, [imageFetch]);
   const [messages, setMessages] = useState(null); // null = loading
   const draftsKey = pairingKey(connection.pairing, DRAFTS_KEY);
   const [input, setInput] = useState(() => loadDraft(draftsKey, tabId));

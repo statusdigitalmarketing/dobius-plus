@@ -370,10 +370,16 @@ export function parseSelectorFromScreen(lines) {
   for (let i = hintIdx - 1; i >= 0; i -= 1) {
     const line = lines[i];
     const t = line.trim();
-    if (t === '' || SCREEN_RULE_RE.test(t)) continue;
+    if (t === '' || SCREEN_RULE_RE.test(t)) {
+      // A blank row INSIDE a description is a real separator: kept, so two
+      // commands around it can never be joined into one (Codex P2).
+      if (t === '' && pendingDetail.length) { pendingDetail.push(''); pendingEnds.push(0); }
+      continue;
+    }
     const m = line.match(SCREEN_OPTION_RE);
     if (m) {
       const opt = { num: Number(m[2]), label: m[3].trim() };
+      while (pendingDetail[pendingDetail.length - 1] === '') { pendingDetail.pop(); pendingEnds.pop(); } // blank rows above it
       if (pendingDetail.length) { opt.detail = pendingDetail.reverse().join('\n'); detailEnds.set(opt, pendingEnds.reverse()); }
       pendingDetail = [];
       pendingEnds = [];
@@ -405,14 +411,14 @@ export function parseSelectorFromScreen(lines) {
   }
   if (sel === -1) return null;
 
-  const steps = screenSteps(lines, blockTop, hintIdx);
+  // The terminal's width, as wide as its widest row (the frame's rule).
+  const frameW = lines.reduce((w, l, i) => Math.max(w, colOf(lines, i)), 0);
+  const steps = screenSteps(lines, blockTop, hintIdx, frameW);
   // An AskUserQuestion question is prose that Claude wrapped at the terminal
   // width: re-flow its rows into one paragraph, or a phone card shows it
   // broken mid-sentence. Permission prompts and the review step keep their
   // rows (a command, its description, the question; answers one per line).
   const prose = !!steps && steps.current < steps.total;
-  // The terminal's width, as wide as its widest row (the frame's rule).
-  const frameW = lines.reduce((w, l, i) => Math.max(w, colOf(lines, i)), 0);
   // Option descriptions likewise (Claude wrapped them at the terminal width).
   const opts = prose ? options.map((o) => (o.detail ? { ...o, detail: reflow(o.detail.split('\n'), detailEnds.get(o), frameW) } : o)) : options;
   const out = { prompt: screenPrompt(lines, blockTop, prose, frameW), options: opts, selectedIndex: sel };
@@ -460,7 +466,7 @@ function colOf(lines, i) {
   const e = Array.isArray(lines.ends) ? lines.ends[i] : undefined;
   return typeof e === 'number' ? e : rowWidth(lines[i]);
 }
-function screenSteps(lines, blockTop, hintIdx = blockTop) {
+function screenSteps(lines, blockTop, hintIdx = blockTop, frameW = 0) {
   // The tab bar sits between the frame's rule and the question: never look
   // past a rule (a permission prompt's border), so text above it can't count.
   // The bar is the FIRST row of the frame, right under its rule (or the top
@@ -478,7 +484,10 @@ function screenSteps(lines, blockTop, hintIdx = blockTop) {
   for (let i = blockTop; i <= hintIdx && i < lines.length; i += 1) widest = Math.max(widest, colOf(lines, i));
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
     const len = colOf(lines, i);
-    if (/^─/.test(lines[i]) && SCREEN_RULE_RE.test(lines[i].trim()) && len >= widest) { bounded = true; break; }
+    // The frame's rule spans the terminal: as wide as the WHOLE screen's
+    // widest row, not just the rows under it (a 60-column rule quoted above
+    // short rows is not one: Codex P2).
+    if (/^─/.test(lines[i]) && SCREEN_RULE_RE.test(lines[i].trim()) && len >= widest && len >= frameW) { bounded = true; break; }
     widest = Math.max(widest, len);
     if (i === 0) bounded = true;
     if (lines[i].trim()) top = i;
@@ -573,7 +582,7 @@ function reflow(rows, ends, frameW) {
     if (!k) { out = r; return; }
     const end = ends?.[k - 1];
     const line = out.slice(out.lastIndexOf('\n') + 1);
-    const wrapped = typeof end === 'number' && frameW > 0 && end < frameW && end >= frameW - WRAP_REACH
+    const wrapped = r !== '' && typeof end === 'number' && frameW > 0 && end < frameW && end >= frameW - WRAP_REACH
       && end + 1 + rowWidth(r.split(' ')[0]) > frameW - WRAP_SLACK;
     const dotted = (w) => /\.\w/.test(w);
     const pathy = line.includes('/') || r.includes('/') || dotted(line.split(' ').pop()) || dotted(r.split(' ')[0]) || !line.includes(' ');

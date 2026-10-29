@@ -373,6 +373,8 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: a sentence ending a full row still re-flows', wrapAt(['Writes the file, then it reads the whole tree back to check each entry.', 'Then it stops.']), 'Writes the file, then it reads the whole tree back to check each entry. Then it stops.');
   sv2('screen: a full row of prose re-flows with a space', wrapAt(['Writes the main config file for this project and each workspace under', 'it and nothing else.']), 'Writes the main config file for this project and each workspace under it and nothing else.');
   sv2('screen: a short row and a long next word stay two lines', wrapAt(['echo checking production resources', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build']), 'echo checking production resources\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build');
+  const longEcho = 'echo this is a deliberately long status line for the production cleanup';
+  sv2('screen: a blank row between two commands is kept', wrapAt([longEcho, '', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build']), `${longEcho}\n\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build`);
   sv2('screen: two short rows are two lines, never one (separate commands)', wrapAt(['echo cleanup', 'rm -rf build']), 'echo cleanup\nrm -rf build');
   sv2('screen: a row cut at the very last column keeps the break', wrapAt(['x'.repeat(70) + ' abcd', 'efgh tail']), 'x'.repeat(70) + ' abcd\nefgh tail');
   // A crafted row cannot freeze the parser (it backtracked exponentially once).
@@ -407,6 +409,8 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: wide characters count two columns, so a short quoted rule cannot bound', cjk?.steps?.total, 1);
   const arrows = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Dev→Prod  ☐ Prod→Dev  ✔ Submit  →', 'Proceed?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
   const ends = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Deploy  →  ☐ Deploy  ←  ✔ Submit  →', 'Proceed?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const shortQuoted = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Like this?', '─'.repeat(60), '←  ☐ A  ☐ B  ✔ Submit  →', 'Use this layout?', '❯ 1. Yes', '  2. No', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  sv2('screen: a rule narrower than the screen does not bound the frame', shortQuoted?.steps?.labels, ['Layout']);
   sv2('screen: a standalone arrow inside a header is header text', ends?.steps?.labels, ['Deploy  →', 'Deploy  ←']);
   sv2('screen: arrows inside headers keep the bar', arrows?.steps?.labels, ['Dev→Prod', 'Prod→Dev']);
   sv2('screen: a checkbox inside a multi-question header stays in that header', multiBox?.steps?.labels, ['Use ☐ box', 'Deploy']);
