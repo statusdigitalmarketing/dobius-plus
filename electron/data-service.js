@@ -1547,6 +1547,94 @@ function toolResultText(content) {
   }).filter(Boolean).join('\n');
 }
 
+// --- Images in tool results ------------------------------------------------
+// A tool can return pictures (Read of a screenshot returns the image itself).
+// Rows carry only REFERENCES (`<record uuid>:<result #>:<image #>` plus its
+// type): the picture is fetched on demand by loadTranscriptImage, so a
+// chat poll never re-ships megabytes of base64.
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const IMAGE_MAX_BASE64 = 12 * 1024 * 1024;
+const IMAGES_PER_RESULT = 6;
+const UUID_RE = /^[0-9a-fA-F-]{8,64}$/;
+export const IMAGE_REF_RE = /^([0-9a-fA-F-]{8,64}):(\d{1,3}):(\d{1,2})$/;
+
+function resultImages(content) {
+  return Array.isArray(content) ? content.filter((x) => x?.type === 'image') : [];
+}
+function usableImage(x) {
+  return x?.source?.type === 'base64' && IMAGE_TYPES.has(x.source.media_type) && typeof x.source.data === 'string'
+    && x.source.data.length > 0 && x.source.data.length <= IMAGE_MAX_BASE64;
+}
+function resultImageRefs(uuid, resultIndex, content) {
+  if (typeof uuid !== 'string' || !UUID_RE.test(uuid)) return [];
+  const out = [];
+  resultImages(content).forEach((x, j) => {
+    if (out.length < IMAGES_PER_RESULT && usableImage(x)) {
+      out.push({ ref: `${uuid}:${resultIndex}:${j}`, mime: x.source.media_type });
+    }
+  });
+  return out;
+}
+
+/**
+ * One image from a transcript, by the reference a row carried: { mime, data }
+ * (base64), or null. Streams the file and parses only the line holding that
+ * record (a cheap substring test first); lines past LINE_MAX are skipped, never
+ * assembled (a huge record must not exhaust memory, see NOTES 2026-09-15).
+ */
+const IMAGE_LINE_MAX = 64 * 1024 * 1024;
+export async function loadTranscriptImage(sessionId, projectPath, ref) {
+  const m = typeof ref === 'string' ? IMAGE_REF_RE.exec(ref) : null;
+  if (!m || typeof sessionId !== 'string' || !/^[\w-]{1,128}$/.test(sessionId) || typeof projectPath !== 'string') return null;
+  let p;
+  try { p = await resolveTranscriptPath(sessionId, projectPath); } catch { return null; }
+  return p ? readTranscriptImage(p, ref) : null;
+}
+
+/** loadTranscriptImage on a known transcript file (exported for tests). */
+export function readTranscriptImage(p, ref) {
+  const m = typeof ref === 'string' ? IMAGE_REF_RE.exec(ref) : null;
+  if (!m) return Promise.resolve(null);
+  const [, uuid, ri, ii] = m;
+  // A cheap pre-filter on the id itself (spacing-agnostic: `"uuid": "x"` and
+  // `"uuid":"x"` both pass); the parse below checks it is THE record's uuid.
+  const marker = `"${uuid}"`;
+  const pick = (line) => {
+    let entry;
+    try { entry = JSON.parse(line); } catch { return null; }
+    if (!entry || typeof entry !== 'object' || entry.uuid !== uuid || !Array.isArray(entry.message?.content)) return null;
+    const results = entry.message.content.filter((c) => c?.type === 'tool_result' && typeof c.tool_use_id === 'string');
+    const img = resultImages(results[Number(ri)]?.content)[Number(ii)];
+    return usableImage(img) ? { mime: img.source.media_type, data: img.source.data } : null;
+  };
+  return new Promise((resolve) => {
+    let stream;
+    try { stream = fsSync.createReadStream(p, { encoding: 'utf8' }); } catch { resolve(null); return; }
+    let buf = '';
+    let skipping = false;
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; try { stream.destroy(); } catch { /* closed */ } resolve(v); };
+    stream.on('data', (chunk) => {
+      let start = 0;
+      let nl;
+      while ((nl = chunk.indexOf('\n', start)) !== -1) {
+        const piece = chunk.slice(start, nl);
+        start = nl + 1;
+        if (skipping) { skipping = false; buf = ''; continue; }
+        const line = buf ? buf + piece : piece;
+        buf = '';
+        if (line.includes(marker)) { const hit = pick(line); if (hit) { finish(hit); return; } }
+      }
+      if (!skipping) {
+        buf += chunk.slice(start);
+        if (buf.length > IMAGE_LINE_MAX) { buf = ''; skipping = true; }
+      }
+    });
+    stream.on('end', () => finish(buf && !skipping && buf.includes(marker) ? pick(buf) : null));
+    stream.on('error', () => finish(null));
+  });
+}
+
 // Fold a turn into one assistant row and attach tool results. Runs AFTER
 // dedupeQueuedMessages (a queued row would otherwise split a turn) and before
 // the tail is cut, so the window counts rows the user actually sees. Mutates
@@ -1576,6 +1664,7 @@ export function mergeTurns(messages) {
         t.result = r.text.length <= room ? r.text : RESULT_OMITTED.length <= room ? RESULT_OMITTED : '';
         bytes.set(row, (bytes.get(row) || 0) - was + t.result.length);
         if (r.isError) t.isError = true;
+        if (r.images) t.images = r.images; // references only: a few bytes each
       }
       // A user record can carry text beside its tool results (a message typed
       // mid-turn rides in with them): that text is a real row and ends the turn.
@@ -1650,11 +1739,16 @@ export function entryToMessage(entry, opts = {}) {
   const msgContent = entry.message?.content;
   if (wantBlocks && Array.isArray(msgContent)) {
     if (role === 'user' && msgContent.some((c) => c?.type === 'tool_result')) {
-      const toolResults = msgContent.filter((c) => c?.type === 'tool_result' && typeof c.tool_use_id === 'string').map((c) => ({
-        id: c.tool_use_id,
-        text: capText(stripAnsiText(toolResultText(c.content)).trim(), TOOL_RESULT_MAX, 'output'),
-        isError: c.is_error === true,
-      }));
+      const toolResults = msgContent.filter((c) => c?.type === 'tool_result' && typeof c.tool_use_id === 'string').map((c, i) => {
+        const r = {
+          id: c.tool_use_id,
+          text: capText(stripAnsiText(toolResultText(c.content)).trim(), TOOL_RESULT_MAX, 'output'),
+          isError: c.is_error === true,
+        };
+        const images = resultImageRefs(entry.uuid, i, c.content);
+        if (images.length) r.images = images;
+        return r;
+      });
       // Any text beside the results goes through the ordinary user path (and
       // its filters), exactly as the legacy shape shows it (Codex High).
       const rest = msgContent.filter((c) => c?.type !== 'tool_result');

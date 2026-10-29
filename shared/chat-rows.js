@@ -28,7 +28,53 @@ function normBlock(b) {
   }
   if (str(b.result) !== undefined) out.result = b.result;
   if (b.isError === true) out.isError = true;
+  const images = toolImages(b.images);
+  if (images.length) out.images = images;
   return out;
+}
+
+// Image references a tool result carried (main sends refs, never pixels).
+const IMAGE_REF = /^[0-9a-fA-F-]{8,64}:\d{1,3}:\d{1,2}$/;
+const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/;
+function toolImages(list) {
+  if (!Array.isArray(list)) return [];
+  return list.filter((i) => i && typeof i.ref === 'string' && IMAGE_REF.test(i.ref) && typeof i.mime === 'string' && IMAGE_MIME.test(i.mime))
+    .slice(0, 6).map((i) => ({ ref: i.ref, mime: i.mime }));
+}
+
+/**
+ * Every tool image in a run of steps, in order: what a chat view shows as
+ * thumbnails beside the (possibly folded) steps.
+ */
+export function stepImages(steps) {
+  const out = [];
+  for (const b of steps || []) for (const i of b.images || []) if (out.length < 8) out.push(i);
+  return out;
+}
+
+/**
+ * A small cache in front of a view's image fetch(ref) -> Promise<{mime,data}>,
+ * so a re-render or a poll never fetches a picture twice. Bounded: the oldest
+ * entries go past `max`.
+ */
+export function createImageCache(fetchOne, max = 24) {
+  const cache = new Map();
+  return (ref) => {
+    if (cache.has(ref)) {
+      const hit = cache.get(ref);
+      cache.delete(ref);
+      cache.set(ref, hit);
+      return hit;
+    }
+    const p = Promise.resolve().then(() => fetchOne(ref)).then(
+      (img) => (img && IMAGE_MIME.test(img.mime) && typeof img.data === 'string' ? `data:${img.mime};base64,${img.data}` : null),
+      () => null,
+    );
+    cache.set(ref, p);
+    p.then((url) => { if (!url) cache.delete(ref); }); // a miss may succeed later
+    while (cache.size > max) cache.delete(cache.keys().next().value);
+    return p;
+  };
 }
 
 /** The row's usable blocks, or null to render `content` as before. */

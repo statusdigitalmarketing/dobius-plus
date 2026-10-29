@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext } from 'react';
 import ReactMarkdown from 'react-markdown';
 import SpecialKeys from './SpecialKeys';
 import remarkGfm from 'remark-gfm';
 import { pairingKey } from './pairings';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard } from '../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
@@ -249,11 +249,50 @@ function StepGroup({ steps, live }) {
   );
 }
 
+// The chat's image fetch (ref -> Promise<data URL | null>), over the socket.
+const ImageFetch = createContext(null);
+let imageReqSeq = 0; // module-scoped: survives remounts, ids never repeat on a connection
+
+// Thumbnails of the images a run of steps returned (a screenshot Claude read),
+// shown even while the steps are folded; tap for full screen.
+function ToolImages({ images }) {
+  const fetchImage = useContext(ImageFetch);
+  const [urls, setUrls] = useState({});
+  const [big, setBig] = useState(null);
+  useEffect(() => {
+    let live = true;
+    if (!fetchImage) return undefined;
+    for (const i of images) {
+      fetchImage(i.ref).then((url) => { if (live && url) setUrls((cur) => (cur[i.ref] ? cur : { ...cur, [i.ref]: url })); });
+    }
+    return () => { live = false; };
+  }, [images, fetchImage]);
+  return (
+    <div className="chat-imgs">
+      {images.map((i) => (urls[i.ref]
+        ? <button key={i.ref} className="chat-img" onClick={() => setBig(urls[i.ref])} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" /></button>
+        : <div key={i.ref} className="chat-img loading" />))}
+      {big && (
+        <div className="chat-lightbox" role="dialog" aria-label="Image" onClick={() => setBig(null)}>
+          <img src={big} alt="Tool output, full size" />
+          <span className="chat-lightbox-close">✕</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Blocks({ blocks, live }) {
   const parts = [];
   let run = [];
   // Only the run of steps that ENDS the turn can still be running.
-  const flush = (atEnd) => { if (run.length) { parts.push(<StepGroup key={`s${parts.length}`} steps={run} live={live && atEnd} />); run = []; } };
+  const flush = (atEnd) => {
+    if (!run.length) return;
+    parts.push(<StepGroup key={`s${parts.length}`} steps={run} live={live && atEnd} />);
+    const images = stepImages(run);
+    if (images.length) parts.push(<ToolImages key={`i${parts.length}`} images={images} />);
+    run = [];
+  };
   for (const b of blocks) {
     if (b.type === 'text') {
       flush(false);
@@ -331,6 +370,24 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const sessionId = tab?.sessionId || null;
   const projectPath = tab?.sessionProject || null;
   const tabId = tab?.id || null;
+  // Tool images: requested over the socket only when a thumbnail shows, cached
+  // per session. A Mac too old to answer just leaves the placeholder.
+  const imageFetch = useMemo(() => {
+    if (!sessionId || !projectPath) return null;
+    return createImageCache((ref) => new Promise((resolve) => {
+      if (connection.closed) { resolve(null); return; }
+      const reqId = ++imageReqSeq;
+      let off = () => {};
+      const t = setTimeout(() => { off(); resolve(null); }, 20000);
+      off = connection.onMessage((msg) => {
+        if (msg?.type !== 'chatImage' || msg.reqId !== reqId) return;
+        off();
+        clearTimeout(t);
+        resolve(msg.ok && typeof msg.data === 'string' ? { mime: msg.mime, data: msg.data } : null);
+      });
+      connection.send({ type: 'chatImage', sessionId, projectPath, ref, reqId });
+    }));
+  }, [connection, sessionId, projectPath]);
   const [messages, setMessages] = useState(null); // null = loading
   const draftsKey = pairingKey(connection.pairing, DRAFTS_KEY);
   const [input, setInput] = useState(() => loadDraft(draftsKey, tabId));
@@ -1016,6 +1073,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   }
 
   return (
+    <ImageFetch.Provider value={imageFetch}>
     <div className="chat-view">
       <div className="chat-body-wrap">
       <main className="chat-body" ref={bodyRef} onScroll={onScroll}>
@@ -1062,6 +1120,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       {selectorPopup}
       {inputRow}
     </div>
+    </ImageFetch.Provider>
   );
 }
 

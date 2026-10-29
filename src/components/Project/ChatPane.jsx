@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard } from '../../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import './ChatPane.css';
 
@@ -89,6 +89,42 @@ function nodeText(node) {
 // with no language looks the same), so `pre` tells its children they are in a
 // block through context.
 const InPre = createContext(false);
+// The current chat's image fetch (ref -> Promise<data URL | null>).
+const ImageFetch = createContext(null);
+
+// Thumbnails of the images a run of steps returned, shown even while the steps
+// are folded: a screenshot is the point of the step. Click opens it full size.
+function ToolImages({ images }) {
+  const fetchImage = useContext(ImageFetch);
+  const [urls, setUrls] = useState({});
+  const [big, setBig] = useState(null);
+  useEffect(() => {
+    let live = true;
+    if (!fetchImage) return undefined;
+    for (const i of images) {
+      fetchImage(i.ref).then((url) => { if (live && url) setUrls((cur) => (cur[i.ref] ? cur : { ...cur, [i.ref]: url })); });
+    }
+    return () => { live = false; };
+  }, [images, fetchImage]);
+  useEffect(() => {
+    if (!big) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') setBig(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [big]);
+  return (
+    <div className="chatp-imgs">
+      {images.map((i) => (urls[i.ref]
+        ? <button key={i.ref} type="button" className="chatp-img" onClick={() => setBig(urls[i.ref])} title="Open image"><img src={urls[i.ref]} alt="Tool output" /></button>
+        : <div key={i.ref} className="chatp-img loading" />))}
+      {big && (
+        <div className="chatp-lightbox" role="dialog" aria-label="Image" onClick={() => setBig(null)}>
+          <img src={big} alt="Tool output, full size" />
+        </div>
+      )}
+    </div>
+  );
+}
 
 function InlineCode({ children, ...props }) {
   const [done, setDone] = useState(false);
@@ -235,7 +271,13 @@ function Blocks({ blocks, live }) {
   const parts = [];
   let run = [];
   // Only the run of steps that ENDS the turn can still be running.
-  const flush = (atEnd) => { if (run.length) { parts.push(<StepGroup key={`s${parts.length}`} steps={run} live={live && atEnd} />); run = []; } };
+  const flush = (atEnd) => {
+    if (!run.length) return;
+    parts.push(<StepGroup key={`s${parts.length}`} steps={run} live={live && atEnd} />);
+    const images = stepImages(run);
+    if (images.length) parts.push(<ToolImages key={`i${parts.length}`} images={images} />);
+    run = [];
+  };
   for (const b of blocks) {
     if (b.type === 'text') {
       flush(false);
@@ -421,6 +463,12 @@ export default function ChatPane({ tabId, visible }) {
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const sessionIdRef = useRef(undefined);
+  // Tool images (a screenshot Claude read): fetched by reference only when a
+  // thumbnail shows, cached per session.
+  const imageFetch = useMemo(() => createImageCache((ref) => {
+    const h = haveRef.current;
+    return h?.sessionId && h.projectPath ? window.electronAPI.chatImage?.(h.sessionId, h.projectPath, ref) : null;
+  }), [sessionId]);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const mountedRef = useRef(true);
@@ -883,6 +931,7 @@ export default function ChatPane({ tabId, visible }) {
   }
 
   return (
+    <ImageFetch.Provider value={imageFetch}>
     <div className="chatp" data-chat-tab={tabId} onMouseDownCapture={activate} onFocusCapture={activate} onDragEnterCapture={activate}>
       <div className="chatp-head">
         <span className={`chatp-status ${status || 'idle'}`} />
@@ -955,6 +1004,7 @@ export default function ChatPane({ tabId, visible }) {
         </div>
       </div>
     </div>
+    </ImageFetch.Provider>
   );
 }
 

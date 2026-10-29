@@ -33,7 +33,7 @@ import {
 } from './terminal-manager.js';
 import { stripAnsi, spinnerStatus } from './selector-parser.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
-import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills } from './data-service.js';
+import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills, loadTranscriptImage } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { peekReply } from './voice-bridge.js';
@@ -1008,6 +1008,17 @@ function handleAuthedMessage(socket, msg, subs) {
           wsSend(socket, { type: 'transcript', sessionId, projectPath, blocks, sig: res.sig || null, entries: res.entries || [] });
         })
         .catch((err) => wsSend(socket, { type: 'error', message: String(err?.message || err) }));
+      break;
+    }
+
+    case 'chatImage': {
+      // One image a tool returned, for a Chat thumbnail: requested only when
+      // it is shown, never inside the polled transcript.
+      const { sessionId, projectPath, ref, reqId } = msg;
+      if (typeof reqId !== 'number' || typeof sessionId !== 'string' || typeof projectPath !== 'string' || typeof ref !== 'string') break;
+      loadTranscriptImage(sessionId, projectPath, ref)
+        .then((img) => wsSend(socket, img ? { type: 'chatImage', reqId, ok: true, mime: img.mime, data: img.data } : { type: 'chatImage', reqId, ok: false }))
+        .catch(() => wsSend(socket, { type: 'chatImage', reqId, ok: false }));
       break;
     }
 

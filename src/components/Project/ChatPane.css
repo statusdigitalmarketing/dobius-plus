@@ -278,3 +278,20 @@
   .chatp-activity, .chatp-jump, .chatp-act-verb, .chatp-step-dot.running { animation: none; }
   .chatp-act-verb { color: var(--accent); background: none; }
 }
+
+/* Images a tool returned (a screenshot Claude read): thumbnails beside the
+ * steps, even while those are folded; click for full size. */
+.chatp-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 10px; }
+.chatp-img {
+  padding: 0; border: 1px solid var(--border, rgba(255, 255, 255, 0.12)); border-radius: 10px; overflow: hidden;
+  background: rgba(127, 127, 127, 0.08); cursor: zoom-in; line-height: 0;
+}
+.chatp-img img { display: block; max-height: 160px; max-width: 280px; object-fit: contain; }
+.chatp-img.loading { width: 120px; height: 90px; cursor: default; animation: chatp-img-pulse 1.4s ease-in-out infinite; }
+@keyframes chatp-img-pulse { 50% { opacity: 0.5; } }
+.chatp-lightbox {
+  position: fixed; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center;
+  padding: 32px; background: rgba(0, 0, 0, 0.82); cursor: zoom-out;
+}
+.chatp-lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
+@media (prefers-reduced-motion: reduce) { .chatp-img.loading { animation: none; } }

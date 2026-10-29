@@ -401,4 +401,40 @@ fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true });
   assert.equal(rows[0].blocks[1].result, 'ok', 'a result that fits still lands');
 }
 
-console.log('queued-messages: 29 groups pass');
+// 30. Images a tool returned travel as references, never pixels, and come
+// back exactly by reference; anything else is refused.
+{
+  const { parseTranscriptTail, readTranscriptImage } = await import('../data-service.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'img-'));
+  const f = path.join(dir, 't.jsonl');
+  const png = Buffer.from('fake-png-bytes').toString('base64');
+  const jpg = Buffer.from('fake-jpg-bytes').toString('base64');
+  const uuid = '0a1b2c3d-1111-2222-3333-444455556666';
+  fs.writeFileSync(f, [
+    JSON.stringify({ type: 'user', uuid: 'u-0', message: { role: 'user', content: 'x'.repeat(70 * 1024 * 1024 / 64) } }),
+    JSON.stringify({ type: 'assistant', uuid: 'a-1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'k1', name: 'Read', input: { file_path: '/tmp/shot.png' } }, { type: 'tool_use', id: 'k2', name: 'Read', input: { file_path: '/tmp/b.jpg' } }] } }),
+    JSON.stringify({ type: 'user', uuid, message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'k1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }] },
+      { type: 'tool_result', tool_use_id: 'k2', content: [{ type: 'text', text: 'here' }, { type: 'image', source: { type: 'base64', media_type: 'image/svg+xml', data: png } }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: jpg } }] },
+    ] } }),
+  ].join('\n') + '\n');
+  const rows = await parseTranscriptTail(f, 50, true);
+  const tools = rows.flatMap((r) => r.blocks || []).filter((b) => b.type === 'tool');
+  assert.deepEqual(tools[0].images, [{ ref: `${uuid}:0:0`, mime: 'image/png' }], 'a reference, not the pixels');
+  assert.deepEqual(tools[1].images, [{ ref: `${uuid}:1:1`, mime: 'image/jpeg' }], 'an svg is skipped, the jpeg keeps its own index');
+  assert.ok(!JSON.stringify(rows).includes(png), 'no base64 in the payload');
+  assert.deepEqual(await readTranscriptImage(f, `${uuid}:0:0`), { mime: 'image/png', data: png });
+  assert.deepEqual(await readTranscriptImage(f, `${uuid}:1:1`), { mime: 'image/jpeg', data: jpg });
+  assert.equal(await readTranscriptImage(f, `${uuid}:1:0`), null, 'an svg is never served');
+  assert.equal(await readTranscriptImage(f, `${uuid}:5:0`), null, 'no such result');
+  assert.equal(await readTranscriptImage(f, 'a-1:0:0'), null, 'not a uuid-shaped ref');
+  assert.equal(await readTranscriptImage(f, '../../etc/passwd'), null);
+  assert.equal(await readTranscriptImage(f, `0a1b2c3d-9999-2222-3333-444455556666:0:0`), null, 'another record');
+  // Spaced JSON (any writer, not only Claude's compact form) is found too.
+  const g = path.join(dir, 'spaced.jsonl');
+  fs.writeFileSync(g, fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.stringify(JSON.parse(l), null, 1).replace(/\n\s*/g, ' ')).join('\n') + '\n');
+  assert.deepEqual(await readTranscriptImage(g, `${uuid}:0:0`), { mime: 'image/png', data: png }, 'spacing does not matter');
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('queued-messages: 30 groups pass');
