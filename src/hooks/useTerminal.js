@@ -248,8 +248,13 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     // Text for this terminal's SCREEN only (a restored checkpoint). It is
     // drawn like the previous-session scrollback above and never reaches the
     // PTY: typed into a running Claude, every saved line became a prompt.
+    // A full-screen program (vim, less) owns the alternate screen: drawing
+    // there would scribble over its display, so nothing is drawn.
     const onPrint = (e) => {
-      if (e.detail?.id === id && termRef.current && typeof e.detail.text === 'string') termRef.current.write(e.detail.text);
+      const t = termRef.current;
+      if (e.detail?.id !== id || !t || typeof e.detail.text !== 'string') return;
+      if (t.buffer.active.type === 'alternate') return;
+      t.write(e.detail.text);
     };
     window.addEventListener('dobius:terminal-print', onPrint);
 

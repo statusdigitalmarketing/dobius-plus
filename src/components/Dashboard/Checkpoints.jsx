@@ -74,9 +74,11 @@ export default function Checkpoints() {
     // Draw the checkpoint as dimmed text on the terminal's SCREEN. It used to
     // go through terminalWrite, which is PTY input: each line plus \r was
     // typed into whatever ran in the tab, so a running Claude got every saved
-    // line as a prompt (Codex P1).
+    // line as a prompt (Codex P1). It starts on a fresh line so it never
+    // paints over what is on screen, such as a half-typed command the shell
+    // still holds (Codex P1, round 2).
     if (cp.scrollback?.length > 0) {
-      const text = cp.scrollback.map((line) => '\x1b[2m' + drawableLine(line) + '\x1b[0m\r\n').join('')
+      const text = '\x1b[0m\r\n' + cp.scrollback.map((line) => '\x1b[2m' + drawableLine(line) + '\x1b[0m\r\n').join('')
         + '\x1b[2m\x1b[38;5;240m── restored checkpoint ──\x1b[0m\r\n\r\n';
       window.dispatchEvent(new CustomEvent('dobius:terminal-print', { detail: { id: termId, text } }));
     }
