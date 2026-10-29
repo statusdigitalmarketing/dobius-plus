@@ -438,6 +438,13 @@ function isTabBar(line) {
   const t = line.trim().replace(/^←\s*/, '').replace(/\s*→$/, '');
   return /^[☐☒✔]/.test(t) && !/[←→]/.test(t);
 }
+// Characters a row shows, not UTF-16 units: combining marks and zero-width
+// characters take no column, so they must not make a body row look wider
+// than the full-width rule above it (security review). Wide (CJK) glyphs
+// count as one, which only ever understates a row: the safe direction.
+function rowWidth(s) {
+  return [...s.trimEnd().replace(/[\p{M}\u200B-\u200D\u2060\uFEFF]/gu, '')].length;
+}
 function screenSteps(lines, blockTop) {
   // The tab bar sits between the frame's rule and the question: never look
   // past a rule (a permission prompt's border), so text above it can't count.
@@ -452,7 +459,7 @@ function screenSteps(lines, blockTop) {
   let bounded = false;
   let widest = 0;
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
-    const len = lines[i].trimEnd().length;
+    const len = rowWidth(lines[i]);
     if (/^─/.test(lines[i]) && SCREEN_RULE_RE.test(lines[i].trim()) && len >= widest) { bounded = true; break; }
     widest = Math.max(widest, len);
     if (i === 0) bounded = true;
