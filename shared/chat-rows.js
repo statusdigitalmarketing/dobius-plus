@@ -55,10 +55,19 @@ export function stepImages(steps) {
 /**
  * A small cache in front of a view's image fetch(ref) -> Promise<{mime,data}>,
  * so a re-render or a poll never fetches a picture twice. Bounded: the oldest
- * entries go past `max`.
+ * SETTLED entries go past `max`; a pending one is never evicted, or a page of
+ * more thumbnails than `max` re-requests every one on each poll and none
+ * ever lands (Codex P2). Pending entries are bounded by what is on screen.
  */
 export function createImageCache(fetchOne, max = 24) {
   const cache = new Map();
+  const pending = new Set();
+  const evict = () => {
+    for (const [k, v] of cache) {
+      if (cache.size <= max) return;
+      if (!pending.has(v)) cache.delete(k);
+    }
+  };
   return (ref) => {
     if (cache.has(ref)) {
       const hit = cache.get(ref);
@@ -71,8 +80,13 @@ export function createImageCache(fetchOne, max = 24) {
       () => null,
     );
     cache.set(ref, p);
-    p.then((url) => { if (!url) cache.delete(ref); }); // a miss may succeed later
-    while (cache.size > max) cache.delete(cache.keys().next().value);
+    pending.add(p);
+    p.then((url) => {
+      pending.delete(p);
+      if (!url && cache.get(ref) === p) cache.delete(ref); // a miss may succeed later
+      evict();
+    });
+    evict();
     return p;
   };
 }

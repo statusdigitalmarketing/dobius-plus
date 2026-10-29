@@ -1614,7 +1614,7 @@ function scanImageIndex(p, from, end, map, skipFirst = false) {
   return new Promise((resolve) => {
     if (from >= end) { resolve({ resume: from, skipping: skipFirst }); return; }
     let stream;
-    try { stream = fsSync.createReadStream(p, { start: from, end: end - 1 }); } catch { resolve({ resume: from, skipping: skipFirst }); return; }
+    try { stream = fsSync.createReadStream(p, { start: from, end: end - 1 }); } catch { resolve({ resume: from, skipping: skipFirst, failed: true }); return; }
     let parts = [];
     let partLen = 0;
     let lineStart = from;
@@ -1648,7 +1648,9 @@ function scanImageIndex(p, from, end, map, skipFirst = false) {
       indexLine(pos);
       resolve({ resume: lineStart, skipping: false });
     });
-    stream.on('error', () => resolve({ resume: from, skipping: skipFirst })); // retry the whole range
+    // A failed read records nothing as scanned, so the next fetch retries it
+    // (a permission fixed later must not leave the index empty: Codex P2).
+    stream.on('error', () => resolve({ resume: from, skipping: skipFirst, failed: true }));
   });
 }
 // The bytes just before `at`: if they changed, the file was rewritten rather
@@ -1677,7 +1679,9 @@ async function imageRecordRange(p, uuid) {
     || (st.size > idx.size && (await tailBytes(p, idx.resume)) !== idx.tail);
   if (stale) idx = { ino: st.ino, size: 0, mtimeMs: 0, resume: 0, skipping: false, tail: '', map: new Map() };
   if (st.size > idx.size) {
-    ({ resume: idx.resume, skipping: idx.skipping } = await scanImageIndex(p, idx.resume, st.size, idx.map, idx.skipping));
+    const r = await scanImageIndex(p, idx.resume, st.size, idx.map, idx.skipping);
+    if (r.failed) return idx.map.get(uuid) || null; // not cached: retried next time
+    ({ resume: idx.resume, skipping: idx.skipping } = r);
     idx.size = st.size;
     idx.mtimeMs = st.mtimeMs;
     idx.tail = await tailBytes(p, idx.resume);

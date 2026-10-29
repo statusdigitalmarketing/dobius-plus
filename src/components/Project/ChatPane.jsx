@@ -92,6 +92,8 @@ function nodeText(node) {
 const InPre = createContext(false);
 // The current chat's image fetch (ref -> Promise<data URL | null>).
 const ImageFetch = createContext(null);
+// Whether the pane is on screen: an open image (on <body>) closes with it.
+const PaneVisible = createContext(true);
 
 // Thumbnails of the images a run of steps returned, shown even while the steps
 // are folded: a screenshot is the point of the step. Click opens it full size.
@@ -100,6 +102,10 @@ function ToolImages({ images }) {
   const [urls, setUrls] = useState({});
   const [failed, setFailed] = useState({});
   const [big, setBig] = useState(null);
+  // The lightbox lives on <body>, so a hidden tab's would cover whatever is
+  // showing now and swallow its keys (Codex P2): it closes with the pane.
+  const shown = useContext(PaneVisible);
+  useEffect(() => { if (!shown) setBig(null); }, [shown]);
   // What is shown is never fetched again (a poll hands in new arrays, and the
   // cache may have evicted it: Codex), and a miss retries a few times (a
   // reconnect can swallow a reply) before it says so.
@@ -970,7 +976,7 @@ export default function ChatPane({ tabId, visible }) {
   }
 
   return (
-    <ImageFetch.Provider value={imageFetch}>
+    <ImageFetch.Provider value={imageFetch}><PaneVisible.Provider value={visible}>
     <div className="chatp" data-chat-tab={tabId} onMouseDownCapture={activate} onFocusCapture={activate} onDragEnterCapture={activate}>
       <div className="chatp-head">
         <span className={`chatp-status ${status || 'idle'}`} />
@@ -1043,7 +1049,7 @@ export default function ChatPane({ tabId, visible }) {
         </div>
       </div>
     </div>
-    </ImageFetch.Provider>
+    </PaneVisible.Provider></ImageFetch.Provider>
   );
 }
 

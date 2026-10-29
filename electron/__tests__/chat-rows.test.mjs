@@ -2,7 +2,7 @@
 // A malformed row must degrade to its plain text, never throw.
 // Run: node ./electron/__tests__/chat-rows.test.mjs
 import assert from 'node:assert/strict';
-import { normalizeBlocks, rowText, rowKeys } from '../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, createImageCache } from '../../shared/chat-rows.js';
 
 // 1. Junk blocks are dropped field by field; nothing usable means null.
 assert.equal(normalizeBlocks(undefined), null);
@@ -214,4 +214,22 @@ console.log('PASS  row keys survive a sliding window');
   assert.deepEqual(stepSummary([{ type: 'thinking', text: 'hm' }]).text, 'Thought');
   assert.deepEqual(stepSummary([t('Edit'), t('MultiEdit')]).text, 'Edited 2 files');
   console.log('PASS  step summaries');
+}
+
+// The image cache never evicts a request still in flight: a page with more
+// thumbnails than its size would otherwise re-request every one on each poll.
+{
+  const calls = [];
+  const fetchOne = (ref) => new Promise((resolve) => calls.push({ ref, resolve }));
+  const get = createImageCache(fetchOne, 2);
+  const ps = ['a', 'b', 'c', 'd'].map((r) => get(r));
+  await new Promise((r) => setTimeout(r, 0));
+  ['a', 'b', 'c', 'd'].forEach((r) => assert.equal(get(r), ps[['a', 'b', 'c', 'd'].indexOf(r)], `pending ${r} is reused`));
+  assert.equal(calls.length, 4, 'each image fetched once while pending');
+  calls.forEach((c) => c.resolve({ mime: 'image/png', data: 'QUJD' }));
+  await Promise.all(ps);
+  get('e'); await new Promise((r) => setTimeout(r, 0));
+  get('a'); await new Promise((r) => setTimeout(r, 0));
+  assert.equal(calls.filter((c) => c.ref === 'a').length, 2, 'settled entries past the cap are evicted');
+  console.log('PASS  image cache keeps pending requests');
 }

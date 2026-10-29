@@ -930,7 +930,8 @@ button.primary:disabled { opacity: 0.4; }
 
 .ask-review { display: flex; flex-direction: column; margin: 8px 0 4px; padding: 12px 14px; border-radius: 14px; background: var(--surface-2); }
 .ask-review .ask-eyebrow { margin-bottom: 4px; }
-.ask-review-q { margin-top: 8px; font-size: 13px; color: var(--dim); line-height: 1.35; overflow-wrap: anywhere; }
+.ask-review-q { margin-top: 8px; font-size: 13px; color: var(--dim); line-height: 1.35; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ask-review-more { margin-top: 0; }
 .ask-review-q:first-of-type { margin-top: 4px; }
 .ask-review-a { font-size: 15px; font-weight: 600; color: var(--fg); line-height: 1.35; overflow-wrap: anywhere; white-space: pre-wrap; }
 .ask-context { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 2px; padding: 12px 14px; border-radius: 14px; background: var(--surface-2); }

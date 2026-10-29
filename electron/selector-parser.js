@@ -442,24 +442,30 @@ function isTabBar(line) {
 function screenSteps(lines, blockTop) {
   // The tab bar sits between the frame's rule and the question: never look
   // past a rule (a permission prompt's border), so text above it can't count.
-  // A multi-question bar is drawn between arrows (`← ... →`) at the TOP of
-  // the frame, right under its rule. A question line that starts with a
-  // checkbox, or quotes a whole bar, sits below it, so the topmost arrow-led
-  // row wins (Codex P2, twice). With none (a single question's bare tab),
-  // the nearest bare one stands.
-  let tb = -1;
+  // The bar is the FIRST row of the frame, right under its rule (or the top
+  // of the screen). Anything below it is the question: a line starting with
+  // a checkbox, a quoted bar, a heredoc in a permission prompt. Choosing
+  // among rows that merely look like bars lost three rounds (Codex P2).
+  let top = -1;
+  let bounded = false;
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
-    if (SCREEN_RULE_RE.test(lines[i].trim())) break;
-    if (!/[☐☒]/.test(lines[i]) || !isTabBar(lines[i])) continue;
-    if (/^\s*←/.test(lines[i])) tb = i; // scanning upward: the last one set is the topmost
-    else if (tb === -1) tb = i;
+    if (SCREEN_RULE_RE.test(lines[i].trim())) { bounded = true; break; }
+    if (i === 0) bounded = true;
+    if (lines[i].trim()) top = i;
   }
-  if (tb === -1) return null;
+  if (!bounded || top === -1 || !/[☐☒]/.test(lines[top]) || !isTabBar(lines[top])) return null;
+  const tb = top;
+  const raw = [...lines[tb].matchAll(TAB_ITEM_RE)].map((m) => ({ mark: m[1], label: m[2].slice(0, 60), col: m.index }));
+  // Only the LAST ✔ is the review step; an earlier one belongs to a header
+  // (`☐ ✔ Check` is the question "✔ Check", Codex P2).
   const items = [];
-  for (const m of lines[tb].matchAll(TAB_ITEM_RE)) {
-    if (m[1] !== '✔' && !m[2]) continue;
-    items.push({ mark: m[1], label: m[2].slice(0, 60), col: m.index });
-  }
+  raw.forEach((t, k) => {
+    const prev = items[items.length - 1];
+    if (t.mark === '✔' && k < raw.length - 1 && prev && prev.mark !== '✔') {
+      prev.label = [prev.label, `✔ ${t.label}`.trim()].filter(Boolean).join(' ').slice(0, 60);
+    } else items.push(t);
+  });
+  for (let k = items.length - 1; k >= 0; k -= 1) if (items[k].mark !== '✔' && !items[k].label) items.splice(k, 1);
   const questions = items.filter((t) => t.mark !== '✔');
   if (!questions.length) return null;
   const labels = questions.map((t) => t.label);
@@ -499,21 +505,20 @@ const SCREEN_CONTEXT_ROWS = 40;
 const PROMPT_MAX_CHARS = 1500;
 /**
  * Rows Claude wrapped, back into one line with spaces. Where the break may
- * have fallen inside a token (a '/' in the word on EITHER side of the break,
- * or a row that is one unbroken token), neither a space nor no space is safe
- * to guess (`/srv/confi` + `g.json`, `Application Supp` + `ort/x.json`, vs
- * `/tmp/cache/x` + `after`): the terminal's own line break is kept, so the
- * card shows exactly what the terminal did, never a different path (Codex,
- * four rounds).
+ * have fallen inside a path or file name (either row holds a '/', the next
+ * row opens with a `name.ext` fragment, or a row is one unbroken token),
+ * neither a space nor no space is safe to guess (`Quarterly Rep` +
+ * `ort.pdf` vs `/tmp/cache/x` + `after`): the terminal's own line break is
+ * kept, so the card never shows a different path (Codex, five rounds).
+ * ponytail: a slashless, extensionless name split mid-word still gets a space.
  */
 function reflow(rows) {
   let out = '';
   for (const r of rows) {
     if (!out) { out = r; continue; }
     const line = out.slice(out.lastIndexOf('\n') + 1);
-    const last = line.split(' ').pop();
-    const next = r.split(' ')[0];
-    out += last.includes('/') || next.includes('/') || !line.includes(' ') ? `\n${r}` : ` ${r}`;
+    const keep = line.includes('/') || r.includes('/') || /^[\w-]*\.\w/.test(r) || !line.includes(' ');
+    out += keep ? `\n${r}` : ` ${r}`;
   }
   return out;
 }

@@ -47,16 +47,16 @@ function AskPrompt({ text }) {
 function AskReview({ text }) {
   const rows = text.split('\n').map((r) => r.trim()).filter(Boolean);
   const heading = rows.length && !/^[●→]/.test(rows[rows.length - 1]) ? rows.pop() : 'Ready to submit your answers?';
-  let inAnswer = false;
+  let kind = null; // the marked row a wrapped continuation belongs to
   return (
     <>
       <div className="ask-review">
         {rows.map((r, i) => {
-          if (r.startsWith('●')) { inAnswer = false; return <div key={i} className="ask-review-q">{r.replace(/^●\s*/, '')}</div>; }
-          if (r.startsWith('→')) { inAnswer = true; return <div key={i} className="ask-review-a">{r.replace(/^→\s*/, '')}</div>; }
-          // A row after an answer continues that answer: shown as written,
-          // never as an eyebrow (that would uppercase a path: Codex P2).
-          if (inAnswer) return <div key={i} className="ask-review-a">{r}</div>;
+          if (r.startsWith('●')) { kind = 'q'; return <div key={i} className="ask-review-q">{r.replace(/^●\s*/, '')}</div>; }
+          if (r.startsWith('→')) { kind = 'a'; return <div key={i} className="ask-review-a">{r.replace(/^→\s*/, '')}</div>; }
+          // A row after a question or answer continues it: shown as written,
+          // never as an eyebrow (that would uppercase a path: Codex P2, twice).
+          if (kind) return <div key={i} className={`ask-review-${kind} ask-review-more`}>{r}</div>;
           return <div key={i} className="ask-eyebrow">{r}</div>;
         })}
       </div>
@@ -524,9 +524,13 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // The card key the cancel was armed on: a different card is never armed
   // (the Mac can answer and show another question inside the 3s window).
   const [cancelArmedKey, setCancelArmedKey] = useState(null);
-  // A card that goes away takes its arming with it: on a Mac that sends no
-  // tokens, the next question could otherwise read the same and inherit it.
-  useEffect(() => { if (!selector) setCancelArmedKey(null); }, [selector]);
+  // Arming ends the moment the phone sees anything but the card it was armed
+  // on (no card, or another one): on a Mac that sends no tokens a LATER card
+  // that reads the same would otherwise inherit it (Codex P1, twice).
+  useEffect(() => {
+    const key = selector ? `${selectorCardKey(selector)}|${selector.token ?? ''}` : null;
+    setCancelArmedKey((armed) => (armed && armed !== key ? null : armed));
+  }, [selector]);
   // Stop takes Send's place the moment a message goes out while Claude works,
   // so a double tap on Send would land on Stop and interrupt (Codex P1).
   const sentAtRef = useRef(0);

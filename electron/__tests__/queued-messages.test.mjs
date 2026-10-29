@@ -463,6 +463,13 @@ fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true });
   const other = '0a1b2c3d-7777-2222-3333-444455556666';
   fs.appendFileSync(big, '"}}\n' + dupe(later).replace(uuid, other) + '\n');
   assert.equal((await readTranscriptImage(big, `${other}:0:0`))?.data, later, 'the record after it is indexed');
+  // A scan that fails (unreadable) is not cached: once readable, it loads.
+  const locked = path.join(dir, 'locked.jsonl');
+  fs.writeFileSync(locked, dupe(first) + '\n');
+  fs.chmodSync(locked, 0o000);
+  if (process.getuid?.() !== 0) assert.equal(await readTranscriptImage(locked, `${uuid}:0:0`), null, 'unreadable');
+  fs.chmodSync(locked, 0o644);
+  assert.equal((await readTranscriptImage(locked, `${uuid}:0:0`))?.data, first, 'readable again, found');
   // Rewritten in place at the SAME size, the record moved: the index notices.
   const r = path.join(dir, 'rewrite.jsonl');
   const pad = (n) => JSON.stringify({ type: 'user', uuid: 'u-p', message: { role: 'user', content: 'p'.repeat(n) } });
