@@ -23,7 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { app, powerSaveBlocker } from 'electron';
-import { createAutoStart, createStartGate, listenSettled, attachWebSocketServer } from './mobile-autostart.js';
+import { createAutoStart, createStartGate, listenSettled, attachWebSocketServer, dualProtocolServer } from './mobile-autostart.js';
 import { getMobileServerConfig, updateMobileServerConfig, setSessionTabLink, removePushSubscriptionsByToken, getSessionTabMap, getAllProjectsWithTabs, loadConfig } from './config-manager.js';
 import {
   listTerminals, subscribeTerminal, writeTerminal, terminalHasDesktopAttached,
@@ -43,7 +43,6 @@ import { estimateContextForTabId } from './tab-context.js';
 import { getMagicDNSName, certPathsFor, hasCertFor, getTailnetHosts } from './tailscale.js';
 import { transcribeAudio, transcribeAvailable } from './voice-transcribe.js';
 import { getVapidPublicKey, subscribePush, sendPush, hasPushSubscribers } from './push.js';
-import { httpsAllowedFor } from '../shared/pairing-link.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1093,13 +1092,6 @@ function handleAuthedMessage(socket, msg, subs) {
 }
 
 /** Current server status, safe to expose to the renderer. */
-// Every start and restart decides HTTPS by this (shared/pairing-link.js),
-// never by what happens to be on disk: a cert left from earlier would move
-// phones paired over HTTP to an address they cannot reach (Codex P1, twice).
-export function httpsAllowed() {
-  return httpsAllowedFor(getMobileServerConfig());
-}
-
 export function getMobileServerStatus() {
   return {
     running: !!httpServer,
@@ -1461,20 +1453,23 @@ async function doStartMobileServer(stillCurrent) {
   // A stop (Settings off, quit, cert re-provision) landed while we waited:
   // nothing has been created yet, so just step back.
   if (quitting || !stillCurrent()) return { running: false, error: 'stopped during start' };
-  if (magicName && hasCertFor(magicName) && httpsAllowed()) {
+  // Plain HTTP is always served, and HTTPS beside it on the same port when
+  // this Mac has a certificate (mobile-autostart.js dualProtocolServer): a
+  // phone paired at either address keeps working when HTTPS comes or goes.
+  const httpSide = http.createServer(expApp);
+  let httpsSide = null;
+  if (magicName && hasCertFor(magicName)) {
     const cp = certPathsFor(magicName);
     try {
       const cert = fs.readFileSync(cp.certFile);
-      httpServer = https.createServer({ cert, key: fs.readFileSync(cp.keyFile) }, expApp);
+      httpsSide = https.createServer({ cert, key: fs.readFileSync(cp.keyFile) }, expApp);
       secure = true;
       certValidTo = Date.parse(new crypto.X509Certificate(cert).validTo) || null;
-      // Phones paired from now on pair at this HTTPS address: keep it.
-      if (getMobileServerConfig().httpsChosen !== true) updateMobileServerConfig({ httpsChosen: true });
     } catch (e) {
-      console.warn('[mobile-server] cert unreadable, falling back to HTTP:', e?.message || e);
+      console.warn('[mobile-server] cert unreadable, serving HTTP only:', e?.message || e);
     }
   }
-  if (!httpServer) httpServer = http.createServer(expApp);
+  httpServer = httpsSide ? dualProtocolServer(httpSide, httpsSide) : httpSide;
   const pendingServeInfo = {
     secure,
     certValidTo,

@@ -598,10 +598,8 @@ export default function Settings() {
             <SettingRow
               label="HTTPS"
               description={mobileStatus.secure
-                ? 'Secure: notifications and install are available. A phone paired before HTTPS came on needs one re-pair: scan the code below'
-                : mobileStatus.deviceCount > 0
-                  ? 'HTTP only: push notifications and installing the app need HTTPS. Enable HTTPS below; each paired phone then pairs once more, at the new address'
-                  : 'HTTP only: push notifications and installing the app need HTTPS. It turns on by itself once HTTPS Certificates are enabled for your tailnet'}
+                ? 'Secure: notifications and install are available. A phone paired over plain HTTP keeps working; scan the code below on it once to get notifications'
+                : 'HTTP only: push notifications and installing the app need HTTPS. It turns on by itself once HTTPS Certificates are enabled for your tailnet, and phones paired over HTTP keep working'}
             >
               {mobileStatus.secure ? (
                 <span className="text-xs px-2 py-1 rounded" style={{ color: 'var(--accent)', backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}>

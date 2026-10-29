@@ -15,6 +15,7 @@
 // without Electron or a network interface.
 
 import { WebSocketServer } from 'ws';
+import net from 'node:net';
 
 export const FAST_RETRY_MS = 5_000;
 export const FAST_WINDOW_MS = 120_000;
@@ -149,8 +150,61 @@ export function listenSettled(server, port, host) {
  * owns the failure; this listener only has to exist.
  */
 export function attachWebSocketServer(httpServer, options) {
+  // A dual-protocol front (below) is a plain TCP server: upgrades arrive on
+  // its two inner servers, into ONE WebSocketServer so the client list, the
+  // heartbeat and every broadcast stay one set.
+  if (httpServer.inner) {
+    const wss = new WebSocketServer({ noServer: true, ...options });
+    for (const s of httpServer.inner) {
+      s.on('upgrade', (req, socket, head) => {
+        if (!wss.shouldHandle(req)) { socket.destroy(); return; }
+        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+      });
+    }
+    wss.on('error', () => {});
+    return wss;
+  }
   const wss = new WebSocketServer({ server: httpServer, ...options });
   wss.on('error', () => {});
   return wss;
+}
+
+/**
+ * HTTPS and plain HTTP on ONE port. A phone paired at http://100.x.x.x:8420
+ * and one paired at https://<name>.ts.net:8420 are both served, so turning
+ * HTTPS on (by hand or by itself) never strands a phone paired before it: a
+ * phone's installed app and its pairings live at the address it paired at
+ * (Codex P1, three rounds of "which address may we move to"). Each new
+ * connection is routed by its first byte: 0x16 opens every TLS handshake,
+ * an HTTP request starts with a letter. A connection that sends nothing is
+ * dropped after IDLE_MS. close() stops listening and closes both inner
+ * servers' connections, so a restart on the same port is not held up.
+ */
+export const DUAL_IDLE_MS = 10_000;
+export function dualProtocolServer(httpSide, httpsSide) {
+  const front = net.createServer({ pauseOnConnect: true }, (sock) => {
+    sock.on('error', () => { /* a client gone before its first byte */ });
+    const idle = setTimeout(() => sock.destroy(), DUAL_IDLE_MS);
+    idle.unref?.();
+    sock.once('close', () => clearTimeout(idle));
+    sock.once('data', (buf) => {
+      clearTimeout(idle);
+      sock.pause();
+      sock.unshift(buf);
+      (buf[0] === 0x16 ? httpsSide : httpSide).emit('connection', sock);
+      process.nextTick(() => sock.resume());
+    });
+    sock.resume();
+  });
+  front.inner = [httpSide, httpsSide];
+  const closeFront = front.close.bind(front);
+  front.close = (cb) => {
+    for (const s of front.inner) {
+      try { s.closeAllConnections?.(); } catch { /* noop */ }
+      try { s.close(); } catch { /* not listening on its own: fine */ }
+    }
+    return closeFront(cb);
+  };
+  return front;
 }
 

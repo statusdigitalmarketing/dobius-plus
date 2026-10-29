@@ -68,7 +68,7 @@ import {
   getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink, clearSessionTabRunning,
   getAgentMemory, setAgentMemory, appendJournalEntry,
   getOrchestrationRuns, saveOrchestrationRun, deleteOrchestrationRun,
-  getMobileServerConfig, updateMobileServerConfig,
+  getMobileServerConfig,
   saveTerminalScrollback, loadTerminalScrollback,
   addManualProject, setProjectDisplayName, addHiddenProject,
   getAccounts, saveAccount, deleteAccount, getProjectAccount, setProjectAccount,
@@ -83,9 +83,9 @@ import {
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater } from './auto-updater.js';
-import { provisionCert, certCapableName, certValidTo, getMagicDNSName } from './tailscale.js';
+import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCert } from './tailscale.js';
 import {
-  stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting, httpsAllowed,
+  stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
   deriveDeviceId,
 } from './mobile-server.js';
@@ -2520,9 +2520,6 @@ function setupMobileServerHandlers() {
   // Provision the tailnet HTTPS cert (Phase 4): enables service-worker install
   // and Web Push. If the server is running, restart it so it picks up HTTPS.
   ipcMain.handle('mobileServer:provisionCert', async () => {
-    // An explicit choice: phones paired over HTTP pair once more, at the new
-    // address (Settings says so before the button is pressed).
-    updateMobileServerConfig({ httpsChosen: true });
     const res = await provisionCertAndRestart();
     return { ...res, status: getMobileServerStatus() };
   });
@@ -2556,11 +2553,10 @@ function provisionCertAndRestart() {
     // Restart only onto a NEWER cert than the one loaded, or off plain HTTP:
     // tailscale can return the same cert, and a pointless restart drops every
     // phone.
-    // Decided NOW, after the slow provision: a phone may have paired over HTTP
-    // meanwhile, and moving it off that address would strand it (Codex P1).
     const st = getMobileServerStatus();
     const disk = res.ok && certValidTo(res.name);
-    if (disk && st.running && servingOlder(st, res.name, disk) && httpsAllowed()) await restartMobileServer();
+    if (disk && st.running && servingOlder(st, res.name, disk)) await restartMobileServer();
+    retryHttpsSoon();
     return res;
   })().finally(() => { certJob = null; });
   return certJob;
@@ -2570,18 +2566,12 @@ function provisionCertAndRestart() {
 // and there is no usable one, or it has under 30 days left, provision it and
 // restart the mobile server on it. Runs at launch and every 30 minutes, which
 // catches Tailscale coming up after launch and renews on a Mac left running.
-//
-// Moving a plain-HTTP server to HTTPS changes the Mac's address, and a phone
-// paired at the old one loses its installed app and every pairing stored
-// there. So that move happens on its own only while NO phone is paired; with
-// phones paired it waits for Settings' Enable HTTPS, which says they will
-// need to pair again. Renewing a server already on HTTPS keeps its address
-// and always runs.
+// Plain HTTP stays served on the same port beside it (dualProtocolServer), so
+// a phone paired before HTTPS came on keeps working at its old address.
 async function autoEnableMobileHttps() {
   if (!getMobileServerConfig().enabled || certJob) return;
-  if (!httpsAllowed()) return; // phones paired over HTTP: only Enable HTTPS moves them
   const name = await getMagicDNSName();
-  if (!name) { retryHttpsSoon(); return; }
+  if (!name) return;
   const validTo = certValidTo(name);
   // Renew under 30 days, but only where this tailnet can issue certificates.
   if (!(validTo && validTo - Date.now() > 30 * 86_400_000) && (await certCapableName()) === name) {
@@ -2594,20 +2584,21 @@ async function autoEnableMobileHttps() {
   // HTTP, or a renewal wrote a new cert but failed (timeout) before restarting.
   const disk = certValidTo(name);
   const st = getMobileServerStatus();
-  if (disk && disk > Date.now() && st.running && servingOlder(st, name, disk) && !certJob && httpsAllowed()) {
+  if (disk && disk > Date.now() && st.running && servingOlder(st, name, disk) && !certJob) {
     certJob = restartMobileServer().then(() => ({ ok: true, name })).finally(() => { certJob = null; });
     await certJob;
   }
   retryHttpsSoon();
 }
 
-// HTTPS was chosen but the server came up on plain HTTP (a MagicDNS lookup
-// timed out during a restart, say): its phones are waiting at the HTTPS
-// address, so try again in a minute rather than at the next 30-minute check.
+// A start that could not read the MagicDNS name (a lookup timed out during a
+// restart, say) comes up on plain HTTP only, while phones paired over HTTPS
+// wait at that address. When this Mac has a certificate, try again in a
+// minute rather than at the next 30-minute check.
 let httpsRetry = null;
 function retryHttpsSoon() {
   const st = getMobileServerStatus();
-  if (!getMobileServerConfig().httpsChosen || !st.running || st.secure || httpsRetry) return;
+  if (!st.running || st.secure || httpsRetry || !hasAnyCert()) return;
   httpsRetry = setTimeout(() => { httpsRetry = null; runAutoHttps(); }, 60_000);
   httpsRetry.unref?.();
 }

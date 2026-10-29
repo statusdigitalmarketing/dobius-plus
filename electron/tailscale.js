@@ -136,6 +136,21 @@ export function certPathsFor(name) {
   return { certFile: path.join(d, `${name}.crt`), keyFile: path.join(d, `${name}.key`) };
 }
 
+/**
+ * True if ANY unexpired cert+key pair is on disk, whatever its name: lets a
+ * caller whose MagicDNS lookup just failed tell "this Mac serves HTTPS and
+ * should again soon" from "this Mac never had a certificate".
+ */
+export function hasAnyCert() {
+  try {
+    return fsSync.readdirSync(certDir())
+      .filter((f) => f.endsWith('.crt'))
+      .some((f) => (certValidTo(f.slice(0, -4)) || 0) > Date.now());
+  } catch {
+    return false;
+  }
+}
+
 /** True if a usable cert+key pair exists for the current MagicDNS name. */
 export function hasCertFor(name) {
   const p = certPathsFor(name);
