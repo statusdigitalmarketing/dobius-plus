@@ -303,7 +303,7 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
     { labels: ['Color', 'Size'], answered: [true, false], current: 0, total: 2 });
   // A long question Claude wrapped over several rows reads as one paragraph.
   const wrapped = parseSelectorFromScreen([
-    '─'.repeat(40),
+    '─'.repeat(80),
     '←  ☐ Rate  ☐ Payout  ✔ Submit  →',
     'What should Trybe pay creators? Trybe needs a commission program before we',
     'can invite anyone, and the rate is visible to every creator.',
@@ -321,7 +321,7 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   // tab bar: no steps, so no arrow keys reach a Bash prompt.
   const perm = parseSelectorFromScreen([
     'Todo: ☐ Cleanup ☐ Verify',
-    '─'.repeat(40),
+    '─'.repeat(80),
     ' Bash command',
     '   rm -rf build',
     ' Do you want to proceed?',
@@ -341,7 +341,7 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: the real Submit tab is the review step', await at('←  ☒ Color  ☒ Size   ✔ Submit  →', '✔ Submit'), 2);
   // A path Claude wrapped mid-token is re-joined without a space.
   const pathy = parseSelectorFromScreen([
-    '─'.repeat(40),
+    '─'.repeat(80),
     '←  ☐ Target  ✔ Submit  →',
     'Which config should change?',
     '❯ 1. Project config',
@@ -351,7 +351,7 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
     'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
   ]);
   sv2('screen: a path wrapped mid-token keeps the terminal break, not a guess', pathy?.options?.[0]?.detail, 'Edits /Users/sam/Projects/dobius-\nplus/config.json and nothing else.');
-  const wrapAt = (detail) => parseSelectorFromScreen(['─'.repeat(40), '←  ☐ Target  ✔ Submit  →', 'Which file?', '❯ 1. That one', ...detail.map((d) => '     ' + d), '  2. Neither', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel'])?.options?.[0]?.detail;
+  const wrapAt = (detail) => parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Target  ✔ Submit  →', 'Which file?', '❯ 1. That one', ...detail.map((d) => '     ' + d), '  2. Neither', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel'])?.options?.[0]?.detail;
   sv2('screen: a path broken after a letter keeps the break', wrapAt(['Writes /srv/production/confi', 'g.json today.']), 'Writes /srv/production/confi\ng.json today.');
   const longName = 'a'.repeat(60);
   sv2('screen: a token that filled the row keeps the break', wrapAt(['Writes /tmp/' + longName.slice(0, 20), longName, 'aaa.json now.']), `Writes /tmp/${longName.slice(0, 20)}\n${longName}\naaa.json now.`);
@@ -359,26 +359,32 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: a file name broken mid-word keeps the break', wrapAt(['Edits /Users/sam/Desktop/Quarterly Rep', 'ort.pdf today.']), 'Edits /Users/sam/Desktop/Quarterly Rep\nort.pdf today.');
   sv2('screen: a slashless file name broken mid-word keeps the break', wrapAt(['Renames the Quarterly Rep', 'ort.pdf today.']), 'Renames the Quarterly Rep\nort.pdf today.');
   sv2('screen: an extension broken mid-word keeps the break', wrapAt(['Renames Quarterly Report.p', 'df today.']), 'Renames Quarterly Report.p\ndf today.');
+  sv2('screen: a name broken right after its dot keeps the break', wrapAt(['Renames Quarterly Report.', 'pdf today.']), 'Renames Quarterly Report.\npdf today.');
+  sv2('screen: a sentence ending a row still re-flows', wrapAt(['Writes the file.', 'Then it stops.']), 'Writes the file. Then it stops.');
   sv2('screen: ordinary prose still re-flows with a space', wrapAt(['Writes the main config file', 'and nothing else.']), 'Writes the main config file and nothing else.');
   // A crafted row cannot freeze the parser (it backtracked exponentially once).
-  { const t0 = Date.now(); parseSelectorFromScreen(['─'.repeat(40), '☐ A '.repeat(2000) + '←', 'Q', '❯ 1. x', '  2. y', 'Enter to select · Esc to cancel']); sv2('screen: a hostile tab-like row parses quickly', Date.now() - t0 < 200, true); }
+  { const t0 = Date.now(); parseSelectorFromScreen(['─'.repeat(80), '☐ A '.repeat(2000) + '←', 'Q', '❯ 1. x', '  2. y', 'Enter to select · Esc to cancel']); sv2('screen: a hostile tab-like row parses quickly', Date.now() - t0 < 200, true); }
   // Prose with a checkbox under the real bar does not hide the bar.
-  const proseBox = parseSelectorFromScreen(['─'.repeat(40), '←  ☒ A  ☐ B  ✔ Submit  →', 'Should ☐ mean disabled?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const proseBox = parseSelectorFromScreen(['─'.repeat(80), '←  ☒ A  ☐ B  ✔ Submit  →', 'Should ☐ mean disabled?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
   sv2('screen: a checkbox in the question does not hide the tabs', proseBox?.steps?.total, 2);
   // ...nor does a question line that STARTS with a checkbox (Codex P2).
-  const leadBox = parseSelectorFromScreen(['─'.repeat(40), '←  ☒ Scope  ☐ Deploy  ✔ Submit  →', '☐ means disabled. Should deployment stay disabled?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const leadBox = parseSelectorFromScreen(['─'.repeat(80), '←  ☒ Scope  ☐ Deploy  ✔ Submit  →', '☐ means disabled. Should deployment stay disabled?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
   sv2('screen: a checkbox-led question line does not replace the tabs', leadBox?.steps?.total, 2);
-  const quoteBox = parseSelectorFromScreen(['─'.repeat(40), '←  ☒ Scope  ☐ Deploy  ✔ Submit  →', 'Should the bar read like this?', '←  ☐ Preview  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const quoteBox = parseSelectorFromScreen(['─'.repeat(80), '←  ☒ Scope  ☐ Deploy  ✔ Submit  →', 'Should the bar read like this?', '←  ☐ Preview  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
   sv2('screen: a quoted bar below the real one does not replace it', quoteBox?.steps?.labels, ['Scope', 'Deploy']);
-  const single = parseSelectorFromScreen(['─'.repeat(40), ' ☐ Layout ', 'Should the bar read like this?', '←  ☐ A  ☐ B  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · Esc to cancel']);
+  const single = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Should the bar read like this?', '←  ☐ A  ☐ B  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · Esc to cancel']);
   sv2('screen: a quoted multi-question bar does not override a single question', single?.steps?.total, 1);
-  const heredoc = parseSelectorFromScreen(['─'.repeat(40), ' Bash command', "   cat <<'EOF' > notes.md", '←  ☐ A  ☐ B  ✔ Submit  →', '   EOF', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel']);
+  const heredoc = parseSelectorFromScreen(['─'.repeat(80), ' Bash command', "   cat <<'EOF' > notes.md", '←  ☐ A  ☐ B  ✔ Submit  →', '   EOF', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel']);
   sv2('screen: a bar inside a permission prompt\'s heredoc is not a tab bar', heredoc?.steps, undefined);
-  const checked = parseSelectorFromScreen(['─'.repeat(40), '←  ☐ ✔ Check  ☐ Deploy  ✔ Submit  →', 'Run the check?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
-  const boxHeader = parseSelectorFromScreen(['─'.repeat(40), ' ☐ Use ☐ box ', 'Which box?', '❯ 1. This', '  2. That', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  const checked = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ ✔ Check  ☐ Deploy  ✔ Submit  →', 'Run the check?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  const boxHeader = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Use ☐ box ', 'Which box?', '❯ 1. This', '  2. That', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
   sv2('screen: a checkbox inside a single question\'s header is one question', boxHeader?.steps, { labels: ['Use ☐ box'], answered: [false], current: 0, total: 1 });
-  const ruled = parseSelectorFromScreen(['─'.repeat(40), ' Bash command', "   cat <<'EOF' > notes.md", '   ──────────', '   ←  ☐ A  ☐ B  ✔ Submit  →', '   EOF', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel']);
+  const ruled = parseSelectorFromScreen(['─'.repeat(80), ' Bash command', "   cat <<'EOF' > notes.md", '   ──────────', '   ←  ☐ A  ☐ B  ✔ Submit  →', '   EOF', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel']);
   sv2('screen: a rule and bar inside a heredoc give a permission prompt no steps', ruled?.steps, undefined);
+  const quotedRule = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Should it look like this?', '──────', '←  ☐ A  ☐ B  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  sv2('screen: a short rule and bar quoted in a question do not replace its tab', quotedRule?.steps, { labels: ['Layout'], answered: [false], current: 0, total: 1 });
+  const multiBox = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Use ☐ box  ☐ Deploy  ✔ Submit  →', 'Which box?', '❯ 1. This', '  2. That', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: a checkbox inside a multi-question header stays in that header', multiBox?.steps?.labels, ['Use ☐ box', 'Deploy']);
   sv2('screen: a checkmark inside a header is part of that header', checked?.steps, { labels: ['✔ Check', 'Deploy'], answered: [false, false], current: 0, total: 2 });
   // Plain lines (no highlight information): the first unanswered one.
   sv2('screen: without highlights, steps fall back to the first unanswered', parseSelectorFromScreen([...lines])?.steps,
@@ -388,7 +394,7 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
 // long option wraps onto an indented row. All of it must reach the card.
 sv2('screen: permission prompt keeps the command and wrapped option', parseSelectorFromScreen([
   'previous transcript text that must not leak in',
-  '─'.repeat(40),
+  '─'.repeat(80),
   ' Bash command',
   '',
   '   git push origin main',
@@ -442,7 +448,7 @@ sv2('screen: null input safe', parseSelectorFromScreen(null), null);
 {
   const { selectorFingerprint } = await import('../selector-parser.js');
   const bash = (cmd, cur) => parseSelectorFromScreen([
-    '─'.repeat(40), ' Bash command', '', `   ${cmd}`, '', ' Do you want to proceed?',
+    '─'.repeat(80), ' Bash command', '', `   ${cmd}`, '', ' Do you want to proceed?',
     `${cur === 1 ? ' ❯' : '  '} 1. Yes`, `${cur === 2 ? ' ❯' : '  '} 2. No`, '', ' Esc to cancel',
   ]);
   const a = bash('rm -rf build', 1), b = bash('rm -rf ~/src', 1), a2 = bash('rm -rf build', 2);
@@ -452,7 +458,7 @@ sv2('screen: null input safe', parseSelectorFromScreen(null), null);
   // Same prompt text and options, differing only ABOVE a rule (e.g. two edits
   // to one file whose diffs sit outside the prompt paragraph).
   const edit = (line) => parseSelectorFromScreen([
-    `+ ${line}`, '─'.repeat(40), ' Do you want to make this edit to main.js?',
+    `+ ${line}`, '─'.repeat(80), ' Do you want to make this edit to main.js?',
     ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel',
   ]);
   sv2('fingerprint: diff above the rule counts', selectorFingerprint(edit('a = 1')) === selectorFingerprint(edit('a = 2')), false);

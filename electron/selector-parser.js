@@ -430,7 +430,6 @@ export function parseSelectorFromScreen(lines) {
  * caller, a plain string array) the first unanswered question is assumed.
  * null when there is no tab bar.
  */
-const TAB_ITEM_RE = /([☐☒✔])\s*([^☐☒✔←→]*?)\s*(?=[☐☒✔→]|$)/g;
 // A tab bar row holds NOTHING but tab items (and the ← → arrows): a line of
 // prose with checkboxes in it ("Todo: ☐ Cleanup ☐ Verify") is not one
 // (Codex). A plain linear test: a regex here backtracked exponentially on a
@@ -446,12 +445,16 @@ function screenSteps(lines, blockTop) {
   // of the screen). Anything below it is the question: a line starting with
   // a checkbox, a quoted bar, a heredoc in a permission prompt. Choosing
   // among rows that merely look like bars lost three rounds (Codex P2). The
-  // frame's rule starts at column 0; a permission prompt's command rows are
-  // indented, so a rule inside a heredoc never bounds the frame.
+  // frame's rule starts at column 0 and spans the terminal, so it is at least
+  // as long as every row under it: a permission prompt's indented heredoc, or
+  // a short rule quoted in a question, never bounds the frame.
   let top = -1;
   let bounded = false;
+  let widest = 0;
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
-    if (/^─/.test(lines[i]) && SCREEN_RULE_RE.test(lines[i].trim())) { bounded = true; break; }
+    const len = lines[i].trimEnd().length;
+    if (/^─/.test(lines[i]) && SCREEN_RULE_RE.test(lines[i].trim()) && len >= widest) { bounded = true; break; }
+    widest = Math.max(widest, len);
     if (i === 0) bounded = true;
     if (lines[i].trim()) top = i;
   }
@@ -463,16 +466,19 @@ function screenSteps(lines, blockTop) {
     const label = lines[tb].trim().replace(/^[☐☒]\s*/, '').slice(0, 60);
     return label ? { labels: [label], answered: [lines[tb].trim().startsWith('☒')], current: 0, total: 1 } : null;
   }
-  const raw = [...lines[tb].matchAll(TAB_ITEM_RE)].map((m) => ({ mark: m[1], label: m[2].slice(0, 60), col: m.index }));
-  // Only the LAST ✔ is the review step; an earlier one belongs to a header
-  // (`☐ ✔ Check` is the question "✔ Check", Codex P2).
+  // Claude separates tabs by two or more spaces (`←  ☐ Color  ☐ Size  ✔
+  // Submit  →`); a header may hold single-spaced marks of its own ("Use ☐
+  // box", "✔ Check"), so items are the 2+-space runs, never every mark
+  // (Codex P2, three rounds). Runs of non-space joined by single spaces:
+  // linear, the two parts cannot overlap.
   const items = [];
-  raw.forEach((t, k) => {
-    const prev = items[items.length - 1];
-    if (t.mark === '✔' && k < raw.length - 1 && prev && prev.mark !== '✔') {
-      prev.label = [prev.label, `✔ ${t.label}`.trim()].filter(Boolean).join(' ').slice(0, 60);
-    } else items.push(t);
-  });
+  for (const m of lines[tb].matchAll(/\S+(?: \S+)*/g)) {
+    const run = m[0];
+    if (!/^[☐☒✔]/.test(run)) continue; // the arrows
+    items.push({ mark: run[0], label: run.slice(1).trim().slice(0, 60), col: m.index });
+  }
+  // Only the LAST ✔ run is the review step.
+  for (let k = items.length - 2; k >= 0; k -= 1) if (items[k].mark === '✔') items.splice(k, 1);
   for (let k = items.length - 1; k >= 0; k -= 1) if (items[k].mark !== '✔' && !items[k].label) items.splice(k, 1);
   const questions = items.filter((t) => t.mark !== '✔');
   if (!questions.length) return null;
@@ -514,11 +520,12 @@ const PROMPT_MAX_CHARS = 1500;
 /**
  * Rows Claude wrapped, back into one line with spaces. Where the break may
  * have fallen inside a path or file name (either row holds a '/', a word
- * touching the break holds a dot followed by more text, or a row is one
- * unbroken token), neither a space nor no space is safe to guess
- * (`Quarterly Rep` + `ort.pdf`, `Report.p` + `df` vs `/tmp/cache/x` +
- * `after`): the terminal's own line break is kept, so the card never shows
- * a different path (Codex, six rounds).
+ * touching the break holds a dot followed by more text, a row ends in a dot
+ * and the next opens lowercase, or a row is one unbroken token), neither a
+ * space nor no space is safe to guess (`Quarterly Rep` + `ort.pdf`,
+ * `Report.` + `pdf` vs `/tmp/cache/x` + `after`): the terminal's own line
+ * break is kept, so the card never shows a different path (Codex, seven
+ * rounds).
  * ponytail: a slashless, extensionless name split mid-word still gets a space.
  */
 function reflow(rows) {
@@ -527,7 +534,8 @@ function reflow(rows) {
     if (!out) { out = r; continue; }
     const line = out.slice(out.lastIndexOf('\n') + 1);
     const dotted = (w) => /\.\w/.test(w);
-    const keep = line.includes('/') || r.includes('/') || dotted(line.split(' ').pop()) || dotted(r.split(' ')[0]) || !line.includes(' ');
+    const keep = line.includes('/') || r.includes('/') || dotted(line.split(' ').pop()) || dotted(r.split(' ')[0])
+      || (/\.$/.test(line) && /^[a-z0-9]/.test(r)) || !line.includes(' ');
     out += keep ? `\n${r}` : ` ${r}`;
   }
   return out;

@@ -133,7 +133,9 @@ function ToolImages({ images }) {
       {images.map((i) => (urls[i.ref]
         ? <button key={i.ref} type="button" className="chatp-img" onClick={(e) => setBig({ url: urls[i.ref], from: e.currentTarget })} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" /></button>
         : <div key={i.ref} className={`chatp-img ${failed[i.ref] ? 'failed' : 'loading'}`}>{failed[i.ref] ? 'Image unavailable' : null}</div>))}
-      {big && <Lightbox url={big.url} onClose={() => { const from = big.from; setBig(null); from?.focus?.(); }} />}
+      {/* Back to the thumbnail AFTER the lightbox (and its focus guard) is
+          gone, or the guard pulls focus back and it lands on <body>. */}
+      {big && <Lightbox url={big.url} onClose={() => { const from = big.from; setBig(null); requestAnimationFrame(() => from?.focus?.()); }} />}
     </div>
   );
 }
