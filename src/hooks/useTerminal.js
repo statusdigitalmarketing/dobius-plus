@@ -245,19 +245,6 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       }
     });
 
-    // Text for this terminal's SCREEN only (a restored checkpoint). It is
-    // drawn like the previous-session scrollback above and never reaches the
-    // PTY: typed into a running Claude, every saved line became a prompt.
-    // A full-screen program (vim, less) owns the alternate screen: drawing
-    // there would scribble over its display, so nothing is drawn.
-    const onPrint = (e) => {
-      const t = termRef.current;
-      if (e.detail?.id !== id || !t || typeof e.detail.text !== 'string') return;
-      if (t.buffer.active.type === 'alternate') return;
-      t.write(e.detail.text);
-    };
-    window.addEventListener('dobius:terminal-print', onPrint);
-
     const removeExitListener = window.electronAPI.onTerminalExit((termId, exitCode) => {
       if (termId === id && termRef.current) {
         termRef.current.write(`\r\n[Process exited with code ${exitCode}]\r\n`);
@@ -380,7 +367,6 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       removeAutoLabelListener?.();
       removeDataListener();
       removeExitListener();
-      window.removeEventListener('dobius:terminal-print', onPrint);
       removeRequestSave?.();
       // Don't kill PTY if: (a) this is a claimed terminal, or (b) it was marked
       // as do-not-kill by the tear-off handler (old window unmounting torn-off tab)

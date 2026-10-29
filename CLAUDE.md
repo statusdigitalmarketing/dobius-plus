@@ -44,8 +44,8 @@ Session notes and learnings live in `.dobius/NOTES.md` (also editable from the D
 ## Checkpoints
 - Save terminal scrollback as named checkpoints: `config.projects[path].checkpoints[]`
 - IPC: `checkpoint:save`, `checkpoint:list`, `checkpoint:delete`, `checkpoint:rename`
-- Restore: writes checkpoint scrollback as dimmed text to active terminal
-- Fork: creates new tab with checkpoint data pre-loaded via `terminalSaveState`
+- View: shows a checkpoint read-only in the dashboard. It is never drawn into a live terminal (that typed saved lines into Claude, then painted over pending commands: removed 2026-10-29)
+- Fork: creates a new tab whose terminal opens showing the checkpoint (handed over in memory via `src/lib/pending-scrollback.js`, also saved with `terminalSaveState`)
 
 ## Custom Agents
 - Built-in starters: Code Reviewer, Bug Hunter, Refactor Assistant, Test Writer

@@ -6,16 +6,19 @@ export default function Checkpoints() {
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const addTab = useStore((s) => s.addTab);
   const setActiveView = useStore((s) => s.setActiveView);
-  const setActiveTab = useStore((s) => s.setActiveTab);
-  const setTabViewMode = useStore((s) => s.setTabViewMode);
   const activeTabId = useStore((s) => s.activeTabId);
-  const getActiveTerminalTabId = useStore((s) => s.getActiveTerminalTabId);
 
   const [checkpoints, setCheckpoints] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
+  // A checkpoint is VIEWED here, read-only. Drawing it into a live terminal
+  // (the old Restore) could never be made safe: the app cannot know what the
+  // shell or program has on screen, and every guard was beaten (typed into
+  // Claude, painted over a pending command, landed on vim's screen). To carry
+  // a checkpoint into a terminal, Fork opens a new tab before its shell runs.
+  const [viewingId, setViewingId] = useState(null);
 
   const loadCheckpoints = useCallback(async () => {
     if (!window.electronAPI?.checkpointList || !currentProjectPath) return;
@@ -63,27 +66,6 @@ export default function Checkpoints() {
     await loadCheckpoints();
     setEditingId(null);
   }, [editValue, currentProjectPath, loadCheckpoints]);
-
-  const handleRestore = useCallback((cp) => {
-    // Target a terminal tab (the active tab may be a browser tab, which drops
-    // the write) and focus it so the restored scrollback is visible. Audit.
-    const termId = getActiveTerminalTabId();
-    if (!window.electronAPI || !termId) return;
-    setActiveTab(termId);
-    setTabViewMode(termId, 'terminal'); // a tab in Chat view would hide it (Codex P2)
-    // Draw the checkpoint as dimmed text on the terminal's SCREEN. It used to
-    // go through terminalWrite, which is PTY input: each line plus \r was
-    // typed into whatever ran in the tab, so a running Claude got every saved
-    // line as a prompt (Codex P1). It starts on a fresh line so it never
-    // paints over what is on screen, such as a half-typed command the shell
-    // still holds (Codex P1, round 2).
-    if (cp.scrollback?.length > 0) {
-      const text = '\x1b[0m\r\n' + cp.scrollback.map((line) => '\x1b[2m' + drawableLine(line) + '\x1b[0m\r\n').join('')
-        + '\x1b[2m\x1b[38;5;240m── restored checkpoint ──\x1b[0m\r\n\r\n';
-      window.dispatchEvent(new CustomEvent('dobius:terminal-print', { detail: { id: termId, text } }));
-    }
-    setActiveView('terminal');
-  }, [getActiveTerminalTabId, setActiveTab, setTabViewMode, setActiveView]);
 
   const handleFork = useCallback((cp) => {
     if (!currentProjectPath || !window.electronAPI) return;
@@ -156,8 +138,8 @@ export default function Checkpoints() {
             const lines = cp.scrollback?.length || 0;
 
             return (
+              <div key={cp.id}>
               <div
-                key={cp.id}
                 className="flex items-center gap-3 p-3 rounded"
                 style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
               >
@@ -213,10 +195,24 @@ export default function Checkpoints() {
 
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0">
-                  <ActionBtn label="Restore" onClick={() => handleRestore(cp)} />
+                  <ActionBtn label={viewingId === cp.id ? 'Hide' : 'View'} onClick={() => setViewingId((v) => (v === cp.id ? null : cp.id))} />
                   <ActionBtn label="Fork" onClick={() => handleFork(cp)} />
                   <ActionBtn label="Delete" onClick={() => handleDelete(cp.id)} danger />
                 </div>
+              </div>
+              {viewingId === cp.id && (
+                <pre
+                  className="checkpoint-view"
+                  aria-label={`${cp.label}, saved output`}
+                  style={{
+                    margin: '4px 0 0', padding: '10px 12px', maxHeight: 320, overflow: 'auto',
+                    backgroundColor: 'var(--bg)', color: 'var(--dim)', border: '1px solid var(--border)', borderRadius: 4,
+                    fontSize: 11, lineHeight: 1.45, fontFamily: "'SF Mono', monospace", whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+                  }}
+                >
+                  {(cp.scrollback || []).map(drawableLine).join('\n') || 'This checkpoint has no saved output.'}
+                </pre>
+              )}
               </div>
             );
           })}
