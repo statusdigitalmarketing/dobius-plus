@@ -459,7 +459,9 @@ function isTabBar(line) {
 const WIDE_RE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u;
 function rowWidth(s) {
   let w = 0;
-  for (const ch of s.trimEnd().replace(/[\p{M}\u200B-\u200D\u2060\uFEFF]/gu, '')) w += WIDE_RE.test(ch) ? 2 : 1;
+  // \p{Cf} is every format character (direction marks, zero-width space and
+  // joiners, BOM): the emulator gives them no column (Codex P2).
+  for (const ch of s.trimEnd().replace(/[\p{M}\p{Cf}]/gu, '')) w += WIDE_RE.test(ch) ? 2 : 1;
   return w;
 }
 // The column row i ends at: the emulator's own answer when screen-render gave

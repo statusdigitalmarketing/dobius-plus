@@ -382,6 +382,8 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   // above the glyph (security review).
   const unbounded = parseSelectorFromScreen(['Bash command', '   rm -rf build/cache', '***', '   && echo done', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel']);
   sv2('screen: a glyph row never hides the prompt rows above it', unbounded?.prompt?.includes('rm -rf build/cache'), true);
+  const lrm = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Cleanup  ✔ Submit  →', 'echo ' + 'x'.repeat(65), 'rm' + '\u200E'.repeat(8) + ' -rf build', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: zero-width marks do not make the next word look too wide to fit', lrm?.prompt, 'echo ' + 'x'.repeat(65) + '\nrm' + '\u200E'.repeat(8) + ' -rf build');
   sv2('screen: a rule row between two commands is kept', wrapAt([longEcho, '------', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build']), `${longEcho}\n------\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build`);
   sv2('screen: two short rows are two lines, never one (separate commands)', wrapAt(['echo cleanup', 'rm -rf build']), 'echo cleanup\nrm -rf build');
   sv2('screen: a row cut at the very last column keeps the break', wrapAt(['x'.repeat(70) + ' abcd', 'efgh tail']), 'x'.repeat(70) + ' abcd\nefgh tail');
