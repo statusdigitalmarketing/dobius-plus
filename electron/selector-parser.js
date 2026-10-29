@@ -409,7 +409,7 @@ export function parseSelectorFromScreen(lines) {
   // rows (a command, its description, the question; answers one per line).
   const prose = !!steps && steps.current < steps.total;
   // Option descriptions likewise (Claude wrapped them at the terminal width).
-  const opts = prose ? options.map((o) => (o.detail ? { ...o, detail: o.detail.replace(/\n/g, ' ') } : o)) : options;
+  const opts = prose ? options.map((o) => (o.detail ? { ...o, detail: reflow(o.detail.split('\n')) } : o)) : options;
   const out = { prompt: screenPrompt(lines, blockTop, prose), options: opts, selectedIndex: sel };
   if (steps) out.steps = steps;
   // For selectorFingerprint only: the uncapped screen above the block, so two
@@ -431,31 +431,40 @@ export function parseSelectorFromScreen(lines) {
  * null when there is no tab bar.
  */
 const TAB_ITEM_RE = /([☐☒✔])\s*([^☐☒✔←→]*?)\s*(?=[☐☒✔→]|$)/g;
+// A tab bar row holds NOTHING but tab items (and the ← → arrows): a line of
+// prose with checkboxes in it ("Todo: ☐ Cleanup ☐ Verify") is not one (Codex).
+const TAB_BAR_RE = /^\s*(?:←\s*)?(?:[☐☒✔]\s*[^☐☒✔←→]+?\s*)+(?:→\s*)?$/;
 function screenSteps(lines, blockTop) {
+  // The tab bar sits between the frame's rule and the question: never look
+  // past a rule (a permission prompt's border), so text above it can't count.
   let tb = -1;
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
-    if (/[☐☒]/.test(lines[i])) { tb = i; break; }
+    if (SCREEN_RULE_RE.test(lines[i].trim())) break;
+    if (/[☐☒]/.test(lines[i])) { if (TAB_BAR_RE.test(lines[i])) tb = i; break; }
   }
   if (tb === -1) return null;
-  const labels = [];
-  const answered = [];
-  let hasSubmit = false;
+  const items = [];
   for (const m of lines[tb].matchAll(TAB_ITEM_RE)) {
-    if (m[1] === '✔') { hasSubmit = true; continue; }
-    if (!m[2]) continue;
-    labels.push(m[2].slice(0, 60));
-    answered.push(m[1] === '☒');
+    if (m[1] !== '✔' && !m[2]) continue;
+    items.push({ mark: m[1], label: m[2].slice(0, 60), col: m.index });
   }
-  if (!labels.length) return null;
+  const questions = items.filter((t) => t.mark !== '✔');
+  if (!questions.length) return null;
+  const labels = questions.map((t) => t.label);
+  const answered = questions.map((t) => t.mark === '☒');
   const total = labels.length;
   let current = -1;
+  // The highlighted run is matched to a tab by POSITION (labels can repeat,
+  // a question can be named "Submit"); the ✔ item is the review step.
   const hl = lines.highlights?.[tb];
   if (Array.isArray(hl)) {
     for (const h of hl) {
-      const name = h.replace(/[☐☒✔]/g, '').trim();
-      if (hasSubmit && /^Submit$/i.test(name)) { current = total; break; }
-      const k = labels.indexOf(name);
-      if (k !== -1) { current = k; break; }
+      if (!h || typeof h.col !== 'number') continue;
+      const end = h.col + String(h.text).length;
+      const hit = items.find((t) => t.col >= h.col - 1 && t.col < end);
+      if (!hit) continue;
+      current = hit.mark === '✔' ? total : questions.indexOf(hit);
+      break;
     }
   }
   if (current === -1) {
@@ -476,6 +485,21 @@ function screenSteps(lines, blockTop) {
 const PROMPT_MAX_ROWS = 15;
 const SCREEN_CONTEXT_ROWS = 40;
 const PROMPT_MAX_CHARS = 1500;
+/**
+ * Rows Claude wrapped, back into one line: a space between rows, except where
+ * the break fell inside a path (the row's last word holds a '/' and ends in
+ * '/', '-', '_' or '.'), which a space would turn into a different path.
+ */
+function reflow(rows) {
+  let out = '';
+  for (const r of rows) {
+    if (!out) { out = r; continue; }
+    const last = out.split(' ').pop();
+    out += /\//.test(last) && /[/\-_.]$/.test(last) ? r : ` ${r}`;
+  }
+  return out;
+}
+
 function screenPrompt(lines, blockTop, prose = false) {
   const paragraphs = [[]];
   let bounded = false;
@@ -488,7 +512,7 @@ function screenPrompt(lines, blockTop, prose = false) {
   }
   const kept = (bounded ? paragraphs : paragraphs.slice(-1)).filter((p) => p.length);
   if (prose) {
-    let text = kept.map((p) => p.join(' ')).join('\n');
+    let text = kept.map((p) => reflow(p)).join('\n');
     if (text.length > PROMPT_MAX_CHARS) text = text.slice(-PROMPT_MAX_CHARS);
     return text;
   }

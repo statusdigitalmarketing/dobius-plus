@@ -66,11 +66,13 @@ function AskReview({ text }) {
 // The question tabs a newer Mac sends ({ labels, answered, current, total }),
 // checked field by field: an older or newer Mac may send something else.
 function askSteps(st) {
-  if (!st || typeof st !== 'object' || !Array.isArray(st.labels)) return null;
-  const labels = st.labels.filter((l) => typeof l === 'string').map((l) => l.slice(0, 60));
+  if (!st || typeof st !== 'object' || !Array.isArray(st.labels) || !st.labels.length) return null;
+  // All or nothing: dropping one bad label would shift every index after it.
+  if (!st.labels.every((l) => typeof l === 'string')) return null;
+  const labels = st.labels.map((l) => l.slice(0, 60));
   const total = labels.length;
-  const current = Number.isInteger(st.current) && st.current >= 0 && st.current <= total ? st.current : 0;
-  return total ? { labels, total, current } : null;
+  if (!Number.isInteger(st.current) || st.current < 0 || st.current > total) return null;
+  return { labels, total, current: st.current };
 }
 function loadDraft(draftsKey, tabId) {
   if (!tabId) return '';
@@ -445,7 +447,9 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // (or the prompt is a multi-select), and the close button needs a second
   // tap, because Esc cancels Claude's whole question.
   const [askKeys, setAskKeys] = useState(false);
-  const [cancelArmed, setCancelArmed] = useState(false);
+  // The card key the cancel was armed on: a different card is never armed
+  // (the Mac can answer and show another question inside the 3s window).
+  const [cancelArmedKey, setCancelArmedKey] = useState(null);
   // Sessionless tabs only: plain-text tail of the live PTY (null = loading).
   const [shellText, setShellText] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -877,17 +881,23 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const selectorPopup = selector && selector.options && selector.options.length > 0 && (() => {
     const steps = askSteps(selector.steps);
     const cannotAnswer = selBusy || selector.token === '';
-    const main = selector.options.filter((o) => !ESCAPE_OPTION.test(o.label));
-    const extra = selector.options.filter((o) => ESCAPE_OPTION.test(o.label));
+    // Claude's escape hatches are always the LAST options and carry no
+    // description; a real answer that happens to share the label is not one.
+    let cut = selector.options.length;
+    while (cut > 0 && ESCAPE_OPTION.test(selector.options[cut - 1].label) && !selector.options[cut - 1].detail) cut -= 1;
+    const main = selector.options.slice(0, cut);
+    const extra = selector.options.slice(cut);
     const multi = selector.options.some((o) => MULTI_OPTION.test(o.label));
     const onReview = steps && steps.current >= steps.total;
+    const cardKey = selectorCardKey(selector);
+    const cancelArmed = cancelArmedKey === cardKey;
     const cancel = (e) => {
       if (!cancelArmed) {
-        setCancelArmed(true);
-        setTimeout(() => setCancelArmed(false), 3000);
+        setCancelArmedKey(cardKey);
+        setTimeout(() => setCancelArmedKey((k) => (k === cardKey ? null : k)), 3000);
         return;
       }
-      setCancelArmed(false);
+      setCancelArmedKey(null);
       sendSelectorKey(selector, '\x1b', true, e);
     };
     return (

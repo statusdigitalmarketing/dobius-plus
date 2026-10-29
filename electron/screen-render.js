@@ -82,17 +82,23 @@ function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
         for (let i = 0; i < ROWS; i += 1) {
           if (!/[☐☒✔]/.test(out[i])) continue;
           const line = buf.getLine(i);
+          // { text, col }: col is the string index of the run's first cell
+          // (the parser matches tabs by POSITION, labels can repeat).
           const runs = [];
           let run = '';
+          let col = 0;
+          let at = -1;
           for (let x = 0; x < COLS; x += 1) {
             const cell = line?.getCell(x);
             if (!cell) break;
             if (cell.getWidth() === 0) continue; // second half of a wide char
-            if (!cell.isBgDefault()) run += cell.getChars() || ' ';
-            else if (run) { runs.push(run.trim()); run = ''; }
+            const ch = cell.getChars() || ' ';
+            if (!cell.isBgDefault()) { if (at === -1) at = col; run += ch; }
+            else if (run) { runs.push({ text: run, col: at }); run = ''; at = -1; }
+            col += ch.length;
           }
-          if (run) runs.push(run.trim());
-          if (runs.length) highlights[i] = runs.filter(Boolean);
+          if (run) runs.push({ text: run, col: at });
+          if (runs.length) highlights[i] = runs;
         }
         Object.defineProperty(out, 'highlights', { value: highlights });
         resolve(out);

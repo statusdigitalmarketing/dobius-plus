@@ -317,6 +317,40 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
     "Trybe's recommended type. Below our 25% affiliate rate, since Trybe also takes its cut and runs the ads.");
   sv2('screen: a wrapped question re-flows into one paragraph', wrapped?.prompt,
     'What should Trybe pay creators? Trybe needs a commission program before we can invite anyone, and the rate is visible to every creator.');
+  // A checklist in the transcript above a permission prompt's border is not a
+  // tab bar: no steps, so no arrow keys reach a Bash prompt.
+  const perm = parseSelectorFromScreen([
+    'Todo: ☐ Cleanup ☐ Verify',
+    '─'.repeat(40),
+    ' Bash command',
+    '   rm -rf build',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ]);
+  sv2('screen: a checklist above a permission prompt is not a tab bar', perm?.steps, undefined);
+  // Repeated tab labels, and a question named Submit: matched by POSITION.
+  const at = async (bar, hlText) => {
+    const pre = bar.slice(0, bar.indexOf(hlText));
+    const raw = `${E}[2J${E}[H${pre}${E}[48;2;177;185;249m${hlText}${E}[49m${bar.slice(pre.length + hlText.length)}\r\nPick\r\n❯ 1. A\r\n  2. B\r\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\r\n`;
+    return parseSelectorFromScreen(await renderScreenLines(new TextEncoder().encode(raw)))?.steps?.current;
+  };
+  sv2('screen: the second of two same-named tabs is question 2', await at('←  ☒ Scope  ☐ Scope   ✔ Submit  →', '☐ Scope'), 1);
+  sv2('screen: a question named Submit is not the review step', await at('←  ☒ Color  ☐ Submit   ✔ Submit  →', '☐ Submit'), 1);
+  sv2('screen: the real Submit tab is the review step', await at('←  ☒ Color  ☒ Size   ✔ Submit  →', '✔ Submit'), 2);
+  // A path Claude wrapped mid-token is re-joined without a space.
+  const pathy = parseSelectorFromScreen([
+    '─'.repeat(40),
+    '←  ☐ Target  ✔ Submit  →',
+    'Which config should change?',
+    '❯ 1. Project config',
+    '     Edits /Users/sam/Projects/dobius-',
+    '     plus/config.json and nothing else.',
+    '  2. Global config',
+    'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+  ]);
+  sv2('screen: a wrapped path keeps its exact spelling', pathy?.options?.[0]?.detail, 'Edits /Users/sam/Projects/dobius-plus/config.json and nothing else.');
   // Plain lines (no highlight information): the first unanswered one.
   sv2('screen: without highlights, steps fall back to the first unanswered', parseSelectorFromScreen([...lines])?.steps,
     { labels: ['Color', 'Size'], answered: [true, false], current: 1, total: 2 });
