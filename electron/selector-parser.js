@@ -402,7 +402,7 @@ export function parseSelectorFromScreen(lines) {
   }
   if (sel === -1) return null;
 
-  const steps = screenSteps(lines, blockTop);
+  const steps = screenSteps(lines, blockTop, hintIdx);
   // An AskUserQuestion question is prose that Claude wrapped at the terminal
   // width: re-flow its rows into one paragraph, or a phone card shows it
   // broken mid-sentence. Permission prompts and the review step keep their
@@ -445,7 +445,7 @@ function isTabBar(line) {
 function rowWidth(s) {
   return [...s.trimEnd().replace(/[\p{M}\u200B-\u200D\u2060\uFEFF]/gu, '')].length;
 }
-function screenSteps(lines, blockTop) {
+function screenSteps(lines, blockTop, hintIdx = blockTop) {
   // The tab bar sits between the frame's rule and the question: never look
   // past a rule (a permission prompt's border), so text above it can't count.
   // The bar is the FIRST row of the frame, right under its rule (or the top
@@ -457,7 +457,10 @@ function screenSteps(lines, blockTop) {
   // a short rule quoted in a question, never bounds the frame.
   let top = -1;
   let bounded = false;
+  // Every row of the frame counts, the options and hint too, not only the
+  // rows above them (Codex P2).
   let widest = 0;
+  for (let i = blockTop; i <= hintIdx && i < lines.length; i += 1) widest = Math.max(widest, rowWidth(lines[i]));
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
     const len = rowWidth(lines[i]);
     if (/^─/.test(lines[i]) && SCREEN_RULE_RE.test(lines[i].trim()) && len >= widest) { bounded = true; break; }
@@ -528,7 +531,8 @@ const PROMPT_MAX_CHARS = 1500;
  * Rows Claude wrapped, back into one line with spaces. Where the break may
  * have fallen inside a path or file name (either row holds a '/', a word
  * touching the break holds a dot followed by more text, a row ends in a dot
- * and the next opens lowercase, or a row is one unbroken token), neither a
+ * and the next opens lowercase or with a short all-caps word like `PDF`, or
+ * a row is one unbroken token), neither a
  * space nor no space is safe to guess (`Quarterly Rep` + `ort.pdf`,
  * `Report.` + `pdf` vs `/tmp/cache/x` + `after`): the terminal's own line
  * break is kept, so the card never shows a different path (Codex, seven
@@ -542,7 +546,7 @@ function reflow(rows) {
     const line = out.slice(out.lastIndexOf('\n') + 1);
     const dotted = (w) => /\.\w/.test(w);
     const keep = line.includes('/') || r.includes('/') || dotted(line.split(' ').pop()) || dotted(r.split(' ')[0])
-      || (/\.$/.test(line) && /^[a-z0-9]/.test(r)) || !line.includes(' ');
+      || (/\.$/.test(line) && /^([a-z0-9]|[A-Z0-9]{1,5}\b)/.test(r)) || !line.includes(' ');
     out += keep ? `\n${r}` : ` ${r}`;
   }
   return out;

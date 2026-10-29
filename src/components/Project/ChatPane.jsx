@@ -92,6 +92,9 @@ function nodeText(node) {
 const InPre = createContext(false);
 // The current chat's image fetch (ref -> Promise<data URL | null>).
 const ImageFetch = createContext(null);
+// Called when a thumbnail finishes loading: it is taller than its placeholder,
+// so a reader pinned to the bottom is kept there (Codex P2).
+const ImageLoaded = createContext(null);
 // Whether the pane is on screen: an open image (on <body>) closes with it.
 const PaneVisible = createContext(true);
 
@@ -99,6 +102,7 @@ const PaneVisible = createContext(true);
 // are folded: a screenshot is the point of the step. Click opens it full size.
 function ToolImages({ images }) {
   const fetchImage = useContext(ImageFetch);
+  const onLoaded = useContext(ImageLoaded);
   const [urls, setUrls] = useState({});
   const [failed, setFailed] = useState({});
   const [big, setBig] = useState(null);
@@ -131,7 +135,7 @@ function ToolImages({ images }) {
   return (
     <div className="chatp-imgs">
       {images.map((i) => (urls[i.ref]
-        ? <button key={i.ref} type="button" className="chatp-img" onClick={(e) => setBig({ url: urls[i.ref], from: e.currentTarget })} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" /></button>
+        ? <button key={i.ref} type="button" className="chatp-img" onClick={(e) => setBig({ url: urls[i.ref], from: e.currentTarget })} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" onLoad={onLoaded || undefined} /></button>
         : <div key={i.ref} className={`chatp-img ${failed[i.ref] ? 'failed' : 'loading'}`}>{failed[i.ref] ? 'Image unavailable' : null}</div>))}
       {/* Back to the thumbnail AFTER the lightbox (and its focus guard) is
           gone, or the guard pulls focus back and it lands on <body>. */}
@@ -499,6 +503,10 @@ export default function ChatPane({ tabId, visible }) {
   const selAppliedRef = useRef(0);
   const bodyRef = useRef(null);
   const atBottomRef = useRef(true);
+  const keepBottom = useCallback(() => {
+    const el = bodyRef.current;
+    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, []);
   // Rows that arrived (or a live turn that grew) while scrolled up, for the
   // "new messages" pill. The mark is the newest row seen at the bottom (the
   // window slides, so a plain length cannot count them).
@@ -986,7 +994,7 @@ export default function ChatPane({ tabId, visible }) {
   }
 
   return (
-    <ImageFetch.Provider value={imageFetch}><PaneVisible.Provider value={visible}>
+    <ImageFetch.Provider value={imageFetch}><ImageLoaded.Provider value={keepBottom}><PaneVisible.Provider value={visible}>
     <div className="chatp" data-chat-tab={tabId} onMouseDownCapture={activate} onFocusCapture={activate} onDragEnterCapture={activate}>
       <div className="chatp-head">
         <span className={`chatp-status ${status || 'idle'}`} />
@@ -1059,7 +1067,7 @@ export default function ChatPane({ tabId, visible }) {
         </div>
       </div>
     </div>
-    </PaneVisible.Provider></ImageFetch.Provider>
+    </PaneVisible.Provider></ImageLoaded.Provider></ImageFetch.Provider>
   );
 }
 

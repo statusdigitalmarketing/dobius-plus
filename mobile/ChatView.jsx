@@ -271,12 +271,16 @@ function StepGroup({ steps, live }) {
 
 // The chat's image fetch (ref -> Promise<data URL | null>), over the socket.
 const ImageFetch = createContext(null);
+// Called when a thumbnail finishes loading: it is taller than its placeholder,
+// so a reader pinned to the bottom is kept there (Codex P2).
+const ImageLoaded = createContext(null);
 let imageReqSeq = 0; // module-scoped: survives remounts, ids never repeat on a connection
 
 // Thumbnails of the images a run of steps returned (a screenshot Claude read),
 // shown even while the steps are folded; tap for full screen.
 function ToolImages({ images }) {
   const fetchImage = useContext(ImageFetch);
+  const onLoaded = useContext(ImageLoaded);
   const [urls, setUrls] = useState({});
   const [failed, setFailed] = useState({});
   const [big, setBig] = useState(null);
@@ -308,7 +312,7 @@ function ToolImages({ images }) {
   return (
     <div className="chat-imgs">
       {images.map((i) => (urls[i.ref]
-        ? <button key={i.ref} type="button" className="chat-img" onClick={(e) => setBig({ url: urls[i.ref], from: e.currentTarget })} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" /></button>
+        ? <button key={i.ref} type="button" className="chat-img" onClick={(e) => setBig({ url: urls[i.ref], from: e.currentTarget })} aria-label="Open image"><img src={urls[i.ref]} alt="Tool output" onLoad={onLoaded || undefined} /></button>
         : <div key={i.ref} className={`chat-img ${failed[i.ref] ? 'failed' : 'loading'}`}>{failed[i.ref] ? 'Image unavailable' : null}</div>))}
       {big && <Lightbox url={big.url} onClose={() => { const from = big.from; setBig(null); from?.focus?.(); }} />}
     </div>
@@ -551,6 +555,10 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const fileInputRef = useRef(null);
   const bodyRef = useRef(null);
   const atBottomRef = useRef(true);
+  const keepBottom = useCallback(() => {
+    const el = bodyRef.current;
+    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, []);
   // Rows that arrived (or a live turn that grew) while scrolled up, for the
   // "new" pill; the mark is the newest row seen at the bottom.
   const [unseen, setUnseen] = useState(0);
@@ -1195,7 +1203,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   }
 
   return (
-    <ImageFetch.Provider value={imageFetch}>
+    <ImageFetch.Provider value={imageFetch}><ImageLoaded.Provider value={keepBottom}>
     <div className="chat-view">
       <div className="chat-body-wrap">
       <main className="chat-body" ref={bodyRef} onScroll={onScroll}>
@@ -1242,7 +1250,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       {selectorPopup}
       {inputRow}
     </div>
-    </ImageFetch.Provider>
+    </ImageLoaded.Provider></ImageFetch.Provider>
   );
 }
 

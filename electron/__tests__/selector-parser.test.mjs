@@ -360,6 +360,7 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: a slashless file name broken mid-word keeps the break', wrapAt(['Renames the Quarterly Rep', 'ort.pdf today.']), 'Renames the Quarterly Rep\nort.pdf today.');
   sv2('screen: an extension broken mid-word keeps the break', wrapAt(['Renames Quarterly Report.p', 'df today.']), 'Renames Quarterly Report.p\ndf today.');
   sv2('screen: a name broken right after its dot keeps the break', wrapAt(['Renames Quarterly Report.', 'pdf today.']), 'Renames Quarterly Report.\npdf today.');
+  sv2('screen: an uppercase extension after the dot keeps the break', wrapAt(['Renames Quarterly Report.', 'PDF today.']), 'Renames Quarterly Report.\nPDF today.');
   sv2('screen: a sentence ending a row still re-flows', wrapAt(['Writes the file.', 'Then it stops.']), 'Writes the file. Then it stops.');
   sv2('screen: ordinary prose still re-flows with a space', wrapAt(['Writes the main config file', 'and nothing else.']), 'Writes the main config file and nothing else.');
   // A crafted row cannot freeze the parser (it backtracked exponentially once).
@@ -386,6 +387,8 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   const multiBox = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Use ☐ box  ☐ Deploy  ✔ Submit  →', 'Which box?', '❯ 1. This', '  2. That', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
   const marks = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Café  ☐ Size  ✔ Submit  →', 'Pick one for the cafe' + 'e\u0301'.repeat(30), '❯ 1. This', '  2. That', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
   sv2('screen: combining marks do not make a row look wider than the frame', marks?.steps?.total, 2);
+  const shortRule = parseSelectorFromScreen(['─'.repeat(80), ' ☐ Layout ', 'Like this?', '─'.repeat(30), '←  ☐ A  ☐ B  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · ↑/↓ to navigate · Esc to cancel']);
+  sv2('screen: a rule narrower than the footer does not bound the frame', shortRule?.steps?.total, 1);
   sv2('screen: a checkbox inside a multi-question header stays in that header', multiBox?.steps?.labels, ['Use ☐ box', 'Deploy']);
   sv2('screen: a checkmark inside a header is part of that header', checked?.steps, { labels: ['✔ Check', 'Deploy'], answered: [false, false], current: 0, total: 2 });
   // Plain lines (no highlight information): the first unanswered one.
