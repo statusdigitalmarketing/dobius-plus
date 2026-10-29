@@ -442,11 +442,16 @@ function isTabBar(line) {
 function screenSteps(lines, blockTop) {
   // The tab bar sits between the frame's rule and the question: never look
   // past a rule (a permission prompt's border), so text above it can't count.
+  // A multi-question bar is drawn between arrows (`← ... →`); a question
+  // line that merely STARTS with a checkbox ("☐ means disabled...") also
+  // passes isTabBar, so an arrow-led row above it wins (Codex P2). With no
+  // arrow-led row (a single question's bare tab), the nearest one stands.
   let tb = -1;
   for (let i = blockTop - 1; i >= 0 && i >= blockTop - 24; i -= 1) {
     if (SCREEN_RULE_RE.test(lines[i].trim())) break;
-    // Prose with a checkbox in it is not the bar; keep looking above it.
-    if (/[☐☒]/.test(lines[i]) && isTabBar(lines[i])) { tb = i; break; }
+    if (!/[☐☒]/.test(lines[i]) || !isTabBar(lines[i])) continue;
+    if (/^\s*←/.test(lines[i])) { tb = i; break; }
+    if (tb === -1) tb = i;
   }
   if (tb === -1) return null;
   const items = [];
@@ -493,17 +498,19 @@ const SCREEN_CONTEXT_ROWS = 40;
 const PROMPT_MAX_CHARS = 1500;
 /**
  * Rows Claude wrapped, back into one line with spaces. Where the break may
- * have fallen inside a path (the row's last word holds a '/' and ends in '/',
- * '-', '_' or '.'), neither a space nor no space is safe to guess
- * (`dobius-` + `plus/x` vs `/tmp/cache/` + `after`): the terminal's own line
- * break is kept, so the card shows exactly what the terminal did (Codex).
+ * have fallen inside a token (the row's last word holds a '/', or the row is
+ * one unbroken token that filled it), neither a space nor no space is safe
+ * to guess (`/srv/confi` + `g.json` vs `/tmp/cache/x` + `after`): the
+ * terminal's own line break is kept, so the card shows exactly what the
+ * terminal did and never a different path (Codex, three rounds).
  */
 function reflow(rows) {
   let out = '';
   for (const r of rows) {
     if (!out) { out = r; continue; }
-    const last = out.split(/[ \n]/).pop();
-    out += /\//.test(last) && /[/\-_.]$/.test(last) ? `\n${r}` : ` ${r}`;
+    const line = out.slice(out.lastIndexOf('\n') + 1);
+    const last = line.split(' ').pop();
+    out += last.includes('/') || !line.includes(' ') ? `\n${r}` : ` ${r}`;
   }
   return out;
 }

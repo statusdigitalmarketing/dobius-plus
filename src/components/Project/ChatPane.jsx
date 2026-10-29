@@ -643,9 +643,15 @@ export default function ChatPane({ tabId, visible }) {
 
   // Take focus only as THE active tab: in a grid every chat pane is visible,
   // and the last one to grab focus would receive typing meant for another.
+  // An open image stays on top and keeps focus: coming back from Dashboard
+  // must not put Enter on the draft hidden behind it (Codex P2).
+  const focusInput = useCallback(() => {
+    const box = inputRef.current?.closest('[data-chat-tab]')?.querySelector('.chatp-lightbox');
+    (box || inputRef.current)?.focus();
+  }, []);
   useEffect(() => {
-    if (visible && isActive) requestAnimationFrame(() => inputRef.current?.focus());
-  }, [visible, isActive]);
+    if (visible && isActive) requestAnimationFrame(focusInput);
+  }, [visible, isActive, focusInput]);
 
   // Clicking, focusing or dragging over this pane makes its tab the active
   // one, so window-level drops and shortcuts target what the user is using.
@@ -877,7 +883,7 @@ export default function ChatPane({ tabId, visible }) {
       if (!pane) return useStore.getState().activeTabId === tabId;
       // Dropped right here: type into this composer next, even as split's
       // right pane (never the active tab), not the terminal that had focus.
-      if (pane.dataset.chatTab === tabId) { requestAnimationFrame(() => inputRef.current?.focus()); return true; }
+      if (pane.dataset.chatTab === tabId) { requestAnimationFrame(focusInput); return true; }
       return false;
     };
     const onFiles = (e) => {
@@ -895,7 +901,7 @@ export default function ChatPane({ tabId, visible }) {
       window.removeEventListener('dobius:drop-files', onFiles);
       window.removeEventListener('dobius:drop-text', onText);
     };
-  }, [visible, tabId]);
+  }, [visible, tabId, focusInput]);
 
   const working = status === 'working';
   const placeholder = sessionId

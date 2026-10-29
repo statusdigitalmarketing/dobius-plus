@@ -447,6 +447,25 @@ fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true });
   // Many parallel fetches all resolve, each to its own image.
   const got = await Promise.all(Array.from({ length: 30 }, (_, k) => readTranscriptImage(f, `${uuid}:${k % 2}:${k % 2 ? 1 : 0}`)));
   assert.ok(got.every((g, k) => g && g.data === (k % 2 ? jpg : png)), 'parallel fetches are each correct');
+  // A stopped session's last record often has no newline: it still loads.
+  const t = path.join(dir, 'unterminated.jsonl');
+  fs.writeFileSync(t, JSON.stringify({ type: 'user', uuid: 'u-0', message: { role: 'user', content: 'hi' } }) + '\n' + dupe(first));
+  assert.equal((await readTranscriptImage(t, `${uuid}:0:0`))?.data, first, 'unterminated final record is indexed');
+  fs.appendFileSync(t, '\n' + dupe(later) + '\n');
+  assert.equal((await readTranscriptImage(t, `${uuid}:0:0`))?.data, later, 'then grows normally');
+  // Rewritten in place at the SAME size, the record moved: the index notices.
+  const r = path.join(dir, 'rewrite.jsonl');
+  const pad = (n) => JSON.stringify({ type: 'user', uuid: 'u-p', message: { role: 'user', content: 'p'.repeat(n) } });
+  fs.writeFileSync(r, dupe(first) + '\n' + pad(40) + '\n');
+  assert.equal((await readTranscriptImage(r, `${uuid}:0:0`))?.data, first);
+  const before = fs.statSync(r);
+  fs.writeFileSync(r, pad(40) + '\n' + dupe(later) + '\n');
+  assert.equal(fs.statSync(r).size, before.size, 'same size');
+  fs.utimesSync(r, before.atime, new Date(before.mtimeMs + 5000));
+  assert.equal((await readTranscriptImage(r, `${uuid}:0:0`))?.data, later, 'same-size rewrite is rescanned');
+  // Rewritten to something LONGER: the bytes before the old resume point changed.
+  fs.writeFileSync(r, pad(10) + '\n' + dupe(first) + '\n' + pad(200) + '\n');
+  assert.equal((await readTranscriptImage(r, `${uuid}:0:0`))?.data, first, 'growing rewrite is rescanned');
   fs.rmSync(dir, { recursive: true, force: true });
 }
 

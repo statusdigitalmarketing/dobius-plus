@@ -1600,34 +1600,39 @@ export async function loadTranscriptImage(sessionId, projectPath, ref) {
  * ever turned into a string, and a line past IMAGE_LINE_MAX is skipped. A
  * repeated uuid keeps its LAST record, the one a chat's tail window shows.
  */
-const imageIndexes = new Map(); // path -> { ino, size, map }
+const imageIndexes = new Map(); // path -> { ino, size, mtimeMs, resume, tail, map }
 const IMAGE_MARK = Buffer.from('"image"');
-function scanImageIndex(p, from, map) {
+const TAIL_PROBE = 64;
+// Scans [from, end) only: `end` is the size stat saw, so a writer appending
+// faster than we read cannot keep the scan (and the queue behind it) going.
+// Resolves the offset to resume from: the start of an unterminated last line,
+// which is still indexed if it already parses (a stopped session's final
+// record often has no newline), and is re-read once the file grows.
+function scanImageIndex(p, from, end, map) {
   return new Promise((resolve) => {
+    if (from >= end) { resolve(from); return; }
     let stream;
-    try { stream = fsSync.createReadStream(p, { start: from }); } catch { resolve(from); return; }
+    try { stream = fsSync.createReadStream(p, { start: from, end: end - 1 }); } catch { resolve(from); return; }
     let parts = [];
     let partLen = 0;
     let lineStart = from;
     let pos = from;
     let skipping = false;
-    const endLine = (endPos) => {
-      if (!skipping && partLen) {
-        const line = parts.length === 1 ? parts[0] : Buffer.concat(parts, partLen);
-        if (line.indexOf(IMAGE_MARK) !== -1) {
-          let entry;
-          try { entry = JSON.parse(line.toString('utf8')); } catch { entry = null; }
-          if (entry && typeof entry.uuid === 'string' && UUID_RE.test(entry.uuid)) map.set(entry.uuid, { start: lineStart, end: endPos });
-        }
-      }
-      parts = []; partLen = 0; skipping = false; lineStart = endPos + 1;
+    const indexLine = (endPos) => {
+      if (skipping || !partLen) return;
+      const line = parts.length === 1 ? parts[0] : Buffer.concat(parts, partLen);
+      if (line.indexOf(IMAGE_MARK) === -1) return;
+      let entry;
+      try { entry = JSON.parse(line.toString('utf8')); } catch { entry = null; }
+      if (entry && typeof entry.uuid === 'string' && UUID_RE.test(entry.uuid)) map.set(entry.uuid, { start: lineStart, end: endPos });
     };
     stream.on('data', (chunk) => {
       let at = 0;
       let nl;
       while ((nl = chunk.indexOf(10, at)) !== -1) {
         if (!skipping) { parts.push(chunk.subarray(at, nl)); partLen += nl - at; }
-        endLine(pos + nl);
+        indexLine(pos + nl);
+        parts = []; partLen = 0; skipping = false; lineStart = pos + nl + 1;
         at = nl + 1;
       }
       if (!skipping && at < chunk.length) {
@@ -1636,19 +1641,41 @@ function scanImageIndex(p, from, map) {
       }
       pos += chunk.length;
     });
-    // A last line without its newline may still be being written: index only
-    // up to the last complete line, and rescan the rest next time.
-    stream.on('end', () => resolve(lineStart));
+    stream.on('end', () => { indexLine(pos); resolve(lineStart); });
     stream.on('error', () => resolve(lineStart));
   });
+}
+// The bytes just before `at`: if they changed, the file was rewritten rather
+// than appended to, and every offset in the index is suspect.
+async function tailBytes(p, at) {
+  const len = Math.min(TAIL_PROBE, at);
+  if (!len) return '';
+  let fh;
+  try {
+    fh = await fs.open(p, 'r');
+    const buf = Buffer.alloc(len);
+    const { bytesRead } = await fh.read(buf, 0, len, at - len);
+    return buf.subarray(0, bytesRead).toString('hex');
+  } catch { return null; } finally { await fh?.close().catch(() => {}); }
 }
 let imageChain = Promise.resolve();
 async function imageRecordRange(p, uuid) {
   let st;
   try { st = await fs.stat(p); } catch { return null; }
   let idx = imageIndexes.get(p);
-  if (!idx || idx.ino !== st.ino || st.size < idx.size) idx = { ino: st.ino, size: 0, map: new Map() };
-  if (st.size > idx.size) idx.size = await scanImageIndex(p, idx.size, idx.map);
+  // ponytail: a rewrite is caught by inode, shrink, an mtime change at the
+  // same size, or the bytes before the resume point changing. A rewrite that
+  // grows the file AND leaves those 64 bytes intact is not.
+  const stale = !idx || idx.ino !== st.ino || st.size < idx.size
+    || (st.size === idx.size && st.mtimeMs !== idx.mtimeMs)
+    || (st.size > idx.size && (await tailBytes(p, idx.resume)) !== idx.tail);
+  if (stale) idx = { ino: st.ino, size: 0, mtimeMs: 0, resume: 0, tail: '', map: new Map() };
+  if (st.size > idx.size) {
+    idx.resume = await scanImageIndex(p, idx.resume, st.size, idx.map);
+    idx.size = st.size;
+    idx.mtimeMs = st.mtimeMs;
+    idx.tail = await tailBytes(p, idx.resume);
+  }
   imageIndexes.set(p, idx);
   if (imageIndexes.size > 32) imageIndexes.delete(imageIndexes.keys().next().value);
   return idx.map.get(uuid) || null;

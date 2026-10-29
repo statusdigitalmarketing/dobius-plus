@@ -510,6 +510,12 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // The card key the cancel was armed on: a different card is never armed
   // (the Mac can answer and show another question inside the 3s window).
   const [cancelArmedKey, setCancelArmedKey] = useState(null);
+  // A card that goes away takes its arming with it: on a Mac that sends no
+  // tokens, the next question could otherwise read the same and inherit it.
+  useEffect(() => { if (!selector) setCancelArmedKey(null); }, [selector]);
+  // Stop takes Send's place the moment a message goes out while Claude works,
+  // so a double tap on Send would land on Stop and interrupt (Codex P1).
+  const sentAtRef = useRef(0);
   // Sessionless tabs only: plain-text tail of the live PTY (null = loading).
   const [shellText, setShellText] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -840,6 +846,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     // chunk made Claude's Ink TUI treat the \r as pasted newline, so messages
     // sat in the input box unsubmitted (Sam's v1.0.51 bug 3).
     connection.send({ type: 'submitPrompt', id: tabId, text });
+    sentAtRef.current = Date.now();
     setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
     setDraft('');
     atBottomRef.current = true;
@@ -978,7 +985,12 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         className="ask-card"
         key={selectorCardKey(selector)}
         onPointerDownCapture={(e) => pressGuard.current.pointerDown(e, selector)}
-        onKeyDownCapture={(e) => pressGuard.current.keyDown(e, selector)}
+        onKeyDownCapture={(e) => {
+          // A held Enter auto-repeats as clicks: it must never confirm the
+          // cancel or re-answer by itself (Codex P1).
+          if (e.repeat && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); return; }
+          pressGuard.current.keyDown(e, selector);
+        }}
       >
         <div className="ask-head">
           {steps && steps.total > 1 ? (
@@ -1113,7 +1125,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           {tab?.status === 'working' && !input.trim() ? (
             <button
               className="chat-stop"
-              onClick={() => { if (tabId) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
+              onClick={() => { if (tabId && Date.now() - sentAtRef.current > 800) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
               aria-label="Stop Claude (escape)"
               title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
             ><span /></button>
