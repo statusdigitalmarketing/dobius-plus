@@ -375,6 +375,8 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: a short row and a long next word stay two lines', wrapAt(['echo checking production resources', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build']), 'echo checking production resources\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build');
   const longEcho = 'echo this is a deliberately long status line for the production cleanup';
   sv2('screen: a blank row between two commands is kept', wrapAt([longEcho, '', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build']), `${longEcho}\n\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build`);
+  const starred = parseSelectorFromScreen(['─'.repeat(80), '←  ☐ Cleanup  ✔ Submit  →', 'echo this is a deliberately long status line for the production cleanup here', '***', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: a glyph-only row in the question still separates', starred?.prompt, 'echo this is a deliberately long status line for the production cleanup here\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build');
   sv2('screen: a rule row between two commands is kept', wrapAt([longEcho, '------', 'CONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build']), `${longEcho}\n------\nCONFIRM_DELETE_PRODUCTION_RESOURCES=true rm -rf build`);
   sv2('screen: two short rows are two lines, never one (separate commands)', wrapAt(['echo cleanup', 'rm -rf build']), 'echo cleanup\nrm -rf build');
   sv2('screen: a row cut at the very last column keeps the break', wrapAt(['x'.repeat(70) + ' abcd', 'efgh tail']), 'x'.repeat(70) + ' abcd\nefgh tail');

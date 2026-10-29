@@ -600,7 +600,10 @@ function screenPrompt(lines, blockTop, prose = false, frameW = 0) {
     const t = lines[i].trim();
     if (SCREEN_RULE_RE.test(t) || SCREEN_CHROME_RE.test(t)) { bounded = true; break; }
     if (!t) { if (paragraphs[0].length) paragraphs.unshift([]); continue; }
-    if (!/[\p{L}\p{N}]/u.test(t)) continue; // a lone glyph or border
+    // A lone glyph or border is not shown, but it still separated what is
+    // around it: a paragraph break, never something reflow joins across
+    // (`***` between two commands, Codex P2).
+    if (!/[\p{L}\p{N}]/u.test(t)) { if (paragraphs[0].length) paragraphs.unshift([]); continue; }
     const row = { t, end: colOf(lines, i) };
     paragraphs[0].unshift(row);
   }
