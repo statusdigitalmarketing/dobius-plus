@@ -166,7 +166,9 @@ export async function sendImessageToSelf(text) {
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
     .replace(/[\x00-\x09\x0B-\x1F\x7F]/g, '');
-  const safeHandle = cfg.selfHandle.replace(/"/g, '');  // handles have no quotes
+  // Handles (phone or email) never contain quotes, backslashes or control
+  // characters, and any of them would break out of the AppleScript string.
+  const safeHandle = String(cfg.selfHandle).replace(/["\\\x00-\x1F\x7F]/g, '');
 
   const script = `
     tell application "Messages"

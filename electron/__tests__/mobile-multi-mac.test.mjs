@@ -148,6 +148,54 @@ test('hostless browser legacy pairing uses serving origin; native never invents 
   assert.equal(native.values.get(TOKEN_KEY), a.token);
 });
 
+test('a Mac proven to be the same at a new address keeps ONE record, moved there', () => {
+  const before = initial();
+  const next = upsertPairing(before, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'unused', now: 9, replaceIds: ['a'] });
+  assert.equal(next.pairings.length, 2, 'no second entry for the same Mac');
+  const moved = next.pairings.find((p) => p.id === 'a');
+  assert.equal(moved.origin, 'https://a-new.tail.ts.net:8420');
+  assert.equal(moved.token, 'tls-a');
+  assert.equal(moved.name, before.pairings.find((p) => p.id === 'a').name, 'keeps its name');
+  assert.equal(next.activeId, 'a');
+  const unproven = upsertPairing(before, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'c', now: 9 });
+  assert.equal(unproven.pairings.length, 3, 'without proof it is a separate Mac');
+});
+
+test('a proven merge keeps whichever PROVEN record was used last', () => {
+  const before = initial();
+  const dup = upsertPairing(before, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-old' }, { id: 'dup', now: 8 });
+  assert.equal(dup.pairings.length, 3);
+  // Both proved (the record at the new address is probed too): the newer wins.
+  const next = upsertPairing(dup, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'unused', now: 9, replaceIds: ['a', 'dup'] });
+  assert.deepEqual(next.pairings.map((p) => p.id).sort(), ['b', 'dup'], 'one record: the duplicate does not survive a Remove');
+  assert.equal(next.pairings.find((p) => p.id === 'dup').token, 'tls-a');
+  assert.equal(next.activeId, 'dup');
+  // The record at the new address did NOT prove (another Mac used to live
+  // there): the proven one keeps its identity, however recent the other is.
+  const other = upsertPairing(dup, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'unused', now: 9, replaceIds: ['a'] });
+  assert.deepEqual(other.pairings.map((p) => p.id).sort(), ['a', 'b']);
+  assert.equal(other.pairings.find((p) => p.id === 'a').origin, 'https://a-new.tail.ts.net:8420');
+  assert.equal(other.pairings.find((p) => p.id === 'a').name, a.name);
+});
+
+test('every proven record folds into the most recently used one', () => {
+  const before = initial();
+  const two = upsertPairing(before, { origin: 'http://a-short:8420', token: 'short-a' }, { id: 'a2', now: 50 });
+  const next = upsertPairing(two, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'unused', now: 99, replaceIds: ['a', 'a2'] });
+  assert.deepEqual(next.pairings.map((p) => p.id).sort(), ['a2', 'b'], 'one record for the Mac, not one per old address');
+  assert.equal(next.pairings.find((p) => p.id === 'a2').origin, 'https://a-new.tail.ts.net:8420');
+  assert.equal(next.activeId, 'a2');
+});
+
+test('a pairing superseded by a switch is saved without taking over', () => {
+  const onB = switchPairing(initial(), 'b', 20);
+  const next = upsertPairing(onB, { origin: 'https://c.tail.ts.net:8420', token: 'c' }, { id: 'c', now: 21, activate: false });
+  assert.equal(next.activeId, 'b', 'the later switch wins');
+  assert.equal(next.pairings.some((p) => p.id === 'c'), true, 'the pairing is still saved');
+  const folded = upsertPairing(onB, { origin: 'https://b-new.tail.ts.net:8420', token: 'b2' }, { id: 'x', now: 22, replaceIds: ['b'], activate: false });
+  assert.equal(folded.activeId, 'b', 'the active Mac moved address, it stays active');
+});
+
 test('re-pair deduplicates normalized origins and retains identity and name', () => {
   const before = initial();
   const next = upsertPairing(before, { origin: 'HTTPS://A.TAIL.TS.NET:8420/path?x=1', token: 'new-a' }, { id: 'unused', now: 9 });

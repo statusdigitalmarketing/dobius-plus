@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
+import { buildPairingWebLink } from '../../../shared/pairing-link.js';
 import { useStore } from '../../store/store';
 import { CURATED_TERMINAL_FONTS, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
@@ -168,6 +169,22 @@ export default function Settings() {
       refreshMobile();
     }
   }, [refreshMobile]);
+
+  // Text the Mac address, code and pair link to the user's own iMessage, so a
+  // phone signed in to the same Apple ID gets it without retyping. main builds
+  // the message from the live server state; nothing here supplies the text.
+  const [pairTextMsg, setPairTextMsg] = useState('');
+  const [pairTextBusy, setPairTextBusy] = useState(false);
+  const textPairingToSelf = useCallback(async () => {
+    setPairTextBusy(true);
+    setPairTextMsg('Sending...');
+    try {
+      const r = await window.electronAPI.mobileServerTextPairing();
+      setPairTextMsg(r?.ok ? 'Sent. Check Messages on your phone.' : `Failed: ${r?.error || 'unknown error'}`);
+    } finally {
+      setPairTextBusy(false);
+    }
+  }, []);
 
   const regenMobileCode = useCallback(async () => {
     const status = await window.electronAPI.mobileServerRegenerateCode();
@@ -581,8 +598,8 @@ export default function Settings() {
             <SettingRow
               label="HTTPS"
               description={mobileStatus.secure
-                ? 'Secure: notifications and install are available'
-                : 'HTTP only: terminal works, but push notifications and installing the app need HTTPS'}
+                ? 'Secure: notifications and install are available. A phone paired over plain HTTP keeps working. For notifications on it: scan the code below, add the page to the Home Screen, open it from there, pair it with the current code, then tap the bell'
+                : 'HTTP only: push notifications and installing the app need HTTPS. It turns on by itself once HTTPS Certificates are enabled for your tailnet, and phones paired over HTTP keep working'}
             >
               {mobileStatus.secure ? (
                 <span className="text-xs px-2 py-1 rounded" style={{ color: 'var(--accent)', backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}>
@@ -632,7 +649,7 @@ export default function Settings() {
               >
                 <div style={{ background: '#fff', padding: 8, borderRadius: 6, lineHeight: 0 }}>
                   <QRCodeSVG
-                    value={buildPairingDeepLink(mobileStatus)}
+                    value={buildPairingWebLink(mobileStatus)}
                     size={120}
                     level="M"
                     includeMargin={false}
@@ -640,12 +657,37 @@ export default function Settings() {
                 </div>
                 <div className="text-xs" style={{ color: 'var(--dim)' }}>
                   <div style={{ color: 'var(--fg)', marginBottom: 4, fontWeight: 500 }}>
-                    Scan with Dobius+ on your phone
+                    Scan with your iPhone camera
                   </div>
-                  Opens the app and pre-fills the Mac address plus this code so you only
-                  tap &ldquo;Pair this device.&rdquo; The code rotates on regenerate.
+                  Opens Dobius+ in Safari with this Mac filled in{mobileStatus.url?.startsWith('https://')
+                    ? ' and this code too, so you only tap “Pair this device.”'
+                    : '; type this code there. With HTTPS on, the code is filled in too.'}
+                  {' '}Needs Tailscale on the phone. The code rotates on regenerate.
                 </div>
               </div>
+            )}
+
+            {mobileStatus.pairingCode && (mobileStatus.address || mobileStatus.url) && (
+              <SettingRow
+                label="Text it to yourself"
+                description={pairTextMsg || (imsgCfg?.selfHandle
+                  ? `iMessages the address, code and a pair link to ${imsgCfg.selfHandle}`
+                  : 'Set your iMessage handle under iMessage Bridge below first')}
+              >
+                <button
+                  disabled={pairTextBusy || !imsgCfg?.selfHandle}
+                  onClick={textPairingToSelf}
+                  style={{
+                    padding: '4px 10px', fontSize: 11, fontFamily: "'SF Mono', monospace",
+                    color: 'var(--fg)', backgroundColor: 'var(--surface)',
+                    border: '1px solid var(--border)', borderRadius: 6,
+                    opacity: (pairTextBusy || !imsgCfg?.selfHandle) ? 0.5 : 1,
+                    cursor: (pairTextBusy || !imsgCfg?.selfHandle) ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  Text myself the IP URL and the PIN
+                </button>
+              </SettingRow>
             )}
 
             {mobileDevices.length > 0 && (
@@ -821,31 +863,6 @@ export default function Settings() {
       </Section>
     </div>
   );
-}
-
-// Build the dobiusplus:// deep link encoded into the QR code shown on the
-// Mac. The mobile app's @capacitor/app URL handler reads `host` and `code`
-// off this and skips the first-run host entry step. Includes the SCHEME in
-// the host param (http:// or https://) so an HTTPS-enabled Mac pairs with
-// its TLS listener, not plaintext.
-function buildPairingDeepLink(mobileStatus) {
-  if (!mobileStatus?.pairingCode) return '';
-  // mobileStatus.url is `https://my-mac.ts.net:8420/` when HTTPS is on, or
-  // `http://100.x.x.x:8420/` when HTTP-only (see mobile-server.js). Strip the
-  // trailing slash and keep everything else so Pairing.jsx's normaliseHost
-  // round-trips scheme-preserved.
-  let origin = '';
-  try {
-    if (mobileStatus.url) {
-      const u = new URL(mobileStatus.url);
-      origin = `${u.protocol}//${u.host}`;
-    } else if (mobileStatus.address) {
-      origin = `http://${mobileStatus.address.host}:${mobileStatus.address.port}`;
-    }
-  } catch { origin = ''; }
-  if (!origin) return '';
-  const params = new URLSearchParams({ host: origin, code: String(mobileStatus.pairingCode) });
-  return `dobiusplus://pair?${params.toString()}`;
 }
 
 function Section({ title, children }) {

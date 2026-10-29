@@ -1,4 +1,4 @@
-import { isAllowedMobileOrigin } from './mobile-cors.js';
+import { isAllowedMobileOrigin, isOwnHost } from './mobile-cors.js';
 /**
  * Mobile server: embedded HTTP + WebSocket server that bridges Dobius+ to a
  * phone PWA over the user's Tailscale tailnet.
@@ -23,7 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { app, powerSaveBlocker } from 'electron';
-import { createAutoStart, createStartGate, listenSettled, attachWebSocketServer } from './mobile-autostart.js';
+import { createAutoStart, createStartGate, listenSettled, attachWebSocketServer, dualProtocolServer } from './mobile-autostart.js';
 import { getMobileServerConfig, updateMobileServerConfig, setSessionTabLink, removePushSubscriptionsByToken, getSessionTabMap, getAllProjectsWithTabs, loadConfig } from './config-manager.js';
 import {
   listTerminals, subscribeTerminal, writeTerminal, terminalHasDesktopAttached,
@@ -150,6 +150,7 @@ const HEARTBEAT_MS = 30000;           // ping every 30s; a client that misses a 
 const MAX_VOICE_INFLIGHT = 2;
 
 let httpServer = null;
+const STALLED_REQUEST_MS = 120_000;
 // This tailnet's own hosts, for CORS (see mobile-cors.js). null = unknown.
 let corsHosts = null;
 let corsHostsTimer = null;
@@ -1101,6 +1102,8 @@ export function getMobileServerStatus() {
     tailnetIp: getTailnetIp(),
     address: boundAddress,
     secure: serveInfo?.secure || false,
+    certValidTo: serveInfo?.certValidTo || null,
+    certName: serveInfo?.certName || null,
     url: serveInfo?.url || null,
     pairingCode: httpServer ? pairingCode : null,
     deviceCount: getMobileServerConfig().devices.length,
@@ -1141,6 +1144,8 @@ async function doStartMobileServer(stillCurrent) {
     };
   }
   const port = cfg.port || 8420;
+  let magicName = null; // read below, before the server listens
+  let ownName = null; // the same name, refreshed every minute for the Host check
 
   const expApp = express();
 
@@ -1154,6 +1159,13 @@ async function doStartMobileServer(stillCurrent) {
   // isolated instances on one IP.
   const corsPorts = [...new Set([port, 8420, ...String(process.env.DOBIUS_MOBILE_CORS_PORTS || '').split(',').map(Number).filter((n) => n > 0 && n < 65536)])];
   const corsOk = (origin) => isAllowedMobileOrigin(origin, { hosts: corsHosts, ports: corsPorts });
+  // Only requests addressed to this Mac (mobile-cors.js isOwnHost): a foreign
+  // Host is a DNS-rebinding page calling us from its own origin.
+  const hostOk = (host, strict = false) => isOwnHost(host, { ip, name: ownName || magicName, port, strict });
+  expApp.use((req, res, next) => {
+    if (!hostOk(req.headers.host)) return res.status(421).end();
+    return next();
+  });
   expApp.use((req, res, next) => {
     const origin = req.headers.origin;
     if (corsOk(origin)) {
@@ -1212,6 +1224,10 @@ async function doStartMobileServer(stillCurrent) {
   });
 
   expApp.post('/pair', (req, res) => {
+    // Strict here, in the matched route: Express routing ignores case and a
+    // trailing slash, so a check on req.path in the middleware missed /PAIR.
+    // A short name depends on the phone's DNS search domain and proves nothing.
+    if (!hostOk(req.headers.host, true)) return res.status(421).end();
     // Time-boxed cooldown after a wrong-guess flood, NOT a permanent lockout. The
     // old code nulled pairingCode on the 5th miss, so any unauthenticated caller
     // who could reach the server could deny pairing forever (and re-lock right
@@ -1259,6 +1275,9 @@ async function doStartMobileServer(stillCurrent) {
     // The Mac's own name, so a phone holding several Macs can tell them apart
     // without the user typing one (an address alone is unreadable). Only a
     // caller that just proved the pairing code sees it.
+    // hosts: this Mac's own addresses, so a phone that already has it at
+    // another one (HTTP before HTTPS came on) can prove it is the same Mac by
+    // this token and keep ONE record (mobile/pairings.js).
     res.json({ ok: true, token, name: os.hostname().replace(/\.local$/i, '').slice(0, 80) });
   });
 
@@ -1275,6 +1294,32 @@ async function doStartMobileServer(stillCurrent) {
     const m = (req.headers.authorization || '').match(/^Bearer\s+([0-9a-f]{64})$/i);
     return m ? m[1] : null;
   }
+
+  // POST /same-mac { tokenHash, newTokenHash, nonce }  (no auth). Lets a phone
+  // prove an older saved address is THIS Mac without sending any token: both
+  // hashes must name tokens this Mac issued, and the reply is
+  // HMAC(old token + ':' + new token, nonce), which only a server holding both
+  // can make. A different Mac at a reused tailnet IP cannot answer, and
+  // one that relays to the real Mac gets a 404 there, since the real Mac never
+  // issued the relayer's new token (Codex P1 + security review). The hash is
+  // domain-separated so it never matches another hash of a token.
+  const sameMacHash = (token) => crypto.createHash('sha256').update(`dobius-same-mac:${token}`).digest();
+  expApp.post('/same-mac', (req, res) => {
+    const { tokenHash, newTokenHash, nonce } = req.body || {};
+    const hex64 = (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
+    if (!hex64(tokenHash) || !hex64(newTokenHash) || !hex64(nonce)) return res.status(400).json({ ok: false, error: 'bad request' });
+    const issued = (hash) => {
+      const want = Buffer.from(hash, 'hex');
+      return getMobileServerConfig().devices.find((d) => typeof d.token === 'string' && d.token && crypto.timingSafeEqual(sameMacHash(d.token), want));
+    };
+    const old = issued(tokenHash);
+    const fresh = issued(newTokenHash);
+    if (!old || !fresh) return res.status(404).json({ ok: false, error: 'unknown' });
+    // Keyed by BOTH tokens, so the proof itself (not only this lookup) needs
+    // both. The key has its own prefix: HMAC hashes a long key, and a key that
+    // hashed to a disclosed tokenHash could be forged from it (Codex P2).
+    res.json({ ok: true, proof: crypto.createHmac('sha256', `dobius-same-mac-key|${old.token}|${fresh.token}`).update(nonce).digest('hex') });
+  });
 
   // POST /voice/intent  { transcript: string, tabId?: string }
   // Two modes:
@@ -1320,6 +1365,10 @@ async function doStartMobileServer(stillCurrent) {
   // heard) plus a requestId to poll /voice/reply. Audio never leaves the Mac.
   expApp.post('/voice/audio', express.raw({ type: () => true, limit: '8mb' }), async (req, res) => {
     if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
+    // Authenticated, and transcription can be silent for minutes (a cold
+    // Whisper start, then its own 120s deadline and the CLI fallback): the
+    // stalled-request timeout is for unauthenticated sockets only (Codex P2).
+    req.socket.setTimeout(0);
     if (!transcribeAvailable()) {
       return res.status(503).json({ ok: false, error: 'Local transcription is not set up on the Mac (whisper-cli / ffmpeg missing).' });
     }
@@ -1390,6 +1439,7 @@ async function doStartMobileServer(stillCurrent) {
   // the specific requestId. Returns the spoken message when it lands.
   expApp.post('/voice/reply', async (req, res) => {
     if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
+    req.socket.setTimeout(0); // authenticated; holds up to 60s by design
     const requestId = req.body?.requestId;
     if (typeof requestId !== 'string') {
       return res.status(400).json({ ok: false, error: 'requestId required' });
@@ -1437,40 +1487,56 @@ async function doStartMobileServer(stillCurrent) {
   // push/install). That HTTP fallback is safe here BECAUSE it rides the tailnet:
   // WireGuard already encrypts the transport, so the bearer token is not exposed
   // to a same-subnet sniffer the way the removed LAN/plaintext mode exposed it.
-  let magicName;
   let secure = false;
+  let certValidTo = null; // expiry of the cert this server loaded (ms)
   magicName = await getMagicDNSName();
   corsHosts = await getTailnetHosts();
   if (quitting || !stillCurrent()) return { running: false, error: 'stopped during start' };
   if (corsHostsTimer) clearInterval(corsHostsTimer);
   corsHostsTimer = setInterval(() => {
     getTailnetHosts().then((h) => { if (h) corsHosts = h; }).catch(() => { /* keep the last list */ });
+    // This Mac's own name for the Host check, refreshed too: a lookup that
+    // failed at start would otherwise refuse phones paired by name until a
+    // restart (Codex P1, three lenses).
+    getMagicDNSName().then((n) => { if (n) ownName = n; }).catch(() => { /* keep the last name */ });
   }, 60_000);
   corsHostsTimer.unref?.();
   // A stop (Settings off, quit, cert re-provision) landed while we waited:
   // nothing has been created yet, so just step back.
   if (quitting || !stillCurrent()) return { running: false, error: 'stopped during start' };
+  // Plain HTTP is always served, and HTTPS beside it on the same port when
+  // this Mac has a certificate (mobile-autostart.js dualProtocolServer): a
+  // phone paired at either address keeps working when HTTPS comes or goes.
+  const httpSide = http.createServer(expApp);
+  let httpsSide = null;
   if (magicName && hasCertFor(magicName)) {
     const cp = certPathsFor(magicName);
     try {
-      httpServer = https.createServer(
-        { cert: fs.readFileSync(cp.certFile), key: fs.readFileSync(cp.keyFile) },
-        expApp,
-      );
+      const cert = fs.readFileSync(cp.certFile);
+      httpsSide = https.createServer({ cert, key: fs.readFileSync(cp.keyFile) }, expApp);
       secure = true;
+      certValidTo = Date.parse(new crypto.X509Certificate(cert).validTo) || null;
     } catch (e) {
-      console.warn('[mobile-server] cert unreadable, falling back to HTTP:', e?.message || e);
+      console.warn('[mobile-server] cert unreadable, serving HTTP only:', e?.message || e);
     }
   }
-  if (!httpServer) httpServer = http.createServer(expApp);
+  // A connection silent mid-request is dropped after this long: Node's header
+  // deadline does not end a request that stalled after its first bytes (a
+  // tailnet peer could hold sockets open in the process that runs every
+  // terminal: Codex P1). Longer than /voice/reply's 60s hold; a WebSocket
+  // clears it on upgrade.
+  for (const side of [httpSide, httpsSide]) if (side) side.timeout = STALLED_REQUEST_MS;
+  httpServer = httpsSide ? dualProtocolServer(httpSide, httpsSide) : httpSide;
   const pendingServeInfo = {
     secure,
+    certValidTo,
+    certName: secure ? magicName : null,
     url: secure ? `https://${magicName}:${port}/` : `http://${ip}:${port}/`,
   };
 
   // attachWebSocketServer installs the wss 'error' listener a failed bind
   // needs (see mobile-autostart.js); the listen outcome is handled below.
-  wss = attachWebSocketServer(httpServer, { path: '/ws', maxPayload: MAX_WS_PAYLOAD });
+  wss = attachWebSocketServer(httpServer, { path: '/ws', maxPayload: MAX_WS_PAYLOAD, verifyClient: ({ req }) => hostOk(req.headers.host) });
   // Heartbeat: ping every client every HEARTBEAT_MS; a client that hasn't ponged
   // since the last ping is a dead/half-open socket (network dropped while OPEN)
   // and is terminated, so it stops accumulating a send buffer and its cleanup

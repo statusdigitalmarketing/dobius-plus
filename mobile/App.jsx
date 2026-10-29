@@ -118,6 +118,48 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
     onOpen={openTab} onShowHistory={() => setView('history')} />;
 }
 
+// The ids of saved Macs (at any address, this one included) that are the same
+// server as the one just paired. Proof: that address answers POST /same-mac
+// with an HMAC keyed by the saved token AND the new one, which only a server
+// holding both can make. No token is sent anywhere, only domain-separated
+// hashes, so every saved Mac can be asked: a different Mac can hold the same
+// tailnet IP or name, and a shared Mac is saved under an address it cannot
+// know is its own (Codex). One Mac can be saved at several addresses, so this
+// returns every one that proves; empty when WebCrypto is missing (a plain-HTTP
+// browser page), and the records then stay as they are.
+async function sameMacAs(state, token) {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle || !/^[0-9a-f]{64}$/i.test(token)) return [];
+  const enc = new TextEncoder();
+  const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const hashOf = async (t) => hex(await subtle.digest('SHA-256', enc.encode(`dobius-same-mac:${t}`)));
+  const newTokenHash = await hashOf(token);
+  const proves = async (p) => {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 3000);
+    try {
+      const nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
+      // Own prefix: HMAC hashes a long key, and a key that hashed to a
+      // disclosed tokenHash would let a saved Mac forge the proof (Codex P2).
+      const key = await subtle.importKey('raw', enc.encode(`dobius-same-mac-key|${p.token}|${token}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      const want = hex(await subtle.sign('HMAC', key, enc.encode(nonce)));
+      const res = await fetch(`${p.origin}/same-mac`, {
+        method: 'POST', body: JSON.stringify({ tokenHash: await hashOf(p.token), newTokenHash, nonce }), signal: ctl.signal,
+        headers: { 'Content-Type': 'application/json' }, cache: 'no-store', credentials: 'omit', redirect: 'error',
+      });
+      const body = res.ok ? await res.json().catch(() => null) : null;
+      return body?.ok === true && body.proof === want;
+    } catch { return false; /* unreachable from here (mixed content, offline): keep both */ } finally { clearTimeout(timer); }
+  };
+  // In parallel: each unreachable Mac costs up to 3s, and they must not add up.
+  // Only tokens of the shape a Mac issues: a chosen one is how a proof gets forged.
+  // The record already at this address too: it may be another Mac that used
+  // to live there, and only a proof lets it keep its identity (Codex P2).
+  const others = (state?.pairings || []).filter((p) => /^[0-9a-f]{64}$/i.test(p.token));
+  const results = await Promise.all(others.map(proves));
+  return others.filter((_, i) => results[i]).map((p) => p.id);
+}
+
 export default function App() {
   const [state, setState] = useState(null);
   const stateRef = useRef(null);
@@ -200,6 +242,30 @@ export default function App() {
       } catch { /* browser has no native listener */ }
     })();
     return () => { cancelled = true; handle?.remove(); };
+  }, []);
+
+  // Scanned a Mac's QR code in a browser (shared/pairing-link.js
+  // buildPairingWebLink): this page was opened at <origin>/#pair=<code>. Read
+  // the code, take it out of the address bar, and send it through the same
+  // path as a native scan, CONFIRM STEP INCLUDED: being served from an origin
+  // does not prove it is the user's own Mac (anyone can host this bundle and
+  // text the link). Already paired with other Macs, it adds this one. Native
+  // builds take dobiusplus:// links above instead.
+  useEffect(() => {
+    if (window.Capacitor?.isNativePlatform?.() === true) return undefined;
+    // Never inside a frame: a page that frames this one could lay the Pair
+    // button under its own and hide the address shown for confirmation.
+    if (window.top !== window.self) return undefined;
+    const consume = () => {
+      // `#pair=<code>` over HTTPS, bare `#pair` (address only) over HTTP.
+      const m = /^#pair(?:=(\d{6}))?$/.exec(window.location.hash || '');
+      if (!m) return;
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      showPairing({ host: window.location.origin, code: m[1] || '', nonce: (pairingUIRef.current?.nonce || 0) + 1, confirm: true });
+    };
+    consume();
+    window.addEventListener('hashchange', consume); // a second scan in the same tab
+    return () => window.removeEventListener('hashchange', consume);
   }, []);
 
   // Show a document as the current one, ending the old Mac's connection when
@@ -337,7 +403,23 @@ export default function App() {
   const cancelPairing = () => { pairingUIRef.current = null; setPairingUI(null); };
   const handlePaired = async ({ token, host, name }) => {
     const shown = pairingUI;
-    const ok = await update((s) => upsertPairing(s, { origin: host, token, name }, { id: crypto.randomUUID?.() || `mac-${Date.now()}-${Math.random().toString(36).slice(2)}`, now: Date.now() }));
+    // A pairing is the newest action: it supersedes pending taps, and a tap or
+    // switch made while it is still proving wins over it (Codex P2). Like a
+    // pick from the list, it clears the overlay of the tap it supersedes,
+    // which returns without clearing it (Codex P2).
+    const seq = ++tapSeqRef.current;
+    setSwitchingTo(null);
+    // Already paired with this Mac at another of its addresses (HTTP before
+    // HTTPS came on)? Keep ONE record, but only when proven: the server at
+    // that address must hold its saved token AND have issued this new one.
+    const replaceIds = await sameMacAs(stateRef.current, token);
+    const atOrigin = stateRef.current.pairings.find((p) => p.origin === normaliseHost(host))?.id;
+    const ok = await update((s) => upsertPairing(s, { origin: host, token, name }, { id: crypto.randomUUID?.() || `mac-${Date.now()}-${Math.random().toString(36).slice(2)}`, now: Date.now(), replaceIds, activate: seq === tapSeqRef.current }));
+    // A record folded into this one must stop notifying, like a removed Mac
+    // (Codex P2). Decided by the saved list, as onRemove does.
+    for (const gone of new Set([...replaceIds, atOrigin].filter(Boolean))) {
+      if (!stateRef.current.pairings.some((p) => p.id === gone)) forgetPush(gone).catch(() => { /* best effort: the Mac drops a dead endpoint */ });
+    }
     if (!ok) throw new Error('Could not save this pairing. Check device storage and get a new pairing code.');
     const current = pairingUIRef.current;
     // A scan can arrive during the storage write, or before React commits its

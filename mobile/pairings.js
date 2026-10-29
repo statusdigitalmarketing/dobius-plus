@@ -5,18 +5,39 @@ export const emptyPairings = () => ({ version: 1, pairings: [], activeId: null }
 export const activePairing = (state) => state.pairings.find((p) => p.id === state.activeId) || null;
 export const pairingKey = (pairing, key) => `${key}:${pairing.id}`;
 
-export function upsertPairing(state, { origin, token, name }, { id, now }) {
+/**
+ * Add or update a Mac. `replaceIds` name records at OTHER addresses proven to
+ * be this same Mac (App.jsx sameMacAs: each holds its saved token and issued
+ * this new one; the record already at the new address is probed too). The
+ * most recently used of them moves there and keeps its name and settings; the
+ * rest, and an unproven record at that address, fold into it rather than
+ * surviving to reconnect after a Remove.
+ * `activate: false` (the user switched Macs while this pairing was still
+ * proving) saves it without taking over the active Mac, unless the active one
+ * was folded into it.
+ */
+export function upsertPairing(state, { origin, token, name }, { id, now, replaceIds = [], activate = true }) {
   origin = normaliseHost(origin);
   if (!origin || typeof token !== 'string' || !token) throw new Error('Invalid pairing');
-  const existing = state.pairings.find((p) => p.origin === origin);
+  const atOrigin = state.pairings.find((p) => p.origin === origin);
+  // Of the PROVEN records, the one the user touched last keeps its id, so its
+  // name and drafts survive. A record at the new address that did not prove
+  // is another Mac that used to live there: it never wins over a proven one
+  // (Codex P2), and with none proven it is updated in place, as before.
+  const proven = state.pairings.filter((p) => replaceIds.includes(p.id)).sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+  const existing = proven[0] || atOrigin || null;
+  const folded = new Set([...proven, atOrigin].filter((p) => p && p !== existing).map((p) => p.id));
   const record = existing
-    ? { ...existing, token, lastUsedAt: now }
+    ? { ...existing, origin, token, lastUsedAt: now }
     : { id, origin, token, name: name?.trim() || new URL(origin).hostname, addedAt: now, lastUsedAt: now };
   if (!record.id) throw new Error('Missing pairing id');
+  const keepActive = !activate && state.pairings.some((p) => p.id === state.activeId) && !folded.has(state.activeId);
   return {
     ...state,
-    pairings: existing ? state.pairings.map((p) => p.id === existing.id ? record : p) : [...state.pairings, record],
-    activeId: record.id,
+    pairings: existing
+      ? state.pairings.filter((p) => !folded.has(p.id)).map((p) => p.id === existing.id ? record : p)
+      : [...state.pairings, record],
+    activeId: keepActive ? state.activeId : record.id,
   };
 }
 
