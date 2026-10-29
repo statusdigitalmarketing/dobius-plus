@@ -53,3 +53,13 @@ export function pairingText(mobileStatus) {
     `In the Dobius+ iPhone app: ${buildPairingDeepLink(mobileStatus)}`,
   ].join('\n');
 }
+
+// Whether a Mac may serve its phones over HTTPS. HTTPS lives at a different
+// address (https://<name>.ts.net) than plain HTTP (http://100.x.x.x), and a
+// phone paired at one cannot reach the other: its installed app and every
+// pairing stored there stay behind. So HTTPS only once it was CHOSEN
+// (Settings' Enable HTTPS, or it came on with no phone paired), or while no
+// phone is paired at all. `cfg` is the mobile server config.
+export function httpsAllowedFor(cfg) {
+  return cfg?.httpsChosen === true || !(cfg?.devices?.length > 0);
+}

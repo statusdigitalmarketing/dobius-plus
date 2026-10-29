@@ -68,7 +68,7 @@ import {
   getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink, clearSessionTabRunning,
   getAgentMemory, setAgentMemory, appendJournalEntry,
   getOrchestrationRuns, saveOrchestrationRun, deleteOrchestrationRun,
-  getMobileServerConfig,
+  getMobileServerConfig, updateMobileServerConfig,
   saveTerminalScrollback, loadTerminalScrollback,
   addManualProject, setProjectDisplayName, addHiddenProject,
   getAccounts, saveAccount, deleteAccount, getProjectAccount, setProjectAccount,
@@ -85,7 +85,7 @@ import {
 import { initAutoUpdater } from './auto-updater.js';
 import { provisionCert, certCapableName, certValidTo, getMagicDNSName } from './tailscale.js';
 import {
-  stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
+  stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting, httpsAllowed,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
   deriveDeviceId,
 } from './mobile-server.js';
@@ -2520,6 +2520,9 @@ function setupMobileServerHandlers() {
   // Provision the tailnet HTTPS cert (Phase 4): enables service-worker install
   // and Web Push. If the server is running, restart it so it picks up HTTPS.
   ipcMain.handle('mobileServer:provisionCert', async () => {
+    // An explicit choice: phones paired over HTTP pair once more, at the new
+    // address (Settings says so before the button is pressed).
+    updateMobileServerConfig({ httpsChosen: true });
     const res = await provisionCertAndRestart();
     return { ...res, status: getMobileServerStatus() };
   });
@@ -2553,9 +2556,11 @@ function provisionCertAndRestart() {
     // Restart only onto a NEWER cert than the one loaded, or off plain HTTP:
     // tailscale can return the same cert, and a pointless restart drops every
     // phone.
+    // Decided NOW, after the slow provision: a phone may have paired over HTTP
+    // meanwhile, and moving it off that address would strand it (Codex P1).
     const st = getMobileServerStatus();
     const disk = res.ok && certValidTo(res.name);
-    if (disk && st.running && servingOlder(st, res.name, disk)) await restartMobileServer();
+    if (disk && st.running && servingOlder(st, res.name, disk) && httpsAllowed()) await restartMobileServer();
     return res;
   })().finally(() => { certJob = null; });
   return certJob;
@@ -2574,10 +2579,9 @@ function provisionCertAndRestart() {
 // and always runs.
 async function autoEnableMobileHttps() {
   if (!getMobileServerConfig().enabled || certJob) return;
+  if (!httpsAllowed()) return; // phones paired over HTTP: only Enable HTTPS moves them
   const name = await getMagicDNSName();
-  if (!name) return;
-  const before = getMobileServerStatus();
-  if (!before.secure && before.deviceCount > 0) return;
+  if (!name) { retryHttpsSoon(); return; }
   const validTo = certValidTo(name);
   // Renew under 30 days, but only where this tailnet can issue certificates.
   if (!(validTo && validTo - Date.now() > 30 * 86_400_000) && (await certCapableName()) === name) {
@@ -2590,11 +2594,22 @@ async function autoEnableMobileHttps() {
   // HTTP, or a renewal wrote a new cert but failed (timeout) before restarting.
   const disk = certValidTo(name);
   const st = getMobileServerStatus();
-  if (!st.secure && st.deviceCount > 0) return; // see above: phones paired over HTTP stay put
-  if (disk && disk > Date.now() && st.running && servingOlder(st, name, disk) && !certJob) {
+  if (disk && disk > Date.now() && st.running && servingOlder(st, name, disk) && !certJob && httpsAllowed()) {
     certJob = restartMobileServer().then(() => ({ ok: true, name })).finally(() => { certJob = null; });
     await certJob;
   }
+  retryHttpsSoon();
+}
+
+// HTTPS was chosen but the server came up on plain HTTP (a MagicDNS lookup
+// timed out during a restart, say): its phones are waiting at the HTTPS
+// address, so try again in a minute rather than at the next 30-minute check.
+let httpsRetry = null;
+function retryHttpsSoon() {
+  const st = getMobileServerStatus();
+  if (!getMobileServerConfig().httpsChosen || !st.running || st.secure || httpsRetry) return;
+  httpsRetry = setTimeout(() => { httpsRetry = null; runAutoHttps(); }, 60_000);
+  httpsRetry.unref?.();
 }
 const runAutoHttps = () => autoEnableMobileHttps()
   .catch((err) => console.warn('[mobile-server] automatic HTTPS:', err?.message || err));

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pairingOrigin, buildPairingDeepLink, buildPairingWebLink, pairingText } from '../pairing-link.js';
+import { pairingOrigin, buildPairingDeepLink, buildPairingWebLink, pairingText, httpsAllowedFor } from '../pairing-link.js';
 
 const http = { running: true, pairingCode: '482913', address: { host: '100.89.143.67', port: 8420 }, url: null };
 const https = { running: true, pairingCode: '482913', address: { host: '100.89.143.67', port: 8420 }, url: 'https://sams-mac.tail6addbf.ts.net:8420/' };
@@ -38,4 +38,13 @@ test('nothing to send when the server is down or has no code', () => {
   assert.equal(pairingText({ ...http, running: false }), '');
   assert.equal(pairingText({ ...http, pairingCode: null }), '');
   assert.equal(pairingText({ running: true, pairingCode: '1' }), '');
+});
+
+test('HTTPS only where it cannot strand a phone paired over HTTP', () => {
+  assert.equal(httpsAllowedFor({ devices: [] }), true, 'no phone paired yet: HTTPS may come on');
+  assert.equal(httpsAllowedFor({}), true, 'no devices list at all');
+  assert.equal(httpsAllowedFor({ devices: [{ token: 't' }] }), false, 'a phone paired over HTTP stays at its HTTP address');
+  assert.equal(httpsAllowedFor({ devices: [{ token: 't' }], httpsChosen: true }), true, 'chosen in Settings: phones pair once more');
+  assert.equal(httpsAllowedFor({ devices: [{ token: 't' }], httpsChosen: 'yes' }), false, 'only a real true counts');
+  assert.equal(httpsAllowedFor(null), true);
 });
