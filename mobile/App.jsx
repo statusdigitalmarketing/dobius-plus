@@ -403,8 +403,11 @@ export default function App() {
   const handlePaired = async ({ token, host, name }) => {
     const shown = pairingUI;
     // A pairing is the newest action: it supersedes pending taps, and a tap or
-    // switch made while it is still proving wins over it (Codex P2).
+    // switch made while it is still proving wins over it (Codex P2). Like a
+    // pick from the list, it clears the overlay of the tap it supersedes,
+    // which returns without clearing it (Codex P2).
     const seq = ++tapSeqRef.current;
+    setSwitchingTo(null);
     // Already paired with this Mac at another of its addresses (HTTP before
     // HTTPS came on)? Keep ONE record, but only when proven: the server at
     // that address must hold its saved token AND have issued this new one.
