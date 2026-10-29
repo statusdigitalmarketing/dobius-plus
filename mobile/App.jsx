@@ -202,6 +202,32 @@ export default function App() {
     return () => { cancelled = true; handle?.remove(); };
   }, []);
 
+  // Scanned a Mac's QR code in a browser (shared/pairing-link.js
+  // buildPairingWebLink): this page was opened at <origin>/#pair=<code>. Read
+  // the code, take it out of the address bar, and send it through the same
+  // path as a native scan, CONFIRM STEP INCLUDED: being served from an origin
+  // does not prove it is the user's own Mac (anyone can host this bundle and
+  // text the link). Already paired with other Macs, it adds this one. Native
+  // builds take dobiusplus:// links above instead.
+  useEffect(() => {
+    if (window.Capacitor?.isNativePlatform?.() === true) return undefined;
+    // Never inside a frame: a page that frames this one could lay the Pair
+    // button under its own and hide the address shown for confirmation.
+    if (window.top !== window.self) return undefined;
+    const consume = () => {
+      // `#pair=<code>` over HTTPS, bare `#pair` (address only) over HTTP.
+      const m = /^#pair(?:=(\d{6}))?$/.exec(window.location.hash || '');
+      if (!m) return;
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      showPairing({ host: window.location.origin, code: m[1] || '', nonce: (pairingUIRef.current?.nonce || 0) + 1, confirm: true });
+    };
+    consume();
+    window.addEventListener('hashchange', consume); // a second scan in the same tab
+    return () => window.removeEventListener('hashchange', consume);
+    // showPairing only touches refs and setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Show a document as the current one, ending the old Mac's connection when
   // the active Mac or its token changed.
   const adopt = (next) => {

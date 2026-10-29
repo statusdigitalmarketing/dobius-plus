@@ -1101,6 +1101,8 @@ export function getMobileServerStatus() {
     tailnetIp: getTailnetIp(),
     address: boundAddress,
     secure: serveInfo?.secure || false,
+    certValidTo: serveInfo?.certValidTo || null,
+    certName: serveInfo?.certName || null,
     url: serveInfo?.url || null,
     pairingCode: httpServer ? pairingCode : null,
     deviceCount: getMobileServerConfig().devices.length,
@@ -1439,6 +1441,7 @@ async function doStartMobileServer(stillCurrent) {
   // to a same-subnet sniffer the way the removed LAN/plaintext mode exposed it.
   let magicName;
   let secure = false;
+  let certValidTo = null; // expiry of the cert this server loaded (ms)
   magicName = await getMagicDNSName();
   corsHosts = await getTailnetHosts();
   if (quitting || !stillCurrent()) return { running: false, error: 'stopped during start' };
@@ -1453,11 +1456,10 @@ async function doStartMobileServer(stillCurrent) {
   if (magicName && hasCertFor(magicName)) {
     const cp = certPathsFor(magicName);
     try {
-      httpServer = https.createServer(
-        { cert: fs.readFileSync(cp.certFile), key: fs.readFileSync(cp.keyFile) },
-        expApp,
-      );
+      const cert = fs.readFileSync(cp.certFile);
+      httpServer = https.createServer({ cert, key: fs.readFileSync(cp.keyFile) }, expApp);
       secure = true;
+      certValidTo = Date.parse(new crypto.X509Certificate(cert).validTo) || null;
     } catch (e) {
       console.warn('[mobile-server] cert unreadable, falling back to HTTP:', e?.message || e);
     }
@@ -1465,6 +1467,8 @@ async function doStartMobileServer(stillCurrent) {
   if (!httpServer) httpServer = http.createServer(expApp);
   const pendingServeInfo = {
     secure,
+    certValidTo,
+    certName: secure ? magicName : null,
     url: secure ? `https://${magicName}:${port}/` : `http://${ip}:${port}/`,
   };
 
