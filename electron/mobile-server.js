@@ -1295,22 +1295,26 @@ async function doStartMobileServer(stillCurrent) {
     return m ? m[1] : null;
   }
 
-  // POST /same-mac { tokenHash, nonce }  (Bearer: the token just issued by the
-  // Mac the phone paired). Lets a phone prove an older saved address is THIS
-  // Mac without sending that address's token anywhere: it sends sha256(old
-  // token) and a nonce, and only a server holding that token can answer with
-  // HMAC(old token, nonce). A different Mac at a reused tailnet IP cannot, and
-  // one that relays to the real Mac fails the bearer check there (Codex P1).
+  // POST /same-mac { tokenHash, newTokenHash, nonce }  (no auth). Lets a phone
+  // prove an older saved address is THIS Mac without sending any token: both
+  // hashes must name tokens this Mac issued, and the reply is
+  // HMAC(old token, nonce:newTokenHash), which only a server holding the old
+  // token can make. A different Mac at a reused tailnet IP cannot answer, and
+  // one that relays to the real Mac gets a 404 there, since the real Mac never
+  // issued the relayer's new token (Codex P1 + security review). The hash is
+  // domain-separated so it never matches another hash of a token.
+  const sameMacHash = (token) => crypto.createHash('sha256').update(`dobius-same-mac:${token}`).digest();
   expApp.post('/same-mac', (req, res) => {
-    if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
-    const { tokenHash, nonce } = req.body || {};
+    const { tokenHash, newTokenHash, nonce } = req.body || {};
     const hex64 = (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(v);
-    if (!hex64(tokenHash) || !hex64(nonce)) return res.status(400).json({ ok: false, error: 'bad request' });
-    const want = Buffer.from(tokenHash, 'hex');
-    const old = getMobileServerConfig().devices.find((d) => typeof d.token === 'string' && d.token
-      && crypto.timingSafeEqual(crypto.createHash('sha256').update(d.token).digest(), want));
-    if (!old) return res.status(404).json({ ok: false, error: 'unknown' });
-    res.json({ ok: true, proof: crypto.createHmac('sha256', old.token).update(nonce).digest('hex') });
+    if (!hex64(tokenHash) || !hex64(newTokenHash) || !hex64(nonce)) return res.status(400).json({ ok: false, error: 'bad request' });
+    const issued = (hash) => {
+      const want = Buffer.from(hash, 'hex');
+      return getMobileServerConfig().devices.find((d) => typeof d.token === 'string' && d.token && crypto.timingSafeEqual(sameMacHash(d.token), want));
+    };
+    const old = issued(tokenHash);
+    if (!old || !issued(newTokenHash)) return res.status(404).json({ ok: false, error: 'unknown' });
+    res.json({ ok: true, proof: crypto.createHmac('sha256', old.token).update(`${nonce}:${newTokenHash}`).digest('hex') });
   });
 
   // POST /voice/intent  { transcript: string, tabId?: string }

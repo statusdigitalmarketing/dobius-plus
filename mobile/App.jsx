@@ -120,12 +120,12 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
 
 // The id of a paired Mac, at an address other than `origin`, that is the same
 // server as the one just paired. Proof: that address answers POST /same-mac
-// with HMAC(record's token, nonce), which only the server holding that token
-// can make, while accepting the token just issued. The saved token itself is
-// never sent (a different Mac can hold the same tailnet IP: Codex P1), only
-// its hash. The new token only goes to addresses the new Mac named itself.
-// null when there is none, it cannot be reached, or WebCrypto is missing (a
-// plain-HTTP browser page): both records then stay.
+// with HMAC(saved token, nonce:hash of the new token), which only a server
+// that holds the saved token AND issued the new one can make. No token is sent
+// anywhere, only domain-separated hashes: a different Mac can hold the same
+// tailnet IP, and a short name can resolve anywhere (Codex P1, security
+// review). null when there is none, it cannot be reached, or WebCrypto is
+// missing (a plain-HTTP browser page): both records then stay.
 async function sameMacAs(state, origin, token, hosts) {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) return null;
@@ -134,6 +134,8 @@ async function sameMacAs(state, origin, token, hosts) {
   const target = normaliseHost(origin);
   const enc = new TextEncoder();
   const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const hashOf = async (t) => hex(await subtle.digest('SHA-256', enc.encode(`dobius-same-mac:${t}`)));
+  const newTokenHash = await hashOf(token);
   for (const p of state?.pairings || []) {
     if (p.origin === target || !own.has(hostOf(p.origin))) continue;
     const ctl = new AbortController();
@@ -141,12 +143,10 @@ async function sameMacAs(state, origin, token, hosts) {
     try {
       const nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
       const key = await subtle.importKey('raw', enc.encode(p.token), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-      const want = hex(await subtle.sign('HMAC', key, enc.encode(nonce)));
-      const tokenHash = hex(await subtle.digest('SHA-256', enc.encode(p.token)));
+      const want = hex(await subtle.sign('HMAC', key, enc.encode(`${nonce}:${newTokenHash}`)));
       const res = await fetch(`${p.origin}/same-mac`, {
-        method: 'POST', body: JSON.stringify({ tokenHash, nonce }), signal: ctl.signal,
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        cache: 'no-store', credentials: 'omit', redirect: 'error',
+        method: 'POST', body: JSON.stringify({ tokenHash: await hashOf(p.token), newTokenHash, nonce }), signal: ctl.signal,
+        headers: { 'Content-Type': 'application/json' }, cache: 'no-store', credentials: 'omit', redirect: 'error',
       });
       const body = res.ok ? await res.json().catch(() => null) : null;
       if (body?.ok === true && body.proof === want) return p.id;

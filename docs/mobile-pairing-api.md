@@ -33,22 +33,20 @@ curl -s -X POST http://100.89.143.67:8420/pair -H 'Content-Type: application/jso
 
 ## POST /same-mac
 
-Lets a phone prove that an older saved address (for example the HTTP IP it paired before HTTPS came on) is this same Mac, without sending that address's token anywhere. The phone then keeps one record instead of two.
+Lets a phone prove that an older saved address (for example the HTTP IP it paired before HTTPS came on) is this same Mac, without sending any token anywhere. The phone then keeps one record instead of two.
 
-- Auth: `Authorization: Bearer <token just issued by /pair>`
-- Request: `{ "tokenHash": "<sha256 hex of the OLD saved token>", "nonce": "<64 hex, random>" }`
-- Response `200`: `{ "ok": true, "proof": "<HMAC-SHA256(old token, nonce) hex>" }`. The phone computes the same HMAC itself and merges only on an exact match.
-- Errors: `401` missing or unknown bearer, `400` malformed hash or nonce, `404` this Mac never issued a token with that hash (a different Mac at a reused IP lands here).
+- Auth: none. No token is sent, only hashes: `hash(t) = sha256("dobius-same-mac:" + t)`, hex.
+- Request: `{ "tokenHash": "<hash(old saved token)>", "newTokenHash": "<hash(token just issued by /pair)>", "nonce": "<64 hex, random>" }`
+- Response `200`: `{ "ok": true, "proof": "<HMAC-SHA256(key = old token, msg = nonce + ':' + newTokenHash) hex>" }`. The phone computes the same HMAC itself and merges only on an exact match.
+- Errors: `400` malformed field, `404` this Mac did not issue both tokens (a different Mac at a reused IP, or a relay to the real Mac, lands here).
 - Side effects: none.
 
-Only a server holding the old token can produce the proof. A server that relays the request to the real Mac fails the bearer check there, since the bearer is its own token.
+Only a server that holds the old token can make the proof, and it only answers when it also issued the new token, so relaying the request to the real Mac fails there.
 
 ```bash
-NONCE=$(openssl rand -hex 32)
-HASH=$(printf %s "$OLD_TOKEN" | shasum -a 256 | cut -d' ' -f1)
-curl -s -X POST https://sams-macbook-pro.tail6addbf.ts.net:8420/same-mac \
-  -H "Authorization: Bearer $NEW_TOKEN" -H 'Content-Type: application/json' \
-  -d "{\"tokenHash\":\"$HASH\",\"nonce\":\"$NONCE\"}"
+h() { printf 'dobius-same-mac:%s' "$1" | shasum -a 256 | cut -d' ' -f1; }
+curl -s -X POST http://100.89.143.67:8420/same-mac -H 'Content-Type: application/json' \
+  -d "{\"tokenHash\":\"$(h "$OLD_TOKEN")\",\"newTokenHash\":\"$(h "$NEW_TOKEN")\",\"nonce\":\"$(openssl rand -hex 32)\"}"
 ```
 
 A plain-HTTP browser page has no WebCrypto, so it skips this check and keeps both records. The native app always has it.
