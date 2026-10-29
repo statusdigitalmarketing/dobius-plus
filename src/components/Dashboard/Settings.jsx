@@ -598,7 +598,7 @@ export default function Settings() {
             <SettingRow
               label="HTTPS"
               description={mobileStatus.secure
-                ? 'Secure: notifications and install are available. A phone paired over plain HTTP keeps working; scan the code below on it once to get notifications'
+                ? 'Secure: notifications and install are available. A phone paired over plain HTTP keeps working; for notifications on it, scan the code below, add the page to its home screen and tap the bell'
                 : 'HTTP only: push notifications and installing the app need HTTPS. It turns on by itself once HTTPS Certificates are enabled for your tailnet, and phones paired over HTTP keep working'}
             >
               {mobileStatus.secure ? (

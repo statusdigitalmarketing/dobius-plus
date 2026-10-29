@@ -2571,7 +2571,7 @@ function provisionCertAndRestart() {
 async function autoEnableMobileHttps() {
   if (!getMobileServerConfig().enabled || certJob) return;
   const name = await getMagicDNSName();
-  if (!name) return;
+  if (!name) { retryHttpsSoon(); return; } // a failed lookup keeps the short retry going (Codex P1)
   const validTo = certValidTo(name);
   // Renew under 30 days, but only where this tailnet can issue certificates.
   if (!(validTo && validTo - Date.now() > 30 * 86_400_000) && (await certCapableName()) === name) {

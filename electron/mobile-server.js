@@ -150,6 +150,7 @@ const HEARTBEAT_MS = 30000;           // ping every 30s; a client that misses a 
 const MAX_VOICE_INFLIGHT = 2;
 
 let httpServer = null;
+const STALLED_REQUEST_MS = 120_000;
 // This tailnet's own hosts, for CORS (see mobile-cors.js). null = unknown.
 let corsHosts = null;
 let corsHostsTimer = null;
@@ -1469,6 +1470,12 @@ async function doStartMobileServer(stillCurrent) {
       console.warn('[mobile-server] cert unreadable, serving HTTP only:', e?.message || e);
     }
   }
+  // A connection silent mid-request is dropped after this long: Node's header
+  // deadline does not end a request that stalled after its first bytes (a
+  // tailnet peer could hold sockets open in the process that runs every
+  // terminal: Codex P1). Longer than /voice/reply's 60s hold; a WebSocket
+  // clears it on upgrade.
+  for (const side of [httpSide, httpsSide]) if (side) side.timeout = STALLED_REQUEST_MS;
   httpServer = httpsSide ? dualProtocolServer(httpSide, httpsSide) : httpSide;
   const pendingServeInfo = {
     secure,

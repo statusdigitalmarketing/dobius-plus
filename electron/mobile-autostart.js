@@ -177,12 +177,22 @@ export function attachWebSocketServer(httpServer, options) {
  * (Codex P1, three rounds of "which address may we move to"). Each new
  * connection is routed by its first byte: 0x16 opens every TLS handshake,
  * an HTTP request starts with a letter. A connection that sends nothing is
- * dropped after IDLE_MS. close() stops listening and closes both inner
- * servers' connections, so a restart on the same port is not held up.
+ * dropped after IDLE_MS.
+ *
+ * The inner servers never listen themselves, and Node only starts tracking an
+ * HTTP server's connections (header and request deadlines, closeAllConnections)
+ * on 'listening': so the front passes its 'listening' on, or a client sending
+ * one byte could hold a socket forever, and a stop could leave a paired phone's
+ * keep-alive connection running commands (Codex P1, two lenses). The front
+ * also keeps every socket it accepted and destroys them all on close(), so a
+ * stop or a device removal ends every connection and the port frees at once.
  */
 export const DUAL_IDLE_MS = 10_000;
 export function dualProtocolServer(httpSide, httpsSide) {
+  const sockets = new Set();
   const front = net.createServer({ pauseOnConnect: true }, (sock) => {
+    sockets.add(sock);
+    sock.once('close', () => sockets.delete(sock));
     sock.on('error', () => { /* a client gone before its first byte */ });
     const idle = setTimeout(() => sock.destroy(), DUAL_IDLE_MS);
     idle.unref?.();
@@ -197,12 +207,14 @@ export function dualProtocolServer(httpSide, httpsSide) {
     sock.resume();
   });
   front.inner = [httpSide, httpsSide];
+  front.on('listening', () => { for (const s of front.inner) s.emit('listening'); });
   const closeFront = front.close.bind(front);
   front.close = (cb) => {
     for (const s of front.inner) {
       try { s.closeAllConnections?.(); } catch { /* noop */ }
       try { s.close(); } catch { /* not listening on its own: fine */ }
     }
+    for (const sock of sockets) sock.destroy();
     return closeFront(cb);
   };
   return front;
