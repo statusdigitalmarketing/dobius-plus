@@ -119,22 +119,31 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
 }
 
 // The id of a paired Mac, at an address other than `origin`, that is the same
-// server as the one just paired: one of the addresses that server reported
-// for itself, and it accepts the token it just issued. The token only goes to
+// server as the one just paired. Proof: that address accepts BOTH the record's
+// own token and the token just issued, and tokens are only valid on the server
+// that minted them. Accepting only the new one is not enough: a different Mac
+// on another tailnet can hold the same IP. The new token only goes to
 // addresses the new Mac named, so a Mac that lies can only leak its own token.
 // null when there is none or it cannot be reached (both records then stay).
 async function sameMacAs(state, origin, token, hosts) {
   const own = new Set(hosts.map((h) => String(h).toLowerCase().replace(/\.$/, '')));
   const hostOf = (o) => { try { return new URL(o).hostname.toLowerCase(); } catch { return ''; } };
   const target = normaliseHost(origin);
-  for (const p of state?.pairings || []) {
-    if (p.origin === target || !own.has(hostOf(p.origin))) continue;
+  // Only a real answer counts: a 2xx carrying this Mac's push key. An error
+  // (a 431 for an oversized header) is readable same-origin and proves nothing.
+  const accepts = async (base, bearer) => {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 3000);
     try {
-      const res = await fetch(`${p.origin}/push/vapid`, { headers: { Authorization: `Bearer ${token}` }, signal: ctl.signal, cache: 'no-store', credentials: 'omit', redirect: 'error' });
-      if (res.status !== 401 && res.status !== 403 && res.status !== 421 && res.status < 500) return p.id;
-    } catch { /* unreachable from here (mixed content, offline): keep both */ } finally { clearTimeout(timer); }
+      const res = await fetch(`${base}/push/vapid`, { headers: { Authorization: `Bearer ${bearer}` }, signal: ctl.signal, cache: 'no-store', credentials: 'omit', redirect: 'error' });
+      const body = res.ok ? await res.json().catch(() => null) : null;
+      return body?.ok === true && typeof body.publicKey === 'string' && body.publicKey ? body.publicKey : null;
+    } catch { return null; /* unreachable from here (mixed content, offline): keep both */ } finally { clearTimeout(timer); }
+  };
+  for (const p of state?.pairings || []) {
+    if (p.origin === target || !own.has(hostOf(p.origin))) continue;
+    const mine = await accepts(p.origin, p.token);
+    if (mine && await accepts(p.origin, token) === mine) return p.id;
   }
   return null;
 }

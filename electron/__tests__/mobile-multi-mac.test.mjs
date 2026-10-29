@@ -161,6 +161,18 @@ test('a Mac proven to be the same at a new address keeps ONE record, moved there
   assert.equal(unproven.pairings.length, 3, 'without proof it is a separate Mac');
 });
 
+test('a proven merge folds a duplicate already at the new address into the original', () => {
+  const before = initial();
+  const dup = upsertPairing(before, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-old' }, { id: 'dup', now: 8 });
+  assert.equal(dup.pairings.length, 3);
+  const next = upsertPairing(dup, { origin: 'https://a-new.tail.ts.net:8420', token: 'tls-a' }, { id: 'unused', now: 9, replaceId: 'a' });
+  assert.deepEqual(next.pairings.map((p) => p.id).sort(), ['a', 'b'], 'the duplicate is gone, not left to reconnect after a Remove');
+  const moved = next.pairings.find((p) => p.id === 'a');
+  assert.equal(moved.origin, 'https://a-new.tail.ts.net:8420');
+  assert.equal(moved.token, 'tls-a');
+  assert.equal(next.activeId, 'a');
+});
+
 test('re-pair deduplicates normalized origins and retains identity and name', () => {
   const before = initial();
   const next = upsertPairing(before, { origin: 'HTTPS://A.TAIL.TS.NET:8420/path?x=1', token: 'new-a' }, { id: 'unused', now: 9 });

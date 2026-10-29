@@ -337,3 +337,15 @@
 - **FIX**: Decide by WIDTH, measured by the terminal emulator itself. Claude's TUI only breaks a row at a space when the next word would not fit, so a row is a wrap only if it ends within 10 columns of the frame edge AND its successor's first word could not have fit; everything else keeps its break. `electron/screen-render.js` reports each row's true end column (`ends`) and first-word width (`firstWords`) from the cells; a cell is blank by its BASE character. The frame's rule must be as wide as the whole screen's widest row. Separators (blank, rule, glyph-only rows) are hard breaks, never paragraph splits (a split hid prompt rows: security review).
 - **CONTEXT**: Any time a display re-derives structure the source already knows (widths, wraps), ask the source (the emulator) instead of re-guessing from text. A heuristic that needs a new clause every review round is the wrong model, not an incomplete one.
 - **DETECTION**: `grep -n "rowWidth(" electron/selector-parser.js` (production paths must go through colOf/firstWordOf; rowWidth is the plain-array fallback only)
+
+### Security - 2026-10-29
+- **MISTAKE**: The strict Host rule for `/pair` lived in an `expApp.use` middleware keyed on `req.path === '/pair'` (`electron/mobile-server.js`). Express routing is case-insensitive and ignores a trailing slash by default, so `POST /PAIR` or `/pair/` reached the pair handler with the loose check (caught by the automated security review, not by Codex or me).
+- **FIX**: Put a route-specific guard INSIDE the matched handler (`expApp.post('/pair', ...)` first line), never in a middleware that string-compares `req.path`.
+- **CONTEXT**: Any per-route policy (auth, Host strictness, rate limit) applied by path comparison in middleware has the same bypass.
+- **DETECTION**: `grep -n "req.path ===" electron/*.js`
+
+### Process - 2026-10-29
+- **MISTAKE**: A probe loop `for path in /pair /PAIR; do curl ...` in zsh overwrote `PATH` (zsh ties the lowercase `path` array to it), so curl, rm and the harness teardown all failed with "command not found".
+- **FIX**: Never name a zsh variable `path` (also avoid `cdpath`, `fpath`, `manpath`). Use `u` or `route`.
+- **CONTEXT**: Bash tool commands run under zsh here.
+- **DETECTION**: `grep -nE "for path in|\bpath=" scratchpad/**/*.sh`

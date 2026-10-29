@@ -7,22 +7,26 @@ export const pairingKey = (pairing, key) => `${key}:${pairing.id}`;
 
 /**
  * Add or update a Mac. `replaceId` names a record at ANOTHER address that was
- * proven to be this same Mac (App.jsx sameMac: it accepted this new token), so
- * that record moves to the new address and keeps its name and settings rather
- * than leaving two entries for one Mac.
+ * proven to be this same Mac (App.jsx sameMacAs: it accepted its old token
+ * AND this new one), so that record moves to the new address and keeps its
+ * name and settings rather than leaving two entries for one Mac.
  */
 export function upsertPairing(state, { origin, token, name }, { id, now, replaceId = null }) {
   origin = normaliseHost(origin);
   if (!origin || typeof token !== 'string' || !token) throw new Error('Invalid pairing');
-  const existing = state.pairings.find((p) => p.origin === origin)
-    || (replaceId ? state.pairings.find((p) => p.id === replaceId) : null);
+  const atOrigin = state.pairings.find((p) => p.origin === origin);
+  // The proven record wins over one already at the new address: both are this
+  // Mac, so the duplicate goes rather than surviving to reconnect after a Remove.
+  const existing = (replaceId && state.pairings.find((p) => p.id === replaceId)) || atOrigin;
   const record = existing
     ? { ...existing, origin, token, lastUsedAt: now }
     : { id, origin, token, name: name?.trim() || new URL(origin).hostname, addedAt: now, lastUsedAt: now };
   if (!record.id) throw new Error('Missing pairing id');
   return {
     ...state,
-    pairings: existing ? state.pairings.map((p) => p.id === existing.id ? record : p) : [...state.pairings, record],
+    pairings: existing
+      ? state.pairings.filter((p) => p === existing || p !== atOrigin).map((p) => p.id === existing.id ? record : p)
+      : [...state.pairings, record],
     activeId: record.id,
   };
 }

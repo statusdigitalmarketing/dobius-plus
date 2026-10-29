@@ -1163,7 +1163,7 @@ async function doStartMobileServer(stillCurrent) {
   // Host is a DNS-rebinding page calling us from its own origin.
   const hostOk = (host, strict = false) => isOwnHost(host, { ip, name: ownName || magicName, port, strict });
   expApp.use((req, res, next) => {
-    if (!hostOk(req.headers.host, req.path === '/pair')) return res.status(421).end();
+    if (!hostOk(req.headers.host)) return res.status(421).end();
     return next();
   });
   expApp.use((req, res, next) => {
@@ -1224,6 +1224,10 @@ async function doStartMobileServer(stillCurrent) {
   });
 
   expApp.post('/pair', (req, res) => {
+    // Strict here, in the matched route: Express routing ignores case and a
+    // trailing slash, so a check on req.path in the middleware missed /PAIR.
+    // A short name depends on the phone's DNS search domain and proves nothing.
+    if (!hostOk(req.headers.host, true)) return res.status(421).end();
     // Time-boxed cooldown after a wrong-guess flood, NOT a permanent lockout. The
     // old code nulled pairingCode on the 5th miss, so any unauthenticated caller
     // who could reach the server could deny pairing forever (and re-lock right
