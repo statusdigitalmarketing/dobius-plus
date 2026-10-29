@@ -453,6 +453,16 @@ fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true });
   assert.equal((await readTranscriptImage(t, `${uuid}:0:0`))?.data, first, 'unterminated final record is indexed');
   fs.appendFileSync(t, '\n' + dupe(later) + '\n');
   assert.equal((await readTranscriptImage(t, `${uuid}:0:0`))?.data, later, 'then grows normally');
+  // A record over the line cap still being written: earlier images load, it is
+  // skipped across appends (never re-read whole), and what follows it loads.
+  const big = path.join(dir, 'growing.jsonl');
+  fs.writeFileSync(big, dupe(first) + '\n' + '{"type":"user","uuid":"u-big","message":{"content":"' + 'z'.repeat(65 * 1024 * 1024));
+  assert.equal((await readTranscriptImage(big, `${uuid}:0:0`))?.data, first, 'image before a huge unfinished record');
+  fs.appendFileSync(big, 'z'.repeat(1024));
+  assert.equal((await readTranscriptImage(big, `${uuid}:0:0`))?.data, first, 'still found while it grows');
+  const other = '0a1b2c3d-7777-2222-3333-444455556666';
+  fs.appendFileSync(big, '"}}\n' + dupe(later).replace(uuid, other) + '\n');
+  assert.equal((await readTranscriptImage(big, `${other}:0:0`))?.data, later, 'the record after it is indexed');
   // Rewritten in place at the SAME size, the record moved: the index notices.
   const r = path.join(dir, 'rewrite.jsonl');
   const pad = (n) => JSON.stringify({ type: 'user', uuid: 'u-p', message: { role: 'user', content: 'p'.repeat(n) } });

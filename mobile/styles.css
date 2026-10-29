@@ -1153,3 +1153,4 @@ button.primary:disabled { opacity: 0.4; }
 .session-card .card-ctx::before { background: var(--bg); }
 .session-card:active .card-ctx::before { background: var(--surface); }
 .session-card .card-chevron { display: none; }
+.board-title-needs { color: var(--status-needs); font-weight: 600; }

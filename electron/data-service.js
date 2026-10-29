@@ -1600,24 +1600,26 @@ export async function loadTranscriptImage(sessionId, projectPath, ref) {
  * ever turned into a string, and a line past IMAGE_LINE_MAX is skipped. A
  * repeated uuid keeps its LAST record, the one a chat's tail window shows.
  */
-const imageIndexes = new Map(); // path -> { ino, size, mtimeMs, resume, tail, map }
+const imageIndexes = new Map(); // path -> { ino, size, mtimeMs, resume, skipping, tail, map }
 const IMAGE_MARK = Buffer.from('"image"');
 const TAIL_PROBE = 64;
 // Scans [from, end) only: `end` is the size stat saw, so a writer appending
 // faster than we read cannot keep the scan (and the queue behind it) going.
-// Resolves the offset to resume from: the start of an unterminated last line,
-// which is still indexed if it already parses (a stopped session's final
-// record often has no newline), and is re-read once the file grows.
-function scanImageIndex(p, from, end, map) {
+// Resolves { resume, skipping }: normally the start of an unterminated last
+// line, which is still indexed if it already parses (a stopped session's
+// final record often has no newline) and is re-read once the file grows. A
+// last line already past IMAGE_LINE_MAX resumes at the END with skipping
+// set, so a huge record still being written is never re-read (Codex P2).
+function scanImageIndex(p, from, end, map, skipFirst = false) {
   return new Promise((resolve) => {
-    if (from >= end) { resolve(from); return; }
+    if (from >= end) { resolve({ resume: from, skipping: skipFirst }); return; }
     let stream;
-    try { stream = fsSync.createReadStream(p, { start: from, end: end - 1 }); } catch { resolve(from); return; }
+    try { stream = fsSync.createReadStream(p, { start: from, end: end - 1 }); } catch { resolve({ resume: from, skipping: skipFirst }); return; }
     let parts = [];
     let partLen = 0;
     let lineStart = from;
     let pos = from;
-    let skipping = false;
+    let skipping = skipFirst;
     const indexLine = (endPos) => {
       if (skipping || !partLen) return;
       const line = parts.length === 1 ? parts[0] : Buffer.concat(parts, partLen);
@@ -1641,8 +1643,12 @@ function scanImageIndex(p, from, end, map) {
       }
       pos += chunk.length;
     });
-    stream.on('end', () => { indexLine(pos); resolve(lineStart); });
-    stream.on('error', () => resolve(lineStart));
+    stream.on('end', () => {
+      if (skipping) { resolve({ resume: pos, skipping: true }); return; }
+      indexLine(pos);
+      resolve({ resume: lineStart, skipping: false });
+    });
+    stream.on('error', () => resolve({ resume: from, skipping: skipFirst })); // retry the whole range
   });
 }
 // The bytes just before `at`: if they changed, the file was rewritten rather
@@ -1669,9 +1675,9 @@ async function imageRecordRange(p, uuid) {
   const stale = !idx || idx.ino !== st.ino || st.size < idx.size
     || (st.size === idx.size && st.mtimeMs !== idx.mtimeMs)
     || (st.size > idx.size && (await tailBytes(p, idx.resume)) !== idx.tail);
-  if (stale) idx = { ino: st.ino, size: 0, mtimeMs: 0, resume: 0, tail: '', map: new Map() };
+  if (stale) idx = { ino: st.ino, size: 0, mtimeMs: 0, resume: 0, skipping: false, tail: '', map: new Map() };
   if (st.size > idx.size) {
-    idx.resume = await scanImageIndex(p, idx.resume, st.size, idx.map);
+    ({ resume: idx.resume, skipping: idx.skipping } = await scanImageIndex(p, idx.resume, st.size, idx.map, idx.skipping));
     idx.size = st.size;
     idx.mtimeMs = st.mtimeMs;
     idx.tail = await tailBytes(p, idx.resume);

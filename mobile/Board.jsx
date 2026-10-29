@@ -174,6 +174,16 @@ export default function Board({ connection, status, onOpen, onShowHistory, macNa
   const dotColor = status === 'authed' ? 'var(--status-done)'
     : status === 'connecting' ? 'var(--status-working)' : 'var(--status-needs)';
 
+  // One status line, most urgent first: on a 320px phone the end is what gets
+  // clipped, so "needs you" leads and "connected" only shows when nothing
+  // else is worth saying (Codex P2).
+  const statusRest = [
+    status === 'connecting' ? 'connecting' : status !== 'authed' ? 'offline' : '',
+    workingCount > 0 ? `${workingCount} working` : '',
+    terminals.length > 0 && totals.active === 0 ? 'all quiet' : '',
+    totals.done > 0 && totals.needs === 0 && totals.working === 0 ? `${totals.done} just finished` : '',
+  ].filter(Boolean).join(' · ') || (needsCount > 0 ? '' : 'connected');
+  const statusLine = [needsCount > 0 ? `${needsCount} needs you` : '', statusRest].filter(Boolean).join(' · ');
   return (
     <div className="screen board-screen">
       {/* The Claude app's home header: a round button (your Macs), the Mac's
@@ -183,17 +193,13 @@ export default function Board({ connection, status, onOpen, onShowHistory, macNa
           <button className="tb-round" onClick={onMacs} aria-label={`Switch Mac, current Mac: ${macName}`}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="11" rx="2" /><path d="M2.5 19h19" /></svg>
           </button>
-          <button className="board-title-mid" onClick={onMacs} aria-label={`Switch Mac, current Mac: ${macName}`}>
+          <button className="board-title-mid" onClick={onMacs} aria-label={`${macName}: ${statusLine}. Switch Mac`}>
             <span className="board-title-main">{macName}</span>
             <span className="board-title-sub">
               {status !== 'authed' && <span className="status-dot" style={{ backgroundColor: dotColor }} />}
-              {[
-                status === 'authed' ? 'connected' : status === 'connecting' ? 'connecting' : 'offline',
-                needsCount > 0 ? `${needsCount} needs you` : '',
-                workingCount > 0 ? `${workingCount} working` : '',
-                terminals.length > 0 && totals.active === 0 ? 'all quiet' : '',
-                totals.done > 0 && totals.needs === 0 && totals.working === 0 ? `${totals.done} just finished` : '',
-              ].filter(Boolean).join(' · ')}
+              {needsCount > 0 && <span className="board-title-needs">{`${needsCount} needs you`}</span>}
+              {needsCount > 0 && statusRest ? ' · ' : ''}
+              {statusRest}
             </span>
           </button>
           <div className="tb-pill">

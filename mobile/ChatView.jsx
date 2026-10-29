@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext } from 'react';
+import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import SpecialKeys from './SpecialKeys';
 import remarkGfm from 'remark-gfm';
@@ -46,12 +47,16 @@ function AskPrompt({ text }) {
 function AskReview({ text }) {
   const rows = text.split('\n').map((r) => r.trim()).filter(Boolean);
   const heading = rows.length && !/^[●→]/.test(rows[rows.length - 1]) ? rows.pop() : 'Ready to submit your answers?';
+  let inAnswer = false;
   return (
     <>
       <div className="ask-review">
         {rows.map((r, i) => {
-          if (r.startsWith('●')) return <div key={i} className="ask-review-q">{r.replace(/^●\s*/, '')}</div>;
-          if (r.startsWith('→')) return <div key={i} className="ask-review-a">{r.replace(/^→\s*/, '')}</div>;
+          if (r.startsWith('●')) { inAnswer = false; return <div key={i} className="ask-review-q">{r.replace(/^●\s*/, '')}</div>; }
+          if (r.startsWith('→')) { inAnswer = true; return <div key={i} className="ask-review-a">{r.replace(/^→\s*/, '')}</div>; }
+          // A row after an answer continues that answer: shown as written,
+          // never as an eyebrow (that would uppercase a path: Codex P2).
+          if (inAnswer) return <div key={i} className="ask-review-a">{r}</div>;
           return <div key={i} className="ask-eyebrow">{r}</div>;
         })}
       </div>
@@ -278,10 +283,13 @@ function ToolImages({ images }) {
   // reconnect can swallow a reply) before it says so.
   const loaded = useRef({});
   const tries = useRef({});
+  const fetcherRef = useRef(null);
   useEffect(() => {
     let live = true;
     const timers = [];
     if (!fetchImage) return undefined;
+    // A new fetcher (a reconnect) gets a fresh retry budget.
+    if (fetcherRef.current !== fetchImage) { fetcherRef.current = fetchImage; tries.current = {}; setFailed({}); }
     const get = (ref) => {
       if (loaded.current[ref]) return;
       fetchImage(ref).then((url) => {
@@ -310,7 +318,9 @@ function ToolImages({ images }) {
 function Lightbox({ url, onClose }) {
   const ref = useRef(null);
   useEffect(() => { ref.current?.focus(); }, []);
-  return (
+  // Rendered on <body>: inside a collapsed message, the clamp's mask would
+  // crop a fixed overlay to the message (Codex P2).
+  return createPortal(
     <div
       ref={ref}
       className="chat-lightbox"
@@ -326,7 +336,8 @@ function Lightbox({ url, onClose }) {
     >
       <img src={url} alt="Tool output, full size" />
       <span className="chat-lightbox-close">✕</span>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -434,6 +445,9 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const tabId = tab?.id || null;
   // Tool images: requested over the socket only when a thumbnail shows, cached
   // per session. A Mac too old to answer just leaves the placeholder.
+  // A fresh cache per (re)connection: images that failed while the socket was
+  // down get fetched again once it is back (Codex P2).
+  const [authEpoch, setAuthEpoch] = useState(0);
   const imageFetch = useMemo(() => {
     if (!sessionId || !projectPath) return null;
     return createImageCache((ref) => new Promise((resolve) => {
@@ -449,7 +463,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       });
       connection.send({ type: 'chatImage', sessionId, projectPath, ref, reqId });
     }));
-  }, [connection, sessionId, projectPath]);
+  }, [connection, sessionId, projectPath, authEpoch]); // eslint-disable-line react-hooks/exhaustive-deps -- authEpoch only renews the cache
   const [messages, setMessages] = useState(null); // null = loading
   const draftsKey = pairingKey(connection.pairing, DRAFTS_KEY);
   const [input, setInput] = useState(() => loadDraft(draftsKey, tabId));
@@ -625,6 +639,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   useEffect(() => {
     const off = connection.onMessage((msg) => {
       if (msg.type === 'authed') {
+        setAuthEpoch((n) => n + 1);
         // Reconnect (iOS kills the socket on every backgrounding). Two jobs,
         // both BEFORE the connection's queued-send flush (emit runs listeners
         // synchronously, then flushes):
@@ -1124,13 +1139,15 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           <span className="chat-composer-spacer" />
           {tab?.status === 'working' && !input.trim() ? (
             <button
+              key="stop"
               className="chat-stop"
+              onKeyDown={(e) => { if (e.repeat) e.preventDefault(); }}
               onClick={() => { if (tabId && Date.now() - sentAtRef.current > 800) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
               aria-label="Stop Claude (escape)"
               title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
             ><span /></button>
           ) : (
-            <button className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
+            <button key="send" className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
           )}
         </div>
       </div>

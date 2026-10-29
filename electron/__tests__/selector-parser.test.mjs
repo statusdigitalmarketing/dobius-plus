@@ -355,6 +355,7 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   sv2('screen: a path broken after a letter keeps the break', wrapAt(['Writes /srv/production/confi', 'g.json today.']), 'Writes /srv/production/confi\ng.json today.');
   const longName = 'a'.repeat(60);
   sv2('screen: a token that filled the row keeps the break', wrapAt(['Writes /tmp/' + longName.slice(0, 20), longName, 'aaa.json now.']), `Writes /tmp/${longName.slice(0, 20)}\n${longName}\naaa.json now.`);
+  sv2('screen: a path with a space broken before its slash keeps the break', wrapAt(['Edits /Users/sam/Library/Application Supp', 'ort/config.json now.']), 'Edits /Users/sam/Library/Application Supp\nort/config.json now.');
   sv2('screen: ordinary prose still re-flows with a space', wrapAt(['Writes the main config file', 'and nothing else.']), 'Writes the main config file and nothing else.');
   // A crafted row cannot freeze the parser (it backtracked exponentially once).
   { const t0 = Date.now(); parseSelectorFromScreen(['─'.repeat(40), '☐ A '.repeat(2000) + '←', 'Q', '❯ 1. x', '  2. y', 'Enter to select · Esc to cancel']); sv2('screen: a hostile tab-like row parses quickly', Date.now() - t0 < 200, true); }
@@ -364,6 +365,8 @@ sv2('screen: submit step is a popup too', await screenSel('askq-multi-submit-2.1
   // ...nor does a question line that STARTS with a checkbox (Codex P2).
   const leadBox = parseSelectorFromScreen(['─'.repeat(40), '←  ☒ Scope  ☐ Deploy  ✔ Submit  →', '☐ means disabled. Should deployment stay disabled?', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
   sv2('screen: a checkbox-led question line does not replace the tabs', leadBox?.steps?.total, 2);
+  const quoteBox = parseSelectorFromScreen(['─'.repeat(40), '←  ☒ Scope  ☐ Deploy  ✔ Submit  →', 'Should the bar read like this?', '←  ☐ Preview  ✔ Submit  →', '❯ 1. Yes', '  2. No', 'Enter to select · Tab/Arrow keys to navigate · Esc to cancel']);
+  sv2('screen: a quoted bar below the real one does not replace it', quoteBox?.steps?.labels, ['Scope', 'Deploy']);
   // Plain lines (no highlight information): the first unanswered one.
   sv2('screen: without highlights, steps fall back to the first unanswered', parseSelectorFromScreen([...lines])?.steps,
     { labels: ['Color', 'Size'], answered: [true, false], current: 1, total: 2 });

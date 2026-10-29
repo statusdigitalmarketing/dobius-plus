@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext } from 'react';
+import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
@@ -136,7 +137,9 @@ function ToolImages({ images }) {
 function Lightbox({ url, onClose }) {
   const ref = useRef(null);
   useEffect(() => { ref.current?.focus(); }, []);
-  return (
+  // Rendered on <body>: inside a collapsed message, the clamp's mask would
+  // crop a fixed overlay to the message (Codex P2).
+  return createPortal(
     <div
       ref={ref}
       className="chatp-lightbox"
@@ -151,8 +154,8 @@ function Lightbox({ url, onClose }) {
       }}
     >
       <img src={url} alt="Tool output, full size" />
-      
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -643,11 +646,11 @@ export default function ChatPane({ tabId, visible }) {
 
   // Take focus only as THE active tab: in a grid every chat pane is visible,
   // and the last one to grab focus would receive typing meant for another.
-  // An open image stays on top and keeps focus: coming back from Dashboard
-  // must not put Enter on the draft hidden behind it (Codex P2).
+  // An open image (in ANY pane: split shows two) stays on top and keeps
+  // focus, so coming back from Dashboard never puts Enter on a draft hidden
+  // behind it (Codex P2, twice).
   const focusInput = useCallback(() => {
-    const box = inputRef.current?.closest('[data-chat-tab]')?.querySelector('.chatp-lightbox');
-    (box || inputRef.current)?.focus();
+    (document.querySelector('.chatp-lightbox') || inputRef.current)?.focus();
   }, []);
   useEffect(() => {
     if (visible && isActive) requestAnimationFrame(focusInput);
