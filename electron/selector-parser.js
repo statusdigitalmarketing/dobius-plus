@@ -482,9 +482,14 @@ function screenSteps(lines, blockTop, hintIdx = blockTop) {
   // (Codex P2, three rounds). Runs of non-space joined by single spaces:
   // linear, the two parts cannot overlap.
   const items = [];
-  for (const m of lines[tb].matchAll(/\S+(?: \S+)*/g)) {
+  const row = lines[tb];
+  for (const m of row.matchAll(/\S+(?: \S+)*/g)) {
     const run = m[0];
-    if (!/^[☐☒✔]/.test(run)) continue; // the arrows
+    if (run === '←' || run === '→') continue;
+    const prev = items[items.length - 1];
+    // A run with no mark of its own continues the header before it: "Deploy
+    // prod" with two spaces is one header, not "Deploy" (Codex P2).
+    if (!/^[☐☒✔]/.test(run)) { if (prev) prev.label = row.slice(prev.col + 1, m.index + run.length).trim().slice(0, 60); continue; }
     items.push({ mark: run[0], label: run.slice(1).trim().slice(0, 60), col: m.index });
   }
   // Only the LAST ✔ run is the review step.
@@ -531,7 +536,7 @@ const PROMPT_MAX_CHARS = 1500;
  * Rows Claude wrapped, back into one line with spaces. Where the break may
  * have fallen inside a path or file name (either row holds a '/', a word
  * touching the break holds a dot followed by more text, a row ends in a dot
- * and the next opens lowercase or with a short all-caps word like `PDF`, or
+ * and the next opens lowercase or with an all-caps word like `PDF`, or
  * a row is one unbroken token), neither a
  * space nor no space is safe to guess (`Quarterly Rep` + `ort.pdf`,
  * `Report.` + `pdf` vs `/tmp/cache/x` + `after`): the terminal's own line
@@ -546,7 +551,7 @@ function reflow(rows) {
     const line = out.slice(out.lastIndexOf('\n') + 1);
     const dotted = (w) => /\.\w/.test(w);
     const keep = line.includes('/') || r.includes('/') || dotted(line.split(' ').pop()) || dotted(r.split(' ')[0])
-      || (/\.$/.test(line) && /^([a-z0-9]|[A-Z0-9]{1,5}\b)/.test(r)) || !line.includes(' ');
+      || (/\.$/.test(line) && /^([a-z0-9]|[A-Z0-9]+\b)/.test(r)) || !line.includes(' ');
     out += keep ? `\n${r}` : ` ${r}`;
   }
   return out;
