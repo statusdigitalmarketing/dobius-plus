@@ -124,12 +124,12 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
 // holding both can make. No token is sent
 // anywhere, only domain-separated hashes, so every saved Mac can be asked: a
 // different Mac can hold the same tailnet IP or short name, and a shared Mac
-// is saved under an address it cannot know is its own (Codex). null when
-// none is, none can be reached, or WebCrypto is missing (a plain-HTTP browser
-// page): both records then stay.
+// is saved under an address it cannot know is its own (Codex). Returns the
+// ids of every one that proves (one Mac can be saved at several addresses);
+// empty when WebCrypto is missing (a plain-HTTP browser page): records stay.
 async function sameMacAs(state, origin, token) {
   const subtle = globalThis.crypto?.subtle;
-  if (!subtle) return null;
+  if (!subtle || !/^[0-9a-f]{64}$/i.test(token)) return [];
   const target = normaliseHost(origin);
   const enc = new TextEncoder();
   const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -140,7 +140,9 @@ async function sameMacAs(state, origin, token) {
     const timer = setTimeout(() => ctl.abort(), 3000);
     try {
       const nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
-      const key = await subtle.importKey('raw', enc.encode(`${p.token}:${token}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      // Own prefix: HMAC hashes a long key, and a key that hashed to a
+      // disclosed tokenHash would let a saved Mac forge the proof (Codex P2).
+      const key = await subtle.importKey('raw', enc.encode(`dobius-same-mac-key|${p.token}|${token}`), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
       const want = hex(await subtle.sign('HMAC', key, enc.encode(nonce)));
       const res = await fetch(`${p.origin}/same-mac`, {
         method: 'POST', body: JSON.stringify({ tokenHash: await hashOf(p.token), newTokenHash, nonce }), signal: ctl.signal,
@@ -151,9 +153,10 @@ async function sameMacAs(state, origin, token) {
     } catch { return false; /* unreachable from here (mixed content, offline): keep both */ } finally { clearTimeout(timer); }
   };
   // In parallel: each unreachable Mac costs up to 3s, and they must not add up.
-  const others = (state?.pairings || []).filter((p) => p.origin !== target);
+  // Only tokens of the shape a Mac issues: a chosen one is how a proof gets forged.
+  const others = (state?.pairings || []).filter((p) => p.origin !== target && /^[0-9a-f]{64}$/i.test(p.token));
   const results = await Promise.all(others.map(proves));
-  return others.find((_, i) => results[i])?.id || null;
+  return others.filter((_, i) => results[i]).map((p) => p.id);
 }
 
 export default function App() {
@@ -399,11 +402,14 @@ export default function App() {
   const cancelPairing = () => { pairingUIRef.current = null; setPairingUI(null); };
   const handlePaired = async ({ token, host, name }) => {
     const shown = pairingUI;
+    // A pairing is the newest action: it supersedes pending taps, and a tap or
+    // switch made while it is still proving wins over it (Codex P2).
+    const seq = ++tapSeqRef.current;
     // Already paired with this Mac at another of its addresses (HTTP before
     // HTTPS came on)? Keep ONE record, but only when proven: the server at
     // that address must hold its saved token AND have issued this new one.
-    const replaceId = await sameMacAs(stateRef.current, host, token);
-    const ok = await update((s) => upsertPairing(s, { origin: host, token, name }, { id: crypto.randomUUID?.() || `mac-${Date.now()}-${Math.random().toString(36).slice(2)}`, now: Date.now(), replaceId }));
+    const replaceIds = await sameMacAs(stateRef.current, host, token);
+    const ok = await update((s) => upsertPairing(s, { origin: host, token, name }, { id: crypto.randomUUID?.() || `mac-${Date.now()}-${Math.random().toString(36).slice(2)}`, now: Date.now(), replaceIds, activate: seq === tapSeqRef.current }));
     if (!ok) throw new Error('Could not save this pairing. Check device storage and get a new pairing code.');
     const current = pairingUIRef.current;
     // A scan can arrive during the storage write, or before React commits its

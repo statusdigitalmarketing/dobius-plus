@@ -69,8 +69,9 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
         body: JSON.stringify({ code: codeToSend, deviceName: navigator.userAgent.includes('iPad') ? 'iPad' : 'Phone' }),
       });
       if (generation !== generationRef.current) return; // superseded
-      // A real token is 64 hex chars; an oversized one could only be a lie.
-      if (data.ok && typeof data.token === 'string' && data.token && data.token.length <= 512) {
+      // A real token is exactly 64 hex chars (the server accepts no other
+      // bearer); any other shape could only be a lie.
+      if (data.ok && typeof data.token === 'string' && /^[0-9a-f]{64}$/i.test(data.token)) {
         await onPaired({ token: data.token, host: hostToUse, name: typeof data.name === 'string' ? data.name : '' });
       } else {
         setError(data.error || 'Pairing failed.');

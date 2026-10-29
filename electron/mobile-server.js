@@ -1315,8 +1315,10 @@ async function doStartMobileServer(stillCurrent) {
     const old = issued(tokenHash);
     const fresh = issued(newTokenHash);
     if (!old || !fresh) return res.status(404).json({ ok: false, error: 'unknown' });
-    // Keyed by BOTH tokens, so the proof itself (not only this lookup) needs both.
-    res.json({ ok: true, proof: crypto.createHmac('sha256', `${old.token}:${fresh.token}`).update(nonce).digest('hex') });
+    // Keyed by BOTH tokens, so the proof itself (not only this lookup) needs
+    // both. The key has its own prefix: HMAC hashes a long key, and a key that
+    // hashed to a disclosed tokenHash could be forged from it (Codex P2).
+    res.json({ ok: true, proof: crypto.createHmac('sha256', `dobius-same-mac-key|${old.token}|${fresh.token}`).update(nonce).digest('hex') });
   });
 
   // POST /voice/intent  { transcript: string, tabId?: string }
