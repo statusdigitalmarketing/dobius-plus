@@ -1610,11 +1610,14 @@ function setupFileHandlers() {
     const file = id(claudeSettingsPath);
     const realFile = path.join(homedir, '.claude', 'settings.json');
     if (file && file === id(realFile)) return 'the isolated settings.json is the real one, refused';
-    // A DANGLING real link has no inode to compare; it could be waiting for
-    // this very write to create its target, so refuse rather than guess.
-    let dangling = false;
-    try { dangling = fs.lstatSync(realFile).isSymbolicLink() && !id(realFile); } catch { dangling = false; }
-    if (dangling) return 'the real ~/.claude/settings.json is a broken symlink, refused';
+    // A DANGLING real link (the ~/.claude dir or its settings.json) has no
+    // inode to compare; it could be waiting for this very write to create its
+    // target, so refuse rather than guess.
+    for (const real of [path.join(homedir, '.claude'), realFile]) {
+      let dangling = false;
+      try { dangling = fs.lstatSync(real).isSymbolicLink() && !id(real); } catch { dangling = false; }
+      if (dangling) return `the real ${real} is a broken symlink, refused`;
+    }
     return '';
   };
   const STATUS_MARKER = ']777;dobius;';
