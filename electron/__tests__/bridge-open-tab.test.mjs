@@ -417,6 +417,12 @@ function fakeDeps(over = {}) {
   const r4 = await createOpenTabService(d4).open({ projectPath: '/p', message: 'go', requestId: 'newline4' });
   assert.equal(r4.body.submitted, false);
   assert.match(r4.body.note, /someone typed/);
+  // ...nor an empty box because the window is closing (its Ctrl+C is not a key).
+  const d5 = fakeDeps();
+  d5.submit = (id) => { d5.log.push(['submit', id]); const t = d5.tabs.get(id); t.alive = false; t.frames.push({ lines: [rule, '❯ ', rule], modes: { bracketedPaste: true } }); };
+  const r5 = await createOpenTabService(d5).open({ projectPath: '/p', message: 'go', requestId: 'newline5' });
+  assert.equal(r5.body.submitted, false);
+  assert.match(r5.body.note, /tab closed/);
   ok('an Enter that did not send is reported as not sent');
 }
 

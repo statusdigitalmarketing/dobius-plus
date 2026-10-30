@@ -314,6 +314,9 @@ export function createOpenTabService(deps, opts = {}) {
       // Someone typed meanwhile (a Ctrl+C can clear an unsent draft): an
       // empty box no longer proves Claude took it.
       if (watch.keys() !== 0) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but someone typed into the tab before Claude was seen taking the message; check the tab' };
+      // A closing window sends Ctrl+C straight to the PTY (no key counted),
+      // which also empties the box.
+      if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but the tab closed before Claude was seen taking the message' };
       if (!after) continue; // a failed read proves nothing
       // Only an input box that is SEEN and no longer holds the message
       // confirms the send; a frame with no recognisable box proves nothing.
