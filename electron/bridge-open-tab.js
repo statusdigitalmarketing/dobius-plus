@@ -321,8 +321,8 @@ export function createOpenTabService(deps, opts = {}) {
       await deps.sleep(SUBMIT_POLL_MS);
       let after;
       try { after = await watch.screen(); } catch { after = null; }
-      const left = after ? promptBoxText(after.lines, after.modes) : null;
-      if (!boxHoldsMessage(left, message)) return { ok: true, tabId, submitted: true };
+      if (!after) continue; // a failed read proves nothing
+      if (!boxHoldsMessage(promptBoxText(after.lines, after.modes), message)) return { ok: true, tabId, submitted: true };
     }
     return { ok: true, tabId, submitted: false, note: 'Enter was pressed but the message is still in Claude\'s prompt (is Enter set to insert a new line?); press the key that sends it' };
   }
@@ -473,12 +473,19 @@ command -v python3 >/dev/null 2>&1 || { echo "dobius-open: python3 not found on 
 command -v curl >/dev/null 2>&1 || { echo "dobius-open: curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat ${shQuote(tokenFile)} 2>/dev/null) || { echo "dobius-open: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
 if [ "$3" = "-" ]; then MESSAGE=$(cat); else MESSAGE="$3"; fi
-BODY=$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "requestId": sys.argv[2], "message": sys.argv[3]}))' "$1" "$2" "$MESSAGE")
-RESPONSE=$(curl -sS --max-time 180 -X POST "http://127.0.0.1:${port}/openTab" \\
+# The token and the message never go on a command line (any local user can
+# read argv with ps): the header comes from a 0600 temp file, the body from
+# stdin, and python reads the fields from its environment.
+BODY=$(OPEN_PROJECT="$1" OPEN_ID="$2" OPEN_MESSAGE="$MESSAGE" python3 -c 'import json,os; print(json.dumps({"projectPath": os.environ["OPEN_PROJECT"], "requestId": os.environ["OPEN_ID"], "message": os.environ["OPEN_MESSAGE"]}))')
+HDR=$(mktemp) || exit 3
+trap 'rm -f "$HDR"' EXIT
+chmod 600 "$HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$HDR"
+RESPONSE=$(printf '%s' "$BODY" | curl -sS --max-time 180 -X POST "http://127.0.0.1:${port}/openTab" \\
   -H "Host: 127.0.0.1:${port}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$BODY")
+  --data-binary @-)
 echo "$RESPONSE"
 printf '%s' "$RESPONSE" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") else 1)'
 `;

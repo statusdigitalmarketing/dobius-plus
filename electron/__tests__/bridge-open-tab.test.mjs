@@ -477,6 +477,14 @@ function fakeDeps(over = {}) {
   assert.equal(r.body.submitted, false);
   assert.match(r.body.note, /still in Claude's prompt/);
   assert.equal(d.log.filter((e) => e[0] === 'submit').length, 1);
+  // A confirmation read that FAILS proves nothing: still not sent.
+  const d2 = fakeDeps();
+  const ow = d2.watchOutput;
+  let submitted = false;
+  d2.submit = (id) => { submitted = true; d2.log.push(['submit', id]); };
+  d2.watchOutput = (id, c) => { const w = ow(id, c); const sc = w.screen; w.screen = async () => (submitted ? null : sc()); return w; };
+  const r2 = await createOpenTabService(d2).open({ projectPath: '/p', message: 'go', requestId: 'newline2' });
+  assert.equal(r2.body.submitted, false);
   ok('an Enter that did not send is reported as not sent');
 }
 
@@ -527,6 +535,12 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
 const script = path.join(dir, 'dobius-open');
 fs.writeFileSync(script, buildOpenCliScript({ port, tokenFile }), { mode: 0o755 });
+// The token and the message never ride on a command line (ps shows argv to
+// every local user): only builtins and files/stdin carry them.
+const scriptText = buildOpenCliScript({ port, tokenFile });
+assert.equal(/-H "Authorization/.test(scriptText), false);
+assert.equal(/--data-binary "\$BODY"/.test(scriptText), false);
+assert.equal(/sys\.argv/.test(scriptText.split('\n').find((l) => l.startsWith('BODY=')) || 'sys.argv'), false);
 const run = (args, stdin) => new Promise((resolve) => {
   const p = spawn(script, args, { env: { ...process.env } });
   let out = '';

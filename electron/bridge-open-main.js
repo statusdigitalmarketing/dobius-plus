@@ -156,28 +156,33 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // One counter PER REQUEST (a reused tab id after a crash must not share or
   // cancel another request's counter). tabId -> Set of { n }
   const keyCounters = new Map();
-  function countKeys(tabId) {
-    const c = { n: 0, tabId };
+  function countKeys(tabId, wcId = null) {
+    const c = { n: 0, tabId, wcId };
     if (!keyCounters.has(tabId)) keyCounters.set(tabId, new Set());
     keyCounters.get(tabId).add(c);
     return c;
   }
   function stopCounting(c) {
+    c?.cleanup?.();
     const set = c && keyCounters.get(c.tabId);
     if (!set) return;
     set.delete(c);
     if (!set.size) keyCounters.delete(c.tabId);
   }
-  const bump = (id, data) => {
+  // senderId: a window's terminal:write counts only for the request that
+  // window is opening (another window cannot write into this tab, so its
+  // writes must not be able to cancel the request either).
+  const bump = (id, data, senderId = null) => {
     const set = typeof id === 'string' ? keyCounters.get(id) : null;
-    if (set && isKeyboardInput(data)) for (const c of set) c.n += 1;
+    if (!set || !isKeyboardInput(data)) return;
+    for (const c of set) if (senderId === null || c.wcId === senderId) c.n += 1;
   };
   addInputObserver((id, data) => { if (!ownWrite) bump(id, data); });
   // Keys a window sends for a tab whose PTY does not exist yet are dropped by
   // terminal:write, so the observer above never sees them; a person typed
   // all the same, and their Enter may follow once the shell is up. Count
   // them here too.
-  ipcMain.on('terminal:write', (_event, id, data) => bump(id, data));
+  ipcMain.on('terminal:write', (event, id, data) => bump(id, data, event.sender.id));
 
   ipcMain.on('bridge:tabOpened', (event, nonce, tabId) => {
     const p = typeof nonce === 'string' ? pending.get(nonce) : null;
@@ -189,7 +194,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       p.done(null);
       return;
     }
-    p.counter = countKeys(tabId);
+    p.counter = countKeys(tabId, p.wcId);
     p.done(tabId);
   });
 
@@ -237,6 +242,12 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // The tab's pane spawns the PTY via terminal:create; wait until it is
     // this window's.
     const { counter } = entry;
+    // From here until the request ends, a reload of this window ends it: the
+    // reloaded page replaces the tab's PTY, so nothing may be typed into the
+    // old one (tabAlive reads this flag).
+    const onReload = () => { counter.reloaded = true; };
+    wc.on('did-start-loading', onReload);
+    counter.cleanup = () => { if (!wc.isDestroyed()) wc.removeListener('did-start-loading', onReload); };
     const started = await waitFor(() => reloaded() || wc.isDestroyed() || (!!terminalInstance(tabId) && ownerOf(tabId) === wc.id), PTY_START_MS);
     if (reloaded() || wc.isDestroyed()) { stopCounting(counter); return { error: 'the project window reloaded or closed while the tab was opening' }; }
     if (!started) { stopCounting(counter); return { error: 'the new tab\'s terminal did not start', tabId }; }
@@ -297,7 +308,13 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // EVERY child, not the first claude one: a background `claude -p` listed
     // first must not hide the interactive one.
     let pids;
-    try { pids = [...(await childPids(shellPid)), shellPid]; } catch { return false; }
+    let tty;
+    try {
+      pids = [...(await childPids(shellPid)), shellPid];
+      tty = await psField(shellPid, 'tty');
+    } catch { return false; }
+    // It must be on THIS tab's terminal (a child can hold another pty).
+    if (!tty || tty === '??') return false;
     for (const pid of pids) {
       try {
         const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
@@ -306,7 +323,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
         const [, pgid, tpgid, stat] = m;
         // The permission mode is NOT checked (Sam: "bypass permissions should
         // act just like auto mode"); only that this really is claude.
-        if (pgid !== tpgid || pgid !== String(pid) || stat.startsWith('T') || !(await isClaudeProcess(pid))) continue;
+        if (pgid !== tpgid || pgid !== String(pid) || stat.startsWith('T') || (await psField(pid, 'tty')) !== tty || !(await isClaudeProcess(pid))) continue;
         const cwd = await getProcessCwd(pid);
         if (cwd && (await fs.promises.realpath(cwd)) === (await fs.promises.realpath(projectPath))) return true;
       } catch { /* this candidate is unreadable: not claude */ }
@@ -361,7 +378,8 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     claudeRunning,
     // A tab being closed (its window shutting down sends Ctrl+C straight to
     // the PTY) is not alive: nothing more is typed into it.
-    tabAlive: (tabId) => !!terminalInstance(tabId) && getTerminalWebContentsId(tabId) !== null && !terminalClosing(tabId),
+    tabAlive: (tabId) => !!terminalInstance(tabId) && getTerminalWebContentsId(tabId) !== null && !terminalClosing(tabId)
+      && ![...(keyCounters.get(tabId) || [])].some((c) => c.reloaded),
     ptyOf: (tabId) => terminalInstance(tabId),
     outputSeq: (tabId) => terminalRawOutputSeq(tabId),
     // Typed at the shell prompt, as a person would: plain `claude`, the
