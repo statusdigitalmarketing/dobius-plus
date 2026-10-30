@@ -438,6 +438,17 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
   );
 });
 
+// What the chat input says when the Mac refuses a send (opError codes, see
+// docs/mobile-ws-protocol.md). Codes not listed here stay silent.
+const SEND_REFUSED = {
+  unknown_tab: 'Not sent: this tab is no longer running.',
+  tab_exited: 'Not sent: this tab is no longer running.',
+  not_authorized: 'Not sent: the connection lost this tab. Send it again.',
+  too_large: 'Not sent: the message is too long.',
+  cancelled: 'Not sent: a cancel key dropped it.',
+  stranded: 'Pasted but not submitted: something else typed into this tab. Check the terminal.',
+};
+
 /**
  * Responsive conversation view for a session on mobile. Instead of mirroring the
  * width-locked raw terminal (a full-screen TUI drawn at the desktop's ~200 cols,
@@ -776,6 +787,15 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         setTimeout(() => connection.send({ type: 'selectorSnapshot', id: tabId }), msg.ok ? 700 : 0);
       } else if (msg.type === 'terminalText' && msg.id === tabId) {
         setShellText(typeof msg.text === 'string' ? msg.text : '');
+      } else if (msg.type === 'opError' && msg.op === 'submitPrompt' && msg.id === tabId) {
+        // Macs from v1.0.88 answer a send that did not go through; older ones
+        // dropped it without a word. Say so instead of leaving the echo bubble
+        // looking delivered.
+        const note = SEND_REFUSED[msg.code];
+        if (note) {
+          setSelNote(note);
+          setTimeout(() => setSelNote(''), 6000);
+        }
       }
     });
     return off;

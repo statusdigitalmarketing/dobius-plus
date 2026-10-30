@@ -29,10 +29,11 @@ import {
   listTerminals, subscribeTerminal, writeTerminal, terminalHasDesktopAttached,
   resizeTerminal, killTerminal, createTerminal, getTerminalBuffer,
   liveClaudeSessionIds, claimSessionResume, bindReservationTab, releaseSessionResume,
-  addTerminalObserver,
+  addTerminalObserver, terminalInstance,
 } from './terminal-manager.js';
 import { stripAnsi, spinnerStatus } from './selector-parser.js';
-import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
+import { terminalTextTail, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
+import { TAB_OPS, ACK_FEATURES, handleTabOp } from './mobile-tab-ops.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills, loadTranscriptImage } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
@@ -684,7 +685,51 @@ function mobileTermId() {
   return `term-mobile-${mobileTermCounter}`;
 }
 
+// The side effects input and submitPrompt always had, run once a write is
+// accepted (mobile-tab-ops answers the request itself).
+function afterTabWriteAccepted(socket, op, id, msg) {
+  invalidateSelectorPush(id); // the phone may have cleared a popup for this
+  const refresh = () => setTimeout(async () => {
+    wsSend(socket, await selectorMessage(id, () => knownToken(socket._authToken)));
+  }, op === 'input' ? 700 : 900);
+  // A short write is how the Chat view answers a selector (a bare option
+  // digit). Re-parse after the TUI repaints and push the (likely cleared)
+  // selector state so the phone's buttons drop off immediately instead of
+  // waiting out the 2.5s probe. v1.0.51 mobile kinks. A submit may have
+  // answered a selector (or started Claude) too.
+  if (op === 'submitPrompt' || msg.data.length <= 4) refresh();
+}
+
+function handleTabWrite(socket, msg) {
+  // authorizeTab: the client is actively viewing this tab (e.g. the Chat view,
+  // including a sessionless tab that never loads a transcript, or the Stop
+  // button), so input/resize/kill are allowed. Audit Medium. Only a LIVE id is
+  // recorded now: an unknown one is answered unknown_tab.
+  // input: waits behind a pending submit so keys land in the order sent.
+  // submitPrompt: types a chat message the way a human would. The old client
+  // path sent `text\r` in ONE chunk; Claude's Ink TUI treats a fast chunk as a
+  // paste, so the trailing \r became a newline INSIDE the input box and the
+  // message sat there unsubmitted (Sam's v1.0.51 mobile bug 3). chat-service
+  // bracketed-pastes the text, presses Enter as a DISCRETE keypress after the
+  // paste settles, strips control chars and serializes per tab.
+  // Both writes stop if this phone is revoked before their turn. A dropped
+  // socket does not stop them: the phone already cleared the message, so a
+  // reconnect would never resend it.
+  handleTabOp(msg, {
+    send: (obj) => wsSend(socket, obj),
+    isLive: (id) => !!terminalInstance(id),
+    liveIds: () => listTerminals().map((t) => t.id),
+    authed: socket._authedTabs,
+    maxBytes: MAX_INPUT_BYTES, // real BYTE cap (Codex: .length undercounts multibyte)
+    stillOk: () => knownToken(socket._authToken),
+    writeRawInput,
+    submitPrompt: submitPromptDetailed,
+    onAccepted: (op, id, m) => afterTabWriteAccepted(socket, op, id, m),
+  }).catch((err) => console.error('[mobile] tab op failed:', err?.message || err));
+}
+
 function handleAuthedMessage(socket, msg, subs) {
+  if (TAB_OPS.has(msg.type)) { handleTabWrite(socket, msg); return; }
   switch (msg.type) {
     case 'ping':
       wsSend(socket, { type: 'pong' });
@@ -692,13 +737,6 @@ function handleAuthedMessage(socket, msg, subs) {
 
     case 'listTerminals':
       wsSend(socket, buildTerminalsPayload());
-      break;
-
-    case 'authorizeTab':
-      // The client is actively viewing this tab (e.g. the Chat view, including a
-      // sessionless tab that never loads a transcript, or the Stop button). Mark
-      // it interacted-with so input/resize/kill are allowed. Audit Medium.
-      if (typeof msg.id === 'string') socket._authedTabs.add(msg.id);
       break;
 
     case 'attach': {
@@ -735,50 +773,6 @@ function handleAuthedMessage(socket, msg, subs) {
     case 'detach': {
       const u = subs.get(msg.id);
       if (u) { u(); subs.delete(msg.id); }
-      break;
-    }
-
-    case 'input':
-      if (typeof msg.id === 'string' && socket._authedTabs.has(msg.id)
-          && typeof msg.data === 'string' && msg.data.length <= MAX_INPUT_BYTES) {
-        // Waits behind a pending submit so keys land in the order sent.
-        writeRawInput(msg.id, msg.data, () => knownToken(socket._authToken));
-        invalidateSelectorPush(msg.id); // the phone cleared its popup on tap
-        // A short write is how the Chat view answers a selector (a bare option
-        // digit). Re-parse after the TUI repaints and push the (likely cleared)
-        // selector state so the phone's buttons drop off immediately instead of
-        // waiting out the 2.5s probe. v1.0.51 mobile kinks.
-        if (msg.data.length <= 4) {
-          const id = msg.id;
-          setTimeout(async () => {
-            wsSend(socket, await selectorMessage(id, () => knownToken(socket._authToken)));
-          }, 700);
-        }
-      }
-      break;
-
-    case 'submitPrompt': {
-      // Type a chat message into the tab the way a human would. The old client
-      // path sent `text\r` in ONE chunk; Claude's Ink TUI treats a fast chunk
-      // as a paste, so the trailing \r became a newline INSIDE the input box
-      // and the message sat there unsubmitted (Sam's v1.0.51 mobile bug 3).
-      // Bracketed-paste the text, then press Enter as a DISCRETE keypress after
-      // the paste settles. Works at a bare shell prompt too (zsh honors
-      // bracketed paste + delayed CR), which is how "Start Claude" launches.
-      if (typeof msg.id !== 'string' || !socket._authedTabs.has(msg.id)) break;
-      if (typeof msg.text !== 'string' || !msg.text.trim()
-          || Buffer.byteLength(msg.text, 'utf8') > MAX_INPUT_BYTES) break; // real BYTE cap (Codex: .length undercounts multibyte)
-      // chat-service strips control chars and serializes per tab.
-      const id = msg.id;
-      invalidateSelectorPush(id); // the phone may have cleared a popup for this
-      // Stops if this phone is revoked before its turn. A dropped socket does
-      // not stop it: the phone already cleared the message, so a reconnect
-      // would never resend it.
-      submitPromptToTab(id, msg.text, () => knownToken(socket._authToken));
-      // If this answered a selector (or started Claude), refresh selector state.
-      setTimeout(async () => {
-        wsSend(socket, await selectorMessage(id, () => knownToken(socket._authToken)));
-      }, 900);
       break;
     }
 
@@ -1579,7 +1573,7 @@ async function doStartMobileServer(stillCurrent) {
           let set = activeSocketsByToken.get(authedToken);
           if (!set) { set = new Set(); activeSocketsByToken.set(authedToken, set); }
           set.add(socket);
-          wsSend(socket, { type: 'authed', version: app.getVersion() });
+          wsSend(socket, { type: 'authed', version: app.getVersion(), features: ACK_FEATURES });
         } else {
           socket.close(4003, 'unauthorized');
         }

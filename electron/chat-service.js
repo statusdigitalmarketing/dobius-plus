@@ -175,11 +175,24 @@ function queueFor(id) {
  * @returns {Promise<boolean>} whether the Enter was sent
  */
 export function submitPromptToTab(id, text, stillOk = () => true, onStranded = () => {}) {
+  return submitPromptDetailed(id, text, stillOk, onStranded).then((r) => r.ok);
+}
+
+/**
+ * submitPromptToTab with the reason a submit did not go through, for callers
+ * that answer a remote client (the phone WS acks). `reason` is one of
+ * 'tab_exited' (no PTY, closing, or replaced), 'not_allowed' (stillOk said no),
+ * 'cancelled' (a cancel key dropped or erased it) or 'stranded' (pasted, but
+ * the Enter was withheld: the text sits in the input line, see onStranded).
+ * @returns {Promise<{ok: boolean, reason?: string}>}
+ */
+export function submitPromptDetailed(id, text, stillOk = () => true, onStranded = () => {}) {
   // Strip control chars except \t and \n (multi-line paste is legitimate); \r
   // goes too so the only Enter is the discrete one sent below.
   const clean = String(text).replace(/[\x00-\x08\x0B-\x1F\x7F]/g, '');
   const pty = terminalInstance(id);
-  if (!pty || terminalClosing(id) || !stillOk()) return Promise.resolve(false);
+  if (!pty || terminalClosing(id)) return Promise.resolve(refused('tab_exited'));
+  if (!stillOk()) return Promise.resolve(refused('not_allowed'));
   const q = queueFor(id);
   return new Promise((resolve) => {
     q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded });
@@ -187,17 +200,26 @@ export function submitPromptToTab(id, text, stillOk = () => true, onStranded = (
   });
 }
 
+const DONE = Object.freeze({ ok: true });
+const refused = (reason) => ({ ok: false, reason });
+
 /**
  * Raw keys from a terminal or the phone. Written at once unless a submit is
  * pending on the tab, in which case they wait their turn behind it. A cancel
  * key (Ctrl+C, Ctrl+U, a bare Esc) always goes at once and drops everything
  * still queued, as it would have when every paste went out immediately.
+ *
+ * Resolves once the keys are written ({ ok: true }) or dropped ({ ok: false,
+ * reason }, reasons as for submitPromptDetailed), so a remote caller can ack
+ * the write itself rather than its arrival. Callers that do not care ignore it.
  */
 export function writeRawInput(id, data, stillOk = () => true) {
-  if (typeof data !== 'string' || !data) return;
+  if (typeof data !== 'string' || !data) return Promise.resolve(refused('empty'));
   // A frame already in flight when its phone was revoked: not even a cancel
   // key, which would also throw away the desktop's pending submit.
-  if (!stillOk()) return;
+  if (!stillOk()) return Promise.resolve(refused('not_allowed'));
+  // writeTerminal is a no-op without a PTY; report that instead of a write.
+  const written = () => (terminalInstance(id) ? DONE : refused('tab_exited'));
   const q = submitQueues.get(id);
   if (isCancelKey(data)) {
     // Ctrl+C and Ctrl+U erase the input line; a bare Esc leaves it as typed.
@@ -211,11 +233,14 @@ export function writeRawInput(id, data, stillOk = () => true) {
       if (/^[\x03\x15\x1b]+$/.test(data)) q.cancelWrites = (q.cancelWrites || 0) + 1;
       if (data !== '\x1b') q.clearedGen = q.gen;
     }
+    const r = written();
     writeTerminal(id, data);
-    return;
+    return Promise.resolve(r);
   }
-  if (!q || !q.running) { writeTerminal(id, data); return; }
-  q.items.push({ raw: data, pty: terminalInstance(id), stillOk, gen: q.gen, resolve: () => {} });
+  if (!q || !q.running) { const r = written(); writeTerminal(id, data); return Promise.resolve(r); }
+  return new Promise((resolve) => {
+    q.items.push({ raw: data, pty: terminalInstance(id), stillOk, gen: q.gen, resolve });
+  });
 }
 
 /** A submit is typing into this tab right now (or queued behind one). */
@@ -223,18 +248,27 @@ export function submitPending(id) {
   return !!submitQueues.get(id)?.running;
 }
 
+// Why a queued item must not be written now, or '' when it may be.
+function skipReason(id, q, it) {
+  if (terminalInstance(id) !== it.pty || terminalClosing(id)) return 'tab_exited';
+  if (it.gen !== q.gen) return 'cancelled';
+  return it.stillOk() ? '' : 'not_allowed';
+}
+
 async function drainSubmits(id, q) {
   q.running = true;
   while (q.items.length > 0) {
     const it = q.items.shift();
-    if (it.gen !== q.gen || terminalInstance(id) !== it.pty || terminalClosing(id) || !it.stillOk()) { it.resolve(false); continue; }
+    let skip = skipReason(id, q, it);
+    if (skip) { it.resolve(refused(skip)); continue; }
     if (it.raw !== undefined) {
       // Keys that waited behind a submit go out as separate keystrokes, not
       // one burst Claude would read as a paste (an Enter in it becomes a newline).
       await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
-      if (it.gen !== q.gen || terminalInstance(id) !== it.pty || terminalClosing(id) || !it.stillOk()) { it.resolve(false); continue; }
+      skip = skipReason(id, q, it);
+      if (skip) { it.resolve(refused(skip)); continue; }
       writeTerminal(id, it.raw);
-      it.resolve(true);
+      it.resolve(DONE);
       continue;
     }
     writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
@@ -255,12 +289,13 @@ async function drainSubmits(id, q) {
       // the terminal.
       const foreign = (terminalInputSeq(id) - pastedAt) - ((q.cancelWrites || 0) - cancelsAt);
       const erased = foreign === 0 && (q.clearedGen ?? -1) > it.gen;
-      if (terminalInstance(id) === it.pty && !terminalClosing(id) && !erased) it.onStranded();
-      it.resolve(false);
+      const gone = terminalInstance(id) !== it.pty || terminalClosing(id);
+      if (!gone && !erased) it.onStranded();
+      it.resolve(refused(gone ? 'tab_exited' : erased ? 'cancelled' : 'stranded'));
       continue;
     }
     writeTerminal(id, '\r');
-    it.resolve(true);
+    it.resolve(DONE);
   }
   q.running = false;
   if (submitQueues.get(id) === q) submitQueues.delete(id);
