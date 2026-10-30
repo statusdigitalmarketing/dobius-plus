@@ -8,7 +8,7 @@ import { tabActivityLabel, formatDuration, WORKING_MIN_MS } from '../../src/lib/
 import * as ts from '../terminal-status.js';
 import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds, createTabActivity, coalescePerTab, judgePresence } from '../claude-presence.js';
 import { classifyClaudeProcess } from '../claude-argv.js';
-import { isProvenClaudeCommand } from '../claude-process-scan.js';
+import { isProvenClaudeCommand, claudeChildVerdict } from '../claude-process-scan.js';
 
 const NOW = 10_000_000;
 const base = { live: true, status: 'idle', hookOwned: false, since: null, lastTurnMs: 0, background: null, unread: false, now: NOW };
@@ -769,7 +769,7 @@ test('approving a permission keeps the turn and its clock', async () => {
   });
   const r = await tabActivity(ID);
   assert.equal(label({ ...r.activity, live: true, now: 34_000 }).text, 'Working 24s');
-  assert.equal(ts.activityFor(ID).status, 'needs', 'the record is untouched');
+  assert.deepEqual([ts.activityFor(ID).status, ts.activityFor(ID).hookOwned], ['working', true], 'the record follows, the turn goes on');
   ts.ingest(ID, mk('working'), 40_000);
   ts.ingest(ID, mk('done'), 70_000);
   assert.equal(ts.activityFor(ID).lastTurnMs, 60_000);
@@ -799,4 +799,44 @@ test('fresh lookups: many asks while one is in flight share it', async () => {
   release({ pid: 1 });
   await again;
   assert.equal(calls, 2, 'a settled answer is never reused');
+});
+
+test('an approved dialog stays Working when the presence signal is lost', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('needs'), 20_000);
+  let presence = { pid: 1, startedAt: 1_000, status: 'busy', statusUpdatedAt: 30_000 };
+  let t = 34_000;
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),
+    presenceForTab: async () => presence,
+    now: () => t,
+  });
+  await tabActivity(ID);
+  presence = null; // the file went away
+  t = 40_000;
+  const r = await tabActivity(ID);
+  assert.equal(label({ ...r.activity, live: true, now: t }).kind, 'working');
+});
+
+test('judgePresence: an unknown status never ends a turn', () => {
+  const info = { pid: 1, startedAt: 100_000 };
+  const working = { status: 'working', hookOwned: true, turnEndedAt: 0, lastMarkerAt: 200_000 };
+  const r = judgePresence({ pid: 1, startedAt: 100_000, status: 'garbage', statusUpdatedAt: 220_000 }, working, info, 300_000);
+  assert.equal(r.uncertain, false);
+});
+
+test('judgePresence: idle written just now waits for a Stop racing behind it', () => {
+  const info = { pid: 1, startedAt: 100_000 };
+  const working = { status: 'working', hookOwned: true, turnEndedAt: 0, lastMarkerAt: 10_000 };
+  const f = { pid: 1, startedAt: 100_000, status: 'idle', statusUpdatedAt: 70_000 };
+  assert.equal(judgePresence(f, working, info, 70_005).uncertain, false);
+  assert.equal(judgePresence(f, working, info, 73_000).over, true);
+});
+
+test('unique lookup: a claude path with spaces makes the shell ambiguous, not skipped', async () => {
+  assert.equal(await claudeChildVerdict('/Users/alice/CLI Tools/claude'), 'ambiguous');
+  assert.equal(await claudeChildVerdict('node /tmp/watcher.js /opt/homebrew/bin/claude'), 'ambiguous');
+  assert.equal(await claudeChildVerdict('sleep 25'), 'not-claude');
+  assert.equal(await claudeChildVerdict('claude --resume abc'), 'claude');
 });

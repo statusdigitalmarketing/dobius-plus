@@ -96,7 +96,7 @@ export function matchPresence(rec, proc) {
  *   `over`: the hook's turn ended without its marker (main ends it too).
  *   `showAs`: the turn continues but is in the other state than the hook said.
  */
-export function judgePresence(found, a, info) {
+export function judgePresence(found, a, info, now = Infinity) {
   const none = { background: null, uncertain: false };
   if (!found || !info || found.pid !== info.pid || found.startedAt !== info.startedAt) return none;
   const at = found.statusUpdatedAt;
@@ -110,7 +110,12 @@ export function judgePresence(found, a, info) {
     if (found.status === 'busy') return a.status === 'needs' ? { ...none, showAs: 'working' } : none;
     if (found.status === 'waiting') return a.status === 'working' ? { ...none, showAs: 'needs' } : none;
     // Idle, or a turn that ended with a background shell: the hook's turn is
-    // over without its closing marker (hooks switched off, an interrupt).
+    // over without its closing marker (hooks switched off, an interrupt). Not
+    // before GRACE_MS has passed since the CLI wrote it, which gives a Stop
+    // racing behind the presence write time to arrive; and never on a state
+    // this CLI is not known to write.
+    if (found.status !== 'idle' && found.status !== 'shell') return none;
+    if (now - at < GRACE_MS) return none;
     return { background: null, uncertain: true, over: true };
   }
   const end = a.turnEndedAt;
@@ -330,7 +335,7 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
  * work once a turn has ended, and whether a window that owns the PTY has it
  * unread. Dependencies are injected so this is tested without Electron.
  * @param {object} deps
- * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function}} deps.status
+ * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function, adoptHookState:Function}} deps.status
  * @param {(id:string)=>Promise<object|null>} deps.claudeInfo  cached lookup
  * @param {(id:string)=>Promise<object|null>} [deps.claudeInfoFresh]  uncached, for turn ends
  * @param {(id:string, key:string)=>Promise<object|null>} deps.presenceForTab
@@ -392,9 +397,14 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
           ? { id, activity: { ...reconcileWithProcess(after, await claudeInfo(id)), background: null }, unread: unreadAnywhere(id) }
           : null;
       }
-      const j = judgePresence(found, a, info);
+      const j = judgePresence(found, a, info, t);
       background = j.background;
-      if (j.showAs) return { id, activity: { ...a, status: j.showAs, background: null }, unread: unreadAnywhere(id) };
+      if (j.showAs) {
+        // Kept in the record, so losing the presence signal later cannot bring
+        // back the state it disproved (an approved dialog as Input again).
+        status.adoptHookState(id, a.lastMarkerAt, j.showAs);
+        return { id, activity: { ...a, status: j.showAs, background: null }, unread: unreadAnywhere(id) };
+      }
       if (j.uncertain) {
         // The CLI showed the hook's turn is over: end it in the record too, so
         // a later hookless turn cannot revive its clock.

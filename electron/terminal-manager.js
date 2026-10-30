@@ -1,7 +1,7 @@
 import pty from 'node-pty';
 import { isTerminalReply, createVisibleOutputScanner } from './terminal-reply.js';
 import { isClaudeCommand } from './claude-argv.js';
-import { isProvenClaudeCommand } from './claude-process-scan.js';
+import { claudeChildVerdict } from './claude-process-scan.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -544,11 +544,15 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
       // rest is the command.
       const lstart = line.slice(0, 24);
       const command = line.slice(24).trim();
-      if (!isClaudeCommand(command)) continue;
-      // `unique` callers act on the answer, so a command that only NAMES the
-      // CLI (`node watcher.js /path/claude`) makes the shell ambiguous rather
-      // than counting as the claude.
-      if (unique && !(await isProvenClaudeCommand(command))) return null;
+      if (unique) {
+        // `unique` callers act on the answer, so ANY child that might be a
+        // claude counts: one that only names the CLI (`node watcher.js
+        // /path/claude`) or one whose path has spaces (`/x/CLI Tools/claude`,
+        // which isClaudeCommand alone would skip) makes the shell ambiguous.
+        const verdict = await claudeChildVerdict(command);
+        if (verdict === 'not-claude') continue;
+        if (verdict === 'ambiguous') return null;
+      } else if (!isClaudeCommand(command)) continue;
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);

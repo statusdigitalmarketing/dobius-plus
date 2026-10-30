@@ -213,6 +213,18 @@ export function abandonTurn(id, lastMarkerAt) {
   st.lastTurnMs = 0;
 }
 
+/**
+ * main proved (from Claude's presence file) that the hook's turn went on in
+ * the other state with no marker for it: a dialog approved (needs -> working)
+ * or one the hook has not reported (working -> needs). The turn and its clock
+ * continue. Only for the exact record checked.
+ */
+export function adoptHookState(id, lastMarkerAt, next) {
+  const st = live.get(id);
+  if (!st || !st.hookOwned || st.lastMarkerAt !== lastMarkerAt) return;
+  if (next === 'working' || next === 'needs') st.status = next;
+}
+
 /** When the hook last ended a turn here (0 = never). Cheap, for the data path. */
 export function turnEndedAtFor(id) {
   return live.get(id)?.turnEndedAt || 0;

@@ -27,7 +27,7 @@ import { promisify } from 'node:util';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { classifyClaudeProcess } from './claude-argv.js';
+import { classifyClaudeProcess, isClaudeCommand } from './claude-argv.js';
 import { keychainServiceFor } from './account-identity.js';
 
 const execFileP = promisify(execFile);
@@ -254,6 +254,19 @@ export async function isProvenClaudeCommand(command) {
     const st = await fsp.stat(token);
     return st.isFile() && (st.mode & 0o111) !== 0;
   } catch { return false; }
+}
+
+/**
+ * For a caller that must name THE claude in a shell: is this child one, not
+ * one, or impossible to tell? Anything that might be a claude (a command that
+ * only names the CLI, or a path with spaces ps cannot delimit) is 'ambiguous'.
+ * @returns {Promise<'claude'|'not-claude'|'ambiguous'>}
+ */
+export async function claudeChildVerdict(command) {
+  const { kind } = classifyClaudeProcess(command);
+  if (kind === 'not-claude' && !isClaudeCommand(command)) return 'not-claude';
+  if (kind !== 'claude') return 'ambiguous';
+  return (await isProvenClaudeCommand(command)) ? 'claude' : 'ambiguous';
 }
 
 /**
