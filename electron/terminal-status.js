@@ -86,6 +86,7 @@ export function ingest(id, data, now = Date.now()) {
       st.turnEndedAt = now;
     }
     st.hooklessAfter = 0; // a hook spoke: whatever ran without one is over
+    st.ambiguousMarker = 0; // and a new marker is a new state to judge
     if (state === 'done') {
       // Only a running turn ends here; Claude's idle-prompt re-send of 'done'
       // must not move the end (the length is measured back from it).
@@ -179,6 +180,7 @@ export function activityFor(id) {
     turnEndedAt: st.turnEndedAt || 0,
     lastMarkerAt: st.lastMarkerAt || 0,
     hooklessTurn: !!st.hooklessAfter && st.hooklessAfter === st.turnEndedAt,
+    ambiguous: !!st.ambiguousMarker && st.ambiguousMarker === st.lastMarkerAt,
   };
 }
 
@@ -209,11 +211,13 @@ export function distrustTurnStart(id, since, { runningOnly = false } = {}) {
  * interrupt). End it here, so its clock cannot come back with a later turn.
  * Only for the exact record checked: a marker since then wins.
  */
-export function abandonTurn(id, lastMarkerAt) {
+export function abandonTurn(id, lastMarkerAt, endedAt) {
   const st = live.get(id);
   if (!st || !st.hookOwned || st.lastMarkerAt !== lastMarkerAt) return;
   st.hookOwned = false;
   st.status = 'idle';
+  // It did end (when the CLI wrote so): later checks key off that end.
+  if (st.turnStartedAt && Number.isFinite(endedAt) && endedAt > 0) st.turnEndedAt = endedAt;
   st.turnStartedAt = 0;
   st.turnStartDistrusted = false;
   // The abandoned turn is now the last one and its length is unknown: a
@@ -242,6 +246,16 @@ export function markHooklessTurn(id, turnEndedAt) {
   const st = live.get(id);
   if (!st || st.hookOwned || st.turnEndedAt !== turnEndedAt) return;
   st.hooklessAfter = turnEndedAt;
+}
+
+/**
+ * main saw more than one possible claude in the tab: the markers since the
+ * last one could have come from either, so nothing about them is proven.
+ * Kept until the next marker (a later lone claude cannot claim them).
+ */
+export function markAmbiguous(id) {
+  const st = live.get(id);
+  if (st && st.lastMarkerAt) st.ambiguousMarker = st.lastMarkerAt;
 }
 
 /** When the hook last ended a turn here (0 = never). Cheap, for the data path. */

@@ -144,7 +144,7 @@ export function reconcileWithProcess(a, info) {
   // The shell holds something that may be a claude besides (or instead of)
   // the one we would check against: nothing can be proven either way, so
   // nothing is changed and no live state is claimed.
-  if (info?.ambiguous) { out.uncertain = true; return out; }
+  if (info?.ambiguous || a.ambiguous) { out.uncertain = true; return out; }
   if (!info) {
     // The hook says a turn runs but no claude is there to run it. (A claude
     // started through a wrapper is not a direct child and lands here too: it
@@ -343,7 +343,7 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
  * work once a turn has ended, and whether a window that owns the PTY has it
  * unread. Dependencies are injected so this is tested without Electron.
  * @param {object} deps
- * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function, adoptHookState:Function, markHooklessTurn:Function}} deps.status
+ * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function, adoptHookState:Function, markHooklessTurn:Function, markAmbiguous:Function}} deps.status
  * @param {(id:string)=>Promise<object|null>} deps.claudeInfo  cached lookup
  * @param {(id:string)=>Promise<object|null>} [deps.claudeInfoFresh]  uncached, for turn ends
  * @param {(id:string, key:string)=>Promise<object|null>} deps.presenceForTab
@@ -365,6 +365,7 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     // An absence is only evidence when read now: a cached "no claude" can
     // predate the claude that just started this turn.
     if (!info && !fresh && raw.hookOwned && raw.since) info = await claudeInfoFresh(id);
+    if (info?.ambiguous) status.markAmbiguous(id);
     const a = reconcileWithProcess(raw, info);
     // A claude's start time proves a time wrong. Finding NO claude proves a
     // still-running turn was abandoned (or runs behind a wrapper, where an
@@ -380,7 +381,8 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
   const moved = (id, raw) => {
     const now2 = status.activityFor(id);
     return !now2 || now2.turnEndedAt !== raw.turnEndedAt || now2.lastMarkerAt !== raw.lastMarkerAt
-      || now2.status !== raw.status || now2.hookOwned !== raw.hookOwned;
+      || now2.status !== raw.status || now2.hookOwned !== raw.hookOwned
+      || now2.since !== raw.since || now2.lastTurnMs !== raw.lastTurnMs || now2.ambiguous !== raw.ambiguous;
   };
   const shape = (id, a, extra) => ({
     id,
@@ -420,7 +422,9 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     const ended = !!info && a.turnEndedAt && !hookLive && !a.hooklessTurn
       && t - a.turnEndedAt >= GRACE_MS;
     const quietWorking = !!info && hookLive && a.lastMarkerAt && t - a.lastMarkerAt >= GRACE_MS;
-    if (!ended && !quietWorking) return shape(id, a);
+    // Nothing a presence file says can be pinned on one claude when there may
+    // be two (or the record already gave up): no claim.
+    if ((!ended && !quietWorking) || a.uncertain) return shape(id, a);
     const found = await presenceForTab(id, ended ? `e:${a.turnEndedAt}` : `w:${a.lastMarkerAt}`);
     if (moved(id, raw)) return settleOnCurrent(id);
     const j = judgePresence(found, a, info, t);
@@ -434,7 +438,7 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
       // Kept in the record too, so a later failed read cannot revive what this
       // one disproved: a hook turn that ended without its marker is ended
       // there; a hookless turn after an ended one hides that turn's Done.
-      if (j.over) status.abandonTurn(id, a.lastMarkerAt);
+      if (j.over) status.abandonTurn(id, a.lastMarkerAt, found.statusUpdatedAt);
       else if (ended) status.markHooklessTurn(id, a.turnEndedAt);
       return shape(id, a, { uncertain: true });
     }

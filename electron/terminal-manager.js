@@ -535,10 +535,19 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
     for (const childPid of children) {
       // `lstart` is the process start time; `command` is the argv. One ps
       // call gets both so the fresh-session correlation costs nothing extra.
-      const { stdout: psOut } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', childPid], {
-        timeout: 1000,
-        encoding: 'utf8',
-      });
+      let psOut;
+      try {
+        ({ stdout: psOut } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', childPid], {
+          timeout: 1000,
+          encoding: 'utf8',
+        }));
+      } catch (err) {
+        if (!unique) throw err;
+        // A child that exited since pgrep (ps exits 1) is not a claude; one
+        // ps could not describe for another reason might be.
+        if (err?.code === 1) continue;
+        return { ambiguous: true };
+      }
       const line = psOut.trim();
       if (!line) continue;
       // `lstart` is a fixed 24-char date ("Wed Jul 15 21:49:26 2026"), the

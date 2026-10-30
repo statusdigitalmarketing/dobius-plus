@@ -920,3 +920,40 @@ test('settle after a moved record re-checks after its own process read', async (
   const r = await tabActivity(ID);
   assert.equal(r.activity.status, 'working');
 });
+
+test('an abandoned turn records its end, so later checks still run', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.abandonTurn(ID, 10_000, 20_000);
+  assert.equal(ts.activityFor(ID).turnEndedAt, 20_000);
+});
+
+test('ambiguity is kept until the next marker, so a later lone claude cannot claim it', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 30_000);
+  let info = { ambiguous: true };
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => info,
+    presenceForTab: async () => ({ pid: 2, startedAt: 2_000, status: 'busy', statusUpdatedAt: 20_000 }),
+    now: () => 40_000,
+  });
+  assert.equal((await tabActivity(ID)).activity.uncertain, true);
+  info = { pid: 2, startedAt: 2_000 }; // A exited, B alone
+  const r = await tabActivity(ID);
+  assert.deepEqual([r.activity.uncertain, r.activity.background], [true, null]);
+  ts.ingest(ID, mk('working'), 50_000);
+  assert.equal(ts.activityFor(ID).ambiguous, false);
+});
+
+test('moved() notices a since or length change made during the await', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 100_200);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => { ts.distrustLastTurn(ID, 100_200); return { pid: 1, startedAt: 1_000 }; },
+    now: () => 100_300,
+  });
+  const r = await tabActivity(ID);
+  assert.equal(r.activity.lastTurnMs, 0);
+});
