@@ -141,6 +141,10 @@ export function judgePresence(found, a, info, now = Infinity) {
  */
 export function reconcileWithProcess(a, info) {
   const out = { ...a };
+  // The shell holds something that may be a claude besides (or instead of)
+  // the one we would check against: nothing can be proven either way, so
+  // nothing is changed and no live state is claimed.
+  if (info?.ambiguous) { out.uncertain = true; return out; }
   if (!info) {
     // The hook says a turn runs but no claude is there to run it. (A claude
     // started through a wrapper is not a direct child and lands here too: it
@@ -385,8 +389,16 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
   });
   // Answer from the CURRENT record without a presence read.
   const settleOnCurrent = async (id) => {
+    // The process read awaits too, so re-check after it; a few rounds, then
+    // the record as it stands with no process claim beyond it.
+    for (let i = 0; i < 3; i += 1) {
+      const cur = status.activityFor(id);
+      if (!cur) return null;
+      const info = await claudeInfo(id);
+      if (!moved(id, cur)) return shape(id, reconcileWithProcess(cur, info));
+    }
     const cur = status.activityFor(id);
-    return cur ? shape(id, reconcileWithProcess(cur, await claudeInfo(id))) : null;
+    return cur ? shape(id, cur, { uncertain: true }) : null;
   };
 
   /** Null when no PTY runs for the id (a closed tab shows its age). */

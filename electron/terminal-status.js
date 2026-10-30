@@ -79,6 +79,12 @@ export function ingest(id, data, now = Date.now()) {
     lastMatch = m;
     const state = m[1];
     st.lastMarkerAt = now;
+    if (state === 'done' && !st.turnStartedAt && st.hooklessAfter) {
+      // The Stop of a turn that ran without a working marker: it is the last
+      // turn now, and its length was never measured.
+      st.lastTurnMs = 0;
+      st.turnEndedAt = now;
+    }
     st.hooklessAfter = 0; // a hook spoke: whatever ran without one is over
     if (state === 'done') {
       // Only a running turn ends here; Claude's idle-prompt re-send of 'done'

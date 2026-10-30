@@ -839,6 +839,9 @@ test('unique lookup: a claude path with spaces makes the shell ambiguous, not sk
   assert.equal(await claudeChildVerdict('node /tmp/watcher.js /opt/homebrew/bin/claude'), 'ambiguous');
   assert.equal(await claudeChildVerdict('sleep 25'), 'not-claude');
   assert.equal(await claudeChildVerdict('claude --resume abc'), 'claude');
+  const r = reconcileWithProcess({ status: 'done', hookOwned: false, since: null, lastTurnMs: 60_000, turnEndedAt: 70_000 }, { ambiguous: true });
+  assert.deepEqual([r.uncertain, r.lastTurnMs], [true, 60_000], 'ambiguous: no claim, nothing changed');
+  assert.equal(label({ ...r, live: true, unread: true }), null);
 });
 
 test('a hookless turn after an ended one keeps the old Done hidden when presence is lost', async () => {
@@ -883,4 +886,37 @@ test('tab activity: a marker arriving during the process lookup is answered from
   const r = await tabActivity(ID);
   assert.equal(r.activity.status, 'working');
   assert.equal(label({ ...r.activity, live: true, unread: true, now: 130_300 }).kind, 'working');
+});
+
+test('the Stop of a hookless turn ends it with an unknown length', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 70_000);
+  ts.markHooklessTurn(ID, 70_000);
+  ts.ingest(ID, mk('done'), 150_000); // B's Stop, no working marker before it
+  const a = ts.activityFor(ID);
+  assert.deepEqual([a.lastTurnMs, a.turnEndedAt, a.hooklessTurn], [0, 150_000, false]);
+  // Without a hookless turn, an idle-prompt re-send still changes nothing.
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 70_000);
+  ts.ingest(ID, mk('done'), 130_000);
+  assert.deepEqual([ts.activityFor(ID).lastTurnMs, ts.activityFor(ID).turnEndedAt], [60_000, 70_000]);
+});
+
+test('settle after a moved record re-checks after its own process read', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  let calls = 0;
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => {
+      calls += 1;
+      if (calls === 1) ts.ingest(ID, mk('done'), 70_000);      // during the first read
+      if (calls === 2) ts.ingest(ID, mk('working'), 70_060);   // during the settle's read
+      return { pid: 1, startedAt: 1_000 };
+    },
+    now: () => 70_100,
+  });
+  const r = await tabActivity(ID);
+  assert.equal(r.activity.status, 'working');
 });

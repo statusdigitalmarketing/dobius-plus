@@ -517,7 +517,8 @@ export async function getTerminalProcessArgv(id) {
  * tabs got no name badge in the sidebar, and auto-resume could never restore
  * them either. startedAt lets the caller correlate the process to the
  * transcript it created (see resolveFreshSessionId in main.js).
- * `unique: true` answers null when more than one claude runs in the shell.
+ * `unique: true` answers { ambiguous: true } when it cannot name ONE claude
+ * (two claudes, or a child that may be one).
  */
 export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
   const entry = terminals.get(id);
@@ -551,7 +552,7 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
         // which isClaudeCommand alone would skip) makes the shell ambiguous.
         const verdict = await claudeChildVerdict(command);
         if (verdict === 'not-claude') continue;
-        if (verdict === 'ambiguous') return null;
+        if (verdict === 'ambiguous') return { ambiguous: true };
       } else if (!isClaudeCommand(command)) continue;
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
@@ -560,7 +561,7 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
       if (!unique) return info;
       // `unique`: two claudes in one shell (one suspended with Ctrl+Z, say)
       // cannot be told apart, so the caller gets no answer rather than a guess.
-      if (found) return null;
+      if (found) return { ambiguous: true };
       found = info;
     }
     return found;
