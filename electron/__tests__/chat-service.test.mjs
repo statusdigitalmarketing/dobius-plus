@@ -399,8 +399,45 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   await g;
   await tick(100);
   assert.deepEqual(writes.map((w) => w[1]), [PASTE('/exit'), '\r', '\r'], 'the path never went out');
+  // ...and so is one that comes just after the submit's Enter, even with the
+  // queue finished (the screen it was checked on may predate that Enter).
   writeRawInput('h', "\x1b[200~'/p/a.png'\x1b[201~", () => true, { promptOnly: true });
-  assert.equal(writes.at(-1)[1], "\x1b[200~'/p/a.png'\x1b[201~");
+  assert.equal(writes.length, 3, 'within a second of the Enter: dropped');
+  await tick(1050);
+  writeRawInput('h', "\x1b[200~'/p/a.png'\x1b[201~", () => true, { promptOnly: true });
+  assert.equal(writes.at(-1)[1], "\x1b[200~'/p/a.png'\x1b[201~", 'later it goes');
+
+  // Keys flushed ahead of a waiting submit are paced like queued keys: an
+  // Enter right behind its text would read as a pasted newline.
+  const stamps = [];
+  const push0 = writes.push;
+  writes.push = function (...a) { stamps.push(Date.now()); return push0.apply(this, a); };
+  held = false;
+  reset(); ptys.set('h', {});
+  const k1 = submitPromptToTab('h', 'one');
+  const k2 = submitPromptToTab('h', 'two');
+  writeRawInput('h', 'x');
+  writeRawInput('h', '\r');
+  held = true;
+  await tick(400);
+  held = false;
+  await Promise.all([k1, k2]);
+  writes.push = push0;
+  const order = writes.map((w) => w[1]);
+  assert.deepEqual(order, [PASTE('one'), '\r', 'x', '\r', PASTE('two'), '\r']);
+  assert.ok(stamps[2] - stamps[1] >= 15 && stamps[3] - stamps[2] >= 15, `paced: ${stamps.map((t) => t - stamps[0])}`);
+
+  // A window that held input is gone with it half sent: a waiting submit is
+  // cancelled, never appended to the half.
+  const { cancelQueuedSubmits } = await import('../chat-service.js');
+  held = true;
+  reset(); ptys.set('h', {});
+  const w = submitPromptToTab('h', './backup.sh');
+  await tick(80);
+  held = false;
+  cancelQueuedSubmits('h');
+  assert.equal(await w, false);
+  assert.equal(writes.length, 0);
   setInputHeldCheck(() => false);
   ok('a Chat send waits for held input, keeps its order, and is cancelled by Ctrl+C or a new shell');
 }

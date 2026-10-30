@@ -83,6 +83,8 @@ export const pendingSubmits = new Set();
 export function submitPending(id) { return pendingSubmits.has(id); }
 export const heldNotes = [];
 export function noteHeldInput(id, data) { heldNotes.push([id, data]); }
+export const cancelled = [];
+export function cancelQueuedSubmits(id) { cancelled.push(id); }
 
 // data-service
 export async function listProjects() { return []; }

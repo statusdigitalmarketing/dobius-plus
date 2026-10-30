@@ -158,8 +158,22 @@ export function noteHeldInput(id, data) {
   const q = submitQueues.get(id);
   if (q && typeof data === 'string' && isCancelKey(data)) q.gen += 1;
 }
+
+/**
+ * A window that held input for the tab is gone (crashed, reloaded, closed)
+ * with that input half sent: queued submits are cancelled, never appended
+ * to whatever part of it reached the terminal.
+ */
+export function cancelQueuedSubmits(id) {
+  const q = submitQueues.get(id);
+  if (q) q.gen += 1;
+}
 const HELD_WAIT_MS = 16_000; // prompt editing gives up on a paste after 15s
 const HELD_POLL_MS = 50;
+// When each tab's last submit pressed Enter; a prompt-only paste arriving
+// within PROMPT_SETTLE_MS of it is dropped (writeRawInput).
+const lastSubmitEnterAt = new Map();
+const PROMPT_SETTLE_MS = 1000; // src/lib/prompt-edit-term.js AFTER_ENTER_MS
 // tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
 // under an older gen is dropped instead of written.
 const submitQueues = new Map();
@@ -234,10 +248,13 @@ export function writeRawInput(id, data, stillOk = () => true, { promptOnly = fal
   }
   // A submit waiting for held input lets keys through: that input arriving
   // is what it waits for, and it was taken before the submit.
-  if (!q || !q.running || q.waitingHeld) { writeTerminal(id, data); return; }
   // Prompt editing checked that Claude's prompt was showing when it sent
   // this (a file path pasted into it). Behind a submit it would land later,
-  // maybe in the shell a "/exit" left behind: dropped instead.
+  // maybe in the shell a "/exit" left behind; and just after a submit's
+  // Enter that check may have read the screen from before it: dropped.
+  // (Prompt editing waits the same second after its own Enter.)
+  if (promptOnly && Date.now() - (lastSubmitEnterAt.get(id) ?? -Infinity) < PROMPT_SETTLE_MS) return;
+  if (!q || !q.running || q.waitingHeld) { writeTerminal(id, data); return; }
   if (promptOnly) return;
   q.items.push({ raw: data, pty: terminalInstance(id), stillOk, gen: q.gen, resolve: () => {} });
 }
@@ -262,16 +279,18 @@ async function drainSubmits(id, q) {
       continue;
     }
     if (inputHeld(id)) {
-      q.waitingHeld = true;
       // Keys already queued behind this submit came while that input was
-      // held: they go now, in order, ahead of the keys still to come.
-      const early = q.items.filter((x) => x.raw !== undefined);
-      q.items = q.items.filter((x) => x.raw === undefined);
-      for (const x of early) {
+      // held: they go now, in order, ahead of the keys still to come, and
+      // paced like any queued key (a burst would read as a paste, its Enter
+      // as a newline). Keys arriving meanwhile queue behind them.
+      for (let k; (k = q.items.findIndex((x) => x.raw !== undefined)) >= 0;) {
+        const [x] = q.items.splice(k, 1);
+        await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
         const live = x.gen === q.gen && terminalInstance(id) === x.pty && !terminalClosing(id) && x.stillOk();
         if (live) writeTerminal(id, x.raw);
         x.resolve(live);
       }
+      q.waitingHeld = true;
       const end = Date.now() + HELD_WAIT_MS;
       while (inputHeld(id) && Date.now() < end && it.gen === q.gen && terminalInstance(id) === it.pty && !terminalClosing(id)) {
         await new Promise((r) => setTimeout(r, HELD_POLL_MS));
@@ -304,6 +323,7 @@ async function drainSubmits(id, q) {
       continue;
     }
     writeTerminal(id, '\r');
+    lastSubmitEnterAt.set(id, Date.now());
     it.resolve(true);
   }
   q.running = false;

@@ -17,7 +17,7 @@ import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProj
 import { terminalInstance, getTerminalBuffer, terminalCols, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint, JS_RUNTIMES, CLAUDE_SCRIPT_RE } from './claude-argv.js';
 import { isKeyboardInput, isUserInput } from './bridge-open-tab.js';
-import { submitPending, noteHeldInput } from './chat-service.js';
+import { submitPending, noteHeldInput, cancelQueuedSubmits } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
 import { parseTabId } from './tab-id-util.js';
@@ -190,8 +190,15 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // its own queue while an edit or an image paste is pending, so it reaches
   // terminal:write late, maybe after our Enter. The window owning the tab
   // reports each held input as it accepts it (a key, counted now) and null
-  // once its queue drains; until then the tab is busy. tabId -> wcId
+  // once its queue drains; until then the tab is busy. After a tear-off the
+  // old and the new window can both hold. tabId -> Set of wcIds
   const heldInput = new Map();
+  const dropHold = (t, w) => {
+    const set = heldInput.get(t);
+    if (!set?.delete(w)) return false;
+    if (!set.size) heldInput.delete(t);
+    return true;
+  };
   const heldHooked = new WeakSet();
   ipcMain.on('terminal:inputHeld', (event, id, data) => {
     const wc = event.sender;
@@ -200,20 +207,26 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // moved to another window (a tear-off claims the PTY before the old pane
     // is gone); only a new hold needs the tab's current owner.
     if (data === null) {
-      if (heldInput.get(id) === wc.id) heldInput.delete(id);
+      dropHold(id, wc.id);
       return;
     }
     if (getTerminalWebContentsId(id) !== wc.id || typeof data !== 'string' || !data) return;
     if (!heldHooked.has(wc)) {
       heldHooked.add(wc);
       // A reloaded, crashed or closed page never reports its drain.
-      const forget = () => { for (const [t, w] of heldInput) if (w === wc.id) heldInput.delete(t); };
+      // Its held input is lost half sent: Chat must not append to it.
+      const forget = () => {
+        for (const t of [...heldInput.keys()]) if (dropHold(t, wc.id)) cancelQueuedSubmits(t);
+      };
       wc.on('did-start-loading', forget);
       wc.on('render-process-gone', forget);
       wc.once('destroyed', forget);
     }
-    heldInput.set(id, wc.id);
-    bump(id, data, wc.id);
+    if (!heldInput.has(id)) heldInput.set(id, new Set());
+    heldInput.get(id).add(wc.id);
+    // Counted for every request on the tab: the sender was just checked as
+    // the tab's owner, which may be a tear-off and not the opening window.
+    bump(id, data);
     noteHeldInput(id, data);
   });
 

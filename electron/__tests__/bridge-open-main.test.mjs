@@ -64,6 +64,11 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   env.emit('terminal:inputHeld', wc, opened.tabId, 'y');
   const dest = env.fakeWebContents();
   env.terminals.get(opened.tabId).wcId = dest.id;
+  // The new owner's held input counts for the request too.
+  const before = watch.keys();
+  env.emit('terminal:inputHeld', dest, opened.tabId, '\x1b[200~\x1b[201~');
+  assert.ok(watch.keys() > before, 'held input from the tab\'s new window counts');
+  env.emit('terminal:inputHeld', dest, opened.tabId, null);
   env.emit('terminal:inputHeld', dest, opened.tabId, null);
   assert.equal(deps.inputBusy(opened.tabId), true, 'another window cannot release it');
   env.emit('terminal:inputHeld', wc, opened.tabId, null);
@@ -77,8 +82,10 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   assert.equal(deps.inputBusy(opened.tabId), false);
   // So does a crashed renderer whose window stays open.
   env.emit('terminal:inputHeld', wc, opened.tabId, 'x');
+  const n = env.cancelled.length;
   wc.fire('render-process-gone');
   assert.equal(deps.inputBusy(opened.tabId), false);
+  assert.deepEqual(env.cancelled.slice(n), [opened.tabId], 'Chat submits waiting on it are cancelled');
   watch.stop();
 });
 
