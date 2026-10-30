@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { tabActivityLabel, formatDuration } from '../../src/lib/tab-activity.js';
 import * as ts from '../terminal-status.js';
-import { waitingFrom, createWaitingReader, boundedIds, activityRow, GRACE_MS } from '../claude-presence.js';
+import { waitingFrom, createWaitingReader, boundedIds, activityRow, freshenRows, GRACE_MS } from '../claude-presence.js';
 
 const NOW = 10_000_000;
 const label = (over) => tabActivityLabel({ live: true, status: 'idle', now: NOW, ...over });
@@ -240,4 +240,17 @@ test('waiting reader: a relative config dir is no claim', async () => {
   });
   assert.equal(await read('a', DONE), null);
   assert.equal(reads, 0);
+});
+
+test('freshenRows: a row settled early is re-read when the whole reply is ready', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 1_000);
+  ts.ingest(ID, mk('done'), 10_000);
+  const row = { id: ID, activity: { ...ts.activityFor(ID), background: 'agents' }, unread: true };
+  assert.equal(freshenRows([row], ts.activityFor)[0].activity.background, 'agents', 'same done: kept');
+  ts.ingest(ID, mk('working'), 14_000); // another row's lookup was still pending
+  const [r] = freshenRows([row, null], ts.activityFor);
+  assert.deepEqual([r.activity.status, r.activity.background, r.unread], ['working', null, true]);
+  ts.forget(ID);
+  assert.deepEqual(freshenRows([row], ts.activityFor), [], 'gone: dropped');
 });

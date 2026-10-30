@@ -26,7 +26,7 @@ import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses } from './claude-process-scan.js';
-import { createWaitingReader, boundedIds, activityRow } from './claude-presence.js';
+import { createWaitingReader, boundedIds, activityRow, freshenRows } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
@@ -520,7 +520,7 @@ function setupDataHandlers() {
     const rows = await Promise.all(wanted.map((id) => activityRow(id, {
       activityFor: terminalStatus.activityFor, waitingForTab, unreadAnywhere,
     })));
-    return rows.filter(Boolean);
+    return freshenRows(rows, terminalStatus.activityFor);
   });
   ipcMain.on('tabs:reportUnread', (event, ids) => {
     // ipcMain.on has no rejection path: a throw here would reach the

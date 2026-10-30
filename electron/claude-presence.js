@@ -137,6 +137,23 @@ export async function activityRow(id, { activityFor, waitingForTab, unreadAnywhe
 }
 
 /**
+ * Re-read every row's status once all of a request's rows are in: one row
+ * can settle while another's lookup is still pending, and its tab may have
+ * moved on meanwhile. Synchronous, so the reply matches the status now.
+ */
+export function freshenRows(rows, activityFor) {
+  const out = [];
+  for (const row of rows) {
+    if (!row) continue;
+    const now = activityFor(row.id);
+    if (!now) continue;
+    const same = now.status === 'done' && now.doneAt === row.activity.doneAt;
+    out.push({ ...row, activity: { ...now, background: same ? row.activity.background : null } });
+  }
+  return out;
+}
+
+/**
  * Renderer-supplied id list, cut to `cap` BEFORE anything walks it (a sparse
  * array with a huge length is a tiny IPC message), using the prototype's slice
  * (own properties survive IPC). Strings up to 4096 chars only.
