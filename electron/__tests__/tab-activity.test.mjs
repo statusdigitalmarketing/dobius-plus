@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { tabActivityLabel, formatDuration, WORKING_MIN_MS } from '../../src/lib/tab-activity.js';
 import * as ts from '../terminal-status.js';
-import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab } from '../claude-presence.js';
+import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds } from '../claude-presence.js';
+import { classifyClaudeProcess } from '../claude-argv.js';
 
 const NOW = 10_000_000;
 const base = { live: true, status: 'idle', hookOwned: false, since: null, lastTurnMs: 0, background: null, unread: false, now: NOW };
@@ -384,4 +385,32 @@ test('a disproved turn length stays gone after the claude that disproved it exit
   if (raw.lastTurnMs && !a.lastTurnMs) ts.distrustLastTurn(ID, raw.turnEndedAt);
   // B exits: no claude left to prove anything with.
   assert.equal(reconcileWithProcess(ts.activityFor(ID), null).lastTurnMs, 0);
+});
+
+test('reconcile: within the second a claude started counts as before it', () => {
+  const info = { pid: 2, startedAt: 100_000 }; // real start anywhere in 100.0-100.999s
+  // A's needs at 100.1s, then A died and B started at 100.8s (ps says 100s).
+  const stale = reconcileWithProcess({ status: 'needs', hookOwned: true, since: 90_000, lastTurnMs: 0, turnEndedAt: 0, lastMarkerAt: 100_100 }, info);
+  assert.deepEqual([stale.status, stale.hookOwned], ['idle', false]);
+  const since = reconcileWithProcess({ status: 'working', hookOwned: true, since: 100_200, lastTurnMs: 0, turnEndedAt: 0, lastMarkerAt: 105_000 }, info);
+  assert.deepEqual([since.status, since.since], ['working', null]);
+  const own = reconcileWithProcess({ status: 'working', hookOwned: true, since: 101_000, lastTurnMs: 0, turnEndedAt: 0, lastMarkerAt: 105_000 }, info);
+  assert.equal(own.since, 101_000, 'a turn from the next second on is this claude\'s');
+});
+
+test('boundedIds cuts before it walks (a sparse huge array is cheap)', () => {
+  const huge = [];
+  huge.length = 0xffffffff;
+  huge[0] = 'a';
+  const t0 = Date.now();
+  assert.deepEqual(boundedIds(huge, 1000), ['a']);
+  assert.ok(Date.now() - t0 < 500);
+  assert.deepEqual(boundedIds(['a', 1, null, 'x'.repeat(5000), 'b'], 1000), ['a', 'b']);
+  assert.deepEqual(boundedIds('nope', 10), []);
+});
+
+test('the unique claude lookup relies on: a command that only names the CLI is not claude', () => {
+  assert.notEqual(classifyClaudeProcess('node /tmp/watcher.js /opt/homebrew/bin/claude').kind, 'claude');
+  assert.notEqual(classifyClaudeProcess("node -e setInterval(()=>{},1000) /opt/homebrew/bin/claude").kind, 'claude');
+  assert.equal(classifyClaudeProcess('/Users/a/.local/bin/claude --resume abc').kind, 'claude');
 });

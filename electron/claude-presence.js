@@ -83,14 +83,28 @@ export function reconcileWithProcess(a, info) {
     // was not running then. A hook state whose last marker came before this
     // claude started was left by an earlier one (it died without Stop): it is
     // not this claude's Input or Working.
-    if (out.hookOwned && out.lastMarkerAt && out.lastMarkerAt < info.startedAt) {
+    // The comparisons allow the truncated second: a claude cannot boot, take a
+    // prompt and send a hook marker within one second of starting, so anything
+    // inside the second it started in also came before it.
+    const before = (t) => t < info.startedAt + 1000;
+    if (out.hookOwned && out.lastMarkerAt && before(out.lastMarkerAt)) {
       Object.assign(out, { status: 'idle', hookOwned: false, since: null });
     }
     // This claude did not run the whole stretch, so its clock is unknown.
-    if (out.since && info.startedAt > out.since) out.since = null;
-    if (out.lastTurnMs && info.startedAt > out.turnEndedAt - out.lastTurnMs) out.lastTurnMs = 0;
+    if (out.since && before(out.since)) out.since = null;
+    if (out.lastTurnMs && before(out.turnEndedAt - out.lastTurnMs)) out.lastTurnMs = 0;
   }
   return out;
+}
+
+/**
+ * Renderer-supplied id list, cut to `cap` BEFORE anything walks it: a sparse
+ * array with a huge length is a tiny IPC message that filter() would walk
+ * index by index on the main thread. Strings up to 4096 chars only.
+ */
+export function boundedIds(ids, cap) {
+  if (!Array.isArray(ids)) return [];
+  return ids.slice(0, cap).filter((id) => typeof id === 'string' && id.length <= 4096);
 }
 
 /**

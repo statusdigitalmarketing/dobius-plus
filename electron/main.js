@@ -26,7 +26,7 @@ import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses, configDirOfPid } from './claude-process-scan.js';
-import { createPresenceReader, reconcileWithProcess, cachedPerTab, GRACE_MS as PRESENCE_GRACE_MS } from './claude-presence.js';
+import { createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds, GRACE_MS as PRESENCE_GRACE_MS } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
@@ -551,9 +551,8 @@ function setupDataHandlers() {
   // aggregate reads session history. Any window may ask about any tab, like
   // the aggregate. Returns an ARRAY, never keyed by caller-supplied ids.
   ipcMain.handle('tabs:activity', async (_event, ids) => {
-    if (!Array.isArray(ids)) return [];
     const live = new Set(listTerminals().map((t) => t.id));
-    const wanted = [...new Set(ids.filter((id) => typeof id === 'string' && live.has(id)))].slice(0, 256);
+    const wanted = [...new Set(boundedIds(ids, 1000).filter((id) => live.has(id)))].slice(0, 256);
     const out = await Promise.all(wanted.map((id) => tabActivity(id).catch((err) => {
       console.warn('[tabs:activity] skipped', id, err?.message);
       return null;
@@ -566,9 +565,7 @@ function setupDataHandlers() {
   // a tab moved by a tear-off or dock never keeps a stale mark.
   ipcMain.on('tabs:reportUnread', (event, ids) => {
     const wcId = event.sender.id;
-    const list = Array.isArray(ids)
-      ? ids.filter((id) => typeof id === 'string' && id.length <= 4096).slice(0, 1000)
-      : [];
+    const list = boundedIds(ids, 1000);
     if (!unreadByWindow.has(wcId)) event.sender.once('destroyed', () => unreadByWindow.delete(wcId));
     unreadByWindow.set(wcId, new Set(list));
   });
