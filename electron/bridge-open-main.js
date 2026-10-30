@@ -17,7 +17,7 @@ import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProj
 import { terminalInstance, getTerminalBuffer, terminalCols, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint, JS_RUNTIMES, CLAUDE_SCRIPT_RE } from './claude-argv.js';
 import { isKeyboardInput, isUserInput } from './bridge-open-tab.js';
-import { submitPending } from './chat-service.js';
+import { submitPending, noteHeldInput } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
 import { parseTabId } from './tab-id-util.js';
@@ -206,13 +206,15 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     if (getTerminalWebContentsId(id) !== wc.id || typeof data !== 'string' || !data) return;
     if (!heldHooked.has(wc)) {
       heldHooked.add(wc);
-      // A reloaded or closed page never reports its drain.
+      // A reloaded, crashed or closed page never reports its drain.
       const forget = () => { for (const [t, w] of heldInput) if (w === wc.id) heldInput.delete(t); };
       wc.on('did-start-loading', forget);
+      wc.on('render-process-gone', forget);
       wc.once('destroyed', forget);
     }
     heldInput.set(id, wc.id);
     bump(id, data, wc.id);
+    noteHeldInput(id, data);
   });
 
   // Windows /openTab opened (webContents ids). Such a window, starting with no

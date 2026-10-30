@@ -81,6 +81,8 @@ export function terminalClosing() { return false; }
 // chat-service
 export const pendingSubmits = new Set();
 export function submitPending(id) { return pendingSubmits.has(id); }
+export const heldNotes = [];
+export function noteHeldInput(id, data) { heldNotes.push([id, data]); }
 
 // data-service
 export async function listProjects() { return []; }

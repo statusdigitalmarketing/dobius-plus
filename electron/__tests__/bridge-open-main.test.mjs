@@ -49,6 +49,7 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   env.emit('terminal:inputHeld', wc, opened.tabId, '\x1b[200~\x1b[201~');
   env.emit('terminal:inputHeld', wc, opened.tabId, '\x03');
   assert.equal(env.written.length, 0);
+  assert.deepEqual(env.heldNotes.at(-1), [opened.tabId, '\x03'], 'Chat hears of it too (a held Ctrl+C cancels)');
   assert.ok(watch.keys() > 0, 'held keys count as typing');
   assert.equal(deps.inputBusy(opened.tabId), true);
 
@@ -73,6 +74,10 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   env.emit('terminal:inputHeld', wc, opened.tabId, 'x');
   assert.equal(deps.inputBusy(opened.tabId), true);
   wc.fire('did-start-loading');
+  assert.equal(deps.inputBusy(opened.tabId), false);
+  // So does a crashed renderer whose window stays open.
+  env.emit('terminal:inputHeld', wc, opened.tabId, 'x');
+  wc.fire('render-process-gone');
   assert.equal(deps.inputBusy(opened.tabId), false);
   watch.stop();
 });

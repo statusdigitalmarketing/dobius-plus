@@ -148,6 +148,16 @@ const RAW_KEY_GAP_MS = 20;
 // parts. main.js wires the check (bridge-open-main.js inputHeld).
 let inputHeld = () => false;
 export function setInputHeldCheck(fn) { inputHeld = typeof fn === 'function' ? fn : () => false; }
+
+/**
+ * A key a window took but still holds (bridge-open-main.js terminal:inputHeld).
+ * A cancel key among it cancels queued submits NOW, as it would on arrival:
+ * the window may still drop it (its paste timed out) and never send it.
+ */
+export function noteHeldInput(id, data) {
+  const q = submitQueues.get(id);
+  if (q && typeof data === 'string' && isCancelKey(data)) q.gen += 1;
+}
 const HELD_WAIT_MS = 16_000; // prompt editing gives up on a paste after 15s
 const HELD_POLL_MS = 50;
 // tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
@@ -201,7 +211,7 @@ export function submitPromptToTab(id, text, stillOk = () => true, onStranded = (
  * key (Ctrl+C, Ctrl+U, a bare Esc) always goes at once and drops everything
  * still queued, as it would have when every paste went out immediately.
  */
-export function writeRawInput(id, data, stillOk = () => true) {
+export function writeRawInput(id, data, stillOk = () => true, { promptOnly = false } = {}) {
   if (typeof data !== 'string' || !data) return;
   // A frame already in flight when its phone was revoked: not even a cancel
   // key, which would also throw away the desktop's pending submit.
@@ -225,6 +235,10 @@ export function writeRawInput(id, data, stillOk = () => true) {
   // A submit waiting for held input lets keys through: that input arriving
   // is what it waits for, and it was taken before the submit.
   if (!q || !q.running || q.waitingHeld) { writeTerminal(id, data); return; }
+  // Prompt editing checked that Claude's prompt was showing when it sent
+  // this (a file path pasted into it). Behind a submit it would land later,
+  // maybe in the shell a "/exit" left behind: dropped instead.
+  if (promptOnly) return;
   q.items.push({ raw: data, pty: terminalInstance(id), stillOk, gen: q.gen, resolve: () => {} });
 }
 
@@ -249,6 +263,15 @@ async function drainSubmits(id, q) {
     }
     if (inputHeld(id)) {
       q.waitingHeld = true;
+      // Keys already queued behind this submit came while that input was
+      // held: they go now, in order, ahead of the keys still to come.
+      const early = q.items.filter((x) => x.raw !== undefined);
+      q.items = q.items.filter((x) => x.raw === undefined);
+      for (const x of early) {
+        const live = x.gen === q.gen && terminalInstance(id) === x.pty && !terminalClosing(id) && x.stillOk();
+        if (live) writeTerminal(id, x.raw);
+        x.resolve(live);
+      }
       const end = Date.now() + HELD_WAIT_MS;
       while (inputHeld(id) && Date.now() < end && it.gen === q.gen && terminalInstance(id) === it.pty && !terminalClosing(id)) {
         await new Promise((r) => setTimeout(r, HELD_POLL_MS));

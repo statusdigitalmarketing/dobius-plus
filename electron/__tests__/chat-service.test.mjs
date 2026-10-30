@@ -364,6 +364,43 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   held = false;
   assert.equal(await d, false);
   assert.equal(writes.length, 0, 'nothing typed into the replacement');
+  // Keys queued behind a submit that then waits for held input go first, in
+  // order, before keys that come later (no suffix ahead of its prefix).
+  const { noteHeldInput } = await import('../chat-service.js');
+  held = false;
+  reset(); ptys.set('h', {});
+  const e1 = submitPromptToTab('h', 'one');
+  const e2 = submitPromptToTab('h', 'two');
+  writeRawInput('h', 'ab'); // queued behind both while "one" is running
+  held = true;
+  await tick(400); // "one" done; "two" now waits for the held input
+  writeRawInput('h', 'cd');
+  held = false;
+  assert.deepEqual(await Promise.all([e1, e2]), [true, true]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('one'), '\r', 'ab', 'cd', PASTE('two'), '\r']);
+
+  // A cancel key the window took and holds cancels a waiting submit at once,
+  // even if the window later drops it.
+  held = true;
+  reset(); ptys.set('h', {});
+  const f = submitPromptToTab('h', 'F');
+  await tick(80);
+  noteHeldInput('h', '\x03');
+  held = false;
+  assert.equal(await f, false);
+  assert.equal(writes.length, 0);
+
+  // A path prompt editing pasted into Claude's prompt is dropped, not
+  // delivered after a submit that may end Claude (/exit); idle it goes.
+  reset(); ptys.set('h', {});
+  const g = submitPromptToTab('h', '/exit');
+  writeRawInput('h', "\x1b[200~'/p/deploy.sh'\x1b[201~", () => true, { promptOnly: true });
+  writeRawInput('h', '\r');
+  await g;
+  await tick(100);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('/exit'), '\r', '\r'], 'the path never went out');
+  writeRawInput('h', "\x1b[200~'/p/a.png'\x1b[201~", () => true, { promptOnly: true });
+  assert.equal(writes.at(-1)[1], "\x1b[200~'/p/a.png'\x1b[201~");
   setInputHeldCheck(() => false);
   ok('a Chat send waits for held input, keeps its order, and is cancelled by Ctrl+C or a new shell');
 }

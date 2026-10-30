@@ -44,10 +44,12 @@ function signature(term, box) {
 // What a held image paste reports to main (an empty bracketed paste): it is
 // a person's input, not a terminal reply.
 const HELD_PASTE = '\x1b[200~\x1b[201~';
+const PROMPT_ONLY = Object.freeze({ promptOnly: true });
 
 /**
  * @param {import('@xterm/xterm').Terminal} term
- * @param {(data: string) => void} send writes to the PTY
+ * @param {(data: string, opts?: { promptOnly: boolean }) => void} send writes to
+ *   the PTY; promptOnly marks a paste meant only for Claude's prompt
  * @param {(data: string | null) => void} [held] input the queue HOLDS (behind
  *   an edit or a pending paste) reaches the PTY late, so nothing in main sees
  *   it yet: each such input is reported the moment it is accepted, and null
@@ -124,12 +126,12 @@ export function attachPromptEditing(term, send, held = () => {}) {
   // Delete the selection with keys the prompt understands, then send what
   // replaces it. Stops before any backspace if the caret does not land where
   // the model said: Claude's caret is the only proof of the count.
-  const replace = async (sel, text) => {
+  const replace = async (sel, text, opts) => {
     for (const step of planDelete(sel.box, sel.start, sel.end, app())) {
       if (step.keys) send(step.keys);
       if (step.expect && !(await settle(step.expect, sel.sig))) return false;
     }
-    if (text && !disposed) send(text);
+    if (text && !disposed) send(text, opts);
     return true;
   };
 
@@ -155,8 +157,10 @@ export function attachPromptEditing(term, send, held = () => {}) {
       if (disposed || !inPrompt()) return false;    // the prompt it was pasted into is gone
       if (!text) return true;                       // nothing to paste (save failed)
       if (item.sel === MID_EDIT) return true;       // pasted onto a selection we could not read
-      if (item.sel) return replace(item.sel, pasteData(text));
-      send(pasteData(text));
+      // Checked against Claude's prompt just now; main drops it rather than
+      // deliver it late to whatever replaced the prompt.
+      if (item.sel) return replace(item.sel, pasteData(text), PROMPT_ONLY);
+      send(pasteData(text), PROMPT_ONLY);
       return true;
     }
     const { data, sel } = item;

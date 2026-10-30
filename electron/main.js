@@ -271,7 +271,7 @@ function setupTerminalHandlers() {
     return createTerminal(id, cwd, event.sender, accountEnv, { startCommand });
   });
 
-  ipcMain.on('terminal:write', (event, id, data) => {
+  ipcMain.on('terminal:write', (event, id, data, opts) => {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
     if (typeof data !== 'string') return;
     if (data.length > TERMINAL_WRITE_MAX_BYTES) return;
@@ -285,7 +285,9 @@ function setupTerminalHandlers() {
     // touches the tab first, the queued resume defers to that.
     cancelAutoResumeTab(id);
     // Waits behind a pending Chat submit so keys land in the order typed.
-    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id));
+    // promptOnly: a path prompt editing pasted into Claude's prompt, which
+    // must not land later in whatever replaced it (chat-service).
+    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id), { promptOnly: opts?.promptOnly === true });
   });
 
   ipcMain.on('terminal:resize', (event, id, cols, rows) => {

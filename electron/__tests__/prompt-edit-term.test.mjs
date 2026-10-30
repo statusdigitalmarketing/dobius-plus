@@ -8,7 +8,7 @@ import { attachPromptEditing } from '../../src/lib/prompt-edit-term.js';
 // `exit()` replaces the prompt with a shell, as when Claude quits mid-edit.
 const COLS = 40;
 function fakeClaude(text, { placeholder = false } = {}) {
-  const app = { text, caret: text.length, alive: true, writes: [], submitted: null, held: [] };
+  const app = { text, caret: text.length, alive: true, writes: [], submitted: null, held: [], promptOnly: [] };
   const parsed = new Set();
   const dom = {};
   let grid = [];
@@ -21,8 +21,9 @@ function fakeClaude(text, { placeholder = false } = {}) {
     for (const fn of parsed) fn();
   };
   const insert = (s) => { app.text = app.text.slice(0, app.caret) + s + app.text.slice(app.caret); app.caret += s.length; };
-  const send = (data) => {
+  const send = (data, opts) => {
     app.writes.push(data);
+    if (opts?.promptOnly) app.promptOnly.push(data);
     if (!app.alive) return;
     let s = data;
     while (s) {
@@ -370,4 +371,14 @@ test('when the queue drops what it held, the rest of a reserved send is dropped 
   await wait(50);
   assert.deepEqual(t.app.writes, [], 'nothing of the send reached the shell');
   assert.equal(t.app.held.at(-1), null);
+});
+
+test('a pasted path is marked prompt-only, so main never delivers it late elsewhere; typed keys are not', async () => {
+  const t = fakeClaude('look at');
+  t.edit.pasteWhenReady(Promise.resolve("'/tmp/a.png'"));
+  await wait(50);
+  t.type('x');
+  await wait(20);
+  assert.deepEqual(t.app.promptOnly, ["\x1b[200~'/tmp/a.png'\x1b[201~"]);
+  assert.ok(t.app.writes.includes('x'));
 });
