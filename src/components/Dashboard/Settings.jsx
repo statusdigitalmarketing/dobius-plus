@@ -369,7 +369,7 @@ export default function Settings() {
       <Section title="Terminal">
         <SettingRow
           label="New Tab Starts"
-          description="What a new tab runs in its project folder (Cmd+T, or the + project picker). Restored tabs are left alone."
+          description="What a new tab runs in its project folder (Cmd+T, or the + project picker), back to your shell when it exits. Needs zsh or bash. Restored tabs are left alone."
         >
           <select
             value={normalizeNewTabTool(settings.newTabTool)}
