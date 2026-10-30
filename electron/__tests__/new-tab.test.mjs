@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import {
   normalizeNewTabTool, newTabCommand, buildPickerProjects, countHiddenProjects,
   toggleHiddenProject, pickerShortcutIndex,
-  launchCommandFor, loginShellSpawn,
+  launchCommandFor, loginShellSpawn, isNewTabWrapperCommand,
 } from '../../shared/new-tab.js';
 import { setPendingLaunch, takePendingLaunch, clearPendingLaunches } from '../../src/lib/pending-launch.js';
 
@@ -121,6 +121,16 @@ test('loginShellSpawn starts only a bare tool, under zsh or bash, via env', () =
   assert.deepEqual(loginShellSpawn('/bin/zsh', 'claude; rm -rf ~'), { args: ['-l'], env: {} });
   assert.deepEqual(loginShellSpawn('/bin/zsh', 'Claude'), { args: ['-l'], env: {} });
   assert.deepEqual(loginShellSpawn('/bin/zsh', 'shell'), { args: ['-l'], env: {} });
+});
+
+test('isNewTabWrapperCommand spots the wrapper shell, not a Claude that mentions it', () => {
+  for (const sh of ['/bin/zsh', '/bin/bash', '/opt/homebrew/bin/bash']) {
+    const argv = [sh, ...loginShellSpawn(sh, 'claude').args].join(' ');
+    assert.equal(isNewTabWrapperCommand(`123 ${argv}`), true, sh);
+  }
+  assert.equal(isNewTabWrapperCommand('456 claude -p Explain DOBIUS_NEW_TAB_TOOL'), false);
+  assert.equal(isNewTabWrapperCommand('456 node /opt/claude/cli.js set -- "$DOBIUS_NEW_TAB_TOOL"'), false);
+  assert.equal(isNewTabWrapperCommand('789 /bin/zsh -l'), false);
 });
 
 // The real shells: a hostile prompt hook (a direnv .env import, say) rewrites
