@@ -4,6 +4,7 @@ import { buildPairingWebLink } from '../../../shared/pairing-link.js';
 import { useStore } from '../../store/store';
 import { CURATED_TERMINAL_FONTS, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
+import { normalizeNewTabTool } from '../../lib/new-tab';
 import AccountsSection from './AccountsSection';
 import GwsAccounts from './GwsAccounts';
 
@@ -17,6 +18,7 @@ export default function Settings() {
     terminalFontSize: 13,
     terminalFontFamily: '',
     sidebarDefaultOpen: false,
+    newTabTool: 'claude',
   });
   const [loaded, setLoaded] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -365,6 +367,30 @@ export default function Settings() {
 
       {/* Terminal */}
       <Section title="Terminal">
+        <SettingRow
+          label="New Tab Starts"
+          description="What a new tab runs in its project folder (Cmd+T, or the + project picker). Restored tabs are left alone."
+        >
+          <select
+            value={normalizeNewTabTool(settings.newTabTool)}
+            onChange={(e) => updateSetting('newTabTool', e.target.value)}
+            data-testid="new-tab-tool"
+            style={{
+              backgroundColor: 'var(--bg)',
+              color: 'var(--fg)',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              padding: '4px 8px',
+              fontSize: 12,
+              fontFamily: "'SF Mono', monospace",
+              outline: 'none',
+            }}
+          >
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+            <option value="shell">Plain shell</option>
+          </select>
+        </SettingRow>
         <SettingRow label="Scrollback Lines" description={`Save up to ${settings.scrollbackLines.toLocaleString()} lines on window close`}>
           <select
             value={settings.scrollbackLines}

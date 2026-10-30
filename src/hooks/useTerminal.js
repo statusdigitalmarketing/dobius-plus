@@ -6,6 +6,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import { useStore } from '../store/store';
 import { takePendingScrollback, drawableLine } from '../lib/pending-scrollback';
+import { takePendingLaunch, armLaunch } from '../lib/pending-launch';
 
 // States carried by the Dobius status marker (OSC 777;dobius;<state>), emitted by
 // the managed Claude Notification/Stop hook. Anything else is ignored.
@@ -193,6 +194,10 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     // its scrollback over in memory, so it never races the disk save.
     let restorePromise = Promise.resolve();
     const forked = takePendingScrollback(id);
+    // A New Tab asks for its tool (Claude Code, Codex) here; armed once the
+    // PTY is created. A claimed (moved) tab is never new.
+    const launchTool = claimExisting ? undefined : takePendingLaunch(id);
+    let launch = null;
     if (forked || window.electronAPI.terminalLoadState) {
       restorePromise = (forked ? Promise.resolve(forked) : window.electronAPI.terminalLoadState(id)).then((state) => {
         if (cancelled) return;
@@ -208,6 +213,9 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     }
 
     const inputDisposable = term.onData((data) => {
+      // Escape sequences are mostly xterm's own replies to the shell's
+      // queries (cursor position, device attributes), not keystrokes.
+      if (data[0] !== '\x1b') launch?.onUserInput();
       window.electronAPI.terminalWrite(id, data);
     });
 
@@ -242,6 +250,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     const removeDataListener = window.electronAPI.onTerminalData((termId, data) => {
       if (termId === id && termRef.current) {
         termRef.current.write(data);
+        launch?.onOutput();
       }
     });
 
@@ -270,6 +279,11 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
           })
           .catch((err) => console.warn('[useTerminal] claim failed:', err?.message));
       } else {
+        if (launchTool !== undefined) {
+          launch = armLaunch(launchTool, {
+            write: (cmd) => { if (!cancelled) window.electronAPI.terminalWrite(id, cmd); },
+          });
+        }
         window.electronAPI.terminalCreate(id, cwd);
       }
     });
@@ -353,6 +367,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
 
     return () => {
       cancelled = true;
+      launch?.dispose();
       cancelAnimationFrame(rafId);
       clearInterval(autoSaveInterval);
       clearTimeout(resizeTimer);

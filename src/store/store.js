@@ -6,6 +6,8 @@ import { onScreenTabIds, becomesUnread, clearSeen } from '../lib/tab-unread';
 import { windowFocused } from '../lib/window-focus';
 import { latestSessionForTab } from '../../shared/session-tab.js';
 import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.js';
+import { normalizeNewTabTool, NEW_TAB_TOOLS } from '../lib/new-tab';
+import { setPendingLaunch } from '../lib/pending-launch';
 
 
 // Drop any grid entries whose tab is no longer present. Returns null when the
@@ -169,6 +171,10 @@ export const useStore = create((set, get) => ({
   // Board notification
   boardNotification: null,
 
+  // The New Tab project picker, opened by the tab bar's + button.
+  newTabPickerOpen: false,
+  setNewTabPickerOpen: (open) => set({ newTabPickerOpen: !!open }),
+
   // Tab actions
   addTab: (projectPath) => {
     const state = get();
@@ -183,6 +189,24 @@ export const useStore = create((set, get) => ({
       activeTabId: id,
       tabCounter: counter,
     });
+    return tab;
+  },
+
+  // New Tab (the + picker, Cmd+T, the menu, the palette): a terminal tab that
+  // starts the tool chosen in Settings (Claude Code by default) in its project.
+  // `tool` ('claude' | 'codex' | 'shell') overrides the setting. Every other
+  // addTab caller (reopen, agents, checkpoints, orchestrator, restored tabs)
+  // types its own command or none, so it must not come through here.
+  openNewTab: (projectPath, tool) => {
+    const tab = get().addTab(projectPath);
+    const api = typeof window !== 'undefined' ? window.electronAPI : null;
+    // A failed settings read opens a plain shell rather than guessing.
+    const chosen = tool !== undefined
+      ? (NEW_TAB_TOOLS.includes(tool) ? tool : 'shell')
+      : (api?.configGetSettings
+        ? Promise.resolve(api.configGetSettings()).then((s) => normalizeNewTabTool(s?.newTabTool), () => 'shell')
+        : 'shell');
+    setPendingLaunch(tab.id, chosen);
     return tab;
   },
 

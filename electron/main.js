@@ -2638,26 +2638,48 @@ function setupImessageBridgeHandlers() {
   });
 }
 
+// Existence + safety guard for opening a project window. Avoids opening a
+// window for a deleted / typo / sensitive path. Resolves symlinks then verifies
+// the path is an actual directory. Apple-grade audit P2. null when it is fine.
+function projectDirError(projectPath) {
+  if (typeof projectPath !== 'string' || !projectPath.startsWith('/')) {
+    return 'projectPath must be an absolute path';
+  }
+  try {
+    const real = fs.realpathSync(projectPath);
+    const stat = fs.statSync(real);
+    if (!stat.isDirectory()) return 'projectPath is not a directory';
+  } catch (err) {
+    return `cannot open project: ${err.message}`;
+  }
+  return null;
+}
+
+// Project windows (by webContents id) owed a new tab by the New Tab picker in
+// another window. The window takes it once its tabs are restored, which covers
+// a window that is still loading and so cannot hear window:newTabRequest.
+// ponytail: an entry for a window closed before it took its tab is never
+// removed (webContents ids are not reused, so it is only a stale integer).
+const pendingNewTabs = new Set();
+
 function setupWindowHandlers() {
   ipcMain.handle('window:openProject', (_event, projectPath) => {
-    // Existence + safety guard. Avoids opening a window for a deleted /
-    // typo / sensitive path. Resolves symlinks then verifies the path is
-    // an actual directory. Apple-grade audit P2.
-    if (typeof projectPath !== 'string' || !projectPath.startsWith('/')) {
-      return { ok: false, error: 'projectPath must be an absolute path' };
-    }
-    try {
-      const real = fs.realpathSync(projectPath);
-      const stat = fs.statSync(real);
-      if (!stat.isDirectory()) {
-        return { ok: false, error: 'projectPath is not a directory' };
-      }
-    } catch (err) {
-      return { ok: false, error: `cannot open project: ${err.message}` };
-    }
+    const error = projectDirError(projectPath);
+    if (error) return { ok: false, error };
     const win = openProjectWindow(projectPath);
     return { ok: true, id: win.id };
   });
+
+  ipcMain.handle('window:openProjectNewTab', (_event, projectPath) => {
+    const error = projectDirError(projectPath);
+    if (error) return { ok: false, error };
+    const win = openProjectWindow(projectPath);
+    pendingNewTabs.add(win.webContents.id);
+    win.webContents.send('window:newTabRequest');
+    return { ok: true, id: win.id };
+  });
+
+  ipcMain.handle('window:takePendingNewTab', (event) => pendingNewTabs.delete(event.sender.id));
 
   ipcMain.handle('window:pickAndOpenProject', async (event) => {
     const result = await pickFolder(event, {
