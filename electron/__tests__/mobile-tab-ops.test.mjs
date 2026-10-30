@@ -203,15 +203,15 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   ok('foreign input during the Enter delay: stranded, uncertain');
 }
 {
-  // Esc alone (the queue's own cancel key) leaves the paste in the line and
-  // nothing else touched the tab: definitely not submitted.
+  // Esc alone leaves the paste in the input line, where a person may still
+  // press Enter on it: a caller must not resend it as unsent.
   const h = harness({ live: [A], authed: [A] });
   const p = h.run({ type: 'submitPrompt', id: A, text: 'hello', reqId: 'x' });
   writeRawInput(A, '\x1b');
   await p;
   assert.equal(h.sent[0].code, 'stranded');
-  assert.equal('uncertain' in h.sent[0], false);
-  ok('Esc during the Enter delay: stranded, not uncertain');
+  assert.equal(h.sent[0].uncertain, true);
+  ok('Esc during the Enter delay: stranded, uncertain');
 }
 {
   const h = harness({ live: [A], authed: [A] });
@@ -252,11 +252,23 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   const k1 = h.run({ type: 'input', id: A, data: 'x', reqId: 'k1' });
   ptys.get(A).throwOnWrite = true; // the delayed Enter throws
   await Promise.all([p1, k1]);
-  assert.deepEqual(h.sent.map((m) => [m.reqId, m.code, m.uncertain]).sort(), [['k1', 'write_failed', true], ['p1', 'write_failed', true]]);
+  // p1 was pasted (maybe in the line); k1 was never written: plainly unsent.
+  assert.deepEqual(h.sent.map((m) => [m.reqId, m.code, m.uncertain]).sort(), [['k1', 'write_failed', undefined], ['p1', 'write_failed', true]]);
   ptys.get(A).throwOnWrite = false;
   await h.run({ type: 'submitPrompt', id: A, text: 'after', reqId: 'p2' });
   assert.equal(h.sent[2].type, 'ack');
   ok('a throwing queued write: every request answered, queue released');
+}
+
+// 11. Back-to-back awaited submits: the second is queued in the same turn the
+// first resolves in, and must still be written and settle.
+{
+  harness({ live: [A] });
+  assert.deepEqual(await submitPromptDetailed(A, 'one'), { ok: true });
+  const second = await Promise.race([submitPromptDetailed(A, 'two'), new Promise((r) => setTimeout(() => r('hung'), 2000))]);
+  assert.deepEqual(second, { ok: true });
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('one'), '\r', PASTE('two'), '\r']);
+  ok('sequential awaited submits both land');
 }
 
 console.log(`\n${pass} passed`);

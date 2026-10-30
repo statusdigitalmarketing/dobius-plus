@@ -260,66 +260,72 @@ function skipReason(id, q, it) {
 
 async function drainSubmits(id, q) {
   q.running = true;
+  // The cleanup runs in the SAME turn the loop ends in: an await between them
+  // let a caller queue another submit (seeing running) that the cleanup then
+  // dropped, never written and never settled (Codex Medium).
   try {
-    await drainItems(id, q);
+    while (q.items.length > 0) {
+      const it = q.items.shift();
+      q.current = it;
+      let skip = skipReason(id, q, it);
+      if (skip) { it.resolve(refused(skip)); continue; }
+      if (it.raw !== undefined) {
+        // Keys that waited behind a submit go out as separate keystrokes, not
+        // one burst Claude would read as a paste (an Enter in it becomes a newline).
+        await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
+        skip = skipReason(id, q, it);
+        if (skip) { it.resolve(refused(skip)); continue; }
+        it.touched = true;
+        writeTerminal(id, it.raw);
+        it.resolve(DONE);
+        continue;
+      }
+      it.touched = true;
+      writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
+      const pastedAt = terminalInputSeq(id);
+      const cancelsAt = q.cancelWrites || 0;
+      await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
+      // No stillOk() here on purpose: a paste that went out gets its Enter even
+      // if the phone that sent it dropped, or its text would sit half-typed and
+      // be glued onto the next message (test 4).
+      // Withheld, the pasted text stays in the prompt's input line: tell the
+      // caller, so it says so instead of offering the text back to send twice.
+      if (terminalInstance(id) !== it.pty || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalClosing(id)) {
+        // Any Ctrl+C/Ctrl+U since this item queued erased the pasted line, even if
+        // a later Esc was the most recent cancel. Only when nothing ELSE wrote to
+        // the tab: another writer's Enter (a terminal, /tabSend) may have sent
+        // the paste before the erase, and reporting it unsent would offer the
+        // text back to be sent twice (Codex High). Then it is stranded: check
+        // the terminal.
+        const foreign = (terminalInputSeq(id) - pastedAt) - ((q.cancelWrites || 0) - cancelsAt);
+        const erased = foreign === 0 && (q.clearedGen ?? -1) > it.gen;
+        const gone = terminalInstance(id) !== it.pty || terminalClosing(id);
+        if (!gone && !erased) it.onStranded();
+        // uncertain: unless it was erased, the paste is in the tab and may yet
+        // be submitted: by another writer's input during the delay, by the
+        // tab going away with its counters, or by a person pressing Enter on
+        // the line later. A remote caller must not treat it as unsent and
+        // resend it (Codex High, rounds 3 and 4).
+        const uncertain = !erased;
+        it.resolve({ ...refused(gone ? 'tab_exited' : erased ? 'cancelled' : 'stranded'), ...(uncertain ? { uncertain: true } : {}) });
+        continue;
+      }
+      writeTerminal(id, '\r');
+      it.resolve(DONE);
+    }
   } catch (err) {
     // A throwing PTY write must not wedge the tab's queue or leave a request
-    // unanswered: everything still queued is reported, the queue released.
+    // unanswered. Only the item being written can have reached the tab (it is
+    // uncertain, and the desktop is told its text may be in the input line);
+    // the ones queued behind it were never touched and are plainly unsent.
     console.error('[chat-service] submit queue failed:', err?.message || err);
-    for (const it of q.items.splice(0)) it.resolve({ ...refused('write_failed'), uncertain: true });
-    q.current?.resolve({ ...refused('write_failed'), uncertain: true });
+    const cur = q.current;
+    if (cur?.touched && terminalInstance(id) === cur.pty) cur.onStranded?.();
+    cur?.resolve({ ...refused('write_failed'), ...(cur.touched ? { uncertain: true } : {}) });
+    for (const it of q.items.splice(0)) it.resolve(refused('write_failed'));
   } finally {
     q.current = null;
     q.running = false;
     if (submitQueues.get(id) === q) submitQueues.delete(id);
-  }
-}
-
-async function drainItems(id, q) {
-  while (q.items.length > 0) {
-    const it = q.items.shift();
-    q.current = it;
-    let skip = skipReason(id, q, it);
-    if (skip) { it.resolve(refused(skip)); continue; }
-    if (it.raw !== undefined) {
-      // Keys that waited behind a submit go out as separate keystrokes, not
-      // one burst Claude would read as a paste (an Enter in it becomes a newline).
-      await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
-      skip = skipReason(id, q, it);
-      if (skip) { it.resolve(refused(skip)); continue; }
-      writeTerminal(id, it.raw);
-      it.resolve(DONE);
-      continue;
-    }
-    writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
-    const pastedAt = terminalInputSeq(id);
-    const cancelsAt = q.cancelWrites || 0;
-    await new Promise((r) => setTimeout(r, SUBMIT_ENTER_DELAY_MS));
-    // No stillOk() here on purpose: a paste that went out gets its Enter even
-    // if the phone that sent it dropped, or its text would sit half-typed and
-    // be glued onto the next message (test 4).
-    // Withheld, the pasted text stays in the prompt's input line: tell the
-    // caller, so it says so instead of offering the text back to send twice.
-    if (terminalInstance(id) !== it.pty || it.gen !== q.gen || terminalInputSeq(id) !== pastedAt || terminalClosing(id)) {
-      // Any Ctrl+C/Ctrl+U since this item queued erased the pasted line, even if
-      // a later Esc was the most recent cancel. Only when nothing ELSE wrote to
-      // the tab: another writer's Enter (a terminal, /tabSend) may have sent
-      // the paste before the erase, and reporting it unsent would offer the
-      // text back to be sent twice (Codex High). Then it is stranded: check
-      // the terminal.
-      const foreign = (terminalInputSeq(id) - pastedAt) - ((q.cancelWrites || 0) - cancelsAt);
-      const erased = foreign === 0 && (q.clearedGen ?? -1) > it.gen;
-      const gone = terminalInstance(id) !== it.pty || terminalClosing(id);
-      if (!gone && !erased) it.onStranded();
-      // uncertain: the paste is in the tab and something we did not send may
-      // have pressed Enter on it (another writer's input; or the tab is gone
-      // and its counters with it). A remote caller must not treat it as unsent
-      // and resend (Codex High, three lenses).
-      const uncertain = gone || (!erased && foreign > 0);
-      it.resolve({ ...refused(gone ? 'tab_exited' : erased ? 'cancelled' : 'stranded'), ...(uncertain ? { uncertain: true } : {}) });
-      continue;
-    }
-    writeTerminal(id, '\r');
-    it.resolve(DONE);
   }
 }

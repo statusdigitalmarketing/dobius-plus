@@ -78,11 +78,14 @@ Refusal:
 is the full id that was written to. `reqId` is null when the request had none.
 `message` is for people; match on `code`.
 
-`uncertain: true` (present only when set) means the text reached the tab and
-the server withheld its own Enter, but it cannot rule out that something else
-submitted it: another writer typed into the tab during the paste delay, the tab
-went away after the paste, or the write path threw. Treat it as UNKNOWN
-delivery, never as "not sent": read the tab back before resending.
+`uncertain: true` (present only when set) means the text reached the tab but
+the server did not finish the write: the paste went out and its own Enter was
+withheld (something else reached the tab during the paste delay, or the tab
+went away), or the write threw part way. The text may be sitting in the input
+line, or something else (another writer, a person pressing Enter later) may
+submit it. Treat it as UNKNOWN delivery, never as "not sent": read the tab back
+before resending. Requests queued behind a failed write that were never
+touched get `write_failed` WITHOUT `uncertain`: they are plainly unsent.
 
 The refusal type is `opError`, not `error`: the phone's Board and Terminal
 screens treat every `error` frame as a failed create (an alert, and the create
@@ -100,8 +103,8 @@ refused keystroke. Clients ignore message types they do not know, so `ack` and
 | `revoked` | the device was unpaired while the write was queued | no |
 | `tab_exited` | the tab closed, exited or was replaced before the write | no; after a paste, `uncertain` |
 | `cancelled` | a cancel key (Ctrl+C, Ctrl+U, Esc) dropped or erased it | no, or erased |
-| `stranded` | submit only: pasted, but Enter was withheld because something else reached the tab meanwhile. Without `uncertain` (only our own Esc) the text sits in the input line | pasted; with `uncertain`, maybe submitted |
-| `write_failed` | an unexpected failure in the write path (always `uncertain`) | unknown |
+| `stranded` | submit only: pasted, but Enter was withheld because something else reached the tab meanwhile (always `uncertain`) | pasted, maybe submitted |
+| `write_failed` | an unexpected failure in the write path | `uncertain` if this request had started writing, else no |
 
 ### Short ids are never guessed
 

@@ -124,5 +124,5 @@ export async function handleTabOp(msg, deps) {
   // uncertain: the text reached the tab and may have been submitted by
   // another writer's Enter. A client must not resend it as if unsent.
   const code = REASON_CODES[r?.reason] || 'write_failed';
-  return fail(code, r?.uncertain || code === 'write_failed' ? { uncertain: true } : undefined);
+  return fail(code, r?.uncertain ? { uncertain: true } : undefined);
 }
