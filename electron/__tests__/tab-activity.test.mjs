@@ -190,13 +190,13 @@ test('presence reader: a claude started AFTER the turn ended never inherits it',
   const read = createPresenceReader({
     claudeInfo: async () => proc,
     configDirOf: async () => '/cfg',
-    readFile: async () => JSON.stringify(rec({ status: 'busy' })),
+    readFile: async () => JSON.stringify(rec({ status: 'shell' })),
     now: () => 0,
   });
   // Process A's turn ended a minute BEFORE this process (B) started.
   assert.equal(await bg(read, 'a', proc.startedAt - 60_000), null);
   // Same cached lookup, a turn this process was alive for.
-  assert.equal(await bg(read, 'a', proc.startedAt + 1000), 'agents');
+  assert.equal(await bg(read, 'a', proc.startedAt + 1000), 'shells');
 });
 
 test('presence reader: the real file reader refuses non-files and oversize files', async () => {
@@ -245,11 +245,11 @@ test('presence reader: a claude started in the same second the turn ended is not
   const read = createPresenceReader({
     claudeInfo: async () => proc,
     configDirOf: async () => '/cfg',
-    readFile: async () => JSON.stringify(rec({ status: 'busy' })),
+    readFile: async () => JSON.stringify(rec({ status: 'shell' })),
     now: () => 0,
   });
   assert.equal(await bg(read, 'a', proc.startedAt + 900), null);
-  assert.equal(await bg(read, 'a', proc.startedAt + 1000), 'agents');
+  assert.equal(await bg(read, 'a', proc.startedAt + 1000), 'shells');
 });
 
 test('presence reader: concurrent asks share one lookup', async () => {
@@ -1075,4 +1075,26 @@ test('an older scan still in flight cannot clear a newer ambiguity', () => {
   ts.ingest(ID, mk('done'), 105_000);
   ts.ingest(ID, mk('working'), 106_000);
   assert.equal(ts.activityFor(ID).ambiguous, false);
+});
+
+test('a shared scan is dated by its own start, not by the caller that joined it', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.markAmbiguous(ID, 100_300);                          // a scan started at 100.3 saw two
+  const { checkTurnAgainstProcess } = makeActivity({
+    claudeInfoFresh: async () => ({ pid: 1, startedAt: 1_000, scanStartedAt: 100_000 }), // began at 100
+    now: () => 101_400,                                   // the joining caller
+  });
+  await checkTurnAgainstProcess(ID, ts.activityFor(ID), { fresh: true });
+  ts.ingest(ID, mk('done'), 102_000);
+  ts.ingest(ID, mk('needs'), 103_000);
+  assert.equal(ts.activityFor(ID).ambiguous, true);
+});
+
+test('judgePresence: a busy written just before the received Stop is no claim', () => {
+  const info = { pid: 1, startedAt: 1_000 };
+  const a = { status: 'done', hookOwned: false, turnEndedAt: 21_000 };
+  const f = (at) => ({ pid: 1, startedAt: 1_000, status: 'busy', statusUpdatedAt: at });
+  assert.deepEqual(judgePresence(f(20_500), a, info), { background: null, uncertain: true });
+  assert.equal(judgePresence(f(17_000), a, info).background, 'agents');
 });

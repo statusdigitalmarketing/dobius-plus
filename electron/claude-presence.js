@@ -126,6 +126,10 @@ export function judgePresence(found, a, info, now = Infinity) {
   if (found.status === 'busy' || found.status === 'waiting') {
     if (!Number.isFinite(at)) return none;
     if (at > end) return { background: null, uncertain: true };
+    // The end is when the Stop marker REACHED us, which can lag its sending
+    // (PTY buffering): a state written just before it cannot be placed on
+    // either side of the turn's real end, so no claim either way.
+    if (at > end - GRACE_MS) return { background: null, uncertain: true };
     if (found.status === 'busy') return { background: 'agents', uncertain: false };
   }
   return none;
@@ -361,6 +365,8 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     if (!raw.hookOwned && !raw.lastTurnMs && !raw.turnEndedAt) return undefined;
     // At a turn's end the process must be read NOW: a cached identity can be
     // the claude that died just before this turn's claude started.
+    // A scan carries its own start (scanStartedAt) when the lookup stamps it:
+    // a shared or cached scan began earlier than this caller.
     let scanStart = now();
     let info = await (fresh ? claudeInfoFresh : claudeInfo)(id);
     let readNow = fresh;
@@ -372,11 +378,15 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
       readNow = true;
     }
     // Scans are ordered by when they STARTED: what a scan saw is from then.
-    // A cached "two" is dated now: no scan already in flight may undo it.
-    if (info?.ambiguous) status.markAmbiguous(id, readNow ? scanStart : now());
-    // Only a scan run now may vouch for one claude, and only one that started
-    // after the scan that saw two (an older scan still in flight cannot).
-    else if (info && readNow) status.noteUnique(id, scanStart, now());
+    // Unstamped, a "two" is dated now (no scan in flight may undo it) and a
+    // "one" counts only from a scan this call started.
+    const seenAt = Number.isFinite(info?.scanStartedAt) ? info.scanStartedAt : null;
+    if (info?.ambiguous) status.markAmbiguous(id, seenAt ?? (readNow ? scanStart : now()));
+    else if (info && (seenAt ?? (readNow ? scanStart : null)) !== null) {
+      // Only a scan that started after the one that saw two (noteUnique
+      // checks), so an older scan still in flight cannot clear it.
+      status.noteUnique(id, seenAt ?? scanStart, now());
+    }
     const a = reconcileWithProcess(raw, info);
     // A claude's start time proves a time wrong. Finding NO claude proves a
     // still-running turn was abandoned (or runs behind a wrapper, where an

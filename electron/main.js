@@ -232,13 +232,19 @@ const ownerCleanup = createOwnerCleanup(terminalOwners);
 // Sidebar tab activity (Working / Input / Waiting / Done labels). Unread ids
 // mirrored from each window, keyed by webContents.id.
 const unreadByWindow = new Map();
-const claudeInfoCached = cachedPerTab((id) => getTerminalClaudeInfo(id, { unique: true }), 2500);
+// Each scan is stamped with when it STARTED, which is what it saw (a shared
+// or cached answer reaches callers that began later).
+const scanClaude = (id) => {
+  const scanStartedAt = Date.now();
+  return getTerminalClaudeInfo(id, { unique: true }).then((info) => (info ? { ...info, scanStartedAt } : info));
+};
+const claudeInfoCached = cachedPerTab(scanClaude, 2500);
 const { tabActivity, checkTurnAgainstProcess } = createTabActivity({
   status: terminalStatus,
   claudeInfo: claudeInfoCached,
   // Fresh = never a settled answer, but one scan in flight per tab is shared
   // however many asks arrive (renderer requests cannot fan out scans).
-  claudeInfoFresh: cachedPerTab((id) => getTerminalClaudeInfo(id, { unique: true }), 0),
+  claudeInfoFresh: cachedPerTab(scanClaude, 0),
   presenceForTab: createPresenceReader({ claudeInfo: claudeInfoCached, configDirOf: configDirOfPid }),
   unreadAnywhere: (id) => unreadAnywhere(id),
 });
