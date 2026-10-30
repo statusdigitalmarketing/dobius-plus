@@ -82,6 +82,8 @@ export default function AccountUsage() {
       if (window.confirm(`${res.message}\n\nCreate it?`)) res = await window.electronAPI.claudeUsageEnable({ confirmCreate: true });
       else { setBusy(false); return; }
     }
+    // The model-line switch in Settings shares this status line.
+    window.dispatchEvent(new Event('dobius:statusline-changed'));
     if (!mounted.current) return;
     setBusy(false);
     if (res?.error) setError(res.error); else load();
@@ -90,6 +92,7 @@ export default function AccountUsage() {
   const disable = async () => {
     setBusy(true); setError('');
     const res = await window.electronAPI.claudeUsageDisable();
+    window.dispatchEvent(new Event('dobius:statusline-changed'));
     if (!mounted.current) return;
     setBusy(false);
     if (res?.error) setError(res.error); else load();

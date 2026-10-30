@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import {
   parseRecord, aggregateUsage, reporterScript,
   planStatusLineInstall, planStatusLineRemove, ownsStatusLine, REPORTER_MARKER,
-  reporterCommand, EFFORT_WORDS,
+  reporterCommand, EFFORT_WORDS, chainFromScript,
 } from '../claude-usage.js';
 
 // Ownership is detected by the marker appearing in the command string, and the
@@ -325,5 +325,20 @@ check('model line: still no helper process', () => {
   }
 });
 fs.rmSync(tmpUsage, { recursive: true, force: true });
+
+check('the chained command can be read back out of any generated script', () => {
+  // Recovery when the restore record is lost: a regenerated script must keep
+  // chaining their command rather than silently dropping it.
+  const cmds = ['mine.sh --flag', "evil'; rm -rf /; echo 'x", "a 'b' c", "line1\nline2", "ends with '"];
+  for (const cmd of cmds) {
+    for (const opts of [{}, { model: true }, { capture: false, model: true }]) {
+      assert.equal(chainFromScript(reporterScript('/u/usage', cmd, opts)), cmd, `${cmd} ${JSON.stringify(opts)}`);
+    }
+  }
+  assert.equal(chainFromScript(reporterScript('/u/usage', null)), null, 'no chain');
+  assert.equal(chainFromScript(reporterScript('/u/usage', null, { model: true })), null);
+  assert.equal(chainFromScript('#!/bin/sh\necho hi\n'), undefined, 'not ours: unknown');
+  assert.equal(chainFromScript(undefined), undefined);
+});
 
 console.log(`\nALL PASS  (${pass} passed)`);

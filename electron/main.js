@@ -29,7 +29,7 @@ import { scanClaudeProcesses } from './claude-process-scan.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
-  planStatusLineInstall, planStatusLineRemove, ownsStatusLine,
+  planStatusLineInstall, planStatusLineRemove, ownsStatusLine, chainFromScript,
 } from './claude-usage.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
@@ -1591,7 +1591,22 @@ function setupFileHandlers() {
   // shared ~/.claude/settings.json. DOBIUS_CLAUDE_HOME points it at a throwaway
   // Claude home instead, so an install can still be ship-tested; outside the
   // harness the variable is ignored.
-  const claudeHomeOverride = process.env.DOBIUS_USERDATA_DIR ? (process.env.DOBIUS_CLAUDE_HOME || '') : '';
+  // The override must be a real directory that is NOT the real Claude home by
+  // another name: a symlink to ~/.claude, or a settings.json linked to the real
+  // one, would put the harness's writes back on the shared file (Codex HIGH).
+  const claudeHomeOverride = (() => {
+    const o = process.env.DOBIUS_USERDATA_DIR ? (process.env.DOBIUS_CLAUDE_HOME || '') : '';
+    if (!o) return '';
+    const real = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+    const realHome = real(path.join(homedir, '.claude'));
+    const dir = real(o);
+    const file = real(path.join(o, 'settings.json'));
+    if (!dir || dir === realHome || (file && file === real(path.join(homedir, '.claude', 'settings.json')))) {
+      console.warn(`[claudeSettings] DOBIUS_CLAUDE_HOME refused: ${o} is missing or is the real ~/.claude`);
+      return '';
+    }
+    return dir;
+  })();
   const claudeHome = claudeHomeOverride || path.join(homedir, '.claude');
   const claudeSettingsPath = path.join(claudeHome, 'settings.json');
   const REAL_CLAUDE_HOME_REFUSED = process.env.DOBIUS_USERDATA_DIR && !claudeHomeOverride
@@ -1913,15 +1928,35 @@ function setupFileHandlers() {
   // modelUnderPrompt is ON unless explicitly turned off. usageReporting did
   // not exist before the model line: an older build's install meant usage was
   // on, so an unset value is settled from what settings.json shows, once.
+  // Settled with every parsed read, not once at launch: a settings.json that
+  // was unparseable at launch says nothing either way, and treating unset as
+  // off there would uninstall a working reporter on the next toggle (Codex).
+  // Persisted at once, never debounced: a crash after an install but before
+  // the save would read a model-only install as a legacy usage one next time.
+  const settleUsage = (settings) => {
+    if (getSettings().usageReporting !== undefined || !settings) return;
+    updateSettings({ usageReporting: statusLineIsMine(settings) });
+    persistConfigNow();
+  };
   const statusLineParts = () => {
     const s = getSettings();
     return { capture: s.usageReporting === true, model: s.modelUnderPrompt !== false };
   };
-  if (getSettings().usageReporting === undefined) {
-    const { settings } = readClaudeSettings();
-    // Unparseable today says nothing either way: settle it on a later launch.
-    if (settings) updateSettings({ usageReporting: statusLineIsMine(settings) });
-  }
+  settleUsage(readClaudeSettings().settings);
+
+  // Which command of the user's the script chains. The restore record is the
+  // source; when it is missing or unreadable, the installed script itself still
+  // carries the command. Neither readable means UNKNOWN, and regenerating with
+  // no chain then would silently drop their status line (Codex HIGH).
+  const currentChain = () => {
+    const { remember } = readStatusLineBackup();
+    if (remember && typeof remember === 'object') return { known: true, chain: remember.chain ?? null };
+    let text;
+    try { text = fs.readFileSync(reporterScriptPath(app.getPath('userData')), 'utf8'); }
+    catch { return { known: false }; }
+    const chain = chainFromScript(text);
+    return chain === undefined ? { known: false } : { known: true, chain };
+  };
 
   // Temp file then rename. Writing in place truncates the LIVE script first,
   // so a failure here would leave settings.json pointing at a half-written file
@@ -1940,7 +1975,11 @@ function setupFileHandlers() {
     }
   };
 
-  const installStatusLine = (opts, settings, raw, exists) => {
+  // `eligible`, when given, is re-checked against every read that is about to
+  // be written, including the conflict retry: the launch install is allowed
+  // only into an empty slot or over this instance's own reporter, and the
+  // slot can change between the launch check and the write (Codex).
+  const installStatusLine = (opts, settings, raw, exists, eligible = null) => {
     // Checked before the restore record is written, which also lives there.
     if (REAL_CLAUDE_HOME_REFUSED) return { error: REAL_CLAUDE_HOME_REFUSED };
     // Same refusal as the status hooks: never create this file silently.
@@ -1949,12 +1988,19 @@ function setupFileHandlers() {
     }
     const userData = app.getPath('userData');
     const install = (base, baseRaw) => {
+      if (eligible && !eligible(base)) throw new Error('status line changed since launch, left alone');
       const plan = planStatusLineInstall(base.statusLine, reporterCommand(userData));
       // Keep the ORIGINAL when we already own the value: re-running enable must
       // never record our own wrapper as the thing to restore.
-      const remember = plan.remember ?? readStatusLineBackup().remember;
+      let chain;
+      if (plan.remember) chain = plan.remember.chain;
+      else {
+        const cur = currentChain();
+        if (!cur.known) throw new Error('could not tell which status line of yours to keep, left as is');
+        chain = cur.chain;
+      }
       if (plan.remember) writeStatusLineBackup(plan.remember);
-      writeReporter(remember?.chain ?? null);
+      writeReporter(chain);
       base.statusLine = plan.statusLine;
       writeClaudeSettings(base, baseRaw);
     };
@@ -1996,26 +2042,32 @@ function setupFileHandlers() {
 
   // Bring settings.json and the script in line with the two switches. Already
   // ours: only the script is rewritten, settings.json is not touched at all.
-  const syncStatusLine = (opts) => {
+  const syncStatusLine = (opts, eligible = null) => {
     const { settings, raw, exists } = readClaudeSettings();
     if (settings === null) return { error: PARSE_FAIL };
+    settleUsage(settings);
     const { capture, model } = statusLineParts();
     if (!capture && !model) return removeStatusLine(settings, raw);
     if (statusLineIsMine(settings)) {
-      try { writeReporter(readStatusLineBackup().remember?.chain ?? null); }
+      const cur = currentChain();
+      if (!cur.known) return { error: 'Could not tell which status line of yours to keep, left as is' };
+      try { writeReporter(cur.chain); }
       catch (err) { return { error: `Could not update the status line script: ${err.message}` }; }
       return { ok: true };
     }
-    return installStatusLine(opts, settings, raw, exists);
+    return installStatusLine(opts, settings, raw, exists, eligible);
   };
 
   // Flip one switch and sync; a failed sync puts the switch back, so the
   // stored choice never claims a state settings.json does not have.
-  const setStatusLinePart = (key, on, opts) => {
+  // Persisted before settings.json is touched, for the same crash reason as
+  // settleUsage.
+  const setStatusLinePart = (key, on, opts, eligible = null) => {
     const before = getSettings()[key];
     updateSettings({ [key]: on });
-    const r = syncStatusLine(opts);
-    if (r?.error) updateSettings({ [key]: before });
+    persistConfigNow();
+    const r = syncStatusLine(opts, eligible);
+    if (r?.error) { updateSettings({ [key]: before }); persistConfigNow(); }
     return r;
   };
 
@@ -2030,8 +2082,9 @@ function setupFileHandlers() {
     const { settings, exists } = readClaudeSettings();
     if (settings && exists) {
       if (getSettings().modelUnderPrompt === undefined) {
-        if (statusLineIsMine(settings) || settings.statusLine === undefined) {
-          const r = setStatusLinePart('modelUnderPrompt', true);
+        const eligible = (st) => statusLineIsMine(st) || st.statusLine === undefined;
+        if (eligible(settings)) {
+          const r = setStatusLinePart('modelUnderPrompt', true, undefined, eligible);
           if (r?.error) console.warn(`[statusLine] model line install skipped: ${r.error}`);
         }
       } else if (statusLineIsMine(settings)) {

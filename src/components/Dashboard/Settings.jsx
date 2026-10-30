@@ -50,7 +50,6 @@ export default function Settings() {
     });
     window.electronAPI?.autoModeGet?.().then((a) => { if (a) setAutoMode(a); });
     window.electronAPI?.claudeHooksGetStatus?.().then((r) => { if (r) setStatusHooks(!!r.installed); });
-    window.electronAPI?.modelLineGetStatus?.().then((r) => { if (r) setModelLine(r); });
     window.electronAPI?.voiceConductorGet?.().then((r) => { if (r) setVoiceConductor(!!r.enabled); });
     window.electronAPI?.errorLogInfo?.().then((r) => { if (r?.path) setErrorLogPath(r.path); });
   }, []);
@@ -87,6 +86,15 @@ export default function Settings() {
     if (r?.error) setStatusHooksError(r.error);
     else setStatusHooks(!!r?.installed);
     setStatusHooksBusy(false);
+  }, []);
+
+  // Account usage (in the Accounts section) installs the same status line, so
+  // it announces changes and this re-reads rather than showing a stale switch.
+  useEffect(() => {
+    const refresh = () => window.electronAPI?.modelLineGetStatus?.().then((r) => { if (r) setModelLine(r); });
+    refresh();
+    window.addEventListener('dobius:statusline-changed', refresh);
+    return () => window.removeEventListener('dobius:statusline-changed', refresh);
   }, []);
 
   const toggleModelLine = useCallback(async (on) => {

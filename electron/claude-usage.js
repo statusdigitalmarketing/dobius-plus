@@ -101,6 +101,21 @@ ${capture ? captureBlock(usageDir) : ''}${model ? MODEL_BLOCK : ''}${tail}exit 0
 `;
 }
 
+/**
+ * The user's command a generated script chains, read back out of the script.
+ * Recovery for when the restore record is gone: regenerating the script must
+ * not drop their status line just because the record that named it was lost.
+ * Matches only the exact shQuote form reporterScript writes.
+ *
+ * @returns {string|null|undefined} the command, null when the script chains
+ *   nothing, undefined when this is not a script we can read (unknown).
+ */
+export function chainFromScript(text) {
+  if (typeof text !== 'string' || !text.startsWith(`#!/bin/sh\n# ${REPORTER_MARKER}:`)) return undefined;
+  const m = text.match(/^(?:printf '%s' "\$payload" \| exec |out=\$\(printf '%s' "\$payload" \| )\/bin\/sh -c '((?:[^']|'\\'')*)'\)?$/m);
+  return m ? m[1].replace(/'\\''/g, "'") : null;
+}
+
 // Effort levels in the words a person would say. Claude's own label is the raw
 // level; "xhigh" is what Brett asked to read as "extra high". A level missing
 // from this table is shown as Claude sent it, if it is a plain word.
