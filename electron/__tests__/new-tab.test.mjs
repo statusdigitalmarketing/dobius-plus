@@ -101,7 +101,7 @@ test('loginShellSpawn starts only a bare tool, under zsh or bash, via env', () =
   assert.deepEqual(z.env, { DOBIUS_NEW_TAB_TOOL: 'claude' });
   assert.deepEqual(z.args.slice(0, 3), ['-l', '-i', '-c']);
   const read = 'set -- "$DOBIUS_NEW_TAB_TOOL"; unset DOBIUS_NEW_TAB_TOOL;';
-  const launch = 'case $1 in claude) claude ;; codex) codex ;; esac;';
+  const launch = '[[ $1 == claude ]] && claude; [[ $1 == codex ]] && codex;';
   // The tool is read BEFORE the hooks, which could change the env.
   assert.ok(z.args[3].startsWith(`trap : INT; setopt no_nounset no_err_exit 2>/dev/null; ${read} `));
   assert.ok(z.args[3].indexOf(read) < z.args[3].indexOf('precmd_functions'));

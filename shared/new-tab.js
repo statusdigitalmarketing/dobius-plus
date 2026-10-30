@@ -117,7 +117,10 @@ export function loginShellSpawn(shell, startCommand) {
   // only select one of these commands or none. A literal command word keeps
   // the user's alias or function for it, as when typed.
   const take = `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV};`;
-  const launch = `case $1 in ${NEW_TAB_TOOLS.filter((x) => newTabCommand(x)).map((x) => `${x}) ${newTabCommand(x)} ;;`).join(' ')} esac;`;
+  // An and-list, not case/if: zsh forks a suspended compound command off as
+  // its own job, so a Ctrl+Z inside one ended the whole wrapper (and the tab).
+  const launch = NEW_TAB_TOOLS.filter((x) => newTabCommand(x))
+    .map((x) => `[[ $1 == ${x} ]] && ${newTabCommand(x)};`).join(' ');
   let run;
   if (name === 'zsh') {
     run = `setopt no_nounset no_err_exit 2>/dev/null; ${take} (( $+functions[precmd] )) && precmd; for f in $precmd_functions; do "$f"; done; `
