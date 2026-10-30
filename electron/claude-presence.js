@@ -88,13 +88,17 @@ export function createWaitingReader({ claudeInfo, configDirFor, readFile = readP
   const cache = new Map(); // tabId -> { at, doneAt, pending }
 
   async function lookup(tabId, doneAt) {
+    // Sample only after the grace: the CLI's busy -> idle rewrite at the end
+    // of a plain turn must already be on disk when the file is read.
+    const sampledAt = now();
+    if (sampledAt - doneAt < GRACE_MS) return null;
     const info = await claudeInfo(tabId);
     if (!info || !Number.isInteger(info.pid)) return null;
     const dir = configDirFor(tabId) || path.join(os.homedir(), '.claude');
     let rec;
     try { rec = JSON.parse(await readFile(path.join(dir, 'sessions', `${info.pid}.json`))); }
     catch { return null; } // no presence file, or mid-rewrite: no claim
-    return waitingFrom(rec, info, doneAt, now());
+    return waitingFrom(rec, info, doneAt, sampledAt);
   }
 
   return function waitingForTab(tabId, doneAt) {
@@ -132,9 +136,17 @@ export async function activityRow(id, { activityFor, waitingForTab, unreadAnywhe
 /**
  * Renderer-supplied id list, cut to `cap` BEFORE anything walks it (a sparse
  * array with a huge length is a tiny IPC message), using the prototype's slice
- * (an own `slice` property survives IPC). Strings up to 4096 chars only.
+ * (own properties survive IPC). Strings up to 4096 chars only.
  */
 export function boundedIds(ids, cap) {
   if (!Array.isArray(ids)) return [];
-  return Array.prototype.slice.call(ids, 0, cap).filter((id) => typeof id === 'string' && id.length <= 4096);
+  // A plain indexed loop: slice/filter consult an own `constructor`, which
+  // survives IPC and can make them throw.
+  const out = [];
+  const n = Math.min(ids.length, cap);
+  for (let i = 0; i < n; i += 1) {
+    const id = ids[i];
+    if (typeof id === 'string' && id.length <= 4096) out.push(id);
+  }
+  return out;
 }

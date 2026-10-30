@@ -527,8 +527,9 @@ function setupDataHandlers() {
     // uncaughtException handler, which exits the app.
     try {
       const wcId = event.sender.id;
+      const list = new Set(boundedIds(ids, 1000));
       if (!unreadByWindow.has(wcId)) event.sender.once('destroyed', () => unreadByWindow.delete(wcId));
-      unreadByWindow.set(wcId, new Set(boundedIds(ids, 1000)));
+      unreadByWindow.set(wcId, list);
     } catch (err) {
       console.warn('[tabs:reportUnread] ignored a malformed report:', err?.message);
     }

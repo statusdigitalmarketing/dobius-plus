@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { tabActivityLabel, formatDuration, WORKING_MIN_MS } from '../../src/lib/tab-activity.js';
+import { tabActivityLabel, formatDuration } from '../../src/lib/tab-activity.js';
 import * as ts from '../terminal-status.js';
 import { waitingFrom, createWaitingReader, boundedIds, activityRow, GRACE_MS } from '../claude-presence.js';
 
@@ -27,7 +27,7 @@ test('labels: priority and text', () => {
   assert.equal(label({ status: 'needs' }).text, 'Input');
   assert.equal(label({ status: 'working', hookOwned: true, since: NOW - 4 * 60_000 }).text, 'Working 4m');
   assert.equal(label({ status: 'working', hookOwned: true, since: null }).text, 'Working');
-  assert.equal(label({ status: 'working', since: NOW - (WORKING_MIN_MS - 1) }), null, 'a keystroke is not work');
+  assert.equal(label({ status: 'working', since: NOW - 1000 }).text, 'Working 1s', 'plain output counts, like the dot');
   assert.equal(label({ status: 'working', hookOwned: true, since: NOW - 1000, unread: true, background: 'agents' }).kind, 'working');
   assert.equal(label({ status: 'done', background: 'shells', unread: true }).kind, 'waiting');
   assert.equal(label({ status: 'done', unread: true, lastWorkMs: 12 * 60_000 }).text, 'Done 12m');
@@ -61,15 +61,19 @@ test('a new stretch after done resets; an idle-prompt done re-send keeps the len
   assert.equal(ts.activityFor(ID).since, 80_000);
 });
 
-test('a needs from outside a stretch starts a new one', () => {
+test('a needs from outside a stretch does not reuse an ended start', () => {
   ts._reset();
   ts.ingest(ID, mk('working'), 1_000);
   ts.ingest(ID, mk('done'), 4_000);
   ts.ingest(ID, mk('needs'), 70_000);
+  assert.equal(ts.activityFor(ID).since, null, 'not the ended stretch');
   ts.ingest(ID, mk('working'), 80_000);
-  assert.equal(ts.activityFor(ID).since, 70_000);
+  assert.equal(ts.activityFor(ID).since, 80_000, 'the timer starts at working');
   ts.ingest(ID, mk('done'), 90_000);
-  assert.equal(ts.activityFor(ID).lastWorkMs, 20_000);
+  assert.equal(ts.activityFor(ID).lastWorkMs, 10_000);
+  ts.ingest(ID, mk('needs'), 100_000); // a dialog then done, no working at all
+  ts.ingest(ID, mk('done'), 110_000);
+  assert.equal(ts.activityFor(ID).lastWorkMs, 0, 'no stale length');
 });
 
 test('one chunk carrying done and the next working is two stretches', () => {
@@ -176,6 +180,7 @@ test('boundedIds: cut before walking, prototype slice, strings only', () => {
   huge[0] = 'a';
   assert.deepEqual(boundedIds(huge, 1000), ['a']);
   assert.deepEqual(boundedIds(Object.assign(['a', 'b'], { slice: 0 }), 10), ['a', 'b']);
+  assert.deepEqual(boundedIds(Object.assign(['a', 'b'], { constructor: 0, filter: 0 }), 10), ['a', 'b']);
   assert.deepEqual(boundedIds(['a', 1, null, 'x'.repeat(5000)], 10), ['a']);
   assert.deepEqual(boundedIds('nope', 10), []);
 });
@@ -196,4 +201,16 @@ test('activityRow: a new turn during the Waiting lookup wins', async () => {
     unreadAnywhere: () => false,
   });
   assert.equal(kept.activity.background, 'shells');
+});
+
+test('waiting reader: never samples inside the grace', async () => {
+  let reads = 0;
+  const read = createWaitingReader({
+    claudeInfo: async () => proc,
+    configDirFor: () => '/cfg',
+    readFile: async () => { reads += 1; return JSON.stringify(rec({ status: 'busy' })); },
+    now: () => DONE + 100,
+  });
+  assert.equal(await read('a', DONE), null);
+  assert.equal(reads, 0);
 });

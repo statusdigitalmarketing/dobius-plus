@@ -4,10 +4,6 @@
 // otherwise nothing and the row shows its plain age.
 // Pure so it is tested under plain node (electron/__tests__/tab-activity.test.mjs).
 
-// Plain output (no hook) has to keep flowing this long to count as Working, so
-// typing at Claude's prompt or a one-line `ls` never flashes a spinner.
-export const WORKING_MIN_MS = 3000;
-
 /** 42s, 4m, 1h 5m, 2h, 3d. Empty for anything that is not a duration. */
 export function formatDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) return '';
@@ -39,16 +35,15 @@ export function tabActivityLabel(x) {
   if (x.status === 'needs') {
     return { kind: 'input', text: 'Input', title: 'Needs your input (a permission prompt or a question)' };
   }
+  // Working whenever the status is, like the yellow dot (plain output too).
   if (x.status === 'working') {
     const elapsed = Number.isFinite(x.since) && x.since > 0 && x.since <= now ? now - x.since : null;
-    if (x.hookOwned || (elapsed !== null && elapsed >= WORKING_MIN_MS)) {
-      const d = elapsed !== null ? formatDuration(elapsed) : '';
-      return {
-        kind: 'working',
-        text: d ? `Working ${d}` : 'Working',
-        title: d ? `Working for ${d}` : 'Working',
-      };
-    }
+    const d = elapsed !== null ? formatDuration(elapsed) : '';
+    return {
+      kind: 'working',
+      text: d ? `Working ${d}` : 'Working',
+      title: d ? `Working for ${d}` : 'Working',
+    };
   }
   // main reports background work only for a tab whose hook status is 'done'.
   if (x.background === 'shells' || x.background === 'agents') {
