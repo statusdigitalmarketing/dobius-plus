@@ -1112,3 +1112,30 @@ test('a hook Working with a silent PTY for a minute is not claimed', async () =>
   const live = makeActivity({ claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }), presenceForTab: async () => null, now: () => 70_000 });
   assert.notEqual((await live.tabActivity(ID)).activity.uncertain, true);
 });
+
+test('silence does not stop presence from ending the turn in the record', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),
+    presenceForTab: async () => ({ pid: 1, startedAt: 1_000, status: 'idle', statusUpdatedAt: 20_000 }),
+    now: () => 90_000,
+  });
+  assert.equal((await tabActivity(ID)).activity.uncertain, true);
+  ts.ingest(ID, mk('working'), 100_000);
+  ts.ingest(ID, mk('done'), 130_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 30_000);
+});
+
+test('the silence rule also applies on the settle path', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000); // A
+  ts.ingest(ID, mk('working'), 45_000); // B (started 40s), then silence
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 2, startedAt: 40_000 }),
+    presenceForTab: async () => null,
+    now: () => 120_000,
+  });
+  const r = await tabActivity(ID);
+  assert.equal(label({ ...r.activity, live: true, now: 120_000 }), null);
+});

@@ -411,11 +411,17 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
       || now2.since !== raw.since || now2.lastTurnMs !== raw.lastTurnMs || now2.ambiguous !== raw.ambiguous
       || now2.hooklessTurn !== raw.hooklessTurn;
   };
-  const shape = (id, a, extra) => ({
-    id,
-    activity: { ...a, background: null, ...(a.hooklessTurn ? { uncertain: true } : {}), ...extra },
-    unread: unreadAnywhere(id),
-  });
+  const shape = (id, a, extra) => {
+    const activity = { ...a, background: null, ...(a.hooklessTurn ? { uncertain: true } : {}), ...extra };
+    // Applied to every reply, after any presence check had its say (which may
+    // end the turn in the record): a Working the PTY has been silent through
+    // is not claimed (see SILENT_WORKING_MS).
+    if (activity.status === 'working' && activity.hookOwned && Number.isFinite(activity.lastActivityAt)
+        && now() - activity.lastActivityAt >= SILENT_WORKING_MS) {
+      activity.uncertain = true;
+    }
+    return { id, activity, unread: unreadAnywhere(id) };
+  };
   // Answer from the CURRENT record without a presence read.
   const settleOnCurrent = async (id) => {
     // The process read awaits too, so re-check after it; a few rounds, then
@@ -440,9 +446,6 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     const a = info === undefined ? raw : reconcileWithProcess(raw, info);
     const t = now();
     const hookWorking = a.status === 'working' && a.hookOwned;
-    if (hookWorking && Number.isFinite(a.lastActivityAt) && t - a.lastActivityAt >= SILENT_WORKING_MS) {
-      return shape(id, a, { uncertain: true });
-    }
     const hookLive = (hookWorking || a.status === 'needs') && a.hookOwned;
     // Ask the presence file only with a claude in the tab (a cached answer
     // describes a process, and with none there is nothing to describe):
