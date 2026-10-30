@@ -26,19 +26,15 @@ export function formatDuration(ms) {
  * @param {string}  [x.status]    hook/output status: working | needs | done | idle | queued
  * @param {boolean} [x.hookOwned] the status came from the Claude hook
  * @param {number|null} [x.since] start of the current working stretch (main)
- * @param {number}  [x.lastTurnMs] length of the last turn the hook finished
+ * @param {number}  [x.lastWorkMs] length of the last working stretch the hook ended
  * @param {'shells'|'agents'|null} [x.background] proven background work (main)
  * @param {boolean} [x.unread]    a turn finished there and the tab was not viewed since
- * @param {boolean} [x.uncertain] main could not confirm the hook state against a process
  * @param {number}  x.now
  * @returns {{kind:'working'|'input'|'waiting'|'done', text:string, title:string}|null}
  *   null = show the plain age.
  */
 export function tabActivityLabel(x) {
   if (!x || !x.live) return null; // a closed tab has no live state to report
-  // main could not tell what the tab is doing (a hook turn with no claude it
-  // can see): the plain age, never a guess.
-  if (x.uncertain) return null;
   const now = x.now;
   if (x.status === 'needs') {
     return { kind: 'input', text: 'Input', title: 'Needs your input (a permission prompt or a question)' };
@@ -54,8 +50,7 @@ export function tabActivityLabel(x) {
       };
     }
   }
-  // Reached only when not Working: brief keystroke output at the prompt keeps
-  // the Waiting it would otherwise flicker away from.
+  // main reports background work only for a tab whose hook status is 'done'.
   if (x.background === 'shells' || x.background === 'agents') {
     return {
       kind: 'waiting',
@@ -66,7 +61,7 @@ export function tabActivityLabel(x) {
     };
   }
   if (x.unread) {
-    const d = x.lastTurnMs > 0 ? formatDuration(x.lastTurnMs) : '';
+    const d = x.lastWorkMs > 0 ? formatDuration(x.lastWorkMs) : '';
     return {
       kind: 'done',
       text: d ? `Done ${d}` : 'Done',

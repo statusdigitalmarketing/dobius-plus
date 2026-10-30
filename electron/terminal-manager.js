@@ -1,7 +1,6 @@
 import pty from 'node-pty';
 import { isTerminalReply, createVisibleOutputScanner } from './terminal-reply.js';
 import { isClaudeCommand } from './claude-argv.js';
-import { claudeChildVerdict } from './claude-process-scan.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -155,8 +154,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   if (terminals.has(id)) {
     killTerminal(id);
   }
-  // Observers drop what they derived from the old PTY (a respawn under the
-  // same id must not inherit its turn timing).
+  // A respawn under the same id starts fresh for observers (status timing).
   for (const obs of terminalObservers) {
     try { obs.onSpawn?.(id); } catch { /* never let an observer break the PTY */ }
   }
@@ -517,30 +515,8 @@ export async function getTerminalProcessArgv(id) {
  * tabs got no name badge in the sidebar, and auto-resume could never restore
  * them either. startedAt lets the caller correlate the process to the
  * transcript it created (see resolveFreshSessionId in main.js).
- * `unique: true` answers { ambiguous: true } when it cannot name ONE claude
- * (two claudes, or a child that may be one).
+ * `unique: true` answers null when more than one claude runs in the shell.
  */
-async function hasClaudeChild(pid) {
-  let out = '';
-  try {
-    ({ stdout: out } = await execFileP('/usr/bin/pgrep', ['-P', String(pid)], { timeout: 1000, encoding: 'utf8' }));
-  } catch (err) {
-    if (err?.code === 1) return false; // no children
-    return true; // could not look: assume it might
-  }
-  for (const child of out.trim().split('\n').filter(Boolean)) {
-    let line = '';
-    try {
-      ({ stdout: line } = await execFileP('/bin/ps', ['-o', 'command=', '-p', child], { timeout: 1000, encoding: 'utf8' }));
-    } catch (err) {
-      if (err?.code === 1) continue; // gone
-      return true;
-    }
-    if ((await claudeChildVerdict(line.trim())) !== 'not-claude') return true;
-  }
-  return false;
-}
-
 export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;
@@ -556,55 +532,28 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
     for (const childPid of children) {
       // `lstart` is the process start time; `command` is the argv. One ps
       // call gets both so the fresh-session correlation costs nothing extra.
-      let psOut;
-      try {
-        ({ stdout: psOut } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', childPid], {
-          timeout: 1000,
-          encoding: 'utf8',
-        }));
-      } catch (err) {
-        if (!unique) throw err;
-        // A child that exited since pgrep (ps exits 1) is not a claude; one
-        // ps could not describe for another reason might be.
-        if (err?.code === 1) continue;
-        return { ambiguous: true };
-      }
+      const { stdout: psOut } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', childPid], {
+        timeout: 1000,
+        encoding: 'utf8',
+      });
       const line = psOut.trim();
       if (!line) continue;
       // `lstart` is a fixed 24-char date ("Wed Jul 15 21:49:26 2026"), the
       // rest is the command.
       const lstart = line.slice(0, 24);
       const command = line.slice(24).trim();
-      if (unique) {
-        // `unique` callers act on the answer, so ANY child that might be a
-        // claude counts: one that only names the CLI (`node watcher.js
-        // /path/claude`) or one whose path has spaces (`/x/CLI Tools/claude`,
-        // which isClaudeCommand alone would skip) makes the shell ambiguous.
-        const verdict = await claudeChildVerdict(command);
-        if (verdict === 'ambiguous') return { ambiguous: true };
-        if (verdict === 'not-claude') {
-          // A wrapper (`bash -c 'claude; :'`) runs claude one level down:
-          // that claude could be the one sending markers, so the shell is
-          // ambiguous. Accepted residual: deeper nesting is not walked.
-          if (await hasClaudeChild(childPid)) return { ambiguous: true };
-          continue;
-        }
-      } else if (!isClaudeCommand(command)) continue;
+      if (!isClaudeCommand(command)) continue;
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
       const info = { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid) };
       if (!unique) return info;
-      // `unique`: two claudes in one shell (one suspended with Ctrl+Z, say)
-      // cannot be told apart, so the caller gets no answer rather than a guess.
-      if (found) return { ambiguous: true };
+      // `unique`: two claudes in one shell cannot be told apart, so no answer.
+      if (found) return null;
       found = info;
     }
     return found;
-  } catch (err) {
-    // `unique`: a scan that failed (a pgrep timeout, say) proves nothing,
-    // which is not the same as "no claude here". pgrep exits 1 for none.
-    if (unique && err?.code !== 1) return { ambiguous: true };
+  } catch {
     return null;
   }
 }

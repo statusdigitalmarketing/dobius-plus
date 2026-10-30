@@ -27,15 +27,13 @@ import { promisify } from 'node:util';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { classifyClaudeProcess, isClaudeCommand } from './claude-argv.js';
+import { classifyClaudeProcess } from './claude-argv.js';
 import { keychainServiceFor } from './account-identity.js';
 
 const execFileP = promisify(execFile);
 
 /** The CLI's own default config dir, used when CLAUDE_CONFIG_DIR is unset. */
 export const defaultConfigDir = () => path.join(os.homedir(), '.claude');
-export const MAX_BINDING_READINGS = 256;
-export const MAX_VERDICT_COMMAND = 4096;
 
 /**
  * Every live Claude process id for the current user.
@@ -97,17 +95,11 @@ function configDirCandidates(tail) {
   const raw = tail.slice(last.index + last[0].length);
   // Deliberately loose: anything shaped like a variable can end the value.
   const cuts = new Set([raw.length]);
-  for (const m of raw.matchAll(/\s[^\s=]+=/g)) {
-    cuts.add(m.index);
-    // Every reading is a filesystem probe for the caller. A real environment
-    // has a few dozen variables after this one; thousands mean a value built
-    // to stall the scan, and the binding is reported unresolved instead.
-    if (cuts.size > MAX_BINDING_READINGS) return { found: true, candidates: [] };
-  }
+  for (const m of raw.matchAll(/\s[^\s=]+=/g)) cuts.add(m.index);
   const candidates = [];
-  // Distinct cut points give distinct prefixes, so no duplicate check needed.
   for (const c of [...cuts].sort((a, b) => b - a)) {
-    if (c > 0) candidates.push(raw.slice(0, c));
+    const v = raw.slice(0, c);
+    if (v && !candidates.includes(v)) candidates.push(v);
   }
   return { found: true, candidates };
 }
@@ -242,58 +234,6 @@ async function inspect(pid) {
   }
   if (real.length !== 1) return { pid, command, classify: 'claude', state: 'unknown' };
   return { pid, command, classify: 'claude', state: 'explicit', configDir: real[0] };
-}
-
-/**
- * True only when a ps command line is PROVABLY a claude process: classified
- * 'claude' and, when the verdict rests on a path, that path is a file. ps does
- * not quote, so `node "/tmp/claude tools/x.js"` reads as the path /tmp/claude
- * (a directory). A bare name went through PATH and cannot be checked here.
- * Accepted residual: an EXECUTABLE file planted at that cut-off path still
- * passes; ps output cannot tell the two apart.
- */
-export async function isProvenClaudeCommand(command) {
-  const { kind, token } = classifyClaudeProcess(command);
-  if (kind !== 'claude') return false;
-  if (!token || !token.includes('/')) return true;
-  // And executable: a plain file at the cut-off path (`/tmp/claude` beside
-  // `/tmp/claude tools/x.js`) is not the CLI.
-  try {
-    const st = await fsp.stat(token);
-    return st.isFile() && (st.mode & 0o111) !== 0;
-  } catch { return false; }
-}
-
-/**
- * For a caller that must name THE claude in a shell: is this child one, not
- * one, or impossible to tell? Anything that might be a claude (a command that
- * only names the CLI, or a path with spaces ps cannot delimit) is 'ambiguous'.
- * @returns {Promise<'claude'|'not-claude'|'ambiguous'>}
- */
-export async function claudeChildVerdict(command) {
-  // classifyClaudeProcess re-scans growing prefixes, so its cost grows with
-  // the square of the command; a claude command line is short. Anything this
-  // long is not parsed on main's thread and makes the shell ambiguous.
-  if (typeof command !== 'string' || command.length > MAX_VERDICT_COMMAND) return 'ambiguous';
-  const { kind } = classifyClaudeProcess(command);
-  if (kind === 'not-claude' && !isClaudeCommand(command)) return 'not-claude';
-  if (kind !== 'claude') return 'ambiguous';
-  return (await isProvenClaudeCommand(command)) ? 'claude' : 'ambiguous';
-}
-
-/**
- * The config dir ONE known Claude process reads, or null when it cannot be
- * proven (same rules as the scan: an unreadable or ambiguous binding is never
- * guessed to be the default). Read-only.
- * @param {number} pid
- * @returns {Promise<string|null>}
- */
-export async function configDirOfPid(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  const r = await inspect(pid);
-  if (r.classify !== 'claude') return null;
-  if (r.state === 'default') return defaultConfigDir();
-  return r.state === 'explicit' ? r.configDir : null;
 }
 
 async function mapLimit(items, limit, fn) {

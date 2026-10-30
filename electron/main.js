@@ -25,8 +25,8 @@ import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-a
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
-import { scanClaudeProcesses, configDirOfPid } from './claude-process-scan.js';
-import { createPresenceReader, createTabActivity, cachedPerTab, coalescePerTab, boundedIds } from './claude-presence.js';
+import { scanClaudeProcesses } from './claude-process-scan.js';
+import { createWaitingReader, boundedIds } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
@@ -229,46 +229,14 @@ const tearOffGrants = new Map();
 // WebContents and the list grew with tab churn for the life of the window.
 const ownerCleanup = createOwnerCleanup(terminalOwners);
 
-// Sidebar tab activity (Working / Input / Waiting / Done labels). Unread ids
-// mirrored from each window, keyed by webContents.id.
+// Tabs sidebar status (Working / Input / Waiting / Done). Each window mirrors
+// its unread tab ids here, keyed by webContents.id: the renderer's unreadTabs
+// is the only unread system, this copy lets OTHER windows show Done.
 const unreadByWindow = new Map();
-// Each scan is stamped with when it STARTED, which is what it saw (a shared
-// or cached answer reaches callers that began later).
-const scanClaude = (id) => {
-  const scanStartedAt = Date.now();
-  return getTerminalClaudeInfo(id, { unique: true }).then((info) => (info ? { ...info, scanStartedAt } : info));
-};
-const claudeInfoCached = cachedPerTab(scanClaude, 2500);
-const { tabActivity, checkTurnAgainstProcess } = createTabActivity({
-  status: terminalStatus,
-  claudeInfo: claudeInfoCached,
-  // Fresh = never a settled answer, but one scan in flight per tab is shared
-  // however many asks arrive (renderer requests cannot fan out scans).
-  claudeInfoFresh: cachedPerTab(scanClaude, 0),
-  presenceForTab: createPresenceReader({ claudeInfo: claudeInfoCached, configDirOf: configDirOfPid }),
-  unreadAnywhere: (id) => unreadAnywhere(id),
+const waitingForTab = createWaitingReader({
+  claudeInfo: (id) => getTerminalClaudeInfo(id, { unique: true }),
+  configDirFor: (id) => listTerminals().find((t) => t.id === id)?.claudeConfigDir || null,
 });
-// Turn-end checks come from the PTY data path, so they are coalesced per tab
-// (one in flight, one trailing, at least a second apart) and read the record
-// current when they run. A failure is logged once per tab, never swallowed.
-const turnEndErrorsLogged = new Set();
-const checkTurnEnd = coalescePerTab((id) => {
-  const raw = terminalStatus.activityFor(id);
-  return raw ? checkTurnAgainstProcess(id, raw, { fresh: true }) : null;
-}, 1000, {
-  onError: (id, err) => {
-    if (turnEndErrorsLogged.has(id)) return;
-    turnEndErrorsLogged.add(id);
-    console.warn('[tab-activity] turn-end process check failed for', id, err?.message || err);
-  },
-});
-
-function unreadAnywhere(id) {
-  for (const [wcId, ids] of unreadByWindow) {
-    if (ids.has(id) && ownsTerminal(wcId, id)) return true;
-  }
-  return false;
-}
 
 // Settle tick for the main-process terminal status authority (v1.0.43).
 let statusSettleTimer = null;
@@ -537,31 +505,33 @@ function setupDataHandlers() {
     });
     return getAllProjectTabs({ liveTabIds, tearOffTabs });
   });
-  // Live status for the Tabs sidebar's rows, separate from the aggregate above
-  // because it is cheap and asked often (every local status change), while the
-  // aggregate reads session history. Any window may ask about any tab, like
-  // the aggregate. Returns an ARRAY, never keyed by caller-supplied ids.
+  // Live row status for the Tabs sidebar, apart from the aggregate above
+  // (which reads session history and is slow): main's hook status and the
+  // working stretch timing, Waiting for a 'done' tab with proven background
+  // work, and whether a window that owns the PTY has it unread. Any window may
+  // ask about any tab, like the aggregate. Returns an ARRAY.
   ipcMain.handle('tabs:activity', async (_event, ids) => {
     const live = new Set(listTerminals().map((t) => t.id));
     const wanted = [...new Set(boundedIds(ids, 1000).filter((id) => live.has(id)))].slice(0, 256);
-    const out = await Promise.all(wanted.map((id) => tabActivity(id).catch((err) => {
-      console.warn('[tabs:activity] skipped', id, err?.message);
-      return null;
-    })));
-    return out.filter(Boolean);
+    const rows = await Promise.all(wanted.map(async (id) => {
+      const activity = terminalStatus.activityFor(id);
+      if (!activity) return null;
+      const background = activity.status === 'done' ? await waitingForTab(id, activity.doneAt) : null;
+      let unread = false;
+      for (const [wcId, set] of unreadByWindow) {
+        if (set.has(id) && ownsTerminal(wcId, id)) { unread = true; break; }
+      }
+      return { id, activity: { ...activity, background }, unread };
+    }));
+    return rows.filter(Boolean);
   });
-  // Each window mirrors its unread tab ids here (the renderer's unreadTabs is
-  // the only unread system; this copy only lets OTHER windows' sidebars show
-  // "Done" for them). Counted only while the reporter still owns the PTY, so
-  // a tab moved by a tear-off or dock never keeps a stale mark.
   ipcMain.on('tabs:reportUnread', (event, ids) => {
     // ipcMain.on has no rejection path: a throw here would reach the
     // uncaughtException handler, which exits the app.
     try {
       const wcId = event.sender.id;
-      const list = boundedIds(ids, 1000);
       if (!unreadByWindow.has(wcId)) event.sender.once('destroyed', () => unreadByWindow.delete(wcId));
-      unreadByWindow.set(wcId, new Set(list));
+      unreadByWindow.set(wcId, new Set(boundedIds(ids, 1000)));
     } catch (err) {
       console.warn('[tabs:reportUnread] ignored a malformed report:', err?.message);
     }
@@ -3512,16 +3482,7 @@ app.whenReady().then(() => {
   // are tracked centrally for the mobile board, and settle idle tabs on a 1s
   // tick like the renderer's useTabActivity.
   addTerminalObserver({
-    onData: (id, data) => {
-      const endedBefore = terminalStatus.turnEndedAtFor(id);
-      terminalStatus.ingest(id, data);
-      // A turn just ended: check it against the claude NOW, while the process
-      // that ran it is most likely still there, so a length spanning two
-      // claudes is caught even when no sidebar is asking.
-      if (terminalStatus.turnEndedAtFor(id) !== endedBefore) {
-        checkTurnEnd(id);
-      }
-    },
+    onData: (id, data) => terminalStatus.ingest(id, data),
     onExit: (id, info) => terminalStatus.noteExit(id, info),
     onSpawn: (id) => terminalStatus.forget(id),
   });

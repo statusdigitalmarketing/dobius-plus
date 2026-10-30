@@ -29,14 +29,13 @@ const DONE_GUARD_MS = 800;      // after a hook 'done', ignore its own trailing 
 const TAIL_KEEP = 64;           // bytes retained to catch a marker split across chunks
 const MAX_RECENT_EXITS = 50;
 
-// id -> { status, lastActivityAt, hookOwned, doneAt, tail, workingSince,
-//        turnStartedAt, lastTurnMs, turnEndedAt }
-// A TURN runs from the hook's first 'working' marker to its 'done' marker
-// ('needs' in between is part of the same turn). workingSince is the start of
-// the current non-hook output stretch (a plain shell build). Both live here,
-// keyed by PTY id, so they survive a tab switch, a tear-off and a reload.
-// Accepted: an interrupt (Esc) fires no Stop, so a prompt sent before Claude's
-// idle notification (about a minute) continues the interrupted turn's clock.
+// id -> { status, lastActivityAt, hookOwned, doneAt, tail, workingSince, lastWorkMs }
+// workingSince: when the current working stretch began (entering 'working'
+// from anything but 'needs'; a permission prompt inside a turn keeps it).
+// lastWorkMs: how long the stretch lasted when the hook reported 'done'.
+// Both follow the same status the tab dots show, nothing more: if a hook never
+// sends Stop (a crash, an Esc interrupt) the stretch runs on exactly as the
+// yellow dot does today. Accepted; there is no reliable signal to end it.
 const live = new Map();
 // bounded FIFO of { id, cwd, project, exitCode, signal, status, at }
 const recentExits = [];
@@ -59,60 +58,20 @@ export function ingest(id, data, now = Date.now()) {
   if (!id || typeof data !== 'string') return null;
   let st = live.get(id);
   if (!st) {
-    st = {
-      status: 'working', lastActivityAt: now, hookOwned: false, doneAt: 0, tail: '',
-      workingSince: now, turnStartedAt: 0, lastTurnMs: 0, turnEndedAt: 0, lastMarkerAt: 0,
-    };
+    st = { status: 'working', lastActivityAt: now, hookOwned: false, doneAt: 0, tail: '', workingSince: now, lastWorkMs: 0 };
     live.set(id, st);
   }
-  const prev = st.status;
   st.lastActivityAt = now;
 
   const combined = st.tail + data;
   MARKER_RE.lastIndex = 0;
   let lastMatch = null;
   let m;
-  // Every marker in order, not just the last: a chunk can carry one turn's
-  // 'done' and the next turn's 'working', and the turn bookkeeping must see
-  // both. The status itself ends up as the last marker's, as before.
+  // Every marker in order: one chunk can carry a turn's 'done' and the next
+  // turn's 'working', and the stretch timing must see both.
   while ((m = MARKER_RE.exec(combined)) !== null) {
     lastMatch = m;
-    const state = m[1];
-    st.lastMarkerAt = now;
-    if (state === 'done' && !st.turnStartedAt && st.hooklessAfter) {
-      // The Stop of a turn that ran without a working marker: it is the last
-      // turn now, and its length was never measured.
-      st.lastTurnMs = 0;
-      st.turnEndedAt = now;
-    }
-    const hookless = !!st.hooklessAfter;
-    st.hooklessAfter = 0; // a hook spoke: whatever ran without one is over
-    if (state === 'done') {
-      // Only a running turn ends here; Claude's idle-prompt re-send of 'done'
-      // must not move the end (the length is measured back from it).
-      if (st.turnStartedAt) {
-        st.lastTurnStartedAt = st.turnStartedAt;
-        // A start shown to predate the claude now running is not this turn's.
-        st.lastTurnMs = st.turnStartDistrusted ? 0 : Math.max(0, now - st.turnStartedAt);
-        st.turnEndedAt = now;
-      }
-      st.turnStartedAt = 0;
-      st.turnStartDistrusted = false;
-    } else if (!st.turnStartedAt) {
-      st.turnStartedAt = now;
-      // A turn's clock is trusted only when this marker really is its start:
-      // not when it began without a marker (a hookless turn running, or a
-      // 'needs' with no UserPromptSubmit/PreToolUse before it), and not while
-      // two claudes may share the tab.
-      st.turnStartDistrusted = hookless || state === 'needs' || !!st.ambiguous;
-      // Ambiguity ends only with a turn that starts after main saw ONE
-      // claude; even that first turn may be a continuation, so it stays
-      // distrusted above.
-      if (st.ambiguous && st.uniqueSince && now > st.uniqueSince) {
-        st.ambiguous = false;
-        st.uniqueSince = 0;
-      }
-    }
+    enterStatus(st, m[1], now);
   }
 
   if (lastMatch) {
@@ -130,15 +89,23 @@ export function ingest(id, data, now = Date.now()) {
     // so a finished Claude turn stays green instead of settling to idle).
     // Mirrors useTabActivity + the recentHookDone guard on the desktop.
     const recentlyDone = st.status === 'done' && st.doneAt && now - st.doneAt < DONE_GUARD_MS;
-    if (st.status !== 'needs' && !st.hookOwned && !recentlyDone) st.status = 'working';
+    if (st.status !== 'needs' && !st.hookOwned && !recentlyDone) {
+      enterStatus(st, 'working', now);
+      st.status = 'working';
+    }
     st.tail = combined.slice(-TAIL_KEEP);
   }
-  if (st.status === 'working' && prev !== 'working') {
-    st.workingSince = now;
-    // A new plain stretch is new evidence; an old verdict was about another.
-    if (!st.turnStartedAt) st.turnStartDistrusted = false;
-  }
   return st.status;
+}
+
+// Stretch bookkeeping on a status change (the status itself is set by ingest).
+function enterStatus(st, next, now) {
+  const prev = st.timingStatus || st.status;
+  if (next === 'working' && prev !== 'working' && prev !== 'needs') st.workingSince = now;
+  if (next === 'done' && (prev === 'working' || prev === 'needs') && st.workingSince) {
+    st.lastWorkMs = Math.max(0, now - st.workingSince);
+  }
+  st.timingStatus = next;
 }
 
 /** Settle tick: a non-hook-owned working tab (a plain shell) goes IDLE (gray)
@@ -148,6 +115,7 @@ export function settle(now = Date.now()) {
   for (const st of live.values()) {
     if (st.status === 'working' && !st.hookOwned && now - st.lastActivityAt > QUIET_MS) {
       st.status = 'idle';
+      st.timingStatus = 'idle';
     }
   }
 }
@@ -172,11 +140,9 @@ export function noteExit(id, info = {}, now = Date.now()) {
 }
 
 /**
- * Timing for one live terminal's sidebar label. `since` is when the current
- * working stretch began: the hook turn's start while a turn runs (a 'needs'
- * inside the turn keeps it), else the plain-output stretch's. `lastTurnMs` and
- * `turnEndedAt` describe the last turn the hook finished (0 when none, which
- * also means no hook has ever reported for this PTY).
+ * Sidebar timing for one live terminal: its status, when the current working
+ * stretch began (null unless working or needs), and how long the last one
+ * the hook ended with 'done' lasted.
  */
 export function activityFor(id) {
   const st = live.get(id);
@@ -185,129 +151,10 @@ export function activityFor(id) {
   return {
     status: st.status,
     hookOwned: st.hookOwned,
-    since: !inStretch || st.turnStartDistrusted ? null
-      : (st.turnStartedAt || (st.status === 'working' ? st.workingSince : 0) || null),
-    lastTurnMs: st.lastTurnMs || 0,
-    turnEndedAt: st.turnEndedAt || 0,
-    lastMarkerAt: st.lastMarkerAt || 0,
-    hooklessTurn: !!st.hooklessAfter && st.hooklessAfter === st.turnEndedAt,
-    ambiguous: !!st.ambiguous,
-    lastActivityAt: st.lastActivityAt,
-    silenced: !!st.silentMarker && st.silentMarker === st.lastMarkerAt,
+    since: inStretch ? st.workingSince || null : null,
+    lastWorkMs: st.lastWorkMs || 0,
+    doneAt: st.status === 'done' ? st.doneAt || 0 : 0,
   };
-}
-
-/**
- * main proved (from the claude process start) that a recorded time is not the
- * current claude's. Kept, not just hidden per answer: once that claude exits
- * there is nothing left to prove it with, and the wrong length would return.
- * Each only applies while the record is still the one that was checked.
- */
-export function distrustTurnStart(id, since, { runningOnly = false } = {}) {
-  const st = live.get(id);
-  if (!st || !since) return;
-  if (st.turnStartedAt === since) {
-    st.turnStartDistrusted = true;
-  } else if (runningOnly) {
-    // the turn checked has ended since: nothing proven about its length
-  } else if (!st.turnStartedAt && st.lastTurnStartedAt === since) {
-    // That turn ended while the check ran: its length is the disproved one.
-    st.lastTurnMs = 0;
-  } else if (!st.turnStartedAt && st.workingSince === since) {
-    st.turnStartDistrusted = true;
-  }
-}
-
-/**
- * main proved (from Claude's presence file) that the hook's running turn or
- * dialog is over although no closing marker came (hooks switched off, an
- * interrupt). End it here, so its clock cannot come back with a later turn.
- * Only for the exact record checked: a marker since then wins.
- */
-export function abandonTurn(id, lastMarkerAt, endedAt) {
-  const st = live.get(id);
-  if (!st || !st.hookOwned || st.lastMarkerAt !== lastMarkerAt) return;
-  st.hookOwned = false;
-  st.status = 'idle';
-  // It did end (when the CLI wrote so): later checks key off that end.
-  if (st.turnStartedAt && Number.isFinite(endedAt) && endedAt > 0) st.turnEndedAt = endedAt;
-  st.turnStartedAt = 0;
-  st.turnStartDistrusted = false;
-  // The abandoned turn is now the last one and its length is unknown: a
-  // later idle-prompt 'done' must not show the turn before it.
-  st.lastTurnMs = 0;
-}
-
-/**
- * main proved (from Claude's presence file) that the hook's turn went on in
- * the other state with no marker for it: a dialog approved (needs -> working)
- * or one the hook has not reported (working -> needs). The turn and its clock
- * continue. Only for the exact record checked.
- */
-export function adoptHookState(id, lastMarkerAt, next) {
-  const st = live.get(id);
-  if (!st || !st.hookOwned || st.lastMarkerAt !== lastMarkerAt) return;
-  if (next === 'working' || next === 'needs') st.status = next;
-}
-
-/**
- * main proved (from Claude's presence file) that a turn without hooks began
- * after the hook's last turn ended: that turn's Done is not the tab's state
- * any more. Kept until the next marker. Only for the exact turn checked.
- */
-export function markHooklessTurn(id, turnEndedAt) {
-  const st = live.get(id);
-  if (!st || st.hookOwned || st.turnEndedAt !== turnEndedAt) return;
-  st.hooklessAfter = turnEndedAt;
-}
-
-/**
- * main saw more than one possible claude in the tab: any marker could have
- * come from either, so nothing about the tab's turns is proven. Sticky: a
- * marker from either claude proves nothing, so it ends only with a turn that
- * STARTS after main has seen one claude again (noteUnique).
- */
-export function markAmbiguous(id, scanStartedAt = 0) {
-  const st = live.get(id);
-  if (!st) return;
-  st.ambiguous = true;
-  st.uniqueSince = 0;
-  st.ambiguousAt = Math.max(st.ambiguousAt || 0, scanStartedAt || 0);
-  // The running turn's start cannot be pinned on one claude either.
-  if (st.turnStartedAt) st.turnStartDistrusted = true;
-  // Nor the last finished turn's length (its start may be the other's).
-  st.lastTurnMs = 0;
-}
-
-/**
- * main saw the PTY silent through a hook 'working' (see SILENT_WORKING_MS):
- * the row stops claiming Working until the next marker. Nothing else about
- * the turn changes. Only for the exact record checked.
- */
-export function markSilent(id, lastMarkerAt) {
-  const st = live.get(id);
-  if (st && st.hookOwned && lastMarkerAt && st.lastMarkerAt === lastMarkerAt) st.silentMarker = lastMarkerAt;
-}
-
-/**
- * A scan that started at `scanStartedAt` and finished at `at` saw exactly one
- * claude (see markAmbiguous). It counts only if it started after the last
- * scan that saw two.
- */
-export function noteUnique(id, scanStartedAt, at) {
-  const st = live.get(id);
-  if (!st || !st.ambiguous || st.uniqueSince) return;
-  if (!(scanStartedAt > (st.ambiguousAt || 0))) return;
-  st.uniqueSince = at;
-}
-
-/** When the hook last ended a turn here (0 = never). Cheap, for the data path. */
-export function turnEndedAtFor(id) {
-  return live.get(id)?.turnEndedAt || 0;
-}
-export function distrustLastTurn(id, turnEndedAt) {
-  const st = live.get(id);
-  if (st && turnEndedAt && st.turnEndedAt === turnEndedAt) st.lastTurnMs = 0;
 }
 
 /** A new PTY under this id (a respawn): nothing from the old one carries over. */

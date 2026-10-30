@@ -276,10 +276,9 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                     status: a?.status,
                     hookOwned: !!a?.hookOwned,
                     since: a?.since,
-                    lastTurnMs: a?.lastTurnMs,
+                    lastWorkMs: a?.lastWorkMs,
                     background: a?.background,
                     unread: live ? !!unreadTabs[t.id] : !!row?.unread,
-                    uncertain: !!a?.uncertain,
                     now,
                   });
                   return (
