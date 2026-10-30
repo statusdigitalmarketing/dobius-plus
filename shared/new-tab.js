@@ -146,5 +146,7 @@ export function loginShellSpawn(shell, startCommand) {
 // Matches the wrapper's exact shape, not a mere mention of the marker, so a
 // real `claude -p "...DOBIUS_NEW_TAB_TOOL..."` still counts.
 export function isNewTabWrapperCommand(line) {
-  return /(?:^|[\s/])(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"; /.test(String(line));
+  // Anchored on argv0 (after an optional pgrep pid), so the same text inside
+  // some other program's arguments never matches.
+  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"; /.test(String(line));
 }

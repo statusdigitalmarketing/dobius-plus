@@ -131,6 +131,9 @@ test('isNewTabWrapperCommand spots the wrapper shell, not a Claude that mentions
   assert.equal(isNewTabWrapperCommand('456 claude -p Explain DOBIUS_NEW_TAB_TOOL'), false);
   assert.equal(isNewTabWrapperCommand('456 node /opt/claude/cli.js set -- "$DOBIUS_NEW_TAB_TOOL"'), false);
   assert.equal(isNewTabWrapperCommand('789 /bin/zsh -l'), false);
+  const inner = [ '/bin/bash', ...loginShellSpawn('/bin/bash', 'claude').args].join(' ');
+  assert.equal(isNewTabWrapperCommand(`456 claude -p Explain: ${inner}`), false, 'wrapper text inside a prompt');
+  assert.equal(isNewTabWrapperCommand(inner), true, 'ps line without a pid');
 });
 
 // The real shells: a hostile prompt hook (a direnv .env import, say) rewrites

@@ -90,11 +90,19 @@ export default function NewTabPicker({ projectPath }) {
     }).catch((err) => console.warn('[NewTabPicker] open failed:', err?.message));
   };
 
-  const toggleHidden = (row) => {
+  // Read-modify-write against the saved list, not this window's copy, so a
+  // project another window hid meanwhile is not unhidden by this write.
+  const toggleHidden = async (row) => {
     if (!row || row.isCurrent) return;
-    const next = toggleHiddenProject(hidden, row.path);
+    const api = window.electronAPI;
+    let saved = hidden;
+    try {
+      const st = await api?.configGetSettings?.();
+      if (Array.isArray(st?.newTabHiddenProjects)) saved = st.newTabHiddenProjects;
+    } catch (err) { console.warn('[NewTabPicker] settings read failed:', err?.message); }
+    const next = toggleHiddenProject(saved, row.path);
     setHidden(next);
-    window.electronAPI?.configUpdateSettings?.({ newTabHiddenProjects: next });
+    api?.configUpdateSettings?.({ newTabHiddenProjects: next });
   };
 
   const onKeyDown = (e) => {
