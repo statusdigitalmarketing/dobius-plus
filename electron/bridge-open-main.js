@@ -154,6 +154,14 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     keyCounters.set(tabId, c);
     return c;
   }
+  // Keys a window sends for a tab whose PTY does not exist yet are dropped by
+  // terminal:write, so the observer above never sees them; a person typed
+  // all the same, and their Enter may follow once the shell is up. Count
+  // them here too.
+  ipcMain.on('terminal:write', (_event, id, data) => {
+    const c = typeof id === 'string' ? keyCounters.get(id) : null;
+    if (c && isKeyboardInput(data)) c.n += 1;
+  });
   function stopCounting(tabId) {
     const c = keyCounters.get(tabId);
     if (c) { c.off(); keyCounters.delete(tabId); }

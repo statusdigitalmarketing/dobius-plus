@@ -429,9 +429,30 @@ function fakeDeps(over = {}) {
   assert.equal(boxHoldsMessage('[Pasted text #1 +40 lines]', 'x'), true);
   assert.equal(boxHoldsMessage('hello there', 'hello there\nmore'), true);
   assert.equal(boxHoldsMessage('', 'hello'), false);
+  assert.equal(boxHoldsMessage('Hi', '\n\nHi'), true, 'leading blank lines');
+  // The message itself may read like a dialog: only rows outside the box count.
+  assert.equal(promptBoxText([rule2, '❯ Do you want to meet at 3? Esc to cancel', rule2, '  ? for shortcuts'], { bracketedPaste: true }), 'Do you want to meet at 3? Esc to cancel');
+  assert.equal(promptBoxText([' Do you want to proceed?', rule2, '❯ hi', rule2], { bracketedPaste: true }), null);
   assert.equal(boxHoldsMessage(null, 'hello'), false);
   assert.equal(promptBoxText([rule2, '❯ a', '  b', rule2], { bracketedPaste: true }), 'a\nb');
   ok('Enter withheld unless everything still holds; tall box still sent');
+}
+
+{
+  // The tab keeps drawing while the launch checks run (a program a login
+  // script just started): the checks never settle, nothing is typed.
+  const d = fakeDeps();
+  d.shellForeground = async (id) => { d.tabs.get(id).frames.push({ lines: ['codex> '], modes: {} }); return true; };
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'busy-start' });
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /kept changing/);
+  assert.equal(d.log.filter((e) => ['launch', 'paste', 'submit'].includes(e[0])).length, 0);
+  // ...but one redraw (a prompt theme finishing) only costs a retry.
+  const d2 = fakeDeps();
+  let draws = 0;
+  d2.shellForeground = async (id) => { if (draws++ === 0) d2.tabs.get(id).frames.push({ lines: ['% '], modes: {} }); return true; };
+  assert.equal((await createOpenTabService(d2).open({ projectPath: '/p', message: 'go', requestId: 'one-redraw' })).body.submitted, true);
+  ok('launch checks must settle');
 }
 
 {

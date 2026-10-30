@@ -57,6 +57,8 @@ const READY_POLL_MS = 250;
 const SHELL_QUIET_POLLS = 3;
 const SHELL_POLL_MS = 100;
 const SHELL_WAIT_MAX_MS = 10_000;
+const LAUNCH_CHECK_TRIES = 5;
+const LAUNCH_CHECK_GAP_MS = 300;
 
 /**
  * Make a message safe to type into Claude's prompt as ONE bracketed paste.
@@ -149,7 +151,6 @@ function dialogOnScreen(lines) {
  */
 export function promptBoxText(lines, modes) {
   if (!Array.isArray(lines) || !modes?.bracketedPaste) return null;
-  if (dialogOnScreen(lines)) return null;
   let last = lines.length - 1;
   while (last >= 0 && !String(lines[last] || '').trim()) last -= 1;
   // The box's CLOSING edge must be near the bottom; its top is the nearest
@@ -164,6 +165,9 @@ export function promptBoxText(lines, modes) {
     if (top < 0 || top === j - 1 || j - top > MAX_BOX_ROWS) continue;
     const row = lines[top + 1] || '';
     if (flat ? (PROMPT_ROW_RE.test(row) && !OPTION_ROW_RE.test(row)) : BOX_PROMPT_RE.test(row)) {
+      // A dialog anywhere OUTSIDE the box (the box's own text is the
+      // message, which may well say "Do you want to ...").
+      if (dialogOnScreen([...lines.slice(0, top + 1), ...lines.slice(j)])) return null;
       const rows = lines.slice(top + 1, j).map((r) => String(r).replace(/^\s*│?\s*[❯>]?\s?/, '').replace(/\s*│?\s*$/, ''));
       return rows.join('\n');
     }
@@ -179,7 +183,7 @@ export function promptBoxText(lines, modes) {
 export function boxHoldsMessage(boxText, message) {
   if (typeof boxText !== 'string') return false;
   if (/\[Pasted text #\d+/.test(boxText)) return true;
-  const want = message.split('\n')[0].trim().slice(0, 20);
+  const want = (message.split('\n').find((l) => l.trim()) || '').trim().slice(0, 20);
   return want.length > 0 && boxText.trimStart().startsWith(want);
 }
 
@@ -326,12 +330,24 @@ export function createOpenTabService(deps, opts = {}) {
       // Claude already runs in the tab (a "new tabs start Claude" setting,
       // say): never type the launch command into it. Re-check the shell after
       // the await: never type into a replacement.
-      const already = await deps.claudeRunning(tabId);
       // Only the shell may receive `claude` + Enter: a program a login script
-      // started (Codex, say) would take it as input.
-      const shellOwns = !already && (await deps.shellForeground(tabId));
-      // And Claude must start IN the project: a login script may `cd` away.
-      const inProject = shellOwns && (await deps.shellInProject(tabId, resolved.path));
+      // started (Codex, say) would take it as input. And Claude must start IN
+      // the project: a login script may `cd` away. The three checks are
+      // async, so they only count when the tab drew nothing while they ran
+      // (a program starting draws); otherwise they are taken again.
+      let already = false;
+      let shellOwns = false;
+      let inProject = false;
+      let settled = false;
+      for (let i = 0; i < LAUNCH_CHECK_TRIES && !settled; i += 1) {
+        if (i > 0) await deps.sleep(LAUNCH_CHECK_GAP_MS);
+        const seqBefore = watch.seq();
+        already = await deps.claudeRunning(tabId);
+        inProject = !already && (await deps.shellInProject(tabId, resolved.path));
+        shellOwns = !already && (await deps.shellForeground(tabId));
+        settled = watch.seq() === seqBefore;
+      }
+      if (!settled) return { ok: false, status: 409, tabId, error: 'the tab kept changing while Claude was being started; nothing was typed' };
       if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: false, status: 409, tabId, error: 'the tab was closed or its shell was replaced before Claude could start; nothing was typed' };
       // A person typing into the new tab has taken it over: whatever they
       // typed (and an Enter of theirs still on its way) must never carry
