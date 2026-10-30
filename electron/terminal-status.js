@@ -265,21 +265,28 @@ export function markHooklessTurn(id, turnEndedAt) {
  * marker from either claude proves nothing, so it ends only with a turn that
  * STARTS after main has seen one claude again (noteUnique).
  */
-export function markAmbiguous(id) {
+export function markAmbiguous(id, scanStartedAt = 0) {
   const st = live.get(id);
   if (!st) return;
   st.ambiguous = true;
   st.uniqueSince = 0;
+  st.ambiguousAt = Math.max(st.ambiguousAt || 0, scanStartedAt || 0);
   // The running turn's start cannot be pinned on one claude either.
   if (st.turnStartedAt) st.turnStartDistrusted = true;
   // Nor the last finished turn's length (its start may be the other's).
   st.lastTurnMs = 0;
 }
 
-/** main saw exactly one claude in the tab at `at` (see markAmbiguous). */
-export function noteUnique(id, at) {
+/**
+ * A scan that started at `scanStartedAt` and finished at `at` saw exactly one
+ * claude (see markAmbiguous). It counts only if it started after the last
+ * scan that saw two.
+ */
+export function noteUnique(id, scanStartedAt, at) {
   const st = live.get(id);
-  if (st && st.ambiguous && !st.uniqueSince) st.uniqueSince = at;
+  if (!st || !st.ambiguous || st.uniqueSince) return;
+  if (!(scanStartedAt > (st.ambiguousAt || 0))) return;
+  st.uniqueSince = at;
 }
 
 /** When the hook last ended a turn here (0 = never). Cheap, for the data path. */

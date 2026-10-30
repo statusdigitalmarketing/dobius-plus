@@ -941,7 +941,7 @@ test('ambiguity is kept until the next marker, so a later lone claude cannot cla
     claudeInfo: async () => info,
     claudeInfoFresh: async () => info,
     presenceForTab: async () => ({ pid: 2, startedAt: 2_000, status: 'busy', statusUpdatedAt: 20_000 }),
-    now: () => 40_000,
+    now: (() => { let c = 40_000; return () => (c += 1); })(), // a clock that moves
   });
   assert.equal((await tabActivity(ID)).activity.uncertain, true);
   info = { pid: 2, startedAt: 2_000 }; // A exited, B alone
@@ -1060,5 +1060,19 @@ test('a cached singleton cannot vouch for one claude after a scan saw two', asyn
   await checkTurnAgainstProcess(ID, ts.activityFor(ID), { fresh: true });
   ts.ingest(ID, mk('done'), 14_000);
   ts.ingest(ID, mk('working'), 15_000);
+  assert.equal(ts.activityFor(ID).ambiguous, false);
+});
+
+test('an older scan still in flight cannot clear a newer ambiguity', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.markAmbiguous(ID, 101_000);           // a scan started at 101 saw two
+  ts.noteUnique(ID, 100_000, 102_000);     // a scan started at 100 saw one
+  ts.ingest(ID, mk('done'), 103_000);
+  ts.ingest(ID, mk('working'), 103_500);
+  assert.equal(ts.activityFor(ID).ambiguous, true);
+  ts.noteUnique(ID, 104_000, 104_500);     // a scan started after it
+  ts.ingest(ID, mk('done'), 105_000);
+  ts.ingest(ID, mk('working'), 106_000);
   assert.equal(ts.activityFor(ID).ambiguous, false);
 });
