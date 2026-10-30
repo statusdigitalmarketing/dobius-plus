@@ -8,7 +8,7 @@ import {
   parseJsonl, streamJsonl, timeAgo, pathExists, mapLimit,
 } from './data-utils.js';
 import { listCodexSessions, codexTranscript } from './codex-sessions.js';
-import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects, getAllProjectsWithTabs, getSessionTabMap } from './config-manager.js';
+import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects, getAllProjectsWithTabs, getSessionTabMap, getSessionTabNames } from './config-manager.js';
 
 /**
  * Load session history from ~/.claude/history.jsonl
@@ -189,7 +189,14 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         // timestamp=0 for every recent session (v1.0.34 fix).
         const entries = await parseJsonl(filePath, 200);
         let preview = '';
+        // Newest stamp on ANY record: drives the 'working' status. Not the
+        // sort key: hook output, file snapshots and queue records are written
+        // when a session is merely resumed, which floated untouched chats to
+        // the top of History (Brett: "in order from the most recently
+        // messaged one").
         let timestamp = 0;
+        // Stamp of the newest real user or assistant message: the sort key.
+        let messageAt = 0;
         // lastRole drives the cross-session status dot.
         let lastRole = '';
         // entrypoint of the NEWEST user/assistant record (set with lastRole
@@ -249,7 +256,9 @@ export async function loadAllSessions(projectFilter, opts = {}) {
             lastRole = role;
             entrypoint = typeof entry.entrypoint === 'string' ? entry.entrypoint : '';
           }
-          if (preview && timestamp && lastRole) break;
+          // isMeta rows are injected context (hook output, caveats), not a turn.
+          if (role && !messageAt && tsMs && entry.isMeta !== true) messageAt = tsMs;
+          if (preview && messageAt && lastRole) break;
         }
         // Claude Code's own name for the conversation ("Fix login bug"),
         // rewritten as the chat goes; the newest one wins. History rows lead
@@ -296,6 +305,9 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         let status = 'done';
         if (recent && lastRole === 'assistant') status = 'working';
         else if (lastRole === 'user') status = 'needs';
+        // A transcript with no message in its tail keeps the activity stamp.
+        const activityAt = timestamp;
+        if (messageAt) timestamp = messageAt;
 
         sessions.push({
           sessionId,
@@ -304,6 +316,7 @@ export async function loadAllSessions(projectFilter, opts = {}) {
           preview: preview || 'No preview available',
           title,
           timestamp,
+          activityAt,
           age: timestamp ? timeAgo(timestamp) : 'unknown',
           status,
           sizeMB, // for the resume dead-session guard, Codex PR#3 r6 P2
@@ -343,9 +356,14 @@ export async function loadAllSessions(projectFilter, opts = {}) {
     return [];
   }
 
+  // The tab each session ran in names it in History (main records it while
+  // the session runs, see recordSessionTabNames). Added after the cap so the
+  // lookup touches only what is returned.
+  const tabNames = getSessionTabNames();
   return sessions
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
-    .slice(0, 500);
+    .slice(0, 500)
+    .map((s) => (s.source === 'claude' && tabNames.has(s.sessionId) ? { ...s, tabName: tabNames.get(s.sessionId) } : s));
 }
 
 /**

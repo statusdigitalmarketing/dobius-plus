@@ -155,6 +155,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('data:updated', handler);
     return () => ipcRenderer.removeListener('data:updated', handler);
   },
+  // A running session's tab name changed (History names sessions by tab).
+  onSessionNamesChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('sessions:namesChanged', handler);
+    return () => ipcRenderer.removeListener('sessions:namesChanged', handler);
+  },
 
   // File change watcher
   filewatcherWatch: (projectPath) => ipcRenderer.invoke('filewatcher:watch', projectPath),

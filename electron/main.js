@@ -66,6 +66,7 @@ import {
   getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig, flushConfigAsync, persistConfigNow,
   getSessionTags, setSessionTag, removeSessionTag,
   getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink, clearSessionTabRunning,
+  getTabLabelsById, recordSessionTabNames,
   getAgentMemory, setAgentMemory, appendJournalEntry,
   getOrchestrationRuns, saveOrchestrationRun, deleteOrchestrationRun,
   getMobileServerConfig,
@@ -96,6 +97,7 @@ import {
   sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus,
 } from './imessage-bridge.js';
 import { pairingText } from '../shared/pairing-link.js';
+import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
@@ -2351,6 +2353,11 @@ function setupSessionTabCapture() {
       const freshByTab = await resolveFreshSessionsForTabs(
         liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds,
       );
+      // Name each running session after its tab (History shows it). Read as
+      // the tick sees it, so a session keeps the name its tab had while it
+      // ran, not whatever the tab is renamed to for later work.
+      const labelByTabId = getTabLabelsById();
+      const namePairs = [];
       for (const t of liveTabs) {
         const claudeInfo = infoByTab.get(t.id);
         const runningSessionId = claudeInfo?.sessionId || freshByTab.get(t.id) || null;
@@ -2364,6 +2371,8 @@ function setupSessionTabCapture() {
           continue;
         }
         claimedIds.add(runningSessionId);
+        const tabName = sessionNameFromTabLabel(labelByTabId.get(t.id));
+        if (tabName) namePairs.push([runningSessionId, tabName]);
         const mappedSessionId = tabToSessionId.get(t.id);
         if (mappedSessionId === runningSessionId) {
           // UPGRADE provenance: the link was inferred from timing, but the tab's
@@ -2398,6 +2407,14 @@ function setupSessionTabCapture() {
           // Codex v1.0.39 r11 P2.
           const linkPath = how === 'fresh' ? (cwdByTab.get(t.id) || t.cwd) : t.cwd;
           setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
+        }
+      }
+      // A name changed (a rename, a new title): History lists re-read now
+      // rather than on the next transcript write, which an idle chat never
+      // makes. Its own event: data:updated also reloads projects and stats.
+      if (recordSessionTabNames(namePairs)) {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send('sessions:namesChanged');
         }
       }
     } catch { /* best-effort */ }

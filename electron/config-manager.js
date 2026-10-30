@@ -479,7 +479,7 @@ export function loadConfig() {
         return configCache;
       }
       // Sanitize unsafe keys from nested objects (prototype pollution guard)
-      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'projects', 'orchestrationRuns', 'imessageBridge', 'workRegistry', 'asanaQueue', 'scheduledTasks']) {
+      for (const topKey of ['agentMemory', 'sessionTags', 'sessionTabMap', 'sessionTabNames', 'projects', 'orchestrationRuns', 'imessageBridge', 'workRegistry', 'asanaQueue', 'scheduledTasks']) {
         if (loaded[topKey] && typeof loaded[topKey] === 'object') {
           for (const key of UNSAFE_KEYS) delete loaded[topKey][key];
         }
@@ -1079,6 +1079,80 @@ export function removeSessionTabLink(sessionId) {
     delete config.sessionTabMap[sessionId];
     saveConfig(config);
   }
+}
+
+// sessionTabNames remembers the name of the tab a session RAN in (Brett:
+// History should read "what you actually name the tab"). Separate from
+// sessionTabMap on purpose: a link is removed when its tab moves on to
+// another session and pruned at 30 days, and the name must outlive both.
+// Bounded by count, oldest sighting dropped first.
+const SESSION_TAB_NAMES_MAX = 1000;
+
+/** sessionId -> name, as a Map (ids come from transcript file names). */
+export function getSessionTabNames() {
+  const out = new Map();
+  const names = loadConfig().sessionTabNames;
+  if (!names || typeof names !== 'object') return out;
+  for (const [sid, entry] of Object.entries(names)) {
+    if (UNSAFE_KEYS.has(sid) || typeof entry?.name !== 'string' || !entry.name) continue;
+    out.set(sid, entry.name);
+  }
+  return out;
+}
+
+/**
+ * Record the tab names seen this tick for running sessions. `pairs` is
+ * [[sessionId, name]]. Writes only when a name changed; returns true then.
+ */
+export function recordSessionTabNames(pairs, now = Date.now()) {
+  if (!Array.isArray(pairs) || pairs.length === 0) return false;
+  const config = loadConfig();
+  if (!config.sessionTabNames || typeof config.sessionTabNames !== 'object') config.sessionTabNames = {};
+  const names = config.sessionTabNames;
+  let changed = false;
+  for (const [sid, name] of pairs) {
+    if (!sid || typeof sid !== 'string' || sid.length > 100 || UNSAFE_KEYS.has(sid)) continue;
+    if (typeof name !== 'string' || !name || name.length > 200) continue;
+    if (names[sid]?.name === name) continue;
+    names[sid] = { name, at: now };
+    changed = true;
+  }
+  if (!changed) return false;
+  const ids = Object.keys(names);
+  if (ids.length > SESSION_TAB_NAMES_MAX) {
+    ids.sort((a, b) => (names[a]?.at || 0) - (names[b]?.at || 0));
+    for (const sid of ids.slice(0, ids.length - SESSION_TAB_NAMES_MAX)) delete names[sid];
+  }
+  saveConfig(config);
+  return true;
+}
+
+// The USER'S tab labels (renames like "Email" / "refund commish") live in
+// config.projects[*].tabs, not in the terminal id. Map tab id -> persisted
+// label from every window kind; callers fall back to their own default when
+// a tab has no (or a blank) label. Moved here from mobile-server.js so the
+// session-name capture in main reads the same labels the phone shows.
+export function getTabLabelsById() {
+  const labelByTabId = new Map();
+  const take = (id, label) => {
+    if (typeof id === 'string' && typeof label === 'string' && label.trim()) labelByTabId.set(id, label);
+  };
+  try {
+    for (const proj of getAllProjectsWithTabs()) {
+      for (const tab of (Array.isArray(proj.tabs) ? proj.tabs : [])) take(tab?.id, tab?.label);
+    }
+    // Tabs living in TEAR-OFF windows are absent from config.projects[*].tabs:
+    // their labels come from the tear-off tab bucket (when present) and from
+    // lastTearOffs (the torn tab's label survives there even without a bucket).
+    const cfg = loadConfig();
+    for (const st of Object.values(cfg?.tearOffWindows || {})) {
+      for (const tab of (Array.isArray(st?.tabs) ? st.tabs : [])) take(tab?.id, tab?.label);
+    }
+    for (const t of (Array.isArray(cfg?.lastTearOffs) ? cfg.lastTearOffs : [])) {
+      if (!labelByTabId.has(t?.tabId)) take(t?.tabId, t?.label);
+    }
+  } catch { /* config unavailable; callers' default labels still work */ }
+  return labelByTabId;
 }
 
 // --- Agent Memory ---
