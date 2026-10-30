@@ -362,11 +362,14 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     // At a turn's end the process must be read NOW: a cached identity can be
     // the claude that died just before this turn's claude started.
     let info = await (fresh ? claudeInfoFresh : claudeInfo)(id);
+    let readNow = fresh;
     // An absence is only evidence when read now: a cached "no claude" can
     // predate the claude that just started this turn.
-    if (!info && !fresh && raw.hookOwned && raw.since) info = await claudeInfoFresh(id);
+    if (!info && !fresh && raw.hookOwned && raw.since) { info = await claudeInfoFresh(id); readNow = true; }
     if (info?.ambiguous) status.markAmbiguous(id);
-    else if (info) status.noteUnique(id, now());
+    // Only a scan run NOW may vouch for one claude: a cached singleton can
+    // predate a second claude a newer scan already saw.
+    else if (info && readNow) status.noteUnique(id, now());
     const a = reconcileWithProcess(raw, info);
     // A claude's start time proves a time wrong. Finding NO claude proves a
     // still-running turn was abandoned (or runs behind a wrapper, where an

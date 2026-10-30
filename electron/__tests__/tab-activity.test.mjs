@@ -937,8 +937,9 @@ test('ambiguity is kept until the next marker, so a later lone claude cannot cla
   ts.ingest(ID, mk('working'), 10_000);
   ts.ingest(ID, mk('done'), 30_000);
   let info = { ambiguous: true };
-  const { tabActivity } = makeActivity({
+  const { tabActivity, checkTurnAgainstProcess } = makeActivity({
     claudeInfo: async () => info,
+    claudeInfoFresh: async () => info,
     presenceForTab: async () => ({ pid: 2, startedAt: 2_000, status: 'busy', statusUpdatedAt: 20_000 }),
     now: () => 40_000,
   });
@@ -946,7 +947,8 @@ test('ambiguity is kept until the next marker, so a later lone claude cannot cla
   info = { pid: 2, startedAt: 2_000 }; // A exited, B alone
   const r = await tabActivity(ID);
   assert.deepEqual([r.activity.uncertain, r.activity.background], [true, null]);
-  ts.ingest(ID, mk('working'), 50_000); // a turn starting after one claude was seen (40s)
+  await checkTurnAgainstProcess(ID, ts.activityFor(ID), { fresh: true }); // a scan NOW sees one claude
+  ts.ingest(ID, mk('working'), 50_000); // a turn starting after that
   assert.equal(ts.activityFor(ID).ambiguous, false);
   assert.equal(ts.activityFor(ID).since, null, 'that first turn may be a continuation: no clock');
 });
@@ -1040,4 +1042,23 @@ test('a turn that starts with needs, or during a hookless turn, has no trusted c
   ts.ingest(ID, mk('needs'), 150_000);
   ts.ingest(ID, mk('done'), 190_000);
   assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+});
+
+test('a cached singleton cannot vouch for one claude after a scan saw two', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.markAmbiguous(ID);
+  const { checkTurnAgainstProcess } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),        // cached: A only
+    claudeInfoFresh: async () => ({ pid: 1, startedAt: 1_000 }),
+    now: () => 11_000,
+  });
+  await checkTurnAgainstProcess(ID, ts.activityFor(ID));          // cached read
+  ts.ingest(ID, mk('done'), 12_000);
+  ts.ingest(ID, mk('working'), 13_000);
+  assert.equal(ts.activityFor(ID).ambiguous, true, 'no fresh scan vouched, still ambiguous');
+  await checkTurnAgainstProcess(ID, ts.activityFor(ID), { fresh: true });
+  ts.ingest(ID, mk('done'), 14_000);
+  ts.ingest(ID, mk('working'), 15_000);
+  assert.equal(ts.activityFor(ID).ambiguous, false);
 });

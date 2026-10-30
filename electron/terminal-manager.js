@@ -601,7 +601,10 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
       found = info;
     }
     return found;
-  } catch {
+  } catch (err) {
+    // `unique`: a scan that failed (a pgrep timeout, say) proves nothing,
+    // which is not the same as "no claude here". pgrep exits 1 for none.
+    if (unique && err?.code !== 1) return { ambiguous: true };
     return null;
   }
 }
