@@ -68,21 +68,24 @@ assert.equal(isClaudePromptReady([rule, '❯ 1. Yes', '  2. No', rule], { bracke
 assert.equal(isClaudePromptReady([rule, '❯ ', 'no closing rule'], { bracketedPaste: true }), false);
 assert.equal(isClaudePromptReady(['╭────────╮', '│ > hi   │', '╰────────╯'], { bracketedPaste: true }), true, 'older boxed prompt');
 assert.equal(isClaudePromptReady(['user@mac proj % '], { bracketedPaste: true }), false, 'a shell is not Claude');
+assert.equal(isClaudePromptReady([rule, '❯ ', rule, ...Array(20).fill('text shown after it'), '% '], { bracketedPaste: true }), false, 'a lookalike high up the screen');
+assert.equal(isClaudePromptReady([rule, '❯ ', rule, '  ? for shortcuts', '', '', ''], { bracketedPaste: true }), true, 'trailing blank rows do not count');
 ok('Claude ready check on real screens');
 
 // 4. The request flow with fake deps.
+const PROMPT = { lines: [rule, '❯ ', rule], modes: { bracketedPaste: true } };
 function fakeDeps(over = {}) {
   let t = 0;
   let n = 0;
   const log = [];
-  const tabs = new Map(); // tabId -> { pty, seq, screen, alive }
+  const tabs = new Map(); // tabId -> { pty, seq, frames, alive, claude }
   const deps = {
     log, tabs,
     resolveProject: async (p) => (p === '/missing' ? { status: 404, error: 'no such folder' } : { path: p }),
     openTab: async (p) => {
       n += 1;
       const id = `term-${p}-${n}`;
-      tabs.set(id, { pty: { n }, seq: 1, alive: true, screen: { lines: ['% '], modes: { bracketedPaste: true } } });
+      tabs.set(id, { pty: { n }, seq: 1, alive: true, frames: [{ lines: ['% '], modes: { bracketedPaste: true } }] });
       log.push(['open', id]);
       return { tabId: id };
     },
@@ -90,14 +93,26 @@ function fakeDeps(over = {}) {
     focusTab: (id) => { log.push(['focus', id]); return true; },
     ptyOf: (id) => (tabs.get(id)?.alive ? tabs.get(id).pty : null),
     outputSeq: (id) => tabs.get(id)?.seq || 0,
-    cliRunning: async () => false,
+    claudeRunning: async (id) => !!tabs.get(id)?.claude,
     // "Claude" draws its prompt a few polls after the launch is typed.
     typeLaunch: (id) => {
       log.push(['launch', id]);
       const tab = tabs.get(id);
-      setTimeout(() => { tab.screen = { lines: [rule, '❯ ', rule], modes: { bracketedPaste: true } }; }, 0);
+      setTimeout(() => { tab.claude = true; tab.frames.push(PROMPT); }, 0);
     },
-    readScreen: async (id) => tabs.get(id)?.screen || null,
+    // Frames drawn since the watch began, or since mark().
+    watchOutput: (id) => {
+      const tab = tabs.get(id);
+      let from = tab.frames.length;
+      return {
+        mark: () => { from = tab.frames.length; },
+        // Like the emulator: everything drawn since stays on screen, newest at the bottom.
+        screen: async () => (tab.frames.length > from
+          ? { lines: tab.frames.slice(from).flatMap((f) => f.lines), modes: tab.frames.at(-1).modes }
+          : { lines: [], modes: {} }),
+        stop: () => log.push(['stop', id]),
+      };
+    },
     paste: (id, text) => log.push(['paste', id, text]),
     sleep: async (ms) => { t += ms; await new Promise((r) => setImmediate(r)); },
     now: () => t,
@@ -112,7 +127,7 @@ function fakeDeps(over = {}) {
   const r = await svc.open({ projectPath: '/p', message: 'Reply to Dom\r\nthanks', requestId: 'r1' });
   assert.equal(r.status, 200);
   assert.deepEqual(r.body, { ok: true, tabId: 'term-/p-1' });
-  assert.deepEqual(d.log, [['open', 'term-/p-1'], ['launch', 'term-/p-1'], ['paste', 'term-/p-1', 'Reply to Dom\nthanks']]);
+  assert.deepEqual(d.log, [['open', 'term-/p-1'], ['launch', 'term-/p-1'], ['paste', 'term-/p-1', 'Reply to Dom\nthanks'], ['stop', 'term-/p-1']]);
   // Same id again: the same tab comes forward, nothing new opens or is typed.
   const again = await svc.open({ projectPath: '/p', message: 'Reply to Dom', requestId: 'r1' });
   assert.deepEqual(again, { status: 200, body: { ok: true, tabId: 'term-/p-1', existing: true } });
@@ -163,11 +178,55 @@ function fakeDeps(over = {}) {
   let reads = 0;
   const d = fakeDeps({
     typeLaunch: () => {},
-    readScreen: async () => { reads += 1; return reads === 3 ? { lines: [rule, '❯ ', rule], modes: { bracketedPaste: true } } : { lines: [], modes: {} }; },
+    claudeRunning: async () => true,
+    watchOutput: () => ({ mark() {}, stop() {}, screen: async () => { reads += 1; return reads === 3 ? PROMPT : { lines: [], modes: {} }; } }),
   });
   const r = await createOpenTabService(d, { readyTimeoutMs: 3000 }).open({ projectPath: '/p', message: 'go', requestId: 'flash' });
   assert.equal(r.status, 504);
   ok('one flashed frame does not count as ready');
+}
+
+{
+  // A shell prompt drawn like Claude's box (a prompt theme's ruler + ❯) with
+  // bracketed paste on is NOT Claude: no claude process, nothing pasted.
+  const d = fakeDeps();
+  d.typeLaunch = (id) => { d.tabs.get(id).frames.push({ lines: [rule, '❯ claude', 'zsh: command not found: claude', rule, '❯ '], modes: { bracketedPaste: true } }); };
+  const r = await createOpenTabService(d, { readyTimeoutMs: 3000 }).open({ projectPath: '/p', message: 'go', requestId: 'shell' });
+  assert.equal(r.status, 504);
+  assert.equal(d.log.filter((e) => e[0] === 'paste').length, 0);
+  ok('a shell that looks like the prompt box gets nothing');
+}
+
+{
+  // A prompt lookalike printed by the SHELL before the launch (a banner, a
+  // file shown at login) is forgotten at the launch: Claude itself shows only
+  // a trust question, so nothing is pasted.
+  const d = fakeDeps();
+  d.openTab = async (p) => {
+    const id = `term-${p}-1`;
+    d.tabs.set(id, { pty: {}, seq: 1, alive: true, frames: [] });
+    return { tabId: id };
+  };
+  // The shell prints it while the service waits for the shell prompt, i.e.
+  // after the watch began and before the launch.
+  d.outputSeq = (id) => { const t = d.tabs.get(id); if (!t.frames.length) t.frames.push(PROMPT); return 1; };
+  d.typeLaunch = (id) => { d.tabs.get(id).claude = true; d.tabs.get(id).frames.push({ lines: [rule, ' Accessing workspace:', '', ' ❯ No, exit', '   Yes, I trust this folder'], modes: { bracketedPaste: true } }); };
+  const r = await createOpenTabService(d, { readyTimeoutMs: 3000 }).open({ projectPath: '/p', message: 'go', requestId: 'banner' });
+  assert.equal(r.status, 504);
+  assert.equal(d.log.filter((e) => e[0] === 'paste').length, 0);
+  ok('a prompt lookalike from before the launch does not count');
+}
+
+{
+  // Claude exits between the ready check and the paste: the re-check catches it.
+  let calls = 0;
+  const d = fakeDeps({ claudeRunning: async () => { calls += 1; return calls === 2 || calls === 3; } });
+  d.typeLaunch = (id) => { d.tabs.get(id).frames.push(PROMPT); };
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'exit' });
+  assert.equal(calls, 4, 'pre-launch, two ready polls, the re-check');
+  assert.equal(r.status, 409);
+  assert.equal(d.log.filter((e) => e[0] === 'paste').length, 0);
+  ok('claude gone at the paste: nothing typed');
 }
 
 {
@@ -188,7 +247,7 @@ function fakeDeps(over = {}) {
 
 {
   // An agent CLI already runs in the new tab: do not type `claude` into it.
-  const d = fakeDeps({ cliRunning: async () => true, readScreen: async () => ({ lines: [rule, '❯ ', rule], modes: { bracketedPaste: true } }) });
+  const d = fakeDeps({ claudeRunning: async () => true, watchOutput: () => ({ mark() {}, stop() {}, screen: async () => PROMPT }) });
   const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'running' });
   assert.equal(r.status, 200);
   assert.equal(d.log.filter((e) => e[0] === 'launch').length, 0);

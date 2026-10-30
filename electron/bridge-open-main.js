@@ -9,10 +9,11 @@
 
 import crypto from 'crypto';
 import fs from 'fs';
-import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
-import { terminalInstance, terminalRawOutputSeq, getTerminalBuffer, getTerminalProcess, getTerminalWebContentsId } from './terminal-manager.js';
+import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId } from './terminal-manager.js';
 import { writeRawInput } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
@@ -22,9 +23,9 @@ const TERMINAL_ID_RE = /^term-.+-\d+$/;
 const WINDOW_READY_MS = 15_000;
 const TAB_ADD_MS = 10_000;
 const PTY_START_MS = 15_000;
-// Longest escape sequence a screen tail is backed up over (see activityForTab).
-const SCREEN_TAIL_CHARS = 262_144;
-const ESC_BACKUP_CHARS = 512;
+// Output kept for the readiness render. A Claude startup is a few KB.
+const WATCH_CAP_CHARS = 262_144;
+const execFileP = promisify(execFile);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -138,26 +139,51 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     return true;
   }
 
-  async function readScreen(tabId) {
-    const raw = getTerminalBuffer(tabId) || '';
-    let start = Math.max(0, raw.length - SCREEN_TAIL_CHARS);
-    if (start > 0) {
-      const esc = raw.lastIndexOf('\x1b', start);
-      if (esc !== -1 && start - esc <= ESC_BACKUP_CHARS) start = esc;
+  // The tab's output from now on, for the readiness render. Collected from
+  // a subscription rather than read from the shared rolling buffer, so
+  // mark() can drop everything up to the launch: only what Claude draws
+  // after `claude` is typed can make the tab ready.
+  function watchOutput(tabId) {
+    let buf = '';
+    const sub = subscribeTerminal(tabId, {
+      onData: (_id, data) => { buf = trimToEscapeBoundary(buf + data, WATCH_CAP_CHARS); },
+    });
+    return {
+      mark: () => { buf = ''; },
+      screen: async () => {
+        const lines = await renderScreenLines(buf);
+        return lines ? { lines, modes: lines.modes } : null;
+      },
+      stop: () => sub.unsubscribe(),
+    };
+  }
+
+  // Claude is the tab's FOREGROUND process: a claude child of the shell
+  // (the argv test the app uses everywhere, claude-argv.js; the native
+  // binary's process name is its version, so names are useless) whose
+  // process group owns the terminal. A suspended or background claude, or a
+  // shell back at its prompt, fails, and so does any error.
+  async function claudeRunning(tabId) {
+    const info = await getTerminalClaudeInfo(tabId);
+    if (!info?.pid) return false;
+    try {
+      const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=', '-p', String(info.pid)], { timeout: 1000, encoding: 'utf8' });
+      const [pgid, tpgid, stat] = stdout.trim().split(/\s+/);
+      return !!pgid && pgid === tpgid && !String(stat).startsWith('T');
+    } catch {
+      return false;
     }
-    const lines = await renderScreenLines(raw.slice(start));
-    return lines ? { lines, modes: lines.modes } : null;
   }
 
   return {
     resolveProject,
     openTab,
     focusTab,
-    readScreen,
+    watchOutput,
+    claudeRunning,
     tabAlive: (tabId) => !!terminalInstance(tabId) && getTerminalWebContentsId(tabId) !== null,
     ptyOf: (tabId) => terminalInstance(tabId),
     outputSeq: (tabId) => terminalRawOutputSeq(tabId),
-    cliRunning: async (tabId) => /^(claude|codex|node)$/i.test(path.basename((await getTerminalProcess(tabId)) || '')),
     // Typed at the shell prompt, as a person would: plain `claude`, the
     // account env and PATH come from the tab's shell, and no permission
     // flag is ever added.

@@ -83,6 +83,10 @@ const OPTION_ROW_RE = /^\s*[❯>]\s*\d+[.)]\s/;
 const BOX_TOP_RE = /^\s*╭─+╮\s*$/;
 const BOX_PROMPT_RE = /^\s*│\s*>(?:\s|│|$)/;
 const BOX_BOTTOM_RE = /^\s*╰─+╯\s*$/;
+// Claude keeps its prompt at the bottom of what it draws: at most a footer,
+// a status line and a short list below it. A lookalike higher up (a file
+// being shown, an old screen) does not count.
+export const PROMPT_BOTTOM_ROWS = 12;
 
 /**
  * Is Claude's input prompt on screen and taking input? `lines` is the
@@ -90,12 +94,16 @@ const BOX_BOTTOM_RE = /^\s*╰─+╯\s*$/;
  * signals must agree: the program turned bracketed paste ON (it is reading
  * the keyboard in raw mode and will treat our paste as a paste, not keys),
  * and the prompt box is drawn: a rule, a prompt row, and a closing rule a few
- * rows below. A trust dialog, a login screen or a permission prompt is NOT
- * ready: none of them draws a prompt row right under a rule.
+ * rows below, within the bottom PROMPT_BOTTOM_ROWS rows of drawn content. A
+ * trust dialog, a login screen or a permission prompt is NOT ready: none of
+ * them draws a prompt row right under a rule. This is the SCREEN half only;
+ * the service also requires claude to be the tab's foreground process.
  */
 export function isClaudePromptReady(lines, modes) {
   if (!Array.isArray(lines) || !modes?.bracketedPaste) return false;
-  for (let i = lines.length - 2; i >= 0; i -= 1) {
+  let last = lines.length - 1;
+  while (last >= 0 && !String(lines[last] || '').trim()) last -= 1;
+  for (let i = last - 1; i >= 0 && i + 1 >= last - PROMPT_BOTTOM_ROWS; i -= 1) {
     const row = lines[i + 1] || '';
     if (RULE_RE.test(lines[i]) && PROMPT_ROW_RE.test(row) && !OPTION_ROW_RE.test(row)) {
       for (let j = i + 2; j < Math.min(lines.length, i + 8); j += 1) if (RULE_RE.test(lines[j])) return true;
@@ -115,9 +123,11 @@ export function isClaudePromptReady(lines, modes) {
  *   focusTab(tabId) -> boolean        bring its window and the tab to the front
  *   ptyOf(tabId) -> object|null       PTY identity (a replaced shell is a new object)
  *   outputSeq(tabId) -> number        count of output chunks so far
- *   cliRunning(tabId) -> Promise<boolean>  claude / codex already runs in the tab
+ *   claudeRunning(tabId) -> Promise<boolean>  claude is the FOREGROUND process of the tab's terminal
  *   typeLaunch(tabId) -> void         type `claude` + Enter at the shell prompt
- *   readScreen(tabId) -> Promise<{ lines, modes } | null>
+ *   watchOutput(tabId) -> { mark(), screen(): Promise<{ lines, modes } | null>, stop() }
+ *                                     the tab's output from now on, emulated; mark()
+ *                                     forgets everything received so far
  *   paste(tabId, text) -> void        one bracketed paste, no Enter
  *   sleep(ms), now()
  */
@@ -154,16 +164,19 @@ export function createOpenTabService(deps, opts = {}) {
   }
 
   // Polls the emulated screen. Ready only on two polls in a row, so a frame
-  // caught mid-repaint cannot count. Fails as soon as the tab or its shell
-  // is gone, never typing into a replacement.
-  async function waitReady(tabId, pty) {
+  // caught mid-repaint cannot count, and only while a claude process runs in
+  // the tab: a shell prompt drawn with rules and a ❯ (a prompt theme's ruler)
+  // must never receive the paste. Fails as soon as the tab or its shell is
+  // gone, never typing into a replacement.
+  async function waitReady(tabId, pty, watch) {
     const end = deps.now() + readyTimeoutMs;
     let hits = 0;
     while (deps.now() < end) {
       if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return 'gone';
       let screen;
-      try { screen = await deps.readScreen(tabId); } catch { screen = null; }
-      hits = screen && isClaudePromptReady(screen.lines, screen.modes) ? hits + 1 : 0;
+      try { screen = await watch.screen(); } catch { screen = null; }
+      const drawn = !!screen && isClaudePromptReady(screen.lines, screen.modes);
+      hits = drawn && (await deps.claudeRunning(tabId)) ? hits + 1 : 0;
       if (hits >= 2) return 'ready';
       await deps.sleep(READY_POLL_MS);
     }
@@ -177,17 +190,33 @@ export function createOpenTabService(deps, opts = {}) {
     if (opened.error) return { ok: false, status: 500, error: opened.error };
     const { tabId } = opened;
     const pty = deps.ptyOf(tabId);
-    if (!pty || !(await waitShell(tabId))) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
-    // An agent CLI already runs in the tab (a "new tabs start Claude"
-    // setting, say): never type the launch command into it.
-    if (!(await deps.cliRunning(tabId))) deps.typeLaunch(tabId);
-    const state = await waitReady(tabId, pty);
-    if (state === 'gone') return { ok: false, status: 409, tabId, error: 'the tab was closed or its shell exited before Claude was ready; nothing was typed' };
-    if (state === 'timeout') {
-      return { ok: false, status: 504, tabId, error: `Claude's prompt did not appear within ${Math.round(readyTimeoutMs / 1000)}s (a trust or login question may be waiting in the tab); the tab is open and nothing was typed` };
+    if (!pty) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
+    // Only output from here on can make the tab "ready" (and, once the
+    // launch is typed, only output after it): a prompt lookalike in the
+    // shell's startup text cannot.
+    const watch = deps.watchOutput(tabId);
+    try {
+      if (!(await waitShell(tabId))) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
+      // Claude already runs in the tab (a "new tabs start Claude" setting,
+      // say): never type the launch command into it.
+      if (!(await deps.claudeRunning(tabId))) {
+        watch.mark();
+        deps.typeLaunch(tabId);
+      }
+      const state = await waitReady(tabId, pty, watch);
+      const gone = { ok: false, status: 409, tabId, error: 'the tab was closed, its shell exited or Claude stopped before the message could be typed; nothing was typed' };
+      if (state === 'gone') return gone;
+      if (state === 'timeout') {
+        return { ok: false, status: 504, tabId, error: `Claude's prompt did not appear within ${Math.round(readyTimeoutMs / 1000)}s (a trust or login question may be waiting in the tab); the tab is open and nothing was typed` };
+      }
+      // Once more right before typing: Claude can exit between the last poll
+      // and now. The paste then goes out in the same tick as these checks.
+      if (!(await deps.claudeRunning(tabId)) || !deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return gone;
+      deps.paste(tabId, message);
+      return { ok: true, tabId };
+    } finally {
+      watch.stop();
     }
-    deps.paste(tabId, message);
-    return { ok: true, tabId };
   }
 
   /** Handle one /openTab body. Resolves { status, body }. */

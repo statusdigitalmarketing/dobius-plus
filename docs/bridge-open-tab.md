@@ -48,8 +48,12 @@ It is typed as ONE bracketed paste, which Claude treats as pasted text, never as
 2. Opens the project's window if it is not open, otherwise uses its first window, and brings it to the front.
 3. Asks that window for a new tab (exactly like Cmd+T) and shows it. The tab's shell is spawned by the window like every other tab, with the active Claude account's environment and the project folder as its working directory.
 4. Waits for the shell prompt (output, then a short quiet), then types `claude` and Enter, as a person would. No flags are added, so Claude runs with your normal settings and still asks before changing anything. If Claude (or Codex) is already running in the tab, nothing is typed.
-5. Waits until Claude is ready: the tab's screen, replayed through the headless terminal emulator, must show Claude's prompt box (a rule, the `❯` row, a closing rule) AND Claude must have turned bracketed paste on, on two checks in a row. A trust question, a login screen or a permission prompt does not count. Polled every 250ms for up to 60 seconds.
-6. Pastes the message. No Enter.
+5. Waits until Claude is ready. Three things must hold on two checks in a row (polled every 250ms, for up to 60 seconds):
+   - the output the tab produced AFTER `claude` was typed, replayed through the headless terminal emulator, shows Claude's prompt box (a rule, the `❯` row, a closing rule) within the bottom 12 rows of what is drawn. Anything the shell printed before the launch (a banner, a file shown at login) is ignored;
+   - the program turned bracketed paste on;
+   - a `claude` process (recognised by its command line, the same test the app uses everywhere) is the FOREGROUND process of the tab's terminal. A shell at its prompt, a suspended or background claude, or anything else fails closed.
+   A trust question, a login screen or a permission prompt does not count as ready.
+6. Checks once more that claude is still the foreground process and the tab is unchanged, then pastes the message. No Enter.
 
 The reply is sent after step 6 (or with the reason it stopped). Allow about two minutes: a cold window plus a Claude startup can take a while. `dobius-open` waits up to 180 seconds.
 
