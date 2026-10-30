@@ -543,9 +543,11 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
       const lstart = line.slice(0, 24);
       const command = line.slice(24).trim();
       if (!isClaudeCommand(command)) {
-        // `unique`: a claude whose path has spaces (`/x/CLI Tools/claude`)
-        // fails isClaudeCommand but may be one, so the shell is ambiguous.
-        if (unique && /\/claude(?:\s|$)/.test(command)) return null;
+        // `unique`: anything else that so much as names claude (a path with
+        // spaces such as `/x/CLI Tools/claude[/versions/N]` fails
+        // isClaudeCommand) may be one, so the shell is ambiguous. Fails
+        // closed: a child like `vim claude.md` also costs the Waiting label.
+        if (unique && /claude/i.test(command)) return null;
         continue;
       }
       const parsed = Date.parse(lstart);
