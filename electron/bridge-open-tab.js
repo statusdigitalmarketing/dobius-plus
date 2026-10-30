@@ -183,6 +183,19 @@ export function promptBoxText(lines, modes) {
  * text and a long one as "[Pasted text #1 +N lines]". Checked before the
  * Enter, so it can only ever send the box when it holds what was pasted.
  */
+// After the Enter: is any of the message still in the box? Looser than
+// boxHoldsMessage on purpose (whitespace ignored, anywhere in the box), so
+// a message the Enter only split in two ("he" / "llo", a cursor moved by a
+// click and Enter bound to a new line) still counts as NOT sent. An empty
+// box, or Claude's placeholder, counts as sent.
+export function boxStillHasMessage(boxText, message) {
+  if (typeof boxText !== 'string') return false;
+  if (/\[Pasted text #\d+/.test(boxText)) return true;
+  const squash = (x) => x.replace(/\s+/g, '');
+  const want = squash(message.split('\n').find((l) => l.trim()) || '').slice(0, 20);
+  return want.length > 0 && squash(boxText).includes(want);
+}
+
 export function boxHoldsMessage(boxText, message) {
   if (typeof boxText !== 'string') return false;
   if (/\[Pasted text #\d+/.test(boxText)) return true;
@@ -322,7 +335,7 @@ export function createOpenTabService(deps, opts = {}) {
       let after;
       try { after = await watch.screen(); } catch { after = null; }
       if (!after) continue; // a failed read proves nothing
-      if (!boxHoldsMessage(promptBoxText(after.lines, after.modes), message)) return { ok: true, tabId, submitted: true };
+      if (!boxStillHasMessage(promptBoxText(after.lines, after.modes), message)) return { ok: true, tabId, submitted: true };
     }
     return { ok: true, tabId, submitted: false, note: 'Enter was pressed but the message is still in Claude\'s prompt (is Enter set to insert a new line?); press the key that sends it' };
   }
@@ -462,6 +475,8 @@ export function buildOpenCliScript({ port, tokenFile }) {
 # type a message into Claude's prompt, then press Enter once to send it.
 # Usage: dobius-open <project-folder> <request-id> "<message>"
 #        dobius-open <project-folder> <request-id> - < message.txt
+# Use the stdin form for anything private: a message given as an argument is
+# visible to other local users (ps) while the command runs.
 # The same request id again brings that tab to the front instead.
 # Prints the bridge's JSON reply; exits 0 only when it says ok.
 set -e
@@ -476,7 +491,9 @@ if [ "$3" = "-" ]; then MESSAGE=$(cat); else MESSAGE="$3"; fi
 # The token and the message never go on a command line (any local user can
 # read argv with ps): the header comes from a 0600 temp file, the body from
 # stdin, and python reads the fields from its environment.
-BODY=$(OPEN_PROJECT="$1" OPEN_ID="$2" OPEN_MESSAGE="$MESSAGE" python3 -c 'import json,os; print(json.dumps({"projectPath": os.environ["OPEN_PROJECT"], "requestId": os.environ["OPEN_ID"], "message": os.environ["OPEN_MESSAGE"]}))')
+# ensure_ascii=False: \\u escapes would triple a non-ASCII message past the
+# bridge's 64KB body limit.
+BODY=$(PYTHONIOENCODING=utf-8 OPEN_PROJECT="$1" OPEN_ID="$2" OPEN_MESSAGE="$MESSAGE" python3 -c 'import json,os; print(json.dumps({"projectPath": os.environ["OPEN_PROJECT"], "requestId": os.environ["OPEN_ID"], "message": os.environ["OPEN_MESSAGE"]}, ensure_ascii=False))')
 HDR=$(mktemp) || exit 3
 trap 'rm -f "$HDR"' EXIT
 chmod 600 "$HDR"

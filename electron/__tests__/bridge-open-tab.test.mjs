@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   sanitizeOpenMessage, validateOpenTabBody, isClaudePromptReady, createOpenTabService,
-  buildOpenCliScript, isKeyboardInput, promptBoxText, boxHoldsMessage, CLAUDE_SCRIPT_RE, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
+  buildOpenCliScript, isKeyboardInput, promptBoxText, boxHoldsMessage, boxStillHasMessage, CLAUDE_SCRIPT_RE, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
 } from '../bridge-open-tab.js';
 import { renderScreenLines } from '../screen-render.js';
 
@@ -437,6 +437,10 @@ function fakeDeps(over = {}) {
   assert.equal(boxHoldsMessage('Hi', '\n\nHi'), true, 'leading blank lines');
   assert.equal(boxHoldsMessage('Reply    to Dom', 'Reply\tto Dom'), true, 'a tab drawn as spaces');
   assert.equal(boxHoldsMessage('Reply to Bob', 'Reply to Dom'), false);
+  assert.equal(boxStillHasMessage('he\nllo', 'hello'), true, 'split by a stray newline: not sent');
+  assert.equal(boxStillHasMessage('', 'hello'), false);
+  assert.equal(boxStillHasMessage('Try "refactor ProjectView.jsx"', 'hello'), false, 'placeholder');
+  assert.equal(boxStillHasMessage(null, 'hello'), false);
   // The message itself may read like a dialog: only rows outside the box count.
   assert.equal(promptBoxText([rule2, '❯ Do you want to meet at 3? Esc to cancel', rule2, '  ? for shortcuts'], { bracketedPaste: true }), 'Do you want to meet at 3? Esc to cancel');
   assert.equal(promptBoxText([' Do you want to proceed?', rule2, '❯ hi', rule2], { bracketedPaste: true }), null);
@@ -566,6 +570,11 @@ reply = { ok: false, error: 'timed out', tabId: 'term-/p-1' };
 r = await run(['/p', 'card-3', 'x']);
 assert.equal(r.code, 1, 'ok:false exits non-zero');
 assert.match(r.out, /timed out/);
+const big = 'é'.repeat(16384); // 32768 bytes of UTF-8: at the message cap
+r = await run(['/p', 'card-4', '-'], big);
+assert.equal(r.code, 1, 'reply ok:false still exits 1');
+assert.equal(JSON.parse(seen.at(-1).body).message, big);
+assert.ok(Buffer.byteLength(seen.at(-1).body) < 64 * 1024, 'body fits the bridge limit');
 r = await run(['/p']);
 assert.equal(r.code, 1);
 assert.match(r.err, /usage/);

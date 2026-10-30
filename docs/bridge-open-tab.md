@@ -152,4 +152,4 @@ dobius-open /Users/brett/Projects/acme gmail-18c2f0a9 "Reply to Dom about the Q3
 dobius-open /Users/brett/Projects/acme asana-1209 - < card.txt   # message from stdin
 ```
 
-It prints the JSON reply and exits 0 only when it says `ok`.
+It prints the JSON reply and exits 0 only when it says `ok`. The token never appears on a command line. A message passed as an argument does (any local user can read it with `ps` while the command runs), so pass anything private on stdin with `-`; Brett's board should call the HTTP endpoint directly.
