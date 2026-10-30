@@ -121,17 +121,25 @@ export default function DashboardView() {
     const mine = ++jumpSeq.current;
     let tries = 0;
     let settles = 0;
-    let landedAt = null; // scrollTop as our last jump left it
+    // Only real input means the user took over: scrollTop also moves by itself
+    // (clamping while the page animates in), so it cannot tell us.
+    let userMoved = false;
+    let unlisten = null;
+    const stop = () => { unlisten?.(); unlisten = null; };
     const attempt = () => {
-      if (mine !== jumpSeq.current) return;
+      if (mine !== jumpSeq.current || userMoved) { stop(); return; }
       const box = contentRef.current;
       const el = box?.querySelector(settingsSectionSelector(id));
       if (!el) {
         if (++tries < 300) setTimeout(attempt, 100);
         return;
       }
-      // The user scrolled since our jump: their position wins.
-      if (landedAt !== null && box.scrollTop !== landedAt) return;
+      if (!unlisten) {
+        const onUser = () => { userMoved = true; };
+        const events = ['wheel', 'touchstart', 'pointerdown', 'keydown'];
+        events.forEach((e) => box.addEventListener(e, onUser, { passive: true }));
+        unlisten = () => events.forEach((e) => box.removeEventListener(e, onUser));
+      }
       box.scrollTo({
         top: sectionScrollTop({
           scrollTop: box.scrollTop,
@@ -142,11 +150,12 @@ export default function DashboardView() {
         // data loads, and a smooth scroll aims at a target that moves under it.
         behavior: 'auto',
       });
-      landedAt = box.scrollTop;
       // Rows that load above the section (accounts, Google accounts) can push
       // it down, and scroll anchoring is off during the page's entrance
-      // animation, so re-aim a few times over the next ~1.5s.
+      // animation, so re-aim a few times over the next ~1.5s unless the user
+      // has wheeled, touched, clicked or typed in the page since.
       if (settles < 4) setTimeout(attempt, [150, 300, 500, 600][settles++]);
+      else stop();
     };
     attempt();
   };
