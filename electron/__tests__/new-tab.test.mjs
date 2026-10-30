@@ -3,8 +3,9 @@ import { test } from 'node:test';
 import {
   normalizeNewTabTool, newTabCommand, buildPickerProjects, countHiddenProjects,
   toggleHiddenProject, pickerShortcutIndex,
-} from '../../src/lib/new-tab.js';
-import { setPendingLaunch, takePendingLaunch, armLaunch } from '../../src/lib/pending-launch.js';
+  armLaunch, launchCommandFor,
+} from '../../shared/new-tab.js';
+import { setPendingLaunch, takePendingLaunch, clearPendingLaunches } from '../../src/lib/pending-launch.js';
 
 const P = (decodedPath, displayName) => ({ decodedPath, displayName });
 const projects = [P('/u/a/alpha', 'alpha'), P('/u/a/beta-api', 'beta-api'), P('/u/a/gamma', 'gamma')];
@@ -21,6 +22,15 @@ test('newTabCommand types the bare tool, nothing for a shell', () => {
   assert.equal(newTabCommand('codex'), 'codex');
   assert.equal(newTabCommand('shell'), null);
   assert.equal(newTabCommand('rm -rf /'), null);
+});
+
+test('launchCommandFor maps a request to a fixed command, never to input text', () => {
+  assert.equal(launchCommandFor('default', undefined), 'claude');
+  assert.equal(launchCommandFor('default', 'codex'), 'codex');
+  assert.equal(launchCommandFor('default', 'shell'), null);
+  assert.equal(launchCommandFor('codex', 'claude'), 'codex');
+  assert.equal(launchCommandFor('claude; rm -rf ~', 'claude'), null);
+  assert.equal(launchCommandFor({ toString: () => 'claude' }, 'claude'), null);
 });
 
 test('picker puts the current project first, once, then the launcher order', () => {
@@ -72,10 +82,13 @@ test('Cmd+1..9 picks a row, other chords do not', () => {
   assert.equal(pickerShortcutIndex({ key: '1' }), -1);
 });
 
-test('a pending launch is taken once', () => {
-  setPendingLaunch('t1', 'claude');
-  assert.equal(takePendingLaunch('t1'), 'claude');
+test('a pending launch is taken once, and restore clears them all', () => {
+  setPendingLaunch('t1', 'default');
+  assert.equal(takePendingLaunch('t1'), 'default');
   assert.equal(takePendingLaunch('t1'), undefined);
+  setPendingLaunch('t2', 'codex');
+  clearPendingLaunches();
+  assert.equal(takePendingLaunch('t2'), undefined);
 });
 
 // Fake timers: run(ms) advances the clock and fires due callbacks in order.
@@ -96,53 +109,56 @@ function clock() {
     },
   };
 }
-const flush = () => new Promise((r) => setImmediate(r));
+const arm = (command, extra = {}) => {
+  const c = clock(); const writes = []; let done = 0;
+  const l = armLaunch(command, { write: (d) => writes.push(d), onDone: () => { done += 1; }, setTimer: c.setTimer, clearTimer: c.clearTimer, ...extra });
+  return { c, l, writes, done: () => done };
+};
 
-test('launch types the command after the shell prompt settles', async () => {
-  const c = clock(); const writes = [];
-  const l = armLaunch('claude', { write: (d) => writes.push(d), setTimer: c.setTimer, clearTimer: c.clearTimer });
-  await flush();
-  assert.deepEqual(writes, []);
+test('launch types the command once the shell output settles', () => {
+  const { c, l, writes, done } = arm('claude');
   l.onOutput(); c.run(200); l.onOutput(); c.run(200);
   assert.deepEqual(writes, [], 'still printing, not settled yet');
   c.run(150);
   assert.deepEqual(writes, ['claude\r']);
-  l.onOutput(); c.run(5000);
+  l.onOutput(); c.run(20000);
   assert.deepEqual(writes, ['claude\r'], 'typed exactly once');
+  assert.equal(done(), 1);
 });
 
-test('launch falls back when the shell prints nothing', async () => {
-  const c = clock(); const writes = [];
-  armLaunch(Promise.resolve('codex'), { write: (d) => writes.push(d), setTimer: c.setTimer, clearTimer: c.clearTimer });
-  await flush();
+test('a shell that prints nothing gets the command at the fallback', () => {
+  const { c, writes } = arm('codex');
   c.run(3999);
   assert.deepEqual(writes, []);
   c.run(1);
   assert.deepEqual(writes, ['codex\r']);
 });
 
-test('launch waits for a setting that resolves after the prompt', async () => {
-  const c = clock(); const writes = [];
-  let resolve;
-  armLaunch(new Promise((r) => { resolve = r; }), { write: (d) => writes.push(d), setTimer: c.setTimer, clearTimer: c.clearTimer }).onOutput();
-  c.run(1000);
-  assert.deepEqual(writes, []);
-  resolve('claude'); await flush();
+test('a shell still printing past the fallback is not typed into mid-output', () => {
+  const { c, l, writes } = arm('claude');
+  for (let t = 0; t < 6000; t += 100) { l.onOutput(); c.run(100); }
+  assert.deepEqual(writes, [], 'fallback must not fire while output streams');
+  c.run(300);
   assert.deepEqual(writes, ['claude\r']);
 });
 
-test('user input, a plain shell, a failed read or dispose type nothing', async () => {
-  for (const [tool, act] of [
-    [() => 'claude', (l) => l.onUserInput()],
-    [() => 'shell', () => {}],
-    [() => Promise.reject(new Error('ipc')), () => {}],
-    [() => 'claude', (l) => l.dispose()],
-  ]) {
-    const c = clock(); const writes = [];
-    const l = armLaunch(tool(), { write: (d) => writes.push(d), setTimer: c.setTimer, clearTimer: c.clearTimer });
-    act(l);
-    await flush();
-    l.onOutput(); c.run(10000);
-    assert.deepEqual(writes, []);
-  }
+test('a shell that never goes quiet gets nothing', () => {
+  const { c, l, writes, done } = arm('claude');
+  for (let t = 0; t < 16000; t += 100) { l.onOutput(); c.run(100); }
+  c.run(1000);
+  assert.deepEqual(writes, []);
+  assert.equal(done(), 1);
+});
+
+test('anything typed first (canWrite false), no command or dispose types nothing', () => {
+  const a = arm('claude', { canWrite: () => false });
+  a.l.onOutput(); a.c.run(10000);
+  assert.deepEqual(a.writes, []);
+  assert.equal(a.done(), 1);
+  const b = arm(null);
+  b.l.onOutput(); b.c.run(10000);
+  assert.deepEqual(b.writes, []);
+  const d = arm('claude');
+  d.l.onOutput(); d.l.dispose(); d.c.run(10000);
+  assert.deepEqual(d.writes, []);
 });

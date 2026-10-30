@@ -4,7 +4,7 @@ import { buildPairingWebLink } from '../../../shared/pairing-link.js';
 import { useStore } from '../../store/store';
 import { CURATED_TERMINAL_FONTS, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
-import { normalizeNewTabTool } from '../../lib/new-tab';
+import { normalizeNewTabTool } from '../../../shared/new-tab.js';
 import AccountsSection from './AccountsSection';
 import GwsAccounts from './GwsAccounts';
 

@@ -3,7 +3,7 @@ import { useStore } from '../../store/store';
 import { projectMonogram } from '../../lib/project-color';
 import {
   buildPickerProjects, countHiddenProjects, toggleHiddenProject, pickerShortcutIndex, normalizeNewTabTool,
-} from '../../lib/new-tab';
+} from '../../../shared/new-tab.js';
 import Kbd from '../shared/Kbd';
 
 const TOOL_LABEL = { claude: 'Claude Code', codex: 'Codex', shell: 'a plain shell' };

@@ -39,6 +39,7 @@ import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
+import { launchInNewTerminal } from './new-tab-launch.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -237,7 +238,7 @@ function ownsTerminal(senderId, id) {
 }
 
 function setupTerminalHandlers() {
-  ipcMain.handle('terminal:create', (event, id, cwd) => {
+  ipcMain.handle('terminal:create', (event, id, cwd, opts) => {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
     if (cwd !== undefined && cwd !== null && typeof cwd !== 'string') return null;
     // Reject hijack attempts: if this id is already owned by a DIFFERENT
@@ -261,7 +262,12 @@ function setupTerminalHandlers() {
     // Shared with the mobile spawn paths via resolveAccountEnvForCwd so a phone
     // terminal lands on the same active accounts as a desktop one (reviewer P2).
     const accountEnv = resolveAccountEnvForCwd(cwd);
-    return createTerminal(id, cwd, event.sender, accountEnv);
+    const created = createTerminal(id, cwd, event.sender, accountEnv);
+    // A New Tab (store.openNewTab) starts its tool once the shell is ready.
+    if (created && opts && typeof opts === 'object' && opts.launch !== undefined) {
+      launchInNewTerminal(id, opts.launch);
+    }
+    return created;
   });
 
   ipcMain.on('terminal:write', (event, id, data) => {
@@ -2655,12 +2661,14 @@ function projectDirError(projectPath) {
   return null;
 }
 
-// Project windows (by webContents id) owed a new tab by the New Tab picker in
-// another window. The window takes it once its tabs are restored, which covers
-// a window that is still loading and so cannot hear window:newTabRequest.
-// ponytail: an entry for a window closed before it took its tab is never
+// Project windows (webContents id -> count) owed new tabs by the New Tab
+// picker in another window. The window takes them once its tabs are restored,
+// which covers a window still loading and so unable to hear
+// window:newTabRequest. Capped so a stuck window cannot be owed a pile.
+// ponytail: an entry for a window closed before it took its tabs is never
 // removed (webContents ids are not reused, so it is only a stale integer).
-const pendingNewTabs = new Set();
+const pendingNewTabs = new Map();
+const MAX_PENDING_NEW_TABS = 5;
 
 function setupWindowHandlers() {
   ipcMain.handle('window:openProject', (_event, projectPath) => {
@@ -2674,12 +2682,18 @@ function setupWindowHandlers() {
     const error = projectDirError(projectPath);
     if (error) return { ok: false, error };
     const win = openProjectWindow(projectPath);
-    pendingNewTabs.add(win.webContents.id);
+    const wcId = win.webContents.id;
+    pendingNewTabs.set(wcId, Math.min(MAX_PENDING_NEW_TABS, (pendingNewTabs.get(wcId) || 0) + 1));
     win.webContents.send('window:newTabRequest');
     return { ok: true, id: win.id };
   });
 
-  ipcMain.handle('window:takePendingNewTab', (event) => pendingNewTabs.delete(event.sender.id));
+  // How many new tabs this window owes, cleared as it is read.
+  ipcMain.handle('window:takePendingNewTab', (event) => {
+    const n = pendingNewTabs.get(event.sender.id) || 0;
+    pendingNewTabs.delete(event.sender.id);
+    return n;
+  });
 
   ipcMain.handle('window:pickAndOpenProject', async (event) => {
     const result = await pickFolder(event, {

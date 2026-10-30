@@ -290,6 +290,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
             setActiveTab(saved.activeTabId);
           }
         } else {
+          useStore.getState().markTabsReady();
           openNewTab(projectPath);
           freshFirstTabRef.current = true;
         }
@@ -329,6 +330,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
           }
         } else {
           // First open: a New Tab, which starts the default tool.
+          useStore.getState().markTabsReady();
           openNewTab(projectPath);
           freshFirstTabRef.current = true;
         }
@@ -400,6 +402,10 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
   // focused this window). Taken from main once tabs are restored, so a request
   // that arrived while this window was still loading is not lost.
   useEffect(() => {
+    if (tabsInitialized) useStore.getState().markTabsReady();
+  }, [tabsInitialized]);
+
+  useEffect(() => {
     if (!tabsInitialized || tearOffTabId || !projectPath) return undefined;
     const api = window.electronAPI;
     if (!api?.windowTakePendingNewTab) return undefined;
@@ -409,9 +415,10 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       first = false;
       freshFirstTabRef.current = false;
       api.windowTakePendingNewTab().then((owed) => {
-        if (!owed || fresh) return;
-        useStore.getState().openNewTab(projectPath);
-        setActiveView('terminal');
+        // The fresh first tab already answers one request.
+        const n = Math.min(5, Number(owed) || 0) - (fresh ? 1 : 0);
+        for (let i = 0; i < n; i += 1) useStore.getState().openNewTab(projectPath);
+        if (n > 0) setActiveView('terminal');
       }).catch((err) => console.warn('[newTab] pending request failed:', err?.message));
     };
     take();
@@ -1099,11 +1106,15 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       window.electronAPI.onMenuToggleSidebar?.(() => toggleSidebar()),
       window.electronAPI.onMenuToggleGitPanel?.(() => toggleGitPanel()),
       window.electronAPI.onMenuNewTab?.(() => {
+        useStore.getState().setNewTabPickerOpen(false);
         openNewTab(projectPath);
         setActiveView('terminal');
       }),
-      window.electronAPI.onMenuCloseTab?.(() => closeActiveTab()),
+      // While the New Tab picker owns the keyboard, menu accelerators (which
+      // skip its DOM key handler) must not close or type into the tab behind it.
+      window.electronAPI.onMenuCloseTab?.(() => { if (!useStore.getState().newTabPickerOpen) closeActiveTab(); }),
       window.electronAPI.onMenuResumeSession?.(() => {
+        if (useStore.getState().newTabPickerOpen) return;
         // Menu "Resume Last Session" — shares the keydown's guarded path.
         doResumeLatest();
       }),

@@ -1,6 +1,8 @@
 // Pure logic for new tabs: which tool a new tab starts, the command that
-// starts it, and the New Tab picker's project list. No React or Electron here
-// so it can be unit-tested under plain node (electron/__tests__/new-tab.test.mjs).
+// starts it, when it is safe to type it, and the New Tab picker's project
+// list. Shared by main (electron/new-tab-launch.js) and the renderer. No React
+// or Electron here so it is unit-tested under plain node
+// (electron/__tests__/new-tab.test.mjs).
 
 export const NEW_TAB_TOOLS = ['claude', 'codex', 'shell'];
 export const DEFAULT_NEW_TAB_TOOL = 'claude';
@@ -17,6 +19,13 @@ export function newTabCommand(tool) {
   if (tool === 'claude') return 'claude';
   if (tool === 'codex') return 'codex';
   return null;
+}
+
+// A renderer's launch request for a new terminal: 'default' (the Settings
+// choice, settingTool) or an explicit tool. Anything else starts nothing.
+export function launchCommandFor(request, settingTool) {
+  if (request === 'default') return newTabCommand(normalizeNewTabTool(settingTool));
+  return NEW_TAB_TOOLS.includes(request) ? newTabCommand(request) : null;
 }
 
 function projectName(p) {
@@ -68,4 +77,46 @@ export function toggleHiddenProject(hidden, path) {
 export function pickerShortcutIndex(e) {
   if (!e || !e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return -1;
   return e.key >= '1' && e.key <= '9' && e.key.length === 1 ? Number(e.key) - 1 : -1;
+}
+
+// When to type a new tab's command into its fresh shell. Typing while the
+// shell is still sourcing its rc files (or while an rc helper is reading the
+// terminal) would hand the command to the wrong reader, so it waits for the
+// shell's output to go quiet for settleMs. A shell that prints nothing at all
+// by fallbackMs gets it then; one still printing at giveUpMs gets nothing.
+// canWrite() is asked at the moment of typing (main checks nothing else has
+// typed into the tab and it is the same PTY), so the user's own line is never
+// extended or submitted. Returns { onOutput, dispose }.
+export function armLaunch(command, {
+  write, canWrite = () => true, onDone = () => {},
+  settleMs = 300, fallbackMs = 4000, giveUpMs = 15000,
+  setTimer = setTimeout, clearTimer = clearTimeout,
+} = {}) {
+  let done = false;
+  let sawOutput = false;
+  let settle = null;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    clearTimer(settle); clearTimer(fallback); clearTimer(giveUp);
+    onDone();
+  };
+  const fire = () => {
+    if (done) return;
+    const ok = canWrite();
+    finish();
+    if (ok) write(`${command}\r`);
+  };
+  const fallback = setTimer(() => { if (!sawOutput) fire(); }, fallbackMs);
+  const giveUp = setTimer(finish, giveUpMs);
+  if (!command) finish();
+  return {
+    onOutput() {
+      if (done) return;
+      sawOutput = true;
+      clearTimer(settle);
+      settle = setTimer(fire, settleMs);
+    },
+    dispose: finish,
+  };
 }

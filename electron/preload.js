@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Terminal
-  terminalCreate: (id, cwd) => ipcRenderer.invoke('terminal:create', id, cwd),
+  terminalCreate: (id, cwd, opts) => ipcRenderer.invoke('terminal:create', id, cwd, opts),
   terminalWrite: (id, data) => ipcRenderer.send('terminal:write', id, data),
   chatPoll: (id, have) => ipcRenderer.invoke('chat:poll', id, have),
   chatSelector: (id) => ipcRenderer.invoke('chat:selector', id),

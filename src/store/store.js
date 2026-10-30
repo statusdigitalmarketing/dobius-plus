@@ -6,8 +6,8 @@ import { onScreenTabIds, becomesUnread, clearSeen } from '../lib/tab-unread';
 import { windowFocused } from '../lib/window-focus';
 import { latestSessionForTab } from '../../shared/session-tab.js';
 import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.js';
-import { normalizeNewTabTool, NEW_TAB_TOOLS } from '../lib/new-tab';
-import { setPendingLaunch } from '../lib/pending-launch';
+import { NEW_TAB_TOOLS } from '../../shared/new-tab.js';
+import { setPendingLaunch, clearPendingLaunches } from '../lib/pending-launch';
 
 
 // Drop any grid entries whose tab is no longer present. Returns null when the
@@ -197,18 +197,19 @@ export const useStore = create((set, get) => ({
   // `tool` ('claude' | 'codex' | 'shell') overrides the setting. Every other
   // addTab caller (reopen, agents, checkpoints, orchestrator, restored tabs)
   // types its own command or none, so it must not come through here.
+  // Returns null (no tab) until the window's saved tabs are restored: a tab
+  // made before that could share an id with a restored one.
   openNewTab: (projectPath, tool) => {
+    if (!get().tabsReady) return null;
     const tab = get().addTab(projectPath);
-    const api = typeof window !== 'undefined' ? window.electronAPI : null;
-    // A failed settings read opens a plain shell rather than guessing.
-    const chosen = tool !== undefined
-      ? (NEW_TAB_TOOLS.includes(tool) ? tool : 'shell')
-      : (api?.configGetSettings
-        ? Promise.resolve(api.configGetSettings()).then((s) => normalizeNewTabTool(s?.newTabTool), () => 'shell')
-        : 'shell');
-    setPendingLaunch(tab.id, chosen);
+    // main reads the setting at spawn ('default'); an unknown tool starts nothing.
+    setPendingLaunch(tab.id, tool === undefined ? 'default' : (NEW_TAB_TOOLS.includes(tool) ? tool : 'shell'));
     return tab;
   },
+
+  // Set once this window's tabs are restored (or it starts fresh).
+  tabsReady: false,
+  markTabsReady: () => set({ tabsReady: true }),
 
   // Add a browser pane (embedded webview). Slots into the same terminalTabs
   // list as terminal tabs — the layout engine in ProjectView treats them
@@ -420,6 +421,7 @@ export const useStore = create((set, get) => ({
   // previous project, and the next render references tab ids that don't
   // exist. Codex audit HIGH (store.js:227).
   initTabs: (tabs, counter) => set((s) => {
+    clearPendingLaunches();
     const liveIds = new Set(tabs.map((t) => t.id));
     // tabStatus + hookOwnedTabs are keyed by tab id directly.
     const pruneByTabId = (obj) => {
