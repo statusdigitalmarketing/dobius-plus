@@ -174,6 +174,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     }
   }
 
+  // A New Tab's tool belongs to its project: never start it in the fallback.
+  if (safeCwd !== cwd) startCommand = null;
+
   // Per-project shell history file
   const extraEnv = {};
   if (id.startsWith('term-')) {

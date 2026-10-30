@@ -96,10 +96,15 @@ test('loginShellSpawn starts only a bare tool, under zsh or bash, via env', () =
   const z = loginShellSpawn('/bin/zsh', 'claude');
   assert.deepEqual(z.env, { DOBIUS_NEW_TAB_TOOL: 'claude' });
   assert.deepEqual(z.args.slice(0, 3), ['-l', '-i', '-c']);
-  assert.match(z.args[3], /^trap : INT; setopt no_nounset no_err_exit 2>\/dev\/null; .*precmd_functions.*; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; .*pre=\(\$\{\(k\)jobstates\}\); eval "\$t"; .*:\|pre.*fg %\$s\[1\].*; exec '\/bin\/zsh' -l$/);
+  const read = '__dobius_tool=$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; [[ -n $__dobius_tool && $__dobius_tool != *[!a-z]* ]] || __dobius_tool=:;';
+  // The tool is read (and validated) BEFORE the hooks, which could change the env.
+  assert.ok(z.args[3].startsWith(`trap : INT; setopt no_nounset no_err_exit 2>/dev/null; ${read} `));
+  assert.ok(z.args[3].indexOf(read) < z.args[3].indexOf('precmd_functions'));
+  assert.match(z.args[3], /pre=\(\$\{\(k\)jobstates\}\); eval "\$__dobius_tool"; .*:\|pre.*fg %\$s\[1\].*; exec '\/bin\/zsh' -l$/);
   const bsh = loginShellSpawn('/bin/bash', 'claude').args[3];
-  assert.match(bsh, /^trap : INT; set \+eu; for c in "\$\{PROMPT_COMMAND\[@\]\}".*; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; pre=.*jobs -p.*; eval "\$t"; j=/);
-  assert.ok(!/eval "\$t" &/.test(bsh), 'the tool runs in the foreground, a direct child of the shell');
+  assert.ok(bsh.startsWith(`trap : INT; set +eu; ${read} for c in "\${PROMPT_COMMAND[@]}"`));
+  assert.match(bsh, /pre=.*jobs -p.*; eval "\$__dobius_tool"; j=\$\(jobs -sl .*\[\[ \$n == \\\[\* \]\] \|\| continue/);
+  assert.ok(!/eval "\$__dobius_tool" &/.test(bsh), 'the tool runs in the foreground, a direct child of the shell');
   assert.equal(bsh.split('[ -n "$j" ] && fg %$j').length - 1, 25);
   assert.ok(!z.args.join(' ').includes('claude'), 'the tool name is never in the wrapper argv');
   assert.ok(!z.args[3].includes('%+') && !loginShellSpawn('/bin/bash', 'claude').args[3].includes('%+'), 'never resume %+');
