@@ -998,8 +998,11 @@ test('settleOnCurrent keeps what its check disproves', async () => {
   const { tabActivity } = makeActivity({
     claudeInfo: async () => {
       calls += 1;
-      if (calls === 1) ts.ingest(ID, mk('working'), 107_000); // B's marker during the first read
-      return { pid: 2, startedAt: 105_000 };                 // B, started after A's turn began
+      if (calls === 1) {
+        ts.ingest(ID, mk('working'), 107_000); // B's marker during the first read
+        return { pid: 1, startedAt: 1_000 };    // that read still saw A
+      }
+      return { pid: 2, startedAt: 105_000 };   // B, started after A's turn began
     },
     now: () => 108_000,
   });
