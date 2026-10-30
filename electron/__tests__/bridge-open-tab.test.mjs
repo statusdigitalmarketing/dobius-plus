@@ -102,7 +102,7 @@ function fakeDeps(over = {}) {
     focusTab: (id) => { log.push(['focus', id]); return true; },
     ptyOf: (id) => (tabs.get(id)?.alive ? tabs.get(id).pty : null),
     outputSeq: (id) => tabs.get(id)?.seq || 0,
-    claudeRunning: async (id) => !!tabs.get(id)?.claude,
+    claudeRunning: async (id, projectPath) => { log.push(['claudeCheck', projectPath]); return !!tabs.get(id)?.claude; },
     shellForeground: async (id) => !tabs.get(id)?.claude && !tabs.get(id)?.otherProgram,
     shellInProject: async (id) => !tabs.get(id)?.cdAway,
     // "Claude" draws its prompt a few polls after the launch is typed.
@@ -148,7 +148,10 @@ function fakeDeps(over = {}) {
   assert.equal(r.status, 200);
   assert.deepEqual(r.body, { ok: true, tabId: 'term-/p-1', submitted: true });
   // Exactly one Enter, as its own step, after the paste.
-  assert.deepEqual(d.log, [['open', 'term-/p-1'], ['launch', 'term-/p-1'], ['paste', 'term-/p-1', 'Reply to Dom\nthanks'], ['submit', 'term-/p-1'], ['stop', 'term-/p-1']]);
+  assert.deepEqual(d.log.filter((e) => e[0] !== 'claudeCheck'), [['open', 'term-/p-1'], ['launch', 'term-/p-1'], ['paste', 'term-/p-1', 'Reply to Dom\nthanks'], ['submit', 'term-/p-1'], ['stop', 'term-/p-1']]);
+  // Every claude check is asked about the PROJECT (its cwd must be it).
+  assert.ok(d.log.filter((e) => e[0] === 'claudeCheck').length >= 3);
+  assert.ok(d.log.filter((e) => e[0] === 'claudeCheck').every((e) => e[1] === '/p'));
   // Same id again: the same tab comes forward, nothing new opens or is typed.
   const again = await svc.open({ projectPath: '/p', message: 'Reply to Dom', requestId: 'r1' });
   assert.deepEqual(again, { status: 200, body: { ok: true, tabId: 'term-/p-1', existing: true } });
@@ -430,6 +433,8 @@ function fakeDeps(over = {}) {
   assert.equal(boxHoldsMessage('hello there', 'hello there\nmore'), true);
   assert.equal(boxHoldsMessage('', 'hello'), false);
   assert.equal(boxHoldsMessage('Hi', '\n\nHi'), true, 'leading blank lines');
+  assert.equal(boxHoldsMessage('Reply    to Dom', 'Reply\tto Dom'), true, 'a tab drawn as spaces');
+  assert.equal(boxHoldsMessage('Reply to Bob', 'Reply to Dom'), false);
   // The message itself may read like a dialog: only rows outside the box count.
   assert.equal(promptBoxText([rule2, '❯ Do you want to meet at 3? Esc to cancel', rule2, '  ? for shortcuts'], { bracketedPaste: true }), 'Do you want to meet at 3? Esc to cancel');
   assert.equal(promptBoxText([' Do you want to proceed?', rule2, '❯ hi', rule2], { bracketedPaste: true }), null);

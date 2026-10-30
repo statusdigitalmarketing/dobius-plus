@@ -13,7 +13,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
-import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
+import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint } from './claude-argv.js';
 import { isKeyboardInput, CLAUDE_SCRIPT_RE } from './bridge-open-tab.js';
 import { submitPending } from './chat-service.js';
@@ -271,20 +271,28 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // native binary's process name is its version, so names are useless) and
   // whose process group owns the terminal. A suspended or background claude,
   // a shell back at its prompt, or any error fails.
-  async function claudeRunning(tabId) {
+  // Candidates: a claude child of the shell, or the PTY's own process when
+  // a login script `exec`'d claude in place of the shell. It must LEAD the
+  // terminal's foreground process group (a background claude in the shell's
+  // own group, job control off, does not), and work in the project (a login
+  // script's `cd /q; claude` does not).
+  async function claudeRunning(tabId, projectPath) {
     const info = await getTerminalClaudeInfo(tabId);
-    if (!info?.pid) return false;
-    try {
-      const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=', '-p', String(info.pid)], { timeout: 1000, encoding: 'utf8' });
-      const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
-      if (!m) return false;
-      const [, pgid, tpgid, stat] = m;
-      // The permission mode is NOT checked (Sam: "bypass permissions should
-      // act just like auto mode"); only that this really is claude.
-      return pgid === tpgid && !stat.startsWith('T') && (await isClaudeProcess(info.pid));
-    } catch {
-      return false;
+    const pids = [info?.pid, terminalInstance(tabId)?.pid].filter((n) => Number.isInteger(n) && n > 0);
+    for (const pid of pids) {
+      try {
+        const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
+        const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
+        if (!m) continue;
+        const [, pgid, tpgid, stat] = m;
+        // The permission mode is NOT checked (Sam: "bypass permissions should
+        // act just like auto mode"); only that this really is claude.
+        if (pgid !== tpgid || pgid !== String(pid) || stat.startsWith('T') || !(await isClaudeProcess(pid))) continue;
+        const cwd = await getProcessCwd(pid);
+        if (cwd && (await fs.promises.realpath(cwd)) === (await fs.promises.realpath(projectPath))) return true;
+      } catch { /* this candidate is unreadable: not claude */ }
     }
+    return false;
   }
 
   // The shell itself owns the terminal: the PTY's process is still a shell

@@ -183,8 +183,10 @@ export function promptBoxText(lines, modes) {
 export function boxHoldsMessage(boxText, message) {
   if (typeof boxText !== 'string') return false;
   if (/\[Pasted text #\d+/.test(boxText)) return true;
-  const want = (message.split('\n').find((l) => l.trim()) || '').trim().slice(0, 20);
-  return want.length > 0 && boxText.trimStart().startsWith(want);
+  // Whitespace compared loosely: a pasted tab is drawn as spaces.
+  const norm = (x) => x.replace(/\s+/g, ' ').trim();
+  const want = norm(message.split('\n').find((l) => l.trim()) || '').slice(0, 20).trim();
+  return want.length > 0 && norm(boxText).startsWith(want);
 }
 
 /**
@@ -195,7 +197,8 @@ export function boxHoldsMessage(boxText, message) {
  *   focusTab(tabId) -> boolean        bring its window and the tab to the front
  *   ptyOf(tabId) -> object|null       PTY identity (a replaced shell is a new object)
  *   outputSeq(tabId) -> number        count of output chunks so far
- *   claudeRunning(tabId) -> Promise<boolean>  claude is the FOREGROUND process of the tab's terminal
+ *   claudeRunning(tabId, projectPath) -> Promise<boolean>  claude leads the FOREGROUND process
+ *                                     group of the tab's terminal, working in the project
  *   shellForeground(tabId) -> Promise<boolean>  the shell itself owns the terminal (no job running)
  *   shellInProject(tabId, path) -> Promise<boolean>  the shell's cwd is the project folder now
  *   typeLaunch(tabId) -> void         type `claude` + Enter at the shell prompt
@@ -246,7 +249,7 @@ export function createOpenTabService(deps, opts = {}) {
   // the tab: a shell prompt drawn with rules and a ❯ (a prompt theme's ruler)
   // must never receive the paste. Fails as soon as the tab or its shell is
   // gone, never typing into a replacement.
-  async function waitReady(tabId, pty, watch) {
+  async function waitReady(tabId, pty, watch, projectPath) {
     const end = deps.now() + readyTimeoutMs;
     let hits = 0;
     while (deps.now() < end) {
@@ -255,7 +258,7 @@ export function createOpenTabService(deps, opts = {}) {
       let screen;
       try { screen = await watch.screen(); } catch { screen = null; }
       const drawn = !!screen && isClaudePromptReady(screen.lines, screen.modes);
-      hits = drawn && (await deps.claudeRunning(tabId)) ? hits + 1 : 0;
+      hits = drawn && (await deps.claudeRunning(tabId, projectPath)) ? hits + 1 : 0;
       // Ready means: the screen that was judged is still the screen, checked
       // AFTER the process check. Any output since the read (Claude exiting
       // and the shell redrawing, a dialog opening) sends us round again. The
@@ -276,7 +279,7 @@ export function createOpenTabService(deps, opts = {}) {
   // output since that was read, and nothing else typed into the tab since the
   // paste (a person's keys, or their mouse over a fullscreen Claude). Any
   // doubt leaves the message typed and unsent: { ok, submitted: false }.
-  async function submitPasted(tabId, pty, watch, seqAtPaste, message) {
+  async function submitPasted(tabId, pty, watch, seqAtPaste, message, projectPath) {
     const typedOnly = (why) => ({ ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: ${why}; press Enter in the tab to send it` });
     const end = deps.now() + SUBMIT_SETTLE_MAX_MS;
     let last = seqAtPaste;
@@ -293,7 +296,7 @@ export function createOpenTabService(deps, opts = {}) {
     try { screen = await watch.screen(); } catch { screen = null; }
     const box = screen ? promptBoxText(screen.lines, screen.modes) : null;
     const holds = boxHoldsMessage(box, message);
-    const claude = holds && (await deps.claudeRunning(tabId));
+    const claude = holds && (await deps.claudeRunning(tabId, projectPath));
     // Same tick from here to the Enter.
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return typedOnly('the tab closed or its shell changed');
     if (!holds) return typedOnly('Claude\'s prompt did not show the message (a dialog may be open)');
@@ -342,7 +345,7 @@ export function createOpenTabService(deps, opts = {}) {
       for (let i = 0; i < LAUNCH_CHECK_TRIES && !settled; i += 1) {
         if (i > 0) await deps.sleep(LAUNCH_CHECK_GAP_MS);
         const seqBefore = watch.seq();
-        already = await deps.claudeRunning(tabId);
+        already = await deps.claudeRunning(tabId, resolved.path);
         inProject = !already && (await deps.shellInProject(tabId, resolved.path));
         shellOwns = !already && (await deps.shellForeground(tabId));
         settled = watch.seq() === seqBefore;
@@ -359,7 +362,7 @@ export function createOpenTabService(deps, opts = {}) {
         watch.mark();
         deps.typeLaunch(tabId);
       }
-      const state = await waitReady(tabId, pty, watch);
+      const state = await waitReady(tabId, pty, watch, resolved.path);
       const gone = { ok: false, status: 409, tabId, error: 'the tab was closed, its shell exited or Claude stopped before the message could be typed; nothing was typed' };
       if (state === 'gone') return gone;
       if (state === 'timeout') {
@@ -374,7 +377,7 @@ export function createOpenTabService(deps, opts = {}) {
       deps.paste(tabId, message);
       const lead = MODE_LEAD_RE.exec(message);
       if (lead) return { ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: it starts with "${lead[0].trim()}", which Claude treats as a command rather than a message; check it and press Enter in the tab yourself` };
-      return await submitPasted(tabId, pty, watch, outputBeforePaste, message);
+      return await submitPasted(tabId, pty, watch, outputBeforePaste, message, resolved.path);
     } finally {
       watch.stop();
     }
