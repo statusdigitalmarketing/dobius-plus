@@ -96,8 +96,12 @@ test('loginShellSpawn starts only a bare tool, under zsh or bash, via env', () =
   const z = loginShellSpawn('/bin/zsh', 'claude');
   assert.deepEqual(z.env, { DOBIUS_NEW_TAB_TOOL: 'claude' });
   assert.deepEqual(z.args.slice(0, 3), ['-l', '-i', '-c']);
-  assert.match(z.args[3], /^trap : INT; .*precmd_functions.*; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; eval "\$t" & p=\$!; (kill -0 \$p 2>\/dev\/null && fg %\+ >\/dev\/null 2>&1; ){26}exec '\/bin\/zsh' -l$/);
+  assert.match(z.args[3], /^trap : INT; .*precmd_functions.*; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; .*pre=\(\$\{\(k\)jobstates\}\); eval "\$t"; .*:\|pre.*fg %\$s\[1\].*; exec '\/bin\/zsh' -l$/);
+  const bsh = loginShellSpawn('/bin/bash', 'claude').args[3];
+  assert.match(bsh, /^trap : INT; for c in "\$\{PROMPT_COMMAND\[@\]\}".*; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; eval "\$t" & p=\$!; /);
+  assert.equal(bsh.split('kill -0 $p 2>/dev/null && fg %eval').length - 1, 25);
   assert.ok(!z.args.join(' ').includes('claude'), 'the tool name is never in the wrapper argv');
+  assert.ok(!z.args[3].includes('%+') && !loginShellSpawn('/bin/bash', 'claude').args[3].includes('%+'), 'never resume %+');
   assert.match(loginShellSpawn('/usr/local/bin/bash', 'codex').args[3], /PROMPT_COMMAND.*exec '\/usr\/local\/bin\/bash' -l$/);
   assert.match(loginShellSpawn("/o'dd/zsh", 'codex').args[3], /exec '\/o'\\''dd\/zsh' -l$/);
   assert.deepEqual(loginShellSpawn('/opt/homebrew/bin/fish', 'claude'), { args: ['-l'], env: {} });
