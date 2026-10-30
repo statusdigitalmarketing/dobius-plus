@@ -12,7 +12,7 @@
  *   /tabList   {}                                  -> { tabs: listTerminals() }
  *   /tabRename { tabId: string, label: string }    -> label that tab (dobius-tab)
  *   /openTab   { projectPath, message, requestId } -> new visible tab, Claude
- *              started, message typed WITHOUT Enter (dobius-open,
+ *              started, message typed then sent with one Enter (dobius-open,
  *              docs/bridge-open-tab.md)
  *   /setReply  { message: string }                 -> stores last conductor reply for /voice/reply
  *   /getReply  { since: number? }                  -> { reply, ts } if newer, else 204

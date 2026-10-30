@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   sanitizeOpenMessage, validateOpenTabBody, isClaudePromptReady, createOpenTabService,
-  buildOpenCliScript, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
+  buildOpenCliScript, isKeyboardInput, CLAUDE_SCRIPT_RE, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
 } from '../bridge-open-tab.js';
 import { renderScreenLines } from '../screen-render.js';
 
@@ -35,6 +35,15 @@ for (const s of ['\r', '\x1b', '\x03', '\x15', '\u009b', '\x00']) {
   assert.ok(!sanitizeOpenMessage(`a${s}b`).text.includes(s), JSON.stringify(s));
 }
 ok('message neutralising');
+
+// Keyboard vs pointer: only a person's keys count as typing into the tab.
+for (const m of ['\x1b[<35;10;5M', '\x1b[<0;3;4m\x1b[<35;11;5M', '\x1b[M #!', '\x1b[32;10;5M', '\x1b[I', '\x1b[O']) assert.equal(isKeyboardInput(m), false, JSON.stringify(m));
+for (const k of ['a', '\r', 'hello', '\x1b[A', '\x1b[<35;10;5Mx', '\x15']) assert.equal(isKeyboardInput(k), true, JSON.stringify(k));
+assert.equal(CLAUDE_SCRIPT_RE.test('/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js'), true);
+assert.equal(CLAUDE_SCRIPT_RE.test('/Users/x/.local/share/claude/versions/2.1.314/cli.js'), true);
+assert.equal(CLAUDE_SCRIPT_RE.test('/tmp/claude'), false);
+assert.equal(CLAUDE_SCRIPT_RE.test('/tmp/claude tools/repl.js'), false);
+ok('keyboard vs mouse input, claude script paths');
 
 // 2. Body validation.
 const good = { projectPath: '/Users/x/proj', message: 'hi', requestId: 'card:gmail.123_ab-C' };
@@ -96,7 +105,6 @@ function fakeDeps(over = {}) {
     claudeRunning: async (id) => !!tabs.get(id)?.claude,
     shellForeground: async (id) => !tabs.get(id)?.claude && !tabs.get(id)?.otherProgram,
     shellInProject: async (id) => !tabs.get(id)?.cdAway,
-    inputQuietMs: (id) => tabs.get(id)?.inputQuiet ?? Infinity,
     // "Claude" draws its prompt a few polls after the launch is typed.
     typeLaunch: (id) => {
       log.push(['launch', id]);
@@ -110,6 +118,7 @@ function fakeDeps(over = {}) {
       return {
         mark: () => { from = tab.frames.length; },
         seq: () => tab.frames.length,
+        keys: () => tab.keys || 0,
         // Like the emulator: everything drawn since stays on screen, newest at the bottom.
         screen: async () => (tab.frames.length > from
           ? { lines: tab.frames.slice(from).flatMap((f) => f.lines), modes: tab.frames.at(-1).modes }
@@ -117,7 +126,13 @@ function fakeDeps(over = {}) {
         stop: () => log.push(['stop', id]),
       };
     },
-    paste: (id, text) => log.push(['paste', id, text]),
+    // Claude echoes the pasted text into its box (a new frame).
+    paste: (id, text) => {
+      log.push(['paste', id, text]);
+      const tab = tabs.get(id);
+      if (!tab.noEcho) tab.frames.push({ lines: [rule, `❯ ${text.split('\n')[0]}`, ...text.split('\n').slice(1).map((l) => `  ${l}`), rule], modes: { bracketedPaste: true } });
+    },
+    submit: (id) => log.push(['submit', id]),
     inputBusy: () => false,
     sleep: async (ms) => { t += ms; await new Promise((r) => setImmediate(r)); },
     now: () => t,
@@ -131,8 +146,9 @@ function fakeDeps(over = {}) {
   const svc = createOpenTabService(d);
   const r = await svc.open({ projectPath: '/p', message: 'Reply to Dom\r\nthanks', requestId: 'r1' });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body, { ok: true, tabId: 'term-/p-1' });
-  assert.deepEqual(d.log, [['open', 'term-/p-1'], ['launch', 'term-/p-1'], ['paste', 'term-/p-1', 'Reply to Dom\nthanks'], ['stop', 'term-/p-1']]);
+  assert.deepEqual(r.body, { ok: true, tabId: 'term-/p-1', submitted: true });
+  // Exactly one Enter, as its own step, after the paste.
+  assert.deepEqual(d.log, [['open', 'term-/p-1'], ['launch', 'term-/p-1'], ['paste', 'term-/p-1', 'Reply to Dom\nthanks'], ['submit', 'term-/p-1'], ['stop', 'term-/p-1']]);
   // Same id again: the same tab comes forward, nothing new opens or is typed.
   const again = await svc.open({ projectPath: '/p', message: 'Reply to Dom', requestId: 'r1' });
   assert.deepEqual(again, { status: 200, body: { ok: true, tabId: 'term-/p-1', existing: true } });
@@ -143,7 +159,8 @@ function fakeDeps(over = {}) {
   // The tab was closed: the same id opens a fresh one.
   d.tabs.get('term-/p-1').alive = false;
   const reopened = await svc.open({ projectPath: '/p', message: 'x', requestId: 'r1' });
-  assert.deepEqual(reopened.body, { ok: true, tabId: 'term-/p-2' });
+  assert.deepEqual(reopened.body, { ok: true, tabId: 'term-/p-2', submitted: true });
+  assert.equal(d.log.filter((e) => e[0] === 'submit').length, 2, 'the repeat that only focused submitted nothing');
   ok('open, repeat focuses the same tab, closed tab reopens');
 }
 
@@ -184,7 +201,7 @@ function fakeDeps(over = {}) {
   const d = fakeDeps({
     typeLaunch: () => {},
     claudeRunning: async () => true,
-    watchOutput: () => ({ mark() {}, stop() {}, seq: () => 0, screen: async () => { reads += 1; return reads === 3 ? PROMPT : { lines: [], modes: {} }; } }),
+    watchOutput: () => ({ mark() {}, stop() {}, seq: () => 0, keys: () => 0, screen: async () => { reads += 1; return reads === 3 ? PROMPT : { lines: [], modes: {} }; } }),
   });
   const r = await createOpenTabService(d, { readyTimeoutMs: 3000 }).open({ projectPath: '/p', message: 'go', requestId: 'flash' });
   assert.equal(r.status, 504);
@@ -280,7 +297,7 @@ function fakeDeps(over = {}) {
 
 {
   // An agent CLI already runs in the new tab: do not type `claude` into it.
-  const d = fakeDeps({ claudeRunning: async () => true, watchOutput: () => ({ mark() {}, stop() {}, seq: () => 0, screen: async () => PROMPT }) });
+  const d = fakeDeps({ claudeRunning: async () => true, watchOutput: () => ({ mark() {}, stop() {}, seq: () => 0, keys: () => 0, screen: async () => PROMPT }) });
   const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'running' });
   assert.equal(r.status, 200);
   assert.equal(d.log.filter((e) => e[0] === 'launch').length, 0);
@@ -349,18 +366,49 @@ function fakeDeps(over = {}) {
 }
 
 {
-  // The person is typing in the tab (their Enter may still be coming): wait.
+  // A person typed into the new tab (their own Enter may still be coming):
+  // before the launch, nothing is launched; after it, nothing is pasted.
   const d = fakeDeps();
   const orig = d.openTab;
-  d.openTab = async (p) => { const r = await orig(p); d.tabs.get(r.tabId).inputQuiet = 5; return r; };
-  const r = await createOpenTabService(d, { readyTimeoutMs: 20000 }).open({ projectPath: '/p', message: 'go', requestId: 'typing' });
-  assert.equal(r.status, 504);
-  assert.equal(d.log.filter((e) => e[0] === 'paste').length, 0);
-  // Same tab once the typing stopped: pasted.
+  d.openTab = async (p) => { const r = await orig(p); d.tabs.get(r.tabId).keys = 1; return r; };
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'typing' });
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /someone typed/);
+  assert.equal(d.log.filter((e) => ['launch', 'paste', 'submit'].includes(e[0])).length, 0);
   const d2 = fakeDeps();
-  const r2 = await createOpenTabService(d2, { readyTimeoutMs: 20000 }).open({ projectPath: '/p', message: 'go', requestId: 'typing' });
-  assert.equal(r2.status, 200);
-  ok('no paste while someone is typing in the tab');
+  d2.typeLaunch = ((o) => (id) => { o(id); d2.tabs.get(id).keys = 2; })(d2.typeLaunch);
+  const r2 = await createOpenTabService(d2).open({ projectPath: '/p', message: 'go', requestId: 'typing' });
+  assert.equal(r2.status, 409);
+  assert.equal(d2.log.filter((e) => e[0] === 'paste' || e[0] === 'submit').length, 0);
+  ok('a person typing into the tab: no launch, no paste, no Enter');
+}
+
+{
+  // The Enter: withheld whenever anything that cleared the paste stopped holding.
+  const rule2 = '─'.repeat(40);
+  const cases = [
+    ['no echo', (d) => { const o = d.openTab; d.openTab = async (p) => { const r = await o(p); d.tabs.get(r.tabId).noEcho = true; return r; }; }, /did not show the pasted text/],
+    ['claude gone at the Enter', (d) => { const o = d.paste; d.paste = (id, t) => { o(id, t); d.tabs.get(id).claude = false; }; }, /not in the foreground/],
+    ['someone typed after the paste', (d) => { const o = d.paste; d.paste = (id, t) => { o(id, t); setImmediate(() => { d.tabs.get(id).keys = 1; }); }; }, /someone typed/],
+    ['box gone after the paste', (d) => { const o = d.paste; d.paste = (id, t) => { o(id, t); d.tabs.get(id).frames.push({ lines: [...Array(15).fill('a dialog took over'), '❯ 1. Yes'], modes: { bracketedPaste: true } }); }; }, /not in the foreground/],
+  ];
+  for (const [name, setup, why] of cases) {
+    const d = fakeDeps();
+    setup(d);
+    const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'enter' });
+    assert.equal(r.status, 200, name);
+    assert.equal(r.body.submitted, false, name);
+    assert.match(r.body.note, why, name);
+    assert.equal(d.log.filter((e) => e[0] === 'paste').length, 1, name);
+    assert.equal(d.log.filter((e) => e[0] === 'submit').length, 0, name);
+  }
+  // A long multi-line message grows the box: still recognised, still sent.
+  const d = fakeDeps();
+  const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n');
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message: long, requestId: 'tall' });
+  assert.equal(r.body.submitted, true);
+  assert.equal(isClaudePromptReady([rule2, '❯ a', ...Array(30).fill('  b'), rule2, '  ? for shortcuts'], { bracketedPaste: true }), true);
+  ok('Enter withheld unless everything still holds; tall box still sent');
 }
 
 {

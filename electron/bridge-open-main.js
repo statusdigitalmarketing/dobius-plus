@@ -13,8 +13,9 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
-import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, terminalInputAgeMs } from './terminal-manager.js';
+import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, addInputObserver } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint } from './claude-argv.js';
+import { isKeyboardInput, CLAUDE_SCRIPT_RE } from './bridge-open-tab.js';
 import { submitPending } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
@@ -39,6 +40,13 @@ function isTabOfProject(tabId, projectPath) {
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh']);
 const INTERPRETERS = new Set(['node', 'bun', 'deno']);
 
+// Writes made by /openTab itself, so they are not counted as a person's.
+let ownWrite = false;
+function writeOwn(tabId, data) {
+  ownWrite = true;
+  try { writeTerminal(tabId, data); } finally { ownWrite = false; }
+}
+
 const psField = async (pid, field) => (await execFileP('/bin/ps', ['-o', `${field}=`, '-p', String(pid)], { timeout: 1000, encoding: 'utf8' })).stdout.trim();
 
 function isExecutableFile(f) {
@@ -61,7 +69,10 @@ async function isClaudeProcess(pid) {
   if (comm.startsWith('/') && isClaudeEntrypoint(comm)) return isExecutableFile(comm);
   if (!INTERPRETERS.has(comm.split('/').pop())) return false;
   const { kind, token } = classifyClaudeProcess(await psField(pid, 'command'));
-  return kind === 'claude' && typeof token === 'string' && token.startsWith('/') && fs.statSync(token, { throwIfNoEntry: false })?.isFile() === true;
+  if (kind !== 'claude' || typeof token !== 'string' || !token.startsWith('/')) return false;
+  // The command line splits at spaces (`node "/tmp/claude tools/x.js"` reads
+  // as `/tmp/claude`), so the token must RESOLVE to Claude's own script.
+  try { return CLAUDE_SCRIPT_RE.test(fs.realpathSync(token)) && fs.statSync(token).isFile(); } catch { return false; }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -209,17 +220,22 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   function watchOutput(tabId) {
     let buf = '';
     let seq = 0;
+    let keys = 0;
     const sub = subscribeTerminal(tabId, {
       onData: (_id, data) => { seq += 1; buf = trimToEscapeBoundary(buf + data, WATCH_CAP_CHARS); },
+    });
+    const offInput = addInputObserver((id, data) => {
+      if (id === tabId && !ownWrite && isKeyboardInput(data)) keys += 1;
     });
     return {
       mark: () => { buf = ''; },
       seq: () => seq,
+      keys: () => keys,
       screen: async () => {
         const lines = await renderScreenLines(buf);
         return lines ? { lines, modes: lines.modes } : null;
       },
-      stop: () => sub.unsubscribe(),
+      stop: () => { sub.unsubscribe(); offInput(); },
     };
   }
 
@@ -276,7 +292,6 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     resolveProject,
     shellForeground,
     shellInProject,
-    inputQuietMs: (tabId) => terminalInputAgeMs(tabId),
     openTab,
     focusTab,
     watchOutput,
@@ -290,9 +305,13 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // Written straight to the PTY, never queued behind a Chat submit: a
     // queued write would go out LATER, after the checks that cleared it (a
     // queued /exit could put Claude's shell in front of it).
-    typeLaunch: (tabId) => writeTerminal(tabId, 'claude\r'),
-    // One bracketed paste and no Enter: the person presses Enter.
-    paste: (tabId, text) => writeTerminal(tabId, `\x1b[200~${text}\x1b[201~`),
+    // Ctrl+U first: anything already on the shell's input line (someone
+    // typed into the new tab) is erased, never run along with the launch.
+    typeLaunch: (tabId) => writeOwn(tabId, '\x15claude\r'),
+    // One bracketed paste, no Enter in it.
+    paste: (tabId, text) => writeOwn(tabId, `\x1b[200~${text}\x1b[201~`),
+    // The single Enter, written on its own once the paste has settled.
+    submit: (tabId) => writeOwn(tabId, '\r'),
     // Someone is sending a Chat message into the tab right now: its Enter is
     // still to come, so the prompt is not ours to type into.
     inputBusy: (tabId) => submitPending(tabId),

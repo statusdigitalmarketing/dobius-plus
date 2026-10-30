@@ -1,13 +1,30 @@
 // /openTab on the local bridge: open a VISIBLE tab in a project's window,
 // start Claude in it the way a user would, wait until Claude's prompt is
-// really on screen, then type a message WITHOUT pressing Enter. Built for
-// Brett's inbox board: his click on a card is the OK, so nothing here asks
-// for a YES, and the person reads the message and presses Enter themselves.
+// really on screen, type a message (one bracketed paste, so its line breaks
+// stay input) and then press Enter ONCE, separately, so Claude starts on it.
+// Built for Brett's inbox board: his click on a card is the OK, so nothing
+// here asks for a YES; Claude's own permission prompts still apply.
 //
 // Pure module (no electron import). Everything that touches windows, PTYs or
 // the screen emulator comes in as `deps` from main.js, so the request logic,
 // the dedupe and the readiness wait are unit tested with fakes:
 // electron/__tests__/bridge-open-tab.test.mjs. Docs: docs/bridge-open-tab.md.
+
+import { isTerminalReply } from './terminal-reply.js';
+
+// The file a node/bun/deno claude actually runs, once symlinks are resolved:
+// the npm package's cli.js, or a native install's versioned entry.
+export const CLAUDE_SCRIPT_RE = /\/(?:@anthropic-ai\/claude-code\/cli|claude\/versions\/[^/]+\/cli)\.(?:js|mjs|cjs)$/;
+
+// Mouse reports (X10, SGR, urxvt) are what a pointer over a fullscreen
+// Claude sends; they are not someone typing. Neither are the terminal's
+// own replies (focus, cursor reports).
+const MOUSE_RE = /\x1b\[M[\s\S]{3}|\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[\d+;\d+;\d+M/g;
+export function isKeyboardInput(data) {
+  if (typeof data !== 'string' || !data) return false;
+  if (isTerminalReply(data)) return false;
+  return data.replace(MOUSE_RE, '').length > 0;
+}
 
 // The board's own id for a card click: letters, digits and . _ : - only, so
 // it can never smuggle anything into a log line or a map key.
@@ -23,9 +40,11 @@ export const MAX_REMEMBERED_REQUESTS = 500;
 export const MAX_OPENS_IN_FLIGHT = 4;
 
 export const READY_TIMEOUT_MS = 60_000;
-// No keys typed into the tab for this long before the paste: a person typing
-// in the tab (whose Enter could still be on its way) goes first.
-export const INPUT_QUIET_MS = 1000;
+// After the paste: Claude must redraw (its echo of the text), then stay
+// quiet for SUBMIT_QUIET_POLLS polls, within SUBMIT_SETTLE_MAX_MS.
+const SUBMIT_POLL_MS = 100;
+const SUBMIT_QUIET_POLLS = 3;
+const SUBMIT_SETTLE_MAX_MS = 5000;
 const READY_POLL_MS = 250;
 // Shell readiness: some output, then this many quiet polls in a row.
 const SHELL_QUIET_POLLS = 3;
@@ -90,6 +109,8 @@ const BOX_BOTTOM_RE = /^\s*╰─+╯\s*$/;
 // a status line and a short list below it. A lookalike higher up (a file
 // being shown, an old screen) does not count.
 export const PROMPT_BOTTOM_ROWS = 12;
+// Tallest input box accepted (a typed multi-line message grows it).
+const MAX_BOX_ROWS = 60;
 
 /**
  * Is Claude's input prompt on screen and taking input? `lines` is the
@@ -106,14 +127,18 @@ export function isClaudePromptReady(lines, modes) {
   if (!Array.isArray(lines) || !modes?.bracketedPaste) return false;
   let last = lines.length - 1;
   while (last >= 0 && !String(lines[last] || '').trim()) last -= 1;
-  for (let i = last - 1; i >= 0 && i + 1 >= last - PROMPT_BOTTOM_ROWS; i -= 1) {
-    const row = lines[i + 1] || '';
-    if (RULE_RE.test(lines[i]) && PROMPT_ROW_RE.test(row) && !OPTION_ROW_RE.test(row)) {
-      for (let j = i + 2; j < Math.min(lines.length, i + 8); j += 1) if (RULE_RE.test(lines[j])) return true;
-    }
-    if (BOX_TOP_RE.test(lines[i]) && BOX_PROMPT_RE.test(row)) {
-      for (let j = i + 2; j < Math.min(lines.length, i + 8); j += 1) if (BOX_BOTTOM_RE.test(lines[j])) return true;
-    }
+  // The box's CLOSING edge must be near the bottom; its top is the nearest
+  // rule above it, with the prompt row right under that. The box may be
+  // tall once a message is typed into it.
+  for (let j = last; j >= 1 && j >= last - PROMPT_BOTTOM_ROWS; j -= 1) {
+    const flat = RULE_RE.test(lines[j]);
+    if (!flat && !BOX_BOTTOM_RE.test(lines[j])) continue;
+    const isTop = flat ? (r) => RULE_RE.test(r) : (r) => BOX_TOP_RE.test(r);
+    let top = j - 1;
+    while (top >= 0 && j - top <= MAX_BOX_ROWS && !isTop(lines[top] || '')) top -= 1;
+    if (top < 0 || top === j - 1 || j - top > MAX_BOX_ROWS) continue;
+    const row = lines[top + 1] || '';
+    if (flat ? (PROMPT_ROW_RE.test(row) && !OPTION_ROW_RE.test(row)) : BOX_PROMPT_RE.test(row)) return true;
   }
   return false;
 }
@@ -129,12 +154,14 @@ export function isClaudePromptReady(lines, modes) {
  *   claudeRunning(tabId) -> Promise<boolean>  claude is the FOREGROUND process of the tab's terminal
  *   shellForeground(tabId) -> Promise<boolean>  the shell itself owns the terminal (no job running)
  *   shellInProject(tabId, path) -> Promise<boolean>  the shell's cwd is the project folder now
- *   inputQuietMs(tabId) -> number     ms since anything last typed into the tab
  *   typeLaunch(tabId) -> void         type `claude` + Enter at the shell prompt
- *   watchOutput(tabId) -> { mark(), seq(), screen(): Promise<{ lines, modes } | null>, stop() }
+ *   watchOutput(tabId) -> { mark(), seq(), keys(), screen(): Promise<{ lines, modes } | null>, stop() }
  *                                     the tab's output from now on, emulated; mark()
- *                                     forgets everything received so far; seq() counts chunks
+ *                                     forgets everything received so far; seq() counts chunks;
+ *                                     keys() counts a PERSON's keyboard writes into the tab
+ *                                     (not ours, not mouse reports or terminal replies)
  *   paste(tabId, text) -> void        one bracketed paste, no Enter, written now
+ *   submit(tabId) -> void             one Enter, its own write
  *   inputBusy(tabId) -> boolean       another surface is mid-submit into the tab
  *   sleep(ms), now()
  */
@@ -190,11 +217,45 @@ export function createOpenTabService(deps, opts = {}) {
       // and the shell redrawing, a dialog opening) sends us round again. The
       // caller pastes in the same tick as this return: no output or exit can
       // be processed in between.
-      if (hits >= 2 && watch.seq() === seqAtRead && deps.ptyOf(tabId) === pty && deps.inputQuietMs(tabId) >= INPUT_QUIET_MS) return 'ready';
+      if (hits >= 2 && watch.seq() === seqAtRead && deps.ptyOf(tabId) === pty) return 'ready';
       if (watch.seq() !== seqAtRead) hits = Math.min(hits, 1);
       await deps.sleep(READY_POLL_MS);
     }
     return 'timeout';
+  }
+
+  // Brett: "after it types the message, press Enter so Claude starts right
+  // away". The Enter is the ONLY submit (the message cannot contain one) and
+  // goes out as its own write, only after Claude has visibly taken the paste
+  // (its echo, then quiet), and only while everything that cleared the paste
+  // still holds: claude in the foreground, its prompt box on screen, no
+  // output since that was read, and nothing else typed into the tab since the
+  // paste (a person's keys, or their mouse over a fullscreen Claude). Any
+  // doubt leaves the message typed and unsent: { ok, submitted: false }.
+  async function submitPasted(tabId, pty, watch, seqAtPaste) {
+    const typedOnly = (why) => ({ ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: ${why}; press Enter in the tab to send it` });
+    const end = deps.now() + SUBMIT_SETTLE_MAX_MS;
+    let last = seqAtPaste;
+    let quiet = 0;
+    while (quiet < SUBMIT_QUIET_POLLS) {
+      if (deps.now() >= end) return typedOnly('Claude did not show the pasted text in time');
+      await deps.sleep(SUBMIT_POLL_MS);
+      const seq = watch.seq();
+      quiet = seq > seqAtPaste && seq === last ? quiet + 1 : 0;
+      last = seq;
+    }
+    const seqAtRead = watch.seq();
+    let screen;
+    try { screen = await watch.screen(); } catch { screen = null; }
+    const boxed = !!screen && isClaudePromptReady(screen.lines, screen.modes);
+    const claude = boxed && (await deps.claudeRunning(tabId));
+    // Same tick from here to the Enter.
+    if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return typedOnly('the tab closed or its shell changed');
+    if (!claude) return typedOnly('Claude was not in the foreground with its prompt on screen');
+    if (watch.seq() !== seqAtRead) return typedOnly('the screen changed while it was being checked');
+    if (watch.keys() !== 0 || deps.inputBusy(tabId)) return typedOnly('someone typed into the tab');
+    deps.submit(tabId);
+    return { ok: true, tabId, submitted: true };
   }
 
   async function run(projectPath, message) {
@@ -223,6 +284,11 @@ export function createOpenTabService(deps, opts = {}) {
       // And Claude must start IN the project: a login script may `cd` away.
       const inProject = shellOwns && (await deps.shellInProject(tabId, resolved.path));
       if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: false, status: 409, tabId, error: 'the tab was closed or its shell was replaced before Claude could start; nothing was typed' };
+      // A person typing into the new tab has taken it over: whatever they
+      // typed (and an Enter of theirs still on its way) must never carry
+      // the card's text. Mouse movement does not count.
+      const typedIn = { ok: false, status: 409, tabId, error: 'someone typed into the tab, so the message was not typed' };
+      if (watch.keys() !== 0) return typedIn;
       if (shellOwns && !inProject) return { ok: false, status: 500, tabId, error: 'the tab\'s shell is not in the project folder (a login script changed directory); nothing was typed' };
       if (shellOwns) {
         watch.mark();
@@ -237,9 +303,11 @@ export function createOpenTabService(deps, opts = {}) {
       // No await between the last process check (inside waitReady) and the
       // paste, so nothing can change in between.
       if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return gone;
+      if (watch.keys() !== 0) return typedIn;
       if (deps.inputBusy(tabId)) return { ok: false, status: 409, tabId, error: 'something else was typing into the tab; nothing was typed' };
+      const outputBeforePaste = watch.seq();
       deps.paste(tabId, message);
-      return { ok: true, tabId };
+      return await submitPasted(tabId, pty, watch, outputBeforePaste);
     } finally {
       watch.stop();
     }
@@ -300,7 +368,7 @@ const shQuote = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 export function buildOpenCliScript({ port, tokenFile }) {
   return `#!/bin/bash
 # dobius-open: open a new Dobius+ tab in a project, start Claude in it and
-# type a message into Claude's prompt WITHOUT pressing Enter.
+# type a message into Claude's prompt, then press Enter once to send it.
 # Usage: dobius-open <project-folder> <request-id> "<message>"
 #        dobius-open <project-folder> <request-id> - < message.txt
 # The same request id again brings that tab to the front instead.
