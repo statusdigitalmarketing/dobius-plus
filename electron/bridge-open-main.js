@@ -15,7 +15,7 @@ import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
 import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint } from './claude-argv.js';
-import { isKeyboardInput, CLAUDE_SCRIPT_RE, isUnguardedClaudeCommand } from './bridge-open-tab.js';
+import { isKeyboardInput, CLAUDE_SCRIPT_RE } from './bridge-open-tab.js';
 import { submitPending } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
@@ -47,7 +47,8 @@ function writeOwn(tabId, data) {
   try { writeTerminal(tabId, data); } finally { ownWrite = false; }
 }
 
-const psField = async (pid, field) => (await execFileP('/bin/ps', ['-o', `${field}=`, '-p', String(pid)], { timeout: 1000, encoding: 'utf8' })).stdout.trim();
+// -ww: never truncate a command line.
+const psField = async (pid, field) => (await execFileP('/bin/ps', ['-ww', '-o', `${field}=`, '-p', String(pid)], { timeout: 1000, encoding: 'utf8' })).stdout.trim();
 
 function isExecutableFile(f) {
   try {
@@ -270,10 +271,9 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
       if (!m) return false;
       const [, pgid, tpgid, stat] = m;
-      if (pgid !== tpgid || stat.startsWith('T') || !(await isClaudeProcess(info.pid))) return false;
-      // Never type into a Claude running without its permission prompts
-      // (however it was started): the card would be sent unguarded.
-      return !isUnguardedClaudeCommand(await psField(info.pid, 'command'));
+      // The permission mode is NOT checked (Sam: "bypass permissions should
+      // act just like auto mode"); only that this really is claude.
+      return pgid === tpgid && !stat.startsWith('T') && (await isClaudeProcess(info.pid));
     } catch {
       return false;
     }

@@ -3,7 +3,8 @@
 // really on screen, type a message (one bracketed paste, so its line breaks
 // stay input) and then press Enter ONCE, separately, so Claude starts on it.
 // Built for Brett's inbox board: his click on a card is the OK, so nothing
-// here asks for a YES; Claude's own permission prompts still apply.
+// here asks for a YES. Claude's permission mode is the user's own, in every
+// mode including bypass (Sam's decision, docs/bridge-open-tab.md Security).
 //
 // Pure module (no electron import). Everything that touches windows, PTYs or
 // the screen emulator comes in as `deps` from main.js, so the request logic,
@@ -25,13 +26,6 @@ export function isKeyboardInput(data) {
   if (typeof data !== 'string' || !data) return false;
   if (isTerminalReply(data)) return false;
   return data.replace(MOUSE_RE, '').length > 0;
-}
-
-// A claude command line that turns its permission prompts off. /openTab
-// never types into one: the card would be sent with nothing to stop it.
-const UNGUARDED_RE = /dangerously|bypassPermissions|--permission-mode[= ]+(?:acceptEdits|bypass|dontAsk|auto)/i;
-export function isUnguardedClaudeCommand(command) {
-  return UNGUARDED_RE.test(String(command || ''));
 }
 
 // The board's own id for a card click: letters, digits and . _ : - only, so
@@ -306,8 +300,9 @@ export function createOpenTabService(deps, opts = {}) {
     // purpose: Brett asked for the send, and /tabSend with the same token
     // already writes message + Enter into ANY tab, plain shells included.
     // This route adds no capability the token lacks and is narrower: a fresh
-    // tab, claude verified as its foreground process, normal permission
-    // prompts. See docs/bridge-open-tab.md, Security.
+    // tab, claude verified as its foreground process, and the session's own
+    // permission mode (in bypass there are no prompts: Sam's decision). See
+    // docs/bridge-open-tab.md, Security.
     deps.submit(tabId);
     return { ok: true, tabId, submitted: true };
   }

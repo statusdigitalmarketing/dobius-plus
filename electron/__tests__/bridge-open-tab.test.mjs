@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   sanitizeOpenMessage, validateOpenTabBody, isClaudePromptReady, createOpenTabService,
-  buildOpenCliScript, isKeyboardInput, promptBoxText, boxHoldsMessage, isUnguardedClaudeCommand, CLAUDE_SCRIPT_RE, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
+  buildOpenCliScript, isKeyboardInput, promptBoxText, boxHoldsMessage, CLAUDE_SCRIPT_RE, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
 } from '../bridge-open-tab.js';
 import { renderScreenLines } from '../screen-render.js';
 
@@ -43,9 +43,7 @@ assert.equal(CLAUDE_SCRIPT_RE.test('/opt/homebrew/lib/node_modules/@anthropic-ai
 assert.equal(CLAUDE_SCRIPT_RE.test('/Users/x/.local/share/claude/versions/2.1.314/cli.js'), true);
 assert.equal(CLAUDE_SCRIPT_RE.test('/tmp/claude'), false);
 assert.equal(CLAUDE_SCRIPT_RE.test('/tmp/claude tools/repl.js'), false);
-for (const c of ['claude --dangerously-skip-permissions', '/x/claude --permission-mode bypassPermissions', 'node /x/cli.js --permission-mode=acceptEdits', 'claude --allow-dangerously-skip-permissions']) assert.equal(isUnguardedClaudeCommand(c), true, c);
-for (const c of ['claude', 'node /x/cli.js', 'claude --permission-mode default', 'claude --resume abc']) assert.equal(isUnguardedClaudeCommand(c), false, c);
-ok('keyboard vs mouse input, claude script paths, unguarded claude');
+ok('keyboard vs mouse input, claude script paths');
 
 // 2. Body validation.
 const good = { projectPath: '/Users/x/proj', message: 'hi', requestId: 'card:gmail.123_ab-C' };
