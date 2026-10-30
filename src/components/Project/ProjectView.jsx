@@ -386,13 +386,30 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       dropDead(tabId);
     };
     const offFailed = window.electronAPI?.onTabAdoptFailed?.(giveUp);
+    // /openTab (Brett's inbox board): a New Tab that starts CLAUDE, whatever
+    // this user's New Tab default is, shown. Main waits for Claude's prompt.
+    const offBridgeOpen = window.electronAPI?.onBridgeOpenTab?.(({ nonce, expiresAt } = {}) => {
+      if (!(Date.now() < expiresAt)) return; // main gave up on this one
+      const tab = useStore.getState().openNewTab(projectPath, 'claude');
+      if (!tab) return; // tabs not restored yet: main times out, nothing opened
+      useStore.getState().showTab(tab.id);
+      useStore.getState().setActiveView('terminal');
+      window.electronAPI.bridgeTabOpened?.(nonce, tab.id);
+    });
+    // Main gave up on that open before our answer arrived: take the tab back.
+    const offBridgeDrop = window.electronAPI?.onBridgeDropTab?.((tabId) => {
+      const st = useStore.getState();
+      if (!st.terminalTabs.some((t) => t.id === tabId)) return;
+      if (st.terminalTabs.length === 1) st.addTab(projectPath);
+      useStore.getState().removeTab(tabId);
+    });
     // A claiming pane whose claim was refused (a late adopt after a timeout)
     // has no terminal at all.
     const onRefused = (e) => giveUp(e.detail);
     window.addEventListener('dobius:claim-refused', onRefused);
     window.electronAPI?.windowTabsReady?.();
     return () => {
-      offAdopt?.(); offFailed?.();
+      offAdopt?.(); offFailed?.(); offBridgeOpen?.(); offBridgeDrop?.();
       window.removeEventListener('dobius:claim-refused', onRefused);
       for (const t of pending.values()) clearTimeout(t);
     };
@@ -1115,6 +1132,12 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       // While the New Tab picker owns the keyboard, menu accelerators (which
       // skip its DOM key handler) must not close or type into the tab behind it.
       window.electronAPI.onMenuCloseTab?.(() => { if (!useStore.getState().newTabPickerOpen) closeActiveTab(); }),
+      // /openTab repeat: bring the tab that request already opened forward.
+      window.electronAPI.onBridgeFocusTab?.((tabId) => {
+        if (!useStore.getState().terminalTabs.some((t) => t.id === tabId)) return;
+        useStore.getState().showTab(tabId);
+        setActiveView('terminal');
+      }),
       window.electronAPI.onMenuResumeSession?.(() => {
         if (useStore.getState().newTabPickerOpen) return;
         // Menu "Resume Last Session" — shares the keydown's guarded path.

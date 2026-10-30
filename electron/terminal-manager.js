@@ -29,6 +29,14 @@ export function addTerminalObserver(observer) {
   return () => terminalObservers.delete(observer);
 }
 
+// Sinks that see every write INTO a terminal (id, data), from any surface.
+// /openTab uses it to notice a person typing into the tab it opened.
+const inputObservers = new Set();
+export function addInputObserver(fn) {
+  if (typeof fn === 'function') inputObservers.add(fn);
+  return () => inputObservers.delete(fn);
+}
+
 /**
  * Defensive startup check: node-pty's `spawn-helper` MUST be executable or
  * every PTY opens blank (the helper is exec'd to launch the shell, and without
@@ -398,6 +406,9 @@ export function writeTerminal(id, data) {
       entry.inputSeq = (entry.inputSeq || 0) + 1; // see terminalInputSeq
       entry.outputSeqAtInput = entry.outputSeq || 0;
       entry.inputAt = Date.now();
+    }
+    for (const fn of inputObservers) {
+      try { fn(id, data); } catch { /* an observer must never break typing */ }
     }
     entry.pty.write(data);
   }
