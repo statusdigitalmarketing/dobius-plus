@@ -165,3 +165,15 @@ test('a prompt hook rewriting the tool runs nothing but the allowlisted tool', (
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('one shell quoting for every generated command survives /bin/sh, quotes included', async () => {
+  const { shQuote } = await import('../../shared/sh-quote.js');
+  for (const s of ["plain", "with space", "it's", "'", "''x''", "$HOME `id` $(id) \\ \"q\"", "Library/Application Support/dobius-plus", '']) {
+    const r = spawnSync('/bin/sh', ['-c', `printf '%s' ${shQuote(s)}`], { encoding: 'utf8' });
+    assert.equal(r.stdout, s, s);
+  }
+  // The New Tab wrapper replaces itself with the user's shell by that quoting.
+  const { loginShellSpawn: spawnFor, launchCommandFor: launchFor } = await import('../../shared/new-tab.js');
+  const script = spawnFor("/opt/it's/zsh", launchFor('claude', 'claude')).args.at(-1);
+  assert.ok(script.endsWith(` exec ${shQuote("/opt/it's/zsh")} -l`), script);
+});

@@ -4,6 +4,8 @@
 // or Electron here so it is unit-tested under plain node
 // (electron/__tests__/new-tab.test.mjs).
 
+import { shQuote } from './sh-quote.js';
+
 export const NEW_TAB_TOOLS = ['claude', 'codex', 'shell'];
 export const DEFAULT_NEW_TAB_TOOL = 'claude';
 
@@ -136,8 +138,7 @@ export function loginShellSpawn(shell, startCommand) {
   } else {
     return plain;
   }
-  const quoted = `'${String(shell).replace(/'/g, "'\\''")}'`;
-  const script = `trap : INT; ${run} exec ${quoted} -l`;
+  const script = `trap : INT; ${run} exec ${shQuote(shell)} -l`;
   return { args: ['-l', '-i', '-c', script], env: { [START_TOOL_ENV]: startCommand } };
 }
 

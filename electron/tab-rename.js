@@ -9,6 +9,8 @@
 // Pure module (no electron import) so the script and the body check are unit
 // tested against a real HTTP server: electron/__tests__/tab-rename.test.mjs.
 
+import { shQuote } from '../shared/sh-quote.js';
+
 export const MAX_RAW_LABEL = 500; // the renderer trims to 40; this only bounds the IPC payload
 
 /** Validate a /tabRename body. Returns { tabId, label } or { error }. */
@@ -23,7 +25,6 @@ export function validateTabRename(body, tabIdRe) {
   return { tabId, label };
 }
 
-const shQuote = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 
 /** The bash script installed as <userData>/bin/dobius-tab. */
 export function buildTabCliScript({ port, tokenFile }) {

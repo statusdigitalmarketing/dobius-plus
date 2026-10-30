@@ -21,6 +21,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { keychainServiceFor, defaultClaudeDir } from './account-identity.js';
+import { shQuote } from '../shared/sh-quote.js';
 
 // Bumped when the on-disk record format changes, so a stale reporter left by an
 // older build is ignored rather than misparsed.
@@ -31,8 +32,6 @@ const FORMAT = 'DOBIUS1';
 // the surrounding value, so it lives in the command string itself.
 export const REPORTER_MARKER = 'dobius-usage-reporter';
 
-/** POSIX single-quote a string for a /bin/sh command line. */
-export const shQuote = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 
 /**
  * The statusLine value is a SHELL COMMAND, not an argv array, so the path has

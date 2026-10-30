@@ -14,6 +14,7 @@
 
 import { isTerminalReply } from './terminal-reply.js';
 import { parseSelectorFromScreen } from './selector-parser.js';
+import { shQuote } from '../shared/sh-quote.js';
 
 // Mouse reports (X10, SGR, urxvt) are what a pointer over a fullscreen
 // Claude sends; they are not someone typing. Neither are the terminal's
@@ -460,8 +461,6 @@ export function createOpenTabService(deps, opts = {}) {
 
   return { open, _requests: requests };
 }
-
-const shQuote = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 
 /** The bash script installed as dobius-open. */
 export function buildOpenCliScript({ port, tokenFile }) {
