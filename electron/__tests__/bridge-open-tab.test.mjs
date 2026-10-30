@@ -402,6 +402,18 @@ function fakeDeps(over = {}) {
     assert.equal(d.log.filter((e) => e[0] === 'paste').length, 1, name);
     assert.equal(d.log.filter((e) => e[0] === 'submit').length, 0, name);
   }
+  // A card starting with a Claude mode character (! runs a shell command with
+  // no permission prompt) is typed, never sent.
+  for (const lead of ['!rm -rf ~', '  /logout', '#remember this', '&go']) {
+    const dm = fakeDeps();
+    const rm = await createOpenTabService(dm).open({ projectPath: '/p', message: lead, requestId: 'mode' });
+    assert.equal(rm.body.submitted, false, lead);
+    assert.match(rm.body.note, /treats as a command/, lead);
+    assert.equal(dm.log.filter((e) => e[0] === 'paste').length, 1, lead);
+    assert.equal(dm.log.filter((e) => e[0] === 'submit').length, 0, lead);
+  }
+  const dn = fakeDeps();
+  assert.equal((await createOpenTabService(dn).open({ projectPath: '/p', message: 'Reply: 50% off! /cc #3', requestId: 'mode2' })).body.submitted, true, 'only the FIRST character matters');
   // A long multi-line message grows the box: still recognised, still sent.
   const d = fakeDeps();
   const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n');

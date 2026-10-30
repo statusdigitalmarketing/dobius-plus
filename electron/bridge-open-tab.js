@@ -45,6 +45,11 @@ export const READY_TIMEOUT_MS = 60_000;
 const SUBMIT_POLL_MS = 100;
 const SUBMIT_QUIET_POLLS = 3;
 const SUBMIT_SETTLE_MAX_MS = 5000;
+// Claude reads these as the first character of its input as a MODE, not a
+// message: ! runs the rest as a shell command with no permission prompt,
+// / runs a slash command, # writes memory, & sends to the background. A card
+// starting with one is typed but never sent automatically.
+const MODE_LEAD_RE = /^\s*[!/#&]/;
 const READY_POLL_MS = 250;
 // Shell readiness: some output, then this many quiet polls in a row.
 const SHELL_QUIET_POLLS = 3;
@@ -307,6 +312,8 @@ export function createOpenTabService(deps, opts = {}) {
       if (deps.inputBusy(tabId)) return { ok: false, status: 409, tabId, error: 'something else was typing into the tab; nothing was typed' };
       const outputBeforePaste = watch.seq();
       deps.paste(tabId, message);
+      const lead = MODE_LEAD_RE.exec(message);
+      if (lead) return { ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: it starts with "${lead[0].trim()}", which Claude treats as a command rather than a message; check it and press Enter in the tab yourself` };
       return await submitPasted(tabId, pty, watch, outputBeforePaste);
     } finally {
       watch.stop();
