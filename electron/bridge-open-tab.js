@@ -11,6 +11,7 @@
 // electron/__tests__/bridge-open-tab.test.mjs. Docs: docs/bridge-open-tab.md.
 
 import { isTerminalReply } from './terminal-reply.js';
+import { parseSelectorFromScreen } from './selector-parser.js';
 
 // The file a node/bun/deno claude actually runs, once symlinks are resolved:
 // the npm package's cli.js, or a native install's versioned entry.
@@ -24,6 +25,13 @@ export function isKeyboardInput(data) {
   if (typeof data !== 'string' || !data) return false;
   if (isTerminalReply(data)) return false;
   return data.replace(MOUSE_RE, '').length > 0;
+}
+
+// A claude command line that turns its permission prompts off. /openTab
+// never types into one: the card would be sent with nothing to stop it.
+const UNGUARDED_RE = /dangerously|bypassPermissions|--permission-mode[= ]+(?:acceptEdits|bypass|dontAsk|auto)/i;
+export function isUnguardedClaudeCommand(command) {
+  return UNGUARDED_RE.test(String(command || ''));
 }
 
 // The board's own id for a card click: letters, digits and . _ : - only, so
@@ -129,7 +137,25 @@ const MAX_BOX_ROWS = 60;
  * the service also requires claude to be the tab's foreground process.
  */
 export function isClaudePromptReady(lines, modes) {
-  if (!Array.isArray(lines) || !modes?.bracketedPaste) return false;
+  return promptBoxText(lines, modes) !== null;
+}
+
+// A dialog on screen (a permission question, a selector): an Enter there
+// ANSWERS it. Its footer or a numbered selector anywhere means not ready,
+// whatever box-like rows it quotes (a heredoc can contain a rule and a ❯).
+const DIALOG_RE = /Esc to cancel|Enter to (?:confirm|select)|Do you want to |Would you like to /i;
+function dialogOnScreen(lines) {
+  if (lines.some((l) => DIALOG_RE.test(String(l || '')))) return true;
+  try { return !!parseSelectorFromScreen(lines); } catch { return true; }
+}
+
+/**
+ * The text inside Claude's input box (prompt row with the ❯ removed, then any
+ * further rows), or null when the screen is not an idle Claude prompt.
+ */
+export function promptBoxText(lines, modes) {
+  if (!Array.isArray(lines) || !modes?.bracketedPaste) return null;
+  if (dialogOnScreen(lines)) return null;
   let last = lines.length - 1;
   while (last >= 0 && !String(lines[last] || '').trim()) last -= 1;
   // The box's CLOSING edge must be near the bottom; its top is the nearest
@@ -143,9 +169,24 @@ export function isClaudePromptReady(lines, modes) {
     while (top >= 0 && j - top <= MAX_BOX_ROWS && !isTop(lines[top] || '')) top -= 1;
     if (top < 0 || top === j - 1 || j - top > MAX_BOX_ROWS) continue;
     const row = lines[top + 1] || '';
-    if (flat ? (PROMPT_ROW_RE.test(row) && !OPTION_ROW_RE.test(row)) : BOX_PROMPT_RE.test(row)) return true;
+    if (flat ? (PROMPT_ROW_RE.test(row) && !OPTION_ROW_RE.test(row)) : BOX_PROMPT_RE.test(row)) {
+      const rows = lines.slice(top + 1, j).map((r) => String(r).replace(/^\s*│?\s*[❯>]?\s?/, '').replace(/\s*│?\s*$/, ''));
+      return rows.join('\n');
+    }
   }
-  return false;
+  return null;
+}
+
+/**
+ * Does the box hold the message just pasted? Claude shows a short paste as
+ * text and a long one as "[Pasted text #1 +N lines]". Checked before the
+ * Enter, so it can only ever send the box when it holds what was pasted.
+ */
+export function boxHoldsMessage(boxText, message) {
+  if (typeof boxText !== 'string') return false;
+  if (/\[Pasted text #\d+/.test(boxText)) return true;
+  const want = message.split('\n')[0].trim().slice(0, 20);
+  return want.length > 0 && boxText.trimStart().startsWith(want);
 }
 
 /**
@@ -237,7 +278,7 @@ export function createOpenTabService(deps, opts = {}) {
   // output since that was read, and nothing else typed into the tab since the
   // paste (a person's keys, or their mouse over a fullscreen Claude). Any
   // doubt leaves the message typed and unsent: { ok, submitted: false }.
-  async function submitPasted(tabId, pty, watch, seqAtPaste) {
+  async function submitPasted(tabId, pty, watch, seqAtPaste, message) {
     const typedOnly = (why) => ({ ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: ${why}; press Enter in the tab to send it` });
     const end = deps.now() + SUBMIT_SETTLE_MAX_MS;
     let last = seqAtPaste;
@@ -252,10 +293,12 @@ export function createOpenTabService(deps, opts = {}) {
     const seqAtRead = watch.seq();
     let screen;
     try { screen = await watch.screen(); } catch { screen = null; }
-    const boxed = !!screen && isClaudePromptReady(screen.lines, screen.modes);
-    const claude = boxed && (await deps.claudeRunning(tabId));
+    const box = screen ? promptBoxText(screen.lines, screen.modes) : null;
+    const holds = boxHoldsMessage(box, message);
+    const claude = holds && (await deps.claudeRunning(tabId));
     // Same tick from here to the Enter.
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return typedOnly('the tab closed or its shell changed');
+    if (!holds) return typedOnly('Claude\'s prompt did not show the message (a dialog may be open)');
     if (!claude) return typedOnly('Claude was not in the foreground with its prompt on screen');
     if (watch.seq() !== seqAtRead) return typedOnly('the screen changed while it was being checked');
     if (watch.keys() !== 0 || deps.inputBusy(tabId)) return typedOnly('someone typed into the tab');
@@ -320,7 +363,7 @@ export function createOpenTabService(deps, opts = {}) {
       deps.paste(tabId, message);
       const lead = MODE_LEAD_RE.exec(message);
       if (lead) return { ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: it starts with "${lead[0].trim()}", which Claude treats as a command rather than a message; check it and press Enter in the tab yourself` };
-      return await submitPasted(tabId, pty, watch, outputBeforePaste);
+      return await submitPasted(tabId, pty, watch, outputBeforePaste, message);
     } finally {
       watch.stop();
     }

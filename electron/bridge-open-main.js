@@ -13,9 +13,9 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
-import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, addInputObserver } from './terminal-manager.js';
+import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint } from './claude-argv.js';
-import { isKeyboardInput, CLAUDE_SCRIPT_RE } from './bridge-open-tab.js';
+import { isKeyboardInput, CLAUDE_SCRIPT_RE, isUnguardedClaudeCommand } from './bridge-open-tab.js';
 import { submitPending } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
@@ -139,6 +139,24 @@ async function resolveProject(input) {
  */
 export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   const pending = new Map(); // nonce -> { wcId, projectPath, done }
+  // A PERSON's keyboard writes into each tab we opened, counted from the
+  // moment the window names the tab (before its PTY exists), so keys typed
+  // while it starts are never missed. tabId -> { n, off }
+  const keyCounters = new Map();
+  function countKeys(tabId) {
+    let c = keyCounters.get(tabId);
+    if (c) return c;
+    c = { n: 0, off: null };
+    c.off = addInputObserver((id, data) => {
+      if (id === tabId && !ownWrite && isKeyboardInput(data)) c.n += 1;
+    });
+    keyCounters.set(tabId, c);
+    return c;
+  }
+  function stopCounting(tabId) {
+    const c = keyCounters.get(tabId);
+    if (c) { c.off(); keyCounters.delete(tabId); }
+  }
 
   ipcMain.on('bridge:tabOpened', (event, nonce, tabId) => {
     const p = typeof nonce === 'string' ? pending.get(nonce) : null;
@@ -150,6 +168,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       p.done(null);
       return;
     }
+    countKeys(tabId);
     p.done(tabId);
   });
 
@@ -195,11 +214,12 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // The tab's pane spawns the PTY via terminal:create; wait until it is
     // this window's.
     const started = await waitFor(() => reloaded() || (!!terminalInstance(tabId) && ownerOf(tabId) === wc.id), PTY_START_MS);
-    if (reloaded()) return { error: 'the project window reloaded while the tab was opening' };
-    if (!started) return { error: 'the new tab\'s terminal did not start', tabId };
+    if (reloaded()) { stopCounting(tabId); return { error: 'the project window reloaded while the tab was opening' }; }
+    if (!started) { stopCounting(tabId); return { error: 'the new tab\'s terminal did not start', tabId }; }
     // The shell must have started IN the project (createTerminal falls back
     // to home for a folder that vanished).
     if (listTerminals().find((t) => t.id === tabId)?.cwd !== projectPath) {
+      stopCounting(tabId);
       return { error: 'the new tab did not start in the project folder', tabId };
     }
     return { tabId };
@@ -220,22 +240,19 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   function watchOutput(tabId) {
     let buf = '';
     let seq = 0;
-    let keys = 0;
+    const keys = countKeys(tabId);
     const sub = subscribeTerminal(tabId, {
       onData: (_id, data) => { seq += 1; buf = trimToEscapeBoundary(buf + data, WATCH_CAP_CHARS); },
-    });
-    const offInput = addInputObserver((id, data) => {
-      if (id === tabId && !ownWrite && isKeyboardInput(data)) keys += 1;
     });
     return {
       mark: () => { buf = ''; },
       seq: () => seq,
-      keys: () => keys,
+      keys: () => keys.n,
       screen: async () => {
         const lines = await renderScreenLines(buf);
         return lines ? { lines, modes: lines.modes } : null;
       },
-      stop: () => { sub.unsubscribe(); offInput(); },
+      stop: () => { sub.unsubscribe(); stopCounting(tabId); },
     };
   }
 
@@ -253,7 +270,10 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
       if (!m) return false;
       const [, pgid, tpgid, stat] = m;
-      return pgid === tpgid && !stat.startsWith('T') && (await isClaudeProcess(info.pid));
+      if (pgid !== tpgid || stat.startsWith('T') || !(await isClaudeProcess(info.pid))) return false;
+      // Never type into a Claude running without its permission prompts
+      // (however it was started): the card would be sent unguarded.
+      return !isUnguardedClaudeCommand(await psField(info.pid, 'command'));
     } catch {
       return false;
     }
@@ -296,7 +316,9 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     focusTab,
     watchOutput,
     claudeRunning,
-    tabAlive: (tabId) => !!terminalInstance(tabId) && getTerminalWebContentsId(tabId) !== null,
+    // A tab being closed (its window shutting down sends Ctrl+C straight to
+    // the PTY) is not alive: nothing more is typed into it.
+    tabAlive: (tabId) => !!terminalInstance(tabId) && getTerminalWebContentsId(tabId) !== null && !terminalClosing(tabId),
     ptyOf: (tabId) => terminalInstance(tabId),
     outputSeq: (tabId) => terminalRawOutputSeq(tabId),
     // Typed at the shell prompt, as a person would: plain `claude`, the
@@ -305,9 +327,10 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // Written straight to the PTY, never queued behind a Chat submit: a
     // queued write would go out LATER, after the checks that cleared it (a
     // queued /exit could put Claude's shell in front of it).
-    // Ctrl+U first: anything already on the shell's input line (someone
-    // typed into the new tab) is erased, never run along with the launch.
-    typeLaunch: (tabId) => writeOwn(tabId, '\x15claude\r'),
+    // Ctrl+E then Ctrl+U first: anything already on the shell's input line
+    // (end of line, then kill to its start, so a cursor moved to the start
+    // cannot leave a tail) is erased, never run along with the launch.
+    typeLaunch: (tabId) => writeOwn(tabId, '\x05\x15claude\r'),
     // One bracketed paste, no Enter in it.
     paste: (tabId, text) => writeOwn(tabId, `\x1b[200~${text}\x1b[201~`),
     // The single Enter, written on its own once the paste has settled.

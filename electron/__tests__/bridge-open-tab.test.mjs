@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   sanitizeOpenMessage, validateOpenTabBody, isClaudePromptReady, createOpenTabService,
-  buildOpenCliScript, isKeyboardInput, CLAUDE_SCRIPT_RE, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
+  buildOpenCliScript, isKeyboardInput, promptBoxText, boxHoldsMessage, isUnguardedClaudeCommand, CLAUDE_SCRIPT_RE, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
 } from '../bridge-open-tab.js';
 import { renderScreenLines } from '../screen-render.js';
 
@@ -43,7 +43,9 @@ assert.equal(CLAUDE_SCRIPT_RE.test('/opt/homebrew/lib/node_modules/@anthropic-ai
 assert.equal(CLAUDE_SCRIPT_RE.test('/Users/x/.local/share/claude/versions/2.1.314/cli.js'), true);
 assert.equal(CLAUDE_SCRIPT_RE.test('/tmp/claude'), false);
 assert.equal(CLAUDE_SCRIPT_RE.test('/tmp/claude tools/repl.js'), false);
-ok('keyboard vs mouse input, claude script paths');
+for (const c of ['claude --dangerously-skip-permissions', '/x/claude --permission-mode bypassPermissions', 'node /x/cli.js --permission-mode=acceptEdits', 'claude --allow-dangerously-skip-permissions']) assert.equal(isUnguardedClaudeCommand(c), true, c);
+for (const c of ['claude', 'node /x/cli.js', 'claude --permission-mode default', 'claude --resume abc']) assert.equal(isUnguardedClaudeCommand(c), false, c);
+ok('keyboard vs mouse input, claude script paths, unguarded claude');
 
 // 2. Body validation.
 const good = { projectPath: '/Users/x/proj', message: 'hi', requestId: 'card:gmail.123_ab-C' };
@@ -390,7 +392,13 @@ function fakeDeps(over = {}) {
     ['no echo', (d) => { const o = d.openTab; d.openTab = async (p) => { const r = await o(p); d.tabs.get(r.tabId).noEcho = true; return r; }; }, /did not show the pasted text/],
     ['claude gone at the Enter', (d) => { const o = d.paste; d.paste = (id, t) => { o(id, t); d.tabs.get(id).claude = false; }; }, /not in the foreground/],
     ['someone typed after the paste', (d) => { const o = d.paste; d.paste = (id, t) => { o(id, t); setImmediate(() => { d.tabs.get(id).keys = 1; }); }; }, /someone typed/],
-    ['box gone after the paste', (d) => { const o = d.paste; d.paste = (id, t) => { o(id, t); d.tabs.get(id).frames.push({ lines: [...Array(15).fill('a dialog took over'), '❯ 1. Yes'], modes: { bracketedPaste: true } }); }; }, /not in the foreground/],
+    ['box gone after the paste', (d) => { const o = d.paste; d.paste = (id, t) => { o(id, t); d.tabs.get(id).frames.push({ lines: [...Array(15).fill('a dialog took over'), '❯ 1. Yes'], modes: { bracketedPaste: true } }); }; }, /did not show the message/],
+    // The screen became a permission dialog QUOTING a prompt box (a heredoc):
+    // an Enter would answer the dialog. Never sent.
+    ['dialog quoting a box', (d) => { const o = d.paste; d.paste = (id, t) => { o(id, t); d.tabs.get(id).frames.push({ lines: [' Bash command', '   cat <<EOF', rule2, `❯ ${t}`, rule2, 'EOF', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel'], modes: { bracketedPaste: true } }); }; }, /did not show the message/],
+    // Something cleared the prompt (a window closing sends Ctrl+C) and Claude
+    // redrew it empty: the box no longer holds the message. Never sent.
+    ['prompt cleared', (d) => { const o = d.paste; d.paste = (id, t) => { o(id, t); d.tabs.get(id).frames.push({ lines: [rule2, '❯ ', rule2], modes: { bracketedPaste: true } }); }; }, /did not show the message/],
   ];
   for (const [name, setup, why] of cases) {
     const d = fakeDeps();
@@ -420,6 +428,11 @@ function fakeDeps(over = {}) {
   const r = await createOpenTabService(d).open({ projectPath: '/p', message: long, requestId: 'tall' });
   assert.equal(r.body.submitted, true);
   assert.equal(isClaudePromptReady([rule2, '❯ a', ...Array(30).fill('  b'), rule2, '  ? for shortcuts'], { bracketedPaste: true }), true);
+  assert.equal(boxHoldsMessage('[Pasted text #1 +40 lines]', 'x'), true);
+  assert.equal(boxHoldsMessage('hello there', 'hello there\nmore'), true);
+  assert.equal(boxHoldsMessage('', 'hello'), false);
+  assert.equal(boxHoldsMessage(null, 'hello'), false);
+  assert.equal(promptBoxText([rule2, '❯ a', '  b', rule2], { bracketedPaste: true }), 'a\nb');
   ok('Enter withheld unless everything still holds; tall box still sent');
 }
 
