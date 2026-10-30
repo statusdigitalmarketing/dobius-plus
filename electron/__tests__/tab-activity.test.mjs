@@ -1179,3 +1179,47 @@ test('presence reader: an unresolved binding is retried only after a minute', as
   t = 61_000; await read('a', 'k3');
   assert.equal(dirCalls, 2);
 });
+
+test('silence uses the newest output, not the snapshot taken before an await', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => { ts.ingest(ID, 'spinner', 69_500); return { pid: 1, startedAt: 1_000 }; },
+    presenceForTab: async () => null,
+    now: () => 71_000,
+  });
+  const r = await tabActivity(ID);
+  assert.notEqual(r.activity.uncertain, true);
+  assert.equal(ts.activityFor(ID).hookOwned, true, 'the turn was not abandoned');
+});
+
+test('presence busy outranks silence (a suspended claude is not a finished turn)', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),
+    presenceForTab: async () => ({ pid: 1, startedAt: 1_000, status: 'busy', statusUpdatedAt: 9_000 }),
+    now: () => 80_000,
+  });
+  await tabActivity(ID);
+  assert.equal(ts.activityFor(ID).hookOwned, true);
+});
+
+test('a silence-ended turn records no end, so no Waiting is measured from it', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),
+    presenceForTab: async () => null,
+    now: () => 80_000,
+  });
+  await tabActivity(ID);
+  assert.deepEqual([ts.activityFor(ID).hookOwned, ts.activityFor(ID).turnEndedAt], [false, 0]);
+});
+
+test('a huge command line is not parsed on main: ambiguous', async () => {
+  const cmd = `/bin/sh -c sleep ${'xxxxxxxxxxxx '.repeat(10_000)}`;
+  const t0 = Date.now();
+  assert.equal(await claudeChildVerdict(cmd), 'ambiguous');
+  assert.ok(Date.now() - t0 < 200);
+});

@@ -35,6 +35,7 @@ const execFileP = promisify(execFile);
 /** The CLI's own default config dir, used when CLAUDE_CONFIG_DIR is unset. */
 export const defaultConfigDir = () => path.join(os.homedir(), '.claude');
 export const MAX_BINDING_READINGS = 256;
+export const MAX_VERDICT_COMMAND = 4096;
 
 /**
  * Every live Claude process id for the current user.
@@ -270,6 +271,10 @@ export async function isProvenClaudeCommand(command) {
  * @returns {Promise<'claude'|'not-claude'|'ambiguous'>}
  */
 export async function claudeChildVerdict(command) {
+  // classifyClaudeProcess re-scans growing prefixes, so its cost grows with
+  // the square of the command; a claude command line is short. Anything this
+  // long is not parsed on main's thread and makes the shell ambiguous.
+  if (typeof command !== 'string' || command.length > MAX_VERDICT_COMMAND) return 'ambiguous';
   const { kind } = classifyClaudeProcess(command);
   if (kind === 'not-claude' && !isClaudeCommand(command)) return 'not-claude';
   if (kind !== 'claude') return 'ambiguous';

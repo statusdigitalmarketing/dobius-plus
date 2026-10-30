@@ -415,15 +415,21 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
       || now2.since !== raw.since || now2.lastTurnMs !== raw.lastTurnMs || now2.ambiguous !== raw.ambiguous
       || now2.hooklessTurn !== raw.hooklessTurn;
   };
-  const shape = (id, a, extra) => {
+  const shape = (id, a, extra, { presenceBusy = false } = {}) => {
     const activity = { ...a, background: null, ...(a.hooklessTurn ? { uncertain: true } : {}), ...extra };
     // Applied to every reply, after any presence check had its say: a hook
     // Working the PTY has been silent through is over (the TUI repaints about
     // every second while busy, see SILENT_WORKING_MS). Ended in the record
     // too, so later unrelated output (typing, a resize) cannot revive it.
-    if (activity.status === 'working' && activity.hookOwned && Number.isFinite(activity.lastActivityAt)
-        && now() - activity.lastActivityAt >= SILENT_WORKING_MS) {
-      status.abandonTurn(id, a.lastMarkerAt, a.lastActivityAt);
+    // Not when the claude's own presence file says it is busy (the CLI knows
+    // better than silence: a suspended claude is not a finished turn), and
+    // measured against the NEWEST output, not the snapshot's.
+    const lastOut = Math.max(activity.lastActivityAt || 0, status.activityFor(id)?.lastActivityAt || 0);
+    if (!presenceBusy && activity.status === 'working' && activity.hookOwned && lastOut
+        && now() - lastOut >= SILENT_WORKING_MS) {
+      // No end time: silence says the turn is over, not WHEN, so nothing may
+      // be measured from it (a Waiting check keys off a real end).
+      status.abandonTurn(id, a.lastMarkerAt);
       activity.uncertain = true;
     }
     return { id, activity, unread: unreadAnywhere(id) };
@@ -468,11 +474,13 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     const found = await presenceForTab(id, ended ? `e:${a.turnEndedAt}` : `w:${a.lastMarkerAt}`);
     if (moved(id, raw)) return settleOnCurrent(id);
     const j = judgePresence(found, a, info, t);
+    const presenceBusy = !!found && !!info && found.pid === info.pid && found.startedAt === info.startedAt
+      && found.status === 'busy';
     if (j.showAs) {
       // Kept in the record, so losing the presence signal later cannot bring
       // back the state it disproved (an approved dialog as Input again).
       status.adoptHookState(id, a.lastMarkerAt, j.showAs);
-      return shape(id, { ...a, status: j.showAs });
+      return shape(id, { ...a, status: j.showAs }, undefined, { presenceBusy });
     }
     if (j.uncertain) {
       // Kept in the record too, so a later failed read cannot revive what this
@@ -482,7 +490,7 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
       else if (ended) status.markHooklessTurn(id, a.turnEndedAt);
       return shape(id, a, { uncertain: true });
     }
-    return shape(id, a, { background: j.background });
+    return shape(id, a, { background: j.background }, { presenceBusy });
   }
 
   return { tabActivity, checkTurnAgainstProcess };
