@@ -91,6 +91,11 @@ await write('trailing-tool', [
   rec('assistant', 'cli', 'running', now - 5_400_000),
   JSON.stringify({ type: 'user', timestamp: new Date(now - 30).toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'ok' }] } }),
 ]);
+// A pasted image with no words is still the user messaging.
+await write('image-only', [
+  rec('assistant', 'cli', 'what does it look like?', now - 5_500_000),
+  JSON.stringify({ type: 'user', timestamp: new Date(now - 5_000_000).toISOString(), message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }] } }),
+]);
 // 250 bookkeeping records after the last message push it past the 200-record
 // tail; the deeper look must still find it.
 await write('buried', [
@@ -118,7 +123,7 @@ await write('all-blobs', [
 
 const all = await loadAllSessions();
 const ids = (arr) => arr.map((s) => s.sessionId).sort();
-const ALL = ['all-blobs', 'blob-buried', 'buried', 'cli-chat', 'clock-skew', 'messaged-later', 'newest-unmarked', 'no-entrypoint', 'only-meta', 'remote-control', 'resumed-old', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta', 'trailing-tool'];
+const ALL = ['all-blobs', 'blob-buried', 'buried', 'cli-chat', 'clock-skew', 'image-only', 'messaged-later', 'newest-unmarked', 'no-entrypoint', 'only-meta', 'remote-control', 'resumed-old', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta', 'trailing-tool'];
 const byId = (id) => all.find((s) => s.sessionId === id);
 check('timestamp is the last real message, not later metadata', byId('resumed-old')?.timestamp, now - 3_590_000);
 check('activityAt still sees the newest write', byId('resumed-old')?.activityAt, now - 50);
@@ -127,6 +132,7 @@ check('a later message sorts above a later metadata write',
 check('a trailing system record does not move the timestamp', byId('trailing-meta')?.timestamp, now - 8500);
 check('no message at all falls back to the newest record', byId('only-meta')?.timestamp, now - 7_200_000);
 check('a trailing tool result is not a message', byId('trailing-tool')?.timestamp, now - 5_400_000);
+check('an image-only prompt is a message', byId('image-only')?.timestamp, now - 5_000_000);
 check('a message buried past the tail is still found', byId('buried')?.timestamp, now - 4_000_000);
 check('a tail thinned by dropped request blobs still looks deeper', byId('blob-buried')?.timestamp, now - 4_100_000);
 check('a tail of only request blobs still looks deeper', byId('all-blobs')?.timestamp, now - 4_200_000);
@@ -143,7 +149,7 @@ check('default includes everything', ids(all), ALL);
 check('automated flag comes from the newest user/assistant record only',
   Object.fromEntries(all.map((s) => [s.sessionId, s.automated]).sort(([a], [b]) => a.localeCompare(b))),
   {
-    'all-blobs': false, 'blob-buried': false, 'buried': false, 'cli-chat': false, 'clock-skew': false, 'messaged-later': false, 'newest-unmarked': false, 'no-entrypoint': false,
+    'all-blobs': false, 'blob-buried': false, 'buried': false, 'cli-chat': false, 'clock-skew': false, 'image-only': false, 'messaged-later': false, 'newest-unmarked': false, 'no-entrypoint': false,
     'only-meta': false, 'remote-control': false, 'resumed-old': false,
     'sdk-review': true, 'sdk-then-cli': false, 'titled': false, 'trailing-meta': false, 'trailing-tool': false,
   });

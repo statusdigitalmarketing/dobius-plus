@@ -893,13 +893,17 @@ function userEntryText(entry) {
 }
 
 // When a record counts as someone MESSAGING (History's sort key): a Claude
-// reply, or a prompt with typed text. `role` is the caller's, already cleared
-// for system-injected rows. isMeta rows (hook output, caveats) and tool
-// results (no text: a tool finishing is not a message) do not count.
+// reply, or a prompt with typed text or a pasted image. `role` is the
+// caller's, already cleared for system-injected rows. isMeta rows (hook
+// output, caveats) and tool results (a tool finishing is not a message) do
+// not count. "[Request interrupted by user]" does: the user acted then.
 function messageStamp(entry, role, text, tsMs) {
   if (!tsMs || entry.isMeta === true) return 0;
-  if (role === 'assistant' || (role === 'user' && text)) return tsMs;
-  return 0;
+  if (role === 'assistant') return tsMs;
+  if (role !== 'user') return 0;
+  const content = entry.message?.content;
+  const image = Array.isArray(content) && content.some((b) => b?.type === 'image');
+  return text || image ? tsMs : 0;
 }
 
 function isSyntheticUserText(text) {
