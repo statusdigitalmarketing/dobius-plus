@@ -95,6 +95,8 @@ function fakeDeps(over = {}) {
     outputSeq: (id) => tabs.get(id)?.seq || 0,
     claudeRunning: async (id) => !!tabs.get(id)?.claude,
     shellForeground: async (id) => !tabs.get(id)?.claude && !tabs.get(id)?.otherProgram,
+    shellInProject: async (id) => !tabs.get(id)?.cdAway,
+    inputQuietMs: (id) => tabs.get(id)?.inputQuiet ?? Infinity,
     // "Claude" draws its prompt a few polls after the launch is typed.
     typeLaunch: (id) => {
       log.push(['launch', id]);
@@ -310,6 +312,15 @@ function fakeDeps(over = {}) {
   assert.equal(d.log.filter((e) => e[0] === 'open').length, 1);
   assert.equal(a.status, 500);
   assert.deepEqual(b, a);
+  // ...also when the failed request's tab is alive (a trust question is
+  // waiting): the duplicate reports the failure, not a success.
+  const d2 = fakeDeps({ typeLaunch: () => {} });
+  const svc2 = createOpenTabService(d2, { readyTimeoutMs: 2000 });
+  const body2 = { projectPath: '/p', message: 'go', requestId: 'trust' };
+  const [c, e] = await Promise.all([svc2.open(body2), svc2.open(body2)]);
+  assert.equal(c.status, 504);
+  assert.deepEqual(e, c);
+  assert.equal(d2.log.filter((x) => x[0] === 'open').length, 1);
   ok('concurrent duplicate shares a failure, no second tab');
 }
 
@@ -323,6 +334,33 @@ function fakeDeps(over = {}) {
   assert.equal(r.status, 504);
   assert.equal(d.log.filter((e) => e[0] === 'launch' || e[0] === 'paste').length, 0);
   ok('no launch typed into a foreground program that is not the shell');
+}
+
+{
+  // A login script cd'd the shell away from the project: no launch.
+  const d = fakeDeps();
+  const orig = d.openTab;
+  d.openTab = async (p) => { const r = await orig(p); d.tabs.get(r.tabId).cdAway = true; return r; };
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'cd' });
+  assert.equal(r.status, 500);
+  assert.match(r.body.error, /not in the project folder/);
+  assert.equal(d.log.filter((e) => e[0] === 'launch' || e[0] === 'paste').length, 0);
+  ok('shell outside the project: nothing typed');
+}
+
+{
+  // The person is typing in the tab (their Enter may still be coming): wait.
+  const d = fakeDeps();
+  const orig = d.openTab;
+  d.openTab = async (p) => { const r = await orig(p); d.tabs.get(r.tabId).inputQuiet = 5; return r; };
+  const r = await createOpenTabService(d, { readyTimeoutMs: 20000 }).open({ projectPath: '/p', message: 'go', requestId: 'typing' });
+  assert.equal(r.status, 504);
+  assert.equal(d.log.filter((e) => e[0] === 'paste').length, 0);
+  // Same tab once the typing stopped: pasted.
+  const d2 = fakeDeps();
+  const r2 = await createOpenTabService(d2, { readyTimeoutMs: 20000 }).open({ projectPath: '/p', message: 'go', requestId: 'typing' });
+  assert.equal(r2.status, 200);
+  ok('no paste while someone is typing in the tab');
 }
 
 {

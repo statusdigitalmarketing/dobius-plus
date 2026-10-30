@@ -23,6 +23,9 @@ export const MAX_REMEMBERED_REQUESTS = 500;
 export const MAX_OPENS_IN_FLIGHT = 4;
 
 export const READY_TIMEOUT_MS = 60_000;
+// No keys typed into the tab for this long before the paste: a person typing
+// in the tab (whose Enter could still be on its way) goes first.
+export const INPUT_QUIET_MS = 1000;
 const READY_POLL_MS = 250;
 // Shell readiness: some output, then this many quiet polls in a row.
 const SHELL_QUIET_POLLS = 3;
@@ -125,6 +128,8 @@ export function isClaudePromptReady(lines, modes) {
  *   outputSeq(tabId) -> number        count of output chunks so far
  *   claudeRunning(tabId) -> Promise<boolean>  claude is the FOREGROUND process of the tab's terminal
  *   shellForeground(tabId) -> Promise<boolean>  the shell itself owns the terminal (no job running)
+ *   shellInProject(tabId, path) -> Promise<boolean>  the shell's cwd is the project folder now
+ *   inputQuietMs(tabId) -> number     ms since anything last typed into the tab
  *   typeLaunch(tabId) -> void         type `claude` + Enter at the shell prompt
  *   watchOutput(tabId) -> { mark(), seq(), screen(): Promise<{ lines, modes } | null>, stop() }
  *                                     the tab's output from now on, emulated; mark()
@@ -185,7 +190,7 @@ export function createOpenTabService(deps, opts = {}) {
       // and the shell redrawing, a dialog opening) sends us round again. The
       // caller pastes in the same tick as this return: no output or exit can
       // be processed in between.
-      if (hits >= 2 && watch.seq() === seqAtRead && deps.ptyOf(tabId) === pty) return 'ready';
+      if (hits >= 2 && watch.seq() === seqAtRead && deps.ptyOf(tabId) === pty && deps.inputQuietMs(tabId) >= INPUT_QUIET_MS) return 'ready';
       if (watch.seq() !== seqAtRead) hits = Math.min(hits, 1);
       await deps.sleep(READY_POLL_MS);
     }
@@ -215,7 +220,10 @@ export function createOpenTabService(deps, opts = {}) {
       // Only the shell may receive `claude` + Enter: a program a login script
       // started (Codex, say) would take it as input.
       const shellOwns = !already && (await deps.shellForeground(tabId));
+      // And Claude must start IN the project: a login script may `cd` away.
+      const inProject = shellOwns && (await deps.shellInProject(tabId, resolved.path));
       if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: false, status: 409, tabId, error: 'the tab was closed or its shell was replaced before Claude could start; nothing was typed' };
+      if (shellOwns && !inProject) return { ok: false, status: 500, tabId, error: 'the tab\'s shell is not in the project folder (a login script changed directory); nothing was typed' };
       if (shellOwns) {
         watch.mark();
         deps.typeLaunch(tabId);
@@ -253,14 +261,15 @@ export function createOpenTabService(deps, opts = {}) {
       // window or shell must not turn one click into two tabs.
       const concurrent = !prior.settled;
       const first = await prior.promise;
+      if (concurrent && !first.ok) {
+        const { status, ...body } = first;
+        return { status, body };
+      }
       if (first.tabId && deps.tabAlive(first.tabId)) {
         deps.focusTab(first.tabId);
         return { status: 200, body: { ok: true, tabId: first.tabId, existing: true } };
       }
-      if (concurrent) {
-        const { status, ...body } = first;
-        return { status: first.ok ? 200 : status, body };
-      }
+      if (concurrent) return { status: 200, body: { ok: true, tabId: first.tabId, existing: true } };
       // A later click whose tab is gone (closed since): open a new one.
       if (requests.get(requestId) === prior) requests.delete(requestId);
       return open(rawBody);

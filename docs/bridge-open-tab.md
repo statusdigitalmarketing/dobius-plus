@@ -47,12 +47,13 @@ It is typed as ONE bracketed paste, which Claude treats as pasted text, never as
 1. Validates the body and the folder.
 2. Opens the project's window if it is not open, otherwise uses its first window, and brings it to the front.
 3. Asks that window for a new tab (exactly like Cmd+T) and shows it. The tab's shell is spawned by the window like every other tab, with the active Claude account's environment and the project folder as its working directory.
-4. Waits for the shell prompt (output, then a short quiet), then types `claude` and Enter, as a person would. No flags are added, so Claude runs with your normal settings and still asks before changing anything. `claude` is typed only while the shell itself owns the terminal: if Claude already runs there, or a login script started another program (Codex, say), nothing is typed.
+4. Waits for the shell prompt (output, then a short quiet), then types `claude` and Enter, as a person would. No flags are added, so Claude runs with your normal settings and still asks before changing anything. `claude` is typed only while the shell itself owns the terminal and sits in the project folder: if Claude already runs there, a login script started another program (Codex, say) or `exec`'d one, nothing is typed; if a login script changed directory, the call fails (`500`) without typing.
 5. Waits until Claude is ready. Three things must hold on two checks in a row (polled every 250ms, for up to 60 seconds):
    - the output the tab produced AFTER `claude` was typed, replayed through the headless terminal emulator, shows Claude's prompt box (a rule, the `❯` row, a closing rule) within the bottom 12 rows of what is drawn. Anything the shell printed before the launch (a banner, a file shown at login) is ignored;
    - the program turned bracketed paste on;
-   - a `claude` process is the FOREGROUND process of the tab's terminal, recognised by its command line with the strict test (`classifyClaudeProcess`: the executed program must be claude, so `node other.js /path/to/claude` does not count). A shell at its prompt, a suspended or background claude, or anything else fails closed;
-   - no output arrived between reading the screen and the process check (Claude exiting and the shell redrawing would show up there).
+   - a `claude` process is the FOREGROUND process of the tab's terminal, recognised by the executable the system actually ran: a claude entrypoint that exists on disk, or node/bun/deno running one (so `node other.js /path/to/claude`, or a program in a folder named `claude tools`, does not count). A shell at its prompt, a suspended or background claude, or anything else fails closed;
+   - no output arrived between reading the screen and the process check (Claude exiting and the shell redrawing would show up there);
+   - nothing was typed into the tab for the last second (if you are typing in it, your keys go first).
    A trust question, a login screen or a permission prompt does not count as ready.
 6. Pastes the message in the same tick as that last check, so nothing can change in between, unless a Chat message is being sent into the tab at that moment (then `409`). No Enter.
 

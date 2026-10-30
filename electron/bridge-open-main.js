@@ -13,8 +13,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
-import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals } from './terminal-manager.js';
-import { classifyClaudeProcess } from './claude-argv.js';
+import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, terminalInputAgeMs } from './terminal-manager.js';
+import { classifyClaudeProcess, isClaudeEntrypoint } from './claude-argv.js';
 import { submitPending } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
@@ -34,6 +34,34 @@ function isTabOfProject(tabId, projectPath) {
   if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return false;
   const head = `term-${projectPath}`;
   return tabId.startsWith(head) && /^(?:~w-[a-z0-9]{8})?-\d+$/.test(tabId.slice(head.length));
+}
+
+const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh']);
+const INTERPRETERS = new Set(['node', 'bun', 'deno']);
+
+const psField = async (pid, field) => (await execFileP('/bin/ps', ['-o', `${field}=`, '-p', String(pid)], { timeout: 1000, encoding: 'utf8' })).stdout.trim();
+
+function isExecutableFile(f) {
+  try {
+    const st = fs.statSync(f);
+    return st.isFile() && (st.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+// Is this process REALLY claude? Judged on the executable the kernel ran
+// (`comm`, the full path when it is the only column), not only on the
+// command line, which splits at spaces: `/tmp/claude tools/zsh` reads as
+// `/tmp/claude` to every argv parser. Either the executable itself is a
+// claude entrypoint that exists, or it is node/bun/deno running a claude
+// entrypoint (the npm install, and the ship-test stand-in) that exists.
+async function isClaudeProcess(pid) {
+  const comm = await psField(pid, 'comm');
+  if (comm.startsWith('/') && isClaudeEntrypoint(comm)) return isExecutableFile(comm);
+  if (!INTERPRETERS.has(comm.split('/').pop())) return false;
+  const { kind, token } = classifyClaudeProcess(await psField(pid, 'command'));
+  return kind === 'claude' && typeof token === 'string' && token.startsWith('/') && fs.statSync(token, { throwIfNoEntry: false })?.isFile() === true;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -127,6 +155,20 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     if (!(await waitFor(() => wc.isDestroyed() || windowReady(wc), WINDOW_READY_MS)) || wc.isDestroyed()) {
       return { error: 'the project window did not finish loading' };
     }
+    // A reload while we wait restarts the page's tab counter, so a tab the
+    // person opens next could reuse the id we were given. Any reload from
+    // here until the PTY exists fails the open.
+    let reloaded = false;
+    const onReload = () => { reloaded = true; };
+    wc.on('did-start-loading', onReload);
+    try {
+      return await addTabAndWait(wc, projectPath, () => reloaded);
+    } finally {
+      if (!wc.isDestroyed()) wc.removeListener('did-start-loading', onReload);
+    }
+  }
+
+  async function addTabAndWait(wc, projectPath, reloaded) {
     const nonce = crypto.randomBytes(16).toString('hex');
     const tabId = await new Promise((resolve) => {
       const done = (id) => { clearTimeout(timer); pending.delete(nonce); resolve(id); };
@@ -134,14 +176,16 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       pending.set(nonce, { wcId: wc.id, projectPath, done });
       // The window drops a request it receives after main stopped waiting
       // (a stalled renderer), so a late one cannot leave an orphan tab.
-      wc.send('bridge:openTab', { nonce, expiresAt: Date.now() + TAB_ADD_MS });
+      // (2s margin: an answer sent right at the deadline would still be
+      // in flight when main gives up.)
+      wc.send('bridge:openTab', { nonce, expiresAt: Date.now() + TAB_ADD_MS - 2000 });
     });
     if (!tabId) return { error: 'the project window did not add the tab' };
     // The tab's pane spawns the PTY via terminal:create; wait until it is
     // this window's.
-    if (!(await waitFor(() => !!terminalInstance(tabId) && ownerOf(tabId) === wc.id, PTY_START_MS))) {
-      return { error: 'the new tab\'s terminal did not start', tabId };
-    }
+    const started = await waitFor(() => reloaded() || (!!terminalInstance(tabId) && ownerOf(tabId) === wc.id), PTY_START_MS);
+    if (reloaded()) return { error: 'the project window reloaded while the tab was opening' };
+    if (!started) return { error: 'the new tab\'s terminal did not start', tabId };
     // The shell must have started IN the project (createTerminal falls back
     // to home for a folder that vanished).
     if (listTerminals().find((t) => t.id === tabId)?.cwd !== projectPath) {
@@ -189,26 +233,40 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     const info = await getTerminalClaudeInfo(tabId);
     if (!info?.pid) return false;
     try {
-      const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=,command=', '-p', String(info.pid)], { timeout: 1000, encoding: 'utf8' });
-      const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/s);
+      const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=', '-p', String(info.pid)], { timeout: 1000, encoding: 'utf8' });
+      const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
       if (!m) return false;
-      const [, pgid, tpgid, stat, command] = m;
-      return pgid === tpgid && !stat.startsWith('T') && classifyClaudeProcess(command).kind === 'claude';
+      const [, pgid, tpgid, stat] = m;
+      return pgid === tpgid && !stat.startsWith('T') && (await isClaudeProcess(info.pid));
     } catch {
       return false;
     }
   }
 
-  // The shell itself owns the terminal: no job (Codex started by a login
-  // script, an `exec`'d program, a pager) is in the foreground, so a typed
-  // `claude` reaches the shell and nothing else.
+  // The shell itself owns the terminal: the PTY's process is still a shell
+  // (a login script's `exec claude` replaces it in place, same pid) and no
+  // job (Codex started by a login script, a pager) is in the foreground, so
+  // a typed `claude` reaches the shell and nothing else.
   async function shellForeground(tabId) {
     const pid = terminalInstance(tabId)?.pid;
     if (!Number.isInteger(pid) || pid <= 0) return false;
     try {
-      const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
-      const [pgid, tpgid] = stdout.trim().split(/\s+/);
-      return !!pgid && pgid === tpgid;
+      const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,comm=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
+      const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+      if (!m) return false;
+      const name = m[3].split('/').pop().replace(/^-/, '');
+      return m[1] === m[2] && SHELLS.has(name);
+    } catch {
+      return false;
+    }
+  }
+
+  // The shell is in the project folder NOW (a login script can `cd`
+  // elsewhere after the spawn), so Claude starts in the project.
+  async function shellInProject(tabId, projectPath) {
+    try {
+      const cwd = await getTerminalCwd(tabId);
+      return !!cwd && (await fs.promises.realpath(cwd)) === (await fs.promises.realpath(projectPath));
     } catch {
       return false;
     }
@@ -217,6 +275,8 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   return {
     resolveProject,
     shellForeground,
+    shellInProject,
+    inputQuietMs: (tabId) => terminalInputAgeMs(tabId),
     openTab,
     focusTab,
     watchOutput,
