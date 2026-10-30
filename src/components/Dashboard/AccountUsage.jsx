@@ -71,7 +71,13 @@ export default function AccountUsage() {
     // Windows expire on a clock, not on a file change, so a reading can go
     // stale with nothing on disk moving. Re-read on a timer as well.
     const t = setInterval(load, 30000);
-    return () => { mounted.current = false; clearInterval(t); };
+    // The model-line switch in Settings shares this status line.
+    window.addEventListener('dobius:statusline-changed', load);
+    return () => {
+      mounted.current = false;
+      clearInterval(t);
+      window.removeEventListener('dobius:statusline-changed', load);
+    };
   }, [load]);
 
   const enable = async () => {

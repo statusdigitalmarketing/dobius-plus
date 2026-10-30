@@ -112,8 +112,8 @@ export default function Settings() {
       else r = null;
     }
     if (r?.error) setModelLineError(r.error);
-    const st = await window.electronAPI?.modelLineGetStatus?.();
-    if (st) setModelLine(st);
+    // Account usage shares the status line; this also refreshes the switch here.
+    window.dispatchEvent(new Event('dobius:statusline-changed'));
     setModelLineBusy(false);
   }, []);
 
