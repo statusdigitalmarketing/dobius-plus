@@ -114,7 +114,11 @@ export function ingest(id, data, now = Date.now()) {
     if (st.status !== 'needs' && !st.hookOwned && !recentlyDone) st.status = 'working';
     st.tail = combined.slice(-TAIL_KEEP);
   }
-  if (st.status === 'working' && prev !== 'working') st.workingSince = now;
+  if (st.status === 'working' && prev !== 'working') {
+    st.workingSince = now;
+    // A new plain stretch is new evidence; an old verdict was about another.
+    if (!st.turnStartedAt) st.turnStartDistrusted = false;
+  }
   return st.status;
 }
 

@@ -514,3 +514,13 @@ test('presence reader: a cached answer is dropped for a different claude than th
   assert.equal(await read('a', END, proc), 'shells');
   assert.equal(await read('a', END, { pid: 777, startedAt: proc.startedAt + 20_000 }), null);
 });
+
+test('a distrusted plain stretch does not hide the next one', () => {
+  ts._reset();
+  ts.ingest(ID, 'out', 42_000);
+  ts.distrustTurnStart(ID, 42_000);
+  assert.equal(ts.activityFor(ID).since, null);
+  ts.settle(50_000);
+  ts.ingest(ID, 'build', 60_000);
+  assert.equal(ts.activityFor(ID).since, 60_000);
+});
