@@ -29,7 +29,12 @@ const DONE_GUARD_MS = 800;      // after a hook 'done', ignore its own trailing 
 const TAIL_KEEP = 64;           // bytes retained to catch a marker split across chunks
 const MAX_RECENT_EXITS = 50;
 
-// id -> { status, lastActivityAt, hookOwned, doneAt, tail }
+// id -> { status, lastActivityAt, hookOwned, doneAt, tail, workingSince,
+//        turnStartedAt, lastTurnMs, turnEndedAt }
+// A TURN runs from the hook's first 'working' marker to its 'done' marker
+// ('needs' in between is part of the same turn). workingSince is the start of
+// the current non-hook output stretch (a plain shell build). Both live here,
+// keyed by PTY id, so they survive a tab switch, a tear-off and a reload.
 const live = new Map();
 // bounded FIFO of { id, cwd, project, exitCode, signal, status, at }
 const recentExits = [];
@@ -51,7 +56,14 @@ function projectFromId(id, cwd) {
 export function ingest(id, data, now = Date.now()) {
   if (!id || typeof data !== 'string') return null;
   let st = live.get(id);
-  if (!st) { st = { status: 'working', lastActivityAt: now, hookOwned: false, doneAt: 0, tail: '' }; live.set(id, st); }
+  if (!st) {
+    st = {
+      status: 'working', lastActivityAt: now, hookOwned: false, doneAt: 0, tail: '',
+      workingSince: now, turnStartedAt: 0, lastTurnMs: 0, turnEndedAt: 0,
+    };
+    live.set(id, st);
+  }
+  const prev = st.status;
   st.lastActivityAt = now;
 
   const combined = st.tail + data;
@@ -66,6 +78,13 @@ export function ingest(id, data, now = Date.now()) {
     st.status = state;
     st.hookOwned = state !== 'done'; // working/needs own; done releases
     st.doneAt = state === 'done' ? now : 0; // stamp so trailing bytes don't clobber green
+    if (state === 'done') {
+      if (st.turnStartedAt) st.lastTurnMs = Math.max(0, now - st.turnStartedAt);
+      st.turnStartedAt = 0;
+      st.turnEndedAt = now;
+    } else if (!st.turnStartedAt) {
+      st.turnStartedAt = now;
+    }
     // Keep only what follows the processed marker so it is not re-matched.
     st.tail = combined.slice(lastMatch.index + lastMatch[0].length).slice(-TAIL_KEEP);
   } else {
@@ -78,6 +97,7 @@ export function ingest(id, data, now = Date.now()) {
     if (st.status !== 'needs' && !st.hookOwned && !recentlyDone) st.status = 'working';
     st.tail = combined.slice(-TAIL_KEEP);
   }
+  if (st.status === 'working' && prev !== 'working') st.workingSince = now;
   return st.status;
 }
 
@@ -109,6 +129,26 @@ export function noteExit(id, info = {}, now = Date.now()) {
   });
   while (recentExits.length > MAX_RECENT_EXITS) recentExits.shift();
   live.delete(id);
+}
+
+/**
+ * Timing for one live terminal's sidebar label. `since` is when the current
+ * working stretch began: the hook turn's start while a turn runs (a 'needs'
+ * inside the turn keeps it), else the plain-output stretch's. `lastTurnMs` and
+ * `turnEndedAt` describe the last turn the hook finished (0 when none, which
+ * also means no hook has ever reported for this PTY).
+ */
+export function activityFor(id) {
+  const st = live.get(id);
+  if (!st) return null;
+  const inStretch = st.status === 'working' || st.status === 'needs';
+  return {
+    status: st.status,
+    hookOwned: st.hookOwned,
+    since: inStretch ? (st.turnStartedAt || (st.status === 'working' ? st.workingSince : 0) || null) : null,
+    lastTurnMs: st.lastTurnMs || 0,
+    turnEndedAt: st.turnEndedAt || 0,
+  };
 }
 
 /** Current status for one live terminal, or null. */

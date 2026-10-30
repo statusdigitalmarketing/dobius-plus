@@ -25,7 +25,8 @@ import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-a
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
-import { scanClaudeProcesses } from './claude-process-scan.js';
+import { scanClaudeProcesses, configDirOfPid } from './claude-process-scan.js';
+import { createPresenceReader, GRACE_MS as PRESENCE_GRACE_MS } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
@@ -227,6 +228,40 @@ const tearOffGrants = new Map();
 // closure per tab: 11 tabs at boot tripped MaxListeners on the window's
 // WebContents and the list grew with tab churn for the life of the window.
 const ownerCleanup = createOwnerCleanup(terminalOwners);
+
+// Sidebar tab activity (Working / Input / Waiting / Done labels). Unread ids
+// mirrored from each window, keyed by webContents.id.
+const unreadByWindow = new Map();
+const backgroundForTab = createPresenceReader({ claudeInfo: getTerminalClaudeInfo, configDirOf: configDirOfPid });
+
+/**
+ * Add `activity` (main's hook status + turn timing, and background work once a
+ * turn has ended) and `unread` to each LIVE row of the cross-window tab list.
+ * Rows that are not live get neither: a closed tab can only show its age.
+ */
+async function withTabActivity(groups, liveTabIds) {
+  const now = Date.now();
+  const rows = (Array.isArray(groups) ? groups : []).flatMap((g) => g.tabs || []);
+  await Promise.all(rows.map(async (row) => {
+    if (!row?.id || !liveTabIds.has(row.id)) return;
+    const a = terminalStatus.activityFor(row.id);
+    if (!a) return;
+    let background = null;
+    // Only after the HOOK ended a turn, so a session with hooks off (or a plain
+    // shell) never gets a Waiting it cannot prove.
+    // A hook-owned 'working' is a new turn (Working wins anyway); plain output
+    // after the turn (typing at the prompt) still asks.
+    if (a.turnEndedAt && a.status !== 'needs' && !(a.status === 'working' && a.hookOwned)
+        && now - a.turnEndedAt >= PRESENCE_GRACE_MS) {
+      background = await backgroundForTab(row.id);
+    }
+    row.activity = { ...a, background };
+    for (const [wcId, ids] of unreadByWindow) {
+      if (ids.has(row.id) && ownsTerminal(wcId, row.id)) { row.unread = true; break; }
+    }
+  }));
+  return groups;
+}
 
 // Settle tick for the main-process terminal status authority (v1.0.43).
 let statusSettleTimer = null;
@@ -472,7 +507,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
   ipcMain.handle('data:listProjects', () => listProjects());
   ipcMain.handle('data:loadAllSessions', (_event, projectFilter, opts) => loadAllSessions(typeof projectFilter === 'string' ? projectFilter : undefined, (opts && typeof opts === 'object') ? opts : {}));
-  ipcMain.handle('data:getAllProjectTabs', () => {
+  ipcMain.handle('data:getAllProjectTabs', async () => {
     // Feed live-PTY ids (so the sidebar can tell a still-running cross-window tab
     // from a resumable one, H3) and open tear-off windows (so their torn tab,
     // which is stripped from the primary's persisted tabs, still appears, M4).
@@ -493,7 +528,20 @@ function setupDataHandlers() {
       }
       return [w];
     });
-    return getAllProjectTabs({ liveTabIds, tearOffTabs });
+    const groups = await getAllProjectTabs({ liveTabIds, tearOffTabs });
+    return withTabActivity(groups, liveTabIds);
+  });
+  // Each window mirrors its unread tab ids here (the renderer's unreadTabs is
+  // the only unread system; this copy only lets OTHER windows' sidebars show
+  // "Done" for them). Counted only while the reporter still owns the PTY, so
+  // a tab moved by a tear-off or dock never keeps a stale mark.
+  ipcMain.on('tabs:reportUnread', (event, ids) => {
+    const wcId = event.sender.id;
+    const list = Array.isArray(ids)
+      ? ids.filter((id) => typeof id === 'string' && id.length <= 4096).slice(0, 1000)
+      : [];
+    if (!unreadByWindow.has(wcId)) event.sender.once('destroyed', () => unreadByWindow.delete(wcId));
+    unreadByWindow.set(wcId, new Set(list));
   });
   // Focus the window that currently owns a live tab (a tear-off window if the id
   // is torn off, otherwise the project's primary window). Lets the sidebar reveal

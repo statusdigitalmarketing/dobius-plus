@@ -236,6 +236,21 @@ async function inspect(pid) {
   return { pid, command, classify: 'claude', state: 'explicit', configDir: real[0] };
 }
 
+/**
+ * The config dir ONE known Claude process reads, or null when it cannot be
+ * proven (same rules as the scan: an unreadable or ambiguous binding is never
+ * guessed to be the default). Read-only.
+ * @param {number} pid
+ * @returns {Promise<string|null>}
+ */
+export async function configDirOfPid(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const r = await inspect(pid);
+  if (r.classify !== 'claude') return null;
+  if (r.state === 'default') return defaultConfigDir();
+  return r.state === 'explicit' ? r.configDir : null;
+}
+
 async function mapLimit(items, limit, fn) {
   const out = [];
   let i = 0;

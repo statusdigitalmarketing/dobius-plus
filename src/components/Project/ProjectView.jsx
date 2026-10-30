@@ -513,6 +513,12 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     };
   }, [activeView, activeTabId, splitTabId, gridSlots, tabs, unreadTabs]);
 
+  // Mirror the unread ids to main so the Tabs sidebar in OTHER windows can
+  // show "Done" for this window's tabs (main keeps only this copy).
+  useEffect(() => {
+    window.electronAPI?.tabsReportUnread?.(Object.keys(unreadTabs));
+  }, [unreadTabs]);
+
   // Defensive guard: paneStyleFor renders splitTabId on the right and
   // activeTabId on the left. If those collide (Cmd+number activated the
   // split tab, programmatic activeTab change, etc.), the left half goes
