@@ -89,3 +89,28 @@ test('a window opened FOR a request is told so, once, so its first tab is the re
   assert.equal(env.invoke('window:openedForBridge', wc), false);
   assert.deepEqual(env.openedWindows, ['/p/fresh']);
 });
+
+test('a window answering with another project\'s tab id is refused, prefix lookalikes included', async () => {
+  windowReady = () => true;
+  // The page names a tab of /p/ab-1 (or of /p/a, or a phone tab) for a /p/ab request.
+  for (const wrong of ['term-/p/ab-1-7', 'term-/p/a-7', 'term-mobile-1700000000000', 'not-a-tab']) {
+    const wc = env.fakeWebContents((ch, req) => {
+      if (ch === 'bridge:openTab') setTimeout(() => env.emit('bridge:tabOpened', wc, req.nonce, wrong), 0);
+    });
+    env.addWindow('/p/ab', wc);
+    const r = await deps.openTab('/p/ab');
+    assert.deepEqual(r, { error: 'the project window did not add the tab' }, wrong);
+  }
+  // Its own tab, from its first or an extra window, is taken.
+  for (const right of ['term-/p/ab-3', 'term-/p/ab~w-abcd1234-2']) {
+    const wc = env.fakeWebContents((ch, req) => {
+      if (ch !== 'bridge:openTab') return;
+      setTimeout(() => {
+        env.emit('bridge:tabOpened', wc, req.nonce, right);
+        env.terminals.set(right, { pid: 1, cwd: '/p/ab', wcId: wc.id });
+      }, 0);
+    });
+    env.addWindow('/p/ab', wc);
+    assert.equal((await deps.openTab('/p/ab')).tabId, right);
+  }
+});

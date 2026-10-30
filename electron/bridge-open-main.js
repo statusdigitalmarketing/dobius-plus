@@ -20,8 +20,8 @@ import { isKeyboardInput, isUserInput } from './bridge-open-tab.js';
 import { submitPending } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
+import { parseTabId } from './tab-id-util.js';
 
-const TERMINAL_ID_RE = /^term-.+-\d+$/;
 const WINDOW_READY_MS = 15_000;
 const TAB_ADD_MS = 10_000;
 const PTY_START_MS = 15_000;
@@ -29,14 +29,11 @@ const PTY_START_MS = 15_000;
 const WATCH_CAP_CHARS = 262_144;
 const execFileP = promisify(execFile);
 
-// `term-<project>-<n>`, or `term-<project>~w-<8>-<n>` from an extra window.
-// Matched against the KNOWN project rather than parsed, so a folder whose
-// own name contains `~w-` is not misread as a window key.
-function isTabOfProject(tabId, projectPath) {
-  if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return false;
-  const head = `term-${projectPath}`;
-  return tabId.startsWith(head) && /^(?:~w-[a-z0-9]{8})?-\d+$/.test(tabId.slice(head.length));
-}
+// `term-<project>-<n>`, or `term-<project>~w-<8>-<n>` from an extra window,
+// parsed by the one tab-id parser. A whole-path match, so `/a/b`'s request
+// never takes `/a/b-1`'s tab. (A folder whose own name ends in `~w-` plus 8
+// characters parses as an extra window of its parent and is refused: safe.)
+const isTabOfProject = (tabId, projectPath) => parseTabId(tabId)?.projectPath === projectPath;
 
 // Writes made by /openTab itself, so they are not counted as a person's.
 let ownWrite = false;
