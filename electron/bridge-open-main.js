@@ -13,7 +13,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
-import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
+import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint } from './claude-argv.js';
 import { isKeyboardInput, CLAUDE_SCRIPT_RE } from './bridge-open-tab.js';
 import { submitPending } from './chat-service.js';
@@ -74,6 +74,16 @@ async function isClaudeProcess(pid) {
   // The command line splits at spaces (`node "/tmp/claude tools/x.js"` reads
   // as `/tmp/claude`), so the token must RESOLVE to Claude's own script.
   try { return CLAUDE_SCRIPT_RE.test(fs.realpathSync(token)) && fs.statSync(token).isFile(); } catch { return false; }
+}
+
+async function childPids(pid) {
+  try {
+    const { stdout } = await execFileP('/usr/bin/pgrep', ['-P', String(pid)], { timeout: 1000, encoding: 'utf8' });
+    return stdout.split('\n').map((l) => Number(l.trim())).filter((n) => Number.isInteger(n) && n > 0);
+  } catch (err) {
+    if (err?.code === 1) return []; // pgrep: no children
+    throw err;
+  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -143,29 +153,31 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // A PERSON's keyboard writes into each tab we opened, counted from the
   // moment the window names the tab (before its PTY exists), so keys typed
   // while it starts are never missed. tabId -> { n, off }
+  // One counter PER REQUEST (a reused tab id after a crash must not share or
+  // cancel another request's counter). tabId -> Set of { n }
   const keyCounters = new Map();
   function countKeys(tabId) {
-    let c = keyCounters.get(tabId);
-    if (c) return c;
-    c = { n: 0, off: null };
-    c.off = addInputObserver((id, data) => {
-      if (id === tabId && !ownWrite && isKeyboardInput(data)) c.n += 1;
-    });
-    keyCounters.set(tabId, c);
+    const c = { n: 0, tabId };
+    if (!keyCounters.has(tabId)) keyCounters.set(tabId, new Set());
+    keyCounters.get(tabId).add(c);
     return c;
   }
+  function stopCounting(c) {
+    const set = c && keyCounters.get(c.tabId);
+    if (!set) return;
+    set.delete(c);
+    if (!set.size) keyCounters.delete(c.tabId);
+  }
+  const bump = (id, data) => {
+    const set = typeof id === 'string' ? keyCounters.get(id) : null;
+    if (set && isKeyboardInput(data)) for (const c of set) c.n += 1;
+  };
+  addInputObserver((id, data) => { if (!ownWrite) bump(id, data); });
   // Keys a window sends for a tab whose PTY does not exist yet are dropped by
   // terminal:write, so the observer above never sees them; a person typed
   // all the same, and their Enter may follow once the shell is up. Count
   // them here too.
-  ipcMain.on('terminal:write', (_event, id, data) => {
-    const c = typeof id === 'string' ? keyCounters.get(id) : null;
-    if (c && isKeyboardInput(data)) c.n += 1;
-  });
-  function stopCounting(tabId) {
-    const c = keyCounters.get(tabId);
-    if (c) { c.off(); keyCounters.delete(tabId); }
-  }
+  ipcMain.on('terminal:write', (_event, id, data) => bump(id, data));
 
   ipcMain.on('bridge:tabOpened', (event, nonce, tabId) => {
     const p = typeof nonce === 'string' ? pending.get(nonce) : null;
@@ -177,7 +189,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       p.done(null);
       return;
     }
-    countKeys(tabId);
+    p.counter = countKeys(tabId);
     p.done(tabId);
   });
 
@@ -209,10 +221,12 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
 
   async function addTabAndWait(wc, projectPath, reloaded) {
     const nonce = crypto.randomBytes(16).toString('hex');
+    const entry = { wcId: wc.id, projectPath, done: null, counter: null };
     const tabId = await new Promise((resolve) => {
       const done = (id) => { clearTimeout(timer); pending.delete(nonce); resolve(id); };
       const timer = setTimeout(() => done(null), TAB_ADD_MS);
-      pending.set(nonce, { wcId: wc.id, projectPath, done });
+      entry.done = done;
+      pending.set(nonce, entry);
       // The window drops a request it receives after main stopped waiting
       // (a stalled renderer), so a late one cannot leave an orphan tab.
       // (2s margin: an answer sent right at the deadline would still be
@@ -222,16 +236,17 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     if (!tabId) return { error: 'the project window did not add the tab' };
     // The tab's pane spawns the PTY via terminal:create; wait until it is
     // this window's.
-    const started = await waitFor(() => reloaded() || (!!terminalInstance(tabId) && ownerOf(tabId) === wc.id), PTY_START_MS);
-    if (reloaded()) { stopCounting(tabId); return { error: 'the project window reloaded while the tab was opening' }; }
-    if (!started) { stopCounting(tabId); return { error: 'the new tab\'s terminal did not start', tabId }; }
+    const { counter } = entry;
+    const started = await waitFor(() => reloaded() || wc.isDestroyed() || (!!terminalInstance(tabId) && ownerOf(tabId) === wc.id), PTY_START_MS);
+    if (reloaded() || wc.isDestroyed()) { stopCounting(counter); return { error: 'the project window reloaded or closed while the tab was opening' }; }
+    if (!started) { stopCounting(counter); return { error: 'the new tab\'s terminal did not start', tabId }; }
     // The shell must have started IN the project (createTerminal falls back
     // to home for a folder that vanished).
     if (listTerminals().find((t) => t.id === tabId)?.cwd !== projectPath) {
-      stopCounting(tabId);
+      stopCounting(counter);
       return { error: 'the new tab did not start in the project folder', tabId };
     }
-    return { tabId };
+    return { tabId, keyCounter: counter };
   }
 
   function focusTab(tabId) {
@@ -246,10 +261,10 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // a subscription rather than read from the shared rolling buffer, so
   // mark() can drop everything up to the launch: only what Claude draws
   // after `claude` is typed can make the tab ready.
-  function watchOutput(tabId) {
+  function watchOutput(tabId, counter) {
     let buf = '';
     let seq = 0;
-    const keys = countKeys(tabId);
+    const keys = counter || countKeys(tabId);
     const sub = subscribeTerminal(tabId, {
       onData: (_id, data) => { seq += 1; buf = trimToEscapeBoundary(buf + data, WATCH_CAP_CHARS); },
     });
@@ -261,7 +276,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
         const lines = await renderScreenLines(buf);
         return lines ? { lines, modes: lines.modes } : null;
       },
-      stop: () => { sub.unsubscribe(); stopCounting(tabId); },
+      stop: () => { sub.unsubscribe(); stopCounting(keys); },
     };
   }
 
@@ -277,8 +292,12 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // own group, job control off, does not), and work in the project (a login
   // script's `cd /q; claude` does not).
   async function claudeRunning(tabId, projectPath) {
-    const info = await getTerminalClaudeInfo(tabId);
-    const pids = [info?.pid, terminalInstance(tabId)?.pid].filter((n) => Number.isInteger(n) && n > 0);
+    const shellPid = terminalInstance(tabId)?.pid;
+    if (!Number.isInteger(shellPid) || shellPid <= 0) return false;
+    // EVERY child, not the first claude one: a background `claude -p` listed
+    // first must not hide the interactive one.
+    let pids;
+    try { pids = [...(await childPids(shellPid)), shellPid]; } catch { return false; }
     for (const pid of pids) {
       try {
         const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
@@ -307,7 +326,15 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
       if (!m) return false;
       const name = m[3].split('/').pop().replace(/^-/, '');
-      return m[1] === m[2] && SHELLS.has(name);
+      if (m[1] !== m[2] || !SHELLS.has(name)) return false;
+      // With job control off, a running child shares the shell's group, so
+      // the group owning the terminal does not prove the SHELL is reading
+      // it: no child may be in the foreground group.
+      for (const child of await childPids(pid)) {
+        const { stdout: o } = await execFileP('/bin/ps', ['-o', 'pgid=', '-p', String(child)], { timeout: 1000, encoding: 'utf8' });
+        if (o.trim() === m[2]) return false;
+      }
+      return true;
     } catch {
       return false;
     }

@@ -132,7 +132,8 @@ function fakeDeps(over = {}) {
       const tab = tabs.get(id);
       if (!tab.noEcho) tab.frames.push({ lines: [rule, `❯ ${text.split('\n')[0]}`, ...text.split('\n').slice(1).map((l) => `  ${l}`), rule], modes: { bracketedPaste: true } });
     },
-    submit: (id) => log.push(['submit', id]),
+    // Claude takes the message: the box empties.
+    submit: (id) => { log.push(['submit', id]); tabs.get(id).frames.push({ lines: ['● Working', rule, '❯ ', rule], modes: { bracketedPaste: true } }); },
     inputBusy: () => false,
     sleep: async (ms) => { t += ms; await new Promise((r) => setImmediate(r)); },
     now: () => t,
@@ -351,7 +352,8 @@ function fakeDeps(over = {}) {
   const orig = d.openTab;
   d.openTab = async (p) => { const r = await orig(p); d.tabs.get(r.tabId).otherProgram = true; return r; };
   const r = await createOpenTabService(d, { readyTimeoutMs: 2000 }).open({ projectPath: '/p', message: 'go', requestId: 'codex' });
-  assert.equal(r.status, 504);
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /another program/);
   assert.equal(d.log.filter((e) => e[0] === 'launch' || e[0] === 'paste').length, 0);
   ok('no launch typed into a foreground program that is not the shell');
 }
@@ -457,7 +459,25 @@ function fakeDeps(over = {}) {
   let draws = 0;
   d2.shellForeground = async (id) => { if (draws++ === 0) d2.tabs.get(id).frames.push({ lines: ['% '], modes: {} }); return true; };
   assert.equal((await createOpenTabService(d2).open({ projectPath: '/p', message: 'go', requestId: 'one-redraw' })).body.submitted, true);
+  // A slow login job in the foreground at first: waited out, then launched.
+  const d3 = fakeDeps();
+  let fg = 0;
+  d3.shellForeground = async () => (fg++ >= 3);
+  const r3 = await createOpenTabService(d3).open({ projectPath: '/p', message: 'go', requestId: 'slow-login' });
+  assert.equal(r3.body.submitted, true);
+  assert.equal(d3.log.filter((e) => e[0] === 'launch').length, 1);
   ok('launch checks must settle');
+}
+
+{
+  // Enter bound to "new line": the message stays in the box. Reported unsent.
+  const d = fakeDeps();
+  d.submit = (id) => d.log.push(['submit', id]);
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'newline' });
+  assert.equal(r.body.submitted, false);
+  assert.match(r.body.note, /still in Claude's prompt/);
+  assert.equal(d.log.filter((e) => e[0] === 'submit').length, 1);
+  ok('an Enter that did not send is reported as not sent');
 }
 
 {

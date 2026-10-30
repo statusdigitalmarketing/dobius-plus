@@ -59,6 +59,9 @@ const SHELL_POLL_MS = 100;
 const SHELL_WAIT_MAX_MS = 10_000;
 const LAUNCH_CHECK_TRIES = 5;
 const LAUNCH_CHECK_GAP_MS = 300;
+const LAUNCH_WAIT_MAX_MS = 10_000;
+// After the Enter: Claude empties its input box when it takes a message.
+const SUBMIT_CONFIRM_MS = 3000;
 
 /**
  * Make a message safe to type into Claude's prompt as ONE bracketed paste.
@@ -311,7 +314,17 @@ export function createOpenTabService(deps, opts = {}) {
     // permission mode (in bypass there are no prompts: Sam's decision). See
     // docs/bridge-open-tab.md, Security.
     deps.submit(tabId);
-    return { ok: true, tabId, submitted: true };
+    // Did Claude take it? A submit empties the box; an Enter bound to "new
+    // line" (Claude supports that) leaves the message sitting there.
+    const confirmEnd = deps.now() + SUBMIT_CONFIRM_MS;
+    while (deps.now() < confirmEnd) {
+      await deps.sleep(SUBMIT_POLL_MS);
+      let after;
+      try { after = await watch.screen(); } catch { after = null; }
+      const left = after ? promptBoxText(after.lines, after.modes) : null;
+      if (!boxHoldsMessage(left, message)) return { ok: true, tabId, submitted: true };
+    }
+    return { ok: true, tabId, submitted: false, note: 'Enter was pressed but the message is still in Claude\'s prompt (is Enter set to insert a new line?); press the key that sends it' };
   }
 
   async function run(projectPath, message) {
@@ -327,7 +340,7 @@ export function createOpenTabService(deps, opts = {}) {
     // Only output from here on can make the tab "ready" (and, once the
     // launch is typed, only output after it): a prompt lookalike in the
     // shell's startup text cannot.
-    const watch = deps.watchOutput(tabId);
+    const watch = deps.watchOutput(tabId, opened.keyCounter);
     try {
       if (!(await waitShell(tabId))) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
       // Claude already runs in the tab (a "new tabs start Claude" setting,
@@ -342,15 +355,23 @@ export function createOpenTabService(deps, opts = {}) {
       let shellOwns = false;
       let inProject = false;
       let settled = false;
-      for (let i = 0; i < LAUNCH_CHECK_TRIES && !settled; i += 1) {
+      // A startup job still in the foreground (a slow login script) is
+      // waited out too, up to LAUNCH_WAIT_MAX_MS.
+      const launchEnd = deps.now() + LAUNCH_WAIT_MAX_MS;
+      let changes = 0;
+      for (let i = 0; ; i += 1) {
         if (i > 0) await deps.sleep(LAUNCH_CHECK_GAP_MS);
         const seqBefore = watch.seq();
         already = await deps.claudeRunning(tabId, resolved.path);
         inProject = !already && (await deps.shellInProject(tabId, resolved.path));
         shellOwns = !already && (await deps.shellForeground(tabId));
         settled = watch.seq() === seqBefore;
+        if (!settled) changes += 1;
+        if (settled && (already || shellOwns)) break;
+        if (changes >= LAUNCH_CHECK_TRIES || deps.now() >= launchEnd) break;
       }
       if (!settled) return { ok: false, status: 409, tabId, error: 'the tab kept changing while Claude was being started; nothing was typed' };
+      if (!already && !shellOwns) return { ok: false, status: 409, tabId, error: 'another program is running in the tab\'s terminal, so Claude was not started; nothing was typed' };
       if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: false, status: 409, tabId, error: 'the tab was closed or its shell was replaced before Claude could start; nothing was typed' };
       // A person typing into the new tab has taken it over: whatever they
       // typed (and an Enter of theirs still on its way) must never carry
