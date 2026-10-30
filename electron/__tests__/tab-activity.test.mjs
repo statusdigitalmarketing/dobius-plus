@@ -673,3 +673,49 @@ test('tab activity: no claude after a normal exit keeps the finished turn length
   await checkTurnAgainstProcess(ID, ts.activityFor(ID));
   assert.equal(ts.activityFor(ID).lastTurnMs, 60_000);
 });
+
+test('judgePresence: any state after the marker other than the hook one ends it', () => {
+  const info = { pid: 1, startedAt: 100_000 };
+  const working = { status: 'working', hookOwned: true, turnEndedAt: 0, lastMarkerAt: 200_000 };
+  const f = (status, at) => ({ pid: 1, startedAt: 100_000, status, statusUpdatedAt: at });
+  assert.equal(judgePresence(f('shell', 230_000), working, info).uncertain, true, 'turn ended with a background shell');
+  assert.equal(judgePresence(f('busy', 230_000), working, info).uncertain, false);
+  const needs = { ...working, status: 'needs' };
+  assert.equal(judgePresence(f('idle', 230_000), needs, info).uncertain, true, 'dialog answered, turn over');
+  assert.equal(judgePresence(f('waiting', 230_000), needs, info).uncertain, false, 'the dialog is still open');
+});
+
+test('tab activity: an Input whose dialog went away without a marker shows the age', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 800_000);
+  ts.ingest(ID, mk('needs'), 900_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 100_000 }),
+    presenceForTab: async () => ({ pid: 1, startedAt: 100_000, status: 'idle', statusUpdatedAt: 950_000 }),
+  });
+  assert.equal((await tabActivity(ID)).activity.uncertain, true);
+});
+
+test('no claude while a turn runs: its start is distrusted, so the next claude cannot inherit it', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000); // A dies without Stop
+  const { checkTurnAgainstProcess } = makeActivity({ claudeInfo: async () => null });
+  await checkTurnAgainstProcess(ID, ts.activityFor(ID)); // a poll at 30s finds no claude
+  ts.ingest(ID, mk('working'), 45_000); // B
+  ts.ingest(ID, mk('done'), 65_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+});
+
+test('turn-end limiter: a full map never forgets a recent start', async () => {
+  let t = 0;
+  let calls = 0;
+  const check = coalescePerTab(async () => { calls += 1; }, 1000, { now: () => t, setTimer: () => 1 });
+  for (let i = 0; i < 1100; i += 1) check(`old-${i}`);
+  await new Promise((r) => setTimeout(r, 30));
+  t = 5000; // the old entries are past their interval and may go
+  check('busy-tab');
+  await new Promise((r) => setTimeout(r, 10));
+  const before = calls;
+  for (let i = 0; i < 10; i += 1) { check('busy-tab'); await new Promise((r) => setTimeout(r, 2)); }
+  assert.equal(calls, before, 'within its interval: queued behind a timer, not run again');
+});

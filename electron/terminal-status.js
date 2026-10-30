@@ -180,11 +180,13 @@ export function activityFor(id) {
  * there is nothing left to prove it with, and the wrong length would return.
  * Each only applies while the record is still the one that was checked.
  */
-export function distrustTurnStart(id, since) {
+export function distrustTurnStart(id, since, { runningOnly = false } = {}) {
   const st = live.get(id);
   if (!st || !since) return;
   if (st.turnStartedAt === since) {
     st.turnStartDistrusted = true;
+  } else if (runningOnly) {
+    // the turn checked has ended since: nothing proven about its length
   } else if (!st.turnStartedAt && st.lastTurnStartedAt === since) {
     // That turn ended while the check ran: its length is the disproved one.
     st.lastTurnMs = 0;

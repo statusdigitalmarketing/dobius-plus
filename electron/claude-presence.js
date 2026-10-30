@@ -84,8 +84,9 @@ export function matchPresence(rec, proc) {
  *     BEFORE the turn ended is delegated work still running; anything written
  *     AFTER it (busy, a dialog) is a newer turn the hook never reported (a
  *     claude without hooks), so the row cannot claim the old Done: uncertain
- *   - during a hook 'working': 'idle' written after the last marker means the
- *     turn ended without Stop (an Esc interrupt, hooks switched off): uncertain
+ *   - during a hook 'working' or 'needs': any other state written after the
+ *     last marker means it ended without its closing marker (an Esc
+ *     interrupt, hooks switched off, a dialog answered): uncertain
  * The process start must precede the ended turn by a full second (ps
  * truncates it down), and the record must come from the claude seen now.
  * @param {object|null} found  matchPresence result
@@ -97,8 +98,13 @@ export function judgePresence(found, a, info) {
   const none = { background: null, uncertain: false };
   if (!found || !info || found.pid !== info.pid || found.startedAt !== info.startedAt) return none;
   const at = found.statusUpdatedAt;
-  if (a.status === 'working' && a.hookOwned) {
-    const over = found.status === 'idle' && Number.isFinite(at) && a.lastMarkerAt && at > a.lastMarkerAt;
+  if ((a.status === 'working' || a.status === 'needs') && a.hookOwned) {
+    // Hook says a turn is running ('busy') or a dialog is open ('waiting').
+    // Any OTHER state the CLI wrote after the last marker (idle, a turn that
+    // ended with a background shell, a dialog answered) means the hook state
+    // is over without its closing marker (hooks switched off, an interrupt).
+    const expected = a.status === 'working' ? 'busy' : 'waiting';
+    const over = found.status !== expected && Number.isFinite(at) && a.lastMarkerAt && at > a.lastMarkerAt;
     return over ? { background: null, uncertain: true } : none;
   }
   const end = a.turnEndedAt;
@@ -193,8 +199,17 @@ export function coalescePerTab(fn, minIntervalMs, { now = Date.now, setTimer = s
       .finally(() => {
         st.running = false;
         if (st.queued) schedule(id, st);
-        else if (state.size > 1024 && !st.timer) state.delete(id);
+        else if (state.size > 1024) sweep();
       });
+  };
+  // Bound the map by dropping only entries whose interval has passed: an
+  // entry deleted early forgets its last start and lets the next trigger
+  // through immediately (so a tab could defeat the throttle).
+  const sweep = () => {
+    const t = now();
+    for (const [k, v] of state) {
+      if (!v.running && !v.timer && !v.queued && t - v.lastStart >= minIntervalMs) state.delete(k);
+    }
   };
   const schedule = (id, st) => {
     if (st.timer) return;
@@ -329,9 +344,11 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     // the claude that died just before this turn's claude started.
     const info = await (fresh ? claudeInfoFresh : claudeInfo)(id);
     const a = reconcileWithProcess(raw, info);
-    // Only a claude's start time PROVES a time wrong; finding no claude (it
-    // exited normally after its turn) proves nothing about that turn.
-    if (info && raw.since && !a.since) status.distrustTurnStart(id, raw.since);
+    // A claude's start time proves a time wrong. Finding NO claude proves a
+    // still-running turn was abandoned (or runs behind a wrapper, where an
+    // unknown length is the safe answer), but nothing about a turn that ended
+    // meanwhile: claude exiting normally after it is not evidence.
+    if (raw.since && !a.since) status.distrustTurnStart(id, raw.since, { runningOnly: !info });
     if (info && raw.lastTurnMs && !a.lastTurnMs) status.distrustLastTurn(id, raw.turnEndedAt);
     return info;
   }
@@ -345,15 +362,16 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     let background = null;
     const t = now();
     const hookWorking = a.status === 'working' && a.hookOwned;
+    const hookLive = (hookWorking || a.status === 'needs') && a.hookOwned;
     // Ask the presence file only with a claude in the tab (a cached answer
     // describes a process, and with none there is nothing to describe):
     //   - after the HOOK ended a turn, for Waiting (or a newer hookless turn);
     //     plain output after the turn (typing at the prompt) still asks
     //   - during a hook 'working' gone quiet, whether that turn already ended
     //     without a Stop marker
-    const ended = !!info && a.turnEndedAt && a.status !== 'needs' && !hookWorking
+    const ended = !!info && a.turnEndedAt && !hookLive
       && t - a.turnEndedAt >= GRACE_MS;
-    const quietWorking = !!info && hookWorking && a.lastMarkerAt && t - a.lastMarkerAt >= GRACE_MS;
+    const quietWorking = !!info && hookLive && a.lastMarkerAt && t - a.lastMarkerAt >= GRACE_MS;
     if (ended || quietWorking) {
       const found = await presenceForTab(id, ended ? `e:${a.turnEndedAt}` : `w:${a.lastMarkerAt}`);
       // The lookup awaited: if the hook record moved meanwhile, the presence
