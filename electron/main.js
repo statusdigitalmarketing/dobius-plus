@@ -26,7 +26,7 @@ import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses } from './claude-process-scan.js';
-import { createWaitingReader, boundedIds } from './claude-presence.js';
+import { createWaitingReader, boundedIds, activityRow } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
@@ -512,17 +512,14 @@ function setupDataHandlers() {
   // ask about any tab, like the aggregate. Returns an ARRAY.
   ipcMain.handle('tabs:activity', async (_event, ids) => {
     const live = new Set(listTerminals().map((t) => t.id));
-    const wanted = [...new Set(boundedIds(ids, 1000).filter((id) => live.has(id)))].slice(0, 256);
-    const rows = await Promise.all(wanted.map(async (id) => {
-      const activity = terminalStatus.activityFor(id);
-      if (!activity) return null;
-      const background = activity.status === 'done' ? await waitingForTab(id, activity.doneAt) : null;
-      let unread = false;
-      for (const [wcId, set] of unreadByWindow) {
-        if (set.has(id) && ownsTerminal(wcId, id)) { unread = true; break; }
-      }
-      return { id, activity: { ...activity, background }, unread };
-    }));
+    const wanted = [...new Set(boundedIds(ids, 1000).filter((id) => live.has(id)))];
+    const unreadAnywhere = (id) => {
+      for (const [wcId, set] of unreadByWindow) if (set.has(id) && ownsTerminal(wcId, id)) return true;
+      return false;
+    };
+    const rows = await Promise.all(wanted.map((id) => activityRow(id, {
+      activityFor: terminalStatus.activityFor, waitingForTab, unreadAnywhere,
+    })));
     return rows.filter(Boolean);
   });
   ipcMain.on('tabs:reportUnread', (event, ids) => {

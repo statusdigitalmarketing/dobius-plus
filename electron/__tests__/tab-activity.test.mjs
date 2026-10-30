@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { tabActivityLabel, formatDuration, WORKING_MIN_MS } from '../../src/lib/tab-activity.js';
 import * as ts from '../terminal-status.js';
-import { waitingFrom, createWaitingReader, boundedIds, GRACE_MS } from '../claude-presence.js';
+import { waitingFrom, createWaitingReader, boundedIds, activityRow, GRACE_MS } from '../claude-presence.js';
 
 const NOW = 10_000_000;
 const label = (over) => tabActivityLabel({ live: true, status: 'idle', now: NOW, ...over });
@@ -59,6 +59,17 @@ test('a new stretch after done resets; an idle-prompt done re-send keeps the len
   assert.equal(ts.activityFor(ID).lastWorkMs, 3_000);
   ts.ingest(ID, mk('working'), 80_000);
   assert.equal(ts.activityFor(ID).since, 80_000);
+});
+
+test('a needs from outside a stretch starts a new one', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 1_000);
+  ts.ingest(ID, mk('done'), 4_000);
+  ts.ingest(ID, mk('needs'), 70_000);
+  ts.ingest(ID, mk('working'), 80_000);
+  assert.equal(ts.activityFor(ID).since, 70_000);
+  ts.ingest(ID, mk('done'), 90_000);
+  assert.equal(ts.activityFor(ID).lastWorkMs, 20_000);
 });
 
 test('one chunk carrying done and the next working is two stretches', () => {
@@ -167,4 +178,22 @@ test('boundedIds: cut before walking, prototype slice, strings only', () => {
   assert.deepEqual(boundedIds(Object.assign(['a', 'b'], { slice: 0 }), 10), ['a', 'b']);
   assert.deepEqual(boundedIds(['a', 1, null, 'x'.repeat(5000)], 10), ['a']);
   assert.deepEqual(boundedIds('nope', 10), []);
+});
+
+test('activityRow: a new turn during the Waiting lookup wins', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 1_000);
+  ts.ingest(ID, mk('done'), 10_000);
+  const row = await activityRow(ID, {
+    activityFor: ts.activityFor,
+    waitingForTab: async () => { ts.ingest(ID, mk('working'), 14_000); return 'agents'; },
+    unreadAnywhere: () => true,
+  });
+  assert.deepEqual([row.activity.status, row.activity.background, row.unread], ['working', null, true]);
+  const kept = await activityRow(ID, {
+    activityFor: () => ({ status: 'done', doneAt: 5, hookOwned: false, since: null, lastWorkMs: 0 }),
+    waitingForTab: async () => 'shells',
+    unreadAnywhere: () => false,
+  });
+  assert.equal(kept.activity.background, 'shells');
 });

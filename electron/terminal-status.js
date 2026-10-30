@@ -30,8 +30,8 @@ const TAIL_KEEP = 64;           // bytes retained to catch a marker split across
 const MAX_RECENT_EXITS = 50;
 
 // id -> { status, lastActivityAt, hookOwned, doneAt, tail, workingSince, lastWorkMs }
-// workingSince: when the current working stretch began (entering 'working'
-// from anything but 'needs'; a permission prompt inside a turn keeps it).
+// workingSince: when the current stretch began (entering 'working' or 'needs'
+// from anything else; a permission prompt inside a turn keeps it).
 // lastWorkMs: how long the stretch lasted when the hook reported 'done'.
 // Both follow the same status the tab dots show, nothing more: if a hook never
 // sends Stop (a crash, an Esc interrupt) the stretch runs on exactly as the
@@ -101,7 +101,10 @@ export function ingest(id, data, now = Date.now()) {
 // Stretch bookkeeping on a status change (the status itself is set by ingest).
 function enterStatus(st, next, now) {
   const prev = st.timingStatus || st.status;
-  if (next === 'working' && prev !== 'working' && prev !== 'needs') st.workingSince = now;
+  // A stretch starts on entering working or needs from outside one; a
+  // permission prompt inside a turn (working <-> needs) keeps it.
+  const inStretch = (s) => s === 'working' || s === 'needs';
+  if (inStretch(next) && !inStretch(prev)) st.workingSince = now;
   if (next === 'done' && (prev === 'working' || prev === 'needs') && st.workingSince) {
     st.lastWorkMs = Math.max(0, now - st.workingSince);
   }

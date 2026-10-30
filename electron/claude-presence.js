@@ -114,6 +114,22 @@ export function createWaitingReader({ claudeInfo, configDirFor, readFile = readP
 }
 
 /**
+ * One tabs:activity row: main's status and stretch timing, Waiting for a
+ * 'done' tab, unread. The Waiting lookup awaits, so the answer is taken from
+ * the status as it is AFTER it, and the Waiting is kept only if that same
+ * 'done' still stands. Null when no PTY runs for the id.
+ */
+export async function activityRow(id, { activityFor, waitingForTab, unreadAnywhere }) {
+  const before = activityFor(id);
+  if (!before) return null;
+  let background = before.status === 'done' ? await waitingForTab(id, before.doneAt) : null;
+  const activity = activityFor(id);
+  if (!activity) return null;
+  if (activity.status !== 'done' || activity.doneAt !== before.doneAt) background = null;
+  return { id, activity: { ...activity, background }, unread: unreadAnywhere(id) };
+}
+
+/**
  * Renderer-supplied id list, cut to `cap` BEFORE anything walks it (a sparse
  * array with a huge length is a tiny IPC message), using the prototype's slice
  * (an own `slice` property survives IPC). Strings up to 4096 chars only.
