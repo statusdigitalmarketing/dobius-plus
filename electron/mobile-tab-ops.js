@@ -28,6 +28,7 @@ const REASON_CODES = {
   cancelled: 'cancelled',
   stranded: 'stranded',
   empty: 'empty_text',
+  write_failed: 'write_failed',
 };
 
 const MESSAGES = {
@@ -115,9 +116,13 @@ export async function handleTabOp(msg, deps) {
     r = op === 'input'
       ? await deps.writeRawInput(id, text, deps.stillOk)
       : await deps.submitPrompt(id, text, deps.stillOk);
-  } catch {
-    r = { ok: false, reason: 'write_failed' };
+  } catch (err) {
+    console.error('[mobile] tab write threw:', err?.message || err);
+    r = { ok: false, reason: 'write_failed', uncertain: true };
   }
   if (r?.ok) return deps.send({ type: 'ack', op, id, reqId });
-  return fail(REASON_CODES[r?.reason] || 'write_failed');
+  // uncertain: the text reached the tab and may have been submitted by
+  // another writer's Enter. A client must not resend it as if unsent.
+  const code = REASON_CODES[r?.reason] || 'write_failed';
+  return fail(code, r?.uncertain || code === 'write_failed' ? { uncertain: true } : undefined);
 }

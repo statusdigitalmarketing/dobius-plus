@@ -166,6 +166,8 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   await Promise.all([first, second, key]);
   const by = Object.fromEntries(h.sent.map((m) => [m.reqId, m.code]));
   assert.deepEqual(by, { f: 'tab_exited', s: 'tab_exited', z: 'tab_exited' });
+  // f was pasted before the tab went: unknowable whether something submitted it.
+  assert.deepEqual(h.sent.map((m) => [m.reqId, m.uncertain === true]).sort(), [['f', true], ['s', false], ['z', false]]);
   assert.ok(h.sent.every((m) => m.type === 'opError'));
   assert.deepEqual(writes.map((w) => w[1]), [PASTE('first')]);
   ok('tab exits before the write: tab_exited for every queued request');
@@ -197,7 +199,19 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   writeTerminal(A, 'q'); // another writer types during the Enter delay
   await p;
   assert.equal(h.sent[0].code, 'stranded');
-  ok('foreign input during the Enter delay: stranded');
+  assert.equal(h.sent[0].uncertain, true); // that writer may have pressed Enter on it
+  ok('foreign input during the Enter delay: stranded, uncertain');
+}
+{
+  // Esc alone (the queue's own cancel key) leaves the paste in the line and
+  // nothing else touched the tab: definitely not submitted.
+  const h = harness({ live: [A], authed: [A] });
+  const p = h.run({ type: 'submitPrompt', id: A, text: 'hello', reqId: 'x' });
+  writeRawInput(A, '\x1b');
+  await p;
+  assert.equal(h.sent[0].code, 'stranded');
+  assert.equal('uncertain' in h.sent[0], false);
+  ok('Esc during the Enter delay: stranded, not uncertain');
 }
 {
   const h = harness({ live: [A], authed: [A] });
@@ -207,6 +221,7 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   await Promise.all([p, q]);
   const by = Object.fromEntries(h.sent.map((m) => [m.reqId, m.type === 'ack' ? 'ack' : m.code]));
   assert.deepEqual(by, { c: 'ack', x: 'cancelled', y: 'cancelled' });
+  assert.ok(h.sent.every((m) => m.uncertain === undefined)); // erased: definitely unsent
   ok('Ctrl+C: acked, and the submits it dropped report cancelled');
 }
 
@@ -225,7 +240,23 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   h.deps.writeRawInput = () => { throw new Error('boom'); };
   await h.run({ type: 'input', id: A, data: 'x', reqId: 'w' });
   assert.equal(h.sent[0].code, 'write_failed');
+  assert.equal(h.sent[0].uncertain, true);
   ok('a writer that throws: write_failed, still answered');
+}
+
+// 10. A PTY write that throws inside the queue answers every queued request
+// and releases the queue for the next one.
+{
+  const h = harness({ live: [A], authed: [A] });
+  const p1 = h.run({ type: 'submitPrompt', id: A, text: 'one', reqId: 'p1' });
+  const k1 = h.run({ type: 'input', id: A, data: 'x', reqId: 'k1' });
+  ptys.get(A).throwOnWrite = true; // the delayed Enter throws
+  await Promise.all([p1, k1]);
+  assert.deepEqual(h.sent.map((m) => [m.reqId, m.code, m.uncertain]).sort(), [['k1', 'write_failed', true], ['p1', 'write_failed', true]]);
+  ptys.get(A).throwOnWrite = false;
+  await h.run({ type: 'submitPrompt', id: A, text: 'after', reqId: 'p2' });
+  assert.equal(h.sent[2].type, 'ack');
+  ok('a throwing queued write: every request answered, queue released');
 }
 
 console.log(`\n${pass} passed`);

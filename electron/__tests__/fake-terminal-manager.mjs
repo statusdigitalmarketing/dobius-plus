@@ -5,6 +5,7 @@ export const seqs = new Map();
 const outs = new Map(); // id -> { out, atInput }
 const raws = new Map(); // id -> every output chunk, escape-only ones included
 export function writeTerminal(id, data) {
+  if (ptys.get(id)?.throwOnWrite) throw new Error('pty write failed');
   writes.push([id, data]); seqs.set(id, (seqs.get(id) || 0) + 1);
   const o = outs.get(id) || { out: 0, atInput: 0 }; o.atInput = o.out; outs.set(id, o);
 }

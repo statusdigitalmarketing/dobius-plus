@@ -260,8 +260,25 @@ function skipReason(id, q, it) {
 
 async function drainSubmits(id, q) {
   q.running = true;
+  try {
+    await drainItems(id, q);
+  } catch (err) {
+    // A throwing PTY write must not wedge the tab's queue or leave a request
+    // unanswered: everything still queued is reported, the queue released.
+    console.error('[chat-service] submit queue failed:', err?.message || err);
+    for (const it of q.items.splice(0)) it.resolve({ ...refused('write_failed'), uncertain: true });
+    q.current?.resolve({ ...refused('write_failed'), uncertain: true });
+  } finally {
+    q.current = null;
+    q.running = false;
+    if (submitQueues.get(id) === q) submitQueues.delete(id);
+  }
+}
+
+async function drainItems(id, q) {
   while (q.items.length > 0) {
     const it = q.items.shift();
+    q.current = it;
     let skip = skipReason(id, q, it);
     if (skip) { it.resolve(refused(skip)); continue; }
     if (it.raw !== undefined) {
@@ -294,12 +311,15 @@ async function drainSubmits(id, q) {
       const erased = foreign === 0 && (q.clearedGen ?? -1) > it.gen;
       const gone = terminalInstance(id) !== it.pty || terminalClosing(id);
       if (!gone && !erased) it.onStranded();
-      it.resolve(refused(gone ? 'tab_exited' : erased ? 'cancelled' : 'stranded'));
+      // uncertain: the paste is in the tab and something we did not send may
+      // have pressed Enter on it (another writer's input; or the tab is gone
+      // and its counters with it). A remote caller must not treat it as unsent
+      // and resend (Codex High, three lenses).
+      const uncertain = gone || (!erased && foreign > 0);
+      it.resolve({ ...refused(gone ? 'tab_exited' : erased ? 'cancelled' : 'stranded'), ...(uncertain ? { uncertain: true } : {}) });
       continue;
     }
     writeTerminal(id, '\r');
     it.resolve(DONE);
   }
-  q.running = false;
-  if (submitQueues.get(id) === q) submitQueues.delete(id);
 }

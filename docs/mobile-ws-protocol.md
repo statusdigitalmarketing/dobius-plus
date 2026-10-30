@@ -78,6 +78,12 @@ Refusal:
 is the full id that was written to. `reqId` is null when the request had none.
 `message` is for people; match on `code`.
 
+`uncertain: true` (present only when set) means the text reached the tab and
+the server withheld its own Enter, but it cannot rule out that something else
+submitted it: another writer typed into the tab during the paste delay, the tab
+went away after the paste, or the write path threw. Treat it as UNKNOWN
+delivery, never as "not sent": read the tab back before resending.
+
 The refusal type is `opError`, not `error`: the phone's Board and Terminal
 screens treat every `error` frame as a failed create (an alert, and the create
 guard released), and phones on an older cached bundle would do that for every
@@ -92,10 +98,10 @@ refused keystroke. Clients ignore message types they do not know, so `ack` and
 | `empty_text` | `data` is empty, or `text` is blank | no |
 | `too_large` | over 100 KB in UTF-8 bytes | no |
 | `revoked` | the device was unpaired while the write was queued | no |
-| `tab_exited` | the tab closed, exited or was replaced before the write | no, or (submit) the paste went out but no Enter |
+| `tab_exited` | the tab closed, exited or was replaced before the write | no; after a paste, `uncertain` |
 | `cancelled` | a cancel key (Ctrl+C, Ctrl+U, Esc) dropped or erased it | no, or erased |
-| `stranded` | submit only: pasted, but Enter was withheld because something else typed into the tab meanwhile. The text sits in the input line | pasted, not submitted |
-| `write_failed` | an unexpected failure in the write path | unknown |
+| `stranded` | submit only: pasted, but Enter was withheld because something else reached the tab meanwhile. Without `uncertain` (only our own Esc) the text sits in the input line | pasted; with `uncertain`, maybe submitted |
+| `write_failed` | an unexpected failure in the write path (always `uncertain`) | unknown |
 
 ### Short ids are never guessed
 
