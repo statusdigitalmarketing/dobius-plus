@@ -2009,7 +2009,9 @@ export function getActiveProcesses() {
         resolve([]);
         return;
       }
-      const lines = stdout.trim().split('\n').filter(Boolean);
+      // A New Tab's wrapper shell names the tools in its own argv; it is the
+      // tab's shell, not a Claude process (shared/new-tab.js loginShellSpawn).
+      const lines = stdout.trim().split('\n').filter((l) => l && !l.includes('DOBIUS_NEW_TAB_TOOL'));
       resolve(lines.map((line) => {
         const spaceIdx = line.indexOf(' ');
         if (spaceIdx === -1) return null;

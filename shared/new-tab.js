@@ -85,11 +85,12 @@ export function pickerShortcutIndex(e) {
 // with a plain login shell when the tool exits, leaving the tab usable.
 // - The prompt hooks run first (zsh precmd, bash PROMPT_COMMAND): direnv and
 //   similar tools load a project's environment there, and -c shows no prompt.
-//   The tool name is read before them into $1 and must be a bare lowercase
-//   word, so neither a hook nor a project .env can replace it.
-// - The tool name travels in an env var, so no process argv says "claude"
-//   except the tool's own (process scans match on argv). eval runs it so a
-//   user's alias or function for it applies, as when typed.
+//   The tool name is read before them into $1 and launched only through a
+//   fixed allowlist (no eval), so neither a hook nor a project .env can turn
+//   it into code.
+// - The tool name travels in an env var. The wrapper's argv does contain the
+//   allowlist words, so loose argv scans (data-service getActiveProcesses)
+//   skip it by the DOBIUS_NEW_TAB_TOOL marker in that same argv.
 // - A tool suspended with Ctrl+Z is resumed (fg) rather than left stopped
 //   behind the replacement shell, where nothing could ever resume it.
 //   The tool runs in the foreground (a direct child, as process checks
@@ -107,15 +108,16 @@ export function pickerShortcutIndex(e) {
 export const START_TOOL_ENV = 'DOBIUS_NEW_TAB_TOOL';
 export function loginShellSpawn(shell, startCommand) {
   const plain = { args: ['-l'], env: {} };
-  if (typeof startCommand !== 'string' || !/^[a-z]+$/.test(startCommand)) return plain;
+  if (!NEW_TAB_TOOLS.some((x) => newTabCommand(x) && newTabCommand(x) === startCommand)) return plain;
   const name = String(shell).split('/').pop();
-  // Read before the hooks (a hook or a project .env could set the variable)
-  // into the positional parameter $1, which no variable assignment (direnv's
-  // dotenv included) can reach, and only a bare lowercase word is ever run.
-  // (readonly would make a hook that assigns it abort the whole zsh script.)
-  const take = `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV}; `
-    + '[[ -n $1 && $1 != *[!a-z]* ]] || set -- :;';
-  const launch = '[[ $1 != *[!a-z:]* ]] && eval "$1";';
+  // The tool name is read before the hooks (a hook or a project .env could set
+  // the variable) into the positional parameter $1, which no variable
+  // assignment (direnv's dotenv included) can reach. Nothing is ever eval'd:
+  // the launch is a fixed allowlist dispatch, so whatever a hook assigns can
+  // only select one of these commands or none. A literal command word keeps
+  // the user's alias or function for it, as when typed.
+  const take = `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV};`;
+  const launch = `case $1 in ${NEW_TAB_TOOLS.filter((x) => newTabCommand(x)).map((x) => `${x}) ${newTabCommand(x)} ;;`).join(' ')} esac;`;
   let run;
   if (name === 'zsh') {
     run = `setopt no_nounset no_err_exit 2>/dev/null; ${take} (( $+functions[precmd] )) && precmd; for f in $precmd_functions; do "$f"; done; `
@@ -123,7 +125,8 @@ export function loginShellSpawn(shell, startCommand) {
       + 'i=0; while (( i++ < 25 )); do s=(${(k)jobstates[(R)suspended*]}); s=(${s:|pre}); (( $#s )) || break; '
       + 'fg %$s[1] >/dev/null 2>&1; done;';
   } else if (name === 'bash') {
-    run = `set +eu; ${take} for c in "\${PROMPT_COMMAND[@]}"; do eval "$c"; done; pre=" $(jobs -p | tr '\\n' ' ') "; ${launch} `
+    // The hooks run inside a function, so a `set --` among them cannot reach $1.
+    run = `set +eu; ${take} __dobius_hooks() { for c in "\${PROMPT_COMMAND[@]}"; do eval "$c"; done; }; __dobius_hooks; pre=" $(jobs -p | tr '\\n' ' ') "; ${launch} `
       // A stopped pipeline's continuation lines start with a pid, not [n].
       + ('j=$(jobs -sl 2>/dev/null | while read -r n p r; do [[ $n == \\[* ]] || continue; [[ $pre == *" $p "* ]] && continue; '
         + 'n=${n#[}; echo "${n%%]*}"; break; done); [ -n "$j" ] && fg %$j >/dev/null 2>&1; ').repeat(25).trim();
