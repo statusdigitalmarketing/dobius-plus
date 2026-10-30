@@ -28,6 +28,10 @@ import { onScreenTabIds } from '../../lib/tab-unread';
 import { windowFocused, onWindowFocus } from '../../lib/window-focus';
 import { markAdopting, takeAdopting, markDoNotKill } from '../../hooks/useTerminal';
 
+// A window /openTab opened waits this long for that request's tab (main gives
+// up after 15s for the window plus 10s for the tab) before making its own.
+const BRIDGE_FIRST_TAB_WAIT_MS = 30_000;
+
 // Cmd+Shift+[ / ] direction: -1, +1, or 0 when it is neither. By character
 // first, so layouts that type a bracket on another key (AZERTY: Option+Shift
 // +5) work; by physical key when the character is not a bracket, because with
@@ -305,7 +309,10 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     }
 
     if (projectPath) {
-      window.electronAPI.configGetProject(projectPath).then((config) => {
+      Promise.all([
+        window.electronAPI.configGetProject(projectPath),
+        window.electronAPI.windowOpenedForBridge?.().catch(() => false),
+      ]).then(([config, openedForBridge]) => {
         if (config && typeof config.themeIndex === 'number') {
           setThemeIndex(config.themeIndex);
         }
@@ -328,6 +335,14 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
             const stillExists = config.tabs.some((t) => t.id === config.activeTabId);
             if (stillExists) setActiveTab(config.activeTabId);
           }
+        } else if (openedForBridge) {
+          // Opened by /openTab: that request's tab (Claude) is this window's
+          // first, so nothing starts here (it would be a second tool). If the
+          // request never adds it, a New Tab does: never an empty window.
+          useStore.getState().markTabsReady();
+          setTimeout(() => {
+            if (useStore.getState().terminalTabs.length === 0) openNewTab(projectPath);
+          }, BRIDGE_FIRST_TAB_WAIT_MS);
         } else {
           // First open: a New Tab, which starts the default tool.
           useStore.getState().markTabsReady();
@@ -389,7 +404,11 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     // /openTab (Brett's inbox board): a New Tab that starts CLAUDE, whatever
     // this user's New Tab default is, shown. Main waits for Claude's prompt.
     const offBridgeOpen = window.electronAPI?.onBridgeOpenTab?.(({ nonce, expiresAt } = {}) => {
-      if (!(Date.now() < expiresAt)) return; // main gave up on this one
+      if (!(Date.now() < expiresAt)) {
+        // main gave up on this one; a window it opened still needs a tab.
+        if (useStore.getState().terminalTabs.length === 0) useStore.getState().openNewTab(projectPath);
+        return;
+      }
       const tab = useStore.getState().openNewTab(projectPath, 'claude');
       if (!tab) return; // tabs not restored yet: main times out, nothing opened
       useStore.getState().showTab(tab.id);

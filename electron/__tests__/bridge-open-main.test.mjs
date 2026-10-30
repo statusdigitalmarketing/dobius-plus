@@ -7,8 +7,10 @@ import { test } from 'node:test';
 import { createBridgeOpenDeps } from '../bridge-open-main.js';
 import * as env from './fake-bridge-env.mjs';
 
+// A window is ready once its page has restored its tabs (window:tabsReady).
+let windowReady = () => true;
 const deps = createBridgeOpenDeps({
-  windowReady: () => true,
+  windowReady: (wc) => windowReady(wc),
   ownerOf: (tabId) => env.terminals.get(tabId)?.wcId,
 });
 
@@ -61,4 +63,29 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   wc.fire('did-start-loading');
   assert.equal(deps.inputBusy(opened.tabId), false);
   watch.stop();
+});
+
+test('a window opened FOR a request is told so, once, so its first tab is the request\'s and nothing else starts', async () => {
+  // The page asks while it restores its tabs, before it reports ready.
+  env.windowFactory.make = () => {
+    const wc = projectWindow('/p/fresh');
+    setTimeout(() => { wc.askedFirst = env.invoke('window:openedForBridge', wc); }, 0);
+    return { webContents: wc };
+  };
+  windowReady = (wc) => wc.askedFirst !== undefined;
+  const opened = await deps.openTab('/p/fresh');
+  assert.equal(typeof opened.tabId, 'string', JSON.stringify(opened));
+  const wc = env.windows.get('/p/fresh').win.webContents;
+  assert.deepEqual(env.openedWindows, ['/p/fresh']);
+  assert.equal(wc.askedFirst, true, 'the new window skips its default first tab');
+  assert.equal(env.invoke('window:openedForBridge', wc), false, 'answered once');
+  // Exactly one tab was asked of it: the request's.
+  assert.equal(wc.sent.filter(([ch]) => ch === 'bridge:openTab').length, 1);
+
+  // A window that was already open was not opened for the request.
+  windowReady = () => true;
+  const again = await deps.openTab('/p/fresh');
+  assert.equal(typeof again.tabId, 'string');
+  assert.equal(env.invoke('window:openedForBridge', wc), false);
+  assert.deepEqual(env.openedWindows, ['/p/fresh']);
 });

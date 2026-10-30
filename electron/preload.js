@@ -314,6 +314,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('bridge:openTab', handler);
   },
   bridgeTabOpened: (nonce, tabId) => ipcRenderer.send('bridge:tabOpened', nonce, tabId),
+  // True (once) when /openTab opened this window: its request's tab is the first.
+  windowOpenedForBridge: () => ipcRenderer.invoke('window:openedForBridge'),
   onBridgeDropTab: (callback) => {
     const handler = (_event, tabId) => callback(tabId);
     ipcRenderer.on('bridge:dropTab', handler);

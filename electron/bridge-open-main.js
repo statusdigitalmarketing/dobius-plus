@@ -217,6 +217,13 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     bump(id, data, wc.id);
   });
 
+  // Windows /openTab opened (webContents ids). Such a window, starting with no
+  // saved tabs, makes no first tab of its own: the request's tab (tool
+  // claude) is its first, so one request never starts two tools (ProjectView
+  // asks once, while it restores its tabs).
+  const openedForBridge = new Set();
+  ipcMain.handle('window:openedForBridge', (event) => openedForBridge.delete(event.sender.id));
+
   // Requests main stopped waiting for: a window that answers one anyway
   // (it added the tab after main gave up) is told to drop that tab, so a
   // retry of the same request cannot leave two. nonce -> { wcId, projectPath }
@@ -245,15 +252,25 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
 
   async function openTab(projectPath) {
     let target = primaryDockTarget(projectPath, null);
+    let opened = null;
     if (!target) {
-      openProjectWindow(projectPath);
+      const win = openProjectWindow(projectPath);
       target = primaryDockTarget(projectPath, null);
+      // A window opened FOR this request: our tab is its first, so a fresh
+      // window (no saved tabs) must not also start the New Tab default.
+      if (target?.win === win) {
+        opened = win.webContents.id;
+        openedForBridge.add(opened);
+      }
     }
     if (!target) return { error: 'could not open the project window' };
     const { win } = target;
     const wc = win.webContents;
     bringToFront(win);
-    if (!(await waitFor(() => wc.isDestroyed() || windowReady(wc), WINDOW_READY_MS)) || wc.isDestroyed()) {
+    const ready = await waitFor(() => wc.isDestroyed() || windowReady(wc), WINDOW_READY_MS);
+    // A ready window has read the flag (it does so before restoring tabs).
+    if (opened !== null) openedForBridge.delete(opened);
+    if (!ready || wc.isDestroyed()) {
       return { error: 'the project window did not finish loading' };
     }
     // A reload while we wait restarts the page's tab counter, so a tab the
