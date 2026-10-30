@@ -59,6 +59,9 @@ const SUBMIT_SETTLE_MAX_MS = 5000;
 // / runs a slash command, # writes memory, & sends to the background. A card
 // starting with one is typed but never sent automatically.
 const MODE_LEAD_RE = /^\s*[!/#&]/;
+// A message ending in a backslash: Claude reads backslash + Enter as "new
+// line", so the Enter would not send it. Typed, never sent automatically.
+const TRAILING_BACKSLASH_RE = /\\\s*$/;
 const READY_POLL_MS = 250;
 // After the Enter: Claude empties its input box when it takes a message.
 const SUBMIT_CONFIRM_MS = 3000;
@@ -187,27 +190,25 @@ export function promptBoxText(lines, modes) {
  * text and a long one as "[Pasted text #1 +N lines]". Checked before the
  * Enter, so it can only ever send the box when it holds what was pasted.
  */
-// After the Enter: is any of the message still in the box? Looser than
-// boxHoldsMessage on purpose (whitespace ignored, anywhere in the box), so
-// a message the Enter only split in two ("he" / "llo", a cursor moved by a
-// click and Enter bound to a new line) still counts as NOT sent. An empty
-// box, or Claude's placeholder, counts as sent.
-export function boxStillHasMessage(boxText, message) {
+// The box holds exactly this message: same text with all whitespace removed
+// (Claude wraps rows, draws a tab as spaces, indents continuation rows), or
+// only Claude's own marker for a long paste. EXACT, not a prefix: anything
+// else in the box (a recalled history entry, a person's text) means the
+// Enter would send something the card did not say.
+const squash = (x) => String(x).replace(/\s+/g, '');
+const PASTE_MARKER_RE = /^\[Pasted text #\d+(?: \+\d+ lines?)?\]$/;
+function boxIsMessage(boxText, message) {
   if (typeof boxText !== 'string') return false;
-  if (/\[Pasted text #\d+/.test(boxText)) return true;
-  const squash = (x) => x.replace(/\s+/g, '');
-  const want = squash(message.split('\n').find((l) => l.trim()) || '').slice(0, 20);
-  return want.length > 0 && squash(boxText).includes(want);
+  if (PASTE_MARKER_RE.test(boxText.trim())) return true;
+  const want = squash(message);
+  return want.length > 0 && squash(boxText) === want;
 }
-
-export function boxHoldsMessage(boxText, message) {
-  if (typeof boxText !== 'string') return false;
-  if (/\[Pasted text #\d+/.test(boxText)) return true;
-  // Whitespace compared loosely: a pasted tab is drawn as spaces.
-  const norm = (x) => x.replace(/\s+/g, ' ').trim();
-  const want = norm(message.split('\n').find((l) => l.trim()) || '').slice(0, 20).trim();
-  return want.length > 0 && norm(boxText).startsWith(want);
-}
+export const boxHoldsMessage = boxIsMessage;
+// After the Enter: is the message still sitting there? Same exact test, so
+// a message the Enter only split in two ("he" / "llo", Enter bound to a new
+// line) still counts as NOT sent, while an empty box or Claude's
+// placeholder ("Try ...") counts as sent.
+export const boxStillHasMessage = boxIsMessage;
 
 /**
  * The /openTab service. deps:
@@ -366,6 +367,7 @@ export function createOpenTabService(deps, opts = {}) {
       deps.paste(tabId, message);
       const lead = MODE_LEAD_RE.exec(message);
       if (lead) return { ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: it starts with "${lead[0].trim()}", which Claude treats as a command rather than a message; check it and press Enter in the tab yourself` };
+      if (TRAILING_BACKSLASH_RE.test(message)) return { ok: true, tabId, submitted: false, note: 'the message is typed into Claude\'s prompt but was not sent: it ends with a backslash, which Claude reads as a line continuation; press Enter in the tab yourself' };
       return await submitPasted(tabId, pty, watch, outputBeforePaste, message, resolved.path);
     } finally {
       watch.stop();

@@ -361,6 +361,20 @@ function fakeDeps(over = {}) {
     assert.equal(dm.log.filter((e) => e[0] === 'paste').length, 1, lead);
     assert.equal(dm.log.filter((e) => e[0] === 'submit').length, 0, lead);
   }
+  // A trailing backslash turns the Enter into a new line: typed, never sent.
+  const db = fakeDeps();
+  const rb = await createOpenTabService(db).open({ projectPath: '/p', message: 'hello\\', requestId: 'bslash' });
+  assert.equal(rb.body.submitted, false);
+  assert.match(rb.body.note, /backslash/);
+  assert.equal(db.log.filter((e) => e[0] === 'submit').length, 0);
+  // Something else replaced the box's text after the paste (a history entry
+  // recalled by the wheel): the Enter is withheld.
+  const dh = fakeDeps();
+  const oh = dh.paste;
+  dh.paste = (id, t) => { oh(id, t); dh.tabs.get(id).frames.push({ lines: [rule, '❯ go delete the backups', rule], modes: { bracketedPaste: true } }); };
+  const rh = await createOpenTabService(dh).open({ projectPath: '/p', message: 'go', requestId: 'history' });
+  assert.equal(rh.body.submitted, false);
+  assert.equal(dh.log.filter((e) => e[0] === 'submit').length, 0);
   const dn = fakeDeps();
   assert.equal((await createOpenTabService(dn).open({ projectPath: '/p', message: 'Reply: 50% off! /cc #3', requestId: 'mode2' })).body.submitted, true, 'only the FIRST character matters');
   // A long multi-line message grows the box: still recognised, still sent.
@@ -370,7 +384,10 @@ function fakeDeps(over = {}) {
   assert.equal(r.body.submitted, true);
   assert.equal(isClaudePromptReady([rule2, '❯ a', ...Array(30).fill('  b'), rule2, '  ? for shortcuts'], { bracketedPaste: true }), true);
   assert.equal(boxHoldsMessage('[Pasted text #1 +40 lines]', 'x'), true);
-  assert.equal(boxHoldsMessage('hello there', 'hello there\nmore'), true);
+  assert.equal(boxHoldsMessage('hello there', 'hello there\nmore'), false, 'only part of the message');
+  assert.equal(boxHoldsMessage('hello there\n  more', 'hello there\nmore'), true);
+  assert.equal(boxHoldsMessage('go delete the backups', 'go'), false, 'a recalled history entry is not the message');
+  assert.equal(boxHoldsMessage('[Pasted text #1 +40 lines] and more', 'x'), false, 'marker plus other text');
   assert.equal(boxHoldsMessage('', 'hello'), false);
   assert.equal(boxHoldsMessage('Hi', '\n\nHi'), true, 'leading blank lines');
   assert.equal(boxHoldsMessage('Reply    to Dom', 'Reply\tto Dom'), true, 'a tab drawn as spaces');
@@ -378,6 +395,7 @@ function fakeDeps(over = {}) {
   assert.equal(boxStillHasMessage('he\nllo', 'hello'), true, 'split by a stray newline: not sent');
   assert.equal(boxStillHasMessage('', 'hello'), false);
   assert.equal(boxStillHasMessage('Try "refactor ProjectView.jsx"', 'hello'), false, 'placeholder');
+  assert.equal(boxStillHasMessage('Try "refactor ProjectView.jsx"', 'Try'), false, 'a placeholder that starts like the message');
   assert.equal(boxStillHasMessage(null, 'hello'), false);
   assert.equal(boxStillHasMessage(promptBoxText([rule2, '❯ a', '  >b', rule2], { bracketedPaste: true }), 'a>b'), true, 'a ">" on a later row is message text');
   assert.equal(boxStillHasMessage(promptBoxText([rule2, '❯ a', '  │b', rule2], { bracketedPaste: true }), 'a│b'), true, 'a "│" in the flat prompt is message text');
