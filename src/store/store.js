@@ -28,6 +28,9 @@ function idSpace(state) {
   return state.tabIdSpace || state.windowKey;
 }
 
+// New Tab requests made before this window's tabs were restored (openNewTab).
+const queuedNewTabs = [];
+
 function pruneGrid(gridSlots, keptIds) {
   if (!gridSlots) return null;
   const pruned = gridSlots.filter((id) => keptIds.has(id));
@@ -197,10 +200,11 @@ export const useStore = create((set, get) => ({
   // `tool` ('claude' | 'codex' | 'shell') overrides the setting. Every other
   // addTab caller (reopen, agents, checkpoints, orchestrator, restored tabs)
   // types its own command or none, so it must not come through here.
-  // Returns null (no tab) until the window's saved tabs are restored: a tab
-  // made before that could share an id with a restored one.
+  // Before the window's saved tabs are restored the request waits (a tab made
+  // then could share an id with a restored one) and opens once they are;
+  // it returns null in that case.
   openNewTab: (projectPath, tool) => {
-    if (!get().tabsReady) return null;
+    if (!get().tabsReady) { queuedNewTabs.push([projectPath, tool]); return null; }
     const tab = get().addTab(projectPath);
     // main reads the setting at spawn ('default'); an unknown tool starts nothing.
     setPendingLaunch(tab.id, tool === undefined ? 'default' : (NEW_TAB_TOOLS.includes(tool) ? tool : 'shell'));
@@ -209,7 +213,11 @@ export const useStore = create((set, get) => ({
 
   // Set once this window's tabs are restored (or it starts fresh).
   tabsReady: false,
-  markTabsReady: () => set({ tabsReady: true }),
+  markTabsReady: () => {
+    if (get().tabsReady) return;
+    set({ tabsReady: true });
+    for (const [projectPath, tool] of queuedNewTabs.splice(0)) get().openNewTab(projectPath, tool);
+  },
 
   // Add a browser pane (embedded webview). Slots into the same terminalTabs
   // list as terminal tabs — the layout engine in ProjectView treats them

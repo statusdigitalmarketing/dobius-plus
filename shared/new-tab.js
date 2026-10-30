@@ -90,7 +90,13 @@ export function pickerShortcutIndex(e) {
 //   except the tool's own (process scans match on argv). eval runs it so a
 //   user's alias or function for it applies, as when typed.
 // - A tool suspended with Ctrl+Z is resumed (fg) rather than left stopped
-//   behind the replacement shell, where nothing could ever resume it.
+//   behind the replacement shell, where nothing could ever resume it. The tool
+//   is started as a job and brought to the foreground at once, so its pid is
+//   known: only it is resumed (an rc file's background job is left alone).
+//   The fg steps are unrolled because bash abandons a loop whose foreground
+//   job stops. ponytail: 25 suspends per tool run; past that the tool is
+//   ended (bash) or left stopped (zsh) when the wrapper becomes a shell.
+//   zsh's BG_NICE is turned off so the tool does not run at a lower priority.
 // - The INT trap keeps a Ctrl+C that kills the tool before it owns the
 //   terminal from also ending the wrapper and the tab. A trap with a handler
 //   is not inherited by the tool.
@@ -101,11 +107,12 @@ export function loginShellSpawn(shell, startCommand) {
   if (typeof startCommand !== 'string' || !/^[a-z]+$/.test(startCommand)) return plain;
   const name = String(shell).split('/').pop();
   let hooks;
-  if (name === 'zsh') hooks = '(( $+functions[precmd] )) && precmd; for f in $precmd_functions; do "$f"; done;';
+  if (name === 'zsh') hooks = 'setopt no_bg_nice 2>/dev/null; (( $+functions[precmd] )) && precmd; for f in $precmd_functions; do "$f"; done;';
   else if (name === 'bash') hooks = 'for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done;';
   else return plain;
   const quoted = `'${String(shell).replace(/'/g, "'\\''")}'`;
-  const script = `trap : INT; ${hooks} t=$${START_TOOL_ENV}; unset ${START_TOOL_ENV}; eval "$t"; `
-    + `while jobs %% >/dev/null 2>&1; do fg >/dev/null 2>&1 || break; done; exec ${quoted} -l`;
+  const script = `trap : INT; ${hooks} t=$${START_TOOL_ENV}; unset ${START_TOOL_ENV}; eval "$t" & p=$!; `
+    + 'kill -0 $p 2>/dev/null && fg %+ >/dev/null 2>&1; '.repeat(26)
+    + `exec ${quoted} -l`;
   return { args: ['-l', '-i', '-c', script], env: { [START_TOOL_ENV]: startCommand } };
 }
