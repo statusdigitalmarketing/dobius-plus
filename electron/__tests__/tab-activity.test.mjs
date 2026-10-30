@@ -122,6 +122,7 @@ test('plain output stretch: since is when output started, no turn recorded', () 
 // --- presence file -----------------------------------------------------------
 const LSTART = 'Tue Oct 27 13:39:54 2026';
 const proc = { pid: 4242, startedAt: Date.parse(LSTART) };
+const END = Date.parse(LSTART) + 60_000; // the hook ended a turn a minute in
 const rec = (over) => ({ pid: 4242, procStart: LSTART, status: 'idle', ...over });
 
 test('presence: shell -> shells, busy -> agents, else nothing', () => {
@@ -150,16 +151,16 @@ test('presence reader: resolves dir once per process, caches briefly, never thro
     readFile: async (f) => { if (!(f in files)) throw new Error('ENOENT'); return files[f]; },
     now: () => t,
   });
-  assert.equal(await read('a'), 'shells');
-  assert.equal(await read('b'), null, 'no claude in the tab');
+  assert.equal(await read('a', END), 'shells');
+  assert.equal(await read('b', END), null, 'no claude in the tab');
   files['/cfg/sessions/4242.json'] = JSON.stringify(rec({ status: 'idle' }));
-  assert.equal(await read('a'), 'shells', 'cached inside the window');
+  assert.equal(await read('a', END), 'shells', 'cached inside the window');
   t = 5000;
-  assert.equal(await read('a'), null, 're-read after the cache window');
+  assert.equal(await read('a', END), null, 're-read after the cache window');
   assert.equal(dirCalls, 1);
   files['/cfg/sessions/4242.json'] = '{not json';
   t = 10_000;
-  assert.equal(await read('a'), null, 'a half-written file is no claim');
+  assert.equal(await read('a', END), null, 'a half-written file is no claim');
 });
 
 test('presence reader: an unprovable binding answers null and is retried', async () => {
@@ -171,8 +172,63 @@ test('presence reader: an unprovable binding answers null and is retried', async
     readFile: async () => JSON.stringify(rec({ status: 'shell' })),
     now: () => t,
   });
-  assert.equal(await read('a'), null);
+  assert.equal(await read('a', END), null);
   t = 5000;
-  assert.equal(await read('a'), null);
+  assert.equal(await read('a', END), null);
   assert.equal(dirCalls, 2);
+});
+
+test('presence reader: a claude started AFTER the turn ended never inherits it', async () => {
+  const read = createPresenceReader({
+    claudeInfo: async () => proc,
+    configDirOf: async () => '/cfg',
+    readFile: async () => JSON.stringify(rec({ status: 'busy' })),
+    now: () => 0,
+  });
+  // Process A's turn ended a minute BEFORE this process (B) started.
+  assert.equal(await read('a', proc.startedAt - 60_000), null);
+  // Same cached lookup, a turn this process was alive for.
+  assert.equal(await read('a', proc.startedAt + 1000), 'agents');
+});
+
+test('presence reader: the real file reader refuses non-files and oversize files', async () => {
+  const fsMod = await import('node:fs');
+  const os = await import('node:os');
+  const pathMod = await import('node:path');
+  const dir = fsMod.mkdtempSync(pathMod.join(os.tmpdir(), 'presence-'));
+  fsMod.mkdirSync(pathMod.join(dir, 'sessions'));
+  const file = pathMod.join(dir, 'sessions', '4242.json');
+  const reader = () => createPresenceReader({ claudeInfo: async () => proc, configDirOf: async () => dir, now: () => 0 });
+  try {
+    fsMod.writeFileSync(file, JSON.stringify(rec({ status: 'shell' })));
+    assert.equal(await reader()('a', END), 'shells', 'a normal file reads');
+    fsMod.writeFileSync(file, JSON.stringify(rec({ status: 'shell', pad: 'x'.repeat(70 * 1024) })));
+    assert.equal(await reader()('a', END), null, 'oversize is refused');
+    fsMod.rmSync(file);
+    const target = pathMod.join(dir, 'real.json');
+    fsMod.writeFileSync(target, JSON.stringify(rec({ status: 'shell' })));
+    fsMod.symlinkSync(target, file);
+    assert.equal(await reader()('a', END), null, 'a symlink is not followed');
+  } finally {
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coalesced markers: one chunk ending a turn and starting the next', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 1000);
+  ts.ingest(ID, mk('done') + 'prompt' + mk('working'), 121_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 120_000);
+  assert.equal(ts.activityFor(ID).since, 121_000, 'the new turn starts at the chunk, not at 1000');
+  ts.ingest(ID, mk('done'), 151_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 30_000);
+});
+
+test('forget: a respawned PTY does not inherit the old turn', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 1000);
+  ts.forget(ID);
+  ts.ingest(ID, mk('working'), 131_000);
+  ts.ingest(ID, mk('done'), 161_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 30_000);
 });

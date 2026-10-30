@@ -113,6 +113,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataListProjects: () => ipcRenderer.invoke('data:listProjects'),
   dataLoadAllSessions: (projectFilter, opts) => ipcRenderer.invoke('data:loadAllSessions', projectFilter, opts),
   dataGetAllProjectTabs: () => ipcRenderer.invoke('data:getAllProjectTabs'),
+  tabsActivity: (tabIds) => ipcRenderer.invoke('tabs:activity', tabIds),
   // Mirror this window's unread tab ids so other windows' sidebars can show Done.
   tabsReportUnread: (ids) => ipcRenderer.send('tabs:reportUnread', ids),
   dataGetSessionSize: (sessionId, projectPath) => ipcRenderer.invoke('data:getSessionSize', sessionId, projectPath),

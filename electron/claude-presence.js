@@ -19,10 +19,13 @@
 //   - the caller only asks after the HOOK says the turn ended, and only once
 //     GRACE_MS has passed, so the CLI's own busy -> idle rewrite at the end of
 //     a plain turn is never read as background work
+//   - the claude process must have been running when that turn ended: a
+//     later claude in the same shell (hooks off, say) never inherits it
 //   - any failure (no claude, binding unreadable, file missing or malformed,
 //     a format this CLI does not write) answers null: the label falls back to
 //     today's display.
 
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
@@ -56,10 +59,22 @@ export function backgroundFromPresence(rec, proc) {
  * @param {()=>number} [deps.now]
  */
 export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = Date.now }) {
+  // One open file handle for the checks AND the read, so the file cannot be
+  // swapped for a device or a huge file in between. No symlinks, and
+  // non-blocking so a FIFO planted there cannot hang a worker thread.
   const read = readFile || (async (file) => {
-    const st = await fsp.stat(file);
-    if (!st.isFile() || st.size > MAX_FILE_BYTES) throw new Error('not a presence file');
-    return fsp.readFile(file, 'utf8');
+    const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+    const fh = await fsp.open(file, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    try {
+      const st = await fh.stat();
+      if (!st.isFile() || st.size > MAX_FILE_BYTES) throw new Error('not a presence file');
+      const buf = Buffer.alloc(MAX_FILE_BYTES + 1);
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+      if (bytesRead > MAX_FILE_BYTES) throw new Error('presence file too large');
+      return buf.toString('utf8', 0, bytesRead);
+    } finally {
+      await fh.close();
+    }
   });
   // A process keeps its environment for life, so its config dir is cached
   // per pid + start time; bounded by pruning to the processes seen recently.
@@ -81,19 +96,29 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
     let rec;
     try { rec = JSON.parse(await read(path.join(dir, 'sessions', `${info.pid}.json`))); }
     catch { return null; } // CLI without presence files, or mid-rewrite: no claim
-    return backgroundFromPresence(rec, info);
+    const value = backgroundFromPresence(rec, info);
+    return value ? { value, startedAt: info.startedAt } : null;
   }
 
-  /** Background work in this tab's Claude, or null. Never throws. */
-  return async function backgroundForTab(tabId) {
+  /**
+   * Background work in this tab's Claude, or null. Never throws.
+   * @param {string} tabId
+   * @param {number} turnEndedAt  when the hook ended the turn; the process
+   *   read must already have been running then (ps start is truncated to the
+   *   second, so it is never later than the real start)
+   */
+  return async function backgroundForTab(tabId, turnEndedAt) {
     const t = now();
-    const hit = cache.get(tabId);
-    if (hit && t - hit.at < CACHE_MS) return hit.value;
-    let value = null;
-    try { value = await resolve(tabId); }
-    catch (err) { console.warn('[claude-presence] lookup failed', tabId, err?.message); }
-    cache.set(tabId, { at: t, value });
-    if (cache.size > 512) cache.delete(cache.keys().next().value);
-    return value;
+    let hit = cache.get(tabId);
+    if (!hit || t - hit.at >= CACHE_MS) {
+      let found = null;
+      try { found = await resolve(tabId); }
+      catch (err) { console.warn('[claude-presence] lookup failed', tabId, err?.message); }
+      hit = { at: t, found };
+      cache.set(tabId, hit);
+      if (cache.size > 512) cache.delete(cache.keys().next().value);
+    }
+    if (!hit.found || !(hit.found.startedAt <= turnEndedAt)) return null;
+    return hit.found.value;
   };
 }

@@ -70,14 +70,12 @@ export function ingest(id, data, now = Date.now()) {
   MARKER_RE.lastIndex = 0;
   let lastMatch = null;
   let m;
-  while ((m = MARKER_RE.exec(combined)) !== null) lastMatch = m;
-
-  if (lastMatch) {
-    // The marker is authoritative for this chunk.
-    const state = lastMatch[1];
-    st.status = state;
-    st.hookOwned = state !== 'done'; // working/needs own; done releases
-    st.doneAt = state === 'done' ? now : 0; // stamp so trailing bytes don't clobber green
+  // Every marker in order, not just the last: a chunk can carry one turn's
+  // 'done' and the next turn's 'working', and the turn bookkeeping must see
+  // both. The status itself ends up as the last marker's, as before.
+  while ((m = MARKER_RE.exec(combined)) !== null) {
+    lastMatch = m;
+    const state = m[1];
     if (state === 'done') {
       if (st.turnStartedAt) st.lastTurnMs = Math.max(0, now - st.turnStartedAt);
       st.turnStartedAt = 0;
@@ -85,6 +83,14 @@ export function ingest(id, data, now = Date.now()) {
     } else if (!st.turnStartedAt) {
       st.turnStartedAt = now;
     }
+  }
+
+  if (lastMatch) {
+    // The marker is authoritative for this chunk.
+    const state = lastMatch[1];
+    st.status = state;
+    st.hookOwned = state !== 'done'; // working/needs own; done releases
+    st.doneAt = state === 'done' ? now : 0; // stamp so trailing bytes don't clobber green
     // Keep only what follows the processed marker so it is not re-matched.
     st.tail = combined.slice(lastMatch.index + lastMatch[0].length).slice(-TAIL_KEEP);
   } else {
@@ -149,6 +155,11 @@ export function activityFor(id) {
     lastTurnMs: st.lastTurnMs || 0,
     turnEndedAt: st.turnEndedAt || 0,
   };
+}
+
+/** A new PTY under this id (a respawn): nothing from the old one carries over. */
+export function forget(id) {
+  live.delete(id);
 }
 
 /** Current status for one live terminal, or null. */

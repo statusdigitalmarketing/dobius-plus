@@ -21,7 +21,7 @@ const terminals = new Map();
 // Global terminal observers (v1.0.43): sinks that see EVERY terminal's data +
 // exit, independent of window/mobile attachment. Used by the main-process
 // status authority. Each observer is { onData(id, data, cwd), onExit(id,
-// {exitCode, signal, cwd}) }.
+// {exitCode, signal, cwd}), onSpawn(id) }.
 const terminalObservers = new Set();
 export function addTerminalObserver(observer) {
   if (observer) terminalObservers.add(observer);
@@ -153,6 +153,11 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   // Kill existing terminal with this ID if any
   if (terminals.has(id)) {
     killTerminal(id);
+  }
+  // Observers drop what they derived from the old PTY (a respawn under the
+  // same id must not inherit its turn timing).
+  for (const obs of terminalObservers) {
+    try { obs.onSpawn?.(id); } catch { /* never let an observer break the PTY */ }
   }
 
   // Validate cwd is an existing directory; fall back to home

@@ -235,32 +235,37 @@ const unreadByWindow = new Map();
 const backgroundForTab = createPresenceReader({ claudeInfo: getTerminalClaudeInfo, configDirOf: configDirOfPid });
 
 /**
- * Add `activity` (main's hook status + turn timing, and background work once a
- * turn has ended) and `unread` to each LIVE row of the cross-window tab list.
- * Rows that are not live get neither: a closed tab can only show its age.
+ * Sidebar status for one tab: main's hook status + turn timing, background
+ * work once a turn has ended, and whether any window that OWNS the PTY has it
+ * unread. Null when no PTY runs for the id (a closed tab shows its age).
  */
-async function withTabActivity(groups, liveTabIds) {
-  const now = Date.now();
-  const rows = (Array.isArray(groups) ? groups : []).flatMap((g) => g.tabs || []);
-  await Promise.all(rows.map(async (row) => {
-    if (!row?.id || !liveTabIds.has(row.id)) return;
-    const a = terminalStatus.activityFor(row.id);
-    if (!a) return;
-    let background = null;
-    // Only after the HOOK ended a turn, so a session with hooks off (or a plain
-    // shell) never gets a Waiting it cannot prove.
-    // A hook-owned 'working' is a new turn (Working wins anyway); plain output
-    // after the turn (typing at the prompt) still asks.
-    if (a.turnEndedAt && a.status !== 'needs' && !(a.status === 'working' && a.hookOwned)
-        && now - a.turnEndedAt >= PRESENCE_GRACE_MS) {
-      background = await backgroundForTab(row.id);
+async function tabActivity(id) {
+  const a = terminalStatus.activityFor(id);
+  if (!a) return null;
+  let background = null;
+  // Only after the HOOK ended a turn, so a session with hooks off (or a plain
+  // shell) never gets a Waiting it cannot prove. A hook-owned 'working' is a
+  // new turn (Working wins anyway); plain output after the turn (typing at
+  // the prompt) still asks.
+  if (a.turnEndedAt && a.status !== 'needs' && !(a.status === 'working' && a.hookOwned)
+      && Date.now() - a.turnEndedAt >= PRESENCE_GRACE_MS) {
+    background = await backgroundForTab(id, a.turnEndedAt);
+    // The lookup awaited: if a new turn started (or this one's end changed)
+    // meanwhile, the presence file may describe that turn instead.
+    const after = terminalStatus.activityFor(id);
+    if (!after || after.turnEndedAt !== a.turnEndedAt || after.status === 'needs'
+        || (after.status === 'working' && after.hookOwned)) {
+      return after ? { id, activity: { ...after, background: null }, unread: unreadAnywhere(id) } : null;
     }
-    row.activity = { ...a, background };
-    for (const [wcId, ids] of unreadByWindow) {
-      if (ids.has(row.id) && ownsTerminal(wcId, row.id)) { row.unread = true; break; }
-    }
-  }));
-  return groups;
+  }
+  return { id, activity: { ...a, background }, unread: unreadAnywhere(id) };
+}
+
+function unreadAnywhere(id) {
+  for (const [wcId, ids] of unreadByWindow) {
+    if (ids.has(id) && ownsTerminal(wcId, id)) return true;
+  }
+  return false;
 }
 
 // Settle tick for the main-process terminal status authority (v1.0.43).
@@ -507,7 +512,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
   ipcMain.handle('data:listProjects', () => listProjects());
   ipcMain.handle('data:loadAllSessions', (_event, projectFilter, opts) => loadAllSessions(typeof projectFilter === 'string' ? projectFilter : undefined, (opts && typeof opts === 'object') ? opts : {}));
-  ipcMain.handle('data:getAllProjectTabs', async () => {
+  ipcMain.handle('data:getAllProjectTabs', () => {
     // Feed live-PTY ids (so the sidebar can tell a still-running cross-window tab
     // from a resumable one, H3) and open tear-off windows (so their torn tab,
     // which is stripped from the primary's persisted tabs, still appears, M4).
@@ -528,8 +533,21 @@ function setupDataHandlers() {
       }
       return [w];
     });
-    const groups = await getAllProjectTabs({ liveTabIds, tearOffTabs });
-    return withTabActivity(groups, liveTabIds);
+    return getAllProjectTabs({ liveTabIds, tearOffTabs });
+  });
+  // Live status for the Tabs sidebar's rows, separate from the aggregate above
+  // because it is cheap and asked often (every local status change), while the
+  // aggregate reads session history. Any window may ask about any tab, like
+  // the aggregate. Returns an ARRAY, never keyed by caller-supplied ids.
+  ipcMain.handle('tabs:activity', async (_event, ids) => {
+    if (!Array.isArray(ids)) return [];
+    const live = new Set(listTerminals().map((t) => t.id));
+    const wanted = [...new Set(ids.filter((id) => typeof id === 'string' && live.has(id)))].slice(0, 256);
+    const out = await Promise.all(wanted.map((id) => tabActivity(id).catch((err) => {
+      console.warn('[tabs:activity] skipped', id, err?.message);
+      return null;
+    })));
+    return out.filter(Boolean);
   });
   // Each window mirrors its unread tab ids here (the renderer's unreadTabs is
   // the only unread system; this copy only lets OTHER windows' sidebars show
@@ -3491,6 +3509,7 @@ app.whenReady().then(() => {
   addTerminalObserver({
     onData: (id, data) => terminalStatus.ingest(id, data),
     onExit: (id, info) => terminalStatus.noteExit(id, info),
+    onSpawn: (id) => terminalStatus.forget(id),
   });
   statusSettleTimer = setInterval(() => terminalStatus.settle(), 1000);
   startVoiceBridge();

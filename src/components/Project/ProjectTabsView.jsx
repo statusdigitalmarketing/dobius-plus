@@ -78,37 +78,70 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
   const setActiveView = useStore((s) => s.setActiveView);
   const [collapsed, setCollapsed] = useState({}); // path -> true when collapsed
 
-  // Asks overlap (poll + status changes), so only a reply newer than the last
-  // one applied may land: an older reply would put back a stale status.
-  const askSeqRef = useRef(0);
-  const appliedSeqRef = useRef(0);
+  // The aggregate reads session history and can be slow on a big history, so
+  // a tick is skipped while one is still out (overlapping asks piled up).
+  const groupsInFlight = useRef(false);
   const refresh = useCallback(() => {
     if (!window.electronAPI?.dataGetAllProjectTabs) { setGroups([]); return; }
-    const seq = ++askSeqRef.current;
-    const apply = (g) => {
-      if (seq < appliedSeqRef.current) return;
-      appliedSeqRef.current = seq;
-      setGroups(g);
-    };
+    if (groupsInFlight.current) return;
+    groupsInFlight.current = true;
     window.electronAPI.dataGetAllProjectTabs()
-      .then((g) => apply(Array.isArray(g) ? g : []))
-      .catch(() => apply([]));
+      .then((g) => setGroups(Array.isArray(g) ? g : []))
+      .catch(() => setGroups([]))
+      .finally(() => { groupsInFlight.current = false; });
   }, []);
 
-  // Poll (the first ask is the localKey effect below): the aggregate spans
-  // other windows, so there's no in-window event for their changes. 5s is cheap.
+  // Refresh on open, then poll: the aggregate spans other windows, so there's no
+  // in-window event for their changes.
   useEffect(() => {
+    refresh();
     const i = setInterval(refresh, 5000);
     return () => clearInterval(i);
   }, [refresh]);
 
-  // A status or unread change in THIS window re-asks main at once, so a new
-  // turn's start time (main records it) shows without waiting for the poll.
+  // Live row status (Working / Input / Waiting / Done) comes from main's cheap
+  // tabs:activity, keyed by tab id. One ask at a time; an ask requested while
+  // one is out runs once when it lands, so the newest state always arrives.
+  const [activity, setActivity] = useState(() => new Map());
+  const activityIdsRef = useRef([]);
+  const activityState = useRef({ inFlight: false, again: false });
+  const refreshActivity = useCallback(() => {
+    if (!window.electronAPI?.tabsActivity) return;
+    const st = activityState.current;
+    if (st.inFlight) { st.again = true; return; }
+    st.inFlight = true;
+    st.again = false;
+    window.electronAPI.tabsActivity(activityIdsRef.current)
+      .then((list) => setActivity(new Map((Array.isArray(list) ? list : []).map((r) => [r.id, r]))))
+      .catch((err) => console.warn('[ProjectTabsView] activity lookup failed:', err?.message))
+      .finally(() => {
+        st.inFlight = false;
+        if (st.again) refreshActivity();
+      });
+  }, []);
+
+  // Ask about every tab that may be live: this window's, and any the
+  // aggregate says has a PTY in another window.
+  const activityIdsKey = useMemo(() => {
+    const ids = new Set(terminalTabs.map((t) => t.id));
+    for (const g of groups || []) for (const t of g.tabs || []) if (t.live) ids.add(t.id);
+    return [...ids].join('\n');
+  }, [terminalTabs, groups]);
+  // A status or unread change in THIS window re-asks at once, so a new turn's
+  // start time (main records it) shows without waiting for the tick.
   const localKey = useMemo(
     () => terminalTabs.map((t) => `${t.id}:${tabStatus[t.id] || ''}:${unreadTabs[t.id] ? 1 : 0}`).join('|'),
     [terminalTabs, tabStatus, unreadTabs],
   );
-  useEffect(() => { refresh(); }, [localKey, refresh]);
+  useEffect(() => {
+    activityIdsRef.current = activityIdsKey ? activityIdsKey.split('\n') : [];
+    refreshActivity();
+  }, [activityIdsKey, localKey, refreshActivity]);
+  // The tick also re-renders, which is what advances "Working 4m".
+  useEffect(() => {
+    const i = setInterval(refreshActivity, 3000);
+    return () => clearInterval(i);
+  }, [refreshActivity]);
 
   const liveHere = useCallback(
     (projectPath, tabId) => projectPath === currentProjectPath && terminalTabs.some((t) => t.id === tabId),
@@ -193,7 +226,7 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
     );
   }
 
-  const now = Date.now(); // every 5s poll re-renders, which ticks "Working 4m"
+  const now = Date.now(); // the activity tick re-renders, which advances "Working 4m"
   return (
     <div className="flex-1 overflow-y-auto">
       {filtered.map((g) => {
@@ -228,18 +261,22 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                   const live = liveHere(g.path, t.id);
                   const status = (live ? tabStatus[t.id] : t.status) || 'idle';
                   const dot = STATUS_COLORS[status] || 'var(--dim)';
-                  // This window's own tabs read the store (instant); other
-                  // windows' tabs read main's copy. Timing always comes from
-                  // main, where the status transitions are recorded.
-                  const act = t.activity;
+                  // A PTY runs for the tab only if main says so (a tab still
+                  // listed here can have an exited shell). This window's own
+                  // tabs read the store (instant) unless main holds a hook
+                  // status the store lost (a tab torn off mid-turn); other
+                  // windows' tabs read main. Timing always comes from main.
+                  const row = activity.get(t.id);
+                  const a = row?.activity;
+                  const useMain = !live || (!!a?.hookOwned && !hookOwnedTabs[t.id]);
                   const label = tabActivityLabel({
-                    live: live || !!t.live,
-                    status: live ? tabStatus[t.id] : act?.status,
-                    hookOwned: live ? !!hookOwnedTabs[t.id] : !!act?.hookOwned,
-                    since: act?.since,
-                    lastTurnMs: act?.lastTurnMs,
-                    background: act?.background,
-                    unread: live ? !!unreadTabs[t.id] : !!t.unread,
+                    live: !!a,
+                    status: useMain ? a?.status : tabStatus[t.id],
+                    hookOwned: useMain ? !!a?.hookOwned : !!hookOwnedTabs[t.id],
+                    since: a?.since,
+                    lastTurnMs: a?.lastTurnMs,
+                    background: a?.background,
+                    unread: live ? !!unreadTabs[t.id] : !!row?.unread,
                     now,
                   });
                   return (
