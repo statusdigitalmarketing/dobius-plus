@@ -176,15 +176,16 @@ const HELD_POLL_MS = 50;
 // dropped (writeRawInput).
 const lastSubmitEnterAt = new Map();
 const PROMPT_SETTLE_MS = 1000; // src/lib/prompt-edit-term.js AFTER_ENTER_MS
-// tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
-// under an older gen is dropped instead of written.
+// tabId -> { running, items, gen, dropGen }. gen bumps on a cancel key; an item queued
+// under an older gen is dropped instead of written. dropGen bumps when a
+// prompt-only paste is dropped; it drops only submits not yet pasted.
 const submitQueues = new Map();
 
 const isCancelKey = (data) => data === '\x1b' || data.includes('\x03') || data.includes('\x15');
 
 function queueFor(id) {
   let q = submitQueues.get(id);
-  if (!q) { q = { running: false, items: [], gen: 0 }; submitQueues.set(id, q); }
+  if (!q) { q = { running: false, items: [], gen: 0, dropGen: 0 }; submitQueues.set(id, q); }
   return q;
 }
 
@@ -216,7 +217,7 @@ export function submitPromptToTab(id, text, stillOk = () => true, onStranded = (
   if (!pty || terminalClosing(id) || !stillOk()) return Promise.resolve(false);
   const q = queueFor(id);
   return new Promise((resolve) => {
-    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded });
+    q.items.push({ clean, pty, stillOk, gen: q.gen, dropGen: q.dropGen, resolve, onStranded });
     if (!q.running) drainSubmits(id, q);
   });
 }
@@ -255,9 +256,13 @@ export function writeRawInput(id, data, stillOk = () => true, { promptOnly = fal
   // maybe in the shell a "/exit" left behind; and just after a submit's
   // Enter that check may have read the screen from before it: dropped.
   // (Prompt editing waits the same second after its own Enter.)
-  if (promptOnly && Date.now() - (lastSubmitEnterAt.get(id) ?? -Infinity) < PROMPT_SETTLE_MS) return;
+  // A dropped paste is input lost: queued submits are cancelled with it,
+  // never sent without the attachment the person meant to go first.
+  // Only submits not yet pasted (dropGen): the one already in the box is
+  // what the box holds, the dropped paste never reached it.
+  if (promptOnly && Date.now() - (lastSubmitEnterAt.get(id) ?? -Infinity) < PROMPT_SETTLE_MS) { if (q) q.dropGen += 1; return; }
   if (!q || !q.running || q.waitingHeld) { writeTerminal(id, data); return; }
-  if (promptOnly) return;
+  if (promptOnly) { q.dropGen += 1; return; }
   q.items.push({ raw: data, pty: terminalInstance(id), stillOk, gen: q.gen, resolve: () => {} });
 }
 
@@ -304,6 +309,9 @@ async function drainSubmits(id, q) {
       // nothing is typed.
       if (inputHeld(id) || it.gen !== q.gen || terminalInstance(id) !== it.pty || terminalClosing(id) || !it.stillOk()) { it.resolve(false); continue; }
     }
+    // A prompt-only paste was dropped since this was accepted (writeRawInput):
+    // the person's attachment never went in, so this does not go either.
+    if (it.dropGen !== q.dropGen) { it.resolve(false); continue; }
     writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
     const pastedAt = terminalInputSeq(id);
     const cancelsAt = q.cancelWrites || 0;

@@ -440,6 +440,21 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   writeRawInput('h', "\x1b[200~'/p/deploy.sh'\x1b[201~", () => true, { promptOnly: true });
   assert.equal(writes.at(-1)[1], '\r', 'dropped: the queued Enter went out under a second ago');
 
+  // A prompt-only paste main drops cancels the submit waiting for it: never
+  // sent without the attachment.
+  held = false;
+  await tick(1100); // clear of the previous case's Enter
+  reset(); ptys.set('h', {});
+  const t1 = submitPromptToTab('h', 'A');
+  const t2 = submitPromptToTab('h', 'Describe this image');
+  held = true; // an image paste is accepted while A waits for its Enter
+  await t1;
+  await tick(100); // B waits for the held paste
+  writeRawInput('h', "\x1b[200~'/p/shot.png'\x1b[201~", () => true, { promptOnly: true }); // within a second of A's Enter
+  held = false;
+  assert.equal(await t2, false);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r']);
+
   // A window that held input is gone with it half sent: a waiting submit is
   // cancelled, never appended to the half.
   const { cancelQueuedSubmits } = await import('../chat-service.js');

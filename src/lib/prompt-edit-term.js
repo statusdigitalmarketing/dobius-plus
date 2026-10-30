@@ -160,8 +160,9 @@ export function attachPromptEditing(term, send, held = () => {}) {
       const sinceEnter = performance.now() - lastEnterAt;
       if (sinceEnter < AFTER_ENTER_MS) await new Promise((r) => setTimeout(r, AFTER_ENTER_MS - sinceEnter));
       if (disposed || !inPrompt()) return false;    // the prompt it was pasted into is gone
-      if (!text) return true;                       // nothing to paste (save failed)
-      if (item.sel === MID_EDIT) return true;       // pasted onto a selection we could not read
+      // Nothing pasted (the save failed), or pasted onto a selection we
+      // could not read: the rest goes on, but this input was lost.
+      if (!text || item.sel === MID_EDIT) { dropped = true; return true; }
       // Checked against Claude's prompt just now; main drops it rather than
       // deliver it late to whatever replaced the prompt.
       if (item.sel) return replace(item.sel, pasteData(text), PROMPT_ONLY);
@@ -174,6 +175,7 @@ export function attachPromptEditing(term, send, held = () => {}) {
     if (/(^|[^\x1b])\r|[\x03\x04]/.test(data) && classifyInput(data) === 'other') lastEnterAt = performance.now();
     if (sel === MID_EDIT) {
       if (classifyInput(data) === 'other') send(data);
+      else dropped = true; // a key typed onto that selection is lost
       return true;
     }
     if (sel && Date.now() - sel.at < ARM_TTL_MS && classifyInput(data) !== 'other') {

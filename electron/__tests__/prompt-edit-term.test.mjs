@@ -420,3 +420,18 @@ test('input that waited behind a paste goes out paced, not in one burst', async 
   assert.ok(gaps.every((g) => g >= 15), `gaps ${gaps}`);
   assert.equal(t.app.submitted, 'Xhi');
 });
+
+test('a paste whose save failed, or a key typed onto a selection made mid-edit, counts as dropped', async () => {
+  const t = fakeClaude('old request ');
+  t.edit.pasteWhenReady(Promise.resolve(null));
+  t.type('x');
+  await wait();
+  assert.deepEqual(t.app.drops, [true], 'save failed');
+  const u = fakeClaude('one two');
+  u.select(2, 5);
+  u.type('X'); // an edit starts
+  u.select(6, 9); // selection made while it runs
+  u.type('\x15');
+  await wait();
+  assert.deepEqual(u.app.drops, [true], 'the key on the mid-edit selection was lost');
+});
