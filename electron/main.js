@@ -236,7 +236,9 @@ const claudeInfoCached = cachedPerTab((id) => getTerminalClaudeInfo(id, { unique
 const { tabActivity, checkTurnAgainstProcess } = createTabActivity({
   status: terminalStatus,
   claudeInfo: claudeInfoCached,
-  claudeInfoFresh: (id) => getTerminalClaudeInfo(id, { unique: true }),
+  // Fresh = never a settled answer, but one scan in flight per tab is shared
+  // however many asks arrive (renderer requests cannot fan out scans).
+  claudeInfoFresh: cachedPerTab((id) => getTerminalClaudeInfo(id, { unique: true }), 0),
   presenceForTab: createPresenceReader({ claudeInfo: claudeInfoCached, configDirOf: configDirOfPid }),
   unreadAnywhere: (id) => unreadAnywhere(id),
 });

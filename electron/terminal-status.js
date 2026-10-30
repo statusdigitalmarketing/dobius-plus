@@ -208,6 +208,9 @@ export function abandonTurn(id, lastMarkerAt) {
   st.status = 'idle';
   st.turnStartedAt = 0;
   st.turnStartDistrusted = false;
+  // The abandoned turn is now the last one and its length is unknown: a
+  // later idle-prompt 'done' must not show the turn before it.
+  st.lastTurnMs = 0;
 }
 
 /** When the hook last ended a turn here (0 = never). Cheap, for the data path. */

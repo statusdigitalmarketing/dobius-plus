@@ -92,20 +92,26 @@ export function matchPresence(rec, proc) {
  * @param {object|null} found  matchPresence result
  * @param {{status:string, hookOwned:boolean, turnEndedAt:number, lastMarkerAt?:number}} a
  * @param {{pid:number, startedAt:number}|null} info  the claude in the tab now
- * @returns {{background:'shells'|'agents'|null, uncertain:boolean}}
+ * @returns {{background:'shells'|'agents'|null, uncertain:boolean, over?:boolean, showAs?:'working'|'needs'}}
+ *   `over`: the hook's turn ended without its marker (main ends it too).
+ *   `showAs`: the turn continues but is in the other state than the hook said.
  */
 export function judgePresence(found, a, info) {
   const none = { background: null, uncertain: false };
   if (!found || !info || found.pid !== info.pid || found.startedAt !== info.startedAt) return none;
   const at = found.statusUpdatedAt;
   if ((a.status === 'working' || a.status === 'needs') && a.hookOwned) {
-    // Hook says a turn is running ('busy') or a dialog is open ('waiting').
-    // Any OTHER state the CLI wrote after the last marker (idle, a turn that
-    // ended with a background shell, a dialog answered) means the hook state
-    // is over without its closing marker (hooks switched off, an interrupt).
-    const expected = a.status === 'working' ? 'busy' : 'waiting';
-    const over = found.status !== expected && Number.isFinite(at) && a.lastMarkerAt && at > a.lastMarkerAt;
-    return over ? { background: null, uncertain: true } : none;
+    // Only a state the CLI wrote AFTER the last marker says anything new.
+    if (!Number.isFinite(at) || !a.lastMarkerAt || at <= a.lastMarkerAt) return none;
+    // Still in the turn, just between the two: a dialog approved goes back to
+    // 'busy' (the approved tool runs with no new marker), a dialog the hook
+    // has not reported yet is 'waiting'. Show what the CLI says; the turn and
+    // its clock continue.
+    if (found.status === 'busy') return a.status === 'needs' ? { ...none, showAs: 'working' } : none;
+    if (found.status === 'waiting') return a.status === 'working' ? { ...none, showAs: 'needs' } : none;
+    // Idle, or a turn that ended with a background shell: the hook's turn is
+    // over without its closing marker (hooks switched off, an interrupt).
+    return { background: null, uncertain: true, over: true };
   }
   const end = a.turnEndedAt;
   if (!end || !(found.startedAt + 1000 <= end)) return none;
@@ -388,10 +394,11 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
       }
       const j = judgePresence(found, a, info);
       background = j.background;
+      if (j.showAs) return { id, activity: { ...a, status: j.showAs, background: null }, unread: unreadAnywhere(id) };
       if (j.uncertain) {
-        // The CLI showed the hook's turn or dialog is over: end it in the
-        // record too, so a later hookless turn cannot revive its clock.
-        if (hookLive) status.abandonTurn(id, a.lastMarkerAt);
+        // The CLI showed the hook's turn is over: end it in the record too, so
+        // a later hookless turn cannot revive its clock.
+        if (j.over) status.abandonTurn(id, a.lastMarkerAt);
         return { id, activity: { ...a, background: null, uncertain: true }, unread: unreadAnywhere(id) };
       }
     }

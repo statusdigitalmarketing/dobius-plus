@@ -683,6 +683,9 @@ test('judgePresence: any state after the marker other than the hook one ends it'
   const needs = { ...working, status: 'needs' };
   assert.equal(judgePresence(f('idle', 230_000), needs, info).uncertain, true, 'dialog answered, turn over');
   assert.equal(judgePresence(f('waiting', 230_000), needs, info).uncertain, false, 'the dialog is still open');
+  const approved = judgePresence(f('busy', 230_000), needs, info);
+  assert.deepEqual([approved.uncertain, approved.over, approved.showAs], [false, undefined, 'working'], 'approved: the turn goes on');
+  assert.equal(judgePresence(f('waiting', 230_000), working, info).showAs, 'needs', 'a dialog the hook has not reported yet');
 });
 
 test('tab activity: an Input whose dialog went away without a marker shows the age', async () => {
@@ -753,4 +756,47 @@ test('a cached "no claude" is re-read fresh before it distrusts a running turn',
   await checkTurnAgainstProcess(ID, ts.activityFor(ID));
   ts.ingest(ID, mk('done'), 161_500);
   assert.equal(ts.activityFor(ID).lastTurnMs, 60_000);
+});
+
+test('approving a permission keeps the turn and its clock', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('needs'), 20_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),
+    presenceForTab: async () => ({ pid: 1, startedAt: 1_000, status: 'busy', statusUpdatedAt: 30_000 }),
+    now: () => 34_000,
+  });
+  const r = await tabActivity(ID);
+  assert.equal(label({ ...r.activity, live: true, now: 34_000 }).text, 'Working 24s');
+  assert.equal(ts.activityFor(ID).status, 'needs', 'the record is untouched');
+  ts.ingest(ID, mk('working'), 40_000);
+  ts.ingest(ID, mk('done'), 70_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 60_000);
+});
+
+test('an abandoned turn leaves no old length for a later done', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 70_000);
+  ts.ingest(ID, mk('working'), 100_000);
+  ts.abandonTurn(ID, 100_000);
+  ts.ingest(ID, mk('done'), 190_000); // idle-prompt re-send
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+});
+
+test('fresh lookups: many asks while one is in flight share it', async () => {
+  let calls = 0;
+  let release;
+  const fresh = cachedPerTab(() => { calls += 1; return new Promise((r) => { release = r; }); }, 0);
+  const all = Array.from({ length: 50 }, () => fresh('a'));
+  await new Promise((r) => setImmediate(r));
+  release({ pid: 1 });
+  await Promise.all(all);
+  assert.equal(calls, 1);
+  const again = fresh('a');
+  await new Promise((r) => setImmediate(r));
+  release({ pid: 1 });
+  await again;
+  assert.equal(calls, 2, 'a settled answer is never reused');
 });
