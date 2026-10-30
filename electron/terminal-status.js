@@ -195,6 +195,21 @@ export function distrustTurnStart(id, since, { runningOnly = false } = {}) {
   }
 }
 
+/**
+ * main proved (from Claude's presence file) that the hook's running turn or
+ * dialog is over although no closing marker came (hooks switched off, an
+ * interrupt). End it here, so its clock cannot come back with a later turn.
+ * Only for the exact record checked: a marker since then wins.
+ */
+export function abandonTurn(id, lastMarkerAt) {
+  const st = live.get(id);
+  if (!st || !st.hookOwned || st.lastMarkerAt !== lastMarkerAt) return;
+  st.hookOwned = false;
+  st.status = 'idle';
+  st.turnStartedAt = 0;
+  st.turnStartDistrusted = false;
+}
+
 /** When the hook last ended a turn here (0 = never). Cheap, for the data path. */
 export function turnEndedAtFor(id) {
   return live.get(id)?.turnEndedAt || 0;

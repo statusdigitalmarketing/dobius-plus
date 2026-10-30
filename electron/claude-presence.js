@@ -324,7 +324,7 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
  * work once a turn has ended, and whether a window that owns the PTY has it
  * unread. Dependencies are injected so this is tested without Electron.
  * @param {object} deps
- * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function}} deps.status
+ * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function}} deps.status
  * @param {(id:string)=>Promise<object|null>} deps.claudeInfo  cached lookup
  * @param {(id:string)=>Promise<object|null>} [deps.claudeInfoFresh]  uncached, for turn ends
  * @param {(id:string, key:string)=>Promise<object|null>} deps.presenceForTab
@@ -342,7 +342,10 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     if (!raw.hookOwned && !raw.lastTurnMs && !raw.turnEndedAt) return undefined;
     // At a turn's end the process must be read NOW: a cached identity can be
     // the claude that died just before this turn's claude started.
-    const info = await (fresh ? claudeInfoFresh : claudeInfo)(id);
+    let info = await (fresh ? claudeInfoFresh : claudeInfo)(id);
+    // An absence is only evidence when read now: a cached "no claude" can
+    // predate the claude that just started this turn.
+    if (!info && !fresh && raw.hookOwned && raw.since) info = await claudeInfoFresh(id);
     const a = reconcileWithProcess(raw, info);
     // A claude's start time proves a time wrong. Finding NO claude proves a
     // still-running turn was abandoned (or runs behind a wrapper, where an
@@ -385,7 +388,12 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
       }
       const j = judgePresence(found, a, info);
       background = j.background;
-      if (j.uncertain) return { id, activity: { ...a, background: null, uncertain: true }, unread: unreadAnywhere(id) };
+      if (j.uncertain) {
+        // The CLI showed the hook's turn or dialog is over: end it in the
+        // record too, so a later hookless turn cannot revive its clock.
+        if (hookLive) status.abandonTurn(id, a.lastMarkerAt);
+        return { id, activity: { ...a, background: null, uncertain: true }, unread: unreadAnywhere(id) };
+      }
     }
     return { id, activity: { ...a, background }, unread: unreadAnywhere(id) };
   }

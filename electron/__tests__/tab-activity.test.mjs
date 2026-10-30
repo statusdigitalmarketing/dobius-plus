@@ -719,3 +719,38 @@ test('turn-end limiter: a full map never forgets a recent start', async () => {
   for (let i = 0; i < 10; i += 1) { check('busy-tab'); await new Promise((r) => setTimeout(r, 2)); }
   assert.equal(calls, before, 'within its interval: queued behind a timer, not run again');
 });
+
+test('a turn presence proved over is ended in the record, so a later turn starts fresh', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  let presence = { pid: 1, startedAt: 1_000, status: 'idle', statusUpdatedAt: 20_000 };
+  let t = 25_000;
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),
+    presenceForTab: async () => presence,
+    now: () => t,
+  });
+  assert.equal((await tabActivity(ID)).activity.uncertain, true);
+  assert.deepEqual([ts.activityFor(ID).status, ts.activityFor(ID).hookOwned], ['idle', false]);
+  // A hookless turn later: busy, no marker. Not Working with the old clock.
+  presence = { ...presence, status: 'busy', statusUpdatedAt: 130_000 };
+  t = 134_000;
+  const r = await tabActivity(ID);
+  assert.equal(label({ ...r.activity, live: true, now: t }), null);
+  // Hooks back on: the next turn's clock starts at its own marker.
+  ts.ingest(ID, mk('working'), 130_000);
+  ts.ingest(ID, mk('done'), 190_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 60_000);
+});
+
+test('a cached "no claude" is re-read fresh before it distrusts a running turn', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 101_500);
+  const { checkTurnAgainstProcess } = makeActivity({
+    claudeInfo: async () => null,                                // cached from before B started
+    claudeInfoFresh: async () => ({ pid: 2, startedAt: 100_000 }), // B, the turn's own claude
+  });
+  await checkTurnAgainstProcess(ID, ts.activityFor(ID));
+  ts.ingest(ID, mk('done'), 161_500);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 60_000);
+});
