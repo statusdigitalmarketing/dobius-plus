@@ -138,7 +138,10 @@ function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
         Object.defineProperty(out, 'firstWords', { value: firstWords });
         // Whether the program asked for bracketed paste: /openTab only pastes
         // into a Claude that turned it on (bridge-open-tab.js).
-        Object.defineProperty(out, 'modes', { value: { bracketedPaste: !!term.modes?.bracketedPasteMode } });
+        // And where the cursor is (row and column of the screen): Claude's
+        // default renderer keeps it on the caret, so it tells the real input
+        // box from a lookalike drawn elsewhere (a status line, a selector).
+        Object.defineProperty(out, 'modes', { value: { bracketedPaste: !!term.modes?.bracketedPasteMode, cursor: { x: buf.cursorX, y: buf.cursorY } } });
         resolve(out);
       } catch {
         resolve(null);

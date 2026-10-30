@@ -84,6 +84,27 @@ assert.equal(isClaudePromptReady([rule, '❯ ', rule, ...Array(20).fill('text sh
 assert.equal(isClaudePromptReady([rule, '❯ ', rule, '  ? for shortcuts', '', '', ''], { bracketedPaste: true }), true, 'trailing blank rows do not count');
 ok('Claude ready check on real screens');
 
+// The box holding the caret is Claude's input (screen-render reports the
+// cursor): a numbered message in it is text, while a selector (its caret
+// parked ON the ❯) and a lookalike box a chained status line draws below the
+// prompt are not.
+{
+  const at = (x, y) => ({ bracketedPaste: true, cursor: { x, y } });
+  assert.deepEqual(idle.modes.cursor, { x: 2, y: 36 }, 'the real idle prompt holds the caret');
+  assert.equal(promptBoxText([rule, '❯ 1. Review README', rule], at(18, 1)), '1. Review README');
+  assert.equal(promptBoxText([rule, '❯ 1. Review README', '  2. Fix the tests', rule], at(19, 2)), '1. Review README\n2. Fix the tests');
+  assert.equal(isClaudePromptReady([rule, '❯ 1. Yes', '  2. No', rule], at(0, 1)), false, 'a selector: caret on its ❯');
+  assert.equal(isClaudePromptReady([rule, ' ❯ 1. Yes', '   2. No', rule], at(1, 1)), false, 'an indented selector');
+  const chained = ['● Done', rule, '❯ Fix the README', rule, '  Opus 4.1 · high', 'Project', rule, '❯ main', rule];
+  assert.equal(promptBoxText(chained, at(16, 2)), 'Fix the README', 'the status line box is not the prompt');
+  assert.equal(isClaudePromptReady(chained, at(0, 8)), false, 'no box holds the caret');
+  for (const f of ['opentab-trust-2.1.314-raw.bin', 'askq-2.1.224-raw.txt', 'askq-multi-q1-2.1.233-raw.bin', 'askq-multi-submit-2.1.233-raw.bin']) {
+    const sc = await render(f);
+    assert.equal(Number.isInteger(sc.modes.cursor?.y), true, f);
+  }
+  ok('the input box is the one holding the caret');
+}
+
 // 4. The request flow with fake deps.
 const PROMPT = { lines: [rule, '❯ ', rule], modes: { bracketedPaste: true } };
 // openTab wrapper: tweak the new tab before Claude would come up.
@@ -124,9 +145,15 @@ function fakeDeps(over = {}) {
         keys: () => tab.keys || 0,
         input: () => (tab.keys || 0) + (tab.mouse || 0),
         // Like the emulator: everything drawn since stays on screen, newest at the bottom.
-        screen: async () => (tab.frames.length > from
-          ? { lines: tab.frames.slice(from).flatMap((f) => f.lines), modes: tab.frames.at(-1).modes }
-          : { lines: [], modes: {} }),
+        // A frame with a `caret` (row/column within that frame) reports the
+        // cursor there, as screen-render does.
+        screen: async () => {
+          if (!(tab.frames.length > from)) return { lines: [], modes: {} };
+          const lines = tab.frames.slice(from).flatMap((f) => f.lines);
+          const top = tab.frames.at(-1);
+          const modes = top.caret ? { ...top.modes, cursor: { x: top.caret.x, y: lines.length - top.lines.length + top.caret.y } } : top.modes;
+          return { lines, modes };
+        },
         stop: () => log.push(['stop', id]),
       };
     },
@@ -173,6 +200,21 @@ function fakeDeps(over = {}) {
   assert.deepEqual(reopened.body, { ok: true, tabId: 'term-/p-2', submitted: true });
   assert.equal(d.log.filter((e) => e[0] === 'submit').length, 2, 'the repeat that only focused submitted nothing');
   ok('open, repeat focuses the same tab, closed tab reopens');
+}
+
+{
+  // A numbered card ("1. Review README") into a Claude whose chained status
+  // line draws its own box under the prompt: sent, into the real box.
+  const d = fakeDeps();
+  const status = ['  Opus 4.1 · high', 'Project', rule, '❯ main', rule];
+  const frame = (text) => ({ lines: [rule, `❯ ${text}`, rule, ...status], modes: { bracketedPaste: true }, caret: { x: 2 + text.length, y: 1 } });
+  tweakTab(d, (t) => { t.noClaude = true; t.claude = true; t.frames.push(frame('')); });
+  d.paste = (id, text) => { d.log.push(['paste', id, text]); d.tabs.get(id).frames.push(frame(text)); };
+  d.submit = (id) => { d.log.push(['submit', id]); d.tabs.get(id).frames.push(frame('')); };
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message: '1. Review README', requestId: 'numbered' });
+  assert.deepEqual(r.body, { ok: true, tabId: 'term-/p-1', submitted: true });
+  assert.equal(d.log.filter((e) => e[0] === 'submit').length, 1);
+  ok('a numbered card is sent, a chained status line box is not the prompt');
 }
 
 {

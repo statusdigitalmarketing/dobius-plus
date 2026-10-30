@@ -122,7 +122,9 @@ export function validateOpenTabBody(body) {
 
 // A horizontal rule row: Claude draws one above and one below its prompt.
 const RULE_RE = /^\s*─{8,}/;
-// The prompt row itself. A selector row ("❯ 1. Yes") is an option, not the prompt.
+// The prompt row itself. Told from a selector row ("❯ 1. Yes") by where the
+// caret is (caretInBox); a screen with no cursor position (tests that pass
+// plain rows) falls back to refusing any numbered row.
 const PROMPT_ROW_RE = /^\s*[❯>](?:\s|$)/;
 const OPTION_ROW_RE = /^\s*[❯>]\s*\d+[.)]\s/;
 // Older Claude Code: a rounded box, "│ > ..." inside it.
@@ -160,9 +162,23 @@ function dialogOnScreen(lines) {
   try { return !!parseSelectorFromScreen(lines); } catch { return true; }
 }
 
+// Is the terminal cursor in this box's TEXT? Claude's default renderer keeps
+// it on the input caret: right of the prompt character, on a row between the
+// rules. A selector parks it ON its ❯ (column 0 or 1), and a lookalike box
+// drawn elsewhere (a chained status line printing a rule, "❯ main", a rule)
+// does not hold it at all. modes.cursor comes from screen-render.js.
+function caretInBox(cursor, top, bottom, firstRow) {
+  if (!cursor) return null; // unknown: the caller falls back to row text
+  const glyph = String(firstRow).search(/[❯>]/);
+  return Number.isInteger(cursor.y) && cursor.y > top && cursor.y < bottom
+    && Number.isInteger(cursor.x) && cursor.x >= glyph + 2;
+}
+
 /**
  * The text inside Claude's input box (prompt row with the ❯ removed, then any
- * further rows), or null when the screen is not an idle Claude prompt.
+ * further rows), or null when the screen is not an idle Claude prompt. The box
+ * is the one holding the caret, not merely the lowest lookalike: rows Claude
+ * draws under its box (a status line) can draw boxes too.
  */
 export function promptBoxText(lines, modes) {
   if (!Array.isArray(lines) || !modes?.bracketedPaste) return null;
@@ -179,7 +195,9 @@ export function promptBoxText(lines, modes) {
     while (top >= 0 && j - top <= MAX_BOX_ROWS && !isTop(lines[top] || '')) top -= 1;
     if (top < 0 || top === j - 1 || j - top > MAX_BOX_ROWS) continue;
     const row = lines[top + 1] || '';
-    if (flat ? (PROMPT_ROW_RE.test(row) && !OPTION_ROW_RE.test(row)) : BOX_PROMPT_RE.test(row)) {
+    const caret = caretInBox(modes.cursor, top, j, row);
+    if (caret === false) continue;
+    if (flat ? (PROMPT_ROW_RE.test(row) && (caret || !OPTION_ROW_RE.test(row))) : BOX_PROMPT_RE.test(row)) {
       // A dialog anywhere OUTSIDE the box (the box's own text is the
       // message, which may well say "Do you want to ...").
       if (dialogOnScreen([...lines.slice(0, top + 1), ...lines.slice(j)])) return null;
