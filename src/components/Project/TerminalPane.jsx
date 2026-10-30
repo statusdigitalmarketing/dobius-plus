@@ -325,7 +325,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     const handler = (e) => {
       // Only the active tab handles the drop (ChatPane does, in Chat)
       if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
-      if (e.detail?.target?.closest?.('[data-chat-tab], [role="dialog"]')) return; // dropped on a chat pane or a dialog
+      if (e.detail?.target?.closest?.('[data-chat-tab], [role="dialog"], [data-dialog-backdrop]')) return; // dropped on a chat pane or a dialog
       const paths = e.detail?.paths;
       if (!paths || paths.length === 0) return;
       const escaped = paths.map((p) => shellEscape(p)).join(' ');
@@ -344,7 +344,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   useEffect(() => {
     const handler = (e) => {
       if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
-      if (e.detail?.target?.closest?.('[data-chat-tab], [role="dialog"]')) return; // dropped on a chat pane or a dialog
+      if (e.detail?.target?.closest?.('[data-chat-tab], [role="dialog"], [data-dialog-backdrop]')) return; // dropped on a chat pane or a dialog
       const text = e.detail?.text;
       if (!text) return;
       setInput((prev) => {

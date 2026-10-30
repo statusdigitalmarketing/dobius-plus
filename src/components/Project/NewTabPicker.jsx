@@ -124,6 +124,7 @@ export default function NewTabPicker({ projectPath }) {
 
   return (
     <div
+      data-dialog-backdrop=""
       onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}
       style={{
         position: 'fixed', inset: 0, zIndex: 9990,

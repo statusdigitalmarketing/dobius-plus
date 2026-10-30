@@ -99,6 +99,9 @@ export function pickerShortcutIndex(e) {
 //   whose foreground job stops.
 //   ponytail: 25 suspends per tool run; past that the tool is ended (bash)
 //   or left stopped (zsh) when the wrapper becomes a login shell.
+// - nounset / errexit from the user's rc are switched off for this script
+//   only (the replacement shell reads the rc again), so an unset hook array
+//   or the tool's exit status cannot abort it before it becomes a shell.
 // Only zsh and bash are driven this way; any other shell opens plain.
 export const START_TOOL_ENV = 'DOBIUS_NEW_TAB_TOOL';
 export function loginShellSpawn(shell, startCommand) {
@@ -108,12 +111,12 @@ export function loginShellSpawn(shell, startCommand) {
   const take = `t=$${START_TOOL_ENV}; unset ${START_TOOL_ENV};`;
   let run;
   if (name === 'zsh') {
-    run = '(( $+functions[precmd] )) && precmd; for f in $precmd_functions; do "$f"; done; '
+    run = 'setopt no_nounset no_err_exit 2>/dev/null; (( $+functions[precmd] )) && precmd; for f in $precmd_functions; do "$f"; done; '
       + `${take} zmodload zsh/parameter 2>/dev/null; pre=(\${(k)jobstates}); eval "$t"; `
       + 'i=0; while (( i++ < 25 )); do s=(${(k)jobstates[(R)suspended*]}); s=(${s:|pre}); (( $#s )) || break; '
       + 'fg %$s[1] >/dev/null 2>&1; done;';
   } else if (name === 'bash') {
-    run = `for c in "\${PROMPT_COMMAND[@]}"; do eval "$c"; done; ${take} pre=" $(jobs -p | tr '\\n' ' ') "; eval "$t"; `
+    run = `set +eu; for c in "\${PROMPT_COMMAND[@]}"; do eval "$c"; done; ${take} pre=" $(jobs -p | tr '\\n' ' ') "; eval "$t"; `
       + ('j=$(jobs -sl 2>/dev/null | while read -r n p r; do [[ $pre == *" $p "* ]] && continue; '
         + 'n=${n#[}; echo "${n%%]*}"; break; done); [ -n "$j" ] && fg %$j >/dev/null 2>&1; ').repeat(25).trim();
   } else {
