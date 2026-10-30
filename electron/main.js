@@ -3189,7 +3189,7 @@ function setupWindowHandlers() {
   });
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
   // Chat sends (desktop and phone) wait for input a window still holds.
-  setInputHeldCheck(bridgeOpenDeps.inputHeld);
+  setInputHeldCheck(bridgeOpenDeps.inputHeld, bridgeOpenDeps.markHeldLost);
 
   // Record the docked tab in the target window's saved tab list BEFORE the
   // handoff: terminal:loadState only returns scrollback for a tab a window

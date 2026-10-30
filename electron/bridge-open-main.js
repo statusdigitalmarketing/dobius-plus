@@ -193,6 +193,9 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // once its queue drains; until then the tab is busy. After a tear-off the
   // old and the new window can both hold. tabId -> Set of wcIds
   const heldInput = new Map();
+  // Tabs whose current hold lost input in main (chat-service dropped a
+  // prompt-only paste of it): its drain counts as dropped.
+  const lostHolds = new Set();
   const dropHold = (t, w) => {
     const set = heldInput.get(t);
     if (!set?.delete(w)) return false;
@@ -209,7 +212,8 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     if (data === null) {
       // Some of it was thrown away (a tear-off, a timed-out paste): what
       // reached the terminal is half of it, so Chat must not append to it.
-      if (dropHold(id, wc.id) && dropped === true) cancelQueuedSubmits(id);
+      if (dropHold(id, wc.id) && (dropped === true || lostHolds.has(id))) cancelQueuedSubmits(id);
+      if (!heldInput.has(id)) lostHolds.delete(id);
       return;
     }
     if (getTerminalWebContentsId(id) !== wc.id || typeof data !== 'string' || !data) return;
@@ -218,7 +222,10 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       // A reloaded, crashed or closed page never reports its drain.
       // Its held input is lost half sent: Chat must not append to it.
       const forget = () => {
-        for (const t of [...heldInput.keys()]) if (dropHold(t, wc.id)) cancelQueuedSubmits(t);
+        for (const t of [...heldInput.keys()]) {
+          if (dropHold(t, wc.id)) cancelQueuedSubmits(t);
+          if (!heldInput.has(t)) lostHolds.delete(t);
+        }
       };
       wc.on('did-start-loading', forget);
       wc.on('render-process-gone', forget);
@@ -458,6 +465,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // The tab's window still holds a person's input (chat-service: a Chat
     // send waits for it, so the two never interleave).
     inputHeld: (tabId) => heldInput.has(tabId),
+    markHeldLost: (tabId) => { if (heldInput.has(tabId)) lostHolds.add(tabId); },
     sleep,
     now: () => Date.now(),
   };

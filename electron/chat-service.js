@@ -147,7 +147,13 @@ const RAW_KEY_GAP_MS = 20;
 // the head of this queue, so its paste never lands between that input's
 // parts. main.js wires the check (bridge-open-main.js inputHeld).
 let inputHeld = () => false;
-export function setInputHeldCheck(fn) { inputHeld = typeof fn === 'function' ? fn : () => false; }
+// And marks the window's current hold as having lost input, so its drain
+// cancels every submit waiting on it, including ones accepted later.
+let markHeldLost = () => {};
+export function setInputHeldCheck(fn, lost) {
+  inputHeld = typeof fn === 'function' ? fn : () => false;
+  markHeldLost = typeof lost === 'function' ? lost : () => {};
+}
 
 /**
  * A key a window took but still holds (bridge-open-main.js terminal:inputHeld).
@@ -260,9 +266,10 @@ export function writeRawInput(id, data, stillOk = () => true, { promptOnly = fal
   // never sent without the attachment the person meant to go first.
   // Only submits not yet pasted (dropGen): the one already in the box is
   // what the box holds, the dropped paste never reached it.
-  if (promptOnly && Date.now() - (lastSubmitEnterAt.get(id) ?? -Infinity) < PROMPT_SETTLE_MS) { if (q) q.dropGen += 1; return; }
+  const dropPaste = () => { if (q) q.dropGen += 1; markHeldLost(id); };
+  if (promptOnly && Date.now() - (lastSubmitEnterAt.get(id) ?? -Infinity) < PROMPT_SETTLE_MS) { dropPaste(); return; }
   if (!q || !q.running || q.waitingHeld) { writeTerminal(id, data); return; }
-  if (promptOnly) { q.dropGen += 1; return; }
+  if (promptOnly) { dropPaste(); return; }
   q.items.push({ raw: data, pty: terminalInstance(id), stillOk, gen: q.gen, resolve: () => {} });
 }
 
