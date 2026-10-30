@@ -18,7 +18,9 @@
 //     pid is ignored)
 //   - the caller only asks after the HOOK says the turn ended, and only once
 //     GRACE_MS has passed, so the CLI's own busy -> idle rewrite at the end of
-//     a plain turn is never read as background work
+//     a plain turn is never read as background work (accepted residual: a
+//     rewrite stalled past the grace shows Waiting until the next read, at
+//     most CACHE_MS later)
 //   - the claude process must have been running when that turn ended: a
 //     later claude in the same shell (hooks off, say) never inherits it
 // Accepted residual: two claudes taking turns in ONE shell through job control
@@ -50,15 +52,64 @@ const MAX_FILE_BYTES = 64 * 1024;
  * @returns {'shells'|'agents'|null}
  */
 export function backgroundFromPresence(rec, proc) {
+  const m = matchPresence(rec, proc);
+  if (m?.status === 'shell') return 'shells';
+  if (m?.status === 'busy') return 'agents';
+  return null;
+}
+
+/**
+ * Pure: the presence record, if it is THIS process's: same pid and the same
+ * `procStart` as ps reports (both are `ps lstart` text, "Tue Oct 27 13:39:54
+ * 2026", so an exact match is expected; anything else is another process's).
+ * @returns {{pid:number, startedAt:number, status:string, statusUpdatedAt:number|null}|null}
+ */
+export function matchPresence(rec, proc) {
   if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return null;
   if (!proc || !Number.isInteger(proc.pid) || rec.pid !== proc.pid) return null;
   if (typeof rec.procStart !== 'string' || !Number.isFinite(proc.startedAt)) return null;
-  // Both sides are `ps lstart` text ("Tue Oct 27 13:39:54 2026"), so an exact
-  // match is expected; anything else is another process's file.
   if (Date.parse(rec.procStart) !== proc.startedAt) return null;
-  if (rec.status === 'shell') return 'shells';
-  if (rec.status === 'busy') return 'agents';
-  return null;
+  if (typeof rec.status !== 'string') return null;
+  return {
+    pid: proc.pid,
+    startedAt: proc.startedAt,
+    status: rec.status,
+    statusUpdatedAt: Number.isFinite(rec.statusUpdatedAt) ? rec.statusUpdatedAt : null,
+  };
+}
+
+/**
+ * Pure: what a matched presence record says about a tab's hook record.
+ *   - after an ended turn: 'shell' is background shells; 'busy' written
+ *     BEFORE the turn ended is delegated work still running; anything written
+ *     AFTER it (busy, a dialog) is a newer turn the hook never reported (a
+ *     claude without hooks), so the row cannot claim the old Done: uncertain
+ *   - during a hook 'working': 'idle' written after the last marker means the
+ *     turn ended without Stop (an Esc interrupt, hooks switched off): uncertain
+ * The process start must precede the ended turn by a full second (ps
+ * truncates it down), and the record must come from the claude seen now.
+ * @param {object|null} found  matchPresence result
+ * @param {{status:string, hookOwned:boolean, turnEndedAt:number, lastMarkerAt?:number}} a
+ * @param {{pid:number, startedAt:number}|null} info  the claude in the tab now
+ * @returns {{background:'shells'|'agents'|null, uncertain:boolean}}
+ */
+export function judgePresence(found, a, info) {
+  const none = { background: null, uncertain: false };
+  if (!found || !info || found.pid !== info.pid || found.startedAt !== info.startedAt) return none;
+  const at = found.statusUpdatedAt;
+  if (a.status === 'working' && a.hookOwned) {
+    const over = found.status === 'idle' && Number.isFinite(at) && a.lastMarkerAt && at > a.lastMarkerAt;
+    return over ? { background: null, uncertain: true } : none;
+  }
+  const end = a.turnEndedAt;
+  if (!end || !(found.startedAt + 1000 <= end)) return none;
+  if (found.status === 'shell') return { background: 'shells', uncertain: false };
+  if (found.status === 'busy' || found.status === 'waiting') {
+    if (!Number.isFinite(at)) return none;
+    if (at > end) return { background: null, uncertain: true };
+    if (found.status === 'busy') return { background: 'agents', uncertain: false };
+  }
+  return none;
 }
 
 /**
@@ -225,30 +276,21 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
     let rec;
     try { rec = JSON.parse(await read(path.join(dir, 'sessions', `${info.pid}.json`))); }
     catch { return null; } // CLI without presence files, or mid-rewrite: no claim
-    const value = backgroundFromPresence(rec, info);
-    return value ? { value, pid: info.pid, startedAt: info.startedAt, statusUpdatedAt: rec.statusUpdatedAt } : null;
+    return matchPresence(rec, info);
   }
 
   /**
-   * Background work in this tab's Claude, or null. Never throws.
-   * @param {string} tabId
-   * @param {{pid:number, startedAt:number}} [expected]  the claude the caller
-   *   sees in the tab now; an answer read from any other process is dropped
-   * @param {number} turnEndedAt  when the hook ended the turn. The process read
-   *   must provably have been running then: ps truncates its start DOWN to the
-   *   second, so only a start a full second before the turn ended proves it
-   *   (a claude started in that same second may have replaced the one that
-   *   finished).
+   * This tab's claude's presence record (matchPresence), or null. Never
+   * throws. One lookup per tab and `key` at a time: concurrent asks (several
+   * windows, bursts) share the pending one. An entry is reused only for the
+   * SAME key (the turn or marker it was asked about), so an answer read for
+   * one turn is never served for the next. Judge it with judgePresence.
    */
-  return function backgroundForTab(tabId, turnEndedAt, expected) {
+  return function presenceForTab(tabId, key) {
     const t = now();
-    // One lookup per tab and turn at a time: concurrent asks (several windows,
-    // bursts) share the pending one instead of each spawning ps. An entry is
-    // reused only for the SAME turn, so an answer read while a new turn was
-    // running can never be served once that turn has ended.
     let hit = cache.get(tabId);
-    if (!hit || hit.turnEndedAt !== turnEndedAt || (hit.settled && t - hit.at >= CACHE_MS)) {
-      const entry = { at: t, turnEndedAt, settled: false, pending: null };
+    if (!hit || hit.key !== key || (hit.settled && t - hit.at >= CACHE_MS)) {
+      const entry = { at: t, key, settled: false, pending: null };
       entry.pending = resolve(tabId).catch((err) => {
         console.warn('[claude-presence] lookup failed', tabId, err?.message);
         return null;
@@ -257,17 +299,7 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
       cache.set(tabId, hit);
       evictSettled(cache);
     }
-    return hit.pending.then((found) => (
-      found && Number.isFinite(found.startedAt) && found.startedAt + 1000 <= turnEndedAt
-        // A cached answer is only for the claude the caller sees now.
-        && (!expected || (found.pid === expected.pid && found.startedAt === expected.startedAt))
-        // 'busy' after a turn means delegated work that was ALREADY running:
-        // the CLI wrote busy when the turn started and has not changed it
-        // since. A busy written after the turn ended is a new foreground turn
-        // (one the hook never reported, e.g. a claude without hooks).
-        && (found.value !== 'agents' || (Number.isFinite(found.statusUpdatedAt) && found.statusUpdatedAt <= turnEndedAt))
-        ? found.value : null
-    ));
+    return hit.pending;
   };
 }
 
@@ -280,11 +312,11 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
  * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function}} deps.status
  * @param {(id:string)=>Promise<object|null>} deps.claudeInfo  cached lookup
  * @param {(id:string)=>Promise<object|null>} [deps.claudeInfoFresh]  uncached, for turn ends
- * @param {(id:string, turnEndedAt:number)=>Promise<string|null>} deps.backgroundForTab
+ * @param {(id:string, key:string)=>Promise<object|null>} deps.presenceForTab
  * @param {(id:string)=>boolean} deps.unreadAnywhere
  * @param {()=>number} [deps.now]
  */
-export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claudeInfo, backgroundForTab, unreadAnywhere, now = Date.now }) {
+export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claudeInfo, presenceForTab, unreadAnywhere, now = Date.now }) {
   /**
    * Check a tab's hook record against the claude running in it and remember
    * what that disproves (terminal-status distrustTurnStart). Returns the
@@ -297,10 +329,10 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     // the claude that died just before this turn's claude started.
     const info = await (fresh ? claudeInfoFresh : claudeInfo)(id);
     const a = reconcileWithProcess(raw, info);
-    // Remembered whatever the status became: a start disproved here stays
-    // disproved even when the state was also found stale.
-    if (raw.since && !a.since) status.distrustTurnStart(id, raw.since);
-    if (raw.lastTurnMs && !a.lastTurnMs) status.distrustLastTurn(id, raw.turnEndedAt);
+    // Only a claude's start time PROVES a time wrong; finding no claude (it
+    // exited normally after its turn) proves nothing about that turn.
+    if (info && raw.since && !a.since) status.distrustTurnStart(id, raw.since);
+    if (info && raw.lastTurnMs && !a.lastTurnMs) status.distrustLastTurn(id, raw.turnEndedAt);
     return info;
   }
 
@@ -311,24 +343,31 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     const info = await checkTurnAgainstProcess(id, raw);
     const a = info === undefined ? raw : reconcileWithProcess(raw, info);
     let background = null;
-    // Only after the HOOK ended a turn, so a session with hooks off (or a
-    // plain shell) never gets a Waiting it cannot prove. A hook-owned
-    // 'working' is a new turn (Working wins anyway); plain output after the
-    // turn (typing at the prompt) still asks. And only while a claude is
-    // there: with none, a presence answer cached a moment ago describes a
-    // process that is gone.
-    if (info && a.turnEndedAt && a.status !== 'needs' && !(a.status === 'working' && a.hookOwned)
-        && now() - a.turnEndedAt >= GRACE_MS) {
-      background = await backgroundForTab(id, a.turnEndedAt, info);
-      // The lookup awaited: if a new turn started (or this one's end changed)
-      // meanwhile, the presence file may describe that turn instead.
+    const t = now();
+    const hookWorking = a.status === 'working' && a.hookOwned;
+    // Ask the presence file only with a claude in the tab (a cached answer
+    // describes a process, and with none there is nothing to describe):
+    //   - after the HOOK ended a turn, for Waiting (or a newer hookless turn);
+    //     plain output after the turn (typing at the prompt) still asks
+    //   - during a hook 'working' gone quiet, whether that turn already ended
+    //     without a Stop marker
+    const ended = !!info && a.turnEndedAt && a.status !== 'needs' && !hookWorking
+      && t - a.turnEndedAt >= GRACE_MS;
+    const quietWorking = !!info && hookWorking && a.lastMarkerAt && t - a.lastMarkerAt >= GRACE_MS;
+    if (ended || quietWorking) {
+      const found = await presenceForTab(id, ended ? `e:${a.turnEndedAt}` : `w:${a.lastMarkerAt}`);
+      // The lookup awaited: if the hook record moved meanwhile, the presence
+      // file may describe a different moment. Answer from the new record.
       const after = status.activityFor(id);
-      if (!after || after.turnEndedAt !== a.turnEndedAt || after.status === 'needs'
-          || (after.status === 'working' && after.hookOwned)) {
+      if (!after || after.turnEndedAt !== a.turnEndedAt || after.lastMarkerAt !== a.lastMarkerAt
+          || after.status !== raw.status || after.hookOwned !== raw.hookOwned) {
         return after
           ? { id, activity: { ...reconcileWithProcess(after, await claudeInfo(id)), background: null }, unread: unreadAnywhere(id) }
           : null;
       }
+      const j = judgePresence(found, a, info);
+      background = j.background;
+      if (j.uncertain) return { id, activity: { ...a, background: null, uncertain: true }, unread: unreadAnywhere(id) };
     }
     return { id, activity: { ...a, background }, unread: unreadAnywhere(id) };
   }

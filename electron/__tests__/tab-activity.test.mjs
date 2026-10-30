@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { tabActivityLabel, formatDuration, WORKING_MIN_MS } from '../../src/lib/tab-activity.js';
 import * as ts from '../terminal-status.js';
-import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds, createTabActivity, coalescePerTab } from '../claude-presence.js';
+import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds, createTabActivity, coalescePerTab, judgePresence } from '../claude-presence.js';
 import { classifyClaudeProcess } from '../claude-argv.js';
 import { isProvenClaudeCommand } from '../claude-process-scan.js';
 
@@ -126,6 +126,11 @@ const LSTART = 'Tue Oct 27 13:39:54 2026';
 const proc = { pid: 4242, startedAt: Date.parse(LSTART) };
 const END = Date.parse(LSTART) + 60_000; // the hook ended a turn a minute in
 // statusUpdatedAt: the CLI wrote this state when the turn started, before it ended.
+// The reader returns this process's record; judge it the way main does after
+// an ended turn, which is what these tests assert on.
+const bg = async (read, id, end, expected = proc) => judgePresence(
+  await read(id, `e:${end}`), { status: 'done', hookOwned: false, turnEndedAt: end }, expected,
+).background;
 const rec = (over) => ({ pid: 4242, procStart: LSTART, status: 'idle', statusUpdatedAt: Date.parse(LSTART) + 500, ...over });
 
 test('presence: shell -> shells, busy -> agents, else nothing', () => {
@@ -154,16 +159,16 @@ test('presence reader: resolves dir once per process, caches briefly, never thro
     readFile: async (f) => { if (!(f in files)) throw new Error('ENOENT'); return files[f]; },
     now: () => t,
   });
-  assert.equal(await read('a', END), 'shells');
+  assert.equal(await bg(read, 'a', END), 'shells');
   assert.equal(await read('b', END), null, 'no claude in the tab');
   files['/cfg/sessions/4242.json'] = JSON.stringify(rec({ status: 'idle' }));
-  assert.equal(await read('a', END), 'shells', 'cached inside the window');
+  assert.equal(await bg(read, 'a', END), 'shells', 'cached inside the window');
   t = 5000;
-  assert.equal(await read('a', END), null, 're-read after the cache window');
+  assert.equal(await bg(read, 'a', END), null, 're-read after the cache window');
   assert.equal(dirCalls, 1);
   files['/cfg/sessions/4242.json'] = '{not json';
   t = 10_000;
-  assert.equal(await read('a', END), null, 'a half-written file is no claim');
+  assert.equal(await bg(read, 'a', END), null, 'a half-written file is no claim');
 });
 
 test('presence reader: an unprovable binding answers null and is retried', async () => {
@@ -175,9 +180,9 @@ test('presence reader: an unprovable binding answers null and is retried', async
     readFile: async () => JSON.stringify(rec({ status: 'shell' })),
     now: () => t,
   });
-  assert.equal(await read('a', END), null);
+  assert.equal(await bg(read, 'a', END), null);
   t = 5000;
-  assert.equal(await read('a', END), null);
+  assert.equal(await bg(read, 'a', END), null);
   assert.equal(dirCalls, 2);
 });
 
@@ -189,9 +194,9 @@ test('presence reader: a claude started AFTER the turn ended never inherits it',
     now: () => 0,
   });
   // Process A's turn ended a minute BEFORE this process (B) started.
-  assert.equal(await read('a', proc.startedAt - 60_000), null);
+  assert.equal(await bg(read, 'a', proc.startedAt - 60_000), null);
   // Same cached lookup, a turn this process was alive for.
-  assert.equal(await read('a', proc.startedAt + 1000), 'agents');
+  assert.equal(await bg(read, 'a', proc.startedAt + 1000), 'agents');
 });
 
 test('presence reader: the real file reader refuses non-files and oversize files', async () => {
@@ -204,14 +209,14 @@ test('presence reader: the real file reader refuses non-files and oversize files
   const reader = () => createPresenceReader({ claudeInfo: async () => proc, configDirOf: async () => dir, now: () => 0 });
   try {
     fsMod.writeFileSync(file, JSON.stringify(rec({ status: 'shell' })));
-    assert.equal(await reader()('a', END), 'shells', 'a normal file reads');
+    assert.equal(await bg(reader(), 'a', END), 'shells', 'a normal file reads');
     fsMod.writeFileSync(file, JSON.stringify(rec({ status: 'shell', pad: 'x'.repeat(70 * 1024) })));
-    assert.equal(await reader()('a', END), null, 'oversize is refused');
+    assert.equal(await bg(reader(), 'a', END), null, 'oversize is refused');
     fsMod.rmSync(file);
     const target = pathMod.join(dir, 'real.json');
     fsMod.writeFileSync(target, JSON.stringify(rec({ status: 'shell' })));
     fsMod.symlinkSync(target, file);
-    assert.equal(await reader()('a', END), null, 'a symlink is not followed');
+    assert.equal(await bg(reader(), 'a', END), null, 'a symlink is not followed');
   } finally {
     fsMod.rmSync(dir, { recursive: true, force: true });
   }
@@ -243,8 +248,8 @@ test('presence reader: a claude started in the same second the turn ended is not
     readFile: async () => JSON.stringify(rec({ status: 'busy' })),
     now: () => 0,
   });
-  assert.equal(await read('a', proc.startedAt + 900), null);
-  assert.equal(await read('a', proc.startedAt + 1000), 'agents');
+  assert.equal(await bg(read, 'a', proc.startedAt + 900), null);
+  assert.equal(await bg(read, 'a', proc.startedAt + 1000), 'agents');
 });
 
 test('presence reader: concurrent asks share one lookup', async () => {
@@ -255,7 +260,7 @@ test('presence reader: concurrent asks share one lookup', async () => {
     readFile: async () => JSON.stringify(rec({ status: 'shell' })),
     now: () => 0,
   });
-  const out = await Promise.all(Array.from({ length: 50 }, () => read('a', END)));
+  const out = await Promise.all(Array.from({ length: 50 }, () => bg(read, 'a', END)));
   assert.equal(infoCalls, 1);
   assert.ok(out.every((v) => v === 'shells'));
 });
@@ -268,9 +273,9 @@ test('presence reader: an answer cached for one turn is never served for the nex
     readFile: async () => JSON.stringify(rec({ status })),
     now: () => 0, // inside the cache window throughout
   });
-  assert.equal(await read('a', END), 'agents');
+  assert.equal(await bg(read, 'a', END), 'agents');
   status = 'idle'; // that turn ended with nothing in the background
-  assert.equal(await read('a', END + 30_000), null);
+  assert.equal(await bg(read, 'a', END + 30_000), null);
 });
 
 test('reconcile: a hook turn with no claude left in the tab is not Working', () => {
@@ -315,21 +320,21 @@ test('presence reader: busy written AFTER the turn ended is a new foreground tur
     readFile: async () => JSON.stringify(rec({ status: 'busy', statusUpdatedAt: written })),
     now: () => 0,
   });
-  assert.equal(await read('a', END), 'agents');
+  assert.equal(await bg(read, 'a', END), 'agents');
   written = END + 5000;
-  assert.equal(await read('a', END + 1), null);
+  assert.equal(await bg(read, 'a', END + 1), null);
   // Missing timestamp: cannot prove it, so no claim.
   const r2 = createPresenceReader({
     claudeInfo: async () => proc, configDirOf: async () => '/cfg', now: () => 0,
     readFile: async () => JSON.stringify(rec({ status: 'busy', statusUpdatedAt: undefined })),
   });
-  assert.equal(await r2('a', END), null);
+  assert.equal(await bg(r2, 'a', END), null);
   // A background shell is written at the turn's end or later, so no such rule.
   const r3 = createPresenceReader({
     claudeInfo: async () => proc, configDirOf: async () => '/cfg', now: () => 0,
     readFile: async () => JSON.stringify(rec({ status: 'shell', statusUpdatedAt: END + 200 })),
   });
-  assert.equal(await r3('a', END), 'shells');
+  assert.equal(await bg(r3, 'a', END), 'shells');
 });
 
 test('reconcile: hook state left by a claude that died is not the new claude\'s', () => {
@@ -429,7 +434,7 @@ test('a hook turn main cannot see a claude for shows the age, not an older Done'
 const makeActivity = (over = {}) => createTabActivity({
   status: ts,
   claudeInfo: async () => null,
-  backgroundForTab: async () => 'agents',
+  presenceForTab: async () => ({ pid: 1, startedAt: 100_000, status: 'busy', statusUpdatedAt: 900_000 }),
   unreadAnywhere: () => false,
   now: () => 1_000_000,
   ...over,
@@ -502,7 +507,10 @@ test('tab activity: an ended turn with no length still gets its Waiting', async 
   ts.ingest(ID, mk('done'), 950_000);
   ts.distrustLastTurn(ID, 950_000); // its length was disproved earlier
   assert.equal(ts.activityFor(ID).lastTurnMs, 0);
-  const { tabActivity } = makeActivity({ claudeInfo: async () => ({ pid: 1, startedAt: 100_000 }), backgroundForTab: async () => 'shells' });
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 100_000 }),
+    presenceForTab: async () => ({ pid: 1, startedAt: 100_000, status: 'shell', statusUpdatedAt: 950_000 }),
+  });
   assert.equal((await tabActivity(ID)).activity.background, 'shells');
 });
 
@@ -513,8 +521,8 @@ test('presence reader: a cached answer is dropped for a different claude than th
     readFile: async () => JSON.stringify(rec({ status: 'shell' })),
     now: () => 0,
   });
-  assert.equal(await read('a', END, proc), 'shells');
-  assert.equal(await read('a', END, { pid: 777, startedAt: proc.startedAt + 20_000 }), null);
+  assert.equal(await bg(read, 'a', END, proc), 'shells');
+  assert.equal(await bg(read, 'a', END, { pid: 777, startedAt: proc.startedAt + 20_000 }), null);
 });
 
 test('a distrusted plain stretch does not hide the next one', () => {
@@ -625,4 +633,43 @@ test('turn-end checks: a lookup slower than the interval still never overlaps', 
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(calls, 2, 'one trailing run');
   assert.equal(maxInFlight, 1);
+});
+
+test('judgePresence: a newer turn the hook never reported makes the row uncertain', () => {
+  const found = (over) => ({ pid: 1, startedAt: 100_000, status: 'busy', statusUpdatedAt: 50_000 + 100_000, ...over });
+  const a = { status: 'done', hookOwned: false, turnEndedAt: 140_000 };
+  const info = { pid: 1, startedAt: 100_000 };
+  assert.deepEqual(judgePresence(found(), a, info), { background: null, uncertain: true });
+  assert.deepEqual(judgePresence(found({ statusUpdatedAt: 120_000 }), a, info), { background: 'agents', uncertain: false });
+  assert.deepEqual(judgePresence(found({ status: 'waiting', statusUpdatedAt: 145_000 }), a, info), { background: null, uncertain: true });
+  assert.deepEqual(judgePresence(found({ status: 'idle', statusUpdatedAt: 145_000 }), a, info), { background: null, uncertain: false });
+});
+
+test('judgePresence: a hook Working whose turn went idle without Stop is uncertain', () => {
+  const info = { pid: 1, startedAt: 100_000 };
+  const a = { status: 'working', hookOwned: true, turnEndedAt: 0, lastMarkerAt: 200_000 };
+  assert.equal(judgePresence({ pid: 1, startedAt: 100_000, status: 'idle', statusUpdatedAt: 230_000 }, a, info).uncertain, true);
+  assert.equal(judgePresence({ pid: 1, startedAt: 100_000, status: 'busy', statusUpdatedAt: 150_000 }, a, info).uncertain, false, 'a long quiet tool call stays Working');
+  assert.equal(judgePresence({ pid: 1, startedAt: 100_000, status: 'idle', statusUpdatedAt: 190_000 }, a, info).uncertain, false, 'idle from before the marker is the old turn');
+});
+
+test('tab activity: a quiet hook Working that presence shows idle shows the age', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 900_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 100_000 }),
+    presenceForTab: async () => ({ pid: 1, startedAt: 100_000, status: 'idle', statusUpdatedAt: 950_000 }),
+  });
+  const r = await tabActivity(ID);
+  assert.equal(r.activity.uncertain, true);
+  assert.equal(label({ ...r.activity, live: true }), null);
+});
+
+test('tab activity: no claude after a normal exit keeps the finished turn length', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  // A snapshot taken while working, then the turn ends and claude exits.
+  const { checkTurnAgainstProcess } = makeActivity({ claudeInfo: async () => { ts.ingest(ID, mk('done'), 70_000); return null; } });
+  await checkTurnAgainstProcess(ID, ts.activityFor(ID));
+  assert.equal(ts.activityFor(ID).lastTurnMs, 60_000);
 });

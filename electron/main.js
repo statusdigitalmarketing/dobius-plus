@@ -237,7 +237,7 @@ const { tabActivity, checkTurnAgainstProcess } = createTabActivity({
   status: terminalStatus,
   claudeInfo: claudeInfoCached,
   claudeInfoFresh: (id) => getTerminalClaudeInfo(id, { unique: true }),
-  backgroundForTab: createPresenceReader({ claudeInfo: claudeInfoCached, configDirOf: configDirOfPid }),
+  presenceForTab: createPresenceReader({ claudeInfo: claudeInfoCached, configDirOf: configDirOfPid }),
   unreadAnywhere: (id) => unreadAnywhere(id),
 });
 // Turn-end checks come from the PTY data path, so they are coalesced per tab
