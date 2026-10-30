@@ -2384,6 +2384,11 @@ function setupSessionTabCapture() {
           // writes a NEW transcript while the match stays on the old one. Skip
           // an inferred session once a newer unclaimed transcript appeared, so
           // a renamed tab cannot relabel a conversation it has moved past.
+          // ponytail: the name follows whatever session this loop believes
+          // the tab runs. Where that belief is wrong (/clear under
+          // `claude --resume A`, whose argv still says A; two bare claudes in
+          // one project racing a /clear) the link, auto-resume and the phone
+          // are wrong too; the fix belongs in the resolver, not here.
           const movedPast = !claudeInfo?.sessionId && await sessionMovedPast(
             cwdByTab.get(t.id) || t.cwd, runningSessionId, claudeInfo?.startedAt, claimedIds);
           if (!movedPast) namePairs.push([runningSessionId, sessionNameFromTabLabel(label)]);

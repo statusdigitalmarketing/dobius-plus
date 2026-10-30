@@ -242,9 +242,11 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         // A tail that is ALL bookkeeping (progress, hook output) holds no
         // message: look further back once, or the newest bookkeeping stamp
         // would float an untouched chat above newer conversations.
-        // Not gated on the tail being full: parseJsonl drops request blobs,
-        // so a short parsed tail does not prove the whole file was read.
-        if (!messageAt && entries.length > 0) {
+        // Not gated on the tail's size: parseJsonl drops request blobs, so a
+        // short (even empty) parsed tail does not prove the file was read
+        // whole. Ceiling: readTail's 8MB cap, so a message behind more than
+        // 8MB of blobs still falls back to the bookkeeping stamp.
+        if (!messageAt) {
           const deeper = await parseJsonl(filePath, 2000);
           for (let i = deeper.length - 1; i >= 0 && !messageAt; i -= 1) {
             const e = deeper[i];

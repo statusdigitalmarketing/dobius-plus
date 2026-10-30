@@ -109,9 +109,16 @@ await write('blob-buried', [
     : meta('progress', now - 900 + i, { pad: 'y'.repeat(900) }))),
 ]);
 
+// A tail that is nothing but request blobs parses to NO entries at all.
+await write('all-blobs', [
+  rec('user', 'cli', 'all blobs question', now - 4_200_010),
+  rec('assistant', 'cli', 'all blobs answer', now - 4_200_000),
+  ...Array.from({ length: 400 }, (_, i) => JSON.stringify({ type: 'api-request-blob', timestamp: new Date(now - 900 + i).toISOString(), body: 'x'.repeat(1000) })),
+]);
+
 const all = await loadAllSessions();
 const ids = (arr) => arr.map((s) => s.sessionId).sort();
-const ALL = ['blob-buried', 'buried', 'cli-chat', 'clock-skew', 'messaged-later', 'newest-unmarked', 'no-entrypoint', 'only-meta', 'remote-control', 'resumed-old', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta', 'trailing-tool'];
+const ALL = ['all-blobs', 'blob-buried', 'buried', 'cli-chat', 'clock-skew', 'messaged-later', 'newest-unmarked', 'no-entrypoint', 'only-meta', 'remote-control', 'resumed-old', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta', 'trailing-tool'];
 const byId = (id) => all.find((s) => s.sessionId === id);
 check('timestamp is the last real message, not later metadata', byId('resumed-old')?.timestamp, now - 3_590_000);
 check('activityAt still sees the newest write', byId('resumed-old')?.activityAt, now - 50);
@@ -122,6 +129,7 @@ check('no message at all falls back to the newest record', byId('only-meta')?.ti
 check('a trailing tool result is not a message', byId('trailing-tool')?.timestamp, now - 5_400_000);
 check('a message buried past the tail is still found', byId('buried')?.timestamp, now - 4_000_000);
 check('a tail thinned by dropped request blobs still looks deeper', byId('blob-buried')?.timestamp, now - 4_100_000);
+check('a tail of only request blobs still looks deeper', byId('all-blobs')?.timestamp, now - 4_200_000);
 check('list is sorted newest message first',
   all.every((s, i) => i === 0 || (all[i - 1].timestamp || 0) >= (s.timestamp || 0)), true);
 const skew = all.find((s) => s.sessionId === 'clock-skew');
@@ -135,7 +143,7 @@ check('default includes everything', ids(all), ALL);
 check('automated flag comes from the newest user/assistant record only',
   Object.fromEntries(all.map((s) => [s.sessionId, s.automated]).sort(([a], [b]) => a.localeCompare(b))),
   {
-    'blob-buried': false, 'buried': false, 'cli-chat': false, 'clock-skew': false, 'messaged-later': false, 'newest-unmarked': false, 'no-entrypoint': false,
+    'all-blobs': false, 'blob-buried': false, 'buried': false, 'cli-chat': false, 'clock-skew': false, 'messaged-later': false, 'newest-unmarked': false, 'no-entrypoint': false,
     'only-meta': false, 'remote-control': false, 'resumed-old': false,
     'sdk-review': true, 'sdk-then-cli': false, 'titled': false, 'trailing-meta': false, 'trailing-tool': false,
   });
