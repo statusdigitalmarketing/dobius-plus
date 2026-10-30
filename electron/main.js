@@ -29,7 +29,7 @@ import { scanClaudeProcesses } from './claude-process-scan.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
-  planStatusLineInstall, planStatusLineRemove, ownsStatusLine, chainFromScript, scriptPathFromCommand,
+  planStatusLineInstall, planStatusLineRemove, ownsStatusLine, chainFromScript, scriptPathFromCommand, MODEL_LINE_MARKER,
 } from './claude-usage.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
@@ -1588,28 +1588,24 @@ function setupFileHandlers() {
   // Markers are identified by the ']777;dobius;' substring so the block can be
   // removed cleanly without ever touching the user's own hooks.
   // An isolated instance (DOBIUS_USERDATA_DIR) must never write the real,
-  // shared ~/.claude/settings.json. DOBIUS_CLAUDE_HOME points it at a throwaway
-  // Claude home instead, so an install can still be ship-tested; outside the
-  // harness the variable is ignored.
-  // The override must be a directory that is NOT the real Claude home by
-  // another name: a symlink to ~/.claude, a differently-cased path on a
-  // case-insensitive volume, or a settings.json linked to the real one would
-  // put the harness's writes back on the shared file (Codex HIGH). Compared by
-  // device + inode, which no spelling changes, and re-checked before every
-  // write because the directory can be swapped after launch.
-  const claudeHomeOverride = process.env.DOBIUS_USERDATA_DIR ? (process.env.DOBIUS_CLAUDE_HOME || '') : '';
-  const claudeHome = claudeHomeOverride || path.join(homedir, '.claude');
+  // shared ~/.claude/settings.json. DOBIUS_CLAUDE_HOME=1 gives it a throwaway
+  // Claude home INSIDE its own userData (<userData>/claude-home), so an install
+  // can still be ship-tested; outside the harness the variable is ignored.
+  // It is a switch and not a path on purpose: three review rounds aliased a
+  // free-form path back onto the real ~/.claude (a symlink, a different case,
+  // a `..` through a symlink, a dangling link created later). The harness's
+  // own throwaway userData is the one place that cannot be the real home.
+  const isolatedHome = process.env.DOBIUS_USERDATA_DIR && process.env.DOBIUS_CLAUDE_HOME
+    ? path.join(path.resolve(process.env.DOBIUS_USERDATA_DIR), 'claude-home') : '';
+  const claudeHome = isolatedHome || path.join(homedir, '.claude');
   const claudeSettingsPath = path.join(claudeHome, 'settings.json');
   const realClaudeHomeRefusal = () => {
     if (!process.env.DOBIUS_USERDATA_DIR) return '';
-    if (!claudeHomeOverride) return 'an isolated Dobius never writes the real ~/.claude (set DOBIUS_CLAUDE_HOME)';
+    if (!isolatedHome) return 'an isolated Dobius never writes the real ~/.claude (set DOBIUS_CLAUDE_HOME=1)';
+    // Belt and braces: the same directory under another name, by inode.
     const id = (p) => { try { const st = fs.statSync(p); return `${st.dev}:${st.ino}`; } catch { return null; } };
-    const dir = id(claudeHomeOverride);
-    const file = id(claudeSettingsPath);
-    if (!dir || dir === id(path.join(homedir, '.claude'))
-      || (file && file === id(path.join(homedir, '.claude', 'settings.json')))) {
-      return `DOBIUS_CLAUDE_HOME (${claudeHomeOverride}) is missing or is the real ~/.claude, refused`;
-    }
+    const dir = id(isolatedHome);
+    if (dir && dir === id(path.join(homedir, '.claude'))) return 'the isolated Claude home is the real ~/.claude, refused';
     return '';
   };
   const STATUS_MARKER = ']777;dobius;';
@@ -1946,25 +1942,28 @@ function setupFileHandlers() {
   };
   settleUsage(readClaudeSettings().settings);
 
-  // Which command of the user's the script chains. The restore record is the
-  // source; when it is missing or not a record, the INSTALLED script (the one
-  // settings.json points at, which may be another Dobius's) still carries the
-  // command. Neither readable means UNKNOWN, and regenerating with no chain
-  // then would silently drop their status line (Codex HIGH). A command
-  // recovered that way is written back as the restore record, or turning the
-  // features off later would delete their line instead of restoring it.
-  const isRecord = (r) => !!r && typeof r === 'object' && !Array.isArray(r) && typeof r.present === 'boolean';
+  // Which command of the user's the script chains. The INSTALLED script (the
+  // one settings.json actually runs, possibly another Dobius's) is the truth,
+  // because it is what renders today; the restore record is the fallback when
+  // that script cannot be read. Never this instance's own copy when the slot
+  // points elsewhere: that copy can be stale (Codex). Neither readable means
+  // UNKNOWN, and regenerating with no chain then would silently drop their
+  // status line (Codex HIGH). A command recovered from the script while the
+  // record is missing or malformed is written back as the record, or turning
+  // the features off later would delete their line instead of restoring it.
+  const isRecord = (r) => !!r && typeof r === 'object' && !Array.isArray(r)
+    && typeof r.present === 'boolean' && (r.chain === null || typeof r.chain === 'string')
+    && (r.present ? !!r.value && typeof r.value === 'object' : r.value === null);
   const currentChain = (settings) => {
     const { remember } = readStatusLineBackup();
-    if (isRecord(remember)) return { known: true, chain: remember.chain ?? null };
     const installed = ownsStatusLine(settings?.statusLine)
       ? scriptPathFromCommand(settings.statusLine.command) : null;
-    let text;
-    try { text = fs.readFileSync(installed || reporterScriptPath(app.getPath('userData')), 'utf8'); }
-    catch { return { known: false }; }
-    const chain = chainFromScript(text);
-    if (chain === undefined) return { known: false };
-    if (chain && !realClaudeHomeRefusal()) {
+    let chain;
+    if (installed) {
+      try { chain = chainFromScript(fs.readFileSync(installed, 'utf8')); } catch { chain = undefined; }
+    }
+    if (chain === undefined) return isRecord(remember) ? { known: true, chain: remember.chain } : { known: false };
+    if (chain && !isRecord(remember) && !realClaudeHomeRefusal()) {
       try { writeStatusLineBackup({ present: true, value: { type: 'command', command: chain }, chain }); }
       catch (err) { console.warn(`[statusLine] could not rebuild the restore record: ${err.message}`); }
     }
@@ -2038,7 +2037,14 @@ function setupFileHandlers() {
   const removeStatusLine = (settings, raw) => {
     const refused = realClaudeHomeRefusal();
     if (refused) return { error: refused };
-    const backup = readStatusLineBackup();
+    let backup = readStatusLineBackup();
+    // A lost or malformed record would read as "there was nothing" and delete
+    // their line. Recover it from the installed script first (Codex HIGH).
+    if (!isRecord(backup.remember) && ownsStatusLine(settings.statusLine)) {
+      const cur = currentChain(settings);
+      if (!cur.known) return { error: 'Could not tell which status line of yours to restore, left as is' };
+      backup = readStatusLineBackup();
+    }
     const out = planStatusLineRemove(settings.statusLine, backup.remember);
     if (out.action === 'leave') {
       // Someone pointed statusLine elsewhere. Theirs stands; drop our record so
@@ -2060,6 +2066,7 @@ function setupFileHandlers() {
   const syncStatusLine = (opts, eligible = null) => {
     const { settings, raw, exists } = readClaudeSettings();
     if (settings === null) return { error: PARSE_FAIL };
+    if (eligible && !eligible(settings)) return { error: 'status line changed since launch, left alone' };
     settleUsage(settings);
     const { capture, model } = statusLineParts();
     if (!capture && !model) return removeStatusLine(settings, raw);
@@ -2104,14 +2111,17 @@ function setupFileHandlers() {
     const { settings, exists } = readClaudeSettings();
     if (settings && exists) {
       if (getSettings().modelUnderPrompt === undefined) {
-        const eligible = (st) => statusLineIsMine(st) || st.statusLine === undefined;
+        // Existence re-checked too: a settings.json deleted since launch read
+        // would otherwise be recreated without anyone confirming it.
+        const eligible = (st) => fs.existsSync(claudeSettingsPath)
+          && (statusLineIsMine(st) || st.statusLine === undefined);
         if (eligible(settings)) {
           const r = setStatusLinePart('modelUnderPrompt', true, undefined, eligible);
           if (r?.error) console.warn(`[statusLine] model line install skipped: ${r.error}`);
         }
       } else if (statusLineIsMine(settings)) {
         // Refresh only: if the slot changed since this read, leave it alone.
-        const r = syncStatusLine(undefined, statusLineIsMine);
+        const r = syncStatusLine(undefined, (st) => fs.existsSync(claudeSettingsPath) && statusLineIsMine(st));
         if (r?.error) console.warn(`[statusLine] script refresh skipped: ${r.error}`);
       }
     }
@@ -2142,8 +2152,15 @@ function setupFileHandlers() {
     settleUsage(settings);
     const owned = ownsStatusLine(settings.statusLine);
     const mine = statusLineIsMine(settings);
+    // ON only if the script that runs actually prints it: a reporter left by
+    // an older build (an upgrade launch that could not refresh it) does not.
+    let printsModel = false;
+    if (mine) {
+      try { printsModel = fs.readFileSync(reporterScriptPath(app.getPath('userData')), 'utf8').includes(MODEL_LINE_MARKER); }
+      catch { printsModel = false; }
+    }
     return {
-      on: mine && statusLineParts().model,
+      on: mine && statusLineParts().model && printsModel,
       // A status line of the user's own: turning this on chains it, after it.
       theirs: settings.statusLine !== undefined && !owned,
       installedElsewhere: owned && !mine,

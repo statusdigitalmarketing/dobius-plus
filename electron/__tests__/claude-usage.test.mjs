@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import {
   parseRecord, aggregateUsage, reporterScript,
   planStatusLineInstall, planStatusLineRemove, ownsStatusLine, REPORTER_MARKER,
-  reporterCommand, EFFORT_WORDS, chainFromScript, scriptPathFromCommand,
+  reporterCommand, EFFORT_WORDS, chainFromScript, scriptPathFromCommand, MODEL_LINE_MARKER,
 } from '../claude-usage.js';
 
 // Ownership is detected by the marker appearing in the command string, and the
@@ -307,6 +307,13 @@ check('model line off: the script is exactly the usage reporter it was', () => {
   assert.equal(reporterScript('/u/usage', 'mine.sh', { model: false }), reporterScript('/u/usage', 'mine.sh'));
   assert.ok(reporterScript('/u/usage', 'mine.sh').includes(`exec /bin/sh -c 'mine.sh'`));
   assert.equal(runLine(REAL, { model: false }).out, '');
+});
+
+check('the model marker is in a script exactly when it prints the model', () => {
+  // Settings reads it to tell an upgraded script from one an older build left.
+  assert.ok(reporterScript('/u/usage', null, { model: true }).includes(MODEL_LINE_MARKER));
+  assert.ok(reporterScript('/u/usage', 'mine.sh', { capture: false, model: true }).includes(MODEL_LINE_MARKER));
+  assert.ok(!reporterScript('/u/usage', 'mine.sh').includes(MODEL_LINE_MARKER));
 });
 
 check('capture off: no record is written, the line still prints', () => {

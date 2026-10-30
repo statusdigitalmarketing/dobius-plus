@@ -145,7 +145,9 @@ const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
  * there. What is extracted must still be plain characters or it is dropped.
  * An absent field drops out of the line rather than printing a placeholder.
  */
-const MODEL_BLOCK = `m=
+export const MODEL_LINE_MARKER = '# dobius-model-line';
+const MODEL_BLOCK = `${MODEL_LINE_MARKER}
+m=
 r=\${payload#*\\"model\\":\\{}
 if [ "$r" != "$payload" ]; then
   r=\${r%%\\}*}
