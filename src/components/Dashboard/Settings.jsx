@@ -256,11 +256,11 @@ export default function Settings() {
       </div>
 
       {/* Accounts */}
-      <AccountsSection />
-      <GwsAccounts />
+      <div data-settings-section="accounts"><AccountsSection /></div>
+      <div data-settings-section="gws"><GwsAccounts /></div>
 
       {/* Appearance */}
-      <Section title="Appearance">
+      <Section id="appearance" title="Appearance">
         <SettingRow label="Theme" description="Terminal and UI color theme">
           <div className="flex items-center gap-2">
             <select
@@ -282,8 +282,10 @@ export default function Settings() {
               ))}
             </select>
             <div
-              className="flex gap-0.5 rounded overflow-hidden"
-              style={{ border: '1px solid var(--border)' }}
+              className="flex flex-wrap gap-0.5 rounded overflow-hidden"
+              // Two rows of 16 swatches: one row of every theme ran past the
+              // settings column, and off a narrow window beside the side nav.
+              style={{ border: '1px solid var(--border)', maxWidth: 288 }}
             >
               {THEMES.map((t, i) => (
                 <button
@@ -364,7 +366,7 @@ export default function Settings() {
       </Section>
 
       {/* Terminal */}
-      <Section title="Terminal">
+      <Section id="terminal" title="Terminal">
         <SettingRow label="Scrollback Lines" description={`Save up to ${settings.scrollbackLines.toLocaleString()} lines on window close`}>
           <select
             value={settings.scrollbackLines}
@@ -390,7 +392,7 @@ export default function Settings() {
       </Section>
 
       {/* Projects */}
-      <Section title="Projects">
+      <Section id="projects" title="Projects">
         <SettingRow label="Project Scan Directory" description="Dobius+ scans this folder to find your projects">
           <div className="flex items-center gap-2">
             <input
@@ -493,7 +495,7 @@ export default function Settings() {
       </Section>
 
       {/* Integrations */}
-      <Section title="Integrations">
+      <Section id="integrations" title="Integrations">
         <SettingRow label="Asana PAT" description="Personal access token for the Asana sync button in Tasks">
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <input
@@ -549,7 +551,7 @@ export default function Settings() {
       </Section>
 
       {/* Mobile Access */}
-      <Section title="Mobile Access">
+      <Section id="mobile" title="Mobile Access">
         <SettingRow
           label="Mobile Server"
           description="Reach your terminals from your phone or iPad"
@@ -722,7 +724,7 @@ export default function Settings() {
       </Section>
 
       {/* iMessage Bridge — text yourself to drive Dobius */}
-      <Section title="iMessage Bridge">
+      <Section id="imessage" title="iMessage Bridge">
         <SettingRow
           label="Enable bridge"
           description="Text yourself in iMessage with the prefix below to drive Dobius."
@@ -818,7 +820,7 @@ export default function Settings() {
       </Section>
 
       {/* Keyboard Shortcuts */}
-      <Section title="Keyboard Shortcuts">
+      <Section id="shortcuts" title="Keyboard Shortcuts">
         <div className="space-y-1.5">
           <ShortcutRow keys="Cmd+T" action="New Tab" />
           <ShortcutRow keys="Cmd+W" action="Close Tab" />
@@ -837,7 +839,7 @@ export default function Settings() {
         </div>
       </Section>
 
-      <Section title="Diagnostics">
+      <Section id="diagnostics" title="Diagnostics">
         <SettingRow
           label="Voice Conductor"
           description="A background Opus session for iPhone voice routing. Off by default: leave it off unless you use the voice Shortcut. When on it self-recycles so it never fills memory."
@@ -865,9 +867,9 @@ export default function Settings() {
   );
 }
 
-function Section({ title, children }) {
+function Section({ id, title, children }) {
   return (
-    <div>
+    <div data-settings-section={id}>
       <div
         className="text-xs font-medium uppercase tracking-wider mb-3 pb-1"
         style={{ color: 'var(--dim)', fontSize: 10, borderBottom: '1px solid var(--border)' }}

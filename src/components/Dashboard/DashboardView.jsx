@@ -29,6 +29,11 @@ import Costs from './Costs';
 import ChangeFeed from './ChangeFeed';
 import Search from './Search';
 import BrowserProfiles from './BrowserProfiles';
+import { SETTINGS_SECTIONS, settingsSectionSelector, sectionScrollTop } from '../../lib/settings-sections';
+
+// Wide enough for the longest label plus a count ("Sessions (1234)"), narrow
+// enough to leave a 900px window most of its width for the page itself.
+const NAV_WIDTH = 152;
 
 export const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -97,12 +102,45 @@ export default function DashboardView() {
   const [sessionCount, setSessionCount] = useState(0);
   const runningCount = Object.keys(runningAgents).length;
 
-  // Keep the selected tab visible: with ~22 tabs the active one can sit off-screen
-  // in the horizontal scroller, so scroll it into view when it changes.
+  // Keep the selected page visible when the window is too short for the whole
+  // side nav. The ref sits on the entry's group, so Settings brings its
+  // section list into view with it.
   const activeTabRef = useRef(null);
+  const contentRef = useRef(null);
+  const jumpSeq = useRef(0);
   useEffect(() => {
-    activeTabRef.current?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
-  }, [dashboardTab]);
+    activeTabRef.current?.scrollIntoView({ block: 'nearest' });
+    jumpSeq.current++; // a pending section jump belongs to the page it was asked on
+  }, [dashboardTab, loading]); // loading: the nav is a skeleton until stats arrive
+  useEffect(() => () => { jumpSeq.current++; }, []);
+
+  // Settings renders its sections only after its async settings load (and after
+  // the page transition), so wait briefly for the anchor instead of no-oping.
+  const jumpToSettingsSection = (id) => {
+    const mine = ++jumpSeq.current;
+    let tries = 0;
+    const attempt = () => {
+      if (mine !== jumpSeq.current) return;
+      const box = contentRef.current;
+      const el = box?.querySelector(settingsSectionSelector(id));
+      if (!el) {
+        if (++tries < 30) setTimeout(attempt, 100);
+        return;
+      }
+      box.scrollTo({
+        top: sectionScrollTop({
+          scrollTop: box.scrollTop,
+          boxTop: box.getBoundingClientRect().top,
+          elTop: el.getBoundingClientRect().top,
+        }),
+        // Instant, not smooth: Settings' sections are still growing as their
+        // data loads, and a smooth scroll aims at a target that moves under
+        // it. After an instant jump, scroll anchoring holds the section put.
+        behavior: 'auto',
+      });
+    };
+    attempt();
+  };
 
   // Clear board notification badge when user switches to Board tab
   useEffect(() => {
@@ -141,15 +179,15 @@ export default function DashboardView() {
 
   if (loading) {
     return (
-      <div className="h-full flex flex-col">
-        <div className="flex items-center gap-1 px-4 py-2 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+      <div className="h-full flex">
+        <div className="shrink-0 py-2 overflow-hidden" style={{ width: NAV_WIDTH, borderRight: '1px solid var(--border)' }}>
           {TABS.map((tab) => (
-            <div key={tab.id} className="px-3 py-1.5">
-              <div className="h-3 w-10 rounded animate-pulse" style={{ backgroundColor: 'var(--border)' }} />
+            <div key={tab.id} className="px-3 py-[5px]">
+              <div className="h-3 w-16 rounded animate-pulse" style={{ backgroundColor: 'var(--border)' }} />
             </div>
           ))}
         </div>
-        <div className="flex-1 p-4">
+        <div className="flex-1 min-w-0 p-4">
           <div className="grid grid-cols-4 gap-3 mb-4">
             {[1, 2, 3, 4].map((i) => (
               <div key={i} className="p-3 rounded animate-pulse" style={{ backgroundColor: 'var(--surface)' }}>
@@ -166,78 +204,110 @@ export default function DashboardView() {
   const renderTab = TAB_CONTENT[dashboardTab];
 
   return (
-    <div className="h-full flex flex-col">
-      {/* Tab bar */}
-      <div
-        className="flex items-center gap-0.5 px-4 shrink-0 overflow-x-auto"
-        style={{ borderBottom: '1px solid var(--border)', scrollbarWidth: 'none' }}
+    <div className="h-full flex">
+      {/* Side nav: every page listed top to bottom, so none hides off the edge
+          the way they did in the old horizontal strip. Scrolls on its own only
+          when the window is too short. */}
+      <nav
+        aria-label="Dashboard pages"
+        className="shrink-0 overflow-y-auto py-2"
+        style={{ width: NAV_WIDTH, borderRight: '1px solid var(--border)', scrollbarWidth: 'thin' }}
       >
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            ref={dashboardTab === tab.id ? activeTabRef : null}
-            onClick={() => setDashboardTab(tab.id)}
-            className="relative px-3 py-2.5 text-xs transition-colors duration-150 shrink-0"
-            style={{
-              color: dashboardTab === tab.id ? 'var(--fg)' : 'var(--dim)',
-              fontWeight: dashboardTab === tab.id ? 500 : 400,
-            }}
-          >
-            {tab.label}
-            {tab.id === 'sessions' && sessionCount > 0 && (
-              <span
-                className="ml-1 text-xs"
+        {TABS.map((tab) => {
+          const active = dashboardTab === tab.id;
+          return (
+            <div key={tab.id} ref={active ? activeTabRef : null}>
+              <button
+                onClick={() => setDashboardTab(tab.id)}
+                aria-current={active ? 'page' : undefined}
+                className="relative w-full flex items-center gap-1 pl-4 pr-2 py-[3px] text-xs text-left transition-colors duration-150 hover:bg-[var(--surface-hover)]"
                 style={{
-                  color: 'var(--dim)',
-                  fontFamily: "'SF Mono', monospace",
-                  fontSize: 9,
+                  color: active ? 'var(--fg)' : 'var(--dim)',
+                  fontWeight: active ? 500 : 400,
+                  backgroundColor: active ? 'var(--accent-muted)' : undefined,
                 }}
               >
-                ({sessionCount})
-              </span>
-            )}
-            {tab.id === 'board' && runningCount > 0 && (
-              <span
-                className="ml-1 inline-flex items-center gap-0.5"
-                style={{
-                  fontFamily: "'SF Mono', monospace",
-                  fontSize: 9,
-                }}
-              >
-                <span
-                  className="inline-block w-1.5 h-1.5 rounded-full"
-                  style={{ backgroundColor: '#3FB950' }}
-                />
-                <span style={{ color: '#3FB950' }}>
-                  {runningCount}
-                </span>
-              </span>
-            )}
-            {tab.id === 'board' && boardNotification && dashboardTab !== 'board' && (
-              <span
-                className="absolute top-1.5 right-1 w-1.5 h-1.5 rounded-full"
-                style={{ backgroundColor: '#3FB950' }}
-              />
-            )}
-            {tab.id === 'builds' && buildComplete && dashboardTab !== 'builds' && (
-              <span
-                className="absolute top-1.5 right-1 w-1.5 h-1.5 rounded-full"
-                style={{ backgroundColor: 'var(--accent)' }}
-              />
-            )}
-            {dashboardTab === tab.id && (
-              <span
-                className="absolute bottom-0 left-1/2 -translate-x-1/2 h-0.5 rounded-full"
-                style={{ width: '70%', backgroundColor: 'var(--accent)' }}
-              />
-            )}
-          </button>
-        ))}
-      </div>
+                {active && (
+                  <span
+                    className="absolute left-0 top-1 bottom-1 w-0.5 rounded-full"
+                    style={{ backgroundColor: 'var(--accent)' }}
+                  />
+                )}
+                <span className="truncate">{tab.label}</span>
+                {tab.id === 'sessions' && sessionCount > 0 && (
+                  <span
+                    className="shrink-0"
+                    style={{
+                      color: 'var(--dim)',
+                      fontFamily: "'SF Mono', monospace",
+                      fontSize: 9,
+                    }}
+                  >
+                    ({sessionCount})
+                  </span>
+                )}
+                {tab.id === 'board' && runningCount > 0 && (
+                  <span
+                    className="shrink-0 inline-flex items-center gap-0.5"
+                    style={{
+                      fontFamily: "'SF Mono', monospace",
+                      fontSize: 9,
+                    }}
+                  >
+                    <span
+                      className="inline-block w-1.5 h-1.5 rounded-full"
+                      style={{ backgroundColor: '#3FB950' }}
+                    />
+                    <span style={{ color: '#3FB950' }}>
+                      {runningCount}
+                    </span>
+                  </span>
+                )}
+                {tab.id === 'board' && boardNotification && !active && (
+                  <span
+                    className="ml-auto shrink-0 w-1.5 h-1.5 rounded-full"
+                    style={{ backgroundColor: '#3FB950' }}
+                  />
+                )}
+                {tab.id === 'builds' && buildComplete && !active && (
+                  <span
+                    className="ml-auto shrink-0 w-1.5 h-1.5 rounded-full"
+                    style={{ backgroundColor: 'var(--accent)' }}
+                  />
+                )}
+              </button>
+              {/* Settings is one long page: list its sections under the entry
+                  so they read at a glance and jump on click. Here rather than
+                  beside the settings column, it costs no content width and
+                  works at any window width. */}
+              {tab.id === 'settings' && active && (
+                <div className="py-0.5" aria-label="Settings sections" role="group">
+                  {SETTINGS_SECTIONS.map((sec) => (
+                    <button
+                      key={sec.id}
+                      onClick={() => jumpToSettingsSection(sec.id)}
+                      className="w-full block pl-7 pr-2 py-[2px] text-left truncate transition-colors duration-150 hover:bg-[var(--surface-hover)]"
+                      style={{ color: 'var(--dim)', fontSize: 11 }}
+                      title={`Jump to ${sec.label}`}
+                    >
+                      {sec.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </nav>
 
       {/* Tab content */}
-      <div className="flex-1 overflow-y-auto">
-        <AnimatePresence mode="wait">
+      <div ref={contentRef} className="flex-1 min-w-0 overflow-y-auto">
+        {/* One scroller serves every page: start each new page at its top
+            rather than wherever the last one (often a section jump) left it. */}
+        <AnimatePresence
+          mode="wait"
+          onExitComplete={() => { if (contentRef.current) contentRef.current.scrollTop = 0; }}
+        >
           <motion.div
             key={dashboardTab}
             initial={{ opacity: 0, y: 4 }}
