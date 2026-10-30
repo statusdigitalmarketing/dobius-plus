@@ -259,6 +259,12 @@ export function createOpenTabService(deps, opts = {}) {
     if (!claude) return typedOnly('Claude was not in the foreground with its prompt on screen');
     if (watch.seq() !== seqAtRead) return typedOnly('the screen changed while it was being checked');
     if (watch.keys() !== 0 || deps.inputBusy(tabId)) return typedOnly('someone typed into the tab');
+    // Security review (HIGH, "a token holder can submit a prompt"), kept on
+    // purpose: Brett asked for the send, and /tabSend with the same token
+    // already writes message + Enter into ANY tab, plain shells included.
+    // This route adds no capability the token lacks and is narrower: a fresh
+    // tab, claude verified as its foreground process, normal permission
+    // prompts. See docs/bridge-open-tab.md, Security.
     deps.submit(tabId);
     return { ok: true, tabId, submitted: true };
   }

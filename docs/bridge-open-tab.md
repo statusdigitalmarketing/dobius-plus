@@ -116,6 +116,13 @@ When a tab was opened but the message could not be typed, `tabId` is included to
 | `503` | Dobius+ is still starting |
 | `504` | Claude's prompt did not appear within 60 seconds. The tab stays open with Claude in it, nothing was typed. `tabId` included. A repeat of the same `requestId` brings that tab forward |
 
+## Security
+
+- **Who can call it.** Only a local process that can read the bridge token file (the Mac user's own processes). A web page cannot: no token, wrong `Host`, an `Origin` header, and the JSON content type forces a preflight the bridge never answers.
+- **Auto-send is deliberate.** An automated security review rated "a token holder can submit a prompt to Claude" HIGH. It was kept: the requester asked for the message to be sent, and `/tabSend` with the same token already writes a message plus Enter into ANY tab, plain shells included. `/openTab` adds no capability the token did not have, and it is narrower: it only ever types into a tab it just opened, only after verifying `claude` is that tab's foreground process, and Claude keeps its normal permission prompts.
+- **What still guards your machine.** The message is a prompt, and an email can contain instructions. Claude's permission prompts are the control: nothing here answers them, and no permission-skipping flag is ever used. A message starting with `!` (Claude's shell mode, which runs with no permission prompt), `/`, `#` or `&` is never sent automatically.
+- **Keystroke safety.** The message cannot carry an Enter, Ctrl+C, an escape sequence or any other control character (see "What happens to the message"); the single Enter is written separately by Dobius+ after the checks in step 7.
+
 ## Side effects
 
 - May open a project window, and always brings the window to the front.
