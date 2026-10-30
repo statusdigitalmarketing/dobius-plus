@@ -1,6 +1,6 @@
 import pty from 'node-pty';
 import { isTerminalReply, createVisibleOutputScanner } from './terminal-reply.js';
-import { isClaudeCommand } from './claude-argv.js';
+import { isClaudeCommand, classifyClaudeProcess } from './claude-argv.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -17,6 +17,8 @@ import { app } from 'electron';
 import { getSessionTabMap } from './config-manager.js';
 
 const terminals = new Map();
+// getTerminalClaudeInfo { unique }: a shell with more children answers nothing.
+const MAX_UNIQUE_CHILDREN = 16;
 
 // Global terminal observers (v1.0.43): sinks that see EVERY terminal's data +
 // exit, independent of window/mobile attachment. Used by the main-process
@@ -528,6 +530,9 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
       encoding: 'utf8',
     });
     const children = pgrepOut.trim().split('\n').filter(Boolean);
+    // `unique`: one ps per child, so a shell with many children is not
+    // walked (each poll would spawn them all again): no answer.
+    if (unique && children.length > MAX_UNIQUE_CHILDREN) return null;
     let found = null;
     for (const childPid of children) {
       // `lstart` is the process start time; `command` is the argv. One ps
@@ -550,6 +555,11 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
         if (unique && /claude/i.test(command)) return null;
         continue;
       }
+      // `unique`: the strict reading too, so a process that only names the CLI
+      // (`node watcher.js /path/claude`) is not taken for it. Capped, since
+      // classifyClaudeProcess's cost grows with the square of the length and
+      // a claude command line is short.
+      if (unique && (command.length > 4096 || classifyClaudeProcess(command).kind !== 'claude')) return null;
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
