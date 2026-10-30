@@ -79,6 +79,7 @@ export function ingest(id, data, now = Date.now()) {
     lastMatch = m;
     const state = m[1];
     st.lastMarkerAt = now;
+    st.hooklessAfter = 0; // a hook spoke: whatever ran without one is over
     if (state === 'done') {
       // Only a running turn ends here; Claude's idle-prompt re-send of 'done'
       // must not move the end (the length is measured back from it).
@@ -171,6 +172,7 @@ export function activityFor(id) {
     lastTurnMs: st.lastTurnMs || 0,
     turnEndedAt: st.turnEndedAt || 0,
     lastMarkerAt: st.lastMarkerAt || 0,
+    hooklessTurn: !!st.hooklessAfter && st.hooklessAfter === st.turnEndedAt,
   };
 }
 
@@ -223,6 +225,17 @@ export function adoptHookState(id, lastMarkerAt, next) {
   const st = live.get(id);
   if (!st || !st.hookOwned || st.lastMarkerAt !== lastMarkerAt) return;
   if (next === 'working' || next === 'needs') st.status = next;
+}
+
+/**
+ * main proved (from Claude's presence file) that a turn without hooks began
+ * after the hook's last turn ended: that turn's Done is not the tab's state
+ * any more. Kept until the next marker. Only for the exact turn checked.
+ */
+export function markHooklessTurn(id, turnEndedAt) {
+  const st = live.get(id);
+  if (!st || st.hookOwned || st.turnEndedAt !== turnEndedAt) return;
+  st.hooklessAfter = turnEndedAt;
 }
 
 /** When the hook last ended a turn here (0 = never). Cheap, for the data path. */

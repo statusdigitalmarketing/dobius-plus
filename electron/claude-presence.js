@@ -100,6 +100,8 @@ export function judgePresence(found, a, info, now = Infinity) {
   const none = { background: null, uncertain: false };
   if (!found || !info || found.pid !== info.pid || found.startedAt !== info.startedAt) return none;
   const at = found.statusUpdatedAt;
+  // A time from the future (a minute of clock slack) is not evidence.
+  if (Number.isFinite(at) && Number.isFinite(now) && at > now + 60_000) return none;
   if ((a.status === 'working' || a.status === 'needs') && a.hookOwned) {
     // Only a state the CLI wrote AFTER the last marker says anything new.
     if (!Number.isFinite(at) || !a.lastMarkerAt || at <= a.lastMarkerAt) return none;
@@ -179,7 +181,9 @@ export function reconcileWithProcess(a, info) {
  */
 export function boundedIds(ids, cap) {
   if (!Array.isArray(ids)) return [];
-  return ids.slice(0, cap).filter((id) => typeof id === 'string' && id.length <= 4096);
+  // The prototype's slice, never the array's own: an own `slice` property
+  // survives IPC serialization, and calling it would throw in main.
+  return Array.prototype.slice.call(ids, 0, cap).filter((id) => typeof id === 'string' && id.length <= 4096);
 }
 
 // Bound a lookup cache by dropping its oldest SETTLED entry: dropping a
@@ -335,7 +339,7 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
  * work once a turn has ended, and whether a window that owns the PTY has it
  * unread. Dependencies are injected so this is tested without Electron.
  * @param {object} deps
- * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function, adoptHookState:Function}} deps.status
+ * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function, adoptHookState:Function, markHooklessTurn:Function}} deps.status
  * @param {(id:string)=>Promise<object|null>} deps.claudeInfo  cached lookup
  * @param {(id:string)=>Promise<object|null>} [deps.claudeInfoFresh]  uncached, for turn ends
  * @param {(id:string, key:string)=>Promise<object|null>} deps.presenceForTab
@@ -367,13 +371,31 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     return info;
   }
 
+  // The hook record a lookup was based on has moved on (a marker arrived
+  // while it awaited): its answer may describe another moment.
+  const moved = (id, raw) => {
+    const now2 = status.activityFor(id);
+    return !now2 || now2.turnEndedAt !== raw.turnEndedAt || now2.lastMarkerAt !== raw.lastMarkerAt
+      || now2.status !== raw.status || now2.hookOwned !== raw.hookOwned;
+  };
+  const shape = (id, a, extra) => ({
+    id,
+    activity: { ...a, background: null, ...(a.hooklessTurn ? { uncertain: true } : {}), ...extra },
+    unread: unreadAnywhere(id),
+  });
+  // Answer from the CURRENT record without a presence read.
+  const settleOnCurrent = async (id) => {
+    const cur = status.activityFor(id);
+    return cur ? shape(id, reconcileWithProcess(cur, await claudeInfo(id))) : null;
+  };
+
   /** Null when no PTY runs for the id (a closed tab shows its age). */
   async function tabActivity(id) {
     const raw = status.activityFor(id);
     if (!raw) return null;
     const info = await checkTurnAgainstProcess(id, raw);
+    if (moved(id, raw)) return settleOnCurrent(id);
     const a = info === undefined ? raw : reconcileWithProcess(raw, info);
-    let background = null;
     const t = now();
     const hookWorking = a.status === 'working' && a.hookOwned;
     const hookLive = (hookWorking || a.status === 'needs') && a.hookOwned;
@@ -381,38 +403,30 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     // describes a process, and with none there is nothing to describe):
     //   - after the HOOK ended a turn, for Waiting (or a newer hookless turn);
     //     plain output after the turn (typing at the prompt) still asks
-    //   - during a hook 'working' gone quiet, whether that turn already ended
-    //     without a Stop marker
-    const ended = !!info && a.turnEndedAt && !hookLive
+    //   - during a hook 'working' or 'needs' gone quiet, whether it moved on
+    //     without a marker
+    const ended = !!info && a.turnEndedAt && !hookLive && !a.hooklessTurn
       && t - a.turnEndedAt >= GRACE_MS;
     const quietWorking = !!info && hookLive && a.lastMarkerAt && t - a.lastMarkerAt >= GRACE_MS;
-    if (ended || quietWorking) {
-      const found = await presenceForTab(id, ended ? `e:${a.turnEndedAt}` : `w:${a.lastMarkerAt}`);
-      // The lookup awaited: if the hook record moved meanwhile, the presence
-      // file may describe a different moment. Answer from the new record.
-      const after = status.activityFor(id);
-      if (!after || after.turnEndedAt !== a.turnEndedAt || after.lastMarkerAt !== a.lastMarkerAt
-          || after.status !== raw.status || after.hookOwned !== raw.hookOwned) {
-        return after
-          ? { id, activity: { ...reconcileWithProcess(after, await claudeInfo(id)), background: null }, unread: unreadAnywhere(id) }
-          : null;
-      }
-      const j = judgePresence(found, a, info, t);
-      background = j.background;
-      if (j.showAs) {
-        // Kept in the record, so losing the presence signal later cannot bring
-        // back the state it disproved (an approved dialog as Input again).
-        status.adoptHookState(id, a.lastMarkerAt, j.showAs);
-        return { id, activity: { ...a, status: j.showAs, background: null }, unread: unreadAnywhere(id) };
-      }
-      if (j.uncertain) {
-        // The CLI showed the hook's turn is over: end it in the record too, so
-        // a later hookless turn cannot revive its clock.
-        if (j.over) status.abandonTurn(id, a.lastMarkerAt);
-        return { id, activity: { ...a, background: null, uncertain: true }, unread: unreadAnywhere(id) };
-      }
+    if (!ended && !quietWorking) return shape(id, a);
+    const found = await presenceForTab(id, ended ? `e:${a.turnEndedAt}` : `w:${a.lastMarkerAt}`);
+    if (moved(id, raw)) return settleOnCurrent(id);
+    const j = judgePresence(found, a, info, t);
+    if (j.showAs) {
+      // Kept in the record, so losing the presence signal later cannot bring
+      // back the state it disproved (an approved dialog as Input again).
+      status.adoptHookState(id, a.lastMarkerAt, j.showAs);
+      return shape(id, { ...a, status: j.showAs });
     }
-    return { id, activity: { ...a, background }, unread: unreadAnywhere(id) };
+    if (j.uncertain) {
+      // Kept in the record too, so a later failed read cannot revive what this
+      // one disproved: a hook turn that ended without its marker is ended
+      // there; a hookless turn after an ended one hides that turn's Done.
+      if (j.over) status.abandonTurn(id, a.lastMarkerAt);
+      else if (ended) status.markHooklessTurn(id, a.turnEndedAt);
+      return shape(id, a, { uncertain: true });
+    }
+    return shape(id, a, { background: j.background });
   }
 
   return { tabActivity, checkTurnAgainstProcess };

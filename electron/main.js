@@ -549,10 +549,16 @@ function setupDataHandlers() {
   // "Done" for them). Counted only while the reporter still owns the PTY, so
   // a tab moved by a tear-off or dock never keeps a stale mark.
   ipcMain.on('tabs:reportUnread', (event, ids) => {
-    const wcId = event.sender.id;
-    const list = boundedIds(ids, 1000);
-    if (!unreadByWindow.has(wcId)) event.sender.once('destroyed', () => unreadByWindow.delete(wcId));
-    unreadByWindow.set(wcId, new Set(list));
+    // ipcMain.on has no rejection path: a throw here would reach the
+    // uncaughtException handler, which exits the app.
+    try {
+      const wcId = event.sender.id;
+      const list = boundedIds(ids, 1000);
+      if (!unreadByWindow.has(wcId)) event.sender.once('destroyed', () => unreadByWindow.delete(wcId));
+      unreadByWindow.set(wcId, new Set(list));
+    } catch (err) {
+      console.warn('[tabs:reportUnread] ignored a malformed report:', err?.message);
+    }
   });
   // Focus the window that currently owns a live tab (a tear-off window if the id
   // is torn off, otherwise the project's primary window). Lets the sidebar reveal

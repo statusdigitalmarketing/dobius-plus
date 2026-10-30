@@ -840,3 +840,47 @@ test('unique lookup: a claude path with spaces makes the shell ambiguous, not sk
   assert.equal(await claudeChildVerdict('sleep 25'), 'not-claude');
   assert.equal(await claudeChildVerdict('claude --resume abc'), 'claude');
 });
+
+test('a hookless turn after an ended one keeps the old Done hidden when presence is lost', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 70_000);
+  let presence = { pid: 1, startedAt: 1_000, status: 'busy', statusUpdatedAt: 130_000 };
+  let t = 134_000;
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),
+    presenceForTab: async () => presence,
+    now: () => t,
+  });
+  assert.equal((await tabActivity(ID)).activity.uncertain, true);
+  presence = null;
+  t = 140_000;
+  assert.equal((await tabActivity(ID)).activity.uncertain, true);
+  ts.ingest(ID, mk('working'), 150_000); // hooks back: a fresh state
+  assert.equal(ts.activityFor(ID).hooklessTurn, false);
+});
+
+test('boundedIds ignores an own slice property (IPC can carry one)', () => {
+  const evil = Object.assign(['a', 'b'], { slice: 0, filter: 0 });
+  assert.deepEqual(boundedIds(evil, 10), ['a', 'b']);
+});
+
+test('judgePresence: a timestamp from the future is no evidence', () => {
+  const info = { pid: 1, startedAt: 100_000 };
+  const working = { status: 'working', hookOwned: true, turnEndedAt: 0, lastMarkerAt: 200_000 };
+  const r = judgePresence({ pid: 1, startedAt: 100_000, status: 'waiting', statusUpdatedAt: 9007199254740991 }, working, info, 210_000);
+  assert.equal(r.showAs, undefined);
+});
+
+test('tab activity: a marker arriving during the process lookup is answered from the new record', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 130_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => { ts.ingest(ID, mk('working'), 130_100); return { pid: 1, startedAt: 1_000 }; },
+    now: () => 130_300,
+  });
+  const r = await tabActivity(ID);
+  assert.equal(r.activity.status, 'working');
+  assert.equal(label({ ...r.activity, live: true, unread: true, now: 130_300 }).kind, 'working');
+});
