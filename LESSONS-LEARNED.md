@@ -349,3 +349,9 @@
 - **FIX**: Never name a zsh variable `path` (also avoid `cdpath`, `fpath`, `manpath`). Use `u` or `route`.
 - **CONTEXT**: Bash tool commands run under zsh here.
 - **DETECTION**: `grep -nE "for path in|\bpath=" scratchpad/**/*.sh`
+
+### API - 2026-10-30
+- **MISTAKE**: `electron/mobile-server.js` handled `authorizeTab` / `input` / `submitPrompt` with a bare `break` on any bad request (unknown tab id, unauthorized, oversized). The orchestrator client could not tell delivered from dropped and printed SENT for an afternoon of relays to short ids that never arrived.
+- **FIX**: every write request is answered (`electron/mobile-tab-ops.js`): `ack` after the PTY write, `opError` with a code otherwise, and `uncertain: true` when the text may have landed anyway. Refusals use type `opError`, never `error`: the phone's Board alerts on every `error` frame. Docs: `docs/mobile-ws-protocol.md`.
+- **CONTEXT**: Five Codex rounds were almost all about classifying outcomes as sent / not sent / unknown. Anything after the paste that is not a proven erase is unknown; a cancel must be written before its counters move; a replaced PTY's counters prove nothing. Never put an `await` between a queue's drain loop ending and its cleanup: a caller resumed in that microtask queues onto a queue that is then deleted.
+- **DETECTION**: `grep -n "break; *//\|) break;" electron/mobile-server.js` for silent drops in new WS handlers; `npm run test:tabops`.
