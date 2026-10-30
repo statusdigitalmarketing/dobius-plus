@@ -1098,3 +1098,17 @@ test('judgePresence: a busy written just before the received Stop is no claim', 
   assert.deepEqual(judgePresence(f(20_500), a, info), { background: null, uncertain: true });
   assert.equal(judgePresence(f(17_000), a, info).background, 'agents');
 });
+
+test('a hook Working with a silent PTY for a minute is not claimed', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),
+    presenceForTab: async () => null, // a CLI without presence files
+    now: () => 70_000,
+  });
+  assert.equal((await tabActivity(ID)).activity.uncertain, true);
+  ts.ingest(ID, 'spinner frame', 69_000); // the TUI is still painting
+  const live = makeActivity({ claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }), presenceForTab: async () => null, now: () => 70_000 });
+  assert.notEqual((await live.tabActivity(ID)).activity.uncertain, true);
+});

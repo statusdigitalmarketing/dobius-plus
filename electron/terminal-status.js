@@ -192,6 +192,7 @@ export function activityFor(id) {
     lastMarkerAt: st.lastMarkerAt || 0,
     hooklessTurn: !!st.hooklessAfter && st.hooklessAfter === st.turnEndedAt,
     ambiguous: !!st.ambiguous,
+    lastActivityAt: st.lastActivityAt,
   };
 }
 

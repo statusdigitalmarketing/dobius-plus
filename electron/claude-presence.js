@@ -42,6 +42,11 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 export const GRACE_MS = 3000;
+// Claude's TUI repaints its spinner and elapsed time while a turn runs, so a
+// hook 'working' with a silent PTY this long is no longer provably running
+// (hooks switched off mid-turn and no presence file to say so): the row shows
+// its age. Label only; the record is not changed on silence alone.
+export const SILENT_WORKING_MS = 60_000;
 const CACHE_MS = 4000;          // several windows poll the same tabs
 const MAX_FILE_BYTES = 64 * 1024;
 
@@ -435,6 +440,9 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     const a = info === undefined ? raw : reconcileWithProcess(raw, info);
     const t = now();
     const hookWorking = a.status === 'working' && a.hookOwned;
+    if (hookWorking && Number.isFinite(a.lastActivityAt) && t - a.lastActivityAt >= SILENT_WORKING_MS) {
+      return shape(id, a, { uncertain: true });
+    }
     const hookLive = (hookWorking || a.status === 'needs') && a.hookOwned;
     // Ask the presence file only with a claude in the tab (a cached answer
     // describes a process, and with none there is nothing to describe):
