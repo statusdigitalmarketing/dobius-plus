@@ -84,10 +84,24 @@ await write('messaged-later', [
   rec('assistant', 'cli', 'newer answer', now - 1_790_000),
 ]);
 await write('only-meta', [meta('file-history-snapshot', now - 7_200_000)]);
+// A tool finishing is not a message: the trailing tool result keeps the
+// session at its last reply.
+await write('trailing-tool', [
+  rec('user', 'cli', 'run the long migration', now - 5_400_010),
+  rec('assistant', 'cli', 'running', now - 5_400_000),
+  JSON.stringify({ type: 'user', timestamp: new Date(now - 30).toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'ok' }] } }),
+]);
+// 250 bookkeeping records after the last message push it past the 200-record
+// tail; the deeper look must still find it.
+await write('buried', [
+  rec('user', 'cli', 'buried question', now - 4_000_010),
+  rec('assistant', 'cli', 'buried answer', now - 4_000_000),
+  ...Array.from({ length: 250 }, (_, i) => meta('progress', now - 1000 + i)),
+]);
 
 const all = await loadAllSessions();
 const ids = (arr) => arr.map((s) => s.sessionId).sort();
-const ALL = ['cli-chat', 'clock-skew', 'messaged-later', 'newest-unmarked', 'no-entrypoint', 'only-meta', 'remote-control', 'resumed-old', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta'];
+const ALL = ['buried', 'cli-chat', 'clock-skew', 'messaged-later', 'newest-unmarked', 'no-entrypoint', 'only-meta', 'remote-control', 'resumed-old', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta', 'trailing-tool'];
 const byId = (id) => all.find((s) => s.sessionId === id);
 check('timestamp is the last real message, not later metadata', byId('resumed-old')?.timestamp, now - 3_590_000);
 check('activityAt still sees the newest write', byId('resumed-old')?.activityAt, now - 50);
@@ -95,6 +109,8 @@ check('a later message sorts above a later metadata write',
   all.map((s) => s.sessionId).filter((id) => id === 'resumed-old' || id === 'messaged-later'), ['messaged-later', 'resumed-old']);
 check('a trailing system record does not move the timestamp', byId('trailing-meta')?.timestamp, now - 8500);
 check('no message at all falls back to the newest record', byId('only-meta')?.timestamp, now - 7_200_000);
+check('a trailing tool result is not a message', byId('trailing-tool')?.timestamp, now - 5_400_000);
+check('a message buried past the tail is still found', byId('buried')?.timestamp, now - 4_000_000);
 check('list is sorted newest message first',
   all.every((s, i) => i === 0 || (all[i - 1].timestamp || 0) >= (s.timestamp || 0)), true);
 const skew = all.find((s) => s.sessionId === 'clock-skew');
@@ -108,9 +124,9 @@ check('default includes everything', ids(all), ALL);
 check('automated flag comes from the newest user/assistant record only',
   Object.fromEntries(all.map((s) => [s.sessionId, s.automated]).sort(([a], [b]) => a.localeCompare(b))),
   {
-    'cli-chat': false, 'clock-skew': false, 'messaged-later': false, 'newest-unmarked': false, 'no-entrypoint': false,
+    'buried': false, 'cli-chat': false, 'clock-skew': false, 'messaged-later': false, 'newest-unmarked': false, 'no-entrypoint': false,
     'only-meta': false, 'remote-control': false, 'resumed-old': false,
-    'sdk-review': true, 'sdk-then-cli': false, 'titled': false, 'trailing-meta': false,
+    'sdk-review': true, 'sdk-then-cli': false, 'titled': false, 'trailing-meta': false, 'trailing-tool': false,
   });
 
 const real = await loadAllSessions(undefined, { excludeAutomated: true });
@@ -123,11 +139,17 @@ check('the same name again is not a change', recordSessionTabNames([['cli-chat',
 const named = await loadAllSessions();
 check('the tab name rides on the session', named.find((s) => s.sessionId === 'cli-chat')?.tabName, 'Email');
 check('unsafe ids and empty names are never stored', [...getSessionTabNames().keys()], ['cli-chat']);
+check('one id twice keeps the last pair; a net no-op is no change',
+  recordSessionTabNames([['cli-chat', 'Billing'], ['cli-chat', 'Email']]), false);
+check('a default-labelled tab clears the name', [recordSessionTabNames([['cli-chat', null]]), getSessionTabNames().has('cli-chat')], [true, false]);
+check('clearing a name that is not there is no change', recordSessionTabNames([['cli-chat', null]]), false);
+recordSessionTabNames([['cli-chat', 'Email']], 1);
 const many = Array.from({ length: 1005 }, (_, i) => [`s-${i}`, `n${i}`]);
-recordSessionTabNames(many.slice(0, 600), 1);
-recordSessionTabNames(many.slice(600), 2);
+recordSessionTabNames(many.slice(0, 600), 2);
+// cli-chat is still running: seen again, unchanged, it must not be the one evicted.
+recordSessionTabNames([...many.slice(600), ['cli-chat', 'Email']], 3);
 const kept = getSessionTabNames();
-check('names are capped, oldest sighting dropped first', [kept.size, kept.has('cli-chat'), kept.has('s-1004')], [1000, true, true]);
+check('names are capped, the session seen longest ago goes first', [kept.size, kept.has('cli-chat'), kept.has('s-0'), kept.has('s-1004')], [1000, true, false, true]);
 flushConfig?.();
 
 await fs.rm(TMP_HOME, { recursive: true, force: true });

@@ -42,7 +42,7 @@ import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnsw
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, findLooseEnds, getTranscriptSig,
+  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, sessionTranscriptMtime, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
   getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
 import {
@@ -2307,6 +2307,9 @@ function setupConfigHandlers() {
 //   3. LINK newly-discovered sessions running in tabs that have no map entry.
 // Cancellable: store the interval ref so will-quit can clear it.
 let sessionTabCaptureInterval = null;
+// An inferred (bare `claude`) session takes its tab's name only if its
+// transcript was written this recently. See the capture loop.
+const NAME_FRESH_WRITE_MS = 120 * 1000;
 function setupSessionTabCapture() {
   if (sessionTabCaptureInterval) return;
   sessionTabCaptureInterval = setInterval(async () => {
@@ -2331,6 +2334,11 @@ function setupSessionTabCapture() {
       // ambiguity, and doing it here keeps it to one ps per tab per tick.
       // Codex v1.0.39 r4 P2.
       const liveTabs = listTerminals();
+      // Tab labels before AND after the probes below: a session is named only
+      // when its tab's label held still across the whole tick, so a rename
+      // landing mid-tick (often with a new claude) cannot pair the new name
+      // with the session the probe saw before it.
+      const labelsBefore = getTabLabelsById();
       const infoByTab = new Map();
       const probedAt = new Map(); // when each tab was looked at: the link stamp
       for (const t of liveTabs) {
@@ -2356,7 +2364,7 @@ function setupSessionTabCapture() {
       // Name each running session after its tab (History shows it). Read as
       // the tick sees it, so a session keeps the name its tab had while it
       // ran, not whatever the tab is renamed to for later work.
-      const labelByTabId = getTabLabelsById();
+      const labelsAfter = getTabLabelsById();
       const namePairs = [];
       for (const t of liveTabs) {
         const claudeInfo = infoByTab.get(t.id);
@@ -2371,8 +2379,19 @@ function setupSessionTabCapture() {
           continue;
         }
         claimedIds.add(runningSessionId);
-        const tabName = sessionNameFromTabLabel(labelByTabId.get(t.id));
-        if (tabName) namePairs.push([runningSessionId, tabName]);
+        const label = labelsAfter.get(t.id);
+        // An unknown label (tab not persisted yet) says nothing; a default one
+        // ("Tab 3") clears the name so the summary shows again.
+        if (label !== undefined && label === labelsBefore.get(t.id)) {
+          // A bare `claude` is matched by timing, and after /clear its process
+          // writes a NEW transcript while the match stays on the old one. Name
+          // an inferred session only while its transcript is being written,
+          // so a renamed tab cannot relabel a conversation it has moved past.
+          const inferred = !claudeInfo?.sessionId;
+          const writing = !inferred || (Date.now() - await sessionTranscriptMtime(
+            cwdByTab.get(t.id) || t.cwd, runningSessionId)) < NAME_FRESH_WRITE_MS;
+          if (writing) namePairs.push([runningSessionId, sessionNameFromTabLabel(label)]);
+        }
         const mappedSessionId = tabToSessionId.get(t.id);
         if (mappedSessionId === runningSessionId) {
           // UPGRADE provenance: the link was inferred from timing, but the tab's

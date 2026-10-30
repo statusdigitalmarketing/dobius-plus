@@ -212,31 +212,11 @@ export async function loadAllSessions(projectFilter, opts = {}) {
             ? entry.timestamp
             : (entry.timestamp ? new Date(entry.timestamp).getTime() : 0);
           if (tsMs && tsMs > timestamp) timestamp = tsMs;
-          let role = (entry.type === 'human' || entry.role === 'user' || entry.message?.role === 'user')
-            ? 'user'
-            : (entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant')
-              ? 'assistant'
-              : '';
+          let role = entryRole(entry);
+          // Typed text of a user row ('' for a tool result). Hoisted so the
+          // message stamp below can tell a typed prompt from a tool result.
+          const text = role === 'user' ? userEntryText(entry) : '';
           if (role === 'user') {
-            const raw = entry.message?.content !== undefined
-              ? entry.message.content
-              : (entry.content !== undefined
-                ? entry.content
-                : (typeof entry.message === 'string' ? entry.message : ''));
-            let text = '';
-            if (typeof raw === 'string') {
-              text = raw;
-            } else if (Array.isArray(raw)) {
-              // Anthropic content-blocks shape. Keep text-type blocks only,
-              // skip tool_use / tool_result / image so the sidebar doesn't
-              // preview a base64 blob. Codex-alike shape check.
-              text = raw
-                .filter((b) => b && (b.type === 'text' || typeof b.text === 'string'))
-                .map((b) => (typeof b.text === 'string' ? b.text : ''))
-                .filter(Boolean)
-                .join(' ');
-            }
-            text = String(text).trim();
             // System-injected pseudo-user rows (task notifications, system
             // reminders, command echoes, skill bodies) are not turns Sam took:
             // they must not become the preview (v1.0.37) NOR count as "user
@@ -256,9 +236,23 @@ export async function loadAllSessions(projectFilter, opts = {}) {
             lastRole = role;
             entrypoint = typeof entry.entrypoint === 'string' ? entry.entrypoint : '';
           }
-          // isMeta rows are injected context (hook output, caveats), not a turn.
-          if (role && !messageAt && tsMs && entry.isMeta !== true) messageAt = tsMs;
+          if (!messageAt) messageAt = messageStamp(entry, role, text, tsMs);
           if (preview && messageAt && lastRole) break;
+        }
+        // A tail that is ALL bookkeeping (progress, hook output) holds no
+        // message: look further back once, or the newest bookkeeping stamp
+        // would float an untouched chat above newer conversations.
+        if (!messageAt && entries.length >= 200) {
+          const deeper = await parseJsonl(filePath, 2000);
+          for (let i = deeper.length - 1; i >= 0 && !messageAt; i -= 1) {
+            const e = deeper[i];
+            if (!e || typeof e !== 'object') continue;
+            const r = entryRole(e);
+            const t = r === 'user' ? userEntryText(e) : '';
+            // Same rule as the walk above: a system-injected row is no turn.
+            if (t && isSyntheticUserText(t)) continue;
+            messageAt = messageStamp(e, r, t, tsToEpochMs(e.timestamp));
+          }
         }
         // Claude Code's own name for the conversation ("Fix login bug"),
         // rewritten as the chat goes; the newest one wins. History rows lead
@@ -642,6 +636,23 @@ export async function resolveContinuedSessionId(
 }
 
 /**
+ * Last write (epoch ms) of a session's transcript within a project, checking
+ * both encoder forms. 0 when the file is not found under either.
+ */
+export async function sessionTranscriptMtime(projectPath, sessionId) {
+  if (!projectPath || !sessionId) return 0;
+  const seen = new Set();
+  for (const enc of [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)]) {
+    if (seen.has(enc)) continue;
+    seen.add(enc);
+    try {
+      return (await fs.stat(path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`))).mtimeMs || 0;
+    } catch { /* try the other encoding */ }
+  }
+  return 0;
+}
+
+/**
  * Birth time (epoch ms) of a session's transcript within a project, checking
  * both encoder forms. 0 when the file is not found under either.
  */
@@ -833,6 +844,44 @@ const SYNTHETIC_USER_PREFIXES = [
   // answered" in loose ends, and the sidebar previews a wall of skill text.
   'Base directory for this skill:',
 ];
+function entryRole(entry) {
+  if (entry.type === 'human' || entry.role === 'user' || entry.message?.role === 'user') return 'user';
+  if (entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant') return 'assistant';
+  return '';
+}
+
+// The typed text of a user row, trimmed. Text blocks only: tool_use,
+// tool_result and image blocks are skipped so the sidebar never previews a
+// base64 blob, and a tool-result row comes back ''.
+function userEntryText(entry) {
+  const raw = entry.message?.content !== undefined
+    ? entry.message.content
+    : (entry.content !== undefined
+      ? entry.content
+      : (typeof entry.message === 'string' ? entry.message : ''));
+  let text = '';
+  if (typeof raw === 'string') {
+    text = raw;
+  } else if (Array.isArray(raw)) {
+    text = raw
+      .filter((b) => b && (b.type === 'text' || typeof b.text === 'string'))
+      .map((b) => (typeof b.text === 'string' ? b.text : ''))
+      .filter(Boolean)
+      .join(' ');
+  }
+  return String(text).trim();
+}
+
+// When a record counts as someone MESSAGING (History's sort key): a Claude
+// reply, or a prompt with typed text. `role` is the caller's, already cleared
+// for system-injected rows. isMeta rows (hook output, caveats) and tool
+// results (no text: a tool finishing is not a message) do not count.
+function messageStamp(entry, role, text, tsMs) {
+  if (!tsMs || entry.isMeta === true) return 0;
+  if (role === 'assistant' || (role === 'user' && text)) return tsMs;
+  return 0;
+}
+
 function isSyntheticUserText(text) {
   if (!text) return true;
   const t = text.trimStart();

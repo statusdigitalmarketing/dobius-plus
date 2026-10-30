@@ -1102,29 +1102,44 @@ export function getSessionTabNames() {
 
 /**
  * Record the tab names seen this tick for running sessions. `pairs` is
- * [[sessionId, name]]. Writes only when a name changed; returns true then.
+ * [[sessionId, name]], where a null name means the tab now carries a default
+ * label ("Tab 3"), so the session goes back to its summary. One id seen twice
+ * keeps the LAST pair. Every sighting refreshes `at`, so the cap evicts the
+ * sessions seen longest ago, never a running one. Returns true only when a
+ * name was added, changed or removed (the caller pings History then).
  */
 export function recordSessionTabNames(pairs, now = Date.now()) {
   if (!Array.isArray(pairs) || pairs.length === 0) return false;
+  const latest = new Map();
+  for (const pair of pairs) {
+    const [sid, name] = Array.isArray(pair) ? pair : [];
+    if (!sid || typeof sid !== 'string' || sid.length > 100 || UNSAFE_KEYS.has(sid)) continue;
+    if (name !== null && (typeof name !== 'string' || !name || name.length > 200)) continue;
+    latest.set(sid, name);
+  }
+  if (latest.size === 0) return false;
   const config = loadConfig();
   if (!config.sessionTabNames || typeof config.sessionTabNames !== 'object') config.sessionTabNames = {};
   const names = config.sessionTabNames;
   let changed = false;
-  for (const [sid, name] of pairs) {
-    if (!sid || typeof sid !== 'string' || sid.length > 100 || UNSAFE_KEYS.has(sid)) continue;
-    if (typeof name !== 'string' || !name || name.length > 200) continue;
-    if (names[sid]?.name === name) continue;
-    names[sid] = { name, at: now };
-    changed = true;
+  let dirty = false;
+  for (const [sid, name] of latest) {
+    const prev = Object.hasOwn(names, sid) ? names[sid] : null;
+    if (name === null) {
+      if (prev) { delete names[sid]; changed = true; }
+      continue;
+    }
+    if (prev?.name !== name) changed = true;
+    if (prev?.name !== name || prev?.at !== now) { names[sid] = { name, at: now }; dirty = true; }
   }
-  if (!changed) return false;
+  if (!changed && !dirty) return false;
   const ids = Object.keys(names);
   if (ids.length > SESSION_TAB_NAMES_MAX) {
     ids.sort((a, b) => (names[a]?.at || 0) - (names[b]?.at || 0));
     for (const sid of ids.slice(0, ids.length - SESSION_TAB_NAMES_MAX)) delete names[sid];
   }
   saveConfig(config);
-  return true;
+  return changed;
 }
 
 // The USER'S tab labels (renames like "Email" / "refund commish") live in
