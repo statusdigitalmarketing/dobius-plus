@@ -1587,7 +1587,15 @@ function setupFileHandlers() {
   //   Notification[idle_prompt] / Stop     -> done    (green)
   // Markers are identified by the ']777;dobius;' substring so the block can be
   // removed cleanly without ever touching the user's own hooks.
-  const claudeSettingsPath = path.join(homedir, '.claude', 'settings.json');
+  // An isolated instance (DOBIUS_USERDATA_DIR) must never write the real,
+  // shared ~/.claude/settings.json. DOBIUS_CLAUDE_HOME points it at a throwaway
+  // Claude home instead, so an install can still be ship-tested; outside the
+  // harness the variable is ignored.
+  const claudeHomeOverride = process.env.DOBIUS_USERDATA_DIR ? (process.env.DOBIUS_CLAUDE_HOME || '') : '';
+  const claudeHome = claudeHomeOverride || path.join(homedir, '.claude');
+  const claudeSettingsPath = path.join(claudeHome, 'settings.json');
+  const REAL_CLAUDE_HOME_REFUSED = process.env.DOBIUS_USERDATA_DIR && !claudeHomeOverride
+    ? 'an isolated Dobius never writes the real ~/.claude (set DOBIUS_CLAUDE_HOME)' : '';
   const STATUS_MARKER = ']777;dobius;';
   // printf '%s' does NOT interpret backslash escapes, so the JSON \uXXXX escapes
   // reach Claude's hook parser verbatim and become ESC / BEL when it emits them.
@@ -1662,6 +1670,7 @@ function setupFileHandlers() {
    * Closing it needs a lock file the CLI would also have to honour.
    */
   function writeClaudeSettings(settings, expectedRaw) {
+    if (REAL_CLAUDE_HOME_REFUSED) throw new Error(REAL_CLAUDE_HOME_REFUSED);
     fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
     // undefined means "no guard". null means "the file did NOT exist when I
     // read it", which is a real claim and must be checked: treating it as no
@@ -1864,7 +1873,7 @@ function setupFileHandlers() {
   // validation is silently ignored in its entirety, so that fix could disable
   // every setting the user has, which is far worse than the thing it fixes,
   // and it cannot be verified without writing to a real settings.json.
-  const statusLineBackupPath = path.join(homedir, '.claude', '.dobius-statusline-backup.json');
+  const statusLineBackupPath = path.join(claudeHome, '.dobius-statusline-backup.json');
   // Returns the parsed record AND the exact bytes it came from, so a later
   // delete can prove it is removing the same record rather than one another
   // instance wrote in between (Codex HIGH).
@@ -1891,47 +1900,61 @@ function setupFileHandlers() {
     } catch { /* already gone */ }
   };
 
-  ipcMain.handle('claudeUsage:getStatus', () => {
-    const { settings, exists } = readClaudeSettings();
-    if (settings === null) return { installed: false, error: 'settings.json is not valid JSON' };
-    const owned = ownsStatusLine(settings.statusLine);
-    // Owned by SOME Dobius is not the same as owned by THIS one. Two instances
-    // with different userData share this settings file, and the other one's
-    // reporter publishes into the other one's usage directory, so reporting
-    // here would look enabled and stay permanently empty (Codex MEDIUM).
-    const mine = owned && settings.statusLine.command === reporterCommand(app.getPath('userData'));
-    return { installed: mine, installedElsewhere: owned && !mine, exists };
-  });
+  // Owned by SOME Dobius is not the same as owned by THIS one. Two instances
+  // with different userData share this settings file, and the other one's
+  // reporter publishes into the other one's usage directory, so reporting
+  // here would look enabled and stay permanently empty (Codex MEDIUM).
+  const statusLineIsMine = (settings) => ownsStatusLine(settings?.statusLine)
+    && settings.statusLine.command === reporterCommand(app.getPath('userData'));
 
-  ipcMain.handle('claudeUsage:enable', (_evt, opts) => {
-    const { settings, raw, exists } = readClaudeSettings();
-    if (settings === null) return { error: PARSE_FAIL };
-    // Same refusal as the status hooks: never create this file silently.
-    if (!exists && !opts?.confirmCreate) {
-      return { error: 'needs-confirm-create', message: '~/.claude/settings.json does not exist. Confirm creation to enable usage reporting.' };
-    }
+  // The one statusLine carries two features, each with its own Settings
+  // switch: usage capture ("Account usage") and the model line ("Show model
+  // under the prompt", Brett). It is installed while either is on.
+  // modelUnderPrompt is ON unless explicitly turned off. usageReporting did
+  // not exist before the model line: an older build's install meant usage was
+  // on, so an unset value is settled from what settings.json shows, once.
+  const statusLineParts = () => {
+    const s = getSettings();
+    return { capture: s.usageReporting === true, model: s.modelUnderPrompt !== false };
+  };
+  if (getSettings().usageReporting === undefined) {
+    const { settings } = readClaudeSettings();
+    // Unparseable today says nothing either way: settle it on a later launch.
+    if (settings) updateSettings({ usageReporting: statusLineIsMine(settings) });
+  }
+
+  // Temp file then rename. Writing in place truncates the LIVE script first,
+  // so a failure here would leave settings.json pointing at a half-written file
+  // and every render would lose the user's status line (reviewer HIGH).
+  const writeReporter = (chain) => {
     const userData = app.getPath('userData');
     const script = reporterScriptPath(userData);
+    fs.mkdirSync(usageDirPath(userData), { recursive: true });
+    const tmp = `${script}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, reporterScript(usageDirPath(userData), chain, statusLineParts()), { mode: 0o755 });
+      fs.renameSync(tmp, script);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+      throw err;
+    }
+  };
 
+  const installStatusLine = (opts, settings, raw, exists) => {
+    // Checked before the restore record is written, which also lives there.
+    if (REAL_CLAUDE_HOME_REFUSED) return { error: REAL_CLAUDE_HOME_REFUSED };
+    // Same refusal as the status hooks: never create this file silently.
+    if (!exists && !opts?.confirmCreate) {
+      return { error: 'needs-confirm-create', message: '~/.claude/settings.json does not exist. Confirm creation to turn this on.' };
+    }
+    const userData = app.getPath('userData');
     const install = (base, baseRaw) => {
       const plan = planStatusLineInstall(base.statusLine, reporterCommand(userData));
       // Keep the ORIGINAL when we already own the value: re-running enable must
       // never record our own wrapper as the thing to restore.
       const remember = plan.remember ?? readStatusLineBackup().remember;
       if (plan.remember) writeStatusLineBackup(plan.remember);
-      fs.mkdirSync(usageDirPath(userData), { recursive: true });
-      // Temp file then rename. Writing in place truncates the LIVE script
-      // first, so a failure here would leave settings.json pointing at a
-      // half-written file and every render would lose the user's status line
-      // (reviewer HIGH).
-      const tmp = `${script}.${process.pid}.tmp`;
-      try {
-        fs.writeFileSync(tmp, reporterScript(usageDirPath(userData), remember?.chain ?? null), { mode: 0o755 });
-        fs.renameSync(tmp, script);
-      } catch (err) {
-        try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
-        throw err;
-      }
+      writeReporter(remember?.chain ?? null);
       base.statusLine = plan.statusLine;
       writeClaudeSettings(base, baseRaw);
     };
@@ -1940,7 +1963,7 @@ function setupFileHandlers() {
       install(settings, raw);
     } catch (err) {
       if (!String(err.message).includes('changed under us')) {
-        return { error: `Could not enable usage reporting: ${err.message}` };
+        return { error: `Could not update settings.json: ${err.message}` };
       }
       // Rebuild the edit from the FRESH read, so a concurrent Claude write to
       // permissions or MCP is not discarded by replaying our stale copy.
@@ -1949,19 +1972,18 @@ function setupFileHandlers() {
       try { install(fresh.settings, fresh.raw); }
       catch (err2) { return { error: `Could not update settings.json: ${err2.message}` }; }
     }
-    return { ok: true, installed: true };
-  });
+    return { ok: true };
+  };
 
-  ipcMain.handle('claudeUsage:disable', () => {
-    const { settings, raw } = readClaudeSettings();
-    if (settings === null) return { error: PARSE_FAIL };
+  const removeStatusLine = (settings, raw) => {
+    if (REAL_CLAUDE_HOME_REFUSED) return { error: REAL_CLAUDE_HOME_REFUSED };
     const backup = readStatusLineBackup();
     const out = planStatusLineRemove(settings.statusLine, backup.remember);
     if (out.action === 'leave') {
       // Someone pointed statusLine elsewhere. Theirs stands; drop our record so
       // a later disable cannot resurrect a long-dead original over it.
       clearStatusLineBackup(backup.raw);
-      return { ok: true, installed: false, note: 'Your own status line was left in place' };
+      return { ok: true, note: 'Your own status line was left in place' };
     }
     if (out.action === 'delete') delete settings.statusLine;
     else settings.statusLine = out.statusLine;
@@ -1969,7 +1991,91 @@ function setupFileHandlers() {
     catch (err) { return { error: `Could not update settings.json: ${err.message}` }; }
     clearStatusLineBackup(backup.raw);
     try { fs.unlinkSync(reporterScriptPath(app.getPath('userData'))); } catch { /* already gone */ }
-    return { ok: true, installed: false };
+    return { ok: true };
+  };
+
+  // Bring settings.json and the script in line with the two switches. Already
+  // ours: only the script is rewritten, settings.json is not touched at all.
+  const syncStatusLine = (opts) => {
+    const { settings, raw, exists } = readClaudeSettings();
+    if (settings === null) return { error: PARSE_FAIL };
+    const { capture, model } = statusLineParts();
+    if (!capture && !model) return removeStatusLine(settings, raw);
+    if (statusLineIsMine(settings)) {
+      try { writeReporter(readStatusLineBackup().remember?.chain ?? null); }
+      catch (err) { return { error: `Could not update the status line script: ${err.message}` }; }
+      return { ok: true };
+    }
+    return installStatusLine(opts, settings, raw, exists);
+  };
+
+  // Flip one switch and sync; a failed sync puts the switch back, so the
+  // stored choice never claims a state settings.json does not have.
+  const setStatusLinePart = (key, on, opts) => {
+    const before = getSettings()[key];
+    updateSettings({ [key]: on });
+    const r = syncStatusLine(opts);
+    if (r?.error) updateSettings({ [key]: before });
+    return r;
+  };
+
+  // On launch: the model line defaults ON, so a Dobius that has never decided
+  // installs it, but ONLY into an empty slot or over its own reporter. A status
+  // line the user set themselves is left alone (Settings says so and offers to
+  // chain it), and settings.json is never created here. A reporter already
+  // installed gets its script regenerated, which is how an update reaches it.
+  // An isolated instance touches the real settings.json never; it may run this
+  // against a throwaway home (DOBIUS_CLAUDE_HOME).
+  if (!process.env.DOBIUS_USERDATA_DIR || claudeHomeOverride) {
+    const { settings, exists } = readClaudeSettings();
+    if (settings && exists) {
+      if (getSettings().modelUnderPrompt === undefined) {
+        if (statusLineIsMine(settings) || settings.statusLine === undefined) {
+          const r = setStatusLinePart('modelUnderPrompt', true);
+          if (r?.error) console.warn(`[statusLine] model line install skipped: ${r.error}`);
+        }
+      } else if (statusLineIsMine(settings)) {
+        const r = syncStatusLine();
+        if (r?.error) console.warn(`[statusLine] script refresh skipped: ${r.error}`);
+      }
+    }
+  }
+
+  ipcMain.handle('claudeUsage:getStatus', () => {
+    const { settings, exists } = readClaudeSettings();
+    if (settings === null) return { installed: false, error: 'settings.json is not valid JSON' };
+    const owned = ownsStatusLine(settings.statusLine);
+    const mine = statusLineIsMine(settings);
+    return { installed: mine && statusLineParts().capture, installedElsewhere: owned && !mine, exists };
+  });
+
+  ipcMain.handle('claudeUsage:enable', (_evt, opts) => {
+    const r = setStatusLinePart('usageReporting', true, opts);
+    return r?.error ? r : { ok: true, installed: true };
+  });
+
+  ipcMain.handle('claudeUsage:disable', () => {
+    const r = setStatusLinePart('usageReporting', false);
+    return r?.error ? r : { ...r, installed: false };
+  });
+
+  ipcMain.handle('modelLine:getStatus', () => {
+    const { settings, exists } = readClaudeSettings();
+    if (settings === null) return { on: false, error: 'settings.json is not valid JSON' };
+    const owned = ownsStatusLine(settings.statusLine);
+    const mine = statusLineIsMine(settings);
+    return {
+      on: mine && statusLineParts().model,
+      // A status line of the user's own: turning this on chains it, after it.
+      theirs: settings.statusLine !== undefined && !owned,
+      installedElsewhere: owned && !mine,
+      exists,
+    };
+  });
+
+  ipcMain.handle('modelLine:set', (_evt, on, opts) => {
+    const r = setStatusLinePart('modelUnderPrompt', !!on, opts);
+    return r?.error ? r : { ...r, on: !!on };
   });
 
   // Read-only. Liveness is reported as CONTEXT, never as precedence: a record

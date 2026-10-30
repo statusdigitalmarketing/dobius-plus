@@ -65,18 +65,88 @@ export const reporterScriptPath = (userDataDir) => path.join(userDataDir, `${REP
  * `chain` is the user's own statusLine command, which must keep working. Its
  * stdin is replayed because this script has already consumed it, and its stdout
  * is passed through untouched so the line renders exactly as it did before.
+ *
+ * Two parts, each switched on its own, because the script is the ONE
+ * statusLine and two features share it:
+ *  - `capture`: the usage records ("Account usage").
+ *  - `model`: print the model and effort under the prompt ("Show model under
+ *    the prompt"), so they stay visible after the startup banner scrolls away.
+ *    With a chained command the model goes IN FRONT of the user's first line.
+ * With `model` off the chain still `exec`s, byte for byte the old behaviour.
  */
-export function reporterScript(usageDir, chainCommand) {
+export function reporterScript(usageDir, chainCommand, { capture = true, model = false } = {}) {
   const q = shQuote;
-  const chain = chainCommand
-    ? `printf '%s' "$payload" | exec /bin/sh -c ${q(chainCommand)}\n`
-    : '';
+  let tail;
+  if (!model) {
+    tail = chainCommand ? `printf '%s' "$payload" | exec /bin/sh -c ${q(chainCommand)}\n` : '';
+  } else if (chainCommand) {
+    // Command substitution drops their trailing newlines; one is put back.
+    // Their exit status is not passed on: a failing command of theirs must not
+    // take the model line down with it.
+    tail = `out=$(printf '%s' "$payload" | /bin/sh -c ${q(chainCommand)})
+if [ -n "$l" ] && [ -n "$out" ]; then printf '%s · %s\\n' "$l" "$out"
+elif [ -n "$l" ]; then printf '%s\\n' "$l"
+elif [ -n "$out" ]; then printf '%s\\n' "$out"; fi
+`;
+  } else {
+    tail = `[ -n "$l" ] && printf '%s\\n' "$l"\n`;
+  }
   return `#!/bin/sh
-# ${REPORTER_MARKER}: written by Dobius+. Reports Claude usage per session.
-# Safe to delete. Disabling "Account usage" in Dobius Settings removes it and
-# restores whatever statusLine was here before.
+# ${REPORTER_MARKER}: written by Dobius+. Reports Claude usage per session
+# and shows the model under the prompt.
+# Safe to delete. Turning off "Account usage" and "Show model under the
+# prompt" in Dobius removes it and restores whatever statusLine was here before.
 payload=$(cat)
-d=${q(usageDir)}
+${capture ? captureBlock(usageDir) : ''}${model ? MODEL_BLOCK : ''}${tail}exit 0
+`;
+}
+
+// Effort levels in the words a person would say. Claude's own label is the raw
+// level; "xhigh" is what Brett asked to read as "extra high". A level missing
+// from this table is shown as Claude sent it, if it is a plain word.
+export const EFFORT_WORDS = { low: 'low', medium: 'medium', high: 'high', xhigh: 'extra high', max: 'max' };
+
+// Letters spelled out rather than written as ranges: a range like A-Z follows
+// the locale's collation, and what passes here is printed into a terminal.
+const ALNUM = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
+/**
+ * Payload -> `$l`, the model line, by pure shell expansion (no jq, no python:
+ * this runs on every render). Anchoring on `"model":{` and `"effort":` with an
+ * UNESCAPED quote keeps user-controlled strings (session_name, a cwd) out:
+ * inside a JSON string every quote is written \", so the anchor cannot occur
+ * there. What is extracted must still be plain characters or it is dropped.
+ * An absent field drops out of the line rather than printing a placeholder.
+ */
+const MODEL_BLOCK = `m=
+r=\${payload#*\\"model\\":\\{}
+if [ "$r" != "$payload" ]; then
+  r=\${r%%\\}*}
+  v=\${r#*\\"display_name\\":\\"}
+  [ "$v" != "$r" ] && m=\${v%%\\"*}
+fi
+case "$m" in *[!]${ALNUM}' ._()/:+[-']*) m= ;; esac
+e=
+r=\${payload#*\\"effort\\":}
+if [ "$r" != "$payload" ]; then
+  case "$r" in
+    \\{*) r=\${r%%\\}*}; v=\${r#*\\"level\\":\\"}; [ "$v" != "$r" ] && e=\${v%%\\"*} ;;
+    \\"*) v=\${r#\\"}; e=\${v%%\\"*} ;;
+  esac
+fi
+case "$e" in
+${Object.entries(EFFORT_WORDS).map(([k, w]) => `  ${k}) e=${shQuote(w)} ;;`).join('\n')}
+  *[!${ALNUM}_-]*) e= ;;
+esac
+l=$m
+[ -n "$e" ] && l="\${l:+$l · }$e"
+case "$payload" in *'"fast_mode":true'*) l="\${l:+$l · }fast" ;; esac
+case "$payload" in *'"thinking":{"enabled":false'*) l="\${l:+$l · }thinking off" ;; esac
+`;
+
+function captureBlock(usageDir) {
+  const q = shQuote;
+  return `d=${q(usageDir)}
 rest=\${payload#*\\"session_id\\":\\"}
 if [ "$rest" != "$payload" ]; then
   sid=\${rest%%\\"*}
@@ -100,7 +170,6 @@ if [ "$rest" != "$payload" ]; then
     fi
   fi
 fi
-${chain}exit 0
 `;
 }
 

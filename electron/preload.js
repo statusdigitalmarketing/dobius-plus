@@ -192,6 +192,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   claudeUsageEnable: (opts) => ipcRenderer.invoke('claudeUsage:enable', opts),
   claudeUsageDisable: () => ipcRenderer.invoke('claudeUsage:disable'),
   claudeUsageRead: () => ipcRenderer.invoke('claudeUsage:read'),
+  modelLineGetStatus: () => ipcRenderer.invoke('modelLine:getStatus'),
+  modelLineSet: (on, opts) => ipcRenderer.invoke('modelLine:set', on, opts),
   accountsSwitchPlan: (targetEmail) => ipcRenderer.invoke('accounts:switchPlan', targetEmail),
   accountsSwitchRun: (targetEmail, cliPath, allowKeys) => ipcRenderer.invoke('accounts:switchRun', targetEmail, cliPath, allowKeys),
   accountsSwitchCancel: () => ipcRenderer.invoke('accounts:switchCancel'),
