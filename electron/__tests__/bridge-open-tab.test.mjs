@@ -12,8 +12,9 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   sanitizeOpenMessage, validateOpenTabBody, isClaudePromptReady, createOpenTabService,
-  buildOpenCliScript, isKeyboardInput, isUserInput, promptBoxText, boxHoldsMessage, boxStillHasMessage, CLAUDE_SCRIPT_RE, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
+  buildOpenCliScript, isKeyboardInput, isUserInput, promptBoxText, boxHoldsMessage, boxStillHasMessage, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
 } from '../bridge-open-tab.js';
+import { CLAUDE_SCRIPT_RE } from '../claude-argv.js';
 import { renderScreenLines } from '../screen-render.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));

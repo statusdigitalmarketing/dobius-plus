@@ -15,8 +15,8 @@ import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
 import { terminalInstance, getTerminalBuffer, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
-import { classifyClaudeProcess, isClaudeEntrypoint } from './claude-argv.js';
-import { isKeyboardInput, isUserInput, CLAUDE_SCRIPT_RE } from './bridge-open-tab.js';
+import { classifyClaudeProcess, isClaudeEntrypoint, JS_RUNTIMES, CLAUDE_SCRIPT_RE } from './claude-argv.js';
+import { isKeyboardInput, isUserInput } from './bridge-open-tab.js';
 import { submitPending } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
@@ -37,8 +37,6 @@ function isTabOfProject(tabId, projectPath) {
   const head = `term-${projectPath}`;
   return tabId.startsWith(head) && /^(?:~w-[a-z0-9]{8})?-\d+$/.test(tabId.slice(head.length));
 }
-
-const INTERPRETERS = new Set(['node', 'bun', 'deno']);
 
 // Writes made by /openTab itself, so they are not counted as a person's.
 let ownWrite = false;
@@ -68,7 +66,7 @@ function isExecutableFile(f) {
 async function isClaudeProcess(pid) {
   const comm = await psField(pid, 'comm');
   if (comm.startsWith('/') && isClaudeEntrypoint(comm)) return isExecutableFile(comm);
-  if (!INTERPRETERS.has(comm.split('/').pop())) return false;
+  if (!JS_RUNTIMES.has(comm.split('/').pop())) return false;
   const { kind, token } = classifyClaudeProcess(await psField(pid, 'command'));
   if (kind !== 'claude' || typeof token !== 'string' || !token.startsWith('/')) return false;
   // The command line splits at spaces (`node "/tmp/claude tools/x.js"` reads

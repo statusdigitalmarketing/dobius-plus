@@ -15,10 +15,6 @@
 import { isTerminalReply } from './terminal-reply.js';
 import { parseSelectorFromScreen } from './selector-parser.js';
 
-// The file a node/bun/deno claude actually runs, once symlinks are resolved:
-// the npm package's cli.js, or a native install's versioned entry.
-export const CLAUDE_SCRIPT_RE = /\/(?:@anthropic-ai\/claude-code\/cli|claude\/versions\/[^/]+\/cli)\.(?:js|mjs|cjs)$/;
-
 // Mouse reports (X10, SGR, urxvt) are what a pointer over a fullscreen
 // Claude sends; they are not someone typing. Neither are the terminal's
 // own replies (focus, cursor reports).

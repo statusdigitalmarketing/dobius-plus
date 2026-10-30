@@ -10,7 +10,8 @@
 //                   session looked idle and lost its tab name + auto-resume.
 //
 // Cases marked REAL are verbatim ps lines captured from this machine.
-import { isClaudeCommand, classifyClaudeProcess } from '../claude-argv.js';
+import { isClaudeCommand, classifyClaudeProcess, isClaudeEntrypoint, JS_RUNTIMES, CLAUDE_SCRIPT_RE } from '../claude-argv.js';
+import { loginShellSpawn, launchCommandFor } from '../../shared/new-tab.js';
 
 let pass = 0, fail = 0;
 const check = (cmd, want, note) => {
@@ -96,6 +97,11 @@ strict('node -p1 /usr/local/bin/claude', 'maybe', 'the attached print form');
 strict('vim claude-notes.md', 'not-claude', 'unrelated process naming claude');
 strict('node /Users/bigfuckingdog/.claude/hooks/notify.js', 'not-claude', 'a hook script is not the CLI');
 strict('', 'not-claude', 'empty command');
+// A New Tab's wrapper shell names claude in its own argv (its launch list),
+// but it is the tab's shell, never a live Claude: ps shows it exactly so.
+for (const sh of ['/bin/zsh', '/bin/bash']) {
+  strict([sh, ...loginShellSpawn(sh, launchCommandFor('claude', 'claude')).args].join(' '), 'not-claude', `the New Tab wrapper (${sh})`);
+}
 // The verdict names the token it rests on, so the scan can confirm that token
 // is a real executable FILE. A DIRECTORY named claude satisfies the name test.
 {
@@ -106,6 +112,20 @@ strict('', 'not-claude', 'empty command');
 if (isClaudeCommand('node /tmp/watcher.js /opt/homebrew/bin/claude') !== true) {
   fail++; console.log('FAIL  the loose variant was expected to still accept the argument form');
 } else { pass++; console.log('PASS  the loose variant is deliberately unchanged'); }
+
+// The shared helpers /openTab's process check uses (bridge-open-main.js): the
+// runtimes a live claude process can BE (env and npx only start one), and the
+// real script path, which every JS entrypoint it accepts also passes.
+{
+  const same = (got, want, note) => { const ok = got === want; ok ? pass++ : fail++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${note}`); };
+  same([...JS_RUNTIMES].sort().join(','), 'bun,deno,node', 'JS runtimes: node, bun, deno');
+  for (const p of ['/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js', '/Users/x/.local/share/claude/versions/2.1.314/cli.mjs']) {
+    same(CLAUDE_SCRIPT_RE.test(p) && isClaudeEntrypoint(p), true, `real claude script: ${p}`);
+  }
+  for (const p of ['/tmp/claude', '/tmp/claude tools/repl.js', '/x/claude-code/cli.js', '/x/claude/versions/1/cli.ts']) {
+    same(CLAUDE_SCRIPT_RE.test(p), false, `not a real claude script: ${p}`);
+  }
+}
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);
 process.exit(fail === 0 ? 0 : 1);
