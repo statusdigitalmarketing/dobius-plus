@@ -41,6 +41,15 @@ flight can match them. Anything else in `reqId` is refused as `bad_request`
 | `input` | `id`, `data` (raw keys, non-empty) | the keys are written to the PTY (after any submit queued ahead of them) |
 | `submitPrompt` | `id`, `text` (not blank) | the text is pasted AND the discrete Enter after it is written |
 
+What an ack proves: the bytes were handed, in order, to the tab's PTY writer
+(the same point the desktop terminal's own typing reaches). node-pty moves them
+into the kernel's tty buffer asynchronously, and nothing at the PTY level can
+say whether the program in the tab READ them: a tab that exits while its
+foreground process is not reading stdin loses whatever is still buffered,
+acked or not. An ack rules out the dropped-request class (wrong id, not
+authorized, refused, tab gone before the write); it is not proof the agent saw
+the text. Read the tab back when that matters.
+
 `id` is the FULL tab id, as `listTerminals` returns it, for example
 `term-/Users/sam/Projects (Code)/better-telehealth-83`. A socket must authorize
 a tab (`authorizeTab`, `attach`, `createTerminal`, `selectorSnapshot`,

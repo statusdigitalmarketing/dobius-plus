@@ -581,6 +581,9 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const [shellText, setShellText] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
+  // A chat send the Mac refused (opError). Shown in the input row, which is on
+  // screen in every state; the selector card's note is only shown with a card.
+  const [sendNote, setSendNote] = useState('');
   // Local echoes: a just-sent message renders IMMEDIATELY instead of waiting
   // for the transcript poll (a mid-turn send used to look eaten: it sat in
   // Claude's queue and never appeared here; the server now also surfaces
@@ -793,8 +796,8 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         // looking delivered.
         const note = SEND_REFUSED[msg.code];
         if (note) {
-          setSelNote(note);
-          setTimeout(() => setSelNote(''), 6000);
+          setSendNote(note);
+          setTimeout(() => setSendNote(''), 6000);
         }
       }
     });
@@ -1128,6 +1131,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const inputRow = (
     <>
       {uploadMsg && <div className="chat-upload-msg">{uploadMsg}</div>}
+      {sendNote && <div className="chat-upload-msg" role="alert">{sendNote}</div>}
       {suggestions.length > 0 && (
         <div className="chat-skill-suggest">
           {suggestions.map((sk) => (

@@ -211,7 +211,10 @@ const refused = (reason) => ({ ok: false, reason });
  *
  * Resolves once the keys are written ({ ok: true }) or dropped ({ ok: false,
  * reason }, reasons as for submitPromptDetailed), so a remote caller can ack
- * the write itself rather than its arrival. Callers that do not care ignore it.
+ * the write itself rather than its arrival. "Written" is handed to the PTY
+ * writer: node-pty drains it into the kernel asynchronously, and no PTY-level
+ * signal says the program read it (docs/mobile-ws-protocol.md). Callers that
+ * do not care ignore it.
  */
 export function writeRawInput(id, data, stillOk = () => true) {
   if (typeof data !== 'string' || !data) return Promise.resolve(refused('empty'));
