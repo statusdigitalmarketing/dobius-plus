@@ -384,3 +384,15 @@
 - **FIX**: Spell the two conditions out: `const win = getWindowEntryByWcId(...); return !!win && !win.closing`. `?? default` on an optional-chained boolean conflates "no object" with "property unset".
 - **CONTEXT**: Any guard that combines "exists" and "flag not set" on a value whose flag is only ever set to true (window-manager sets `closing = true`, never false). Re-run the harness after every guard change, even one Codex cleared.
 - **DETECTION**: `grep -n "?\.[a-zA-Z]* ?? true" electron/*.js src -r`
+
+### Architecture - 2026-10-30 (2.0.0 integration)
+- **MISTAKE**: Five features built on separate branches each read Claude's screen and the tab's input their own way, and only met on release/2.0.0. /openTab found Claude's input box as the LOWEST rule/❯/rule match, so a chained statusLine drawing a box under the prompt (possible once the model line kept the user's status output) and a numbered card ("1. Review README") both fooled it; and it counted keys only at terminal:write, while prompt editing holds a person's input in its own queue behind an image paste.
+- **FIX**: The input box is the one holding the terminal CURSOR right of the ❯ (screen-render reports `modes.cursor`; prompt-edit's promptFrame already worked this way). Input a renderer holds back is reported to main the moment it is accepted (`terminal:inputHeld`), not when it drains.
+- **CONTEXT**: Any new reader of Claude's screen or of a tab's input. A selector ALSO parks the cursor on its ❯ row, at column 0 or 1, so the caret test needs the column too, not just the row.
+- **DETECTION**: `grep -rn "promptBoxText\|promptFrame\|terminal:inputHeld" electron src --include=*.js`
+
+### Architecture - 2026-10-30 (2.0.0 follow-ups, left as is)
+- **MISTAKE**: Not a mistake yet, deliberately deferred: two window-readiness signals (window:tabsReady for docks and /openTab, store tabsReady/markTabsReady for New Tab requests) and several window-focus helpers (bringToFront in bridge-open-main.js, focus paths in window-manager.js and main.js) do overlapping jobs. Selector-parser.js, prompt-edit.js and bridge-open-tab.js each define their own prompt/rule constants.
+- **FIX**: Follow-up after 2.0.0: one readiness signal per window, one bring-to-front helper, and one module for Claude's prompt/rule shapes. Only what the integration fixes needed was shared (the caret rule, the bridge-opened first tab).
+- **CONTEXT**: Integration review of release/2.0.0; judged too risky to unify this late.
+- **DETECTION**: `grep -rn "tabsReady\|bringToFront\|RULE_RE\|PROMPT_ROW_RE" electron src`
