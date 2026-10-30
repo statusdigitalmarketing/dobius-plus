@@ -21,6 +21,12 @@
 //     a plain turn is never read as background work
 //   - the claude process must have been running when that turn ended: a
 //     later claude in the same shell (hooks off, say) never inherits it
+// Accepted residual: the config dir is parsed from the process environment
+// with the same rules as the account scan, so a CLAUDE_CONFIG_DIR=... string
+// embedded in ANOTHER variable's value, naming a directory that holds a planted
+// file with this exact pid and start time, could show a wrong "Waiting". That
+// needs control of the user's own environment and files, and the cost is one
+// label.
 //   - any failure (no claude, binding unreadable, file missing or malformed,
 //     a format this CLI does not write) answers null: the label falls back to
 //     today's display.
@@ -103,22 +109,30 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
   /**
    * Background work in this tab's Claude, or null. Never throws.
    * @param {string} tabId
-   * @param {number} turnEndedAt  when the hook ended the turn; the process
-   *   read must already have been running then (ps start is truncated to the
-   *   second, so it is never later than the real start)
+   * @param {number} turnEndedAt  when the hook ended the turn. The process read
+   *   must provably have been running then: ps truncates its start DOWN to the
+   *   second, so only a start a full second before the turn ended proves it
+   *   (a claude started in that same second may have replaced the one that
+   *   finished).
    */
-  return async function backgroundForTab(tabId, turnEndedAt) {
+  return function backgroundForTab(tabId, turnEndedAt) {
     const t = now();
+    // One lookup per tab and turn at a time: concurrent asks (several windows,
+    // bursts) share the pending one instead of each spawning ps. An entry is
+    // reused only for the SAME turn, so an answer read while a new turn was
+    // running can never be served once that turn has ended.
     let hit = cache.get(tabId);
-    if (!hit || t - hit.at >= CACHE_MS) {
-      let found = null;
-      try { found = await resolve(tabId); }
-      catch (err) { console.warn('[claude-presence] lookup failed', tabId, err?.message); }
-      hit = { at: t, found };
+    if (!hit || hit.turnEndedAt !== turnEndedAt || t - hit.at >= CACHE_MS) {
+      const pending = resolve(tabId).catch((err) => {
+        console.warn('[claude-presence] lookup failed', tabId, err?.message);
+        return null;
+      });
+      hit = { at: t, turnEndedAt, pending };
       cache.set(tabId, hit);
       if (cache.size > 512) cache.delete(cache.keys().next().value);
     }
-    if (!hit.found || !(hit.found.startedAt <= turnEndedAt)) return null;
-    return hit.found.value;
+    return hit.pending.then((found) => (
+      found && Number.isFinite(found.startedAt) && found.startedAt + 1000 <= turnEndedAt ? found.value : null
+    ));
   };
 }

@@ -232,3 +232,40 @@ test('forget: a respawned PTY does not inherit the old turn', () => {
   ts.ingest(ID, mk('done'), 161_000);
   assert.equal(ts.activityFor(ID).lastTurnMs, 30_000);
 });
+
+test('presence reader: a claude started in the same second the turn ended is not proof', async () => {
+  const read = createPresenceReader({
+    claudeInfo: async () => proc,
+    configDirOf: async () => '/cfg',
+    readFile: async () => JSON.stringify(rec({ status: 'busy' })),
+    now: () => 0,
+  });
+  assert.equal(await read('a', proc.startedAt + 900), null);
+  assert.equal(await read('a', proc.startedAt + 1000), 'agents');
+});
+
+test('presence reader: concurrent asks share one lookup', async () => {
+  let infoCalls = 0;
+  const read = createPresenceReader({
+    claudeInfo: async () => { infoCalls += 1; await new Promise((r) => setTimeout(r, 20)); return proc; },
+    configDirOf: async () => '/cfg',
+    readFile: async () => JSON.stringify(rec({ status: 'shell' })),
+    now: () => 0,
+  });
+  const out = await Promise.all(Array.from({ length: 50 }, () => read('a', END)));
+  assert.equal(infoCalls, 1);
+  assert.ok(out.every((v) => v === 'shells'));
+});
+
+test('presence reader: an answer cached for one turn is never served for the next', async () => {
+  let status = 'busy'; // read while a NEW turn was running
+  const read = createPresenceReader({
+    claudeInfo: async () => proc,
+    configDirOf: async () => '/cfg',
+    readFile: async () => JSON.stringify(rec({ status })),
+    now: () => 0, // inside the cache window throughout
+  });
+  assert.equal(await read('a', END), 'agents');
+  status = 'idle'; // that turn ended with nothing in the background
+  assert.equal(await read('a', END + 30_000), null);
+});
