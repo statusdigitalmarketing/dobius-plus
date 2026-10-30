@@ -79,15 +79,28 @@ export function pickerShortcutIndex(e) {
   return e.key >= '1' && e.key <= '9' && e.key.length === 1 ? Number(e.key) - 1 : -1;
 }
 
-// The login shell's argv for a new PTY. With a startCommand (only a bare tool
-// name from launchCommandFor) the shell runs it after its rc files, so PATH and
-// the account env are the user's own, then replaces itself with a plain login
-// shell when the tool exits, leaving the tab usable. The INT trap keeps a
-// Ctrl+C that kills the tool (before it takes the terminal, or a crash) from
-// also ending the wrapper shell and with it the tab. A trap with a handler is
-// not inherited by the tool, which keeps the default SIGINT.
-export function loginShellArgs(shell, startCommand) {
-  if (typeof startCommand !== 'string' || !/^[a-z]+$/.test(startCommand)) return ['-l'];
+// How to spawn a new PTY's login shell: { args, env }. With a startCommand
+// (only a bare tool name from launchCommandFor) the shell runs it after its rc
+// files, so PATH and the account env are the user's own, then replaces itself
+// with a plain login shell when the tool exits, leaving the tab usable.
+// - The prompt hooks run first (zsh precmd, bash PROMPT_COMMAND): direnv and
+//   similar tools load a project's environment there, and -c shows no prompt.
+// - The tool name travels in an env var, so no process argv says "claude"
+//   except the tool's own (process scans match on argv).
+// - The INT trap keeps a Ctrl+C that kills the tool before it owns the
+//   terminal from also ending the wrapper and the tab. A trap with a handler
+//   is not inherited by the tool.
+// Only zsh and bash are driven this way; any other shell opens plain.
+export const START_TOOL_ENV = 'DOBIUS_NEW_TAB_TOOL';
+export function loginShellSpawn(shell, startCommand) {
+  const plain = { args: ['-l'], env: {} };
+  if (typeof startCommand !== 'string' || !/^[a-z]+$/.test(startCommand)) return plain;
+  const name = String(shell).split('/').pop();
+  let hooks;
+  if (name === 'zsh') hooks = '(( $+functions[precmd] )) && precmd; for f in $precmd_functions; do "$f"; done;';
+  else if (name === 'bash') hooks = 'for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done;';
+  else return plain;
   const quoted = `'${String(shell).replace(/'/g, "'\\''")}'`;
-  return ['-l', '-i', '-c', `trap : INT; ${startCommand}; exec ${quoted} -l`];
+  const script = `trap : INT; t=$${START_TOOL_ENV}; unset ${START_TOOL_ENV}; ${hooks} "$t"; exec ${quoted} -l`;
+  return { args: ['-l', '-i', '-c', script], env: { [START_TOOL_ENV]: startCommand } };
 }

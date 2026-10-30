@@ -15,7 +15,7 @@ import { promisify } from 'util';
 const execFileP = promisify(execFile);
 import { app } from 'electron';
 import { getSessionTabMap } from './config-manager.js';
-import { loginShellArgs } from '../shared/new-tab.js';
+import { loginShellSpawn } from '../shared/new-tab.js';
 
 const terminals = new Map();
 
@@ -246,8 +246,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   };
   const spawnCols = (Number.isInteger(prevCols) && prevCols > 0) ? prevCols : 80;
   const spawnRows = (Number.isInteger(prevRows) && prevRows > 0) ? prevRows : 24;
-  const term = pty.spawn(shell, loginShellArgs(shell, startCommand), {
-    name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: spawnEnv,
+  const start = loginShellSpawn(shell, startCommand);
+  const term = pty.spawn(shell, start.args, {
+    name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: { ...spawnEnv, ...start.env },
   });
 
   const dataSub = term.onData((data) => {

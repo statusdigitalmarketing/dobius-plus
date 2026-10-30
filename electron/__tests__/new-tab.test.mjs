@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import {
   normalizeNewTabTool, newTabCommand, buildPickerProjects, countHiddenProjects,
   toggleHiddenProject, pickerShortcutIndex,
-  launchCommandFor, loginShellArgs,
+  launchCommandFor, loginShellSpawn,
 } from '../../shared/new-tab.js';
 import { setPendingLaunch, takePendingLaunch, clearPendingLaunches } from '../../src/lib/pending-launch.js';
 
@@ -91,10 +91,16 @@ test('a pending launch is taken once, and restore clears them all', () => {
   assert.equal(takePendingLaunch('t2'), undefined);
 });
 
-test('loginShellArgs runs only a bare tool, then becomes a login shell', () => {
-  assert.deepEqual(loginShellArgs('/bin/zsh', null), ['-l']);
-  assert.deepEqual(loginShellArgs('/bin/zsh', 'claude'), ['-l', '-i', '-c', "trap : INT; claude; exec '/bin/zsh' -l"]);
-  assert.deepEqual(loginShellArgs("/o'dd/sh", 'codex'), ['-l', '-i', '-c', "trap : INT; codex; exec '/o'\\''dd/sh' -l"]);
-  assert.deepEqual(loginShellArgs('/bin/zsh', 'claude; rm -rf ~'), ['-l']);
-  assert.deepEqual(loginShellArgs('/bin/zsh', 'Claude'), ['-l']);
+test('loginShellSpawn starts only a bare tool, under zsh or bash, via env', () => {
+  assert.deepEqual(loginShellSpawn('/bin/zsh', null), { args: ['-l'], env: {} });
+  const z = loginShellSpawn('/bin/zsh', 'claude');
+  assert.deepEqual(z.env, { DOBIUS_NEW_TAB_TOOL: 'claude' });
+  assert.deepEqual(z.args.slice(0, 3), ['-l', '-i', '-c']);
+  assert.match(z.args[3], /^trap : INT; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; .*precmd_functions.*; "\$t"; exec '\/bin\/zsh' -l$/);
+  assert.ok(!z.args.join(' ').includes('claude'), 'the tool name is never in the wrapper argv');
+  assert.match(loginShellSpawn('/usr/local/bin/bash', 'codex').args[3], /PROMPT_COMMAND.*exec '\/usr\/local\/bin\/bash' -l$/);
+  assert.match(loginShellSpawn("/o'dd/zsh", 'codex').args[3], /exec '\/o'\\''dd\/zsh' -l$/);
+  assert.deepEqual(loginShellSpawn('/opt/homebrew/bin/fish', 'claude'), { args: ['-l'], env: {} });
+  assert.deepEqual(loginShellSpawn('/bin/zsh', 'claude; rm -rf ~'), { args: ['-l'], env: {} });
+  assert.deepEqual(loginShellSpawn('/bin/zsh', 'Claude'), { args: ['-l'], env: {} });
 });
