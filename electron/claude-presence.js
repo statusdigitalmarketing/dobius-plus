@@ -178,19 +178,21 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
     try { rec = JSON.parse(await read(path.join(dir, 'sessions', `${info.pid}.json`))); }
     catch { return null; } // CLI without presence files, or mid-rewrite: no claim
     const value = backgroundFromPresence(rec, info);
-    return value ? { value, startedAt: info.startedAt, statusUpdatedAt: rec.statusUpdatedAt } : null;
+    return value ? { value, pid: info.pid, startedAt: info.startedAt, statusUpdatedAt: rec.statusUpdatedAt } : null;
   }
 
   /**
    * Background work in this tab's Claude, or null. Never throws.
    * @param {string} tabId
+   * @param {{pid:number, startedAt:number}} [expected]  the claude the caller
+   *   sees in the tab now; an answer read from any other process is dropped
    * @param {number} turnEndedAt  when the hook ended the turn. The process read
    *   must provably have been running then: ps truncates its start DOWN to the
    *   second, so only a start a full second before the turn ended proves it
    *   (a claude started in that same second may have replaced the one that
    *   finished).
    */
-  return function backgroundForTab(tabId, turnEndedAt) {
+  return function backgroundForTab(tabId, turnEndedAt, expected) {
     const t = now();
     // One lookup per tab and turn at a time: concurrent asks (several windows,
     // bursts) share the pending one instead of each spawning ps. An entry is
@@ -209,6 +211,8 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
     }
     return hit.pending.then((found) => (
       found && Number.isFinite(found.startedAt) && found.startedAt + 1000 <= turnEndedAt
+        // A cached answer is only for the claude the caller sees now.
+        && (!expected || (found.pid === expected.pid && found.startedAt === expected.startedAt))
         // 'busy' after a turn means delegated work that was ALREADY running:
         // the CLI wrote busy when the turn started and has not changed it
         // since. A busy written after the turn ended is a new foreground turn
@@ -239,7 +243,7 @@ export function createTabActivity({ status, claudeInfo, backgroundForTab, unread
    * to check (a plain shell costs nothing).
    */
   async function checkTurnAgainstProcess(id, raw) {
-    if (!raw.hookOwned && !raw.lastTurnMs) return undefined;
+    if (!raw.hookOwned && !raw.lastTurnMs && !raw.turnEndedAt) return undefined;
     const info = await claudeInfo(id);
     const a = reconcileWithProcess(raw, info);
     if (raw.since && !a.since && a.status === raw.status) status.distrustTurnStart(id, raw.since);
@@ -262,7 +266,7 @@ export function createTabActivity({ status, claudeInfo, backgroundForTab, unread
     // process that is gone.
     if (info && a.turnEndedAt && a.status !== 'needs' && !(a.status === 'working' && a.hookOwned)
         && now() - a.turnEndedAt >= GRACE_MS) {
-      background = await backgroundForTab(id, a.turnEndedAt);
+      background = await backgroundForTab(id, a.turnEndedAt, info);
       // The lookup awaited: if a new turn started (or this one's end changed)
       // meanwhile, the presence file may describe that turn instead.
       const after = status.activityFor(id);

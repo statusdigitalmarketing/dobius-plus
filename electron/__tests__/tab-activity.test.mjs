@@ -493,3 +493,24 @@ test('the unique lookup needs a PROVEN claude: a path token that is a directory 
     fsMod.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('tab activity: an ended turn with no length still gets its Waiting', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 900_000);
+  ts.ingest(ID, mk('done'), 950_000);
+  ts.distrustLastTurn(ID, 950_000); // its length was disproved earlier
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+  const { tabActivity } = makeActivity({ claudeInfo: async () => ({ pid: 1, startedAt: 100_000 }), backgroundForTab: async () => 'shells' });
+  assert.equal((await tabActivity(ID)).activity.background, 'shells');
+});
+
+test('presence reader: a cached answer is dropped for a different claude than the caller sees', async () => {
+  const read = createPresenceReader({
+    claudeInfo: async () => proc,
+    configDirOf: async () => '/cfg',
+    readFile: async () => JSON.stringify(rec({ status: 'shell' })),
+    now: () => 0,
+  });
+  assert.equal(await read('a', END, proc), 'shells');
+  assert.equal(await read('a', END, { pid: 777, startedAt: proc.startedAt + 20_000 }), null);
+});
