@@ -386,13 +386,20 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       useStore.getState().setActiveView('terminal');
       window.electronAPI.bridgeTabOpened?.(nonce, tab.id);
     });
+    // Main gave up on that open before our answer arrived: take the tab back.
+    const offBridgeDrop = window.electronAPI?.onBridgeDropTab?.((tabId) => {
+      const st = useStore.getState();
+      if (!st.terminalTabs.some((t) => t.id === tabId)) return;
+      if (st.terminalTabs.length === 1) st.addTab(projectPath);
+      useStore.getState().removeTab(tabId);
+    });
     // A claiming pane whose claim was refused (a late adopt after a timeout)
     // has no terminal at all.
     const onRefused = (e) => giveUp(e.detail);
     window.addEventListener('dobius:claim-refused', onRefused);
     window.electronAPI?.windowTabsReady?.();
     return () => {
-      offAdopt?.(); offFailed?.(); offBridgeOpen?.();
+      offAdopt?.(); offFailed?.(); offBridgeOpen?.(); offBridgeDrop?.();
       window.removeEventListener('dobius:claim-refused', onRefused);
       for (const t of pending.values()) clearTimeout(t);
     };

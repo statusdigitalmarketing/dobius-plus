@@ -184,7 +184,17 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // them here too.
   ipcMain.on('terminal:write', (event, id, data) => bump(id, data, event.sender.id));
 
+  // Requests main stopped waiting for: a window that answers one anyway
+  // (it added the tab after main gave up) is told to drop that tab, so a
+  // retry of the same request cannot leave two. nonce -> { wcId, projectPath }
+  const expired = new Map();
   ipcMain.on('bridge:tabOpened', (event, nonce, tabId) => {
+    const late = typeof nonce === 'string' ? expired.get(nonce) : null;
+    if (late) {
+      expired.delete(nonce);
+      if (late.wcId === event.sender.id && isTabOfProject(tabId, late.projectPath)) event.sender.send('bridge:dropTab', tabId);
+      return;
+    }
     const p = typeof nonce === 'string' ? pending.get(nonce) : null;
     if (!p || p.wcId !== event.sender.id) return;
     // A NEW tab has no PTY yet when the window answers (its pane spawns one
@@ -229,7 +239,11 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     const entry = { wcId: wc.id, projectPath, done: null, counter: null };
     const tabId = await new Promise((resolve) => {
       const done = (id) => { clearTimeout(timer); pending.delete(nonce); resolve(id); };
-      const timer = setTimeout(() => done(null), TAB_ADD_MS);
+      const timer = setTimeout(() => {
+        expired.set(nonce, { wcId: wc.id, projectPath });
+        setTimeout(() => expired.delete(nonce), 60_000).unref?.();
+        done(null);
+      }, TAB_ADD_MS);
       entry.done = done;
       pending.set(nonce, entry);
       // The window drops a request it receives after main stopped waiting

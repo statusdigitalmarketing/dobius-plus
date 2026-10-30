@@ -171,7 +171,11 @@ export function promptBoxText(lines, modes) {
       // A dialog anywhere OUTSIDE the box (the box's own text is the
       // message, which may well say "Do you want to ...").
       if (dialogOnScreen([...lines.slice(0, top + 1), ...lines.slice(j)])) return null;
-      const rows = lines.slice(top + 1, j).map((r) => String(r).replace(/^\s*│?\s*[❯>]?\s?/, '').replace(/\s*│?\s*$/, ''));
+      // Only Claude's own chrome is stripped: the prompt character on the
+      // FIRST row, and the side borders of the older boxed prompt. A later
+      // row starting with ">" or "│" in the flat prompt is message text.
+      const lead = k0 => (flat ? (k0 ? /^\s*[❯>]?\s?/ : /^\s*/) : (k0 ? /^\s*│?\s*>?\s?/ : /^\s*│?\s*/));
+      const rows = lines.slice(top + 1, j).map((r, k) => String(r).replace(lead(k === 0), '').replace(flat ? /\s+$/ : /\s*│?\s*$/, ''));
       return rows.join('\n');
     }
   }
@@ -498,7 +502,8 @@ HDR=$(mktemp) || exit 3
 trap 'rm -f "$HDR"' EXIT
 chmod 600 "$HDR"
 printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$HDR"
-RESPONSE=$(printf '%s' "$BODY" | curl -sS --max-time 180 -X POST "http://127.0.0.1:${port}/openTab" \\
+# --noproxy: an http_proxy in the environment must never see the token.
+RESPONSE=$(printf '%s' "$BODY" | curl -sS --noproxy '*' --max-time 180 -X POST "http://127.0.0.1:${port}/openTab" \\
   -H "Host: 127.0.0.1:${port}" \\
   -H @"$HDR" \\
   -H "Content-Type: application/json" \\

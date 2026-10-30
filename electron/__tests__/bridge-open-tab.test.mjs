@@ -441,6 +441,9 @@ function fakeDeps(over = {}) {
   assert.equal(boxStillHasMessage('', 'hello'), false);
   assert.equal(boxStillHasMessage('Try "refactor ProjectView.jsx"', 'hello'), false, 'placeholder');
   assert.equal(boxStillHasMessage(null, 'hello'), false);
+  assert.equal(boxStillHasMessage(promptBoxText([rule2, '❯ a', '  >b', rule2], { bracketedPaste: true }), 'a>b'), true, 'a ">" on a later row is message text');
+  assert.equal(boxStillHasMessage(promptBoxText([rule2, '❯ a', '  │b', rule2], { bracketedPaste: true }), 'a│b'), true, 'a "│" in the flat prompt is message text');
+  assert.equal(promptBoxText(['╭────────╮', '│ > hi   │', '│ there  │', '╰────────╯'], { bracketedPaste: true }), 'hi\nthere', 'boxed prompt borders stripped');
   // The message itself may read like a dialog: only rows outside the box count.
   assert.equal(promptBoxText([rule2, '❯ Do you want to meet at 3? Esc to cancel', rule2, '  ? for shortcuts'], { bracketedPaste: true }), 'Do you want to meet at 3? Esc to cancel');
   assert.equal(promptBoxText([' Do you want to proceed?', rule2, '❯ hi', rule2], { bracketedPaste: true }), null);
@@ -546,7 +549,8 @@ assert.equal(/-H "Authorization/.test(scriptText), false);
 assert.equal(/--data-binary "\$BODY"/.test(scriptText), false);
 assert.equal(/sys\.argv/.test(scriptText.split('\n').find((l) => l.startsWith('BODY=')) || 'sys.argv'), false);
 const run = (args, stdin) => new Promise((resolve) => {
-  const p = spawn(script, args, { env: { ...process.env } });
+  // A proxy in the environment must be ignored for the loopback bridge.
+  const p = spawn(script, args, { env: { ...process.env, http_proxy: 'http://127.0.0.1:9', HTTP_PROXY: 'http://127.0.0.1:9', ALL_PROXY: 'http://127.0.0.1:9' } });
   let out = '';
   let err = '';
   p.stdout.on('data', (c) => { out += c; });
