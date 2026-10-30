@@ -264,8 +264,9 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     const onReload = () => { counter.reloaded = true; };
     wc.on('did-start-loading', onReload);
     counter.cleanup = () => { if (!wc.isDestroyed()) wc.removeListener('did-start-loading', onReload); };
-    const started = await waitFor(() => reloaded() || wc.isDestroyed() || (!!terminalInstance(tabId) && ownerOf(tabId) === wc.id), PTY_START_MS);
-    if (reloaded() || wc.isDestroyed()) { stopCounting(counter); return { error: 'the project window reloaded or closed while the tab was opening' }; }
+    const closing = () => !!getWindowEntryByWcId(wc.id)?.closing;
+    const started = await waitFor(() => reloaded() || wc.isDestroyed() || closing() || (!!terminalInstance(tabId) && ownerOf(tabId) === wc.id), PTY_START_MS);
+    if (reloaded() || wc.isDestroyed() || closing()) { stopCounting(counter); return { error: 'the project window reloaded or closed while the tab was opening' }; }
     if (!started) { stopCounting(counter); return { error: 'the new tab\'s terminal did not start', tabId }; }
     // The shell must have started IN the project (createTerminal falls back
     // to home for a folder that vanished).
@@ -354,7 +355,10 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     claudeRunning,
     // A tab being closed (its window shutting down sends Ctrl+C straight to
     // the PTY) is not alive: nothing more is typed into it.
-    tabAlive: (tabId) => !!terminalInstance(tabId) && getTerminalWebContentsId(tabId) !== null && !terminalClosing(tabId)
+    // Nor is a tab whose window is closing (its shutdown snapshot can miss a
+    // PTY that started after it began).
+    tabAlive: (tabId) => !!terminalInstance(tabId) && !terminalClosing(tabId)
+      && !(getWindowEntryByWcId(getTerminalWebContentsId(tabId))?.closing ?? true)
       && ![...(keyCounters.get(tabId) || [])].some((c) => c.reloaded),
     ptyOf: (tabId) => terminalInstance(tabId),
     // Written straight to the PTY, never queued behind a Chat submit: a

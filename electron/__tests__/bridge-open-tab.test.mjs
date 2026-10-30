@@ -411,6 +411,12 @@ function fakeDeps(over = {}) {
   d3.submit = (id) => { d3.log.push(['submit', id]); d3.tabs.get(id).frames.push({ lines: Array(20).fill('repainting'), modes: { bracketedPaste: true } }); };
   const r3 = await createOpenTabService(d3).open({ projectPath: '/p', message: 'go', requestId: 'newline3' });
   assert.equal(r3.body.submitted, false);
+  // ...nor an empty box after someone typed (a Ctrl+C clears an unsent draft).
+  const d4 = fakeDeps();
+  d4.submit = (id) => { d4.log.push(['submit', id]); const t = d4.tabs.get(id); t.keys = 1; t.frames.push({ lines: [rule, '❯ ', rule], modes: { bracketedPaste: true } }); };
+  const r4 = await createOpenTabService(d4).open({ projectPath: '/p', message: 'go', requestId: 'newline4' });
+  assert.equal(r4.body.submitted, false);
+  assert.match(r4.body.note, /someone typed/);
   ok('an Enter that did not send is reported as not sent');
 }
 

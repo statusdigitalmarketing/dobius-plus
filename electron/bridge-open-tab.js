@@ -311,6 +311,9 @@ export function createOpenTabService(deps, opts = {}) {
       await deps.sleep(SUBMIT_POLL_MS);
       let after;
       try { after = await watch.screen(); } catch { after = null; }
+      // Someone typed meanwhile (a Ctrl+C can clear an unsent draft): an
+      // empty box no longer proves Claude took it.
+      if (watch.keys() !== 0) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but someone typed into the tab before Claude was seen taking the message; check the tab' };
       if (!after) continue; // a failed read proves nothing
       // Only an input box that is SEEN and no longer holds the message
       // confirms the send; a frame with no recognisable box proves nothing.
