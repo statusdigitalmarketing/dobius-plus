@@ -7,10 +7,23 @@
 // ponytail: the cost is that a real cursor report on row 1 counts as input,
 // which only makes the selector card re-read once. Tracking outstanding DSR
 // queries would remove it.
-const TERMINAL_REPLY_RE = /^(?:\x1b\[[IO]|\x1b\[\?\d+;\d+R|\x1b\[(?!1;(?:[2-9]|1[0-6])R)\d+;\d+R|\x1b\[[?>=][\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))+$/;
+// The replies both tests below share: focus, device attributes, DECRQM, OSC.
+const REPLY_PARTS = String.raw`\x1b\[[IO]|\x1b\[[?>=][\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`;
+const TERMINAL_REPLY_RE = new RegExp(String.raw`^(?:${REPLY_PARTS}|\x1b\[\?\d+;\d+R|\x1b\[(?!1;(?:[2-9]|1[0-6])R)\d+;\d+R)+$`);
 
 export function isTerminalReply(data) {
   return typeof data === 'string' && TERMINAL_REPLY_RE.test(data);
+}
+
+// The other direction, for /openTab's "did a person type?" (bridge-open-
+// tab.js): every reply removed wherever it sits in a chunk, EVERY cursor
+// report and status report (ESC[0n) included. There a missed key is the
+// cheap error: a modified F3 does nothing in Claude's prompt, while a reply
+// counted as typing would cancel the request. isTerminalReply keeps the
+// stricter rule because a missed key there marks a stale prompt as fresh.
+const ANY_REPLY_RE = new RegExp(String.raw`${REPLY_PARTS}|\x1b\[\??\d+(?:;\d+)*R|\x1b\[\d*n`, 'g');
+export function stripTerminalReplies(data) {
+  return typeof data === 'string' ? data.replace(ANY_REPLY_RE, '') : '';
 }
 
 /**

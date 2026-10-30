@@ -12,33 +12,28 @@
 // the dedupe and the readiness wait are unit tested with fakes:
 // electron/__tests__/bridge-open-tab.test.mjs. Docs: docs/bridge-open-tab.md.
 
-import { isTerminalReply } from './terminal-reply.js';
+import { stripTerminalReplies } from './terminal-reply.js';
 import { parseSelectorFromScreen } from './selector-parser.js';
 import { shQuote } from '../shared/sh-quote.js';
 
 // Mouse reports (X10, SGR, urxvt) are what a pointer over a fullscreen
 // Claude sends; they are not someone typing. Neither are the terminal's
-// own replies (focus, cursor reports).
+// own replies (focus, cursor and status reports, device attributes, mode
+// reports, OSC answers), removed wherever they sit in a chunk by
+// terminal-reply.js (stripTerminalReplies: a cursor report can equal a
+// modified F3, and missing such a key here is harmless).
 const MOUSE_RE = /\x1b\[M[\s\S]{3}|\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[\d+;\d+;\d+M/g;
-// The terminal's own answers to a program's queries, wherever they sit in a
-// chunk: focus, cursor and status reports (ESC[0n, ESC[r;cR), device
-// attributes, mode reports, OSC answers. A cursor report can equal a
-// modified F3; missing such a key press here only means a stray Shift+F3
-// does not count as someone typing, which is harmless.
-const REPLY_RE = /\x1b\[[IO]|\x1b\[\??\d+(?:;\d+)*R|\x1b\[\d*n|\x1b\[[?>=][\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 // Any input a PERSON made (keys, mouse clicks and wheel): only the
 // terminal's own replies are left out. Between the paste and the Enter even a
 // wheel turn counts: Claude can bind it to recall history into the box.
 export function isUserInput(data) {
   if (typeof data !== 'string' || !data) return false;
-  if (isTerminalReply(data)) return false;
-  return data.replace(REPLY_RE, '').length > 0;
+  return stripTerminalReplies(data).length > 0;
 }
 
 export function isKeyboardInput(data) {
   if (typeof data !== 'string' || !data) return false;
-  if (isTerminalReply(data)) return false;
-  return data.replace(MOUSE_RE, '').replace(REPLY_RE, '').length > 0;
+  return stripTerminalReplies(data.replace(MOUSE_RE, '')).length > 0;
 }
 
 // The board's own id for a card click: letters, digits and . _ : - only, so
