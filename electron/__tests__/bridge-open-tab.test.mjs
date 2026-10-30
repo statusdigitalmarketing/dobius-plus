@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   sanitizeOpenMessage, validateOpenTabBody, isClaudePromptReady, createOpenTabService,
-  buildOpenCliScript, isKeyboardInput, promptBoxText, boxHoldsMessage, boxStillHasMessage, CLAUDE_SCRIPT_RE, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
+  buildOpenCliScript, isKeyboardInput, isUserInput, promptBoxText, boxHoldsMessage, boxStillHasMessage, CLAUDE_SCRIPT_RE, MAX_OPEN_MESSAGE_BYTES, MAX_OPENS_IN_FLIGHT, MAX_REMEMBERED_REQUESTS,
 } from '../bridge-open-tab.js';
 import { renderScreenLines } from '../screen-render.js';
 
@@ -39,6 +39,9 @@ ok('message neutralising');
 // Keyboard vs pointer: only a person's keys count as typing into the tab.
 for (const m of ['\x1b[<35;10;5M', '\x1b[<0;3;4m\x1b[<35;11;5M', '\x1b[M #!', '\x1b[32;10;5M', '\x1b[I', '\x1b[O', '\x1b[0n', '\x1b[1;5R', '\x1b[0n\x1b[12;40R', '\x1b[?1;2c', '\x1b]11;rgb:0000/0000/0000\x07']) assert.equal(isKeyboardInput(m), false, JSON.stringify(m));
 for (const k of ['a', '\r', 'hello', '\x1b[A', '\x1b[<35;10;5Mx', '\x15']) assert.equal(isKeyboardInput(k), true, JSON.stringify(k));
+assert.equal(isUserInput('\x1b[<64;10;5M'), true, 'a wheel turn is a person');
+assert.equal(isUserInput('\x1b[0n'), false);
+assert.equal(isUserInput('\x1b[I'), false);
 assert.equal(CLAUDE_SCRIPT_RE.test('/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js'), true);
 assert.equal(CLAUDE_SCRIPT_RE.test('/Users/x/.local/share/claude/versions/2.1.314/cli.js'), true);
 assert.equal(CLAUDE_SCRIPT_RE.test('/tmp/claude'), false);
@@ -119,6 +122,7 @@ function fakeDeps(over = {}) {
       return {
         seq: () => tab.frames.length,
         keys: () => tab.keys || 0,
+        input: () => (tab.keys || 0) + (tab.mouse || 0),
         // Like the emulator: everything drawn since stays on screen, newest at the bottom.
         screen: async () => (tab.frames.length > from
           ? { lines: tab.frames.slice(from).flatMap((f) => f.lines), modes: tab.frames.at(-1).modes }
@@ -208,7 +212,7 @@ function fakeDeps(over = {}) {
   let reads = 0;
   const d = fakeDeps({
     claudeRunning: async () => true,
-    watchOutput: () => ({ stop() {}, seq: () => 0, keys: () => 0, screen: async () => { reads += 1; return reads === 3 ? PROMPT : { lines: [], modes: {} }; } }),
+    watchOutput: () => ({ stop() {}, seq: () => 0, keys: () => 0, input: () => 0, screen: async () => { reads += 1; return reads === 3 ? PROMPT : { lines: [], modes: {} }; } }),
   });
   const r = await createOpenTabService(d, { readyTimeoutMs: 3000 }).open({ projectPath: '/p', message: 'go', requestId: 'flash' });
   assert.equal(r.status, 504);
@@ -375,6 +379,15 @@ function fakeDeps(over = {}) {
   const rh = await createOpenTabService(dh).open({ projectPath: '/p', message: 'go', requestId: 'history' });
   assert.equal(rh.body.submitted, false);
   assert.equal(dh.log.filter((e) => e[0] === 'submit').length, 0);
+  // A wheel turn after the paste (history:previous can be bound to it):
+  // the Enter is withheld even though no key was typed.
+  const dw = fakeDeps();
+  const ow = dw.paste;
+  dw.paste = (id, t) => { ow(id, t); setImmediate(() => { dw.tabs.get(id).mouse = 1; }); };
+  const rw = await createOpenTabService(dw).open({ projectPath: '/p', message: 'go', requestId: 'wheel' });
+  assert.equal(rw.body.submitted, false);
+  assert.match(rw.body.note, /mouse/);
+  assert.equal(dw.log.filter((e) => e[0] === 'submit').length, 0);
   const dn = fakeDeps();
   assert.equal((await createOpenTabService(dn).open({ projectPath: '/p', message: 'Reply: 50% off! /cc #3', requestId: 'mode2' })).body.submitted, true, 'only the FIRST character matters');
   // A long multi-line message grows the box: still recognised, still sent.
@@ -383,7 +396,10 @@ function fakeDeps(over = {}) {
   const r = await createOpenTabService(d).open({ projectPath: '/p', message: long, requestId: 'tall' });
   assert.equal(r.body.submitted, true);
   assert.equal(isClaudePromptReady([rule2, '❯ a', ...Array(30).fill('  b'), rule2, '  ? for shortcuts'], { bracketedPaste: true }), true);
-  assert.equal(boxHoldsMessage('[Pasted text #1 +40 lines]', 'x'), true);
+  const forty = Array.from({ length: 41 }, (_, i) => `l${i}`).join('\n');
+  assert.equal(boxHoldsMessage('[Pasted text #1 +40 lines]', forty), true, 'this card, collapsed');
+  assert.equal(boxHoldsMessage('[Pasted text #1 +40 lines]', 'go'), false, 'a marker for some other text');
+  assert.equal(boxHoldsMessage('[Pasted text #2 +40 lines]', forty), false, 'not this tab\'s first paste');
   assert.equal(boxHoldsMessage('hello there', 'hello there\nmore'), false, 'only part of the message');
   assert.equal(boxHoldsMessage('hello there\n  more', 'hello there\nmore'), true);
   assert.equal(boxHoldsMessage('go delete the backups', 'go'), false, 'a recalled history entry is not the message');

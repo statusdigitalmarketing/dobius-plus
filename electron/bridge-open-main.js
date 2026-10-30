@@ -16,7 +16,7 @@ import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
 import { terminalInstance, getTerminalBuffer, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint } from './claude-argv.js';
-import { isKeyboardInput, CLAUDE_SCRIPT_RE } from './bridge-open-tab.js';
+import { isKeyboardInput, isUserInput, CLAUDE_SCRIPT_RE } from './bridge-open-tab.js';
 import { submitPending } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
@@ -157,7 +157,8 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // cancel another request's counter). tabId -> Set of { n }
   const keyCounters = new Map();
   function countKeys(tabId, wcId = null) {
-    const c = { n: 0, tabId, wcId };
+    // n: keyboard writes; any: every write a person made, mouse included.
+    const c = { n: 0, any: 0, tabId, wcId };
     if (!keyCounters.has(tabId)) keyCounters.set(tabId, new Set());
     keyCounters.get(tabId).add(c);
     return c;
@@ -174,8 +175,13 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // writes must not be able to cancel the request either).
   const bump = (id, data, senderId = null) => {
     const set = typeof id === 'string' ? keyCounters.get(id) : null;
-    if (!set || !isKeyboardInput(data)) return;
-    for (const c of set) if (senderId === null || c.wcId === senderId) c.n += 1;
+    if (!set || !isUserInput(data)) return;
+    const key = isKeyboardInput(data);
+    for (const c of set) {
+      if (senderId !== null && c.wcId !== senderId) continue;
+      c.any += 1;
+      if (key) c.n += 1;
+    }
   };
   addInputObserver((id, data) => { if (!ownWrite) bump(id, data); });
   // Keys a window sends for a tab whose PTY does not exist yet are dropped by
@@ -299,6 +305,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     return {
       seq: () => seq,
       keys: () => keys.n,
+      input: () => keys.any,
       screen: async () => {
         const lines = await renderScreenLines(buf);
         return lines ? { lines, modes: lines.modes } : null;

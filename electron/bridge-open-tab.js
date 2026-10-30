@@ -29,6 +29,15 @@ const MOUSE_RE = /\x1b\[M[\s\S]{3}|\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[\d+;\d+;\d+M/g;
 // modified F3; missing such a key press here only means a stray Shift+F3
 // does not count as someone typing, which is harmless.
 const REPLY_RE = /\x1b\[[IO]|\x1b\[\??\d+(?:;\d+)*R|\x1b\[\d*n|\x1b\[[?>=][\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+// Any input a PERSON made (keys, mouse clicks and wheel): only the
+// terminal's own replies are left out. Between the paste and the Enter even a
+// wheel turn counts: Claude can bind it to recall history into the box.
+export function isUserInput(data) {
+  if (typeof data !== 'string' || !data) return false;
+  if (isTerminalReply(data)) return false;
+  return data.replace(REPLY_RE, '').length > 0;
+}
+
 export function isKeyboardInput(data) {
   if (typeof data !== 'string' || !data) return false;
   if (isTerminalReply(data)) return false;
@@ -196,10 +205,19 @@ export function promptBoxText(lines, modes) {
 // else in the box (a recalled history entry, a person's text) means the
 // Enter would send something the card did not say.
 const squash = (x) => String(x).replace(/\s+/g, '');
-const PASTE_MARKER_RE = /^\[Pasted text #\d+(?: \+\d+ lines?)?\]$/;
+// Claude's marker for a long paste names the paste's number in the session
+// and its extra lines. The tab is brand new, so the card is paste #1, and the
+// line count must be the card's: an older entry recalled into the box (shown
+// as some other marker) never passes.
+const PASTE_MARKER_RE = /^\[Pasted text #(\d+)(?: \+(\d+) lines?)?\]$/;
 function boxIsMessage(boxText, message) {
   if (typeof boxText !== 'string') return false;
-  if (PASTE_MARKER_RE.test(boxText.trim())) return true;
+  const marker = PASTE_MARKER_RE.exec(boxText.trim());
+  if (marker) {
+    const lines = message.split('\n').length;
+    const extra = marker[2] === undefined ? null : Number(marker[2]);
+    return marker[1] === '1' && (extra === null ? lines === 1 : (extra === lines - 1 || extra === lines));
+  }
   const want = squash(message);
   return want.length > 0 && squash(boxText) === want;
 }
@@ -220,7 +238,7 @@ export const boxStillHasMessage = boxIsMessage;
  *   ptyOf(tabId) -> object|null       PTY identity (a replaced shell is a new object)
  *   claudeRunning(tabId, projectPath) -> Promise<boolean>  claude leads the FOREGROUND process
  *                                     group of the tab's terminal, working in the project
- *   watchOutput(tabId, keyCounter) -> { seq(), keys(), screen(): Promise<{ lines, modes } | null>, stop() }
+ *   watchOutput(tabId, keyCounter) -> { seq(), keys(), input(), screen(): Promise<{ lines, modes } | null>, stop() }
  *                                     the tab's output since its PTY started, emulated;
  *                                     seq() counts chunks;
  *                                     keys() counts a PERSON's keyboard writes into the tab
@@ -280,6 +298,9 @@ export function createOpenTabService(deps, opts = {}) {
   // paste (a person's keys, or their mouse over a fullscreen Claude). Any
   // doubt leaves the message typed and unsent: { ok, submitted: false }.
   async function submitPasted(tabId, pty, watch, seqAtPaste, message, projectPath) {
+    // Any person's input from here on (a wheel turn included) can change what
+    // the box holds, so it withholds the Enter and voids the confirmation.
+    const inputAtPaste = watch.input();
     const typedOnly = (why) => ({ ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: ${why}; press Enter in the tab to send it` });
     const end = deps.now() + SUBMIT_SETTLE_MAX_MS;
     let last = seqAtPaste;
@@ -303,6 +324,7 @@ export function createOpenTabService(deps, opts = {}) {
     if (!claude) return typedOnly('Claude was not in the foreground with its prompt on screen');
     if (watch.seq() !== seqAtRead) return typedOnly('the screen changed while it was being checked');
     if (watch.keys() !== 0 || deps.inputBusy(tabId)) return typedOnly('someone typed into the tab');
+    if (watch.input() !== inputAtPaste) return typedOnly('someone used the mouse or keyboard in the tab after the paste');
     // Security review (HIGH, "a token holder can submit a prompt"), kept on
     // purpose: Brett asked for the send, and /tabSend with the same token
     // already writes message + Enter into ANY tab, plain shells included.
@@ -320,7 +342,7 @@ export function createOpenTabService(deps, opts = {}) {
       try { after = await watch.screen(); } catch { after = null; }
       // Someone typed meanwhile (a Ctrl+C can clear an unsent draft): an
       // empty box no longer proves Claude took it.
-      if (watch.keys() !== 0) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but someone typed into the tab before Claude was seen taking the message; check the tab' };
+      if (watch.keys() !== 0 || watch.input() !== inputAtPaste) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but someone typed or used the mouse in the tab before Claude was seen taking the message; check the tab' };
       // A closing window sends Ctrl+C straight to the PTY (no key counted),
       // which also empties the box.
       if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but the tab closed before Claude was seen taking the message' };
