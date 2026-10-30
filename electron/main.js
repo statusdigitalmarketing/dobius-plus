@@ -1606,6 +1606,9 @@ function setupFileHandlers() {
     const id = (p) => { try { const st = fs.statSync(p); return `${st.dev}:${st.ino}`; } catch { return null; } };
     const dir = id(isolatedHome);
     if (dir && dir === id(path.join(homedir, '.claude'))) return 'the isolated Claude home is the real ~/.claude, refused';
+    // Writes follow a symlinked settings.json, so it must not lead to the real one.
+    const file = id(claudeSettingsPath);
+    if (file && file === id(path.join(homedir, '.claude', 'settings.json'))) return 'the isolated settings.json is the real one, refused';
     return '';
   };
   const STATUS_MARKER = ']777;dobius;';
@@ -1703,11 +1706,17 @@ function setupFileHandlers() {
     if (!unchanged()) throw new Error('settings.json changed under us, retry');
 
     const data = JSON.stringify(settings, null, 2) + '\n';
-    const tmp = `${claudeSettingsPath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
+    // Write THROUGH a symlinked settings.json (dotfiles): renaming over the
+    // link itself would replace it with a plain file and silently detach the
+    // user's real one, which now matters because the model line installs at
+    // launch without a click (Codex).
+    let target = claudeSettingsPath;
+    try { target = fs.realpathSync(claudeSettingsPath); } catch { /* absent: create it here */ }
+    const tmp = `${target}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
     try {
       fs.writeFileSync(tmp, data, 'utf8');
       if (!unchanged()) throw new Error('settings.json changed under us, retry');
-      fs.renameSync(tmp, claudeSettingsPath);
+      fs.renameSync(tmp, target);
     } catch (err) {
       try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
       throw err;
