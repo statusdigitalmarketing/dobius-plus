@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import {
   normalizeNewTabTool, newTabCommand, buildPickerProjects, countHiddenProjects,
   toggleHiddenProject, pickerShortcutIndex,
-  armLaunch, launchCommandFor,
+  launchCommandFor, loginShellArgs,
 } from '../../shared/new-tab.js';
 import { setPendingLaunch, takePendingLaunch, clearPendingLaunches } from '../../src/lib/pending-launch.js';
 
@@ -91,74 +91,10 @@ test('a pending launch is taken once, and restore clears them all', () => {
   assert.equal(takePendingLaunch('t2'), undefined);
 });
 
-// Fake timers: run(ms) advances the clock and fires due callbacks in order.
-function clock() {
-  let now = 0; let seq = 0;
-  const timers = new Map();
-  return {
-    setTimer: (fn, ms) => { const id = ++seq; timers.set(id, { fn, at: now + ms }); return id; },
-    clearTimer: (id) => { timers.delete(id); },
-    run(ms) {
-      const end = now + ms;
-      for (;;) {
-        const due = [...timers.entries()].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
-        if (!due) break;
-        timers.delete(due[0]); now = due[1].at; due[1].fn();
-      }
-      now = end;
-    },
-  };
-}
-const arm = (command, extra = {}) => {
-  const c = clock(); const writes = []; let done = 0;
-  const l = armLaunch(command, { write: (d) => writes.push(d), onDone: () => { done += 1; }, setTimer: c.setTimer, clearTimer: c.clearTimer, ...extra });
-  return { c, l, writes, done: () => done };
-};
-
-test('launch types the command once the shell output settles', () => {
-  const { c, l, writes, done } = arm('claude');
-  l.onOutput(); c.run(200); l.onOutput(); c.run(200);
-  assert.deepEqual(writes, [], 'still printing, not settled yet');
-  c.run(150);
-  assert.deepEqual(writes, ['claude\r']);
-  l.onOutput(); c.run(20000);
-  assert.deepEqual(writes, ['claude\r'], 'typed exactly once');
-  assert.equal(done(), 1);
-});
-
-test('a shell that prints nothing gets the command at the fallback', () => {
-  const { c, writes } = arm('codex');
-  c.run(3999);
-  assert.deepEqual(writes, []);
-  c.run(1);
-  assert.deepEqual(writes, ['codex\r']);
-});
-
-test('a shell still printing past the fallback is not typed into mid-output', () => {
-  const { c, l, writes } = arm('claude');
-  for (let t = 0; t < 6000; t += 100) { l.onOutput(); c.run(100); }
-  assert.deepEqual(writes, [], 'fallback must not fire while output streams');
-  c.run(300);
-  assert.deepEqual(writes, ['claude\r']);
-});
-
-test('a shell that never goes quiet gets nothing', () => {
-  const { c, l, writes, done } = arm('claude');
-  for (let t = 0; t < 16000; t += 100) { l.onOutput(); c.run(100); }
-  c.run(1000);
-  assert.deepEqual(writes, []);
-  assert.equal(done(), 1);
-});
-
-test('anything typed first (canWrite false), no command or dispose types nothing', () => {
-  const a = arm('claude', { canWrite: () => false });
-  a.l.onOutput(); a.c.run(10000);
-  assert.deepEqual(a.writes, []);
-  assert.equal(a.done(), 1);
-  const b = arm(null);
-  b.l.onOutput(); b.c.run(10000);
-  assert.deepEqual(b.writes, []);
-  const d = arm('claude');
-  d.l.onOutput(); d.l.dispose(); d.c.run(10000);
-  assert.deepEqual(d.writes, []);
+test('loginShellArgs runs only a bare tool, then becomes a login shell', () => {
+  assert.deepEqual(loginShellArgs('/bin/zsh', null), ['-l']);
+  assert.deepEqual(loginShellArgs('/bin/zsh', 'claude'), ['-l', '-i', '-c', "trap : INT; claude; exec '/bin/zsh' -l"]);
+  assert.deepEqual(loginShellArgs("/o'dd/sh", 'codex'), ['-l', '-i', '-c', "trap : INT; codex; exec '/o'\\''dd/sh' -l"]);
+  assert.deepEqual(loginShellArgs('/bin/zsh', 'claude; rm -rf ~'), ['-l']);
+  assert.deepEqual(loginShellArgs('/bin/zsh', 'Claude'), ['-l']);
 });

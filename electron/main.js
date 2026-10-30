@@ -39,7 +39,7 @@ import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
-import { launchInNewTerminal } from './new-tab-launch.js';
+import { launchCommandFor } from '../shared/new-tab.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -262,12 +262,11 @@ function setupTerminalHandlers() {
     // Shared with the mobile spawn paths via resolveAccountEnvForCwd so a phone
     // terminal lands on the same active accounts as a desktop one (reviewer P2).
     const accountEnv = resolveAccountEnvForCwd(cwd);
-    const created = createTerminal(id, cwd, event.sender, accountEnv);
-    // A New Tab (store.openNewTab) starts its tool once the shell is ready.
-    if (created && opts && typeof opts === 'object' && opts.launch !== undefined) {
-      launchInNewTerminal(id, opts.launch);
-    }
-    return created;
+    // A New Tab (store.openNewTab) starts its tool: 'default' is the Settings
+    // choice, read here; anything outside the fixed set starts nothing.
+    const launch = opts && typeof opts === 'object' ? opts.launch : undefined;
+    const startCommand = launch === undefined ? null : launchCommandFor(launch, getSettings().newTabTool);
+    return createTerminal(id, cwd, event.sender, accountEnv, { startCommand });
   });
 
   ipcMain.on('terminal:write', (event, id, data) => {
@@ -2661,10 +2660,12 @@ function projectDirError(projectPath) {
   return null;
 }
 
-// Project windows (webContents id -> count) owed new tabs by the New Tab
-// picker in another window. The window takes them once its tabs are restored,
-// which covers a window still loading and so unable to hear
-// window:newTabRequest. Capped so a stuck window cannot be owed a pile.
+// Project windows (webContents id -> { count, opened }) owed new tabs by the
+// New Tab picker in another window. The window takes them once its tabs are
+// restored, which covers a window still loading and so unable to hear
+// window:newTabRequest. `opened`: the request created the window, so its fresh
+// first tab (if it had no saved tabs) already answers one. Capped so a stuck
+// window cannot be owed a pile; a request past the cap is refused, not lost.
 // ponytail: an entry for a window closed before it took its tabs is never
 // removed (webContents ids are not reused, so it is only a stale integer).
 const pendingNewTabs = new Map();
@@ -2681,18 +2682,21 @@ function setupWindowHandlers() {
   ipcMain.handle('window:openProjectNewTab', (_event, projectPath) => {
     const error = projectDirError(projectPath);
     if (error) return { ok: false, error };
+    const before = new Set(BrowserWindow.getAllWindows().map((w) => w.id));
     const win = openProjectWindow(projectPath);
     const wcId = win.webContents.id;
-    pendingNewTabs.set(wcId, Math.min(MAX_PENDING_NEW_TABS, (pendingNewTabs.get(wcId) || 0) + 1));
+    const owed = pendingNewTabs.get(wcId) || { count: 0, opened: !before.has(win.id) };
+    if (owed.count >= MAX_PENDING_NEW_TABS) return { ok: false, error: 'that window is still opening' };
+    pendingNewTabs.set(wcId, { count: owed.count + 1, opened: owed.opened });
     win.webContents.send('window:newTabRequest');
     return { ok: true, id: win.id };
   });
 
-  // How many new tabs this window owes, cleared as it is read.
+  // The new tabs this window owes ({ count, opened }), cleared as it is read.
   ipcMain.handle('window:takePendingNewTab', (event) => {
-    const n = pendingNewTabs.get(event.sender.id) || 0;
+    const owed = pendingNewTabs.get(event.sender.id) || { count: 0, opened: false };
     pendingNewTabs.delete(event.sender.id);
-    return n;
+    return owed;
   });
 
   ipcMain.handle('window:pickAndOpenProject', async (event) => {

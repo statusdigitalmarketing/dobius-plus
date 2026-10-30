@@ -415,8 +415,9 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       first = false;
       freshFirstTabRef.current = false;
       api.windowTakePendingNewTab().then((owed) => {
-        // The fresh first tab already answers one request.
-        const n = Math.min(5, Number(owed) || 0) - (fresh ? 1 : 0);
+        // A fresh first tab answers one request only when that request is
+        // what opened this window.
+        const n = Math.min(5, Number(owed?.count) || 0) - (fresh && owed?.opened ? 1 : 0);
         for (let i = 0; i < n; i += 1) useStore.getState().openNewTab(projectPath);
         if (n > 0) setActiveView('terminal');
       }).catch((err) => console.warn('[newTab] pending request failed:', err?.message));
@@ -1103,8 +1104,8 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         const current = useStore.getState().activeView;
         setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
       }),
-      window.electronAPI.onMenuToggleSidebar?.(() => toggleSidebar()),
-      window.electronAPI.onMenuToggleGitPanel?.(() => toggleGitPanel()),
+      window.electronAPI.onMenuToggleSidebar?.(() => { if (!useStore.getState().newTabPickerOpen) toggleSidebar(); }),
+      window.electronAPI.onMenuToggleGitPanel?.(() => { if (!useStore.getState().newTabPickerOpen) toggleGitPanel(); }),
       window.electronAPI.onMenuNewTab?.(() => {
         useStore.getState().setNewTabPickerOpen(false);
         openNewTab(projectPath);

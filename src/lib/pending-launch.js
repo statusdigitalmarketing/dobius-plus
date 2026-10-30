@@ -1,7 +1,7 @@
 // The tool a brand-new tab should start (Claude Code, Codex), handed to the
 // tab's terminal before it mounts, like pending-scrollback. The terminal passes
-// it to terminal:create and main types the command once the shell is ready
-// (electron/new-tab-launch.js). Only store.openNewTab sets it, so a restored,
+// it to terminal:create and main starts the tool as the login shell's first
+// command (shared/new-tab.js loginShellArgs). Only store.openNewTab sets it, so a restored,
 // reopened or agent tab never gets one and never launches a second tool.
 const pending = new Map();
 

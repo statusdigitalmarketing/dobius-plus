@@ -1,6 +1,6 @@
-// Pure logic for new tabs: which tool a new tab starts, the command that
-// starts it, when it is safe to type it, and the New Tab picker's project
-// list. Shared by main (electron/new-tab-launch.js) and the renderer. No React
+// Pure logic for new tabs: which tool a new tab starts, the shell argv that
+// starts it, and the New Tab picker's project list. Shared by main
+// (terminal:create, terminal-manager) and the renderer. No React
 // or Electron here so it is unit-tested under plain node
 // (electron/__tests__/new-tab.test.mjs).
 
@@ -79,44 +79,15 @@ export function pickerShortcutIndex(e) {
   return e.key >= '1' && e.key <= '9' && e.key.length === 1 ? Number(e.key) - 1 : -1;
 }
 
-// When to type a new tab's command into its fresh shell. Typing while the
-// shell is still sourcing its rc files (or while an rc helper is reading the
-// terminal) would hand the command to the wrong reader, so it waits for the
-// shell's output to go quiet for settleMs. A shell that prints nothing at all
-// by fallbackMs gets it then; one still printing at giveUpMs gets nothing.
-// canWrite() is asked at the moment of typing (main checks nothing else has
-// typed into the tab and it is the same PTY), so the user's own line is never
-// extended or submitted. Returns { onOutput, dispose }.
-export function armLaunch(command, {
-  write, canWrite = () => true, onDone = () => {},
-  settleMs = 300, fallbackMs = 4000, giveUpMs = 15000,
-  setTimer = setTimeout, clearTimer = clearTimeout,
-} = {}) {
-  let done = false;
-  let sawOutput = false;
-  let settle = null;
-  const finish = () => {
-    if (done) return;
-    done = true;
-    clearTimer(settle); clearTimer(fallback); clearTimer(giveUp);
-    onDone();
-  };
-  const fire = () => {
-    if (done) return;
-    const ok = canWrite();
-    finish();
-    if (ok) write(`${command}\r`);
-  };
-  const fallback = setTimer(() => { if (!sawOutput) fire(); }, fallbackMs);
-  const giveUp = setTimer(finish, giveUpMs);
-  if (!command) finish();
-  return {
-    onOutput() {
-      if (done) return;
-      sawOutput = true;
-      clearTimer(settle);
-      settle = setTimer(fire, settleMs);
-    },
-    dispose: finish,
-  };
+// The login shell's argv for a new PTY. With a startCommand (only a bare tool
+// name from launchCommandFor) the shell runs it after its rc files, so PATH and
+// the account env are the user's own, then replaces itself with a plain login
+// shell when the tool exits, leaving the tab usable. The INT trap keeps a
+// Ctrl+C that kills the tool (before it takes the terminal, or a crash) from
+// also ending the wrapper shell and with it the tab. A trap with a handler is
+// not inherited by the tool, which keeps the default SIGINT.
+export function loginShellArgs(shell, startCommand) {
+  if (typeof startCommand !== 'string' || !/^[a-z]+$/.test(startCommand)) return ['-l'];
+  const quoted = `'${String(shell).replace(/'/g, "'\\''")}'`;
+  return ['-l', '-i', '-c', `trap : INT; ${startCommand}; exec ${quoted} -l`];
 }
