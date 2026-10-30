@@ -98,8 +98,9 @@ test('loginShellSpawn starts only a bare tool, under zsh or bash, via env', () =
   assert.deepEqual(z.args.slice(0, 3), ['-l', '-i', '-c']);
   assert.match(z.args[3], /^trap : INT; .*precmd_functions.*; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; .*pre=\(\$\{\(k\)jobstates\}\); eval "\$t"; .*:\|pre.*fg %\$s\[1\].*; exec '\/bin\/zsh' -l$/);
   const bsh = loginShellSpawn('/bin/bash', 'claude').args[3];
-  assert.match(bsh, /^trap : INT; for c in "\$\{PROMPT_COMMAND\[@\]\}".*; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; eval "\$t" & p=\$!; /);
-  assert.equal(bsh.split('kill -0 $p 2>/dev/null && fg %eval').length - 1, 25);
+  assert.match(bsh, /^trap : INT; for c in "\$\{PROMPT_COMMAND\[@\]\}".*; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; pre=.*jobs -p.*; eval "\$t"; j=/);
+  assert.ok(!/eval "\$t" &/.test(bsh), 'the tool runs in the foreground, a direct child of the shell');
+  assert.equal(bsh.split('[ -n "$j" ] && fg %$j').length - 1, 25);
   assert.ok(!z.args.join(' ').includes('claude'), 'the tool name is never in the wrapper argv');
   assert.ok(!z.args[3].includes('%+') && !loginShellSpawn('/bin/bash', 'claude').args[3].includes('%+'), 'never resume %+');
   assert.match(loginShellSpawn('/usr/local/bin/bash', 'codex').args[3], /PROMPT_COMMAND.*exec '\/usr\/local\/bin\/bash' -l$/);

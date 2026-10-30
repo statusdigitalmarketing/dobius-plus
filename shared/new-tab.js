@@ -91,13 +91,12 @@ export function pickerShortcutIndex(e) {
 //   user's alias or function for it applies, as when typed.
 // - A tool suspended with Ctrl+Z is resumed (fg) rather than left stopped
 //   behind the replacement shell, where nothing could ever resume it.
-//   Never %+, which can name an rc file's background job. zsh: the tool runs
-//   in the foreground and a suspended job is resumed by number, read from
-//   zsh's own job table ($jobstates, no subshell), only if it did not exist
-//   before the tool started. bash: the tool starts as the job "eval ..." with
-//   a kept pid and is resumed by that name (%eval), in unrolled steps because
-//   bash abandons a loop whose foreground job stops (zsh would print job
-//   notices to the terminal for that form, bash prints none).
+//   The tool runs in the foreground (a direct child, as process checks
+//   expect) and only a suspended job that did not exist before it started is
+//   resumed, by number, never %+ (which can name an rc file's background job).
+//   zsh reads its job table from $jobstates (no subshell); bash reads
+//   `jobs -sl` and repeats the step unrolled, because bash abandons a loop
+//   whose foreground job stops.
 //   ponytail: 25 suspends per tool run; past that the tool is ended (bash)
 //   or left stopped (zsh) when the wrapper becomes a login shell.
 // Only zsh and bash are driven this way; any other shell opens plain.
@@ -114,8 +113,9 @@ export function loginShellSpawn(shell, startCommand) {
       + 'i=0; while (( i++ < 25 )); do s=(${(k)jobstates[(R)suspended*]}); s=(${s:|pre}); (( $#s )) || break; '
       + 'fg %$s[1] >/dev/null 2>&1; done;';
   } else if (name === 'bash') {
-    run = `for c in "\${PROMPT_COMMAND[@]}"; do eval "$c"; done; ${take} eval "$t" & p=$!; `
-      + 'kill -0 $p 2>/dev/null && fg %eval >/dev/null 2>&1; '.repeat(25).trim();
+    run = `for c in "\${PROMPT_COMMAND[@]}"; do eval "$c"; done; ${take} pre=" $(jobs -p | tr '\\n' ' ') "; eval "$t"; `
+      + ('j=$(jobs -sl 2>/dev/null | while read -r n p r; do [[ $pre == *" $p "* ]] && continue; '
+        + 'n=${n#[}; echo "${n%%]*}"; break; done); [ -n "$j" ] && fg %$j >/dev/null 2>&1; ').repeat(25).trim();
   } else {
     return plain;
   }
