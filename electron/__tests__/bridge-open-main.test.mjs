@@ -78,7 +78,7 @@ test('a window opened FOR a request is told so, once, so its first tab is the re
   const wc = env.windows.get('/p/fresh').win.webContents;
   assert.deepEqual(env.openedWindows, ['/p/fresh']);
   assert.equal(wc.askedFirst, true, 'the new window skips its default first tab');
-  assert.equal(env.invoke('window:openedForBridge', wc), false, 'answered once');
+  assert.equal(env.invoke('window:openedForBridge', wc), false, 'not after the request has its tab');
   // Exactly one tab was asked of it: the request's.
   assert.equal(wc.sent.filter(([ch]) => ch === 'bridge:openTab').length, 1);
 
@@ -88,6 +88,29 @@ test('a window opened FOR a request is told so, once, so its first tab is the re
   assert.equal(typeof again.tabId, 'string');
   assert.equal(env.invoke('window:openedForBridge', wc), false);
   assert.deepEqual(env.openedWindows, ['/p/fresh']);
+});
+
+test('a page reloaded while the request waits for it still makes no tab of its own', async () => {
+  let loads = 0;
+  env.windowFactory.make = () => {
+    const wc = projectWindow('/p/reload');
+    // First page: asks, then reloads before it reports ready; the second asks again.
+    const load = () => setTimeout(() => {
+      loads += 1;
+      const asked = env.invoke('window:openedForBridge', wc);
+      (wc.asks ||= []).push(asked);
+      if (loads === 1) setTimeout(load, 20); else wc.ready = true;
+    }, 0);
+    load();
+    return { webContents: wc };
+  };
+  windowReady = (wc) => wc.ready === true;
+  const opened = await deps.openTab('/p/reload');
+  assert.equal(typeof opened.tabId, 'string', JSON.stringify(opened));
+  const wc = env.windows.get('/p/reload').win.webContents;
+  assert.deepEqual(wc.asks, [true, true], 'both pages were told');
+  assert.equal(env.invoke('window:openedForBridge', wc), false);
+  windowReady = () => true;
 });
 
 test('a window answering with another project\'s tab id is refused, prefix lookalikes included', async () => {

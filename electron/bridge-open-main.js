@@ -215,9 +215,10 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // Windows /openTab opened (webContents ids). Such a window, starting with no
   // saved tabs, makes no first tab of its own: the request's tab (tool
   // claude) is its first, so one request never starts two tools (ProjectView
-  // asks once, while it restores its tabs).
+  // asks while it restores its tabs). Kept until the request ends, so a page
+  // reloaded meanwhile asks again and still makes no tab of its own.
   const openedForBridge = new Set();
-  ipcMain.handle('window:openedForBridge', (event) => openedForBridge.delete(event.sender.id));
+  ipcMain.handle('window:openedForBridge', (event) => openedForBridge.has(event.sender.id));
 
   // Requests main stopped waiting for: a window that answers one anyway
   // (it added the tab after main gave up) is told to drop that tab, so a
@@ -258,14 +259,21 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
         openedForBridge.add(opened);
       }
     }
+    try {
+      return await openTabIn(target, projectPath);
+    } finally {
+      // The request's tab exists now (or never will): the window decides
+      // its own first tab again from here on.
+      if (opened !== null) openedForBridge.delete(opened);
+    }
+  }
+
+  async function openTabIn(target, projectPath) {
     if (!target) return { error: 'could not open the project window' };
     const { win } = target;
     const wc = win.webContents;
     bringToFront(win);
-    const ready = await waitFor(() => wc.isDestroyed() || windowReady(wc), WINDOW_READY_MS);
-    // A ready window has read the flag (it does so before restoring tabs).
-    if (opened !== null) openedForBridge.delete(opened);
-    if (!ready || wc.isDestroyed()) {
+    if (!(await waitFor(() => wc.isDestroyed() || windowReady(wc), WINDOW_READY_MS)) || wc.isDestroyed()) {
       return { error: 'the project window did not finish loading' };
     }
     // A reload while we wait restarts the page's tab counter, so a tab the

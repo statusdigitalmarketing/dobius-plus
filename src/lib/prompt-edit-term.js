@@ -189,8 +189,10 @@ export function attachPromptEditing(term, send, held = () => {}) {
   function handleData(data) {
     const sel = armed;
     armed = null;
-    // Behind a running edit or a pending paste, this input waits.
-    const waits = busy || queue.length > 0;
+    // Behind a running edit or a pending paste this input waits, and on a
+    // selection it STARTS an edit, which waits on Claude's caret before its
+    // own keys go out (its first leg can be empty).
+    const waits = busy || queue.length > 0 || sel !== null;
     queue.push({ data, sel });
     if (waits) hold(data);
     pump();

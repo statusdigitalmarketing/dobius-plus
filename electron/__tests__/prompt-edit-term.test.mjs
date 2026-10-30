@@ -321,7 +321,18 @@ test('keys typed during a selection edit are reported as held', async () => {
   t.select(8, 13);
   t.type('X');
   t.type('\r');
-  assert.deepEqual(t.app.held, ['\r'], 'the Enter waits behind the edit');
+  assert.deepEqual(t.app.held, ['X', '\r'], 'the key that starts the edit, then the Enter behind it');
   await wait();
+  assert.equal(t.app.held.at(-1), null);
+});
+
+test('a key that starts a selection edit is reported before the edit sends anything', async () => {
+  const t = fakeClaude('hello world foo');
+  t.select(14, 17); // "foo", the caret already at its end: the first leg is empty
+  t.type(BS);
+  assert.deepEqual(t.app.writes, [], 'nothing reached the PTY yet');
+  assert.deepEqual(t.app.held, [BS]);
+  await wait();
+  assert.equal(t.app.text, 'hello world ');
   assert.equal(t.app.held.at(-1), null);
 });
