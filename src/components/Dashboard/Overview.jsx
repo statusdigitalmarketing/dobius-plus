@@ -43,10 +43,17 @@ export default function Overview({ stats, settings }) {
           <div className="text-xs" style={{ color: 'var(--dim)' }}>No active Claude processes</div>
         ) : (
           <div
-            className="rounded overflow-hidden"
+            className="rounded overflow-x-auto"
             style={{ border: '1px solid var(--border)' }}
           >
-            <table className="w-full text-xs">
+            {/* Fixed layout: the command cell truncates to whatever width is
+                left, so the kill buttons stay on screen in a narrow window. */}
+            <table className="w-full text-xs table-fixed">
+              <colgroup>
+                <col style={{ width: 88 }} />
+                <col />
+                <col style={{ width: 76 }} />
+              </colgroup>
               <thead>
                 <tr style={{ backgroundColor: 'var(--surface)' }}>
                   <th className="text-left px-3 py-1.5 font-medium" style={{ color: 'var(--dim)' }}>PID</th>
@@ -108,10 +115,10 @@ function ProcessRow({ process: p, onKilled }) {
         backgroundColor: confirm ? 'rgba(248,81,73,0.05)' : 'transparent',
       }}
     >
-      <td className="px-3 py-1.5" style={{ color: 'var(--accent)', fontFamily: "'SF Mono', monospace" }}>
+      <td className="px-3 py-1.5" style={{ color: 'var(--accent)', fontFamily: "'SF Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {p.pid}
       </td>
-      <td className="px-3 py-1.5" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace", maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      <td className="px-3 py-1.5" style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace", overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.command}>
         {p.command}
       </td>
       <td className="px-3 py-1.5 text-right">

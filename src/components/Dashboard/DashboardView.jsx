@@ -115,18 +115,23 @@ export default function DashboardView() {
   useEffect(() => () => { jumpSeq.current++; }, []);
 
   // Settings renders its sections only after its async settings load (and after
-  // the page transition), so wait briefly for the anchor instead of no-oping.
+  // the page transition), so wait for the anchor instead of no-oping. Leaving
+  // the page cancels the wait; the 30s cap only stops a page that never loads.
   const jumpToSettingsSection = (id) => {
     const mine = ++jumpSeq.current;
     let tries = 0;
+    let settles = 0;
+    let landedAt = null; // scrollTop as our last jump left it
     const attempt = () => {
       if (mine !== jumpSeq.current) return;
       const box = contentRef.current;
       const el = box?.querySelector(settingsSectionSelector(id));
       if (!el) {
-        if (++tries < 30) setTimeout(attempt, 100);
+        if (++tries < 300) setTimeout(attempt, 100);
         return;
       }
+      // The user scrolled since our jump: their position wins.
+      if (landedAt !== null && box.scrollTop !== landedAt) return;
       box.scrollTo({
         top: sectionScrollTop({
           scrollTop: box.scrollTop,
@@ -134,10 +139,14 @@ export default function DashboardView() {
           elTop: el.getBoundingClientRect().top,
         }),
         // Instant, not smooth: Settings' sections are still growing as their
-        // data loads, and a smooth scroll aims at a target that moves under
-        // it. After an instant jump, scroll anchoring holds the section put.
+        // data loads, and a smooth scroll aims at a target that moves under it.
         behavior: 'auto',
       });
+      landedAt = box.scrollTop;
+      // Rows that load above the section (accounts, Google accounts) can push
+      // it down, and scroll anchoring is off during the page's entrance
+      // animation, so re-aim a few times over the next ~1.5s.
+      if (settles < 4) setTimeout(attempt, [150, 300, 500, 600][settles++]);
     };
     attempt();
   };
