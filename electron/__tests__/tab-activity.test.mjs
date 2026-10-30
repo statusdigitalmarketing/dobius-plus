@@ -6,8 +6,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { tabActivityLabel, formatDuration, WORKING_MIN_MS } from '../../src/lib/tab-activity.js';
 import * as ts from '../terminal-status.js';
-import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds } from '../claude-presence.js';
+import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds, createTabActivity } from '../claude-presence.js';
 import { classifyClaudeProcess } from '../claude-argv.js';
+import { isProvenClaudeCommand } from '../claude-process-scan.js';
 
 const NOW = 10_000_000;
 const base = { live: true, status: 'idle', hookOwned: false, since: null, lastTurnMs: 0, background: null, unread: false, now: NOW };
@@ -423,4 +424,72 @@ test('a hook turn main cannot see a claude for shows the age, not an older Done'
   assert.equal(label({ ...r, live: true, unread: true }), null);
   // Without the doubt flag the unread fallback would have said Done 2m.
   assert.equal(label({ ...r, uncertain: false, live: true, unread: true }).text, 'Done 2m');
+});
+
+const makeActivity = (over = {}) => createTabActivity({
+  status: ts,
+  claudeInfo: async () => null,
+  backgroundForTab: async () => 'agents',
+  unreadAnywhere: () => false,
+  now: () => 1_000_000,
+  ...over,
+});
+
+test('tab activity: no claude left means no Waiting, whatever a cached presence says', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 900_000);
+  ts.ingest(ID, mk('done'), 950_000);
+  const { tabActivity } = makeActivity({ claudeInfo: async () => null });
+  assert.equal((await tabActivity(ID)).activity.background, null);
+  const withClaude = makeActivity({ claudeInfo: async () => ({ pid: 1, startedAt: 100_000 }) });
+  assert.equal((await withClaude.tabActivity(ID)).activity.background, 'agents');
+});
+
+test('tab activity: a turn that ends while the process check runs loses the disproved length', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000); // claude A, died without Stop
+  ts.ingest(ID, mk('working'), 45_000); // claude B (started 40s)
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => { ts.ingest(ID, mk('done'), 65_000); return { pid: 2, startedAt: 40_000 }; },
+    now: () => 66_000,
+  });
+  await tabActivity(ID);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+});
+
+test('tab activity: the turn-end check catches a merged length with no sidebar open', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  const before = ts.turnEndedAtFor(ID);
+  ts.ingest(ID, mk('done'), 65_000);
+  assert.notEqual(ts.turnEndedAtFor(ID), before);
+  const { checkTurnAgainstProcess } = makeActivity({ claudeInfo: async () => ({ pid: 2, startedAt: 40_000 }) });
+  await checkTurnAgainstProcess(ID, ts.activityFor(ID));
+  // Later, with B gone, nothing can re-prove it, and nothing brings it back.
+  assert.equal(reconcileWithProcess(ts.activityFor(ID), null).lastTurnMs, 0);
+});
+
+test('reconcile: stale hook state under a new claude is uncertain (it may work without hooks)', () => {
+  const r = reconcileWithProcess({ status: 'working', hookOwned: true, since: 50_000, lastTurnMs: 30_000, turnEndedAt: 40_000, lastMarkerAt: 50_000 }, { pid: 3, startedAt: 100_000 });
+  assert.equal(r.uncertain, true);
+  assert.equal(label({ ...r, live: true, unread: true }), null);
+});
+
+test('the unique lookup needs a PROVEN claude: a path token that is a directory is not one', async () => {
+  const fsMod = await import('node:fs');
+  const os = await import('node:os');
+  const pathMod = await import('node:path');
+  const dir = fsMod.mkdtempSync(pathMod.join(os.tmpdir(), 'proven-'));
+  try {
+    fsMod.mkdirSync(pathMod.join(dir, 'claude'));           // `/tmp/x/claude tools/...` reads as /tmp/x/claude
+    assert.equal(await isProvenClaudeCommand(`node ${dir}/claude tools/sleep.js`), false);
+    fsMod.writeFileSync(pathMod.join(dir, 'bin-claude'), '');
+    fsMod.mkdirSync(pathMod.join(dir, 'bin'));
+    fsMod.renameSync(pathMod.join(dir, 'bin-claude'), pathMod.join(dir, 'bin', 'claude'));
+    assert.equal(await isProvenClaudeCommand(`${dir}/bin/claude --resume abc`), true);
+    assert.equal(await isProvenClaudeCommand('claude'), true, 'a bare name cannot be checked');
+    assert.equal(await isProvenClaudeCommand(`node /tmp/watcher.js ${dir}/bin/claude`), false);
+  } finally {
+    fsMod.rmSync(dir, { recursive: true, force: true });
+  }
 });

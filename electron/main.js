@@ -26,7 +26,7 @@ import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses, configDirOfPid } from './claude-process-scan.js';
-import { createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds, GRACE_MS as PRESENCE_GRACE_MS } from './claude-presence.js';
+import { createPresenceReader, createTabActivity, cachedPerTab, boundedIds } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
@@ -233,44 +233,12 @@ const ownerCleanup = createOwnerCleanup(terminalOwners);
 // mirrored from each window, keyed by webContents.id.
 const unreadByWindow = new Map();
 const claudeInfoCached = cachedPerTab((id) => getTerminalClaudeInfo(id, { unique: true }), 2500);
-const backgroundForTab = createPresenceReader({ claudeInfo: claudeInfoCached, configDirOf: configDirOfPid });
-
-/**
- * Sidebar status for one tab: main's hook status + turn timing, background
- * work once a turn has ended, and whether any window that OWNS the PTY has it
- * unread. Null when no PTY runs for the id (a closed tab shows its age).
- */
-async function tabActivity(id) {
-  const raw = terminalStatus.activityFor(id);
-  if (!raw) return null;
-  // Only tabs that ever had hook state need the process check; a plain shell
-  // costs nothing.
-  const a = (raw.hookOwned || raw.lastTurnMs)
-    ? reconcileWithProcess(raw, await claudeInfoCached(id))
-    : raw;
-  // Remember what the process check disproved (see distrustTurnStart).
-  if (raw.since && !a.since && a.status === raw.status) terminalStatus.distrustTurnStart(id, raw.since);
-  if (raw.lastTurnMs && !a.lastTurnMs) terminalStatus.distrustLastTurn(id, raw.turnEndedAt);
-  let background = null;
-  // Only after the HOOK ended a turn, so a session with hooks off (or a plain
-  // shell) never gets a Waiting it cannot prove. A hook-owned 'working' is a
-  // new turn (Working wins anyway); plain output after the turn (typing at
-  // the prompt) still asks.
-  if (a.turnEndedAt && a.status !== 'needs' && !(a.status === 'working' && a.hookOwned)
-      && Date.now() - a.turnEndedAt >= PRESENCE_GRACE_MS) {
-    background = await backgroundForTab(id, a.turnEndedAt);
-    // The lookup awaited: if a new turn started (or this one's end changed)
-    // meanwhile, the presence file may describe that turn instead.
-    const after = terminalStatus.activityFor(id);
-    if (!after || after.turnEndedAt !== a.turnEndedAt || after.status === 'needs'
-        || (after.status === 'working' && after.hookOwned)) {
-      return after
-        ? { id, activity: { ...reconcileWithProcess(after, await claudeInfoCached(id)), background: null }, unread: unreadAnywhere(id) }
-        : null;
-    }
-  }
-  return { id, activity: { ...a, background }, unread: unreadAnywhere(id) };
-}
+const { tabActivity, checkTurnAgainstProcess } = createTabActivity({
+  status: terminalStatus,
+  claudeInfo: claudeInfoCached,
+  backgroundForTab: createPresenceReader({ claudeInfo: claudeInfoCached, configDirOf: configDirOfPid }),
+  unreadAnywhere: (id) => unreadAnywhere(id),
+});
 
 function unreadAnywhere(id) {
   for (const [wcId, ids] of unreadByWindow) {
@@ -3515,7 +3483,17 @@ app.whenReady().then(() => {
   // are tracked centrally for the mobile board, and settle idle tabs on a 1s
   // tick like the renderer's useTabActivity.
   addTerminalObserver({
-    onData: (id, data) => terminalStatus.ingest(id, data),
+    onData: (id, data) => {
+      const endedBefore = terminalStatus.turnEndedAtFor(id);
+      terminalStatus.ingest(id, data);
+      // A turn just ended: check it against the claude NOW, while the process
+      // that ran it is most likely still there, so a length spanning two
+      // claudes is caught even when no sidebar is asking.
+      if (terminalStatus.turnEndedAtFor(id) !== endedBefore) {
+        const raw = terminalStatus.activityFor(id);
+        if (raw) checkTurnAgainstProcess(id, raw).catch(() => {});
+      }
+    },
     onExit: (id, info) => terminalStatus.noteExit(id, info),
     onSpawn: (id) => terminalStatus.forget(id),
   });

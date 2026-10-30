@@ -83,6 +83,7 @@ export function ingest(id, data, now = Date.now()) {
       // Only a running turn ends here; Claude's idle-prompt re-send of 'done'
       // must not move the end (the length is measured back from it).
       if (st.turnStartedAt) {
+        st.lastTurnStartedAt = st.turnStartedAt;
         // A start shown to predate the claude now running is not this turn's.
         st.lastTurnMs = st.turnStartDistrusted ? 0 : Math.max(0, now - st.turnStartedAt);
         st.turnEndedAt = now;
@@ -177,9 +178,20 @@ export function activityFor(id) {
  */
 export function distrustTurnStart(id, since) {
   const st = live.get(id);
-  if (st && since && (st.turnStartedAt === since || (!st.turnStartedAt && st.workingSince === since))) {
+  if (!st || !since) return;
+  if (st.turnStartedAt === since) {
+    st.turnStartDistrusted = true;
+  } else if (!st.turnStartedAt && st.lastTurnStartedAt === since) {
+    // That turn ended while the check ran: its length is the disproved one.
+    st.lastTurnMs = 0;
+  } else if (!st.turnStartedAt && st.workingSince === since) {
     st.turnStartDistrusted = true;
   }
+}
+
+/** When the hook last ended a turn here (0 = never). Cheap, for the data path. */
+export function turnEndedAtFor(id) {
+  return live.get(id)?.turnEndedAt || 0;
 }
 export function distrustLastTurn(id, turnEndedAt) {
   const st = live.get(id);

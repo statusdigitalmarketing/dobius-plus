@@ -237,6 +237,19 @@ async function inspect(pid) {
 }
 
 /**
+ * True only when a ps command line is PROVABLY a claude process: classified
+ * 'claude' and, when the verdict rests on a path, that path is a file. ps does
+ * not quote, so `node "/tmp/claude tools/x.js"` reads as the path /tmp/claude
+ * (a directory). A bare name went through PATH and cannot be checked here.
+ */
+export async function isProvenClaudeCommand(command) {
+  const { kind, token } = classifyClaudeProcess(command);
+  if (kind !== 'claude') return false;
+  if (!token || !token.includes('/')) return true;
+  try { return (await fsp.stat(token)).isFile(); } catch { return false; }
+}
+
+/**
  * The config dir ONE known Claude process reads, or null when it cannot be
  * proven (same rules as the scan: an unreadable or ambiguous binding is never
  * guessed to be the default). Read-only.

@@ -1,6 +1,7 @@
 import pty from 'node-pty';
 import { isTerminalReply, createVisibleOutputScanner } from './terminal-reply.js';
-import { isClaudeCommand, classifyClaudeProcess } from './claude-argv.js';
+import { isClaudeCommand } from './claude-argv.js';
+import { isProvenClaudeCommand } from './claude-process-scan.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -547,7 +548,7 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
       // `unique` callers act on the answer, so a command that only NAMES the
       // CLI (`node watcher.js /path/claude`) makes the shell ambiguous rather
       // than counting as the claude.
-      if (unique && classifyClaudeProcess(command).kind !== 'claude') return null;
+      if (unique && !(await isProvenClaudeCommand(command))) return null;
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);

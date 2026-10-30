@@ -89,8 +89,10 @@ export function reconcileWithProcess(a, info) {
     // prompt and send a hook marker within one second of starting, so anything
     // inside the second it started in also came before it.
     const before = (t) => t < info.startedAt + 1000;
+    // This claude may be working without hooks, so no label at all (not an
+    // older turn's Done either).
     if (out.hookOwned && out.lastMarkerAt && before(out.lastMarkerAt)) {
-      Object.assign(out, { status: 'idle', hookOwned: false, since: null });
+      Object.assign(out, { status: 'idle', hookOwned: false, since: null, uncertain: true });
     }
     // This claude did not run the whole stretch, so its clock is unknown.
     if (out.since && before(out.since)) out.since = null;
@@ -215,4 +217,64 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
         ? found.value : null
     ));
   };
+}
+
+/**
+ * Sidebar status for one tab, as main serves it on tabs:activity: the hook
+ * status and turn timing checked against the claude in the tab, background
+ * work once a turn has ended, and whether a window that owns the PTY has it
+ * unread. Dependencies are injected so this is tested without Electron.
+ * @param {object} deps
+ * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function}} deps.status
+ * @param {(id:string)=>Promise<object|null>} deps.claudeInfo
+ * @param {(id:string, turnEndedAt:number)=>Promise<string|null>} deps.backgroundForTab
+ * @param {(id:string)=>boolean} deps.unreadAnywhere
+ * @param {()=>number} [deps.now]
+ */
+export function createTabActivity({ status, claudeInfo, backgroundForTab, unreadAnywhere, now = Date.now }) {
+  /**
+   * Check a tab's hook record against the claude running in it and remember
+   * what that disproves (terminal-status distrustTurnStart). Returns the
+   * claude info (null = none), or undefined when the record has no hook state
+   * to check (a plain shell costs nothing).
+   */
+  async function checkTurnAgainstProcess(id, raw) {
+    if (!raw.hookOwned && !raw.lastTurnMs) return undefined;
+    const info = await claudeInfo(id);
+    const a = reconcileWithProcess(raw, info);
+    if (raw.since && !a.since && a.status === raw.status) status.distrustTurnStart(id, raw.since);
+    if (raw.lastTurnMs && !a.lastTurnMs) status.distrustLastTurn(id, raw.turnEndedAt);
+    return info;
+  }
+
+  /** Null when no PTY runs for the id (a closed tab shows its age). */
+  async function tabActivity(id) {
+    const raw = status.activityFor(id);
+    if (!raw) return null;
+    const info = await checkTurnAgainstProcess(id, raw);
+    const a = info === undefined ? raw : reconcileWithProcess(raw, info);
+    let background = null;
+    // Only after the HOOK ended a turn, so a session with hooks off (or a
+    // plain shell) never gets a Waiting it cannot prove. A hook-owned
+    // 'working' is a new turn (Working wins anyway); plain output after the
+    // turn (typing at the prompt) still asks. And only while a claude is
+    // there: with none, a presence answer cached a moment ago describes a
+    // process that is gone.
+    if (info && a.turnEndedAt && a.status !== 'needs' && !(a.status === 'working' && a.hookOwned)
+        && now() - a.turnEndedAt >= GRACE_MS) {
+      background = await backgroundForTab(id, a.turnEndedAt);
+      // The lookup awaited: if a new turn started (or this one's end changed)
+      // meanwhile, the presence file may describe that turn instead.
+      const after = status.activityFor(id);
+      if (!after || after.turnEndedAt !== a.turnEndedAt || after.status === 'needs'
+          || (after.status === 'working' && after.hookOwned)) {
+        return after
+          ? { id, activity: { ...reconcileWithProcess(after, await claudeInfo(id)), background: null }, unread: unreadAnywhere(id) }
+          : null;
+      }
+    }
+    return { id, activity: { ...a, background }, unread: unreadAnywhere(id) };
+  }
+
+  return { tabActivity, checkTurnAgainstProcess };
 }
