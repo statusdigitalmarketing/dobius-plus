@@ -61,7 +61,7 @@ export function ingest(id, data, now = Date.now()) {
   if (!st) {
     st = {
       status: 'working', lastActivityAt: now, hookOwned: false, doneAt: 0, tail: '',
-      workingSince: now, turnStartedAt: 0, lastTurnMs: 0, turnEndedAt: 0,
+      workingSince: now, turnStartedAt: 0, lastTurnMs: 0, turnEndedAt: 0, lastMarkerAt: 0,
     };
     live.set(id, st);
   }
@@ -78,10 +78,15 @@ export function ingest(id, data, now = Date.now()) {
   while ((m = MARKER_RE.exec(combined)) !== null) {
     lastMatch = m;
     const state = m[1];
+    st.lastMarkerAt = now;
     if (state === 'done') {
-      if (st.turnStartedAt) st.lastTurnMs = Math.max(0, now - st.turnStartedAt);
+      // Only a running turn ends here; Claude's idle-prompt re-send of 'done'
+      // must not move the end (the length is measured back from it).
+      if (st.turnStartedAt) {
+        st.lastTurnMs = Math.max(0, now - st.turnStartedAt);
+        st.turnEndedAt = now;
+      }
       st.turnStartedAt = 0;
-      st.turnEndedAt = now;
     } else if (!st.turnStartedAt) {
       st.turnStartedAt = now;
     }
@@ -156,6 +161,7 @@ export function activityFor(id) {
     since: inStretch ? (st.turnStartedAt || (st.status === 'working' ? st.workingSince : 0) || null) : null,
     lastTurnMs: st.lastTurnMs || 0,
     turnEndedAt: st.turnEndedAt || 0,
+    lastMarkerAt: st.lastMarkerAt || 0,
   };
 }
 

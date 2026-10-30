@@ -258,8 +258,6 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
               <div className="pb-1">
                 {g.tabs.map((t) => {
                   const live = liveHere(g.path, t.id);
-                  const status = (live ? tabStatus[t.id] : t.status) || 'idle';
-                  const dot = STATUS_COLORS[status] || 'var(--dim)';
                   // A PTY runs for the tab only if main says so (a tab still
                   // listed here can have an exited shell). Status and timing
                   // come from main, where the hook markers are recorded for
@@ -268,6 +266,11 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                   // this window's own for its tabs, main's mirror for others.
                   const row = activity.get(t.id);
                   const a = row?.activity;
+                  // Dot: this window's tabs keep the store (it also carries
+                  // auto-resume's queued state); another window's live tab
+                  // uses main's hook status rather than a transcript guess.
+                  const status = (live ? tabStatus[t.id] : (a?.status || t.status)) || 'idle';
+                  const dot = STATUS_COLORS[status] || 'var(--dim)';
                   const label = tabActivityLabel({
                     live: !!a,
                     status: a?.status,

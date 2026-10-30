@@ -123,7 +123,8 @@ test('plain output stretch: since is when output started, no turn recorded', () 
 const LSTART = 'Tue Oct 27 13:39:54 2026';
 const proc = { pid: 4242, startedAt: Date.parse(LSTART) };
 const END = Date.parse(LSTART) + 60_000; // the hook ended a turn a minute in
-const rec = (over) => ({ pid: 4242, procStart: LSTART, status: 'idle', ...over });
+// statusUpdatedAt: the CLI wrote this state when the turn started, before it ended.
+const rec = (over) => ({ pid: 4242, procStart: LSTART, status: 'idle', statusUpdatedAt: Date.parse(LSTART) + 500, ...over });
 
 test('presence: shell -> shells, busy -> agents, else nothing', () => {
   assert.equal(backgroundFromPresence(rec({ status: 'shell' }), proc), 'shells');
@@ -302,4 +303,62 @@ test('cachedPerTab shares a pending call and expires', async () => {
   assert.equal(calls, 2);
   const g = cachedPerTab(async () => { throw new Error('x'); }, 2500, () => 0);
   assert.equal(await g('a'), null, 'a failed lookup is no answer, never a throw');
+});
+
+test('presence reader: busy written AFTER the turn ended is a new foreground turn, not Waiting', async () => {
+  let written = Date.parse(LSTART) + 500;
+  const read = createPresenceReader({
+    claudeInfo: async () => proc,
+    configDirOf: async () => '/cfg',
+    readFile: async () => JSON.stringify(rec({ status: 'busy', statusUpdatedAt: written })),
+    now: () => 0,
+  });
+  assert.equal(await read('a', END), 'agents');
+  written = END + 5000;
+  assert.equal(await read('a', END + 1), null);
+  // Missing timestamp: cannot prove it, so no claim.
+  const r2 = createPresenceReader({
+    claudeInfo: async () => proc, configDirOf: async () => '/cfg', now: () => 0,
+    readFile: async () => JSON.stringify(rec({ status: 'busy', statusUpdatedAt: undefined })),
+  });
+  assert.equal(await r2('a', END), null);
+  // A background shell is written at the turn's end or later, so no such rule.
+  const r3 = createPresenceReader({
+    claudeInfo: async () => proc, configDirOf: async () => '/cfg', now: () => 0,
+    readFile: async () => JSON.stringify(rec({ status: 'shell', statusUpdatedAt: END + 200 })),
+  });
+  assert.equal(await r3('a', END), 'shells');
+});
+
+test('reconcile: hook state left by a claude that died is not the new claude\'s', () => {
+  const info = { pid: 2, startedAt: 100_000 };
+  // A's permission prompt at 50s, A died, B (hooks off) started at 100s.
+  const stale = reconcileWithProcess({ status: 'needs', hookOwned: true, since: 40_000, lastTurnMs: 0, turnEndedAt: 0, lastMarkerAt: 50_000 }, info);
+  assert.deepEqual([stale.status, stale.hookOwned], ['idle', false]);
+  // B (hooks on) sent its own working marker at 110s: still Working, A's start dropped.
+  const own = reconcileWithProcess({ status: 'working', hookOwned: true, since: 40_000, lastTurnMs: 0, turnEndedAt: 0, lastMarkerAt: 110_000 }, info);
+  assert.deepEqual([own.status, own.hookOwned, own.since], ['working', true, null]);
+});
+
+test('an idle-prompt re-send does not move the turn end', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 40_000);
+  ts.ingest(ID, mk('done'), 100_000);
+  const a = ts.activityFor(ID);
+  assert.deepEqual([a.lastTurnMs, a.turnEndedAt, a.lastMarkerAt], [30_000, 40_000, 100_000]);
+});
+
+test('a slow lookup is shared past its ttl, never run twice at once', async () => {
+  let t = 0;
+  let calls = 0;
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const f = cachedPerTab(async () => { calls += 1; await gate; return 'x'; }, 2500, () => t);
+  const p1 = f('a');
+  t = 8000; // far past the ttl, first call still running
+  const p2 = f('a');
+  release();
+  assert.deepEqual(await Promise.all([p1, p2]), ['x', 'x']);
+  assert.equal(calls, 1);
 });

@@ -21,6 +21,10 @@
 //     a plain turn is never read as background work
 //   - the claude process must have been running when that turn ended: a
 //     later claude in the same shell (hooks off, say) never inherits it
+// Accepted residual: two claudes taking turns in ONE shell through job control
+// (one suspended with Ctrl+Z mid-turn, another run and exited) leave a busy
+// file that cannot be told apart from delegated work; the label may say
+// Waiting for the suspended one. Two claudes alive together answer nothing.
 // Accepted residual: the config dir is parsed from the process environment
 // with the same rules as the account scan, so a CLAUDE_CONFIG_DIR=... string
 // embedded in ANOTHER variable's value, naming a directory that holds a planted
@@ -75,8 +79,14 @@ export function reconcileWithProcess(a, info) {
     return out;
   }
   if (Number.isFinite(info.startedAt)) {
-    // ps truncates the start DOWN, so a start after the turn's start proves
-    // this claude did not run the whole stretch.
+    // ps truncates the start DOWN, so a start after a time proves this claude
+    // was not running then. A hook state whose last marker came before this
+    // claude started was left by an earlier one (it died without Stop): it is
+    // not this claude's Input or Working.
+    if (out.hookOwned && out.lastMarkerAt && out.lastMarkerAt < info.startedAt) {
+      Object.assign(out, { status: 'idle', hookOwned: false, since: null });
+    }
+    // This claude did not run the whole stretch, so its clock is unknown.
     if (out.since && info.startedAt > out.since) out.since = null;
     if (out.lastTurnMs && info.startedAt > out.turnEndedAt - out.lastTurnMs) out.lastTurnMs = 0;
   }
@@ -92,11 +102,15 @@ export function cachedPerTab(fn, ttlMs, now = Date.now) {
   return (id) => {
     const t = now();
     const hit = cache.get(id);
-    if (hit && t - hit.at < ttlMs) return hit.pending;
-    const pending = Promise.resolve().then(() => fn(id)).catch(() => null);
-    cache.set(id, { at: t, pending });
+    // A lookup still running is shared however long it takes, so a slow one
+    // never has a second started beside it.
+    if (hit && (!hit.settled || t - hit.at < ttlMs)) return hit.pending;
+    const entry = { at: t, settled: false, pending: null };
+    entry.pending = Promise.resolve().then(() => fn(id)).catch(() => null)
+      .finally(() => { entry.settled = true; entry.at = now(); });
+    cache.set(id, entry);
     if (cache.size > 512) cache.delete(cache.keys().next().value);
-    return pending;
+    return entry.pending;
   };
 }
 
@@ -146,7 +160,7 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
     try { rec = JSON.parse(await read(path.join(dir, 'sessions', `${info.pid}.json`))); }
     catch { return null; } // CLI without presence files, or mid-rewrite: no claim
     const value = backgroundFromPresence(rec, info);
-    return value ? { value, startedAt: info.startedAt } : null;
+    return value ? { value, startedAt: info.startedAt, statusUpdatedAt: rec.statusUpdatedAt } : null;
   }
 
   /**
@@ -165,17 +179,24 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
     // reused only for the SAME turn, so an answer read while a new turn was
     // running can never be served once that turn has ended.
     let hit = cache.get(tabId);
-    if (!hit || hit.turnEndedAt !== turnEndedAt || t - hit.at >= CACHE_MS) {
-      const pending = resolve(tabId).catch((err) => {
+    if (!hit || hit.turnEndedAt !== turnEndedAt || (hit.settled && t - hit.at >= CACHE_MS)) {
+      const entry = { at: t, turnEndedAt, settled: false, pending: null };
+      entry.pending = resolve(tabId).catch((err) => {
         console.warn('[claude-presence] lookup failed', tabId, err?.message);
         return null;
-      });
-      hit = { at: t, turnEndedAt, pending };
+      }).finally(() => { entry.settled = true; entry.at = now(); });
+      hit = entry;
       cache.set(tabId, hit);
       if (cache.size > 512) cache.delete(cache.keys().next().value);
     }
     return hit.pending.then((found) => (
-      found && Number.isFinite(found.startedAt) && found.startedAt + 1000 <= turnEndedAt ? found.value : null
+      found && Number.isFinite(found.startedAt) && found.startedAt + 1000 <= turnEndedAt
+        // 'busy' after a turn means delegated work that was ALREADY running:
+        // the CLI wrote busy when the turn started and has not changed it
+        // since. A busy written after the turn ended is a new foreground turn
+        // (one the hook never reported, e.g. a claude without hooks).
+        && (found.value !== 'agents' || (Number.isFinite(found.statusUpdatedAt) && found.statusUpdatedAt <= turnEndedAt))
+        ? found.value : null
     ));
   };
 }
