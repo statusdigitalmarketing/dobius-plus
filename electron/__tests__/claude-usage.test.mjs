@@ -364,4 +364,20 @@ check('the chained command can be read back out of any generated script', () => 
   assert.equal(chainFromScript(undefined), undefined);
 });
 
+// The statusLine switches must stay UNDECLARED in the settings defaults: the
+// launch logic (main.js settleUsage, the model line's first install) reads
+// undefined as "never decided", and getSettings() merges the defaults in.
+{
+  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-usage-defaults-'));
+  process.env.DOBIUS_TEST_USERDATA = ud;
+  const { getSettings } = await import('../config-manager.js');
+  const s = getSettings();
+  check('the statusLine switches have no default, so a fresh install still decides them', () => {
+    assert.equal(s.newTabTool, 'claude', 'read from the defaults');
+    assert.equal('usageReporting' in s, false);
+    assert.equal('modelUnderPrompt' in s, false);
+  });
+  fs.rmSync(ud, { recursive: true, force: true });
+}
+
 console.log(`\nALL PASS  (${pass} passed)`);

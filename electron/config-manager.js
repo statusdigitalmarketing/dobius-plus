@@ -46,6 +46,12 @@ const DEFAULT_CONFIG = {
     newTabTool: 'claude',
     // Projects left out of the New Tab picker (real paths).
     newTabHiddenProjects: [],
+    // NOT declared here on purpose: usageReporting and modelUnderPrompt (the
+    // two switches of the shared statusLine, main.js). Their launch logic
+    // reads UNDEFINED as "never decided": usageReporting is then settled once
+    // from what settings.json shows (an older build's install meant usage on)
+    // and modelUnderPrompt installs the model line once. getSettings() merges
+    // these defaults in, so a default would skip both for good.
   },
   mobileServer: {
     // On by default (v1.0.77, Sam: "ALWAYS DEFAULTS TO ON"). Only an explicit
