@@ -219,7 +219,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     const promptEdit = attachPromptEditing(
       term,
       (data, opts) => window.electronAPI.terminalWrite(id, data, opts),
-      (data) => window.electronAPI.terminalInputHeld?.(id, data),
+      (data, dropped) => window.electronAPI.terminalInputHeld?.(id, data, dropped === true),
     );
     promptEditRef.current = promptEdit;
     const inputDisposable = term.onData((data) => promptEdit.handleData(data));

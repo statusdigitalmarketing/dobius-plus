@@ -200,14 +200,16 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     return true;
   };
   const heldHooked = new WeakSet();
-  ipcMain.on('terminal:inputHeld', (event, id, data) => {
+  ipcMain.on('terminal:inputHeld', (event, id, data, dropped) => {
     const wc = event.sender;
     if (typeof id !== 'string') return;
     // The release comes from the window that holds, even once the tab has
     // moved to another window (a tear-off claims the PTY before the old pane
     // is gone); only a new hold needs the tab's current owner.
     if (data === null) {
-      dropHold(id, wc.id);
+      // Some of it was thrown away (a tear-off, a timed-out paste): what
+      // reached the terminal is half of it, so Chat must not append to it.
+      if (dropHold(id, wc.id) && dropped === true) cancelQueuedSubmits(id);
       return;
     }
     if (getTerminalWebContentsId(id) !== wc.id || typeof data !== 'string' || !data) return;

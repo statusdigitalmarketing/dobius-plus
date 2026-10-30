@@ -427,6 +427,19 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.deepEqual(order, [PASTE('one'), '\r', 'x', '\r', PASTE('two'), '\r']);
   assert.ok(stamps[2] - stamps[1] >= 15 && stamps[3] - stamps[2] >= 15, `paced: ${stamps.map((t) => t - stamps[0])}`);
 
+  // An Enter this queue delivered late (a key that waited behind a submit)
+  // starts the same one-second window: the window that typed it could not
+  // see when it went out.
+  held = false;
+  reset(); ptys.set('h', {});
+  const s1 = submitPromptToTab('h', 'A');
+  for (const k of 'abcdefghijklmnopqrstuvwxyz') writeRawInput('h', k);
+  writeRawInput('h', '\r');
+  await s1;
+  await tick(1100); // A's Enter is over a second old; the queued Enter is not
+  writeRawInput('h', "\x1b[200~'/p/deploy.sh'\x1b[201~", () => true, { promptOnly: true });
+  assert.equal(writes.at(-1)[1], '\r', 'dropped: the queued Enter went out under a second ago');
+
   // A window that held input is gone with it half sent: a waiting submit is
   // cancelled, never appended to the half.
   const { cancelQueuedSubmits } = await import('../chat-service.js');

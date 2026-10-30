@@ -10,8 +10,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Terminal
   terminalCreate: (id, cwd, opts) => ipcRenderer.invoke('terminal:create', id, cwd, opts),
   terminalWrite: (id, data, opts) => ipcRenderer.send('terminal:write', id, data, opts),
-  // Input prompt editing holds back (data), or null once it all went out.
-  terminalInputHeld: (id, data) => ipcRenderer.send('terminal:inputHeld', id, data),
+  // Input prompt editing holds back (data), or null once it is all gone
+  // (dropped: some of it was thrown away rather than sent).
+  terminalInputHeld: (id, data, dropped) => ipcRenderer.send('terminal:inputHeld', id, data, dropped),
   chatPoll: (id, have) => ipcRenderer.invoke('chat:poll', id, have),
   chatSelector: (id) => ipcRenderer.invoke('chat:selector', id),
   chatImage: (sessionId, projectPath, ref) => ipcRenderer.invoke('chat:image', sessionId, projectPath, ref),

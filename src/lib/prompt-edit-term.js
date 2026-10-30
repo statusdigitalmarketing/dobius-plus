@@ -11,6 +11,7 @@ const STEP_TIMEOUT_MS = 800;
 const ARM_TTL_MS = 1000;     // a selection snapshot belongs to the key that took it
 const PASTE_WAIT_MS = 15000; // longest a pending image paste holds typing back
 const AFTER_ENTER_MS = 1000; // a paste waits this long after an Enter for the screen to catch up
+const QUEUED_KEY_GAP_MS = 20; // between inputs that waited in the queue (chat-service RAW_KEY_GAP_MS)
 const IS_MAC = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
 const MID_EDIT = Symbol('selection made while an edit was running');
 
@@ -50,10 +51,13 @@ const PROMPT_ONLY = Object.freeze({ promptOnly: true });
  * @param {import('@xterm/xterm').Terminal} term
  * @param {(data: string, opts?: { promptOnly: boolean }) => void} send writes to
  *   the PTY; promptOnly marks a paste meant only for Claude's prompt
- * @param {(data: string | null) => void} [held] input the queue HOLDS (behind
- *   an edit or a pending paste) reaches the PTY late, so nothing in main sees
- *   it yet: each such input is reported the moment it is accepted, and null
- *   once the queue has drained. /openTab counts it as a person typing.
+ * @param {(data: string | null, dropped?: boolean) => void} [held] input the
+ *   queue HOLDS (behind an edit or a pending paste) reaches the PTY late, so
+ *   nothing in main sees it yet: each such input is reported the moment it is
+ *   accepted, and null once the queue has drained, with dropped = true when
+ *   some of it was thrown away instead of sent (the prompt changed, a paste
+ *   timed out, the pane went away). /openTab counts it as a person typing;
+ *   Chat waits for it, and gives up its own send after a drop.
  */
 export function attachPromptEditing(term, send, held = () => {}) {
   // Everything bound for the PTY goes through one ordered queue: typed input
@@ -68,10 +72,11 @@ export function attachPromptEditing(term, send, held = () => {}) {
   let armed = null;
   let columnSelect = false; // xterm's Option+drag selects a rectangle, not a range
   let holding = false; // held input was reported and the drain was not yet
+  let dropped = false; // some held input was thrown away since the last drain
   const reserved = new Set(); // sends accepted elsewhere whose input is still to come
   const hold = (data) => { holding = true; held(data); };
   const drained = () => {
-    if (holding && !busy && !queue.length && !reserved.size) { holding = false; held(null); }
+    if (holding && !busy && !queue.length && !reserved.size) { holding = false; held(null, dropped); dropped = false; }
   };
   const app = () => !!term.modes.applicationCursorKeysMode;
 
@@ -186,9 +191,13 @@ export function attachPromptEditing(term, send, held = () => {}) {
         if (!(await run(queue.shift()))) {
           console.debug(`[prompt-edit] prompt changed under an edit or paste; ${queue.length} queued input(s) dropped`);
           queue.length = 0;
+          dropped = true;
           // A paced send still arriving loses its rest too, Enter included.
           for (const r of reserved) r.cancelled = true;
         }
+        // Input that waited goes out paced, as it was typed: in one burst
+        // Claude reads it as a paste, and an Enter in it as a new line.
+        if (queue.length && !disposed) await new Promise((r) => setTimeout(r, QUEUED_KEY_GAP_MS));
       }
     } finally {
       busy = false;
@@ -318,9 +327,10 @@ export function attachPromptEditing(term, send, held = () => {}) {
       disposed = true;
       for (const type of armEvents) el?.removeEventListener(type, arm, true);
       el?.removeEventListener('mousedown', onMouseDown, true);
+      const lost = dropped || busy || queue.length > 0 || reserved.size > 0;
       queue.length = 0;
       reserved.clear();
-      if (holding) { holding = false; held(null); }
+      if (holding) { holding = false; held(null, lost); }
     },
   };
 }

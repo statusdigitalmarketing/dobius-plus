@@ -170,8 +170,10 @@ export function cancelQueuedSubmits(id) {
 }
 const HELD_WAIT_MS = 16_000; // prompt editing gives up on a paste after 15s
 const HELD_POLL_MS = 50;
-// When each tab's last submit pressed Enter; a prompt-only paste arriving
-// within PROMPT_SETTLE_MS of it is dropped (writeRawInput).
+// When this queue last delivered an Enter to each tab (a submit's, or a key
+// that waited behind one: the window that typed it cannot see when it really
+// went out). A prompt-only paste arriving within PROMPT_SETTLE_MS of it is
+// dropped (writeRawInput).
 const lastSubmitEnterAt = new Map();
 const PROMPT_SETTLE_MS = 1000; // src/lib/prompt-edit-term.js AFTER_ENTER_MS
 // tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
@@ -275,6 +277,7 @@ async function drainSubmits(id, q) {
       await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
       if (it.gen !== q.gen || terminalInstance(id) !== it.pty || terminalClosing(id) || !it.stillOk()) { it.resolve(false); continue; }
       writeTerminal(id, it.raw);
+      if (it.raw.includes('\r')) lastSubmitEnterAt.set(id, Date.now());
       it.resolve(true);
       continue;
     }
@@ -288,6 +291,7 @@ async function drainSubmits(id, q) {
         await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
         const live = x.gen === q.gen && terminalInstance(id) === x.pty && !terminalClosing(id) && x.stillOk();
         if (live) writeTerminal(id, x.raw);
+        if (live && x.raw.includes('\r')) lastSubmitEnterAt.set(id, Date.now());
         x.resolve(live);
       }
       q.waitingHeld = true;

@@ -8,7 +8,7 @@ import { attachPromptEditing } from '../../src/lib/prompt-edit-term.js';
 // `exit()` replaces the prompt with a shell, as when Claude quits mid-edit.
 const COLS = 40;
 function fakeClaude(text, { placeholder = false } = {}) {
-  const app = { text, caret: text.length, alive: true, writes: [], submitted: null, held: [], promptOnly: [] };
+  const app = { text, caret: text.length, alive: true, writes: [], submitted: null, held: [], promptOnly: [], drops: [], times: [] };
   const parsed = new Set();
   const dom = {};
   let grid = [];
@@ -23,6 +23,7 @@ function fakeClaude(text, { placeholder = false } = {}) {
   const insert = (s) => { app.text = app.text.slice(0, app.caret) + s + app.text.slice(app.caret); app.caret += s.length; };
   const send = (data, opts) => {
     app.writes.push(data);
+    app.times.push(Date.now());
     if (opts?.promptOnly) app.promptOnly.push(data);
     if (!app.alive) return;
     let s = data;
@@ -74,7 +75,7 @@ function fakeClaude(text, { placeholder = false } = {}) {
     clearSelection: () => { selection = null; },
   };
   draw();
-  const edit = attachPromptEditing(term, send, (d) => app.held.push(d));
+  const edit = attachPromptEditing(term, send, (d, dropped) => { app.held.push(d); if (d === null) app.drops.push(dropped === true); });
   return {
     app,
     edit,
@@ -381,4 +382,41 @@ test('a pasted path is marked prompt-only, so main never delivers it late elsewh
   await wait(20);
   assert.deepEqual(t.app.promptOnly, ["\x1b[200~'/tmp/a.png'\x1b[201~"]);
   assert.ok(t.app.writes.includes('x'));
+});
+
+test('a drain that threw held input away says so; a full drain does not', async () => {
+  const t = fakeClaude('Describe ');
+  let resolve;
+  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
+  t.type('\r');
+  t.exit(); // the prompt goes away: the paste and the Enter are dropped
+  resolve("'/tmp/shot.png'");
+  await wait();
+  assert.deepEqual(t.app.drops, [true]);
+  const u = fakeClaude('ok');
+  u.edit.pasteWhenReady(Promise.resolve("'/tmp/a.png'"));
+  u.type('\r');
+  await wait();
+  assert.deepEqual(u.app.drops, [false]);
+});
+
+test('a pane that goes away while holding input reports the drop', async () => {
+  const t = fakeClaude('Describe ');
+  t.edit.pasteWhenReady(new Promise(() => {}));
+  t.type('\r');
+  t.edit.dispose();
+  assert.deepEqual(t.app.drops, [true]);
+});
+
+test('input that waited behind a paste goes out paced, not in one burst', async () => {
+  const t = fakeClaude('');
+  let resolve;
+  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
+  for (const k of ['h', 'i', '\r']) t.type(k);
+  resolve('X');
+  await wait();
+  const gaps = t.app.times.slice(1).map((x, i) => x - t.app.times[i]);
+  assert.equal(t.app.writes.length, 4, JSON.stringify(t.app.writes));
+  assert.ok(gaps.every((g) => g >= 15), `gaps ${gaps}`);
+  assert.equal(t.app.submitted, 'Xhi');
 });

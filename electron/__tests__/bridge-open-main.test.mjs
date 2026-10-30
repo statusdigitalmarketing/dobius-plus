@@ -55,7 +55,9 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
 
   assert.equal(deps.inputHeld(opened.tabId), true, 'Chat waits for it too');
   // The queue drained: no longer busy (the keys stay counted).
+  const c0 = env.cancelled.length;
   env.emit('terminal:inputHeld', wc, opened.tabId, null);
+  assert.equal(env.cancelled.length, c0, 'a full drain cancels nothing');
   assert.equal(deps.inputBusy(opened.tabId), false);
   assert.ok(watch.keys() > 0);
 
@@ -74,6 +76,13 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   env.emit('terminal:inputHeld', wc, opened.tabId, null);
   assert.equal(deps.inputBusy(opened.tabId), false, 'released by the window that held it');
   env.terminals.get(opened.tabId).wcId = wc.id;
+
+  // A drain that threw some of the input away cancels Chat's waiting sends.
+  env.emit('terminal:inputHeld', wc, opened.tabId, 'z');
+  const c1 = env.cancelled.length;
+  env.emit('terminal:inputHeld', wc, opened.tabId, null, true);
+  assert.deepEqual(env.cancelled.slice(c1), [opened.tabId]);
+  assert.equal(deps.inputBusy(opened.tabId), false);
 
   // A reload forgets a hold the old page never released.
   env.emit('terminal:inputHeld', wc, opened.tabId, 'x');
