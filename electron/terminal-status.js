@@ -85,8 +85,8 @@ export function ingest(id, data, now = Date.now()) {
       st.lastTurnMs = 0;
       st.turnEndedAt = now;
     }
+    const hookless = !!st.hooklessAfter;
     st.hooklessAfter = 0; // a hook spoke: whatever ran without one is over
-    st.ambiguousMarker = 0; // and a new marker is a new state to judge
     if (state === 'done') {
       // Only a running turn ends here; Claude's idle-prompt re-send of 'done'
       // must not move the end (the length is measured back from it).
@@ -100,7 +100,18 @@ export function ingest(id, data, now = Date.now()) {
       st.turnStartDistrusted = false;
     } else if (!st.turnStartedAt) {
       st.turnStartedAt = now;
-      st.turnStartDistrusted = false;
+      // A turn's clock is trusted only when this marker really is its start:
+      // not when it began without a marker (a hookless turn running, or a
+      // 'needs' with no UserPromptSubmit/PreToolUse before it), and not while
+      // two claudes may share the tab.
+      st.turnStartDistrusted = hookless || state === 'needs' || !!st.ambiguous;
+      // Ambiguity ends only with a turn that starts after main saw ONE
+      // claude; even that first turn may be a continuation, so it stays
+      // distrusted above.
+      if (st.ambiguous && st.uniqueSince && now > st.uniqueSince) {
+        st.ambiguous = false;
+        st.uniqueSince = 0;
+      }
     }
   }
 
@@ -180,7 +191,7 @@ export function activityFor(id) {
     turnEndedAt: st.turnEndedAt || 0,
     lastMarkerAt: st.lastMarkerAt || 0,
     hooklessTurn: !!st.hooklessAfter && st.hooklessAfter === st.turnEndedAt,
-    ambiguous: !!st.ambiguousMarker && st.ambiguousMarker === st.lastMarkerAt,
+    ambiguous: !!st.ambiguous,
   };
 }
 
@@ -249,19 +260,26 @@ export function markHooklessTurn(id, turnEndedAt) {
 }
 
 /**
- * main saw more than one possible claude in the tab: the markers since the
- * last one could have come from either, so nothing about them is proven.
- * Kept until the next marker (a later lone claude cannot claim them).
+ * main saw more than one possible claude in the tab: any marker could have
+ * come from either, so nothing about the tab's turns is proven. Sticky: a
+ * marker from either claude proves nothing, so it ends only with a turn that
+ * STARTS after main has seen one claude again (noteUnique).
  */
 export function markAmbiguous(id) {
   const st = live.get(id);
   if (!st) return;
-  if (st.lastMarkerAt) st.ambiguousMarker = st.lastMarkerAt;
-  // The running turn's start cannot be pinned on one claude either, and
-  // unlike the flag that stays so when the next marker comes.
+  st.ambiguous = true;
+  st.uniqueSince = 0;
+  // The running turn's start cannot be pinned on one claude either.
   if (st.turnStartedAt) st.turnStartDistrusted = true;
   // Nor the last finished turn's length (its start may be the other's).
   st.lastTurnMs = 0;
+}
+
+/** main saw exactly one claude in the tab at `at` (see markAmbiguous). */
+export function noteUnique(id, at) {
+  const st = live.get(id);
+  if (st && st.ambiguous && !st.uniqueSince) st.uniqueSince = at;
 }
 
 /** When the hook last ended a turn here (0 = never). Cheap, for the data path. */

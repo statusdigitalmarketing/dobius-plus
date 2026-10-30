@@ -343,7 +343,7 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
  * work once a turn has ended, and whether a window that owns the PTY has it
  * unread. Dependencies are injected so this is tested without Electron.
  * @param {object} deps
- * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function, adoptHookState:Function, markHooklessTurn:Function, markAmbiguous:Function}} deps.status
+ * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function, adoptHookState:Function, markHooklessTurn:Function, markAmbiguous:Function, noteUnique:Function}} deps.status
  * @param {(id:string)=>Promise<object|null>} deps.claudeInfo  cached lookup
  * @param {(id:string)=>Promise<object|null>} [deps.claudeInfoFresh]  uncached, for turn ends
  * @param {(id:string, key:string)=>Promise<object|null>} deps.presenceForTab
@@ -366,6 +366,7 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     // predate the claude that just started this turn.
     if (!info && !fresh && raw.hookOwned && raw.since) info = await claudeInfoFresh(id);
     if (info?.ambiguous) status.markAmbiguous(id);
+    else if (info) status.noteUnique(id, now());
     const a = reconcileWithProcess(raw, info);
     // A claude's start time proves a time wrong. Finding NO claude proves a
     // still-running turn was abandoned (or runs behind a wrapper, where an

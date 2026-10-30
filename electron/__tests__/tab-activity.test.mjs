@@ -740,9 +740,13 @@ test('a turn presence proved over is ended in the record, so a later turn starts
   t = 134_000;
   const r = await tabActivity(ID);
   assert.equal(label({ ...r.activity, live: true, now: t }), null);
-  // Hooks back on: the next turn's clock starts at its own marker.
-  ts.ingest(ID, mk('working'), 130_000);
+  // Hooks back on mid-way: the first marker cannot be that turn's start.
+  ts.ingest(ID, mk('working'), 140_000);
   ts.ingest(ID, mk('done'), 190_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+  // The turn after starts at its own marker.
+  ts.ingest(ID, mk('working'), 200_000);
+  ts.ingest(ID, mk('done'), 260_000);
   assert.equal(ts.activityFor(ID).lastTurnMs, 60_000);
 });
 
@@ -942,8 +946,9 @@ test('ambiguity is kept until the next marker, so a later lone claude cannot cla
   info = { pid: 2, startedAt: 2_000 }; // A exited, B alone
   const r = await tabActivity(ID);
   assert.deepEqual([r.activity.uncertain, r.activity.background], [true, null]);
-  ts.ingest(ID, mk('working'), 50_000);
+  ts.ingest(ID, mk('working'), 50_000); // a turn starting after one claude was seen (40s)
   assert.equal(ts.activityFor(ID).ambiguous, false);
+  assert.equal(ts.activityFor(ID).since, null, 'that first turn may be a continuation: no clock');
 });
 
 test('moved() notices a since or length change made during the await', async () => {
@@ -1008,5 +1013,31 @@ test('settleOnCurrent keeps what its check disproves', async () => {
   });
   await tabActivity(ID);
   ts.ingest(ID, mk('done'), 110_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+});
+
+test('ambiguity survives the other claude\'s markers (Stop, idle re-send)', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000); // A
+  ts.ingest(ID, mk('working'), 20_000); // B
+  ts.markAmbiguous(ID);
+  ts.ingest(ID, mk('done'), 30_000);    // B's Stop
+  ts.ingest(ID, mk('done'), 90_000);    // B's idle re-send
+  assert.equal(ts.activityFor(ID).ambiguous, true);
+  ts.ingest(ID, mk('working'), 95_000); // a start, but no single claude seen yet
+  assert.equal(ts.activityFor(ID).ambiguous, true);
+});
+
+test('a turn that starts with needs, or during a hookless turn, has no trusted clock', () => {
+  ts._reset();
+  ts.ingest(ID, mk('needs'), 10_000);
+  ts.ingest(ID, mk('done'), 40_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 70_000);
+  ts.markHooklessTurn(ID, 70_000);
+  ts.ingest(ID, mk('needs'), 150_000);
+  ts.ingest(ID, mk('done'), 190_000);
   assert.equal(ts.activityFor(ID).lastTurnMs, 0);
 });
