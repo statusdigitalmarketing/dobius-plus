@@ -8,7 +8,7 @@ import { tabActivityLabel, formatDuration, WORKING_MIN_MS } from '../../src/lib/
 import * as ts from '../terminal-status.js';
 import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds, createTabActivity, coalescePerTab, judgePresence } from '../claude-presence.js';
 import { classifyClaudeProcess } from '../claude-argv.js';
-import { isProvenClaudeCommand, claudeChildVerdict } from '../claude-process-scan.js';
+import { isProvenClaudeCommand, claudeChildVerdict, bindingFrom } from '../claude-process-scan.js';
 
 const NOW = 10_000_000;
 const base = { live: true, status: 'idle', hookOwned: false, since: null, lastTurnMs: 0, background: null, unread: false, now: NOW };
@@ -181,7 +181,7 @@ test('presence reader: an unprovable binding answers null and is retried', async
     now: () => t,
   });
   assert.equal(await bg(read, 'a', END), null);
-  t = 5000;
+  t = 61_000; // unresolved bindings are retried after a minute
   assert.equal(await bg(read, 'a', END), null);
   assert.equal(dirCalls, 2);
 });
@@ -1138,4 +1138,44 @@ test('the silence rule also applies on the settle path', async () => {
   });
   const r = await tabActivity(ID);
   assert.equal(label({ ...r.activity, live: true, now: 120_000 }), null);
+});
+
+test('a silent Working is ended in the record, so later output cannot revive it', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  let t = 90_000;
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),
+    presenceForTab: async () => null,
+    now: () => t,
+  });
+  assert.equal((await tabActivity(ID)).activity.uncertain, true);
+  ts.ingest(ID, 'x', 100_000); // a keystroke echo
+  t = 100_500;
+  const r = await tabActivity(ID);
+  assert.equal(label({ ...r.activity, live: true, now: t }), null);
+});
+
+test('a crafted environment with thousands of readings is unresolved, quickly', () => {
+  const pad = 'X=0 '.repeat(50_000);
+  const t0 = Date.now();
+  const b = bindingFrom('claude', `claude SHELL=/bin/zsh CLAUDE_CONFIG_DIR=/tmp/cfg PAD=${pad}`);
+  assert.equal(b.state, 'unknown');
+  assert.ok(Date.now() - t0 < 1000);
+});
+
+test('presence reader: an unresolved binding is retried only after a minute', async () => {
+  let t = 0;
+  let dirCalls = 0;
+  const read = createPresenceReader({
+    claudeInfo: async () => proc,
+    configDirOf: async () => { dirCalls += 1; return null; },
+    readFile: async () => '{}',
+    now: () => t,
+  });
+  await read('a', 'k1');
+  t = 5_000; await read('a', 'k2');
+  assert.equal(dirCalls, 1);
+  t = 61_000; await read('a', 'k3');
+  assert.equal(dirCalls, 2);
 });

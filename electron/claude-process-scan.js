@@ -34,6 +34,7 @@ const execFileP = promisify(execFile);
 
 /** The CLI's own default config dir, used when CLAUDE_CONFIG_DIR is unset. */
 export const defaultConfigDir = () => path.join(os.homedir(), '.claude');
+export const MAX_BINDING_READINGS = 256;
 
 /**
  * Every live Claude process id for the current user.
@@ -95,11 +96,17 @@ function configDirCandidates(tail) {
   const raw = tail.slice(last.index + last[0].length);
   // Deliberately loose: anything shaped like a variable can end the value.
   const cuts = new Set([raw.length]);
-  for (const m of raw.matchAll(/\s[^\s=]+=/g)) cuts.add(m.index);
+  for (const m of raw.matchAll(/\s[^\s=]+=/g)) {
+    cuts.add(m.index);
+    // Every reading is a filesystem probe for the caller. A real environment
+    // has a few dozen variables after this one; thousands mean a value built
+    // to stall the scan, and the binding is reported unresolved instead.
+    if (cuts.size > MAX_BINDING_READINGS) return { found: true, candidates: [] };
+  }
   const candidates = [];
+  // Distinct cut points give distinct prefixes, so no duplicate check needed.
   for (const c of [...cuts].sort((a, b) => b - a)) {
-    const v = raw.slice(0, c);
-    if (v && !candidates.includes(v)) candidates.push(v);
+    if (c > 0) candidates.push(raw.slice(0, c));
   }
   return { found: true, candidates };
 }

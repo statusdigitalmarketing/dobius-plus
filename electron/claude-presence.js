@@ -42,12 +42,13 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 export const GRACE_MS = 3000;
-// Claude's TUI repaints its spinner and elapsed time while a turn runs, so a
-// hook 'working' with a silent PTY this long is no longer provably running
-// (hooks switched off mid-turn and no presence file to say so): the row shows
-// its age. Label only; the record is not changed on silence alone.
+// Claude's TUI repaints its spinner and elapsed time (and its terminal title)
+// about every second while a turn runs, so a hook 'working' with a silent PTY
+// this long is over (hooks switched off mid-turn, no presence file to say so):
+// main ends it in the record and the row shows its age.
 export const SILENT_WORKING_MS = 60_000;
 const CACHE_MS = 4000;          // several windows poll the same tabs
+const NEGATIVE_DIR_MS = 60_000; // retry an unresolved config-dir binding
 const MAX_FILE_BYTES = 64 * 1024;
 
 /**
@@ -308,11 +309,14 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
     const info = await claudeInfo(tabId);
     if (!info || !Number.isInteger(info.pid)) return null;
     const key = `${info.pid}:${info.startedAt}`;
-    let dir = dirByProc.get(key);
-    if (!dir) {
+    const cached = dirByProc.get(key);
+    let dir = cached?.dir || null;
+    // A proven dir is kept for the process's life; an unresolved binding is
+    // retried only after NEGATIVE_DIR_MS (resolving it walks the environment
+    // and probes the filesystem, which a crafted environment can make slow).
+    if (!cached || (!cached.dir && now() - cached.at >= NEGATIVE_DIR_MS)) {
       dir = await configDirOf(info.pid);
-      // Only a proven dir is kept: an unreadable binding may read next time.
-      if (dir) dirByProc.set(key, dir);
+      dirByProc.set(key, { dir, at: now() });
       if (dirByProc.size > 256) dirByProc.delete(dirByProc.keys().next().value);
     }
     if (!dir) return null;
@@ -413,11 +417,13 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
   };
   const shape = (id, a, extra) => {
     const activity = { ...a, background: null, ...(a.hooklessTurn ? { uncertain: true } : {}), ...extra };
-    // Applied to every reply, after any presence check had its say (which may
-    // end the turn in the record): a Working the PTY has been silent through
-    // is not claimed (see SILENT_WORKING_MS).
+    // Applied to every reply, after any presence check had its say: a hook
+    // Working the PTY has been silent through is over (the TUI repaints about
+    // every second while busy, see SILENT_WORKING_MS). Ended in the record
+    // too, so later unrelated output (typing, a resize) cannot revive it.
     if (activity.status === 'working' && activity.hookOwned && Number.isFinite(activity.lastActivityAt)
         && now() - activity.lastActivityAt >= SILENT_WORKING_MS) {
+      status.abandonTurn(id, a.lastMarkerAt, a.lastActivityAt);
       activity.uncertain = true;
     }
     return { id, activity, unread: unreadAnywhere(id) };
