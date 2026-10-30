@@ -13,8 +13,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
-import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId } from './terminal-manager.js';
-import { writeRawInput } from './chat-service.js';
+import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal } from './terminal-manager.js';
+import { submitPending } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
 import { parseTabId } from './tab-id-util.js';
@@ -126,7 +126,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // The tab's pane spawns the PTY via terminal:create; wait until it is
     // this window's.
     if (!(await waitFor(() => !!terminalInstance(tabId) && ownerOf(tabId) === wc.id, PTY_START_MS))) {
-      return { error: 'the new tab\'s terminal did not start' };
+      return { error: 'the new tab\'s terminal did not start', tabId };
     }
     return { tabId };
   }
@@ -187,9 +187,15 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // Typed at the shell prompt, as a person would: plain `claude`, the
     // account env and PATH come from the tab's shell, and no permission
     // flag is ever added.
-    typeLaunch: (tabId) => writeRawInput(tabId, 'claude\r'),
+    // Written straight to the PTY, never queued behind a Chat submit: a
+    // queued write would go out LATER, after the checks that cleared it (a
+    // queued /exit could put Claude's shell in front of it).
+    typeLaunch: (tabId) => writeTerminal(tabId, 'claude\r'),
     // One bracketed paste and no Enter: the person presses Enter.
-    paste: (tabId, text) => writeRawInput(tabId, `\x1b[200~${text}\x1b[201~`),
+    paste: (tabId, text) => writeTerminal(tabId, `\x1b[200~${text}\x1b[201~`),
+    // Someone is sending a Chat message into the tab right now: its Enter is
+    // still to come, so the prompt is not ours to type into.
+    inputBusy: (tabId) => submitPending(tabId),
     sleep,
     now: () => Date.now(),
   };

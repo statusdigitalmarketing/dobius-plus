@@ -118,7 +118,7 @@ export function isClaudePromptReady(lines, modes) {
 /**
  * The /openTab service. deps:
  *   resolveProject(path) -> Promise<{ path } | { error, status? }>
- *   openTab(projectPath) -> Promise<{ tabId } | { error }>   window + visible tab + its PTY
+ *   openTab(projectPath) -> Promise<{ tabId } | { error, tabId? }>   window + visible tab + its PTY
  *   tabAlive(tabId) -> boolean        the tab still exists in a live window
  *   focusTab(tabId) -> boolean        bring its window and the tab to the front
  *   ptyOf(tabId) -> object|null       PTY identity (a replaced shell is a new object)
@@ -128,7 +128,8 @@ export function isClaudePromptReady(lines, modes) {
  *   watchOutput(tabId) -> { mark(), screen(): Promise<{ lines, modes } | null>, stop() }
  *                                     the tab's output from now on, emulated; mark()
  *                                     forgets everything received so far
- *   paste(tabId, text) -> void        one bracketed paste, no Enter
+ *   paste(tabId, text) -> void        one bracketed paste, no Enter, written now
+ *   inputBusy(tabId) -> boolean       another surface is mid-submit into the tab
  *   sleep(ms), now()
  */
 export function createOpenTabService(deps, opts = {}) {
@@ -187,7 +188,9 @@ export function createOpenTabService(deps, opts = {}) {
     const resolved = await deps.resolveProject(projectPath);
     if (resolved.error) return { ok: false, status: resolved.status || 400, error: resolved.error };
     const opened = await deps.openTab(resolved.path);
-    if (opened.error) return { ok: false, status: 500, error: opened.error };
+    // A tab that was added but whose shell never started is still named, so
+    // the board can tell the person which tab to close.
+    if (opened.error) return { ok: false, status: 500, error: opened.error, ...(opened.tabId ? { tabId: opened.tabId } : {}) };
     const { tabId } = opened;
     const pty = deps.ptyOf(tabId);
     if (!pty) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
@@ -212,6 +215,7 @@ export function createOpenTabService(deps, opts = {}) {
       // Once more right before typing: Claude can exit between the last poll
       // and now. The paste then goes out in the same tick as these checks.
       if (!(await deps.claudeRunning(tabId)) || !deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return gone;
+      if (deps.inputBusy(tabId)) return { ok: false, status: 409, tabId, error: 'something else was typing into the tab; nothing was typed' };
       deps.paste(tabId, message);
       return { ok: true, tabId };
     } finally {

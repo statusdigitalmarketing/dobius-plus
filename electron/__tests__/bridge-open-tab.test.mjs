@@ -114,6 +114,7 @@ function fakeDeps(over = {}) {
       };
     },
     paste: (id, text) => log.push(['paste', id, text]),
+    inputBusy: () => false,
     sleep: async (ms) => { t += ms; await new Promise((r) => setImmediate(r)); },
     now: () => t,
     ...over,
@@ -227,6 +228,15 @@ function fakeDeps(over = {}) {
   assert.equal(r.status, 409);
   assert.equal(d.log.filter((e) => e[0] === 'paste').length, 0);
   ok('claude gone at the paste: nothing typed');
+}
+
+{
+  // A Chat submit is mid-flight into the tab at paste time: refuse.
+  const d = fakeDeps({ inputBusy: () => true });
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'busy' });
+  assert.equal(r.status, 409);
+  assert.equal(d.log.filter((e) => e[0] === 'paste').length, 0);
+  ok('busy input: nothing typed');
 }
 
 {
