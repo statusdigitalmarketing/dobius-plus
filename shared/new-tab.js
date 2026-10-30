@@ -85,8 +85,8 @@ export function pickerShortcutIndex(e) {
 // with a plain login shell when the tool exits, leaving the tab usable.
 // - The prompt hooks run first (zsh precmd, bash PROMPT_COMMAND): direnv and
 //   similar tools load a project's environment there, and -c shows no prompt.
-//   The tool name is read before them into a private variable and must be a
-//   bare lowercase word, so neither a hook nor a project .env can replace it.
+//   The tool name is read before them into $1 and must be a bare lowercase
+//   word, so neither a hook nor a project .env can replace it.
 // - The tool name travels in an env var, so no process argv says "claude"
 //   except the tool's own (process scans match on argv). eval runs it so a
 //   user's alias or function for it applies, as when typed.
@@ -109,18 +109,21 @@ export function loginShellSpawn(shell, startCommand) {
   const plain = { args: ['-l'], env: {} };
   if (typeof startCommand !== 'string' || !/^[a-z]+$/.test(startCommand)) return plain;
   const name = String(shell).split('/').pop();
-  // Read before the hooks (a hook or a project .env could set the variable),
-  // into a private name, and only a bare lowercase word is ever run.
-  const take = `__dobius_tool=$${START_TOOL_ENV}; unset ${START_TOOL_ENV}; `
-    + '[[ -n $__dobius_tool && $__dobius_tool != *[!a-z]* ]] || __dobius_tool=:;';
+  // Read before the hooks (a hook or a project .env could set the variable)
+  // into the positional parameter $1, which no variable assignment (direnv's
+  // dotenv included) can reach, and only a bare lowercase word is ever run.
+  // (readonly would make a hook that assigns it abort the whole zsh script.)
+  const take = `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV}; `
+    + '[[ -n $1 && $1 != *[!a-z]* ]] || set -- :;';
+  const launch = '[[ $1 != *[!a-z:]* ]] && eval "$1";';
   let run;
   if (name === 'zsh') {
     run = `setopt no_nounset no_err_exit 2>/dev/null; ${take} (( $+functions[precmd] )) && precmd; for f in $precmd_functions; do "$f"; done; `
-      + 'zmodload zsh/parameter 2>/dev/null; pre=(${(k)jobstates}); eval "$__dobius_tool"; '
+      + `zmodload zsh/parameter 2>/dev/null; pre=(\${(k)jobstates}); ${launch} `
       + 'i=0; while (( i++ < 25 )); do s=(${(k)jobstates[(R)suspended*]}); s=(${s:|pre}); (( $#s )) || break; '
       + 'fg %$s[1] >/dev/null 2>&1; done;';
   } else if (name === 'bash') {
-    run = `set +eu; ${take} for c in "\${PROMPT_COMMAND[@]}"; do eval "$c"; done; pre=" $(jobs -p | tr '\\n' ' ') "; eval "$__dobius_tool"; `
+    run = `set +eu; ${take} for c in "\${PROMPT_COMMAND[@]}"; do eval "$c"; done; pre=" $(jobs -p | tr '\\n' ' ') "; ${launch} `
       // A stopped pipeline's continuation lines start with a pid, not [n].
       + ('j=$(jobs -sl 2>/dev/null | while read -r n p r; do [[ $n == \\[* ]] || continue; [[ $pre == *" $p "* ]] && continue; '
         + 'n=${n#[}; echo "${n%%]*}"; break; done); [ -n "$j" ] && fg %$j >/dev/null 2>&1; ').repeat(25).trim();
