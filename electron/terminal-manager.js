@@ -15,6 +15,7 @@ import { promisify } from 'util';
 const execFileP = promisify(execFile);
 import { app } from 'electron';
 import { getSessionTabMap } from './config-manager.js';
+import { loginShellSpawn } from '../shared/new-tab.js';
 
 const terminals = new Map();
 
@@ -138,7 +139,12 @@ export function trimToEscapeBoundary(buf, cap) {
   return esc > 0 && esc <= ESC_RESYNC_WINDOW ? cut.slice(esc) : cut;
 }
 
-export function createTerminal(id, cwd, webContents, accountEnv = {}) {
+// startCommand: a New Tab's tool ('claude' | 'codex', from shared/new-tab.js
+// launchCommandFor, never free text). The login shell runs it as its first
+// command, after the rc files, then becomes a normal login shell when it exits.
+// Nothing is typed into the terminal, so it can never land in a user's line,
+// a startup prompt or a moved tab.
+export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCommand = null } = {}) {
   // A respawn under an existing id (e.g. "Continue on switched account") must
   // NOT strand what was attached to the old PTY. Carry over the live subscriber
   // set so an attached phone keeps streaming (killing the old PTY would orphan
@@ -167,6 +173,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
       // Invalid path — use home directory
     }
   }
+
+  // A New Tab's tool belongs to its project: never start it in the fallback.
+  if (safeCwd !== cwd) startCommand = null;
 
   // Per-project shell history file
   const extraEnv = {};
@@ -240,8 +249,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   };
   const spawnCols = (Number.isInteger(prevCols) && prevCols > 0) ? prevCols : 80;
   const spawnRows = (Number.isInteger(prevRows) && prevRows > 0) ? prevRows : 24;
-  const term = pty.spawn(shell, ['-l'], {
-    name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: spawnEnv,
+  const start = loginShellSpawn(shell, startCommand);
+  const term = pty.spawn(shell, start.args, {
+    name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: { ...spawnEnv, ...start.env },
   });
 
   const dataSub = term.onData((data) => {

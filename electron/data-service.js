@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import fsSync from 'fs';
+import { isNewTabWrapperCommand } from '../shared/new-tab.js';
 import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
@@ -2009,7 +2010,9 @@ export function getActiveProcesses() {
         resolve([]);
         return;
       }
-      const lines = stdout.trim().split('\n').filter(Boolean);
+      // A New Tab's wrapper shell names the tools in its own argv; it is the
+      // tab's shell, not a Claude process (shared/new-tab.js loginShellSpawn).
+      const lines = stdout.trim().split('\n').filter((l) => l && !isNewTabWrapperCommand(l));
       resolve(lines.map((line) => {
         const spaceIdx = line.indexOf(' ');
         if (spaceIdx === -1) return null;

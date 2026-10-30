@@ -39,6 +39,7 @@ import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
+import { launchCommandFor } from '../shared/new-tab.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -237,7 +238,7 @@ function ownsTerminal(senderId, id) {
 }
 
 function setupTerminalHandlers() {
-  ipcMain.handle('terminal:create', (event, id, cwd) => {
+  ipcMain.handle('terminal:create', (event, id, cwd, opts) => {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
     if (cwd !== undefined && cwd !== null && typeof cwd !== 'string') return null;
     // Reject hijack attempts: if this id is already owned by a DIFFERENT
@@ -261,7 +262,11 @@ function setupTerminalHandlers() {
     // Shared with the mobile spawn paths via resolveAccountEnvForCwd so a phone
     // terminal lands on the same active accounts as a desktop one (reviewer P2).
     const accountEnv = resolveAccountEnvForCwd(cwd);
-    return createTerminal(id, cwd, event.sender, accountEnv);
+    // A New Tab (store.openNewTab) starts its tool: 'default' is the Settings
+    // choice, read here; anything outside the fixed set starts nothing.
+    const launch = opts && typeof opts === 'object' ? opts.launch : undefined;
+    const startCommand = launch === undefined ? null : launchCommandFor(launch, getSettings().newTabTool);
+    return createTerminal(id, cwd, event.sender, accountEnv, { startCommand });
   });
 
   ipcMain.on('terminal:write', (event, id, data) => {
@@ -2638,25 +2643,60 @@ function setupImessageBridgeHandlers() {
   });
 }
 
+// Existence + safety guard for opening a project window. Avoids opening a
+// window for a deleted / typo / sensitive path. Resolves symlinks then verifies
+// the path is an actual directory. Apple-grade audit P2. null when it is fine.
+function projectDirError(projectPath) {
+  if (typeof projectPath !== 'string' || !projectPath.startsWith('/')) {
+    return 'projectPath must be an absolute path';
+  }
+  try {
+    const real = fs.realpathSync(projectPath);
+    const stat = fs.statSync(real);
+    if (!stat.isDirectory()) return 'projectPath is not a directory';
+  } catch (err) {
+    return `cannot open project: ${err.message}`;
+  }
+  return null;
+}
+
+// Project windows (webContents id -> { count, opened }) owed new tabs by the
+// New Tab picker in another window. The window takes them once its tabs are
+// restored, which covers a window still loading and so unable to hear
+// window:newTabRequest. `opened`: the request created the window, so its fresh
+// first tab (if it had no saved tabs) already answers one. Capped so a stuck
+// window cannot be owed a pile; a request past the cap is refused, not lost.
+// ponytail: an entry for a window closed before it took its tabs is never
+// removed (webContents ids are not reused, so it is only a stale integer).
+const pendingNewTabs = new Map();
+const MAX_PENDING_NEW_TABS = 5;
+
 function setupWindowHandlers() {
   ipcMain.handle('window:openProject', (_event, projectPath) => {
-    // Existence + safety guard. Avoids opening a window for a deleted /
-    // typo / sensitive path. Resolves symlinks then verifies the path is
-    // an actual directory. Apple-grade audit P2.
-    if (typeof projectPath !== 'string' || !projectPath.startsWith('/')) {
-      return { ok: false, error: 'projectPath must be an absolute path' };
-    }
-    try {
-      const real = fs.realpathSync(projectPath);
-      const stat = fs.statSync(real);
-      if (!stat.isDirectory()) {
-        return { ok: false, error: 'projectPath is not a directory' };
-      }
-    } catch (err) {
-      return { ok: false, error: `cannot open project: ${err.message}` };
-    }
+    const error = projectDirError(projectPath);
+    if (error) return { ok: false, error };
     const win = openProjectWindow(projectPath);
     return { ok: true, id: win.id };
+  });
+
+  ipcMain.handle('window:openProjectNewTab', (_event, projectPath) => {
+    const error = projectDirError(projectPath);
+    if (error) return { ok: false, error };
+    const before = new Set(BrowserWindow.getAllWindows().map((w) => w.id));
+    const win = openProjectWindow(projectPath);
+    const wcId = win.webContents.id;
+    const owed = pendingNewTabs.get(wcId) || { count: 0, opened: !before.has(win.id) };
+    if (owed.count >= MAX_PENDING_NEW_TABS) return { ok: false, error: 'that window is still opening' };
+    pendingNewTabs.set(wcId, { count: owed.count + 1, opened: owed.opened });
+    win.webContents.send('window:newTabRequest');
+    return { ok: true, id: win.id };
+  });
+
+  // The new tabs this window owes ({ count, opened }), cleared as it is read.
+  ipcMain.handle('window:takePendingNewTab', (event) => {
+    const owed = pendingNewTabs.get(event.sender.id) || { count: 0, opened: false };
+    pendingNewTabs.delete(event.sender.id);
+    return owed;
   });
 
   ipcMain.handle('window:pickAndOpenProject', async (event) => {

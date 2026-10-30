@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Terminal
-  terminalCreate: (id, cwd) => ipcRenderer.invoke('terminal:create', id, cwd),
+  terminalCreate: (id, cwd, opts) => ipcRenderer.invoke('terminal:create', id, cwd, opts),
   terminalWrite: (id, data) => ipcRenderer.send('terminal:write', id, data),
   chatPoll: (id, have) => ipcRenderer.invoke('chat:poll', id, have),
   chatSelector: (id) => ipcRenderer.invoke('chat:selector', id),
@@ -216,6 +216,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Window management
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),
+  // New Tab picker: a new tab in ANOTHER project's window (opened if needed).
+  // That window takes the request once its tabs are ready.
+  windowOpenProjectNewTab: (projectPath) => ipcRenderer.invoke('window:openProjectNewTab', projectPath),
+  windowTakePendingNewTab: () => ipcRenderer.invoke('window:takePendingNewTab'),
+  onWindowNewTabRequest: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('window:newTabRequest', handler);
+    return () => ipcRenderer.removeListener('window:newTabRequest', handler);
+  },
   windowFocusTabOwner: (projectPath, tabId) => ipcRenderer.invoke('window:focusTabOwner', projectPath, tabId),
   windowIsFocused: () => ipcRenderer.invoke('window:isFocused'),
   onWindowFocusChanged: (callback) => {

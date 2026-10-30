@@ -19,6 +19,7 @@ import DashboardView from '../Dashboard/DashboardView';
 import GitSidePanel from '../shared/GitSidePanel';
 import QuitOverlay from '../shared/QuitOverlay';
 import CommandPalette from '../shared/CommandPalette';
+import NewTabPicker from './NewTabPicker';
 import ResumeBanner from './ResumeBanner';
 import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
@@ -57,6 +58,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
   const tabs = useStore((s) => s.terminalTabs);
   const activeTabId = useStore((s) => s.activeTabId);
   const addTab = useStore((s) => s.addTab);
+  const openNewTab = useStore((s) => s.openNewTab);
   const removeTab = useStore((s) => s.removeTab);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const initTabs = useStore((s) => s.initTabs);
@@ -87,6 +89,9 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
 
   const [pinnedIds, setPinnedIds] = useState([]);
   const [tabsInitialized, setTabsInitialized] = useState(false);
+  // True when this window opened with no saved tabs and made a fresh New Tab,
+  // which already answers a New Tab request that opened the window.
+  const freshFirstTabRef = useRef(false);
   const terminalLayoutRef = useRef(null);
 
   // Start agent activity monitoring for all running agents
@@ -285,7 +290,9 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
             setActiveTab(saved.activeTabId);
           }
         } else {
-          addTab(projectPath);
+          useStore.getState().markTabsReady();
+          openNewTab(projectPath);
+          freshFirstTabRef.current = true;
         }
         setTabsInitialized(true);
       });
@@ -322,8 +329,10 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
             if (stillExists) setActiveTab(config.activeTabId);
           }
         } else {
-          // First open: create initial tab
-          addTab(projectPath);
+          // First open: a New Tab, which starts the default tool.
+          useStore.getState().markTabsReady();
+          openNewTab(projectPath);
+          freshFirstTabRef.current = true;
         }
         setTabsInitialized(true);
       });
@@ -388,6 +397,35 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       for (const t of pending.values()) clearTimeout(t);
     };
   }, [tabsInitialized, tearOffTabId, projectPath]);
+
+  // The New Tab picker in another window asked for a tab here (main opened or
+  // focused this window). Taken from main once tabs are restored, so a request
+  // that arrived while this window was still loading is not lost.
+  useEffect(() => {
+    if (tabsInitialized) useStore.getState().markTabsReady();
+  }, [tabsInitialized]);
+
+  useEffect(() => {
+    if (!tabsInitialized || tearOffTabId || !projectPath) return undefined;
+    const api = window.electronAPI;
+    if (!api?.windowTakePendingNewTab) return undefined;
+    let first = true;
+    const take = () => {
+      const fresh = first && freshFirstTabRef.current;
+      first = false;
+      freshFirstTabRef.current = false;
+      api.windowTakePendingNewTab().then((owed) => {
+        // A fresh first tab answers one request only when that request is
+        // what opened this window.
+        const n = Math.min(5, Number(owed?.count) || 0) - (fresh && owed?.opened ? 1 : 0);
+        for (let i = 0; i < n; i += 1) useStore.getState().openNewTab(projectPath);
+        if (n > 0) setActiveView('terminal');
+      }).catch((err) => console.warn('[newTab] pending request failed:', err?.message));
+    };
+    take();
+    const off = api.onWindowNewTabRequest?.(take);
+    return () => off?.();
+  }, [tabsInitialized, tearOffTabId, projectPath, setActiveView]);
 
   const startSplitResize = useCallback((e) => {
     e.preventDefault();
@@ -924,7 +962,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const paletteCommands = useMemo(() => ({
-    newTab: () => addTab(projectPath),
+    newTab: () => openNewTab(projectPath),
     newWindow: () => window.electronAPI?.windowOpenNew?.(projectPath),
     reopenClosedTab: reopenLastClosedTab,
     closeTab: closeActiveTab,
@@ -932,7 +970,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     resumeLatest: doResumeLatest,
     toggleSidebar,
     toggleGitPanel,
-  }), [addTab, projectPath, reopenLastClosedTab, closeActiveTab, clearActiveTerminal, doResumeLatest, toggleSidebar, toggleGitPanel]);
+  }), [openNewTab, projectPath, reopenLastClosedTab, closeActiveTab, clearActiveTerminal, doResumeLatest, toggleSidebar, toggleGitPanel]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -957,10 +995,11 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       const inAppField = !inXterm && !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
 
       if (e.key === 't' && !e.shiftKey) {
-        // Cmd+T = new tab
+        // Cmd+T = new tab here with the default tool, instantly (the + button
+        // opens the project picker instead).
         e.preventDefault();
         if (useStore.getState().activeView === 'terminal') {
-          addTab(projectPath);
+          openNewTab(projectPath);
         } else {
           // In dashboard, switch to terminal
           setActiveView('terminal');
@@ -1055,30 +1094,35 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [projectPath, addTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab, doResumeLatest, reopenLastClosedTab, clearActiveTerminal]);
+  }, [projectPath, openNewTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab, doResumeLatest, reopenLastClosedTab, clearActiveTerminal]);
 
   // Menu bar events
   useEffect(() => {
     if (!window.electronAPI) return;
     const cleanups = [
       window.electronAPI.onMenuToggleView?.(() => {
+        if (useStore.getState().newTabPickerOpen) return;
         const current = useStore.getState().activeView;
         setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
       }),
-      window.electronAPI.onMenuToggleSidebar?.(() => toggleSidebar()),
-      window.electronAPI.onMenuToggleGitPanel?.(() => toggleGitPanel()),
+      window.electronAPI.onMenuToggleSidebar?.(() => { if (!useStore.getState().newTabPickerOpen) toggleSidebar(); }),
+      window.electronAPI.onMenuToggleGitPanel?.(() => { if (!useStore.getState().newTabPickerOpen) toggleGitPanel(); }),
       window.electronAPI.onMenuNewTab?.(() => {
-        addTab(projectPath);
+        useStore.getState().setNewTabPickerOpen(false);
+        openNewTab(projectPath);
         setActiveView('terminal');
       }),
-      window.electronAPI.onMenuCloseTab?.(() => closeActiveTab()),
+      // While the New Tab picker owns the keyboard, menu accelerators (which
+      // skip its DOM key handler) must not close or type into the tab behind it.
+      window.electronAPI.onMenuCloseTab?.(() => { if (!useStore.getState().newTabPickerOpen) closeActiveTab(); }),
       window.electronAPI.onMenuResumeSession?.(() => {
+        if (useStore.getState().newTabPickerOpen) return;
         // Menu "Resume Last Session" — shares the keydown's guarded path.
         doResumeLatest();
       }),
     ];
     return () => cleanups.forEach((fn) => fn?.());
-  }, [setActiveView, toggleSidebar, toggleGitPanel, addTab, removeTab, projectPath, closeActiveTab, doResumeLatest]);
+  }, [setActiveView, toggleSidebar, toggleGitPanel, openNewTab, removeTab, projectPath, closeActiveTab, doResumeLatest]);
 
   return (
     <div className="h-full w-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>
@@ -1421,6 +1465,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         projectPath={projectPath}
         commands={paletteCommands}
       />
+      <NewTabPicker projectPath={projectPath} />
       <QuitOverlay />
     </div>
   );
