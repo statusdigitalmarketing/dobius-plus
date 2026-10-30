@@ -124,6 +124,42 @@ function evictSettled(cache, max = 512) {
 }
 
 /**
+ * Run `fn(id)` for a burst of triggers at most once at a time per id, with one
+ * trailing run for everything that arrived meanwhile, and at least
+ * `minIntervalMs` between starts. For checks fired from the PTY data path: a
+ * chatty tab (or anything printing the status escape) must not fan out into
+ * concurrent process scans. `fn` reads current state itself when it runs.
+ * Errors go to `onError(id, err)`; nothing is thrown.
+ */
+export function coalescePerTab(fn, minIntervalMs, { now = Date.now, setTimer = setTimeout, onError } = {}) {
+  const state = new Map(); // id -> { running, queued, lastStart, timer }
+  const run = (id, st) => {
+    st.running = true;
+    st.queued = false;
+    st.lastStart = now();
+    Promise.resolve().then(() => fn(id))
+      .catch((err) => { try { onError?.(id, err); } catch { /* a logger must not break the loop */ } })
+      .finally(() => {
+        st.running = false;
+        if (st.queued) schedule(id, st);
+        else if (state.size > 1024 && !st.timer) state.delete(id);
+      });
+  };
+  const schedule = (id, st) => {
+    if (st.timer) return;
+    const wait = Math.max(0, st.lastStart + minIntervalMs - now());
+    if (wait === 0) { run(id, st); return; }
+    st.timer = setTimer(() => { st.timer = null; run(id, st); }, wait);
+  };
+  return (id) => {
+    let st = state.get(id);
+    if (!st) { st = { running: false, queued: false, lastStart: -Infinity, timer: null }; state.set(id, st); }
+    if (st.running || st.timer) { st.queued = true; return; }
+    schedule(id, st);
+  };
+}
+
+/**
  * Cache an async per-tab lookup briefly and share the pending call, so several
  * windows polling every few seconds cost one pgrep/ps per tab.
  */

@@ -26,7 +26,7 @@ import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses, configDirOfPid } from './claude-process-scan.js';
-import { createPresenceReader, createTabActivity, cachedPerTab, boundedIds } from './claude-presence.js';
+import { createPresenceReader, createTabActivity, cachedPerTab, coalescePerTab, boundedIds } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
@@ -239,6 +239,20 @@ const { tabActivity, checkTurnAgainstProcess } = createTabActivity({
   claudeInfoFresh: (id) => getTerminalClaudeInfo(id, { unique: true }),
   backgroundForTab: createPresenceReader({ claudeInfo: claudeInfoCached, configDirOf: configDirOfPid }),
   unreadAnywhere: (id) => unreadAnywhere(id),
+});
+// Turn-end checks come from the PTY data path, so they are coalesced per tab
+// (one in flight, one trailing, at least a second apart) and read the record
+// current when they run. A failure is logged once per tab, never swallowed.
+const turnEndErrorsLogged = new Set();
+const checkTurnEnd = coalescePerTab((id) => {
+  const raw = terminalStatus.activityFor(id);
+  return raw ? checkTurnAgainstProcess(id, raw, { fresh: true }) : null;
+}, 1000, {
+  onError: (id, err) => {
+    if (turnEndErrorsLogged.has(id)) return;
+    turnEndErrorsLogged.add(id);
+    console.warn('[tab-activity] turn-end process check failed for', id, err?.message || err);
+  },
 });
 
 function unreadAnywhere(id) {
@@ -3491,8 +3505,7 @@ app.whenReady().then(() => {
       // that ran it is most likely still there, so a length spanning two
       // claudes is caught even when no sidebar is asking.
       if (terminalStatus.turnEndedAtFor(id) !== endedBefore) {
-        const raw = terminalStatus.activityFor(id);
-        if (raw) checkTurnAgainstProcess(id, raw, { fresh: true }).catch(() => {});
+        checkTurnEnd(id);
       }
     },
     onExit: (id, info) => terminalStatus.noteExit(id, info),

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { tabActivityLabel, formatDuration, WORKING_MIN_MS } from '../../src/lib/tab-activity.js';
 import * as ts from '../terminal-status.js';
-import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds, createTabActivity } from '../claude-presence.js';
+import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab, boundedIds, createTabActivity, coalescePerTab } from '../claude-presence.js';
 import { classifyClaudeProcess } from '../claude-argv.js';
 import { isProvenClaudeCommand } from '../claude-process-scan.js';
 
@@ -567,4 +567,62 @@ test('cache eviction never drops a pending lookup', async () => {
   await new Promise((r) => setImmediate(r));
   assert.equal(calls, 520, 't0 is still pending, so it is shared, not started again');
   gates.forEach((g) => g());
+});
+
+test('turn-end checks: 50 rapid triggers for one tab cause at most 2 lookups', async () => {
+  let t = 0;
+  let calls = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const timers = [];
+  const check = coalescePerTab(async () => {
+    calls += 1; inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((r) => setImmediate(r));
+    inFlight -= 1;
+  }, 1000, { now: () => t, setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length; } });
+  for (let i = 0; i < 50; i += 1) check('tab-a');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(calls, 1, 'one runs now');
+  assert.equal(timers.length, 1, 'the other 49 collapse into ONE trailing check');
+  assert.equal(timers[0].ms, 1000, 'a second after the first started');
+  t = 1000;
+  timers[0].fn();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(calls, 2);
+  assert.equal(maxInFlight, 1);
+  // Another tab is independent.
+  check('tab-b');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(calls, 3);
+});
+
+test('turn-end checks: a failure reaches onError, nothing is thrown', async () => {
+  const errors = [];
+  const check = coalescePerTab(async () => { throw new Error('ps failed'); }, 1000, { onError: (id, e) => errors.push(`${id}:${e.message}`) });
+  check('tab-a');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(errors, ['tab-a:ps failed']);
+});
+
+test('turn-end checks: a lookup slower than the interval still never overlaps', async () => {
+  let t = 0;
+  let calls = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let release;
+  const check = coalescePerTab(async () => {
+    calls += 1; inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight);
+    if (calls === 1) await new Promise((r) => { release = r; });
+    inFlight -= 1;
+  }, 1000, { now: () => t, setTimer: (fn) => { fn(); return 1; } });
+  check('tab-a');
+  await new Promise((r) => setTimeout(r, 10));
+  t = 5000; // the interval has long passed, the first scan is still running
+  for (let i = 0; i < 10; i += 1) check('tab-a');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(calls, 1);
+  release();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(calls, 2, 'one trailing run');
+  assert.equal(maxInFlight, 1);
 });
