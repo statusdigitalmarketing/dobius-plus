@@ -255,7 +255,11 @@ export function markHooklessTurn(id, turnEndedAt) {
  */
 export function markAmbiguous(id) {
   const st = live.get(id);
-  if (st && st.lastMarkerAt) st.ambiguousMarker = st.lastMarkerAt;
+  if (!st) return;
+  if (st.lastMarkerAt) st.ambiguousMarker = st.lastMarkerAt;
+  // The running turn's start cannot be pinned on one claude either, and
+  // unlike the flag that stays so when the next marker comes.
+  if (st.turnStartedAt) st.turnStartDistrusted = true;
 }
 
 /** When the hook last ended a turn here (0 = never). Cheap, for the data path. */

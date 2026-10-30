@@ -957,3 +957,27 @@ test('moved() notices a since or length change made during the await', async () 
   const r = await tabActivity(ID);
   assert.equal(r.activity.lastTurnMs, 0);
 });
+
+test('a turn start seen while two claudes ran stays untrusted after one leaves', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000); // A
+  ts.ingest(ID, mk('working'), 20_000); // B
+  ts.markAmbiguous(ID);
+  ts.ingest(ID, mk('working'), 30_000); // B alone now
+  assert.equal(ts.activityFor(ID).since, null);
+  ts.ingest(ID, mk('done'), 50_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+});
+
+test('moved() notices a hookless turn recorded during the await', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 70_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => { ts.markHooklessTurn(ID, 70_000); return { pid: 1, startedAt: 1_000 }; },
+    presenceForTab: async () => null,
+    now: () => 83_000,
+  });
+  const r = await tabActivity(ID);
+  assert.equal(label({ ...r.activity, live: true, unread: true, now: 83_000 }), null);
+});

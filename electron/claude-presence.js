@@ -382,7 +382,8 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     const now2 = status.activityFor(id);
     return !now2 || now2.turnEndedAt !== raw.turnEndedAt || now2.lastMarkerAt !== raw.lastMarkerAt
       || now2.status !== raw.status || now2.hookOwned !== raw.hookOwned
-      || now2.since !== raw.since || now2.lastTurnMs !== raw.lastTurnMs || now2.ambiguous !== raw.ambiguous;
+      || now2.since !== raw.since || now2.lastTurnMs !== raw.lastTurnMs || now2.ambiguous !== raw.ambiguous
+      || now2.hooklessTurn !== raw.hooklessTurn;
   };
   const shape = (id, a, extra) => ({
     id,
