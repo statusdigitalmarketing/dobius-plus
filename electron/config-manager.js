@@ -41,6 +41,11 @@ const DEFAULT_CONFIG = {
     // `claude -p` in a loop) without deleting transcripts. Managed from the
     // Sessions tab (Hide) + Settings (unhide).
     hiddenSessionPaths: [],
+    // What a New Tab starts in its project: 'claude' | 'codex' | 'shell'.
+    // Restored tabs never start anything (auto-resume owns those).
+    newTabTool: 'claude',
+    // Projects left out of the New Tab picker (real paths).
+    newTabHiddenProjects: [],
   },
   mobileServer: {
     // On by default (v1.0.77, Sam: "ALWAYS DEFAULTS TO ON"). Only an explicit

@@ -6,6 +6,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import { useStore } from '../store/store';
 import { takePendingScrollback, drawableLine } from '../lib/pending-scrollback';
+import { takePendingLaunch } from '../lib/pending-launch';
 
 // States carried by the Dobius status marker (OSC 777;dobius;<state>), emitted by
 // the managed Claude Notification/Stop hook. Anything else is ignored.
@@ -193,6 +194,9 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     // its scrollback over in memory, so it never races the disk save.
     let restorePromise = Promise.resolve();
     const forked = takePendingScrollback(id);
+    // A New Tab asks main to start its tool (Claude Code, Codex) in the PTY it
+    // creates. A claimed (moved) tab is never new.
+    const launchTool = claimExisting ? undefined : takePendingLaunch(id);
     if (forked || window.electronAPI.terminalLoadState) {
       restorePromise = (forked ? Promise.resolve(forked) : window.electronAPI.terminalLoadState(id)).then((state) => {
         if (cancelled) return;
@@ -270,7 +274,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
           })
           .catch((err) => console.warn('[useTerminal] claim failed:', err?.message));
       } else {
-        window.electronAPI.terminalCreate(id, cwd);
+        window.electronAPI.terminalCreate(id, cwd, launchTool !== undefined ? { launch: launchTool } : undefined);
       }
     });
 

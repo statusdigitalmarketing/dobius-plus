@@ -48,12 +48,12 @@ It is typed as ONE bracketed paste, which Claude treats as pasted text, never as
 
 1. Validates the body and the folder.
 2. Opens the project's window if it is not open, otherwise uses its first window, and brings it to the front.
-3. Asks that window for a new tab (exactly like Cmd+T) and shows it. The tab's shell is spawned by the window like every other tab, with the active Claude account's environment and the project folder as its working directory.
-4. Waits for the shell prompt (output, then a short quiet), then types Ctrl+E and Ctrl+U (clearing anything already typed on the shell's line, so it is never run), `claude` and Enter, as a person would. No flags are added, so Claude runs with your normal settings and permission mode. `claude` is typed only while the shell itself owns the terminal (no program of its own in the foreground) and sits in the project folder. A slow startup job is waited out for up to 10 seconds; if Claude already runs there nothing is typed; if another program keeps the terminal (a login script started Codex, say, or `exec`'d one) the call fails with `409`; if a login script changed directory it fails with `500`. Nothing is typed in either case.
+3. Asks that window for a New Tab that starts **Claude**, whatever the "New Tab Starts" setting says (Claude, Codex or a plain shell): the same path as the New Tab menu with Claude picked (`store.openNewTab(project, 'claude')`). The tab is shown. Its shell is spawned by the window like every other tab, with the active Claude account's environment and the project folder as its working directory.
+4. The tab's login shell starts `claude` itself as its first command (`terminal:create` with launch `claude`, mapped through the fixed allowlist in `shared/new-tab.js`). Nothing is typed to start it. No flags are added, so Claude runs with your normal settings and permission mode. If a login script keeps the terminal busy, starts something else, or changes directory, Claude does not come up in the project as the foreground program and the call ends at step 5 with `504`, nothing typed.
 5. Waits until Claude is ready. Three things must hold on two checks in a row (polled every 250ms, for up to 60 seconds):
-   - the output the tab produced AFTER `claude` was typed, replayed through the headless terminal emulator, shows Claude's prompt box (a rule, the `❯` row, a closing rule) within the bottom 12 rows of what is drawn. Anything the shell printed before the launch (a banner, a file shown at login) is ignored;
+   - the tab's output since it started, replayed through the headless terminal emulator, shows Claude's prompt box (a rule, the `❯` row, a closing rule) within the bottom 12 rows of what is drawn;
    - the program turned bracketed paste on;
-   - a `claude` process is the FOREGROUND process of the tab's terminal, recognised by the executable the system actually ran: a claude entrypoint that exists on disk, or node/bun/deno running one (so `node other.js /path/to/claude`, or a program in a folder named `claude tools`, does not count). A shell at its prompt, a suspended or background claude, or anything else fails closed;
+   - a `claude` process leads the foreground process group of THIS tab's terminal and works in the project folder, recognised by the executable the system actually ran: a claude entrypoint that exists on disk, or node/bun/deno running one (so `node other.js /path/to/claude`, or a program in a folder named `claude tools`, does not count). A shell at its prompt, a suspended or background claude, or anything else fails closed;
    - no output arrived between reading the screen and the process check (Claude exiting and the shell redrawing would show up there).
    A trust question, a login screen, a permission prompt or any selector does not count as ready, even if it quotes something that looks like the prompt box. Claude's permission mode is not checked: the card is sent in every mode (see Security).
 6. Pastes the message as one bracketed paste, in the same tick as that last check, so nothing can change in between. Not if a person has typed into the tab (keyboard, paste or a Chat message; moving the mouse does not count): then `409` and nothing is typed, because their own Enter could still be on its way and would carry the card's text.
@@ -108,13 +108,13 @@ When a tab was opened but the message could not be typed, `tabId` is included to
 | `401` | Missing or wrong token |
 | `403` | Folder is not a project Dobius+ knows; or the request carried an `Origin` (browser) or did not come from loopback |
 | `404` | Folder does not exist |
-| `409` | `requestId` already used for another project; or the tab was closed, its shell exited or was replaced, someone typed into it, or another program kept its terminal, before the message could be typed. Nothing was typed. `tabId` included in the second case |
+| `409` | `requestId` already used for another project; or the tab was closed, its shell exited or was replaced, or someone typed into it, before the message could be typed. Nothing was typed. `tabId` included in the second case |
 | `415` | `Content-Type` is not `application/json` |
 | `421` | `Host` is not `127.0.0.1:<port>` |
 | `429` | 4 opens already in progress |
 | `500` | The window, the tab or its shell did not start, or the shell did not start in the project folder (`tabId` included when the tab exists) |
 | `503` | Dobius+ is still starting |
-| `504` | Claude's prompt did not appear within 60 seconds. The tab stays open with Claude in it, nothing was typed. `tabId` included. A repeat of the same `requestId` brings that tab forward |
+| `504` | Claude's prompt did not appear within 60 seconds (or Claude is not the foreground program in the project: a login script got in the way). The tab stays open, nothing was typed. `tabId` included. A repeat of the same `requestId` brings that tab forward |
 
 ## Security
 
@@ -128,7 +128,7 @@ When a tab was opened but the message could not be typed, `tabId` is included to
 ## Side effects
 
 - May open a project window, and always brings the window to the front.
-- Adds one tab to that window (saved with its tabs like any other) and starts a shell and `claude` in it.
+- Adds one tab to that window (saved with its tabs like any other); its shell starts `claude`.
 - Types the message into Claude's prompt and presses Enter once to send it (unless a check fails, see step 7). Never answers any question Claude asks: permission prompts, the trust question and logins are left to you.
 - Sends no texts or notifications.
 

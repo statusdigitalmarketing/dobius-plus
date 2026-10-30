@@ -1,5 +1,6 @@
 // /openTab on the local bridge: open a VISIBLE tab in a project's window,
-// start Claude in it the way a user would, wait until Claude's prompt is
+// as a New Tab that starts Claude (tool 'claude', whatever the user's New
+// Tab default is; no flags, the user's own settings), wait until its prompt is
 // really on screen, type a message (one bracketed paste, so its line breaks
 // stay input) and then press Enter ONCE, separately, so Claude starts on it.
 // Built for Brett's inbox board: his click on a card is the OK, so nothing
@@ -53,13 +54,6 @@ const SUBMIT_SETTLE_MAX_MS = 5000;
 // starting with one is typed but never sent automatically.
 const MODE_LEAD_RE = /^\s*[!/#&]/;
 const READY_POLL_MS = 250;
-// Shell readiness: some output, then this many quiet polls in a row.
-const SHELL_QUIET_POLLS = 3;
-const SHELL_POLL_MS = 100;
-const SHELL_WAIT_MAX_MS = 10_000;
-const LAUNCH_CHECK_TRIES = 5;
-const LAUNCH_CHECK_GAP_MS = 300;
-const LAUNCH_WAIT_MAX_MS = 10_000;
 // After the Enter: Claude empties its input box when it takes a message.
 const SUBMIT_CONFIRM_MS = 3000;
 
@@ -212,19 +206,16 @@ export function boxHoldsMessage(boxText, message) {
 /**
  * The /openTab service. deps:
  *   resolveProject(path) -> Promise<{ path } | { error, status? }>
- *   openTab(projectPath) -> Promise<{ tabId } | { error, tabId? }>   window + visible tab + its PTY
+ *   openTab(projectPath) -> Promise<{ tabId, keyCounter } | { error, tabId? }>   window + visible
+ *                                     tab whose shell starts Claude (New Tab, tool 'claude')
  *   tabAlive(tabId) -> boolean        the tab still exists in a live window
  *   focusTab(tabId) -> boolean        bring its window and the tab to the front
  *   ptyOf(tabId) -> object|null       PTY identity (a replaced shell is a new object)
- *   outputSeq(tabId) -> number        count of output chunks so far
  *   claudeRunning(tabId, projectPath) -> Promise<boolean>  claude leads the FOREGROUND process
  *                                     group of the tab's terminal, working in the project
- *   shellForeground(tabId) -> Promise<boolean>  the shell itself owns the terminal (no job running)
- *   shellInProject(tabId, path) -> Promise<boolean>  the shell's cwd is the project folder now
- *   typeLaunch(tabId) -> void         type `claude` + Enter at the shell prompt
- *   watchOutput(tabId) -> { mark(), seq(), keys(), screen(): Promise<{ lines, modes } | null>, stop() }
- *                                     the tab's output from now on, emulated; mark()
- *                                     forgets everything received so far; seq() counts chunks;
+ *   watchOutput(tabId, keyCounter) -> { seq(), keys(), screen(): Promise<{ lines, modes } | null>, stop() }
+ *                                     the tab's output since its PTY started, emulated;
+ *                                     seq() counts chunks;
  *                                     keys() counts a PERSON's keyboard writes into the tab
  *                                     (not ours, not mouse reports or terminal replies)
  *   paste(tabId, text) -> void        one bracketed paste, no Enter, written now
@@ -244,24 +235,6 @@ export function createOpenTabService(deps, opts = {}) {
       if (requests.size <= MAX_REMEMBERED_REQUESTS) break;
       if (e.settled) requests.delete(id);
     }
-  }
-
-  async function waitShell(tabId) {
-    const pty = deps.ptyOf(tabId);
-    const end = deps.now() + SHELL_WAIT_MAX_MS;
-    let last = -1;
-    let quiet = 0;
-    while (deps.now() < end) {
-      if (deps.ptyOf(tabId) !== pty || !pty) return false;
-      const seq = deps.outputSeq(tabId);
-      quiet = seq > 0 && seq === last ? quiet + 1 : 0;
-      if (quiet >= SHELL_QUIET_POLLS) return true;
-      last = seq;
-      await deps.sleep(SHELL_POLL_MS);
-    }
-    // A prompt that keeps redrawing (a clock in it) never goes quiet: the
-    // shell is up, type anyway. The PTY is still the one we were given.
-    return deps.ptyOf(tabId) === pty;
   }
 
   // Polls the emulated screen. Ready only on two polls in a row, so a frame
@@ -354,52 +327,15 @@ export function createOpenTabService(deps, opts = {}) {
     const { tabId } = opened;
     const pty = deps.ptyOf(tabId);
     if (!pty) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
-    // Only output from here on can make the tab "ready" (and, once the
-    // launch is typed, only output after it): a prompt lookalike in the
-    // shell's startup text cannot.
+    // The tab was asked for with tool 'claude' (store.openNewTab): its login
+    // shell starts Claude itself as its first command (shared/new-tab.js),
+    // whatever the user's New Tab default is. Nothing is typed to launch it.
     const watch = deps.watchOutput(tabId, opened.keyCounter);
     try {
-      if (!(await waitShell(tabId))) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
-      // Claude already runs in the tab (a "new tabs start Claude" setting,
-      // say): never type the launch command into it. Re-check the shell after
-      // the await: never type into a replacement.
-      // Only the shell may receive `claude` + Enter: a program a login script
-      // started (Codex, say) would take it as input. And Claude must start IN
-      // the project: a login script may `cd` away. The three checks are
-      // async, so they only count when the tab drew nothing while they ran
-      // (a program starting draws); otherwise they are taken again.
-      let already = false;
-      let shellOwns = false;
-      let inProject = false;
-      let settled = false;
-      // A startup job still in the foreground (a slow login script) is
-      // waited out too, up to LAUNCH_WAIT_MAX_MS.
-      const launchEnd = deps.now() + LAUNCH_WAIT_MAX_MS;
-      let changes = 0;
-      for (let i = 0; ; i += 1) {
-        if (i > 0) await deps.sleep(LAUNCH_CHECK_GAP_MS);
-        const seqBefore = watch.seq();
-        already = await deps.claudeRunning(tabId, resolved.path);
-        inProject = !already && (await deps.shellInProject(tabId, resolved.path));
-        shellOwns = !already && (await deps.shellForeground(tabId));
-        settled = watch.seq() === seqBefore;
-        if (!settled) changes += 1;
-        if (settled && (already || shellOwns)) break;
-        if (changes >= LAUNCH_CHECK_TRIES || deps.now() >= launchEnd) break;
-      }
-      if (!settled) return { ok: false, status: 409, tabId, error: 'the tab kept changing while Claude was being started; nothing was typed' };
-      if (!already && !shellOwns) return { ok: false, status: 409, tabId, error: 'another program is running in the tab\'s terminal, so Claude was not started; nothing was typed' };
-      if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: false, status: 409, tabId, error: 'the tab was closed or its shell was replaced before Claude could start; nothing was typed' };
       // A person typing into the new tab has taken it over: whatever they
       // typed (and an Enter of theirs still on its way) must never carry
       // the card's text. Mouse movement does not count.
       const typedIn = { ok: false, status: 409, tabId, error: 'someone typed into the tab, so the message was not typed' };
-      if (watch.keys() !== 0) return typedIn;
-      if (shellOwns && !inProject) return { ok: false, status: 500, tabId, error: 'the tab\'s shell is not in the project folder (a login script changed directory); nothing was typed' };
-      if (shellOwns) {
-        watch.mark();
-        deps.typeLaunch(tabId);
-      }
       const state = await waitReady(tabId, pty, watch, resolved.path);
       const gone = { ok: false, status: 409, tabId, error: 'the tab was closed, its shell exited or Claude stopped before the message could be typed; nothing was typed' };
       if (state === 'gone') return gone;

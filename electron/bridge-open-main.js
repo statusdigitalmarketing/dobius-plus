@@ -2,10 +2,11 @@
 // docs/bridge-open-tab.md). Builds the deps createOpenTabService needs from
 // the real windows, PTYs and screen emulator.
 //
-// The tab is created by the project WINDOW, exactly like Cmd+T: main asks the
-// renderer to add a tab, the renderer answers with the id it made, and that
-// tab's pane spawns the PTY through terminal:create, so the shell gets the
-// same account environment as every other tab.
+// The tab is created by the project WINDOW through the New Tab path
+// (store.openNewTab with tool 'claude'): main asks the renderer for it, the
+// renderer answers with the id it made, and that tab's pane spawns the PTY
+// through terminal:create with launch 'claude', so the shell gets the same
+// account environment as every other tab and starts Claude itself (no typing).
 
 import crypto from 'crypto';
 import fs from 'fs';
@@ -13,7 +14,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
-import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getTerminalCwd, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
+import { terminalInstance, getTerminalBuffer, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint } from './claude-argv.js';
 import { isKeyboardInput, CLAUDE_SCRIPT_RE } from './bridge-open-tab.js';
 import { submitPending } from './chat-service.js';
@@ -37,7 +38,6 @@ function isTabOfProject(tabId, projectPath) {
   return tabId.startsWith(head) && /^(?:~w-[a-z0-9]{8})?-\d+$/.test(tabId.slice(head.length));
 }
 
-const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh']);
 const INTERPRETERS = new Set(['node', 'bun', 'deno']);
 
 // Writes made by /openTab itself, so they are not counted as a person's.
@@ -282,19 +282,18 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     return true;
   }
 
-  // The tab's output from now on, for the readiness render. Collected from
-  // a subscription rather than read from the shared rolling buffer, so
-  // mark() can drop everything up to the launch: only what Claude draws
-  // after `claude` is typed can make the tab ready.
+  // The tab's output since its PTY started (it is brand new: its shell's
+  // first command is claude), kept current from a subscription. Seeded from
+  // the PTY's own buffer in the same tick it subscribes, so nothing drawn
+  // before the watch began is missed.
   function watchOutput(tabId, counter) {
-    let buf = '';
+    let buf = trimToEscapeBoundary(getTerminalBuffer(tabId) || '', WATCH_CAP_CHARS);
     let seq = 0;
     const keys = counter || countKeys(tabId);
     const sub = subscribeTerminal(tabId, {
       onData: (_id, data) => { seq += 1; buf = trimToEscapeBoundary(buf + data, WATCH_CAP_CHARS); },
     });
     return {
-      mark: () => { buf = ''; },
       seq: () => seq,
       keys: () => keys.n,
       screen: async () => {
@@ -345,47 +344,8 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     return false;
   }
 
-  // The shell itself owns the terminal: the PTY's process is still a shell
-  // (a login script's `exec claude` replaces it in place, same pid) and no
-  // job (Codex started by a login script, a pager) is in the foreground, so
-  // a typed `claude` reaches the shell and nothing else.
-  async function shellForeground(tabId) {
-    const pid = terminalInstance(tabId)?.pid;
-    if (!Number.isInteger(pid) || pid <= 0) return false;
-    try {
-      const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,comm=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
-      const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
-      if (!m) return false;
-      const name = m[3].split('/').pop().replace(/^-/, '');
-      if (m[1] !== m[2] || !SHELLS.has(name)) return false;
-      // With job control off, a running child shares the shell's group, so
-      // the group owning the terminal does not prove the SHELL is reading
-      // it: no child may be in the foreground group.
-      for (const child of await childPids(pid)) {
-        const { stdout: o } = await execFileP('/bin/ps', ['-o', 'pgid=', '-p', String(child)], { timeout: 1000, encoding: 'utf8' });
-        if (o.trim() === m[2]) return false;
-      }
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  // The shell is in the project folder NOW (a login script can `cd`
-  // elsewhere after the spawn), so Claude starts in the project.
-  async function shellInProject(tabId, projectPath) {
-    try {
-      const cwd = await getTerminalCwd(tabId);
-      return !!cwd && (await fs.promises.realpath(cwd)) === (await fs.promises.realpath(projectPath));
-    } catch {
-      return false;
-    }
-  }
-
   return {
     resolveProject,
-    shellForeground,
-    shellInProject,
     openTab,
     focusTab,
     watchOutput,
@@ -395,17 +355,9 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     tabAlive: (tabId) => !!terminalInstance(tabId) && getTerminalWebContentsId(tabId) !== null && !terminalClosing(tabId)
       && ![...(keyCounters.get(tabId) || [])].some((c) => c.reloaded),
     ptyOf: (tabId) => terminalInstance(tabId),
-    outputSeq: (tabId) => terminalRawOutputSeq(tabId),
-    // Typed at the shell prompt, as a person would: plain `claude`, the
-    // account env and PATH come from the tab's shell, and no permission
-    // flag is ever added.
     // Written straight to the PTY, never queued behind a Chat submit: a
     // queued write would go out LATER, after the checks that cleared it (a
     // queued /exit could put Claude's shell in front of it).
-    // Ctrl+E then Ctrl+U first: anything already on the shell's input line
-    // (end of line, then kill to its start, so a cursor moved to the start
-    // cannot leave a tail) is erased, never run along with the launch.
-    typeLaunch: (tabId) => writeOwn(tabId, '\x05\x15claude\r'),
     // One bracketed paste, no Enter in it.
     paste: (tabId, text) => writeOwn(tabId, `\x1b[200~${text}\x1b[201~`),
     // The single Enter, written on its own once the paste has settled.
