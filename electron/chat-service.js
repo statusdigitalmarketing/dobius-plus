@@ -231,13 +231,15 @@ export function writeRawInput(id, data, stillOk = () => true) {
     // Only a frame of nothing but cancel keys counts as the queue's own: one
     // that also carries an Enter ("\r\x15") may have sent the paste first
     // (Codex High), so it counts as another writer.
+    // Written FIRST: a cancel whose write throws must not be counted as an
+    // erase, or the pending paste it never cleared reads as unsent (Codex High).
+    const r = written();
+    writeTerminal(id, data);
     if (q) {
       q.gen += 1;
       if (/^[\x03\x15\x1b]+$/.test(data)) q.cancelWrites = (q.cancelWrites || 0) + 1;
       if (data !== '\x1b') q.clearedGen = q.gen;
     }
-    const r = written();
-    writeTerminal(id, data);
     return Promise.resolve(r);
   }
   if (!q || !q.running) { const r = written(); writeTerminal(id, data); return Promise.resolve(r); }
@@ -297,9 +299,11 @@ async function drainSubmits(id, q) {
         // the paste before the erase, and reporting it unsent would offer the
         // text back to be sent twice (Codex High). Then it is stranded: check
         // the terminal.
-        const foreign = (terminalInputSeq(id) - pastedAt) - ((q.cancelWrites || 0) - cancelsAt);
-        const erased = foreign === 0 && (q.clearedGen ?? -1) > it.gen;
         const gone = terminalInstance(id) !== it.pty || terminalClosing(id);
+        const foreign = (terminalInputSeq(id) - pastedAt) - ((q.cancelWrites || 0) - cancelsAt);
+        // Never an erase once the PTY is gone: a replacement's counters say
+        // nothing about what reached the old one (Codex High).
+        const erased = !gone && foreign === 0 && (q.clearedGen ?? -1) > it.gen;
         if (!gone && !erased) it.onStranded();
         // uncertain: unless it was erased, the paste is in the tab and may yet
         // be submitted: by another writer's input during the delay, by the

@@ -446,11 +446,10 @@ const SEND_REFUSED = {
   not_authorized: 'Not sent: the connection lost this tab. Send it again.',
   too_large: 'Not sent: the message is too long.',
   cancelled: 'Not sent: a cancel key dropped it.',
-  stranded: 'Pasted but not submitted: it may be waiting in the input line. Check the terminal before resending.',
 };
-// The Mac could not tell: the text reached the tab, then the tab went away or
-// the write failed, so it may have been sent.
-const SEND_UNCERTAIN = 'Maybe sent: the tab changed while it was being typed. Check before resending.';
+// uncertain (stranded is always uncertain): the text reached the tab but its
+// Enter was withheld, so it may be in the input line or already sent.
+const SEND_UNCERTAIN = 'Maybe sent: it was pasted but the tab changed before Enter. Check the terminal before resending.';
 
 /**
  * Responsive conversation view for a session on mobile. Instead of mirroring the
@@ -802,7 +801,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         // Macs from v1.0.88 answer a send that did not go through; older ones
         // dropped it without a word. Say so instead of leaving the echo bubble
         // looking delivered.
-        const note = msg.code !== 'stranded' && msg.uncertain ? SEND_UNCERTAIN : SEND_REFUSED[msg.code];
+        const note = msg.uncertain ? SEND_UNCERTAIN : SEND_REFUSED[msg.code];
         if (note) {
           setSendNote(note);
           clearTimeout(sendNoteTimer.current);

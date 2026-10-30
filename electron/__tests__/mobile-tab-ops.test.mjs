@@ -271,4 +271,30 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   ok('sequential awaited submits both land');
 }
 
+// 12. A cancel whose write throws did not erase anything: the paste it never
+// cleared is uncertain, not "cancelled".
+{
+  const h = harness({ live: [A], authed: [A] });
+  const p = h.run({ type: 'submitPrompt', id: A, text: 'deploy', reqId: 'd' });
+  ptys.get(A).throwOnWrite = true;
+  await h.run({ type: 'input', id: A, data: '\x15', reqId: 'u' });
+  ptys.get(A).throwOnWrite = false;
+  await p;
+  const by = Object.fromEntries(h.sent.map((m) => [m.reqId, [m.code, m.uncertain === true]]));
+  assert.deepEqual(by, { u: ['write_failed', true], d: ['stranded', true] });
+  ok('a cancel that failed to write is not an erase');
+}
+
+// 13. Once the PTY is replaced, a cancel on the new one proves nothing about
+// the paste in the old one.
+{
+  const h = harness({ live: [A], authed: [A] });
+  const p = h.run({ type: 'submitPrompt', id: A, text: 'deploy', reqId: 'd' });
+  ptys.set(A, { replacement: true });
+  writeRawInput(A, '\x15');
+  await p;
+  assert.deepEqual([h.sent[0].code, h.sent[0].uncertain], ['tab_exited', true]);
+  ok('replaced PTY: tab_exited stays uncertain whatever the new one sees');
+}
+
 console.log(`\n${pass} passed`);

@@ -154,6 +154,8 @@ printf '%s\n' '{"type":"auth","token":"<token>"}' \
   fresh `selector` message 700 to 900 ms later (the write may have answered a
   prompt). Refused requests push nothing.
 - An accepted write clears the tab's pending selector push.
-- The phone's Chat view shows a short note for a refused chat send
-  (`unknown_tab`, `tab_exited`, `not_authorized`, `too_large`, `cancelled`,
-  `stranded`); its Terminal screen refreshes the tab list on `unknown_tab`.
+- The phone's Chat view tags each chat send with a `reqId` and shows a short
+  note when THAT send is refused (`unknown_tab`, `tab_exited`,
+  `not_authorized`, `too_large`, `cancelled`), or "Maybe sent" for any
+  `uncertain` refusal; its Terminal screen refreshes the tab list on
+  `unknown_tab`.
