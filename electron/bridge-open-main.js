@@ -200,7 +200,9 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // A NEW tab has no PTY yet when the window answers (its pane spawns one
     // after this), so an id that already has a shell is an existing tab and
     // is refused: the message must never land in a tab already in use.
-    if (!isTabOfProject(tabId, p.projectPath) || terminalInstance(tabId)) {
+    // And an id another live request already holds is refused: one tab per
+    // request, never two requests typing into one tab.
+    if (!isTabOfProject(tabId, p.projectPath) || terminalInstance(tabId) || keyCounters.get(tabId)?.size) {
       p.done(null);
       return;
     }

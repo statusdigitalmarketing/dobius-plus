@@ -406,6 +406,11 @@ function fakeDeps(over = {}) {
   d2.watchOutput = (id, c) => { const w = ow(id, c); const sc = w.screen; w.screen = async () => (submitted ? null : sc()); return w; };
   const r2 = await createOpenTabService(d2).open({ projectPath: '/p', message: 'go', requestId: 'newline2' });
   assert.equal(r2.body.submitted, false);
+  // ...and neither does a frame with no recognisable input box (a repaint).
+  const d3 = fakeDeps();
+  d3.submit = (id) => { d3.log.push(['submit', id]); d3.tabs.get(id).frames.push({ lines: Array(20).fill('repainting'), modes: { bracketedPaste: true } }); };
+  const r3 = await createOpenTabService(d3).open({ projectPath: '/p', message: 'go', requestId: 'newline3' });
+  assert.equal(r3.body.submitted, false);
   ok('an Enter that did not send is reported as not sent');
 }
 

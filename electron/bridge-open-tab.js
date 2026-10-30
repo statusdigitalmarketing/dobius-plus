@@ -312,7 +312,10 @@ export function createOpenTabService(deps, opts = {}) {
       let after;
       try { after = await watch.screen(); } catch { after = null; }
       if (!after) continue; // a failed read proves nothing
-      if (!boxStillHasMessage(promptBoxText(after.lines, after.modes), message)) return { ok: true, tabId, submitted: true };
+      // Only an input box that is SEEN and no longer holds the message
+      // confirms the send; a frame with no recognisable box proves nothing.
+      const box = promptBoxText(after.lines, after.modes);
+      if (box !== null && !boxStillHasMessage(box, message)) return { ok: true, tabId, submitted: true };
     }
     return { ok: true, tabId, submitted: false, note: 'Enter was pressed but the message is still in Claude\'s prompt (is Enter set to insert a new line?); press the key that sends it' };
   }
