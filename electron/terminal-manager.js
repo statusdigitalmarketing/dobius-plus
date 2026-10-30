@@ -1008,6 +1008,11 @@ export function getTerminalBuffer(id) {
   return entry ? entry.outputBuffer : '';
 }
 
+/** The PTY's current width in columns (last spawn or resize), or null. */
+export function terminalCols(id) {
+  return terminals.get(id)?.cols ?? null;
+}
+
 // The live pty object behind a tab id, or null. Identity, not a handle to
 // write through: a caller that waits between two writes compares it to tell
 // "same shell" from "the tab id now names a respawned PTY".

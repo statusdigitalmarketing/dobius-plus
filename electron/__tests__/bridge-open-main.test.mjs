@@ -52,6 +52,7 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   assert.ok(watch.keys() > 0, 'held keys count as typing');
   assert.equal(deps.inputBusy(opened.tabId), true);
 
+  assert.equal(deps.inputHeld(opened.tabId), true, 'Chat waits for it too');
   // The queue drained: no longer busy (the keys stay counted).
   env.emit('terminal:inputHeld', wc, opened.tabId, null);
   assert.equal(deps.inputBusy(opened.tabId), false);
@@ -111,6 +112,36 @@ test('a page reloaded while the request waits for it still makes no tab of its o
   assert.deepEqual(wc.asks, [true, true], 'both pages were told');
   assert.equal(env.invoke('window:openedForBridge', wc), false);
   windowReady = () => true;
+});
+
+test('a second request into a window another request opened keeps it from making its own tab', async () => {
+  // The page starts slowly. Request A opens the window; B arrives just before
+  // A's 15s readiness wait runs out; A gives up while B still waits.
+  let release;
+  env.windowFactory.make = () => {
+    const wc = projectWindow('/p/two');
+    release = () => { wc.asked = env.invoke('window:openedForBridge', wc); wc.ready = true; };
+    return { webContents: wc };
+  };
+  windowReady = (wc) => wc.ready === true;
+  const realNow = Date.now;
+  let skew = 0;
+  Date.now = () => realNow() + skew;
+  try {
+    const a = deps.openTab('/p/two');
+    skew = 14_900;
+    const b = deps.openTab('/p/two');
+    skew = 15_100; // past A's deadline only
+    assert.deepEqual(await a, { error: 'the project window did not finish loading' });
+    const wc = env.windows.get('/p/two').win.webContents;
+    release();
+    assert.equal(wc.asked, true, 'still told while B waits');
+    assert.equal(typeof (await b).tabId, 'string');
+    assert.equal(env.invoke('window:openedForBridge', wc), false, 'cleared once both ended');
+  } finally {
+    Date.now = realNow;
+    windowReady = () => true;
+  }
 });
 
 test('a window answering with another project\'s tab id is refused, prefix lookalikes included', async () => {

@@ -14,7 +14,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
-import { terminalInstance, getTerminalBuffer, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
+import { terminalInstance, getTerminalBuffer, terminalCols, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint, JS_RUNTIMES, CLAUDE_SCRIPT_RE } from './claude-argv.js';
 import { isKeyboardInput, isUserInput } from './bridge-open-tab.js';
 import { submitPending } from './chat-service.js';
@@ -216,8 +216,10 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // saved tabs, makes no first tab of its own: the request's tab (tool
   // claude) is its first, so one request never starts two tools (ProjectView
   // asks while it restores its tabs). Kept until the request ends, so a page
-  // reloaded meanwhile asks again and still makes no tab of its own.
-  const openedForBridge = new Set();
+  // reloaded meanwhile asks again and still makes no tab of its own, and
+  // counted: a second request into that window keeps it until IT ends too.
+  // wcId -> requests in flight
+  const openedForBridge = new Map();
   ipcMain.handle('window:openedForBridge', (event) => openedForBridge.has(event.sender.id));
 
   // Requests main stopped waiting for: a window that answers one anyway
@@ -254,17 +256,21 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       target = primaryDockTarget(projectPath, null);
       // A window opened FOR this request: our tab is its first, so a fresh
       // window (no saved tabs) must not also start the New Tab default.
-      if (target?.win === win) {
-        opened = win.webContents.id;
-        openedForBridge.add(opened);
-      }
+      if (target?.win === win) opened = win.webContents.id;
+    } else if (openedForBridge.has(target.win.webContents.id)) {
+      // Another request opened it and its page may still be starting.
+      opened = target.win.webContents.id;
     }
+    if (opened !== null) openedForBridge.set(opened, (openedForBridge.get(opened) || 0) + 1);
     try {
       return await openTabIn(target, projectPath);
     } finally {
-      // The request's tab exists now (or never will): the window decides
-      // its own first tab again from here on.
-      if (opened !== null) openedForBridge.delete(opened);
+      // The request's tab exists now (or never will): once no request is
+      // left, the window decides its own first tab again.
+      if (opened !== null) {
+        const n = openedForBridge.get(opened) - 1;
+        if (n > 0) openedForBridge.set(opened, n); else openedForBridge.delete(opened);
+      }
     }
   }
 
@@ -354,7 +360,8 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       keys: () => keys.n,
       input: () => keys.any,
       screen: async () => {
-        const lines = await renderScreenLines(buf);
+        // At the PTY's own width: a wider window's rules must not wrap.
+        const lines = await renderScreenLines(buf, { cols: terminalCols(tabId) });
         return lines ? { lines, modes: lines.modes } : null;
       },
       stop: () => { sub.unsubscribe(); stopCounting(keys); },
@@ -428,6 +435,9 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // editing holds their input: their Enter may still be to come, so the
     // prompt is not ours to type into.
     inputBusy: (tabId) => submitPending(tabId) || heldInput.has(tabId),
+    // The tab's window still holds a person's input (main.js: a Chat send
+    // waits for it, so the two never interleave).
+    inputHeld: (tabId) => heldInput.has(tabId),
     sleep,
     now: () => Date.now(),
   };

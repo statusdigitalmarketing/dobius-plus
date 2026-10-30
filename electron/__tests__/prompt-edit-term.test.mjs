@@ -336,3 +336,21 @@ test('a key that starts a selection edit is reported before the edit sends anyth
   assert.equal(t.app.text, 'hello world ');
   assert.equal(t.app.held.at(-1), null);
 });
+
+test('a send reserved by the command bar is held from the moment it is accepted until it is released', async () => {
+  const t = fakeClaude('');
+  const release = t.edit.reserve('hi\r');
+  assert.deepEqual(t.app.held, ['hi\r'], 'held before any of its input arrives');
+  t.edit.handleData('h');
+  await wait(0);
+  t.edit.handleData('i');
+  await wait(20);
+  assert.deepEqual(t.app.writes, ['h', 'i']);
+  assert.equal(t.app.held.includes(null), false, 'not drained while the send is still coming');
+  t.edit.handleData('\r');
+  release();
+  release(); // a second release changes nothing
+  await wait(20);
+  assert.deepEqual(t.app.held, ['hi\r', null]);
+  assert.equal(t.app.submitted, 'hi');
+});

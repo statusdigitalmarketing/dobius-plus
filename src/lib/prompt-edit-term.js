@@ -66,7 +66,11 @@ export function attachPromptEditing(term, send, held = () => {}) {
   let armed = null;
   let columnSelect = false; // xterm's Option+drag selects a rectangle, not a range
   let holding = false; // held input was reported and the drain was not yet
+  let reserved = 0; // sends accepted elsewhere whose input is still to come
   const hold = (data) => { holding = true; held(data); };
+  const drained = () => {
+    if (holding && !busy && !queue.length && !reserved) { holding = false; held(null); }
+  };
   const app = () => !!term.modes.applicationCursorKeysMode;
 
   const defaultRenderer = () => term.buffer.active.type === 'normal' && term.modes.mouseTrackingMode === 'none';
@@ -182,7 +186,7 @@ export function attachPromptEditing(term, send, held = () => {}) {
       }
     } finally {
       busy = false;
-      if (holding && !queue.length) { holding = false; held(null); }
+      drained();
     }
   };
 
@@ -289,11 +293,23 @@ export function attachPromptEditing(term, send, held = () => {}) {
     pasteWhenReady,
     /** True when the selection is (all) inside the prompt's text. */
     selectionInInput: () => term.hasSelection() && !!selectedRange(),
+    /**
+     * A send accepted now whose input arrives later, paced (the command bar):
+     * reported as held at once, and held until the returned release() is
+     * called after its last handleData.
+     */
+    reserve(data) {
+      reserved += 1;
+      hold(data);
+      let open = true;
+      return () => { if (open) { open = false; reserved = Math.max(0, reserved - 1); drained(); } };
+    },
     dispose() {
       disposed = true;
       for (const type of armEvents) el?.removeEventListener(type, arm, true);
       el?.removeEventListener('mousedown', onMouseDown, true);
       queue.length = 0;
+      reserved = 0;
       if (holding) { holding = false; held(null); }
     },
   };

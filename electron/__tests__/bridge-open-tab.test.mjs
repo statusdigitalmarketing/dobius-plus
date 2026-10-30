@@ -99,10 +99,23 @@ ok('Claude ready check on real screens');
   const chained = ['● Done', rule, '❯ Fix the README', rule, '  Opus 4.1 · high', 'Project', rule, '❯ main', rule];
   assert.equal(promptBoxText(chained, at(16, 2)), 'Fix the README', 'the status line box is not the prompt');
   assert.equal(isClaudePromptReady(chained, at(0, 8)), false, 'no box holds the caret');
+  const titled = ['● Done', rule, '❯ ', rule, '  Opus 4.1 · high', 'Do you want to deploy? (task title)'];
+  assert.equal(isClaudePromptReady(titled, at(2, 2)), true, 'a status line asking a question is not a dialog');
+  assert.equal(isClaudePromptReady(['Do you want to proceed?', rule, '❯ ', rule], at(2, 2)), false, 'a question above the box is');
+  assert.equal(isClaudePromptReady([rule, '❯ ', rule, '  Esc to cancel'], at(2, 1)), false, 'a dialog footer below the box is');
   for (const f of ['opentab-trust-2.1.314-raw.bin', 'askq-2.1.224-raw.txt', 'askq-multi-q1-2.1.233-raw.bin', 'askq-multi-submit-2.1.233-raw.bin']) {
     const sc = await render(f);
     assert.equal(Number.isInteger(sc.modes.cursor?.y), true, f);
   }
+  // A terminal wider than the emulator's default: rendered at the PTY's own
+  // width, Claude's full-width rules stay one row each.
+  const wide = new TextEncoder().encode(`\x1b[?2004h${'─'.repeat(230)}\r\n❯ \r\n${'─'.repeat(230)}\r\n  ? for shortcuts\x1b[2;3H`);
+  const atWidth = await renderScreenLines(wide, { cols: 230 });
+  assert.equal(isClaudePromptReady(atWidth, atWidth.modes), true, 'rendered at the real width');
+  const narrow = await renderScreenLines(wide);
+  assert.equal(isClaudePromptReady(narrow, narrow.modes), false, 'the 220-column default wraps the rules');
+  const back = await renderScreenLines(new Uint8Array(fs.readFileSync(path.join(here, 'fixtures', 'opentab-idle-2.1.314-raw.bin'))));
+  assert.equal(isClaudePromptReady(back, back.modes), true, 'the next render is back at the default width');
   ok('the input box is the one holding the caret');
 }
 

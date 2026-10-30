@@ -148,10 +148,15 @@ export function isClaudePromptReady(lines, modes) {
 // A dialog on screen (a permission question, a selector): an Enter there
 // ANSWERS it. Its footer or a numbered selector anywhere means not ready,
 // whatever box-like rows it quotes (a heredoc can contain a rule and a ❯).
-const DIALOG_RE = /Esc to cancel|Enter to (?:confirm|select)|Do you want to |Would you like to /i;
-function dialogOnScreen(lines) {
-  if (lines.some((l) => DIALOG_RE.test(String(l || '')))) return true;
-  try { return !!parseSelectorFromScreen(lines); } catch { return true; }
+// Below the input box only a dialog's footer or its options count: a chained
+// status line draws there, and its text ("Do you want to deploy?" as a task
+// title) must not read as a question. Every Claude dialog has such a footer.
+const DIALOG_FOOTER_RE = /Esc to cancel|Enter to (?:confirm|select)/i;
+const DIALOG_RE = /Do you want to |Would you like to /i;
+function dialogOnScreen(above, below) {
+  if (above.some((l) => DIALOG_RE.test(String(l || '')))) return true;
+  if ([...above, ...below].some((l) => DIALOG_FOOTER_RE.test(String(l || '')))) return true;
+  try { return !!parseSelectorFromScreen([...above, ...below]); } catch { return true; }
 }
 
 // Is the terminal cursor in this box's TEXT? Claude's default renderer keeps
@@ -192,7 +197,7 @@ export function promptBoxText(lines, modes) {
     if (flat ? (PROMPT_ROW_RE.test(row) && (caret || !OPTION_ROW_RE.test(row))) : BOX_PROMPT_RE.test(row)) {
       // A dialog anywhere OUTSIDE the box (the box's own text is the
       // message, which may well say "Do you want to ...").
-      if (dialogOnScreen([...lines.slice(0, top + 1), ...lines.slice(j)])) return null;
+      if (dialogOnScreen(lines.slice(0, top + 1), lines.slice(j))) return null;
       // Only Claude's own chrome is stripped: the prompt character on the
       // FIRST row, and the side borders of the older boxed prompt. A later
       // row starting with ">" or "│" in the flat prompt is message text.

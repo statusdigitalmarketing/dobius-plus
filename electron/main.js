@@ -213,6 +213,12 @@ function createWindow() {
 // write into one. Codex audit HIGH finding (main.js:115 + main.js:119).
 const TERMINAL_ID_RE = /^term-.+-\d+$/;
 const TERMINAL_WRITE_MAX_BYTES = 256 * 1024; // 256KB per write — plenty for a paste, blocks DoS
+// /openTab's electron side (bridge-open-main.js), set up with the window
+// handlers; Chat also reads the input a window holds from it.
+let bridgeOpenDeps = null;
+// A Chat send waits this long for input prompt editing holds (its longest
+// image paste wait, src/lib/prompt-edit-term.js PASTE_WAIT_MS, plus margin).
+const CHAT_WAIT_HELD_MS = 16_000;
 
 // Per-webContents ownership of terminal ids. terminal:create records the
 // owning sender; terminal:write/resize/kill require the same sender. This
@@ -718,6 +724,13 @@ function setupDataHandlers() {
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return false;
     cancelAutoResumeTab(tabId); // user input wins over a queued resume, as in terminal:write
+    // Input the terminal's prompt editing still holds (an image paste being
+    // saved, the keys typed after it) goes first: Chat's paste and Enter
+    // would otherwise land between them. Waits as long as that queue does.
+    for (const end = Date.now() + CHAT_WAIT_HELD_MS; bridgeOpenDeps?.inputHeld(tabId);) {
+      if (Date.now() >= end || !ownsTerminal(senderId, tabId)) return false;
+      await new Promise((r) => setTimeout(r, 50));
+    }
     // true, false, or 'stranded': pasted, but the Enter was withheld because
     // other input reached the tab first, so the text sits in its input line.
     let stranded = false;
@@ -3181,10 +3194,11 @@ function setupWindowHandlers() {
   // project window, with Claude started and a message typed and then sent
   // with one Enter (docs/bridge-open-tab.md). It waits for the same
   // tabsReady signal a dock does.
-  setOpenTabService(createOpenTabService(createBridgeOpenDeps({
+  bridgeOpenDeps = createBridgeOpenDeps({
     windowReady: (wc) => dockReadyWc.has(wc.id),
     ownerOf: (tabId) => terminalOwners.get(tabId),
-  })));
+  });
+  setOpenTabService(createOpenTabService(bridgeOpenDeps));
 
   // Record the docked tab in the target window's saved tab list BEFORE the
   // handoff: terminal:loadState only returns scrollback for a tab a window

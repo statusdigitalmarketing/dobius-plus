@@ -64,6 +64,7 @@ export const terminals = new Map(); // tabId -> { pid, cwd, wcId }
 const inputObservers = new Set();
 export function terminalInstance(id) { return terminals.get(id) || null; }
 export function getTerminalBuffer() { return ''; }
+export function terminalCols() { return 80; }
 export function subscribeTerminal() { return { ok: true, unsubscribe: () => {} }; }
 export function trimToEscapeBoundary(s) { return s; }
 export function getTerminalWebContentsId(id) { return terminals.get(id)?.wcId ?? null; }
