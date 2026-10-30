@@ -357,9 +357,11 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // the PTY) is not alive: nothing more is typed into it.
     // Nor is a tab whose window is closing (its shutdown snapshot can miss a
     // PTY that started after it began).
-    tabAlive: (tabId) => !!terminalInstance(tabId) && !terminalClosing(tabId)
-      && !(getWindowEntryByWcId(getTerminalWebContentsId(tabId))?.closing ?? true)
-      && ![...(keyCounters.get(tabId) || [])].some((c) => c.reloaded),
+    tabAlive: (tabId) => {
+      if (!terminalInstance(tabId) || terminalClosing(tabId)) return false;
+      const win = getWindowEntryByWcId(getTerminalWebContentsId(tabId));
+      return !!win && !win.closing && ![...(keyCounters.get(tabId) || [])].some((c) => c.reloaded);
+    },
     ptyOf: (tabId) => terminalInstance(tabId),
     // Written straight to the PTY, never queued behind a Chat submit: a
     // queued write would go out LATER, after the checks that cleared it (a

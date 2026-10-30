@@ -349,3 +349,9 @@
 - **FIX**: Never name a zsh variable `path` (also avoid `cdpath`, `fpath`, `manpath`). Use `u` or `route`.
 - **CONTEXT**: Bash tool commands run under zsh here.
 - **DETECTION**: `grep -nE "for path in|\bpath=" scratchpad/**/*.sh`
+
+### Architecture - 2026-10-30
+- **MISTAKE**: In /openTab's `tabAlive` (electron/bridge-open-main.js) I wrote `!(getWindowEntryByWcId(id)?.closing ?? true)` to mean "a window exists and is not closing". A window entry whose `closing` is simply unset gives `undefined ?? true` = true, so every live tab read as dead and the harness dropped from 36/36 to 16/36. Three Codex lenses had just answered "No bugs found." on that exact line; only the ship-test caught it.
+- **FIX**: Spell the two conditions out: `const win = getWindowEntryByWcId(...); return !!win && !win.closing`. `?? default` on an optional-chained boolean conflates "no object" with "property unset".
+- **CONTEXT**: Any guard that combines "exists" and "flag not set" on a value whose flag is only ever set to true (window-manager sets `closing = true`, never false). Re-run the harness after every guard change, even one Codex cleared.
+- **DETECTION**: `grep -n "?\.[a-zA-Z]* ?? true" electron/*.js src -r`
