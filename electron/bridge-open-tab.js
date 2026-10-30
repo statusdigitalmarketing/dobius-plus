@@ -23,10 +23,16 @@ export const CLAUDE_SCRIPT_RE = /\/(?:@anthropic-ai\/claude-code\/cli|claude\/ve
 // Claude sends; they are not someone typing. Neither are the terminal's
 // own replies (focus, cursor reports).
 const MOUSE_RE = /\x1b\[M[\s\S]{3}|\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[\d+;\d+;\d+M/g;
+// The terminal's own answers to a program's queries, wherever they sit in a
+// chunk: focus, cursor and status reports (ESC[0n, ESC[r;cR), device
+// attributes, mode reports, OSC answers. A cursor report can equal a
+// modified F3; missing such a key press here only means a stray Shift+F3
+// does not count as someone typing, which is harmless.
+const REPLY_RE = /\x1b\[[IO]|\x1b\[\??\d+(?:;\d+)*R|\x1b\[\d*n|\x1b\[[?>=][\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 export function isKeyboardInput(data) {
   if (typeof data !== 'string' || !data) return false;
   if (isTerminalReply(data)) return false;
-  return data.replace(MOUSE_RE, '').length > 0;
+  return data.replace(MOUSE_RE, '').replace(REPLY_RE, '').length > 0;
 }
 
 // The board's own id for a card click: letters, digits and . _ : - only, so

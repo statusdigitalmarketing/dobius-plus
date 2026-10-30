@@ -37,7 +37,7 @@ for (const s of ['\r', '\x1b', '\x03', '\x15', '\u009b', '\x00']) {
 ok('message neutralising');
 
 // Keyboard vs pointer: only a person's keys count as typing into the tab.
-for (const m of ['\x1b[<35;10;5M', '\x1b[<0;3;4m\x1b[<35;11;5M', '\x1b[M #!', '\x1b[32;10;5M', '\x1b[I', '\x1b[O']) assert.equal(isKeyboardInput(m), false, JSON.stringify(m));
+for (const m of ['\x1b[<35;10;5M', '\x1b[<0;3;4m\x1b[<35;11;5M', '\x1b[M #!', '\x1b[32;10;5M', '\x1b[I', '\x1b[O', '\x1b[0n', '\x1b[1;5R', '\x1b[0n\x1b[12;40R', '\x1b[?1;2c', '\x1b]11;rgb:0000/0000/0000\x07']) assert.equal(isKeyboardInput(m), false, JSON.stringify(m));
 for (const k of ['a', '\r', 'hello', '\x1b[A', '\x1b[<35;10;5Mx', '\x15']) assert.equal(isKeyboardInput(k), true, JSON.stringify(k));
 assert.equal(CLAUDE_SCRIPT_RE.test('/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js'), true);
 assert.equal(CLAUDE_SCRIPT_RE.test('/Users/x/.local/share/claude/versions/2.1.314/cli.js'), true);
