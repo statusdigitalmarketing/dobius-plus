@@ -2068,7 +2068,9 @@ function setupFileHandlers() {
     }
     if (out.action === 'delete') delete settings.statusLine;
     else settings.statusLine = out.statusLine;
-    try { writeClaudeSettings(settings, raw); }
+    // Removing never needs the file to exist: a settings.json that vanished
+    // since this read is not recreated from the stale copy.
+    try { writeClaudeSettings(settings, raw, { mustExist: true }); }
     catch (err) { return { error: `Could not update settings.json: ${err.message}` }; }
     clearStatusLineBackup(backup.raw);
     try { fs.unlinkSync(reporterScriptPath(app.getPath('userData'))); } catch { /* already gone */ }
