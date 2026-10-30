@@ -987,7 +987,12 @@ export async function getLatestSession(projectPath) {
       try {
         const tail = await parseJsonl(filePath, 200);
         for (const e of tail) {
-          const t = tsToEpochMs(e.timestamp);
+          if (!e || typeof e !== 'object') continue;
+          // Messages only, as in loadAllSessions: hook output and snapshots
+          // written by merely resuming a chat must not make it the latest.
+          const r = entryRole(e);
+          const tx = r === 'user' ? userEntryText(e) : '';
+          const t = tx && isSyntheticUserText(tx) ? 0 : messageStamp(e, r, tx, tsToEpochMs(e.timestamp));
           if (t > msgTs) msgTs = t;
           // Track the LAST user message we see in the tail as a preview.
           if (e.type === 'human' || e.role === 'user' || e.message?.role === 'user') {

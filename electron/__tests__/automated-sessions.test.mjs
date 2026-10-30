@@ -11,7 +11,7 @@ process.env.HOME = TMP_HOME;
 // Own config dir: this suite records tab names through config-manager.
 process.env.DOBIUS_TEST_USERDATA = path.join(TMP_HOME, 'userdata');
 await fs.mkdir(process.env.DOBIUS_TEST_USERDATA, { recursive: true });
-const { loadAllSessions, sessionMovedPast } = await import('../data-service.js');
+const { loadAllSessions, sessionMovedPast, getLatestSession } = await import('../data-service.js');
 const { recordSessionTabNames, getSessionTabNames, flushConfig } = await import('../config-manager.js');
 
 let pass = 0, fail = 0;
@@ -181,6 +181,18 @@ await fs.writeFile(path.join(movedDir, 'b.jsonl'), rec('user', 'cli', 'after cle
 check('a newer unclaimed transcript: moved past', await sessionMovedPast('/tmp/movedproj', 'a', startedAt, new Set()), true);
 check('a newer transcript another tab owns does not count', await sessionMovedPast('/tmp/movedproj', 'a', startedAt, new Set(['b'])), false);
 check('a missing transcript is never named', await sessionMovedPast('/tmp/movedproj', 'zz', startedAt, new Set()), true);
+
+// The "Resume last session?" pick follows the same rule as History.
+const latestDir = path.join(TMP_HOME, '.claude', 'projects', '-tmp-latestproj');
+await fs.mkdir(latestDir, { recursive: true });
+await fs.writeFile(path.join(latestDir, 'resumed.jsonl'), [
+  rec('user', 'cli', 'old ask', now - 3_600_000), rec('assistant', 'cli', 'old reply', now - 3_590_000),
+  meta('attachment', now - 100), meta('file-history-snapshot', now - 90),
+].join('\n') + '\n');
+await fs.writeFile(path.join(latestDir, 'talked.jsonl'), [
+  rec('user', 'cli', 'newer ask', now - 600_000), rec('assistant', 'cli', 'newer reply', now - 590_000),
+].join('\n') + '\n');
+check('the latest session is the last one messaged', (await getLatestSession('/tmp/latestproj'))?.sessionId, 'talked');
 
 flushConfig?.();
 
