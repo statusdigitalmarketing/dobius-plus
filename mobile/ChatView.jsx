@@ -584,6 +584,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // A chat send the Mac refused (opError). Shown in the input row, which is on
   // screen in every state; the selector card's note is only shown with a card.
   const [sendNote, setSendNote] = useState('');
+  const sendNoteTimer = useRef(null);
   // Local echoes: a just-sent message renders IMMEDIATELY instead of waiting
   // for the transcript poll (a mid-turn send used to look eaten: it sat in
   // Claude's queue and never appeared here; the server now also surfaces
@@ -797,7 +798,8 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         const note = SEND_REFUSED[msg.code];
         if (note) {
           setSendNote(note);
-          setTimeout(() => setSendNote(''), 6000);
+          clearTimeout(sendNoteTimer.current);
+          sendNoteTimer.current = setTimeout(() => setSendNote(''), 6000);
         }
       }
     });
@@ -924,6 +926,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     // chunk made Claude's Ink TUI treat the \r as pasted newline, so messages
     // sat in the input box unsubmitted (Sam's v1.0.51 bug 3).
     connection.send({ type: 'submitPrompt', id: tabId, text });
+    setSendNote(''); // a refusal note is about the PREVIOUS send
     sentAtRef.current = Date.now();
     setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
     setDraft('');
