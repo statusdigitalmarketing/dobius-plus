@@ -1108,6 +1108,8 @@ test('a hook Working with a silent PTY for a minute is not claimed', async () =>
     now: () => 70_000,
   });
   assert.equal((await tabActivity(ID)).activity.uncertain, true);
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
   ts.ingest(ID, 'spinner frame', 69_000); // the TUI is still painting
   const live = makeActivity({ claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }), presenceForTab: async () => null, now: () => 70_000 });
   assert.notEqual((await live.tabActivity(ID)).activity.uncertain, true);
@@ -1140,7 +1142,7 @@ test('the silence rule also applies on the settle path', async () => {
   assert.equal(label({ ...r.activity, live: true, now: 120_000 }), null);
 });
 
-test('a silent Working is ended in the record, so later output cannot revive it', async () => {
+test('a silent Working is flagged in the record, so later output cannot revive it', async () => {
   ts._reset();
   ts.ingest(ID, mk('working'), 10_000);
   let t = 90_000;
@@ -1205,7 +1207,7 @@ test('presence busy outranks silence (a suspended claude is not a finished turn)
   assert.equal(ts.activityFor(ID).hookOwned, true);
 });
 
-test('a silence-ended turn records no end, so no Waiting is measured from it', async () => {
+test('silence keeps the turn and gives it no end, so no Waiting is measured from it', async () => {
   ts._reset();
   ts.ingest(ID, mk('working'), 10_000);
   const { tabActivity } = makeActivity({
@@ -1214,7 +1216,12 @@ test('a silence-ended turn records no end, so no Waiting is measured from it', a
     now: () => 80_000,
   });
   await tabActivity(ID);
-  assert.deepEqual([ts.activityFor(ID).hookOwned, ts.activityFor(ID).turnEndedAt], [false, 0]);
+  const a = ts.activityFor(ID);
+  assert.deepEqual([a.hookOwned, a.turnEndedAt, a.silenced], [true, 0, true], 'turn kept, only flagged');
+  ts.ingest(ID, mk('working'), 90_000); // a marker: the flag goes
+  assert.equal(ts.activityFor(ID).silenced, false);
+  ts.ingest(ID, mk('done'), 100_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 90_000, 'the turn clock survived the silence');
 });
 
 test('a huge command line is not parsed on main: ambiguous', async () => {
@@ -1222,4 +1229,15 @@ test('a huge command line is not parsed on main: ambiguous', async () => {
   const t0 = Date.now();
   assert.equal(await claudeChildVerdict(cmd), 'ambiguous');
   assert.ok(Date.now() - t0 < 200);
+});
+
+test('presence busy with a future timestamp does not outrank silence', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),
+    presenceForTab: async () => ({ pid: 1, startedAt: 1_000, status: 'busy', statusUpdatedAt: 9007199254740991 }),
+    now: () => 90_000,
+  });
+  assert.equal((await tabActivity(ID)).activity.uncertain, true);
 });

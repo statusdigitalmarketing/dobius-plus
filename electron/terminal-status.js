@@ -193,6 +193,7 @@ export function activityFor(id) {
     hooklessTurn: !!st.hooklessAfter && st.hooklessAfter === st.turnEndedAt,
     ambiguous: !!st.ambiguous,
     lastActivityAt: st.lastActivityAt,
+    silenced: !!st.silentMarker && st.silentMarker === st.lastMarkerAt,
   };
 }
 
@@ -276,6 +277,16 @@ export function markAmbiguous(id, scanStartedAt = 0) {
   if (st.turnStartedAt) st.turnStartDistrusted = true;
   // Nor the last finished turn's length (its start may be the other's).
   st.lastTurnMs = 0;
+}
+
+/**
+ * main saw the PTY silent through a hook 'working' (see SILENT_WORKING_MS):
+ * the row stops claiming Working until the next marker. Nothing else about
+ * the turn changes. Only for the exact record checked.
+ */
+export function markSilent(id, lastMarkerAt) {
+  const st = live.get(id);
+  if (st && st.hookOwned && lastMarkerAt && st.lastMarkerAt === lastMarkerAt) st.silentMarker = lastMarkerAt;
 }
 
 /**

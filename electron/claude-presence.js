@@ -44,8 +44,9 @@ import path from 'node:path';
 export const GRACE_MS = 3000;
 // Claude's TUI repaints its spinner and elapsed time (and its terminal title)
 // about every second while a turn runs, so a hook 'working' with a silent PTY
-// this long is over (hooks switched off mid-turn, no presence file to say so):
-// main ends it in the record and the row shows its age.
+// this long is not provably running (hooks switched off mid-turn, a suspended
+// claude, no presence file to say): the row shows its age until the next
+// marker. The turn itself is left as it is (silence gives no end time).
 export const SILENT_WORKING_MS = 60_000;
 const CACHE_MS = 4000;          // several windows poll the same tabs
 const NEGATIVE_DIR_MS = 60_000; // retry an unresolved config-dir binding
@@ -356,7 +357,7 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
  * work once a turn has ended, and whether a window that owns the PTY has it
  * unread. Dependencies are injected so this is tested without Electron.
  * @param {object} deps
- * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function, adoptHookState:Function, markHooklessTurn:Function, markAmbiguous:Function, noteUnique:Function}} deps.status
+ * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function, abandonTurn:Function, adoptHookState:Function, markHooklessTurn:Function, markAmbiguous:Function, noteUnique:Function, markSilent:Function}} deps.status
  * @param {(id:string)=>Promise<object|null>} deps.claudeInfo  cached lookup
  * @param {(id:string)=>Promise<object|null>} [deps.claudeInfoFresh]  uncached, for turn ends
  * @param {(id:string, key:string)=>Promise<object|null>} deps.presenceForTab
@@ -418,20 +419,21 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
   const shape = (id, a, extra, { presenceBusy = false } = {}) => {
     const activity = { ...a, background: null, ...(a.hooklessTurn ? { uncertain: true } : {}), ...extra };
     // Applied to every reply, after any presence check had its say: a hook
-    // Working the PTY has been silent through is over (the TUI repaints about
-    // every second while busy, see SILENT_WORKING_MS). Ended in the record
-    // too, so later unrelated output (typing, a resize) cannot revive it.
+    // Working the PTY has been silent through is not claimed (the TUI
+    // repaints about every second while busy, see SILENT_WORKING_MS).
     // Not when the claude's own presence file says it is busy (the CLI knows
     // better than silence: a suspended claude is not a finished turn), and
     // measured against the NEWEST output, not the snapshot's.
     const lastOut = Math.max(activity.lastActivityAt || 0, status.activityFor(id)?.lastActivityAt || 0);
     if (!presenceBusy && activity.status === 'working' && activity.hookOwned && lastOut
         && now() - lastOut >= SILENT_WORKING_MS) {
-      // No end time: silence says the turn is over, not WHEN, so nothing may
-      // be measured from it (a Waiting check keys off a real end).
-      status.abandonTurn(id, a.lastMarkerAt);
+      // Silence says the turn is not provably running, not that it ended or
+      // when: the record keeps the turn (its start, no end) and only a flag
+      // is kept, until the next marker, so later output cannot revive it.
+      status.markSilent(id, a.lastMarkerAt);
       activity.uncertain = true;
     }
+    if (activity.silenced) activity.uncertain = true;
     return { id, activity, unread: unreadAnywhere(id) };
   };
   // Answer from the CURRENT record without a presence read.
@@ -474,8 +476,9 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     const found = await presenceForTab(id, ended ? `e:${a.turnEndedAt}` : `w:${a.lastMarkerAt}`);
     if (moved(id, raw)) return settleOnCurrent(id);
     const j = judgePresence(found, a, info, t);
+    // A believable busy (this claude's, not from the future) outranks silence.
     const presenceBusy = !!found && !!info && found.pid === info.pid && found.startedAt === info.startedAt
-      && found.status === 'busy';
+      && found.status === 'busy' && Number.isFinite(found.statusUpdatedAt) && found.statusUpdatedAt <= t + 60_000;
     if (j.showAs) {
       // Kept in the record, so losing the presence signal later cannot bring
       // back the state it disproved (an approved dialog as Input again).
