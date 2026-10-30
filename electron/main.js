@@ -29,7 +29,7 @@ import { scanClaudeProcesses } from './claude-process-scan.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
-  planStatusLineInstall, planStatusLineRemove, ownsStatusLine, chainFromScript,
+  planStatusLineInstall, planStatusLineRemove, ownsStatusLine, chainFromScript, scriptPathFromCommand,
 } from './claude-usage.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
@@ -1591,26 +1591,27 @@ function setupFileHandlers() {
   // shared ~/.claude/settings.json. DOBIUS_CLAUDE_HOME points it at a throwaway
   // Claude home instead, so an install can still be ship-tested; outside the
   // harness the variable is ignored.
-  // The override must be a real directory that is NOT the real Claude home by
-  // another name: a symlink to ~/.claude, or a settings.json linked to the real
-  // one, would put the harness's writes back on the shared file (Codex HIGH).
-  const claudeHomeOverride = (() => {
-    const o = process.env.DOBIUS_USERDATA_DIR ? (process.env.DOBIUS_CLAUDE_HOME || '') : '';
-    if (!o) return '';
-    const real = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
-    const realHome = real(path.join(homedir, '.claude'));
-    const dir = real(o);
-    const file = real(path.join(o, 'settings.json'));
-    if (!dir || dir === realHome || (file && file === real(path.join(homedir, '.claude', 'settings.json')))) {
-      console.warn(`[claudeSettings] DOBIUS_CLAUDE_HOME refused: ${o} is missing or is the real ~/.claude`);
-      return '';
-    }
-    return dir;
-  })();
+  // The override must be a directory that is NOT the real Claude home by
+  // another name: a symlink to ~/.claude, a differently-cased path on a
+  // case-insensitive volume, or a settings.json linked to the real one would
+  // put the harness's writes back on the shared file (Codex HIGH). Compared by
+  // device + inode, which no spelling changes, and re-checked before every
+  // write because the directory can be swapped after launch.
+  const claudeHomeOverride = process.env.DOBIUS_USERDATA_DIR ? (process.env.DOBIUS_CLAUDE_HOME || '') : '';
   const claudeHome = claudeHomeOverride || path.join(homedir, '.claude');
   const claudeSettingsPath = path.join(claudeHome, 'settings.json');
-  const REAL_CLAUDE_HOME_REFUSED = process.env.DOBIUS_USERDATA_DIR && !claudeHomeOverride
-    ? 'an isolated Dobius never writes the real ~/.claude (set DOBIUS_CLAUDE_HOME)' : '';
+  const realClaudeHomeRefusal = () => {
+    if (!process.env.DOBIUS_USERDATA_DIR) return '';
+    if (!claudeHomeOverride) return 'an isolated Dobius never writes the real ~/.claude (set DOBIUS_CLAUDE_HOME)';
+    const id = (p) => { try { const st = fs.statSync(p); return `${st.dev}:${st.ino}`; } catch { return null; } };
+    const dir = id(claudeHomeOverride);
+    const file = id(claudeSettingsPath);
+    if (!dir || dir === id(path.join(homedir, '.claude'))
+      || (file && file === id(path.join(homedir, '.claude', 'settings.json')))) {
+      return `DOBIUS_CLAUDE_HOME (${claudeHomeOverride}) is missing or is the real ~/.claude, refused`;
+    }
+    return '';
+  };
   const STATUS_MARKER = ']777;dobius;';
   // printf '%s' does NOT interpret backslash escapes, so the JSON \uXXXX escapes
   // reach Claude's hook parser verbatim and become ESC / BEL when it emits them.
@@ -1685,7 +1686,8 @@ function setupFileHandlers() {
    * Closing it needs a lock file the CLI would also have to honour.
    */
   function writeClaudeSettings(settings, expectedRaw) {
-    if (REAL_CLAUDE_HOME_REFUSED) throw new Error(REAL_CLAUDE_HOME_REFUSED);
+    const refused = realClaudeHomeRefusal();
+    if (refused) throw new Error(refused);
     fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
     // undefined means "no guard". null means "the file did NOT exist when I
     // read it", which is a real claim and must be checked: treating it as no
@@ -1945,17 +1947,28 @@ function setupFileHandlers() {
   settleUsage(readClaudeSettings().settings);
 
   // Which command of the user's the script chains. The restore record is the
-  // source; when it is missing or unreadable, the installed script itself still
-  // carries the command. Neither readable means UNKNOWN, and regenerating with
-  // no chain then would silently drop their status line (Codex HIGH).
-  const currentChain = () => {
+  // source; when it is missing or not a record, the INSTALLED script (the one
+  // settings.json points at, which may be another Dobius's) still carries the
+  // command. Neither readable means UNKNOWN, and regenerating with no chain
+  // then would silently drop their status line (Codex HIGH). A command
+  // recovered that way is written back as the restore record, or turning the
+  // features off later would delete their line instead of restoring it.
+  const isRecord = (r) => !!r && typeof r === 'object' && !Array.isArray(r) && typeof r.present === 'boolean';
+  const currentChain = (settings) => {
     const { remember } = readStatusLineBackup();
-    if (remember && typeof remember === 'object') return { known: true, chain: remember.chain ?? null };
+    if (isRecord(remember)) return { known: true, chain: remember.chain ?? null };
+    const installed = ownsStatusLine(settings?.statusLine)
+      ? scriptPathFromCommand(settings.statusLine.command) : null;
     let text;
-    try { text = fs.readFileSync(reporterScriptPath(app.getPath('userData')), 'utf8'); }
+    try { text = fs.readFileSync(installed || reporterScriptPath(app.getPath('userData')), 'utf8'); }
     catch { return { known: false }; }
     const chain = chainFromScript(text);
-    return chain === undefined ? { known: false } : { known: true, chain };
+    if (chain === undefined) return { known: false };
+    if (chain && !realClaudeHomeRefusal()) {
+      try { writeStatusLineBackup({ present: true, value: { type: 'command', command: chain }, chain }); }
+      catch (err) { console.warn(`[statusLine] could not rebuild the restore record: ${err.message}`); }
+    }
+    return { known: true, chain };
   };
 
   // Temp file then rename. Writing in place truncates the LIVE script first,
@@ -1981,7 +1994,8 @@ function setupFileHandlers() {
   // slot can change between the launch check and the write (Codex).
   const installStatusLine = (opts, settings, raw, exists, eligible = null) => {
     // Checked before the restore record is written, which also lives there.
-    if (REAL_CLAUDE_HOME_REFUSED) return { error: REAL_CLAUDE_HOME_REFUSED };
+    const refused = realClaudeHomeRefusal();
+    if (refused) return { error: refused };
     // Same refusal as the status hooks: never create this file silently.
     if (!exists && !opts?.confirmCreate) {
       return { error: 'needs-confirm-create', message: '~/.claude/settings.json does not exist. Confirm creation to turn this on.' };
@@ -1995,7 +2009,7 @@ function setupFileHandlers() {
       let chain;
       if (plan.remember) chain = plan.remember.chain;
       else {
-        const cur = currentChain();
+        const cur = currentChain(base);
         if (!cur.known) throw new Error('could not tell which status line of yours to keep, left as is');
         chain = cur.chain;
       }
@@ -2022,7 +2036,8 @@ function setupFileHandlers() {
   };
 
   const removeStatusLine = (settings, raw) => {
-    if (REAL_CLAUDE_HOME_REFUSED) return { error: REAL_CLAUDE_HOME_REFUSED };
+    const refused = realClaudeHomeRefusal();
+    if (refused) return { error: refused };
     const backup = readStatusLineBackup();
     const out = planStatusLineRemove(settings.statusLine, backup.remember);
     if (out.action === 'leave') {
@@ -2049,7 +2064,7 @@ function setupFileHandlers() {
     const { capture, model } = statusLineParts();
     if (!capture && !model) return removeStatusLine(settings, raw);
     if (statusLineIsMine(settings)) {
-      const cur = currentChain();
+      const cur = currentChain(settings);
       if (!cur.known) return { error: 'Could not tell which status line of yours to keep, left as is' };
       try { writeReporter(cur.chain); }
       catch (err) { return { error: `Could not update the status line script: ${err.message}` }; }
@@ -2078,7 +2093,14 @@ function setupFileHandlers() {
   // installed gets its script regenerated, which is how an update reaches it.
   // An isolated instance touches the real settings.json never; it may run this
   // against a throwaway home (DOBIUS_CLAUDE_HOME).
-  if (!process.env.DOBIUS_USERDATA_DIR || claudeHomeOverride) {
+  //
+  // ACCEPTED RESIDUALS (Codex round 2): two Dobius instances with different
+  // userData installing in the same instant can still overwrite each other's
+  // restore record, the race already accepted above for the restore record;
+  // and persistConfigNow cannot cancel an async config write already in flight,
+  // so a crash inside that sub-second window can resurrect the previous switch
+  // values, which the next launch then applies to the script.
+  if (!realClaudeHomeRefusal()) {
     const { settings, exists } = readClaudeSettings();
     if (settings && exists) {
       if (getSettings().modelUnderPrompt === undefined) {
@@ -2088,7 +2110,8 @@ function setupFileHandlers() {
           if (r?.error) console.warn(`[statusLine] model line install skipped: ${r.error}`);
         }
       } else if (statusLineIsMine(settings)) {
-        const r = syncStatusLine();
+        // Refresh only: if the slot changed since this read, leave it alone.
+        const r = syncStatusLine(undefined, statusLineIsMine);
         if (r?.error) console.warn(`[statusLine] script refresh skipped: ${r.error}`);
       }
     }
@@ -2097,6 +2120,7 @@ function setupFileHandlers() {
   ipcMain.handle('claudeUsage:getStatus', () => {
     const { settings, exists } = readClaudeSettings();
     if (settings === null) return { installed: false, error: 'settings.json is not valid JSON' };
+    settleUsage(settings);
     const owned = ownsStatusLine(settings.statusLine);
     const mine = statusLineIsMine(settings);
     return { installed: mine && statusLineParts().capture, installedElsewhere: owned && !mine, exists };
@@ -2115,6 +2139,7 @@ function setupFileHandlers() {
   ipcMain.handle('modelLine:getStatus', () => {
     const { settings, exists } = readClaudeSettings();
     if (settings === null) return { on: false, error: 'settings.json is not valid JSON' };
+    settleUsage(settings);
     const owned = ownsStatusLine(settings.statusLine);
     const mine = statusLineIsMine(settings);
     return {

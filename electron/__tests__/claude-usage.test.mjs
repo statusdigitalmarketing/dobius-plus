@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import {
   parseRecord, aggregateUsage, reporterScript,
   planStatusLineInstall, planStatusLineRemove, ownsStatusLine, REPORTER_MARKER,
-  reporterCommand, EFFORT_WORDS, chainFromScript,
+  reporterCommand, EFFORT_WORDS, chainFromScript, scriptPathFromCommand,
 } from '../claude-usage.js';
 
 // Ownership is detected by the marker appearing in the command string, and the
@@ -325,6 +325,18 @@ check('model line: still no helper process', () => {
   }
 });
 fs.rmSync(tmpUsage, { recursive: true, force: true });
+
+check('the installed script path is read back out of its statusLine command', () => {
+  // Recovery reads the script settings.json actually runs, which can be
+  // another Dobius's, not our own possibly stale copy.
+  for (const ud of ['/Users/x/Library/Application Support/dobius-plus', "/tmp/it's here"]) {
+    assert.equal(scriptPathFromCommand(reporterCommand(ud)), path.join(ud, `${REPORTER_MARKER}.sh`));
+  }
+  assert.equal(scriptPathFromCommand('mine.sh'), null);
+  assert.equal(scriptPathFromCommand("'/etc/passwd'"), null, 'only a reporter script');
+  assert.equal(scriptPathFromCommand(`'relative/${REPORTER_MARKER}.sh'`), null);
+  assert.equal(scriptPathFromCommand(undefined), null);
+});
 
 check('the chained command can be read back out of any generated script', () => {
   // Recovery when the restore record is lost: a regenerated script must keep

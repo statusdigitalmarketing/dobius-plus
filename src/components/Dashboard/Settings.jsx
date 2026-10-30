@@ -90,11 +90,16 @@ export default function Settings() {
 
   // Account usage (in the Accounts section) installs the same status line, so
   // it announces changes and this re-reads rather than showing a stale switch.
+  // Focus covers a change made from another window.
   useEffect(() => {
     const refresh = () => window.electronAPI?.modelLineGetStatus?.().then((r) => { if (r) setModelLine(r); });
     refresh();
     window.addEventListener('dobius:statusline-changed', refresh);
-    return () => window.removeEventListener('dobius:statusline-changed', refresh);
+    window.addEventListener('focus', refresh);
+    return () => {
+      window.removeEventListener('dobius:statusline-changed', refresh);
+      window.removeEventListener('focus', refresh);
+    };
   }, []);
 
   const toggleModelLine = useCallback(async (on) => {

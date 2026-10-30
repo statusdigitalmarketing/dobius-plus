@@ -116,6 +116,18 @@ export function chainFromScript(text) {
   return m ? m[1].replace(/'\\''/g, "'") : null;
 }
 
+/**
+ * The script path inside a statusLine command written by reporterCommand, or
+ * null for any other shape. Lets recovery read the script that is actually
+ * INSTALLED, which may belong to another Dobius, rather than our own copy.
+ */
+export function scriptPathFromCommand(command) {
+  const m = typeof command === 'string' && command.match(/^'((?:[^']|'\\'')*)'$/);
+  if (!m) return null;
+  const p = m[1].replace(/'\\''/g, "'");
+  return p.startsWith('/') && p.endsWith(`/${REPORTER_MARKER}.sh`) ? p : null;
+}
+
 // Effort levels in the words a person would say. Claude's own label is the raw
 // level; "xhigh" is what Brett asked to read as "extra high". A level missing
 // from this table is shown as Claude sent it, if it is a plain word.
