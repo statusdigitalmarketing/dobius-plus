@@ -349,3 +349,21 @@
 - **FIX**: Never name a zsh variable `path` (also avoid `cdpath`, `fpath`, `manpath`). Use `u` or `route`.
 - **CONTEXT**: Bash tool commands run under zsh here.
 - **DETECTION**: `grep -nE "for path in|\bpath=" scratchpad/**/*.sh`
+
+### Architecture - 2026-10-30
+- **MISTAKE**: Assumed Claude Code's prompt in a Dobius tab is always the same kind of screen. It is not: with `"tui": "fullscreen"` (Sam's settings, or the `tengu_pewter_brook` rollout when unset) Claude runs in the ALTERNATE buffer with mouse tracking on and handles click, drag-select, Backspace-over-selection and copy itself; the default renderer draws in the NORMAL buffer with no mouse support at all, which is what Brett sees. A probe that runs plain `claude` on Sam's Mac tests the wrong renderer.
+- **FIX**: Probe both with `claude --settings '{"tui":"default"}'` and `'{"tui":"fullscreen"}'`. Anything that edits Claude's prompt from Dobius (src/lib/prompt-edit-term.js) stands down unless `buffer.active.type === 'normal'` and `term.modes.mouseTrackingMode === 'none'`.
+- **CONTEXT**: Any terminal-side feature that reads or drives Claude's TUI.
+- **DETECTION**: `grep -n "mouseTrackingMode" src/lib/*.js src/hooks/*.js`
+
+### Architecture - 2026-10-30
+- **MISTAKE**: The prompt-box reader treated only `''` and `' '` as blank, so it never recognised Claude's prompt row: Claude draws `❯` followed by U+00A0 (no-break space), not a space. Every gesture silently did nothing in the first live run while all unit tests passed.
+- **FIX**: Blank = `''`, `' '` or `' '` (src/lib/prompt-edit.js), with a test pinned to the real bytes. Dump the real cells (`getChars()` code points per cell) before writing a screen parser's fixtures.
+- **CONTEXT**: Also: xterm 6 (unicode v6 widths) draws an emoji one cell wide where Claude counts two, so a prompt containing emoji is already drawn out of step with Claude's caret. The prompt editor refuses such prompts.
+- **DETECTION**: `grep -n "u00a0" src/lib/prompt-edit.js`
+
+### Testing - 2026-10-30
+- **MISTAKE**: Edited src/hooks/useTerminal.js while a harness tab ran a real `claude`; Vite HMR remounted TerminalPane, which kills the tab's PTY and the claude in it, and the next probe drove a bare shell.
+- **FIX**: After any edit under src/hooks or src/lib that TerminalPane imports, reload the harness page and start claude again before probing (`p10-reload.mjs` pattern: reload, then type the claude command).
+- **CONTEXT**: Every harness ship-test of terminal behaviour.
+- **DETECTION**: `pgrep -fl 'claude --settings'` returns nothing after an HMR update.
