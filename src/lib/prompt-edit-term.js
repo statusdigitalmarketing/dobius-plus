@@ -41,11 +41,19 @@ function signature(term, box) {
   return JSON.stringify(rows);
 }
 
+// What a held image paste reports to main (an empty bracketed paste): it is
+// a person's input, not a terminal reply.
+const HELD_PASTE = '\x1b[200~\x1b[201~';
+
 /**
  * @param {import('@xterm/xterm').Terminal} term
  * @param {(data: string) => void} send writes to the PTY
+ * @param {(data: string | null) => void} [held] input the queue HOLDS (behind
+ *   an edit or a pending paste) reaches the PTY late, so nothing in main sees
+ *   it yet: each such input is reported the moment it is accepted, and null
+ *   once the queue has drained. /openTab counts it as a person typing.
  */
-export function attachPromptEditing(term, send) {
+export function attachPromptEditing(term, send, held = () => {}) {
   // Everything bound for the PTY goes through one ordered queue: typed input
   // ({ data, sel }) and pending pastes ({ paste, sel }). An edit or a
   // paste still being saved holds everything behind it, so nothing overtakes
@@ -57,6 +65,8 @@ export function attachPromptEditing(term, send) {
   let disposed = false;
   let armed = null;
   let columnSelect = false; // xterm's Option+drag selects a rectangle, not a range
+  let holding = false; // held input was reported and the drain was not yet
+  const hold = (data) => { holding = true; held(data); };
   const app = () => !!term.modes.applicationCursorKeysMode;
 
   const defaultRenderer = () => term.buffer.active.type === 'normal' && term.modes.mouseTrackingMode === 'none';
@@ -172,13 +182,17 @@ export function attachPromptEditing(term, send) {
       }
     } finally {
       busy = false;
+      if (holding && !queue.length) { holding = false; held(null); }
     }
   };
 
   function handleData(data) {
     const sel = armed;
     armed = null;
+    // Behind a running edit or a pending paste, this input waits.
+    const waits = busy || queue.length > 0;
     queue.push({ data, sel });
+    if (waits) hold(data);
     pump();
   }
 
@@ -203,6 +217,7 @@ export function attachPromptEditing(term, send) {
       term.clearSelection();
     }
     queue.push({ paste, sel });
+    hold(HELD_PASTE);
     pump();
     return true;
   };
@@ -277,6 +292,7 @@ export function attachPromptEditing(term, send) {
       for (const type of armEvents) el?.removeEventListener(type, arm, true);
       el?.removeEventListener('mousedown', onMouseDown, true);
       queue.length = 0;
+      if (holding) { holding = false; held(null); }
     },
   };
 }

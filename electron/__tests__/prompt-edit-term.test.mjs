@@ -8,7 +8,7 @@ import { attachPromptEditing } from '../../src/lib/prompt-edit-term.js';
 // `exit()` replaces the prompt with a shell, as when Claude quits mid-edit.
 const COLS = 40;
 function fakeClaude(text, { placeholder = false } = {}) {
-  const app = { text, caret: text.length, alive: true, writes: [], submitted: null };
+  const app = { text, caret: text.length, alive: true, writes: [], submitted: null, held: [] };
   const parsed = new Set();
   const dom = {};
   let grid = [];
@@ -73,7 +73,7 @@ function fakeClaude(text, { placeholder = false } = {}) {
     clearSelection: () => { selection = null; },
   };
   draw();
-  const edit = attachPromptEditing(term, send);
+  const edit = attachPromptEditing(term, send, (d) => app.held.push(d));
   return {
     app,
     edit,
@@ -290,4 +290,38 @@ test('scrolling away during an edit does not abandon it', async () => {
   t.scrollUp();
   await wait();
   assert.equal(t.app.text, 'hello X foo');
+});
+
+test('input held behind a pending paste is reported the moment it is taken, the drain once it all went out', async () => {
+  const t = fakeClaude('look');
+  let resolve;
+  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
+  t.type('\x03');
+  // Nothing reached the PTY yet, but main already knows a person typed.
+  assert.deepEqual(t.app.writes, []);
+  assert.deepEqual(t.app.held, ['\x1b[200~\x1b[201~', '\x03']);
+  resolve("'/tmp/shot.png'");
+  await wait();
+  assert.deepEqual(t.app.writes, ["\x1b[200~'/tmp/shot.png'\x1b[201~", '\x03']);
+  assert.deepEqual(t.app.held, ['\x1b[200~\x1b[201~', '\x03', null]);
+});
+
+test('typing that goes straight through is not reported as held', async () => {
+  const t = fakeClaude('abc');
+  t.type('d');
+  await wait(0); // keys arrive as separate events
+  t.type('\r');
+  await wait(50);
+  assert.deepEqual(t.app.writes, ['d', '\r']);
+  assert.deepEqual(t.app.held, []);
+});
+
+test('keys typed during a selection edit are reported as held', async () => {
+  const t = fakeClaude('hello world foo');
+  t.select(8, 13);
+  t.type('X');
+  t.type('\r');
+  assert.deepEqual(t.app.held, ['\r'], 'the Enter waits behind the edit');
+  await wait();
+  assert.equal(t.app.held.at(-1), null);
 });

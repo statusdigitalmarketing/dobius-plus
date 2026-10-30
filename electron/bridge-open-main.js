@@ -187,8 +187,35 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // Keys a window sends for a tab whose PTY does not exist yet are dropped by
   // terminal:write, so the observer above never sees them; a person typed
   // all the same, and their Enter may follow once the shell is up. Count
-  // them here too.
+  // them here too. A key that does reach the PTY is so counted twice (and a
+  // held one, below, three times): harmless, every reader only asks whether
+  // a count moved (!== 0, or !== an earlier reading), never by how much.
   ipcMain.on('terminal:write', (event, id, data) => bump(id, data, event.sender.id));
+  // Prompt editing (src/lib/prompt-edit-term.js) holds a person's input in
+  // its own queue while an edit or an image paste is pending, so it reaches
+  // terminal:write late, maybe after our Enter. The window owning the tab
+  // reports each held input as it accepts it (a key, counted now) and null
+  // once its queue drains; until then the tab is busy. tabId -> wcId
+  const heldInput = new Map();
+  const heldHooked = new WeakSet();
+  ipcMain.on('terminal:inputHeld', (event, id, data) => {
+    const wc = event.sender;
+    if (typeof id !== 'string' || getTerminalWebContentsId(id) !== wc.id) return;
+    if (data === null) {
+      if (heldInput.get(id) === wc.id) heldInput.delete(id);
+      return;
+    }
+    if (typeof data !== 'string' || !data) return;
+    if (!heldHooked.has(wc)) {
+      heldHooked.add(wc);
+      // A reloaded or closed page never reports its drain.
+      const forget = () => { for (const [t, w] of heldInput) if (w === wc.id) heldInput.delete(t); };
+      wc.on('did-start-loading', forget);
+      wc.once('destroyed', forget);
+    }
+    heldInput.set(id, wc.id);
+    bump(id, data, wc.id);
+  });
 
   // Requests main stopped waiting for: a window that answers one anyway
   // (it added the tab after main gave up) is told to drop that tab, so a
@@ -377,9 +404,10 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     paste: (tabId, text) => writeOwn(tabId, `\x1b[200~${text}\x1b[201~`),
     // The single Enter, written on its own once the paste has settled.
     submit: (tabId) => writeOwn(tabId, '\r'),
-    // Someone is sending a Chat message into the tab right now: its Enter is
-    // still to come, so the prompt is not ours to type into.
-    inputBusy: (tabId) => submitPending(tabId),
+    // Someone is sending a Chat message into the tab right now, or prompt
+    // editing holds their input: their Enter may still be to come, so the
+    // prompt is not ours to type into.
+    inputBusy: (tabId) => submitPending(tabId) || heldInput.has(tabId),
     sleep,
     now: () => Date.now(),
   };

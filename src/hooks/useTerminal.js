@@ -214,8 +214,13 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     }
 
     // Claude's prompt edits like a text field (click, select + delete/type/
-    // paste); everything else passes straight through to the PTY.
-    const promptEdit = attachPromptEditing(term, (data) => window.electronAPI.terminalWrite(id, data));
+    // paste); everything else passes straight through to the PTY. Input it
+    // holds back is reported to main as it arrives (/openTab must see it).
+    const promptEdit = attachPromptEditing(
+      term,
+      (data) => window.electronAPI.terminalWrite(id, data),
+      (data) => window.electronAPI.terminalInputHeld?.(id, data),
+    );
     promptEditRef.current = promptEdit;
     const inputDisposable = term.onData((data) => promptEdit.handleData(data));
 
