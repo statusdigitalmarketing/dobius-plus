@@ -96,7 +96,7 @@ test('loginShellSpawn starts only a bare tool, under zsh or bash, via env', () =
   const z = loginShellSpawn('/bin/zsh', 'claude');
   assert.deepEqual(z.env, { DOBIUS_NEW_TAB_TOOL: 'claude' });
   assert.deepEqual(z.args.slice(0, 3), ['-l', '-i', '-c']);
-  assert.match(z.args[3], /^trap : INT; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; .*precmd_functions.*; "\$t"; exec '\/bin\/zsh' -l$/);
+  assert.match(z.args[3], /^trap : INT; .*precmd_functions.*; t=\$DOBIUS_NEW_TAB_TOOL; unset DOBIUS_NEW_TAB_TOOL; eval "\$t"; while jobs .*; exec '\/bin\/zsh' -l$/);
   assert.ok(!z.args.join(' ').includes('claude'), 'the tool name is never in the wrapper argv');
   assert.match(loginShellSpawn('/usr/local/bin/bash', 'codex').args[3], /PROMPT_COMMAND.*exec '\/usr\/local\/bin\/bash' -l$/);
   assert.match(loginShellSpawn("/o'dd/zsh", 'codex').args[3], /exec '\/o'\\''dd\/zsh' -l$/);

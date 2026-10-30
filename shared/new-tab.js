@@ -85,8 +85,12 @@ export function pickerShortcutIndex(e) {
 // with a plain login shell when the tool exits, leaving the tab usable.
 // - The prompt hooks run first (zsh precmd, bash PROMPT_COMMAND): direnv and
 //   similar tools load a project's environment there, and -c shows no prompt.
+//   The tool name is read only after them, so a hook cannot replace it.
 // - The tool name travels in an env var, so no process argv says "claude"
-//   except the tool's own (process scans match on argv).
+//   except the tool's own (process scans match on argv). eval runs it so a
+//   user's alias or function for it applies, as when typed.
+// - A tool suspended with Ctrl+Z is resumed (fg) rather than left stopped
+//   behind the replacement shell, where nothing could ever resume it.
 // - The INT trap keeps a Ctrl+C that kills the tool before it owns the
 //   terminal from also ending the wrapper and the tab. A trap with a handler
 //   is not inherited by the tool.
@@ -101,6 +105,7 @@ export function loginShellSpawn(shell, startCommand) {
   else if (name === 'bash') hooks = 'for c in "${PROMPT_COMMAND[@]}"; do eval "$c"; done;';
   else return plain;
   const quoted = `'${String(shell).replace(/'/g, "'\\''")}'`;
-  const script = `trap : INT; t=$${START_TOOL_ENV}; unset ${START_TOOL_ENV}; ${hooks} "$t"; exec ${quoted} -l`;
+  const script = `trap : INT; ${hooks} t=$${START_TOOL_ENV}; unset ${START_TOOL_ENV}; eval "$t"; `
+    + `while jobs %% >/dev/null 2>&1; do fg >/dev/null 2>&1 || break; done; exec ${quoted} -l`;
   return { args: ['-l', '-i', '-c', script], env: { [START_TOOL_ENV]: startCommand } };
 }

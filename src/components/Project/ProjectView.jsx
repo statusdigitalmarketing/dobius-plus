@@ -1101,6 +1101,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     if (!window.electronAPI) return;
     const cleanups = [
       window.electronAPI.onMenuToggleView?.(() => {
+        if (useStore.getState().newTabPickerOpen) return;
         const current = useStore.getState().activeView;
         setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
       }),
