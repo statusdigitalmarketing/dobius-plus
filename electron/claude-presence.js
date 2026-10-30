@@ -137,11 +137,11 @@ export async function activityRow(id, { activityFor, waitingForTab, unreadAnywhe
 }
 
 /**
- * Re-read every row's status once all of a request's rows are in: one row
- * can settle while another's lookup is still pending, and its tab may have
- * moved on meanwhile. Synchronous, so the reply matches the status now.
+ * Re-read every row's status (and unread) once all of a request's rows are
+ * in: one row can settle while another's lookup is still pending, and its tab
+ * may have moved on meanwhile. Synchronous, so the reply matches now.
  */
-export function freshenRows(rows, activityFor, isLive = () => true) {
+export function freshenRows(rows, activityFor, isLive = () => true, unreadAnywhere = null) {
   const out = [];
   for (const row of rows) {
     // A PTY killed meanwhile keeps its status record (kill skips the exit
@@ -150,7 +150,11 @@ export function freshenRows(rows, activityFor, isLive = () => true) {
     const now = activityFor(row.id);
     if (!now) continue;
     const same = now.status === 'done' && now.doneAt === row.activity.doneAt;
-    out.push({ ...row, activity: { ...now, background: same ? row.activity.background : null } });
+    out.push({
+      ...row,
+      activity: { ...now, background: same ? row.activity.background : null },
+      unread: unreadAnywhere ? unreadAnywhere(row.id) : row.unread,
+    });
   }
   return out;
 }

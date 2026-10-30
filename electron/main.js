@@ -521,7 +521,7 @@ function setupDataHandlers() {
       activityFor: terminalStatus.activityFor, waitingForTab, unreadAnywhere,
     })));
     const stillLive = new Set(listTerminals().map((t) => t.id));
-    return freshenRows(rows, terminalStatus.activityFor, (id) => stillLive.has(id));
+    return freshenRows(rows, terminalStatus.activityFor, (id) => stillLive.has(id), unreadAnywhere);
   });
   ipcMain.on('tabs:reportUnread', (event, ids) => {
     // ipcMain.on has no rejection path: a throw here would reach the

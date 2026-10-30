@@ -542,7 +542,12 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
       // rest is the command.
       const lstart = line.slice(0, 24);
       const command = line.slice(24).trim();
-      if (!isClaudeCommand(command)) continue;
+      if (!isClaudeCommand(command)) {
+        // `unique`: a claude whose path has spaces (`/x/CLI Tools/claude`)
+        // fails isClaudeCommand but may be one, so the shell is ambiguous.
+        if (unique && /\/claude(?:\s|$)/.test(command)) return null;
+        continue;
+      }
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
