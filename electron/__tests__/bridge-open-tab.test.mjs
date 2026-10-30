@@ -189,7 +189,7 @@ function fakeDeps(over = {}) {
   assert.ok(d.log.filter((e) => e[0] === 'claudeCheck').every((e) => e[1] === '/p'));
   // Same id again: the same tab comes forward, nothing new opens or is typed.
   const again = await svc.open({ projectPath: '/p', message: 'Reply to Dom', requestId: 'r1' });
-  assert.deepEqual(again, { status: 200, body: { ok: true, tabId: 'term-/p-1', existing: true } });
+  assert.deepEqual(again, { status: 200, body: { ok: true, tabId: 'term-/p-1', submitted: true, existing: true } });
   assert.deepEqual(d.log.at(-1), ['focus', 'term-/p-1']);
   assert.equal(d.log.filter((e) => e[0] === 'open').length, 1);
   // Same id, different project: refused, not silently mapped.
@@ -243,10 +243,34 @@ function fakeDeps(over = {}) {
   assert.equal(r.body.tabId, 'term-/p-1');
   assert.match(r.body.error, /did not appear within 5s/);
   assert.equal(d.log.filter((e) => e[0] === 'paste').length, 0);
-  // A repeat brings that tab forward instead of opening another.
+  // A repeat brings that tab forward instead of opening another, and says
+  // the card never went in: not a success.
   const again = await svc.open({ projectPath: '/p', message: 'go', requestId: 'slow' });
-  assert.deepEqual(again.body, { ok: true, tabId: 'term-/p-1', existing: true });
+  assert.equal(again.status, 504);
+  assert.deepEqual(again.body, { ...r.body, existing: true });
+  assert.deepEqual(d.log.at(-1), ['focus', 'term-/p-1']);
+  assert.equal(d.log.filter((e) => e[0] === 'open' || e[0] === 'paste').length, 1, 'nothing more opened or typed');
   ok('readiness timeout keeps the tab and types nothing');
+}
+
+{
+  // Repeats report the first call's outcome: a card typed but not sent, or
+  // one never typed because someone took the tab over, is not a success.
+  const d = fakeDeps();
+  const svc = createOpenTabService(d);
+  const typed = await svc.open({ projectPath: '/p', message: '!ls', requestId: 'bang' });
+  assert.equal(typed.body.submitted, false);
+  const again = await svc.open({ projectPath: '/p', message: '!ls', requestId: 'bang' });
+  assert.deepEqual(again, { status: 200, body: { ...typed.body, existing: true } });
+  const d2 = fakeDeps();
+  tweakTab(d2, (t) => { t.keys = 1; });
+  const svc2 = createOpenTabService(d2);
+  const taken = await svc2.open({ projectPath: '/p', message: 'go', requestId: 'taken' });
+  assert.equal(taken.status, 409);
+  const retry = await svc2.open({ projectPath: '/p', message: 'go', requestId: 'taken' });
+  assert.deepEqual(retry, { status: 409, body: { ...taken.body, existing: true } });
+  assert.equal(d2.log.filter((e) => e[0] === 'paste' || e[0] === 'submit').length, 0);
+  ok('a repeat reports what the first call did');
 }
 
 {

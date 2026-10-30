@@ -63,7 +63,7 @@ The reply is sent after step 7 (or with the reason it stopped). Allow about two 
 
 ## Repeats (requestId)
 
-- The same `requestId` while its tab still exists brings that tab and its window to the front and replies with the same `tabId` and `"existing": true`. Nothing is typed or sent again.
+- The same `requestId` while its tab still exists brings that tab and its window to the front and replies with what the FIRST call did, plus `"existing": true`: its status and body again (`submitted` and `note` for a card typed but not sent, or the `409`/`504` error for one that was never typed). A repeat is not a fresh success. Nothing is typed or sent again.
 - Two calls with the same `requestId` at the same time open one tab: the second waits for the first and gets the same outcome, a failure included.
 - The same `requestId` with a different `projectPath` is refused with `409`.
 - If that tab has been closed (or its shell has exited), a later call with the same `requestId` opens a new tab.
@@ -86,10 +86,16 @@ Typed but not sent (see step 7), `200`:
 { "ok": true, "tabId": "term-/Users/brett/Projects/acme-7", "submitted": false, "note": "the message is typed into Claude's prompt but was not sent: someone typed into the tab; press Enter in the tab to send it" }
 ```
 
-Repeat of a live request, `200`:
+Repeat of a live request: the first call's reply again, with `existing` (here a send that went through, `200`):
 
 ```json
-{ "ok": true, "tabId": "term-/Users/brett/Projects/acme-7", "existing": true }
+{ "ok": true, "tabId": "term-/Users/brett/Projects/acme-7", "submitted": true, "existing": true }
+```
+
+A repeat of a request whose card was never typed keeps that call's status and error, for example `504`:
+
+```json
+{ "ok": false, "tabId": "term-/Users/brett/Projects/acme-7", "error": "Claude's prompt did not appear within 60s (...); the tab is open and nothing was typed", "existing": true }
 ```
 
 Failure:
@@ -114,7 +120,7 @@ When a tab was opened but the message could not be typed, `tabId` is included to
 | `429` | 4 opens already in progress |
 | `500` | The window, the tab or its shell did not start, or the shell did not start in the project folder (`tabId` included when the tab exists) |
 | `503` | Dobius+ is still starting |
-| `504` | Claude's prompt did not appear within 60 seconds (or Claude is not the foreground program in the project: a login script got in the way). The tab stays open, nothing was typed. `tabId` included. A repeat of the same `requestId` brings that tab forward |
+| `504` | Claude's prompt did not appear within 60 seconds (or Claude is not the foreground program in the project: a login script got in the way). The tab stays open, nothing was typed. `tabId` included. A repeat of the same `requestId` brings that tab forward and answers `504` again, with `"existing": true` |
 
 ## Security
 

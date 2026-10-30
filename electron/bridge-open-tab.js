@@ -430,15 +430,15 @@ export function createOpenTabService(deps, opts = {}) {
       // window or shell must not turn one click into two tabs.
       const concurrent = !prior.settled;
       const first = await prior.promise;
-      if (concurrent && !first.ok) {
-        const { status, ...body } = first;
-        return { status, body };
-      }
+      const { status, ...remembered } = first;
+      if (concurrent && !first.ok) return { status, body: remembered };
+      // A repeat reports what the first call did, not a fresh success: a
+      // tab whose card was never typed (504, 409) or never sent says so.
       if (first.tabId && deps.tabAlive(first.tabId)) {
         deps.focusTab(first.tabId);
-        return { status: 200, body: { ok: true, tabId: first.tabId, existing: true } };
+        return { status: first.ok ? 200 : status, body: { ...remembered, existing: true } };
       }
-      if (concurrent) return { status: 200, body: { ok: true, tabId: first.tabId, existing: true } };
+      if (concurrent) return { status: 200, body: { ...remembered, existing: true } };
       // A later click whose tab is gone (closed since): open a new one.
       if (requests.get(requestId) === prior) requests.delete(requestId);
       return open(rawBody);
