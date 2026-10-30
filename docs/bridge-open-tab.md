@@ -47,22 +47,23 @@ It is typed as ONE bracketed paste, which Claude treats as pasted text, never as
 1. Validates the body and the folder.
 2. Opens the project's window if it is not open, otherwise uses its first window, and brings it to the front.
 3. Asks that window for a new tab (exactly like Cmd+T) and shows it. The tab's shell is spawned by the window like every other tab, with the active Claude account's environment and the project folder as its working directory.
-4. Waits for the shell prompt (output, then a short quiet), then types `claude` and Enter, as a person would. No flags are added, so Claude runs with your normal settings and still asks before changing anything. If Claude (or Codex) is already running in the tab, nothing is typed.
+4. Waits for the shell prompt (output, then a short quiet), then types `claude` and Enter, as a person would. No flags are added, so Claude runs with your normal settings and still asks before changing anything. `claude` is typed only while the shell itself owns the terminal: if Claude already runs there, or a login script started another program (Codex, say), nothing is typed.
 5. Waits until Claude is ready. Three things must hold on two checks in a row (polled every 250ms, for up to 60 seconds):
    - the output the tab produced AFTER `claude` was typed, replayed through the headless terminal emulator, shows Claude's prompt box (a rule, the `❯` row, a closing rule) within the bottom 12 rows of what is drawn. Anything the shell printed before the launch (a banner, a file shown at login) is ignored;
    - the program turned bracketed paste on;
-   - a `claude` process (recognised by its command line, the same test the app uses everywhere) is the FOREGROUND process of the tab's terminal. A shell at its prompt, a suspended or background claude, or anything else fails closed.
+   - a `claude` process is the FOREGROUND process of the tab's terminal, recognised by its command line with the strict test (`classifyClaudeProcess`: the executed program must be claude, so `node other.js /path/to/claude` does not count). A shell at its prompt, a suspended or background claude, or anything else fails closed;
+   - no output arrived between reading the screen and the process check (Claude exiting and the shell redrawing would show up there).
    A trust question, a login screen or a permission prompt does not count as ready.
-6. Checks once more that claude is still the foreground process and the tab is unchanged, then pastes the message. No Enter.
+6. Pastes the message in the same tick as that last check, so nothing can change in between, unless a Chat message is being sent into the tab at that moment (then `409`). No Enter.
 
 The reply is sent after step 6 (or with the reason it stopped). Allow about two minutes: a cold window plus a Claude startup can take a while. `dobius-open` waits up to 180 seconds.
 
 ## Repeats (requestId)
 
 - The same `requestId` while its tab still exists brings that tab and its window to the front and replies with the same `tabId` and `"existing": true`. Nothing is typed again.
-- Two calls with the same `requestId` at the same time open one tab: the second waits for the first.
+- Two calls with the same `requestId` at the same time open one tab: the second waits for the first and gets the same outcome, a failure included.
 - The same `requestId` with a different `projectPath` is refused with `409`.
-- If that tab has been closed, the same `requestId` opens a new tab.
+- If that tab has been closed (or its shell has exited), a later call with the same `requestId` opens a new tab.
 - A call that failed before any tab existed is forgotten, so it can simply be retried.
 - The last 500 ids are remembered, in memory only (a restart forgets them).
 
@@ -98,11 +99,11 @@ When a tab was opened but the message could not be typed, `tabId` is included to
 | `401` | Missing or wrong token |
 | `403` | Folder is not a project Dobius+ knows; or the request carried an `Origin` (browser) or did not come from loopback |
 | `404` | Folder does not exist |
-| `409` | `requestId` already used for another project; or the tab was closed (or its shell exited) before Claude was ready. Nothing was typed. `tabId` included in the second case |
+| `409` | `requestId` already used for another project; or the tab was closed, its shell exited or was replaced, or a Chat message was being sent into it, before the message could be typed. Nothing was typed. `tabId` included in the second case |
 | `415` | `Content-Type` is not `application/json` |
 | `421` | `Host` is not `127.0.0.1:<port>` |
 | `429` | 4 opens already in progress |
-| `500` | The window, the tab or its shell did not start (`tabId` included when the tab exists) |
+| `500` | The window, the tab or its shell did not start, or the shell did not start in the project folder (`tabId` included when the tab exists) |
 | `503` | Dobius+ is still starting |
 | `504` | Claude's prompt did not appear within 60 seconds. The tab stays open with Claude in it, nothing was typed. `tabId` included. A repeat of the same `requestId` brings that tab forward |
 

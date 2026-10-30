@@ -13,11 +13,11 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { app, ipcMain } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
-import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal } from './terminal-manager.js';
+import { terminalInstance, terminalRawOutputSeq, subscribeTerminal, trimToEscapeBoundary, getTerminalClaudeInfo, getTerminalWebContentsId, writeTerminal, listTerminals } from './terminal-manager.js';
+import { classifyClaudeProcess } from './claude-argv.js';
 import { submitPending } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
-import { parseTabId } from './tab-id-util.js';
 
 const TERMINAL_ID_RE = /^term-.+-\d+$/;
 const WINDOW_READY_MS = 15_000;
@@ -26,6 +26,15 @@ const PTY_START_MS = 15_000;
 // Output kept for the readiness render. A Claude startup is a few KB.
 const WATCH_CAP_CHARS = 262_144;
 const execFileP = promisify(execFile);
+
+// `term-<project>-<n>`, or `term-<project>~w-<8>-<n>` from an extra window.
+// Matched against the KNOWN project rather than parsed, so a folder whose
+// own name contains `~w-` is not misread as a window key.
+function isTabOfProject(tabId, projectPath) {
+  if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return false;
+  const head = `term-${projectPath}`;
+  return tabId.startsWith(head) && /^(?:~w-[a-z0-9]{8})?-\d+$/.test(tabId.slice(head.length));
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -95,7 +104,10 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   ipcMain.on('bridge:tabOpened', (event, nonce, tabId) => {
     const p = typeof nonce === 'string' ? pending.get(nonce) : null;
     if (!p || p.wcId !== event.sender.id) return;
-    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId) || parseTabId(tabId)?.projectPath !== p.projectPath) {
+    // A NEW tab has no PTY yet when the window answers (its pane spawns one
+    // after this), so an id that already has a shell is an existing tab and
+    // is refused: the message must never land in a tab already in use.
+    if (!isTabOfProject(tabId, p.projectPath) || terminalInstance(tabId)) {
       p.done(null);
       return;
     }
@@ -120,13 +132,20 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       const done = (id) => { clearTimeout(timer); pending.delete(nonce); resolve(id); };
       const timer = setTimeout(() => done(null), TAB_ADD_MS);
       pending.set(nonce, { wcId: wc.id, projectPath, done });
-      wc.send('bridge:openTab', { nonce });
+      // The window drops a request it receives after main stopped waiting
+      // (a stalled renderer), so a late one cannot leave an orphan tab.
+      wc.send('bridge:openTab', { nonce, expiresAt: Date.now() + TAB_ADD_MS });
     });
     if (!tabId) return { error: 'the project window did not add the tab' };
     // The tab's pane spawns the PTY via terminal:create; wait until it is
     // this window's.
     if (!(await waitFor(() => !!terminalInstance(tabId) && ownerOf(tabId) === wc.id, PTY_START_MS))) {
       return { error: 'the new tab\'s terminal did not start', tabId };
+    }
+    // The shell must have started IN the project (createTerminal falls back
+    // to home for a folder that vanished).
+    if (listTerminals().find((t) => t.id === tabId)?.cwd !== projectPath) {
+      return { error: 'the new tab did not start in the project folder', tabId };
     }
     return { tabId };
   }
@@ -145,11 +164,13 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // after `claude` is typed can make the tab ready.
   function watchOutput(tabId) {
     let buf = '';
+    let seq = 0;
     const sub = subscribeTerminal(tabId, {
-      onData: (_id, data) => { buf = trimToEscapeBoundary(buf + data, WATCH_CAP_CHARS); },
+      onData: (_id, data) => { seq += 1; buf = trimToEscapeBoundary(buf + data, WATCH_CAP_CHARS); },
     });
     return {
       mark: () => { buf = ''; },
+      seq: () => seq,
       screen: async () => {
         const lines = await renderScreenLines(buf);
         return lines ? { lines, modes: lines.modes } : null;
@@ -158,18 +179,36 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     };
   }
 
-  // Claude is the tab's FOREGROUND process: a claude child of the shell
-  // (the argv test the app uses everywhere, claude-argv.js; the native
-  // binary's process name is its version, so names are useless) whose
-  // process group owns the terminal. A suspended or background claude, or a
-  // shell back at its prompt, fails, and so does any error.
+  // Claude is the tab's FOREGROUND process: a child of the shell whose
+  // command line is claude by the STRICT test (classifyClaudeProcess: the
+  // executed program itself, so `node other.js /path/claude` is not; the
+  // native binary's process name is its version, so names are useless) and
+  // whose process group owns the terminal. A suspended or background claude,
+  // a shell back at its prompt, or any error fails.
   async function claudeRunning(tabId) {
     const info = await getTerminalClaudeInfo(tabId);
     if (!info?.pid) return false;
     try {
-      const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=', '-p', String(info.pid)], { timeout: 1000, encoding: 'utf8' });
-      const [pgid, tpgid, stat] = stdout.trim().split(/\s+/);
-      return !!pgid && pgid === tpgid && !String(stat).startsWith('T');
+      const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=,command=', '-p', String(info.pid)], { timeout: 1000, encoding: 'utf8' });
+      const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/s);
+      if (!m) return false;
+      const [, pgid, tpgid, stat, command] = m;
+      return pgid === tpgid && !stat.startsWith('T') && classifyClaudeProcess(command).kind === 'claude';
+    } catch {
+      return false;
+    }
+  }
+
+  // The shell itself owns the terminal: no job (Codex started by a login
+  // script, an `exec`'d program, a pager) is in the foreground, so a typed
+  // `claude` reaches the shell and nothing else.
+  async function shellForeground(tabId) {
+    const pid = terminalInstance(tabId)?.pid;
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
+      const [pgid, tpgid] = stdout.trim().split(/\s+/);
+      return !!pgid && pgid === tpgid;
     } catch {
       return false;
     }
@@ -177,6 +216,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
 
   return {
     resolveProject,
+    shellForeground,
     openTab,
     focusTab,
     watchOutput,

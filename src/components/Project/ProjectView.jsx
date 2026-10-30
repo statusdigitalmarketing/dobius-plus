@@ -379,7 +379,8 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     const offFailed = window.electronAPI?.onTabAdoptFailed?.(giveUp);
     // /openTab (Brett's inbox board): a new tab, shown, like Cmd+T. Main
     // starts Claude in it once its PTY exists.
-    const offBridgeOpen = window.electronAPI?.onBridgeOpenTab?.(({ nonce } = {}) => {
+    const offBridgeOpen = window.electronAPI?.onBridgeOpenTab?.(({ nonce, expiresAt } = {}) => {
+      if (!(Date.now() < expiresAt)) return; // main gave up on this one
       const tab = useStore.getState().addTab(projectPath);
       useStore.getState().showTab(tab.id);
       useStore.getState().setActiveView('terminal');

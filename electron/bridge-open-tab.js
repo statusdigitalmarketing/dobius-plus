@@ -124,10 +124,11 @@ export function isClaudePromptReady(lines, modes) {
  *   ptyOf(tabId) -> object|null       PTY identity (a replaced shell is a new object)
  *   outputSeq(tabId) -> number        count of output chunks so far
  *   claudeRunning(tabId) -> Promise<boolean>  claude is the FOREGROUND process of the tab's terminal
+ *   shellForeground(tabId) -> Promise<boolean>  the shell itself owns the terminal (no job running)
  *   typeLaunch(tabId) -> void         type `claude` + Enter at the shell prompt
- *   watchOutput(tabId) -> { mark(), screen(): Promise<{ lines, modes } | null>, stop() }
+ *   watchOutput(tabId) -> { mark(), seq(), screen(): Promise<{ lines, modes } | null>, stop() }
  *                                     the tab's output from now on, emulated; mark()
- *                                     forgets everything received so far
+ *                                     forgets everything received so far; seq() counts chunks
  *   paste(tabId, text) -> void        one bracketed paste, no Enter, written now
  *   inputBusy(tabId) -> boolean       another surface is mid-submit into the tab
  *   sleep(ms), now()
@@ -174,11 +175,18 @@ export function createOpenTabService(deps, opts = {}) {
     let hits = 0;
     while (deps.now() < end) {
       if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return 'gone';
+      const seqAtRead = watch.seq();
       let screen;
       try { screen = await watch.screen(); } catch { screen = null; }
       const drawn = !!screen && isClaudePromptReady(screen.lines, screen.modes);
       hits = drawn && (await deps.claudeRunning(tabId)) ? hits + 1 : 0;
-      if (hits >= 2) return 'ready';
+      // Ready means: the screen that was judged is still the screen, checked
+      // AFTER the process check. Any output since the read (Claude exiting
+      // and the shell redrawing, a dialog opening) sends us round again. The
+      // caller pastes in the same tick as this return: no output or exit can
+      // be processed in between.
+      if (hits >= 2 && watch.seq() === seqAtRead && deps.ptyOf(tabId) === pty) return 'ready';
+      if (watch.seq() !== seqAtRead) hits = Math.min(hits, 1);
       await deps.sleep(READY_POLL_MS);
     }
     return 'timeout';
@@ -201,8 +209,14 @@ export function createOpenTabService(deps, opts = {}) {
     try {
       if (!(await waitShell(tabId))) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
       // Claude already runs in the tab (a "new tabs start Claude" setting,
-      // say): never type the launch command into it.
-      if (!(await deps.claudeRunning(tabId))) {
+      // say): never type the launch command into it. Re-check the shell after
+      // the await: never type into a replacement.
+      const already = await deps.claudeRunning(tabId);
+      // Only the shell may receive `claude` + Enter: a program a login script
+      // started (Codex, say) would take it as input.
+      const shellOwns = !already && (await deps.shellForeground(tabId));
+      if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: false, status: 409, tabId, error: 'the tab was closed or its shell was replaced before Claude could start; nothing was typed' };
+      if (shellOwns) {
         watch.mark();
         deps.typeLaunch(tabId);
       }
@@ -212,9 +226,9 @@ export function createOpenTabService(deps, opts = {}) {
       if (state === 'timeout') {
         return { ok: false, status: 504, tabId, error: `Claude's prompt did not appear within ${Math.round(readyTimeoutMs / 1000)}s (a trust or login question may be waiting in the tab); the tab is open and nothing was typed` };
       }
-      // Once more right before typing: Claude can exit between the last poll
-      // and now. The paste then goes out in the same tick as these checks.
-      if (!(await deps.claudeRunning(tabId)) || !deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return gone;
+      // No await between the last process check (inside waitReady) and the
+      // paste, so nothing can change in between.
+      if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return gone;
       if (deps.inputBusy(tabId)) return { ok: false, status: 409, tabId, error: 'something else was typing into the tab; nothing was typed' };
       deps.paste(tabId, message);
       return { ok: true, tabId };
@@ -235,13 +249,19 @@ export function createOpenTabService(deps, opts = {}) {
         return { status: 409, body: { ok: false, error: 'requestId was already used for a different projectPath' } };
       }
       // A concurrent duplicate waits for the first call instead of opening
-      // a second tab.
+      // a second tab, and shares its outcome even when that failed: a slow
+      // window or shell must not turn one click into two tabs.
+      const concurrent = !prior.settled;
       const first = await prior.promise;
       if (first.tabId && deps.tabAlive(first.tabId)) {
         deps.focusTab(first.tabId);
         return { status: 200, body: { ok: true, tabId: first.tabId, existing: true } };
       }
-      // Its tab is gone (or never opened): this click opens a new one.
+      if (concurrent) {
+        const { status, ...body } = first;
+        return { status: first.ok ? 200 : status, body };
+      }
+      // A later click whose tab is gone (closed since): open a new one.
       if (requests.get(requestId) === prior) requests.delete(requestId);
       return open(rawBody);
     }

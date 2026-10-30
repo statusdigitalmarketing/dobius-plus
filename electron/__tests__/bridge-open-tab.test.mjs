@@ -94,6 +94,7 @@ function fakeDeps(over = {}) {
     ptyOf: (id) => (tabs.get(id)?.alive ? tabs.get(id).pty : null),
     outputSeq: (id) => tabs.get(id)?.seq || 0,
     claudeRunning: async (id) => !!tabs.get(id)?.claude,
+    shellForeground: async (id) => !tabs.get(id)?.claude && !tabs.get(id)?.otherProgram,
     // "Claude" draws its prompt a few polls after the launch is typed.
     typeLaunch: (id) => {
       log.push(['launch', id]);
@@ -106,6 +107,7 @@ function fakeDeps(over = {}) {
       let from = tab.frames.length;
       return {
         mark: () => { from = tab.frames.length; },
+        seq: () => tab.frames.length,
         // Like the emulator: everything drawn since stays on screen, newest at the bottom.
         screen: async () => (tab.frames.length > from
           ? { lines: tab.frames.slice(from).flatMap((f) => f.lines), modes: tab.frames.at(-1).modes }
@@ -180,7 +182,7 @@ function fakeDeps(over = {}) {
   const d = fakeDeps({
     typeLaunch: () => {},
     claudeRunning: async () => true,
-    watchOutput: () => ({ mark() {}, stop() {}, screen: async () => { reads += 1; return reads === 3 ? PROMPT : { lines: [], modes: {} }; } }),
+    watchOutput: () => ({ mark() {}, stop() {}, seq: () => 0, screen: async () => { reads += 1; return reads === 3 ? PROMPT : { lines: [], modes: {} }; } }),
   });
   const r = await createOpenTabService(d, { readyTimeoutMs: 3000 }).open({ projectPath: '/p', message: 'go', requestId: 'flash' });
   assert.equal(r.status, 504);
@@ -219,15 +221,34 @@ function fakeDeps(over = {}) {
 }
 
 {
-  // Claude exits between the ready check and the paste: the re-check catches it.
+  // Claude exits WHILE the last process check runs: the check still said
+  // yes, but the shell's redraw arrived meanwhile. Nothing is pasted.
   let calls = 0;
-  const d = fakeDeps({ claudeRunning: async () => { calls += 1; return calls === 2 || calls === 3; } });
-  d.typeLaunch = (id) => { d.tabs.get(id).frames.push(PROMPT); };
-  const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'exit' });
-  assert.equal(calls, 4, 'pre-launch, two ready polls, the re-check');
-  assert.equal(r.status, 409);
+  let tabRef;
+  const d = fakeDeps({
+    claudeRunning: async () => {
+      calls += 1;
+      if (calls === 3) { tabRef.frames.push({ lines: ['% '], modes: { bracketedPaste: true } }); return true; } // exit output lands during the check
+      return calls === 2;
+    },
+  });
+  d.typeLaunch = (id) => { tabRef = d.tabs.get(id); tabRef.frames.push(PROMPT); };
+  const r = await createOpenTabService(d, { readyTimeoutMs: 3000 }).open({ projectPath: '/p', message: 'go', requestId: 'exit' });
+  assert.ok(calls >= 3);
+  assert.equal(r.status, 504);
   assert.equal(d.log.filter((e) => e[0] === 'paste').length, 0);
-  ok('claude gone at the paste: nothing typed');
+  ok('claude exits during the last check: nothing typed');
+}
+
+{
+  // The shell is replaced while the pre-launch process check runs: the
+  // launch is never typed into the replacement.
+  const d = fakeDeps();
+  d.claudeRunning = async (id) => { const t = d.tabs.get(id); if (!t.swapped) { t.swapped = true; t.pty = { replacement: true }; } return false; };
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'swap-early' });
+  assert.equal(r.status, 409);
+  assert.equal(d.log.filter((e) => e[0] === 'launch' || e[0] === 'paste').length, 0);
+  ok('replaced shell before the launch: nothing typed');
 }
 
 {
@@ -257,7 +278,7 @@ function fakeDeps(over = {}) {
 
 {
   // An agent CLI already runs in the new tab: do not type `claude` into it.
-  const d = fakeDeps({ claudeRunning: async () => true, watchOutput: () => ({ mark() {}, stop() {}, screen: async () => PROMPT }) });
+  const d = fakeDeps({ claudeRunning: async () => true, watchOutput: () => ({ mark() {}, stop() {}, seq: () => 0, screen: async () => PROMPT }) });
   const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'running' });
   assert.equal(r.status, 200);
   assert.equal(d.log.filter((e) => e[0] === 'launch').length, 0);
@@ -277,6 +298,31 @@ function fakeDeps(over = {}) {
   assert.match(thrown.body.error, /boom/);
   assert.equal((await svc.open({ projectPath: '/p', message: 'x', requestId: 'bad id' })).status, 400);
   ok('errors without a tab are retryable');
+}
+
+{
+  // A concurrent duplicate shares a FAILED first outcome instead of opening
+  // a second tab (a slow shell that missed its deadline).
+  const d = fakeDeps({ openTab: async (p) => { d.log.push(['open']); return { error: 'the new tab\'s terminal did not start', tabId: `term-${p}-9` }; } });
+  const svc = createOpenTabService(d);
+  const body = { projectPath: '/p', message: 'go', requestId: 'slowpty' };
+  const [a, b] = await Promise.all([svc.open(body), svc.open(body)]);
+  assert.equal(d.log.filter((e) => e[0] === 'open').length, 1);
+  assert.equal(a.status, 500);
+  assert.deepEqual(b, a);
+  ok('concurrent duplicate shares a failure, no second tab');
+}
+
+{
+  // Something other than the shell owns the terminal (a login script started
+  // Codex): `claude` + Enter is never typed into it.
+  const d = fakeDeps();
+  const orig = d.openTab;
+  d.openTab = async (p) => { const r = await orig(p); d.tabs.get(r.tabId).otherProgram = true; return r; };
+  const r = await createOpenTabService(d, { readyTimeoutMs: 2000 }).open({ projectPath: '/p', message: 'go', requestId: 'codex' });
+  assert.equal(r.status, 504);
+  assert.equal(d.log.filter((e) => e[0] === 'launch' || e[0] === 'paste').length, 0);
+  ok('no launch typed into a foreground program that is not the shell');
 }
 
 {
