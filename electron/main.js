@@ -3178,8 +3178,9 @@ function setupWindowHandlers() {
   });
 
   // /openTab on the local bridge (Brett's inbox board): a visible tab in a
-  // project window, with Claude started and a message typed but not sent. It
-  // waits for the same tabsReady signal a dock does.
+  // project window, with Claude started and a message typed and then sent
+  // with one Enter (docs/bridge-open-tab.md). It waits for the same
+  // tabsReady signal a dock does.
   setOpenTabService(createOpenTabService(createBridgeOpenDeps({
     windowReady: (wc) => dockReadyWc.has(wc.id),
     ownerOf: (tabId) => terminalOwners.get(tabId),
