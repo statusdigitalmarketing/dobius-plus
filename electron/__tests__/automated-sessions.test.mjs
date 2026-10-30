@@ -11,7 +11,7 @@ process.env.HOME = TMP_HOME;
 // Own config dir: this suite records tab names through config-manager.
 process.env.DOBIUS_TEST_USERDATA = path.join(TMP_HOME, 'userdata');
 await fs.mkdir(process.env.DOBIUS_TEST_USERDATA, { recursive: true });
-const { loadAllSessions } = await import('../data-service.js');
+const { loadAllSessions, sessionMovedPast } = await import('../data-service.js');
 const { recordSessionTabNames, getSessionTabNames, flushConfig } = await import('../config-manager.js');
 
 let pass = 0, fail = 0;
@@ -99,9 +99,19 @@ await write('buried', [
   ...Array.from({ length: 250 }, (_, i) => meta('progress', now - 1000 + i)),
 ]);
 
+// Request blobs are dropped by parseJsonl, so a tail of blobs and progress
+// parses SHORT of 200 entries without the file having been read whole.
+await write('blob-buried', [
+  rec('user', 'cli', 'blob question', now - 4_100_010),
+  rec('assistant', 'cli', 'blob answer', now - 4_100_000),
+  ...Array.from({ length: 400 }, (_, i) => (i % 2
+    ? JSON.stringify({ type: 'api-request-blob', timestamp: new Date(now - 900 + i).toISOString(), body: 'x'.repeat(900) })
+    : meta('progress', now - 900 + i, { pad: 'y'.repeat(900) }))),
+]);
+
 const all = await loadAllSessions();
 const ids = (arr) => arr.map((s) => s.sessionId).sort();
-const ALL = ['buried', 'cli-chat', 'clock-skew', 'messaged-later', 'newest-unmarked', 'no-entrypoint', 'only-meta', 'remote-control', 'resumed-old', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta', 'trailing-tool'];
+const ALL = ['blob-buried', 'buried', 'cli-chat', 'clock-skew', 'messaged-later', 'newest-unmarked', 'no-entrypoint', 'only-meta', 'remote-control', 'resumed-old', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta', 'trailing-tool'];
 const byId = (id) => all.find((s) => s.sessionId === id);
 check('timestamp is the last real message, not later metadata', byId('resumed-old')?.timestamp, now - 3_590_000);
 check('activityAt still sees the newest write', byId('resumed-old')?.activityAt, now - 50);
@@ -111,6 +121,7 @@ check('a trailing system record does not move the timestamp', byId('trailing-met
 check('no message at all falls back to the newest record', byId('only-meta')?.timestamp, now - 7_200_000);
 check('a trailing tool result is not a message', byId('trailing-tool')?.timestamp, now - 5_400_000);
 check('a message buried past the tail is still found', byId('buried')?.timestamp, now - 4_000_000);
+check('a tail thinned by dropped request blobs still looks deeper', byId('blob-buried')?.timestamp, now - 4_100_000);
 check('list is sorted newest message first',
   all.every((s, i) => i === 0 || (all[i - 1].timestamp || 0) >= (s.timestamp || 0)), true);
 const skew = all.find((s) => s.sessionId === 'clock-skew');
@@ -124,7 +135,7 @@ check('default includes everything', ids(all), ALL);
 check('automated flag comes from the newest user/assistant record only',
   Object.fromEntries(all.map((s) => [s.sessionId, s.automated]).sort(([a], [b]) => a.localeCompare(b))),
   {
-    'buried': false, 'cli-chat': false, 'clock-skew': false, 'messaged-later': false, 'newest-unmarked': false, 'no-entrypoint': false,
+    'blob-buried': false, 'buried': false, 'cli-chat': false, 'clock-skew': false, 'messaged-later': false, 'newest-unmarked': false, 'no-entrypoint': false,
     'only-meta': false, 'remote-control': false, 'resumed-old': false,
     'sdk-review': true, 'sdk-then-cli': false, 'titled': false, 'trailing-meta': false, 'trailing-tool': false,
   });
@@ -150,6 +161,19 @@ recordSessionTabNames(many.slice(0, 600), 2);
 recordSessionTabNames([...many.slice(600), ['cli-chat', 'Email']], 3);
 const kept = getSessionTabNames();
 check('names are capped, the session seen longest ago goes first', [kept.size, kept.has('cli-chat'), kept.has('s-0'), kept.has('s-1004')], [1000, true, false, true]);
+// /clear: a bare claude matched to A by timing has moved on once an
+// unclaimed transcript is born after A's last write.
+const movedDir = path.join(TMP_HOME, '.claude', 'projects', '-tmp-movedproj');
+await fs.mkdir(movedDir, { recursive: true });
+await fs.writeFile(path.join(movedDir, 'a.jsonl'), rec('user', 'cli', 'first chat', now - 1000) + '\n');
+const startedAt = now - 60_000;
+check('no newer transcript: not moved past', await sessionMovedPast('/tmp/movedproj', 'a', startedAt, new Set()), false);
+await new Promise((r) => setTimeout(r, 30));
+await fs.writeFile(path.join(movedDir, 'b.jsonl'), rec('user', 'cli', 'after clear', now) + '\n');
+check('a newer unclaimed transcript: moved past', await sessionMovedPast('/tmp/movedproj', 'a', startedAt, new Set()), true);
+check('a newer transcript another tab owns does not count', await sessionMovedPast('/tmp/movedproj', 'a', startedAt, new Set(['b'])), false);
+check('a missing transcript is never named', await sessionMovedPast('/tmp/movedproj', 'zz', startedAt, new Set()), true);
+
 flushConfig?.();
 
 await fs.rm(TMP_HOME, { recursive: true, force: true });

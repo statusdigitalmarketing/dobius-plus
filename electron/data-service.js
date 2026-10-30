@@ -242,7 +242,9 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         // A tail that is ALL bookkeeping (progress, hook output) holds no
         // message: look further back once, or the newest bookkeeping stamp
         // would float an untouched chat above newer conversations.
-        if (!messageAt && entries.length >= 200) {
+        // Not gated on the tail being full: parseJsonl drops request blobs,
+        // so a short parsed tail does not prove the whole file was read.
+        if (!messageAt && entries.length > 0) {
           const deeper = await parseJsonl(filePath, 2000);
           for (let i = deeper.length - 1; i >= 0 && !messageAt; i -= 1) {
             const e = deeper[i];
@@ -636,20 +638,36 @@ export async function resolveContinuedSessionId(
 }
 
 /**
- * Last write (epoch ms) of a session's transcript within a project, checking
- * both encoder forms. 0 when the file is not found under either.
+ * Has a bare `claude` that the fresh resolver matched to `sessionId` moved on
+ * to another transcript? `/clear` keeps the process but starts a new file, and
+ * the resolver keeps answering the old id (it was born closest to the start).
+ * The sign: an UNCLAIMED transcript in the same project born after this one's
+ * last write and after the process started. Errs toward true (a headless run
+ * in the project also counts), which only delays a name, never misplaces one.
  */
-export async function sessionTranscriptMtime(projectPath, sessionId) {
-  if (!projectPath || !sessionId) return 0;
+export async function sessionMovedPast(projectPath, sessionId, startedAt, claimed = new Set()) {
+  if (!projectPath || !sessionId) return true;
   const seen = new Set();
   for (const enc of [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)]) {
     if (seen.has(enc)) continue;
     seen.add(enc);
-    try {
-      return (await fs.stat(path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`))).mtimeMs || 0;
-    } catch { /* try the other encoding */ }
+    const dir = path.join(PROJECTS_DIR, enc);
+    let own;
+    try { own = await fs.stat(path.join(dir, `${sessionId}.jsonl`)); } catch { continue; }
+    const after = Math.max(own.mtimeMs || 0, Number.isFinite(startedAt) ? startedAt - FRESH_CLOCK_SLACK_MS : 0);
+    let files;
+    try { files = (await fs.readdir(dir)).filter((f) => f.endsWith('.jsonl')); } catch { return true; }
+    for (const f of files) {
+      const sid = f.slice(0, -'.jsonl'.length);
+      if (sid === sessionId || claimed.has(sid)) continue;
+      try {
+        const st = await fs.stat(path.join(dir, f));
+        if ((st.birthtimeMs || st.ctimeMs || 0) > after) return true;
+      } catch { /* vanished: not a rival */ }
+    }
+    return false;
   }
-  return 0;
+  return true; // transcript not found: nothing safe to name
 }
 
 /**

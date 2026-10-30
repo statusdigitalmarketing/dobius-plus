@@ -42,7 +42,7 @@ import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnsw
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, sessionTranscriptMtime, findLooseEnds, getTranscriptSig,
+  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, sessionMovedPast, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
   getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
 import {
@@ -2307,9 +2307,6 @@ function setupConfigHandlers() {
 //   3. LINK newly-discovered sessions running in tabs that have no map entry.
 // Cancellable: store the interval ref so will-quit can clear it.
 let sessionTabCaptureInterval = null;
-// An inferred (bare `claude`) session takes its tab's name only if its
-// transcript was written this recently. See the capture loop.
-const NAME_FRESH_WRITE_MS = 120 * 1000;
 function setupSessionTabCapture() {
   if (sessionTabCaptureInterval) return;
   sessionTabCaptureInterval = setInterval(async () => {
@@ -2384,13 +2381,12 @@ function setupSessionTabCapture() {
         // ("Tab 3") clears the name so the summary shows again.
         if (label !== undefined && label === labelsBefore.get(t.id)) {
           // A bare `claude` is matched by timing, and after /clear its process
-          // writes a NEW transcript while the match stays on the old one. Name
-          // an inferred session only while its transcript is being written,
-          // so a renamed tab cannot relabel a conversation it has moved past.
-          const inferred = !claudeInfo?.sessionId;
-          const writing = !inferred || (Date.now() - await sessionTranscriptMtime(
-            cwdByTab.get(t.id) || t.cwd, runningSessionId)) < NAME_FRESH_WRITE_MS;
-          if (writing) namePairs.push([runningSessionId, sessionNameFromTabLabel(label)]);
+          // writes a NEW transcript while the match stays on the old one. Skip
+          // an inferred session once a newer unclaimed transcript appeared, so
+          // a renamed tab cannot relabel a conversation it has moved past.
+          const movedPast = !claudeInfo?.sessionId && await sessionMovedPast(
+            cwdByTab.get(t.id) || t.cwd, runningSessionId, claudeInfo?.startedAt, claimedIds);
+          if (!movedPast) namePairs.push([runningSessionId, sessionNameFromTabLabel(label)]);
         }
         const mappedSessionId = tabToSessionId.get(t.id);
         if (mappedSessionId === runningSessionId) {
