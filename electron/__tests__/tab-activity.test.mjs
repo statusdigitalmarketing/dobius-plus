@@ -251,6 +251,7 @@ test('freshenRows: a row settled early is re-read when the whole reply is ready'
   ts.ingest(ID, mk('working'), 14_000); // another row's lookup was still pending
   const [r] = freshenRows([row, null], ts.activityFor);
   assert.deepEqual([r.activity.status, r.activity.background, r.unread], ['working', null, true]);
+  assert.deepEqual(freshenRows([row], ts.activityFor, () => false), [], 'PTY killed meanwhile: dropped');
   ts.forget(ID);
   assert.deepEqual(freshenRows([row], ts.activityFor), [], 'gone: dropped');
 });

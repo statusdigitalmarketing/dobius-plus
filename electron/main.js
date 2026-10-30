@@ -520,7 +520,8 @@ function setupDataHandlers() {
     const rows = await Promise.all(wanted.map((id) => activityRow(id, {
       activityFor: terminalStatus.activityFor, waitingForTab, unreadAnywhere,
     })));
-    return freshenRows(rows, terminalStatus.activityFor);
+    const stillLive = new Set(listTerminals().map((t) => t.id));
+    return freshenRows(rows, terminalStatus.activityFor, (id) => stillLive.has(id));
   });
   ipcMain.on('tabs:reportUnread', (event, ids) => {
     // ipcMain.on has no rejection path: a throw here would reach the

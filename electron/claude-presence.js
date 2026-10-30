@@ -141,10 +141,12 @@ export async function activityRow(id, { activityFor, waitingForTab, unreadAnywhe
  * can settle while another's lookup is still pending, and its tab may have
  * moved on meanwhile. Synchronous, so the reply matches the status now.
  */
-export function freshenRows(rows, activityFor) {
+export function freshenRows(rows, activityFor, isLive = () => true) {
   const out = [];
   for (const row of rows) {
-    if (!row) continue;
+    // A PTY killed meanwhile keeps its status record (kill skips the exit
+    // observers), so liveness is checked again here too.
+    if (!row || !isLive(row.id)) continue;
     const now = activityFor(row.id);
     if (!now) continue;
     const same = now.status === 'done' && now.doneAt === row.activity.doneAt;
