@@ -414,3 +414,13 @@ test('the unique claude lookup relies on: a command that only names the CLI is n
   assert.notEqual(classifyClaudeProcess("node -e setInterval(()=>{},1000) /opt/homebrew/bin/claude").kind, 'claude');
   assert.equal(classifyClaudeProcess('/Users/a/.local/bin/claude --resume abc').kind, 'claude');
 });
+
+test('a hook turn main cannot see a claude for shows the age, not an older Done', () => {
+  // A 2m turn finished unseen; a new turn's working marker came, but claude
+  // runs behind a wrapper (bash -c 'claude; :') so no claude is visible.
+  const r = reconcileWithProcess({ status: 'working', hookOwned: true, since: 500_000, lastTurnMs: 120_000, turnEndedAt: 400_000, lastMarkerAt: 500_000 }, null);
+  assert.equal(r.uncertain, true);
+  assert.equal(label({ ...r, live: true, unread: true }), null);
+  // Without the doubt flag the unread fallback would have said Done 2m.
+  assert.equal(label({ ...r, uncertain: false, live: true, unread: true }).text, 'Done 2m');
+});

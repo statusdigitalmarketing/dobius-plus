@@ -75,7 +75,9 @@ export function reconcileWithProcess(a, info) {
     // The hook says a turn runs but no claude is there to run it. (A claude
     // started through a wrapper is not a direct child and lands here too: it
     // shows its age, which is less than it could, never wrong.)
-    if (out.hookOwned) Object.assign(out, { status: 'idle', hookOwned: false, since: null });
+    // It may also be running unseen (behind a wrapper) right now, so no label
+    // at all: not Working, and not an older turn's Done either.
+    if (out.hookOwned) Object.assign(out, { status: 'idle', hookOwned: false, since: null, uncertain: true });
     return out;
   }
   if (Number.isFinite(info.startedAt)) {

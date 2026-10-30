@@ -29,12 +29,16 @@ export function formatDuration(ms) {
  * @param {number}  [x.lastTurnMs] length of the last turn the hook finished
  * @param {'shells'|'agents'|null} [x.background] proven background work (main)
  * @param {boolean} [x.unread]    a turn finished there and the tab was not viewed since
+ * @param {boolean} [x.uncertain] main could not confirm the hook state against a process
  * @param {number}  x.now
  * @returns {{kind:'working'|'input'|'waiting'|'done', text:string, title:string}|null}
  *   null = show the plain age.
  */
 export function tabActivityLabel(x) {
   if (!x || !x.live) return null; // a closed tab has no live state to report
+  // main could not tell what the tab is doing (a hook turn with no claude it
+  // can see): the plain age, never a guess.
+  if (x.uncertain) return null;
   const now = x.now;
   if (x.status === 'needs') {
     return { kind: 'input', text: 'Input', title: 'Needs your input (a permission prompt or a question)' };
