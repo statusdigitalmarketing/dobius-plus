@@ -397,8 +397,9 @@ export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claude
     for (let i = 0; i < 3; i += 1) {
       const cur = status.activityFor(id);
       if (!cur) return null;
-      const info = await claudeInfo(id);
-      if (!moved(id, cur)) return shape(id, reconcileWithProcess(cur, info));
+      // The full check, so what it disproves is kept in the record too.
+      const info = await checkTurnAgainstProcess(id, cur);
+      if (!moved(id, cur)) return shape(id, info === undefined ? cur : reconcileWithProcess(cur, info));
     }
     const cur = status.activityFor(id);
     return cur ? shape(id, cur, { uncertain: true }) : null;

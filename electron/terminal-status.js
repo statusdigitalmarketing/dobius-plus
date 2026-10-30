@@ -260,6 +260,8 @@ export function markAmbiguous(id) {
   // The running turn's start cannot be pinned on one claude either, and
   // unlike the flag that stays so when the next marker comes.
   if (st.turnStartedAt) st.turnStartDistrusted = true;
+  // Nor the last finished turn's length (its start may be the other's).
+  st.lastTurnMs = 0;
 }
 
 /** When the hook last ended a turn here (0 = never). Cheap, for the data path. */

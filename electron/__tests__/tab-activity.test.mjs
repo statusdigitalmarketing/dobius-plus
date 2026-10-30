@@ -981,3 +981,29 @@ test('moved() notices a hookless turn recorded during the await', async () => {
   const r = await tabActivity(ID);
   assert.equal(label({ ...r.activity, live: true, unread: true, now: 83_000 }), null);
 });
+
+test('ambiguity seen after a Stop also drops that turn\'s length', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 30_000);
+  ts.markAmbiguous(ID);
+  ts.ingest(ID, mk('done'), 60_000); // the other claude's lone done
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+});
+
+test('settleOnCurrent keeps what its check disproves', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 100_000); // A
+  let calls = 0;
+  const { tabActivity } = makeActivity({
+    claudeInfo: async () => {
+      calls += 1;
+      if (calls === 1) ts.ingest(ID, mk('working'), 107_000); // B's marker during the first read
+      return { pid: 2, startedAt: 105_000 };                 // B, started after A's turn began
+    },
+    now: () => 108_000,
+  });
+  await tabActivity(ID);
+  ts.ingest(ID, mk('done'), 110_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+});

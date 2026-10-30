@@ -520,6 +520,27 @@ export async function getTerminalProcessArgv(id) {
  * `unique: true` answers { ambiguous: true } when it cannot name ONE claude
  * (two claudes, or a child that may be one).
  */
+async function hasClaudeChild(pid) {
+  let out = '';
+  try {
+    ({ stdout: out } = await execFileP('/usr/bin/pgrep', ['-P', String(pid)], { timeout: 1000, encoding: 'utf8' }));
+  } catch (err) {
+    if (err?.code === 1) return false; // no children
+    return true; // could not look: assume it might
+  }
+  for (const child of out.trim().split('\n').filter(Boolean)) {
+    let line = '';
+    try {
+      ({ stdout: line } = await execFileP('/bin/ps', ['-o', 'command=', '-p', child], { timeout: 1000, encoding: 'utf8' }));
+    } catch (err) {
+      if (err?.code === 1) continue; // gone
+      return true;
+    }
+    if ((await claudeChildVerdict(line.trim())) !== 'not-claude') return true;
+  }
+  return false;
+}
+
 export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;
@@ -560,8 +581,14 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
         // /path/claude`) or one whose path has spaces (`/x/CLI Tools/claude`,
         // which isClaudeCommand alone would skip) makes the shell ambiguous.
         const verdict = await claudeChildVerdict(command);
-        if (verdict === 'not-claude') continue;
         if (verdict === 'ambiguous') return { ambiguous: true };
+        if (verdict === 'not-claude') {
+          // A wrapper (`bash -c 'claude; :'`) runs claude one level down:
+          // that claude could be the one sending markers, so the shell is
+          // ambiguous. Accepted residual: deeper nesting is not walked.
+          if (await hasClaudeChild(childPid)) return { ambiguous: true };
+          continue;
+        }
       } else if (!isClaudeCommand(command)) continue;
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
