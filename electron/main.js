@@ -89,7 +89,9 @@ import {
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
   deriveDeviceId,
 } from './mobile-server.js';
-import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents } from './voice-bridge.js';
+import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService } from './voice-bridge.js';
+import { createOpenTabService } from './bridge-open-tab.js';
+import { createBridgeOpenDeps } from './bridge-open-main.js';
 import { ensureVoiceConductor, stopVoiceConductor } from './voice-conductor.js';
 import {
   startImessageBridge, stopImessageBridge, restartImessageBridge,
@@ -2899,6 +2901,14 @@ function setupWindowHandlers() {
     }
     return { ok: true };
   });
+
+  // /openTab on the local bridge (Brett's inbox board): a visible tab in a
+  // project window, with Claude started and a message typed but not sent. It
+  // waits for the same tabsReady signal a dock does.
+  setOpenTabService(createOpenTabService(createBridgeOpenDeps({
+    windowReady: (wc) => dockReadyWc.has(wc.id),
+    ownerOf: (tabId) => terminalOwners.get(tabId),
+  })));
 
   // Record the docked tab in the target window's saved tab list BEFORE the
   // handoff: terminal:loadState only returns scrollback for a tab a window

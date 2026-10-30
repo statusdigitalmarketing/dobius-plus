@@ -136,6 +136,9 @@ function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
         }
         Object.defineProperty(out, 'ends', { value: ends });
         Object.defineProperty(out, 'firstWords', { value: firstWords });
+        // Whether the program asked for bracketed paste: /openTab only pastes
+        // into a Claude that turned it on (bridge-open-tab.js).
+        Object.defineProperty(out, 'modes', { value: { bracketedPaste: !!term.modes?.bracketedPasteMode } });
         resolve(out);
       } catch {
         resolve(null);

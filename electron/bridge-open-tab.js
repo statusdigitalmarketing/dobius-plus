@@ -1,0 +1,264 @@
+// /openTab on the local bridge: open a VISIBLE tab in a project's window,
+// start Claude in it the way a user would, wait until Claude's prompt is
+// really on screen, then type a message WITHOUT pressing Enter. Built for
+// Brett's inbox board: his click on a card is the OK, so nothing here asks
+// for a YES, and the person reads the message and presses Enter themselves.
+//
+// Pure module (no electron import). Everything that touches windows, PTYs or
+// the screen emulator comes in as `deps` from main.js, so the request logic,
+// the dedupe and the readiness wait are unit tested with fakes:
+// electron/__tests__/bridge-open-tab.test.mjs. Docs: docs/bridge-open-tab.md.
+
+// The board's own id for a card click: letters, digits and . _ : - only, so
+// it can never smuggle anything into a log line or a map key.
+export const OPEN_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+export const MAX_OPEN_MESSAGE_BYTES = 32 * 1024;
+const MAX_PROJECT_PATH = 4096;
+
+// Remembered request ids. A repeat of a remembered id brings its tab to the
+// front instead of opening another. Oldest settled entries go first.
+export const MAX_REMEMBERED_REQUESTS = 500;
+// Opens running at once (distinct ids). Each one holds a window, a PTY and a
+// Claude startup, so a runaway caller is refused instead of queued.
+export const MAX_OPENS_IN_FLIGHT = 4;
+
+export const READY_TIMEOUT_MS = 60_000;
+const READY_POLL_MS = 250;
+// Shell readiness: some output, then this many quiet polls in a row.
+const SHELL_QUIET_POLLS = 3;
+const SHELL_POLL_MS = 100;
+const SHELL_WAIT_MAX_MS = 10_000;
+
+/**
+ * Make a message safe to type into Claude's prompt as ONE bracketed paste.
+ * Line breaks survive as \n (Claude puts them in the input box, it does not
+ * submit on a pasted newline); \r\n and a lone \r become \n so no carriage
+ * return can act as Enter. Escape sequences are removed whole (an ESC [201~
+ * would end the paste early and let the rest drive the TUI as keys), then any
+ * remaining C0/C1 control character except tab and newline is dropped.
+ * Returns { text } or { error }.
+ */
+export function sanitizeOpenMessage(message) {
+  if (typeof message !== 'string') return { error: 'message must be a string' };
+  if (Buffer.byteLength(message, 'utf8') > MAX_OPEN_MESSAGE_BYTES) {
+    return { error: `message is larger than ${MAX_OPEN_MESSAGE_BYTES} bytes` };
+  }
+  const text = message
+    .replace(/\r\n?/g, '\n')
+    // OSC / DCS / APC / PM / SOS strings, to BEL or ST (or the end).
+    .replace(/\x1b[\]PX^_][\s\S]*?(?:\x07|\x1b\\|$)/g, '')
+    // CSI with its parameters and final byte.
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]?/g, '')
+    // SS2/SS3 (ESC O A is an arrow key) and ESC with intermediates (ESC ( B).
+    .replace(/\x1b(?:[NO]|[ -/]+)[\s\S]?/g, '')
+    // Any other two-byte escape (ESC 7, ESC c ...).
+    .replace(/\x1b[\s\S]?/g, '')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f\u0080-\u009f]/g, '');
+  if (!text.trim()) return { error: 'message is empty' };
+  return { text };
+}
+
+/** Validate a /openTab body. Returns { requestId, projectPath, message } or { error }. */
+export function validateOpenTabBody(body) {
+  const { projectPath, message, requestId } = body || {};
+  if (typeof requestId !== 'string' || !OPEN_REQUEST_ID_RE.test(requestId)) {
+    return { error: 'requestId must be 1-128 characters: letters, digits, . _ : - (starting with a letter or digit)' };
+  }
+  if (typeof projectPath !== 'string' || !projectPath) return { error: 'projectPath must be a non-empty string' };
+  if (!projectPath.startsWith('/')) return { error: 'projectPath must be an absolute path' };
+  if (projectPath.length > MAX_PROJECT_PATH || /[\x00-\x1f\x7f]/.test(projectPath)) {
+    return { error: 'projectPath is too long or contains control characters' };
+  }
+  const m = sanitizeOpenMessage(message);
+  if (m.error) return { error: m.error };
+  return { requestId, projectPath, message: m.text };
+}
+
+// A horizontal rule row: Claude draws one above and one below its prompt.
+const RULE_RE = /^\s*─{8,}/;
+// The prompt row itself. A selector row ("❯ 1. Yes") is an option, not the prompt.
+const PROMPT_ROW_RE = /^\s*[❯>](?:\s|$)/;
+const OPTION_ROW_RE = /^\s*[❯>]\s*\d+[.)]\s/;
+// Older Claude Code: a rounded box, "│ > ..." inside it.
+const BOX_TOP_RE = /^\s*╭─+╮\s*$/;
+const BOX_PROMPT_RE = /^\s*│\s*>(?:\s|│|$)/;
+const BOX_BOTTOM_RE = /^\s*╰─+╯\s*$/;
+
+/**
+ * Is Claude's input prompt on screen and taking input? `lines` is the
+ * emulated screen (screen-render.js) and `modes` its terminal modes. Two
+ * signals must agree: the program turned bracketed paste ON (it is reading
+ * the keyboard in raw mode and will treat our paste as a paste, not keys),
+ * and the prompt box is drawn: a rule, a prompt row, and a closing rule a few
+ * rows below. A trust dialog, a login screen or a permission prompt is NOT
+ * ready: none of them draws a prompt row right under a rule.
+ */
+export function isClaudePromptReady(lines, modes) {
+  if (!Array.isArray(lines) || !modes?.bracketedPaste) return false;
+  for (let i = lines.length - 2; i >= 0; i -= 1) {
+    const row = lines[i + 1] || '';
+    if (RULE_RE.test(lines[i]) && PROMPT_ROW_RE.test(row) && !OPTION_ROW_RE.test(row)) {
+      for (let j = i + 2; j < Math.min(lines.length, i + 8); j += 1) if (RULE_RE.test(lines[j])) return true;
+    }
+    if (BOX_TOP_RE.test(lines[i]) && BOX_PROMPT_RE.test(row)) {
+      for (let j = i + 2; j < Math.min(lines.length, i + 8); j += 1) if (BOX_BOTTOM_RE.test(lines[j])) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The /openTab service. deps:
+ *   resolveProject(path) -> Promise<{ path } | { error, status? }>
+ *   openTab(projectPath) -> Promise<{ tabId } | { error }>   window + visible tab + its PTY
+ *   tabAlive(tabId) -> boolean        the tab still exists in a live window
+ *   focusTab(tabId) -> boolean        bring its window and the tab to the front
+ *   ptyOf(tabId) -> object|null       PTY identity (a replaced shell is a new object)
+ *   outputSeq(tabId) -> number        count of output chunks so far
+ *   cliRunning(tabId) -> Promise<boolean>  claude / codex already runs in the tab
+ *   typeLaunch(tabId) -> void         type `claude` + Enter at the shell prompt
+ *   readScreen(tabId) -> Promise<{ lines, modes } | null>
+ *   paste(tabId, text) -> void        one bracketed paste, no Enter
+ *   sleep(ms), now()
+ */
+export function createOpenTabService(deps, opts = {}) {
+  const readyTimeoutMs = opts.readyTimeoutMs ?? READY_TIMEOUT_MS;
+  const requests = new Map(); // requestId -> { projectPath, promise, settled, tabId }
+  let inFlight = 0;
+
+  function remember(requestId, entry) {
+    requests.set(requestId, entry);
+    if (requests.size <= MAX_REMEMBERED_REQUESTS) return;
+    for (const [id, e] of requests) {
+      if (requests.size <= MAX_REMEMBERED_REQUESTS) break;
+      if (e.settled) requests.delete(id);
+    }
+  }
+
+  async function waitShell(tabId) {
+    const pty = deps.ptyOf(tabId);
+    const end = deps.now() + SHELL_WAIT_MAX_MS;
+    let last = -1;
+    let quiet = 0;
+    while (deps.now() < end) {
+      if (deps.ptyOf(tabId) !== pty || !pty) return false;
+      const seq = deps.outputSeq(tabId);
+      quiet = seq > 0 && seq === last ? quiet + 1 : 0;
+      if (quiet >= SHELL_QUIET_POLLS) return true;
+      last = seq;
+      await deps.sleep(SHELL_POLL_MS);
+    }
+    // A prompt that keeps redrawing (a clock in it) never goes quiet: the
+    // shell is up, type anyway. The PTY is still the one we were given.
+    return deps.ptyOf(tabId) === pty;
+  }
+
+  // Polls the emulated screen. Ready only on two polls in a row, so a frame
+  // caught mid-repaint cannot count. Fails as soon as the tab or its shell
+  // is gone, never typing into a replacement.
+  async function waitReady(tabId, pty) {
+    const end = deps.now() + readyTimeoutMs;
+    let hits = 0;
+    while (deps.now() < end) {
+      if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return 'gone';
+      let screen;
+      try { screen = await deps.readScreen(tabId); } catch { screen = null; }
+      hits = screen && isClaudePromptReady(screen.lines, screen.modes) ? hits + 1 : 0;
+      if (hits >= 2) return 'ready';
+      await deps.sleep(READY_POLL_MS);
+    }
+    return 'timeout';
+  }
+
+  async function run(projectPath, message) {
+    const resolved = await deps.resolveProject(projectPath);
+    if (resolved.error) return { ok: false, status: resolved.status || 400, error: resolved.error };
+    const opened = await deps.openTab(resolved.path);
+    if (opened.error) return { ok: false, status: 500, error: opened.error };
+    const { tabId } = opened;
+    const pty = deps.ptyOf(tabId);
+    if (!pty || !(await waitShell(tabId))) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
+    // An agent CLI already runs in the tab (a "new tabs start Claude"
+    // setting, say): never type the launch command into it.
+    if (!(await deps.cliRunning(tabId))) deps.typeLaunch(tabId);
+    const state = await waitReady(tabId, pty);
+    if (state === 'gone') return { ok: false, status: 409, tabId, error: 'the tab was closed or its shell exited before Claude was ready; nothing was typed' };
+    if (state === 'timeout') {
+      return { ok: false, status: 504, tabId, error: `Claude's prompt did not appear within ${Math.round(readyTimeoutMs / 1000)}s (a trust or login question may be waiting in the tab); the tab is open and nothing was typed` };
+    }
+    deps.paste(tabId, message);
+    return { ok: true, tabId };
+  }
+
+  /** Handle one /openTab body. Resolves { status, body }. */
+  async function open(rawBody) {
+    const v = validateOpenTabBody(rawBody);
+    if (v.error) return { status: 400, body: { ok: false, error: v.error } };
+    const { requestId, projectPath, message } = v;
+
+    const prior = requests.get(requestId);
+    if (prior) {
+      if (prior.projectPath !== projectPath) {
+        return { status: 409, body: { ok: false, error: 'requestId was already used for a different projectPath' } };
+      }
+      // A concurrent duplicate waits for the first call instead of opening
+      // a second tab.
+      const first = await prior.promise;
+      if (first.tabId && deps.tabAlive(first.tabId)) {
+        deps.focusTab(first.tabId);
+        return { status: 200, body: { ok: true, tabId: first.tabId, existing: true } };
+      }
+      // Its tab is gone (or never opened): this click opens a new one.
+      if (requests.get(requestId) === prior) requests.delete(requestId);
+      return open(rawBody);
+    }
+
+    if (inFlight >= MAX_OPENS_IN_FLIGHT) {
+      return { status: 429, body: { ok: false, error: 'too many tabs are opening right now; try again in a moment' } };
+    }
+    inFlight += 1;
+    const entry = { projectPath, settled: false, promise: null };
+    entry.promise = run(projectPath, message)
+      .catch((err) => ({ ok: false, status: 500, error: `could not open the tab: ${err?.message || err}` }))
+      .finally(() => { inFlight -= 1; entry.settled = true; });
+    remember(requestId, entry);
+    const result = await entry.promise;
+    // Nothing was opened: forget the id so the board can simply retry.
+    if (!result.tabId && requests.get(requestId) === entry) requests.delete(requestId);
+    const { status, ...body } = result;
+    return { status: result.ok ? 200 : status, body };
+  }
+
+  return { open, _requests: requests };
+}
+
+const shQuote = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+
+/** The bash script installed as dobius-open. */
+export function buildOpenCliScript({ port, tokenFile }) {
+  return `#!/bin/bash
+# dobius-open: open a new Dobius+ tab in a project, start Claude in it and
+# type a message into Claude's prompt WITHOUT pressing Enter.
+# Usage: dobius-open <project-folder> <request-id> "<message>"
+#        dobius-open <project-folder> <request-id> - < message.txt
+# The same request id again brings that tab to the front instead.
+# Prints the bridge's JSON reply; exits 0 only when it says ok.
+set -e
+if [ $# -lt 3 ]; then
+  echo 'usage: dobius-open <project-folder> <request-id> "<message>" (or - to read stdin)' >&2
+  exit 1
+fi
+command -v python3 >/dev/null 2>&1 || { echo "dobius-open: python3 not found on PATH" >&2; exit 3; }
+command -v curl >/dev/null 2>&1 || { echo "dobius-open: curl not found on PATH" >&2; exit 3; }
+TOKEN=$(cat ${shQuote(tokenFile)} 2>/dev/null) || { echo "dobius-open: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+if [ "$3" = "-" ]; then MESSAGE=$(cat); else MESSAGE="$3"; fi
+BODY=$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "requestId": sys.argv[2], "message": sys.argv[3]}))' "$1" "$2" "$MESSAGE")
+RESPONSE=$(curl -sS --max-time 180 -X POST "http://127.0.0.1:${port}/openTab" \\
+  -H "Host: 127.0.0.1:${port}" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  --data-binary "$BODY")
+echo "$RESPONSE"
+printf '%s' "$RESPONSE" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") else 1)'
+`;
+}

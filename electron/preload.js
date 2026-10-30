@@ -293,6 +293,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('tab:adoptFailed', handler);
   },
   terminalClaimPty: (tabId) => ipcRenderer.invoke('terminal:claimPty', tabId),
+  // /openTab on the local bridge: main asks a primary window for a new tab
+  // and the window answers with its id; a repeat brings that tab forward.
+  onBridgeOpenTab: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('bridge:openTab', handler);
+    return () => ipcRenderer.removeListener('bridge:openTab', handler);
+  },
+  bridgeTabOpened: (nonce, tabId) => ipcRenderer.send('bridge:tabOpened', nonce, tabId),
+  onBridgeFocusTab: (callback) => {
+    const handler = (_event, tabId) => callback(tabId);
+    ipcRenderer.on('bridge:focusTab', handler);
+    return () => ipcRenderer.removeListener('bridge:focusTab', handler);
+  },
 
   // Build Monitor
   buildMonitorLoadProgress: (projectDir) => ipcRenderer.invoke('buildMonitor:loadProgress', projectDir),

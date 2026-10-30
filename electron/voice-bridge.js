@@ -11,6 +11,9 @@
  *   /tabSend   { tabId: string, message: string }  -> writeTerminal(tabId, message + '\r')
  *   /tabList   {}                                  -> { tabs: listTerminals() }
  *   /tabRename { tabId: string, label: string }    -> label that tab (dobius-tab)
+ *   /openTab   { projectPath, message, requestId } -> new visible tab, Claude
+ *              started, message typed WITHOUT Enter (dobius-open,
+ *              docs/bridge-open-tab.md)
  *   /setReply  { message: string }                 -> stores last conductor reply for /voice/reply
  *   /getReply  { since: number? }                  -> { reply, ts } if newer, else 204
  *
@@ -27,6 +30,7 @@ import crypto from 'crypto';
 import { app, BrowserWindow } from 'electron';
 import { writeTerminal, listTerminals, sendToTerminalWindow, tabBinDir } from './terminal-manager.js';
 import { validateTabRename, buildTabCliScript } from './tab-rename.js';
+import { buildOpenCliScript } from './bridge-open-tab.js';
 import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
 import { STAGES } from './task-pipeline.js';
 
@@ -129,6 +133,25 @@ async function handleTabRename(req, res) {
   if (result === 'no-terminal') return sendJson(res, 404, { ok: false, error: 'no such tab' });
   if (result === 'no-window') return sendJson(res, 409, { ok: false, error: 'tab is not open in a window' });
   return sendJson(res, 200, { ok: true });
+}
+
+// /openTab: main.js installs the service once the window handlers exist.
+// The reply is sent after the message is typed (or with the reason it was
+// not), so a caller waits up to ~2 minutes: window, tab, Claude startup.
+let openTabService = null;
+export function setOpenTabService(svc) { openTabService = svc; }
+
+async function handleOpenTab(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  if (!openTabService) return sendJson(res, 503, { ok: false, error: 'Dobius+ is still starting; try again' });
+  try {
+    const { status, body: reply } = await openTabService.open(body);
+    return sendJson(res, status, reply);
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: `could not open the tab: ${err.message}` });
+  }
 }
 
 function handleTabList(_req, res) {
@@ -541,6 +564,7 @@ function handleRequest(req, res) {
   if (req.url === '/tabSend') return handleTabSend(req, res);
   if (req.url === '/tabList') return handleTabList(req, res);
   if (req.url === '/tabRename') return handleTabRename(req, res);
+  if (req.url === '/openTab') return handleOpenTab(req, res);
   if (req.url === '/setReply') return handleSetReply(req, res);
   if (req.url === '/getReply') return handleGetReply(req, res);
   if (req.url === '/trackWork') return handleTrackWork(req, res);
@@ -614,6 +638,7 @@ function installTabCli() {
   try {
     fs.mkdirSync(tabBinDir(), { recursive: true });
     writeIfChanged(path.join(tabBinDir(), 'dobius-tab'), buildTabCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
+    writeIfChanged(path.join(tabBinDir(), 'dobius-open'), buildOpenCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
   } catch (err) {
     console.warn(`[voice-bridge] dobius-tab install failed: ${err.message}`);
   }
@@ -651,6 +676,9 @@ const CLI_ASANA_LIST_PATH = path.join(CLI_DIR, 'dobius-asana-list-allowed');
 const CLI_CONFIRM_PATH = path.join(CLI_DIR, 'dobius-confirm');
 const CLI_HANDOFF_PATH = path.join(CLI_DIR, 'dobius-handoff');
 const CLI_SCHEDULED_PATH = path.join(CLI_DIR, 'dobius-scheduled');
+// Also in <userData>/bin (installTabCli); this copy is for callers OUTSIDE a
+// Dobius+ tab, like Brett's inbox board.
+const CLI_OPEN_PATH = path.join(CLI_DIR, 'dobius-open');
 const CLI_MARKER = `# dobius-cli v${CLI_VERSION}`;
 
 // All CLI scripts read the bridge token from a 0o600 file in userData and
@@ -1101,6 +1129,7 @@ function installCliScript() {
     writeIfChanged(CLI_CONFIRM_PATH, CLI_CONFIRM_SCRIPT);
     writeIfChanged(CLI_HANDOFF_PATH, CLI_HANDOFF_SCRIPT);
     writeIfChanged(CLI_SCHEDULED_PATH, CLI_SCHEDULED_SCRIPT);
+    writeIfChanged(CLI_OPEN_PATH, buildOpenCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
   } catch (err) {
     console.warn(`[voice-bridge] CLI install failed: ${err.message}`);
   }

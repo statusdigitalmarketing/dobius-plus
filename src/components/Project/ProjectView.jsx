@@ -377,13 +377,21 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       dropDead(tabId);
     };
     const offFailed = window.electronAPI?.onTabAdoptFailed?.(giveUp);
+    // /openTab (Brett's inbox board): a new tab, shown, like Cmd+T. Main
+    // starts Claude in it once its PTY exists.
+    const offBridgeOpen = window.electronAPI?.onBridgeOpenTab?.(({ nonce } = {}) => {
+      const tab = useStore.getState().addTab(projectPath);
+      useStore.getState().showTab(tab.id);
+      useStore.getState().setActiveView('terminal');
+      window.electronAPI.bridgeTabOpened?.(nonce, tab.id);
+    });
     // A claiming pane whose claim was refused (a late adopt after a timeout)
     // has no terminal at all.
     const onRefused = (e) => giveUp(e.detail);
     window.addEventListener('dobius:claim-refused', onRefused);
     window.electronAPI?.windowTabsReady?.();
     return () => {
-      offAdopt?.(); offFailed?.();
+      offAdopt?.(); offFailed?.(); offBridgeOpen?.();
       window.removeEventListener('dobius:claim-refused', onRefused);
       for (const t of pending.values()) clearTimeout(t);
     };
@@ -1072,6 +1080,12 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         setActiveView('terminal');
       }),
       window.electronAPI.onMenuCloseTab?.(() => closeActiveTab()),
+      // /openTab repeat: bring the tab that request already opened forward.
+      window.electronAPI.onBridgeFocusTab?.((tabId) => {
+        if (!useStore.getState().terminalTabs.some((t) => t.id === tabId)) return;
+        useStore.getState().showTab(tabId);
+        setActiveView('terminal');
+      }),
       window.electronAPI.onMenuResumeSession?.(() => {
         // Menu "Resume Last Session" — shares the keydown's guarded path.
         doResumeLatest();
