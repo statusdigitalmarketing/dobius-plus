@@ -216,12 +216,13 @@ check('uninstalling NEVER overwrites a line the user has since chosen', () => {
 // because the formatting is shell expansion and only running it proves it.
 const SHELLS = ['/bin/sh', '/bin/dash', '/bin/bash'].filter((s) => fs.existsSync(s));
 const tmpUsage = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-modelline-'));
-const runLine = (payload, { chain = null, capture = false, model = true, shell = SHELLS[0] } = {}) => {
+const runLine = (payload, { chain = null, capture = false, model = true, shell = SHELLS[0], env } = {}) => {
   const file = path.join(tmpUsage, `s-${Math.floor(performance.now() * 1000)}.sh`);
   fs.writeFileSync(file, reporterScript(tmpUsage, chain, { capture, model }));
   const r = spawnSync(shell, [file], {
     input: typeof payload === 'string' ? payload : JSON.stringify(payload),
     encoding: 'utf8',
+    ...(env ? { env: { ...process.env, ...env } } : {}),
   });
   fs.unlinkSync(file);
   return { out: r.stdout, err: r.stderr, status: r.status };
@@ -301,6 +302,9 @@ check("model line: the user's own line follows it, and survives their failure", 
   assert.equal(r.status, 0);
   assert.equal(runLine(REAL, { chain: 'true' }).out, 'Opus 5.5 · extra high\n', 'theirs empty');
   assert.equal(runLine({}, { chain: 'echo theirs' }).out, 'theirs\n', 'ours empty');
+  // An inherited errexit must not abort on their failure and blank the line.
+  const errexit = runLine(REAL, { chain: 'printf theirs; exit 3', shell: '/bin/bash', env: { SHELLOPTS: 'errexit' } });
+  assert.equal(errexit.out, 'Opus 5.5 · extra high · theirs\n');
 });
 
 check('model line off: the script is exactly the usage reporter it was', () => {

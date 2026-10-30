@@ -96,6 +96,8 @@ elif [ -n "$out" ]; then printf '%s\\n' "$out"; fi
 # and shows the model under the prompt.
 # Safe to delete. Turning off "Account usage" and "Show model under the
 # prompt" in Dobius removes it and restores whatever statusLine was here before.
+# An inherited SHELLOPTS=errexit must not abort the line on a failing step.
+set +e
 payload=$(cat)
 ${capture ? captureBlock(usageDir) : ''}${model ? MODEL_BLOCK : ''}${tail}exit 0
 `;

@@ -1681,7 +1681,7 @@ function setupFileHandlers() {
    * compare-and-swap, so a write landing inside that final gap is still lost.
    * Closing it needs a lock file the CLI would also have to honour.
    */
-  function writeClaudeSettings(settings, expectedRaw) {
+  function writeClaudeSettings(settings, expectedRaw, { mustExist = false } = {}) {
     const refused = realClaudeHomeRefusal();
     if (refused) throw new Error(refused);
     fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
@@ -1695,7 +1695,9 @@ function setupFileHandlers() {
       try { current = fs.readFileSync(claudeSettingsPath, 'utf8'); }
       catch { current = null; }
       if (expectedRaw === null) return current === null;
-      if (current === null) return true; // vanished: recreate rather than refuse
+      // Vanished: recreate rather than refuse, unless nobody asked for this
+      // write (the launch install), which must never create the file.
+      if (current === null) return !mustExist;
       return current === expectedRaw;
     };
     if (!unchanged()) throw new Error('settings.json changed under us, retry');
@@ -1951,9 +1953,14 @@ function setupFileHandlers() {
   // status line (Codex HIGH). A command recovered from the script while the
   // record is missing or malformed is written back as the record, or turning
   // the features off later would delete their line instead of restoring it.
-  const isRecord = (r) => !!r && typeof r === 'object' && !Array.isArray(r)
-    && typeof r.present === 'boolean' && (r.chain === null || typeof r.chain === 'string')
-    && (r.present ? !!r.value && typeof r.value === 'object' : r.value === null);
+  // The exact invariant planStatusLineInstall writes: chain is the value's own
+  // non-blank command. A record that breaks it was not written by us, and
+  // restoring from it could write garbage into the shared file (Codex HIGH).
+  const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  const isRecord = (r) => isPlainObject(r) && typeof r.present === 'boolean'
+    && (r.present
+      ? isPlainObject(r.value) && r.chain === (typeof r.value.command === 'string' && r.value.command.trim() ? r.value.command : null)
+      : r.value === null && r.chain === null);
   const currentChain = (settings) => {
     const { remember } = readStatusLineBackup();
     const installed = ownsStatusLine(settings?.statusLine)
@@ -2015,7 +2022,7 @@ function setupFileHandlers() {
       if (plan.remember) writeStatusLineBackup(plan.remember);
       writeReporter(chain);
       base.statusLine = plan.statusLine;
-      writeClaudeSettings(base, baseRaw);
+      writeClaudeSettings(base, baseRaw, { mustExist: !!eligible });
     };
 
     try {
@@ -2044,6 +2051,13 @@ function setupFileHandlers() {
       const cur = currentChain(settings);
       if (!cur.known) return { error: 'Could not tell which status line of yours to restore, left as is' };
       backup = readStatusLineBackup();
+      if (!isRecord(backup.remember)) {
+        // Their command could not be saved back: keep everything as it is.
+        if (cur.chain) return { error: 'Could not save your status line to restore later, left as is' };
+        // Nothing was chained, so there is nothing to restore. Never hand
+        // the planner a record that failed validation.
+        backup = { remember: null, raw: backup.raw };
+      }
     }
     const out = planStatusLineRemove(settings.statusLine, backup.remember);
     if (out.action === 'leave') {
