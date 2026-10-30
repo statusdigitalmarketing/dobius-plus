@@ -97,6 +97,9 @@ export function reconcileWithProcess(a, info) {
     // This claude did not run the whole stretch, so its clock is unknown.
     if (out.since && before(out.since)) out.since = null;
     if (out.lastTurnMs && before(out.turnEndedAt - out.lastTurnMs)) out.lastTurnMs = 0;
+    // The last turn ended before this claude started and it has sent no hook
+    // since: it may be working without hooks, so not that older turn's Done.
+    if (!out.hookOwned && out.turnEndedAt && before(out.turnEndedAt)) out.uncertain = true;
   }
   return out;
 }
@@ -109,6 +112,15 @@ export function reconcileWithProcess(a, info) {
 export function boundedIds(ids, cap) {
   if (!Array.isArray(ids)) return [];
   return ids.slice(0, cap).filter((id) => typeof id === 'string' && id.length <= 4096);
+}
+
+// Bound a lookup cache by dropping its oldest SETTLED entry: dropping a
+// pending one would let the next ask start a second lookup beside it.
+function evictSettled(cache, max = 512) {
+  if (cache.size <= max) return;
+  for (const [k, v] of cache) {
+    if (v.settled) { cache.delete(k); return; }
+  }
 }
 
 /**
@@ -127,7 +139,7 @@ export function cachedPerTab(fn, ttlMs, now = Date.now) {
     entry.pending = Promise.resolve().then(() => fn(id)).catch(() => null)
       .finally(() => { entry.settled = true; entry.at = now(); });
     cache.set(id, entry);
-    if (cache.size > 512) cache.delete(cache.keys().next().value);
+    evictSettled(cache);
     return entry.pending;
   };
 }
@@ -207,7 +219,7 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
       }).finally(() => { entry.settled = true; entry.at = now(); });
       hit = entry;
       cache.set(tabId, hit);
-      if (cache.size > 512) cache.delete(cache.keys().next().value);
+      evictSettled(cache);
     }
     return hit.pending.then((found) => (
       found && Number.isFinite(found.startedAt) && found.startedAt + 1000 <= turnEndedAt
@@ -230,23 +242,28 @@ export function createPresenceReader({ claudeInfo, configDirOf, readFile, now = 
  * unread. Dependencies are injected so this is tested without Electron.
  * @param {object} deps
  * @param {{activityFor:Function, distrustTurnStart:Function, distrustLastTurn:Function}} deps.status
- * @param {(id:string)=>Promise<object|null>} deps.claudeInfo
+ * @param {(id:string)=>Promise<object|null>} deps.claudeInfo  cached lookup
+ * @param {(id:string)=>Promise<object|null>} [deps.claudeInfoFresh]  uncached, for turn ends
  * @param {(id:string, turnEndedAt:number)=>Promise<string|null>} deps.backgroundForTab
  * @param {(id:string)=>boolean} deps.unreadAnywhere
  * @param {()=>number} [deps.now]
  */
-export function createTabActivity({ status, claudeInfo, backgroundForTab, unreadAnywhere, now = Date.now }) {
+export function createTabActivity({ status, claudeInfo, claudeInfoFresh = claudeInfo, backgroundForTab, unreadAnywhere, now = Date.now }) {
   /**
    * Check a tab's hook record against the claude running in it and remember
    * what that disproves (terminal-status distrustTurnStart). Returns the
    * claude info (null = none), or undefined when the record has no hook state
    * to check (a plain shell costs nothing).
    */
-  async function checkTurnAgainstProcess(id, raw) {
+  async function checkTurnAgainstProcess(id, raw, { fresh = false } = {}) {
     if (!raw.hookOwned && !raw.lastTurnMs && !raw.turnEndedAt) return undefined;
-    const info = await claudeInfo(id);
+    // At a turn's end the process must be read NOW: a cached identity can be
+    // the claude that died just before this turn's claude started.
+    const info = await (fresh ? claudeInfoFresh : claudeInfo)(id);
     const a = reconcileWithProcess(raw, info);
-    if (raw.since && !a.since && a.status === raw.status) status.distrustTurnStart(id, raw.since);
+    // Remembered whatever the status became: a start disproved here stays
+    // disproved even when the state was also found stale.
+    if (raw.since && !a.since) status.distrustTurnStart(id, raw.since);
     if (raw.lastTurnMs && !a.lastTurnMs) status.distrustLastTurn(id, raw.turnEndedAt);
     return info;
   }

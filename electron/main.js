@@ -236,6 +236,7 @@ const claudeInfoCached = cachedPerTab((id) => getTerminalClaudeInfo(id, { unique
 const { tabActivity, checkTurnAgainstProcess } = createTabActivity({
   status: terminalStatus,
   claudeInfo: claudeInfoCached,
+  claudeInfoFresh: (id) => getTerminalClaudeInfo(id, { unique: true }),
   backgroundForTab: createPresenceReader({ claudeInfo: claudeInfoCached, configDirOf: configDirOfPid }),
   unreadAnywhere: (id) => unreadAnywhere(id),
 });
@@ -3491,7 +3492,7 @@ app.whenReady().then(() => {
       // claudes is caught even when no sidebar is asking.
       if (terminalStatus.turnEndedAtFor(id) !== endedBefore) {
         const raw = terminalStatus.activityFor(id);
-        if (raw) checkTurnAgainstProcess(id, raw).catch(() => {});
+        if (raw) checkTurnAgainstProcess(id, raw, { fresh: true }).catch(() => {});
       }
     },
     onExit: (id, info) => terminalStatus.noteExit(id, info),

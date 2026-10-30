@@ -241,12 +241,19 @@ async function inspect(pid) {
  * 'claude' and, when the verdict rests on a path, that path is a file. ps does
  * not quote, so `node "/tmp/claude tools/x.js"` reads as the path /tmp/claude
  * (a directory). A bare name went through PATH and cannot be checked here.
+ * Accepted residual: an EXECUTABLE file planted at that cut-off path still
+ * passes; ps output cannot tell the two apart.
  */
 export async function isProvenClaudeCommand(command) {
   const { kind, token } = classifyClaudeProcess(command);
   if (kind !== 'claude') return false;
   if (!token || !token.includes('/')) return true;
-  try { return (await fsp.stat(token)).isFile(); } catch { return false; }
+  // And executable: a plain file at the cut-off path (`/tmp/claude` beside
+  // `/tmp/claude tools/x.js`) is not the CLI.
+  try {
+    const st = await fsp.stat(token);
+    return st.isFile() && (st.mode & 0o111) !== 0;
+  } catch { return false; }
 }
 
 /**

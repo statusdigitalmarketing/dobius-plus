@@ -486,6 +486,8 @@ test('the unique lookup needs a PROVEN claude: a path token that is a directory 
     fsMod.writeFileSync(pathMod.join(dir, 'bin-claude'), '');
     fsMod.mkdirSync(pathMod.join(dir, 'bin'));
     fsMod.renameSync(pathMod.join(dir, 'bin-claude'), pathMod.join(dir, 'bin', 'claude'));
+    assert.equal(await isProvenClaudeCommand(`${dir}/bin/claude --resume abc`), false, 'not executable');
+    fsMod.chmodSync(pathMod.join(dir, 'bin', 'claude'), 0o755);
     assert.equal(await isProvenClaudeCommand(`${dir}/bin/claude --resume abc`), true);
     assert.equal(await isProvenClaudeCommand('claude'), true, 'a bare name cannot be checked');
     assert.equal(await isProvenClaudeCommand(`node /tmp/watcher.js ${dir}/bin/claude`), false);
@@ -523,4 +525,46 @@ test('a distrusted plain stretch does not hide the next one', () => {
   ts.settle(50_000);
   ts.ingest(ID, 'build', 60_000);
   assert.equal(ts.activityFor(ID).since, 60_000);
+});
+
+test('reconcile: a claude started after the last turn ended makes its Done uncertain', () => {
+  const r = reconcileWithProcess({ status: 'idle', hookOwned: false, since: null, lastTurnMs: 30_000, turnEndedAt: 40_000, lastMarkerAt: 40_000 }, { pid: 5, startedAt: 100_000 });
+  assert.equal(r.uncertain, true);
+  assert.equal(label({ ...r, live: true, unread: true }), null);
+  // The claude that ran the turn is still there: Done stands.
+  const same = reconcileWithProcess({ status: 'done', hookOwned: false, since: null, lastTurnMs: 30_000, turnEndedAt: 40_000, lastMarkerAt: 40_000 }, { pid: 5, startedAt: 1_000 });
+  assert.equal(label({ ...same, live: true, unread: true }).text, 'Done 30s');
+});
+
+test('turn-end check reads the process fresh, not the cache', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 102_000);
+  const { checkTurnAgainstProcess } = makeActivity({
+    claudeInfo: async () => ({ pid: 1, startedAt: 1_000 }),        // cached: dead claude A
+    claudeInfoFresh: async () => ({ pid: 2, startedAt: 100_000 }), // now: claude B
+  });
+  await checkTurnAgainstProcess(ID, ts.activityFor(ID), { fresh: true });
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+});
+
+test('a start disproved together with a stale state is still remembered', async () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000); // A, dies without Stop
+  const { checkTurnAgainstProcess } = makeActivity({ claudeInfo: async () => ({ pid: 2, startedAt: 40_000 }) });
+  await checkTurnAgainstProcess(ID, ts.activityFor(ID)); // finds the state stale (idle)
+  ts.ingest(ID, mk('working'), 60_000); // B, same turn record
+  ts.ingest(ID, mk('done'), 65_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0);
+});
+
+test('cache eviction never drops a pending lookup', async () => {
+  let calls = 0;
+  const gates = [];
+  const f = cachedPerTab((id) => { calls += 1; return new Promise((r) => gates.push(() => r(id))); }, 2500, () => 0);
+  for (let i = 0; i < 520; i += 1) f(`t${i}`);
+  f('t0');
+  await new Promise((r) => setImmediate(r));
+  assert.equal(calls, 520, 't0 is still pending, so it is shared, not started again');
+  gates.forEach((g) => g());
 });
