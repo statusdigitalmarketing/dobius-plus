@@ -95,6 +95,9 @@ export function createWaitingReader({ claudeInfo, configDirFor, readFile = readP
     const info = await claudeInfo(tabId);
     if (!info || !Number.isInteger(info.pid)) return null;
     const dir = configDirFor(tabId) || path.join(os.homedir(), '.claude');
+    // A relative dir is resolved by the CLI against its own cwd, which is not
+    // known here: no claim.
+    if (!path.isAbsolute(dir)) return null;
     let rec;
     try { rec = JSON.parse(await readFile(path.join(dir, 'sessions', `${info.pid}.json`))); }
     catch { return null; } // no presence file, or mid-rewrite: no claim

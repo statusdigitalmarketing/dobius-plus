@@ -94,6 +94,21 @@ test('plain output: a stretch from its first byte after settling to idle', () =>
   assert.equal(ts.activityFor(ID).since, 10_000);
 });
 
+test('a fresh entry whose first chunk is a needs has no stretch yet', () => {
+  ts._reset();
+  ts.ingest(ID, mk('needs'), 10_000);
+  assert.equal(ts.activityFor(ID).since, null);
+  ts.ingest(ID, mk('working'), 70_000);
+  assert.equal(ts.activityFor(ID).since, 70_000);
+  ts._reset();
+  ts.ingest(ID, mk('needs'), 10_000);
+  ts.ingest(ID, mk('done'), 70_000);
+  assert.equal(ts.activityFor(ID).lastWorkMs, 0);
+  ts._reset();
+  ts.ingest(ID, 'first bytes', 5_000);
+  assert.equal(ts.activityFor(ID).since, 5_000, 'plain output still starts one');
+});
+
 test('forget: a respawned PTY starts with nothing', () => {
   ts._reset();
   ts.ingest(ID, mk('working'), 1_000);
@@ -210,6 +225,18 @@ test('waiting reader: never samples inside the grace', async () => {
     configDirFor: () => '/cfg',
     readFile: async () => { reads += 1; return JSON.stringify(rec({ status: 'busy' })); },
     now: () => DONE + 100,
+  });
+  assert.equal(await read('a', DONE), null);
+  assert.equal(reads, 0);
+});
+
+test('waiting reader: a relative config dir is no claim', async () => {
+  let reads = 0;
+  const read = createWaitingReader({
+    claudeInfo: async () => proc,
+    configDirFor: () => 'cfg',
+    readFile: async () => { reads += 1; return JSON.stringify(rec({ status: 'shell' })); },
+    now: () => AFTER,
   });
   assert.equal(await read('a', DONE), null);
   assert.equal(reads, 0);

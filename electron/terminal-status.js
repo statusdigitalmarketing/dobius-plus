@@ -58,7 +58,12 @@ export function ingest(id, data, now = Date.now()) {
   if (!id || typeof data !== 'string') return null;
   let st = live.get(id);
   if (!st) {
-    st = { status: 'working', lastActivityAt: now, hookOwned: false, doneAt: 0, tail: '', workingSince: now, lastWorkMs: 0 };
+    // timingStatus starts 'idle' so this very chunk's status (plain output, or
+    // a marker such as a lone 'needs') decides whether a stretch begins.
+    st = {
+      status: 'working', lastActivityAt: now, hookOwned: false, doneAt: 0, tail: '',
+      timingStatus: 'idle', workingSince: 0, lastWorkMs: 0,
+    };
     live.set(id, st);
   }
   st.lastActivityAt = now;
