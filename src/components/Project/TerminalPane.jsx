@@ -40,7 +40,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     return () => window.removeEventListener('dobius:terminal-font', onFont);
   }, []);
 
-  const { containerRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, fontFamily: termFontFamily, maxScrollbackLines: scrollbackLines, claimExisting });
+  const { containerRef, promptEditRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, fontFamily: termFontFamily, maxScrollbackLines: scrollbackLines, claimExisting });
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const mountedRef = useRef(true);
@@ -280,23 +280,33 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       if (e.target?.closest?.('[role="dialog"], [data-chat-tab]')) return;
       const items = e.clipboardData?.items;
       if (!items) return;
+      // Cmd+V with Claude's prompt focused in the terminal pastes the path
+      // there, like text: Claude turns a pasted image path into an
+      // attachment. Anywhere else it goes to the command bar.
+      const promptEdit = containerRef.current?.contains(e.target) ? promptEditRef.current : null;
+      // pathPromise resolves to a file path or null. The terminal takes its
+      // place in the input queue now, so keys typed while it saves wait.
+      const insertPath = async (pathPromise) => {
+        if (promptEdit?.pasteWhenReady(pathPromise.then((p) => (p ? shellEscape(p) : null)))) return;
+        const p = await pathPromise;
+        if (!p) return;
+        setInput((prev) => {
+          const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+          return prev + (needsSpace ? ' ' : '') + shellEscape(p);
+        });
+        setHistoryIndex(-1);
+        inputRef.current?.focus();
+      };
       for (const item of items) {
         if (item.type.startsWith('image/')) {
           e.preventDefault();
           e.stopPropagation();
           const blob = item.getAsFile();
           if (!blob) return;
-          const arrayBuffer = await blob.arrayBuffer();
-          const base64 = arrayBufferToBase64(arrayBuffer);
-          const filePath = await window.electronAPI.saveClipboardImage(base64, item.type);
-          if (filePath) {
-            setInput((prev) => {
-              const needsSpace = prev.length > 0 && !prev.endsWith(' ');
-              return prev + (needsSpace ? ' ' : '') + shellEscape(filePath);
-            });
-            setHistoryIndex(-1);
-            inputRef.current?.focus();
-          }
+          insertPath((async () => {
+            const base64 = arrayBufferToBase64(await blob.arrayBuffer());
+            return window.electronAPI.saveClipboardImage(base64, item.type);
+          })());
           return;
         }
         // Non-image files (PDF, etc.) — insert as path
@@ -305,12 +315,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
           if (file?.path) {
             e.preventDefault();
             e.stopPropagation();
-            setInput((prev) => {
-              const needsSpace = prev.length > 0 && !prev.endsWith(' ');
-              return prev + (needsSpace ? ' ' : '') + shellEscape(file.path);
-            });
-            setHistoryIndex(-1);
-            inputRef.current?.focus();
+            insertPath(Promise.resolve(file.path));
             return;
           }
         }
