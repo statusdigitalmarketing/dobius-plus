@@ -195,12 +195,15 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   const heldHooked = new WeakSet();
   ipcMain.on('terminal:inputHeld', (event, id, data) => {
     const wc = event.sender;
-    if (typeof id !== 'string' || getTerminalWebContentsId(id) !== wc.id) return;
+    if (typeof id !== 'string') return;
+    // The release comes from the window that holds, even once the tab has
+    // moved to another window (a tear-off claims the PTY before the old pane
+    // is gone); only a new hold needs the tab's current owner.
     if (data === null) {
       if (heldInput.get(id) === wc.id) heldInput.delete(id);
       return;
     }
-    if (typeof data !== 'string' || !data) return;
+    if (getTerminalWebContentsId(id) !== wc.id || typeof data !== 'string' || !data) return;
     if (!heldHooked.has(wc)) {
       heldHooked.add(wc);
       // A reloaded or closed page never reports its drain.
@@ -435,8 +438,8 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // editing holds their input: their Enter may still be to come, so the
     // prompt is not ours to type into.
     inputBusy: (tabId) => submitPending(tabId) || heldInput.has(tabId),
-    // The tab's window still holds a person's input (main.js: a Chat send
-    // waits for it, so the two never interleave).
+    // The tab's window still holds a person's input (chat-service: a Chat
+    // send waits for it, so the two never interleave).
     inputHeld: (tabId) => heldInput.has(tabId),
     sleep,
     now: () => Date.now(),

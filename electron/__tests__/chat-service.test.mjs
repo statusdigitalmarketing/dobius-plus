@@ -326,4 +326,46 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   ok('tokens from another app process never match');
 }
 
+// A window still holds input for the tab (prompt editing: an image paste
+// being saved, keys typed after it). A Chat send, from the desktop or the
+// phone, waits for it at the head of the queue, in order, and is cancelled
+// by Ctrl+C or a replaced shell meanwhile.
+{
+  const { setInputHeldCheck } = await import('../chat-service.js');
+  let held = true;
+  setInputHeldCheck((id) => id === 'h' && held);
+  const tick = (ms) => new Promise((res) => setTimeout(res, ms));
+  reset(); ptys.set('h', {});
+  const a = submitPromptToTab('h', 'A');
+  const b = submitPromptToTab('h', 'B');
+  await tick(120);
+  assert.equal(writes.length, 0, 'nothing pasted while input is held');
+  assert.equal(submitPending('h'), true);
+  writeRawInput('h', "\x1b[200~'/tmp/shot.png'\x1b[201~"); // the held paste arrives first
+  writeRawInput('h', '\r');
+  held = false;
+  assert.deepEqual(await Promise.all([a, b]), [true, true]);
+  assert.deepEqual(writes.map((w) => w[1]), ["\x1b[200~'/tmp/shot.png'\x1b[201~", '\r', PASTE('A'), '\r', PASTE('B'), '\r']);
+
+  held = true;
+  reset(); ptys.set('h', {});
+  const c = submitPromptToTab('h', 'C');
+  await tick(80);
+  writeRawInput('h', '\x03');
+  held = false;
+  assert.equal(await c, false, 'Ctrl+C while it waited cancels it');
+  assert.deepEqual(writes.map((w) => w[1]), ['\x03']);
+
+  held = true;
+  reset(); ptys.set('h', { gen: 1 });
+  const d = submitPromptToTab('h', 'echo reviewed');
+  await tick(80);
+  ptys.set('h', { gen: 2 }); // the shell was replaced while it waited
+  held = false;
+  assert.equal(await d, false);
+  assert.equal(writes.length, 0, 'nothing typed into the replacement');
+  setInputHeldCheck(() => false);
+  ok('a Chat send waits for held input, keeps its order, and is cancelled by Ctrl+C or a new shell');
+}
+
 console.log(`\n${pass} passed`);

@@ -142,6 +142,14 @@ export async function answerSelector(id, data, token, stillOk = () => true, befo
 
 const SUBMIT_ENTER_DELAY_MS = 250;
 const RAW_KEY_GAP_MS = 20;
+// Input a terminal window still holds back for the tab (prompt editing: an
+// image paste being saved, the keys typed after it). A submit waits for it at
+// the head of this queue, so its paste never lands between that input's
+// parts. main.js wires the check (bridge-open-main.js inputHeld).
+let inputHeld = () => false;
+export function setInputHeldCheck(fn) { inputHeld = typeof fn === 'function' ? fn : () => false; }
+const HELD_WAIT_MS = 16_000; // prompt editing gives up on a paste after 15s
+const HELD_POLL_MS = 50;
 // tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
 // under an older gen is dropped instead of written.
 const submitQueues = new Map();
@@ -214,7 +222,9 @@ export function writeRawInput(id, data, stillOk = () => true) {
     writeTerminal(id, data);
     return;
   }
-  if (!q || !q.running) { writeTerminal(id, data); return; }
+  // A submit waiting for held input lets keys through: that input arriving
+  // is what it waits for, and it was taken before the submit.
+  if (!q || !q.running || q.waitingHeld) { writeTerminal(id, data); return; }
   q.items.push({ raw: data, pty: terminalInstance(id), stillOk, gen: q.gen, resolve: () => {} });
 }
 
@@ -236,6 +246,17 @@ async function drainSubmits(id, q) {
       writeTerminal(id, it.raw);
       it.resolve(true);
       continue;
+    }
+    if (inputHeld(id)) {
+      q.waitingHeld = true;
+      const end = Date.now() + HELD_WAIT_MS;
+      while (inputHeld(id) && Date.now() < end && it.gen === q.gen && terminalInstance(id) === it.pty && !terminalClosing(id)) {
+        await new Promise((r) => setTimeout(r, HELD_POLL_MS));
+      }
+      q.waitingHeld = false;
+      // Still held, cancelled (Ctrl+C), or the shell replaced meanwhile:
+      // nothing is typed.
+      if (inputHeld(id) || it.gen !== q.gen || terminalInstance(id) !== it.pty || terminalClosing(id) || !it.stillOk()) { it.resolve(false); continue; }
     }
     writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
     const pastedAt = terminalInputSeq(id);

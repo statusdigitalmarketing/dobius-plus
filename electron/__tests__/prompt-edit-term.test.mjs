@@ -339,18 +339,35 @@ test('a key that starts a selection edit is reported before the edit sends anyth
 
 test('a send reserved by the command bar is held from the moment it is accepted until it is released', async () => {
   const t = fakeClaude('');
-  const release = t.edit.reserve('hi\r');
+  const send = t.edit.reserve('hi\r');
   assert.deepEqual(t.app.held, ['hi\r'], 'held before any of its input arrives');
-  t.edit.handleData('h');
+  send.write('h');
   await wait(0);
-  t.edit.handleData('i');
+  send.write('i');
   await wait(20);
   assert.deepEqual(t.app.writes, ['h', 'i']);
   assert.equal(t.app.held.includes(null), false, 'not drained while the send is still coming');
-  t.edit.handleData('\r');
-  release();
-  release(); // a second release changes nothing
+  send.write('\r');
+  send.release();
+  send.release(); // a second release changes nothing
   await wait(20);
   assert.deepEqual(t.app.held, ['hi\r', null]);
   assert.equal(t.app.submitted, 'hi');
+});
+
+test('when the queue drops what it held, the rest of a reserved send is dropped too, Enter included', async () => {
+  const t = fakeClaude('draft');
+  let resolve;
+  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
+  const send = t.edit.reserve('tail\r');
+  send.write('ta');
+  t.exit(); // the prompt goes away under the pending paste
+  resolve("'/tmp/shot.png'");
+  await wait(50);
+  send.write('il');
+  send.write('\r');
+  send.release();
+  await wait(50);
+  assert.deepEqual(t.app.writes, [], 'nothing of the send reached the shell');
+  assert.equal(t.app.held.at(-1), null);
 });

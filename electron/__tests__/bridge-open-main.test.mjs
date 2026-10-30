@@ -58,6 +58,17 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   assert.equal(deps.inputBusy(opened.tabId), false);
   assert.ok(watch.keys() > 0);
 
+  // The tab moves to another window while held: the old window's release
+  // still clears its hold, and the new owner cannot be blocked by it.
+  env.emit('terminal:inputHeld', wc, opened.tabId, 'y');
+  const dest = env.fakeWebContents();
+  env.terminals.get(opened.tabId).wcId = dest.id;
+  env.emit('terminal:inputHeld', dest, opened.tabId, null);
+  assert.equal(deps.inputBusy(opened.tabId), true, 'another window cannot release it');
+  env.emit('terminal:inputHeld', wc, opened.tabId, null);
+  assert.equal(deps.inputBusy(opened.tabId), false, 'released by the window that held it');
+  env.terminals.get(opened.tabId).wcId = wc.id;
+
   // A reload forgets a hold the old page never released.
   env.emit('terminal:inputHeld', wc, opened.tabId, 'x');
   assert.equal(deps.inputBusy(opened.tabId), true);

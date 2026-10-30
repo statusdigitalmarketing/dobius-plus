@@ -66,10 +66,10 @@ export function attachPromptEditing(term, send, held = () => {}) {
   let armed = null;
   let columnSelect = false; // xterm's Option+drag selects a rectangle, not a range
   let holding = false; // held input was reported and the drain was not yet
-  let reserved = 0; // sends accepted elsewhere whose input is still to come
+  const reserved = new Set(); // sends accepted elsewhere whose input is still to come
   const hold = (data) => { holding = true; held(data); };
   const drained = () => {
-    if (holding && !busy && !queue.length && !reserved) { holding = false; held(null); }
+    if (holding && !busy && !queue.length && !reserved.size) { holding = false; held(null); }
   };
   const app = () => !!term.modes.applicationCursorKeysMode;
 
@@ -182,6 +182,8 @@ export function attachPromptEditing(term, send, held = () => {}) {
         if (!(await run(queue.shift()))) {
           console.debug(`[prompt-edit] prompt changed under an edit or paste; ${queue.length} queued input(s) dropped`);
           queue.length = 0;
+          // A paced send still arriving loses its rest too, Enter included.
+          for (const r of reserved) r.cancelled = true;
         }
       }
     } finally {
@@ -295,21 +297,25 @@ export function attachPromptEditing(term, send, held = () => {}) {
     selectionInInput: () => term.hasSelection() && !!selectedRange(),
     /**
      * A send accepted now whose input arrives later, paced (the command bar):
-     * reported as held at once, and held until the returned release() is
-     * called after its last handleData.
+     * reported as held at once, and held until release(). Its input goes in
+     * through write(); once the queue drops what it held (the prompt changed
+     * under an edit or a paste), the rest of the send is dropped too.
      */
     reserve(data) {
-      reserved += 1;
+      const r = { cancelled: false };
+      reserved.add(r);
       hold(data);
-      let open = true;
-      return () => { if (open) { open = false; reserved = Math.max(0, reserved - 1); drained(); } };
+      return {
+        write: (d) => { if (!r.cancelled && !disposed) handleData(d); },
+        release: () => { if (reserved.delete(r)) drained(); },
+      };
     },
     dispose() {
       disposed = true;
       for (const type of armEvents) el?.removeEventListener(type, arm, true);
       el?.removeEventListener('mousedown', onMouseDown, true);
       queue.length = 0;
-      reserved = 0;
+      reserved.clear();
       if (holding) { holding = false; held(null); }
     },
   };

@@ -140,13 +140,9 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     // image paste still being saved into Claude's prompt, not ahead of it.
     // Reserved there from this moment, so the paced writes below count as
     // input already taken (/openTab must not paste before them).
-    const edit = promptEditRef.current;
-    const release = edit?.reserve(text || '\r') || (() => {});
-    const write = (data) => {
-      if (edit) edit.handleData(data);
-      else window.electronAPI.terminalWrite(id, data);
-    };
-    const done = () => { release(); if (mountedRef.current) setIsSending(false); };
+    const send = promptEditRef.current?.reserve(text || '\r');
+    const write = (data) => (send ? send.write(data) : window.electronAPI.terminalWrite(id, data));
+    const done = () => { send?.release(); if (mountedRef.current) setIsSending(false); };
 
     // Short text (< 80 chars): char-by-char for Claude TUI raw-mode compat
     // Long text (>= 80 chars): chunked sending — keeps the UI responsive
