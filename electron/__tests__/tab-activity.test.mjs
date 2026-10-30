@@ -362,3 +362,26 @@ test('a slow lookup is shared past its ttl, never run twice at once', async () =
   assert.deepEqual(await Promise.all([p1, p2]), ['x', 'x']);
   assert.equal(calls, 1);
 });
+
+test('a disproved turn length stays gone after the claude that disproved it exits', () => {
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000); // claude A, killed later without Stop
+  ts.ingest(ID, mk('working'), 45_000); // claude B (started at 40s) begins its turn
+  const B = { pid: 9, startedAt: 40_000 };
+  // main's check while B runs: the turn start predates B.
+  let raw = ts.activityFor(ID);
+  let a = reconcileWithProcess(raw, B);
+  assert.equal(a.since, null);
+  if (raw.since && !a.since && a.status === raw.status) ts.distrustTurnStart(ID, raw.since);
+  ts.ingest(ID, mk('done'), 65_000);
+  assert.equal(ts.activityFor(ID).lastTurnMs, 0, 'B finished; the 55s span over A and B is not a length');
+  // Without the earlier check, the length is still caught and remembered.
+  ts._reset();
+  ts.ingest(ID, mk('working'), 10_000);
+  ts.ingest(ID, mk('done'), 65_000);
+  raw = ts.activityFor(ID);
+  a = reconcileWithProcess(raw, B);
+  if (raw.lastTurnMs && !a.lastTurnMs) ts.distrustLastTurn(ID, raw.turnEndedAt);
+  // B exits: no claude left to prove anything with.
+  assert.equal(reconcileWithProcess(ts.activityFor(ID), null).lastTurnMs, 0);
+});

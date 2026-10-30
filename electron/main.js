@@ -248,6 +248,9 @@ async function tabActivity(id) {
   const a = (raw.hookOwned || raw.lastTurnMs)
     ? reconcileWithProcess(raw, await claudeInfoCached(id))
     : raw;
+  // Remember what the process check disproved (see distrustTurnStart).
+  if (raw.since && !a.since && a.status === raw.status) terminalStatus.distrustTurnStart(id, raw.since);
+  if (raw.lastTurnMs && !a.lastTurnMs) terminalStatus.distrustLastTurn(id, raw.turnEndedAt);
   let background = null;
   // Only after the HOOK ended a turn, so a session with hooks off (or a plain
   // shell) never gets a Waiting it cannot prove. A hook-owned 'working' is a

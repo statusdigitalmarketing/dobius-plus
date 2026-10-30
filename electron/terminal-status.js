@@ -83,12 +83,15 @@ export function ingest(id, data, now = Date.now()) {
       // Only a running turn ends here; Claude's idle-prompt re-send of 'done'
       // must not move the end (the length is measured back from it).
       if (st.turnStartedAt) {
-        st.lastTurnMs = Math.max(0, now - st.turnStartedAt);
+        // A start shown to predate the claude now running is not this turn's.
+        st.lastTurnMs = st.turnStartDistrusted ? 0 : Math.max(0, now - st.turnStartedAt);
         st.turnEndedAt = now;
       }
       st.turnStartedAt = 0;
+      st.turnStartDistrusted = false;
     } else if (!st.turnStartedAt) {
       st.turnStartedAt = now;
+      st.turnStartDistrusted = false;
     }
   }
 
@@ -158,11 +161,29 @@ export function activityFor(id) {
   return {
     status: st.status,
     hookOwned: st.hookOwned,
-    since: inStretch ? (st.turnStartedAt || (st.status === 'working' ? st.workingSince : 0) || null) : null,
+    since: !inStretch || st.turnStartDistrusted ? null
+      : (st.turnStartedAt || (st.status === 'working' ? st.workingSince : 0) || null),
     lastTurnMs: st.lastTurnMs || 0,
     turnEndedAt: st.turnEndedAt || 0,
     lastMarkerAt: st.lastMarkerAt || 0,
   };
+}
+
+/**
+ * main proved (from the claude process start) that a recorded time is not the
+ * current claude's. Kept, not just hidden per answer: once that claude exits
+ * there is nothing left to prove it with, and the wrong length would return.
+ * Each only applies while the record is still the one that was checked.
+ */
+export function distrustTurnStart(id, since) {
+  const st = live.get(id);
+  if (st && since && (st.turnStartedAt === since || (!st.turnStartedAt && st.workingSince === since))) {
+    st.turnStartDistrusted = true;
+  }
+}
+export function distrustLastTurn(id, turnEndedAt) {
+  const st = live.get(id);
+  if (st && turnEndedAt && st.turnEndedAt === turnEndedAt) st.lastTurnMs = 0;
 }
 
 /** A new PTY under this id (a respawn): nothing from the old one carries over. */
