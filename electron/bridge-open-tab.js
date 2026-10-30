@@ -382,12 +382,14 @@ export function createOpenTabService(deps, opts = {}) {
     if (opened.error) return { ok: false, status: 500, error: opened.error, ...(opened.tabId ? { tabId: opened.tabId } : {}) };
     const { tabId } = opened;
     const pty = deps.ptyOf(tabId);
-    if (!pty) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
     // The tab was asked for with tool 'claude' (store.openNewTab): its login
     // shell starts Claude itself as its first command (shared/new-tab.js),
     // whatever the user's New Tab default is. Nothing is typed to launch it.
+    // Watched before anything can return, so stop() always releases the key
+    // counter openTab started (and its reload listener).
     const watch = deps.watchOutput(tabId, opened.keyCounter);
     try {
+      if (!pty) return { ok: false, status: 500, tabId, error: 'the tab\'s shell exited before Claude could start' };
       // A person typing into the new tab has taken it over: whatever they
       // typed (and an Enter of theirs still on its way) must never carry
       // the card's text. Mouse movement does not count.

@@ -342,6 +342,18 @@ function fakeDeps(over = {}) {
 }
 
 {
+  // The shell is already gone when the tab is named: 500, and the key
+  // counter openTab started is released (watch stopped), not leaked.
+  const d = fakeDeps();
+  tweakTab(d, (t) => { t.alive = false; });
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message: 'go', requestId: 'nopty' });
+  assert.equal(r.status, 500);
+  assert.match(r.body.error, /shell exited/);
+  assert.deepEqual(d.log.filter((e) => e[0] === 'stop'), [['stop', 'term-/p-1']]);
+  ok('a tab without a shell still releases its key counter');
+}
+
+{
   // Errors before a tab exists forget the id so the board can retry.
   const d = fakeDeps();
   const svc = createOpenTabService(d);
