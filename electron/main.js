@@ -26,7 +26,7 @@ import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses, configDirOfPid } from './claude-process-scan.js';
-import { createPresenceReader, GRACE_MS as PRESENCE_GRACE_MS } from './claude-presence.js';
+import { createPresenceReader, reconcileWithProcess, cachedPerTab, GRACE_MS as PRESENCE_GRACE_MS } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
@@ -232,7 +232,8 @@ const ownerCleanup = createOwnerCleanup(terminalOwners);
 // Sidebar tab activity (Working / Input / Waiting / Done labels). Unread ids
 // mirrored from each window, keyed by webContents.id.
 const unreadByWindow = new Map();
-const backgroundForTab = createPresenceReader({ claudeInfo: getTerminalClaudeInfo, configDirOf: configDirOfPid });
+const claudeInfoCached = cachedPerTab((id) => getTerminalClaudeInfo(id, { unique: true }), 2500);
+const backgroundForTab = createPresenceReader({ claudeInfo: claudeInfoCached, configDirOf: configDirOfPid });
 
 /**
  * Sidebar status for one tab: main's hook status + turn timing, background
@@ -240,8 +241,13 @@ const backgroundForTab = createPresenceReader({ claudeInfo: getTerminalClaudeInf
  * unread. Null when no PTY runs for the id (a closed tab shows its age).
  */
 async function tabActivity(id) {
-  const a = terminalStatus.activityFor(id);
-  if (!a) return null;
+  const raw = terminalStatus.activityFor(id);
+  if (!raw) return null;
+  // Only tabs that ever had hook state need the process check; a plain shell
+  // costs nothing.
+  const a = (raw.hookOwned || raw.lastTurnMs)
+    ? reconcileWithProcess(raw, await claudeInfoCached(id))
+    : raw;
   let background = null;
   // Only after the HOOK ended a turn, so a session with hooks off (or a plain
   // shell) never gets a Waiting it cannot prove. A hook-owned 'working' is a
@@ -255,7 +261,9 @@ async function tabActivity(id) {
     const after = terminalStatus.activityFor(id);
     if (!after || after.turnEndedAt !== a.turnEndedAt || after.status === 'needs'
         || (after.status === 'working' && after.hookOwned)) {
-      return after ? { id, activity: { ...after, background: null }, unread: unreadAnywhere(id) } : null;
+      return after
+        ? { id, activity: { ...reconcileWithProcess(after, await claudeInfoCached(id)), background: null }, unread: unreadAnywhere(id) }
+        : null;
     }
   }
   return { id, activity: { ...a, background }, unread: unreadAnywhere(id) };

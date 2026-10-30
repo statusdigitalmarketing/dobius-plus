@@ -35,6 +35,8 @@ const MAX_RECENT_EXITS = 50;
 // ('needs' in between is part of the same turn). workingSince is the start of
 // the current non-hook output stretch (a plain shell build). Both live here,
 // keyed by PTY id, so they survive a tab switch, a tear-off and a reload.
+// Accepted: an interrupt (Esc) fires no Stop, so a prompt sent before Claude's
+// idle notification (about a minute) continues the interrupted turn's clock.
 const live = new Map();
 // bounded FIFO of { id, cwd, project, exitCode, signal, status, at }
 const recentExits = [];

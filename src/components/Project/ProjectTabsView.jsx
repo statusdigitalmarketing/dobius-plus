@@ -72,7 +72,6 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const terminalTabs = useStore((s) => s.terminalTabs);
   const tabStatus = useStore((s) => s.tabStatus);
-  const hookOwnedTabs = useStore((s) => s.hookOwnedTabs);
   const unreadTabs = useStore((s) => s.unreadTabs);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setActiveView = useStore((s) => s.setActiveView);
@@ -262,17 +261,17 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                   const status = (live ? tabStatus[t.id] : t.status) || 'idle';
                   const dot = STATUS_COLORS[status] || 'var(--dim)';
                   // A PTY runs for the tab only if main says so (a tab still
-                  // listed here can have an exited shell). This window's own
-                  // tabs read the store (instant) unless main holds a hook
-                  // status the store lost (a tab torn off mid-turn); other
-                  // windows' tabs read main. Timing always comes from main.
+                  // listed here can have an exited shell). Status and timing
+                  // come from main, where the hook markers are recorded for
+                  // every window (a tear-off, a respawn and auto-resume's
+                  // status broadcasts all leave the store behind). Unread is
+                  // this window's own for its tabs, main's mirror for others.
                   const row = activity.get(t.id);
                   const a = row?.activity;
-                  const useMain = !live || (!!a?.hookOwned && !hookOwnedTabs[t.id]);
                   const label = tabActivityLabel({
                     live: !!a,
-                    status: useMain ? a?.status : tabStatus[t.id],
-                    hookOwned: useMain ? !!a?.hookOwned : !!hookOwnedTabs[t.id],
+                    status: a?.status,
+                    hookOwned: !!a?.hookOwned,
                     since: a?.since,
                     lastTurnMs: a?.lastTurnMs,
                     background: a?.background,

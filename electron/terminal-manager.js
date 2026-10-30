@@ -516,8 +516,9 @@ export async function getTerminalProcessArgv(id) {
  * tabs got no name badge in the sidebar, and auto-resume could never restore
  * them either. startedAt lets the caller correlate the process to the
  * transcript it created (see resolveFreshSessionId in main.js).
+ * `unique: true` answers null when more than one claude runs in the shell.
  */
-export async function getTerminalClaudeInfo(id) {
+export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;
   try {
@@ -528,6 +529,7 @@ export async function getTerminalClaudeInfo(id) {
       encoding: 'utf8',
     });
     const children = pgrepOut.trim().split('\n').filter(Boolean);
+    let found = null;
     for (const childPid of children) {
       // `lstart` is the process start time; `command` is the argv. One ps
       // call gets both so the fresh-session correlation costs nothing extra.
@@ -545,9 +547,14 @@ export async function getTerminalClaudeInfo(id) {
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
-      return { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid) };
+      const info = { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid) };
+      if (!unique) return info;
+      // `unique`: two claudes in one shell (one suspended with Ctrl+Z, say)
+      // cannot be told apart, so the caller gets no answer rather than a guess.
+      if (found) return null;
+      found = info;
     }
-    return null;
+    return found;
   } catch {
     return null;
   }

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { tabActivityLabel, formatDuration, WORKING_MIN_MS } from '../../src/lib/tab-activity.js';
 import * as ts from '../terminal-status.js';
-import { backgroundFromPresence, createPresenceReader } from '../claude-presence.js';
+import { backgroundFromPresence, createPresenceReader, reconcileWithProcess, cachedPerTab } from '../claude-presence.js';
 
 const NOW = 10_000_000;
 const base = { live: true, status: 'idle', hookOwned: false, since: null, lastTurnMs: 0, background: null, unread: false, now: NOW };
@@ -268,4 +268,38 @@ test('presence reader: an answer cached for one turn is never served for the nex
   assert.equal(await read('a', END), 'agents');
   status = 'idle'; // that turn ended with nothing in the background
   assert.equal(await read('a', END + 30_000), null);
+});
+
+test('reconcile: a hook turn with no claude left in the tab is not Working', () => {
+  const a = { status: 'working', hookOwned: true, since: 1000, lastTurnMs: 0, turnEndedAt: 0 };
+  const r = reconcileWithProcess(a, null);
+  assert.deepEqual([r.status, r.hookOwned, r.since], ['idle', false, null]);
+  assert.equal(label({ ...r, live: true }), null);
+  // A finished turn keeps its length when claude has since exited (Done 12m stays right).
+  const done = { status: 'done', hookOwned: false, since: null, lastTurnMs: 720_000, turnEndedAt: 2_000_000 };
+  assert.deepEqual(reconcileWithProcess(done, null), done);
+});
+
+test('reconcile: a turn older than the claude now running loses its times', () => {
+  const info = { pid: 1, startedAt: 100_000 };
+  const working = reconcileWithProcess({ status: 'working', hookOwned: true, since: 50_000, lastTurnMs: 0, turnEndedAt: 0 }, info);
+  assert.equal(working.since, null);
+  assert.equal(working.status, 'working', 'still Working, just without a made-up time');
+  const done = reconcileWithProcess({ status: 'done', hookOwned: false, since: null, lastTurnMs: 90_000, turnEndedAt: 130_000 }, info);
+  assert.equal(done.lastTurnMs, 0);
+  const ok = reconcileWithProcess({ status: 'done', hookOwned: false, since: null, lastTurnMs: 20_000, turnEndedAt: 130_000 }, info);
+  assert.equal(ok.lastTurnMs, 20_000);
+});
+
+test('cachedPerTab shares a pending call and expires', async () => {
+  let t = 0;
+  let calls = 0;
+  const f = cachedPerTab(async (id) => { calls += 1; return id; }, 2500, () => t);
+  await Promise.all([f('a'), f('a'), f('a')]);
+  assert.equal(calls, 1);
+  t = 3000;
+  assert.equal(await f('a'), 'a');
+  assert.equal(calls, 2);
+  const g = cachedPerTab(async () => { throw new Error('x'); }, 2500, () => 0);
+  assert.equal(await g('a'), null, 'a failed lookup is no answer, never a throw');
 });

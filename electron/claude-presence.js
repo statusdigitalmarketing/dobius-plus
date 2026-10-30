@@ -58,6 +58,49 @@ export function backgroundFromPresence(rec, proc) {
 }
 
 /**
+ * Pure: check main's turn record against the claude process running in the
+ * tab NOW, so a turn left behind by a claude that exited mid-turn (no Stop
+ * hook ever came) never shows as live work or lends its start to the next
+ * claude. Only removes claims, never adds one.
+ * @param {{status:string, hookOwned:boolean, since:number|null, lastTurnMs:number, turnEndedAt:number}} a
+ * @param {{pid:number, startedAt:number|null}|null} info  null = no claude in the tab
+ */
+export function reconcileWithProcess(a, info) {
+  const out = { ...a };
+  if (!info) {
+    // The hook says a turn runs but no claude is there to run it. (A claude
+    // started through a wrapper is not a direct child and lands here too: it
+    // shows its age, which is less than it could, never wrong.)
+    if (out.hookOwned) Object.assign(out, { status: 'idle', hookOwned: false, since: null });
+    return out;
+  }
+  if (Number.isFinite(info.startedAt)) {
+    // ps truncates the start DOWN, so a start after the turn's start proves
+    // this claude did not run the whole stretch.
+    if (out.since && info.startedAt > out.since) out.since = null;
+    if (out.lastTurnMs && info.startedAt > out.turnEndedAt - out.lastTurnMs) out.lastTurnMs = 0;
+  }
+  return out;
+}
+
+/**
+ * Cache an async per-tab lookup briefly and share the pending call, so several
+ * windows polling every few seconds cost one pgrep/ps per tab.
+ */
+export function cachedPerTab(fn, ttlMs, now = Date.now) {
+  const cache = new Map();
+  return (id) => {
+    const t = now();
+    const hit = cache.get(id);
+    if (hit && t - hit.at < ttlMs) return hit.pending;
+    const pending = Promise.resolve().then(() => fn(id)).catch(() => null);
+    cache.set(id, { at: t, pending });
+    if (cache.size > 512) cache.delete(cache.keys().next().value);
+    return pending;
+  };
+}
+
+/**
  * @param {object} deps
  * @param {(tabId:string)=>Promise<{pid:number,startedAt:number|null}|null>} deps.claudeInfo
  * @param {(pid:number)=>Promise<string|null>} deps.configDirOf
