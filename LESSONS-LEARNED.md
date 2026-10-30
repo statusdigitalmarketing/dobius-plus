@@ -367,3 +367,15 @@
 - **FIX**: After any edit under src/hooks or src/lib that TerminalPane imports, reload the harness page and start claude again before probing (`p10-reload.mjs` pattern: reload, then type the claude command).
 - **CONTEXT**: Every harness ship-test of terminal behaviour.
 - **DETECTION**: `pgrep -fl 'claude --settings'` returns nothing after an HMR update.
+
+### Process - 2026-10-30
+- **MISTAKE**: Harness teardown killed the CDP listener PID read once, then removed the userData and released the shared harness lock. A second Electron main from the same `npm run electron:dev` (concurrently parent still alive) was still listening on the CDP port, and another agent's Vite took 5173 seconds later while it was up.
+- **FIX**: Kill the `concurrently` parent of YOUR worktree too (`ps aux | grep "[<worktree-name>]/node_modules/.bin/concurrently"`), then re-run `lsof -nP -iTCP:<cdp> -sTCP:LISTEN` AND confirm zero processes from your worktree path BEFORE `rm -rf <ud>` and releasing the lock.
+- **CONTEXT**: Shared-lock harness runs with several agents on one machine (Brett batch, 1.0.88).
+- **DETECTION**: `ps aux | grep "[d]obius-plus-<branch>" | grep -v codex`
+
+### Security - 2026-10-30
+- **MISTAKE**: A free-form `DOBIUS_CLAUDE_HOME=<path>` for redirecting an isolated instance's settings.json writes was aliased back onto the real `~/.claude` in three Codex rounds (symlink, different case on a case-insensitive volume, `..` through a symlink, a dangling link).
+- **FIX**: Make it a switch (`DOBIUS_CLAUDE_HOME=1`) that places the throwaway home at `<DOBIUS_USERDATA_DIR>/claude-home`, the one place that cannot be the real home, and re-check by dev+inode before each write.
+- **CONTEXT**: Any harness redirect of a write away from a shared real file. Do not accept a path when a fixed location inside the harness's own scratch works.
+- **DETECTION**: `grep -n "DOBIUS_CLAUDE_HOME" electron/main.js`

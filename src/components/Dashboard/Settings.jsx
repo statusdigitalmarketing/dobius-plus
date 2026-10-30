@@ -39,6 +39,10 @@ export default function Settings() {
   const [statusHooks, setStatusHooks] = useState(false);
   const [statusHooksBusy, setStatusHooksBusy] = useState(false);
   const [statusHooksError, setStatusHooksError] = useState('');
+  // Model + effort on Claude's status line, under the prompt
+  const [modelLine, setModelLine] = useState(null);
+  const [modelLineBusy, setModelLineBusy] = useState(false);
+  const [modelLineError, setModelLineError] = useState('');
   const [voiceConductor, setVoiceConductor] = useState(false);
   const [errorLogPath, setErrorLogPath] = useState('');
 
@@ -84,6 +88,35 @@ export default function Settings() {
     if (r?.error) setStatusHooksError(r.error);
     else setStatusHooks(!!r?.installed);
     setStatusHooksBusy(false);
+  }, []);
+
+  // Account usage (in the Accounts section) installs the same status line, so
+  // it announces changes and this re-reads rather than showing a stale switch.
+  // Focus covers a change made from another window.
+  useEffect(() => {
+    const refresh = () => window.electronAPI?.modelLineGetStatus?.().then((r) => { if (r) setModelLine(r); });
+    refresh();
+    window.addEventListener('dobius:statusline-changed', refresh);
+    window.addEventListener('focus', refresh);
+    return () => {
+      window.removeEventListener('dobius:statusline-changed', refresh);
+      window.removeEventListener('focus', refresh);
+    };
+  }, []);
+
+  const toggleModelLine = useCallback(async (on) => {
+    setModelLineBusy(true);
+    setModelLineError('');
+    let r = await window.electronAPI?.modelLineSet?.(on);
+    // Same consent as the status dots: never create settings.json unasked.
+    if (r?.error === 'needs-confirm-create') {
+      if (window.confirm(`${r.message}\n\nCreate it now?`)) r = await window.electronAPI?.modelLineSet?.(on, { confirmCreate: true });
+      else r = null;
+    }
+    if (r?.error) setModelLineError(r.error);
+    // Account usage shares the status line; this also refreshes the switch here.
+    window.dispatchEvent(new Event('dobius:statusline-changed'));
+    setModelLineBusy(false);
   }, []);
 
   // iMessage Bridge state
@@ -476,6 +509,28 @@ export default function Settings() {
               checked={statusHooks}
               disabled={statusHooksBusy}
               onChange={(v) => toggleStatusHooks(v)}
+            />
+          </div>
+        </SettingRow>
+
+        <SettingRow
+          label="Show model under the prompt"
+          description={
+            modelLine?.installedElsewhere
+              ? 'Another copy of Dobius owns Claude\'s status line. Turn this on here to take it over.'
+              : modelLine?.theirs && !modelLine?.on
+                ? 'You have your own Claude status line. Turning this on puts the model in front of it; yours keeps working and is restored when you turn this off.'
+                : 'Shows the model and effort (e.g. Opus 5.5 · extra high) on Claude\'s status line, under the prompt, so it stays visible after the startup banner scrolls away.'
+          }
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {modelLineError && (
+              <span style={{ color: 'var(--danger)', fontSize: 10, maxWidth: 180 }}>{modelLineError}</span>
+            )}
+            <Toggle
+              checked={!!modelLine?.on}
+              disabled={modelLineBusy || modelLine === null}
+              onChange={(v) => toggleModelLine(v)}
             />
           </div>
         </SettingRow>

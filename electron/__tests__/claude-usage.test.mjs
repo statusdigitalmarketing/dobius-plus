@@ -6,12 +6,14 @@
 // beat what. The payload carries no measurement timestamp, so nothing here can
 // prove a number is current; it can only refuse to present an old one as new.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   parseRecord, aggregateUsage, reporterScript,
   planStatusLineInstall, planStatusLineRemove, ownsStatusLine, REPORTER_MARKER,
-  reporterCommand,
+  reporterCommand, EFFORT_WORDS, chainFromScript, scriptPathFromCommand, MODEL_LINE_MARKER,
 } from '../claude-usage.js';
 
 // Ownership is detected by the marker appearing in the command string, and the
@@ -207,6 +209,159 @@ check('uninstalling NEVER overwrites a line the user has since chosen', () => {
   // Blind restoration would delete a deliberate newer choice.
   const { remember } = planStatusLineInstall({ type: 'command', command: 'old.sh' }, SCRIPT);
   assert.equal(planStatusLineRemove({ type: 'command', command: 'brand-new.sh' }, remember).action, 'leave');
+});
+
+// --- the model line under the prompt (Brett) ---------------------------------
+// These RUN the generated script, under every shell /bin/sh can be on a Mac,
+// because the formatting is shell expansion and only running it proves it.
+const SHELLS = ['/bin/sh', '/bin/dash', '/bin/bash'].filter((s) => fs.existsSync(s));
+const tmpUsage = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-modelline-'));
+const runLine = (payload, { chain = null, capture = false, model = true, shell = SHELLS[0], env } = {}) => {
+  const file = path.join(tmpUsage, `s-${Math.floor(performance.now() * 1000)}.sh`);
+  fs.writeFileSync(file, reporterScript(tmpUsage, chain, { capture, model }));
+  const r = spawnSync(shell, [file], {
+    input: typeof payload === 'string' ? payload : JSON.stringify(payload),
+    encoding: 'utf8',
+    ...(env ? { env: { ...process.env, ...env } } : {}),
+  });
+  fs.unlinkSync(file);
+  return { out: r.stdout, err: r.stderr, status: r.status };
+};
+// Shape captured from a live 2.1.311 session on this Mac.
+const REAL = {
+  session_id: 'abc-1', session_name: 'Merge all',
+  effort: { level: 'xhigh' }, model: { id: 'claude-opus-5-5', display_name: 'Opus 5.5' },
+  fast_mode: false, thinking: { enabled: true },
+};
+
+check('model line: name and effort in plain words, on every shell', () => {
+  assert.ok(SHELLS.length >= 1);
+  for (const shell of SHELLS) {
+    const r = runLine(REAL, { shell });
+    assert.equal(r.out, 'Opus 5.5 · extra high\n', shell);
+    assert.equal(r.err, '', shell);
+    assert.equal(r.status, 0, shell);
+  }
+});
+
+check('model line: every known effort level maps to its words', () => {
+  for (const [level, words] of Object.entries(EFFORT_WORDS)) {
+    assert.equal(runLine({ ...REAL, effort: { level } }).out, `Opus 5.5 · ${words}\n`, level);
+  }
+  assert.equal(EFFORT_WORDS.xhigh, 'extra high');
+});
+
+check('model line: no rate_limits yet (before the first API call) still shows it', () => {
+  const r = runLine({ ...REAL, rate_limits: undefined }, { capture: true });
+  assert.equal(r.out, 'Opus 5.5 · extra high\n');
+});
+
+check('model line: an unknown effort shows as sent, a malformed one is dropped', () => {
+  assert.equal(runLine({ ...REAL, effort: { level: 'ultra' } }).out, 'Opus 5.5 · ultra\n');
+  assert.equal(runLine({ ...REAL, effort: { level: 'ul tra' } }).out, 'Opus 5.5\n');
+  assert.equal(runLine({ ...REAL, effort: { level: 'a\u001b[31m' } }).out, 'Opus 5.5\n');
+  assert.equal(runLine({ ...REAL, effort: 'high' }).out, 'Opus 5.5 · high\n', 'a bare string effort');
+  assert.equal(runLine({ ...REAL, effort: undefined }).out, 'Opus 5.5\n');
+});
+
+check('model line: missing pieces drop out, nothing at all prints nothing', () => {
+  assert.equal(runLine({ ...REAL, model: undefined }).out, 'extra high\n');
+  assert.equal(runLine({ ...REAL, model: { id: 'claude-opus-5-5' } }).out, 'extra high\n');
+  assert.equal(runLine({}).out, '');
+  assert.equal(runLine('').out, '');
+  assert.equal(runLine('not json').out, '');
+});
+
+check('model line: fast mode and thinking off are named', () => {
+  assert.equal(runLine({ ...REAL, fast_mode: true }).out, 'Opus 5.5 · extra high · fast\n');
+  assert.equal(runLine({ ...REAL, thinking: { enabled: false } }).out, 'Opus 5.5 · extra high · thinking off\n');
+});
+
+check('model line: user-controlled strings cannot impersonate the fields', () => {
+  // session_name and paths come BEFORE model in the real payload. Their quotes
+  // are escaped, so the unescaped anchors cannot match inside them.
+  const sneaky = {
+    session_id: 'abc-1',
+    session_name: 'x "model":{"display_name":"EVIL"} "effort":{"level":"max"} "fast_mode":true',
+    effort: { level: 'low' }, model: { display_name: 'Opus 5.5' },
+  };
+  assert.equal(runLine(sneaky).out, 'Opus 5.5 · low\n');
+  // A key that merely ENDS in "model" or "effort" is not the field.
+  const suffixed = { session_id: 'abc-1', fallback_model: { display_name: 'Wrong' }, max_effort: 'max', ...REAL };
+  assert.equal(runLine(suffixed).out, 'Opus 5.5 · extra high\n');
+  // A display name carrying an escape sequence is dropped, never printed.
+  assert.equal(runLine({ ...REAL, model: { display_name: 'Op\u001b]0;pwn\u0007us' } }).out, 'extra high\n');
+  assert.equal(runLine({ ...REAL, model: { display_name: 'Opus "5"' } }).out, 'extra high\n');
+  assert.equal(runLine({ ...REAL, model: { display_name: 'Opus 5.5 (1M context)' } }).out, 'Opus 5.5 (1M context) · extra high\n');
+});
+
+check("model line: the user's own line follows it, and survives their failure", () => {
+  const chain = 'p=$(cat); case "$p" in *abc-1*) printf "theirs\\nline2\\n" ;; esac; exit 3';
+  const r = runLine(REAL, { chain });
+  assert.equal(r.out, 'Opus 5.5 · extra high · theirs\nline2\n', 'stdin replayed, model in front');
+  assert.equal(r.status, 0);
+  assert.equal(runLine(REAL, { chain: 'true' }).out, 'Opus 5.5 · extra high\n', 'theirs empty');
+  assert.equal(runLine({}, { chain: 'echo theirs' }).out, 'theirs\n', 'ours empty');
+  // An inherited errexit must not abort on their failure and blank the line.
+  const errexit = runLine(REAL, { chain: 'printf theirs; exit 3', shell: '/bin/bash', env: { SHELLOPTS: 'errexit' } });
+  assert.equal(errexit.out, 'Opus 5.5 · extra high · theirs\n');
+});
+
+check('model line off: the script is exactly the usage reporter it was', () => {
+  assert.equal(reporterScript('/u/usage', 'mine.sh', { model: false }), reporterScript('/u/usage', 'mine.sh'));
+  assert.ok(reporterScript('/u/usage', 'mine.sh').includes(`exec /bin/sh -c 'mine.sh'`));
+  assert.equal(runLine(REAL, { model: false }).out, '');
+});
+
+check('the model marker is in a script exactly when it prints the model', () => {
+  // Settings reads it to tell an upgraded script from one an older build left.
+  assert.ok(reporterScript('/u/usage', null, { model: true }).includes(MODEL_LINE_MARKER));
+  assert.ok(reporterScript('/u/usage', 'mine.sh', { capture: false, model: true }).includes(MODEL_LINE_MARKER));
+  assert.ok(!reporterScript('/u/usage', 'mine.sh').includes(MODEL_LINE_MARKER));
+});
+
+check('capture off: no record is written, the line still prints', () => {
+  const before = fs.readdirSync(tmpUsage).filter((n) => n.endsWith('.json'));
+  assert.equal(runLine(REAL, { capture: false }).out, 'Opus 5.5 · extra high\n');
+  assert.deepEqual(fs.readdirSync(tmpUsage).filter((n) => n.endsWith('.json')), before);
+  assert.ok(!reporterScript('/u/usage', null, { capture: false, model: true }).includes('mv -f'));
+  runLine(REAL, { capture: true });
+  assert.ok(fs.readdirSync(tmpUsage).includes('abc-1.json'), 'capture on still records');
+});
+
+check('model line: still no helper process', () => {
+  const s = reporterScript('/u/usage', null, { capture: true, model: true });
+  for (const bad of ['jq', '$(date', 'shasum', 'openssl', 'python', 'sed ', 'awk', 'grep']) {
+    assert.ok(!s.includes(bad), `script must not use ${bad}`);
+  }
+});
+fs.rmSync(tmpUsage, { recursive: true, force: true });
+
+check('the installed script path is read back out of its statusLine command', () => {
+  // Recovery reads the script settings.json actually runs, which can be
+  // another Dobius's, not our own possibly stale copy.
+  for (const ud of ['/Users/x/Library/Application Support/dobius-plus', "/tmp/it's here"]) {
+    assert.equal(scriptPathFromCommand(reporterCommand(ud)), path.join(ud, `${REPORTER_MARKER}.sh`));
+  }
+  assert.equal(scriptPathFromCommand('mine.sh'), null);
+  assert.equal(scriptPathFromCommand("'/etc/passwd'"), null, 'only a reporter script');
+  assert.equal(scriptPathFromCommand(`'relative/${REPORTER_MARKER}.sh'`), null);
+  assert.equal(scriptPathFromCommand(undefined), null);
+});
+
+check('the chained command can be read back out of any generated script', () => {
+  // Recovery when the restore record is lost: a regenerated script must keep
+  // chaining their command rather than silently dropping it.
+  const cmds = ['mine.sh --flag', "evil'; rm -rf /; echo 'x", "a 'b' c", "line1\nline2", "ends with '"];
+  for (const cmd of cmds) {
+    for (const opts of [{}, { model: true }, { capture: false, model: true }]) {
+      assert.equal(chainFromScript(reporterScript('/u/usage', cmd, opts)), cmd, `${cmd} ${JSON.stringify(opts)}`);
+    }
+  }
+  assert.equal(chainFromScript(reporterScript('/u/usage', null)), null, 'no chain');
+  assert.equal(chainFromScript(reporterScript('/u/usage', null, { model: true })), null);
+  assert.equal(chainFromScript('#!/bin/sh\necho hi\n'), undefined, 'not ours: unknown');
+  assert.equal(chainFromScript(undefined), undefined);
 });
 
 console.log(`\nALL PASS  (${pass} passed)`);
