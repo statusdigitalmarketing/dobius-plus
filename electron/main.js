@@ -26,10 +26,11 @@ import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses } from './claude-process-scan.js';
+import { createWaitingReader, boundedIds, activityRow, freshenRows } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage,
-  planStatusLineInstall, planStatusLineRemove, ownsStatusLine,
+  planStatusLineInstall, planStatusLineRemove, ownsStatusLine, chainFromScript, scriptPathFromCommand, MODEL_LINE_MARKER,
 } from './claude-usage.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
@@ -39,10 +40,11 @@ import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
+import { launchCommandFor } from '../shared/new-tab.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, findLooseEnds, getTranscriptSig,
+  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, provenanceChanged, sessionMovedPast, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
   getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
 import {
@@ -66,6 +68,7 @@ import {
   getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig, flushConfigAsync, persistConfigNow,
   getSessionTags, setSessionTag, removeSessionTag,
   getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink, clearSessionTabRunning,
+  getTabLabelsById, recordSessionTabNames,
   getAgentMemory, setAgentMemory, appendJournalEntry,
   getOrchestrationRuns, saveOrchestrationRun, deleteOrchestrationRun,
   getMobileServerConfig,
@@ -89,13 +92,16 @@ import {
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
   deriveDeviceId,
 } from './mobile-server.js';
-import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents } from './voice-bridge.js';
+import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService } from './voice-bridge.js';
+import { createOpenTabService } from './bridge-open-tab.js';
+import { createBridgeOpenDeps } from './bridge-open-main.js';
 import { ensureVoiceConductor, stopVoiceConductor } from './voice-conductor.js';
 import {
   startImessageBridge, stopImessageBridge, restartImessageBridge,
   sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus,
 } from './imessage-bridge.js';
 import { pairingText } from '../shared/pairing-link.js';
+import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
@@ -226,6 +232,15 @@ const tearOffGrants = new Map();
 // WebContents and the list grew with tab churn for the life of the window.
 const ownerCleanup = createOwnerCleanup(terminalOwners);
 
+// Tabs sidebar status (Working / Input / Waiting / Done). Each window mirrors
+// its unread tab ids here, keyed by webContents.id: the renderer's unreadTabs
+// is the only unread system, this copy lets OTHER windows show Done.
+const unreadByWindow = new Map();
+const waitingForTab = createWaitingReader({
+  claudeInfo: (id) => getTerminalClaudeInfo(id, { unique: true }),
+  configDirFor: (id) => listTerminals().find((t) => t.id === id)?.claudeConfigDir || null,
+});
+
 // Settle tick for the main-process terminal status authority (v1.0.43).
 let statusSettleTimer = null;
 
@@ -237,7 +252,7 @@ function ownsTerminal(senderId, id) {
 }
 
 function setupTerminalHandlers() {
-  ipcMain.handle('terminal:create', (event, id, cwd) => {
+  ipcMain.handle('terminal:create', (event, id, cwd, opts) => {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
     if (cwd !== undefined && cwd !== null && typeof cwd !== 'string') return null;
     // Reject hijack attempts: if this id is already owned by a DIFFERENT
@@ -261,7 +276,11 @@ function setupTerminalHandlers() {
     // Shared with the mobile spawn paths via resolveAccountEnvForCwd so a phone
     // terminal lands on the same active accounts as a desktop one (reviewer P2).
     const accountEnv = resolveAccountEnvForCwd(cwd);
-    return createTerminal(id, cwd, event.sender, accountEnv);
+    // A New Tab (store.openNewTab) starts its tool: 'default' is the Settings
+    // choice, read here; anything outside the fixed set starts nothing.
+    const launch = opts && typeof opts === 'object' ? opts.launch : undefined;
+    const startCommand = launch === undefined ? null : launchCommandFor(launch, getSettings().newTabTool);
+    return createTerminal(id, cwd, event.sender, accountEnv, { startCommand });
   });
 
   ipcMain.on('terminal:write', (event, id, data) => {
@@ -492,6 +511,36 @@ function setupDataHandlers() {
       return [w];
     });
     return getAllProjectTabs({ liveTabIds, tearOffTabs });
+  });
+  // Live row status for the Tabs sidebar, apart from the aggregate above
+  // (which reads session history and is slow): main's hook status and the
+  // working stretch timing, Waiting for a 'done' tab with proven background
+  // work, and whether a window that owns the PTY has it unread. Any window may
+  // ask about any tab, like the aggregate. Returns an ARRAY.
+  ipcMain.handle('tabs:activity', async (_event, ids) => {
+    const live = new Set(listTerminals().map((t) => t.id));
+    const wanted = [...new Set(boundedIds(ids, 1000).filter((id) => live.has(id)))];
+    const unreadAnywhere = (id) => {
+      for (const [wcId, set] of unreadByWindow) if (set.has(id) && ownsTerminal(wcId, id)) return true;
+      return false;
+    };
+    const rows = await Promise.all(wanted.map((id) => activityRow(id, {
+      activityFor: terminalStatus.activityFor, waitingForTab, unreadAnywhere,
+    })));
+    const stillLive = new Set(listTerminals().map((t) => t.id));
+    return freshenRows(rows, terminalStatus.activityFor, (id) => stillLive.has(id), unreadAnywhere);
+  });
+  ipcMain.on('tabs:reportUnread', (event, ids) => {
+    // ipcMain.on has no rejection path: a throw here would reach the
+    // uncaughtException handler, which exits the app.
+    try {
+      const wcId = event.sender.id;
+      const list = new Set(boundedIds(ids, 1000));
+      if (!unreadByWindow.has(wcId)) event.sender.once('destroyed', () => unreadByWindow.delete(wcId));
+      unreadByWindow.set(wcId, list);
+    } catch (err) {
+      console.warn('[tabs:reportUnread] ignored a malformed report:', err?.message);
+    }
   });
   // Focus the window that currently owns a live tab (a tear-off window if the id
   // is torn off, otherwise the project's primary window). Lets the sidebar reveal
@@ -1587,7 +1636,39 @@ function setupFileHandlers() {
   //   Notification[idle_prompt] / Stop     -> done    (green)
   // Markers are identified by the ']777;dobius;' substring so the block can be
   // removed cleanly without ever touching the user's own hooks.
-  const claudeSettingsPath = path.join(homedir, '.claude', 'settings.json');
+  // An isolated instance (DOBIUS_USERDATA_DIR) must never write the real,
+  // shared ~/.claude/settings.json. DOBIUS_CLAUDE_HOME=1 gives it a throwaway
+  // Claude home INSIDE its own userData (<userData>/claude-home), so an install
+  // can still be ship-tested; outside the harness the variable is ignored.
+  // It is a switch and not a path on purpose: three review rounds aliased a
+  // free-form path back onto the real ~/.claude (a symlink, a different case,
+  // a `..` through a symlink, a dangling link created later). The harness's
+  // own throwaway userData is the one place that cannot be the real home.
+  const isolatedHome = process.env.DOBIUS_USERDATA_DIR && process.env.DOBIUS_CLAUDE_HOME
+    ? path.join(path.resolve(process.env.DOBIUS_USERDATA_DIR), 'claude-home') : '';
+  const claudeHome = isolatedHome || path.join(homedir, '.claude');
+  const claudeSettingsPath = path.join(claudeHome, 'settings.json');
+  const realClaudeHomeRefusal = () => {
+    if (!process.env.DOBIUS_USERDATA_DIR) return '';
+    if (!isolatedHome) return 'an isolated Dobius never writes the real ~/.claude (set DOBIUS_CLAUDE_HOME=1)';
+    // Belt and braces: the same directory under another name, by inode.
+    const id = (p) => { try { const st = fs.statSync(p); return `${st.dev}:${st.ino}`; } catch { return null; } };
+    const dir = id(isolatedHome);
+    if (dir && dir === id(path.join(homedir, '.claude'))) return 'the isolated Claude home is the real ~/.claude, refused';
+    // Writes follow a symlinked settings.json, so it must not lead to the real one.
+    const file = id(claudeSettingsPath);
+    const realFile = path.join(homedir, '.claude', 'settings.json');
+    if (file && file === id(realFile)) return 'the isolated settings.json is the real one, refused';
+    // A DANGLING real link (the ~/.claude dir or its settings.json) has no
+    // inode to compare; it could be waiting for this very write to create its
+    // target, so refuse rather than guess.
+    for (const real of [path.join(homedir, '.claude'), realFile]) {
+      let dangling = false;
+      try { dangling = fs.lstatSync(real).isSymbolicLink() && !id(real); } catch { dangling = false; }
+      if (dangling) return `the real ${real} is a broken symlink, refused`;
+    }
+    return '';
+  };
   const STATUS_MARKER = ']777;dobius;';
   // printf '%s' does NOT interpret backslash escapes, so the JSON \uXXXX escapes
   // reach Claude's hook parser verbatim and become ESC / BEL when it emits them.
@@ -1661,7 +1742,9 @@ function setupFileHandlers() {
    * compare-and-swap, so a write landing inside that final gap is still lost.
    * Closing it needs a lock file the CLI would also have to honour.
    */
-  function writeClaudeSettings(settings, expectedRaw) {
+  function writeClaudeSettings(settings, expectedRaw, { mustExist = false } = {}) {
+    const refused = realClaudeHomeRefusal();
+    if (refused) throw new Error(refused);
     fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
     // undefined means "no guard". null means "the file did NOT exist when I
     // read it", which is a real claim and must be checked: treating it as no
@@ -1673,17 +1756,25 @@ function setupFileHandlers() {
       try { current = fs.readFileSync(claudeSettingsPath, 'utf8'); }
       catch { current = null; }
       if (expectedRaw === null) return current === null;
-      if (current === null) return true; // vanished: recreate rather than refuse
+      // Vanished: recreate rather than refuse, unless nobody asked for this
+      // write (the launch install), which must never create the file.
+      if (current === null) return !mustExist;
       return current === expectedRaw;
     };
     if (!unchanged()) throw new Error('settings.json changed under us, retry');
 
     const data = JSON.stringify(settings, null, 2) + '\n';
-    const tmp = `${claudeSettingsPath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
+    // Write THROUGH a symlinked settings.json (dotfiles): renaming over the
+    // link itself would replace it with a plain file and silently detach the
+    // user's real one, which now matters because the model line installs at
+    // launch without a click (Codex).
+    let target = claudeSettingsPath;
+    try { target = fs.realpathSync(claudeSettingsPath); } catch { /* absent: create it here */ }
+    const tmp = `${target}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
     try {
       fs.writeFileSync(tmp, data, 'utf8');
       if (!unchanged()) throw new Error('settings.json changed under us, retry');
-      fs.renameSync(tmp, claudeSettingsPath);
+      fs.renameSync(tmp, target);
     } catch (err) {
       try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
       throw err;
@@ -1864,7 +1955,7 @@ function setupFileHandlers() {
   // validation is silently ignored in its entirety, so that fix could disable
   // every setting the user has, which is far worse than the thing it fixes,
   // and it cannot be verified without writing to a real settings.json.
-  const statusLineBackupPath = path.join(homedir, '.claude', '.dobius-statusline-backup.json');
+  const statusLineBackupPath = path.join(claudeHome, '.dobius-statusline-backup.json');
   // Returns the parsed record AND the exact bytes it came from, so a later
   // delete can prove it is removing the same record rather than one another
   // instance wrote in between (Codex HIGH).
@@ -1891,56 +1982,121 @@ function setupFileHandlers() {
     } catch { /* already gone */ }
   };
 
-  ipcMain.handle('claudeUsage:getStatus', () => {
-    const { settings, exists } = readClaudeSettings();
-    if (settings === null) return { installed: false, error: 'settings.json is not valid JSON' };
-    const owned = ownsStatusLine(settings.statusLine);
-    // Owned by SOME Dobius is not the same as owned by THIS one. Two instances
-    // with different userData share this settings file, and the other one's
-    // reporter publishes into the other one's usage directory, so reporting
-    // here would look enabled and stay permanently empty (Codex MEDIUM).
-    const mine = owned && settings.statusLine.command === reporterCommand(app.getPath('userData'));
-    return { installed: mine, installedElsewhere: owned && !mine, exists };
-  });
+  // Owned by SOME Dobius is not the same as owned by THIS one. Two instances
+  // with different userData share this settings file, and the other one's
+  // reporter publishes into the other one's usage directory, so reporting
+  // here would look enabled and stay permanently empty (Codex MEDIUM).
+  const statusLineIsMine = (settings) => ownsStatusLine(settings?.statusLine)
+    && settings.statusLine.command === reporterCommand(app.getPath('userData'));
 
-  ipcMain.handle('claudeUsage:enable', (_evt, opts) => {
-    const { settings, raw, exists } = readClaudeSettings();
-    if (settings === null) return { error: PARSE_FAIL };
-    // Same refusal as the status hooks: never create this file silently.
-    if (!exists && !opts?.confirmCreate) {
-      return { error: 'needs-confirm-create', message: '~/.claude/settings.json does not exist. Confirm creation to enable usage reporting.' };
+  // The one statusLine carries two features, each with its own Settings
+  // switch: usage capture ("Account usage") and the model line ("Show model
+  // under the prompt", Brett). It is installed while either is on.
+  // modelUnderPrompt is ON unless explicitly turned off. usageReporting did
+  // not exist before the model line: an older build's install meant usage was
+  // on, so an unset value is settled from what settings.json shows, once.
+  // Settled with every parsed read, not once at launch: a settings.json that
+  // was unparseable at launch says nothing either way, and treating unset as
+  // off there would uninstall a working reporter on the next toggle (Codex).
+  // Persisted at once, never debounced: a crash after an install but before
+  // the save would read a model-only install as a legacy usage one next time.
+  const settleUsage = (settings) => {
+    if (getSettings().usageReporting !== undefined || !settings) return;
+    updateSettings({ usageReporting: statusLineIsMine(settings) });
+    persistConfigNow();
+  };
+  const statusLineParts = () => {
+    const s = getSettings();
+    return { capture: s.usageReporting === true, model: s.modelUnderPrompt !== false };
+  };
+  settleUsage(readClaudeSettings().settings);
+
+  // Which command of the user's the script chains. The INSTALLED script (the
+  // one settings.json actually runs, possibly another Dobius's) is the truth,
+  // because it is what renders today; the restore record is the fallback when
+  // that script cannot be read. Never this instance's own copy when the slot
+  // points elsewhere: that copy can be stale (Codex). Neither readable means
+  // UNKNOWN, and regenerating with no chain then would silently drop their
+  // status line (Codex HIGH). A command recovered from the script while the
+  // record is missing or malformed is written back as the record, or turning
+  // the features off later would delete their line instead of restoring it.
+  // The exact invariant planStatusLineInstall writes: chain is the value's own
+  // non-blank command. A record that breaks it was not written by us, and
+  // restoring from it could write garbage into the shared file (Codex HIGH).
+  const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  const isRecord = (r) => isPlainObject(r) && typeof r.present === 'boolean'
+    && (r.present
+      ? isPlainObject(r.value) && r.chain === (typeof r.value.command === 'string' && r.value.command.trim() ? r.value.command : null)
+      : r.value === null && r.chain === null);
+  const currentChain = (settings) => {
+    const { remember } = readStatusLineBackup();
+    const installed = ownsStatusLine(settings?.statusLine)
+      ? scriptPathFromCommand(settings.statusLine.command) : null;
+    let chain;
+    if (installed) {
+      try { chain = chainFromScript(fs.readFileSync(installed, 'utf8')); } catch { chain = undefined; }
     }
+    if (chain === undefined) return isRecord(remember) ? { known: true, chain: remember.chain } : { known: false };
+    if (chain && !isRecord(remember) && !realClaudeHomeRefusal()) {
+      try { writeStatusLineBackup({ present: true, value: { type: 'command', command: chain }, chain }); }
+      catch (err) { console.warn(`[statusLine] could not rebuild the restore record: ${err.message}`); }
+    }
+    return { known: true, chain };
+  };
+
+  // Temp file then rename. Writing in place truncates the LIVE script first,
+  // so a failure here would leave settings.json pointing at a half-written file
+  // and every render would lose the user's status line (reviewer HIGH).
+  const writeReporter = (chain) => {
     const userData = app.getPath('userData');
     const script = reporterScriptPath(userData);
+    fs.mkdirSync(usageDirPath(userData), { recursive: true });
+    const tmp = `${script}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, reporterScript(usageDirPath(userData), chain, statusLineParts()), { mode: 0o755 });
+      fs.renameSync(tmp, script);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+      throw err;
+    }
+  };
 
+  // `eligible`, when given, is re-checked against every read that is about to
+  // be written, including the conflict retry: the launch install is allowed
+  // only into an empty slot or over this instance's own reporter, and the
+  // slot can change between the launch check and the write (Codex).
+  const installStatusLine = (opts, settings, raw, exists, eligible = null) => {
+    // Checked before the restore record is written, which also lives there.
+    const refused = realClaudeHomeRefusal();
+    if (refused) return { error: refused };
+    // Same refusal as the status hooks: never create this file silently.
+    if (!exists && !opts?.confirmCreate) {
+      return { error: 'needs-confirm-create', message: '~/.claude/settings.json does not exist. Confirm creation to turn this on.' };
+    }
+    const userData = app.getPath('userData');
     const install = (base, baseRaw) => {
+      if (eligible && !eligible(base)) throw new Error('status line changed since launch, left alone');
       const plan = planStatusLineInstall(base.statusLine, reporterCommand(userData));
       // Keep the ORIGINAL when we already own the value: re-running enable must
       // never record our own wrapper as the thing to restore.
-      const remember = plan.remember ?? readStatusLineBackup().remember;
-      if (plan.remember) writeStatusLineBackup(plan.remember);
-      fs.mkdirSync(usageDirPath(userData), { recursive: true });
-      // Temp file then rename. Writing in place truncates the LIVE script
-      // first, so a failure here would leave settings.json pointing at a
-      // half-written file and every render would lose the user's status line
-      // (reviewer HIGH).
-      const tmp = `${script}.${process.pid}.tmp`;
-      try {
-        fs.writeFileSync(tmp, reporterScript(usageDirPath(userData), remember?.chain ?? null), { mode: 0o755 });
-        fs.renameSync(tmp, script);
-      } catch (err) {
-        try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
-        throw err;
+      let chain;
+      if (plan.remember) chain = plan.remember.chain;
+      else {
+        const cur = currentChain(base);
+        if (!cur.known) throw new Error('could not tell which status line of yours to keep, left as is');
+        chain = cur.chain;
       }
+      if (plan.remember) writeStatusLineBackup(plan.remember);
+      writeReporter(chain);
       base.statusLine = plan.statusLine;
-      writeClaudeSettings(base, baseRaw);
+      writeClaudeSettings(base, baseRaw, { mustExist: !!eligible });
     };
 
     try {
       install(settings, raw);
     } catch (err) {
       if (!String(err.message).includes('changed under us')) {
-        return { error: `Could not enable usage reporting: ${err.message}` };
+        return { error: `Could not update settings.json: ${err.message}` };
       }
       // Rebuild the edit from the FRESH read, so a concurrent Claude write to
       // permissions or MCP is not discarded by replaying our stale copy.
@@ -1949,27 +2105,155 @@ function setupFileHandlers() {
       try { install(fresh.settings, fresh.raw); }
       catch (err2) { return { error: `Could not update settings.json: ${err2.message}` }; }
     }
-    return { ok: true, installed: true };
-  });
+    return { ok: true };
+  };
 
-  ipcMain.handle('claudeUsage:disable', () => {
-    const { settings, raw } = readClaudeSettings();
-    if (settings === null) return { error: PARSE_FAIL };
-    const backup = readStatusLineBackup();
+  const removeStatusLine = (settings, raw) => {
+    const refused = realClaudeHomeRefusal();
+    if (refused) return { error: refused };
+    let backup = readStatusLineBackup();
+    // A lost or malformed record would read as "there was nothing" and delete
+    // their line. Recover it from the installed script first (Codex HIGH).
+    if (!isRecord(backup.remember) && ownsStatusLine(settings.statusLine)) {
+      const cur = currentChain(settings);
+      if (!cur.known) return { error: 'Could not tell which status line of yours to restore, left as is' };
+      backup = readStatusLineBackup();
+      if (!isRecord(backup.remember)) {
+        // Their command could not be saved back: keep everything as it is.
+        if (cur.chain) return { error: 'Could not save your status line to restore later, left as is' };
+        // Nothing was chained, so there is nothing to restore. Never hand
+        // the planner a record that failed validation.
+        backup = { remember: null, raw: backup.raw };
+      }
+    }
     const out = planStatusLineRemove(settings.statusLine, backup.remember);
     if (out.action === 'leave') {
       // Someone pointed statusLine elsewhere. Theirs stands; drop our record so
       // a later disable cannot resurrect a long-dead original over it.
       clearStatusLineBackup(backup.raw);
-      return { ok: true, installed: false, note: 'Your own status line was left in place' };
+      return { ok: true, note: 'Your own status line was left in place' };
     }
     if (out.action === 'delete') delete settings.statusLine;
     else settings.statusLine = out.statusLine;
-    try { writeClaudeSettings(settings, raw); }
+    // Removing never needs the file to exist: a settings.json that vanished
+    // since this read is not recreated from the stale copy.
+    try { writeClaudeSettings(settings, raw, { mustExist: true }); }
     catch (err) { return { error: `Could not update settings.json: ${err.message}` }; }
     clearStatusLineBackup(backup.raw);
     try { fs.unlinkSync(reporterScriptPath(app.getPath('userData'))); } catch { /* already gone */ }
-    return { ok: true, installed: false };
+    return { ok: true };
+  };
+
+  // Bring settings.json and the script in line with the two switches. Already
+  // ours: only the script is rewritten, settings.json is not touched at all.
+  const syncStatusLine = (opts, eligible = null) => {
+    const { settings, raw, exists } = readClaudeSettings();
+    if (settings === null) return { error: PARSE_FAIL };
+    if (eligible && !eligible(settings)) return { error: 'status line changed since launch, left alone' };
+    settleUsage(settings);
+    const { capture, model } = statusLineParts();
+    if (!capture && !model) return removeStatusLine(settings, raw);
+    if (statusLineIsMine(settings)) {
+      const cur = currentChain(settings);
+      if (!cur.known) return { error: 'Could not tell which status line of yours to keep, left as is' };
+      try { writeReporter(cur.chain); }
+      catch (err) { return { error: `Could not update the status line script: ${err.message}` }; }
+      return { ok: true };
+    }
+    return installStatusLine(opts, settings, raw, exists, eligible);
+  };
+
+  // Flip one switch and sync; a failed sync puts the switch back, so the
+  // stored choice never claims a state settings.json does not have.
+  // Persisted before settings.json is touched, for the same crash reason as
+  // settleUsage.
+  const setStatusLinePart = (key, on, opts, eligible = null) => {
+    const before = getSettings()[key];
+    updateSettings({ [key]: on });
+    persistConfigNow();
+    const r = syncStatusLine(opts, eligible);
+    if (r?.error) { updateSettings({ [key]: before }); persistConfigNow(); }
+    return r;
+  };
+
+  // On launch: the model line defaults ON, so a Dobius that has never decided
+  // installs it, but ONLY into an empty slot or over its own reporter. A status
+  // line the user set themselves is left alone (Settings says so and offers to
+  // chain it), and settings.json is never created here. A reporter already
+  // installed gets its script regenerated, which is how an update reaches it.
+  // An isolated instance touches the real settings.json never; it may run this
+  // against a throwaway home (DOBIUS_CLAUDE_HOME).
+  //
+  // ACCEPTED RESIDUALS (Codex round 2): two Dobius instances with different
+  // userData installing in the same instant can still overwrite each other's
+  // restore record, the race already accepted above for the restore record;
+  // and persistConfigNow cannot cancel an async config write already in flight,
+  // so a crash inside that sub-second window can resurrect the previous switch
+  // values, which the next launch then applies to the script.
+  if (!realClaudeHomeRefusal()) {
+    const { settings, exists } = readClaudeSettings();
+    if (settings && exists) {
+      if (getSettings().modelUnderPrompt === undefined) {
+        // Existence re-checked too: a settings.json deleted since launch read
+        // would otherwise be recreated without anyone confirming it.
+        const eligible = (st) => fs.existsSync(claudeSettingsPath)
+          && (statusLineIsMine(st) || st.statusLine === undefined);
+        if (eligible(settings)) {
+          const r = setStatusLinePart('modelUnderPrompt', true, undefined, eligible);
+          if (r?.error) console.warn(`[statusLine] model line install skipped: ${r.error}`);
+        }
+      } else if (statusLineIsMine(settings)) {
+        // Refresh only: if the slot changed since this read, leave it alone.
+        const r = syncStatusLine(undefined, (st) => fs.existsSync(claudeSettingsPath) && statusLineIsMine(st));
+        if (r?.error) console.warn(`[statusLine] script refresh skipped: ${r.error}`);
+      }
+    }
+  }
+
+  ipcMain.handle('claudeUsage:getStatus', () => {
+    const { settings, exists } = readClaudeSettings();
+    if (settings === null) return { installed: false, error: 'settings.json is not valid JSON' };
+    settleUsage(settings);
+    const owned = ownsStatusLine(settings.statusLine);
+    const mine = statusLineIsMine(settings);
+    return { installed: mine && statusLineParts().capture, installedElsewhere: owned && !mine, exists };
+  });
+
+  ipcMain.handle('claudeUsage:enable', (_evt, opts) => {
+    const r = setStatusLinePart('usageReporting', true, opts);
+    return r?.error ? r : { ok: true, installed: true };
+  });
+
+  ipcMain.handle('claudeUsage:disable', () => {
+    const r = setStatusLinePart('usageReporting', false);
+    return r?.error ? r : { ...r, installed: false };
+  });
+
+  ipcMain.handle('modelLine:getStatus', () => {
+    const { settings, exists } = readClaudeSettings();
+    if (settings === null) return { on: false, error: 'settings.json is not valid JSON' };
+    settleUsage(settings);
+    const owned = ownsStatusLine(settings.statusLine);
+    const mine = statusLineIsMine(settings);
+    // ON only if the script that runs actually prints it: a reporter left by
+    // an older build (an upgrade launch that could not refresh it) does not.
+    let printsModel = false;
+    if (mine) {
+      try { printsModel = fs.readFileSync(reporterScriptPath(app.getPath('userData')), 'utf8').includes(MODEL_LINE_MARKER); }
+      catch { printsModel = false; }
+    }
+    return {
+      on: mine && statusLineParts().model && printsModel,
+      // A status line of the user's own: turning this on chains it, after it.
+      theirs: settings.statusLine !== undefined && !owned,
+      installedElsewhere: owned && !mine,
+      exists,
+    };
+  });
+
+  ipcMain.handle('modelLine:set', (_evt, on, opts) => {
+    const r = setStatusLinePart('modelUnderPrompt', !!on, opts);
+    return r?.error ? r : { ...r, on: !!on };
   });
 
   // Read-only. Liveness is reported as CONTEXT, never as precedence: a record
@@ -2329,6 +2613,11 @@ function setupSessionTabCapture() {
       // ambiguity, and doing it here keeps it to one ps per tab per tick.
       // Codex v1.0.39 r4 P2.
       const liveTabs = listTerminals();
+      // Tab labels before AND after the probes below: a session is named only
+      // when its tab's label held still across the whole tick, so a rename
+      // landing mid-tick (often with a new claude) cannot pair the new name
+      // with the session the probe saw before it.
+      const labelsBefore = getTabLabelsById();
       const infoByTab = new Map();
       const probedAt = new Map(); // when each tab was looked at: the link stamp
       for (const t of liveTabs) {
@@ -2344,13 +2633,19 @@ function setupSessionTabCapture() {
         }
       }
       // FRESH sessions (bare `claude`, no --resume): the id is not in the argv,
-      // so correlate process start time to the transcript the process created
-      // inside its own project. Without this a fresh tab never gets linked,
-      // which is why the sidebar showed no tab name for it and auto-resume
-      // could not restore it. v1.0.39.
+      // so read it from Claude's own record, else correlate process start time
+      // to the transcript the process created inside its own project. Without
+      // this a fresh tab never gets linked, which is why the sidebar showed no
+      // tab name for it and auto-resume could not restore it. v1.0.39.
+      const provenTabs = new Set();
       const freshByTab = await resolveFreshSessionsForTabs(
-        liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds,
+        liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds, undefined, provenTabs,
       );
+      // Name each running session after its tab (History shows it). Read as
+      // the tick sees it, so a session keeps the name its tab had while it
+      // ran, not whatever the tab is renamed to for later work.
+      const labelsAfter = getTabLabelsById();
+      const namePairs = [];
       for (const t of liveTabs) {
         const claudeInfo = infoByTab.get(t.id);
         const runningSessionId = claudeInfo?.sessionId || freshByTab.get(t.id) || null;
@@ -2364,16 +2659,46 @@ function setupSessionTabCapture() {
           continue;
         }
         claimedIds.add(runningSessionId);
+        // Tag how we know: an id read out of `claude --resume <id>` or out of
+        // the process's own record is certain, one inferred from start/birth
+        // timing is not. Auto-resume acts only on the certain kinds. v1.0.39.
+        const how = claudeInfo?.sessionId ? 'argv' : (provenTabs.has(t.id) ? 'presence' : 'fresh');
+        // A link for a bare `claude` must persist the cwd the transcript was
+        // actually resolved against (the tab's LIVE cwd), not t.cwd, which is
+        // only where the terminal was originally opened. `cd`ing to another
+        // project and running a bare `claude` is normal, and storing t.cwd
+        // then pointed projectPath at the wrong ~/.claude/projects dir, so
+        // anything loading the transcript from the link (Cmd+R size check,
+        // copy/speak last response) looked in the wrong place.
+        // Codex v1.0.39 r11 P2.
+        const linkPath = how === 'argv' ? t.cwd : (cwdByTab.get(t.id) || t.cwd);
+        const label = labelsAfter.get(t.id);
+        // An unknown label (tab not persisted yet) says nothing; a default one
+        // ("Tab 3") clears the name so the summary shows again.
+        if (label !== undefined && label === labelsBefore.get(t.id)) {
+          // A bare `claude` matched by TIMING: after /clear its process writes
+          // a NEW transcript while the match stays on the old one. Skip it
+          // once a newer unclaimed transcript appeared, so a renamed tab cannot
+          // relabel a conversation it has moved past. Claude's own record
+          // follows /clear, so a tab linked by it needs none of this.
+          // ponytail: the name follows whatever session this loop believes
+          // the tab runs. Where that belief is wrong (/clear under
+          // `claude --resume A`, whose argv still says A) the link, auto-resume
+          // and the phone are wrong too; the fix belongs in the resolver.
+          const movedPast = how === 'fresh' && await sessionMovedPast(
+            cwdByTab.get(t.id) || t.cwd, runningSessionId, claudeInfo?.startedAt, claimedIds);
+          if (!movedPast) namePairs.push([runningSessionId, sessionNameFromTabLabel(label)]);
+        }
         const mappedSessionId = tabToSessionId.get(t.id);
         if (mappedSessionId === runningSessionId) {
           // UPGRADE provenance: the link was inferred from timing, but the tab's
-          // argv now names this very id, so it is certain. Without this the
-          // 'fresh' tag sticks forever and the r8 auto-resume gate keeps
-          // skipping a session argv has since proven, e.g. Sam Ctrl-Cs a bare
+          // argv or Claude's record now names this very id, so it is certain.
+          // Without this the 'fresh' tag sticks forever and the r8 auto-resume
+          // gate keeps skipping a session since proven, e.g. Sam Ctrl-Cs a bare
           // `claude` and reruns it as `claude --resume <same-id>`.
-          // Codex v1.0.39 r12 P2.
-          if (claudeInfo?.sessionId && fresh[runningSessionId]?.resolvedBy === 'fresh') {
-            setSessionTabLink(runningSessionId, t.id, t.cwd, 'argv', probedAt.get(t.id));
+          // Codex v1.0.39 r12 P2. Lapsed proof comes back down the same way.
+          if (provenanceChanged(fresh[runningSessionId]?.resolvedBy, how)) {
+            setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
             continue;
           }
           // Still running: refresh the lastRunningAt stamp so auto-resume
@@ -2384,20 +2709,15 @@ function setupSessionTabCapture() {
         // Tab is running a different (or new) session than the map says.
         if (mappedSessionId) removeSessionTabLink(mappedSessionId);
         if (!fresh[runningSessionId]) {
-          // Tag how we know: an id read out of `claude --resume <id>` is
-          // certain, one inferred from start/birth timing is not. Auto-resume
-          // acts only on the certain kind. v1.0.39.
-          const how = claudeInfo?.sessionId ? 'argv' : 'fresh';
-          // A fresh link must persist the cwd the transcript was actually
-          // resolved against (the tab's LIVE cwd), not t.cwd, which is only
-          // where the terminal was originally opened. `cd`ing to another
-          // project and running a bare `claude` is normal, and storing t.cwd
-          // then pointed projectPath at the wrong ~/.claude/projects dir, so
-          // anything loading the transcript from the link (Cmd+R size check,
-          // copy/speak last response) looked in the wrong place.
-          // Codex v1.0.39 r11 P2.
-          const linkPath = how === 'fresh' ? (cwdByTab.get(t.id) || t.cwd) : t.cwd;
           setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
+        }
+      }
+      // A name changed (a rename, a new title): History lists re-read now
+      // rather than on the next transcript write, which an idle chat never
+      // makes. Its own event: data:updated also reloads projects and stats.
+      if (recordSessionTabNames(namePairs)) {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send('sessions:namesChanged');
         }
       }
     } catch { /* best-effort */ }
@@ -2638,25 +2958,60 @@ function setupImessageBridgeHandlers() {
   });
 }
 
+// Existence + safety guard for opening a project window. Avoids opening a
+// window for a deleted / typo / sensitive path. Resolves symlinks then verifies
+// the path is an actual directory. Apple-grade audit P2. null when it is fine.
+function projectDirError(projectPath) {
+  if (typeof projectPath !== 'string' || !projectPath.startsWith('/')) {
+    return 'projectPath must be an absolute path';
+  }
+  try {
+    const real = fs.realpathSync(projectPath);
+    const stat = fs.statSync(real);
+    if (!stat.isDirectory()) return 'projectPath is not a directory';
+  } catch (err) {
+    return `cannot open project: ${err.message}`;
+  }
+  return null;
+}
+
+// Project windows (webContents id -> { count, opened }) owed new tabs by the
+// New Tab picker in another window. The window takes them once its tabs are
+// restored, which covers a window still loading and so unable to hear
+// window:newTabRequest. `opened`: the request created the window, so its fresh
+// first tab (if it had no saved tabs) already answers one. Capped so a stuck
+// window cannot be owed a pile; a request past the cap is refused, not lost.
+// ponytail: an entry for a window closed before it took its tabs is never
+// removed (webContents ids are not reused, so it is only a stale integer).
+const pendingNewTabs = new Map();
+const MAX_PENDING_NEW_TABS = 5;
+
 function setupWindowHandlers() {
   ipcMain.handle('window:openProject', (_event, projectPath) => {
-    // Existence + safety guard. Avoids opening a window for a deleted /
-    // typo / sensitive path. Resolves symlinks then verifies the path is
-    // an actual directory. Apple-grade audit P2.
-    if (typeof projectPath !== 'string' || !projectPath.startsWith('/')) {
-      return { ok: false, error: 'projectPath must be an absolute path' };
-    }
-    try {
-      const real = fs.realpathSync(projectPath);
-      const stat = fs.statSync(real);
-      if (!stat.isDirectory()) {
-        return { ok: false, error: 'projectPath is not a directory' };
-      }
-    } catch (err) {
-      return { ok: false, error: `cannot open project: ${err.message}` };
-    }
+    const error = projectDirError(projectPath);
+    if (error) return { ok: false, error };
     const win = openProjectWindow(projectPath);
     return { ok: true, id: win.id };
+  });
+
+  ipcMain.handle('window:openProjectNewTab', (_event, projectPath) => {
+    const error = projectDirError(projectPath);
+    if (error) return { ok: false, error };
+    const before = new Set(BrowserWindow.getAllWindows().map((w) => w.id));
+    const win = openProjectWindow(projectPath);
+    const wcId = win.webContents.id;
+    const owed = pendingNewTabs.get(wcId) || { count: 0, opened: !before.has(win.id) };
+    if (owed.count >= MAX_PENDING_NEW_TABS) return { ok: false, error: 'that window is still opening' };
+    pendingNewTabs.set(wcId, { count: owed.count + 1, opened: owed.opened });
+    win.webContents.send('window:newTabRequest');
+    return { ok: true, id: win.id };
+  });
+
+  // The new tabs this window owes ({ count, opened }), cleared as it is read.
+  ipcMain.handle('window:takePendingNewTab', (event) => {
+    const owed = pendingNewTabs.get(event.sender.id) || { count: 0, opened: false };
+    pendingNewTabs.delete(event.sender.id);
+    return owed;
   });
 
   ipcMain.handle('window:pickAndOpenProject', async (event) => {
@@ -2899,6 +3254,15 @@ function setupWindowHandlers() {
     }
     return { ok: true };
   });
+
+  // /openTab on the local bridge (Brett's inbox board): a visible tab in a
+  // project window, with Claude started and a message typed and then sent
+  // with one Enter (docs/bridge-open-tab.md). It waits for the same
+  // tabsReady signal a dock does.
+  setOpenTabService(createOpenTabService(createBridgeOpenDeps({
+    windowReady: (wc) => dockReadyWc.has(wc.id),
+    ownerOf: (tabId) => terminalOwners.get(tabId),
+  })));
 
   // Record the docked tab in the target window's saved tab list BEFORE the
   // handoff: terminal:loadState only returns scrollback for a tab a window
@@ -3406,6 +3770,7 @@ app.whenReady().then(() => {
   addTerminalObserver({
     onData: (id, data) => terminalStatus.ingest(id, data),
     onExit: (id, info) => terminalStatus.noteExit(id, info),
+    onSpawn: (id) => terminalStatus.forget(id),
   });
   statusSettleTimer = setInterval(() => terminalStatus.settle(), 1000);
   startVoiceBridge();
@@ -3805,8 +4170,9 @@ app.on('before-quit', (e) => {
         // Without this, a tab mapped to A that starts a bare `claude` (B) and
         // quits before the next 15s tick would leave A's stamp fresh and
         // auto-resume would reopen A instead of B. Codex v1.0.39 r3 P2.
+        const provenTabs = new Set();
         const freshByTab = await resolveFreshSessionsForTabs(
-          liveTabs, infoByTab, cwdByTab, tabToSidAll, claimedIds, () => reconcileAborted,
+          liveTabs, infoByTab, cwdByTab, tabToSidAll, claimedIds, () => reconcileAborted, provenTabs,
         );
         for (const t of liveTabs) {
           if (reconcileAborted) return;
@@ -3816,6 +4182,9 @@ app.on('before-quit', (e) => {
           // from the fresh correlation. Null means we cannot name what (if
           // anything) this tab is running.
           const running = info?.sessionId || freshByTab.get(t.id) || null;
+          // Same tagging and resolved-cwd rule as the tick. Codex v1.0.39 r11 P2.
+          const howQ = info?.sessionId ? 'argv' : (provenTabs.has(t.id) ? 'presence' : 'fresh');
+          const linkPathQ = howQ === 'argv' ? t.cwd : (cwdByTab.get(t.id) || t.cwd);
           if (sid && !running) {
             // The mapped session is NOT what this tab is running now. Covers
             // both "no claude at all" (stopped before quit) and "a claude we
@@ -3835,23 +4204,20 @@ app.on('before-quit', (e) => {
             clearSessionTabRunning(sid);
           } else if (
             running && running === sid
-            && info?.sessionId && mapQ[sid]?.resolvedBy === 'fresh'
+            && provenanceChanged(mapQ[sid]?.resolvedBy, howQ)
           ) {
-            // Same provenance upgrade as the tick: argv now proves an id we had
-            // only inferred, so re-link it as certain. Quitting right after
-            // `claude --resume <same-id>` would otherwise leave it 'fresh' and
-            // the r8 gate would skip restoring it. Codex v1.0.39 r12 P2.
-            setSessionTabLink(sid, t.id, t.cwd, 'argv');
+            // Same provenance change as the tick: argv or Claude's record now
+            // proves an id we had only inferred, so re-link it as certain.
+            // Quitting right after `claude --resume <same-id>` would otherwise
+            // leave it 'fresh' and the r8 gate would skip restoring it.
+            // Codex v1.0.39 r12 P2.
+            setSessionTabLink(sid, t.id, linkPathQ, howQ);
           } else if (running && running !== sid) {
             // Tab switched sessions since the last capture tick (user ran
             // `claude --resume B` in a tab mapped to A, then quit fast).
             // Mirror the tick: drop the stale link, record the live one so
             // auto-resume revives B, not A. Codex v1.0.35 r11 P2.
             if (sid) removeSessionTabLink(sid);
-            // Same argv-vs-inferred tagging as the tick, and the same
-            // resolved-cwd rule for fresh links. Codex v1.0.39 r11 P2.
-            const howQ = info?.sessionId ? 'argv' : 'fresh';
-            const linkPathQ = howQ === 'fresh' ? (cwdByTab.get(t.id) || t.cwd) : t.cwd;
             setSessionTabLink(running, t.id, linkPathQ, howQ);
           }
         }

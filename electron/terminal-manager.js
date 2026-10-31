@@ -1,6 +1,6 @@
 import pty from 'node-pty';
 import { isTerminalReply, createVisibleOutputScanner } from './terminal-reply.js';
-import { isClaudeCommand } from './claude-argv.js';
+import { isClaudeCommand, classifyClaudeProcess } from './claude-argv.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -15,17 +15,28 @@ import { promisify } from 'util';
 const execFileP = promisify(execFile);
 import { app } from 'electron';
 import { getSessionTabMap } from './config-manager.js';
+import { loginShellSpawn, ptyProgramName } from '../shared/new-tab.js';
 
 const terminals = new Map();
+// getTerminalClaudeInfo { unique }: a shell with more children answers nothing.
+const MAX_UNIQUE_CHILDREN = 16;
 
 // Global terminal observers (v1.0.43): sinks that see EVERY terminal's data +
 // exit, independent of window/mobile attachment. Used by the main-process
 // status authority. Each observer is { onData(id, data, cwd), onExit(id,
-// {exitCode, signal, cwd}) }.
+// {exitCode, signal, cwd}), onSpawn(id) }.
 const terminalObservers = new Set();
 export function addTerminalObserver(observer) {
   if (observer) terminalObservers.add(observer);
   return () => terminalObservers.delete(observer);
+}
+
+// Sinks that see every write INTO a terminal (id, data), from any surface.
+// /openTab uses it to notice a person typing into the tab it opened.
+const inputObservers = new Set();
+export function addInputObserver(fn) {
+  if (typeof fn === 'function') inputObservers.add(fn);
+  return () => inputObservers.delete(fn);
 }
 
 /**
@@ -138,7 +149,12 @@ export function trimToEscapeBoundary(buf, cap) {
   return esc > 0 && esc <= ESC_RESYNC_WINDOW ? cut.slice(esc) : cut;
 }
 
-export function createTerminal(id, cwd, webContents, accountEnv = {}) {
+// startCommand: a New Tab's tool ('claude' | 'codex', from shared/new-tab.js
+// launchCommandFor, never free text). The login shell runs it as its first
+// command, after the rc files, then becomes a normal login shell when it exits.
+// Nothing is typed into the terminal, so it can never land in a user's line,
+// a startup prompt or a moved tab.
+export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCommand = null } = {}) {
   // A respawn under an existing id (e.g. "Continue on switched account") must
   // NOT strand what was attached to the old PTY. Carry over the live subscriber
   // set so an attached phone keeps streaming (killing the old PTY would orphan
@@ -154,6 +170,10 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   if (terminals.has(id)) {
     killTerminal(id);
   }
+  // A respawn under the same id starts fresh for observers (status timing).
+  for (const obs of terminalObservers) {
+    try { obs.onSpawn?.(id); } catch { /* never let an observer break the PTY */ }
+  }
 
   // Validate cwd is an existing directory; fall back to home
   let safeCwd = os.homedir();
@@ -167,6 +187,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
       // Invalid path — use home directory
     }
   }
+
+  // A New Tab's tool belongs to its project: never start it in the fallback.
+  if (safeCwd !== cwd) startCommand = null;
 
   // Per-project shell history file
   const extraEnv = {};
@@ -240,8 +263,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}) {
   };
   const spawnCols = (Number.isInteger(prevCols) && prevCols > 0) ? prevCols : 80;
   const spawnRows = (Number.isInteger(prevRows) && prevRows > 0) ? prevRows : 24;
-  const term = pty.spawn(shell, ['-l'], {
-    name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: spawnEnv,
+  const start = loginShellSpawn(shell, startCommand);
+  const term = pty.spawn(shell, start.args, {
+    name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: { ...spawnEnv, ...start.env },
   });
 
   const dataSub = term.onData((data) => {
@@ -389,6 +413,9 @@ export function writeTerminal(id, data) {
       entry.outputSeqAtInput = entry.outputSeq || 0;
       entry.inputAt = Date.now();
     }
+    for (const fn of inputObservers) {
+      try { fn(id, data); } catch { /* an observer must never break typing */ }
+    }
     entry.pty.write(data);
   }
 }
@@ -474,16 +501,23 @@ export async function getTerminalProcess(id) {
       timeout: 1000,
       encoding: 'utf8',
     });
-    const result = stdout.trim();
-    if (!result) return null;
     // pgrep -lP returns lines like "12345 claude"
-    const lines = result.split('\n').filter(Boolean);
-    if (lines.length === 0) return null;
+    const lines = stdout.trim().split('\n').filter(Boolean);
     for (const line of lines) {
       const name = line.trim().split(/\s+/).slice(1).join(' ');
       if (name && name !== 'zsh' && name !== 'bash' && name !== 'sh') return name;
     }
-    return null;
+  } catch {
+    // pgrep exits 1 when there are no children: not an answer yet.
+  }
+  // No program under the shell: the PTY's process may itself be one, when
+  // `exec` replaced the shell (a shell function exec'ing claude, `exec cat`).
+  try {
+    const { stdout } = await execFileP('/bin/ps', ['-o', 'comm=', '-p', String(entry.pty.pid)], {
+      timeout: 1000,
+      encoding: 'utf8',
+    });
+    return ptyProgramName(stdout, process.env.SHELL);
   } catch {
     return null;
   }
@@ -511,8 +545,11 @@ export async function getTerminalProcessArgv(id) {
  * tabs got no name badge in the sidebar, and auto-resume could never restore
  * them either. startedAt lets the caller correlate the process to the
  * transcript it created (see resolveFreshSessionId in main.js).
+ * `unique: true` answers null when more than one claude runs in the shell.
+ * soleChild: this is the shell's only child, so no other program in the tab
+ * (a suspended claude, say) can be the one the person is really working in.
  */
-export async function getTerminalClaudeInfo(id) {
+export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;
   try {
@@ -523,6 +560,10 @@ export async function getTerminalClaudeInfo(id) {
       encoding: 'utf8',
     });
     const children = pgrepOut.trim().split('\n').filter(Boolean);
+    // `unique`: one ps per child, so a shell with many children is not
+    // walked (each poll would spawn them all again): no answer.
+    if (unique && children.length > MAX_UNIQUE_CHILDREN) return null;
+    let found = null;
     for (const childPid of children) {
       // `lstart` is the process start time; `command` is the argv. One ps
       // call gets both so the fresh-session correlation costs nothing extra.
@@ -536,13 +577,29 @@ export async function getTerminalClaudeInfo(id) {
       // rest is the command.
       const lstart = line.slice(0, 24);
       const command = line.slice(24).trim();
-      if (!isClaudeCommand(command)) continue;
+      if (!isClaudeCommand(command)) {
+        // `unique`: anything else that so much as names claude (a path with
+        // spaces such as `/x/CLI Tools/claude[/versions/N]` fails
+        // isClaudeCommand) may be one, so the shell is ambiguous. Fails
+        // closed: a child like `vim claude.md` also costs the Waiting label.
+        if (unique && /claude/i.test(command)) return null;
+        continue;
+      }
+      // `unique`: the strict reading too, so a process that only names the CLI
+      // (`node watcher.js /path/claude`) is not taken for it. Capped, since
+      // classifyClaudeProcess's cost grows with the square of the length and
+      // a claude command line is short.
+      if (unique && (command.length > 4096 || classifyClaudeProcess(command).kind !== 'claude')) return null;
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
-      return { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid) };
+      const info = { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid), soleChild: children.length === 1 };
+      if (!unique) return info;
+      // `unique`: two claudes in one shell cannot be told apart, so no answer.
+      if (found) return null;
+      found = info;
     }
-    return null;
+    return found;
   } catch {
     return null;
   }
@@ -985,6 +1042,11 @@ export function getActiveTerminals() {
 export function getTerminalBuffer(id) {
   const entry = terminals.get(id);
   return entry ? entry.outputBuffer : '';
+}
+
+/** The PTY's current width in columns (last spawn or resize), or null. */
+export function terminalCols(id) {
+  return terminals.get(id)?.cols ?? null;
 }
 
 // The live pty object behind a tab id, or null. Identity, not a handle to

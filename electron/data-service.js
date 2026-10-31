@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import fsSync from 'fs';
+import { isNewTabWrapperCommand } from '../shared/new-tab.js';
 import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
@@ -8,7 +9,8 @@ import {
   parseJsonl, streamJsonl, timeAgo, pathExists, mapLimit,
 } from './data-utils.js';
 import { listCodexSessions, codexTranscript } from './codex-sessions.js';
-import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects, getAllProjectsWithTabs, getSessionTabMap } from './config-manager.js';
+import { presenceSessionId } from './claude-presence.js';
+import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects, getAllProjectsWithTabs, getSessionTabMap, getSessionTabNames } from './config-manager.js';
 
 /**
  * Load session history from ~/.claude/history.jsonl
@@ -69,6 +71,121 @@ export async function loadHistory() {
 // worse than showing a bot run. On 2026-10-20, 2961 of the 3000 newest
 // transcripts on Sam's Mac were sdk-py, 38 were cli, none were sdk-cli.
 const AUTOMATED_ENTRYPOINTS = new Set(['sdk-py', 'sdk-ts']);
+
+// A copy that owns its characters: a slice of a huge parsed string keeps the
+// whole parent alive, in every entry of the transcript cache. utf16le, because
+// utf8 would turn a lone surrogate into U+FFFD.
+const detached = (text) => (text ? Buffer.from(text, 'utf16le').toString('utf16le') : '');
+
+// What loadAllSessions learns by reading a transcript's tail, per file, kept
+// while the file's size and mtime hold: each Tabs sidebar asks every 5s, and
+// re-parsing 10,000 tails cost 9s of CPU a call. ONLY what the file alone
+// decides goes in here. Anything from the clock (status, age), the settings
+// (project names, hidden paths) or the caller (excludeAutomated) is worked out
+// by the caller, every call. Entries are detached strings, roughly 1KB each.
+// ponytail: past the cap, new files are simply read every time. Dropping old
+// entries instead would miss on every scan, since each scan walks them all.
+export const transcriptCache = new Map(); // filePath -> { size, mtimeMs, facts }
+export const TRANSCRIPT_CACHE_MAX = 20_000;
+
+async function transcriptFacts(filePath, st) {
+  const hit = st && transcriptCache.get(filePath);
+  if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.facts;
+  const { facts, parsed } = await readTranscriptFacts(filePath, st);
+  // stat came first, so a write during the read only makes the next scan miss.
+  // A read that came back empty may have failed (parseJsonl answers [] on any
+  // error, EMFILE included): never remembered as this file's truth.
+  if (st && parsed && (transcriptCache.has(filePath) || transcriptCache.size < TRANSCRIPT_CACHE_MAX)) {
+    transcriptCache.set(filePath, { size: st.size, mtimeMs: st.mtimeMs, facts });
+  }
+  return facts;
+}
+
+async function readTranscriptFacts(filePath, st) {
+    // parseJsonl is bounded since v1.0.23, uses readTail under the hood so
+  // a 24MB transcript no longer pulls 95MB into memory. Read 200 entries
+  // (was 5): modern Claude Code transcripts pad the tail with metadata
+  // entries (last-prompt, ai-title, mode, permission-mode,
+  // queue-operation, attachment, file-history-snapshot, system) and
+  // assistant replies. The user's most recent prompt often sits well
+  // beyond the last 5 records, so a 5-entry tail found no user message,
+  // no parseable timestamp, and returned "No preview available" +
+  // timestamp=0 for every recent session (v1.0.34 fix).
+  const entries = await parseJsonl(filePath, 200);
+  let preview = '';
+  // Newest stamp on ANY record: drives the 'working' status. Not the
+  // sort key: hook output, file snapshots and queue records are written
+  // when a session is merely resumed, which floated untouched chats to
+  // the top of History (Brett: "in order from the most recently
+  // messaged one").
+  let timestamp = 0;
+  // Stamp of the newest real user or assistant message: the sort key.
+  let messageAt = 0;
+  // lastRole drives the cross-session status dot.
+  let lastRole = '';
+  // entrypoint of the NEWEST user/assistant record (set with lastRole
+  // below, never inherited from an older record). See AUTOMATED_ENTRYPOINTS.
+  let entrypoint = '';
+  // Walk from newest to oldest so the FIRST user message we find is the
+  // most recent one, and we stop as soon as we have both preview + a
+  // parseable timestamp + a role signal.
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i];
+    if (!entry || typeof entry !== 'object') continue;
+    const tsMs = typeof entry.timestamp === 'number'
+      ? entry.timestamp
+      : (entry.timestamp ? new Date(entry.timestamp).getTime() : 0);
+    if (tsMs && tsMs > timestamp) timestamp = tsMs;
+    let role = entryRole(entry);
+    // Typed text of a user row ('' for a tool result). Hoisted so the
+    // message stamp below can tell a typed prompt from a tool result.
+    const text = role === 'user' ? userEntryText(entry) : '';
+    if (role === 'user') {
+      // System-injected pseudo-user rows (task notifications, system
+      // reminders, command echoes, skill bodies) are not turns Sam took:
+      // they must not become the preview (v1.0.37) NOR count as "user
+      // spoke last", which pinned a finished session's sidebar dot on
+      // red 'needs' forever when a notification trailed the real ending
+      // (Codex, Medium). Tool-result rows carry no text and keep their
+      // role: a trailing tool result genuinely means Claude owes a
+      // reply.
+      if (text && isSyntheticUserText(text)) {
+        role = '';
+      } else if (!preview && text) {
+        preview = detached(sanitizePreviewText(text).slice(0, 200));
+      }
+    }
+    // lastRole is the newest role we saw (tail walk, first match wins).
+    if (role && !lastRole) {
+      lastRole = role;
+      entrypoint = typeof entry.entrypoint === 'string' ? entry.entrypoint : '';
+    }
+    if (!messageAt) messageAt = messageStamp(entry, role, text, tsMs);
+    if (preview && messageAt && lastRole) break;
+  }
+  // The sort key comes from the one lookup Cmd+R also uses. (The walk's
+  // own messageAt only decides its early exit above.)
+  const last = await lastMessageAt(filePath, entries);
+  messageAt = last.at;
+  // Claude Code's own name for the conversation ("Fix login bug"),
+  // rewritten as the chat goes; the newest one wins. History rows lead
+  // with it because the newest prompt is often a tool echo or missing.
+  // A SEPARATE type-only pass: extending the walk above to find it moved
+  // timestamp/status off records the old early exit never reached.
+  let title = '';
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const e = entries[i];
+    if (e?.type === 'ai-title' && typeof e.aiTitle === 'string') {
+      title = detached(sanitizePreviewText(e.aiTitle).slice(0, 120));
+      break;
+    }
+  }
+
+  // The boolean replaces entrypoint, an unbounded string from the file.
+  const automated = AUTOMATED_ENTRYPOINTS.has(entrypoint);
+  const activityAt = timestamp || st?.mtimeMs || 0;
+  return { facts: { preview, title, lastRole, automated, messageAt, activityAt }, parsed: entries.length > 0 && last.complete };
+}
 
 /**
  * Load ALL sessions across all projects by scanning ~/.claude/projects/.
@@ -137,6 +254,7 @@ export async function loadAllSessions(projectFilter, opts = {}) {
     // in parseJsonl, that OOM-crashed the main process on dashboards with large
     // ~/.claude histories. A cap of 24 keeps memory and fd usage flat.
     const fileTasks = [];
+    const notScanned = []; // hidden projects' dirs: a project window still reads them
     // Only scan Claude transcripts when Claude is a requested source. The
     // Codex tab (sources=['codex']) must NOT return Claude sessions (reviewer
     // HIGH: "Codex" and "All" were byte-identical). Empty fileTasks below makes
@@ -150,7 +268,10 @@ export async function loadAllSessions(projectFilter, opts = {}) {
       if (projectFilter && projectPath !== projectFilter) continue;
       // Skip user-hidden sources (before any file reads, so 260 headless spam
       // transcripts cost zero I/O). projectFilter above already bypasses this.
-      if (!projectFilter && hiddenPaths.has(projectPath)) continue;
+      if (!projectFilter && hiddenPaths.has(projectPath)) {
+        notScanned.push(projectDir + path.sep);
+        continue;
+      }
       const projectName = realPath
         ? realPath.split('/').filter(Boolean).pop()
         : dir.name.split('-').filter(Boolean).pop() || dir.name;
@@ -165,6 +286,17 @@ export async function loadAllSessions(projectFilter, opts = {}) {
       }
     }
 
+    // A full scan sees every file it can: anything else was deleted, unless its
+    // project is hidden from this scan. A scoped scan sees one project, which
+    // says nothing of the rest. First, so a cache full of deleted files makes
+    // room for this scan.
+    if (!projectFilter && sources.includes('claude')) {
+      const seen = new Set(fileTasks.map((t) => path.join(t.projectDir, t.file)));
+      for (const key of transcriptCache.keys()) {
+        if (!seen.has(key) && !notScanned.some((dir) => key.startsWith(dir))) transcriptCache.delete(key);
+      }
+    }
+
     await mapLimit(fileTasks, 24, async ({ projectDir, projectPath, projectName, file }) => {
       const sessionId = file.replace('.jsonl', '');
       const filePath = path.join(projectDir, file);
@@ -173,116 +305,19 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         // resume) still works after the sidebar moved off the history-based
         // source. Without this, double-clicking a 100MB transcript from the
         // sidebar would hang Claude. Codex PR#3 r6 P2.
-        let sizeMB = 0;
+        let st = null;
         try {
-          const st = await fs.stat(filePath);
-          sizeMB = st.size / (1024 * 1024);
+          st = await fs.stat(filePath);
         } catch { /* file vanished between readdir + stat, leave 0 */ }
-        // parseJsonl is bounded since v1.0.23, uses readTail under the hood so
-        // a 24MB transcript no longer pulls 95MB into memory. Read 200 entries
-        // (was 5): modern Claude Code transcripts pad the tail with metadata
-        // entries (last-prompt, ai-title, mode, permission-mode,
-        // queue-operation, attachment, file-history-snapshot, system) and
-        // assistant replies. The user's most recent prompt often sits well
-        // beyond the last 5 records, so a 5-entry tail found no user message,
-        // no parseable timestamp, and returned "No preview available" +
-        // timestamp=0 for every recent session (v1.0.34 fix).
-        const entries = await parseJsonl(filePath, 200);
-        let preview = '';
-        let timestamp = 0;
-        // lastRole drives the cross-session status dot.
-        let lastRole = '';
-        // entrypoint of the NEWEST user/assistant record (set with lastRole
-        // below, never inherited from an older record). See AUTOMATED_ENTRYPOINTS.
-        let entrypoint = '';
-        // Walk from newest to oldest so the FIRST user message we find is the
-        // most recent one, and we stop as soon as we have both preview + a
-        // parseable timestamp + a role signal.
-        for (let i = entries.length - 1; i >= 0; i -= 1) {
-          const entry = entries[i];
-          if (!entry || typeof entry !== 'object') continue;
-          const tsMs = typeof entry.timestamp === 'number'
-            ? entry.timestamp
-            : (entry.timestamp ? new Date(entry.timestamp).getTime() : 0);
-          if (tsMs && tsMs > timestamp) timestamp = tsMs;
-          let role = (entry.type === 'human' || entry.role === 'user' || entry.message?.role === 'user')
-            ? 'user'
-            : (entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant')
-              ? 'assistant'
-              : '';
-          if (role === 'user') {
-            const raw = entry.message?.content !== undefined
-              ? entry.message.content
-              : (entry.content !== undefined
-                ? entry.content
-                : (typeof entry.message === 'string' ? entry.message : ''));
-            let text = '';
-            if (typeof raw === 'string') {
-              text = raw;
-            } else if (Array.isArray(raw)) {
-              // Anthropic content-blocks shape. Keep text-type blocks only,
-              // skip tool_use / tool_result / image so the sidebar doesn't
-              // preview a base64 blob. Codex-alike shape check.
-              text = raw
-                .filter((b) => b && (b.type === 'text' || typeof b.text === 'string'))
-                .map((b) => (typeof b.text === 'string' ? b.text : ''))
-                .filter(Boolean)
-                .join(' ');
-            }
-            text = String(text).trim();
-            // System-injected pseudo-user rows (task notifications, system
-            // reminders, command echoes, skill bodies) are not turns Sam took:
-            // they must not become the preview (v1.0.37) NOR count as "user
-            // spoke last", which pinned a finished session's sidebar dot on
-            // red 'needs' forever when a notification trailed the real ending
-            // (Codex, Medium). Tool-result rows carry no text and keep their
-            // role: a trailing tool result genuinely means Claude owes a
-            // reply.
-            if (text && isSyntheticUserText(text)) {
-              role = '';
-            } else if (!preview && text) {
-              preview = sanitizePreviewText(text).slice(0, 200);
-            }
-          }
-          // lastRole is the newest role we saw (tail walk, first match wins).
-          if (role && !lastRole) {
-            lastRole = role;
-            entrypoint = typeof entry.entrypoint === 'string' ? entry.entrypoint : '';
-          }
-          if (preview && timestamp && lastRole) break;
-        }
-        // Claude Code's own name for the conversation ("Fix login bug"),
-        // rewritten as the chat goes; the newest one wins. History rows lead
-        // with it because the newest prompt is often a tool echo or missing.
-        // A SEPARATE type-only pass: extending the walk above to find it moved
-        // timestamp/status off records the old early exit never reached.
-        let title = '';
-        for (let i = entries.length - 1; i >= 0; i -= 1) {
-          const e = entries[i];
-          if (e?.type === 'ai-title' && typeof e.aiTitle === 'string') {
-            // Detached copy: a slice of a huge parsed string keeps the whole
-            // parent alive in each of up to 500 cached session objects.
-            title = Buffer.from(sanitizePreviewText(e.aiTitle).slice(0, 120), 'utf16le').toString('utf16le');
-            break;
-          }
-        }
+        const sizeMB = st ? st.size / (1024 * 1024) : 0;
+        const { preview, title, lastRole, automated, messageAt, activityAt } = await transcriptFacts(filePath, st);
 
-        const automated = AUTOMATED_ENTRYPOINTS.has(entrypoint);
         // Dropped before the push so the 500-cap below counts only the
         // sessions the caller wants. On this machine 375 of the newest 400
         // transcripts were SDK runs, which buried every real chat.
         if (automated && opts.excludeAutomated) return;
 
-        if (!timestamp) {
-          try {
-            const stat = await fs.stat(filePath);
-            timestamp = stat.mtimeMs;
-          } catch {
-            void 0;
-          }
-        }
-
-        // Cross-session status — same red/yellow/green meaning as terminal tabs:
+        // Cross-session status, same red/yellow/green meaning as terminal tabs:
         //   yellow 'working' = Claude is actively streaming (recent activity + Claude spoke last)
         //   red    'needs'   = user spoke last and Claude hasn't replied yet
         //   green  'done'    = Claude finished its turn cleanly
@@ -292,10 +327,13 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         // bare recency check labeled "user just spoke" as 'working' even when
         // Claude hadn't started. Both flagged independently by review agents.
         // The live terminal tab dot still overrides this for the active tab.
-        const recent = timestamp && (Date.now() - timestamp < 120_000);
+        // Worked out on every call, cache hit or not: it depends on the clock.
+        const recent = activityAt && (Date.now() - activityAt < 120_000);
         let status = 'done';
         if (recent && lastRole === 'assistant') status = 'working';
         else if (lastRole === 'user') status = 'needs';
+        // A transcript with no message in its tail keeps the activity stamp.
+        const timestamp = messageAt || activityAt;
 
         sessions.push({
           sessionId,
@@ -304,6 +342,7 @@ export async function loadAllSessions(projectFilter, opts = {}) {
           preview: preview || 'No preview available',
           title,
           timestamp,
+          activityAt,
           age: timestamp ? timeAgo(timestamp) : 'unknown',
           status,
           sizeMB, // for the resume dead-session guard, Codex PR#3 r6 P2
@@ -343,9 +382,14 @@ export async function loadAllSessions(projectFilter, opts = {}) {
     return [];
   }
 
+  // The tab each session ran in names it in History (main records it while
+  // the session runs, see recordSessionTabNames). Added after the cap so the
+  // lookup touches only what is returned.
+  const tabNames = getSessionTabNames();
   return sessions
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
-    .slice(0, 500);
+    .slice(0, 500)
+    .map((s) => (s.source === 'claude' && tabNames.has(s.sessionId) ? { ...s, tabName: tabNames.get(s.sessionId) } : s));
 }
 
 /**
@@ -360,6 +404,24 @@ export async function loadAllSessions(projectFilter, opts = {}) {
  * Assembled from data that survives quit/restart (config.projects[*].tabs +
  * sessionTabMap + transcripts).
  */
+// One session load for every window's Tabs sidebar: each polls every 5s, and N
+// windows must not mean N scans. Callers share a load in flight and one finished
+// within the TTL. Only the session list is shared: labels, live flags and
+// tear-offs are read fresh by each caller, so a closed tab never lingers.
+const SHARED_SESSIONS_TTL_MS = 3000;
+let sharedSessions = null; // { promise, settledAt } settledAt 0 while in flight
+function sharedAllSessions() {
+  const prior = sharedSessions;
+  if (prior && (!prior.settledAt || Date.now() - prior.settledAt < SHARED_SESSIONS_TTL_MS)) return prior.promise;
+  const entry = { promise: null, settledAt: 0 };
+  entry.promise = loadAllSessions().then(
+    (list) => { entry.settledAt = Date.now(); return list; },
+    (err) => { if (sharedSessions === entry) sharedSessions = null; throw err; },
+  );
+  sharedSessions = entry;
+  return entry.promise;
+}
+
 /**
  * @param {object} [opts]
  * @param {Set<string>} [opts.liveTabIds] tab ids with a live PTY right now (from
@@ -392,7 +454,7 @@ export async function getAllProjectTabs({ liveTabIds = null, tearOffTabs = [] } 
   // One global session index. Currently-open tabs always link to recent
   // sessions, so the 500 cap can't realistically miss one; a miss degrades
   // gracefully to a label-only row (never an error). Codex design review.
-  const sessions = await loadAllSessions();
+  const sessions = await sharedAllSessions();
   const sessionById = new Map(sessions.map((s) => [s.sessionId, s]));
 
   // Shape one output row from a persisted tab (or a synthetic tear-off tab).
@@ -624,6 +686,39 @@ export async function resolveContinuedSessionId(
 }
 
 /**
+ * Has a bare `claude` that the fresh resolver matched to `sessionId` moved on
+ * to another transcript? `/clear` keeps the process but starts a new file, and
+ * the resolver keeps answering the old id (it was born closest to the start).
+ * The sign: an UNCLAIMED transcript in the same project born after this one's
+ * last write and after the process started. Errs toward true (a headless run
+ * in the project also counts), which only delays a name, never misplaces one.
+ */
+export async function sessionMovedPast(projectPath, sessionId, startedAt, claimed = new Set()) {
+  if (!projectPath || !sessionId) return true;
+  const seen = new Set();
+  for (const enc of [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)]) {
+    if (seen.has(enc)) continue;
+    seen.add(enc);
+    const dir = path.join(PROJECTS_DIR, enc);
+    let own;
+    try { own = await fs.stat(path.join(dir, `${sessionId}.jsonl`)); } catch { continue; }
+    const after = Math.max(own.mtimeMs || 0, Number.isFinite(startedAt) ? startedAt - FRESH_CLOCK_SLACK_MS : 0);
+    let files;
+    try { files = (await fs.readdir(dir)).filter((f) => f.endsWith('.jsonl')); } catch { return true; }
+    for (const f of files) {
+      const sid = f.slice(0, -'.jsonl'.length);
+      if (sid === sessionId || claimed.has(sid)) continue;
+      try {
+        const st = await fs.stat(path.join(dir, f));
+        if ((st.birthtimeMs || st.ctimeMs || 0) > after) return true;
+      } catch { /* vanished: not a rival */ }
+    }
+    return false;
+  }
+  return true; // transcript not found: nothing safe to name
+}
+
+/**
  * Birth time (epoch ms) of a session's transcript within a project, checking
  * both encoder forms. 0 when the file is not found under either.
  */
@@ -660,10 +755,12 @@ async function sessionTranscriptBirth(projectPath, sessionId) {
  *                                  resolved id is added so a later tab in the
  *                                  same pass cannot claim the same transcript.
  * @param {() => boolean} [isAborted]  checked between tabs (quit has a 2s cap)
+ * @param {Set<string>} [provenTabs]  MUTATED: tabs whose id came from Claude's
+ *                                  own record, not from timing
  * @returns {Promise<Map<string, string>>} tabId -> resolved sessionId
  */
 export async function resolveFreshSessionsForTabs(
-  liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds, isAborted,
+  liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds, isAborted, provenTabs = new Set(),
 ) {
   const out = new Map();
   // Claim every id a LIVE tab names in its OWN argv before any inference runs.
@@ -674,15 +771,15 @@ export async function resolveFreshSessionsForTabs(
   // `--resume X` into the wrong terminal. Done HERE, not in the callers, so
   // the periodic tick and the quit-time reconcile cannot drift apart.
   // Codex High (Brett v1.0.56 follow-up).
-  const argvByTab = new Map();
+  const namedByTab = new Map();
   for (const t of liveTabs) {
     const argvSid = infoByTab.get(t.id)?.sessionId;
-    if (argvSid) { claimedIds.add(argvSid); argvByTab.set(t.id, argvSid); }
+    if (argvSid) { claimedIds.add(argvSid); namedByTab.set(t.id, argvSid); }
   }
-  // Ids named in the argv of every live tab EXCEPT the given one.
-  const argvOwnedByOthers = (tabId) => {
+  // Ids a live tab's process names itself, for every tab EXCEPT the given one.
+  const namedByOthers = (tabId) => {
     const s = new Set();
-    for (const [id, sid] of argvByTab) if (id !== tabId) s.add(sid);
+    for (const [id, sid] of namedByTab) if (id !== tabId) s.add(sid);
     return s;
   };
   // Earliest-started first. The earliest bare `claude` in a project owns the
@@ -714,7 +811,33 @@ export async function resolveFreshSessionsForTabs(
       linkedTabs.add(t.id);
     }
   }
+  // Claude's own record comes first: it names the exact session, whatever the
+  // start order and however many bare claudes share the project. A tab with a
+  // valid record is settled here. It is nobody's rival for a transcript, and
+  // it never reaches the timing below, even with nothing to link yet (no
+  // transcript until the first message, or the session is another tab's).
+  const recordIds = new Map();
   for (const t of freshTabs) {
+    if (isAborted?.()) return out;
+    const sid = await presenceSessionId(infoByTab.get(t.id), t.claudeConfigDir);
+    if (!sid) continue;
+    recordIds.set(t.id, sid);
+    linkedTabs.add(t.id);
+    // One session, one tab. Its own link is the only claim it can pass.
+    const ownLink = tabToSessionId.get(t.id) === sid && !namedByOthers(t.id).has(sid);
+    if (claimedIds.has(sid) && !ownLink) continue;
+    if (!(await sessionTranscriptBirth(cwdByTab.get(t.id), sid))) continue;
+    out.set(t.id, sid);
+    claimedIds.add(sid);
+    // The id is exact for that process, but with other children in the shell
+    // it may not be the claude in use (the first of two, one suspended): a name
+    // only, too weak for auto-resume to type.
+    if (infoByTab.get(t.id).soleChild !== false) provenTabs.add(t.id);
+  }
+  // Held from here on, so timing cannot hand them to a tab with no record.
+  for (const [id, sid] of recordIds) { claimedIds.add(sid); namedByTab.set(id, sid); }
+  for (const t of freshTabs) {
+    if (recordIds.has(t.id)) continue;
     if (isAborted?.()) return out;
     const cwd = cwdByTab.get(t.id);
     const info = infoByTab.get(t.id);
@@ -730,7 +853,7 @@ export async function resolveFreshSessionsForTabs(
     // a stale map entry pointing this tab at X while tab B actually runs
     // `--resume X` would otherwise re-expose X and hand B's conversation to
     // this tab. Codex round 2 (mislink class).
-    if (ownSid && !argvOwnedByOthers(t.id).has(ownSid)) claimedByOthers.delete(ownSid);
+    if (ownSid && !namedByOthers(t.id).has(ownSid)) claimedByOthers.delete(ownSid);
     // Ambiguity set: ONLY the other fresh claudes in this same project that are
     // not yet linked. An already-linked one owns its own transcript and so
     // cannot also own this candidate. Counting it (as we did) declined every
@@ -756,6 +879,16 @@ export async function resolveFreshSessionsForTabs(
     }
   }
   return out;
+}
+
+/**
+ * Should a link to the session this tab is running now be re-tagged? Up when
+ * argv or Claude's record now proves one inferred from timing. Down when a
+ * 'presence' link's proof has lapsed (another program now shares the shell, the
+ * record is gone), or auto-resume would keep typing it. 'argv' is never lowered.
+ */
+export function provenanceChanged(saved, how) {
+  return how === 'fresh' ? saved === 'presence' : saved === 'fresh';
 }
 
 /**
@@ -815,6 +948,80 @@ const SYNTHETIC_USER_PREFIXES = [
   // answered" in loose ends, and the sidebar previews a wall of skill text.
   'Base directory for this skill:',
 ];
+function entryRole(entry) {
+  if (entry.type === 'human' || entry.role === 'user' || entry.message?.role === 'user') return 'user';
+  if (entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant') return 'assistant';
+  return '';
+}
+
+// The typed text of a user row, trimmed. Text blocks only: tool_use,
+// tool_result and image blocks are skipped so the sidebar never previews a
+// base64 blob, and a tool-result row comes back ''.
+function userEntryText(entry) {
+  const raw = entry.message?.content !== undefined
+    ? entry.message.content
+    : (entry.content !== undefined
+      ? entry.content
+      : (typeof entry.message === 'string' ? entry.message : ''));
+  let text = '';
+  if (typeof raw === 'string') {
+    text = raw;
+  } else if (Array.isArray(raw)) {
+    text = raw
+      .filter((b) => b && (b.type === 'text' || typeof b.text === 'string'))
+      .map((b) => (typeof b.text === 'string' ? b.text : ''))
+      .filter(Boolean)
+      .join(' ');
+  }
+  return String(text).trim();
+}
+
+// When a record counts as someone MESSAGING (History's sort key): a Claude
+// reply, or a prompt with typed text or a pasted image. `role` is the
+// caller's, already cleared for system-injected rows. isMeta rows (hook
+// output, caveats) and tool results (a tool finishing is not a message) do
+// not count. "[Request interrupted by user]" does: the user acted then.
+function messageStamp(entry, role, text, tsMs) {
+  if (!tsMs || entry.isMeta === true) return 0;
+  if (role === 'assistant') return tsMs;
+  if (role !== 'user') return 0;
+  const content = entry.message?.content;
+  const image = Array.isArray(content) && content.some((b) => b?.type === 'image');
+  return text || image ? tsMs : 0;
+}
+
+// Stamp of the newest real message in these records, 0 when none. A
+// system-injected row is no turn.
+function newestMessageStamp(entries) {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const e = entries[i];
+    if (!e || typeof e !== 'object') continue;
+    const r = entryRole(e);
+    const t = r === 'user' ? userEntryText(e) : '';
+    if (t && isSyntheticUserText(t)) continue;
+    const at = messageStamp(e, r, t, tsToEpochMs(e.timestamp));
+    if (at) return at;
+  }
+  return 0;
+}
+
+// When a session was last messaged: what History sorts by and Cmd+R picks by,
+// so the two cannot disagree. `tail` is the file's last 200 records. A tail
+// that is ALL bookkeeping (progress, hook output) holds no message: look
+// further back once, or the newest bookkeeping stamp would float an untouched
+// chat above newer conversations. Not gated on the tail's size: parseJsonl
+// drops request blobs, so a short (even empty) parsed tail does not prove the
+// file was read whole. Ceiling: readTail's 8MB cap, so a message behind more
+// than 8MB of blobs still falls back to the bookkeeping stamp.
+// `complete` is false when the wider read came back empty though the tail did
+// not: parseJsonl answers [] on any error, so that answer is not this file's.
+async function lastMessageAt(filePath, tail) {
+  const at = newestMessageStamp(tail);
+  if (at) return { at, complete: true };
+  const wider = await parseJsonl(filePath, 2000);
+  return { at: newestMessageStamp(wider), complete: wider.length > 0 };
+}
+
 function isSyntheticUserText(text) {
   if (!text) return true;
   const t = text.trimStart();
@@ -893,15 +1100,19 @@ export async function getLatestSession(projectPath) {
       }
       // Read the tail to find the newest message timestamp. parseJsonl with
       // a limit uses readTail under the hood so this stays memory-bounded
-      // even on a 100MB transcript. 20 entries is enough to find the last
-      // user/assistant message timestamp.
+      // even on a 100MB transcript.
       let msgTs = 0;
+      let tailTs = 0; // newest stamp on any record: History's order with no message
       let lastUserPreview = '';
       try {
         const tail = await parseJsonl(filePath, 200);
+        // Messages only, as in loadAllSessions: hook output and snapshots
+        // written by merely resuming a chat must not make it the latest.
+        msgTs = (await lastMessageAt(filePath, tail)).at;
         for (const e of tail) {
-          const t = tsToEpochMs(e.timestamp);
-          if (t > msgTs) msgTs = t;
+          if (!e || typeof e !== 'object') continue;
+          const at = tsToEpochMs(e.timestamp);
+          if (at > tailTs) tailTs = at;
           // Track the LAST user message we see in the tail as a preview.
           if (e.type === 'human' || e.role === 'user' || e.message?.role === 'user') {
             const content = typeof e.message === 'string'
@@ -919,7 +1130,7 @@ export async function getLatestSession(projectPath) {
       return {
         filePath,
         sessionId: file.replace('.jsonl', ''),
-        sortKey: msgTs || mtime, // prefer message ts, fall back to mtime
+        sortKey: msgTs || tailTs || mtime, // same order as History, mtime only when nothing is stamped
         mtime,
         sizeMB: size / (1024 * 1024),
         preview: lastUserPreview,
@@ -2009,7 +2220,9 @@ export function getActiveProcesses() {
         resolve([]);
         return;
       }
-      const lines = stdout.trim().split('\n').filter(Boolean);
+      // A New Tab's wrapper shell names the tools in its own argv; it is the
+      // tab's shell, not a Claude process (shared/new-tab.js loginShellSpawn).
+      const lines = stdout.trim().split('\n').filter((l) => l && !isNewTabWrapperCommand(l));
       resolve(lines.map((line) => {
         const spaceIdx = line.indexOf(' ');
         if (spaceIdx === -1) return null;

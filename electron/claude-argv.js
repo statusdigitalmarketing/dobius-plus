@@ -35,7 +35,19 @@
  * claude-notes.js` stay excluded (their argv[0] is not an interpreter, and the
  * bare filename has no directory separator).
  */
-const SHIM_INTERPRETERS = new Set(['node', 'bun', 'deno', 'env', 'npx']);
+// The JS runtimes a claude CLI runs under (the process's own executable). env
+// and npx only start one of these, so they are interpreters in a command line
+// but never the program a live claude process is.
+export const JS_RUNTIMES = new Set(['node', 'bun', 'deno']);
+const SHIM_INTERPRETERS = new Set([...JS_RUNTIMES, 'env', 'npx']);
+
+/**
+ * The file a node/bun/deno claude actually runs, once symlinks are resolved:
+ * the npm package's cli.js, or a native install's versioned entry. Stricter
+ * than isClaudeEntrypoint's JS patterns (it requires the @anthropic-ai scope)
+ * because it is matched against a REAL path, where the scope is always there.
+ */
+export const CLAUDE_SCRIPT_RE = /\/(?:@anthropic-ai\/claude-code\/cli|claude\/versions\/[^/]+\/cli)\.(?:js|mjs|cjs)$/;
 
 /**
  * Does this single argv token name a claude entrypoint?

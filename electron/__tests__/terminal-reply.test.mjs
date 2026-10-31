@@ -2,7 +2,7 @@
 // Chat selector stale on every focus change); real keys must.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isTerminalReply, hasVisibleOutput, createVisibleOutputScanner } from '../terminal-reply.js';
+import { isTerminalReply, stripTerminalReplies, hasVisibleOutput, createVisibleOutputScanner } from '../terminal-reply.js';
 
 test('emulator replies are recognized', () => {
   for (const s of ['\x1b[I', '\x1b[O', '\x1b[12;40R', '\x1b[?1;2c', '\x1b[>0;276;0c', '\x1b[?2026;2$y',
@@ -15,6 +15,17 @@ test('anything a person types is input', () => {
   for (const s of ['1', '\r', '\x1b', '\x1b[A', '\x1b[1;2R', '\x1b[1;5R', '\x1b[1;16R', '\x03', ' ', '\x1b[Ia', 'a\x1b[I', '\x1b[200~x\x1b[201~', '']) {
     assert.equal(isTerminalReply(s), false, JSON.stringify(s));
   }
+});
+
+test('the lenient strip removes every reply wherever it sits, cursor and status reports included', () => {
+  for (const s of ['\x1b[I', '\x1b[12;40R', '\x1b[1;5R', '\x1b[?6;1R', '\x1b[0n', '\x1b[?1;2c', '\x1b[?2026;2$y', '\x1b]11;rgb:0/0/0\x07', '\x1b[0n\x1b[12;40R\x1b[O']) {
+    assert.equal(stripTerminalReplies(s), '', JSON.stringify(s));
+  }
+  assert.equal(stripTerminalReplies('a\x1b[Ib\x1b[3;4Rc'), 'abc');
+  for (const s of ['x', '\r', '\x03', '\x1b[A', '\x1b[200~x\x1b[201~']) assert.equal(stripTerminalReplies(s), s, JSON.stringify(s));
+  // The strict test is unchanged: a modified F3 still counts as a key there.
+  assert.equal(isTerminalReply('\x1b[1;5R'), false);
+  assert.equal(isTerminalReply('\x1b[0n'), false);
 });
 
 test('output that draws nothing is not a repaint', () => {

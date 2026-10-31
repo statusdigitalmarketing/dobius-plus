@@ -41,6 +41,14 @@ Session notes and learnings live in `.dobius/NOTES.md` (also editable from the D
 - Claude learns about it from a SessionStart hook in the managed status-hook block (`dobius-tab-hint`), which prints only when `DOBIUS_TAB_ID` is set. An already-installed block is upgraded on launch
 - Harness: `DOBIUS_BRIDGE_PORT` moves the bridge off 8421 for an isolated instance, and an isolated instance (`DOBIUS_USERDATA_DIR`) never rewrites `~/.local/bin` or `~/.claude/settings.json`
 
+## New Tabs and the Bridge (2.0)
+- New tab tool: `settings.newTabTool` is `claude` (default), `codex` or `shell`. Cmd+T, the menu, the palette and a window's first tab start it through `store.openNewTab(path, tool?)` and `launchCommandFor` in `shared/new-tab.js` (fixed allowlist, no typing into the PTY, no `eval`). Restored tabs, reopen and Agents/Checkpoints/Orchestrator tabs never auto-start.
+- The `+` opens `NewTabPicker` (current project first, Enter opens here). Cmd+T stays instant, no picker.
+- Bridge `POST /openTab` (`electron/bridge-open-tab.js`, `bridge-open-main.js`, docs in `docs/bridge-open-tab.md`) opens a tab, starts Claude, waits until it is really ready, pastes a card and presses Enter once. Sends in every permission mode by owner decision.
+- Prompt editing (`src/lib/prompt-edit.js`, `prompt-edit-term.js`) makes Claude's default-renderer prompt edit like a text field. Input it holds is read ONLY by `/openTab`; Chat and the command bar do not order around it (accepted residual, noted at the top of the file).
+- Sessions: a bare `claude` links through its own `<configDir>/sessions/<pid>.json` (tag `presence`), with start-time correlation only as the fallback. History rows lead with the tab name (`config.sessionTabNames`) and sort by the last real message.
+- Mobile WS: `authorizeTab`, `input` and `submitPrompt` always answer with `ack` or `opError` (`docs/mobile-ws-protocol.md`).
+
 ## Checkpoints
 - Save terminal scrollback as named checkpoints: `config.projects[path].checkpoints[]`
 - IPC: `checkpoint:save`, `checkpoint:list`, `checkpoint:delete`, `checkpoint:rename`

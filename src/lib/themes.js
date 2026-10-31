@@ -228,6 +228,9 @@ export const THEMES = themes.map((t) => ({
     // the light-background themes (Butter, Peach). Bright teal on dark bg,
     // deeper teal on light bg.
     '--git-worktree': isLightBg(t.bg) ? '#0D9488' : '#2DD4BF',
+    // Finished / OK (the sidebar's green "Done"). Theme accents are not
+    // reliably green, so it is fixed here, darker on light backgrounds.
+    '--success': isLightBg(t.bg) ? '#1A7F37' : '#3FB950',
   },
 }));
 

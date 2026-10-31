@@ -145,9 +145,9 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     // linked at all then, so they were never auto-resumed either.
     //
     // ponytail: fresh sessions do not auto-resume. Ceiling is the missing pid.
-    // Upgrade path: have the tab's claude report its own id (a wrapper writing
-    // $CLAUDE_SESSION_ID, or a Claude Code hook), then link by identity rather
-    // than by timing and drop this gate.
+    // A bare `claude` whose own sessions/<pid>.json names its id links as
+    // 'presence', which is identity rather than timing and does pass this gate;
+    // only Claude versions without that file stay 'fresh'.
     if (entry.resolvedBy === 'fresh') { skippedHeuristic += 1; continue; }
     // Shape sanity only (term-/abs/path-N). Do NOT require the tab's project
     // to equal entry.projectPath: a supported flow is resuming a project-A

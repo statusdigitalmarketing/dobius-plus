@@ -349,3 +349,98 @@
 - **FIX**: Never name a zsh variable `path` (also avoid `cdpath`, `fpath`, `manpath`). Use `u` or `route`.
 - **CONTEXT**: Bash tool commands run under zsh here.
 - **DETECTION**: `grep -nE "for path in|\bpath=" scratchpad/**/*.sh`
+
+### Architecture - 2026-10-30
+- **MISTAKE**: Assumed Claude Code's prompt in a Dobius tab is always the same kind of screen. It is not: with `"tui": "fullscreen"` (Sam's settings, or the `tengu_pewter_brook` rollout when unset) Claude runs in the ALTERNATE buffer with mouse tracking on and handles click, drag-select, Backspace-over-selection and copy itself; the default renderer draws in the NORMAL buffer with no mouse support at all, which is what Brett sees. A probe that runs plain `claude` on Sam's Mac tests the wrong renderer.
+- **FIX**: Probe both with `claude --settings '{"tui":"default"}'` and `'{"tui":"fullscreen"}'`. Anything that edits Claude's prompt from Dobius (src/lib/prompt-edit-term.js) stands down unless `buffer.active.type === 'normal'` and `term.modes.mouseTrackingMode === 'none'`.
+- **CONTEXT**: Any terminal-side feature that reads or drives Claude's TUI.
+- **DETECTION**: `grep -n "mouseTrackingMode" src/lib/*.js src/hooks/*.js`
+
+### Architecture - 2026-10-30
+- **MISTAKE**: The prompt-box reader treated only `''` and `' '` as blank, so it never recognised Claude's prompt row: Claude draws `❯` followed by U+00A0 (no-break space), not a space. Every gesture silently did nothing in the first live run while all unit tests passed.
+- **FIX**: Blank = `''`, `' '` or `' '` (src/lib/prompt-edit.js), with a test pinned to the real bytes. Dump the real cells (`getChars()` code points per cell) before writing a screen parser's fixtures.
+- **CONTEXT**: Also: xterm 6 (unicode v6 widths) draws an emoji one cell wide where Claude counts two, so a prompt containing emoji is already drawn out of step with Claude's caret. The prompt editor refuses such prompts.
+- **DETECTION**: `grep -n "u00a0" src/lib/prompt-edit.js`
+
+### Testing - 2026-10-30
+- **MISTAKE**: Edited src/hooks/useTerminal.js while a harness tab ran a real `claude`; Vite HMR remounted TerminalPane, which kills the tab's PTY and the claude in it, and the next probe drove a bare shell.
+- **FIX**: After any edit under src/hooks or src/lib that TerminalPane imports, reload the harness page and start claude again before probing (`p10-reload.mjs` pattern: reload, then type the claude command).
+- **CONTEXT**: Every harness ship-test of terminal behaviour.
+- **DETECTION**: `pgrep -fl 'claude --settings'` returns nothing after an HMR update.
+
+### Process - 2026-10-30
+- **MISTAKE**: Harness teardown killed the CDP listener PID read once, then removed the userData and released the shared harness lock. A second Electron main from the same `npm run electron:dev` (concurrently parent still alive) was still listening on the CDP port, and another agent's Vite took 5173 seconds later while it was up.
+- **FIX**: Kill the `concurrently` parent of YOUR worktree too (`ps aux | grep "[<worktree-name>]/node_modules/.bin/concurrently"`), then re-run `lsof -nP -iTCP:<cdp> -sTCP:LISTEN` AND confirm zero processes from your worktree path BEFORE `rm -rf <ud>` and releasing the lock.
+- **CONTEXT**: Shared-lock harness runs with several agents on one machine (Brett batch, 1.0.88).
+- **DETECTION**: `ps aux | grep "[d]obius-plus-<branch>" | grep -v codex`
+
+### Security - 2026-10-30
+- **MISTAKE**: A free-form `DOBIUS_CLAUDE_HOME=<path>` for redirecting an isolated instance's settings.json writes was aliased back onto the real `~/.claude` in three Codex rounds (symlink, different case on a case-insensitive volume, `..` through a symlink, a dangling link).
+- **FIX**: Make it a switch (`DOBIUS_CLAUDE_HOME=1`) that places the throwaway home at `<DOBIUS_USERDATA_DIR>/claude-home`, the one place that cannot be the real home, and re-check by dev+inode before each write.
+- **CONTEXT**: Any harness redirect of a write away from a shared real file. Do not accept a path when a fixed location inside the harness's own scratch works.
+- **DETECTION**: `grep -n "DOBIUS_CLAUDE_HOME" electron/main.js`
+
+- **MISTAKE**: In /openTab's `tabAlive` (electron/bridge-open-main.js) I wrote `!(getWindowEntryByWcId(id)?.closing ?? true)` to mean "a window exists and is not closing". A window entry whose `closing` is simply unset gives `undefined ?? true` = true, so every live tab read as dead and the harness dropped from 36/36 to 16/36. Three Codex lenses had just answered "No bugs found." on that exact line; only the ship-test caught it.
+- **FIX**: Spell the two conditions out: `const win = getWindowEntryByWcId(...); return !!win && !win.closing`. `?? default` on an optional-chained boolean conflates "no object" with "property unset".
+- **CONTEXT**: Any guard that combines "exists" and "flag not set" on a value whose flag is only ever set to true (window-manager sets `closing = true`, never false). Re-run the harness after every guard change, even one Codex cleared.
+- **DETECTION**: `grep -n "?\.[a-zA-Z]* ?? true" electron/*.js src -r`
+
+### Architecture - 2026-10-30 (2.0.0 integration)
+- **MISTAKE**: Five features built on separate branches each read Claude's screen and the tab's input their own way, and only met on release/2.0.0. /openTab found Claude's input box as the LOWEST rule/❯/rule match, so a chained statusLine drawing a box under the prompt (possible once the model line kept the user's status output) and a numbered card ("1. Review README") both fooled it; and it counted keys only at terminal:write, while prompt editing holds a person's input in its own queue behind an image paste.
+- **FIX**: The input box is the one holding the terminal CURSOR right of the ❯ (screen-render reports `modes.cursor`; prompt-edit's promptFrame already worked this way). Input a renderer holds back is reported to main the moment it is accepted (`terminal:inputHeld`), not when it drains.
+- **CONTEXT**: Any new reader of Claude's screen or of a tab's input. A selector ALSO parks the cursor on its ❯ row, at column 0 or 1, so the caret test needs the column too, not just the row.
+- **DETECTION**: `grep -rn "promptBoxText\|promptFrame\|terminal:inputHeld" electron src --include=*.js`
+
+### Architecture - 2026-10-30 (2.0.0 follow-ups, left as is)
+- **MISTAKE**: Not a mistake yet, deliberately deferred: two window-readiness signals (window:tabsReady for docks and /openTab, store tabsReady/markTabsReady for New Tab requests) and several window-focus helpers (bringToFront in bridge-open-main.js, focus paths in window-manager.js and main.js) do overlapping jobs. Selector-parser.js, prompt-edit.js and bridge-open-tab.js each define their own prompt/rule constants.
+- **FIX**: Follow-up after 2.0.0: one readiness signal per window, one bring-to-front helper, and one module for Claude's prompt/rule shapes. Only what the integration fixes needed was shared (the caret rule, the bridge-opened first tab).
+- **CONTEXT**: Integration review of release/2.0.0; judged too risky to unify this late.
+- **DETECTION**: `grep -rn "tabsReady\|bringToFront\|RULE_RE\|PROMPT_ROW_RE" electron src`
+### API - 2026-10-30
+- **MISTAKE**: `electron/mobile-server.js` handled `authorizeTab` / `input` / `submitPrompt` with a bare `break` on any bad request (unknown tab id, unauthorized, oversized). The orchestrator client could not tell delivered from dropped and printed SENT for an afternoon of relays to short ids that never arrived.
+- **FIX**: every write request is answered (`electron/mobile-tab-ops.js`): `ack` after the PTY write, `opError` with a code otherwise, and `uncertain: true` when the text may have landed anyway. Refusals use type `opError`, never `error`: the phone's Board alerts on every `error` frame. Docs: `docs/mobile-ws-protocol.md`.
+- **CONTEXT**: Five Codex rounds were almost all about classifying outcomes as sent / not sent / unknown. Anything after the paste that is not a proven erase is unknown; a cancel must be written before its counters move; a replaced PTY's counters prove nothing. Never put an `await` between a queue's drain loop ending and its cleanup: a caller resumed in that microtask queues onto a queue that is then deleted.
+- **DETECTION**: `grep -n "break; *//\|) break;" electron/mobile-server.js` for silent drops in new WS handlers; `npm run test:tabops`.
+
+### Architecture - 2026-10-30 (2.0.0 accepted residual: holds are for /openTab only)
+- **MISTAKE**: Starting from one real bug (the bridge could not see input prompt editing holds), I extended hold state to order Chat and command-bar sends too. Seventeen Codex rounds followed, each fix adding machinery (a held wait in chat-service, prompt-only pastes, drop generations, send ids, end and cut marks, tombstones) that the next round broke. chat-service.js went from 267 to 563 lines, and every Chat send goes through it. Round counts going up with machinery going up is the signal to stop, not to fix the next finding.
+- **FIX**: Cut back (coordinator decision; the long version is kept on `release/2.0.0-heavy`). prompt-edit-term reports holds per tab and window; `/openTab` is the ONLY consumer and treats a held tab as someone typing. Chat keeps chat-service's own serialized queue, and the command bar writes directly.
+- **CONTEXT**: Accepted residual: while prompt editing holds input (an image still saving, an edit running, normally well under a second), a Chat or command-bar send can land ahead of it. Worst case the text order in the prompt is swapped, or a pending image path lands after the message was sent. `/openTab` can never press Enter over held input. Do not build ordering for this. When a review loop stops converging, weigh the bug against the code it takes before fixing the next finding.
+- **DETECTION**: `grep -rn "terminal:inputHeld\|heldInput" electron src` should show only bridge-open-main.js, preload.js and useTerminal.js; `wc -l electron/chat-service.js` should stay near 340.
+
+### Architecture - 2026-10-30 (2.0.0: a bare claude's own record)
+- **MISTAKE**: Tab-to-session linking guessed from process start time against transcript birth for years (`resolveFreshSessionId`), and declined whenever two unlinked bare claudes shared a project. New Tab now auto-starts Claude, so that is the normal case: one idle tab stopped every other tab in the project from linking, so History had no tab name, Chat stayed stuck and auto-resume could not restore it. The exact answer was on disk the whole time: `<configDir>/sessions/<pid>.json`, already read for the Waiting status.
+- **FIX**: `presenceSessionId` (claude-presence.js) is consulted first in `resolveFreshSessionsForTabs`. Pid and start time must match, the id must be a UUID, and the transcript must exist in the project. A tab with a valid record is settled there, link or no link: it is no rival for timing and never falls to it. Links made this way are tagged `presence` and pass auto-resume's gate. Timing remains only for Claude versions without the file. Verified on 2.1.314 with a throwaway config dir, a dummy key and a real `claude`: the record's sessionId changes on `/clear`, so the `sessionMovedPast` workaround applies only to timing matches.
+- **CONTEXT**: `claude --resume A` followed by `/clear` still reports A: argv wins for those tabs and the record is not consulted there. Not changed. Any new heuristic about Claude's state: look in that record first.
+- **DETECTION**: `grep -n "presenceSessionId\|provenTabs" electron/*.js`; `npm run test:presence`.
+
+### Architecture - 2026-10-30 (2.0.0: /openTab read its own echo as a dialog)
+- **MISTAKE**: `promptBoxText` refused any screen with "Do you want to" above the input box. Claude echoes a submitted card above its box, so the card "Do you want to schedule a call tomorrow?" sent fine and was reported `submitted:false`, still in the prompt.
+- **FIX**: With the caret in the box, rows above it are transcript and are not checked. A real dialog replaces the input box, so its caret is never in one. With no cursor position the old check stands. Below the box the footer and selector checks stand.
+- **CONTEXT**: Text matching on anything above the prompt is matching the user's own words.
+- **DETECTION**: `grep -n "dialogOnScreen" electron/bridge-open-tab.js`
+
+### Performance - 2026-10-31 (2.0.0: idle CPU from the Tabs sidebar)
+- **MISTAKE**: `data:getAllProjectTabs` polls every 5s per window and called `loadAllSessions`, which parsed the tail of every transcript on every call: 8s of wall clock and 9s of CPU with 10,300 files, about 130% of a core at idle.
+- **FIX**: `transcriptCache` in data-service.js keeps what a tail told it, per file, while size and mtime hold. Clock, settings and caller choices (status, age, project names, hidden paths, excludeAutomated) stay outside it. `getAllProjectTabs` shares one session load in flight and for 3s; its rows are built per caller. Runs 1 and 2 went from 7.5s to under 0.2s, and rss fell.
+- **CONTEXT**: The cache walks every file on every scan, so a least-recently-used cap would miss on every scan: past the cap it stops adding. Only a full scan may evict, since a scoped scan sees one project. parseJsonl answers [] on ANY error, so a tail that parsed to nothing is never cached. Strings in it must be detached (`detached()`): a slice keeps its parent alive for the life of the cache.
+- **DETECTION**: `npm run test:sessioncache`; `grep -n "transcriptCache\|sharedAllSessions" electron/data-service.js`
+
+### Testing - 2026-10-31 (a stand-in that agrees with you proves nothing)
+- **MISTAKE**: My stand-in claude wrote `procStart` from local `ps`, so the ship-test passed while every real record was rejected on this Mac: Claude writes that field under TZ=UTC with no zone. The sidebar's Waiting status had the same bug from the day it shipped and never showed outside UTC. The same harness also inherited `CLAUDE_CONFIG_DIR` from the session that launched it, so one run wrote a stand-in record into a real profile's sessions dir (removed when the stand-in stopped; nothing else landed there). Codex caught the zone by reading the binary, not by reading the diff.
+- **FIX**: Parse `procStart` as UTC. Before trusting a fixture or stand-in for a third-party file format, compare it with a REAL file on this machine: `scratchpad/.../real-check.mjs` read 22 live records and accepted all 22. A harness with a throwaway HOME must also `unset CLAUDE_CONFIG_DIR CODEX_HOME`.
+- **CONTEXT**: Any stand-in that writes a format the real program owns. Any harness launched from inside a Claude session.
+- **DETECTION**: `grep -n "procStart" electron/claude-presence.js`; `env | grep -E "CLAUDE_CONFIG_DIR|CODEX_HOME"` before launching a harness.
+
+### Process - 2026-10-31 (a review loop that grows the code is the bug)
+- **MISTAKE**: Two 2.0.0 branches ran away under the Codex loop. Sidebar status reached 27 rounds and 2,400 lines of process heuristics; the integration fixes reached 17 rounds and about 640 lines of hold ordering around a 50-line fix (`electron/chat-service.js` went from 267 to 563 lines). Every round was real, and every fix opened the next finding.
+- **FIX**: Measure the diff, not the verdict. When findings keep coming from the previous round's fixes, stop, save the state on a backup branch, and cut back to the smallest design that keeps the real fix. Both cuts then converged in a few rounds (sidebar under 800 lines; `chat-service.js` 339). Scope the reviewer to it and cap the rounds; findings outside the scope come to a person as candidates and are not built.
+- **CONTEXT**: Any Codex-until-clean loop. Rising line count and round count with narrowing scenarios means the design is wrong, not that the code needs one more fix.
+- **DETECTION**: `git diff --shortstat <fix-commit> HEAD -- <core files>` at round 5, and each round after.
+
+### Process - 2026-10-31 (parallel branches pass alone and fail together)
+- **MISTAKE**: Seven features were each Codex clean on their own branch. Merged, three lenses independently found the bridge could press Enter over a cancel held by prompt editing, and a window opened for a card started two tools. A later pass found idle tabs blocking session links once New Tab auto-started Claude.
+- **FIX**: After merging, review the WHOLE branch with lenses aimed at interactions, wiring and duplicates, then run one packaged test with every feature on at once. Merge one branch at a time with the suite between merges.
+- **CONTEXT**: Any release built from parallel worktrees. Also: a package.json conflict hunk can hold a script definition beside the test chain; check every chained script is defined after resolving.
+- **DETECTION**: `node -e "const s=require('./package.json').scripts;for(const c of s.test.split(' && ')){const n=c.replace('npm run ','');if(!s[n])console.log('undefined',n)}"`
+
