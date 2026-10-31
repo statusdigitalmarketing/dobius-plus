@@ -41,8 +41,10 @@ function recordIsProcess(rec, proc) {
   if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return false;
   if (!proc || !Number.isInteger(proc.pid) || rec.pid !== proc.pid) return false;
   if (typeof rec.procStart !== 'string' || !Number.isFinite(proc.startedAt)) return false;
-  // Both sides are `ps lstart` text ("Tue Oct 27 13:39:54 2026").
-  return Date.parse(rec.procStart) === proc.startedAt;
+  // `ps lstart` text ("Tue Oct 27 13:39:54 2026") with no zone: Claude takes it
+  // under TZ=UTC (seen on 2.1.311 and 2.1.314), while proc.startedAt comes from
+  // ps in local time, already parsed as such.
+  return Date.parse(`${rec.procStart} UTC`) === proc.startedAt;
 }
 
 /**

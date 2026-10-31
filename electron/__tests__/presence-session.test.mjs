@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+// A zone away from UTC: Claude writes procStart in UTC, ps answers in local time.
+process.env.TZ = 'America/New_York';
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-presence-home-'));
 process.env.HOME = home;
 process.env.DOBIUS_TEST_USERDATA = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-presence-ud-'));
@@ -28,11 +30,12 @@ const sid = (n) => `${String(n).repeat(8)}-1111-1111-1111-111111111111`;
 const [S1, S2, S3, S4] = [1, 2, 3, 4].map(sid);
 const transcript = (id) => fs.writeFileSync(path.join(projDir, `${id}.jsonl`), '{"type":"user"}\n');
 
-// `ps lstart` text, as Claude writes it. Whole seconds, as ps reports them.
+// `ps lstart` text under TZ=UTC, as Claude writes it. Whole seconds, as ps
+// reports them. Shape from a real record: "Tue Oct 27 12:49:51 2026".
 const NOW = Math.floor(Date.now() / 1000) * 1000;
 const lstart = (ms) => {
-  const [w, mon, d, y, time] = new Date(ms).toString().split(' ');
-  return `${w} ${mon} ${d} ${time} ${y}`;
+  const [w, d, mon, y, time] = new Date(ms).toUTCString().replace(',', '').split(' ');
+  return `${w} ${mon} ${String(Number(d)).padStart(2, ' ')} ${time} ${y}`;
 };
 const record = (pid, startedAt, sessionId, over = {}, dir = defaultDir) => {
   fs.mkdirSync(path.join(dir, 'sessions'), { recursive: true });
@@ -75,6 +78,20 @@ const later = NOW - 30_000;
   assert.deepEqual(r.out, { A: S2, B: S1 });
   assert.deepEqual(r.proven, ['A', 'B']);
   ok('two bare claudes in one project: each links to its own session');
+}
+
+// The real shape on a Mac in New York: the record's text reads four hours (or
+// five) ahead of ps, and it is still the same process.
+{
+  const proc = Date.parse('Tue Oct 27 08:49:51 2026'); // ps, local
+  assert.equal(new Date(proc).getTimezoneOffset(), 240, 'the test really runs away from UTC');
+  clean();
+  transcript(S1);
+  fs.writeFileSync(path.join(defaultDir, 'sessions', '101.json'), JSON.stringify({ pid: 101, sessionId: S1, procStart: 'Tue Oct 27 12:49:51 2026' }));
+  assert.equal(await presenceSessionId({ pid: 101, startedAt: proc }), S1);
+  fs.writeFileSync(path.join(defaultDir, 'sessions', '101.json'), JSON.stringify({ pid: 101, sessionId: S1, procStart: 'Tue Oct 27 08:49:51 2026' }));
+  assert.equal(await presenceSessionId({ pid: 101, startedAt: proc }), null, 'the same wall clock in the wrong zone is another process');
+  ok('the record\'s start time is UTC, ps is local');
 }
 
 // One idle (a record, no transcript until its first message): it links to
@@ -177,6 +194,24 @@ ok('a malformed session id is ignored');
   const twoFree = await resolve({ A: { pid: 101, startedAt: earlier }, B: { pid: 102, startedAt: later } });
   assert.deepEqual(twoFree.out, { A: S1 });
   ok('one session links to one tab');
+}
+
+// Another child in the shell (a suspended claude, a second one): the link is
+// exact for that process but only a name, so auto-resume never types it.
+{
+  clean();
+  transcript(S1);
+  record(101, earlier, S1);
+  const liveTabs = [{ id: 'A', cwd: PROJ, claudeConfigDir: null }];
+  const info = new Map([['A', { sessionId: null, startedAt: earlier, pid: 101, soleChild: false }]]);
+  const proven = new Set();
+  const out = await resolveFreshSessionsForTabs(liveTabs, info, new Map([['A', PROJ]]), new Map(), new Set(), undefined, proven);
+  assert.equal(out.get('A'), S1);
+  assert.deepEqual([...proven], []);
+  info.get('A').soleChild = true;
+  await resolveFreshSessionsForTabs(liveTabs, info, new Map([['A', PROJ]]), new Map(), new Set(), undefined, proven);
+  assert.deepEqual([...proven], ['A']);
+  ok('a claude that is not the shell\'s only child is named, not proven');
 }
 
 // A valid record whose transcript is not in THIS project: no link, no timing.

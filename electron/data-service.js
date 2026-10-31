@@ -769,7 +769,10 @@ export async function resolveFreshSessionsForTabs(
     if (!(await sessionTranscriptBirth(cwdByTab.get(t.id), sid))) continue;
     out.set(t.id, sid);
     claimedIds.add(sid);
-    provenTabs.add(t.id);
+    // The id is exact for that process, but with other children in the shell
+    // it may not be the claude in use (the first of two, one suspended): a name
+    // only, too weak for auto-resume to type.
+    if (infoByTab.get(t.id).soleChild !== false) provenTabs.add(t.id);
   }
   // Held from here on, so timing cannot hand them to a tab with no record.
   for (const [id, sid] of recordIds) { claimedIds.add(sid); namedByTab.set(id, sid); }
