@@ -123,10 +123,11 @@ export function noteLogin(hist, key, email, now, records = []) {
   if (k.email === who) return false;
   // Never owned, and now unknown: figures from a sample that created this key
   // cannot be attributed either.
-  if (!k.email && who === UNKNOWN_LOGIN) k.windows = bare();
   // Records the old login's sessions left on disk keep their old figures;
   // anything received before the change is ignored from now on.
-  if (k.email && k.email !== who) {
+  // Never owned and now unknown is a boundary too: figures from the sample
+  // that created this key cannot be attributed to whoever comes next.
+  if ((k.email && k.email !== who) || (!k.email && who === UNKNOWN_LOGIN)) {
     k.windows = bare();
     k.since = now;
     // A session still running on the folder keeps re-rendering the OLD
@@ -403,8 +404,8 @@ export const AUTO = {
   MIN_HEADROOM: 10,
   GLOBAL_MAX: 10,
   GLOBAL_WINDOW_MS: 10 * 60_000,
-  // The screen alone vouches only for a limit that just happened: a resumed
-  // conversation redraws an old limit line too.
+  // Without a 100% report, the screen vouches only for a limit that just
+  // happened: a limit line can sit there long after the window reset.
   SCREEN_FRESH_MS: 10 * 60_000,
   // What one moved tab is assumed to take from its target within one pass,
   // so five tabs that hit a limit together do not all pile onto one account.
@@ -499,8 +500,12 @@ export function liveLimitLine(lines, termRows = null) {
  *   enabled, now,
  *   limit: { at } | null          the transcript's limit record (the event)
  *   processStartedAt: number|null when the claude now in the tab started
- *   corroboration: { statusLine, screen }  the usage report reads 100%, or
- *                                 the limit line is in the live screen region
+ *   corroboration: { screen, statusLine }  the limit line is in this tab's live
+ *                                 screen region (required: nothing else says
+ *                                 THIS conversation is limited, /clear leaves
+ *                                 the old record behind with --resume still in
+ *                                 argv); the usage report reads 100% (needed
+ *                                 too once the limit is more than a few minutes old)
  *   draft: boolean                Claude's input box holds unsent text
  *   busy: boolean                 a permission prompt is open, or Claude drew
  *                                 something in the last few seconds (a turn
@@ -527,8 +532,8 @@ export function decideAutoMove(inp) {
   // may still be the previous process's: a second of margin (no process
   // reaches a limit within a second of starting).
   if (Number.isFinite(processStartedAt) && limit.at < processStartedAt + 1000) return { action: 'none', reason: 'the limit predates this Claude process', eventId };
-  const byScreen = !!corroboration?.screen && now - limit.at < AUTO.SCREEN_FRESH_MS;
-  if (!corroboration?.statusLine && !byScreen) return { action: 'none', reason: 'the limit record is not confirmed by the usage report or the screen', eventId };
+  if (!corroboration?.screen) return { action: 'none', reason: 'the limit is not on this tab\'s screen', eventId };
+  if (!corroboration?.statusLine && now - limit.at >= AUTO.SCREEN_FRESH_MS) return { action: 'none', reason: 'an old limit the usage report does not confirm', eventId };
   if (tabState?.handled?.has(eventId)) return { action: 'none', reason: 'already handled', eventId };
   if (tabState?.lastMoveAt && limit.at <= tabState.lastMoveAt) return { action: 'none', reason: 'the limit predates the last move', eventId };
   if (tabState?.lastMoveAt && now - tabState.lastMoveAt < AUTO.COOLDOWN_MS) return { action: 'wait', reason: 'moved recently', eventId };

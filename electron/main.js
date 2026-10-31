@@ -2360,6 +2360,14 @@ function setupHeadroomHandlers() {
     processCwd: (pid) => getProcessCwd(pid),
     processAuthOverride: (pid) => processAuthOverride(pid),
     realpath: (p) => fs.promises.realpath(p),
+    // Leads its terminal's foreground process group, and is not stopped.
+    isForeground: async (pid) => {
+      try {
+        const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=', '-p', String(pid)], { timeout: 1500, encoding: 'utf8' });
+        const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
+        return !!m && m[1] === m[2] && m[1] === String(pid) && !m[3].startsWith('T');
+      } catch { return false; }
+    },
     settled: (id) => terminalSettledSinceInput(id),
     metadata: (dir, opts) => accountMetadata(dir, opts),
     // This folder's conversations are the shared store (account-profile-share

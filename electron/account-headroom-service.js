@@ -163,23 +163,23 @@ export function createHeadroomService(d) {
   // Two configured folders that are one folder on disk (a symlink) share one
   // metadata file but have TWO Keychain items (Claude hashes the spelling):
   // the address that file names cannot be trusted for either.
-  // A credential FILE linked between folders is the same problem.
+  // A credential FILE that lives outside its folder (linked to another
+  // profile, listed or not) is the same problem for that folder.
   async function markSharedFolders(rows) {
     await Promise.all(rows.map(async (r) => {
       r.real = await d.realpath(r.dir).catch(() => null);
       r.realCred = await d.realpath(path.join(r.dir, '.credentials.json')).catch(() => null);
+      if (r.real && r.realCred && r.realCred !== path.join(r.real, '.credentials.json')) { r.email = null; r.loginConflict = true; }
     }));
-    for (const field of ['real', 'realCred']) {
-      const groups = new Map();
-      for (const r of rows) {
-        if (!r[field]) continue;
-        if (!groups.has(r[field])) groups.set(r[field], []);
-        groups.get(r[field]).push(r);
-      }
-      for (const group of groups.values()) {
-        if (new Set(group.map((x) => x.key)).size < 2) continue;
-        for (const x of group) { x.email = null; x.loginConflict = true; }
-      }
+    const groups = new Map();
+    for (const r of rows) {
+      if (!r.real) continue;
+      if (!groups.has(r.real)) groups.set(r.real, []);
+      groups.get(r.real).push(r);
+    }
+    for (const group of groups.values()) {
+      if (new Set(group.map((x) => x.key)).size < 2) continue;
+      for (const x of group) { x.email = null; x.loginConflict = true; }
     }
   }
 
@@ -389,9 +389,18 @@ export function createHeadroomService(d) {
         // is on now (each tab is judged again by itself when it moves).
         allRefusal: override ? `${override} is set` : r.duplicateId ? 'two accounts share this id' : (!r.isDefault && typeof r.id !== 'string') ? 'no usable id'
           : r.sharedHistory === false ? 'its conversation history is not linked' : (r.login !== 'in' ? 'not logged in' : null),
-        autoRefusal: autoRefusal(source, r, { fresh: freshUsage(usage, live ? (live.get(r.key) ?? 0) : null) }),
+        autoRefusal: autoRefusal(source, r, { fresh: freshUsage(usage, runningFor(r, rows, live)) }),
       };
     }));
+  }
+
+  // Sessions on this row's login, through any of its folders.
+  function runningFor(r, rows, live) {
+    if (!live) return null;
+    const e = r.email ? r.email.toLowerCase() : null;
+    let n = live.get(r.key) ?? 0;
+    if (e) for (const o of rows) if (o.key !== r.key && o.email && o.email.toLowerCase() === e) n += live.get(o.key) ?? 0;
+    return n;
   }
 
   async function liveByKey() {
@@ -417,7 +426,7 @@ export function createHeadroomService(d) {
       autoMove: !!d.autoMoveEnabled(),
       accounts: rows.map((r) => {
         const u = usageForRow(r, rows, now);
-        const running = live.get(r.key) ?? 0;
+        const running = runningFor(r, rows, live);
         return {
           id: r.id, label: r.label, isDefault: r.isDefault, email: r.email, login: r.login, sameAs: r.sameAs,
           usage: u,
@@ -526,8 +535,7 @@ export function createHeadroomService(d) {
     d.send(tabId, 'accounts:autoMoveNotice', { text });
   }
 
-  // One look at every desktop tab. Cheap first: only a tab whose credential
-  // reads 100%, or whose recent output mentions a limit, is looked at closely.
+  // One look at every desktop tab.
   async function autoTick() {
     if (!d.autoMoveEnabled()) return;
     const now = d.now();
@@ -553,10 +561,10 @@ export function createHeadroomService(d) {
       if (!DESKTOP_TAB_RE.test(tab.id) || pending.has(tab.id) || d.windowOf(tab.id) === null) continue;
       const st = stateFor(tab.id);
       if (st.nextLookAt && d.now() < st.nextLookAt) continue;
+      // Cheap first: no limit wording in the tab's recent output, no closer look.
+      if (!LIMIT_LINE_RE.test(d.strippedTail(tab.id))) continue;
       const key = d.keyFor(tab.claudeConfigDir === null ? d.cliDefaultDir() : tab.claudeConfigDir);
       const u = usageForKey(hist, key, now);
-      const textHit = LIMIT_LINE_RE.test(d.strippedTail(tab.id));
-      if (!u.limited && !textHit) continue;
       st.nextLookAt = d.now() + RECHECK_MS;
       let info;
       try { info = await d.claudeInfo(tab.id); } catch { info = null; }
@@ -564,11 +572,6 @@ export function createHeadroomService(d) {
       let ses;
       try { ses = await d.resolveSession(tab.id); } catch { ses = null; }
       if (!ses?.sessionId) continue;
-      // A session named by the process's own --resume is certain. One matched
-      // from the tab's recent links (a fresh `claude`) is a heuristic, so the
-      // tab's own screen must show the limit too: an account-wide 100% says
-      // nothing about which conversation the link really belongs to.
-      const fromArgv = !!info.sessionId && info.sessionId === ses.sessionId;
       let cwd;
       try { cwd = await d.processCwd(info.pid); } catch { cwd = null; }
       const project = cwd || ses.sessionProject || tab.cwd;
@@ -609,7 +612,7 @@ export function createHeadroomService(d) {
         now: d.now(),
         limit: rec.limit,
         processStartedAt: info.startedAt ?? null,
-        corroboration: { statusLine: u.limited && fromArgv, screen: screenHit },
+        corroboration: { statusLine: u.limited, screen: screenHit },
         draft,
         busy: tabBusy(d.activity(tab.id), d.now()),
         inputAgeMs: d.inputAgeMs(tab.id),
@@ -798,6 +801,9 @@ export function createHeadroomService(d) {
     let now;
     try { now = await d.claudeInfo(tabId); } catch { now = null; }
     if (now?.pid !== started.pid || now?.sessionId !== p.sessionId) return done('no-continue (Claude restarted while waiting)');
+    // And it is the program that will read the keys, not one suspended behind
+    // another started in the same shell.
+    if (!(await d.isForeground(started.pid))) return done('no-continue (that Claude is not in the foreground)', false, `Moved this tab to ${p.targetLabel}, but that Claude is not in the foreground, so "continue" was not sent.`);
     if (!d.autoMoveEnabled()) return done('no-continue (auto-move was switched off)');
     // Resumed where it was working (a worktree): Claude falls back to another
     // folder when it cannot re-enter it, and "continue" there would work on

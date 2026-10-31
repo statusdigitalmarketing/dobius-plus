@@ -739,6 +739,10 @@ export const useStore = create((set, get) => ({
       try {
         const [c] = (await api.accountsMoveCandidates([tabId], accountId)) || [];
         if (c?.session?.sessionId) { sessionId = c.session.sessionId; sessionProject = c.session.project || null; }
+        // A Claude is running but main cannot name its conversation yet (just
+        // started): the map below would name an OLDER one, and resuming that
+        // would kill this one and revive the wrong conversation.
+        else if (c?.running === 'claude') return { ok: false, error: 'its conversation could not be identified yet; try again in a few seconds' };
         if (expectInputSeq === undefined && Number.isInteger(c?.inputSeq)) expectInputSeq = c.inputSeq;
       } catch { /* fall back to the map below */ }
     }
@@ -808,6 +812,7 @@ export const useStore = create((set, get) => ({
     const why = (c) => (c.refusal ? c.refusal
       : c.busy ? (c.status === 'needs' ? 'waiting on a question' : 'in the middle of a turn')
         : c.running === 'other' ? 'running another program'
+          : (c.running === 'claude' && !c.session?.sessionId) ? 'its conversation could not be identified yet'
           : c.running === 'shell' ? 'no Claude running in it (move it by itself if you want its next Claude on that account)'
             : c.draft ? 'has unsent text in the prompt' : null);
     const movable = cands.filter((c) => !why(c));

@@ -264,7 +264,7 @@ check('a USER in the resumed Claude\'s environment that is not exactly ours is a
 // ---- auto-move guard rails ----
 
 const base = (over = {}) => ({
-  enabled: true, now: T0 + 60 * MIN, limit: { at: T0 + 59 * MIN }, processStartedAt: T0, corroboration: { statusLine: true, screen: false }, draft: false, busy: false,
+  enabled: true, now: T0 + 60 * MIN, limit: { at: T0 + 59 * MIN }, processStartedAt: T0, corroboration: { statusLine: true, screen: true }, draft: false, busy: false,
   inputAgeMs: 10 * MIN, tabState: { handled: new Set(), lastMoveAt: 0 }, recentMoves: [],
   ranked: rankTargets([cand('u', false), cand('k', true, 60)]), ...over,
 });
@@ -319,10 +319,14 @@ check('an uncorroborated limit record does nothing', () => {
   assert.equal(decideAutoMove(base({ corroboration: { statusLine: false, screen: false } })).action, 'none');
 });
 
-check('the screen alone vouches only for a limit that just happened', () => {
+check('the limit must be on this tab\'s screen; without a 100% report only while it is recent', () => {
   const screenOnly = { statusLine: false, screen: true };
   assert.equal(decideAutoMove(base({ corroboration: screenOnly })).action, 'move');
-  assert.equal(decideAutoMove(base({ corroboration: screenOnly, limit: { at: T0 + 60 * MIN - AUTO.SCREEN_FRESH_MS - 1 } })).action, 'none');
+  const old = { at: T0 + 60 * MIN - AUTO.SCREEN_FRESH_MS - 1 };
+  assert.equal(decideAutoMove(base({ corroboration: screenOnly, limit: old })).action, 'none');
+  assert.equal(decideAutoMove(base({ corroboration: { statusLine: true, screen: true }, limit: old })).action, 'move');
+  // /clear: the old record and a 100% account, but nothing on this tab's screen.
+  assert.equal(decideAutoMove(base({ corroboration: { statusLine: true, screen: false } })).action, 'none');
 });
 
 check('a limit from before this claude process started (a resumed transcript) never moves it', () => {

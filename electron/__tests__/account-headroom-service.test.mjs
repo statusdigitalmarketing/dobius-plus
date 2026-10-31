@@ -65,6 +65,7 @@ function world(over = {}) {
       return { email, state: email ? 'address' : 'none' };
     },
     realpath: async (p) => (w.links?.[p] ?? p),
+    isForeground: async () => w.foreground ?? true,
     sharesHistory: async (dir) => !(w.privateHistory && w.privateHistory.includes(dir)),
     processAuthOverride: async (pid) => (w.override && w.override[pid]) || null,
     settled: () => w.settled ?? true,
@@ -128,14 +129,22 @@ await check('a tab that hit its limit is moved once, to the account with headroo
   assert.equal(w.sent.length, 1);
 });
 
-await check('a session matched only by a recent link needs the tab\'s own screen to show the limit', async () => {
+await check('the tab\'s own screen must show the limit, even with --resume in argv (a /clear leaves the old record behind)', async () => {
   const { w, svc } = world({ screenLine: 'all quiet' });
   await svc.tick();
   assert.equal(w.sent.length, 0, 'a 100% account alone does not name this conversation');
   const named = world({ screenLine: 'all quiet' });
-  named.w.claude = { ...named.w.claude, sessionId: 's1' }; // claude --resume s1
+  named.w.claude = { ...named.w.claude, sessionId: 's1' }; // claude --resume s1, then /clear
   await named.svc.tick();
-  assert.equal(named.w.sent.length, 1);
+  assert.equal(named.w.sent.length, 0);
+});
+
+await check('no "continue" to a Claude that is not in the foreground', async () => {
+  const { w, svc } = world();
+  const eventId = await moved(w, svc);
+  w.foreground = false;
+  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
+  assert.deepEqual(w.submits, []);
 });
 
 await check('a target whose figure is old and has no session running is never picked automatically', async () => {
@@ -572,12 +581,22 @@ await check('every row on a folder that another spelling links to loses its logi
   for (const label of ['A', 'A2', 'L']) assert.equal(u.accounts.find((r) => r.label === label).email, null, label);
 });
 
-await check('a credential file linked between two folders makes both logins unknown', async () => {
+await check('a credential file that lives outside its folder makes that folder\'s login unknown, whatever it links to', async () => {
   const { w, svc } = world();
-  w.links = { [`${DIR_B}/.credentials.json`]: `${DIR_A}/.credentials.json` };
+  w.links = { [`${DIR_B}/.credentials.json`]: '/profiles/unlisted/.credentials.json' };
   const u = await svc.usage();
   assert.equal(u.accounts.find((r) => r.label === 'B').email, null);
-  assert.equal(u.accounts.find((r) => r.label === 'A').email, null);
+  assert.equal(u.accounts.find((r) => r.label === 'A').email, 'a@x.com');
+});
+
+await check('a folder whose login was unknown from the start keeps its boundary, so old records never reach the next login', async () => {
+  const { w, svc } = world({ records: [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 0, resetsAt: R5 } }, sessionId: 'x1' }] });
+  w.emails[DIR_B] = null;
+  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false, 'figures nobody can be named for are not shown');
+  w.now += 16_000; await svc.usage();
+  w.emails[DIR_B] = 'someone@x.com';
+  w.now += 16_000;
+  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
 });
 
 await check('a move request that outlived its expiry cannot be taken for a later retry of the same limit', async () => {
