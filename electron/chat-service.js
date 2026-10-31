@@ -493,9 +493,11 @@ async function drainSubmits(id, q) {
         // never ended in all that time is given up, so it cannot block the
         // next submit too.
         const stuck = waits();
+        // Given up the same way any cut is (endSend): a send part of which
+        // is in the box cancels every waiting submit, one with none of it
+        // written drops only those not yet pasted.
         if (stuck && Date.now() >= end) {
-          for (const s of openSends.get(id)?.keys() || []) markCut(id, s);
-          openSends.delete(id);
+          for (const s of [...(openSends.get(id)?.keys() || [])]) endSend(id, s, { cut: true, byMain: true });
         }
         skip = skipReason(id, q, it) || (stuck ? 'cancelled' : '');
         if (skip) { it.resolve(refused(skip)); continue; }

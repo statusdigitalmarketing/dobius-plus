@@ -568,6 +568,29 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   const next = await writeRawInput('h', 'z', () => true, { send: 'K', sender: 7 });
   assert.equal(next.ok, true, 'once the window ended it, the id is free again');
 
+  // A send that never ends is given up after the held-input wait like any
+  // cut: its prefix is in the box, so the NEXT waiting submit is cancelled
+  // too and never pastes onto it.
+  {
+    const realNow = Date.now;
+    let skew = 0;
+    Date.now = () => realNow() + skew;
+    try {
+      reset(); ptys.set('h', {});
+      writeRawInput('h', "echo '", () => true, { send: 'L', sender: 7 }); // written (idle)
+      const l1 = submitPromptToTab('h', 'echo first');
+      const l2 = submitPromptToTab('h', 'printf x');
+      await tick(60);
+      skew = 17_000; // past the 16s wait
+      assert.deepEqual(await Promise.all([l1, l2]), [false, false]);
+      assert.deepEqual(writes.map((w) => w[1]), ["echo '"], 'neither message touched the half command');
+      const rest = await writeRawInput('h', "safe'\r", () => true, { send: 'L', sender: 7 });
+      assert.equal(rest.ok, false, 'and its rest stays refused');
+    } finally {
+      Date.now = realNow;
+    }
+  }
+
   // A window that held input is gone with it half sent: a waiting submit is
   // cancelled, never appended to the half.
   const { cancelQueuedSubmits } = await import('../chat-service.js');
