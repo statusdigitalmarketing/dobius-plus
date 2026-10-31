@@ -282,12 +282,14 @@ export function writeRawInput(id, data, stillOk = () => true, { promptOnly = fal
     // Only a frame of nothing but cancel keys counts as the queue's own: one
     // that also carries an Enter ("\r\x15") may have sent the paste first
     // (Codex High), so it counts as another writer.
-    // Written FIRST: a cancel whose write throws must not be counted as an
-    // erase, or the pending paste it never cleared reads as unsent (Codex High).
+    // The cancel drops queued submits whether or not its own write lands (the
+    // person pressed it: release/2.0.0 behaviour), so gen moves FIRST. Only a
+    // cancel that was written counts as an erase, or the pending paste it never
+    // cleared would read as unsent (Codex High, rounds 5 and merge 1).
+    if (q) q.gen += 1;
     const r = written();
     writeTerminal(id, data);
     if (q) {
-      q.gen += 1;
       if (/^[\x03\x15\x1b]+$/.test(data)) q.cancelWrites = (q.cancelWrites || 0) + 1;
       if (data !== '\x1b') q.clearedGen = q.gen;
     }
@@ -308,8 +310,12 @@ export function writeRawInput(id, data, stillOk = () => true, { promptOnly = fal
   if (promptOnly && Date.now() - (lastSubmitEnterAt.get(id) ?? -Infinity) < PROMPT_SETTLE_MS) return dropPaste();
   if (!q || !q.running || q.waitingHeld) { const r = written(); writeTerminal(id, data); return Promise.resolve(r); }
   if (promptOnly) return dropPaste();
+  // No PTY to queue for (it exited under a running submit): nothing would be
+  // written, so say so now rather than report a write of nothing.
+  const pty = terminalInstance(id);
+  if (!pty) return Promise.resolve(refused('tab_exited'));
   return new Promise((resolve) => {
-    q.items.push({ raw: data, pty: terminalInstance(id), stillOk, gen: q.gen, resolve });
+    q.items.push({ raw: data, pty, stillOk, gen: q.gen, resolve });
   });
 }
 

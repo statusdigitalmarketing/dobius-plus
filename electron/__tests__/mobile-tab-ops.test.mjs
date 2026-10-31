@@ -344,4 +344,34 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   ok('held input: keys pass with a result; Ctrl+C cancels the waiting submit');
 }
 
+// 16. A Ctrl+C whose write throws still cancels a submit waiting on held
+// input (release/2.0.0), and a key queued after the PTY exited reports so.
+{
+  harness({ live: [A] });
+  let held = true;
+  setInputHeldCheck(() => held, () => {});
+  try {
+    const sub = submitPromptDetailed(A, 'deploy');
+    await new Promise((r) => setTimeout(r, 120));
+    ptys.get(A).throwOnWrite = true;
+    assert.throws(() => writeRawInput(A, '\x03'));
+    ptys.get(A).throwOnWrite = false;
+    held = false;
+    assert.deepEqual(await sub, { ok: false, reason: 'cancelled' });
+    assert.deepEqual(writes.map((w) => w[1]), []);
+  } finally {
+    held = false;
+    setInputHeldCheck(() => false, () => {});
+  }
+  ok('a cancel that failed to write still cancels a waiting submit');
+}
+{
+  harness({ live: [A] });
+  const sub = submitPromptDetailed(A, 'one');
+  ptys.delete(A); // exits during the Enter delay
+  assert.deepEqual(await writeRawInput(A, 'k'), { ok: false, reason: 'tab_exited' });
+  await sub;
+  ok('a key behind a submit on an exited PTY: tab_exited, not ok');
+}
+
 console.log(`\n${pass} passed`);
