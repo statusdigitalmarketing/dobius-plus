@@ -41,6 +41,8 @@ Accepted, not fixed. Each is a wrong or missing figure, or a refusal that does n
 10. **Relaunch folder after a subfolder resume.** Auto-resume restores a moved conversation with the right id and account, but in the project folder rather than the subfolder it was resumed from: it does this for any conversation resumed from a subfolder, moved or not.
 11. **A subfolder conversation with no link yet.** Moved before Dobius has linked it (the first 15 seconds or so), its link names the subfolder, so auto-resume cannot find the transcript after a relaunch and skips it. Nothing is lost: it can be resumed by hand from History.
 
+12. **Move all right after a Claude starts.** For its first several seconds a new Claude reads as working, so Move all leaves it where it is and names it under "Left where they are". Run Move all again and it moves. Treating a never-messaged Claude as movable was tried and dropped: a first message can be in flight with no sign of it yet (just typed, or passed on the command line), and moving then would lose it.
+
 ## Open, for Sam to judge
 
 Found by Codex on the final pass, not fixed, not accepted.
