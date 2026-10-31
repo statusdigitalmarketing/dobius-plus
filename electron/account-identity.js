@@ -180,6 +180,23 @@ async function probeKeychain(service) {
  * using it is genuinely logged in; reporting "no credential" there would be a
  * false alarm on a working account (Codex P2).
  */
+/**
+ * loginState without reading any credential: a Keychain item's existence
+ * (attribute probe) or a .credentials.json that EXISTS (stat only, never
+ * opened). Account moves call this on every panel refresh and every limit
+ * event, so the token-bearing file is not read even to check its shape. The
+ * cost is that a .credentials.json holding only MCP material reads as 'in';
+ * a move onto it then stops at Claude's login screen, and "continue" is never
+ * sent there (the prompt never appears).
+ */
+export async function loginStatePresenceOnly(configDir) {
+  try {
+    const st = await fs.lstat(path.join(configDir, '.credentials.json'));
+    if (st.isFile() && st.size > 0) return 'in';
+  } catch { /* none: ask the Keychain */ }
+  return probeKeychain(keychainServiceFor(configDir));
+}
+
 export async function loginState(configDir) {
   if (await hasClaudeCredentialFile(configDir)) return 'in';
   return probeKeychain(keychainServiceFor(configDir));

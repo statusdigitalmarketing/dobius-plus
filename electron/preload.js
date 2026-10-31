@@ -193,6 +193,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   accountsUsage: () => ipcRenderer.invoke('accounts:usage'),
   accountsMoveTargets: (tabId) => ipcRenderer.invoke('accounts:moveTargets', tabId),
   accountsMoveCandidates: (tabIds, targetId) => ipcRenderer.invoke('accounts:moveCandidates', tabIds, targetId),
+  accountsAutoMoveStart: (tabId, eventId) => ipcRenderer.invoke('accounts:autoMoveStart', tabId, eventId),
   accountsAutoMoveContinue: (tabId, eventId, failed) => ipcRenderer.invoke('accounts:autoMoveContinue', tabId, eventId, failed),
   onAccountsAutoMove: (callback) => {
     const handler = (_event, tabId, payload) => callback(tabId, payload);

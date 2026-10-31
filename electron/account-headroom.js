@@ -119,8 +119,10 @@ export function updateHistory(hist, records, now) {
       const w = rec.windows[name];
       const p = w?.usedPercentage;
       if (!Number.isFinite(p)) continue;
+      // A figure with no reset time cannot be placed in a window, and would
+      // never expire: it is not kept.
       const r = Number.isFinite(w.resetsAt) ? w.resetsAt : null;
-      if (expired(r, now)) continue;
+      if (r === null || expired(r, now)) continue;
       let k = hist.keys[rec.key];
       if (k?.since && rec.receivedAt < k.since) continue; // from before a re-login (noteLogin)
       if (!k) { k = { windows: bare() }; hist.keys[rec.key] = k; changed = true; }
@@ -344,11 +346,25 @@ export const AUTO = {
  * folders logged into one login share one limit and a folder with no
  * recorded address cannot be shown to be different.
  */
-export function autoRefusal(source, target) {
+export function autoRefusal(source, target, { fresh = false } = {}) {
   const a = typeof source?.email === 'string' ? source.email.trim() : '';
   const b = typeof target?.email === 'string' ? target.email.trim() : '';
   if (!a || !b) return 'its login address (or the tab\'s) is not recorded, so it cannot be shown to be a different login';
+  // An old figure nobody is refreshing is only a lower bound: claude.ai or
+  // another Mac may have used the rest since. Shown, never acted on.
+  if (!fresh) return 'its usage was not reported recently and no session is running on it';
   return null;
+}
+
+/**
+ * Is this usage live enough to act on: reported in the last STALE_MS, or a
+ * session is running on the credential right now (it reports after each
+ * turn). `running` is null when the process scan could not say.
+ */
+export function freshUsage(usage, running) {
+  if (!usage?.known) return false;
+  if (Number.isFinite(usage.ageMs) && usage.ageMs <= STALE_MS) return true;
+  return Number.isInteger(running) && running > 0;
 }
 
 /**
@@ -385,12 +401,17 @@ export const LIMIT_LINE_RE = /You['’]ve\s+hit\s+your\s+(?:[\w-]+\s+){0,3}limit
 // the bottom of the screen. Rows above this are scrollback in all but name.
 export const LIVE_REGION_ROWS = 20;
 
-/** The limit line in the bottom LIVE_REGION_ROWS drawn rows, or null. */
-export function liveLimitLine(lines) {
+/**
+ * The limit line in the bottom drawn rows, or null: LIVE_REGION_ROWS, or the
+ * terminal's own height when that is smaller (the render grid is taller than
+ * the real screen, and rows above the real screen are scrollback).
+ */
+export function liveLimitLine(lines, termRows = null) {
   if (!Array.isArray(lines)) return null;
+  const span = Number.isInteger(termRows) && termRows > 0 ? Math.min(termRows, LIVE_REGION_ROWS) : LIVE_REGION_ROWS;
   let last = lines.length - 1;
   while (last >= 0 && !String(lines[last] || '').trim()) last -= 1;
-  for (let i = last; i >= 0 && i > last - LIVE_REGION_ROWS; i -= 1) {
+  for (let i = last; i >= 0 && i > last - span; i -= 1) {
     const row = String(lines[i] || '');
     if (LIMIT_LINE_RE.test(row)) return row.trim().slice(0, 200);
   }
@@ -428,8 +449,10 @@ export function decideAutoMove(inp) {
   // conversation's transcript still ends in the limit its previous process
   // hit (on the account it left) until something new is written; after a
   // manual move or a relaunch nothing else remembers that. ps reports a
-  // start time to the second, rounded down, so an older record is older.
-  if (Number.isFinite(processStartedAt) && limit.at < processStartedAt) return { action: 'none', reason: 'the limit predates this Claude process', eventId };
+  // start time rounded DOWN to the second, so a limit in that same second
+  // may still be the previous process's: a second of margin (no process
+  // reaches a limit within a second of starting).
+  if (Number.isFinite(processStartedAt) && limit.at < processStartedAt + 1000) return { action: 'none', reason: 'the limit predates this Claude process', eventId };
   const byScreen = !!corroboration?.screen && now - limit.at < AUTO.SCREEN_FRESH_MS;
   if (!corroboration?.statusLine && !byScreen) return { action: 'none', reason: 'the limit record is not confirmed by the usage report or the screen', eventId };
   if (tabState?.handled?.has(eventId)) return { action: 'none', reason: 'already handled', eventId };

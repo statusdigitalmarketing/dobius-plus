@@ -20,7 +20,7 @@ const stallWatchdog = createStallWatchdog({ log: logLine });
 stallWatchdog.wrapIpc(ipcMain);
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
-import { accountIdentities, identityFor, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
+import { accountIdentities, accountEmail, loginStatePresenceOnly, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
@@ -36,14 +36,15 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputAgeMs, terminalInputSeq, terminalRawOutputSeq, terminalClosing, sendToTerminalWindow } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputAgeMs, terminalInputSeq, terminalRawOutputSeq, terminalClosing, sendToTerminalWindow, terminalRows } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, setInputHeldCheck } from './chat-service.js';
 import { launchCommandFor } from '../shared/new-tab.js';
+import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
 import { isClaudePromptReady, promptBoxText } from './bridge-open-tab.js';
-import { stripAnsi } from './selector-parser.js';
+import { stripAnsi, parseSelectorFromScreen } from './selector-parser.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -2258,6 +2259,9 @@ function setupFileHandlers() {
 // auto-move when a tab hits a limit. Rules: account-headroom.js; the service
 // (account-headroom-service.js) gets everything system-facing from here.
 let headroom = null;
+// Input a window still holds for a tab (an image paste being saved): set when
+// the bridge deps exist, read by the auto-move continue.
+let heldInputFor = () => false;
 function setupHeadroomHandlers() {
   const ownsTab = (event, tabId) => typeof tabId === 'string' && TERMINAL_ID_RE.test(tabId) && ownsTerminal(event.sender.id, tabId);
   headroom = createHeadroomService({
@@ -2271,7 +2275,23 @@ function setupHeadroomHandlers() {
     defaultEnvUnset: () => !process.env.CLAUDE_CONFIG_DIR,
     cliDefaultDir: () => defaultClaudeDir(),
     keyFor: (dir) => { try { return keychainServiceFor(dir); } catch { return null; } },
-    identity: (dir, opts) => identityFor(dir, opts),
+    // Read-only and token-free: the metadata file for the address, and only
+    // the EXISTENCE of a credential (account-identity.js).
+    identity: async (dir, opts) => {
+      const [email, login] = await Promise.all([accountEmail(dir, opts), loginStatePresenceOnly(dir)]);
+      return { email, login };
+    },
+    processCwd: (pid) => getProcessCwd(pid),
+    email: (dir, opts) => accountEmail(dir, opts),
+    inputHeld: (id) => heldInputFor(id),
+    samePath: async (a, b) => {
+      try { return (await fs.promises.realpath(a)) === (await fs.promises.realpath(b)); } catch { return false; }
+    },
+    rows: (id) => terminalRows(id),
+    // Any of these in Dobius's own environment authenticates every Claude it
+    // starts the same way, whatever CLAUDE_CONFIG_DIR says, so moving a tab
+    // between profiles would change nothing.
+    authOverride: () => ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'].find((k) => typeof process.env[k] === 'string' && process.env[k].trim()) || null,
     readRecords: () => readUsageRecords(app.getPath('userData')),
     scan: () => scanClaudeProcesses(),
     autoMoveEnabled: () => getSettings().autoMoveOnLimit === true,
@@ -2288,6 +2308,7 @@ function setupHeadroomHandlers() {
     },
     promptReady: (lines, modes) => isClaudePromptReady(lines, modes),
     promptBox: (lines, modes) => promptBoxText(lines, modes),
+    selector: (lines) => { try { return parseSelectorFromScreen(lines); } catch { return null; } },
     pruneRecords: (maxAgeMs) => pruneUsageRecords(app.getPath('userData'), maxAgeMs),
     windowOf: (id) => getTerminalWebContentsId(id),
     send: (id, channel, payload) => sendToTerminalWindow(id, channel, payload),
@@ -2310,6 +2331,13 @@ function setupHeadroomHandlers() {
     const mine = (Array.isArray(tabIds) ? tabIds : []).filter((id) => ownsTab(event, id));
     if (targetId !== null && typeof targetId !== 'string') return [];
     try { return await headroom.moveCandidates(mine, targetId); } catch { return []; }
+  });
+  // The window is about to restart the tab for a move main asked for: still
+  // wanted, nobody typed since main decided, no unsent text? Asked right
+  // before the respawn, because the window may have queued it for a while.
+  ipcMain.handle('accounts:autoMoveStart', async (event, tabId, eventId) => {
+    if (!ownsTab(event, tabId) || typeof eventId !== 'string') return { ok: false };
+    return headroom.startAutoMove(tabId, eventId, event.sender.id);
   });
   ipcMain.handle('accounts:autoMoveContinue', async (event, tabId, eventId, failed) => {
     if (!ownsTab(event, tabId) || typeof eventId !== 'string') return { ok: false };
@@ -3139,6 +3167,8 @@ function setupWindowHandlers() {
       }
       if (typeof labelMeta.autoLabel === 'string') meta.autoLabel = labelMeta.autoLabel.slice(0, 100);
       if (labelMeta.viewMode === 'chat') meta.viewMode = 'chat';
+      const pin = sanitizeAccountPin(labelMeta.claudeAccountPin);
+      if (pin) meta.claudeAccountPin = pin;
     }
     const win = openTornOffWindow(projectPath, tabId, label, screenX || 200, screenY || 200, meta);
     // Record the grant against the new window's webContents.id. The new
@@ -3263,6 +3293,7 @@ function setupWindowHandlers() {
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
   // Chat sends (desktop and phone) wait for input a window still holds.
   setInputHeldCheck(bridgeOpenDeps.inputHeld);
+  heldInputFor = bridgeOpenDeps.inputHeld;
 
   // Record the docked tab in the target window's saved tab list BEFORE the
   // handoff: terminal:loadState only returns scrollback for a tab a window
@@ -3364,6 +3395,8 @@ function setupWindowHandlers() {
       }
       if (typeof labelMeta.autoLabel === 'string') meta.autoLabel = labelMeta.autoLabel.slice(0, 100);
       if (labelMeta.viewMode === 'chat') meta.viewMode = 'chat';
+      const pin = sanitizeAccountPin(labelMeta.claudeAccountPin);
+      if (pin) meta.claudeAccountPin = pin;
     }
     const tab = {
       id: tabId,

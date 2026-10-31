@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHeadroomService, isDraft } from '../account-headroom-service.js';
+import { createHeadroomService, isDraft, draftOnScreen } from '../account-headroom-service.js';
 import { keychainServiceFor } from '../account-identity.js';
 import { resolveClaudeAccountPin } from '../spawn-account-env.js';
 import { pruneUsageRecords } from '../claude-usage.js';
@@ -48,12 +48,16 @@ function world(over = {}) {
     getAccounts: () => [
       { id: 'a', type: 'claude', name: 'A', claudeJsonPath: `${DIR_A}/.claude.json` },
       { id: 'b', type: 'claude', name: 'B', claudeJsonPath: `${DIR_B}/.claude.json` },
+      ...(w.extraAccount ? [{ id: 7, type: 'claude', name: 'Seven', claudeJsonPath: '/profiles/seven/.claude.json' }] : []),
     ],
     defaultDir: () => '/home/.claude',
     defaultEnvUnset: () => true,
     cliDefaultDir: () => '/home/.claude',
     keyFor: (dir) => keychainServiceFor(dir),
     identity: async (dir) => ({ email: w.emails[dir] ?? null, login: 'in' }),
+    email: async (dir) => w.emails[dir] ?? null,
+    inputHeld: () => !!w.held,
+    selector: () => null,
     readRecords: async () => w.records,
     pruneRecords: async () => 0,
     scan: async () => ({ groups: [{ key: w.procKey, pids: [w.claude.pid] }], unresolved: [] }),
@@ -65,9 +69,9 @@ function world(over = {}) {
     process: async () => null,
     limitRecord: async () => ({ found: true, limit: w.limit }),
     strippedTail: () => w.tail,
-    screen: async () => ({ lines: ["You've hit your 5-hour limit", '────', '❯ ', '────'], modes: { bracketedPaste: true } }),
+    screen: async () => ({ lines: [w.screenLine ?? "You've hit your 5-hour limit", '────', '❯ ', '────'], modes: { bracketedPaste: true } }),
     promptReady: () => true,
-    promptBox: () => '',
+    promptBox: () => w.box ?? '',
     windowOf: () => 7,
     send: (id, channel, payload) => {
       if (channel === 'accounts:autoMoveNotice') w.notices.push(payload.text); else w.sent.push({ id, channel, payload });
@@ -78,10 +82,26 @@ function world(over = {}) {
     outputSeq: () => 1,
     pty: () => w.pty,
     closing: () => false,
+    processCwd: async (pid) => (pid === 200 ? (w.resumedCwd ?? '/proj') : '/proj'),
+    samePath: async (a, b) => a === b,
+    rows: () => 40,
+    authOverride: () => w.authOverride ?? null,
     submit: async (id, text) => { w.submits.push(text); return true; },
     log: (kind, detail) => w.logs.push(detail),
   });
   return { w, svc };
+}
+
+// What the window does: confirm right before the restart, then the resumed
+// Claude appears on the target.
+async function moved(w, svc) {
+  await svc.tick();
+  const { eventId } = w.sent[0].payload;
+  const st = await svc.startAutoMove(TAB, eventId, 7);
+  assert.equal(st.ok, true, JSON.stringify(st));
+  w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
+  w.procKey = KEY_B;
+  return eventId;
 }
 
 await check('a tab that hit its limit is moved once, to the account with headroom', async () => {
@@ -94,6 +114,50 @@ await check('a tab that hit its limit is moved once, to the account with headroo
   w.now += 61_000; await svc.tick();
   w.now += 61_000; await svc.tick();
   assert.equal(w.sent.length, 1);
+});
+
+await check('a session matched only by a recent link needs the tab\'s own screen to show the limit', async () => {
+  const { w, svc } = world({ screenLine: 'all quiet' });
+  await svc.tick();
+  assert.equal(w.sent.length, 0, 'a 100% account alone does not name this conversation');
+  const named = world({ screenLine: 'all quiet' });
+  named.w.claude = { ...named.w.claude, sessionId: 's1' }; // claude --resume s1
+  await named.svc.tick();
+  assert.equal(named.w.sent.length, 1);
+});
+
+await check('a target whose figure is old and has no session running is never picked automatically', async () => {
+  const { w, svc } = world();
+  w.records[1].receivedAt = T0 - 3600_000;
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+  assert.match(w.notices[0], /every other account/);
+});
+
+await check('a token or API key in Dobius\'s environment refuses every move', async () => {
+  const { w, svc } = world({ authOverride: 'CLAUDE_CODE_OAUTH_TOKEN' });
+  const r = await svc.moveTargets(TAB);
+  assert.ok(r.targets.every((t) => /CLAUDE_CODE_OAUTH_TOKEN/.test(t.refusal)));
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+});
+
+await check('no "continue" if Claude came back in another folder (a worktree it could not re-enter)', async () => {
+  const { w, svc } = world();
+  const eventId = await moved(w, svc);
+  w.resumedCwd = '/proj-root';
+  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
+  assert.equal(r.ok, false);
+  assert.deepEqual(w.submits, []);
+});
+
+await check('no "continue" once auto-move is switched off', async () => {
+  const { w, svc } = world();
+  const eventId = await moved(w, svc);
+  w.autoMove = false;
+  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
+  assert.equal(r.ok, false);
+  assert.deepEqual(w.submits, []);
 });
 
 await check('auto-move off: nothing moves', async () => {
@@ -129,10 +193,7 @@ await check('the same login under another folder is never an automatic target', 
 
 await check('"continue" goes out once Claude is back on the target account', async () => {
   const { w, svc } = world();
-  await svc.tick();
-  const { eventId } = w.sent[0].payload;
-  w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
-  w.procKey = KEY_B;
+  const eventId = await moved(w, svc);
   const r = await svc.continueAfterMove(TAB, eventId, 7, null);
   assert.equal(r.ok, true);
   assert.deepEqual(w.submits, ['continue']);
@@ -141,11 +202,8 @@ await check('"continue" goes out once Claude is back on the target account', asy
 
 await check('no "continue" from another window, or twice', async () => {
   const { w, svc } = world();
-  await svc.tick();
-  const { eventId } = w.sent[0].payload;
+  const eventId = await moved(w, svc);
   assert.equal((await svc.continueAfterMove(TAB, eventId, 99, null)).ok, false);
-  w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
-  w.procKey = KEY_B;
   await svc.continueAfterMove(TAB, eventId, 7, null);
   assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
   assert.deepEqual(w.submits, ['continue']);
@@ -153,10 +211,9 @@ await check('no "continue" from another window, or twice', async () => {
 
 await check('no "continue" if the resumed Claude is not on the target credential', async () => {
   const { w, svc } = world();
-  await svc.tick();
-  w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
+  const eventId = await moved(w, svc);
   w.procKey = KEY_A; // a shell rc put it back on A
-  const r = await svc.continueAfterMove(TAB, w.sent[0].payload.eventId, 7, null);
+  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
   assert.equal(r.ok, false);
   assert.deepEqual(w.submits, []);
   assert.match(w.notices.at(-1), /not using that account/);
@@ -164,12 +221,10 @@ await check('no "continue" if the resumed Claude is not on the target credential
 
 await check('no "continue" if someone typed after the resume', async () => {
   const { w, svc } = world();
-  await svc.tick();
-  w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
-  w.procKey = KEY_B;
+  const eventId = await moved(w, svc);
   const origSleep = w.now;
   // A key lands while main waits for the prompt.
-  const p = svc.continueAfterMove(TAB, w.sent[0].payload.eventId, 7, null);
+  const p = svc.continueAfterMove(TAB, eventId, 7, null);
   w.inputSeq += 1;
   const r = await p;
   assert.ok(w.now >= origSleep);
@@ -179,11 +234,9 @@ await check('no "continue" if someone typed after the resume', async () => {
 
 await check('no "continue" if the conversation moved on', async () => {
   const { w, svc } = world();
-  await svc.tick();
-  w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
-  w.procKey = KEY_B;
+  const eventId = await moved(w, svc);
   w.limit = null;
-  const r = await svc.continueAfterMove(TAB, w.sent[0].payload.eventId, 7, null);
+  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
   assert.equal(r.ok, false);
   assert.deepEqual(w.submits, []);
 });
@@ -200,7 +253,51 @@ await check('unsent text in the prompt holds an automatic move', async () => {
   assert.equal(isDraft('half a thought'), true);
   assert.equal(isDraft(''), false);
   assert.equal(isDraft('Try "refactor the parser"'), false);
+  assert.equal(isDraft('Try "git status" first, then explain'), true, 'a draft that starts like the placeholder');
   assert.equal(isDraft(null), false);
+  // A box that cannot be read is a possible draft, unless a selector holds the screen.
+  assert.equal(draftOnScreen(null, false), true);
+  assert.equal(draftOnScreen(null, true), false);
+  assert.equal(draftOnScreen('', false), false);
+});
+
+await check('the window must confirm right before restarting: typing, a draft or a busy tab since the decision cancels it', async () => {
+  for (const spoil of [(w) => { w.inputSeq += 1; }, (w) => { w.box = 'new words'; }, (w) => { w.held = true; }]) {
+    const { w, svc } = world();
+    await svc.tick();
+    spoil(w);
+    const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
+    assert.equal(st.ok, false);
+    assert.match(w.logs.at(-1), /not-moved/);
+    // and nothing can be continued for it afterwards
+    assert.equal((await svc.continueAfterMove(TAB, w.sent[0].payload.eventId, 7, null)).ok, false);
+  }
+});
+
+await check('a move that was never started cannot be continued', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
+  w.procKey = KEY_B;
+  assert.equal((await svc.continueAfterMove(TAB, w.sent[0].payload.eventId, 7, null)).ok, false);
+  assert.deepEqual(w.submits, []);
+});
+
+await check('no "continue" while the window holds input for the tab (an image paste being saved)', async () => {
+  const { w, svc } = world();
+  const eventId = await moved(w, svc);
+  w.held = true;
+  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
+  assert.equal(r.ok, false);
+  assert.deepEqual(w.submits, []);
+});
+
+await check('an account whose id is not a string can never be a target (it would read as Default)', async () => {
+  const { w, svc } = world();
+  w.extraAccount = true;
+  const r = await svc.moveTargets(TAB);
+  const odd = r.targets.find((t) => t.label === 'Seven');
+  assert.match(odd.refusal, /no usable id/);
 });
 
 await check('usage rows: every account, unknown where nothing reported', async () => {

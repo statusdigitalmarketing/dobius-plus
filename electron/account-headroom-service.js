@@ -21,7 +21,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   emptyHistory, sanitizeHistory, updateHistory, usageForKey, accountKeyRows, moveRefusal, autoRefusal,
-  rankTargets, liveLimitLine, decideAutoMove, tabBusy, noteLogin, STALE_MS, LIMIT_LINE_RE, AUTO,
+  rankTargets, liveLimitLine, decideAutoMove, tabBusy, noteLogin, freshUsage, STALE_MS, LIMIT_LINE_RE, AUTO,
 } from './account-headroom.js';
 
 const SAVE_EVERY_MS = 30_000;
@@ -29,6 +29,7 @@ const CONTINUE_TIMEOUT_MS = 60_000;
 const PENDING_MAX_MS = 3 * 60_000;
 const POLL_MS = 500;
 const MAX_NOTICED = 200;
+const MAX_HANDLED_PER_TAB = 20;
 const MAX_CANDIDATE_TABS = 64;
 // A tab that looked limited is looked at closely (screen render, transcript)
 // at most this often: a limited tab can sit for hours.
@@ -37,9 +38,22 @@ const RECHECK_MS = 60_000;
 // each sample. Older than the longest window they say nothing.
 const RECORD_MAX_AGE_MS = 8 * 24 * 3600_000;
 const PRUNE_EVERY_MS = 3600_000;
-// Claude's own placeholder in an empty input box ("Try \"refactor ...\"").
-const PLACEHOLDER_RE = /^Try "/;
+// Claude's own placeholder in an empty input box: the WHOLE box is
+// Try "<a suggestion>". A draft that merely starts that way is still a draft.
+const PLACEHOLDER_RE = /^Try "[^"\n]*"$/;
 export const isDraft = (box) => typeof box === 'string' && !!box.trim() && !PLACEHOLDER_RE.test(box.trim());
+
+/**
+ * Could a restart lose unsent text? The box's text when it can be read. When
+ * it cannot (promptBoxText refuses screens with a dialog-like line anywhere
+ * above the box), only a selector on screen (Claude's own limit menu, a
+ * question) is known to hold no typed text; anything else counts as a
+ * possible draft, because guessing "empty" is what loses one.
+ */
+export function draftOnScreen(box, selectorShown) {
+  if (typeof box === 'string') return isDraft(box);
+  return !selectorShown;
+}
 // Desktop tabs only: phone and bridge PTYs have no window to move them.
 const DESKTOP_TAB_RE = /^term-\/.+-\d+$/;
 
@@ -97,9 +111,36 @@ export function createHeadroomService(d) {
       try { await d.pruneRecords(RECORD_MAX_AGE_MS); } catch { /* next hour */ }
     }
     try { records = await d.readRecords(); } catch { records = []; }
+    // Who each folder is logged into, BEFORE folding in new figures: a
+    // folder re-logged since the last look must not have the old login's
+    // samples carried over to the new one (metadata file only, no secrets).
+    await noteLogins(h);
     if (updateHistory(h, records, d.now())) dirty = true;
     await save();
     return h;
+  }
+
+  // Two rows on one credential can read two metadata files (Default with
+  // the home-level file, an explicit ~/.claude with the inner one) and name
+  // two logins: that credential's owner is undecidable, so it is left alone
+  // rather than flipped back and forth.
+  function applyLogins(h, rows) {
+    const loginOf = new Map();
+    for (const r of rows) {
+      if (!r.key || !r.email) continue;
+      const e = r.email.toLowerCase();
+      loginOf.set(r.key, loginOf.has(r.key) && loginOf.get(r.key) !== e ? null : e);
+    }
+    for (const [key, email] of loginOf) if (email && noteLogin(h, key, email, d.now())) dirty = true;
+  }
+
+  async function noteLogins(h) {
+    const { default: def, accounts: rows } = accountKeyRows(d.getAccounts(), { defaultDir: d.defaultDir() });
+    const all = [{ ...def, envUnset: d.defaultEnvUnset() }, ...rows.filter(Boolean).map((r) => ({ ...r, envUnset: false }))];
+    await Promise.all(all.map(async (r) => {
+      try { r.email = await d.email(r.dir, { envUnset: r.envUnset }); } catch { r.email = null; }
+    }));
+    applyLogins(h, all);
   }
 
   // Default + every Claude account, with its login read-only. Ids that two
@@ -132,18 +173,7 @@ export function createHeadroomService(d) {
     }
     for (const r of all) r.sameAs = r.email ? byEmail.get(r.email.toLowerCase()).filter((l) => l !== r.label) : [];
     // A folder re-logged into another login: its old figures are not this one's.
-    // Two rows on one credential can read two metadata files (Default with
-    // the home-level file, an explicit ~/.claude with the inner one) and name
-    // two logins: that credential's owner is undecidable, so it is left alone
-    // rather than flipped back and forth.
-    const h = await history();
-    const loginOf = new Map();
-    for (const r of all) {
-      if (!r.key || !r.email) continue;
-      const e = r.email.toLowerCase();
-      loginOf.set(r.key, loginOf.has(r.key) && loginOf.get(r.key) !== e ? null : e);
-    }
-    for (const [key, email] of loginOf) if (email && noteLogin(h, key, email, d.now())) dirty = true;
+    applyLogins(await history(), all);
     return all;
   }
 
@@ -175,19 +205,23 @@ export function createHeadroomService(d) {
   // One login under two folders is one limit: a folder with no live figure
   // shows (and ranks by) the freshest figure of a folder logged into the same
   // address, marked with where it came from.
+  // The freshest figure wins, the folder's own included: a stale low figure
+  // of one folder must not hide a fresh limit reported through the other.
   function usageForRow(r, rows, now) {
     const own = usageForKey(hist, r.key, now);
-    if (own.known || !r.email) return own;
-    const same = rows
+    if (!r.email) return own;
+    const best = rows
       .filter((o) => o !== r && o.key !== r.key && o.email && o.email.toLowerCase() === r.email.toLowerCase())
       .map((o) => ({ o, u: usageForKey(hist, o.key, now) }))
-      .filter((x) => x.u.known)
+      .filter((x) => x.u.known && (!own.known || (x.u.lastReportedAt || 0) > (own.lastReportedAt || 0)))
       .sort((x, y) => (y.u.lastReportedAt || 0) - (x.u.lastReportedAt || 0))[0];
-    return same ? { ...same.u, via: same.o.label } : own;
+    return best ? { ...best.u, via: best.o.label } : own;
   }
 
   // `reserved`: key -> percent already promised this pass to tabs moved there.
-  function candidatesFor(source, rows, now, reserved = null) {
+  // `live`: key -> sessions running (null: the scan could not say).
+  function candidatesFor(source, rows, now, reserved = null, live = null) {
+    const override = d.authOverride?.() || null;
     return rankTargets(rows.map((r) => {
       const usage = usageForRow(r, rows, now);
       const hold = limitedUntil.get(r.key);
@@ -203,10 +237,20 @@ export function createHeadroomService(d) {
         login: r.login,
         sameAs: r.sameAs,
         usage,
-        refusal: r.duplicateId ? 'two accounts share this id; fix that in Settings first' : moveRefusal(source, r),
-        autoRefusal: autoRefusal(source, r),
+        refusal: override ? `${override} is set in Dobius's environment, and it signs in every Claude the same way whichever account a tab is on`
+          : r.duplicateId ? 'two accounts share this id; fix that in Settings first'
+            : (!r.isDefault && typeof r.id !== 'string') ? 'this account has no usable id; re-add it in Settings'
+              : moveRefusal(source, r),
+        autoRefusal: autoRefusal(source, r, { fresh: freshUsage(usage, live ? (live.get(r.key) ?? 0) : null) }),
       };
     }));
+  }
+
+  async function liveByKey() {
+    let scan;
+    try { scan = await d.scan(); } catch { return null; }
+    if (!scan || scan.discoveryFailed) return null;
+    return new Map((scan.groups || []).map((g) => [g.key, g.pids.length]));
   }
 
   async function usage() {
@@ -241,8 +285,8 @@ export function createHeadroomService(d) {
   async function draftIn(tabId) {
     try {
       const sc = await d.screen(tabId);
-      return sc ? isDraft(d.promptBox(sc.lines, sc.modes)) : false;
-    } catch { return false; }
+      return sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), !!d.selector(sc.lines)) : true;
+    } catch { return true; }
   }
 
   async function tabInfo(tabId) {
@@ -252,7 +296,12 @@ export function createHeadroomService(d) {
     if (info) {
       try {
         const r = await d.resolveSession(tabId);
-        if (r?.sessionId) session = { sessionId: r.sessionId, project: r.sessionProject || null };
+        // Where Claude actually runs (a worktree, a subfolder) is where it is
+        // resumed: respawning at the project root would resume it outside
+        // the checkout it was working in.
+        let cwd = null;
+        try { cwd = await d.processCwd(info.pid); } catch { cwd = null; }
+        if (r?.sessionId) session = { sessionId: r.sessionId, project: cwd || r.sessionProject || null };
       } catch { session = null; }
     }
     let running = 'claude';
@@ -262,8 +311,17 @@ export function createHeadroomService(d) {
       running = proc ? 'other' : 'shell';
     }
     const act = d.activity(tabId);
+    // A turn the hook still calls 'working' but that has drawn nothing for a
+    // while: busy unless its transcript shows it ended on a limit (a turn
+    // that dies on a limit may never send the Stop that clears 'working').
+    let busy = tabBusy(act, d.now());
+    if (!busy && act?.status === 'working' && act.hookOwned) {
+      let rec = null;
+      if (session) { try { rec = await d.limitRecord(session.sessionId, session.project); } catch { rec = null; } }
+      busy = !rec?.limit;
+    }
     return {
-      tabId, running, session, busy: tabBusy(act, d.now()), status: act?.status || null,
+      tabId, running, session, busy, status: act?.status || null,
       // Unsent text in Claude's box: a respawn would throw it away.
       draft: info ? await draftIn(tabId) : false,
       pid: info?.pid ?? null,
@@ -324,9 +382,10 @@ export function createHeadroomService(d) {
         d.log('accounts.auto-move', `tab=${tabId} event=${p.eventId} result=abandoned (the window never confirmed the move)`);
       }
     }
-    const live = new Set(d.tabs().map((t) => t.id));
-    for (const id of tabStates.keys()) if (!live.has(id)) tabStates.delete(id);
+    const open = new Set(d.tabs().map((t) => t.id));
+    for (const id of tabStates.keys()) if (!open.has(id)) tabStates.delete(id);
     let rows = null;
+    let live = null;
     // Headroom promised to tabs moved earlier in this same pass.
     const reserved = new Map();
     for (const tab of d.tabs()) {
@@ -344,29 +403,40 @@ export function createHeadroomService(d) {
       let ses;
       try { ses = await d.resolveSession(tab.id); } catch { ses = null; }
       if (!ses?.sessionId) continue;
-      const project = ses.sessionProject || tab.cwd;
+      // A session named by the process's own --resume is certain. One matched
+      // from the tab's recent links (a fresh `claude`) is a heuristic, so the
+      // tab's own screen must show the limit too: an account-wide 100% says
+      // nothing about which conversation the link really belongs to.
+      const fromArgv = !!info.sessionId && info.sessionId === ses.sessionId;
+      let cwd;
+      try { cwd = await d.processCwd(info.pid); } catch { cwd = null; }
+      const project = cwd || ses.sessionProject || tab.cwd;
       let rec;
-      try { rec = await d.limitRecord(ses.sessionId, project); } catch { rec = null; }
+      try {
+        rec = await d.limitRecord(ses.sessionId, project);
+        if (!rec?.found && ses.sessionProject && ses.sessionProject !== project) rec = await d.limitRecord(ses.sessionId, ses.sessionProject);
+      } catch { rec = null; }
       if (!rec?.found || !rec.limit) continue;
-      if (Number.isFinite(info.startedAt) && rec.limit.at < info.startedAt) continue; // see decideAutoMove
+      if (Number.isFinite(info.startedAt) && rec.limit.at < info.startedAt + 1000) continue; // see decideAutoMove
       let sc;
       try { sc = await d.screen(tab.id); } catch { sc = null; }
-      const screenHit = !!liveLimitLine(sc?.lines);
-      const draft = sc ? isDraft(d.promptBox(sc.lines, sc.modes)) : false;
+      const screenHit = !!liveLimitLine(sc?.lines, d.rows(tab.id));
+      const draft = sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), !!d.selector(sc.lines)) : true;
       rows ??= await accountRows();
+      live ??= await liveByKey();
       const source = await sourceOf(tab, rows, info.pid);
       const dec = decideAutoMove({
         enabled: true,
         now: d.now(),
         limit: rec.limit,
         processStartedAt: info.startedAt ?? null,
-        corroboration: { statusLine: u.limited, screen: screenHit },
+        corroboration: { statusLine: u.limited && fromArgv, screen: screenHit },
         draft,
         busy: tabBusy(d.activity(tab.id), d.now()),
         inputAgeMs: d.inputAgeMs(tab.id),
         tabState: st,
         recentMoves,
-        ranked: candidatesFor(source, rows, d.now(), reserved),
+        ranked: candidatesFor(source, rows, d.now(), reserved, live),
       });
       // A real limit on this tab's account: it is limited for everyone else
       // in this pass and for a while after, whatever its last report said.
@@ -377,11 +447,16 @@ export function createHeadroomService(d) {
       if (dec.action === 'wait') st.nextLookAt = d.now() + 5_000;
       if (dec.action === 'move') {
         st.handled.add(dec.eventId);
+        if (st.handled.size > MAX_HANDLED_PER_TAB) st.handled.delete(st.handled.values().next().value);
         st.lastMoveAt = d.now();
         recentMoves.push(st.lastMoveAt);
         while (recentMoves.length > 50) recentMoves.shift();
         reserved.set(dec.target.key, (reserved.get(dec.target.key) || 0) + AUTO.RESERVE_PER_TAB);
-        const p = { eventId: dec.eventId, eventAt: rec.limit.at, sessionId: ses.sessionId, project, wcId: d.windowOf(tab.id), at: d.now(), targetLabel: dec.target.label, targetKey: dec.target.key, sourceLabel: source.label };
+        const p = {
+          eventId: dec.eventId, eventAt: rec.limit.at, sessionId: ses.sessionId, project, wcId: d.windowOf(tab.id), at: d.now(),
+          targetLabel: dec.target.label, targetKey: dec.target.key, sourceLabel: source.label,
+          inputSeq: d.inputSeq(tab.id), pty: d.pty(tab.id), started: false,
+        };
         pending.set(tab.id, p);
         d.log('accounts.auto-move', `tab=${tab.id} from=${source.label} to=${dec.target.label} event=${dec.eventId} result=moving`);
         const sent = d.send(tab.id, 'accounts:autoMove', {
@@ -423,9 +498,32 @@ export function createHeadroomService(d) {
    * or if the conversation moved on (its transcript no longer ends in the
    * limit this move was for).
    */
+  // Right before the window restarts the tab: the move is still wanted and
+  // nothing about the tab changed since main decided (the window may have
+  // queued it behind other moves for a minute or more).
+  async function startAutoMove(tabId, eventId, senderId) {
+    const p = pending.get(tabId);
+    if (!p || p.eventId !== eventId || p.wcId !== senderId || p.started) return { ok: false, error: 'no automatic move is waiting for that tab' };
+    const stop = (why) => {
+      pending.delete(tabId);
+      d.log('accounts.auto-move', `tab=${tabId} from=${p.sourceLabel} to=${p.targetLabel} event=${eventId} result=not-moved (${why})`);
+      return { ok: false, error: why };
+    };
+    if (!d.autoMoveEnabled()) return stop('auto-move was switched off');
+    if (d.pty(tabId) !== p.pty || d.closing(tabId)) return stop('the tab restarted meanwhile');
+    if (d.inputSeq(tabId) !== p.inputSeq || d.inputHeld(tabId)) return stop('someone typed in the tab');
+    if (tabBusy(d.activity(tabId), d.now())) return stop('the tab got busy');
+    if (await draftIn(tabId)) return stop('there is unsent text in the prompt');
+    if (d.inputSeq(tabId) !== p.inputSeq) return stop('someone typed in the tab');
+    p.started = true;
+    p.at = d.now();
+    return { ok: true };
+  }
+
   async function continueAfterMove(tabId, eventId, senderId, failed) {
     const p = pending.get(tabId);
     if (!p || p.eventId !== eventId || p.wcId !== senderId) return { ok: false, error: 'no automatic move is waiting for that tab' };
+    if (!p.started && !(typeof failed === 'string' && failed)) return { ok: false, error: 'that move was never started' };
     pending.delete(tabId);
     const done = (result, ok = false, text = null) => {
       d.log('accounts.auto-move', `tab=${tabId} from=${p.sourceLabel} to=${p.targetLabel} event=${eventId} result=${result}`);
@@ -437,7 +535,9 @@ export function createHeadroomService(d) {
     const pty = d.pty(tabId);
     if (!pty) return done('no-continue (the tab has no shell)');
     const end = d.now() + CONTINUE_TIMEOUT_MS;
-    const stillHere = () => d.pty(tabId) === pty && !d.closing(tabId);
+    // Same shell, still this window's: a tab docked into another window
+    // meanwhile is that window's business now.
+    const stillHere = () => d.pty(tabId) === pty && !d.closing(tabId) && d.windowOf(tabId) === p.wcId;
     // Claude running the session that was resumed.
     let started = null;
     while (d.now() < end && stillHere()) {
@@ -470,8 +570,25 @@ export function createHeadroomService(d) {
     let rec;
     try { rec = await d.limitRecord(p.sessionId, p.project); } catch { rec = null; }
     if (!rec?.found || rec.limit?.at !== p.eventAt) return done('no-continue (the conversation moved on)', false, `Moved this tab to ${p.targetLabel}. The conversation had moved on, so "continue" was not sent.`);
-    if (d.inputSeq(tabId) !== baseline || !stillHere()) return done('no-continue (someone typed in the tab)');
-    const sent = await d.submit(tabId, 'continue', stillHere);
+    if (d.inputSeq(tabId) !== baseline || d.inputHeld(tabId) || !stillHere()) return done('no-continue (someone typed in the tab)');
+    // Still the Claude that was checked above, not one started after it.
+    let now;
+    try { now = await d.claudeInfo(tabId); } catch { now = null; }
+    if (now?.pid !== started.pid || now?.sessionId !== p.sessionId) return done('no-continue (Claude restarted while waiting)');
+    if (!d.autoMoveEnabled()) return done('no-continue (auto-move was switched off)');
+    // Resumed where it was working (a worktree): Claude falls back to another
+    // folder when it cannot re-enter it, and "continue" there would work on
+    // the wrong checkout.
+    if (p.project) {
+      let at;
+      try { at = await d.processCwd(started.pid); } catch { at = null; }
+      if (!at || !(await d.samePath(at, p.project))) {
+        return done('no-continue (Claude resumed in another folder)', false, `Moved this tab to ${p.targetLabel}, but Claude came back in a different folder from the one it was working in, so "continue" was not sent.`);
+      }
+    }
+    // Checked again where the submit queue decides to paste: input held by
+    // the window (an image paste) or typed meanwhile cancels it.
+    const sent = await d.submit(tabId, 'continue', () => stillHere() && d.inputSeq(tabId) === baseline && !d.inputHeld(tabId));
     return sent
       ? done('continued', true)
       : done('no-continue (the submit was interrupted)', false, `Moved this tab to ${p.targetLabel}, but "continue" did not go through. Check the tab.`);
@@ -483,6 +600,7 @@ export function createHeadroomService(d) {
     moveTargets,
     moveCandidates,
     continueAfterMove,
+    startAutoMove,
     flush: () => save(true),
     _pending: pending,
     _tabStates: tabStates,

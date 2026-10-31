@@ -789,7 +789,11 @@ export const useStore = create((set, get) => ({
     let moved = 0;
     const failed = [];
     // One at a time: each resume claims its session and types into its own tab.
-    for (const c of movable) {
+    for (const c0 of movable) {
+      // Judged again right before its restart: earlier moves take seconds,
+      // and a tab may have started a turn or been typed into meanwhile.
+      const [c] = (await api.accountsMoveCandidates([c0.tabId], accountId)) || [];
+      if (!c || why(c)) { failed.push({ label: name(c0.tabId), reason: c ? why(c) : 'it is gone' }); continue; }
       const r = await get().moveTabToAccount(c.tabId, accountId, {
         confirm: false, background: true, label, sessionId: c.session?.sessionId, project: c.session?.project,
       });

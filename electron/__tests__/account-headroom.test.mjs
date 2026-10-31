@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   emptyHistory, sanitizeHistory, updateHistory, noteLogin, paceFor, forecastFor, usageForKey,
-  accountKeyRows, moveRefusal, rankTargets, limitFromEntries, liveLimitLine, decideAutoMove, AUTO, tabBusy, autoRefusal,
+  accountKeyRows, moveRefusal, rankTargets, limitFromEntries, liveLimitLine, decideAutoMove, AUTO, tabBusy, autoRefusal, freshUsage,
 } from '../account-headroom.js';
 import { keychainServiceFor } from '../account-identity.js';
 
@@ -61,6 +61,12 @@ check('history keeps the FIRST time each value was seen, and a republished lower
   const w = h.keys[KEY_A].windows.five_hour;
   assert.deepEqual(w.samples, [{ t: T0, p: 10 }, { t: T0 + 10 * MIN, p: 20 }]);
   assert.equal(w.seenAt, T0 + 11 * MIN);
+});
+
+check('a figure with no reset time is not kept (it would never expire)', () => {
+  const h = emptyHistory();
+  updateHistory(h, [{ key: KEY_A, receivedAt: T0, windows: { five_hour: { usedPercentage: 0, resetsAt: null } } }], T0);
+  assert.equal(usageForKey(h, KEY_A, T0).known, false);
 });
 
 check('a new resets_at starts a new window and an expired window is dropped', () => {
@@ -200,6 +206,21 @@ check('the screen limit line counts only in the live region, never higher up', (
   assert.equal(liveLimitLine(['You hit a wall']), null);
 });
 
+check('only a recent report, or a running session, makes usage live enough to act on', () => {
+  assert.equal(freshUsage({ known: true, ageMs: 60_000 }, 0), true);
+  assert.equal(freshUsage({ known: true, ageMs: 3600_000 }, 0), false);
+  assert.equal(freshUsage({ known: true, ageMs: 3600_000 }, 2), true);
+  assert.equal(freshUsage({ known: true, ageMs: 3600_000 }, null), false);
+  assert.equal(freshUsage({ known: false, ageMs: 1 }, 3), false);
+});
+
+check('the live region is never taller than the real terminal', () => {
+  const screen = Array(40).fill('x');
+  screen[30] = "You've hit your 5-hour limit";
+  assert.match(liveLimitLine(screen, 24), /5-hour/);
+  assert.equal(liveLimitLine(screen, 8), null);
+});
+
 // ---- auto-move guard rails ----
 
 const base = (over = {}) => ({
@@ -266,6 +287,9 @@ check('the screen alone vouches only for a limit that just happened', () => {
 
 check('a limit from before this claude process started (a resumed transcript) never moves it', () => {
   assert.equal(decideAutoMove(base({ processStartedAt: T0 + 59 * MIN + 1000 })).action, 'none');
+  // ps rounds the start DOWN to the second: a limit in that same second may be the old process's.
+  assert.equal(decideAutoMove(base({ processStartedAt: T0 + 59 * MIN - 500 })).action, 'none');
+  assert.equal(decideAutoMove(base({ processStartedAt: T0 + 59 * MIN - 1000 })).action, 'move');
 });
 
 check('unsent text in the prompt waits rather than being thrown away', () => {
@@ -275,7 +299,8 @@ check('unsent text in the prompt waits rather than being thrown away', () => {
 check('auto-move never picks a login it cannot tell apart from the tab\'s', () => {
   assert.match(autoRefusal({ email: null }, { email: 'b@x' }), /not recorded/);
   assert.match(autoRefusal({ email: 'a@x' }, { email: '' }), /not recorded/);
-  assert.equal(autoRefusal({ email: 'a@x' }, { email: 'b@x' }), null);
+  assert.equal(autoRefusal({ email: 'a@x' }, { email: 'b@x' }, { fresh: true }), null);
+  assert.match(autoRefusal({ email: 'a@x' }, { email: 'b@x' }, { fresh: false }), /not reported recently/);
   const ranked = rankTargets([cand('noaddr', true, 90, T0, { autoRefusal: 'not recorded' })]);
   assert.equal(decideAutoMove(base({ ranked })).action, 'notice');
 });

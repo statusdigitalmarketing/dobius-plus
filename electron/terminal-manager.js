@@ -1013,6 +1013,11 @@ export function terminalCols(id) {
   return terminals.get(id)?.cols ?? null;
 }
 
+/** The PTY's current height in rows (last spawn or resize), or null. */
+export function terminalRows(id) {
+  return terminals.get(id)?.rows ?? null;
+}
+
 // The live pty object behind a tab id, or null. Identity, not a handle to
 // write through: a caller that waits between two writes compares it to tell
 // "same shell" from "the tab id now names a respawned PTY".

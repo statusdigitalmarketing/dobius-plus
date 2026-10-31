@@ -30,6 +30,11 @@ export default function AccountMoveBanner() {
         if (!tab) { await api.accountsAutoMoveContinue?.(tabId, p.eventId, 'the tab is no longer in this window'); return; }
         if (!SESSION_RE.test(String(p.sessionId || ''))) { await api.accountsAutoMoveContinue?.(tabId, p.eventId, 'no conversation to resume'); return; }
         const accountId = p.accountId === null ? null : String(p.accountId || '');
+        // Main re-checks right before the restart (this one may have waited
+        // behind other moves): typed into, unsent text or busy since it
+        // decided means it is not moved at all.
+        const go = await api.accountsAutoMoveStart?.(tabId, p.eventId);
+        if (!go?.ok) { add(tabId, `hit its limit but was not moved: ${go?.error || 'the move was called off'}.`); return; }
         add(tabId, `hit its limit, moving to ${p.targetLabel || 'another account'} and continuing.`);
         let r;
         try {

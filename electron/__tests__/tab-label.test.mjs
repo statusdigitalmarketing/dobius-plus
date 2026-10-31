@@ -117,4 +117,11 @@ assert.deepEqual(parseLabelMeta('not json'), {});
 assert.deepEqual(parseLabelMeta('{"labelSource":"evil","labelLockedByUser":"yes"}'), {});
 ok('label state survives a tear-off');
 
+// An account pin travels with a torn-off or docked tab, cleaned.
+assert.deepEqual(parseLabelMeta(JSON.stringify(labelMeta({ label: 'x', claudeAccountPin: { id: 'acct-b' } }))).claudeAccountPin, { id: 'acct-b' });
+assert.deepEqual(parseLabelMeta(JSON.stringify(labelMeta({ label: 'x', claudeAccountPin: { id: null } }))).claudeAccountPin, { id: null });
+assert.equal(parseLabelMeta(JSON.stringify({ claudeAccountPin: { id: 7 } })).claudeAccountPin, undefined);
+assert.equal(labelMeta({ label: 'x' }).claudeAccountPin, undefined);
+ok('an account pin survives tear-off and dock, and only its clean shape');
+
 console.log(`\n${pass} passed`);

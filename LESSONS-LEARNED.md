@@ -396,3 +396,21 @@
 - **FIX**: Follow-up after 2.0.0: one readiness signal per window, one bring-to-front helper, and one module for Claude's prompt/rule shapes. Only what the integration fixes needed was shared (the caret rule, the bridge-opened first tab).
 - **CONTEXT**: Integration review of release/2.0.0; judged too risky to unify this late.
 - **DETECTION**: `grep -rn "tabsReady\|bringToFront\|RULE_RE\|PROMPT_ROW_RE" electron src`
+
+### Architecture - 2026-10-30 (account headroom)
+- **MISTAKE**: The first auto-move design keyed a limit event on the transcript's newest record alone. `claude --resume` leaves the transcript ending in the PREVIOUS process's limit record (on the account the tab just left) until something new is written, and its screen redraws the old "You've hit your 5-hour limit" line, so every move, manual move or relaunch would have looked like a fresh limit and moved the tab again (independent design review, High).
+- **FIX**: A limit counts only if it happened to the claude running now: `limit.at >= getTerminalClaudeInfo(id).startedAt` (`decideAutoMove`, electron/account-headroom.js). Claude's limit record is `type:'assistant', isApiErrorMessage:true, error:'rate_limit'` with text "You've hit your <5-hour|session|weekly|Opus|Sonnet> limit · resets ...", verified on transcripts from 2.1.251 to 2.1.293.
+- **CONTEXT**: Anything that reacts to the END of a transcript after a resume, or to Claude's screen after a respawn.
+- **DETECTION**: `grep -n "processStartedAt" electron/account-headroom.js`
+
+### Process - 2026-10-30 (account headroom)
+- **MISTAKE**: The auto-move audit lines went through `logLine` as an ordinary kind, and a renderer warning storm in the harness (3000+ duplicate-key warnings from the Settings font picker) used up the per-minute budget, so two of three audit lines never reached error.log. Only the ship-test showed it.
+- **FIX**: An audit trail that must survive is a priority kind (`accounts.auto-move` in error-log.js PRIORITY_RE) and a non-fault for the reporter (error-reporter.js SKIP_KIND), with both pinned by tests.
+- **CONTEXT**: Any new log kind whose loss would hide an automatic action from the person.
+- **DETECTION**: `grep -n "PRIORITY_RE\|SKIP_KIND" electron/error-log.js electron/error-reporter.js`
+
+### Testing - 2026-10-30 (account headroom)
+- **MISTAKE**: Not a mistake: a recipe. Account features cannot be ship-tested against the real profiles, Keychain or ~/.claude.
+- **FIX**: Run the harness with `HOME=<scratch>/home` (fake ~/.claude, ~/.claude-profiles, transcripts) and CLAUDE_CONFIG_DIR unset, fake profiles holding a `.claude.json` (oauthAccount.emailAddress) and a `.credentials.json` with a `claudeAiOauth` key (loginState reads 'in' without the Keychain), PATH starting with a stand-in `claude` node script that writes DOBIUS1 usage records and transcript lines. A stand-in must park the cursor on its prompt row right of the ❯ or promptBoxText never sees the box. Never click the Running sessions "Move" button in such a harness: the process scan still sees the REAL sessions on the Mac.
+- **CONTEXT**: scratchpad/brett/accounts/h (seed.mjs, bin/claude, p1-p12 probes, up.sh/down.sh).
+- **DETECTION**: `pgrep -fl "accounts/h/bin/claude"` after teardown must print nothing.
