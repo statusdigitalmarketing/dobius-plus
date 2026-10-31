@@ -142,144 +142,15 @@ export async function answerSelector(id, data, token, stillOk = () => true, befo
 
 const SUBMIT_ENTER_DELAY_MS = 250;
 const RAW_KEY_GAP_MS = 20;
-// Input a terminal window still holds back for the tab (prompt editing: an
-// image paste being saved, the keys typed after it). A submit waits for it at
-// the head of this queue, so its paste never lands between that input's
-// parts. main.js wires the check (bridge-open-main.js inputHeld).
-let inputHeld = () => false;
-// And marks the window's current hold as having lost input, so its drain
-// cancels every submit waiting on it, including ones accepted later.
-let markHeldLost = () => {};
-export function setInputHeldCheck(fn, lost) {
-  inputHeld = typeof fn === 'function' ? fn : () => false;
-  markHeldLost = typeof lost === 'function' ? lost : () => {};
-}
-
-/**
- * A key a window took but still holds (bridge-open-main.js terminal:inputHeld).
- * A cancel key among it cancels queued submits NOW, as it would on arrival:
- * the window may still drop it (its paste timed out) and never send it.
- */
-export function noteHeldInput(id, data) {
-  const q = submitQueues.get(id);
-  if (q && typeof data === 'string' && isCancelKey(data)) q.gen += 1;
-}
-
-/**
- * A window that held input for the tab is gone (crashed, reloaded, closed)
- * with that input half sent: queued submits are cancelled, never appended
- * to whatever part of it reached the terminal.
- */
-export function cancelQueuedSubmits(id) {
-  const q = submitQueues.get(id);
-  if (q) q.gen += 1;
-  openSends.delete(id); // their window is gone: none of them will end
-}
-
-// Multi-part sends a window paces out (the command bar), per tab:
-// tabId -> Map(sendId -> { written }). A send is open from its first part
-// until its end mark is processed IN QUEUE ORDER, so it stays open while
-// main still holds parts of it; a submit never pastes into an open send.
-// written: some part of it reached the PTY. sender: the window that sent its
-// first part, which may still end it after the tab moved to another window.
-const openSends = new Map();
-function sendState(id, s, sender = null) {
-  let m = openSends.get(id);
-  if (!m) openSends.set(id, (m = new Map()));
-  let st = m.get(s);
-  if (!st) m.set(s, (st = { written: false, sender }));
-  return st;
-}
-function closeSend(id, s) {
-  const m = openSends.get(id);
-  m?.delete(s);
-  if (m && !m.size) openSends.delete(id);
-}
-const sendOpen = (id) => !!openSends.get(id)?.size;
-
-// Sends main cut on its own (a refused part, a send given up): the window
-// does not know and keeps handing over parts, which must not reopen it. Kept
-// until that window's own end or cut mark (its last word on the send).
-// tabId -> Set of sendIds, capped.
-const cutByMain = new Map();
-const MAX_CUT_SENDS = 64;
-function markCut(id, s) {
-  let set = cutByMain.get(id);
-  if (!set) cutByMain.set(id, (set = new Set()));
-  set.add(s);
-  if (set.size > MAX_CUT_SENDS) set.delete(set.values().next().value);
-}
-function unmarkCut(id, s) {
-  const set = cutByMain.get(id);
-  if (set?.delete(s) && !set.size) cutByMain.delete(id);
-}
-
-/**
- * The end of a multi-part send (terminal:write with { send, end } or
- * { send, cut }). end: its last part was handed over; it closes once that is
- * written. cut: the window dropped the rest of it. If some of it already
- * reached the PTY, the box holds half a command: everything queued is
- * cancelled, a pasted message's Enter too (gen). If none did, its parts still
- * queued here are dropped and only submits not yet pasted go with them
- * (dropGen); a message already in the box keeps its Enter.
- */
-export function endSend(id, send, { cut = false, sender = null, owns = true, byMain = false } = {}) {
-  if (typeof send !== 'string' || !send) return;
-  // Only the tab's owner, or the window that started this send (a tear-off
-  // moves the tab before the old pane can say its send was cut).
-  if (!owns && openSends.get(id)?.get(send)?.sender !== sender) return;
-  // Main cutting it: its window's later parts stay refused (markCut). The
-  // window's own mark is its last word: a send main already cut is done.
-  // The window holding the rest still drains it as if it went out, so its
-  // hold is marked lost too: submits accepted later, waiting on that hold,
-  // are dropped when it drains instead of pasting onto what remains.
-  if (byMain) { markCut(id, send); markHeldLost(id); }
-  else if (cutByMain.get(id)?.has(send)) { unmarkCut(id, send); return; }
-  const q = submitQueues.get(id);
-  if (cut) {
-    const written = !!openSends.get(id)?.get(send)?.written;
-    closeSend(id, send);
-    if (!q) return;
-    if (written) { q.gen += 1; return; }
-    for (const x of q.items.filter((i) => i.send === send)) x.resolve(refused('cancelled'));
-    q.items = q.items.filter((i) => i.send !== send);
-    q.dropGen += 1;
-    return;
-  }
-  if (q && q.running && !q.waitingHeld) {
-    q.items.push({ raw: '', endSend: send, pty: terminalInstance(id), stillOk: () => true, gen: q.gen, resolve: () => {} });
-    return;
-  }
-  closeSend(id, send);
-}
-
-/**
- * Input the person meant to go first was dropped before it reached the
- * terminal (a prompt-only paste): submits not yet pasted are dropped, the
- * one already in the box (which that input never touched) keeps its Enter.
- */
-export function dropUnpastedSubmits(id) {
-  const q = submitQueues.get(id);
-  if (q) q.dropGen += 1;
-}
-const HELD_WAIT_MS = 16_000; // prompt editing gives up on a paste after 15s
-const HELD_POLL_MS = 50;
-// When this queue last delivered an Enter to each tab (a submit's, or a key
-// that waited behind one: the window that typed it cannot see when it really
-// went out). A prompt-only paste arriving within PROMPT_SETTLE_MS of it is
-// dropped (writeRawInput).
-const lastSubmitEnterAt = new Map();
-const PROMPT_SETTLE_MS = 1000; // src/lib/prompt-edit-term.js AFTER_ENTER_MS
-// tabId -> { running, items, gen, dropGen }. gen bumps on a cancel key; an item queued
-// under an older gen is dropped instead of written. dropGen bumps when a
-// prompt-only paste is dropped; it drops only submits not yet pasted.
+// tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
+// under an older gen is dropped instead of written.
 const submitQueues = new Map();
 
 const isCancelKey = (data) => data === '\x1b' || data.includes('\x03') || data.includes('\x15');
 
 function queueFor(id) {
   let q = submitQueues.get(id);
-  if (!q) { q = { running: false, items: [], gen: 0, dropGen: 0 }; submitQueues.set(id, q); }
+  if (!q) { q = { running: false, items: [], gen: 0 }; submitQueues.set(id, q); }
   return q;
 }
 
@@ -324,7 +195,7 @@ export function submitPromptDetailed(id, text, stillOk = () => true, onStranded 
   if (!stillOk()) return Promise.resolve(refused('not_allowed'));
   const q = queueFor(id);
   return new Promise((resolve) => {
-    q.items.push({ clean, pty, stillOk, gen: q.gen, dropGen: q.dropGen, resolve, onStranded });
+    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded });
     if (!q.running) drainSubmits(id, q);
   });
 }
@@ -345,13 +216,8 @@ const refused = (reason) => ({ ok: false, reason });
  * signal says the program read it (docs/mobile-ws-protocol.md). Callers that
  * do not care ignore it.
  */
-export function writeRawInput(id, data, stillOk = () => true, { promptOnly = false, send = null, sender = null } = {}) {
+export function writeRawInput(id, data, stillOk = () => true) {
   if (typeof data !== 'string' || !data) return Promise.resolve(refused('empty'));
-  // A part of a multi-part send (endSend): the send is open from now on.
-  if (typeof send !== 'string' || !send) send = null;
-  // A part of a send main already cut: refused, never reopening it.
-  else if (cutByMain.get(id)?.has(send)) { markHeldLost(id); return Promise.resolve(refused('cancelled')); }
-  else sendState(id, send, sender);
   // A frame already in flight when its phone was revoked: not even a cancel
   // key, which would also throw away the desktop's pending submit.
   if (!stillOk()) return Promise.resolve(refused('not_allowed'));
@@ -365,46 +231,24 @@ export function writeRawInput(id, data, stillOk = () => true, { promptOnly = fal
     // Only a frame of nothing but cancel keys counts as the queue's own: one
     // that also carries an Enter ("\r\x15") may have sent the paste first
     // (Codex High), so it counts as another writer.
-    // The cancel drops queued submits whether or not its own write lands (the
-    // person pressed it: release/2.0.0 behaviour), so gen moves FIRST. Only a
-    // cancel that was written counts as an erase, or the pending paste it never
-    // cleared would read as unsent (Codex High, rounds 5 and merge 1).
-    if (q) q.gen += 1;
+    // Written FIRST: a cancel whose write throws must not be counted as an
+    // erase, or the pending paste it never cleared reads as unsent (Codex High).
     const r = written();
     writeTerminal(id, data);
-    if (send) sendState(id, send).written = true;
     if (q) {
+      q.gen += 1;
       if (/^[\x03\x15\x1b]+$/.test(data)) q.cancelWrites = (q.cancelWrites || 0) + 1;
       if (data !== '\x1b') q.clearedGen = q.gen;
     }
     return Promise.resolve(r);
   }
-  // A submit waiting for held input lets keys through: that input arriving
-  // is what it waits for, and it was taken before the submit.
-  // Prompt editing checked that Claude's prompt was showing when it sent
-  // this (a file path pasted into it). Behind a submit it would land later,
-  // maybe in the shell a "/exit" left behind; and just after a submit's
-  // Enter that check may have read the screen from before it: dropped.
-  // (Prompt editing waits the same second after its own Enter.)
-  // A dropped paste is input lost: queued submits are cancelled with it,
-  // never sent without the attachment the person meant to go first.
-  // Only submits not yet pasted (dropGen): the one already in the box is
-  // what the box holds, the dropped paste never reached it.
-  const dropPaste = () => { if (q) q.dropGen += 1; markHeldLost(id); return Promise.resolve(refused('prompt_dropped')); };
-  if (promptOnly && Date.now() - (lastSubmitEnterAt.get(id) ?? -Infinity) < PROMPT_SETTLE_MS) return dropPaste();
-  if (!q || !q.running || q.waitingHeld) {
-    const r = written();
-    writeTerminal(id, data);
-    if (send) sendState(id, send).written = true;
-    return Promise.resolve(r);
-  }
-  if (promptOnly) return dropPaste();
+  if (!q || !q.running) { const r = written(); writeTerminal(id, data); return Promise.resolve(r); }
   // No PTY to queue for (it exited under a running submit): nothing would be
   // written, so say so now rather than report a write of nothing.
   const pty = terminalInstance(id);
   if (!pty) return Promise.resolve(refused('tab_exited'));
   return new Promise((resolve) => {
-    q.items.push({ raw: data, send, pty, stillOk, gen: q.gen, resolve });
+    q.items.push({ raw: data, pty, stillOk, gen: q.gen, resolve });
   });
 }
 
@@ -413,30 +257,11 @@ export function submitPending(id) {
   return !!submitQueues.get(id)?.running;
 }
 
-// Why a queued item must not be written now, or '' when it may be. A part
-// of a send that was cut (or given up) meanwhile, even one already taken off
-// the queue and waiting out its pacing gap, never goes.
+// Why a queued item must not be written now, or '' when it may be.
 function skipReason(id, q, it) {
   if (terminalInstance(id) !== it.pty || terminalClosing(id)) return 'tab_exited';
   if (it.gen !== q.gen) return 'cancelled';
-  if (it.send && !openSends.get(id)?.has(it.send)) return 'cancelled';
   return it.stillOk() ? '' : 'not_allowed';
-}
-
-// A queued part that will not be written: its send can no longer arrive
-// whole, so it is cut here (its other parts and its end go with it).
-function skipPart(id, x, reason) {
-  x.resolve(refused(reason));
-  if (x.send && openSends.get(id)?.has(x.send)) endSend(id, x.send, { cut: true, byMain: true });
-}
-
-// A raw item the queue writes now (or the end mark of a send, which only
-// closes it: its parts before it are written).
-function deliver(id, x) {
-  if (x.endSend) { closeSend(id, x.endSend); return; }
-  writeTerminal(id, x.raw);
-  if (x.send) { const st = openSends.get(id)?.get(x.send); if (st) st.written = true; }
-  if (x.raw.includes('\r')) lastSubmitEnterAt.set(id, Date.now());
 }
 
 async function drainSubmits(id, q) {
@@ -448,66 +273,19 @@ async function drainSubmits(id, q) {
     while (q.items.length > 0) {
       const it = q.items.shift();
       q.current = it;
-      if (it.endSend) { deliver(id, it); continue; } // closes even when cancelled
       let skip = skipReason(id, q, it);
-      if (skip) { if (it.raw !== undefined) skipPart(id, it, skip); else it.resolve(refused(skip)); continue; }
+      if (skip) { it.resolve(refused(skip)); continue; }
       if (it.raw !== undefined) {
         // Keys that waited behind a submit go out as separate keystrokes, not
         // one burst Claude would read as a paste (an Enter in it becomes a newline).
         await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
         skip = skipReason(id, q, it);
-        if (skip) { skipPart(id, it, skip); continue; }
+        if (skip) { it.resolve(refused(skip)); continue; }
         it.touched = true;
-        deliver(id, it);
+        writeTerminal(id, it.raw);
         it.resolve(DONE);
         continue;
       }
-      // Input a window holds back, or a multi-part send still open (its rest
-      // may be queued behind this submit): this waits for it.
-      const waits = () => inputHeld(id) || sendOpen(id);
-      if (waits()) {
-        // Keys already queued behind this submit came while that input was
-        // held: they go now, in order, ahead of the keys still to come, and
-        // paced like any queued key (a burst would read as a paste, its Enter
-        // as a newline). Keys arriving meanwhile queue behind them.
-        for (let k; (k = q.items.findIndex((x) => x.raw !== undefined)) >= 0;) {
-          const [x] = q.items.splice(k, 1);
-          if (x.endSend) { deliver(id, x); continue; }
-          await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
-          const xSkip = skipReason(id, q, x);
-          if (xSkip) { skipPart(id, x, xSkip); continue; }
-          try {
-            deliver(id, x);
-          } catch (err) {
-            // Spliced out of the queue, so the catch below would not reach it.
-            x.resolve({ ...refused('write_failed'), uncertain: true });
-            throw err;
-          }
-          x.resolve(DONE);
-        }
-        q.waitingHeld = true;
-        const end = Date.now() + HELD_WAIT_MS;
-        while (waits() && Date.now() < end && it.gen === q.gen && terminalInstance(id) === it.pty && !terminalClosing(id)) {
-          await new Promise((r) => setTimeout(r, HELD_POLL_MS));
-        }
-        q.waitingHeld = false;
-        // Still held, cancelled (Ctrl+C), or the shell replaced meanwhile:
-        // nothing is typed, so nothing about it is uncertain. A send that
-        // never ended in all that time is given up, so it cannot block the
-        // next submit too.
-        const stuck = waits();
-        // Given up the same way any cut is (endSend): a send part of which
-        // is in the box cancels every waiting submit, one with none of it
-        // written drops only those not yet pasted.
-        if (stuck && Date.now() >= end) {
-          for (const s of [...(openSends.get(id)?.keys() || [])]) endSend(id, s, { cut: true, byMain: true });
-        }
-        skip = skipReason(id, q, it) || (stuck ? 'cancelled' : '');
-        if (skip) { it.resolve(refused(skip)); continue; }
-      }
-      // A prompt-only paste was dropped since this was accepted (writeRawInput):
-      // the person's attachment never went in, so this does not go either.
-      if (it.dropGen !== q.dropGen) { it.resolve(refused('cancelled')); continue; }
       it.touched = true;
       writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
       const pastedAt = terminalInputSeq(id);
@@ -541,7 +319,6 @@ async function drainSubmits(id, q) {
         continue;
       }
       writeTerminal(id, '\r');
-      lastSubmitEnterAt.set(id, Date.now());
       it.resolve(DONE);
     }
   } catch (err) {
@@ -556,7 +333,6 @@ async function drainSubmits(id, q) {
     for (const it of q.items.splice(0)) it.resolve(refused('write_failed'));
   } finally {
     q.current = null;
-    q.waitingHeld = false;
     q.running = false;
     if (submitQueues.get(id) === q) submitQueues.delete(id);
   }

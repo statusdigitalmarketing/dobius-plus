@@ -39,7 +39,7 @@ import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-in
 import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
-import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, setInputHeldCheck, endSend } from './chat-service.js';
+import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
 import { launchCommandFor } from '../shared/new-tab.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
@@ -283,21 +283,11 @@ function setupTerminalHandlers() {
     return createTerminal(id, cwd, event.sender, accountEnv, { startCommand });
   });
 
-  ipcMain.on('terminal:write', (event, id, data, opts) => {
+  ipcMain.on('terminal:write', (event, id, data) => {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
     if (typeof data !== 'string') return;
     if (data.length > TERMINAL_WRITE_MAX_BYTES) return;
-    const owns = ownsTerminal(event.sender.id, id);
-    // A multi-part send (the command bar): each part names it, and its end
-    // (or cut) mark tells chat-service it is complete (or abandoned). The
-    // mark is also taken from the window that started the send after the
-    // tab moved away from it (chat-service checks that).
-    const send = typeof opts?.send === 'string' && opts.send.length <= 64 ? opts.send : null;
-    if (send && (opts.end === true || opts.cut === true)) {
-      endSend(id, send, { cut: opts.cut === true, sender: event.sender.id, owns });
-      return;
-    }
-    if (!owns) return; // not yours, drop silently
+    if (!ownsTerminal(event.sender.id, id)) return; // not yours, drop silently
     // Auto-resume cancellation: if the user types into a tab BEFORE its
     // scheduled `claude --resume` fires, skip that tab. The store's own
     // resumeSession path also writes here (it's how the staggered queue is
@@ -307,9 +297,7 @@ function setupTerminalHandlers() {
     // touches the tab first, the queued resume defers to that.
     cancelAutoResumeTab(id);
     // Waits behind a pending Chat submit so keys land in the order typed.
-    // promptOnly: a path prompt editing pasted into Claude's prompt, which
-    // must not land later in whatever replaced it (chat-service).
-    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id), { promptOnly: opts?.promptOnly === true, send, sender: event.sender.id });
+    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id));
   });
 
   ipcMain.on('terminal:resize', (event, id, cols, rows) => {
@@ -3270,13 +3258,10 @@ function setupWindowHandlers() {
   // project window, with Claude started and a message typed and then sent
   // with one Enter (docs/bridge-open-tab.md). It waits for the same
   // tabsReady signal a dock does.
-  const bridgeOpenDeps = createBridgeOpenDeps({
+  setOpenTabService(createOpenTabService(createBridgeOpenDeps({
     windowReady: (wc) => dockReadyWc.has(wc.id),
     ownerOf: (tabId) => terminalOwners.get(tabId),
-  });
-  setOpenTabService(createOpenTabService(bridgeOpenDeps));
-  // Chat sends (desktop and phone) wait for input a window still holds.
-  setInputHeldCheck(bridgeOpenDeps.inputHeld, bridgeOpenDeps.markHeldLost);
+  })));
 
   // Record the docked tab in the target window's saved tab list BEFORE the
   // handoff: terminal:loadState only returns scrollback for a tab a window

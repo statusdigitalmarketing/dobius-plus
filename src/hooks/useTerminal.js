@@ -218,8 +218,8 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     // holds back is reported to main as it arrives (/openTab must see it).
     const promptEdit = attachPromptEditing(
       term,
-      (data, opts) => window.electronAPI.terminalWrite(id, data, opts),
-      (data, dropped) => window.electronAPI.terminalInputHeld?.(id, data, dropped || false),
+      (data) => window.electronAPI.terminalWrite(id, data),
+      (data) => window.electronAPI.terminalInputHeld?.(id, data),
     );
     promptEditRef.current = promptEdit;
     const inputDisposable = term.onData((data) => promptEdit.handleData(data));

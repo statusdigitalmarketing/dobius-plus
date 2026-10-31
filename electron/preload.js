@@ -9,10 +9,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Terminal
   terminalCreate: (id, cwd, opts) => ipcRenderer.invoke('terminal:create', id, cwd, opts),
-  terminalWrite: (id, data, opts) => ipcRenderer.send('terminal:write', id, data, opts),
-  // Input prompt editing holds back (data), or null once it is all gone
-  // (dropped: false or 'unsent', see src/lib/prompt-edit-term.js).
-  terminalInputHeld: (id, data, dropped) => ipcRenderer.send('terminal:inputHeld', id, data, dropped),
+  terminalWrite: (id, data) => ipcRenderer.send('terminal:write', id, data),
+  // Input prompt editing holds back (data), or null once its queue drained.
+  // Only /openTab reads this (electron/bridge-open-main.js).
+  terminalInputHeld: (id, data) => ipcRenderer.send('terminal:inputHeld', id, data),
   chatPoll: (id, have) => ipcRenderer.invoke('chat:poll', id, have),
   chatSelector: (id) => ipcRenderer.invoke('chat:selector', id),
   chatImage: (sessionId, projectPath, ref) => ipcRenderer.invoke('chat:image', sessionId, projectPath, ref),

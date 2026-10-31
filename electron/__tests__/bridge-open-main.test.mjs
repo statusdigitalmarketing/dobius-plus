@@ -49,20 +49,16 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   env.emit('terminal:inputHeld', wc, opened.tabId, '\x1b[200~\x1b[201~');
   env.emit('terminal:inputHeld', wc, opened.tabId, '\x03');
   assert.equal(env.written.length, 0);
-  assert.deepEqual(env.heldNotes.at(-1), [opened.tabId, '\x03'], 'Chat hears of it too (a held Ctrl+C cancels)');
   assert.ok(watch.keys() > 0, 'held keys count as typing');
   assert.equal(deps.inputBusy(opened.tabId), true);
 
-  assert.equal(deps.inputHeld(opened.tabId), true, 'Chat waits for it too');
   // The queue drained: no longer busy (the keys stay counted).
-  const c0 = env.cancelled.length;
   env.emit('terminal:inputHeld', wc, opened.tabId, null);
-  assert.equal(env.cancelled.length, c0, 'a full drain cancels nothing');
   assert.equal(deps.inputBusy(opened.tabId), false);
   assert.ok(watch.keys() > 0);
 
   // The tab moves to another window while held: the old window's release
-  // still clears its hold, and the new owner cannot be blocked by it.
+  // still clears its hold, and only that window can release it.
   env.emit('terminal:inputHeld', wc, opened.tabId, 'y');
   const dest = env.fakeWebContents();
   env.terminals.get(opened.tabId).wcId = dest.id;
@@ -71,49 +67,20 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   env.emit('terminal:inputHeld', dest, opened.tabId, '\x1b[200~\x1b[201~');
   assert.ok(watch.keys() > before, 'held input from the tab\'s new window counts');
   env.emit('terminal:inputHeld', dest, opened.tabId, null);
-  env.emit('terminal:inputHeld', dest, opened.tabId, null);
   assert.equal(deps.inputBusy(opened.tabId), true, 'another window cannot release it');
   env.emit('terminal:inputHeld', wc, opened.tabId, null);
   assert.equal(deps.inputBusy(opened.tabId), false, 'released by the window that held it');
   env.terminals.get(opened.tabId).wcId = wc.id;
 
-  // A drain where held input was thrown away before it was sent (an image
-  // over the size limit) leaves a message already in the box alone: only
-  // sends not yet pasted are dropped, never a full cancel.
-  env.emit('terminal:inputHeld', wc, opened.tabId, 'z');
-  const c1 = env.cancelled.length;
-  const u1 = env.unpastedDrops.length;
-  env.emit('terminal:inputHeld', wc, opened.tabId, null, 'unsent');
-  assert.equal(env.cancelled.length, c1, 'no full cancel');
-  assert.deepEqual(env.unpastedDrops.slice(u1), [opened.tabId]);
-  assert.equal(deps.inputBusy(opened.tabId), false);
-
-  // Input main dropped from the current hold (a prompt-only paste) makes its
-  // drain drop the Chat sends not yet pasted, even when the window reports
-  // it clean; the one already in the box is not cancelled.
-  env.emit('terminal:inputHeld', wc, opened.tabId, 'p');
-  deps.markHeldLost(opened.tabId);
-  const c2 = env.cancelled.length;
-  const u2 = env.unpastedDrops.length;
-  env.emit('terminal:inputHeld', wc, opened.tabId, null, false);
-  assert.deepEqual(env.unpastedDrops.slice(u2), [opened.tabId]);
-  assert.equal(env.cancelled.length, c2, 'not a full cancel');
-  env.emit('terminal:inputHeld', wc, opened.tabId, 'q');
-  env.emit('terminal:inputHeld', wc, opened.tabId, null, false);
-  assert.equal(env.unpastedDrops.length, u2 + 1, 'the next hold starts clean');
-  deps.markHeldLost(opened.tabId); // no hold: nothing to mark
-
-  // A reload forgets a hold the old page never released.
+  // A reload forgets a hold the old page never released, and so does a
+  // crashed renderer whose window stays open.
   env.emit('terminal:inputHeld', wc, opened.tabId, 'x');
   assert.equal(deps.inputBusy(opened.tabId), true);
   wc.fire('did-start-loading');
   assert.equal(deps.inputBusy(opened.tabId), false);
-  // So does a crashed renderer whose window stays open.
   env.emit('terminal:inputHeld', wc, opened.tabId, 'x');
-  const n = env.cancelled.length;
   wc.fire('render-process-gone');
   assert.equal(deps.inputBusy(opened.tabId), false);
-  assert.deepEqual(env.cancelled.slice(n), [opened.tabId], 'Chat submits waiting on it are cancelled');
   watch.stop();
 });
 
