@@ -129,7 +129,10 @@ export function createHeadroomService(d) {
     // samples carried over to the new one (metadata file only, no secrets).
     const logins = await readLogins();
     applyLogins(h, logins, records);
-    if (updateHistory(h, records, d.now())) dirty = true;
+    // Only credentials of listed accounts are kept: an unlisted folder has no
+    // login to attribute figures to, and could crowd the key cap.
+    const listed = new Set(logins.map((r) => r.key));
+    if (updateHistory(h, (records || []).filter((r) => listed.has(r.key)), d.now())) dirty = true;
     // Again for keys this sample created, so a new key never starts without
     // the login its first figures belong to.
     applyLogins(h, logins);
@@ -169,7 +172,9 @@ export function createHeadroomService(d) {
     await Promise.all(rows.map(async (r) => {
       r.real = await d.realpath(r.dir).catch(() => null);
       r.realCred = await d.realpath(path.join(r.dir, '.credentials.json')).catch(() => null);
-      if (r.real && r.realCred && r.realCred !== path.join(r.real, '.credentials.json')) { r.email = null; r.loginConflict = true; }
+      const aliased = r.real && r.real !== path.resolve(r.dir); // another spelling, listed or not, has its own Keychain item
+      const credOutside = r.real && r.realCred && r.realCred !== path.join(r.real, '.credentials.json');
+      if (aliased || credOutside) { r.email = null; r.loginConflict = true; }
     }));
     const groups = new Map();
     for (const r of rows) {
@@ -463,6 +468,9 @@ export function createHeadroomService(d) {
       } catch { session = null; }
     }
     let running = 'claude';
+    // A Claude suspended behind something else in the shell is not what a
+    // restart would resume; that tab is running "another program".
+    if (info && !(await d.isForeground(info.pid))) running = 'other';
     if (!info) {
       let proc;
       try { proc = await d.process(tabId); } catch { proc = 'unknown'; }
@@ -476,7 +484,11 @@ export function createHeadroomService(d) {
     if (!busy && act?.status === 'working' && act.hookOwned) {
       let rec = null;
       if (session) { try { rec = await d.limitRecord(session.sessionId, session.project); } catch { rec = null; } }
-      busy = !rec?.limit;
+      // The limit must be on this tab's screen too: /clear leaves the old
+      // record behind while a new turn runs quietly.
+      let onScreen = false;
+      if (rec?.limit) { try { onScreen = !!liveLimitLine((await d.screen(tabId))?.lines, d.rows(tabId)); } catch { onScreen = false; } }
+      busy = !onScreen;
     }
     return {
       tabId, running, session, busy, status: act?.status || null,
@@ -569,6 +581,9 @@ export function createHeadroomService(d) {
       let info;
       try { info = await d.claudeInfo(tab.id); } catch { info = null; }
       if (!info) continue;
+      // The Claude the keys and the screen belong to, not one suspended
+      // behind it in the same shell (the session would be the wrong one).
+      if (!(await d.isForeground(info.pid))) continue;
       let ses;
       try { ses = await d.resolveSession(tab.id); } catch { ses = null; }
       if (!ses?.sessionId) continue;
@@ -719,8 +734,9 @@ export function createHeadroomService(d) {
   // The target folder is still logged into the login main chose it for.
   async function targetStillSame(p) {
     if (!p.targetEmail) return false;
-    const now = await loginEmail(p.targetDir, !!p.targetEnvUnset);
-    return !!now && now.toLowerCase() === p.targetEmail.toLowerCase();
+    const row = { dir: p.targetDir, key: p.targetKey, email: await loginEmail(p.targetDir, !!p.targetEnvUnset) };
+    await markSharedFolders([row]); // the folder or its credential file relinked meanwhile
+    return !!row.email && row.email.toLowerCase() === p.targetEmail.toLowerCase();
   }
 
   async function continueAfterMove(tabId, eventId, senderId, failed) {

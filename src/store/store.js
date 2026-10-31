@@ -676,6 +676,7 @@ export const useStore = create((set, get) => ({
       ...(typeof closed.labelLocked === 'boolean' ? { labelLockedByUser: closed.labelLocked } : {}),
       projectPath: closed.projectPath,
       kind: closed.kind || 'terminal',
+      ...(closed.claudeAccountPin ? { claudeAccountPin: closed.claudeAccountPin } : {}),
       ...(closed.url ? { url: closed.url } : {}),
       ...(closed.viewMode === 'chat' ? { viewMode: 'chat' } : {}),
       createdAt: Date.now(),
@@ -743,6 +744,8 @@ export const useStore = create((set, get) => ({
         // started): the map below would name an OLDER one, and resuming that
         // would kill this one and revive the wrong conversation.
         else if (c?.running === 'claude') return { ok: false, error: 'its conversation could not be identified yet; try again in a few seconds' };
+        // The account may have changed since the dialog opened (logged out).
+        if (c?.refusal) return { ok: false, error: c.refusal };
         if (expectInputSeq === undefined && Number.isInteger(c?.inputSeq)) expectInputSeq = c.inputSeq;
       } catch { /* fall back to the map below */ }
     }

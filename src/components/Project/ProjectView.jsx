@@ -955,7 +955,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     if (tab) {
       // Preserve kind/url so a closed browser tab can be resurrected via
       // Cmd+Shift+T as a browser (not a blank terminal). Carson self-flag #4.
-      state.pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode });
+      state.pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode, ...(tab.claudeAccountPin ? { claudeAccountPin: tab.claudeAccountPin } : {}) });
     }
     // Auto-checkpoint on close, matching the tab-bar X / middle-click / context-menu
     // paths (Cmd+W previously skipped this, so the same close produced no checkpoint).

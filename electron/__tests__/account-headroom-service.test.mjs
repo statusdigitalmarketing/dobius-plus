@@ -64,7 +64,14 @@ function world(over = {}) {
       const email = opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null);
       return { email, state: email ? 'address' : 'none' };
     },
-    realpath: async (p) => (w.links?.[p] ?? p),
+    // A link applies to what is under it too, as on a real filesystem.
+    realpath: async (p) => {
+      for (const [from, to] of Object.entries(w.links || {})) {
+        if (p === from) return to;
+        if (p.startsWith(`${from}/`)) return to + p.slice(from.length);
+      }
+      return p;
+    },
     isForeground: async () => w.foreground ?? true,
     sharesHistory: async (dir) => !(w.privateHistory && w.privateHistory.includes(dir)),
     processAuthOverride: async (pid) => (w.override && w.override[pid]) || null,
@@ -75,7 +82,7 @@ function world(over = {}) {
     scan: async () => ({ groups: w.procKey === null ? [] : [{ key: w.procKey, configDir: w.procDir ?? { [KEY_A]: DIR_A, [KEY_B]: DIR_B }[w.procKey], envUnset: false, pids: [w.claude.pid] }], unresolved: w.procKey === null ? [{ pid: w.claude.pid }] : [] }),
     autoMoveEnabled: () => w.autoMove,
     tabs: () => [{ id: TAB, cwd: '/proj', claudeConfigDir: DIR_A }, ...(w.secondTab ? [{ id: TAB2, cwd: '/proj', claudeConfigDir: DIR_A }] : [])],
-    activity: () => ({ status: 'done', lastActivityAt: w.now - 60_000 }),
+    activity: () => w.activityOverride ?? { status: 'done', lastActivityAt: w.now - 60_000 },
     claudeInfo: async () => w.claude,
     resolveSession: async () => ({ sessionId: 's1', sessionProject: '/proj' }),
     process: async () => null,
@@ -619,6 +626,51 @@ await check('Move all stays available on the account this tab is already on', as
   const a = r.targets.find((t) => t.label === 'A');
   assert.match(a.refusal, /already on/);
   assert.equal(a.allRefusal, null);
+});
+
+await check('a Claude that is not the foreground program is not moved, and Move all treats it as another program', async () => {
+  const { w, svc } = world();
+  w.foreground = false;
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+  const [c] = await svc.moveCandidates([TAB], 'b');
+  assert.equal(c.running, 'other');
+});
+
+await check('a folder that is a symlink has no known login, even to an unlisted real folder', async () => {
+  const { w, svc } = world();
+  w.links = { [DIR_B]: '/profiles/unlisted' };
+  const u = await svc.usage();
+  assert.equal(u.accounts.find((r) => r.label === 'B').email, null);
+});
+
+await check('a target whose credential was relinked while the move waited is called off', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  w.links = { [`${DIR_B}/.credentials.json`]: `${DIR_A}/.credentials.json` };
+  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
+  assert.equal(st.ok, false);
+});
+
+await check('figures from a folder no account lists are not kept', async () => {
+  const { w, svc } = world();
+  w.records.push({ key: keychainServiceFor('/profiles/unlisted'), receivedAt: T0, windows: { five_hour: { usedPercentage: 1, resetsAt: R5 } } });
+  await svc.usage();
+  w.extraAccounts = [{ id: 'u', type: 'claude', name: 'U', claudeJsonPath: '/profiles/unlisted/.claude.json' }];
+  w.records = [];
+  w.emails['/profiles/unlisted'] = 'later@x.com';
+  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'U').usage.known, false);
+});
+
+await check('a stale working tab is busy for Move all unless the limit is on its screen (a /clear leaves the record)', async () => {
+  const { w, svc } = world({ screenLine: 'all quiet' });
+  w.activityOverride = { status: 'working', hookOwned: true, lastActivityAt: T0 - 60_000 };
+  const [c] = await svc.moveCandidates([TAB], 'b');
+  assert.equal(c.busy, true);
+  const b = world();
+  b.w.activityOverride = { status: 'working', hookOwned: true, lastActivityAt: T0 - 60_000 };
+  const [d2] = await b.svc.moveCandidates([TAB], 'b');
+  assert.equal(d2.busy, false);
 });
 
 await check('a Claude whose folder the process scan cannot read is not moved automatically', async () => {
