@@ -431,3 +431,16 @@
 - **FIX**: Parse `procStart` as UTC. Before trusting a fixture or stand-in for a third-party file format, compare it with a REAL file on this machine: `scratchpad/.../real-check.mjs` read 22 live records and accepted all 22. A harness with a throwaway HOME must also `unset CLAUDE_CONFIG_DIR CODEX_HOME`.
 - **CONTEXT**: Any stand-in that writes a format the real program owns. Any harness launched from inside a Claude session.
 - **DETECTION**: `grep -n "procStart" electron/claude-presence.js`; `env | grep -E "CLAUDE_CONFIG_DIR|CODEX_HOME"` before launching a harness.
+
+### Process - 2026-10-31 (a review loop that grows the code is the bug)
+- **MISTAKE**: Two 2.0.0 branches ran away under the Codex loop. Sidebar status reached 27 rounds and 2,400 lines of process heuristics; the integration fixes reached 17 rounds and about 640 lines of hold ordering around a 50-line fix (`electron/chat-service.js` went from 267 to 563 lines). Every round was real, and every fix opened the next finding.
+- **FIX**: Measure the diff, not the verdict. When findings keep coming from the previous round's fixes, stop, save the state on a backup branch, and cut back to the smallest design that keeps the real fix. Both cuts then converged in a few rounds (sidebar under 800 lines; `chat-service.js` 339). Scope the reviewer to it and cap the rounds; findings outside the scope come to a person as candidates and are not built.
+- **CONTEXT**: Any Codex-until-clean loop. Rising line count and round count with narrowing scenarios means the design is wrong, not that the code needs one more fix.
+- **DETECTION**: `git diff --shortstat <fix-commit> HEAD -- <core files>` at round 5, and each round after.
+
+### Process - 2026-10-31 (parallel branches pass alone and fail together)
+- **MISTAKE**: Seven features were each Codex clean on their own branch. Merged, three lenses independently found the bridge could press Enter over a cancel held by prompt editing, and a window opened for a card started two tools. A later pass found idle tabs blocking session links once New Tab auto-started Claude.
+- **FIX**: After merging, review the WHOLE branch with lenses aimed at interactions, wiring and duplicates, then run one packaged test with every feature on at once. Merge one branch at a time with the suite between merges.
+- **CONTEXT**: Any release built from parallel worktrees. Also: a package.json conflict hunk can hold a script definition beside the test chain; check every chained script is defined after resolving.
+- **DETECTION**: `node -e "const s=require('./package.json').scripts;for(const c of s.test.split(' && ')){const n=c.replace('npm run ','');if(!s[n])console.log('undefined',n)}"`
+
