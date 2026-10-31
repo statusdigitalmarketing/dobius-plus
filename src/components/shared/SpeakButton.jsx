@@ -109,10 +109,10 @@ export default function SpeakButton() {
         disabled={!enabled}
         title={
           !enabled
-            ? 'Speak: open a terminal tab to have Claude\'s last response read aloud'
-            : (isSpeaking ? 'Stop reading aloud' : `Speak: read Claude's last response aloud (${speed})`)
+            ? 'Speak: open a terminal tab to have the last Claude or Codex reply read aloud'
+            : (isSpeaking ? 'Stop reading aloud' : `Speak: read the last Claude or Codex reply aloud (${speed})`)
         }
-        aria-label={isSpeaking ? 'Stop reading aloud' : 'Speak: read Claude\'s last response aloud'}
+        aria-label={isSpeaking ? 'Stop reading aloud' : 'Speak: read the last Claude or Codex reply aloud'}
         className="no-drag"
         style={{ ...buttonStyle, padding: '4px 6px' }}
         onMouseEnter={(e) => { if (enabled && !isSpeaking) { e.currentTarget.style.color = 'var(--fg)'; e.currentTarget.style.border = '1px solid var(--border)'; }}}
