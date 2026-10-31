@@ -29,9 +29,6 @@ const REASON_CODES = {
   stranded: 'stranded',
   empty: 'empty_text',
   write_failed: 'write_failed',
-  // Only a desktop prompt-edit paste (promptOnly) is dropped this way; the
-  // phone never sends one. Mapped so it can never read as write_failed.
-  prompt_dropped: 'cancelled',
 };
 
 const MESSAGES = {

@@ -136,13 +136,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     const trimmed = input.trim();
     const text = (trimmed || '').replace(/\n/g, '\r');
 
-    // Through the terminal's ordered input queue, like typed keys: behind an
-    // image paste still being saved into Claude's prompt, not ahead of it.
-    // Reserved there from this moment, so the paced writes below count as
-    // input already taken (/openTab must not paste before them).
-    const send = promptEditRef.current?.reserve(text || '\r');
-    const write = (data) => (send ? send.write(data) : window.electronAPI.terminalWrite(id, data));
-    const done = () => { send?.release(); if (mountedRef.current) setIsSending(false); };
+    const done = () => { if (mountedRef.current) setIsSending(false); };
 
     // Short text (< 80 chars): char-by-char for Claude TUI raw-mode compat
     // Long text (>= 80 chars): chunked sending — keeps the UI responsive
@@ -160,7 +154,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       const sendNext = () => {
         if (!mountedRef.current) { done(); return; }
         if (i < chars.length) {
-          write(chars[i]);
+          window.electronAPI.terminalWrite(id, chars[i]);
           i++;
           if (i < chars.length) setTimeout(sendNext, 5);
           else done();
@@ -177,14 +171,14 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       const sendNextChunk = () => {
         if (!mountedRef.current) { done(); return; }
         if (i < chunks.length) {
-          write(chunks[i]);
+          window.electronAPI.terminalWrite(id, chunks[i]);
           i++;
           if (i < chunks.length) {
             setTimeout(sendNextChunk, 2);
           } else {
             // All text sent — send Enter after a brief pause
             setTimeout(() => {
-              if (mountedRef.current) write('\r');
+              if (mountedRef.current) window.electronAPI.terminalWrite(id, '\r');
               done();
             }, 10);
           }
@@ -202,7 +196,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     }
     setInput('');
     setHistoryIndex(-1);
-  }, [id, input, isSending, promptEditRef]);
+  }, [id, input, isSending]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {

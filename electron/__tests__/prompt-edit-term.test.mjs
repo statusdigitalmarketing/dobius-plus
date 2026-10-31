@@ -8,7 +8,7 @@ import { attachPromptEditing } from '../../src/lib/prompt-edit-term.js';
 // `exit()` replaces the prompt with a shell, as when Claude quits mid-edit.
 const COLS = 40;
 function fakeClaude(text, { placeholder = false } = {}) {
-  const app = { text, caret: text.length, alive: true, writes: [], submitted: null, held: [], promptOnly: [], drops: [], times: [], marks: [], parts: [] };
+  const app = { text, caret: text.length, alive: true, writes: [], submitted: null, held: [], times: [] };
   const parsed = new Set();
   const dom = {};
   let grid = [];
@@ -21,13 +21,9 @@ function fakeClaude(text, { placeholder = false } = {}) {
     for (const fn of parsed) fn();
   };
   const insert = (s) => { app.text = app.text.slice(0, app.caret) + s + app.text.slice(app.caret); app.caret += s.length; };
-  const send = (data, opts) => {
-    // A command-bar send's end or cut mark: not terminal input.
-    if (opts?.end || opts?.cut) { app.marks.push([opts.end ? 'end' : 'cut', opts.send]); return; }
-    if (opts?.send) app.parts.push([opts.send, data]);
+  const send = (data) => {
     app.writes.push(data);
     app.times.push(Date.now());
-    if (opts?.promptOnly) app.promptOnly.push(data);
     if (!app.alive) return;
     let s = data;
     while (s) {
@@ -78,7 +74,7 @@ function fakeClaude(text, { placeholder = false } = {}) {
     clearSelection: () => { selection = null; },
   };
   draw();
-  const edit = attachPromptEditing(term, send, (d, dropped) => { app.held.push(d); if (d === null) app.drops.push(dropped); });
+  const edit = attachPromptEditing(term, send, (d) => app.held.push(d));
   return {
     app,
     edit,
@@ -345,76 +341,6 @@ test('a key that starts a selection edit is reported before the edit sends anyth
   assert.equal(t.app.held.at(-1), null);
 });
 
-test('a send reserved by the command bar is held from the moment it is accepted until it is released', async () => {
-  const t = fakeClaude('');
-  const send = t.edit.reserve('hi\r');
-  assert.deepEqual(t.app.held, ['hi\r'], 'held before any of its input arrives');
-  send.write('h');
-  await wait(0);
-  send.write('i');
-  await wait(20);
-  assert.deepEqual(t.app.writes, ['h', 'i']);
-  assert.equal(t.app.held.includes(null), false, 'not drained while the send is still coming');
-  send.write('\r');
-  send.release();
-  send.release(); // a second release changes nothing
-  await wait(80); // the end mark goes out behind the last part
-  assert.deepEqual(t.app.held, ['hi\r', null]);
-  assert.equal(t.app.marks.length, 1);
-  assert.equal(t.app.submitted, 'hi');
-});
-
-test('when the queue drops what it held, the rest of a reserved send is dropped too, Enter included', async () => {
-  const t = fakeClaude('draft');
-  let resolve;
-  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
-  const send = t.edit.reserve('tail\r');
-  send.write('ta');
-  t.exit(); // the prompt goes away under the pending paste
-  resolve("'/tmp/shot.png'");
-  await wait(50);
-  send.write('il');
-  send.write('\r');
-  send.release();
-  await wait(50);
-  assert.deepEqual(t.app.writes, [], 'nothing of the send reached the shell');
-  assert.equal(t.app.held.at(-1), null);
-});
-
-test('a pasted path is marked prompt-only, so main never delivers it late elsewhere; typed keys are not', async () => {
-  const t = fakeClaude('look at');
-  t.edit.pasteWhenReady(Promise.resolve("'/tmp/a.png'"));
-  await wait(50);
-  t.type('x');
-  await wait(20);
-  assert.deepEqual(t.app.promptOnly, ["\x1b[200~'/tmp/a.png'\x1b[201~"]);
-  assert.ok(t.app.writes.includes('x'));
-});
-
-test('a drain that threw held input away says so; a full drain does not', async () => {
-  const t = fakeClaude('Describe ');
-  let resolve;
-  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
-  t.type('\r');
-  t.exit(); // the prompt goes away: the paste and the Enter are dropped
-  resolve("'/tmp/shot.png'");
-  await wait();
-  assert.deepEqual(t.app.drops, ['unsent']);
-  const u = fakeClaude('ok');
-  u.edit.pasteWhenReady(Promise.resolve("'/tmp/a.png'"));
-  u.type('\r');
-  await wait();
-  assert.deepEqual(u.app.drops, [false]);
-});
-
-test('a pane that goes away while holding input reports the drop', async () => {
-  const t = fakeClaude('Describe ');
-  t.edit.pasteWhenReady(new Promise(() => {}));
-  t.type('\r');
-  t.edit.dispose();
-  assert.deepEqual(t.app.drops, ['unsent']);
-});
-
 test('input that waited behind a paste goes out paced, not in one burst', async () => {
   const t = fakeClaude('');
   let resolve;
@@ -426,62 +352,6 @@ test('input that waited behind a paste goes out paced, not in one burst', async 
   assert.equal(t.app.writes.length, 4, JSON.stringify(t.app.writes));
   assert.ok(gaps.every((g) => g >= 15), `gaps ${gaps}`);
   assert.equal(t.app.submitted, 'Xhi');
-});
-
-test('a paste whose save failed, or a key typed onto a selection made mid-edit, counts as dropped', async () => {
-  const t = fakeClaude('old request ');
-  t.edit.pasteWhenReady(Promise.resolve(null));
-  t.type('x');
-  await wait();
-  assert.deepEqual(t.app.drops, ['unsent'], 'save failed: nothing was sent');
-  const u = fakeClaude('one two');
-  u.select(2, 5);
-  u.type('X'); // an edit starts
-  u.select(6, 9); // selection made while it runs
-  u.type('\x15');
-  await wait();
-  assert.deepEqual(u.app.drops, ['unsent'], 'the key on the mid-edit selection was lost');
-});
-
-test('a command-bar send names its parts and ends with a mark behind its last part', async () => {
-  const t = fakeClaude('');
-  let resolve;
-  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
-  const send = t.edit.reserve('hi\r');
-  for (const k of ['h', 'i', '\r']) send.write(k);
-  send.release();
-  assert.deepEqual(t.app.marks, [], 'no end before its parts went out');
-  resolve('X');
-  await wait();
-  const id = t.app.parts[0][0];
-  assert.deepEqual(t.app.parts, [[id, 'h'], [id, 'i'], [id, '\r']]);
-  assert.deepEqual(t.app.marks, [['end', id]]);
-  assert.equal(t.app.submitted, 'Xhi');
-});
-
-test('a command-bar send cut midway is reported to main as cut; the drain says unsent', async () => {
-  const t = fakeClaude('draft ');
-  const send = t.edit.reserve('rm -- x\r');
-  send.write('rm'); // handed over at once
-  await wait(10);
-  let resolve;
-  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
-  send.write(' -- x');
-  t.exit(); // the prompt goes away under the pending paste
-  resolve("'/tmp/a.png'");
-  await wait(50);
-  send.write('\r');
-  send.release();
-  await wait(50);
-  assert.deepEqual(t.app.writes, ['rm']);
-  assert.deepEqual(t.app.marks, [['cut', t.app.parts[0][0]]], 'main decides: it knows whether "rm" reached the terminal');
-  assert.deepEqual(t.app.drops, ['unsent']);
-  // A pane that goes away mid-send cuts it too.
-  const u = fakeClaude('');
-  const s2 = u.edit.reserve('ok\r');
-  s2.write('o');
-  u.edit.dispose();
-  assert.deepEqual(u.app.marks.map((m) => m[0]), ['cut']);
 });
 
 test('after Cmd+V takes a selection, input with no keydown of its own does not act on it again', async () => {
@@ -497,16 +367,20 @@ test('after Cmd+V takes a selection, input with no keydown of its own does not a
   await wait();
   assert.equal(t.app.text, 'hello Xk foo', 'typed at the caret');
   assert.deepEqual(t.app.writes.slice(n), ['k'], 'no selection edit (no arrows, no backspaces)');
-  assert.deepEqual(t.app.drops.filter(Boolean), []);
 });
 
-test('a command-bar send never acts on a live prompt selection either', async () => {
-  const t = fakeClaude('hello world');
-  t.select(8, 13);
-  t.armOnly(); // a key was armed but its bytes went elsewhere
-  const send = t.edit.reserve('z');
-  send.write('z');
-  send.release();
-  await wait(50);
-  assert.equal(t.app.text, 'hello worldz');
+
+test('a hold always ends: the prompt gone under a paste, or the pane going away, reports the drain', async () => {
+  const t = fakeClaude('Describe ');
+  let resolve;
+  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
+  t.type('\r');
+  t.exit();
+  resolve("'/tmp/shot.png'");
+  await wait();
+  assert.equal(t.app.held.at(-1), null);
+  const u = fakeClaude('Describe ');
+  u.edit.pasteWhenReady(new Promise(() => {}));
+  u.edit.dispose();
+  assert.equal(u.app.held.at(-1), null);
 });

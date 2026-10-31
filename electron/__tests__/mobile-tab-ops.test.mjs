@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { writes, ptys, writeTerminal, closing } from './fake-terminal-manager.mjs';
 
-const { writeRawInput, submitPromptDetailed, setInputHeldCheck } = await import('../chat-service.js');
+const { writeRawInput, submitPromptDetailed } = await import('../chat-service.js');
 const { handleTabOp, tabCandidates, validReqId, MAX_CANDIDATES } = await import('../mobile-tab-ops.js');
 
 let pass = 0;
@@ -297,74 +297,7 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   ok('replaced PTY: tab_exited stays uncertain whatever the new one sees');
 }
 
-// 14. release/2.0.0 paths report in the result scheme. A prompt-only paste
-// behind a running submit is dropped (its own reason), and a submit queued
-// behind it is cancelled, nothing pasted, nothing uncertain.
-{
-  // A tab that has never had an Enter, so only the running-submit rule applies.
-  const F = 'term-/Users/x/fresh-1';
-  harness({ live: [F] });
-  const first = submitPromptDetailed(F, 'one');
-  const queued = submitPromptDetailed(F, 'two');
-  const paste = await writeRawInput(F, '/tmp/shot.png ', () => true, { promptOnly: true });
-  assert.deepEqual(paste, { ok: false, reason: 'prompt_dropped' });
-  assert.deepEqual(await first, { ok: true });
-  assert.deepEqual(await queued, { ok: false, reason: 'cancelled' });
-  assert.deepEqual(writes.map((w) => w[1]), [PASTE('one'), '\r']);
-  ok('prompt-only paste dropped; the submit behind it is cancelled, not uncertain');
-}
-{
-  // Within the settle window after an Enter, a prompt-only paste is dropped
-  // even on an idle tab.
-  harness({ live: [A] });
-  await submitPromptDetailed(A, 'one');
-  assert.deepEqual(await writeRawInput(A, '/tmp/x ', () => true, { promptOnly: true }), { ok: false, reason: 'prompt_dropped' });
-  ok('prompt-only paste just after an Enter: prompt_dropped');
-}
-// 15. Held input: keys go straight through while a submit waits for it (a
-// resolved result), and a Ctrl+C during the wait cancels the submit plainly.
-{
-  const h = harness({ live: [A], authed: [A] });
-  let held = true;
-  setInputHeldCheck(() => held, () => {});
-  try {
-    const sub = h.run({ type: 'submitPrompt', id: A, text: 'later', reqId: 's' });
-    await new Promise((r) => setTimeout(r, 120)); // the submit is now waiting
-    const key = await writeRawInput(A, 'k');
-    assert.deepEqual(key, { ok: true });
-    await h.run({ type: 'input', id: A, data: '\x03', reqId: 'c' });
-    await sub;
-    const by = Object.fromEntries(h.sent.map((m) => [m.reqId, [m.type, m.code, m.uncertain]]));
-    assert.deepEqual(by, { c: ['ack', undefined, undefined], s: ['opError', 'cancelled', undefined] });
-    assert.deepEqual(writes.map((w) => w[1]), ['k', '\x03']);
-  } finally {
-    held = false;
-    setInputHeldCheck(() => false, () => {});
-  }
-  ok('held input: keys pass with a result; Ctrl+C cancels the waiting submit');
-}
-
-// 16. A Ctrl+C whose write throws still cancels a submit waiting on held
-// input (release/2.0.0), and a key queued after the PTY exited reports so.
-{
-  harness({ live: [A] });
-  let held = true;
-  setInputHeldCheck(() => held, () => {});
-  try {
-    const sub = submitPromptDetailed(A, 'deploy');
-    await new Promise((r) => setTimeout(r, 120));
-    ptys.get(A).throwOnWrite = true;
-    assert.throws(() => writeRawInput(A, '\x03'));
-    ptys.get(A).throwOnWrite = false;
-    held = false;
-    assert.deepEqual(await sub, { ok: false, reason: 'cancelled' });
-    assert.deepEqual(writes.map((w) => w[1]), []);
-  } finally {
-    held = false;
-    setInputHeldCheck(() => false, () => {});
-  }
-  ok('a cancel that failed to write still cancels a waiting submit');
-}
+// 14. A key queued after the PTY exited reports so.
 {
   harness({ live: [A] });
   const sub = submitPromptDetailed(A, 'one');
