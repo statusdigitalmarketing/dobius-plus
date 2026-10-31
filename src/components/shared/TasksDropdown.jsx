@@ -137,13 +137,14 @@ export default function TasksDropdown() {
       {/* Trigger button */}
       <button
         onClick={() => setOpen((v) => !v)}
-        title="Project Tasks"
+        title={`Tasks: this project's to-do list${pendingCount > 0 ? ` (${pendingCount} open)` : ''}`}
+        aria-label={`Tasks${pendingCount > 0 ? `, ${pendingCount} open` : ''}`}
         className="no-drag"
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 5,
-          padding: '3px 8px',
+          gap: 4,
+          padding: '4px 6px',
           fontSize: 11,
           fontFamily: "'SF Mono', monospace",
           color: open ? 'var(--fg)' : 'var(--dim)',
@@ -159,7 +160,6 @@ export default function TasksDropdown() {
           <path d="M9 11l3 3L22 4" />
           <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
         </svg>
-        Tasks
         {pendingCount > 0 && (
           <span style={{
             minWidth: 16,

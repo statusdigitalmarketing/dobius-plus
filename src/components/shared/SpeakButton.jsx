@@ -103,17 +103,18 @@ export default function SpeakButton() {
   };
 
   return (
-    <div className="no-drag flex items-center" style={{ gap: 4 }}>
+    <div className="no-drag relative flex items-center gap-1 max-[760px]:gap-0">
       <button
         onClick={doSpeak}
         disabled={!enabled}
         title={
           !enabled
-            ? 'Open a terminal tab to speak the last Claude response'
-            : (isSpeaking ? 'Stop reading' : `Read out Claude's last response (${speed})`)
+            ? 'Speak: open a terminal tab to have Claude\'s last response read aloud'
+            : (isSpeaking ? 'Stop reading aloud' : `Speak: read Claude's last response aloud (${speed})`)
         }
+        aria-label={isSpeaking ? 'Stop reading aloud' : 'Speak: read Claude\'s last response aloud'}
         className="no-drag"
-        style={buttonStyle}
+        style={{ ...buttonStyle, padding: '4px 6px' }}
         onMouseEnter={(e) => { if (enabled && !isSpeaking) { e.currentTarget.style.color = 'var(--fg)'; e.currentTarget.style.border = '1px solid var(--border)'; }}}
         onMouseLeave={(e) => { if (!isSpeaking) { e.currentTarget.style.color = 'var(--dim)'; e.currentTarget.style.border = '1px solid transparent'; }}}
       >
@@ -128,15 +129,17 @@ export default function SpeakButton() {
             <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
           </svg>
         )}
-        {isSpeaking ? 'Stop' : 'Speak'}
       </button>
       <button
         onClick={cycleSpeed}
         disabled={!enabled}
-        title="Cycle speed 1x / 1.5x / 2x"
-        className="no-drag"
+        title="Speak speed: click to cycle 1x / 1.5x / 2x"
+        // Hidden in a narrow (torn-off) window so the header fits; the saved
+        // speed still applies and the Speak tooltip names it.
+        className="no-drag flex max-[760px]:hidden"
         style={{
           ...buttonBase,
+          display: undefined,
           padding: '3px 6px',
           minWidth: 34,
           justifyContent: 'center',
@@ -149,9 +152,15 @@ export default function SpeakButton() {
         {speed}
       </button>
       {status && (
+        // Floats under the button so it never widens the header.
         <span
           title={status}
-          style={{ color: '#f87171', fontSize: 10, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          role="status"
+          style={{
+            position: 'absolute', top: '100%', right: 0, marginTop: 4, zIndex: 50,
+            padding: '2px 6px', borderRadius: 4, background: 'var(--surface)', border: '1px solid var(--border)',
+            color: '#f87171', fontSize: 10, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}
         >
           {status}
         </span>

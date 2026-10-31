@@ -516,3 +516,9 @@
 - **CONTEXT**: Any scripted run that tests and commits in one call. A printed `exit 1` above a commit hash is easy to read past. Also, an assertion on `events.at(-1)` breaks whenever a later step is added; find the event by what it is.
 - **DETECTION**: `git log --format=%h | while read c; do git -c advice.detachedHead=false checkout -q $c && npm test >/dev/null 2>&1 || echo "red: $c"; done` on a branch before merging it.
 
+
+### UI/UX - 2026-10-31 (header overlap: fixed the named symptom, not the layout)
+- **MISTAKE**: Sam asked for icon-only Visual/Tasks/Speak "because there are overlap issues with the tab name and the terminal chat switcher". Making them icons freed ~150px but the overlap stayed: the TopBar title was `absolute left-1/2 -translate-x-1/2`, centered on the WINDOW, so it ran under "Dashboard" and the Terminal/Chat switch whenever the side groups were wider than the gap. Sam saw it in the test window before I had measured.
+- **FIX**: The title is a `flex-1 min-w-0` item between two `shrink-0` groups; its parts truncate (branch first via flexShrink 4, tab 2, project 1) and it hides below 680px. Prove no overlap by measuring rects (left group right edge <= title left, title right <= right group left) at 600/700/930/1280, not by one screenshot.
+- **CONTEXT**: Any absolutely centered element in a bar whose sides can grow. Remove the cause, then measure at the narrowest supported window (tear-off windows go to 600px).
+- **DETECTION**: `grep -rn "absolute left-1/2 -translate-x-1/2" src/components`
