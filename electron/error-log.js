@@ -85,9 +85,7 @@ function rotateIfNeeded() {
 // throttle (they are rare and are the whole point of the log).
 // main.stall joins them (v1.0.70): a stall report is written once the loop
 // recovers, which is exactly when a renderer error storm is most likely.
-// accounts.auto-move is the audit trail of automatic account moves: rare
-// (capped by the auto-move rules) and useless if a renderer storm drops it.
-const PRIORITY_RE = /^(crash\.|renderer\.gone|child\.gone|renderer\.preload-error|main\.stall|accounts\.auto-move)/;
+const PRIORITY_RE = /^(crash\.|renderer\.gone|child\.gone|renderer\.preload-error|main\.stall)/;
 export function isPriorityKind(kind) {
   return PRIORITY_RE.test(String(kind || ''));
 }

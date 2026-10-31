@@ -193,10 +193,7 @@ if [ "$rest" != "$payload" ]; then
     t="$d/.tmp.$sid.$$"
     # Write to a unique temp file then rename: a reader must never catch a
     # record mid-write, and a shared temp name would just move the collision.
-    # $PPID is the claude process itself (verified on 2.1.314): the only link
-    # from a pid to the conversation it is on NOW (/clear and /resume leave
-    # argv naming the old one).
-    if printf '${FORMAT} %s %s\\n%s\\n%s' "$s" "$PPID" "\${CLAUDE_CONFIG_DIR-}" "$payload" > "$t" 2>/dev/null; then
+    if printf '${FORMAT} %s\\n%s\\n%s' "$s" "\${CLAUDE_CONFIG_DIR-}" "$payload" > "$t" 2>/dev/null; then
       mv -f "$t" "$d/$sid.json" 2>/dev/null || rm -f "$t" 2>/dev/null
     else
       rm -f "$t" 2>/dev/null
@@ -209,8 +206,7 @@ fi
 /**
  * Parse one record file.
  *
- * Line 1 is the format marker, whether CLAUDE_CONFIG_DIR was SET, and (newer
- * reporters) the claude process's pid. Line 2 is
+ * Line 1 is the format marker and whether CLAUDE_CONFIG_DIR was SET. Line 2 is
  * its raw value. Everything after is the payload verbatim. Deliberately not a
  * JSON envelope: embedding a pathname into JSON from a shell script means
  * escaping it correctly in shell, and getting that subtly wrong is how a
@@ -243,7 +239,6 @@ export function parseRecord(text, receivedAtMs) {
 
   return {
     sessionId: typeof payload.session_id === 'string' ? payload.session_id : null,
-    reporterPid: /^\d+$/.test(header[2] || '') ? Number(header[2]) : null,
     key,
     configDir: usable ? dir : configDir,
     envUnset: !bindingSet,
@@ -269,8 +264,11 @@ function normalizeWindows(raw) {
   return Object.keys(out).length ? out : null;
 }
 
-/** Every record currently on disk, newest receipt first. Never throws. */
-export async function readUsageRecords(userDataDir) {
+/**
+ * Every record on disk (optionally only those refreshed in the last `maxAgeMs`),
+ * newest receipt first. Never throws.
+ */
+export async function readUsageRecords(userDataDir, maxAgeMs = Infinity, now = Date.now()) {
   const dir = usageDirPath(userDataDir);
   let names;
   try { names = await fs.readdir(dir); } catch { return []; }
@@ -286,6 +284,7 @@ export async function readUsageRecords(userDataDir) {
       // reading look like it arrived a moment ago (reviewer HIGH).
       fh = await fs.open(file, 'r');
       const st = await fh.stat();
+      if (now - st.mtimeMs > maxAgeMs) return;
       const text = await fh.readFile('utf8');
       const rec = parseRecord(text, st.mtimeMs);
       if (rec) out.push(rec);
@@ -293,84 +292,6 @@ export async function readUsageRecords(userDataDir) {
     finally { await fh?.close().catch(() => {}); }
   }));
   return out.sort((a, b) => b.receivedAt - a.receivedAt);
-}
-
-/**
- * Delete records nobody has refreshed in `maxAgeMs` (one file per session is
- * written forever, and every one is read on each sample), and temp files a
- * killed reporter left behind. Only names this module writes are touched.
- */
-export async function pruneUsageRecords(userDataDir, maxAgeMs, now = Date.now()) {
-  const dir = usageDirPath(userDataDir);
-  let names;
-  // Only ever inside our own real folder: a linked one could be anything.
-  try {
-    if (!(await fs.lstat(dir)).isDirectory()) return 0;
-    names = await fs.readdir(dir);
-  } catch { return 0; }
-  let removed = 0;
-  await Promise.all(names.map(async (name) => {
-    const tmp = /^\.tmp\.[A-Za-z0-9_-]+\.\d+$/.test(name);
-    if (!tmp && !/^[A-Za-z0-9_-]+\.json$/.test(name)) return;
-    const file = path.join(dir, name);
-    try {
-      const st = await fs.lstat(file);
-      if (!st.isFile() || now - st.mtimeMs < (tmp ? 3600_000 : maxAgeMs)) return;
-      await fs.unlink(file);
-      removed += 1;
-    } catch { /* vanished or not ours to remove */ }
-  }));
-  return removed;
-}
-
-/**
- * Fold records into one reading per CREDENTIAL.
- *
- * The rule is NEWEST RECEIPT, and nothing else.
- *
- * An earlier version preferred a reading from a still-running session over one
- * from an exited session. That precedence cannot be fed honestly: a record
- * names a session id, the process scan names pids, and nothing links the two.
- * Judging liveness at the CREDENTIAL level instead does not rescue it, because
- * knowing that some session on this credential is alive says nothing about
- * which session produced the reading that won (reviewer HIGH). Claiming that
- * distinction while being unable to compute it is precisely the confident wrong
- * answer this project keeps paying for, so it is gone.
- *
- * What remains is defensible: this is the most recent report anyone made, and
- * its age travels with it. Highest-percentage was also rejected, because it
- * preserves an obsolete reading forever, including across an account change on
- * the directory.
- */
-export function aggregateUsage(records, { now = Date.now() } = {}) {
-  const byKey = new Map();
-  for (const r of records) {
-    if (!r.key || !r.windows) continue;
-    const prev = byKey.get(r.key);
-    if (prev && prev.receivedAt >= r.receivedAt) continue;
-    byKey.set(r.key, {
-      key: r.key,
-      configDir: r.configDir,
-      envUnset: r.envUnset,
-      sessionId: r.sessionId,
-      receivedAt: r.receivedAt,
-      windows: r.windows,
-    });
-  }
-
-  const out = [];
-  for (const g of byKey.values()) {
-    // A window past its own reset tells you nothing about the new window, and
-    // showing 0% there would invent a measurement nobody made.
-    const windows = {};
-    for (const [name, w] of Object.entries(g.windows)) {
-      if (w.resetsAt !== null && w.resetsAt * 1000 <= now) continue;
-      windows[name] = w;
-    }
-    if (!Object.keys(windows).length) continue;
-    out.push({ ...g, windows, ageMs: Math.max(0, now - g.receivedAt) });
-  }
-  return out;
 }
 
 /** Is this settings value OUR reporter? Judged by the command, not the shape. */

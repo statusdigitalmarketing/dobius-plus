@@ -444,13 +444,13 @@
 - **CONTEXT**: Any release built from parallel worktrees. Also: a package.json conflict hunk can hold a script definition beside the test chain; check every chained script is defined after resolving.
 - **DETECTION**: `node -e "const s=require('./package.json').scripts;for(const c of s.test.split(' && ')){const n=c.replace('npm run ','');if(!s[n])console.log('undefined',n)}"`
 
-### Architecture - 2026-10-30 (account headroom)
+### Architecture - 2026-10-30 (account headroom) [OUTDATED: auto-move was cut 2026-10-31; the code it names is gone, it survives on feat/account-headroom-automove]
 - **MISTAKE**: The first auto-move design keyed a limit event on the transcript's newest record alone. `claude --resume` leaves the transcript ending in the PREVIOUS process's limit record (on the account the tab just left) until something new is written, and its screen redraws the old "You've hit your 5-hour limit" line, so every move, manual move or relaunch would have looked like a fresh limit and moved the tab again (independent design review, High).
 - **FIX**: A limit counts only if it happened to the claude running now: `limit.at >= getTerminalClaudeInfo(id).startedAt` (`decideAutoMove`, electron/account-headroom.js). Claude's limit record is `type:'assistant', isApiErrorMessage:true, error:'rate_limit'` with text "You've hit your <5-hour|session|weekly|Opus|Sonnet> limit · resets ...", verified on transcripts from 2.1.251 to 2.1.293.
 - **CONTEXT**: Anything that reacts to the END of a transcript after a resume, or to Claude's screen after a respawn.
 - **DETECTION**: `grep -n "processStartedAt" electron/account-headroom.js`
 
-### Process - 2026-10-30 (account headroom)
+### Process - 2026-10-30 (account headroom) [OUTDATED: auto-move and its log kind were cut 2026-10-31]
 - **MISTAKE**: The auto-move audit lines went through `logLine` as an ordinary kind, and a renderer warning storm in the harness (3000+ duplicate-key warnings from the Settings font picker) used up the per-minute budget, so two of three audit lines never reached error.log. Only the ship-test showed it.
 - **FIX**: An audit trail that must survive is a priority kind (`accounts.auto-move` in error-log.js PRIORITY_RE) and a non-fault for the reporter (error-reporter.js SKIP_KIND), with both pinned by tests.
 - **CONTEXT**: Any new log kind whose loss would hide an automatic action from the person.
@@ -458,17 +458,17 @@
 
 ### Testing - 2026-10-30 (account headroom)
 - **MISTAKE**: Not a mistake: a recipe. Account features cannot be ship-tested against the real profiles, Keychain or ~/.claude.
-- **FIX**: Run the harness with `HOME=<scratch>/home` (fake ~/.claude, ~/.claude-profiles, transcripts) and CLAUDE_CONFIG_DIR unset, fake profiles holding a `.claude.json` (oauthAccount.emailAddress) and a `.credentials.json` with a `claudeAiOauth` key (loginState reads 'in' without the Keychain), PATH starting with a stand-in `claude` node script that writes DOBIUS1 usage records and transcript lines. A stand-in must park the cursor on its prompt row right of the ❯ or promptBoxText never sees the box. Never click the Running sessions "Move" button in such a harness: the process scan still sees the REAL sessions on the Mac.
+- **FIX**: Run the harness with `HOME=<scratch>/home` (fake ~/.claude, ~/.claude-profiles, transcripts) and CLAUDE_CONFIG_DIR unset, fake profiles holding a `.claude.json` (oauthAccount.emailAddress) and a `.credentials.json` with a `claudeAiOauth` key (loginState reads 'in' without the Keychain), PATH starting with a stand-in `claude` node script that writes DOBIUS1 usage records and transcript lines. A stand-in must park the cursor on its prompt row right of the ❯ or promptBoxText never sees the box. Never click the Running sessions "Move" button in such a harness: the process scan still sees the REAL sessions on the Mac. The shell must find the stand-in first: set ZDOTDIR to a .zshrc that prepends it, and have the first probe read `whence -p claude` back before anything else runs.
 - **CONTEXT**: scratchpad/brett/accounts/h (seed.mjs, bin/claude, p1-p12 probes, up.sh/down.sh).
 - **DETECTION**: `pgrep -fl "accounts/h/bin/claude"` after teardown must print nothing.
 
-### Testing - 2026-10-30 (account headroom)
+### Testing - 2026-10-30 (account headroom) [OUTDATED: auto-move was cut 2026-10-31; the stillOk-inside-the-queue lesson still applies to chat-service]
 - **MISTAKE**: The auto-move continue passed `submitPromptToTab` a `stillOk` that read `inputHeld`. After the 2.0.0 merge that dep had to become /openTab's `inputBusy`, which is `submitPending(tab) || held`. Inside the submit queue `submitPending` is true because of this very submit, so every automatic "continue" cancelled itself ("the submit was interrupted"). All unit tests passed because the fake submit never called `stillOk`; three Codex lenses read that line and did not flag it. Only the harness re-run after the merge caught it.
 - **FIX**: A `stillOk` runs INSIDE the queue: never read "is a submit pending" from it. The fake `submit` in account-headroom-service.test.mjs now evaluates `stillOk` while `inputHeld` reads true, as main does.
 - **CONTEXT**: Any guard handed to chat-service. And re-run the end-to-end ship-test after every merge from the release branch, not just `npm test`.
 - **DETECTION**: `grep -n "d.submit(" electron/account-headroom-service.js`
 
-### Architecture - 2026-10-30 (account headroom)
+### Architecture - 2026-10-30 (account headroom) [OUTDATED: the $PPID reporter was cut 2026-10-31; a tab's conversation now comes from Claude's own sessions/<pid>.json (presenceOf)]
 - **MISTAKE**: Identified a tab's conversation from `claude --resume <id>` in argv (and from recent-link heuristics for a fresh `claude`). `/clear` and `/resume` change the conversation inside the same process and argv keeps naming the old one, so Codex broke every guard built on it for three rounds (a limit on the new conversation's screen plus the old transcript's limit record would revive and "continue" the abandoned conversation).
 - **FIX**: Ask the process. The statusLine reporter writes `$PPID` into its record header, and `$PPID` IS the claude process (verified live on 2.1.314 with `claude --settings` through a pty, no prompt sent). The newest record with that pid names the conversation it is on now (`reportedSession`, electron/account-headroom-service.js). With no such record there is no automatic move. A wrong source of truth is what makes guards pile up: replacing it let `anotherSessionSince` be deleted.
 - **CONTEXT**: Anything that must know which conversation a live Claude is in. `tab-context.resolveSessionForTab` still has the argv limitation for its other callers.
@@ -480,8 +480,20 @@
 - **CONTEXT**: Any reader of a TAIL of the PTY buffer. Modes set once at startup are not in it. Stand-ins prove the flow, not the volume.
 - **DETECTION**: `grep -n "renderScreenLines(" electron/*.js`, and ask of each what mode it assumes.
 
-### Testing - 2026-10-31 (account headroom)
+### Testing - 2026-10-31 (account headroom) [OUTDATED: limitIsOwn was cut with auto-move 2026-10-31]
 - **MISTAKE**: Added "this process must have been reporting the conversation before the limit" and read that from when a poll first SAW the report. One report file is overwritten per conversation and polled every 15s, so a limit within the first poll interval looked older than the report and the tab never moved. The harness caught it (the stand-in hits its limit seconds after a move); Codex rated it Medium in the same round.
 - **FIX**: `limitIsOwn`: `--resume` in argv vouches for a process that has not left that conversation; otherwise the time this pid was first seen on its CURRENT conversation (only each pid's newest report counts, and coming back starts the clock again).
 - **CONTEXT**: A timestamp read by polling a file that gets overwritten is "seen by", never "happened at".
 - **DETECTION**: `grep -n "limitIsOwn\|onConversation" electron/account-headroom-service.js`
+
+### Process - 2026-10-31 (account headroom cut)
+- **MISTAKE**: Twenty Codex rounds grew an opt-in auto-move to 2,376 app lines, each round's guard answering a finding on the previous guard, and nobody stepped back to ask whether the feature Sam asked for needed it. He asked for a usage panel and a one-click move. Cutting auto-move removed the hard part: limit detection, ps environment parsing, per-process reports, holds, the continue guard.
+- **FIX**: Findings that come from the last round's fix, or code that keeps growing, mean stop and report. A fresh reader of a large diff finds a fresh edge case every time; convergence on a small diff means something, on a large one it does not.
+- **CONTEXT**: Any review loop. The full version is kept on feat/account-headroom-automove.
+- **DETECTION**: `git diff --shortstat main...HEAD -- . ':(exclude)electron/__tests__'` between rounds. Growth is the signal.
+
+### Security - 2026-10-31 (account headroom cut)
+- **MISTAKE**: `realpath(dir) === path.resolve(dir)` was the "is this folder an alias" check, but `path.resolve` removes `/.`, `..` and a trailing slash, while Keychain service names hash the CONFIGURED spelling. So `/profiles/b/.` passed as canonical, read the address written by a login through `/profiles/b`, and used a credential that belonged to someone else. Separately, `fs.writeFile` on `<final>.tmp.<pid>` follows a symlink planted at that predictable name, onto a credential file if that is what it points at, and `flushSync` wrote straight through the final path.
+- **FIX**: Compare `realpath(dir)` with the literal configured string (NFC). Any other spelling reads as an unknown login, and `moveRefusal` fails closed on unknown. Files go through `writePrivateFileSync`: parent is a real dir this user owns, `O_CREAT|O_EXCL|O_NOFOLLOW` at 0600 under a random name, then rename, which replaces a link rather than writing into it. Reads use `O_NOFOLLOW`.
+- **CONTEXT**: Anything comparing config dirs, and anything writing into userData.
+- **DETECTION**: `grep -n "path.resolve(r.dir)\|writeFile(tmp" electron/*.js`

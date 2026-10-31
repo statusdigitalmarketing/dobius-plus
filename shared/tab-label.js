@@ -143,11 +143,7 @@ export function unlockLabel(tab) {
  * The automatic-label fields of a tab, plus its Terminal/Chat view mode, for
  * carrying it into a tear-off window.
  */
-/**
- * A tab's account pin ({ id: string } or { id: null } for Default), cleaned
- * for travel between windows, or undefined. Main still resolves the id
- * against config at spawn (spawn-account-env.js); this only keeps the shape.
- */
+/** A tab's account pin ({ id: string } or { id: null } for Default), cleaned, or undefined. */
 export function sanitizeAccountPin(pin) {
   if (!pin || typeof pin !== 'object' || !('id' in pin)) return undefined;
   if (pin.id === null) return { id: null };
@@ -156,8 +152,7 @@ export function sanitizeAccountPin(pin) {
 
 export function labelMeta(tab) {
   const meta = { labelLockedByUser: isLabelLocked(tab) };
-  // The account a tab was moved to travels with it (tear-off, dock), or a
-  // relaunch would start it on the active account again.
+  // The account a tab was moved to travels with it (tear-off, dock).
   const pin = sanitizeAccountPin(tab?.claudeAccountPin);
   if (pin) meta.claudeAccountPin = pin;
   for (const k of ['labelSource', 'autoLabel', 'autoLabelSource']) {

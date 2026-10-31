@@ -2,8 +2,7 @@ import './dev-userdata.js'; // MUST stay first: userData override before config-
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor } from 'electron';
-import { spawn, execFile } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -21,39 +20,37 @@ const stallWatchdog = createStallWatchdog({ log: logLine });
 stallWatchdog.wrapIpc(ipcMain);
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
-import { accountIdentities, accountMetadata, loginStatePresenceOnly, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
+import { accountIdentities, accountMetadata, loginState, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
-import { userOverrideIn, envOverrideIn } from './account-headroom.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
 import { resolveAccountEnvForCwd, resolveClaudeAccountPin } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses } from './claude-process-scan.js';
-import { createWaitingReader, boundedIds, activityRow, freshenRows } from './claude-presence.js';
+import { createWaitingReader, boundedIds, activityRow, freshenRows, presenceOf } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
-  readUsageRecords, aggregateUsage, pruneUsageRecords,
+  readUsageRecords,
   planStatusLineInstall, planStatusLineRemove, ownsStatusLine, chainFromScript, scriptPathFromCommand, MODEL_LINE_MARKER,
 } from './claude-usage.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputAgeMs, terminalInputSeq, terminalRawOutputSeq, terminalClosing, sendToTerminalWindow, terminalRows, terminalSettledSinceInput, trimToEscapeBoundary } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, trimToEscapeBoundary } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
 import { launchCommandFor } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
-import { isClaudePromptReady, promptBoxText } from './bridge-open-tab.js';
-import { stripAnsi, parseSelectorFromScreen } from './selector-parser.js';
+import { promptBoxText } from './bridge-open-tab.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, provenanceChanged, sessionMovedPast, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
-  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage, getSessionLimitRecord } from './data-service.js';
+  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
 } from './build-monitor-service.js';
@@ -282,18 +279,14 @@ function setupTerminalHandlers() {
     // Per-account env (codex/claude), resolved at the one spawn choke point.
     // Shared with the mobile spawn paths via resolveAccountEnvForCwd so a phone
     // terminal lands on the same active accounts as a desktop one (reviewer P2).
-    // A tab moved to an account carries a pin naming it (an account id, looked
-    // up in config there; never a directory).
+    // A tab moved to an account carries a pin naming it (an id, never a path).
     const claudeAccountPin = opts && typeof opts === 'object' ? opts.claudeAccountPin : undefined;
-    // An automatic account move restarts the tab only if nothing reached it
-    // since main last checked (account-headroom-service startAutoMove): no
-    // await between this check and the kill.
-    // Input a window still holds (an image paste being saved) counts too: it
-    // would be lost with the prompt it was meant for.
+    // An account move restarts the tab only if nothing reached it since main
+    // last judged it: no await between this check and the kill. Input a window
+    // still holds (an image paste being saved) counts too.
     if (opts && Number.isInteger(opts.expectInputSeq) && (terminalInputSeq(id) !== opts.expectInputSeq || heldInputFor(id))) return null;
-    // A move names its account: if that account is gone (deleted, or its id
-    // now ambiguous) the restart is refused rather than quietly landing on
-    // the project's or the active account. A relaunch (not strict) falls back.
+    // A move's account being gone (or its id ambiguous) refuses the restart
+    // rather than landing on another account. A relaunch (not strict) falls back.
     if (opts?.strictPin === true && resolveClaudeAccountPin(claudeAccountPin, loadConfig().accounts) === undefined) return null;
     const accountEnv = resolveAccountEnvForCwd(cwd, { claudeAccountPin });
     // A New Tab (store.openNewTab) starts its tool: 'default' is the Settings
@@ -320,10 +313,9 @@ function setupTerminalHandlers() {
     writeRawInput(id, data, () => ownsTerminal(event.sender.id, id));
   });
 
-  // How many writes reached this tab's shell since it started (terminal
-  // replies excluded). An account move asks it between the restart and the
-  // typed resume: anything there means a person started typing in the new
-  // shell, and the resume would be glued onto their line.
+  // Writes to this tab's shell since it started (terminal replies excluded). An
+  // account move asks before typing its resume, which would be glued onto
+  // anything a person started typing in the new shell.
   ipcMain.handle('terminal:inputCount', (event, id) => {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
     if (!ownsTerminal(event.sender.id, id)) return null;
@@ -614,13 +606,6 @@ function setupDataHandlers() {
   // visible as a process, and a plain check leaves both surfaces seeing "not
   // running" inside that window.
   ipcMain.handle('data:claimSessionResume', (_event, sessionId, tabId) => claimSessionResume(sessionId, tabId));
-  // Give back a claim this window took and then did not use (an account
-  // move found someone typing in the fresh shell): only the owning window,
-  // only a claim bound to that tab.
-  ipcMain.handle('data:releaseSessionResume', (event, sessionId, tabId) => {
-    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId) || !ownsTerminal(event.sender.id, tabId)) return false;
-    return releaseSessionResume(sessionId, tabId);
-  });
   ipcMain.handle('data:getLatestSession', (_event, projectPath) => getLatestSession(projectPath));
   ipcMain.handle('data:getSessionSize', (_event, sessionId, projectPath) => getSessionSize(sessionId, projectPath));
   ipcMain.handle('data:killProcess', async (_event, pid) => {
@@ -2294,51 +2279,26 @@ function setupFileHandlers() {
     const r = setStatusLinePart('modelUnderPrompt', !!on, opts);
     return r?.error ? r : { ...r, on: !!on };
   });
-
-  // Read-only. Liveness is reported as CONTEXT, never as precedence: a record
-  // names a session id and the scan names pids, and nothing links the two, so
-  // "which reading came from a live session" is not knowable. What IS knowable
-  // is how many sessions that credential has running, shown alongside.
-  ipcMain.handle('claudeUsage:read', async () => {
-    try {
-      const records = await readUsageRecords(app.getPath('userData'));
-      const rows = aggregateUsage(records);
-      let scan = null;
-      try { scan = await scanClaudeProcesses(); } catch { /* cannot prove liveness */ }
-      const liveByKey = new Map((scan?.groups || []).map((g) => [g.key, g.pids.length]));
-      // A process whose environment could not be read is UNRESOLVED, not
-      // absent. Calling a credential idle on that evidence would be the same
-      // confident wrong answer the scanner itself refuses to give
-      // (reviewer MEDIUM).
-      const coverageUnknown = !scan || !!scan.discoveryFailed || (scan.unresolved?.length || 0) > 0;
-      return {
-        ok: true,
-        scanFailed: coverageUnknown,
-        usage: rows.map((r) => ({
-          ...r,
-          sessionsRunning: liveByKey.get(r.key) ?? 0,
-          historical: coverageUnknown ? false : !liveByKey.has(r.key),
-        })),
-      };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
 }
 
-// Per-account usage with pace and forecast, Move to account, and the opt-in
-// auto-move when a tab hits a limit. Rules: account-headroom.js; the service
-// (account-headroom-service.js) gets everything system-facing from here.
+// Per-account usage with pace and forecast, and Move to account. Rules:
+// account-headroom.js; the service gets everything system-facing from here.
 let headroom = null;
 // Input a window still holds for a tab (an image paste being saved): set when
-// the bridge deps exist, read by the auto-move continue.
+// the bridge deps exist.
 let heldInputFor = () => false;
+// Any of these in Dobius's own environment signs in every Claude it starts the
+// same way, whatever CLAUDE_CONFIG_DIR says. By name only: no value is kept.
+const AUTH_OVERRIDE_NAMES = [
+  'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BASE_URL',
+];
 function setupHeadroomHandlers() {
   const ownsTab = (event, tabId) => typeof tabId === 'string' && TERMINAL_ID_RE.test(tabId) && ownsTerminal(event.sender.id, tabId);
+  const userData = app.getPath('userData');
   headroom = createHeadroomService({
-    userDataDir: app.getPath('userData'),
+    userDataDir: userData,
     now: () => Date.now(),
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     getAccounts: () => loadConfig().accounts || [],
     // The Default row is what a Default terminal inherits; a tab whose shell
     // had CLAUDE_CONFIG_DIR unset is on the CLI's own ~/.claude.
@@ -2346,74 +2306,38 @@ function setupHeadroomHandlers() {
     defaultEnvUnset: () => !process.env.CLAUDE_CONFIG_DIR,
     cliDefaultDir: () => defaultClaudeDir(),
     keyFor: (dir) => { try { return keychainServiceFor(dir); } catch { return null; } },
-    // Read-only and token-free: the metadata file for the address, and only
-    // the EXISTENCE of a credential (account-identity.js).
-    login: (dir) => loginStatePresenceOnly(dir),
-    processCwd: (pid) => getProcessCwd(pid),
-    processAuthOverride: (pid) => processAuthOverride(pid),
-    realpath: (p) => fs.promises.realpath(p),
-    // Leads its terminal's foreground process group, and is not stopped.
-    isForeground: async (pid) => {
-      try {
-        const { stdout } = await execFileP('/bin/ps', ['-o', 'pgid=,tpgid=,stat=', '-p', String(pid)], { timeout: 1500, encoding: 'utf8' });
-        const m = stdout.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
-        return !!m && m[1] === m[2] && m[1] === String(pid) && !m[3].startsWith('T');
-      } catch { return false; }
-    },
-    settled: (id) => terminalSettledSinceInput(id),
+    login: (dir) => loginState(dir),
     metadata: (dir, opts) => accountMetadata(dir, opts),
+    realpath: (p) => fs.promises.realpath(p),
     // This folder's conversations are the shared store (account-profile-share
-    // links projects into ~/.claude): a resume there finds the same
-    // transcript main reads. A private copy kept after a collision does not.
+    // links projects into ~/.claude): a resume there finds the same transcript
+    // main reads. A private copy kept after a collision does not.
     sharesHistory: async (dir) => {
       try {
         return (await fs.promises.realpath(path.join(dir, 'projects'))) === (await fs.promises.realpath(path.join(defaultClaudeDir(), 'projects')));
       } catch { return false; }
     },
-    inputHeld: (id) => heldInputFor(id),
-    samePath: async (a, b) => {
-      try { return (await fs.promises.realpath(a)) === (await fs.promises.realpath(b)); } catch { return false; }
-    },
-    rows: (id) => terminalRows(id),
-    // Any of these in Dobius's own environment authenticates every Claude it
-    // starts the same way, whatever CLAUDE_CONFIG_DIR says, so moving a tab
-    // between profiles would change nothing.
     authOverride: () => AUTH_OVERRIDE_NAMES.find((k) => typeof process.env[k] === 'string' && process.env[k].trim()) || null,
-    readRecords: () => readUsageRecords(app.getPath('userData')),
+    readRecords: (maxAgeMs) => readUsageRecords(userData, maxAgeMs),
     scan: () => scanClaudeProcesses(),
-    // Needs the reporter on: its reports are what name a tab's conversation, and
-    // ones left from before it was turned off go on naming an old one.
-    autoMoveEnabled: () => getSettings().autoMoveOnLimit === true && getSettings().usageReporting === true,
-    reportingOn: () => getSettings().usageReporting === true,
     tabs: () => listTerminals(),
     activity: (id) => terminalStatus.statusFor(id),
     claudeInfo: (id) => getTerminalClaudeInfo(id),
+    presence: (info, configDir) => presenceOf(info, configDir),
     resolveSession: (id) => resolveSessionForTab(id),
     process: (id) => getTerminalProcess(id),
-    limitRecord: (sessionId, projectPath) => getSessionLimitRecord(sessionId, projectPath),
-    strippedTail: (id) => stripAnsi((getTerminalBuffer(id) || '').slice(-16384)),
+    processCwd: (pid) => getProcessCwd(pid),
+    inputSeq: (id) => terminalInputSeq(id),
+    inputHeld: (id) => heldInputFor(id),
     screen: async (id) => {
       // A long-running Claude turned bracketed paste on long before this tail
       // begins, and promptBoxText requires it: without saying so here, the box
       // of every tab that has been working for a while reads as unreadable (a
-      // possible draft), and it would never move. The caller has checked a
-      // claude runs in the tab.
+      // possible draft). The caller has checked a claude runs in the tab.
       const lines = await renderScreenLines(`\x1b[?2004h${trimToEscapeBoundary(getTerminalBuffer(id) || '', 262144)}`, { cols: terminalCols(id) });
       return lines ? { lines, modes: lines.modes } : null;
     },
-    promptReady: (lines, modes) => isClaudePromptReady(lines, modes),
     promptBox: (lines, modes) => promptBoxText(lines, modes),
-    selector: (lines) => { try { return parseSelectorFromScreen(lines); } catch { return null; } },
-    pruneRecords: (maxAgeMs) => pruneUsageRecords(app.getPath('userData'), maxAgeMs),
-    windowOf: (id) => getTerminalWebContentsId(id),
-    send: (id, channel, payload) => sendToTerminalWindow(id, channel, payload),
-    inputAgeMs: (id) => terminalInputAgeMs(id),
-    inputSeq: (id) => terminalInputSeq(id),
-    outputSeq: (id) => terminalRawOutputSeq(id),
-    pty: (id) => terminalInstance(id),
-    closing: (id) => terminalClosing(id),
-    submit: (id, text, stillOk) => submitPromptToTab(id, text, stillOk),
-    log: (kind, detail) => { console.log(`[${kind}] ${detail}`); logLine(kind, detail); },
   });
   ipcMain.handle('accounts:usage', async () => {
     try { return await headroom.usage(); } catch (err) { return { ok: false, error: err.message }; }
@@ -2427,59 +2351,9 @@ function setupHeadroomHandlers() {
     if (targetId !== null && typeof targetId !== 'string') return [];
     try { return await headroom.moveCandidates(mine, targetId); } catch { return []; }
   });
-  // The window is about to restart the tab for a move main asked for: still
-  // wanted, nobody typed since main decided, no unsent text? Asked right
-  // before the respawn, because the window may have queued it for a while.
-  ipcMain.handle('accounts:autoMoveStart', async (event, tabId, eventId) => {
-    if (!ownsTab(event, tabId) || typeof eventId !== 'string') return { ok: false };
-    return headroom.startAutoMove(tabId, eventId, event.sender.id);
-  });
-  ipcMain.handle('accounts:autoMoveContinue', async (event, tabId, eventId, failed) => {
-    if (!ownsTab(event, tabId) || typeof eventId !== 'string') return { ok: false };
-    return headroom.continueAfterMove(tabId, eventId, event.sender.id, typeof failed === 'string' ? failed : null);
-  });
-  // Sampling keeps pace honest even while no panel is open; auto-move rides
-  // the same tick. unref'd: never keeps the app alive.
-  setInterval(() => { headroom.tick(); }, 15_000).unref();
-}
-
-// Which auth override (a token or API key that signs Claude in regardless of
-// its profile folder) a process carries, by NAME only: its environment is
-// read through ps and only checked for the variable being set; no value is
-// kept or logged. null when none, 'unreadable' when it cannot be read (the
-// caller must then not assume there is none).
-const execFileP = promisify(execFile);
-const AUTH_OVERRIDE_NAMES = [
-  'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
-  // Another provider or endpoint altogether: not this account's Max limit.
-  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BASE_URL',
-];
-async function processAuthOverride(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  try {
-    const { stdout } = await execFileP('/bin/ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 1500, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
-    if (!stdout.trim()) return 'unreadable';
-    const named = AUTH_OVERRIDE_NAMES.find((n) => new RegExp(`(?:^|\\s)${n}=\\S`).test(stdout));
-    if (named) return named;
-    // Claude picks its Keychain item by USER: a shell that changes USER picks
-    // another item under the same service, i.e. possibly another login.
-    // An unset USER falls back to the OS user name, which need not be the
-    // USER Dobius itself (and so the rest of this check) runs with.
-    // Fail closed on anything ambiguous: USER= appearing twice (an argument
-    // or another variable's value can contain it), or a value that is not
-    // exactly ours followed by the next variable or the end.
-    let osUser = null;
-    try { osUser = os.userInfo().username; } catch { osUser = null; }
-    const userOverride = userOverrideIn(stdout, process.env.USER || osUser, osUser);
-    if (userOverride) return userOverride;
-    // HOME decides where an UNSET or ~-relative profile folder lands (the
-    // bare default Keychain item belongs to ~/.claude): a shell that moves
-    // HOME can put the resumed Claude on another login.
-    let osHome = null;
-    try { osHome = os.userInfo().homedir; } catch { osHome = null; }
-    const home = envOverrideIn(stdout, 'HOME', os.homedir(), osHome);
-    return home ? (home === 'unreadable' ? home : 'HOME') : null;
-  } catch { return 'unreadable'; }
+  // Sampling keeps pace honest while no panel is open. unref'd: never keeps the
+  // app alive.
+  setInterval(() => { headroom.tick(); }, 60_000).unref();
 }
 
 function setupConfigHandlers() {
@@ -3462,7 +3336,7 @@ function setupWindowHandlers() {
   });
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
   // /openTab's own "is another surface typing into this tab" (a submit, or
-  // input a window still holds): an automatic "continue" asks the same thing.
+  // input a window still holds): an account move must not restart under it.
   heldInputFor = bridgeOpenDeps.inputBusy;
 
   // Record the docked tab in the target window's saved tab list BEFORE the

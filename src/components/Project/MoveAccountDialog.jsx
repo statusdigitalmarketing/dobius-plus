@@ -3,17 +3,14 @@ import { useStore } from '../../store/store';
 import { orderedWindows, windowLabel, ago, barColor } from '../../lib/usage-format';
 
 /**
- * Move to account: pick one of your Claude logins for this tab (or every tab
- * in this window). Best headroom first; accounts with no usage reported are
- * listed last as Unknown, and a target that is the tab's own login or has no
- * credential is shown but cannot be picked (main decides that, see
- * electron/account-headroom.js moveRefusal).
+ * Move to account: pick one of your Claude logins for this tab (or every tab in
+ * this window). Best headroom first, Unknown last. A target main refuses
+ * (moveRefusal in electron/account-headroom.js) is shown but cannot be picked.
  */
 export default function MoveAccountDialog({ tabId, onClose }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const tab = useStore((s) => s.terminalTabs.find((t) => t.id === tabId));
   const windowTabIds = useStore((s) => s.terminalTabs.filter((t) => (t.kind || 'terminal') === 'terminal').map((t) => t.id).join('\n'));
 
   useEffect(() => {
@@ -29,8 +26,6 @@ export default function MoveAccountDialog({ tabId, onClose }) {
 
   const moveOne = async (t) => {
     setBusy(true);
-    // The conversation is read again at the moment of the move (main's
-    // answer), not the one the dialog saw when it opened.
     const r = await useStore.getState().moveTabToAccount(tabId, t.isDefault ? null : t.id, { label: t.label });
     setBusy(false);
     if (r?.cancelled) return;
@@ -46,7 +41,6 @@ export default function MoveAccountDialog({ tabId, onClose }) {
     if (!r?.cancelled) onClose();
   };
 
-  const pin = tab?.claudeAccountPin;
   const tabWarn = data?.tab?.busy ? 'This tab is in the middle of a turn: moving it stops that turn.'
     : data?.tab?.draft ? 'This tab has unsent text in Claude\'s prompt: moving it loses that text.'
       : data?.tab?.running === 'other' ? 'This tab is running another program: moving it stops it.' : '';
@@ -71,16 +65,12 @@ export default function MoveAccountDialog({ tabId, onClose }) {
         </div>
         <div className="text-xs mb-2" style={{ color: 'var(--dim)' }}>
           {data ? <>This tab is on <b style={{ color: 'var(--fg)' }}>{data.source.label}</b>{data.source.email ? ` (${data.source.email})` : ''}.</> : error || 'Reading accounts…'}
-          {pin && (
-            <> It is pinned there. <button style={{ ...btn(true), padding: '0 6px' }} onClick={() => { useStore.getState().clearTabAccountPin(tabId); onClose(); }}>Follow the active account instead</button></>
-          )}
         </div>
         {tabWarn && <div className="text-xs mb-2" style={{ color: '#fbbf24' }}>{tabWarn}</div>}
         {(data?.targets || []).map((t, i) => {
           const u = t.usage;
           const ok = !t.refusal && !busy;
-          // Consolidating: the tab this dialog opened from may already be on
-          // the target; every other tab is judged by itself when it moves.
+          // Every tab is judged by itself when it moves.
           const okAll = !t.allRefusal && !busy;
           return (
             <div key={`${t.id ?? 'default'}-${i}`} data-move-target={t.label} style={{ border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', marginBottom: 6, opacity: t.refusal ? 0.6 : 1 }}>
@@ -102,7 +92,7 @@ export default function MoveAccountDialog({ tabId, onClose }) {
                           {windowLabel(name)} <span style={{ color: barColor(w.used) }}>{Math.round(w.used)}%</span>
                         </span>
                       ))}
-                      <span>{u.headroom}% headroom, reported {ago(u.ageMs)}{u.via ? ` (by ${u.via}, the same login)` : ''}</span>
+                      <span>{u.headroom}% headroom, reported {ago(u.ageMs)}</span>
                     </>
                   : <span>Usage unknown{u?.lastReportedAt ? ` (last report ${ago(u.ageMs)})` : ': no session has reported on it yet'}</span>}
               </div>

@@ -682,7 +682,6 @@ export const useStore = create((set, get) => ({
       ...(typeof closed.labelLocked === 'boolean' ? { labelLockedByUser: closed.labelLocked } : {}),
       projectPath: closed.projectPath,
       kind: closed.kind || 'terminal',
-      ...(closed.claudeAccountPin ? { claudeAccountPin: closed.claudeAccountPin } : {}),
       ...(closed.url ? { url: closed.url } : {}),
       ...(closed.viewMode === 'chat' ? { viewMode: 'chat' } : {}),
       createdAt: Date.now(),
@@ -714,47 +713,35 @@ export const useStore = create((set, get) => ({
   // don't silently no-op when a browser tab is active. Audit Medium.
   getActiveTerminalTabId: () => resolveActiveTerminalTabId(get()),
 
-  // Move a tab to a chosen Claude account and continue its conversation
-  // there (generalised from "Continue on switched account"). Switching
-  // accounts only changes NEW terminals, so a tab that hit its limit stayed on
-  // the maxed-out account (Sam: "stays on original account and says i still
-  // dont have credits left"). This pins the tab to `accountId` (null =
-  // Default) WITHOUT touching the global active account, respawns its PTY
-  // (main resolves the pin at the spawn choke point), then hands the resume
-  // to resumeSession, which owns the claim gate and the cwd rules.
+  // Move a tab to a chosen Claude account and continue its conversation there.
+  // Pins the tab to `accountId` (null = Default) WITHOUT touching the global
+  // active account, respawns its PTY (main resolves the pin at the spawn choke
+  // point), then hands the resume to resumeSession (claim gate, cwd rules).
   //
-  // opts: { sessionId, project } from main (what the tab runs now), else the
-  // newest map link; confirm: ask first (manual single-tab moves); auto: an
-  // automatic move, which never asks, never steals the active tab, and
-  // resolves { ok, resumed, error }.
+  // opts: confirm: ask first; background: leave the active tab alone (Move all);
+  // refuseIf(judgement): a further reason not to. Resolves { ok, resumed, error }.
   moveTabToAccount: async (tabId, accountId, opts = {}) => {
     const api = typeof window !== 'undefined' ? window.electronAPI : null;
     if (!api || !tabId) return { ok: false, error: 'no tab' };
     if (accountId !== null && typeof accountId !== 'string') return { ok: false, error: 'no account' };
-    const { auto = false, confirm = !auto, background = auto, label = 'the chosen account' } = opts;
-    // The tab's REAL project, read from the live tab list (not the persisted
-    // map), so the lookup is project-guarded and the respawn's cwd is right.
+    const { confirm = true, background = false, label = 'the chosen account', refuseIf = null } = opts;
     const tab = (get().terminalTabs || []).find((t) => t.id === tabId);
     if (!tab) return { ok: false, error: 'the tab is closed' };
     const tabProject = tab.projectPath || get().currentProjectPath || null;
-    let sessionId = typeof opts.sessionId === 'string' ? opts.sessionId : null;
-    let sessionProject = typeof opts.project === 'string' ? opts.project : null;
-    let expectInputSeq = Number.isInteger(opts.expectInputSeq) ? opts.expectInputSeq : undefined;
-    // Which conversation runs in the tab NOW is main's answer (tab-context),
-    // read at the moment of the move, not when a dialog opened.
-    if (!sessionId && api.accountsMoveCandidates) {
-      try {
-        const [c] = (await api.accountsMoveCandidates([tabId], accountId)) || [];
-        if (c?.session?.sessionId) { sessionId = c.session.sessionId; sessionProject = c.session.project || null; }
-        // A Claude is running but main cannot name its conversation yet (just
-        // started): the map below would name an OLDER one, and resuming that
-        // would kill this one and revive the wrong conversation.
-        else if (c?.running === 'claude') return { ok: false, error: 'its conversation could not be identified yet; try again in a few seconds' };
-        // The account may have changed since the dialog opened (logged out).
-        if (c?.refusal) return { ok: false, error: c.refusal };
-        if (expectInputSeq === undefined && Number.isInteger(c?.inputSeq)) expectInputSeq = c.inputSeq;
-      } catch { /* fall back to the map below */ }
-    }
+    // Main judges the tab at the moment of the move, not when a dialog opened:
+    // which conversation it runs now, and whether it may go to that account. No
+    // answer is a refusal: the same-login rule is not checked anywhere else.
+    const [c] = (await api.accountsMoveCandidates?.([tabId], accountId).catch(() => null)) || [];
+    if (!c) return { ok: false, error: 'it could not be checked, so it was not moved' };
+    if (c.refusal) return { ok: false, error: c.refusal };
+    const refused = refuseIf?.(c);
+    if (refused) return { ok: false, error: refused };
+    let sessionId = c.session?.sessionId || null;
+    let sessionProject = c.session?.project || null;
+    // A Claude is running but main cannot name its conversation yet (just
+    // started): the map below would name an OLDER one, and resuming that would
+    // kill this one and revive the wrong conversation.
+    if (!sessionId && c.running === 'claude') return { ok: false, error: 'its conversation could not be identified yet; try again in a few seconds' };
     if (!sessionId) {
       try {
         const map = (await api.configGetSessionTabMap?.()) || {};
@@ -785,9 +772,9 @@ export const useStore = create((set, get) => ({
     }));
     setPin(pin, true);
     if (!background) set({ activeView: 'terminal', activeTabId: tabId });
-    const expect = expectInputSeq !== undefined ? { expectInputSeq } : {};
     let created;
-    try { created = await api.terminalCreate?.(tabId, tabProject || undefined, { claudeAccountPin: pin, strictPin: true, ...expect }); }
+    // main refuses the restart if anything reached the tab since it was judged
+    try { created = await api.terminalCreate?.(tabId, tabProject || undefined, { claudeAccountPin: pin, strictPin: true, expectInputSeq: c.inputSeq }); }
     catch (err) { setPin(prevPin, hadPin); return { ok: false, error: `the tab could not restart: ${err?.message || err}` }; }
     if (created === null) {
       setPin(prevPin, hadPin); // not restarted: it stays where it was, on relaunch too
@@ -807,16 +794,13 @@ export const useStore = create((set, get) => ({
     return typed === true ? { ok: true, resumed: true } : { ok: false, error: typeof typed === 'string' ? typed : 'the conversation could not be resumed' };
   },
 
-  // Move several tabs (this window's) to one account. Tabs that are mid-turn
-  // or waiting on a permission prompt, tabs running some other program or no
-  // Claude at all (a half-typed shell command cannot be read), and tabs with
-  // unsent text in Claude's box are SKIPPED and named, never
-  // interrupted: a respawn kills what runs in the tab. Main judges each tab
-  // (accounts:moveCandidates), including whether it may go to that account.
+  // Move several tabs (this window's) to one account. Tabs that are mid-turn or
+  // on a permission prompt, tabs running some other program or no Claude at all
+  // (a half-typed shell command cannot be read), and tabs with unsent text are
+  // SKIPPED and named, never interrupted: a respawn kills what runs in the tab.
   moveTabsToAccount: async (tabIds, accountId, label = 'the chosen account') => {
     const api = typeof window !== 'undefined' ? window.electronAPI : null;
-    if (!api?.accountsMoveCandidates) return { moved: 0, skipped: [] };
-    const cands = (await api.accountsMoveCandidates(tabIds, accountId)) || [];
+    const cands = (await api?.accountsMoveCandidates?.(tabIds, accountId)) || [];
     const name = (id) => (get().terminalTabs.find((t) => t.id === id)?.label) || id;
     const why = (c) => (c.refusal ? c.refusal
       : c.busy ? (c.status === 'needs' ? 'waiting on a question' : 'in the middle of a turn')
@@ -835,32 +819,15 @@ export const useStore = create((set, get) => ({
     let moved = 0;
     const failed = [];
     // One at a time: each resume claims its session and types into its own tab.
-    for (const c0 of movable) {
-      // Judged again right before its restart: earlier moves take seconds,
-      // and a tab may have started a turn or been typed into meanwhile.
-      const [c] = (await api.accountsMoveCandidates([c0.tabId], accountId)) || [];
-      if (!c || why(c)) { failed.push({ label: name(c0.tabId), reason: c ? why(c) : 'it is gone' }); continue; }
-      const r = await get().moveTabToAccount(c.tabId, accountId, {
-        confirm: false, background: true, label, sessionId: c.session?.sessionId, project: c.session?.project,
-        // main refuses the restart if anything reached the tab since it was judged
-        ...(Number.isInteger(c.inputSeq) ? { expectInputSeq: c.inputSeq } : {}),
-      });
-      if (r.ok) moved += 1; else failed.push({ label: name(c.tabId), reason: r.error || 'failed' });
+    for (const { tabId } of movable) {
+      // Judged again inside: earlier moves take seconds, and a tab may have
+      // started a turn or been typed into meanwhile.
+      const r = await get().moveTabToAccount(tabId, accountId, { confirm: false, background: true, label, refuseIf: why });
+      if (r.ok) moved += 1; else failed.push({ label: name(tabId), reason: r.error || 'failed' });
     }
     if (failed.length) window.alert?.(`Moved ${moved}. These did not move cleanly:\n${failed.map((x) => `${x.label}: ${x.reason}`).join('\n')}`);
     return { moved, skipped, failed };
   },
-
-  // Unpin: the tab follows the active account (and the project's) again on
-  // its next start. Nothing is restarted.
-  clearTabAccountPin: (tabId) => set((s) => ({
-    terminalTabs: s.terminalTabs.map((t) => {
-      if (t.id !== tabId || !t.claudeAccountPin) return t;
-      const { claudeAccountPin: _drop, ...rest } = t;
-      return rest;
-    }),
-  })),
-
 
   // Resume a Codex session in the active terminal tab. Separate from
   // resumeSession because Codex owns its own session lifecycle (no Claude
@@ -915,9 +882,9 @@ export const useStore = create((set, get) => ({
   },
 
   // Resolves true once the resume command is typed, or a reason (string) /
-  // false when it was not. `tabId` targets a specific tab; `background` (an
-  // automatic move) leaves the active tab and view alone and never opens a
-  // dialog. Existing callers ignore the result.
+  // false when it was not. `tabId` targets a specific tab; `background` (Move
+  // all) leaves the active tab and view alone and never opens a dialog.
+  // Existing callers ignore the result.
   resumeSession: (arg) => {
     const session = typeof arg === 'string' ? { sessionId: arg } : (arg || {});
     const { sessionId, sizeMB } = session;
@@ -1007,21 +974,9 @@ export const useStore = create((set, get) => ({
       //
       // The claim is bound to this tab, so retrying here after a failed resume
       // is granted, and killing the tab frees the session at once.
-      // A resume into a shell an account move just started: if anyone typed
-      // into it meanwhile, the command would be glued onto their line and run.
-      const shellUntouched = async () => {
-        if (session.freshShell !== true) return true;
-        const n = await window.electronAPI.terminalInputCount?.(target.id);
-        return !(Number.isInteger(n) && n > 0);
-      };
       const claim = window.electronAPI.dataClaimSessionResume?.(sessionId, target.id);
       if (!claim?.then) { typeIt(); return; } // older preload: behave as before
-      claim.then(async (okToRun) => {
-        if (okToRun !== false && !(await shellUntouched())) {
-          window.electronAPI.dataReleaseSessionResume?.(sessionId, target.id);
-          typed('someone typed in the restarted tab, so the conversation was not resumed there');
-          return;
-        }
+      claim.then((okToRun) => {
         if (okToRun === false) {
           // A tab opened just for this resume has no other purpose.
           if (target.fresh) get().removeTab(target.id);

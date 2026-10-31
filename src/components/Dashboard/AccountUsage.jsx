@@ -18,15 +18,13 @@ import { orderedWindows, windowLabel, ago, untilText, paceText, forecastText, ba
  *
  * Shown per ACCOUNT (name and login), each report attributed by the Keychain
  * service its session ran under, with pace (percent per hour) and when the
- * window runs out at that pace (electron/account-headroom.js). The opt-in
- * auto-move switch lives here too.
+ * window runs out at that pace (electron/account-headroom.js).
  */
 const AMBER = '#fbbf24';
 const RED = '#f87171';
 export default function AccountUsage() {
   const [rows, setRows] = useState(null);
   const [scanFailed, setScanFailed] = useState(false);
-  const [autoMove, setAutoMove] = useState(false);
   const [installed, setInstalled] = useState(null);
   const [elsewhere, setElsewhere] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -40,7 +38,7 @@ export default function AccountUsage() {
     ]);
     if (!mounted.current) return;
     if (st) { setInstalled(!!st.installed); setElsewhere(!!st.installedElsewhere); }
-    if (usage?.ok) { setRows(usage.accounts); setScanFailed(!!usage.scanFailed); setAutoMove(!!usage.autoMove); }
+    if (usage?.ok) { setRows(usage.accounts); setScanFailed(!!usage.scanFailed); }
   }, []);
 
   useEffect(() => {
@@ -80,12 +78,6 @@ export default function AccountUsage() {
     if (!mounted.current) return;
     setBusy(false);
     if (res?.error) setError(res.error); else load();
-  };
-
-  const toggleAutoMove = async () => {
-    const next = !autoMove;
-    await window.electronAPI?.configUpdateSettings?.({ autoMoveOnLimit: next });
-    if (mounted.current) setAutoMove(next);
   };
 
   const box = {
@@ -141,7 +133,7 @@ export default function AccountUsage() {
               {r.email && <span style={{ color: 'var(--dim)' }}> {r.email}</span>}
               <span style={{ color: 'var(--dim)' }}>
                 {u.known
-                  ? <> · {u.via ? `from ${u.via} (same login), ` : ''}last reported {ago(u.ageMs)}{r.sessionsRunning > 0 ? `, ${r.sessionsRunning} running` : ''}{r.stale ? <span style={{ color: AMBER }}> · stale{r.sessionsRunning === 0 ? ', no session running' : ''}</span> : ''}</>
+                  ? <> · last reported {ago(u.ageMs)}{r.sessionsRunning > 0 ? `, ${r.sessionsRunning} running` : ''}{r.stale ? <span style={{ color: AMBER }}> · stale{r.sessionsRunning === 0 ? ', no session running' : ''}</span> : ''}</>
                   : ' · usage unknown'}
               </span>
             </div>
@@ -161,6 +153,7 @@ export default function AccountUsage() {
                 <span style={{ flexShrink: 0 }}>{paceText(w.pace)}</span>
                 <span style={{ flexShrink: 0, color: w.forecast?.limited ? RED : w.forecast?.at ? AMBER : 'var(--dim)' }}>{forecastText(w.forecast)}</span>
                 {w.resetsAt && <span style={{ flexShrink: 0 }}>resets {untilText(w.resetsAt)}</span>}
+                {Math.abs(w.ageMs - (u.ageMs ?? w.ageMs)) > 60_000 && <span style={{ flexShrink: 0 }}>reported {ago(w.ageMs)}</span>}
               </div>
             ))}
             {r.sameAs?.length > 0 && (
@@ -169,19 +162,6 @@ export default function AccountUsage() {
           </div>
         );
       })}
-
-      {installed && (
-        <div className="flex items-center justify-between mt-2 mb-1" style={{ borderTop: '1px solid var(--border)', paddingTop: 8 }}>
-          <div className="text-xs" style={{ color: 'var(--fg)' }}>
-            Move a tab automatically when it hits a limit
-            <div style={{ color: 'var(--dim)' }}>
-              To the logged-in account with the most known headroom, then sends it &quot;continue&quot;. Never to an
-              account whose usage is unknown, never while you are typing in the tab.
-            </div>
-          </div>
-          <button data-auto-move-toggle style={btn} disabled={busy} onClick={toggleAutoMove}>{autoMove ? 'On' : 'Off'}</button>
-        </div>
-      )}
 
       {installed && (rows || []).length > 0 && (
         <div className="text-xs" style={{ color: 'var(--dim)' }}>

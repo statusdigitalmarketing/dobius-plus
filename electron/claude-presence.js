@@ -103,10 +103,18 @@ const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
  * @param {string|null} [configDir]  the tab's CLAUDE_CONFIG_DIR, null = default
  */
 export async function presenceSessionId(proc, configDir, readFile) {
+  return (await presenceOf(proc, configDir, readFile))?.sessionId ?? null;
+}
+
+/** The same record's { sessionId (or null), status (or null) }, or null. */
+export async function presenceOf(proc, configDir, readFile) {
   if (!proc || !Number.isInteger(proc.pid)) return null;
   const rec = await readPresenceRecord(proc.pid, configDir, readFile);
   if (!recordIsProcess(rec, proc)) return null;
-  return typeof rec.sessionId === 'string' && SESSION_ID_RE.test(rec.sessionId) ? rec.sessionId : null;
+  return {
+    sessionId: typeof rec.sessionId === 'string' && SESSION_ID_RE.test(rec.sessionId) ? rec.sessionId : null,
+    status: typeof rec.status === 'string' ? rec.status : null,
+  };
 }
 
 /**

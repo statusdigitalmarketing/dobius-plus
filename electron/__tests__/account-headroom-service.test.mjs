@@ -1,21 +1,20 @@
-// Auto-move end to end against fake system deps (electron/account-headroom-service.js):
-// one move per limit event, the notice when nowhere is left, and the guards on
-// sending "continue". Plus the tab pin resolution at the spawn choke point.
+// The panel figures, the move refusals and the history file
+// (electron/account-headroom-service.js) against fake system deps, plus the tab
+// pin at the spawn choke point and record pruning.
 // Run: node --import ./electron/__tests__/register.mjs ./electron/__tests__/account-headroom-service.test.mjs
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHeadroomService, isDraft, draftOnScreen } from '../account-headroom-service.js';
+import { createHeadroomService, draftOnScreen, writePrivateFileSync } from '../account-headroom-service.js';
 import { keychainServiceFor } from '../account-identity.js';
 import { resolveClaudeAccountPin } from '../spawn-account-env.js';
-import { pruneUsageRecords } from '../claude-usage.js';
+import { readUsageRecords } from '../claude-usage.js';
 
 let pass = 0;
 const check = async (label, fn) => { await fn(); pass += 1; console.log(`PASS  ${label}`); };
 
 const TAB = 'term-/proj-1';
-const TAB2 = 'term-/proj-2';
 const HOMEC = path.join(os.homedir(), '.claude');
 const DIR_A = '/profiles/a';
 const DIR_B = '/profiles/b';
@@ -23,908 +22,352 @@ const KEY_A = keychainServiceFor(DIR_A);
 const KEY_B = keychainServiceFor(DIR_B);
 const T0 = 1_800_000_000_000;
 const R5 = T0 / 1000 + 3 * 3600;
+const R7 = T0 / 1000 + 4 * 86400;
+const five = (p) => ({ five_hour: { usedPercentage: p, resetsAt: R5 } });
+const acct = (id, dir, name = id.toUpperCase()) => ({ id, type: 'claude', name, claudeJsonPath: `${dir}/.claude.json` });
 
 function world(over = {}) {
   const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-headroom-'));
   const w = {
+    ud,
     now: T0,
-    sent: [], notices: [], logs: [], submits: [],
-    inputSeq: 5,
-    pty: { pid: 1 },
-    claude: { pid: 100, sessionId: null, startedAt: T0 - 3600_000 },
-    limit: { at: T0 - 60_000, text: "You've hit your 5-hour limit" },
-    procKey: KEY_A,
+    accounts: [acct('a', DIR_A), acct('b', DIR_B)],
     records: [
-      { key: KEY_A, receivedAt: T0 - 30_000, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } },
-      { key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 20, resetsAt: R5 } } },
+      { key: KEY_A, sessionId: 's-a', receivedAt: T0 - 30_000, windows: five(90) },
+      { key: KEY_B, sessionId: 's-b', receivedAt: T0 - 60_000, windows: five(20) },
     ],
     emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', [HOMEC]: 'd@x.com' },
-    autoMove: true,
-    reportedAt: T0 - 600_000, // long before the limit, as a working session has
-    tail: "You've hit your 5-hour limit",
+    logins: {},
+    links: {}, // path -> where it really is
+    missing: new Set(),
+    unshared: new Set(),
+    tabs: [{ id: TAB, claudeConfigDir: DIR_A }],
+    claude: { pid: 100, sessionId: null, startedAt: T0 - 3600_000, soleChild: true },
+    groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }],
+    presence: { sessionId: 'sess-now', status: 'idle' },
+    resolved: null,
+    box: '',
+    inputSeq: 5,
+    activity: null,
+    held: false,
     ...over,
   };
-  const svc = createHeadroomService({
+  w.svc = createHeadroomService({
     userDataDir: ud,
     now: () => w.now,
-    sleep: async (ms) => { w.now += ms; },
-    getAccounts: () => [
-      { id: 'a', type: 'claude', name: 'A', claudeJsonPath: `${DIR_A}/.claude.json` },
-      { id: 'b', type: 'claude', name: 'B', claudeJsonPath: `${DIR_B}/.claude.json` },
-      ...(w.extraAccount ? [{ id: 7, type: 'claude', name: 'Seven', claudeJsonPath: '/profiles/seven/.claude.json' }] : []),
-      ...(w.extraAccounts || []),
-    ],
-    defaultDir: () => HOMEC,
-    defaultEnvUnset: () => true,
+    getAccounts: () => w.accounts,
+    defaultDir: () => w.defaultDir || HOMEC,
+    defaultEnvUnset: () => w.defaultEnvUnset ?? true,
     cliDefaultDir: () => HOMEC,
     keyFor: (dir) => keychainServiceFor(dir),
-    login: async () => 'in',
-    // As in main: /openTab's inputBusy, which is also true during a submit.
-    inputHeld: () => !!w.held || !!w.submitting,
+    login: async (dir) => w.logins[dir] || 'in',
     metadata: async (dir, opts) => {
-      if (w.holdOnLoginRead && dir === DIR_B && w.claude.pid === 200) w.held = true;
-      if (w.unreadableInner && opts?.envUnset === false) return { email: null, state: 'unreadable' };
-      const email = opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null);
-      return { email, state: email ? 'address' : 'none' };
+      const e = w.metaByCall ? w.metaByCall(dir, opts) : w.emails[path.normalize(dir).replace(/\/$/, '')];
+      return e === 'UNREADABLE' ? { state: 'unreadable', email: null } : (e ? { state: 'address', email: e } : { state: 'none', email: null });
     },
-    // A link applies to what is under it too, as on a real filesystem.
     realpath: async (p) => {
-      for (const [from, to] of Object.entries(w.links || {})) {
-        if (p === from) return to;
-        if (p.startsWith(`${from}/`)) return to + p.slice(from.length);
+      if (w.links[p]) return w.links[p];
+      const r = path.resolve(p);
+      if (w.links[r]) return w.links[r];
+      if (p.endsWith('.credentials.json')) {
+        if (w.creds === 'none') throw new Error('ENOENT');
+        return path.join(path.dirname(r), '.credentials.json');
       }
-      return p;
+      if (w.missing.has(r)) throw new Error('ENOENT');
+      return r;
     },
-    isForeground: async () => w.foreground ?? true,
-    sharesHistory: async (dir) => !(w.privateHistory && w.privateHistory.includes(dir)),
-    processAuthOverride: async (pid) => (w.override && w.override[pid]) || null,
-    settled: () => w.settled ?? true,
-    selector: () => null,
-    // The running Claude's own report names its conversation.
-    readRecords: async () => [...w.records, ...(w.reported === null ? [] : [{ sessionId: w.reported ?? (w.claude.sessionId || 's1'), reporterPid: w.claude.pid, receivedAt: w.reportedAt ?? w.now, windows: null }])],
-    pruneRecords: async () => 0,
-    scan: async () => ({ groups: w.procKey === null ? [] : [{ key: w.procKey, configDir: w.procDir ?? { [KEY_A]: DIR_A, [KEY_B]: DIR_B }[w.procKey], envUnset: false, pids: [w.claude.pid] }], unresolved: w.procKey === null ? [{ pid: w.claude.pid }] : [] }),
-    autoMoveEnabled: () => w.autoMove,
-    reportingOn: () => w.reportingOn ?? true,
-    tabs: () => [{ id: TAB, cwd: '/proj', claudeConfigDir: DIR_A }, ...(w.secondTab ? [{ id: TAB2, cwd: '/proj', claudeConfigDir: DIR_A }] : [])],
-    activity: () => w.activityOverride ?? { status: 'done', lastActivityAt: w.now - 60_000 },
+    sharesHistory: async (dir) => !w.unshared.has(dir),
+    authOverride: () => w.authOverride || null,
+    readRecords: async () => w.records,
+    scan: async () => { if (w.scanThrows) throw new Error('scan'); return { groups: w.groups, unresolved: w.unresolved || [] }; },
+    tabs: () => w.tabs,
+    activity: () => w.activity,
     claudeInfo: async () => w.claude,
-    resolveSession: async () => ({ sessionId: 's1', sessionProject: '/proj' }),
-    process: async () => null,
-    limitRecord: async (sid) => ({ found: true, limit: w.limitsBySession ? (w.limitsBySession[sid] ?? null) : w.limit }),
-    strippedTail: () => w.tail,
-    screen: async () => ({ lines: [w.screenLine ?? "You've hit your 5-hour limit", '────', '❯ ', '────'], modes: { bracketedPaste: true } }),
-    promptReady: () => true,
-    promptBox: () => w.box ?? '',
-    windowOf: () => w.window ?? 7,
-    send: (id, channel, payload) => {
-      if (channel === 'accounts:autoMoveNotice') w.notices.push(payload.text); else w.sent.push({ id, channel, payload });
-      return 'sent';
-    },
-    inputAgeMs: () => w.inputAge ?? 10 * 60_000,
+    presence: async () => w.presence,
+    resolveSession: async () => w.resolved,
+    process: async () => w.proc || null,
+    processCwd: async () => '/proj/worktree',
     inputSeq: () => w.inputSeq,
-    outputSeq: () => 1,
-    pty: () => w.pty,
-    closing: () => false,
-    processCwd: async (pid) => (pid === 200 ? (w.resumedCwd ?? '/proj') : '/proj'),
-    samePath: async (a, b) => a === b,
-    rows: () => 40,
-    authOverride: () => w.authOverride ?? null,
-    submit: async (id, text, stillOk) => {
-      w.submitting = true;
-      const ok = stillOk();
-      w.submitting = false;
-      if (ok) w.submits.push(text);
-      return ok;
-    },
-    log: (kind, detail) => w.logs.push(detail),
+    inputHeld: () => w.held,
+    screen: async () => (w.noScreen ? null : { lines: [], modes: {} }),
+    promptBox: () => w.box,
   });
-  return { w, svc };
+  return w;
 }
+const target = (r, label) => r.targets.find((t) => t.label === label);
 
-// What the window does: confirm right before the restart, then the resumed
-// Claude appears on the target.
-async function moved(w, svc) {
-  await svc.tick();
-  const { eventId } = w.sent[0].payload;
-  const st = await svc.startAutoMove(TAB, eventId, 7);
-  assert.equal(st.ok, true, JSON.stringify(st));
-  assert.equal(st.inputSeq, w.inputSeq, 'the restart is conditional on this input count');
-  w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
-  w.procKey = KEY_B;
-  w.now += 2000; // the resumed Claude has started
-  w.reportedAt = undefined; // and reports from now on
-  return eventId;
-}
-
-await check('a tab that hit its limit is moved once, to the account with headroom', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  assert.equal(w.sent.length, 1);
-  assert.equal(w.sent[0].payload.accountId, 'b');
-  assert.match(w.logs[0], /from=A to=B .*result=moving/);
-  // Next ticks: pending, then handled. Never a second move for this event.
-  w.now += 61_000; await svc.tick();
-  w.now += 61_000; await svc.tick();
-  assert.equal(w.sent.length, 1);
-});
-
-await check('the tab\'s own screen must show the limit, even with --resume in argv (a /clear leaves the old record behind)', async () => {
-  const { w, svc } = world({ screenLine: 'all quiet' });
-  await svc.tick();
-  assert.equal(w.sent.length, 0, 'a 100% account alone does not name this conversation');
-  const named = world({ screenLine: 'all quiet' });
-  named.w.claude = { ...named.w.claude, sessionId: 's1' }; // claude --resume s1, then /clear
-  await named.svc.tick();
-  assert.equal(named.w.sent.length, 0);
-});
-
-await check('no "continue" to a Claude that is not in the foreground', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.foreground = false;
-  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('a target whose figure is old and has no session running is never picked automatically', async () => {
-  const { w, svc } = world();
-  w.records[1].receivedAt = T0 - 3600_000;
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-  assert.match(w.notices[0], /every other account/);
-});
-
-await check('a token or API key in Dobius\'s environment refuses every move', async () => {
-  const { w, svc } = world({ authOverride: 'CLAUDE_CODE_OAUTH_TOKEN' });
-  const r = await svc.moveTargets(TAB);
-  assert.ok(r.targets.every((t) => /CLAUDE_CODE_OAUTH_TOKEN/.test(t.refusal)));
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('no "continue" if Claude came back in another folder (a worktree it could not re-enter)', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.resumedCwd = '/proj-root';
-  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
-  assert.equal(r.ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('no "continue" once auto-move is switched off', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.autoMove = false;
-  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
-  assert.equal(r.ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('auto-move off: nothing moves', async () => {
-  const { w, svc } = world({ autoMove: false });
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('a limit older than the claude in the tab (a resumed transcript) never moves it', async () => {
-  const { w, svc } = world();
-  w.claude = { ...w.claude, startedAt: w.limit.at + 1000 };
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('nowhere left to go: one notice, no move', async () => {
-  const { w, svc } = world();
-  w.records[1].windows.five_hour.usedPercentage = 100;
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-  assert.equal(w.notices.length, 1);
-  assert.match(w.notices[0], /every other account is limited/);
-  w.now += 61_000; await svc.tick();
-  assert.equal(w.notices.length, 1, 'the notice is not repeated for the same event');
-});
-
-await check('the same login under another folder is never an automatic target', async () => {
-  const { w, svc } = world();
-  w.emails[DIR_B] = 'A@x.com';
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('"continue" goes out once Claude is back on the target account', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
+await check('the panel: live figures, stale ones, and Unknown (never 0%) for an account with no report', async () => {
+  const w = world({ accounts: [acct('a', DIR_A), acct('b', DIR_B), acct('c', '/profiles/c')], emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', '/profiles/c': 'c@x.com' } });
+  const r = await w.svc.usage();
   assert.equal(r.ok, true);
-  assert.deepEqual(w.submits, ['continue']);
-  assert.match(w.logs.at(-1), /result=continued/);
+  const row = (l) => r.accounts.find((x) => x.label === l);
+  assert.equal(row('A').usage.windows.five_hour.used, 90);
+  assert.equal(row('A').sessionsRunning, 1);
+  assert.equal(row('A').stale, false);
+  assert.equal(row('B').stale, true, 'no session is refreshing it');
+  assert.equal(row('C').usage.known, false);
+  assert.equal(row('C').usage.windows.five_hour, undefined);
+  assert.equal(row('C').usage.headroom, null);
 });
 
-await check('no "continue" from another window, or twice', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  assert.equal((await svc.continueAfterMove(TAB, eventId, 99, null)).ok, false);
-  await svc.continueAfterMove(TAB, eventId, 7, null);
-  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
-  assert.deepEqual(w.submits, ['continue']);
+await check('a failed process scan never reads as idle', async () => {
+  const w = world({ scanThrows: true });
+  const r = await w.svc.usage();
+  assert.equal(r.scanFailed, true);
+  assert.equal(r.accounts.find((x) => x.label === 'B').stale, false);
+  assert.equal(r.accounts.find((x) => x.label === 'B').sessionsRunning, null);
 });
 
-await check('no "continue" if the resumed Claude is not on the target credential', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.procKey = KEY_A; // a shell rc put it back on A
-  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
-  assert.equal(r.ok, false);
-  assert.deepEqual(w.submits, []);
-  assert.match(w.notices.at(-1), /not using that account/);
+await check('figures from an unlisted folder are not kept', async () => {
+  const w = world();
+  w.records = [...w.records, { key: keychainServiceFor('/elsewhere'), sessionId: 'x', receivedAt: T0, windows: five(5) }];
+  await w.svc.tick();
+  w.svc.flushSync();
+  const saved = JSON.parse(fs.readFileSync(path.join(w.ud, 'usage-history.json'), 'utf8'));
+  assert.equal(keychainServiceFor('/elsewhere') in saved.keys, false);
+  assert.equal(KEY_A in saved.keys, true);
 });
 
-await check('no "continue" if someone typed after the resume', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  const origSleep = w.now;
-  // A key lands while main waits for the prompt.
-  const p = svc.continueAfterMove(TAB, eventId, 7, null);
-  w.inputSeq += 1;
-  const r = await p;
-  assert.ok(w.now >= origSleep);
-  assert.equal(r.ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('no "continue" if the conversation moved on', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.limit = null;
-  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
-  assert.equal(r.ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('a window that could not move the tab is logged and noticed', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  const r = await svc.continueAfterMove(TAB, w.sent[0].payload.eventId, 7, 'that conversation is already running somewhere else');
-  assert.equal(r.ok, false);
-  assert.match(w.logs.at(-1), /not-moved/);
-});
-
-await check('unsent text in the prompt holds an automatic move', async () => {
-  assert.equal(isDraft('half a thought'), true);
-  assert.equal(isDraft(''), false);
-  assert.equal(isDraft('Try "git status"'), true, 'placeholder-shaped text is still treated as the person\'s');
-  assert.equal(isDraft('Try "git status" first, then explain'), true);
-  assert.equal(isDraft(null), false);
-  // A box that cannot be read is always a possible draft.
-  assert.equal(draftOnScreen(null), true);
-  assert.equal(draftOnScreen(''), false);
-});
-
-await check('the window must confirm right before restarting: typing, a draft or a busy tab since the decision cancels it', async () => {
-  for (const spoil of [(w) => { w.inputSeq += 1; }, (w) => { w.box = 'new words'; }, (w) => { w.held = true; }]) {
-    const { w, svc } = world();
-    await svc.tick();
-    spoil(w);
-    const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
-    assert.equal(st.ok, false);
-    assert.match(w.logs.at(-1), /not-moved/);
-    // and nothing can be continued for it afterwards
-    assert.equal((await svc.continueAfterMove(TAB, w.sent[0].payload.eventId, 7, null)).ok, false);
-  }
-});
-
-await check('a move that was never started cannot be continued', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
-  w.procKey = KEY_B;
-  assert.equal((await svc.continueAfterMove(TAB, w.sent[0].payload.eventId, 7, null)).ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('no "continue" while the window holds input for the tab (an image paste being saved)', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.held = true;
-  const r = await svc.continueAfterMove(TAB, eventId, 7, null);
-  assert.equal(r.ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('an account whose id is not a string can never be a target (it would read as Default)', async () => {
-  const { w, svc } = world();
-  w.extraAccount = true;
-  const r = await svc.moveTargets(TAB);
-  const odd = r.targets.find((t) => t.label === 'Seven');
-  assert.match(odd.refusal, /no usable id/);
-});
-
-await check('usage rows: every account, unknown where nothing reported', async () => {
-  const { svc } = world({ records: [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 20, resetsAt: R5 } } }] });
-  const u = await svc.usage();
-  assert.deepEqual(u.accounts.map((r) => [r.label, r.usage.known]), [['Default', false], ['A', false], ['B', true]]);
-  assert.equal(u.accounts[2].usage.headroom, 80);
-});
-
-await check('move targets refuse the tab\'s own account', async () => {
-  const { svc } = world();
-  const r = await svc.moveTargets(TAB);
-  const a = r.targets.find((t) => t.label === 'A');
-  assert.match(a.refusal, /already on/);
-  assert.equal(r.targets[0].label, 'B');
-});
-
-await check('a folder logged into the same address shows that login\'s figures, marked with where they came from', async () => {
-  const { w, svc } = world();
-  w.emails[DIR_A] = 'b@x.com'; // A and B: one login, two folders
-  w.records = [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 30, resetsAt: R5 } } }];
-  const u = await svc.usage();
-  const a = u.accounts.find((r) => r.label === 'A');
-  assert.equal(a.usage.known, true);
-  assert.equal(a.usage.windows.five_hour.used, 30);
-  assert.equal(a.usage.via, 'B');
-});
-
-await check('a re-login of a folder clears its figures; a credential two files disagree on is left alone', async () => {
-  const { w, svc } = world({ records: [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 30, resetsAt: R5 } } }] });
-  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, true);
+await check('a re-logged folder drops the old figures, and a running session republishing them is ignored', async () => {
+  const w = world();
+  await w.svc.usage();
   w.emails[DIR_B] = 'new@x.com';
-  w.now += 1000;
-  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
-});
-
-await check('one login under two folders: the highest figure in the window stands, a republished low one cannot hide a limit', async () => {
-  const { w, svc } = world();
-  w.emails[DIR_A] = 'b@x.com';
-  w.records = [
-    { key: KEY_A, receivedAt: T0 - 120_000, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } },
-    { key: KEY_B, receivedAt: T0 - 10_000, windows: { five_hour: { usedPercentage: 20, resetsAt: R5 } } },
-  ];
-  const u = await svc.usage();
-  for (const label of ['A', 'B']) {
-    const r = u.accounts.find((x) => x.label === label);
-    assert.equal(r.usage.windows.five_hour.used, 100, label);
-    assert.equal(r.usage.limited, true, label);
-  }
-});
-
-await check('a target re-logged into another account while the move waited is called off', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  w.emails[DIR_B] = 'someone-else@x.com';
-  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
-  assert.equal(st.ok, false);
-  assert.match(st.error, /different account/);
-});
-
-await check('no "continue" if the target folder was re-logged after the restart', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.emails[DIR_B] = 'a@x.com';
-  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('no "continue" when Claude\'s box already holds text (input that arrived before the check)', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.box = 'only explain ';
-  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('a token exported into the resumed Claude\'s shell stops "continue"; one in the limited tab stops the move', async () => {
-  const a = world();
-  const eventId = await moved(a.w, a.svc);
-  a.w.override = { 200: 'CLAUDE_CODE_OAUTH_TOKEN' };
-  assert.equal((await a.svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
-  assert.deepEqual(a.w.submits, []);
-  const b = world();
-  b.w.override = { 100: 'ANTHROPIC_API_KEY' };
-  await b.svc.tick();
-  assert.equal(b.w.sent.length, 0);
-  assert.match(b.w.notices[0], /ANTHROPIC_API_KEY/);
-});
-
-await check('a move the window never started gives its event back when it expires', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  assert.equal(w.sent.length, 1);
-  w.now += 4 * 60_000;
-  await svc.tick(); // expires the pending move
-  assert.match(w.logs.find((l) => /abandoned/.test(l)), /never started/);
-  w.now += 61_000;
-  await svc.tick(); // the same limit, still there, is acted on again
-  assert.equal(w.sent.length, 2);
-});
-
-await check('an auth environment that cannot be read stops "continue" (never read as "none")', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.override = { 200: 'unreadable' };
-  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('a screen that has not caught up with input is not trusted to show an empty box', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.settled = false;
-  w.inputAge = 100; // input just arrived and the screen has not redrawn since
-  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('a move called off before it started gives its event back', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  w.inputSeq += 1;
-  assert.equal((await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7)).ok, false);
-  w.now += 2 * 60_000;
-  await svc.tick();
-  assert.equal(w.sent.length, 2, 'the same limit is acted on again later');
-});
-
-await check('the default credential whose two metadata files disagree has no known login', async () => {
-  const { w, svc } = world();
-  w.innerEmails = { [HOMEC]: 'other@x.com' };
-  const u = await svc.usage();
-  assert.equal(u.accounts.find((r) => r.isDefault).email, null);
-});
-
-await check('reservations count per login: two folders of one login cannot both take tabs on the same headroom', async () => {
-  const { w, svc } = world();
-  // A third account C, a fresh figure of 75% (25% headroom), and B also has a second folder B2.
-  w.extraAccounts = [
-    { id: 'b2', type: 'claude', name: 'B2', claudeJsonPath: '/profiles/b2/.claude.json' },
-    { id: 'c', type: 'claude', name: 'C', claudeJsonPath: '/profiles/c/.claude.json' },
-  ];
-  w.emails['/profiles/b2'] = 'b@x.com';
-  w.emails['/profiles/c'] = 'c@x.com';
-  w.records[1].windows.five_hour.usedPercentage = 72; // B: 28% headroom
-  w.records.push({ key: keychainServiceFor('/profiles/c'), receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 76, resetsAt: R5 } } });
-  w.secondTab = true;
-  await svc.tick();
-  const targets = w.sent.map((m) => m.payload.accountId);
-  assert.equal(targets.length, 2);
-  assert.ok(targets.includes('c'), `second tab must go to the other login, got ${targets}`);
-});
-
-await check('a Claude pointed at an unlisted folder is judged by THAT folder\'s login, not the tab\'s', async () => {
-  const { w, svc } = world();
-  // The tab was spawned on A, but its Claude runs on an unsaved folder X
-  // logged into B's address: B is the same login and must not be a target.
-  w.procKey = keychainServiceFor('/profiles/x');
-  w.procDir = '/profiles/x';
-  w.emails['/profiles/x'] = 'b@x.com';
-  w.records.push({ key: w.procKey, receivedAt: T0 - 30_000, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } });
-  const r = await svc.moveTargets(TAB);
-  assert.match(r.targets.find((t) => t.label === 'B').refusal, /same login/);
-});
-
-await check('a restart the window could not do gives the event back', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  const { eventId } = w.sent[0].payload;
-  assert.equal((await svc.startAutoMove(TAB, eventId, 7)).ok, true);
-  await svc.continueAfterMove(TAB, eventId, 7, 'the tab was not restarted');
-  w.now += 2 * 60_000;
-  await svc.tick();
-  assert.equal(w.sent.length, 2);
-});
-
-await check('an unreadable second metadata file on the default credential makes its login unknown', async () => {
-  const { w, svc } = world();
-  w.unreadableInner = true;
-  const u = await svc.usage();
-  assert.equal(u.accounts.find((r) => r.isDefault).email, null);
-});
-
-await check('a folder whose conversations are not the shared store is refused (the resume would read another copy)', async () => {
-  const { w, svc } = world();
-  w.privateHistory = [DIR_B];
-  const r = await svc.moveTargets(TAB);
-  assert.match(r.targets.find((t) => t.label === 'B').refusal, /history is not linked/);
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('a hold taken with no known window is not released by a late cached figure', async () => {
-  const { w, svc } = world();
-  w.records = [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 20, resetsAt: R5 } } }]; // A has no figure
-  w.tail = "You've hit your 5-hour limit";
-  w.claude = { ...w.claude, sessionId: 's1' };
-  await svc.tick(); // A (no figure) is held, tab moves to B
   w.now += 60_000;
-  w.records.push({ key: KEY_A, receivedAt: w.now - 1000, windows: { five_hour: { usedPercentage: 20, resetsAt: R5 } } });
-  await svc.usage();
-  const r = await svc.moveTargets(TAB);
-  assert.equal(r.targets.find((t) => t.label === 'A').usage.limited, true);
+  w.records = [w.records[0], { ...w.records[1], receivedAt: w.now }]; // same figure, fresh file time
+  let r = await w.svc.usage();
+  assert.equal(r.accounts.find((x) => x.label === 'B').usage.known, false);
+  w.records = [w.records[0], { ...w.records[1], receivedAt: w.now + 1000, windows: five(3) }];
+  w.now += 2000;
+  r = await w.svc.usage();
+  assert.equal(r.accounts.find((x) => x.label === 'B').usage.windows.five_hour.used, 3);
 });
 
-await check('a limit hold ends when that folder\'s five-hour window has reset since', async () => {
-  const { w, svc } = world();
-  // Tab 1 on A hits a limit: A is held. Then A's window resets and reports 1%.
-  w.emails[DIR_B] = 'b@x.com';
-  await svc.tick(); // moves tab 1 to B, holds A
-  w.now += 6 * 60_000;
-  const R5b = R5 + 5 * 3600;
-  w.records = [
-    { key: KEY_A, receivedAt: w.now - 1000, windows: { five_hour: { usedPercentage: 1, resetsAt: R5b } } },
-    { key: KEY_B, receivedAt: w.now - 1000, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } },
-  ];
-  const u = await svc.usage();
-  const r = await svc.moveTargets(TAB);
-  assert.equal(u.accounts.find((x) => x.label === 'A').usage.windows.five_hour.used, 1);
-  assert.equal(r.targets.find((t) => t.label === 'A').usage.limited, false, 'the new window is not held');
+await check('the dialog ranks by headroom and refuses the tab\'s own account, a same login and a logged-out one', async () => {
+  const w = world({
+    accounts: [acct('a', DIR_A), acct('b', DIR_B), acct('twin', '/profiles/twin', 'Twin'), acct('out', '/profiles/out', 'Out')],
+    emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', [HOMEC]: 'd@x.com', '/profiles/twin': 'A@x.com', '/profiles/out': 'o@x.com' },
+    logins: { '/profiles/out': 'out' },
+  });
+  const r = await w.svc.moveTargets(TAB);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.source, { label: 'A', email: 'a@x.com' });
+  assert.equal(r.tab.session.sessionId, 'sess-now');
+  assert.equal(r.tab.session.project, '/proj/worktree');
+  assert.equal('key' in r.targets[0], false, 'no credential key leaves main');
+  assert.equal(target(r, 'B').refusal, null);
+  assert.match(target(r, 'A').refusal, /already on/);
+  assert.match(target(r, 'Twin').refusal, /same login/);
+  assert.match(target(r, 'Out').refusal, /not logged in/);
+  assert.equal(target(r, 'Out').allRefusal, 'not logged in');
+  assert.equal(target(r, 'B').allRefusal, null);
+  assert.equal(target(r, 'A').allRefusal, null, 'Move all can consolidate onto the dialog tab\'s own account');
 });
 
-await check('two configured folders that are one folder on disk have no known login', async () => {
-  const { w, svc } = world();
-  w.links = { [DIR_B]: DIR_A }; // B is a symlink to A: one metadata file, two Keychain items
-  const u = await svc.usage();
-  assert.equal(u.accounts.find((r) => r.label === 'A').email, null);
-  assert.equal(u.accounts.find((r) => r.label === 'B').email, null);
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
+// Same folder, other spellings: Keychain hashes the spelling, the metadata
+// belongs to the folder, so none of these can vouch for who the credential is.
+for (const alias of ['/profiles/b/.', '/profiles/b/', '/profiles/./b', '/profiles/x/../b']) {
+  await check(`an alias of a listed folder (${alias}) is refused both ways, whatever its address says`, async () => {
+    const w = world({ accounts: [acct('a', DIR_A), acct('b', DIR_B), { id: 'alias', type: 'claude', name: 'Alias', claudeJsonPath: `${alias}${alias.endsWith('/') ? '' : '/'}.claude.json` }] });
+    const r = await w.svc.moveTargets(TAB);
+    // path.dirname drops a trailing slash, so that spelling is the same key and
+    // the same row: nothing to tell apart.
+    if (keychainServiceFor(path.dirname(`${alias}${alias.endsWith('/') ? '' : '/'}.claude.json`)) === KEY_B) {
+      assert.equal(target(r, 'Alias').email, 'b@x.com');
+      return;
+    }
+    assert.equal(target(r, 'Alias').email, null);
+    assert.equal(target(r, 'B').email, null, 'the canonical spelling cannot vouch either, its metadata is shared');
+    assert.match(target(r, 'Alias').refusal, /which login that account is/);
+    assert.match(target(r, 'B').refusal, /which login that account is/);
+    assert.match(target(r, 'Alias').allRefusal, /could not be told/);
+  });
+}
+
+for (const alias of ['/profiles/b/.', '/profiles/b/', '/profiles/x/../b']) {
+  await check(`Default spelled through an alias (CLAUDE_CONFIG_DIR=${alias}) is unknown even with nothing else listed`, async () => {
+    const w = world({ accounts: [acct('a', DIR_A)], defaultDir: alias, defaultEnvUnset: false });
+    const r = await w.svc.moveTargets(TAB);
+    assert.equal(target(r, 'Default').email, null);
+    assert.match(target(r, 'Default').refusal, /which login that account is/);
+  });
+}
+
+await check('a tab running through an alias of the target has no nameable login, so the move is refused', async () => {
+  const w = world({ groups: [{ key: keychainServiceFor('/profiles/b/.'), configDir: '/profiles/b/.', envUnset: false, pids: [100] }] });
+  const r = await w.svc.moveTargets(TAB);
+  assert.equal(r.source.email, null);
+  assert.match(target(r, 'B').refusal, /which login this tab is on/);
 });
 
-await check('a credential whose login becomes unknown loses its figures', async () => {
-  const { w, svc } = world({ records: [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 30, resetsAt: R5 } } }] });
-  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, true);
-  w.links = { [DIR_B]: DIR_A };
+await check('a symlinked profile folder, or a credential file linked out of it, is unknown', async () => {
+  let w = world({ links: { [DIR_B]: '/profiles/real-b' } });
+  assert.match(target(await w.svc.moveTargets(TAB), 'B').refusal, /which login that account is/);
+  w = world({ links: { [`${DIR_B}/.credentials.json`]: '/profiles/a/.credentials.json' } });
+  assert.match(target(await w.svc.moveTargets(TAB), 'B').refusal, /which login that account is/);
+});
+
+await check('the two default metadata files disagreeing, or one unreadable, makes Default unknown', async () => {
+  const meta = (inner) => (dir, opts) => (dir === HOMEC ? (opts.envUnset ? 'd@x.com' : inner) : { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com' }[dir]);
+  let w = world({ metaByCall: meta('other@x.com') });
+  assert.equal(target(await w.svc.moveTargets(TAB), 'Default').email, null);
+  w = world({ metaByCall: meta('UNREADABLE') });
+  assert.equal(target(await w.svc.moveTargets(TAB), 'Default').email, null);
+  w = world({ metaByCall: meta('D@x.com') });
+  assert.equal(target(await w.svc.moveTargets(TAB), 'Default').refusal, null);
+});
+
+await check('figures are not kept while a login is unknown, and are cleared when it becomes so', async () => {
+  const w = world();
+  await w.svc.usage();
+  w.links[DIR_B] = '/profiles/real-b';
   w.now += 1000;
-  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
+  w.records = [w.records[0], { ...w.records[1], receivedAt: w.now, windows: five(40) }];
+  const r = await w.svc.usage();
+  assert.equal(r.accounts.find((x) => x.label === 'B').usage.known, false);
 });
 
-await check('while a login stays unknown, new reports are not kept for it', async () => {
-  const { w, svc } = world({ records: [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 30, resetsAt: R5 } }, sessionId: 'x1' }] });
-  await svc.usage();
-  w.emails[DIR_B] = null; // its metadata no longer names anyone
-  w.now += 1000;
-  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
-  w.records = [{ key: KEY_B, receivedAt: w.now, windows: { five_hour: { usedPercentage: 35, resetsAt: R5 } }, sessionId: 'x1' }];
-  w.now += 1000;
-  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
+await check('a tab on a folder that is not a listed account has no nameable source', async () => {
+  const w = world({ groups: [{ key: keychainServiceFor('/elsewhere'), configDir: '/elsewhere', envUnset: false, pids: [100] }] });
+  const r = await w.svc.moveTargets(TAB);
+  assert.equal(r.source.email, null);
+  assert.match(target(r, 'B').refusal, /which login this tab is on/);
 });
 
-await check('every row on a folder that another spelling links to loses its login, duplicates included', async () => {
-  const { w, svc } = world();
-  w.extraAccounts = [
-    { id: 'a2', type: 'claude', name: 'A2', claudeJsonPath: `${DIR_A}/.claude.json` },
-    { id: 'l', type: 'claude', name: 'L', claudeJsonPath: '/profiles/l/.claude.json' },
-  ];
-  w.links = { '/profiles/l': DIR_A };
-  w.emails['/profiles/l'] = 'b@x.com';
-  const u = await svc.usage();
-  for (const label of ['A', 'A2', 'L']) assert.equal(u.accounts.find((r) => r.label === label).email, null, label);
+await check('a Claude the process scan cannot place has no nameable source', async () => {
+  const w = world({ groups: [] });
+  const r = await w.svc.moveTargets(TAB);
+  assert.equal(r.source.email, null);
+  assert.match(target(r, 'B').refusal, /which login this tab is on/);
 });
 
-await check('a credential file that lives outside its folder makes that folder\'s login unknown, whatever it links to', async () => {
-  const { w, svc } = world();
-  w.links = { [`${DIR_B}/.credentials.json`]: '/profiles/unlisted/.credentials.json' };
-  const u = await svc.usage();
-  assert.equal(u.accounts.find((r) => r.label === 'B').email, null);
-  assert.equal(u.accounts.find((r) => r.label === 'A').email, 'a@x.com');
+await check('a target whose conversations are not the shared store, or an auth override, is refused', async () => {
+  let w = world({ unshared: new Set([DIR_B]) });
+  assert.match(target(await w.svc.moveTargets(TAB), 'B').refusal, /not linked/);
+  w = world({ authOverride: 'ANTHROPIC_API_KEY' });
+  const r = await w.svc.moveTargets(TAB);
+  assert.match(target(r, 'B').refusal, /ANTHROPIC_API_KEY is set/);
+  assert.match(target(r, 'B').allRefusal, /ANTHROPIC_API_KEY is set/);
 });
 
-await check('a folder whose login was unknown from the start keeps its boundary, so old records never reach the next login', async () => {
-  const { w, svc } = world({ records: [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 0, resetsAt: R5 } }, sessionId: 'x1' }] });
-  w.emails[DIR_B] = null;
-  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false, 'figures nobody can be named for are not shown');
-  w.now += 16_000; await svc.usage();
-  w.emails[DIR_B] = 'someone@x.com';
-  w.now += 16_000;
-  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
+await check('one login under two folders shows one set of figures', async () => {
+  const w = world({
+    accounts: [acct('a', DIR_A), acct('b', DIR_B), acct('twin', '/profiles/twin', 'Twin')],
+    emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', '/profiles/twin': 'b@x.com' },
+    records: [
+      { key: keychainServiceFor('/profiles/twin'), sessionId: 't', receivedAt: T0 - 1000, windows: five(77) },
+      { key: KEY_B, sessionId: 's-b', receivedAt: T0 - 60_000, windows: five(20) },
+    ],
+  });
+  const r = await w.svc.usage();
+  const row = r.accounts.find((x) => x.label === 'B');
+  assert.equal(row.usage.windows.five_hour.used, 77);
+  assert.deepEqual(row.sameAs, ['Twin']);
 });
 
-await check('a move request that outlived its expiry cannot be taken for a later retry of the same limit', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  const first = w.sent[0].payload.eventId;
-  w.now += 4 * 60_000;
-  await svc.tick();
-  w.now += 61_000;
-  await svc.tick();
-  const second = w.sent[1].payload.eventId;
-  assert.notEqual(first, second);
-  assert.equal((await svc.startAutoMove(TAB, first, 7)).ok, false);
-  assert.equal((await svc.startAutoMove(TAB, second, 7)).ok, true);
-});
-
-await check('Move all stays available on the account this tab is already on', async () => {
-  const { svc } = world();
-  const r = await svc.moveTargets(TAB);
-  const a = r.targets.find((t) => t.label === 'A');
-  assert.match(a.refusal, /already on/);
-  assert.equal(a.allRefusal, null);
-});
-
-await check('a Claude that is not the foreground program is not moved, and Move all treats it as another program', async () => {
-  const { w, svc } = world();
-  w.foreground = false;
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-  const [c] = await svc.moveCandidates([TAB], 'b');
+await check('Move all judges each tab: busy, draft, another program, no Claude', async () => {
+  const w = world();
+  const one = async (over) => {
+    Object.assign(w, { activity: null, box: '', claude: { pid: 100, sessionId: null, startedAt: T0, soleChild: true }, presence: { sessionId: 'sess-now', status: 'idle' }, held: false, proc: null }, over);
+    const [c] = await w.svc.moveCandidates([TAB], 'b');
+    return c;
+  };
+  let c = await one({});
+  assert.equal(c.busy, false);
+  assert.equal(c.draft, false);
+  assert.equal(c.running, 'claude');
+  assert.equal(c.session.sessionId, 'sess-now');
+  assert.equal(c.inputSeq, 5);
+  assert.equal(c.refusal, null);
+  assert.equal(c.pid, undefined, 'no pid leaves main');
+  assert.equal((await one({ presence: { sessionId: 'sess-now', status: 'busy' } })).busy, true);
+  assert.equal((await one({ activity: { status: 'needs', lastActivityAt: 0 } })).busy, true);
+  assert.equal((await one({ box: 'half a thought' })).draft, true);
+  assert.equal((await one({ box: null })).draft, true, 'a box that cannot be read might hold text');
+  assert.equal((await one({ held: true })).draft, true);
+  assert.equal((await one({ claude: { pid: 100, sessionId: null, startedAt: T0, soleChild: false } })).running, 'other');
+  c = await one({ claude: null, proc: 'vim' });
   assert.equal(c.running, 'other');
+  c = await one({ claude: null, proc: null });
+  assert.equal(c.running, 'shell');
+  assert.equal(c.draft, false);
+  assert.match((await w.svc.moveCandidates([TAB], 'gone'))[0].refusal, /no longer exists/);
 });
 
-await check('a folder that is a symlink has no known login, even to an unlisted real folder', async () => {
-  const { w, svc } = world();
-  w.links = { [DIR_B]: '/profiles/unlisted' };
-  const u = await svc.usage();
-  assert.equal(u.accounts.find((r) => r.label === 'B').email, null);
+await check('the conversation comes from Claude\'s own record first, then the resolver', async () => {
+  const w = world({ presence: { sessionId: 'on-now', status: 'idle' }, resolved: { sessionId: 'stale-argv', sessionProject: '/p' } });
+  assert.equal((await w.svc.moveCandidates([TAB], 'b'))[0].session.sessionId, 'on-now');
+  w.presence = null;
+  assert.equal((await w.svc.moveCandidates([TAB], 'b'))[0].session.sessionId, 'stale-argv');
+  w.resolved = null;
+  assert.equal((await w.svc.moveCandidates([TAB], 'b'))[0].session, null);
 });
 
-await check('a target whose credential was relinked while the move waited is called off', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  w.links = { [`${DIR_B}/.credentials.json`]: `${DIR_A}/.credentials.json` };
-  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
-  assert.equal(st.ok, false);
+await check('draftOnScreen: only an empty readable box is no draft', async () => {
+  assert.equal(draftOnScreen(''), false);
+  assert.equal(draftOnScreen('  '), false);
+  assert.equal(draftOnScreen('x'), true);
+  assert.equal(draftOnScreen(null), true);
 });
 
-await check('figures from a folder no account lists are not kept', async () => {
-  const { w, svc } = world();
-  w.records.push({ key: keychainServiceFor('/profiles/unlisted'), receivedAt: T0, windows: { five_hour: { usedPercentage: 1, resetsAt: R5 } } });
-  await svc.usage();
-  w.extraAccounts = [{ id: 'u', type: 'claude', name: 'U', claudeJsonPath: '/profiles/unlisted/.claude.json' }];
+// ---- the history file ----
+
+await check('a symlink planted at the temp path is not written through', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-hist-'));
+  const cred = path.join(dir, 'credential');
+  fs.writeFileSync(cred, 'SECRET');
+  const final = path.join(dir, 'h.json');
+  fs.symlinkSync(cred, `${final}.tmp.${process.pid}.fixed`);
+  assert.throws(() => writePrivateFileSync(final, '{}', 'fixed'), /EEXIST|ELOOP/);
+  assert.equal(fs.readFileSync(cred, 'utf8'), 'SECRET');
+  assert.equal(fs.existsSync(final), false);
+});
+
+await check('a symlink at the final path is replaced, never followed, and the file is 0600', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-hist-'));
+  const cred = path.join(dir, 'credential');
+  fs.writeFileSync(cred, 'SECRET');
+  const final = path.join(dir, 'h.json');
+  fs.symlinkSync(cred, final);
+  writePrivateFileSync(final, '{"v":1}');
+  assert.equal(fs.readFileSync(cred, 'utf8'), 'SECRET');
+  assert.equal(fs.lstatSync(final).isSymbolicLink(), false);
+  assert.equal(fs.readFileSync(final, 'utf8'), '{"v":1}');
+  assert.equal(fs.lstatSync(final).mode & 0o777, 0o600);
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n.includes('.tmp.')), [], 'no temp left behind');
+});
+
+await check('a folder that is a link is refused', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-hist-'));
+  const real = path.join(dir, 'real');
+  fs.mkdirSync(real);
+  fs.symlinkSync(real, path.join(dir, 'linked'));
+  assert.throws(() => writePrivateFileSync(path.join(dir, 'linked', 'h.json'), '{}'), /link/);
+  assert.deepEqual(fs.readdirSync(real), []);
+});
+
+await check('the service never follows a link at the history path, reading or quitting', async () => {
+  const w = world();
+  const cred = path.join(w.ud, 'credential');
+  fs.writeFileSync(cred, JSON.stringify({ v: 1, keys: { [KEY_A]: { email: 'a@x.com', windows: { five_hour: { r: R7, seenAt: T0, samples: [{ t: T0, p: 99 }] } } } } }));
+  const before = fs.readFileSync(cred, 'utf8');
+  const hp = path.join(w.ud, 'usage-history.json');
+  fs.symlinkSync(cred, hp);
   w.records = [];
-  w.emails['/profiles/unlisted'] = 'later@x.com';
-  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'U').usage.known, false);
+  const r = await w.svc.usage();
+  assert.equal(r.accounts.find((x) => x.label === 'A').usage.known, false, 'its contents were not loaded');
+  w.svc.flushSync();
+  assert.equal(fs.readFileSync(cred, 'utf8'), before);
+  assert.equal(fs.lstatSync(hp).isSymbolicLink(), false);
 });
 
-await check('a stale working tab is busy for Move all unless the limit is on its screen (a /clear leaves the record)', async () => {
-  const { w, svc } = world({ screenLine: 'all quiet' });
-  w.activityOverride = { status: 'working', hookOwned: true, lastActivityAt: T0 - 60_000 };
-  const [c] = await svc.moveCandidates([TAB], 'b');
-  assert.equal(c.busy, true);
-  const b = world();
-  b.w.activityOverride = { status: 'working', hookOwned: true, lastActivityAt: T0 - 60_000 };
-  const [d2] = await b.svc.moveCandidates([TAB], 'b');
-  assert.equal(d2.busy, false);
-});
-
-await check('a limit on an unlisted folder of a login holds that login\'s listed folders too', async () => {
-  const { w, svc } = world();
-  w.procKey = keychainServiceFor('/profiles/x');
-  w.procDir = '/profiles/x';
-  w.emails['/profiles/x'] = 'b@x.com';
-  w.secondTab = false;
-  await svc.tick(); // B refused (same login), held through X
-  const r = await svc.moveTargets(TAB);
-  assert.equal(r.targets.find((t) => t.label === 'B').usage.limited, true);
-});
-
-await check('input a window starts holding during the last reads stops "continue" right before the paste', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  // The last await before the paste is the target login re-read: hold input during it.
-  w.holdOnLoginRead = true;
-  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('an old limit is judged by the account the Claude really runs on', async () => {
-  const { w, svc } = world();
-  // Spawned on A (100%), but the process runs on B whose figure says 20%; the limit is old.
-  w.procKey = KEY_B;
-  w.limit = { at: T0 - 20 * 60_000, text: 'x' };
-  w.reportedAt = T0 - 3000_000; // reporting since well before that limit
-  w.emails['/profiles/c'] = 'c@x.com';
-  w.extraAccounts = [{ id: 'c', type: 'claude', name: 'C', claudeJsonPath: '/profiles/c/.claude.json' }];
-  w.records.push({ key: keychainServiceFor('/profiles/c'), receivedAt: T0 - 1000, windows: { five_hour: { usedPercentage: 5, resetsAt: R5 } } });
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('an unlisted source folder that is a symlink has no known login, so nothing is picked as "a different login"', async () => {
-  const { w, svc } = world();
-  w.procKey = keychainServiceFor('/profiles/x');
-  w.procDir = '/profiles/x';
-  w.emails['/profiles/x'] = 'bob@x.com';
-  w.links = { '/profiles/x': '/profiles/bob' };
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-  assert.match(w.notices[0] || '', /every other account/);
-});
-
-await check('the conversation is the one the process last reported: /clear or /resume leave argv naming the old one', async () => {
-  // argv s1, reporting s2, s1's transcript ends in a limit but s2's does not.
-  const a = world();
-  a.w.claude = { ...a.w.claude, sessionId: 's1' };
-  a.w.reported = 's2';
-  a.w.limitsBySession = { s1: a.w.limit };
-  await a.svc.tick();
-  assert.equal(a.w.sent.length, 0, 's1 must not be revived');
-  // s2 hit the limit: s2 is what moves.
-  const b = world();
-  b.w.claude = { ...b.w.claude, sessionId: 's1' };
-  b.w.reported = 's2';
-  b.w.limitsBySession = { s1: b.w.limit, s2: b.w.limit };
-  await b.svc.tick();
-  assert.equal(b.w.sent[0].payload.sessionId, 's2');
-  // Move all resumes the same one.
-  const c = world();
-  c.w.claude = { ...c.w.claude, sessionId: 's1' };
-  c.w.reported = 's2';
-  await c.svc.tick();
-  const [cand] = await c.svc.moveCandidates([TAB], 'b');
-  assert.equal(cand.session.sessionId, 's2');
-});
-
-await check('a conversation opened with /resume after its limit is not moved: that limit was not this process\'s', async () => {
-  // The process reports s2 for the first time AFTER s2's limit was recorded.
-  const { w, svc } = world();
-  w.reported = 's2';
-  w.reportedAt = T0; // first report after the limit below, and argv names nothing
-  w.limitsBySession = { s2: { at: T0 - 5000, text: 'x' } };
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('a limit right after a --resume start is that process\'s own, however late it was first sampled', async () => {
-  const { w, svc } = world();
-  w.claude = { pid: 100, sessionId: 's1', startedAt: T0 - 120_000 };
-  w.reportedAt = T0; // only seen after the limit, because the report file was overwritten
-  await svc.tick();
-  assert.equal(w.sent.length, 1);
-});
-
-await check('a process that left a conversation and came back is judged from its return', async () => {
-  const { w, svc } = world();
-  w.claude = { pid: 100, sessionId: null, startedAt: T0 - 3600_000 };
-  w.reported = 's1'; w.reportedAt = T0 - 600_000; w.tail = 'quiet';
-  await svc.tick();             // on s1
-  w.reported = 's2'; w.reportedAt = T0 - 300_000;
-  await svc.tick();             // left for s2
-  // Another process hit a limit on s1 at T0 - 60s; this process returns to s1 now.
-  w.reported = 's1'; w.reportedAt = T0 - 10_000;
-  w.tail = "You've hit your 5-hour limit";
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('--resume in argv only vouches until the process leaves that conversation', async () => {
-  const { w, svc } = world();
-  w.claude = { pid: 100, sessionId: 's1', startedAt: T0 - 3600_000 };
-  w.reportedAt = T0 - 600_000; w.tail = 'quiet';
-  await svc.tick();             // on s1, as argv says
-  w.reported = 's2'; w.reportedAt = T0 - 300_000;
-  await svc.tick();             // /resume s2
-  w.reported = 's1'; w.reportedAt = T0 - 10_000; // back on s1, after a limit another process hit on it
-  w.tail = "You've hit your 5-hour limit";
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('a limit is corroborated by the login, through any of its folders', async () => {
-  const { w, svc } = world();
-  w.extraAccounts = [{ id: 'a2', type: 'claude', name: 'A2', claudeJsonPath: '/profiles/a2/.claude.json' }];
-  w.emails['/profiles/a2'] = 'a@x.com';
-  w.records[0] = { key: KEY_A, receivedAt: T0 - 30_000, windows: { five_hour: { usedPercentage: 99, resetsAt: R5 } } };
-  w.records.push({ key: keychainServiceFor('/profiles/a2'), receivedAt: T0 - 30_000, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } });
-  w.limit = { at: T0 - 11 * 60_000, text: 'x' }; // older than the screen alone may vouch for
-  w.reportedAt = T0 - 3000_000;
-  await svc.tick();
-  assert.equal(w.sent.length, 1);
-});
-
-await check('with no report from this process there is no automatic move', async () => {
-  const { w, svc } = world();
-  w.reported = null;
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('a report from before this process started says nothing about it (a reused pid)', async () => {
-  const { w, svc } = world();
-  w.reported = null;
-  w.records.push({ sessionId: 'old', reporterPid: w.claude.pid, receivedAt: w.claude.startedAt - 1000, windows: null });
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('the restart is called off when the conversation changed since main decided, or the tab changed window', async () => {
-  const a = world();
-  a.w.claude = { ...a.w.claude, sessionId: 's1' };
-  await a.svc.tick();
-  a.w.reported = 's2';
-  const st = await a.svc.startAutoMove(TAB, a.w.sent[0].payload.eventId, 7);
-  assert.equal(st.ok, false);
-  assert.match(st.error, /conversation in the tab changed/);
-  const b = world();
-  await b.svc.tick();
-  b.w.window = 99;
-  assert.match((await b.svc.startAutoMove(TAB, b.w.sent[0].payload.eventId, 7)).error, /another window/);
-});
-
-await check('a target whose figure went out of date while the move waited is called off', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  w.now += 20 * 60_000; // past the 15-minute bar, and no session runs on B
-  w.reported = 's1';
-  w.claude = { ...w.claude, startedAt: T0 - 3600_000 };
-  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
-  assert.equal(st.ok, false);
-  assert.match(st.error, /out of date/);
-});
-
-await check('a target that no longer has room (not just limited) is called off', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  w.records[1] = { ...w.records[1], receivedAt: w.now, windows: { five_hour: { usedPercentage: 95, resetsAt: R5 } } };
-  assert.match((await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7)).error, /no longer has room/);
-});
-
-await check('with the reporter off, old reports do not name the conversation', async () => {
-  const { w, svc } = world();
-  w.claude = { ...w.claude, sessionId: 's9' };
-  w.reported = 'stale';
-  w.reportingOn = false;
-  const [c] = await svc.moveCandidates([TAB], 'b');
-  assert.equal(c.session.sessionId, 's1', 'falls back to the resolver');
-});
-
-await check('the check at the moment of a move refuses what the dialog refuses', async () => {
-  const { w, svc } = world();
-  w.privateHistory = [DIR_B];
-  const [c] = await svc.moveCandidates([TAB], 'b');
-  assert.match(c.refusal, /history is not linked/);
-});
-
-await check('no "continue" once the process reports another conversation', async () => {
-  const { w, svc } = world();
-  const eventId = await moved(w, svc);
-  w.reported = 'other';
-  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
-  assert.deepEqual(w.submits, []);
-});
-
-await check('a target whose login filled up through another folder while the move waited is called off', async () => {
-  const { w, svc } = world();
-  w.extraAccounts = [{ id: 'b2', type: 'claude', name: 'B2', claudeJsonPath: '/profiles/b2/.claude.json' }];
-  w.emails['/profiles/b2'] = 'b@x.com';
-  await svc.tick();
-  assert.equal(w.sent.length, 1);
-  w.records.push({ key: keychainServiceFor('/profiles/b2'), receivedAt: w.now, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } });
-  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
-  assert.equal(st.ok, false);
-});
-
-await check('a target whose conversations stopped being the shared store while the move waited is called off', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  w.privateHistory = [DIR_B];
-  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
-  assert.equal(st.ok, false);
-});
-
-await check('a target that filled up while the move waited is called off', async () => {
-  const { w, svc } = world();
-  await svc.tick();
-  w.records[1] = { ...w.records[1], receivedAt: w.now, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } };
-  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
-  assert.equal(st.ok, false);
-  assert.match(st.error, /no longer has room/);
-});
-
-await check('a Claude whose folder the process scan cannot read is not moved automatically', async () => {
-  const { w, svc } = world();
-  w.procKey = null; // its environment could not be read
-  await svc.tick();
-  assert.equal(w.sent.length, 0);
-});
-
-await check('a hold ends at the reset of the window it was taken in, whichever folder reports next', async () => {
-  const { w, svc } = world();
-  const soon = T0 / 1000 + 600; // A's five-hour window resets ten minutes from now
-  w.records[0].windows.five_hour.resetsAt = soon;
-  await svc.tick(); // A held (30 minutes), taken in the window that resets at `soon`
-  w.now = soon * 1000 + 60_000;
-  const r = await svc.moveTargets(TAB);
-  assert.notEqual(r.targets.find((t) => t.label === 'A').usage.limited, true);
+await check('history survives a restart', async () => {
+  const w = world();
+  await w.svc.usage();
+  w.svc.flushSync();
+  const w2 = world({ records: [] });
+  fs.copyFileSync(path.join(w.ud, 'usage-history.json'), path.join(w2.ud, 'usage-history.json'));
+  const r = await w2.svc.usage();
+  assert.equal(r.accounts.find((x) => x.label === 'A').usage.windows.five_hour.used, 90);
 });
 
 // ---- pin at the spawn choke point ----
@@ -945,29 +388,17 @@ await check('a tab pin names exactly one Claude account, or Default, or nothing'
   assert.equal(resolveClaudeAccountPin({}, accts), undefined);
 });
 
-// ---- record pruning ----
+// ---- records ----
 
-await check('pruning refuses a usage folder that is a link', async () => {
-  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prunelink-'));
-  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prunereal-'));
-  fs.writeFileSync(path.join(real, 'package.json'), 'x');
-  const old = (Date.now() - 10 * 86400_000) / 1000;
-  fs.utimesSync(path.join(real, 'package.json'), old, old);
-  fs.symlinkSync(real, path.join(ud, 'usage'));
-  assert.equal(await pruneUsageRecords(ud, 8 * 86400_000), 0);
-  assert.equal(fs.existsSync(path.join(real, 'package.json')), true);
-});
-
-await check('old usage records and stray temp files are pruned, nothing else', async () => {
-  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prune-'));
+await check('records older than the longest window are not read', async () => {
+  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-records-'));
   const dir = path.join(ud, 'usage');
   fs.mkdirSync(dir);
   const old = (Date.now() - 10 * 86400_000) / 1000;
-  for (const n of ['old.json', 'fresh.json', '.tmp.s1.123', 'keep.txt']) fs.writeFileSync(path.join(dir, n), 'x');
-  for (const n of ['old.json', '.tmp.s1.123', 'keep.txt']) fs.utimesSync(path.join(dir, n), old, old);
-  const removed = await pruneUsageRecords(ud, 8 * 86400_000);
-  assert.equal(removed, 2);
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['fresh.json', 'keep.txt']);
+  for (const n of ['old', 'fresh']) fs.writeFileSync(path.join(dir, `${n}.json`), `DOBIUS1 1\n/d\n${JSON.stringify({ session_id: n })}`);
+  fs.utimesSync(path.join(dir, 'old.json'), old, old);
+  assert.deepEqual((await readUsageRecords(ud, 8 * 86400_000)).map((r) => r.sessionId), ['fresh']);
+  assert.equal((await readUsageRecords(ud)).length, 2);
 });
 
 console.log(`\n${pass} passed`);

@@ -123,7 +123,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataGetSessionSize: (sessionId, projectPath) => ipcRenderer.invoke('data:getSessionSize', sessionId, projectPath),
   dataGetLooseEnds: (opts) => ipcRenderer.invoke('data:getLooseEnds', opts),
   dataClaimSessionResume: (sessionId, tabId) => ipcRenderer.invoke('data:claimSessionResume', sessionId, tabId),
-  dataReleaseSessionResume: (sessionId, tabId) => ipcRenderer.invoke('data:releaseSessionResume', sessionId, tabId),
   dataGetLatestSession: (projectPath) => ipcRenderer.invoke('data:getLatestSession', projectPath),
   dataDeleteSession: (sessionId, projectPath) => ipcRenderer.invoke('data:deleteSession', sessionId, projectPath),
   dataKillProcess: (pid) => ipcRenderer.invoke('data:killProcess', pid),
@@ -200,28 +199,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Account management
   accountsList: () => ipcRenderer.invoke('accounts:list'),
   accountsIdentities: () => ipcRenderer.invoke('accounts:identities'),
-  // Per-account usage, Move to account, auto-move (account-headroom-service.js).
+  // Per-account usage and Move to account (account-headroom-service.js).
   accountsUsage: () => ipcRenderer.invoke('accounts:usage'),
   accountsMoveTargets: (tabId) => ipcRenderer.invoke('accounts:moveTargets', tabId),
   accountsMoveCandidates: (tabIds, targetId) => ipcRenderer.invoke('accounts:moveCandidates', tabIds, targetId),
-  accountsAutoMoveStart: (tabId, eventId) => ipcRenderer.invoke('accounts:autoMoveStart', tabId, eventId),
-  accountsAutoMoveContinue: (tabId, eventId, failed) => ipcRenderer.invoke('accounts:autoMoveContinue', tabId, eventId, failed),
-  onAccountsAutoMove: (callback) => {
-    const handler = (_event, tabId, payload) => callback(tabId, payload);
-    ipcRenderer.on('accounts:autoMove', handler);
-    return () => ipcRenderer.removeListener('accounts:autoMove', handler);
-  },
-  onAccountsAutoMoveNotice: (callback) => {
-    const handler = (_event, tabId, payload) => callback(tabId, payload);
-    ipcRenderer.on('accounts:autoMoveNotice', handler);
-    return () => ipcRenderer.removeListener('accounts:autoMoveNotice', handler);
-  },
   accountsSave: (account) => ipcRenderer.invoke('accounts:save', account),
   accountsDelete: (accountId) => ipcRenderer.invoke('accounts:delete', accountId),
   claudeUsageGetStatus: () => ipcRenderer.invoke('claudeUsage:getStatus'),
   claudeUsageEnable: (opts) => ipcRenderer.invoke('claudeUsage:enable', opts),
   claudeUsageDisable: () => ipcRenderer.invoke('claudeUsage:disable'),
-  claudeUsageRead: () => ipcRenderer.invoke('claudeUsage:read'),
   modelLineGetStatus: () => ipcRenderer.invoke('modelLine:getStatus'),
   modelLineSet: (on, opts) => ipcRenderer.invoke('modelLine:set', on, opts),
   accountsSwitchPlan: (targetEmail) => ipcRenderer.invoke('accounts:switchPlan', targetEmail),

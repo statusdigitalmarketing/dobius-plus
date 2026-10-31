@@ -43,7 +43,6 @@ check('crash.* is priority', isPriorityKind('crash.uncaughtException'), true);
 check('renderer.gone is priority', isPriorityKind('renderer.gone'), true);
 check('child.gone is priority', isPriorityKind('child.gone'), true);
 check('preload-error is priority', isPriorityKind('renderer.preload-error'), true);
-check('the auto-move audit trail is priority', isPriorityKind('accounts.auto-move'), true);
 check('ordinary console noise is NOT priority', isPriorityKind('main.error'), false);
 check('renderer.error (console) is NOT priority', isPriorityKind('renderer.error'), false);
 

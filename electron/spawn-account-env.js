@@ -43,10 +43,9 @@ function pathWithinRoot(p, root) {
 
 /**
  * The account a tab's pin names: undefined for no usable pin (the normal
- * resolution applies), null for Default, or the one Claude account with that
- * id and a profile path. The pin comes from the renderer, so it is only ever
- * an id looked up in config, never a directory: a pin that names nothing, or
- * an id two rows share, is ignored rather than guessed at.
+ * resolution applies), null for Default, or the one Claude account with that id
+ * and a profile path. A pin that names nothing, or an id two rows share, is
+ * ignored rather than guessed at.
  */
 export function resolveClaudeAccountPin(pin, accounts) {
   if (!pin || typeof pin !== 'object' || !('id' in pin)) return undefined;
@@ -84,9 +83,8 @@ export function resolveAccountEnvForCwd(cwd, { claudeAccountPin } = {}) {
     pinned = resolveClaudeAccountPin(claudeAccountPin, accts);
   }
   const claudeProjectAccount = (projectAccount && projectAccount.type === 'claude') ? projectAccount : null;
-  // A tab moved to an account by hand (or by auto-move) keeps that account
-  // over the project's and the active one: the move is the most specific
-  // choice there is. undefined = no pin; null = pinned to Default.
+  // A tab moved to an account keeps it over the project's and the active one.
+  // undefined = no pin; null = pinned to Default.
   const account = pinned !== undefined ? pinned : resolveTerminalAccount(claudeProjectAccount, activeAccount);
 
   if (account?.type === 'claude' && account.claudeJsonPath) {

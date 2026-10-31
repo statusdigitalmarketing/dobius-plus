@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  parseRecord, aggregateUsage, reporterScript,
+  parseRecord, reporterScript,
   planStatusLineInstall, planStatusLineRemove, ownsStatusLine, REPORTER_MARKER,
   reporterCommand, EFFORT_WORDS, chainFromScript, scriptPathFromCommand, MODEL_LINE_MARKER,
 } from '../claude-usage.js';
@@ -30,25 +30,6 @@ const rec = ({ sid = 's1', set = 1, dir = '/Users/x/.claude-profiles/a', limits,
   return `DOBIUS1 ${set}\n${dir}\n${payload}`;
 };
 const FIVE = { five_hour: { used_percentage: 38, resets_at: 4000000000 } };
-
-check('the reporter writes the pid of the process that ran it', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-rep-pid-'));
-  const file = path.join(dir, 'r.sh');
-  fs.writeFileSync(file, reporterScript(dir, null, { capture: true, model: false }), { mode: 0o755 });
-  // /bin/sh runs the file directly here, so its parent is this test process,
-  // as it is the claude process for a real status line.
-  const r = spawnSync('/bin/sh', [file], { input: JSON.stringify({ session_id: 'pidcheck' }), encoding: 'utf8' });
-  assert.equal(r.status, 0);
-  const rec2 = parseRecord(fs.readFileSync(path.join(dir, 'pidcheck.json'), 'utf8'), 1);
-  assert.equal(rec2.reporterPid, process.pid);
-});
-
-check('a record names the claude process that wrote it, when the reporter says', () => {
-  const payload = JSON.stringify({ session_id: 's1' });
-  assert.equal(parseRecord(`DOBIUS1 1 4242\n/d\n${payload}`, 1).reporterPid, 4242);
-  assert.equal(parseRecord(`DOBIUS1 1\n/d\n${payload}`, 1).reporterPid, null);
-  assert.equal(parseRecord(`DOBIUS1 1 x9\n/d\n${payload}`, 1).reporterPid, null);
-});
 
 check('a record carries the binding, the windows and the session', () => {
   const r = parseRecord(rec({ limits: FIVE }), 1000);
@@ -103,13 +84,6 @@ check('a truncated or foreign record is refused', () => {
   assert.equal(parseRecord(`DOBIUS1 1\n/dir\nnull`, 1), null);
 });
 
-check('the newest RECEIPT wins for one credential', () => {
-  const a = parseRecord(rec({ sid: 'old', limits: { five_hour: { used_percentage: 10, resets_at: 4e9 } } }), 1000);
-  const b = parseRecord(rec({ sid: 'new', limits: { five_hour: { used_percentage: 62, resets_at: 4e9 } } }), 2000);
-  const [g] = aggregateUsage([a, b], { now: 3000 });
-  assert.equal(g.windows.five_hour.usedPercentage, 62);
-});
-
 check('the reporter COMMAND is shell-quoted', () => {
   // statusLine is a shell command, and userData on macOS lives under
   // "Library/Application Support". Unquoted, the shell splits it at the space
@@ -118,35 +92,6 @@ check('the reporter COMMAND is shell-quoted', () => {
   const cmd = reporterCommand('/Users/x/Library/Application Support/dobius-plus');
   assert.ok(cmd.startsWith("'") && cmd.endsWith("'"), 'quoted end to end');
   assert.ok(ownsStatusLine({ type: 'command', command: cmd }), 'still recognised as ours');
-});
-
-check('age travels with the reading', () => {
-  const r = parseRecord(rec({ limits: FIVE }), 1000);
-  const [g] = aggregateUsage([r], { now: 61000 });
-  assert.equal(g.ageMs, 60000);
-});
-
-check('a window past its own reset is DROPPED, not shown as zero', () => {
-  // Showing 0% for the new window would invent a measurement nobody made.
-  const r = parseRecord(rec({ limits: { five_hour: { used_percentage: 99, resets_at: 1000 } } }), 500);
-  assert.deepEqual(aggregateUsage([r], { now: 2_000_000 }), []);
-});
-
-check('windows expire INDEPENDENTLY', () => {
-  const r = parseRecord(rec({
-    limits: {
-      five_hour: { used_percentage: 99, resets_at: 1000 },
-      seven_day: { used_percentage: 40, resets_at: 4e9 },
-    },
-  }), 500);
-  const [g] = aggregateUsage([r], { now: 2_000_000 });
-  assert.equal(g.windows.five_hour, undefined);
-  assert.equal(g.windows.seven_day.usedPercentage, 40);
-});
-
-check('an unresolved binding contributes nothing', () => {
-  const r = parseRecord(rec({ dir: 'relative', limits: FIVE }), 1);
-  assert.deepEqual(aggregateUsage([r], { now: 2 }), []);
 });
 
 // --- the reporter script itself -------------------------------------------
