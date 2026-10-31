@@ -471,6 +471,9 @@ export function createHeadroomService(d) {
           const now = { dir: target.dir, key: target.key, email: await loginEmail(target.dir, target.envUnset) };
           await markSharedFolders([now]);
           if (now.email?.toLowerCase() !== target.email.toLowerCase()) return { ok: false, pin, error: `Claude runs on ${target.label}, but that folder now names ${now.email || 'no login that can be confirmed'}, not ${target.email}. Check it is the login you meant.` };
+          // The process appearing is what ends a hold (terminal-manager): from
+          // here the running Claude itself is what stops a second resume.
+          if (sessionId) d.release(sessionId, tabId);
           return { ok: true, pin };
         }
       }

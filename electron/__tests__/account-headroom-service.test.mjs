@@ -548,6 +548,13 @@ await check('a hard-linked credential or metadata file makes the login unknown',
   }
 });
 
+await check('a verified move gives back the claim, or the conversation stays locked after /exit', async () => {
+  const w = world();
+  const r = await moveB(w);
+  assert.equal(r.ok, true);
+  assert.deepEqual(w.events.filter((e) => /claim|release/.test(e)), ['claim sess-now', 'release sess-now']);
+});
+
 await check('after the restart: a wrong account outranks a trust prompt, an exit gives back the claim, a link made meanwhile fails', async () => {
   const raw = fs.readFileSync(new URL('./fixtures/trust-prompt-2.1.316-raw.bin', import.meta.url));
   const lines = await renderScreenLines(new Uint8Array(raw), { cols: 120 });
