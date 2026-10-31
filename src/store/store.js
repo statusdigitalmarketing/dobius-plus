@@ -752,21 +752,29 @@ export const useStore = create((set, get) => ({
     const pin = { id: accountId };
     set((s) => ({ terminalTabs: s.terminalTabs.map((t) => (t.id === tabId ? { ...t, claudeAccountPin: pin } : t)) }));
     if (!background) set({ activeView: 'terminal', activeTabId: tabId });
-    try { await api.terminalCreate?.(tabId, tabProject || undefined, { claudeAccountPin: pin }); }
+    const expect = Number.isInteger(opts.expectInputSeq) ? { expectInputSeq: opts.expectInputSeq } : {};
+    let created;
+    try { created = await api.terminalCreate?.(tabId, tabProject || undefined, { claudeAccountPin: pin, ...expect }); }
     catch (err) { return { ok: false, error: `the tab could not restart: ${err?.message || err}` }; }
+    if (created === null && expect.expectInputSeq !== undefined) return { ok: false, error: 'someone typed in the tab, so it was not restarted' };
     if (!sessionId) return { ok: true, resumed: false };
     // Wait so the old claude has exited (claimSessionResume refuses while its
     // process is still visible) and the new shell is ready.
     await new Promise((r) => setTimeout(r, 900));
     if (!(get().terminalTabs || []).some((t) => t.id === tabId)) return { ok: false, error: 'the tab closed' };
+    // Someone typing into the fresh shell during the wait would have the
+    // resume command appended to their line and run as one.
+    const typedSince = await api.terminalInputCount?.(tabId);
+    if (Number.isInteger(typedSince) && typedSince > 0) return { ok: false, error: 'someone typed in the restarted tab, so the conversation was not resumed there' };
     if (!background) set({ activeTabId: tabId }); // re-assert in case focus moved during the wait
     const typed = await get().resumeSession({ sessionId, project: sessionProject || tabProject || undefined, tabId, background });
     return typed === true ? { ok: true, resumed: true } : { ok: false, error: typeof typed === 'string' ? typed : 'the conversation could not be resumed' };
   },
 
   // Move several tabs (this window's) to one account. Tabs that are mid-turn
-  // or waiting on a permission prompt, tabs running some other program, and
-  // tabs with unsent text in Claude's box are SKIPPED and named, never
+  // or waiting on a permission prompt, tabs running some other program or no
+  // Claude at all (a half-typed shell command cannot be read), and tabs with
+  // unsent text in Claude's box are SKIPPED and named, never
   // interrupted: a respawn kills what runs in the tab. Main judges each tab
   // (accounts:moveCandidates), including whether it may go to that account.
   moveTabsToAccount: async (tabIds, accountId, label = 'the chosen account') => {
@@ -777,7 +785,8 @@ export const useStore = create((set, get) => ({
     const why = (c) => (c.refusal ? c.refusal
       : c.busy ? (c.status === 'needs' ? 'waiting on a question' : 'in the middle of a turn')
         : c.running === 'other' ? 'running another program'
-          : c.draft ? 'has unsent text in the prompt' : null);
+          : c.running === 'shell' ? 'no Claude running in it (move it by itself if you want its next Claude on that account)'
+            : c.draft ? 'has unsent text in the prompt' : null);
     const movable = cands.filter((c) => !why(c));
     const skipped = cands.filter((c) => why(c)).map((c) => ({ tabId: c.tabId, label: name(c.tabId), reason: why(c) }));
     if (!movable.length) {

@@ -57,6 +57,7 @@ function world(over = {}) {
     identity: async (dir) => ({ email: w.emails[dir] ?? null, login: 'in' }),
     email: async (dir) => w.emails[dir] ?? null,
     inputHeld: () => !!w.held,
+    processAuthOverride: async (pid) => (w.override && w.override[pid]) || null,
     selector: () => null,
     readRecords: async () => w.records,
     pruneRecords: async () => 0,
@@ -99,6 +100,7 @@ async function moved(w, svc) {
   const { eventId } = w.sent[0].payload;
   const st = await svc.startAutoMove(TAB, eventId, 7);
   assert.equal(st.ok, true, JSON.stringify(st));
+  assert.equal(st.inputSeq, w.inputSeq, 'the restart is conditional on this input count');
   w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
   w.procKey = KEY_B;
   return eventId;
@@ -252,8 +254,8 @@ await check('a window that could not move the tab is logged and noticed', async 
 await check('unsent text in the prompt holds an automatic move', async () => {
   assert.equal(isDraft('half a thought'), true);
   assert.equal(isDraft(''), false);
-  assert.equal(isDraft('Try "refactor the parser"'), false);
-  assert.equal(isDraft('Try "git status" first, then explain'), true, 'a draft that starts like the placeholder');
+  assert.equal(isDraft('Try "git status"'), true, 'placeholder-shaped text is still treated as the person\'s');
+  assert.equal(isDraft('Try "git status" first, then explain'), true);
   assert.equal(isDraft(null), false);
   // A box that cannot be read is a possible draft, unless a selector holds the screen.
   assert.equal(draftOnScreen(null, false), true);
@@ -332,6 +334,71 @@ await check('a re-login of a folder clears its figures; a credential two files d
   w.emails[DIR_B] = 'new@x.com';
   w.now += 1000;
   assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
+});
+
+await check('one login under two folders: the highest figure in the window stands, a republished low one cannot hide a limit', async () => {
+  const { w, svc } = world();
+  w.emails[DIR_A] = 'b@x.com';
+  w.records = [
+    { key: KEY_A, receivedAt: T0 - 120_000, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } },
+    { key: KEY_B, receivedAt: T0 - 10_000, windows: { five_hour: { usedPercentage: 20, resetsAt: R5 } } },
+  ];
+  const u = await svc.usage();
+  for (const label of ['A', 'B']) {
+    const r = u.accounts.find((x) => x.label === label);
+    assert.equal(r.usage.windows.five_hour.used, 100, label);
+    assert.equal(r.usage.limited, true, label);
+  }
+});
+
+await check('a target re-logged into another account while the move waited is called off', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  w.emails[DIR_B] = 'someone-else@x.com';
+  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
+  assert.equal(st.ok, false);
+  assert.match(st.error, /different account/);
+});
+
+await check('no "continue" if the target folder was re-logged after the restart', async () => {
+  const { w, svc } = world();
+  const eventId = await moved(w, svc);
+  w.emails[DIR_B] = 'a@x.com';
+  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
+  assert.deepEqual(w.submits, []);
+});
+
+await check('no "continue" when Claude\'s box already holds text (input that arrived before the check)', async () => {
+  const { w, svc } = world();
+  const eventId = await moved(w, svc);
+  w.box = 'only explain ';
+  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
+  assert.deepEqual(w.submits, []);
+});
+
+await check('a token exported into the resumed Claude\'s shell stops "continue"; one in the limited tab stops the move', async () => {
+  const a = world();
+  const eventId = await moved(a.w, a.svc);
+  a.w.override = { 200: 'CLAUDE_CODE_OAUTH_TOKEN' };
+  assert.equal((await a.svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
+  assert.deepEqual(a.w.submits, []);
+  const b = world();
+  b.w.override = { 100: 'ANTHROPIC_API_KEY' };
+  await b.svc.tick();
+  assert.equal(b.w.sent.length, 0);
+  assert.match(b.w.notices[0], /ANTHROPIC_API_KEY/);
+});
+
+await check('a move the window never started gives its event back when it expires', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  assert.equal(w.sent.length, 1);
+  w.now += 4 * 60_000;
+  await svc.tick(); // expires the pending move
+  assert.match(w.logs.find((l) => /abandoned/.test(l)), /never started/);
+  w.now += 61_000;
+  await svc.tick(); // the same limit, still there, is acted on again
+  assert.equal(w.sent.length, 2);
 });
 
 // ---- pin at the spawn choke point ----

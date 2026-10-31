@@ -61,7 +61,10 @@ export function sanitizeHistory(raw) {
       if (!isWindowName(name)) continue;
       const w = src[name];
       if (!w || typeof w !== 'object' || !Array.isArray(w.samples)) continue;
-      const r = typeof w.r === 'number' && Number.isFinite(w.r) ? w.r : null;
+      // A window with no reset time never expires: an older build could save
+      // one, and it would read as a known figure forever.
+      if (typeof w.r !== 'number' || !Number.isFinite(w.r)) continue;
+      const r = w.r;
       const samples = [];
       for (const s of w.samples.slice(-MAX_SAMPLES)) {
         if (!s || !Number.isFinite(s.t) || !Number.isFinite(s.p)) continue;

@@ -2,7 +2,8 @@ import './dev-userdata.js'; // MUST stay first: userData override before config-
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor } from 'electron';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -271,6 +272,10 @@ function setupTerminalHandlers() {
     // A tab moved to an account carries a pin naming it (an account id, looked
     // up in config there; never a directory).
     const claudeAccountPin = opts && typeof opts === 'object' ? opts.claudeAccountPin : undefined;
+    // An automatic account move restarts the tab only if nothing reached it
+    // since main last checked (account-headroom-service startAutoMove): no
+    // await between this check and the kill.
+    if (opts && Number.isInteger(opts.expectInputSeq) && terminalInputSeq(id) !== opts.expectInputSeq) return null;
     const accountEnv = resolveAccountEnvForCwd(cwd, { claudeAccountPin });
     // A New Tab (store.openNewTab) starts its tool: 'default' is the Settings
     // choice, read here; anything outside the fixed set starts nothing.
@@ -296,6 +301,16 @@ function setupTerminalHandlers() {
     // promptOnly: a path prompt editing pasted into Claude's prompt, which
     // must not land later in whatever replaced it (chat-service).
     writeRawInput(id, data, () => ownsTerminal(event.sender.id, id), { promptOnly: opts?.promptOnly === true });
+  });
+
+  // How many writes reached this tab's shell since it started (terminal
+  // replies excluded). An account move asks it between the restart and the
+  // typed resume: anything there means a person started typing in the new
+  // shell, and the resume would be glued onto their line.
+  ipcMain.handle('terminal:inputCount', (event, id) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
+    if (!ownsTerminal(event.sender.id, id)) return null;
+    return terminalInputSeq(id);
   });
 
   ipcMain.on('terminal:resize', (event, id, cols, rows) => {
@@ -2282,6 +2297,7 @@ function setupHeadroomHandlers() {
       return { email, login };
     },
     processCwd: (pid) => getProcessCwd(pid),
+    processAuthOverride: (pid) => processAuthOverride(pid),
     email: (dir, opts) => accountEmail(dir, opts),
     inputHeld: (id) => heldInputFor(id),
     samePath: async (a, b) => {
@@ -2346,6 +2362,20 @@ function setupHeadroomHandlers() {
   // Sampling keeps pace honest even while no panel is open; auto-move rides
   // the same tick. unref'd: never keeps the app alive.
   setInterval(() => { headroom.tick(); }, 15_000).unref();
+}
+
+// Which auth override (a token or API key that signs Claude in regardless of
+// its profile folder) a process carries, by NAME only: its environment is
+// read through ps and only checked for the variable being set; no value is
+// kept or logged. null when none, or when it cannot be read.
+const execFileP = promisify(execFile);
+const AUTH_OVERRIDE_NAMES = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
+async function processAuthOverride(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const { stdout } = await execFileP('/bin/ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 1500, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+    return AUTH_OVERRIDE_NAMES.find((n) => new RegExp(`(?:^|\\s)${n}=\\S`).test(stdout)) || null;
+  } catch { return null; }
 }
 
 function setupConfigHandlers() {

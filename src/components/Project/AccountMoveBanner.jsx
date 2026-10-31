@@ -40,9 +40,12 @@ export default function AccountMoveBanner() {
         try {
           r = await useStore.getState().moveTabToAccount(tabId, accountId, {
             auto: true, label: p.targetLabel, sessionId: p.sessionId, project: typeof p.project === 'string' ? p.project : null,
+            expectInputSeq: go.inputSeq,
           });
         } catch (err) { r = { ok: false, error: err?.message || String(err) }; }
-        await api.accountsAutoMoveContinue?.(tabId, p.eventId, r?.ok ? null : (r?.error || 'the move failed'));
+        // Not awaited: main waits up to a minute for Claude's prompt, and the
+        // next tab's move must not queue behind that wait.
+        api.accountsAutoMoveContinue?.(tabId, p.eventId, r?.ok ? null : (r?.error || 'the move failed')).catch(() => {});
       }).catch(() => {});
     });
     const offNotice = api?.onAccountsAutoMoveNotice?.((tabId, p) => {

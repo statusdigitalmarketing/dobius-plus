@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Terminal
   terminalCreate: (id, cwd, opts) => ipcRenderer.invoke('terminal:create', id, cwd, opts),
+  terminalInputCount: (id) => ipcRenderer.invoke('terminal:inputCount', id),
   terminalWrite: (id, data, opts) => ipcRenderer.send('terminal:write', id, data, opts),
   // Input prompt editing holds back (data), or null once it is all gone
   // (dropped: some of it was thrown away rather than sent).

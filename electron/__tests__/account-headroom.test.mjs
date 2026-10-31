@@ -98,6 +98,8 @@ check('history is bounded and rejects hostile names on load', () => {
   assert.deepEqual(Object.keys(loaded.keys[KEY_A].windows), ['five_hour']);
   assert.deepEqual(loaded.keys[KEY_A].windows.five_hour.samples, [{ t: T0, p: 5 }], 'out-of-order sample dropped');
   assert.equal(Object.getPrototypeOf(loaded.keys), null);
+  const noReset = sanitizeHistory({ v: 1, keys: { [KEY_A]: { windows: { five_hour: { r: null, seenAt: T0, samples: [{ t: T0, p: 0 }] } } } } });
+  assert.equal(noReset.keys[KEY_A], undefined, 'a saved window with no reset time is dropped on load');
 });
 
 check('a re-login of the same folder drops the old login\'s figures and ignores its leftover records', () => {
