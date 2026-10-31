@@ -15,6 +15,7 @@ process.env.HOME = home;
 process.env.DOBIUS_TEST_USERDATA = path.join(home, 'userdata');
 fs.mkdirSync(process.env.DOBIUS_TEST_USERDATA);
 const { loadAllSessions, getAllProjectTabs, transcriptCache, TRANSCRIPT_CACHE_MAX } = await import('../data-service.js');
+const { updateSettings } = await import('../config-manager.js');
 
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
@@ -131,6 +132,33 @@ write(dirB, 'scripted', [
   ok('a failed read is not cached');
 }
 
+// The tail reads fine, the wider read behind it fails: the message it would have
+// found must not stay lost until the file changes.
+{
+  const f = path.join(dirA, 'buried.jsonl');
+  write(dirA, 'buried', [
+    rec('user', 'old ask', NOW - 3_600_000), rec('assistant', 'old reply', NOW - 3_590_000),
+    ...Array.from({ length: 300 }, (_, i) => JSON.stringify({ type: 'progress', timestamp: new Date(NOW - 1000 + i).toISOString() })),
+  ]);
+  const working = fsp.open;
+  let calls = 0;
+  fsp.open = (p, ...r) => {
+    if (p === f && (calls += 1) === 2) { const e = new Error('too many open files'); e.code = 'EMFILE'; throw e; }
+    return working.call(fsp, p, ...r);
+  };
+  const failed = byId(await loadAllSessions());
+  fsp.open = working;
+  assert.equal(calls, 2, 'the wider read was tried');
+  assert.equal(failed.buried.timestamp, NOW - 1000 + 299, 'it fell back to the bookkeeping stamp for now');
+  assert.equal(transcriptCache.has(f), false);
+  const retried = byId(await loadAllSessions());
+  assert.equal(retried.buried.timestamp, NOW - 3_590_000, 'the next scan finds the message');
+  assert.equal(transcriptCache.has(f), true);
+  fs.rmSync(f);
+  await loadAllSessions();
+  ok('a failed wider read is not cached');
+}
+
 // Eviction: a full scan drops what it did not see; a scoped scan drops nothing.
 {
   const gone = path.join(dirB, 'scripted.jsonl');
@@ -148,6 +176,21 @@ write(dirB, 'scripted', [
   fs.utimesSync(gone, st.atime, st.mtime);
   assert.equal((await counting(() => loadAllSessions())).reads, 1);
   ok('eviction');
+}
+
+// A hidden project is skipped by full scans, but its own window still lists it:
+// a full scan must not throw those entries away and force a re-read every time.
+{
+  const projectB = byId(await loadAllSessions()).scripted.projectPath;
+  const kept = path.join(dirB, 'scripted.jsonl');
+  updateSettings({ hiddenSessionPaths: [projectB] });
+  assert.equal(byId(await loadAllSessions()).scripted, undefined, 'hidden from the full scan');
+  assert.equal(transcriptCache.has(kept), true, 'and still cached');
+  const own = await counting(() => loadAllSessions(projectB));
+  assert.equal(own.reads, 0, 'its own window reads nothing');
+  assert.equal(byId(own.out).scripted.preview, 'scripted run');
+  updateSettings({ hiddenSessionPaths: [] });
+  ok('a full scan keeps a hidden project\'s entries');
 }
 
 // The cap: a full cache takes no new file, keeps what it has and still updates it.

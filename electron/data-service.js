@@ -93,8 +93,8 @@ async function transcriptFacts(filePath, st) {
   if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) return hit.facts;
   const { facts, parsed } = await readTranscriptFacts(filePath, st);
   // stat came first, so a write during the read only makes the next scan miss.
-  // A tail that parsed to nothing may be a failed read (parseJsonl answers []
-  // on any error, EMFILE included): never remembered as this file's truth.
+  // A read that came back empty may have failed (parseJsonl answers [] on any
+  // error, EMFILE included): never remembered as this file's truth.
   if (st && parsed && (transcriptCache.has(filePath) || transcriptCache.size < TRANSCRIPT_CACHE_MAX)) {
     transcriptCache.set(filePath, { size: st.size, mtimeMs: st.mtimeMs, facts });
   }
@@ -165,7 +165,8 @@ async function readTranscriptFacts(filePath, st) {
   }
   // The sort key comes from the one lookup Cmd+R also uses. (The walk's
   // own messageAt only decides its early exit above.)
-  messageAt = await lastMessageAt(filePath, entries);
+  const last = await lastMessageAt(filePath, entries);
+  messageAt = last.at;
   // Claude Code's own name for the conversation ("Fix login bug"),
   // rewritten as the chat goes; the newest one wins. History rows lead
   // with it because the newest prompt is often a tool echo or missing.
@@ -183,7 +184,7 @@ async function readTranscriptFacts(filePath, st) {
   // The boolean replaces entrypoint, an unbounded string from the file.
   const automated = AUTOMATED_ENTRYPOINTS.has(entrypoint);
   const activityAt = timestamp || st?.mtimeMs || 0;
-  return { facts: { preview, title, lastRole, automated, messageAt, activityAt }, parsed: entries.length > 0 };
+  return { facts: { preview, title, lastRole, automated, messageAt, activityAt }, parsed: entries.length > 0 && last.complete };
 }
 
 /**
@@ -253,6 +254,7 @@ export async function loadAllSessions(projectFilter, opts = {}) {
     // in parseJsonl, that OOM-crashed the main process on dashboards with large
     // ~/.claude histories. A cap of 24 keeps memory and fd usage flat.
     const fileTasks = [];
+    const notScanned = []; // hidden projects' dirs: a project window still reads them
     // Only scan Claude transcripts when Claude is a requested source. The
     // Codex tab (sources=['codex']) must NOT return Claude sessions (reviewer
     // HIGH: "Codex" and "All" were byte-identical). Empty fileTasks below makes
@@ -266,7 +268,10 @@ export async function loadAllSessions(projectFilter, opts = {}) {
       if (projectFilter && projectPath !== projectFilter) continue;
       // Skip user-hidden sources (before any file reads, so 260 headless spam
       // transcripts cost zero I/O). projectFilter above already bypasses this.
-      if (!projectFilter && hiddenPaths.has(projectPath)) continue;
+      if (!projectFilter && hiddenPaths.has(projectPath)) {
+        notScanned.push(projectDir + path.sep);
+        continue;
+      }
       const projectName = realPath
         ? realPath.split('/').filter(Boolean).pop()
         : dir.name.split('-').filter(Boolean).pop() || dir.name;
@@ -281,12 +286,15 @@ export async function loadAllSessions(projectFilter, opts = {}) {
       }
     }
 
-    // A full scan sees every file it can: anything else was deleted (or its
-    // project hidden). A scoped scan sees one project, which says nothing of the
-    // rest. First, so a cache full of deleted files makes room for this scan.
+    // A full scan sees every file it can: anything else was deleted, unless its
+    // project is hidden from this scan. A scoped scan sees one project, which
+    // says nothing of the rest. First, so a cache full of deleted files makes
+    // room for this scan.
     if (!projectFilter && sources.includes('claude')) {
       const seen = new Set(fileTasks.map((t) => path.join(t.projectDir, t.file)));
-      for (const key of transcriptCache.keys()) if (!seen.has(key)) transcriptCache.delete(key);
+      for (const key of transcriptCache.keys()) {
+        if (!seen.has(key) && !notScanned.some((dir) => key.startsWith(dir))) transcriptCache.delete(key);
+      }
     }
 
     await mapLimit(fileTasks, 24, async ({ projectDir, projectPath, projectName, file }) => {
@@ -1005,8 +1013,13 @@ function newestMessageStamp(entries) {
 // drops request blobs, so a short (even empty) parsed tail does not prove the
 // file was read whole. Ceiling: readTail's 8MB cap, so a message behind more
 // than 8MB of blobs still falls back to the bookkeeping stamp.
+// `complete` is false when the wider read came back empty though the tail did
+// not: parseJsonl answers [] on any error, so that answer is not this file's.
 async function lastMessageAt(filePath, tail) {
-  return newestMessageStamp(tail) || newestMessageStamp(await parseJsonl(filePath, 2000));
+  const at = newestMessageStamp(tail);
+  if (at) return { at, complete: true };
+  const wider = await parseJsonl(filePath, 2000);
+  return { at: newestMessageStamp(wider), complete: wider.length > 0 };
 }
 
 function isSyntheticUserText(text) {
@@ -1095,7 +1108,7 @@ export async function getLatestSession(projectPath) {
         const tail = await parseJsonl(filePath, 200);
         // Messages only, as in loadAllSessions: hook output and snapshots
         // written by merely resuming a chat must not make it the latest.
-        msgTs = await lastMessageAt(filePath, tail);
+        msgTs = (await lastMessageAt(filePath, tail)).at;
         for (const e of tail) {
           if (!e || typeof e !== 'object') continue;
           const at = tsToEpochMs(e.timestamp);
