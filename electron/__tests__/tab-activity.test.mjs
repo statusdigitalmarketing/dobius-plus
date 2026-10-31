@@ -118,7 +118,7 @@ test('forget: a respawned PTY starts with nothing', () => {
 
 // --- Waiting (presence file) -------------------------------------------------
 const LSTART = 'Tue Oct 27 13:39:54 2026';
-const START = Date.parse(LSTART);
+const START = Date.parse(`${LSTART} UTC`); // Claude writes it under TZ=UTC; ps reads it local
 const proc = { pid: 4242, startedAt: START };
 const DONE = START + 120_000;
 const AFTER = DONE + GRACE_MS;

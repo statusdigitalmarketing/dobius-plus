@@ -101,7 +101,20 @@ ok('Claude ready check on real screens');
   assert.equal(isClaudePromptReady(chained, at(0, 8)), false, 'no box holds the caret');
   const titled = ['● Done', rule, '❯ ', rule, '  Opus 4.1 · high', 'Do you want to deploy? (task title)'];
   assert.equal(isClaudePromptReady(titled, at(2, 2)), true, 'a status line asking a question is not a dialog');
-  assert.equal(isClaudePromptReady(['Do you want to proceed?', rule, '❯ ', rule], at(2, 2)), false, 'a question above the box is');
+  // Above a box holding the caret is transcript, whatever it reads like. A real
+  // dialog replaces the box, so its caret is never in one.
+  assert.equal(promptBoxText(['❯ Do you want to schedule a call tomorrow?', '● Sure', rule, '❯ ', rule], at(2, 3)), '', 'an echoed question above the box');
+  assert.equal(promptBoxText(['Esc to cancel', '❯ 1. Yes', '  2. No', rule, '❯ hi', rule], at(4, 4)), 'hi', 'an echoed footer and numbered list above the box');
+  assert.equal(isClaudePromptReady(['Do you want to proceed?', rule, '❯ ', rule], { bracketedPaste: true }), false, 'caret unknown: a question above still blocks');
+  // The same dialog with its caret where a real one parks it: on its ❯, under a
+  // quoted box, or nowhere near one.
+  const quoting = [' Bash command', '   cat <<EOF', rule, '❯ hi', rule, 'EOF', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel'];
+  assert.equal(isClaudePromptReady(quoting, at(1, 7)), false, 'a dialog quoting a box');
+  assert.equal(isClaudePromptReady(quoting, at(0, 10)), false, 'a dialog quoting a box, caret at its foot');
+  // A real idle screen with the card's question echoed into its transcript.
+  const echoed = [...idle];
+  echoed.splice(idle.modes.cursor.y - 1, 0, '❯ Do you want to schedule a call tomorrow?', '', '● Sure, which day?');
+  assert.equal(promptBoxText(echoed, { ...idle.modes, cursor: { ...idle.modes.cursor, y: idle.modes.cursor.y + 3 } }), promptBoxText(idle, idle.modes), 'real idle screen, question in its transcript');
   assert.equal(isClaudePromptReady([rule, '❯ ', rule, '  Esc to cancel'], at(2, 1)), false, 'a dialog footer below the box is');
   for (const f of ['opentab-trust-2.1.314-raw.bin', 'askq-2.1.224-raw.txt', 'askq-multi-q1-2.1.233-raw.bin', 'askq-multi-submit-2.1.233-raw.bin']) {
     const sc = await render(f);
@@ -187,6 +200,23 @@ function fakeDeps(over = {}) {
   };
   return deps;
 }
+
+// A card that is a question: Claude echoes it above its emptied box. Sent, not
+// mistaken for a dialog, and the Enter still goes out over the pasted question.
+for (const [message, line] of [
+  ['Do you want to schedule a call tomorrow?', 'plain'],
+  ['Would you like to review this? Esc to cancel', 'names a footer'],
+  ['Can we talk tomorrow?', 'ends in a question mark'],
+]) {
+  const d = fakeDeps({
+    paste: (id, text) => { d.log.push(['paste', id, text]); d.tabs.get(id).frames.push({ lines: [rule, `❯ ${text}`, rule], modes: { bracketedPaste: true }, caret: { x: text.length + 2, y: 1 } }); },
+    submit: (id) => { d.log.push(['submit', id]); d.tabs.get(id).frames.push({ lines: [`❯ ${message}`, '', '● Thinking', rule, '❯ ', rule], modes: { bracketedPaste: true }, caret: { x: 2, y: 4 } }); },
+  });
+  const r = await createOpenTabService(d).open({ projectPath: '/p', message, requestId: 'q1' });
+  assert.deepEqual(r.body, { ok: true, tabId: 'term-/p-1', submitted: true }, line);
+  assert.equal(d.log.filter((e) => e[0] === 'submit').length, 1, line);
+}
+ok('a question card is reported as sent');
 
 {
   const d = fakeDeps();

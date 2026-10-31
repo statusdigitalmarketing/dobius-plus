@@ -546,6 +546,8 @@ export async function getTerminalProcessArgv(id) {
  * them either. startedAt lets the caller correlate the process to the
  * transcript it created (see resolveFreshSessionId in main.js).
  * `unique: true` answers null when more than one claude runs in the shell.
+ * soleChild: this is the shell's only child, so no other program in the tab
+ * (a suspended claude, say) can be the one the person is really working in.
  */
 export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
   const entry = terminals.get(id);
@@ -591,7 +593,7 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
-      const info = { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid) };
+      const info = { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid), soleChild: children.length === 1 };
       if (!unique) return info;
       // `unique`: two claudes in one shell cannot be told apart, so no answer.
       if (found) return null;

@@ -151,6 +151,10 @@ export function isClaudePromptReady(lines, modes) {
 // Below the input box only a dialog's footer or its options count: a chained
 // status line draws there, and its text ("Do you want to deploy?" as a task
 // title) must not read as a question. Every Claude dialog has such a footer.
+// Above an input box that holds the caret nothing counts: that is transcript,
+// including the card's own echo ("Do you want to schedule a call?"). A real
+// dialog replaces the input box, so it never gets this far with the caret in
+// one; `above` is checked only when the caret's place is unknown.
 const DIALOG_FOOTER_RE = /Esc to cancel|Enter to (?:confirm|select)/i;
 const DIALOG_RE = /Do you want to |Would you like to /i;
 function dialogOnScreen(above, below) {
@@ -195,9 +199,9 @@ export function promptBoxText(lines, modes) {
     const caret = caretInBox(modes.cursor, top, j, row);
     if (caret === false) continue;
     if (flat ? (PROMPT_ROW_RE.test(row) && (caret || !OPTION_ROW_RE.test(row))) : BOX_PROMPT_RE.test(row)) {
-      // A dialog anywhere OUTSIDE the box (the box's own text is the
-      // message, which may well say "Do you want to ...").
-      if (dialogOnScreen(lines.slice(0, top + 1), lines.slice(j))) return null;
+      // A dialog OUTSIDE the box (the box's own text is the message, which
+      // may well say "Do you want to ...").
+      if (dialogOnScreen(caret ? [] : lines.slice(0, top + 1), lines.slice(j))) return null;
       // Only Claude's own chrome is stripped: the prompt character on the
       // FIRST row, and the side borders of the older boxed prompt. A later
       // row starting with ">" or "│" in the flat prompt is message text.
@@ -363,7 +367,8 @@ export function createOpenTabService(deps, opts = {}) {
       if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but the tab closed before Claude was seen taking the message' };
       if (!after) continue; // a failed read proves nothing
       // Only an input box that is SEEN and no longer holds the message
-      // confirms the send; a frame with no recognisable box proves nothing.
+      // confirms the send, whatever the transcript above it now shows; a frame
+      // with no recognisable box proves nothing.
       const box = promptBoxText(after.lines, after.modes);
       if (box !== null && !boxStillHasMessage(box, message)) return { ok: true, tabId, submitted: true };
     }

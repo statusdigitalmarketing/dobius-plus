@@ -14,11 +14,17 @@ const { autoUpdater } = electronUpdater;
 // zip made every differential download fail, silently, every 4 hours, forever.
 const UPDATER_CACHE_DIR = path.join(os.homedir(), 'Library', 'Caches', 'dobius-plus-updater');
 
+// An isolated instance (ship-test harness, DOBIUS_USERDATA_DIR) may be a packaged
+// build, but the updater cache and the installed app it would replace are the
+// real ones: it never checks, downloads, installs or purges.
+const updatesEnabled = () => app.isPackaged && !process.env.DOBIUS_USERDATA_DIR;
+
 // Purge the updater cache after a download error so the NEXT periodic check
 // starts clean instead of re-wedging against the same stale state. Rate-limited
 // to once per 10 minutes so an offline burst doesn't thrash the disk.
 let lastCachePurgeAt = 0;
-function purgeUpdaterCache() {
+export function purgeUpdaterCache() {
+  if (process.env.DOBIUS_USERDATA_DIR) return;
   const now = Date.now();
   if (now - lastCachePurgeAt < 10 * 60 * 1000) return;
   lastCachePurgeAt = now;
@@ -153,7 +159,7 @@ async function safeCheck() {
 // which is the second half of the bug Sam reported: even when the quit
 // worked, his app stayed dead.
 async function performInstall() {
-  if (!app.isPackaged) {
+  if (!updatesEnabled()) {
     broadcast('updater:status', { state: 'error', message: 'Updates only run in packaged builds.' });
     return false;
   }
@@ -236,9 +242,9 @@ async function performInstall() {
 
 export function initAutoUpdater() {
   ipcMain.handle('updater:check', () => {
-    if (app.isPackaged) safeCheck();
+    if (updatesEnabled()) safeCheck();
     else broadcast('updater:status', { state: 'error', message: 'Updates only run in packaged builds (you are running dev mode).' });
-    return { ok: app.isPackaged };
+    return { ok: updatesEnabled() };
   });
   ipcMain.handle('updater:install', async () => {
     const ok = await performInstall();
@@ -272,7 +278,7 @@ export function initAutoUpdater() {
     return { ok: true };
   });
 
-  if (!app.isPackaged) return;
+  if (!updatesEnabled()) return;
 
   autoUpdater.autoDownload = true;
   // autoInstallOnAppQuit is INCOMPATIBLE with the 3-phase Cmd+Q gate: the
