@@ -139,11 +139,15 @@ export default function AccountUsage() {
             </div>
             {!u.known && (
               <div className="text-xs" style={{ color: 'var(--dim)' }}>
-                {u.lastReportedAt ? `No live 5 hour figure (last report ${ago(u.ageMs)}). ` : 'No session on this account has reported yet. '}
-                Unknown is not zero: it fills in once a session here sends a message.
+                No session on this account has reported yet. Unknown is not zero: it fills in once a session here sends a message.
               </div>
             )}
-            {orderedWindows(u.windows).map(([name, w]) => (
+            {u.known && orderedWindows(u.windows).map(([name, w]) => (!w ? (
+              <div key={name} className="flex items-center gap-2 text-xs" style={{ color: 'var(--dim)' }}>
+                <span style={{ width: 96, flexShrink: 0 }}>{windowLabel(name)}</span>
+                <span>Unknown</span>
+              </div>
+            ) : (
               <div key={name} className="flex items-center gap-2 text-xs" style={{ color: 'var(--dim)', flexWrap: 'wrap' }}>
                 <span style={{ width: 96, flexShrink: 0 }} title={`Reported ${ago(w.ageMs)}`}>{windowLabel(name)}{Math.abs(w.ageMs - (u.ageMs ?? w.ageMs)) > 60_000 ? `, ${ago(w.ageMs)}` : ''}</span>
                 <span style={{ flex: 1, minWidth: 80, height: 6, borderRadius: 3, backgroundColor: 'var(--border)', overflow: 'hidden', maxWidth: 180 }}>
@@ -154,7 +158,7 @@ export default function AccountUsage() {
                 <span style={{ flexShrink: 0, color: w.forecast?.limited ? RED : w.forecast?.at ? AMBER : 'var(--dim)' }}>{forecastText(w.forecast)}</span>
                 {w.resetsAt && <span style={{ flexShrink: 0 }}>resets {untilText(w.resetsAt)}</span>}
               </div>
-            ))}
+            )))}
             {r.sameAs?.length > 0 && (
               <div className="text-xs" style={{ color: AMBER }}>Same login as {r.sameAs.join(', ')}: one limit between them.</div>
             )}

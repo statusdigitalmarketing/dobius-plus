@@ -9,9 +9,10 @@ const WINDOW_LABEL = {
 };
 export const windowLabel = (name) => WINDOW_LABEL[name] || name.replace(/_/g, ' ');
 
-// five_hour first, seven_day next, the rest after.
+// five_hour first, seven_day next, the rest after. Those two always have a row:
+// one with no live figure (w null) reads Unknown, whatever the other says.
 const ORDER = ['five_hour', 'seven_day'];
-export const orderedWindows = (windows) => Object.entries(windows || {})
+export const orderedWindows = (windows) => Object.entries({ five_hour: null, seven_day: null, ...windows })
   .sort(([a], [b]) => (ORDER.indexOf(a) === -1 ? 9 : ORDER.indexOf(a)) - (ORDER.indexOf(b) === -1 ? 9 : ORDER.indexOf(b)));
 
 export function ago(ms) {

@@ -130,12 +130,13 @@ export function ptyProgramName(comm, shellPath = '') {
 //   or the tool's exit status cannot abort it before it becomes a shell.
 // Only zsh and bash are driven this way; any other shell opens plain.
 // resume ({ sessionId, cwd }, an account move): the same wrapper runs
-// `cd <cwd> && claude --resume <id>`, nothing typed. Both values travel in env
-// and reach the fixed command as $2 and $3, never eval'd.
+// `cd <cwd> && claude --resume <id>`, or plain `claude` with sessionId null,
+// nothing typed. Both values travel in env and reach the fixed command as $2 and
+// $3, never eval'd.
 export const START_TOOL_ENV = 'DOBIUS_NEW_TAB_TOOL';
 export function loginShellSpawn(shell, startCommand, resume = null) {
   const plain = { args: ['-l'], env: {} };
-  const resuming = !!resume && /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(resume.sessionId)) && String(resume.cwd).startsWith('/') && !/[\x00-\x1F\x7F]/.test(resume.cwd);
+  const resuming = !!resume && (resume.sessionId === null || /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(resume.sessionId))) && String(resume.cwd).startsWith('/') && !/[\x00-\x1F\x7F]/.test(resume.cwd);
   if (!resuming && !NEW_TAB_TOOLS.some((x) => newTabCommand(x) && newTabCommand(x) === startCommand)) return plain;
   const name = String(shell).split('/').pop();
   // The tool name is read before the hooks (a hook or a project .env could set
@@ -149,7 +150,7 @@ export function loginShellSpawn(shell, startCommand, resume = null) {
     : `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV};`;
   // An and-list, not case/if: zsh forks a suspended compound command off as
   // its own job, so a Ctrl+Z inside one ended the whole wrapper (and the tab).
-  const launch = resuming ? '[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2";' : NEW_TAB_TOOLS.filter((x) => newTabCommand(x))
+  const launch = resuming ? '[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;' : NEW_TAB_TOOLS.filter((x) => newTabCommand(x))
     .map((x) => `[[ $1 == ${x} ]] && ${newTabCommand(x)};`).join(' ');
   let run;
   if (name === 'zsh') {
@@ -168,7 +169,7 @@ export function loginShellSpawn(shell, startCommand, resume = null) {
   }
   const script = `trap : INT; ${run} exec ${shQuote(shell)} -l`;
   const env = resuming
-    ? { [START_TOOL_ENV]: 'resume', [`${START_TOOL_ENV}_ID`]: resume.sessionId, [`${START_TOOL_ENV}_CWD`]: resume.cwd }
+    ? { [START_TOOL_ENV]: resume.sessionId === null ? 'fresh' : 'resume', [`${START_TOOL_ENV}_ID`]: resume.sessionId ?? '', [`${START_TOOL_ENV}_CWD`]: resume.cwd }
     : { [START_TOOL_ENV]: startCommand };
   return { args: ['-l', '-i', '-c', script], env };
 }

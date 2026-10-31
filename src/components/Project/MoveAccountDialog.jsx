@@ -27,11 +27,11 @@ export default function MoveAccountDialog({ tabId, onClose }) {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [load, onClose]);
 
-  const move = async (t, ids, allowBusy) => {
+  const move = async (t, ids, single) => {
     moving.current = true;
     setBusy(true);
     setError('');
-    const r = await useStore.getState().moveTabsToAccount(ids, t.isDefault ? null : t.id, t.label, { allowBusy })
+    const r = await useStore.getState().moveTabsToAccount(ids, t.isDefault ? null : t.id, t.label, { single })
       .catch((err) => ({ moved: 0, skipped: [], failed: [{ label: 'Not moved', reason: err?.message || String(err) }] }));
     moving.current = false;
     setBusy(false);
@@ -92,12 +92,12 @@ export default function MoveAccountDialog({ tabId, onClose }) {
                   ? <>
                       {orderedWindows(u.windows).map(([name, w]) => (
                         <span key={name} style={{ marginRight: 10 }}>
-                          {windowLabel(name)} <span style={{ color: barColor(w.used) }}>{Math.round(w.used)}%</span>
+                          {windowLabel(name)} {w ? <span style={{ color: barColor(w.used) }}>{Math.round(w.used)}%</span> : 'Unknown'}
                         </span>
                       ))}
                       <span>{u.headroom}% headroom, reported {ago(u.ageMs)}</span>
                     </>
-                  : <span>Usage unknown{u?.lastReportedAt ? ` (last report ${ago(u.ageMs)})` : ': no session has reported on it yet'}</span>}
+                  : <span>Usage unknown: no session has reported on it yet</span>}
               </div>
               {t.refusal && <div className="text-xs mt-1" style={{ color: '#f87171' }}>{t.refusal}</div>}
             </div>

@@ -15,7 +15,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   emptyHistory, sanitizeHistory, updateHistory, usageForKeys, accountKeyRows, moveRefusal,
-  rankTargets, tabBusy, noteLogin, moveBlock, UNKNOWN_LOGIN, STALE_MS,
+  rankTargets, tabBusy, noteLogin, moveBlock, limitMenuOn, trustPromptOn, UNKNOWN_LOGIN, STALE_MS,
 } from './account-headroom.js';
 
 const SAVE_EVERY_MS = 30_000;
@@ -27,6 +27,7 @@ const VERIFY_MS = 45_000;
 const POLL_MS = 1000;
 // Older than the longest window a usage record says nothing.
 const RECORD_MAX_AGE_MS = 8 * 24 * 3600_000;
+const PRUNE_EVERY_MS = 3600_000;
 
 // Could a restart lose unsent text? A box that cannot be read (a menu is open)
 // always could: guessing "empty" is what loses a draft (known limit 8).
@@ -77,6 +78,7 @@ export function createHeadroomService(d) {
   let lastRecords = [];
   // One move at a time, across every window.
   let moving = false;
+  let lastPrune = 0;
 
   async function history() {
     if (hist) return hist;
@@ -104,6 +106,10 @@ export function createHeadroomService(d) {
 
   async function sample() {
     const h = await history();
+    if (d.now() - lastPrune > PRUNE_EVERY_MS) {
+      lastPrune = d.now();
+      await d.pruneRecords(RECORD_MAX_AGE_MS).catch((err) => console.warn('[headroom] record cleanup failed:', err?.message || err));
+    }
     const records = await d.readRecords(RECORD_MAX_AGE_MS);
     lastRecords = records;
     // Logins BEFORE new figures: a folder re-logged since the last look must not
@@ -148,6 +154,8 @@ export function createHeadroomService(d) {
       await Promise.all(['.credentials.json', '.config.json', '.claude.json'].map(async (name) => {
         const at = await d.realpath(path.join(r.dir, name)).catch(() => null);
         if (at && at !== path.join(r.real, name)) r.email = null;
+        // A hard link looks like the folder's own file, and realpath cannot tell.
+        if (at && name === '.credentials.json' && (await d.nlink(at).catch(() => 2)) > 1) r.email = null;
       }));
     }));
     const keysOf = new Map();
@@ -290,13 +298,6 @@ export function createHeadroomService(d) {
     };
   }
 
-  async function draftIn(tabId) {
-    try {
-      const sc = await d.screen(tabId);
-      return sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes)) : true;
-    } catch { return true; }
-  }
-
   // What is in a tab right now, for the dialog's warning and for Move all.
   async function tabInfo(tab, scan) {
     const tabId = tab.id;
@@ -315,7 +316,12 @@ export function createHeadroomService(d) {
       if (presence?.sessionId) {
         // Resumed where it runs (a worktree, a subfolder), not at the project root.
         const cwd = await d.processCwd(info.pid).catch(() => null);
-        session = { sessionId: presence.sessionId, project: cwd && d.isDir(cwd) ? cwd : null };
+        session = {
+          sessionId: presence.sessionId,
+          project: cwd && d.isDir(cwd) ? cwd : null,
+          // A Claude that never got a message has no transcript to resume.
+          hasTranscript: cwd ? await d.hasTranscript(presence.sessionId, cwd).catch(() => true) : true,
+        };
       }
       override = await d.processAuthOverride(info.pid);
     }
@@ -325,13 +331,15 @@ export function createHeadroomService(d) {
     if (!info) running = (await d.process(tabId).catch(() => 'unknown')) ? 'other' : 'shell';
     else if (info.soleChild === false) running = 'other';
     const act = d.activity(tabId);
+    const sc = info ? await d.screen(tabId).catch(() => null) : null;
+    const limited = !!sc && limitMenuOn(sc.lines);
     return {
       tabId, running, session, override,
-      busy: tabBusy(act, d.now(), presence?.status),
+      busy: !limited && tabBusy(act, d.now(), presence?.status),
       status: act?.status || null,
       // Unsent text in Claude's box, or input the window still holds (an image
       // paste being saved): a respawn would throw it away.
-      draft: d.inputHeld(tabId) || (info ? await draftIn(tabId) : false),
+      draft: d.inputHeld(tabId) || (info && !limited ? (sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes)) : true) : false),
       pid: info?.pid ?? null,
       inputSeq,
     };
@@ -343,7 +351,7 @@ export function createHeadroomService(d) {
     await sample();
     const [rows, scan] = await Promise.all([accountRows(), readScan()]);
     const { pid, ...info } = await tabInfo(tab, scan);
-    info.hardBlock = moveBlock(info, { allowBusy: true });
+    info.hardBlock = moveBlock(info, { allowBusy: true, allowDraft: true });
     const source = sourceOf(tab, rows, pid, scan);
     return { ok: true, source: { label: source.label, email: source.email }, targets: candidatesFor(source, rows, d.now()), tab: info };
   }
@@ -365,7 +373,7 @@ export function createHeadroomService(d) {
       out.push({
         ...info,
         block: moveBlock(info),
-        hardBlock: moveBlock(info, { allowBusy: true }),
+        hardBlock: moveBlock(info, { allowBusy: true, allowDraft: true }),
         refusal: target ? rowRefusal(source, target) : 'that account no longer exists',
       });
     }
@@ -376,14 +384,14 @@ export function createHeadroomService(d) {
   const pinOf = (r) => ({ id: r.isDefault ? null : r.id });
   const named = (r) => (r.email ? `${r.label} (${r.email})` : r.label);
 
-  async function moveOne(tabId, targetId, { allowBusy, cannotRestart, restart }) {
+  async function moveOne(tabId, targetId, { allowBusy, allowDraft, cannotRestart, restart }) {
     const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
     const tab = d.tabs().find((t) => t.id === tabId);
     if (!tab) return fail('the tab has no terminal running');
     await sample();
     const scan = await readScan();
     const info = await tabInfo(tab, scan);
-    const block = moveBlock(info, { allowBusy });
+    const block = moveBlock(info, { allowBusy, allowDraft });
     if (block) return fail(block);
     // Read last, so the target's login is as fresh as it can be when Claude stops.
     const rows = await accountRows();
@@ -396,21 +404,24 @@ export function createHeadroomService(d) {
     const pin = pinOf(target);
     const cannot = cannotRestart(tabId, pin);
     if (cannot) return fail(cannot);
-    const { sessionId, project } = info.session;
+    const { project, hasTranscript } = info.session;
+    // No transcript means nothing to resume: a plain Claude starts on the target.
+    const sessionId = hasTranscript ? info.session.sessionId : null;
     const manual = `The conversation is safe: run claude --resume ${sessionId} in ${project}, in this tab.`;
     try { d.stop(info.pid); } catch (err) { if (err?.code !== 'ESRCH') return fail(`Claude could not be stopped: ${err.message}`); }
     // Everything above left the tab untouched. From here it only ever reports.
     const stopBy = d.now() + STOP_MS;
     while (d.alive(info.pid) && d.now() < stopBy) await d.sleep(100);
     if (d.alive(info.pid)) return fail(`Claude did not stop within ${STOP_MS / 1000} seconds, so nothing else was changed. It may still be closing.`);
-    if (!(await d.claim(sessionId, tabId))) return fail(`Claude stopped, but something else is resuming that conversation, so this tab was not restarted. ${manual}`);
+    if (sessionId && !(await d.claim(sessionId, tabId))) return fail(`Claude stopped, but something else is resuming that conversation, so this tab was not restarted. ${manual}`);
+    const abort = (error) => { if (sessionId) d.release(sessionId, tabId); return fail(error); };
     // Input since it was judged may be a program started in the shell Claude left.
-    if (d.inputSeq(tabId) !== info.inputSeq) return fail(`Claude stopped, but something was typed in the tab, so it was not restarted. ${manual}`);
+    if (d.inputSeq(tabId) !== info.inputSeq) return abort(`Claude stopped, but something was typed in the tab, so it was not restarted. ${manual}`);
     // The shell's folder may have been deleted since it started.
     const cwd = d.isDir(tab.cwd) ? tab.cwd : project;
     try {
-      if (!restart(tabId, cwd, pin, { sessionId, cwd: project })) return fail(`Claude stopped, but the tab could not restart on ${target.label}. ${manual}`);
-    } catch (err) { return fail(`Claude stopped, but the tab could not restart on ${target.label}: ${err.message}. ${manual}`); }
+      if (!restart(tabId, cwd, pin, { sessionId, cwd: project })) return abort(`Claude stopped, but the tab could not restart on ${target.label}. ${manual}`);
+    } catch (err) { return abort(`Claude stopped, but the tab could not restart on ${target.label}: ${err.message}. ${manual}`); }
     return verifyMove(tabId, sessionId, target, rows, pin, manual);
   }
 
@@ -422,15 +433,19 @@ export function createHeadroomService(d) {
     let started = false;
     while (d.now() < end) {
       const info = await d.claudeInfo(tabId).catch(() => null);
+      if (started && !info) return { ok: false, pin, error: `Claude started on ${target.label} and exited. The tab is a shell there. ${manual}` };
       if (info) {
         started = true;
+        // Nothing can be confirmed until a person answers this, behind the dialog.
+        const sc = await d.screen(tabId).catch(() => null);
+        if (sc && trustPromptOn(sc.lines)) return { ok: false, pin, error: `Claude on ${target.label} is asking whether to trust this folder. Answer it in the tab; the conversation carries on after that.` };
         const g = groupOf(await readScan(), info.pid);
         if (g && g.key !== target.key) {
           const actual = rows.find((r) => r.key === g.key);
           return { ok: false, pin: actual ? pinOf(actual) : null, error: `Claude resumed on ${actual ? named(actual) : g.configDir}, not ${target.label}. Something in the shell's startup files sets CLAUDE_CONFIG_DIR, so this tab stays there.` };
         }
         const seen = g ? await d.presence(info, g.envUnset ? null : g.configDir).catch(() => null) : null;
-        if (seen?.sessionId && seen.sessionId !== sessionId) return { ok: false, pin, error: `Claude is on ${target.label}, but running conversation ${seen.sessionId}, not ${sessionId}. ${manual}` };
+        if (sessionId && seen?.sessionId && seen.sessionId !== sessionId) return { ok: false, pin, error: `Claude is on ${target.label}, but running conversation ${seen.sessionId}, not ${sessionId}. ${manual}` };
         if (seen?.sessionId) {
           const override = await d.processAuthOverride(info.pid);
           if (override) {

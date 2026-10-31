@@ -2,8 +2,7 @@ import './dev-userdata.js'; // MUST stay first: userData override before config-
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor } from 'electron';
-import { spawn, execFile } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -23,22 +22,23 @@ import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending a
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities, accountMetadata, loginState, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
+import { authOverrideIn } from './account-headroom.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
 import { resolveAccountEnvForCwd, resolveClaudeAccountPin } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
-import { scanClaudeProcesses } from './claude-process-scan.js';
+import { scanClaudeProcesses, processEnvironment } from './claude-process-scan.js';
 import { createWaitingReader, boundedIds, activityRow, freshenRows, presenceOf } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
-  readUsageRecords,
+  readUsageRecords, pruneUsageRecords,
   planStatusLineInstall, planStatusLineRemove, ownsStatusLine, chainFromScript, scriptPathFromCommand, MODEL_LINE_MARKER,
 } from './claude-usage.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, trimToEscapeBoundary } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, trimToEscapeBoundary } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
@@ -2278,17 +2278,9 @@ const AUTH_OVERRIDE_NAMES = [
   'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
   'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BASE_URL',
 ];
-// Which of those a running process carries, by name only, from `ps eww`. null
-// when none, 'unreadable' when its environment cannot be read. A token set
-// inside Claude's own settings files never shows here (docs/account-usage-and-move.md).
-const execFileP = promisify(execFile);
-async function processAuthOverride(pid) {
-  try {
-    const { stdout } = await execFileP('/bin/ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 1500, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
-    if (!stdout.trim()) return 'unreadable';
-    return AUTH_OVERRIDE_NAMES.find((n) => new RegExp(`(?:^|\\s)${n}=\\S`).test(stdout)) || null;
-  } catch { return 'unreadable'; }
-}
+// A token set inside Claude's own settings files never shows here
+// (docs/account-usage-and-move.md).
+const processAuthOverride = async (pid) => authOverrideIn(await processEnvironment(pid), AUTH_OVERRIDE_NAMES, os.homedir());
 function setupHeadroomHandlers() {
   const ownsTab = (event, tabId) => typeof tabId === 'string' && TERMINAL_ID_RE.test(tabId) && ownsTerminal(event.sender.id, tabId);
   const userData = app.getPath('userData');
@@ -2303,9 +2295,12 @@ function setupHeadroomHandlers() {
     cliDefaultDir: () => defaultClaudeDir(),
     keyFor: (dir) => { try { return keychainServiceFor(dir); } catch { return null; } },
     login: (dir) => loginState(dir),
+    nlink: (p) => fs.promises.stat(p).then((st) => st.nlink),
     stop: (pid) => process.kill(pid, 'SIGHUP'), // what closing its PTY would send
     alive: (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } },
     claim: (sessionId, tabId) => claimSessionResume(sessionId, tabId),
+    release: (sessionId, tabId) => releaseSessionResume(sessionId, tabId),
+    hasTranscript: async (sessionId, cwd) => (await getSessionSize(sessionId, cwd)) !== null,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     processAuthOverride,
     isDir: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
@@ -2321,6 +2316,7 @@ function setupHeadroomHandlers() {
     },
     authOverride: () => AUTH_OVERRIDE_NAMES.find((k) => typeof process.env[k] === 'string' && process.env[k].trim()) || null,
     readRecords: (maxAgeMs) => readUsageRecords(userData, maxAgeMs),
+    pruneRecords: (maxAgeMs) => pruneUsageRecords(userData, maxAgeMs),
     scan: () => scanClaudeProcesses(),
     tabs: () => listTerminals(),
     activity: (id) => terminalStatus.statusFor(id),
@@ -2366,11 +2362,11 @@ function setupHeadroomHandlers() {
     };
     const restart = (id, cwd, pin, resume) => {
       if (cannotRestart(id, pin)) return false;
-      setSessionTabLink(resume.sessionId, id, resume.cwd);
+      if (resume.sessionId) setSessionTabLink(resume.sessionId, id, resume.cwd);
       createTerminal(id, cwd, sender, resolveAccountEnvForCwd(cwd, { claudeAccountPin: pin }), { resume });
       return true;
     };
-    try { return await headroom.move(tabId, targetId, { allowBusy: opts?.allowBusy === true, cannotRestart, restart }); }
+    try { return await headroom.move(tabId, targetId, { allowBusy: opts?.allowBusy === true, allowDraft: opts?.allowDraft === true, cannotRestart, restart }); }
     catch (err) { return { ok: false, error: err.message }; }
   });
   // Sampling keeps pace honest while no panel is open. unref'd: never keeps the

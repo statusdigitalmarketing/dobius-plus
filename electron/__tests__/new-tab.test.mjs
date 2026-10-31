@@ -189,6 +189,15 @@ test('a resume runs exactly claude --resume <id> in that folder, nothing typed o
       assert.equal(r.stdout.trim(), `RAN --resume abc-123 IN ${real}`, shell);
       assert.equal(fs.existsSync(path.join(dir, 'PWNED')) || fs.existsSync(path.join(cwd, 'PWNED')), false);
     }
+    // No conversation to resume: plain claude in that folder.
+    for (const shell of ['/bin/zsh', '/bin/bash']) {
+      if (!fs.existsSync(shell)) continue;
+      const spawn = loginShellSpawn(shell, null, { sessionId: null, cwd });
+      assert.equal(spawn.env.DOBIUS_NEW_TAB_TOOL, 'fresh');
+      const script = spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+      const r = spawnSync(shell, ['-c', script], { cwd: dir, env: { ...base, ...spawn.env }, encoding: 'utf8', timeout: 10000, input: '' });
+      assert.equal(r.stdout.trim(), `RAN  IN ${real}`, shell);
+    }
     // A bad id or folder is no resume at all.
     for (const bad of [{ sessionId: 'x; rm -rf ~', cwd: '/tmp' }, { sessionId: 'abc', cwd: 'relative' }, { sessionId: 'abc', cwd: '/tmp/a\nb' }, { sessionId: '', cwd: '/tmp' }]) {
       assert.deepEqual(loginShellSpawn('/bin/zsh', null, bad), { args: ['-l'], env: {} }, JSON.stringify(bad));

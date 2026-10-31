@@ -9,7 +9,9 @@ import path from 'node:path';
 import { createHeadroomService, draftOnScreen, writePrivateFileSync } from '../account-headroom-service.js';
 import { keychainServiceFor } from '../account-identity.js';
 import { resolveClaudeAccountPin } from '../spawn-account-env.js';
-import { readUsageRecords } from '../claude-usage.js';
+import { readUsageRecords, pruneUsageRecords } from '../claude-usage.js';
+import { processEnvironment } from '../claude-process-scan.js';
+import { spawn as spawnChild } from 'node:child_process';
 import { renderScreenLines } from '../screen-render.js';
 import { promptBoxText } from '../bridge-open-tab.js';
 
@@ -62,7 +64,7 @@ function world(over = {}) {
     defaultEnvUnset: () => w.defaultEnvUnset ?? true,
     cliDefaultDir: () => HOMEC,
     keyFor: (dir) => keychainServiceFor(dir),
-    login: async (dir) => w.logins[dir] || 'in',
+    login: async (dir) => { w.onLogin?.(); return w.logins[dir] || 'in'; },
     metadata: async (dir, opts) => {
       const e = w.metaByCall ? w.metaByCall(dir, opts) : w.emails[path.normalize(dir).replace(/\/$/, '')];
       return e === 'UNREADABLE' ? { state: 'unreadable', email: null } : (e ? { state: 'address', email: e } : { state: 'none', email: null });
@@ -86,6 +88,10 @@ function world(over = {}) {
     stop: (pid) => { w.events.push(`stop ${pid}`); w.onStop?.(); if (w.stopThrows) throw w.stopThrows; },
     alive: () => w.stillAlive === true,
     claim: async (sid) => { w.events.push(`claim ${sid}`); return w.claimOk !== false; },
+    release: (sid) => { w.events.push(`release ${sid}`); },
+    hasTranscript: async () => w.transcript !== false,
+    nlink: async (p) => w.nlinks?.[p] ?? 1,
+    pruneRecords: async (age) => { w.pruned = (w.pruned || 0) + 1; w.prunedAge = age; return 0; },
     sleep: async (ms) => { w.now += ms; w.onSleep?.(); },
     processAuthOverride: async () => w.override || null,
     isDir: (p) => p !== w.goneDir,
@@ -93,7 +99,7 @@ function world(over = {}) {
     processCwd: async () => w.cwd === undefined ? '/proj/worktree' : w.cwd,
     inputSeq: () => w.inputSeq,
     inputHeld: () => w.held,
-    screen: async () => { w.onScreen?.(); return w.noScreen ? null : { lines: [], modes: {} }; },
+    screen: async () => { w.onScreen?.(); return w.noScreen ? null : { lines: w.lines || [], modes: {} }; },
     promptBox: () => w.box,
   });
   return w;
@@ -427,7 +433,7 @@ await check('same login, unknown identity, a draft and typing are all refused be
   untouched(w);
   w = world({ held: false });
   const held = moveOpts(w);
-  w.onScreen = () => { w.held = true; };
+  w.onLogin = () => { w.held = true; };
   assert.match((await w.svc.move(TAB, 'b', { ...held, allowBusy: true })).error, /typed/);
   untouched(w);
   w = world({ cannotRestart: 'that account is gone, or two accounts share its id' });
@@ -446,7 +452,78 @@ await check('same login, unknown identity, a draft and typing are all refused be
 
 await check('a warned person can move a tab with a draft, Move all cannot', async () => {
   const w = world({ box: 'half a thought' });
-  assert.equal((await moveB(w, { allowBusy: true })).ok, true);
+  assert.match((await moveB(w, { allowBusy: true })).error, /unsent text/);
+  assert.equal(w.events.length, 0);
+  const o = { ...moveOpts(w), allowDraft: true };
+  assert.equal((await w.svc.move(TAB, 'b', o)).ok, true);
+});
+
+await check('a tab on Claude\'s real limit menu is neither busy nor a draft, so Move all takes it', async () => {
+  const raw = fs.readFileSync(new URL('./fixtures/limit-menu-2.1.316-raw.bin', import.meta.url));
+  const lines = await renderScreenLines(new Uint8Array(raw), { cols: 120 });
+  const w = world({ lines, presence: { sessionId: 'sess-now', status: 'waiting' }, box: null, activity: { status: 'working', lastActivityAt: T0 } });
+  const [c] = await w.svc.moveCandidates([TAB], 'b');
+  assert.equal(c.busy, false);
+  assert.equal(c.draft, false);
+  assert.equal(c.block, null);
+  assert.equal((await moveB(w)).ok, true);
+  // Without the menu, the same record is a dialog and a box that cannot be read.
+  const x = world({ presence: { sessionId: 'sess-now', status: 'waiting' }, box: null });
+  const [d] = await x.svc.moveCandidates([TAB], 'b');
+  assert.equal(d.busy, true);
+  assert.equal(d.draft, true);
+});
+
+await check('a Claude with no transcript starts plain on the target, unclaimed, by account alone', async () => {
+  const w = world({ transcript: false, presenceAfter: { sessionId: 'a-new-id', status: 'idle' } });
+  const r = await moveB(w);
+  assert.deepEqual(r, { ok: true, pin: { id: 'b' } });
+  assert.deepEqual(w.events, ['stop 100', `restart ${TAB} /proj {"id":"b"} null /proj/worktree`]);
+  const x = world({ transcript: false, presenceAfter: { sessionId: 'a-new-id', status: 'idle' }, groupsAfter: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [200] }] });
+  assert.match((await moveB(x)).error, /resumed on A/);
+});
+
+await check('the real trust prompt on the target ends the wait at once and says what to do', async () => {
+  const raw = fs.readFileSync(new URL('./fixtures/trust-prompt-2.1.316-raw.bin', import.meta.url));
+  const lines = await renderScreenLines(new Uint8Array(raw), { cols: 120 });
+  const w = world();
+  const o = moveOpts(w);
+  const restart = o.restart;
+  o.restart = (...a) => { w.lines = lines; return restart(...a); };
+  const t0 = w.now;
+  const r = await w.svc.move(TAB, 'b', o);
+  assert.match(r.error, /asking whether to trust this folder/);
+  assert.deepEqual(r.pin, { id: 'b' });
+  assert.equal(w.now - t0 < 2000, true, 'no long wait');
+});
+
+await check('Claude exiting right after it started is reported at once', async () => {
+  const w = world();
+  const o = moveOpts(w);
+  const restart = o.restart;
+  o.restart = (...a) => { const ok = restart(...a); w.presence = null; w.onSleep = () => { w.claude = null; }; return ok; };
+  const t0 = w.now;
+  const r = await w.svc.move(TAB, 'b', o);
+  assert.match(r.error, /started on B and exited.*claude --resume sess-now/);
+  assert.equal(w.now - t0 < 5000, true, 'no long wait');
+});
+
+await check('every abort after the claim gives it back', async () => {
+  let w = world();
+  w.onStop = () => { w.inputSeq += 1; };
+  await moveB(w);
+  assert.deepEqual(w.events, ['stop 100', 'claim sess-now', 'release sess-now']);
+  w = world({ restartOk: false });
+  await moveB(w);
+  assert.equal(w.events.at(-1), 'release sess-now');
+  w = world({ restartThrows: true });
+  await moveB(w);
+  assert.equal(w.events.at(-1), 'release sess-now');
+});
+
+await check('a hard-linked credential file makes the login unknown', async () => {
+  const w = world({ nlinks: { [`${DIR_B}/.credentials.json`]: 2 } });
+  assert.match(target(await w.svc.moveTargets(TAB), 'B').refusal, /which login that account is/);
 });
 
 await check('.zshrc putting Claude back on its old folder is a failure naming it, and the pin says so', async () => {
@@ -671,6 +748,56 @@ await check('a tab pin names exactly one Claude account, or Default, or nothing'
 });
 
 // ---- records ----
+
+await check('records past the age limit are deleted hourly, and stray temp files, nothing else', async () => {
+  const w = world();
+  await w.svc.tick();
+  await w.svc.tick();
+  assert.equal(w.pruned, 1);
+  assert.equal(w.prunedAge, 8 * 86400_000);
+  w.now += 3600_001;
+  await w.svc.tick();
+  assert.equal(w.pruned, 2);
+  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prune-'));
+  const dir = path.join(ud, 'usage');
+  fs.mkdirSync(dir);
+  const old = (Date.now() - 10 * 86400_000) / 1000;
+  for (const n of ['old.json', 'fresh.json', '.tmp.s1.123', 'keep.txt']) fs.writeFileSync(path.join(dir, n), 'x');
+  for (const n of ['old.json', '.tmp.s1.123', 'keep.txt']) fs.utimesSync(path.join(dir, n), old, old);
+  assert.equal(await pruneUsageRecords(ud, 8 * 86400_000), 2);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['fresh.json', 'keep.txt']);
+  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prunereal-'));
+  fs.writeFileSync(path.join(real, 'x.json'), 'x');
+  fs.utimesSync(path.join(real, 'x.json'), old, old);
+  const ud2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prunelink-'));
+  fs.symlinkSync(real, path.join(ud2, 'usage'));
+  assert.equal(await pruneUsageRecords(ud2, 8 * 86400_000), 0, 'a linked folder is left alone');
+});
+
+await check('2,000 records never open 2,000 files at once', async () => {
+  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-many-'));
+  const dir = path.join(ud, 'usage');
+  fs.mkdirSync(dir);
+  for (let i = 0; i < 2000; i += 1) fs.writeFileSync(path.join(dir, `s${i}.json`), `DOBIUS1 1\n/d\n${JSON.stringify({ session_id: `s${i}` })}`);
+  const fsp = (await import('node:fs/promises')).default;
+  const open = fsp.open;
+  let now = 0; let peak = 0;
+  fsp.open = async (...a) => { now += 1; peak = Math.max(peak, now); const h = await open(...a); const close = h.close.bind(h); h.close = () => { now -= 1; return close(); }; return h; };
+  try { assert.equal((await readUsageRecords(ud)).length, 2000); } finally { fsp.open = open; }
+  assert.equal(peak <= 16, true, `peak ${peak}`);
+});
+
+await check('a process environment leaves out its argv, so a prompt naming a key is not a key', async () => {
+  // Not a system binary: macOS hides the environment of those from ps.
+  const sh = spawnChild(process.execPath, ['-e', 'setTimeout(() => {}, 5000)', 'ANTHROPIC_API_KEY=example'], { env: { PATH: '/bin', HOME: '/h' } });
+  await new Promise((r) => setTimeout(r, 300));
+  const e1 = await processEnvironment(sh.pid);
+  sh.kill();
+  assert.equal(typeof e1, 'string');
+  assert.match(e1, /HOME=\/h/);
+  assert.equal(e1.includes('ANTHROPIC_API_KEY'), false);
+  assert.equal(await processEnvironment(999999), null);
+});
 
 await check('records older than the longest window are not read', async () => {
   const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-records-'));

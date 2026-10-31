@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   emptyHistory, sanitizeHistory, updateHistory, noteLogin, pruneHistory, UNKNOWN_LOGIN, paceFor, forecastFor, usageForKeys,
-  accountKeyRows, moveRefusal, moveBlock, rankTargets, tabBusy,
+  accountKeyRows, moveRefusal, moveBlock, rankTargets, tabBusy, authOverrideIn, limitMenuOn, trustPromptOn,
 } from '../account-headroom.js';
 import { keychainServiceFor } from '../account-identity.js';
 
@@ -179,15 +179,19 @@ check('forecast runs to 100 at the current pace, capped by the reset', () => {
   assert.deepEqual(forecastFor({ p: 50, pace: null, seenAt: T0, resetsAt }), { unknown: true });
 });
 
-check('an account with no live five-hour figure is unknown, never 0%', () => {
+check('each window stands on its own: weekly known with no five-hour figure, and nothing reads 0%', () => {
   const h = emptyHistory();
-  updateHistory(h, [rec(KEY_A, T0, undefined, 40)], T0); // weekly only
+  updateHistory(h, [rec(KEY_A, T0, undefined, 40)], T0); // weekly only, as real records often are
   const u = usageForKeys(h, [KEY_A], T0 + MIN);
-  assert.equal(u.known, false);
-  assert.equal(u.headroom, null);
+  assert.equal(u.known, true);
+  assert.equal(u.windows.five_hour, undefined);
+  assert.equal(u.windows.seven_day.used, 40);
+  assert.equal(u.headroom, 60);
+  assert.equal(u.ageMs, MIN);
   const none = usageForKeys(h, [KEY_B], T0);
   assert.equal(none.known, false);
   assert.equal(none.lastReportedAt, null);
+  assert.equal(none.headroom, null);
 });
 
 check('a lower figure republished later does not refresh an older, higher one', () => {
@@ -261,9 +265,35 @@ check('a move needs one child Claude, its conversation and its folder; a warned 
   assert.match(moveBlock({ ...ok, busy: true }), /middle of a turn/);
   assert.match(moveBlock({ ...ok, busy: true, status: 'needs' }), /question/);
   assert.match(moveBlock({ ...ok, draft: true }), /unsent text/);
-  assert.equal(moveBlock({ ...ok, busy: true, draft: true }, { allowBusy: true }), null);
+  assert.equal(moveBlock({ ...ok, busy: true, draft: true }, { allowBusy: true, allowDraft: true }), null);
+  assert.match(moveBlock({ ...ok, busy: true, draft: true }, { allowBusy: true }), /unsent text/, 'told about the turn, not about a draft that appeared since');
+  assert.match(moveBlock({ ...ok, busy: true, draft: true }, { allowDraft: true }), /middle of a turn/);
   assert.match(moveBlock({ ...ok, override: 'ANTHROPIC_API_KEY' }, { allowBusy: true }), /ANTHROPIC_API_KEY is set/);
   assert.match(moveBlock({ ...ok, override: 'unreadable' }, { allowBusy: true }), /could not be read/);
+});
+
+check('an auth override is read from the environment only, and a HOME other than ours counts', () => {
+  const names = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
+  assert.equal(authOverrideIn(null, names, '/Users/x'), 'unreadable');
+  assert.equal(authOverrideIn(' PATH=/bin HOME=/Users/x USER=x', names, '/Users/x'), null);
+  assert.equal(authOverrideIn(' PATH=/bin HOME=/Users/x', names, '/Users/x'), null);
+  assert.equal(authOverrideIn(' PATH=/bin', names, '/Users/x'), null);
+  assert.equal(authOverrideIn(' ANTHROPIC_API_KEY=abc HOME=/Users/x', names, '/Users/x'), 'ANTHROPIC_API_KEY');
+  assert.equal(authOverrideIn(' ANTHROPIC_API_KEY= HOME=/Users/x', names, '/Users/x'), null, 'set empty signs nothing in');
+  assert.equal(authOverrideIn(' HOME=/Users/x/.claude-profiles/b USER=x', names, '/Users/x'), 'HOME');
+  assert.equal(authOverrideIn(' HOME=/Users/xy USER=x', names, '/Users/x'), 'HOME');
+  assert.equal(authOverrideIn(' HOME=/Users/x more USER=x', names, '/Users/x'), 'HOME');
+});
+
+check('Claude\'s limit menu and trust prompt are told from anything else near the bottom', () => {
+  const pad = Array(30).fill('');
+  assert.equal(limitMenuOn([...pad, 'What do you want to do?', '', '❯ 1. Stop and wait for limit to reset', '  3. Switch to usage credits', 'Enter to confirm']), true);
+  assert.equal(limitMenuOn([...pad, '  ⎿  You\'ve hit your weekly limit · resets Nov 4', '❯ ']), false, 'the line alone, back at the prompt');
+  assert.equal(limitMenuOn([...pad, 'What do you want to do?', '❯ 1. Yes', '  2. No']), false, 'some other question');
+  assert.equal(limitMenuOn(['What do you want to do?', '1. Stop and wait for limit to reset', ...Array(20).fill('x')]), false, 'scrolled away');
+  assert.equal(limitMenuOn(null), false);
+  assert.equal(trustPromptOn([...pad, '❯ No, exit', '  Yes, I trust this folder', 'Enter to confirm']), true);
+  assert.equal(trustPromptOn([...pad, '❯ ']), false);
 });
 
 const cand = (id, known, headroom, lastReportedAt = T0, extra = {}) => ({

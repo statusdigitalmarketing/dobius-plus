@@ -718,23 +718,27 @@ export const useStore = create((set, get) => ({
   // restarts the tab on that account and reports what is really running there.
   // The global active account is untouched. Resolves { moved, skipped, failed,
   // cancelled }, each entry { label, reason }.
-  // allowBusy: the dialog already warned about a turn or unsent text on this one
-  // tab. Without it those tabs are skipped and named, never interrupted.
-  moveTabsToAccount: async (tabIds, accountId, label = 'the chosen account', { allowBusy = false } = {}) => {
+  // single: the one tab the person picked, who is told about a turn or unsent
+  // text and may go ahead. Move all skips and names those tabs, never interrupts.
+  moveTabsToAccount: async (tabIds, accountId, label = 'the chosen account', { single = false } = {}) => {
     const api = window.electronAPI;
     const name = (id) => (get().terminalTabs.find((t) => t.id === id)?.label) || id;
+    // Read now, at the click: what the dialog showed may be out of date.
     const cands = (await api?.accountsMoveCandidates?.(tabIds, accountId)) || [];
-    const reason = (c) => c.refusal || (allowBusy ? c.hardBlock : c.block);
-    const ids = cands.filter((c) => !reason(c)).map((c) => c.tabId);
+    const reason = (c) => c.refusal || (single ? c.hardBlock : c.block);
+    const go = cands.filter((c) => !reason(c));
     const skipped = cands.filter(reason).map((c) => ({ label: name(c.tabId), reason: reason(c) }));
-    if (!ids.length) return { moved: 0, skipped, failed: [] };
+    if (!go.length) return { moved: 0, skipped, failed: [] };
     const left = skipped.length ? `\n\nLeft where they are:\n${skipped.map((x) => `${x.label}: ${x.reason}`).join('\n')}` : '';
-    const count = ids.length === 1 ? 'this tab' : `${ids.length} tabs`;
-    if (!window.confirm(`Restart ${count} on ${label} and resume the conversation? Whatever runs there now is stopped.${left}`)) return { moved: 0, skipped, failed: [], cancelled: true };
+    const loses = single ? `${go[0].busy ? ' Its turn in progress stops.' : ''}${go[0].draft ? ' The unsent text in its prompt is lost.' : ''}` : '';
+    const count = go.length === 1 ? 'this tab' : `${go.length} tabs`;
+    if (!window.confirm(`Restart ${count} on ${label} and resume the conversation, if there is one? Whatever runs there now is stopped.${loses}${left}`)) return { moved: 0, skipped, failed: [], cancelled: true };
     let moved = 0;
     const failed = [];
-    for (const tabId of ids) {
-      const r = await api.accountsMove(tabId, accountId, { allowBusy }).catch((err) => ({ ok: false, error: err?.message || String(err) }));
+    for (const c of go) {
+      const { tabId } = c;
+      // Only what the person was just told: main refuses anything newer.
+      const r = await api.accountsMove(tabId, accountId, { allowBusy: single && c.busy, allowDraft: single && c.draft }).catch((err) => ({ ok: false, error: err?.message || String(err) }));
       // The pin says what main found running, not what was asked for. Set at
       // once: a later tab's wait must not leave this one's saved account stale.
       if (r.pin !== undefined) {

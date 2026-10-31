@@ -22,6 +22,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { keychainServiceFor, defaultClaudeDir } from './account-identity.js';
 import { shQuote } from '../shared/sh-quote.js';
+import { mapLimit } from './data-utils.js';
 
 // Bumped when the on-disk record format changes, so a stale reporter left by an
 // older build is ignored rather than misparsed.
@@ -273,7 +274,8 @@ export async function readUsageRecords(userDataDir, maxAgeMs = Infinity, now = D
   let names;
   try { names = await fs.readdir(dir); } catch { return []; }
   const out = [];
-  await Promise.all(names.map(async (name) => {
+  // Bounded: thousands of records must not open thousands of files at once.
+  await mapLimit(names, 16, async (name) => {
     if (!name.endsWith('.json') || name.startsWith('.')) return; // .tmp.* is mid-write
     const file = path.join(dir, name);
     let fh;
@@ -290,8 +292,35 @@ export async function readUsageRecords(userDataDir, maxAgeMs = Infinity, now = D
       if (rec) out.push(rec);
     } catch { /* vanished or unreadable: it simply does not contribute */ }
     finally { await fh?.close().catch(() => {}); }
-  }));
+  });
   return out.sort((a, b) => b.receivedAt - a.receivedAt);
+}
+
+/**
+ * Delete records nobody has refreshed in `maxAgeMs` (one file per session is
+ * written forever) and temp files a killed reporter left behind. Only names this
+ * module writes, only inside our own real folder.
+ */
+export async function pruneUsageRecords(userDataDir, maxAgeMs, now = Date.now()) {
+  const dir = usageDirPath(userDataDir);
+  let names;
+  try {
+    if (!(await fs.lstat(dir)).isDirectory()) return 0;
+    names = await fs.readdir(dir);
+  } catch { return 0; }
+  let removed = 0;
+  await mapLimit(names, 16, async (name) => {
+    const tmp = /^\.tmp\.[A-Za-z0-9_-]+\.\d+$/.test(name);
+    if (!tmp && !/^[A-Za-z0-9_-]+\.json$/.test(name)) return;
+    const file = path.join(dir, name);
+    try {
+      const st = await fs.lstat(file);
+      if (!st.isFile() || now - st.mtimeMs < (tmp ? 3600_000 : maxAgeMs)) return;
+      await fs.unlink(file);
+      removed += 1;
+    } catch { /* vanished or not ours to remove */ }
+  });
+  return removed;
 }
 
 /** Is this settings value OUR reporter? Judged by the command, not the shape. */

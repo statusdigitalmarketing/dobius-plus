@@ -252,13 +252,13 @@ export function usageForKeys(hist, keys, now) {
       windows[name] = { used: p, resetsAt: ent.r, reportedAt: ent.seenAt, ageMs: Math.max(0, now - ent.seenAt), pace, forecast: forecastFor({ p, pace, seenAt: ent.seenAt, resetsAt: ent.r }) };
     }
   }
-  // Known only with a live five-hour figure: that is the window a limit
-  // usually hits first, and without it the weekly figure says nothing about
-  // whether the next message goes through. Its age is the five-hour figure's
-  // own: a weekly-only report must not make an old five-hour figure look fresh.
+  // Known with any live figure: real accounts often report only seven_day, and
+  // each window shows on its own (a missing one reads Unknown). The headline age
+  // is the five-hour figure's when there is one: a weekly-only report must not
+  // make an old five-hour figure look fresh.
   const list = Object.values(windows);
-  const known = !!windows.five_hour;
-  const lastReportedAt = known ? windows.five_hour.reportedAt : Math.max(0, ...list.map((w) => w.reportedAt));
+  const known = list.length > 0;
+  const lastReportedAt = windows.five_hour ? windows.five_hour.reportedAt : Math.max(0, ...list.map((w) => w.reportedAt));
   return {
     known,
     windows,
@@ -344,13 +344,34 @@ export function tabBusy(activity, now, presenceStatus = null) {
  * without all three it could not be resumed, so nothing is touched. allowBusy:
  * the person was warned about the turn or the unsent text on this tab.
  */
-export function moveBlock(info, { allowBusy = false } = {}) {
+export function moveBlock(info, { allowBusy = false, allowDraft = false } = {}) {
   if (info.running === 'shell') return 'no Claude is running in it';
   if (info.running !== 'claude') return 'something other than one Claude runs in its shell';
   if (!info.session?.sessionId) return 'its conversation could not be identified';
   if (!info.session.project) return 'the folder its conversation runs in could not be read';
   if (info.override) return info.override === 'unreadable' ? 'its environment could not be read, so its login cannot be named' : `${info.override} is set in its environment, so its login cannot be named`;
-  if (allowBusy) return null;
-  if (info.busy) return info.status === 'needs' ? 'waiting on a question' : 'in the middle of a turn';
-  return info.draft ? 'has unsent text in the prompt' : null;
+  if (info.busy && !allowBusy) return info.status === 'needs' ? 'waiting on a question' : 'in the middle of a turn';
+  return info.draft && !allowDraft ? 'has unsent text in the prompt' : null;
 }
+
+/**
+ * What a process's environment text (claude-process-scan's processEnvironment,
+ * no argv) says would stop its account folder deciding its login: one of `names`
+ * set, or a HOME other than `home` (the credential key is derived from HOME).
+ * By name only; 'unreadable' with no text to read.
+ */
+export function authOverrideIn(env, names, home) {
+  if (typeof env !== 'string') return 'unreadable';
+  const named = names.find((n) => new RegExp(`(?:^|\\s)${n}=\\S`).test(env));
+  if (named) return named;
+  const value = env.match(/(?:^|\s)HOME=(.*)/)?.[1];
+  if (value === undefined || value === home) return null;
+  return value.startsWith(home) && /^\s+[A-Za-z_][A-Za-z0-9_]*=/.test(value.slice(home.length)) ? null : 'HOME';
+}
+
+// Claude's own screens, as drawn by 2.1.316 (fixtures: limit-menu and
+// trust-prompt). The limit menu is why a tab moves at all, so it is neither a
+// turn nor a draft even though Claude's record says a dialog is open.
+const bottomRows = (lines) => (Array.isArray(lines) ? lines : []).map(String).filter((l) => l.trim()).slice(-12).join('\n');
+export const limitMenuOn = (lines) => /What do you want to do\?[\s\S]*(limit to reset|usage credits)/.test(bottomRows(lines));
+export const trustPromptOn = (lines) => /Yes, I trust this folder/.test(bottomRows(lines));
