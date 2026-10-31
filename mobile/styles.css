@@ -42,6 +42,9 @@ body {
 }
 
 .screen.center { align-items: center; justify-content: center; }
+/* Chat only fills what the keyboard leaves. Not the terminal: resizing it would
+ * resize the PTY and redraw Claude each time the keyboard opens. */
+.screen:has(.chat-view) { height: var(--app-height, 100dvh); }
 
 .muted { color: var(--dim); }
 .small { font-size: 11px; }
@@ -867,15 +870,18 @@ button.primary:disabled { opacity: 0.4; }
  * options as flat rows of a label and a muted description. Claude's own
  * question tabs become a "1 of 3" stepper. */
 .ask-card {
-  margin: 8px 10px 6px; padding: 14px 18px 10px; flex-shrink: 0;
+  /* Gives way to the composer, then scrolls inside: Send must stay on screen. */
+  margin: 8px 10px 6px; padding: 14px 18px 10px; flex-shrink: 1; min-height: 48px;
   display: flex; flex-direction: column;
   background: var(--surface); border: 1px solid var(--border); border-radius: 22px;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
-  /* Leaves room for the header and the two-row composer in a short
+  /* Leaves room for the header and the composer in a short
    * (landscape) viewport, or Send and Stop are clipped (Codex P2). */
-  max-height: clamp(120px, calc(100dvh - 250px - env(safe-area-inset-top) - env(safe-area-inset-bottom)), 64dvh);
+  max-height: clamp(120px, calc(var(--app-height, 100dvh) - 250px - env(safe-area-inset-top) - env(safe-area-inset-bottom)), 64dvh);
   overflow-y: auto; -webkit-overflow-scrolling: touch;
 }
+/* Above a keyboard the card may use all the room left beside the composer. */
+.keyboard-open .ask-card { max-height: none; }
 .ask-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 38px; }
 .ask-stepper { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: 15px; font-variant-numeric: tabular-nums; }
 .ask-nav {
@@ -1016,30 +1022,32 @@ button.primary:disabled { opacity: 0.4; }
 .chat-activity .chat-act-glyph { display: none; }
 
 .chat-composer {
-  display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
-  margin: 6px 10px calc(10px + env(safe-area-inset-bottom, 0px)); padding: 10px 10px 8px 14px;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 26px;
+  display: flex; align-items: flex-end; gap: 6px; flex-shrink: 0;
+  margin: 6px 10px calc(8px + env(safe-area-inset-bottom, 0px)); padding: 5px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 24px;
 }
+/* The keyboard covers the home indicator, so its inset is empty space there. */
+.keyboard-open .chat-composer { margin-bottom: 6px; }
+/* One line: a long hint is cut at the edge, never wrapped out of the box. */
+.chat-composer .chat-input::placeholder { white-space: nowrap; }
 .chat-composer .chat-input {
-  width: 100%; max-height: 40dvh; padding: 6px 4px 2px; border: 0; outline: none; resize: none;
-  background: transparent; color: var(--fg); font-size: 16px; line-height: 1.4;
+  flex: 1; min-width: 0; min-height: 0; max-height: calc(var(--app-height, 100dvh) * 0.4); padding: 7px 4px; border: 0; outline: none; resize: none;
+  box-sizing: border-box; overflow-y: auto; background: transparent; color: var(--fg); font-size: 16px; line-height: 22px;
 }
-.chat-composer-bar { display: flex; align-items: center; gap: 8px; }
-.chat-composer-spacer { flex: 1; }
 .chat-composer .chat-attach, .chat-composer .chat-keys-toggle {
-  display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0;
-  border: 0; border-radius: 20px; background: var(--surface-2); color: var(--fg); font-size: 22px;
+  display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0;
+  border: 0; border-radius: 18px; background: var(--surface-2); color: var(--fg); font-size: 20px;
 }
 .chat-composer .chat-keys-toggle { color: var(--dim); font-size: 15px; }
 .chat-composer .chat-keys-toggle.on { background: var(--accent-soft); color: var(--fg); }
 .chat-composer .chat-send {
-  width: 40px; height: 40px; padding: 0; border: 0; border-radius: 20px;
-  background: var(--accent); color: var(--on-accent); font-size: 20px; font-weight: 700;
+  flex-shrink: 0; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 18px;
+  background: var(--accent); color: var(--on-accent); font-size: 18px; font-weight: 700;
 }
 .chat-composer .chat-send:disabled { background: var(--surface-2); color: var(--dim); opacity: 1; }
 .chat-stop {
-  display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0;
-  border: 0; border-radius: 20px; background: var(--fg); cursor: pointer;
+  display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0;
+  border: 0; border-radius: 18px; background: var(--fg); cursor: pointer;
 }
 .chat-stop span { width: 13px; height: 13px; border-radius: 3px; background: var(--bg); }
 @media (prefers-reduced-motion: reduce) {
