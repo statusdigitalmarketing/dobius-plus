@@ -2378,7 +2378,7 @@ function setupHeadroomHandlers() {
     // Any of these in Dobius's own environment authenticates every Claude it
     // starts the same way, whatever CLAUDE_CONFIG_DIR says, so moving a tab
     // between profiles would change nothing.
-    authOverride: () => ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'].find((k) => typeof process.env[k] === 'string' && process.env[k].trim()) || null,
+    authOverride: () => AUTH_OVERRIDE_NAMES.find((k) => typeof process.env[k] === 'string' && process.env[k].trim()) || null,
     readRecords: () => readUsageRecords(app.getPath('userData')),
     scan: () => scanClaudeProcesses(),
     // Needs the reporter on: its reports are what name a tab's conversation, and
@@ -2449,7 +2449,11 @@ function setupHeadroomHandlers() {
 // kept or logged. null when none, 'unreadable' when it cannot be read (the
 // caller must then not assume there is none).
 const execFileP = promisify(execFile);
-const AUTH_OVERRIDE_NAMES = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
+const AUTH_OVERRIDE_NAMES = [
+  'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
+  // Another provider or endpoint altogether: not this account's Max limit.
+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BASE_URL',
+];
 async function processAuthOverride(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   try {

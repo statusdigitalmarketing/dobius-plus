@@ -40,6 +40,7 @@ function world(over = {}) {
     ],
     emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', [HOMEC]: 'd@x.com' },
     autoMove: true,
+    reportedAt: T0 - 600_000, // long before the limit, as a working session has
     tail: "You've hit your 5-hour limit",
     ...over,
   };
@@ -80,7 +81,7 @@ function world(over = {}) {
     settled: () => w.settled ?? true,
     selector: () => null,
     // The running Claude's own report names its conversation.
-    readRecords: async () => [...w.records, ...(w.reported === null ? [] : [{ sessionId: w.reported ?? (w.claude.sessionId || 's1'), reporterPid: w.claude.pid, receivedAt: w.now, windows: null }])],
+    readRecords: async () => [...w.records, ...(w.reported === null ? [] : [{ sessionId: w.reported ?? (w.claude.sessionId || 's1'), reporterPid: w.claude.pid, receivedAt: w.reportedAt ?? w.now, windows: null }])],
     pruneRecords: async () => 0,
     scan: async () => ({ groups: w.procKey === null ? [] : [{ key: w.procKey, configDir: w.procDir ?? { [KEY_A]: DIR_A, [KEY_B]: DIR_B }[w.procKey], envUnset: false, pids: [w.claude.pid] }], unresolved: w.procKey === null ? [{ pid: w.claude.pid }] : [] }),
     autoMoveEnabled: () => w.autoMove,
@@ -132,6 +133,7 @@ async function moved(w, svc) {
   w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
   w.procKey = KEY_B;
   w.now += 2000; // the resumed Claude has started
+  w.reportedAt = undefined; // and reports from now on
   return eventId;
 }
 
@@ -709,6 +711,7 @@ await check('an old limit is judged by the account the Claude really runs on', a
   // Spawned on A (100%), but the process runs on B whose figure says 20%; the limit is old.
   w.procKey = KEY_B;
   w.limit = { at: T0 - 20 * 60_000, text: 'x' };
+  w.reportedAt = T0 - 3000_000; // reporting since well before that limit
   w.emails['/profiles/c'] = 'c@x.com';
   w.extraAccounts = [{ id: 'c', type: 'claude', name: 'C', claudeJsonPath: '/profiles/c/.claude.json' }];
   w.records.push({ key: keychainServiceFor('/profiles/c'), receivedAt: T0 - 1000, windows: { five_hour: { usedPercentage: 5, resetsAt: R5 } } });
@@ -749,6 +752,16 @@ await check('the conversation is the one the process last reported: /clear or /r
   await c.svc.tick();
   const [cand] = await c.svc.moveCandidates([TAB], 'b');
   assert.equal(cand.session.sessionId, 's2');
+});
+
+await check('a conversation opened with /resume after its limit is not moved: that limit was not this process\'s', async () => {
+  // The process reports s2 for the first time AFTER s2's limit was recorded.
+  const { w, svc } = world();
+  w.reported = 's2';
+  w.reportedAt = T0; // first report after the limit below
+  w.limitsBySession = { s2: { at: T0 - 5000, text: 'x' } };
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
 });
 
 await check('with no report from this process there is no automatic move', async () => {

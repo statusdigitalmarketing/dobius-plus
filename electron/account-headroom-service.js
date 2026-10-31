@@ -31,6 +31,7 @@ const PENDING_MAX_MS = 3 * 60_000;
 const POLL_MS = 500;
 const MAX_NOTICED = 200;
 const MAX_HANDLED_PER_TAB = 20;
+const MAX_FIRST_REPORTED = 2000;
 const DEFAULT_SERVICE = 'Claude Code-credentials';
 // After its last input, how long a tab's screen may stay unchanged before it
 // is taken as current (Claude echoes typed input at once).
@@ -126,6 +127,7 @@ export function createHeadroomService(d) {
     }
     try { records = await d.readRecords(); } catch { records = []; }
     lastRecords = records;
+    noteReports(records);
     // Who each folder is logged into, BEFORE folding in new figures: a
     // folder re-logged since the last look must not have the old login's
     // samples carried over to the new one (metadata file only, no secrets).
@@ -465,6 +467,23 @@ export function createHeadroomService(d) {
     } catch { return true; }
   }
 
+  // When this process was first seen reporting each conversation. A limit
+  // older than that is not one it hit: `/resume` inside a running Claude opens
+  // a conversation whose limit another process hit, on an account that may be
+  // fine, and its screen shows that old line.
+  const firstReported = new Map(); // `${pid}|${sessionId}` -> receipt time
+  function noteReports(records) {
+    for (const r of records) {
+      if (!Number.isInteger(r?.reporterPid) || typeof r.sessionId !== 'string') continue;
+      const k = `${r.reporterPid}|${r.sessionId}`;
+      const had = firstReported.get(k);
+      if (had === undefined || r.receivedAt < had) firstReported.set(k, r.receivedAt);
+    }
+    if (firstReported.size > MAX_FIRST_REPORTED) {
+      for (const k of firstReported.keys()) { firstReported.delete(k); if (firstReported.size <= MAX_FIRST_REPORTED) break; }
+    }
+  }
+
   // Newest report made by this very process (pid, not older than its start).
   function reportedSession(info) {
     // With the reporter off, what is on disk describes the past.
@@ -638,6 +657,7 @@ export function createHeadroomService(d) {
       } catch { rec = null; }
       if (!rec?.found || !rec.limit) continue;
       if (Number.isFinite(info.startedAt) && rec.limit.at < info.startedAt + 1000) continue; // see decideAutoMove
+      if (!(firstReported.get(`${info.pid}|${current}`) < rec.limit.at)) continue; // not this process's limit
       let sc;
       try { sc = await d.screen(tab.id); } catch { sc = null; }
       const screenHit = !!liveLimitLine(sc?.lines, d.rows(tab.id));
