@@ -2,7 +2,10 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 import './styles.css';
+import { attachKeyboardFit } from './keyboard-fit';
 import '@xterm/xterm/css/xterm.css';
+
+attachKeyboardFit();
 
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>

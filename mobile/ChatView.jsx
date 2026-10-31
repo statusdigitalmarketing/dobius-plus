@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, memo, createContext, useContext } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo, createContext, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import SpecialKeys from './SpecialKeys';
@@ -1139,6 +1139,47 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     );
   })();
 
+  // The message box grows with what is typed, up to its CSS max-height: on an
+  // edit, when sessionId swaps which branch below (and so which textarea) shows,
+  // and when its width changes (rotation, Split View). Before paint, so a new
+  // line never shows clipped.
+  const inputRef = useRef(null);
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return undefined;
+    const measure = () => {
+      // 'auto' collapses the box for a moment, which can clamp the chat's scroll:
+      // put it back, and a reader at the end must land on the NEW end or the
+      // scroll event from this would read as them scrolling away.
+      const body = bodyRef.current;
+      const top = body?.scrollTop;
+      const pinned = atBottomRef.current;
+      el.style.height = 'auto';
+      el.style.height = `${el.scrollHeight}px`;
+      if (body) body.scrollTop = pinned ? body.scrollHeight : top;
+      if (el.selectionEnd === el.value.length) el.scrollTop = el.scrollHeight;
+    };
+    measure();
+    let width = el.offsetWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.offsetWidth !== width) { width = el.offsetWidth; measure(); }
+      // The keyboard lowered its cap: keep the line being typed in view.
+      else if (el.selectionEnd === el.value.length) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [input, sessionId]);
+
+  // The chat got shorter (the keyboard, a growing message box): a reader at the
+  // end stays at the end.
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return undefined;
+    const ro = new ResizeObserver(() => { if (atBottomRef.current) body.scrollTop = body.scrollHeight; });
+    ro.observe(body);
+    return () => ro.disconnect();
+  }, [sessionId]);
+
   const inputRow = (
     <>
       {uploadMsg && <div className="chat-upload-msg">{uploadMsg}</div>}
@@ -1158,10 +1199,9 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       {showKeys && tabId && (
         <SpecialKeys onKey={(seq) => connection.send({ type: 'input', id: tabId, data: seq })} />
       )}
-      {/* One rounded composer, like the Claude app: the message on top, the
-          tools underneath, and on the right Send, or Stop while Claude works
-          and nothing is typed (Stop is Esc to the TUI: it interrupts the turn
-          and pops queued messages back, v1.0.53). */}
+      {/* One rounded composer on one row: the tools, the message, then Send, or
+          Stop while Claude works and nothing is typed (Stop is Esc to the TUI:
+          it interrupts the turn and pops queued messages back, v1.0.53). */}
       <div className="chat-composer">
         <input
           ref={fileInputRef}
@@ -1170,12 +1210,30 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           style={{ display: 'none' }}
           onChange={(e) => { uploadFiles(e.target.files); e.target.value = ''; }}
         />
+        <button
+          className="chat-attach"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          aria-label="Attach a screenshot or file"
+          title="Attach a screenshot or file (uploads to the Mac, path goes into the prompt)"
+        >
+          {uploading ? '…' : '+'}
+        </button>
+        <button
+          className={`chat-keys-toggle${showKeys ? ' on' : ''}`}
+          onClick={() => setShowKeys((v) => !v)}
+          aria-label="Toggle terminal keys"
+          title="Arrow/Enter/Esc/Tab keys for interactive dialogs like /permissions"
+        >
+          ⌨
+        </button>
         {/* Placeholder truth: a session-linked chat whose Claude has EXITED
             still sends input to the underlying shell, where it executes as a
             command (observed live 8/15: a prompt ran in zsh as `Reply ...`).
             Never claim "Message Claude" unless a Claude is actually attached;
             claudeLive comes from the tab's live process detection. */}
         <textarea
+          ref={inputRef}
           className="chat-input"
           value={input}
           onChange={(e) => setDraft(e.target.value)}
@@ -1188,43 +1246,23 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           }}
           placeholder={sessionId
             ? (tab && !tab.claudeLive
-              ? 'Claude exited. Input goes to the terminal...'
+              ? 'Claude exited, to terminal...'
               : tab?.status === 'working' ? 'Queue for after this turn...' : 'Message Claude...')
             : 'Type into the terminal...'}
           rows={1}
         />
-        <div className="chat-composer-bar">
+        {tab?.status === 'working' && !input.trim() ? (
           <button
-            className="chat-attach"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={uploading}
-            aria-label="Attach a screenshot or file"
-            title="Attach a screenshot or file (uploads to the Mac, path goes into the prompt)"
-          >
-            {uploading ? '…' : '+'}
-          </button>
-          <button
-            className={`chat-keys-toggle${showKeys ? ' on' : ''}`}
-            onClick={() => setShowKeys((v) => !v)}
-            aria-label="Toggle terminal keys"
-            title="Arrow/Enter/Esc/Tab keys for interactive dialogs like /permissions"
-          >
-            ⌨
-          </button>
-          <span className="chat-composer-spacer" />
-          {tab?.status === 'working' && !input.trim() ? (
-            <button
-              key="stop"
-              className="chat-stop"
-              onKeyDown={(e) => { if (e.repeat) e.preventDefault(); }}
-              onClick={() => { if (tabId && Date.now() - sentAtRef.current > 800) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
-              aria-label="Stop Claude (escape)"
-              title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
-            ><span /></button>
-          ) : (
-            <button key="send" className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
-          )}
-        </div>
+            key="stop"
+            className="chat-stop"
+            onKeyDown={(e) => { if (e.repeat) e.preventDefault(); }}
+            onClick={() => { if (tabId && Date.now() - sentAtRef.current > 800) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
+            aria-label="Stop Claude (escape)"
+            title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
+          ><span /></button>
+        ) : (
+          <button key="send" className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
+        )}
       </div>
     </>
   );
