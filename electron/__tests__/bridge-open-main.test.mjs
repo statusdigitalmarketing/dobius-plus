@@ -77,22 +77,16 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   assert.equal(deps.inputBusy(opened.tabId), false, 'released by the window that held it');
   env.terminals.get(opened.tabId).wcId = wc.id;
 
-  // A drain where part of a send reached the terminal cancels every Chat
-  // send, the one already in the box included.
+  // A drain where held input was thrown away before it was sent (an image
+  // over the size limit) leaves a message already in the box alone: only
+  // sends not yet pasted are dropped, never a full cancel.
   env.emit('terminal:inputHeld', wc, opened.tabId, 'z');
   const c1 = env.cancelled.length;
   const u1 = env.unpastedDrops.length;
-  env.emit('terminal:inputHeld', wc, opened.tabId, null, 'partial');
-  assert.deepEqual(env.cancelled.slice(c1), [opened.tabId]);
-  assert.equal(env.unpastedDrops.length, u1);
-  assert.equal(deps.inputBusy(opened.tabId), false);
-  // One where nothing of the lost input was sent (an image over the size
-  // limit) leaves the message already in the box alone: only sends not yet
-  // pasted are dropped.
-  env.emit('terminal:inputHeld', wc, opened.tabId, 'z');
   env.emit('terminal:inputHeld', wc, opened.tabId, null, 'unsent');
-  assert.equal(env.cancelled.length, c1 + 1, 'no full cancel');
+  assert.equal(env.cancelled.length, c1, 'no full cancel');
   assert.deepEqual(env.unpastedDrops.slice(u1), [opened.tabId]);
+  assert.equal(deps.inputBusy(opened.tabId), false);
 
   // Input main dropped from the current hold (a prompt-only paste) makes its
   // drain drop the Chat sends not yet pasted, even when the window reports

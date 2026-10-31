@@ -210,17 +210,14 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     // moved to another window (a tear-off claims the PTY before the old pane
     // is gone); only a new hold needs the tab's current owner.
     if (data === null) {
-      // Some of it was thrown away. 'partial': part of a send reached the
-      // terminal, so the box holds half of it and even a Chat message
-      // already pasted must not be sent with it. 'unsent' (a failed or
-      // timed-out paste, a key on a mid-edit selection), or lost in main
-      // before the terminal: the box is as it was, so the message already
+      // Some of it was thrown away before it was sent ('unsent': a failed
+      // or timed-out paste, a key on a mid-edit selection), or lost in main
+      // before the terminal: the box is as it was, so a Chat message already
       // in it keeps its Enter, and only sends not yet pasted are dropped
-      // (accepted while that input was pending, they may refer to it).
-      if (dropHold(id, wc.id)) {
-        if (dropped === 'partial' || dropped === true) cancelQueuedSubmits(id);
-        else if (dropped === 'unsent' || lostHolds.has(id)) dropUnpastedSubmits(id);
-      }
+      // (accepted while that input was pending, they may refer to it). A
+      // command-bar send cut midway is judged by chat-service (endSend),
+      // which knows whether any of it reached the terminal.
+      if (dropHold(id, wc.id) && (dropped || lostHolds.has(id))) dropUnpastedSubmits(id);
       if (!heldInput.has(id)) lostHolds.delete(id);
       return;
     }

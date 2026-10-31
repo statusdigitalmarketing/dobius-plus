@@ -476,6 +476,41 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r']);
   setInputHeldCheck((id) => id === 'h' && held);
 
+  // A command-bar send B whose parts main still holds is kept whole: a Chat
+  // message C accepted meanwhile is never pasted into the middle of it.
+  const { endSend } = await import('../chat-service.js');
+  held = false;
+  await tick(1100);
+  reset(); ptys.set('h', {});
+  const ca = submitPromptToTab('h', 'A');
+  writeRawInput('h', 'b1', () => true, { send: 'B' });
+  const cc = submitPromptToTab('h', 'C');
+  writeRawInput('h', 'b2', () => true, { send: 'B' });
+  writeRawInput('h', '\r', () => true, { send: 'B' });
+  endSend('h', 'B');
+  assert.deepEqual(await Promise.all([ca, cc]), [true, true]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r', 'b1', 'b2', '\r', PASTE('C'), '\r']);
+
+  // A send cut while main still held all of it: nothing of it reached the
+  // terminal, so its parts are dropped, A (already pasted) keeps its Enter,
+  // and only the submit not yet pasted (C) goes.
+  reset(); ptys.set('h', {});
+  const da = submitPromptToTab('h', 'A');
+  writeRawInput('h', 'x1', () => true, { send: 'D' });
+  const dc = submitPromptToTab('h', 'C');
+  endSend('h', 'D', { cut: true });
+  assert.deepEqual(await Promise.all([da, dc]), [true, false]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r'], 'none of the cut send, A sent');
+
+  // Cut after part of it reached the terminal: the box holds half a
+  // command, so everything queued is cancelled.
+  reset(); ptys.set('h', {});
+  writeRawInput('h', 'y1', () => true, { send: 'E' }); // written at once (idle)
+  const ea = submitPromptToTab('h', 'A');
+  endSend('h', 'E', { cut: true });
+  assert.equal(await ea, false);
+  assert.deepEqual(writes.map((w) => w[1]), ['y1']);
+
   // A window that held input is gone with it half sent: a waiting submit is
   // cancelled, never appended to the half.
   const { cancelQueuedSubmits } = await import('../chat-service.js');

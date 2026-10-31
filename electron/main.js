@@ -39,7 +39,7 @@ import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-in
 import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
-import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, setInputHeldCheck } from './chat-service.js';
+import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, setInputHeldCheck, endSend } from './chat-service.js';
 import { launchCommandFor } from '../shared/new-tab.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
@@ -288,6 +288,10 @@ function setupTerminalHandlers() {
     if (typeof data !== 'string') return;
     if (data.length > TERMINAL_WRITE_MAX_BYTES) return;
     if (!ownsTerminal(event.sender.id, id)) return; // not yours, drop silently
+    // A multi-part send (the command bar): each part names it, and its end
+    // (or cut) mark tells chat-service it is complete (or abandoned).
+    const send = typeof opts?.send === 'string' && opts.send.length <= 64 ? opts.send : null;
+    if (send && (opts.end === true || opts.cut === true)) { endSend(id, send, { cut: opts.cut === true }); return; }
     // Auto-resume cancellation: if the user types into a tab BEFORE its
     // scheduled `claude --resume` fires, skip that tab. The store's own
     // resumeSession path also writes here (it's how the staggered queue is
@@ -299,7 +303,7 @@ function setupTerminalHandlers() {
     // Waits behind a pending Chat submit so keys land in the order typed.
     // promptOnly: a path prompt editing pasted into Claude's prompt, which
     // must not land later in whatever replaced it (chat-service).
-    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id), { promptOnly: opts?.promptOnly === true });
+    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id), { promptOnly: opts?.promptOnly === true, send });
   });
 
   ipcMain.on('terminal:resize', (event, id, cols, rows) => {

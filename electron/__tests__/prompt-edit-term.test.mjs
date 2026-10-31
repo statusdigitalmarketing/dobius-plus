@@ -8,7 +8,7 @@ import { attachPromptEditing } from '../../src/lib/prompt-edit-term.js';
 // `exit()` replaces the prompt with a shell, as when Claude quits mid-edit.
 const COLS = 40;
 function fakeClaude(text, { placeholder = false } = {}) {
-  const app = { text, caret: text.length, alive: true, writes: [], submitted: null, held: [], promptOnly: [], drops: [], times: [] };
+  const app = { text, caret: text.length, alive: true, writes: [], submitted: null, held: [], promptOnly: [], drops: [], times: [], marks: [], parts: [] };
   const parsed = new Set();
   const dom = {};
   let grid = [];
@@ -22,6 +22,9 @@ function fakeClaude(text, { placeholder = false } = {}) {
   };
   const insert = (s) => { app.text = app.text.slice(0, app.caret) + s + app.text.slice(app.caret); app.caret += s.length; };
   const send = (data, opts) => {
+    // A command-bar send's end or cut mark: not terminal input.
+    if (opts?.end || opts?.cut) { app.marks.push([opts.end ? 'end' : 'cut', opts.send]); return; }
+    if (opts?.send) app.parts.push([opts.send, data]);
     app.writes.push(data);
     app.times.push(Date.now());
     if (opts?.promptOnly) app.promptOnly.push(data);
@@ -355,8 +358,9 @@ test('a send reserved by the command bar is held from the moment it is accepted 
   send.write('\r');
   send.release();
   send.release(); // a second release changes nothing
-  await wait(20);
+  await wait(80); // the end mark goes out behind the last part
   assert.deepEqual(t.app.held, ['hi\r', null]);
+  assert.equal(t.app.marks.length, 1);
   assert.equal(t.app.submitted, 'hi');
 });
 
@@ -439,10 +443,26 @@ test('a paste whose save failed, or a key typed onto a selection made mid-edit, 
   assert.deepEqual(u.app.drops, ['unsent'], 'the key on the mid-edit selection was lost');
 });
 
-test('a command-bar send cut off midway reports a partial drop; one cut before any of it went out, unsent', async () => {
+test('a command-bar send names its parts and ends with a mark behind its last part', async () => {
+  const t = fakeClaude('');
+  let resolve;
+  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
+  const send = t.edit.reserve('hi\r');
+  for (const k of ['h', 'i', '\r']) send.write(k);
+  send.release();
+  assert.deepEqual(t.app.marks, [], 'no end before its parts went out');
+  resolve('X');
+  await wait();
+  const id = t.app.parts[0][0];
+  assert.deepEqual(t.app.parts, [[id, 'h'], [id, 'i'], [id, '\r']]);
+  assert.deepEqual(t.app.marks, [['end', id]]);
+  assert.equal(t.app.submitted, 'Xhi');
+});
+
+test('a command-bar send cut midway is reported to main as cut; the drain says unsent', async () => {
   const t = fakeClaude('draft ');
   const send = t.edit.reserve('rm -- x\r');
-  send.write('rm'); // goes out at once
+  send.write('rm'); // handed over at once
   await wait(10);
   let resolve;
   t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
@@ -454,18 +474,14 @@ test('a command-bar send cut off midway reports a partial drop; one cut before a
   send.release();
   await wait(50);
   assert.deepEqual(t.app.writes, ['rm']);
-  assert.deepEqual(t.app.drops, ['partial']);
-  const u = fakeClaude('draft ');
-  let r2;
-  u.edit.pasteWhenReady(new Promise((r) => { r2 = r; }));
-  const send2 = u.edit.reserve('hi\r');
-  send2.write('hi');
-  u.exit();
-  r2("'/tmp/a.png'");
-  await wait(50);
-  send2.release();
-  await wait(20);
-  assert.deepEqual(u.app.drops, ['unsent']);
+  assert.deepEqual(t.app.marks, [['cut', t.app.parts[0][0]]], 'main decides: it knows whether "rm" reached the terminal');
+  assert.deepEqual(t.app.drops, ['unsent']);
+  // A pane that goes away mid-send cuts it too.
+  const u = fakeClaude('');
+  const s2 = u.edit.reserve('ok\r');
+  s2.write('o');
+  u.edit.dispose();
+  assert.deepEqual(u.app.marks.map((m) => m[0]), ['cut']);
 });
 
 test('after Cmd+V takes a selection, input with no keydown of its own does not act on it again', async () => {
