@@ -15,7 +15,7 @@ import { promisify } from 'util';
 const execFileP = promisify(execFile);
 import { app } from 'electron';
 import { getSessionTabMap } from './config-manager.js';
-import { loginShellSpawn } from '../shared/new-tab.js';
+import { loginShellSpawn, ptyProgramName } from '../shared/new-tab.js';
 
 const terminals = new Map();
 // getTerminalClaudeInfo { unique }: a shell with more children answers nothing.
@@ -501,16 +501,23 @@ export async function getTerminalProcess(id) {
       timeout: 1000,
       encoding: 'utf8',
     });
-    const result = stdout.trim();
-    if (!result) return null;
     // pgrep -lP returns lines like "12345 claude"
-    const lines = result.split('\n').filter(Boolean);
-    if (lines.length === 0) return null;
+    const lines = stdout.trim().split('\n').filter(Boolean);
     for (const line of lines) {
       const name = line.trim().split(/\s+/).slice(1).join(' ');
       if (name && name !== 'zsh' && name !== 'bash' && name !== 'sh') return name;
     }
-    return null;
+  } catch {
+    // pgrep exits 1 when there are no children: not an answer yet.
+  }
+  // No program under the shell: the PTY's process may itself be one, when
+  // `exec` replaced the shell (a shell function exec'ing claude, `exec cat`).
+  try {
+    const { stdout } = await execFileP('/bin/ps', ['-o', 'comm=', '-p', String(entry.pty.pid)], {
+      timeout: 1000,
+      encoding: 'utf8',
+    });
+    return ptyProgramName(stdout, process.env.SHELL);
   } catch {
     return null;
   }

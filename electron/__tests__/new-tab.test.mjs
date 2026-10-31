@@ -188,3 +188,12 @@ test('a resume never types into a running program or a tab about to start one', 
   assert.equal(resumeNeedsNewTab(null, { startsTool: true, createdAt: now - NEW_TAB_START_MS - 1 }, now), false, 'its tool exited long ago: a shell again');
   assert.equal(resumeNeedsNewTab(null, undefined, now), false);
 });
+
+test('the PTY process counts as a program only when exec replaced the shell', async () => {
+  const { ptyProgramName } = await import('../../shared/new-tab.js');
+  for (const c of ['-zsh', 'zsh', '/bin/zsh', '-bash', '/bin/sh', '', '  ']) assert.equal(ptyProgramName(c, '/bin/zsh'), null, c);
+  assert.equal(ptyProgramName('-fish', '/opt/homebrew/bin/fish'), null, 'the user\'s own $SHELL');
+  assert.equal(ptyProgramName('/usr/bin/fish', '/bin/zsh'), 'fish', 'not their shell');
+  assert.equal(ptyProgramName('/bin/cat', '/bin/zsh'), 'cat');
+  assert.equal(ptyProgramName('/Users/x/.local/share/claude/versions/2.1.314\n', '/bin/zsh'), '2.1.314', 'exec\'d native claude');
+});
