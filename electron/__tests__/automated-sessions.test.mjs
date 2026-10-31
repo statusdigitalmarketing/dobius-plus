@@ -200,6 +200,27 @@ await fs.writeFile(path.join(latestDir, 'talked.jsonl'), [
 ].join('\n') + '\n');
 check('the latest session is the last one messaged', (await getLatestSession('/tmp/latestproj'))?.sessionId, 'talked');
 
+// Its last message sits behind 300 progress records, more than the 200-record
+// tail holds: its newer mtime and bookkeeping must not outrank a newer message,
+// and Cmd+R must pick what History shows first. Written first, so the talked
+// chat is not ahead on mtime alone.
+const buriedDir = path.join(TMP_HOME, '.claude', 'projects', '-tmp-buriedproj');
+await fs.mkdir(buriedDir, { recursive: true });
+await fs.writeFile(path.join(buriedDir, 'talked.jsonl'), [
+  rec('user', 'cli', 'newer ask', now - 600_000), rec('assistant', 'cli', 'newer reply', now - 590_000),
+].join('\n') + '\n');
+await new Promise((r) => setTimeout(r, 30));
+await fs.writeFile(path.join(buriedDir, 'buried.jsonl'), [
+  rec('user', 'cli', 'old ask', now - 3_600_000), rec('assistant', 'cli', 'old reply', now - 3_590_000),
+  ...Array.from({ length: 300 }, (_, i) => meta('progress', now - 300 + i)),
+].join('\n') + '\n');
+const buriedLatest = await getLatestSession('/tmp/buriedproj');
+check('a message behind 300 progress records does not win on bookkeeping', buriedLatest?.sessionId, 'talked');
+check('its stamp is the message, not the file', buriedLatest?.timestamp, now - 590_000);
+const buriedHistory = (await loadAllSessions()).filter((x) => x.projectPath.endsWith('buriedproj')).sort((a, b) => b.timestamp - a.timestamp);
+check('History and Cmd+R agree', buriedHistory[0]?.sessionId, buriedLatest?.sessionId);
+check('History dates the buried chat by its message', buriedHistory.find((x) => x.sessionId === 'buried')?.timestamp, now - 3_590_000);
+
 flushConfig?.();
 
 await fs.rm(TMP_HOME, { recursive: true, force: true });

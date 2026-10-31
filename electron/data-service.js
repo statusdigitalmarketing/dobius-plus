@@ -240,25 +240,9 @@ export async function loadAllSessions(projectFilter, opts = {}) {
           if (!messageAt) messageAt = messageStamp(entry, role, text, tsMs);
           if (preview && messageAt && lastRole) break;
         }
-        // A tail that is ALL bookkeeping (progress, hook output) holds no
-        // message: look further back once, or the newest bookkeeping stamp
-        // would float an untouched chat above newer conversations.
-        // Not gated on the tail's size: parseJsonl drops request blobs, so a
-        // short (even empty) parsed tail does not prove the file was read
-        // whole. Ceiling: readTail's 8MB cap, so a message behind more than
-        // 8MB of blobs still falls back to the bookkeeping stamp.
-        if (!messageAt) {
-          const deeper = await parseJsonl(filePath, 2000);
-          for (let i = deeper.length - 1; i >= 0 && !messageAt; i -= 1) {
-            const e = deeper[i];
-            if (!e || typeof e !== 'object') continue;
-            const r = entryRole(e);
-            const t = r === 'user' ? userEntryText(e) : '';
-            // Same rule as the walk above: a system-injected row is no turn.
-            if (t && isSyntheticUserText(t)) continue;
-            messageAt = messageStamp(e, r, t, tsToEpochMs(e.timestamp));
-          }
-        }
+        // The sort key comes from the one lookup Cmd+R also uses. (The walk's
+        // own messageAt only decides its early exit above.)
+        messageAt = await lastMessageAt(filePath, entries);
         // Claude Code's own name for the conversation ("Fix login bug"),
         // rewritten as the chat goes; the newest one wins. History rows lead
         // with it because the newest prompt is often a tool echo or missing.
@@ -907,6 +891,33 @@ function messageStamp(entry, role, text, tsMs) {
   return text || image ? tsMs : 0;
 }
 
+// Stamp of the newest real message in these records, 0 when none. A
+// system-injected row is no turn.
+function newestMessageStamp(entries) {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const e = entries[i];
+    if (!e || typeof e !== 'object') continue;
+    const r = entryRole(e);
+    const t = r === 'user' ? userEntryText(e) : '';
+    if (t && isSyntheticUserText(t)) continue;
+    const at = messageStamp(e, r, t, tsToEpochMs(e.timestamp));
+    if (at) return at;
+  }
+  return 0;
+}
+
+// When a session was last messaged: what History sorts by and Cmd+R picks by,
+// so the two cannot disagree. `tail` is the file's last 200 records. A tail
+// that is ALL bookkeeping (progress, hook output) holds no message: look
+// further back once, or the newest bookkeeping stamp would float an untouched
+// chat above newer conversations. Not gated on the tail's size: parseJsonl
+// drops request blobs, so a short (even empty) parsed tail does not prove the
+// file was read whole. Ceiling: readTail's 8MB cap, so a message behind more
+// than 8MB of blobs still falls back to the bookkeeping stamp.
+async function lastMessageAt(filePath, tail) {
+  return newestMessageStamp(tail) || newestMessageStamp(await parseJsonl(filePath, 2000));
+}
+
 function isSyntheticUserText(text) {
   if (!text) return true;
   const t = text.trimStart();
@@ -985,20 +996,19 @@ export async function getLatestSession(projectPath) {
       }
       // Read the tail to find the newest message timestamp. parseJsonl with
       // a limit uses readTail under the hood so this stays memory-bounded
-      // even on a 100MB transcript. 20 entries is enough to find the last
-      // user/assistant message timestamp.
+      // even on a 100MB transcript.
       let msgTs = 0;
+      let tailTs = 0; // newest stamp on any record: History's order with no message
       let lastUserPreview = '';
       try {
         const tail = await parseJsonl(filePath, 200);
+        // Messages only, as in loadAllSessions: hook output and snapshots
+        // written by merely resuming a chat must not make it the latest.
+        msgTs = await lastMessageAt(filePath, tail);
         for (const e of tail) {
           if (!e || typeof e !== 'object') continue;
-          // Messages only, as in loadAllSessions: hook output and snapshots
-          // written by merely resuming a chat must not make it the latest.
-          const r = entryRole(e);
-          const tx = r === 'user' ? userEntryText(e) : '';
-          const t = tx && isSyntheticUserText(tx) ? 0 : messageStamp(e, r, tx, tsToEpochMs(e.timestamp));
-          if (t > msgTs) msgTs = t;
+          const at = tsToEpochMs(e.timestamp);
+          if (at > tailTs) tailTs = at;
           // Track the LAST user message we see in the tail as a preview.
           if (e.type === 'human' || e.role === 'user' || e.message?.role === 'user') {
             const content = typeof e.message === 'string'
@@ -1016,7 +1026,7 @@ export async function getLatestSession(projectPath) {
       return {
         filePath,
         sessionId: file.replace('.jsonl', ''),
-        sortKey: msgTs || mtime, // prefer message ts, fall back to mtime
+        sortKey: msgTs || tailTs || mtime, // same order as History, mtime only when nothing is stamped
         mtime,
         sizeMB: size / (1024 * 1024),
         preview: lastUserPreview,
