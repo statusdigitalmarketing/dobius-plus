@@ -18,6 +18,7 @@
 // `claude auth status` (it writes into the config dir).
 
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import {
   emptyHistory, sanitizeHistory, updateHistory, usageForKey, accountKeyRows, moveRefusal, autoRefusal,
@@ -370,6 +371,17 @@ export function createHeadroomService(d) {
     return rows.some((o) => o.email && o.email.toLowerCase() === e && held(o.key));
   }
 
+  // Why a tab on `source` may not go to row `r`. One rule for the dialog and
+  // for the check made at the moment of the move.
+  function rowRefusal(source, r) {
+    const override = d.authOverride?.() || null;
+    if (override) return `${override} is set in Dobius's environment, and it signs in every Claude the same way whichever account a tab is on`;
+    if (r.duplicateId) return 'two accounts share this id; fix that in Settings first';
+    if (!r.isDefault && typeof r.id !== 'string') return 'this account has no usable id; re-add it in Settings';
+    if (r.sharedHistory === false) return 'its conversation history is not linked to the shared one, so the conversation cannot be resumed there';
+    return moveRefusal(source, r);
+  }
+
   // `reserved`: key -> percent already promised this pass to tabs moved there.
   // `live`: key -> sessions running (null: the scan could not say).
   function candidatesFor(source, rows, now, reserved = null, live = null) {
@@ -390,11 +402,7 @@ export function createHeadroomService(d) {
         login: r.login,
         sameAs: r.sameAs,
         usage,
-        refusal: override ? `${override} is set in Dobius's environment, and it signs in every Claude the same way whichever account a tab is on`
-          : r.duplicateId ? 'two accounts share this id; fix that in Settings first'
-            : (!r.isDefault && typeof r.id !== 'string') ? 'this account has no usable id; re-add it in Settings'
-              : r.sharedHistory === false ? 'its conversation history is not linked to the shared one, so the conversation cannot be resumed there'
-                : moveRefusal(source, r),
+        refusal: rowRefusal(source, r),
         // For "Move all": what stops ANY tab going there, whichever account it
         // is on now (each tab is judged again by itself when it moves).
         allRefusal: override ? `${override} is set` : r.duplicateId ? 'two accounts share this id' : (!r.isDefault && typeof r.id !== 'string') ? 'no usable id'
@@ -458,7 +466,8 @@ export function createHeadroomService(d) {
 
   // Newest report made by this very process (pid, not older than its start).
   function reportedSession(info) {
-    if (!info || !Number.isInteger(info.pid)) return null;
+    // With the reporter off, what is on disk describes the past.
+    if (!d.reportingOn() || !info || !Number.isInteger(info.pid)) return null;
     let best = null;
     for (const r of lastRecords) {
       if (r?.reporterPid !== info.pid || typeof r.sessionId !== 'string' || !r.sessionId) continue;
@@ -470,6 +479,9 @@ export function createHeadroomService(d) {
 
   async function tabInfo(tabId) {
     const seqAtStart = d.inputSeq(tabId);
+    // Reports read AFTER that count: a conversation switched before it is
+    // seen here, one switched after it fails the conditional restart.
+    await sample();
     let info;
     try { info = await d.claudeInfo(tabId); } catch { info = null; }
     let session = null;
@@ -551,9 +563,7 @@ export function createHeadroomService(d) {
       if (!tab) continue;
       const info = await tabInfo(id);
       const source = await sourceOf(tab, rows, info.pid);
-      const refusal = !target ? 'that account no longer exists'
-        : target.duplicateId ? 'two accounts share this id; fix that in Settings first'
-          : moveRefusal(source, target);
+      const refusal = !target ? 'that account no longer exists' : rowRefusal(source, target);
       const { pid: _pid, ...rest } = info;
       out.push({ ...rest, refusal });
     }
@@ -754,7 +764,13 @@ export function createHeadroomService(d) {
     await sample();
     const rows = await accountRows();
     const row = rows.find((r) => r.key === p.targetKey);
-    if (!row || usageForRow(row, rows, d.now()).limited || heldNow(row, rows, d.now())) return stop(`${p.targetLabel} has hit its limit too`);
+    const fresh = row ? usageForRow(row, rows, d.now()) : null;
+    if (!fresh?.known || fresh.limited || fresh.headroom < AUTO.MIN_HEADROOM || heldNow(row, rows, d.now())) return stop(`${p.targetLabel} no longer has room`);
+    // Still the conversation main decided on (a /clear since then is not).
+    let info;
+    try { info = await d.claudeInfo(tabId); } catch { info = null; }
+    if (reportedSession(info) !== p.sessionId) return stop('the conversation in the tab changed');
+    if (d.windowOf(tabId) !== p.wcId) return stop('the tab moved to another window');
     if (d.inputSeq(tabId) !== p.inputSeq) return stop('someone typed in the tab');
     p.started = true;
     p.at = d.now();
@@ -890,7 +906,13 @@ export function createHeadroomService(d) {
     moveCandidates,
     continueAfterMove,
     startAutoMove,
-    flush: () => save(true),
+    // Quitting: a save is at most 30s behind, but a login remembered in that
+    // gap is what stops the next login inheriting its figures.
+    flushSync: () => {
+      if (!dirty || !hist) return;
+      try { fsSync.writeFileSync(histPath, JSON.stringify(hist), { mode: 0o600 }); dirty = false; }
+      catch (err) { console.warn('[headroom] could not save usage history:', err?.message || err); }
+    },
     _pending: pending,
     _tabStates: tabStates,
   };

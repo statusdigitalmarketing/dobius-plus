@@ -84,6 +84,7 @@ function world(over = {}) {
     pruneRecords: async () => 0,
     scan: async () => ({ groups: w.procKey === null ? [] : [{ key: w.procKey, configDir: w.procDir ?? { [KEY_A]: DIR_A, [KEY_B]: DIR_B }[w.procKey], envUnset: false, pids: [w.claude.pid] }], unresolved: w.procKey === null ? [{ pid: w.claude.pid }] : [] }),
     autoMoveEnabled: () => w.autoMove,
+    reportingOn: () => w.reportingOn ?? true,
     tabs: () => [{ id: TAB, cwd: '/proj', claudeConfigDir: DIR_A }, ...(w.secondTab ? [{ id: TAB2, cwd: '/proj', claudeConfigDir: DIR_A }] : [])],
     activity: () => w.activityOverride ?? { status: 'done', lastActivityAt: w.now - 60_000 },
     claudeInfo: async () => w.claude,
@@ -94,7 +95,7 @@ function world(over = {}) {
     screen: async () => ({ lines: [w.screenLine ?? "You've hit your 5-hour limit", '────', '❯ ', '────'], modes: { bracketedPaste: true } }),
     promptReady: () => true,
     promptBox: () => w.box ?? '',
-    windowOf: () => 7,
+    windowOf: () => w.window ?? 7,
     send: (id, channel, payload) => {
       if (channel === 'accounts:autoMoveNotice') w.notices.push(payload.text); else w.sent.push({ id, channel, payload });
       return 'sent';
@@ -765,6 +766,43 @@ await check('a report from before this process started says nothing about it (a 
   assert.equal(w.sent.length, 0);
 });
 
+await check('the restart is called off when the conversation changed since main decided, or the tab changed window', async () => {
+  const a = world();
+  a.w.claude = { ...a.w.claude, sessionId: 's1' };
+  await a.svc.tick();
+  a.w.reported = 's2';
+  const st = await a.svc.startAutoMove(TAB, a.w.sent[0].payload.eventId, 7);
+  assert.equal(st.ok, false);
+  assert.match(st.error, /conversation in the tab changed/);
+  const b = world();
+  await b.svc.tick();
+  b.w.window = 99;
+  assert.match((await b.svc.startAutoMove(TAB, b.w.sent[0].payload.eventId, 7)).error, /another window/);
+});
+
+await check('a target that no longer has room (not just limited) is called off', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  w.records[1] = { ...w.records[1], receivedAt: w.now, windows: { five_hour: { usedPercentage: 95, resetsAt: R5 } } };
+  assert.match((await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7)).error, /no longer has room/);
+});
+
+await check('with the reporter off, old reports do not name the conversation', async () => {
+  const { w, svc } = world();
+  w.claude = { ...w.claude, sessionId: 's9' };
+  w.reported = 'stale';
+  w.reportingOn = false;
+  const [c] = await svc.moveCandidates([TAB], 'b');
+  assert.equal(c.session.sessionId, 's1', 'falls back to the resolver');
+});
+
+await check('the check at the moment of a move refuses what the dialog refuses', async () => {
+  const { w, svc } = world();
+  w.privateHistory = [DIR_B];
+  const [c] = await svc.moveCandidates([TAB], 'b');
+  assert.match(c.refusal, /history is not linked/);
+});
+
 await check('no "continue" once the process reports another conversation', async () => {
   const { w, svc } = world();
   const eventId = await moved(w, svc);
@@ -798,7 +836,7 @@ await check('a target that filled up while the move waited is called off', async
   w.records[1] = { ...w.records[1], receivedAt: w.now, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } };
   const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
   assert.equal(st.ok, false);
-  assert.match(st.error, /limit too/);
+  assert.match(st.error, /no longer has room/);
 });
 
 await check('a Claude whose folder the process scan cannot read is not moved automatically', async () => {

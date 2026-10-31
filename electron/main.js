@@ -2384,6 +2384,7 @@ function setupHeadroomHandlers() {
     // Needs the reporter on: its reports are what name a tab's conversation, and
     // ones left from before it was turned off go on naming an old one.
     autoMoveEnabled: () => getSettings().autoMoveOnLimit === true && getSettings().usageReporting === true,
+    reportingOn: () => getSettings().usageReporting === true,
     tabs: () => listTerminals(),
     activity: (id) => terminalStatus.statusFor(id),
     claudeInfo: (id) => getTerminalClaudeInfo(id),
@@ -4457,6 +4458,7 @@ app.on('will-quit', (e) => {
   if (didTeardown) return;
   didTeardown = true;
   try { killAuthChildren(); } catch { /* noop */ }
+  headroom?.flushSync();
   killAll();
   stopWatching();
   stopAllBuildWatchers();
