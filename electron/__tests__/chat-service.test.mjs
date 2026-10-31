@@ -591,6 +591,25 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
     }
   }
 
+  // A cut by main marks the window's hold lost, and so does every later
+  // part it refuses: a message accepted afterwards, waiting on that hold, is
+  // dropped when it drains (bridge-open-main) instead of pasting onto the prefix.
+  {
+    const marks = [];
+    setInputHeldCheck(() => false, (id) => marks.push(id));
+    reset(); ptys.set('h', {});
+    const ma = submitPromptToTab('h', 'A');
+    writeRawInput('h', 'pr', () => true, { send: 'M', sender: 7 });
+    writeRawInput('h', '\x03');
+    await ma;
+    await tick(60); // M cut by main
+    assert.ok(marks.includes('h'), 'the cut marks the hold lost');
+    marks.length = 0;
+    await writeRawInput('h', 'intf', () => true, { send: 'M', sender: 7 });
+    assert.deepEqual(marks, ['h'], 'a refused later part marks it again');
+    setInputHeldCheck((id) => id === 'h' && held);
+  }
+
   // A window that held input is gone with it half sent: a waiting submit is
   // cancelled, never appended to the half.
   const { cancelQueuedSubmits } = await import('../chat-service.js');

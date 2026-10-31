@@ -230,7 +230,10 @@ export function endSend(id, send, { cut = false, sender = null, owns = true, byM
   if (!owns && openSends.get(id)?.get(send)?.sender !== sender) return;
   // Main cutting it: its window's later parts stay refused (markCut). The
   // window's own mark is its last word: a send main already cut is done.
-  if (byMain) markCut(id, send);
+  // The window holding the rest still drains it as if it went out, so its
+  // hold is marked lost too: submits accepted later, waiting on that hold,
+  // are dropped when it drains instead of pasting onto what remains.
+  if (byMain) { markCut(id, send); markHeldLost(id); }
   else if (cutByMain.get(id)?.has(send)) { unmarkCut(id, send); return; }
   const q = submitQueues.get(id);
   if (cut) {
@@ -347,7 +350,7 @@ export function writeRawInput(id, data, stillOk = () => true, { promptOnly = fal
   // A part of a multi-part send (endSend): the send is open from now on.
   if (typeof send !== 'string' || !send) send = null;
   // A part of a send main already cut: refused, never reopening it.
-  else if (cutByMain.get(id)?.has(send)) return Promise.resolve(refused('cancelled'));
+  else if (cutByMain.get(id)?.has(send)) { markHeldLost(id); return Promise.resolve(refused('cancelled')); }
   else sendState(id, send, sender);
   // A frame already in flight when its phone was revoked: not even a cancel
   // key, which would also throw away the desktop's pending submit.
