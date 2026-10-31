@@ -21,7 +21,7 @@ const stallWatchdog = createStallWatchdog({ log: logLine });
 stallWatchdog.wrapIpc(ipcMain);
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
-import { accountIdentities, accountEmail, loginStatePresenceOnly, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
+import { accountIdentities, accountEmail, accountMetadata, loginStatePresenceOnly, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
 import { resolveAccountEnvForCwd, resolveClaudeAccountPin } from './spawn-account-env.js';
@@ -37,7 +37,7 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputAgeMs, terminalInputSeq, terminalRawOutputSeq, terminalClosing, sendToTerminalWindow, terminalRows, terminalSettledSinceInput } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputAgeMs, terminalInputSeq, terminalRawOutputSeq, terminalClosing, sendToTerminalWindow, terminalRows, terminalSettledSinceInput } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, setInputHeldCheck } from './chat-service.js';
@@ -569,6 +569,13 @@ function setupDataHandlers() {
   // visible as a process, and a plain check leaves both surfaces seeing "not
   // running" inside that window.
   ipcMain.handle('data:claimSessionResume', (_event, sessionId, tabId) => claimSessionResume(sessionId, tabId));
+  // Give back a claim this window took and then did not use (an account
+  // move found someone typing in the fresh shell): only the owning window,
+  // only a claim bound to that tab.
+  ipcMain.handle('data:releaseSessionResume', (event, sessionId, tabId) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId) || !ownsTerminal(event.sender.id, tabId)) return false;
+    return releaseSessionResume(sessionId, tabId);
+  });
   ipcMain.handle('data:getLatestSession', (_event, projectPath) => getLatestSession(projectPath));
   ipcMain.handle('data:getSessionSize', (_event, sessionId, projectPath) => getSessionSize(sessionId, projectPath));
   ipcMain.handle('data:killProcess', async (_event, pid) => {
@@ -2304,6 +2311,15 @@ function setupHeadroomHandlers() {
     processAuthOverride: (pid) => processAuthOverride(pid),
     settled: (id) => terminalSettledSinceInput(id),
     email: (dir, opts) => accountEmail(dir, opts),
+    metadata: (dir, opts) => accountMetadata(dir, opts),
+    // This folder's conversations are the shared store (account-profile-share
+    // links projects into ~/.claude): a resume there finds the same
+    // transcript main reads. A private copy kept after a collision does not.
+    sharesHistory: async (dir) => {
+      try {
+        return (await fs.promises.realpath(path.join(dir, 'projects'))) === (await fs.promises.realpath(path.join(defaultClaudeDir(), 'projects')));
+      } catch { return false; }
+    },
     inputHeld: (id) => heldInputFor(id),
     samePath: async (a, b) => {
       try { return (await fs.promises.realpath(a)) === (await fs.promises.realpath(b)); } catch { return false; }
@@ -2385,9 +2401,14 @@ async function processAuthOverride(pid) {
     if (named) return named;
     // Claude picks its Keychain item by USER: a shell that changes USER picks
     // another item under the same service, i.e. possibly another login.
-    const user = stdout.match(/(?:^|\s)USER=(\S+)/)?.[1];
-    const own = process.env.USER || os.userInfo().username;
-    return user && own && user !== own ? 'USER' : null;
+    // An unset USER falls back to the OS user name, which need not be the
+    // USER Dobius itself (and so the rest of this check) runs with.
+    let osUser = null;
+    try { osUser = os.userInfo().username; } catch { osUser = null; }
+    const user = stdout.match(/(?:^|\s)USER=(\S+)/)?.[1] || osUser;
+    const own = process.env.USER || osUser;
+    if (!user || !own) return 'unreadable';
+    return user !== own ? 'USER' : null;
   } catch { return 'unreadable'; }
 }
 

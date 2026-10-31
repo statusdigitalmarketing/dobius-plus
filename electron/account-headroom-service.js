@@ -69,6 +69,20 @@ export function bottomRows(lines, n = 20) {
 const LIMIT_MENU_RE = /wait for (?:the )?limit to reset|usage-credits|Continue now at lower priority/i;
 export const isLimitMenu = (sel) => !!sel && Array.isArray(sel.options) && sel.options.some((o) => LIMIT_MENU_RE.test(String(o?.label ?? o?.text ?? o ?? '')));
 
+/**
+ * Claude's limit menu is at the bottom AND nothing below it looks like an
+ * input prompt ("❯ some text" that is not a numbered option). A menu quoted in
+ * output with a real prompt under it fails the second half.
+ */
+const PROMPT_LIKE_RE = /^\s*[❯>]\s+(?!\d+[.)]\s)\S/;
+export function limitMenuOnly(lines, parse) {
+  const bottom = bottomRows(lines);
+  let sel;
+  try { sel = parse(bottom); } catch { sel = null; }
+  if (!isLimitMenu(sel)) return false;
+  return !bottom.some((l) => PROMPT_LIKE_RE.test(String(l || '')));
+}
+
 export function draftOnScreen(box, limitMenuShown) {
   if (typeof box === 'string') return isDraft(box);
   // Unreadable: only Claude's own limit menu is known to hold no text. Any
@@ -158,8 +172,12 @@ export function createHeadroomService(d) {
     let a;
     try { a = await d.email(dir, { envUnset }); } catch { a = null; }
     if (!a || d.keyFor(dir) !== DEFAULT_SERVICE) return a || null;
-    let b;
-    try { b = await d.email(dir, { envUnset: !envUnset }); } catch { b = null; }
+    // The other file must be readable to agree: an unreadable one may name
+    // the login the credential now belongs to.
+    let other;
+    try { other = await d.metadata(dir, { envUnset: !envUnset }); } catch { other = { state: 'unreadable' }; }
+    if (other?.state === 'unreadable') return null;
+    const b = other?.email;
     return b && b.toLowerCase() !== a.toLowerCase() ? null : a;
   }
 
@@ -206,8 +224,9 @@ export function createHeadroomService(d) {
     ];
     await Promise.all(all.map(async (r) => {
       try {
-        const [ident, email] = await Promise.all([d.identity(r.dir, { envUnset: r.envUnset }), loginEmail(r.dir, r.envUnset)]);
+        const [ident, email, shared] = await Promise.all([d.identity(r.dir, { envUnset: r.envUnset }), loginEmail(r.dir, r.envUnset), d.sharesHistory(r.dir)]);
         r.email = email;
+        r.sharedHistory = shared;
         r.login = ident?.login || 'unknown';
       } catch {
         r.email = null;
@@ -310,7 +329,14 @@ export function createHeadroomService(d) {
   // A limit just hit holds every folder of that login, not only the folder
   // the tab was on.
   function heldNow(r, rows, now) {
-    const held = (key) => (limitedUntil.get(key) || 0) > now;
+    // A hold ends early when that folder's five-hour window has reset since
+    // (a new window's first figure came after the hold began).
+    const held = (key) => {
+      const h = limitedUntil.get(key);
+      if (!h || h.until <= now) return false;
+      const first = hist?.keys?.[key]?.windows?.five_hour?.samples?.[0]?.t;
+      return !(Number.isFinite(first) && first > h.at);
+    };
     if (held(r.key)) return true;
     if (!r.email) return false;
     const e = r.email.toLowerCase();
@@ -340,7 +366,8 @@ export function createHeadroomService(d) {
         refusal: override ? `${override} is set in Dobius's environment, and it signs in every Claude the same way whichever account a tab is on`
           : r.duplicateId ? 'two accounts share this id; fix that in Settings first'
             : (!r.isDefault && typeof r.id !== 'string') ? 'this account has no usable id; re-add it in Settings'
-              : moveRefusal(source, r),
+              : r.sharedHistory === false ? 'its conversation history is not linked to the shared one, so the conversation cannot be resumed there'
+                : moveRefusal(source, r),
         autoRefusal: autoRefusal(source, r, { fresh: freshUsage(usage, live ? (live.get(r.key) ?? 0) : null) }),
       };
     }));
@@ -385,7 +412,7 @@ export function createHeadroomService(d) {
   async function draftIn(tabId) {
     try {
       const sc = await d.screen(tabId);
-      return sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), isLimitMenu(d.selector(bottomRows(sc.lines)))) : true;
+      return sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), limitMenuOnly(sc.lines, d.selector)) : true;
     } catch { return true; }
   }
 
@@ -538,7 +565,7 @@ export function createHeadroomService(d) {
       let sc;
       try { sc = await d.screen(tab.id); } catch { sc = null; }
       const screenHit = !!liveLimitLine(sc?.lines, d.rows(tab.id));
-      const draft = sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), isLimitMenu(d.selector(bottomRows(sc.lines)))) : true;
+      const draft = sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), limitMenuOnly(sc.lines, d.selector)) : true;
       // A token or key exported into this Claude (a shell rc) signs it in
       // whatever its profile folder says: moving it would change nothing.
       const tabOverride = await d.processAuthOverride(info.pid); // a name, 'unreadable', or null
@@ -571,9 +598,9 @@ export function createHeadroomService(d) {
       // A real limit on this tab's account: it is limited for everyone else
       // in this pass and for a while after, whatever its last report said.
       if (dec.action === 'move' || dec.action === 'notice' || dec.action === 'wait') {
-        if (source.key && !limitedUntil.has(source.key)) limitedUntil.set(source.key, d.now() + AUTO.LIMITED_HOLD_MS);
+        if (source.key && !limitedUntil.has(source.key)) limitedUntil.set(source.key, { at: d.now(), until: d.now() + AUTO.LIMITED_HOLD_MS });
       }
-      for (const [k, t] of limitedUntil) if (t <= d.now()) limitedUntil.delete(k);
+      for (const [k, h] of limitedUntil) if (h.until <= d.now()) limitedUntil.delete(k);
       if (dec.action === 'wait') st.nextLookAt = d.now() + 5_000;
       if (dec.action === 'move') {
         const prevLastMoveAt = st.lastMoveAt;

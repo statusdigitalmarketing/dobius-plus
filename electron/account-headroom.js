@@ -107,7 +107,9 @@ export function sanitizeHistory(raw) {
 const figureOf = (windows) => JSON.stringify(Object.keys(windows || {}).sort()
   .map((n) => [n, windows[n]?.usedPercentage, windows[n]?.resetsAt]));
 const SID_RE = /^[A-Za-z0-9_-]{1,100}$/;
-const MAX_IGNORED = 50;
+// Every session with a record on the folder (records older than 8 days are
+// pruned, so this is far above what one folder ever has).
+const MAX_IGNORED = 1000;
 
 export function noteLogin(hist, key, email, now, records = []) {
   if (!isCredentialKey(key) || typeof email !== 'string' || !email.trim()) return false;

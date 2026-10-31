@@ -983,6 +983,7 @@ export const useStore = create((set, get) => ({
     if (!claim?.then) { typeIt(); return done; } // older preload: behave as before
     claim.then(async (okToRun) => {
       if (okToRun !== false && !(await shellUntouched())) {
+        window.electronAPI.dataReleaseSessionResume?.(sessionId, termId);
         typed('someone typed in the restarted tab, so the conversation was not resumed there');
         return;
       }

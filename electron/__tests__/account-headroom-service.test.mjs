@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHeadroomService, isDraft, draftOnScreen, isLimitMenu } from '../account-headroom-service.js';
+import { createHeadroomService, isDraft, draftOnScreen, isLimitMenu, limitMenuOnly } from '../account-headroom-service.js';
 import { keychainServiceFor } from '../account-identity.js';
 import { resolveClaudeAccountPin } from '../spawn-account-env.js';
 import { pruneUsageRecords } from '../claude-usage.js';
@@ -60,6 +60,8 @@ function world(over = {}) {
     identity: async (dir) => ({ email: w.emails[dir] ?? null, login: 'in' }),
     email: async (dir, opts) => (opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null)),
     inputHeld: () => !!w.held,
+    metadata: async (dir, opts) => (w.unreadableInner && opts?.envUnset === false ? { email: null, state: 'unreadable' } : { email: (opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null)), state: 'address' }),
+    sharesHistory: async (dir) => !(w.privateHistory && w.privateHistory.includes(dir)),
     processAuthOverride: async (pid) => (w.override && w.override[pid]) || null,
     settled: () => w.settled ?? true,
     selector: () => null,
@@ -485,6 +487,45 @@ await check('only Claude\'s own limit menu stands in for an unreadable box', asy
   assert.equal(isLimitMenu({ options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'No' }] }), false);
   assert.equal(draftOnScreen(null, false), true);
   assert.equal(draftOnScreen(null, true), false);
+});
+
+await check('an unreadable second metadata file on the default credential makes its login unknown', async () => {
+  const { w, svc } = world();
+  w.unreadableInner = true;
+  const u = await svc.usage();
+  assert.equal(u.accounts.find((r) => r.isDefault).email, null);
+});
+
+await check('a folder whose conversations are not the shared store is refused (the resume would read another copy)', async () => {
+  const { w, svc } = world();
+  w.privateHistory = [DIR_B];
+  const r = await svc.moveTargets(TAB);
+  assert.match(r.targets.find((t) => t.label === 'B').refusal, /history is not linked/);
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+});
+
+await check('a limit hold ends when that folder\'s five-hour window has reset since', async () => {
+  const { w, svc } = world();
+  // Tab 1 on A hits a limit: A is held. Then A's window resets and reports 1%.
+  w.emails[DIR_B] = 'b@x.com';
+  await svc.tick(); // moves tab 1 to B, holds A
+  w.now += 6 * 60_000;
+  const R5b = R5 + 5 * 3600;
+  w.records = [
+    { key: KEY_A, receivedAt: w.now - 1000, windows: { five_hour: { usedPercentage: 1, resetsAt: R5b } } },
+    { key: KEY_B, receivedAt: w.now - 1000, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } },
+  ];
+  const u = await svc.usage();
+  const r = await svc.moveTargets(TAB);
+  assert.equal(u.accounts.find((x) => x.label === 'A').usage.windows.five_hour.used, 1);
+  assert.equal(r.targets.find((t) => t.label === 'A').usage.limited, false, 'the new window is not held');
+});
+
+await check('Claude\'s limit menu stands in for the box only when no prompt row sits under it', async () => {
+  const parse = (ls) => (ls.some((l) => /Wait for limit to reset/.test(l)) ? { options: [{ num: 1, label: 'Wait for limit to reset' }] } : null);
+  assert.equal(limitMenuOnly(['❯ 1. Wait for limit to reset', '  2. Upgrade', 'Enter to select'], parse), true);
+  assert.equal(limitMenuOnly(['❯ 1. Wait for limit to reset', 'Enter to select', '────', '❯ half a draft', '────'], parse), false);
 });
 
 // ---- pin at the spawn choke point ----
