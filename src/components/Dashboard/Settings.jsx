@@ -423,7 +423,7 @@ export default function Settings() {
           >
             <option value="claude">Claude Code</option>
             <option value="codex">Codex</option>
-            <option value="shell">Plain shell</option>
+            <option value="shell">Terminal (nothing starts)</option>
           </select>
         </SettingRow>
         <SettingRow label="Scrollback Lines" description={`Save up to ${settings.scrollbackLines.toLocaleString()} lines on window close`}>

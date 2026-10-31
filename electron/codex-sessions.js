@@ -137,6 +137,156 @@ export function sessionIdFromFilename(name) {
  * a missing or malformed index just means titles fall back to the first user
  * message.
  */
+// Subcommands that are not the interactive TUI (a first word that is none of
+// these is a prompt, as in `codex "fix the bug"`).
+const NON_TUI_SUBCOMMANDS = new Set(['exec', 'e', 'login', 'logout', 'mcp', 'mcp-server', 'app-server', 'apply', 'a', 'completion', 'debug', 'sandbox', 'cloud', 'proto', 'help', 'features']);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Read a `ps -o command=` line: is it the interactive Codex TUI, which session
+ * its argv names (`codex resume <uuid>`), and which folder it was pointed at
+ * (`-C` / `--cd`)? Covers the npm shim (`node [flags] /opt/homebrew/bin/codex`)
+ * and the native binary. Only the word straight after `codex` counts as a
+ * subcommand, so an option value or prompt text is never read as one.
+ * ponytail: argv is split on whitespace (ps has already flattened it), so a
+ * codex under a path with spaces is not recognised, a `--cd` folder with
+ * spaces is cut short, and options placed BEFORE a subcommand
+ * (`codex -m x exec`) hide it.
+ * @returns {{ sessionId: string|null, cd: string|null } | null}  null when not the TUI
+ */
+export function parseCodexCommand(command) {
+  const t = String(command || '').trim().split(/\s+/);
+  const base = (s) => String(s || '').split('/').pop();
+  let rest;
+  if (base(t[0]) === 'codex') rest = t.slice(1);
+  else if (/^node\d*$/.test(base(t[0]))) {
+    const script = t.findIndex((a, i) => i > 0 && !a.startsWith('-'));
+    if (script < 0 || base(t[script]) !== 'codex') return null;
+    rest = t.slice(script + 1);
+  } else return null;
+  if (NON_TUI_SUBCOMMANDS.has(rest[0])) return null;
+  const id = rest[0] === 'resume' && UUID_RE.test(rest[1] || '') ? rest[1] : null;
+  // `--cd` only among the options before the first other word, so a prompt
+  // that mentions --cd is not read as one.
+  let cd = null;
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i];
+    if (a === '-C' || a === '--cd') { cd = rest[i + 1] || null; i += 1; } else if (a.startsWith('--cd=')) cd = a.slice(5);
+    else if (!a.startsWith('-') && (i === 0 || !rest[i - 1].startsWith('-'))) break; // a word that is no option's value
+  }
+  return { sessionId: id, cd };
+}
+
+// The first `n` bytes of a file as text, or null.
+async function readStart(filePath, n) {
+  try {
+    const fh = await fs.open(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(n);
+      const { bytesRead } = await fh.read(buf, 0, n, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } finally { await fh.close(); }
+  } catch { return null; }
+}
+
+// The head of a rollout: { head, size }, or null when it cannot be read.
+// session_meta is line 0. Grow the read until we have a COMPLETE first line (so
+// a large meta record is not clipped mid-line and the session silently
+// dropped), or hit a hard cap. Common case reads 64KB once: meta and the first
+// prompt sit well within it and a newline is present.
+async function readRolloutHead(filePath) {
+  try {
+    const fh = await fs.open(filePath, 'r');
+    try {
+      const st = await fh.stat();
+      let head = '';
+      let readLen = Math.min(65536, st.size);
+      const CAP = Math.min(2 * 1024 * 1024, st.size);
+      for (;;) {
+        const buf = Buffer.alloc(readLen);
+        await fh.read(buf, 0, readLen, 0);
+        head = buf.toString('utf8');
+        if (head.indexOf('\n') !== -1 || readLen >= CAP) break;
+        readLen = Math.min(readLen * 4, CAP);
+      }
+      return { head, size: st.size };
+    } finally { await fh.close(); }
+  } catch { return null; }
+}
+
+/**
+ * The interactive Codex session a running `codex` is writing, for Speak: the
+ * rollout for `cwd` (not a headless `codex exec`) modified most recently since
+ * the process started at `startedAt` (epoch ms). Rollouts carry no pid and
+ * Codex does not keep the file open, so this is a correlation by folder and
+ * time. Covers a fresh run, /new inside it, and a resume of a session from the
+ * newest `maxDays` day folders.
+ * ponytail: two interactive codex runs in the SAME folder at once cannot be
+ * told apart (the one written last wins); a folder reached through a symlink
+ * is compared literally; a resume picked from the picker whose rollout lives
+ * past the newest `maxDays` day folders is not found (argv `resume <id>` is,
+ * by the caller's fallback). Upgrade path: match the rollout's first user
+ * turn to the tab's input history.
+ * Cost per call: one stat per file in the walked days (newest first, capped)
+ * and an 8KB read per candidate written since the start, newest first,
+ * stopping at the first match.
+ * @returns {Promise<string|null>} the session id
+ */
+export async function findCodexSessionForProcess({ cwd, startedAt, maxDays = 14, maxFiles = 6000 } = {}) {
+  if (typeof cwd !== 'string' || !cwd || !Number.isFinite(startedAt)) return null;
+  const root = CODEX_SESSIONS_DIR();
+  const descNums = async (dir) => {
+    let ents;
+    try { ents = await fs.readdir(dir, { withFileTypes: true }); } catch { return []; }
+    return ents.filter((e) => e.isDirectory() && /^\d+$/.test(e.name)).map((e) => e.name).sort((a, b) => Number(b) - Number(a));
+  };
+  const fresh = [];
+  let days = 0;
+  let seen = 0;
+  outer:
+  for (const y of await descNums(root)) {
+    for (const m of await descNums(path.join(root, y))) {
+      for (const d of await descNums(path.join(root, y, m))) {
+        if (days++ >= maxDays) break outer;
+        const dayDir = path.join(root, y, m, d);
+        let names;
+        try { names = (await fs.readdir(dayDir)).filter((n) => n.endsWith('.jsonl')); } catch { continue; }
+        names.sort().reverse(); // newest first, so the cap drops the oldest
+        for (const n of names) {
+          if (seen++ >= maxFiles) break outer;
+          const file = path.join(dayDir, n);
+          try {
+            const st = await fs.stat(file);
+            // No slack: ps lstart is the start rounded DOWN to the second, so
+            // anything this process wrote is at or after it, and a file last
+            // written just before belongs to an earlier run.
+            if (st.mtimeMs >= startedAt) fresh.push({ file, mtime: st.mtimeMs });
+          } catch { /* vanished: skip */ }
+        }
+      }
+    }
+  }
+  fresh.sort((a, b) => b.mtime - a.mtime);
+  // session_meta writes id, cwd, originator and source before its large
+  // base_instructions, so 8KB decides almost every file. A head without those
+  // keys in 8KB is parsed in full instead.
+  const cwdKey = `"cwd":${JSON.stringify(cwd)}`;
+  for (const { file } of fresh) {
+    const peek = await readStart(file, 8192);
+    if (peek === null) continue;
+    if (/"originator":"codex_exec"|"source":"exec"/.test(peek)) continue;
+    if (peek.includes('"cwd":') && peek.includes('"originator":')) {
+      if (!peek.includes(cwdKey)) continue;
+      const id = sessionIdFromFilename(path.basename(file));
+      if (id) return id;
+    }
+    const got = await readRolloutHead(file);
+    const parsed = got && parseCodexSessionHead(got.head);
+    if (parsed?.sessionId && !parsed.isExec && parsed.cwd === cwd) return parsed.sessionId;
+  }
+  return null;
+}
+
 /**
  * List recent Codex sessions as history items, same shape as loadAllSessions'
  * Claude items plus `source: 'codex'`. Bounded for a home with tens of
@@ -160,28 +310,10 @@ export async function listCodexSessions({ limit = 50, includeExec = false, proje
       .map((e) => e.name).sort((a, b) => Number(b) - Number(a));
   };
   const readItem = async (filePath) => {
-    let head;
-    let sizeMB;
-    try {
-      const fh = await fs.open(filePath, 'r');
-      try {
-        const st = await fh.stat();
-        sizeMB = st.size / (1024 * 1024);
-        // session_meta is line 0. Grow the read until we have a COMPLETE first
-        // line (so a large meta record is not clipped mid-line and the session
-        // silently dropped), or hit a hard cap. Common case reads 64KB once:
-        // meta and the first prompt sit well within it and a newline is present.
-        let readLen = Math.min(65536, st.size);
-        const CAP = Math.min(2 * 1024 * 1024, st.size);
-        for (;;) {
-          const buf = Buffer.alloc(readLen);
-          await fh.read(buf, 0, readLen, 0);
-          head = buf.toString('utf8');
-          if (head.indexOf('\n') !== -1 || readLen >= CAP) break;
-          readLen = Math.min(readLen * 4, CAP);
-        }
-      } finally { await fh.close(); }
-    } catch { return null; }
+    const got = await readRolloutHead(filePath);
+    if (!got) return null;
+    const { head } = got;
+    const sizeMB = got.size / (1024 * 1024);
     const id = sessionIdFromFilename(path.basename(filePath));
     const parsed = parseCodexSessionHead(head, { indexTitle: index.get(id) });
     if (!parsed || !parsed.sessionId) return null;

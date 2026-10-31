@@ -1,10 +1,11 @@
 /**
  * voice-playback.js, v1.0.80.
  *
- * "Read out Claude's last response" TTS. Called from the TopBar Speak button.
- * Resolves the active tab's linked sessionId via sessionTabMap, loads the
- * transcript, finds the LAST assistant message, strips markdown/code fences,
- * then speaks it.
+ * "Read out the last response" TTS. Called from the TopBar Speak button.
+ * When a Codex TUI runs in the tab, reads that Codex session (argv
+ * `resume <id>`, else findCodexSessionForProcess); otherwise resolves the
+ * tab's linked Claude sessionId via sessionTabMap. Loads the transcript, finds
+ * the LAST assistant message, strips markdown/code fences, then speaks it.
  *
  * Two engines, auto-selected by availability. Kokoro is preferred because it
  * sounds like a real person; macOS `say` is kept as a fallback so the Speak
@@ -28,6 +29,8 @@ import { fileURLToPath } from 'url';
 import { app } from 'electron';
 import { getSessionTabMap } from './config-manager.js';
 import { loadTranscript } from './data-service.js';
+import { getTerminalCodexInfo } from './terminal-manager.js';
+import { codexTranscript, findCodexSessionForProcess } from './codex-sessions.js';
 
 const SPEED_WPM = { '1x': 175, '1.5x': 260, '2x': 350 };
 const SPEED_FLOAT = { '1x': 1.0, '1.5x': 1.5, '2x': 2.0 };
@@ -211,22 +214,38 @@ export async function speakLastResponse({ tabId, speed = '1x' } = {}) {
     return { ok: false, error: 'tabId required' };
   }
 
-  const map = getSessionTabMap() || {};
-  let best = null;
-  for (const [sid, entry] of Object.entries(map)) {
-    if (entry?.tabId === tabId && (!best || (entry.capturedAt || 0) > best.capturedAt)) {
-      best = { sessionId: sid, projectPath: entry.projectPath, capturedAt: entry.capturedAt || 0 };
-    }
-  }
-  if (!best?.sessionId) {
-    return { ok: false, error: 'no linked Claude session for this tab yet, resume one first' };
-  }
-
+  // A Codex running in the tab wins: it is what the person is talking to now,
+  // even if the tab ran Claude earlier and still has a Claude link.
+  const codex = await getTerminalCodexInfo(tabId);
   let messages;
-  try {
-    messages = await loadTranscript(best.sessionId, best.projectPath);
-  } catch (err) {
-    return { ok: false, error: `failed to load transcript: ${err.message}` };
+  if (codex) {
+    // The rollout this run wrote to most recently comes first: after
+    // `codex resume <id>` then /new, argv still names the old session. The
+    // argv id covers a resumed rollout too old for the walk to reach.
+    const found = codex.startedAt ? await findCodexSessionForProcess({ cwd: codex.cwd, startedAt: codex.startedAt }) : null;
+    const sessionId = found || codex.sessionId;
+    if (!sessionId) return { ok: false, error: 'Codex has not answered in this tab yet' };
+    try {
+      messages = await codexTranscript(sessionId, { limit: 40 });
+    } catch (err) {
+      return { ok: false, error: `failed to load Codex transcript: ${err.message}` };
+    }
+  } else {
+    const map = getSessionTabMap() || {};
+    let best = null;
+    for (const [sid, entry] of Object.entries(map)) {
+      if (entry?.tabId === tabId && (!best || (entry.capturedAt || 0) > best.capturedAt)) {
+        best = { sessionId: sid, projectPath: entry.projectPath, capturedAt: entry.capturedAt || 0 };
+      }
+    }
+    if (!best?.sessionId) {
+      return { ok: false, error: 'no Claude or Codex reply in this tab yet' };
+    }
+    try {
+      messages = await loadTranscript(best.sessionId, best.projectPath);
+    } catch (err) {
+      return { ok: false, error: `failed to load transcript: ${err.message}` };
+    }
   }
   if (!Array.isArray(messages) || messages.length === 0) {
     return { ok: false, error: 'transcript is empty' };

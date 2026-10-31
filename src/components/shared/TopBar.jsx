@@ -37,7 +37,7 @@ export default function TopBar({ projectName }) {
       }}
     >
       {/* Left: home + sidebar toggle + view tabs */}
-      <div className="no-drag flex items-center gap-1">
+      <div className="no-drag shrink-0 flex items-center gap-1">
         <button
           onClick={() => window.electronAPI?.windowShowLauncher?.()}
           className="px-2 py-1 text-xs rounded transition-colors duration-150"
@@ -77,26 +77,31 @@ export default function TopBar({ projectName }) {
         />
       </div>
 
-      {/* Center: project name + active tab */}
+      {/* Center: project name + active tab + branch. A flex item between the
+          two sides, never absolutely centered over them: in a narrow window it
+          shortens (branch first, then tab name, then project) instead of
+          running under Dashboard or the Terminal/Chat switch. */}
+      <div className="flex-1 min-w-0 flex justify-center px-3 max-[760px]:px-1 max-[680px]:invisible">
       <span
-        className="text-xs font-medium absolute left-1/2 -translate-x-1/2 max-w-96 truncate flex items-center gap-1.5"
+        className="text-xs font-medium min-w-0 max-w-[32rem] flex items-center gap-1.5 overflow-hidden whitespace-nowrap"
         style={{ color: 'var(--dim)' }}
       >
-        <span>{projectName || 'Dobius+'}</span>
+        <span className="truncate min-w-[3rem]" style={{ flexShrink: 1 }}>{projectName || 'Dobius+'}</span>
         {activeTabLabel && (
           <>
-            <span style={{ opacity: 0.5 }}>·</span>
-            <span style={{ color: 'var(--fg)' }}>{activeTabLabel}</span>
+            <span className="shrink-0" style={{ opacity: 0.5 }}>·</span>
+            <span className="truncate min-w-[3rem]" style={{ color: 'var(--fg)', flexShrink: 2 }} title={activeTabLabel}>{activeTabLabel}</span>
           </>
         )}
         {showGit && (
           <>
-            <span style={{ opacity: 0.5 }}>·</span>
+            <span className="shrink-0" style={{ opacity: 0.5 }}>·</span>
             <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ opacity: 0.7 }}>
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m9-9a3 3 0 11-3-3m3 3v3a3 3 0 01-3 3H9" />
             </svg>
             <span
-              style={{ color: 'var(--fg)' }}
+              className="truncate min-w-[2rem]"
+              style={{ color: 'var(--fg)', flexShrink: 4 }}
               title={currentDetached
                 ? 'Detached HEAD — not on a branch'
                 : `On branch ${currentBranch}${gitKind ? ` (${gitKind})` : ''}. Polled every 20s, follows the active tab's cwd.`}
@@ -105,6 +110,7 @@ export default function TopBar({ projectName }) {
             </span>
             {gitKind && (
               <span
+                className="shrink-0"
                 style={{
                   color: 'var(--accent)',
                   fontWeight: 600,
@@ -116,21 +122,23 @@ export default function TopBar({ projectName }) {
           </>
         )}
       </span>
+      </div>
 
-      {/* Right: visual + tasks dropdown + theme picker */}
-      <div className="no-drag flex items-center gap-2">
+      {/* Right: visual + tasks dropdown + speak + theme picker. Icons only, the
+          words are in each button's hover tooltip, so the centered tab name and
+          the Terminal/Chat switch have room. */}
+      <div className="no-drag shrink-0 flex items-center gap-2 max-[760px]:gap-1">
         <ViewModeToggle />
         <button
           onClick={() => currentProjectPath && window.electronAPI?.visualOpenWindow?.(currentProjectPath)}
           disabled={!currentProjectPath}
-          title="Visual Preview, open a phone preview that updates as Claude edits"
-          aria-label="Open visual preview"
+          title="Visual: open a phone-sized preview of this project that updates as Claude edits"
+          aria-label="Visual: open a phone preview"
           className="no-drag"
           style={{
             display: 'flex',
             alignItems: 'center',
-            gap: 5,
-            padding: '3px 8px',
+            padding: '4px 6px',
             fontSize: 11,
             fontFamily: "'SF Mono', monospace",
             color: 'var(--dim)',
@@ -148,7 +156,6 @@ export default function TopBar({ projectName }) {
             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
             <circle cx="12" cy="12" r="3"/>
           </svg>
-          Visual
         </button>
         <TasksDropdown />
         <SpeakButton />

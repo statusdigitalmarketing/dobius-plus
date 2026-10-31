@@ -126,5 +126,64 @@ await check('listCodexSessions excludePaths skips a hidden project during the wa
   assert.ok(!filtered.some((s) => s.projectPath === '/Users/x/hidden'), 'hidden excluded');
 });
 
+// Speak in a Codex tab: which rollout the tab's running codex is writing.
+{
+  const { findCodexSessionForProcess, parseCodexCommand } = await import('../codex-sessions.js');
+  const day = path.join(tmp, '.codex', 'sessions', '2026', '10', '31');
+  fs.mkdirSync(day, { recursive: true });
+  const write = (id, cwd, originator, mtimeMs) => {
+    const f = path.join(day, `rollout-2026-10-31T12-00-00-${id}.jsonl`);
+    fs.writeFileSync(f, j({ type: 'session_meta', payload: { id, cwd, originator, source: originator === 'codex_exec' ? 'exec' : 'cli' } }) + '\n' + asstLine('hello') + '\n');
+    fs.utimesSync(f, mtimeMs / 1000, mtimeMs / 1000);
+  };
+  const start = Date.parse('2026-10-31T12:00:00Z');
+  const OLD = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const MINE = 'aaaaaaaa-0000-4000-8000-000000000002';
+  const EXEC = 'aaaaaaaa-0000-4000-8000-000000000003';
+  const OTHER = 'aaaaaaaa-0000-4000-8000-000000000004';
+  write(OLD, '/p/app', 'codex_cli_rs', start - 3600_000); // before the process started
+  write(MINE, '/p/app', 'codex_cli_rs', start + 60_000);
+  write(EXEC, '/p/app', 'codex_exec', start + 120_000); // a review run, newer, same folder
+  write(OTHER, '/p/other', 'codex_cli_rs', start + 180_000); // another folder, newest
+
+  await check('finds the interactive rollout for the folder written since the process started', async () => {
+    assert.equal(await findCodexSessionForProcess({ cwd: '/p/app', startedAt: start }), MINE);
+  });
+  await check('a resumed older session counts once it is written to after the start', async () => {
+    write(OLD, '/p/app', 'codex_cli_rs', start + 240_000);
+    assert.equal(await findCodexSessionForProcess({ cwd: '/p/app', startedAt: start }), OLD);
+  });
+  await check('nothing written since the start, or no cwd: no session', async () => {
+    assert.equal(await findCodexSessionForProcess({ cwd: '/p/app', startedAt: start + 3600_000 }), null);
+    assert.equal(await findCodexSessionForProcess({ cwd: null, startedAt: start }), null);
+  });
+  await check('the previous run\'s file written a moment before the start is not this run\'s', async () => {
+    const PREV = 'aaaaaaaa-0000-4000-8000-000000000005';
+    const later = start + 3600_000;
+    write(PREV, '/p/prev', 'codex_cli_rs', later - 500);
+    assert.equal(await findCodexSessionForProcess({ cwd: '/p/prev', startedAt: later }), null);
+  });
+  await check('parseCodexCommand: TUI forms, resume id, --cd, and non-TUI subcommands', async () => {
+    const tui = (sessionId = null, cd = null) => ({ sessionId, cd });
+    assert.deepEqual(parseCodexCommand('node /opt/homebrew/bin/codex'), tui());
+    assert.deepEqual(parseCodexCommand('node --no-warnings /opt/homebrew/bin/codex'), tui());
+    assert.deepEqual(parseCodexCommand('/opt/x/codex-darwin-arm64/vendor/bin/codex --model gpt-6'), tui());
+    assert.deepEqual(parseCodexCommand(`codex resume ${MINE}`), tui(MINE));
+    assert.deepEqual(parseCodexCommand('codex resume --last'), tui());
+    assert.deepEqual(parseCodexCommand('codex fix the resume bug'), tui());
+    assert.deepEqual(parseCodexCommand('codex -m exec'), tui(), 'an option value is not a subcommand');
+    assert.deepEqual(parseCodexCommand('codex --cd /p/target'), tui(null, '/p/target'));
+    assert.deepEqual(parseCodexCommand('codex -C sub resume --last'), tui(null, 'sub'));
+    assert.deepEqual(parseCodexCommand('codex explain --cd /tmp/other'), tui(), 'a --cd inside the prompt is not an option');
+    assert.deepEqual(parseCodexCommand('codex -m gpt-6 fix it --cd /x'), tui());
+    assert.equal(parseCodexCommand('codex exec --skip-git-repo-check -'), null);
+    assert.equal(parseCodexCommand('-zsh'), null);
+    assert.equal(parseCodexCommand('zsh -l -i -c trap : INT; [[ $1 == codex ]] && codex;'), null);
+    assert.equal(parseCodexCommand('node /opt/homebrew/bin/codex app-server'), null);
+    assert.equal(parseCodexCommand('claude --resume abc'), null);
+    assert.equal(parseCodexCommand('vim codex.md'), null);
+  });
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\nALL PASS  (${pass} passed)`);

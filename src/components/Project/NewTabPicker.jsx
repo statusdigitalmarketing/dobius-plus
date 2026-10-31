@@ -6,7 +6,14 @@ import {
 } from '../../../shared/new-tab.js';
 import Kbd from '../shared/Kbd';
 
-const TOOL_LABEL = { claude: 'Claude Code', codex: 'Codex', shell: 'a plain shell' };
+// The footer switch: what every new tab starts. It writes settings.newTabTool,
+// which main reads at each spawn, so the choice sticks for Cmd+T, the + and
+// every window until it is changed here or in Settings.
+const TOOL_CHOICES = [
+  ['claude', 'Claude', 'New tabs start Claude Code'],
+  ['codex', 'Codex', 'New tabs start Codex'],
+  ['shell', 'Terminal', 'New tabs open a plain terminal, nothing starts'],
+];
 
 // The + button's New Tab picker: this project first (Enter opens a tab here),
 // then the launcher's other projects, each opening a tab in its own window.
@@ -22,6 +29,7 @@ export default function NewTabPicker({ projectPath }) {
   const [hidden, setHidden] = useState([]);
   const [showHidden, setShowHidden] = useState(false);
   const [tool, setTool] = useState('claude');
+  const toolPickedRef = useRef(false);
   const inputRef = useRef(null);
   const listRef = useRef(null);
   const openSnapshotRef = useRef(null);
@@ -33,6 +41,7 @@ export default function NewTabPicker({ projectPath }) {
     setQuery('');
     setHighlight(0);
     setShowHidden(false);
+    toolPickedRef.current = false;
     requestAnimationFrame(() => inputRef.current?.focus());
     const api = window.electronAPI;
     if (!api) return undefined;
@@ -43,7 +52,8 @@ export default function NewTabPicker({ projectPath }) {
     api.configGetSettings?.().then((st) => {
       if (cancelled) return;
       setHidden(Array.isArray(st?.newTabHiddenProjects) ? st.newTabHiddenProjects : []);
-      setTool(normalizeNewTabTool(st?.newTabTool));
+      // A click on the switch before this load landed wins over the old value.
+      if (!toolPickedRef.current) setTool(normalizeNewTabTool(st?.newTabTool));
     }).catch((err) => console.warn('[NewTabPicker] settings load failed:', err?.message));
     return () => { cancelled = true; };
   }, [open]);
@@ -105,6 +115,13 @@ export default function NewTabPicker({ projectPath }) {
     api?.configUpdateSettings?.({ newTabHiddenProjects: next });
   };
 
+  const pickTool = (value) => {
+    toolPickedRef.current = true;
+    setTool(value);
+    Promise.resolve(window.electronAPI?.configUpdateSettings?.({ newTabTool: value }))
+      .catch((err) => console.warn('[NewTabPicker] could not save new tab tool:', err?.message));
+  };
+
   const onKeyDown = (e) => {
     e.stopPropagation();
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
@@ -114,8 +131,16 @@ export default function NewTabPicker({ projectPath }) {
       if (rows[n]) choose(rows[n]);
       return;
     }
+    // Tab (Shift+Tab back) in the search box cycles what new tabs start; focus
+    // stays in the input. From anywhere else Tab only brings focus back.
     if (e.key === 'Tab') {
-      e.preventDefault(); inputRef.current?.focus(); return;
+      e.preventDefault();
+      const fromInput = e.target === inputRef.current;
+      inputRef.current?.focus();
+      if (!fromInput) return;
+      const i = TOOL_CHOICES.findIndex(([v]) => v === tool);
+      pickTool(TOOL_CHOICES[(i + (e.shiftKey ? -1 : 1) + TOOL_CHOICES.length) % TOOL_CHOICES.length][0]);
+      return;
     }
     if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) {
       e.preventDefault(); setHighlight(rows.length ? (active + 1) % rows.length : 0);
@@ -244,7 +269,43 @@ export default function NewTabPicker({ projectPath }) {
               {showHidden ? 'Hide hidden' : `Show hidden (${hiddenCount})`}
             </button>
           )}
-          <span className="ml-auto">Starts {TOOL_LABEL[tool]}</span>
+          <span className="ml-auto inline-flex items-center gap-1.5" title="Tab switches what new tabs start">
+            <kbd style={{ height: 18, padding: '0 4px', display: 'inline-flex', alignItems: 'center', fontSize: 10, fontFamily: "'SF Mono', ui-monospace, monospace", color: 'var(--dim)', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 4 }}>tab</kbd>
+            Starts
+            <span
+              role="radiogroup"
+              aria-label="What new tabs start"
+              data-testid="new-tab-tool-switch"
+              className="inline-flex"
+              style={{ gap: 2, padding: 2, border: '1px solid var(--border)', borderRadius: 6 }}
+            >
+              {TOOL_CHOICES.map(([value, label, hint]) => {
+                const on = tool === value;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={on}
+                    tabIndex={-1}
+                    title={`${hint}. Sticks for Cmd+T and the + until you change it.`}
+                    onClick={() => pickTool(value)}
+                    className="text-[10px]"
+                    style={{
+                      padding: '1px 7px', borderRadius: 4, border: 'none', cursor: on ? 'default' : 'pointer',
+                      background: on ? 'var(--surface-hover)' : 'transparent',
+                      color: on ? 'var(--fg)' : 'var(--dim)',
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </span>
+            <span className="sr-only" aria-live="polite">
+              {`New tabs start ${TOOL_CHOICES.find(([v]) => v === tool)?.[1]}`}
+            </span>
+          </span>
         </div>
       </div>
     </div>

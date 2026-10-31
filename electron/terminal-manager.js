@@ -16,6 +16,7 @@ const execFileP = promisify(execFile);
 import { app } from 'electron';
 import { getSessionTabMap } from './config-manager.js';
 import { loginShellSpawn, ptyProgramName } from '../shared/new-tab.js';
+import { parseCodexCommand } from './codex-sessions.js';
 
 const terminals = new Map();
 // getTerminalClaudeInfo { unique }: a shell with more children answers nothing.
@@ -603,6 +604,45 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
   } catch {
     return null;
   }
+}
+
+/**
+ * The interactive Codex running in a terminal, for Speak: a direct child of
+ * the tab's shell, or the PTY's own process when `exec codex` replaced the
+ * shell. { pid, startedAt, sessionId (from `codex resume <uuid>`, else null),
+ * cwd (the folder Codex works in: `--cd` when given) }, or null when no Codex
+ * TUI runs there. A headless `codex exec` is not one.
+ * ponytail: a codex under a wrapper (`bash -c 'codex; ...'`) is a grandchild
+ * and is not looked for.
+ */
+export async function getTerminalCodexInfo(id) {
+  const entry = terminals.get(id);
+  if (!entry) return null;
+  const pid = entry.pty.pid;
+  if (typeof pid !== 'number' || pid <= 0) return null;
+  let pids = [];
+  try {
+    const { stdout } = await execFileP('/usr/bin/pgrep', ['-P', String(pid)], { timeout: 1000, encoding: 'utf8' });
+    pids = stdout.trim().split('\n').filter(Boolean).slice(0, MAX_UNIQUE_CHILDREN);
+  } catch {
+    // pgrep exits 1 when the shell has no children.
+  }
+  pids.push(String(pid));
+  for (const p of pids) {
+    let line;
+    try {
+      ({ stdout: line } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', p], { timeout: 1000, encoding: 'utf8' }));
+    } catch { continue; } // exited between pgrep and ps
+    line = line.trim();
+    const parsed = line ? parseCodexCommand(line.slice(24)) : null;
+    if (!parsed) continue;
+    const startedAt = Date.parse(line.slice(0, 24));
+    const procCwd = await getProcessCwd(Number(p));
+    let cwd = procCwd;
+    if (parsed.cd) cwd = parsed.cd.startsWith('/') ? path.resolve(parsed.cd) : (procCwd ? path.resolve(procCwd, parsed.cd) : null);
+    return { pid: Number(p), startedAt: Number.isFinite(startedAt) ? startedAt : null, sessionId: parsed.sessionId, cwd };
+  }
+  return null;
 }
 
 /**
