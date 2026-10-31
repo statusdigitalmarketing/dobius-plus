@@ -99,7 +99,7 @@ export default function MoveAccountDialog({ tabId, onClose }) {
                           {windowLabel(name)} <span style={{ color: barColor(w.used) }}>{Math.round(w.used)}%</span>
                         </span>
                       ))}
-                      <span>{u.headroom}% headroom, reported {ago(u.ageMs)}</span>
+                      <span>{u.headroom}% headroom, reported {ago(u.ageMs)}{u.via ? ` (by ${u.via}, the same login)` : ''}</span>
                     </>
                   : <span>Usage unknown{u?.lastReportedAt ? ` (last report ${ago(u.ageMs)})` : ': no session has reported on it yet'}</span>}
               </div>

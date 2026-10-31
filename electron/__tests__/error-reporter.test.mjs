@@ -67,6 +67,7 @@ const check = (label, got, want) => {
 check('uncaught exception is reported', R.isReportable('crash.uncaughtException', 'TypeError: x'), true);
 check('renderer error is reported', R.isReportable('renderer.error', 'boom (app.js:1)'), true);
 check('warnings are not', R.isReportable('main.warn', 'meh'), false);
+check('the auto-move audit trail is not a fault', R.isReportable('accounts.auto-move', 'tab=x result=moving'), false);
 check('the startup line is not', R.isReportable('app', 'started'), false);
 check('crash.render-process-gone duplicates renderer.gone', R.isReportable('crash.render-process-gone', 'reason=crashed'), false);
 check('a clean child exit is not a fault', R.isReportable('child.gone', 'type=Utility reason=clean-exit exitCode=0'), false);

@@ -218,6 +218,25 @@ await check('move targets refuse the tab\'s own account', async () => {
   assert.equal(r.targets[0].label, 'B');
 });
 
+await check('a folder logged into the same address shows that login\'s figures, marked with where they came from', async () => {
+  const { w, svc } = world();
+  w.emails[DIR_A] = 'b@x.com'; // A and B: one login, two folders
+  w.records = [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 30, resetsAt: R5 } } }];
+  const u = await svc.usage();
+  const a = u.accounts.find((r) => r.label === 'A');
+  assert.equal(a.usage.known, true);
+  assert.equal(a.usage.windows.five_hour.used, 30);
+  assert.equal(a.usage.via, 'B');
+});
+
+await check('a re-login of a folder clears its figures; a credential two files disagree on is left alone', async () => {
+  const { w, svc } = world({ records: [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 30, resetsAt: R5 } } }] });
+  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, true);
+  w.emails[DIR_B] = 'new@x.com';
+  w.now += 1000;
+  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
+});
+
 // ---- pin at the spawn choke point ----
 
 await check('a tab pin names exactly one Claude account, or Default, or nothing', async () => {

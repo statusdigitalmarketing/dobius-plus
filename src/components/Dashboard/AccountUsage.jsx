@@ -141,7 +141,7 @@ export default function AccountUsage() {
               {r.email && <span style={{ color: 'var(--dim)' }}> {r.email}</span>}
               <span style={{ color: 'var(--dim)' }}>
                 {u.known
-                  ? <> · last reported {ago(u.ageMs)}{r.sessionsRunning > 0 ? `, ${r.sessionsRunning} running` : ''}{r.stale ? <span style={{ color: AMBER }}> · stale{r.sessionsRunning === 0 ? ', no session running' : ''}</span> : ''}</>
+                  ? <> · {u.via ? `from ${u.via} (same login), ` : ''}last reported {ago(u.ageMs)}{r.sessionsRunning > 0 ? `, ${r.sessionsRunning} running` : ''}{r.stale ? <span style={{ color: AMBER }}> · stale{r.sessionsRunning === 0 ? ', no session running' : ''}</span> : ''}</>
                   : ' · usage unknown'}
               </span>
             </div>

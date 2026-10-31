@@ -132,8 +132,18 @@ export function createHeadroomService(d) {
     }
     for (const r of all) r.sameAs = r.email ? byEmail.get(r.email.toLowerCase()).filter((l) => l !== r.label) : [];
     // A folder re-logged into another login: its old figures are not this one's.
+    // Two rows on one credential can read two metadata files (Default with
+    // the home-level file, an explicit ~/.claude with the inner one) and name
+    // two logins: that credential's owner is undecidable, so it is left alone
+    // rather than flipped back and forth.
     const h = await history();
-    for (const r of all) if (r.key && r.email && noteLogin(h, r.key, r.email, d.now())) dirty = true;
+    const loginOf = new Map();
+    for (const r of all) {
+      if (!r.key || !r.email) continue;
+      const e = r.email.toLowerCase();
+      loginOf.set(r.key, loginOf.has(r.key) && loginOf.get(r.key) !== e ? null : e);
+    }
+    for (const [key, email] of loginOf) if (email && noteLogin(h, key, email, d.now())) dirty = true;
     return all;
   }
 
@@ -162,10 +172,24 @@ export function createHeadroomService(d) {
     return { key, email, label: path.basename(dir) };
   }
 
+  // One login under two folders is one limit: a folder with no live figure
+  // shows (and ranks by) the freshest figure of a folder logged into the same
+  // address, marked with where it came from.
+  function usageForRow(r, rows, now) {
+    const own = usageForKey(hist, r.key, now);
+    if (own.known || !r.email) return own;
+    const same = rows
+      .filter((o) => o !== r && o.key !== r.key && o.email && o.email.toLowerCase() === r.email.toLowerCase())
+      .map((o) => ({ o, u: usageForKey(hist, o.key, now) }))
+      .filter((x) => x.u.known)
+      .sort((x, y) => (y.u.lastReportedAt || 0) - (x.u.lastReportedAt || 0))[0];
+    return same ? { ...same.u, via: same.o.label } : own;
+  }
+
   // `reserved`: key -> percent already promised this pass to tabs moved there.
   function candidatesFor(source, rows, now, reserved = null) {
     return rankTargets(rows.map((r) => {
-      const usage = usageForKey(hist, r.key, now);
+      const usage = usageForRow(r, rows, now);
       const hold = limitedUntil.get(r.key);
       if (hold && hold > now) { usage.limited = true; usage.headroom = 0; }
       const less = reserved?.get(r.key) || 0;
@@ -200,7 +224,7 @@ export function createHeadroomService(d) {
       scanFailed: coverageUnknown,
       autoMove: !!d.autoMoveEnabled(),
       accounts: rows.map((r) => {
-        const u = usageForKey(hist, r.key, now);
+        const u = usageForRow(r, rows, now);
         const running = live.get(r.key) ?? 0;
         return {
           id: r.id, label: r.label, isDefault: r.isDefault, email: r.email, login: r.login, sameAs: r.sameAs,
