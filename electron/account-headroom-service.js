@@ -752,7 +752,9 @@ export function createHeadroomService(d) {
     if (!(await targetStillSame(p))) return stop(`${p.targetLabel} is logged into a different account now`);
     // It may have filled up while this move waited its turn.
     await sample();
-    if (usageForKey(hist, p.targetKey, d.now()).limited) return stop(`${p.targetLabel} has hit its limit too`);
+    const rows = await accountRows();
+    const row = rows.find((r) => r.key === p.targetKey);
+    if (!row || usageForRow(row, rows, d.now()).limited || heldNow(row, rows, d.now())) return stop(`${p.targetLabel} has hit its limit too`);
     if (d.inputSeq(tabId) !== p.inputSeq) return stop('someone typed in the tab');
     p.started = true;
     p.at = d.now();
@@ -766,6 +768,7 @@ export function createHeadroomService(d) {
     if (!p.targetEmail) return false;
     const row = { dir: p.targetDir, key: p.targetKey, email: await loginEmail(p.targetDir, !!p.targetEnvUnset) };
     await markSharedFolders([row]); // the folder or its credential file relinked meanwhile
+    if (!(await d.sharesHistory(p.targetDir))) return false; // so would its conversations be another copy
     return !!row.email && row.email.toLowerCase() === p.targetEmail.toLowerCase();
   }
 

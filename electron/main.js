@@ -2381,7 +2381,9 @@ function setupHeadroomHandlers() {
     authOverride: () => ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'].find((k) => typeof process.env[k] === 'string' && process.env[k].trim()) || null,
     readRecords: () => readUsageRecords(app.getPath('userData')),
     scan: () => scanClaudeProcesses(),
-    autoMoveEnabled: () => getSettings().autoMoveOnLimit === true,
+    // Needs the reporter on: its reports are what name a tab's conversation, and
+    // ones left from before it was turned off go on naming an old one.
+    autoMoveEnabled: () => getSettings().autoMoveOnLimit === true && getSettings().usageReporting === true,
     tabs: () => listTerminals(),
     activity: (id) => terminalStatus.statusFor(id),
     claudeInfo: (id) => getTerminalClaudeInfo(id),

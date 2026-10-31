@@ -773,6 +773,25 @@ await check('no "continue" once the process reports another conversation', async
   assert.deepEqual(w.submits, []);
 });
 
+await check('a target whose login filled up through another folder while the move waited is called off', async () => {
+  const { w, svc } = world();
+  w.extraAccounts = [{ id: 'b2', type: 'claude', name: 'B2', claudeJsonPath: '/profiles/b2/.claude.json' }];
+  w.emails['/profiles/b2'] = 'b@x.com';
+  await svc.tick();
+  assert.equal(w.sent.length, 1);
+  w.records.push({ key: keychainServiceFor('/profiles/b2'), receivedAt: w.now, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } });
+  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
+  assert.equal(st.ok, false);
+});
+
+await check('a target whose conversations stopped being the shared store while the move waited is called off', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  w.privateHistory = [DIR_B];
+  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
+  assert.equal(st.ok, false);
+});
+
 await check('a target that filled up while the move waited is called off', async () => {
   const { w, svc } = world();
   await svc.tick();
