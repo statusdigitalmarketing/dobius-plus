@@ -288,7 +288,9 @@ function setupTerminalHandlers() {
     // An automatic account move restarts the tab only if nothing reached it
     // since main last checked (account-headroom-service startAutoMove): no
     // await between this check and the kill.
-    if (opts && Number.isInteger(opts.expectInputSeq) && terminalInputSeq(id) !== opts.expectInputSeq) return null;
+    // Input a window still holds (an image paste being saved) counts too: it
+    // would be lost with the prompt it was meant for.
+    if (opts && Number.isInteger(opts.expectInputSeq) && (terminalInputSeq(id) !== opts.expectInputSeq || heldInputFor(id))) return null;
     // A move names its account: if that account is gone (deleted, or its id
     // now ambiguous) the restart is refused rather than quietly landing on
     // the project's or the active account. A relaunch (not strict) falls back.

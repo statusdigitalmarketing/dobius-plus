@@ -145,6 +145,15 @@ check('a key kept only for its re-login boundary is not the one the key cap evic
   assert.equal(usageForKey(h, KEY_A, T0 + 3 * MIN).known, false);
 });
 
+check('a login is remembered before its first figure, so the next login does not inherit it', () => {
+  const h = emptyHistory();
+  noteLogin(h, KEY_A, 'alice@x', T0);
+  pruneHistory(h, T0);
+  updateHistory(h, [{ ...rec(KEY_A, T0 + MIN, 0), sessionId: 's' }], T0 + MIN); // Alice's session publishes
+  noteLogin(h, KEY_A, 'bob@x', T0 + 2 * MIN, [{ ...rec(KEY_A, T0 + MIN, 0), sessionId: 's' }]);
+  assert.equal(usageForKey(h, KEY_A, T0 + 2 * MIN).known, false);
+});
+
 check('figures saved with no owner are cleared when the login turns out unknown', () => {
   const h = emptyHistory();
   updateHistory(h, [rec(KEY_A, T0, 40)], T0); // an older build kept no owner

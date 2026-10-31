@@ -713,6 +713,17 @@ await check('an old limit is judged by the account the Claude really runs on', a
   assert.equal(w.sent.length, 0);
 });
 
+await check('an unlisted source folder that is a symlink has no known login, so nothing is picked as "a different login"', async () => {
+  const { w, svc } = world();
+  w.procKey = keychainServiceFor('/profiles/x');
+  w.procDir = '/profiles/x';
+  w.emails['/profiles/x'] = 'bob@x.com';
+  w.links = { '/profiles/x': '/profiles/bob' };
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+  assert.match(w.notices[0] || '', /every other account/);
+});
+
 await check('a Claude whose folder the process scan cannot read is not moved automatically', async () => {
   const { w, svc } = world();
   w.procKey = null; // its environment could not be read

@@ -75,7 +75,7 @@ export function sanitizeHistory(raw) {
       const seenAt = Number.isFinite(w.seenAt) ? Math.max(w.seenAt, samples[samples.length - 1].t) : samples[samples.length - 1].t;
       windows[name] = { r, samples, seenAt };
     }
-    if (Object.keys(windows).length || Number.isFinite(raw.keys[key]?.since)) {
+    if (Object.keys(windows).length || Number.isFinite(raw.keys[key]?.since) || typeof raw.keys[key]?.email === 'string') {
       const email = raw.keys[key]?.email;
       const since = raw.keys[key]?.since;
       const ignore = bare();
@@ -117,10 +117,12 @@ export const UNKNOWN_LOGIN = '(unknown login)';
 
 export function noteLogin(hist, key, email, now, records = []) {
   if (!isCredentialKey(key) || typeof email !== 'string' || !email.trim()) return false;
-  // Unknown with no entry yet: remember the boundary, so a record published
-  // while nobody can be named is not taken for whoever logs in next.
-  if (!hist.keys[key] && email === UNKNOWN_LOGIN) {
-    hist.keys[key] = { windows: bare(), email, since: now };
+  // No entry yet: remember who it is now, so figures that arrive later are
+  // that login's and a later login is seen as a change. Unknown also takes a
+  // boundary: a record published while nobody can be named belongs to no one.
+  if (!hist.keys[key]) {
+    const known = email !== UNKNOWN_LOGIN;
+    hist.keys[key] = { windows: bare(), email: known ? email.trim().toLowerCase() : email, ...(known ? {} : { since: now }) };
     return true;
   }
   const k = hist.keys[key];
@@ -226,7 +228,9 @@ export function pruneHistory(hist, now) {
     }
     // An emptied key is kept while it still remembers a re-login (since), so
     // the old login's records on disk cannot refill it.
-    if (!Object.keys(k.windows).length && !(k.since && now - k.since < KEEP_SINCE_MS)) { delete hist.keys[key]; changed = true; }
+    // So is one that names its login (with no figure yet): forgetting it would
+    // let a later login inherit the figures it is about to receive.
+    if (!Object.keys(k.windows).length && !k.email && !(k.since && now - k.since < KEEP_SINCE_MS)) { delete hist.keys[key]; changed = true; }
   }
   const keys = Object.keys(hist.keys);
   if (keys.length > MAX_KEYS) {

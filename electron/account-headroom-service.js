@@ -292,7 +292,10 @@ export function createHeadroomService(d) {
     const resolved = pid === null || !!g;
     const row = rows.find((r) => r.key === key);
     if (row) return { key, email: row.email, label: row.label, resolved };
-    return { key, email: await loginEmail(dir, envUnset), label: path.basename(dir), resolved };
+    // An unlisted folder gets the same link checks as a listed one.
+    const own = { dir, key, email: await loginEmail(dir, envUnset) };
+    await markSharedFolders([own]);
+    return { key, email: own.email, label: path.basename(dir), resolved };
   }
 
   // One login under two folders is one limit: a folder with no live figure
@@ -522,6 +525,7 @@ export function createHeadroomService(d) {
   async function moveCandidates(tabIds, targetId) {
     const ids = [...new Set((Array.isArray(tabIds) ? tabIds : []).filter((x) => typeof x === 'string'))].slice(0, MAX_CANDIDATE_TABS);
     const tabs = new Map(d.tabs().map((t) => [t.id, t]));
+    await sample(); // a login change noticed below needs the current records
     const rows = await accountRows();
     const target = targetId === null ? rows.find((r) => r.isDefault) : rows.find((r) => !r.isDefault && r.id === targetId);
     const out = [];
