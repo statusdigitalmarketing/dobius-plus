@@ -61,6 +61,7 @@ function world(over = {}) {
     // As in main: /openTab's inputBusy, which is also true during a submit.
     inputHeld: () => !!w.held || !!w.submitting,
     metadata: async (dir, opts) => {
+      if (w.holdOnLoginRead && dir === DIR_B && w.claude.pid === 200) w.held = true;
       if (w.unreadableInner && opts?.envUnset === false) return { email: null, state: 'unreadable' };
       const email = opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null);
       return { email, state: email ? 'address' : 'none' };
@@ -678,6 +679,38 @@ await check('a stale working tab is busy for Move all unless the limit is on its
   b.w.activityOverride = { status: 'working', hookOwned: true, lastActivityAt: T0 - 60_000 };
   const [d2] = await b.svc.moveCandidates([TAB], 'b');
   assert.equal(d2.busy, false);
+});
+
+await check('a limit on an unlisted folder of a login holds that login\'s listed folders too', async () => {
+  const { w, svc } = world();
+  w.procKey = keychainServiceFor('/profiles/x');
+  w.procDir = '/profiles/x';
+  w.emails['/profiles/x'] = 'b@x.com';
+  w.secondTab = false;
+  await svc.tick(); // B refused (same login), held through X
+  const r = await svc.moveTargets(TAB);
+  assert.equal(r.targets.find((t) => t.label === 'B').usage.limited, true);
+});
+
+await check('input a window starts holding during the last reads stops "continue" right before the paste', async () => {
+  const { w, svc } = world();
+  const eventId = await moved(w, svc);
+  // The last await before the paste is the target login re-read: hold input during it.
+  w.holdOnLoginRead = true;
+  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
+  assert.deepEqual(w.submits, []);
+});
+
+await check('an old limit is judged by the account the Claude really runs on', async () => {
+  const { w, svc } = world();
+  // Spawned on A (100%), but the process runs on B whose figure says 20%; the limit is old.
+  w.procKey = KEY_B;
+  w.limit = { at: T0 - 20 * 60_000, text: 'x' };
+  w.emails['/profiles/c'] = 'c@x.com';
+  w.extraAccounts = [{ id: 'c', type: 'claude', name: 'C', claudeJsonPath: '/profiles/c/.claude.json' }];
+  w.records.push({ key: keychainServiceFor('/profiles/c'), receivedAt: T0 - 1000, windows: { five_hour: { usedPercentage: 5, resetsAt: R5 } } });
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
 });
 
 await check('a Claude whose folder the process scan cannot read is not moved automatically', async () => {

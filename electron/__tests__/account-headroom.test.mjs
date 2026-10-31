@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  emptyHistory, sanitizeHistory, updateHistory, noteLogin, pruneHistory, paceFor, forecastFor, usageForKey,
+  emptyHistory, sanitizeHistory, updateHistory, noteLogin, pruneHistory, UNKNOWN_LOGIN, paceFor, forecastFor, usageForKey,
   accountKeyRows, moveRefusal, rankTargets, limitFromEntries, liveLimitLine, decideAutoMove, AUTO, tabBusy, autoRefusal, freshUsage, userOverrideIn,
 } from '../account-headroom.js';
 import { keychainServiceFor } from '../account-identity.js';
@@ -142,6 +142,22 @@ check('a key kept only for its re-login boundary is not the one the key cap evic
   pruneHistory(h, T0 + 2 * MIN);
   assert.ok(h.keys[KEY_A], 'the re-login boundary survives');
   updateHistory(h, [{ ...recs.at(-1), receivedAt: T0 + 3 * MIN }], T0 + 3 * MIN);
+  assert.equal(usageForKey(h, KEY_A, T0 + 3 * MIN).known, false);
+});
+
+check('figures saved with no owner are cleared when the login turns out unknown', () => {
+  const h = emptyHistory();
+  updateHistory(h, [rec(KEY_A, T0, 40)], T0); // an older build kept no owner
+  assert.equal(noteLogin(h, KEY_A, UNKNOWN_LOGIN, T0 + MIN), true);
+  assert.equal(usageForKey(h, KEY_A, T0 + MIN).known, false);
+});
+
+check('a folder whose login is unknown before it has any figure remembers the boundary', () => {
+  const h = emptyHistory();
+  assert.equal(noteLogin(h, KEY_A, UNKNOWN_LOGIN, T0), true);
+  updateHistory(h, [{ ...rec(KEY_A, T0 + MIN, 0), sessionId: 'old' }], T0 + MIN); // published while unknown
+  noteLogin(h, KEY_A, 'b@x', T0 + 2 * MIN, [{ ...rec(KEY_A, T0 + MIN, 0), sessionId: 'old' }]);
+  updateHistory(h, [{ ...rec(KEY_A, T0 + 3 * MIN, 0), sessionId: 'old' }], T0 + 3 * MIN); // republished
   assert.equal(usageForKey(h, KEY_A, T0 + 3 * MIN).known, false);
 });
 

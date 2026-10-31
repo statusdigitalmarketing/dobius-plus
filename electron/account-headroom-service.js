@@ -362,6 +362,8 @@ export function createHeadroomService(d) {
     if (held(r.key)) return true;
     if (!r.email) return false;
     const e = r.email.toLowerCase();
+    // Any folder of that login, listed or not (the hold remembers its login).
+    for (const [key, h] of limitedUntil) if (h.email === e && held(key)) return true;
     return rows.some((o) => o.email && o.email.toLowerCase() === e && held(o.key));
   }
 
@@ -575,8 +577,6 @@ export function createHeadroomService(d) {
       if (st.nextLookAt && d.now() < st.nextLookAt) continue;
       // Cheap first: no limit wording in the tab's recent output, no closer look.
       if (!LIMIT_LINE_RE.test(d.strippedTail(tab.id))) continue;
-      const key = d.keyFor(tab.claudeConfigDir === null ? d.cliDefaultDir() : tab.claudeConfigDir);
-      const u = usageForKey(hist, key, now);
       st.nextLookAt = d.now() + RECHECK_MS;
       let info;
       try { info = await d.claudeInfo(tab.id); } catch { info = null; }
@@ -622,6 +622,7 @@ export function createHeadroomService(d) {
       live ??= await liveByKey();
       const source = await sourceOf(tab, rows, info.pid);
       if (!source.resolved) continue; // which login this Claude is on is unknown: looked at again later
+      const u = usageForKey(hist, source.key, now); // the account it really runs on, not the tab's spawn binding
       const dec = decideAutoMove({
         enabled: true,
         now: d.now(),
@@ -642,7 +643,7 @@ export function createHeadroomService(d) {
         // since): a limit in the new window must hold again.
         if (source.key && !keyHeld(source.key, d.now())) {
           const r = hist?.keys?.[source.key]?.windows?.five_hour?.r;
-          limitedUntil.set(source.key, { at: d.now(), until: d.now() + AUTO.LIMITED_HOLD_MS, r: Number.isFinite(r) ? r : null });
+          limitedUntil.set(source.key, { at: d.now(), until: d.now() + AUTO.LIMITED_HOLD_MS, r: Number.isFinite(r) ? r : null, email: source.email ? source.email.toLowerCase() : null });
         }
       }
       for (const [k, h] of limitedUntil) if (h.until <= d.now()) limitedUntil.delete(k);
@@ -836,6 +837,9 @@ export function createHeadroomService(d) {
     // pending", and inside the queue that is this very submit, so it would
     // always cancel itself (the ship-test caught it). The queue is idle
     // (checked just above), so it pastes in this same tick.
+    // Nothing is awaited from this check to the paste: input a window started
+    // holding during the reads above (an image paste) stops it here.
+    if (d.inputSeq(tabId) !== baseline || d.inputHeld(tabId) || !stillHere()) return done('no-continue (someone typed in the tab)');
     const sent = await d.submit(tabId, 'continue', () => stillHere() && d.inputSeq(tabId) === baseline);
     return sent
       ? done('continued', true)

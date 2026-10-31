@@ -117,6 +117,12 @@ export const UNKNOWN_LOGIN = '(unknown login)';
 
 export function noteLogin(hist, key, email, now, records = []) {
   if (!isCredentialKey(key) || typeof email !== 'string' || !email.trim()) return false;
+  // Unknown with no entry yet: remember the boundary, so a record published
+  // while nobody can be named is not taken for whoever logs in next.
+  if (!hist.keys[key] && email === UNKNOWN_LOGIN) {
+    hist.keys[key] = { windows: bare(), email, since: now };
+    return true;
+  }
   const k = hist.keys[key];
   if (!k) return false;
   const who = email.trim().toLowerCase();
