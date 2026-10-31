@@ -63,9 +63,17 @@ export function bottomRows(lines, n = 20) {
   return lines.slice(Math.max(0, last - n + 1), last + 1);
 }
 
-export function draftOnScreen(box, selectorShown) {
+// Claude's own menu when a limit stops a turn ("Stop and wait for limit to
+// reset", "Wait for limit to reset", "/usage-credits ..."). Its box is hidden
+// while it is open and holds no typed text.
+const LIMIT_MENU_RE = /wait for (?:the )?limit to reset|usage-credits|Continue now at lower priority/i;
+export const isLimitMenu = (sel) => !!sel && Array.isArray(sel.options) && sel.options.some((o) => LIMIT_MENU_RE.test(String(o?.label ?? o?.text ?? o ?? '')));
+
+export function draftOnScreen(box, limitMenuShown) {
   if (typeof box === 'string') return isDraft(box);
-  return !selectorShown;
+  // Unreadable: only Claude's own limit menu is known to hold no text. Any
+  // other selector may be quoted output above a real prompt with a draft.
+  return !limitMenuShown;
 }
 // Desktop tabs only: phone and bridge PTYs have no window to move them.
 const DESKTOP_TAB_RE = /^term-\/.+-\d+$/;
@@ -86,6 +94,9 @@ export function createHeadroomService(d) {
   let ticking = false;
   let loading = null;
   let lastPrune = 0;
+  // The records the last sample read: a login change noticed outside a
+  // sample still needs them to know which sessions carry the old figures.
+  let lastRecords = [];
 
   async function history() {
     if (hist) return hist;
@@ -124,6 +135,7 @@ export function createHeadroomService(d) {
       try { await d.pruneRecords(RECORD_MAX_AGE_MS); } catch { /* next hour */ }
     }
     try { records = await d.readRecords(); } catch { records = []; }
+    lastRecords = records;
     // Who each folder is logged into, BEFORE folding in new figures: a
     // folder re-logged since the last look must not have the old login's
     // samples carried over to the new one (metadata file only, no secrets).
@@ -162,7 +174,15 @@ export function createHeadroomService(d) {
       const e = r.email.toLowerCase();
       loginOf.set(r.key, loginOf.has(r.key) && loginOf.get(r.key) !== e ? null : e);
     }
-    for (const [key, email] of loginOf) if (email && noteLogin(h, key, email, d.now(), records)) dirty = true;
+    for (const [key, email] of loginOf) {
+      if (!email) continue;
+      const before = h.keys[key]?.email;
+      if (noteLogin(h, key, email, d.now(), records)) {
+        dirty = true;
+        // A limit held on the folder was the OLD login's.
+        if (before && before !== email) limitedUntil.delete(key);
+      }
+    }
   }
 
   async function readLogins() {
@@ -206,33 +226,36 @@ export function createHeadroomService(d) {
     }
     for (const r of all) r.sameAs = r.email ? byEmail.get(r.email.toLowerCase()).filter((l) => l !== r.label) : [];
     // A folder re-logged into another login: its old figures are not this one's.
-    applyLogins(await history(), all);
+    applyLogins(await history(), all, lastRecords);
     return all;
   }
 
   // Which credential a running claude actually uses, by process (a shell rc
   // can export its own CLAUDE_CONFIG_DIR over what the tab was spawned with).
   // null when the scan cannot say.
-  async function processKey(pid) {
+  async function processGroup(pid) {
     if (!Number.isInteger(pid)) return null;
     let scan;
     try { scan = await d.scan(); } catch { return null; }
-    const g = (scan?.groups || []).find((x) => x.pids.includes(pid));
-    return g ? g.key : null;
+    return (scan?.groups || []).find((x) => x.pids.includes(pid)) || null;
+  }
+  async function processKey(pid) {
+    return (await processGroup(pid))?.key || null;
   }
 
   // The credential a tab's shell was spawned with: its recorded binding, null
   // meaning CLAUDE_CONFIG_DIR unset (the CLI's ~/.claude, with the home-level
   // metadata file).
   async function sourceOf(tab, rows, pid = null) {
-    const envUnset = tab.claudeConfigDir === null;
-    const dir = envUnset ? d.cliDefaultDir() : tab.claudeConfigDir;
-    const key = (pid !== null && (await processKey(pid))) || d.keyFor(dir);
+    // The running Claude's own folder wins over the tab's spawn binding (a
+    // shell can point it elsewhere), and its login is read from THAT folder.
+    const g = pid !== null ? await processGroup(pid) : null;
+    const envUnset = g ? !!g.envUnset : tab.claudeConfigDir === null;
+    const dir = g ? g.configDir : (envUnset ? d.cliDefaultDir() : tab.claudeConfigDir);
+    const key = g ? g.key : d.keyFor(dir);
     const row = rows.find((r) => r.key === key);
     if (row) return { key, email: row.email, label: row.label };
-    let email;
-    try { email = (await d.identity(dir, { envUnset }))?.email || null; } catch { email = null; }
-    return { key, email, label: path.basename(dir) };
+    return { key, email: await loginEmail(dir, envUnset), label: path.basename(dir) };
   }
 
   // One login under two folders is one limit: a folder with no live figure
@@ -362,7 +385,7 @@ export function createHeadroomService(d) {
   async function draftIn(tabId) {
     try {
       const sc = await d.screen(tabId);
-      return sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), !!d.selector(bottomRows(sc.lines))) : true;
+      return sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), isLimitMenu(d.selector(bottomRows(sc.lines)))) : true;
     } catch { return true; }
   }
 
@@ -515,7 +538,7 @@ export function createHeadroomService(d) {
       let sc;
       try { sc = await d.screen(tab.id); } catch { sc = null; }
       const screenHit = !!liveLimitLine(sc?.lines, d.rows(tab.id));
-      const draft = sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), !!d.selector(bottomRows(sc.lines))) : true;
+      const draft = sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), isLimitMenu(d.selector(bottomRows(sc.lines)))) : true;
       // A token or key exported into this Claude (a shell rc) signs it in
       // whatever its profile folder says: moving it would change nothing.
       const tabOverride = await d.processAuthOverride(info.pid); // a name, 'unreadable', or null
@@ -652,7 +675,13 @@ export function createHeadroomService(d) {
       if (text) notice(tabId, text);
       return { ok, result };
     };
-    if (typeof failed === 'string' && failed) return done(`not-moved (${failed.slice(0, 120)})`, false, `Could not move this tab to ${p.targetLabel}: ${failed.slice(0, 200)}`);
+    if (typeof failed === 'string' && failed) {
+      // Not moved (the restart was refused, the window gave up): the event and
+      // the cooldown are given back, so a later look can try again.
+      const st = tabStates.get(tabId);
+      if (st) { st.handled.delete(p.eventId); st.lastMoveAt = p.prevLastMoveAt || 0; st.nextLookAt = d.now() + RECHECK_MS; }
+      return done(`not-moved (${failed.slice(0, 120)})`, false, `Could not move this tab to ${p.targetLabel}: ${failed.slice(0, 200)}`);
+    }
     const baseline = d.inputSeq(tabId);
     const pty = d.pty(tabId);
     if (!pty) return done('no-continue (the tab has no shell)');

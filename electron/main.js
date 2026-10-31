@@ -24,7 +24,7 @@ import { shareConfiguredProfiles, shareProfile } from './account-profile-share.j
 import { accountIdentities, accountEmail, loginStatePresenceOnly, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
-import { resolveAccountEnvForCwd } from './spawn-account-env.js';
+import { resolveAccountEnvForCwd, resolveClaudeAccountPin } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses } from './claude-process-scan.js';
@@ -276,6 +276,10 @@ function setupTerminalHandlers() {
     // since main last checked (account-headroom-service startAutoMove): no
     // await between this check and the kill.
     if (opts && Number.isInteger(opts.expectInputSeq) && terminalInputSeq(id) !== opts.expectInputSeq) return null;
+    // A move names its account: if that account is gone (deleted, or its id
+    // now ambiguous) the restart is refused rather than quietly landing on
+    // the project's or the active account. A relaunch (not strict) falls back.
+    if (opts?.strictPin === true && resolveClaudeAccountPin(claudeAccountPin, loadConfig().accounts) === undefined) return null;
     const accountEnv = resolveAccountEnvForCwd(cwd, { claudeAccountPin });
     // A New Tab (store.openNewTab) starts its tool: 'default' is the Settings
     // choice, read here; anything outside the fixed set starts nothing.
@@ -2377,7 +2381,13 @@ async function processAuthOverride(pid) {
   try {
     const { stdout } = await execFileP('/bin/ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 1500, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
     if (!stdout.trim()) return 'unreadable';
-    return AUTH_OVERRIDE_NAMES.find((n) => new RegExp(`(?:^|\\s)${n}=\\S`).test(stdout)) || null;
+    const named = AUTH_OVERRIDE_NAMES.find((n) => new RegExp(`(?:^|\\s)${n}=\\S`).test(stdout));
+    if (named) return named;
+    // Claude picks its Keychain item by USER: a shell that changes USER picks
+    // another item under the same service, i.e. possibly another login.
+    const user = stdout.match(/(?:^|\s)USER=(\S+)/)?.[1];
+    const own = process.env.USER || os.userInfo().username;
+    return user && own && user !== own ? 'USER' : null;
   } catch { return 'unreadable'; }
 }
 

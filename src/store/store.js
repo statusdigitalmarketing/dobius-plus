@@ -732,6 +732,16 @@ export const useStore = create((set, get) => ({
     const tabProject = tab.projectPath || get().currentProjectPath || null;
     let sessionId = typeof opts.sessionId === 'string' ? opts.sessionId : null;
     let sessionProject = typeof opts.project === 'string' ? opts.project : null;
+    let expectInputSeq = Number.isInteger(opts.expectInputSeq) ? opts.expectInputSeq : undefined;
+    // Which conversation runs in the tab NOW is main's answer (tab-context),
+    // read at the moment of the move, not when a dialog opened.
+    if (!sessionId && api.accountsMoveCandidates) {
+      try {
+        const [c] = (await api.accountsMoveCandidates([tabId], accountId)) || [];
+        if (c?.session?.sessionId) { sessionId = c.session.sessionId; sessionProject = c.session.project || null; }
+        if (expectInputSeq === undefined && Number.isInteger(c?.inputSeq)) expectInputSeq = c.inputSeq;
+      } catch { /* fall back to the map below */ }
+    }
     if (!sessionId) {
       try {
         const map = (await api.configGetSessionTabMap?.()) || {};
@@ -762,13 +772,13 @@ export const useStore = create((set, get) => ({
     }));
     setPin(pin, true);
     if (!background) set({ activeView: 'terminal', activeTabId: tabId });
-    const expect = Number.isInteger(opts.expectInputSeq) ? { expectInputSeq: opts.expectInputSeq } : {};
+    const expect = expectInputSeq !== undefined ? { expectInputSeq } : {};
     let created;
-    try { created = await api.terminalCreate?.(tabId, tabProject || undefined, { claudeAccountPin: pin, ...expect }); }
-    catch (err) { return { ok: false, error: `the tab could not restart: ${err?.message || err}` }; }
-    if (created === null && expect.expectInputSeq !== undefined) {
+    try { created = await api.terminalCreate?.(tabId, tabProject || undefined, { claudeAccountPin: pin, strictPin: true, ...expect }); }
+    catch (err) { setPin(prevPin, hadPin); return { ok: false, error: `the tab could not restart: ${err?.message || err}` }; }
+    if (created === null) {
       setPin(prevPin, hadPin); // not restarted: it stays where it was, on relaunch too
-      return { ok: false, error: 'someone typed in the tab, so it was not restarted' };
+      return { ok: false, error: 'the tab was not restarted (someone typed in it, or that account no longer exists)' };
     }
     if (!sessionId) return { ok: true, resumed: false };
     // Wait so the old claude has exited (claimSessionResume refuses while its

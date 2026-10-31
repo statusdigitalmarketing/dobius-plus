@@ -29,9 +29,9 @@ export default function MoveAccountDialog({ tabId, onClose }) {
 
   const moveOne = async (t) => {
     setBusy(true);
-    const r = await useStore.getState().moveTabToAccount(tabId, t.isDefault ? null : t.id, {
-      label: t.label, sessionId: data?.tab?.session?.sessionId, project: data?.tab?.session?.project,
-    });
+    // The conversation is read again at the moment of the move (main's
+    // answer), not the one the dialog saw when it opened.
+    const r = await useStore.getState().moveTabToAccount(tabId, t.isDefault ? null : t.id, { label: t.label });
     setBusy(false);
     if (r?.cancelled) return;
     if (!r?.ok) window.alert(`Move to ${t.label}: ${r?.error || 'something went wrong'}`);

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHeadroomService, isDraft, draftOnScreen } from '../account-headroom-service.js';
+import { createHeadroomService, isDraft, draftOnScreen, isLimitMenu } from '../account-headroom-service.js';
 import { keychainServiceFor } from '../account-identity.js';
 import { resolveClaudeAccountPin } from '../spawn-account-env.js';
 import { pruneUsageRecords } from '../claude-usage.js';
@@ -65,7 +65,7 @@ function world(over = {}) {
     selector: () => null,
     readRecords: async () => w.records,
     pruneRecords: async () => 0,
-    scan: async () => ({ groups: [{ key: w.procKey, pids: [w.claude.pid] }], unresolved: [] }),
+    scan: async () => ({ groups: [{ key: w.procKey, configDir: w.procDir ?? { [KEY_A]: DIR_A, [KEY_B]: DIR_B }[w.procKey], envUnset: false, pids: [w.claude.pid] }], unresolved: [] }),
     autoMoveEnabled: () => w.autoMove,
     tabs: () => [{ id: TAB, cwd: '/proj', claudeConfigDir: DIR_A }, ...(w.secondTab ? [{ id: TAB2, cwd: '/proj', claudeConfigDir: DIR_A }] : [])],
     activity: () => ({ status: 'done', lastActivityAt: w.now - 60_000 }),
@@ -455,6 +455,36 @@ await check('reservations count per login: two folders of one login cannot both 
   const targets = w.sent.map((m) => m.payload.accountId);
   assert.equal(targets.length, 2);
   assert.ok(targets.includes('c'), `second tab must go to the other login, got ${targets}`);
+});
+
+await check('a Claude pointed at an unlisted folder is judged by THAT folder\'s login, not the tab\'s', async () => {
+  const { w, svc } = world();
+  // The tab was spawned on A, but its Claude runs on an unsaved folder X
+  // logged into B's address: B is the same login and must not be a target.
+  w.procKey = keychainServiceFor('/profiles/x');
+  w.procDir = '/profiles/x';
+  w.emails['/profiles/x'] = 'b@x.com';
+  w.records.push({ key: w.procKey, receivedAt: T0 - 30_000, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } });
+  const r = await svc.moveTargets(TAB);
+  assert.match(r.targets.find((t) => t.label === 'B').refusal, /same login/);
+});
+
+await check('a restart the window could not do gives the event back', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  const { eventId } = w.sent[0].payload;
+  assert.equal((await svc.startAutoMove(TAB, eventId, 7)).ok, true);
+  await svc.continueAfterMove(TAB, eventId, 7, 'the tab was not restarted');
+  w.now += 2 * 60_000;
+  await svc.tick();
+  assert.equal(w.sent.length, 2);
+});
+
+await check('only Claude\'s own limit menu stands in for an unreadable box', async () => {
+  assert.equal(isLimitMenu({ options: [{ num: 1, label: 'Stop and wait for limit to reset' }] }), true);
+  assert.equal(isLimitMenu({ options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'No' }] }), false);
+  assert.equal(draftOnScreen(null, false), true);
+  assert.equal(draftOnScreen(null, true), false);
 });
 
 // ---- pin at the spawn choke point ----
