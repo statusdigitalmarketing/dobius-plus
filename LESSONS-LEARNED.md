@@ -509,3 +509,10 @@
 - **FIX**: Capture real frames as fixtures (`limit-menu-*`, `trust-prompt-*`). Then a word match on that frame was too loose, and the strict parser's top-edge regex failed on the real frame right after a resume, because Claude draws its effort badge on that same row. Only a second real capture showed it.
 - **CONTEXT**: Anything reading Claude's screen or records. Prove it on a real frame at each moment it can appear, not one.
 - **DETECTION**: `ls electron/__tests__/fixtures/ | grep 2.1.316`
+
+### Process - 2026-10-31 (a commit in a chain with no gate)
+- **MISTAKE**: 16fbdbf was committed with `test:headroomsvc` and `npm test` failing. The command ran the suites, printed their exit codes, then ran `git commit` on the next line with no condition. The sabotage check in the same command also "passed" against a suite that was already red, so it proved nothing.
+- **FIX**: Make the commit conditional on the checks (`if [ $t = 0 ] && [ $b = 0 ]; then git commit ...; fi`), run the baseline before any sabotage and skip the sabotage when the baseline fails. Corrected in 689616c.
+- **CONTEXT**: Any scripted run that tests and commits in one call. A printed `exit 1` above a commit hash is easy to read past. Also, an assertion on `events.at(-1)` breaks whenever a later step is added; find the event by what it is.
+- **DETECTION**: `git log --format=%h | while read c; do git -c advice.detachedHead=false checkout -q $c && npm test >/dev/null 2>&1 || echo "red: $c"; done` on a branch before merging it.
+
