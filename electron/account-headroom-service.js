@@ -605,6 +605,11 @@ export function createHeadroomService(d) {
       } catch { rec = null; }
       if (!rec?.found || !rec.limit) continue;
       if (Number.isFinite(info.startedAt) && rec.limit.at < info.startedAt + 1000) continue; // see decideAutoMove
+      // A newer conversation in this folder: possibly /clear in this very
+      // process, and the limit on screen could be that one's. Not moved.
+      let newer;
+      try { newer = await d.newerSession(ses.sessionId, recProject, rec.limit.at); } catch { newer = true; }
+      if (newer) continue;
       let sc;
       try { sc = await d.screen(tab.id); } catch { sc = null; }
       const screenHit = !!liveLimitLine(sc?.lines, d.rows(tab.id));

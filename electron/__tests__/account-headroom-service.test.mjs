@@ -89,6 +89,7 @@ function world(over = {}) {
     resolveSession: async () => ({ sessionId: 's1', sessionProject: '/proj' }),
     process: async () => null,
     limitRecord: async () => ({ found: true, limit: w.limit }),
+    newerSession: async () => !!w.newerSession,
     strippedTail: () => w.tail,
     screen: async () => ({ lines: [w.screenLine ?? "You've hit your 5-hour limit", '────', '❯ ', '────'], modes: { bracketedPaste: true } }),
     promptReady: () => true,
@@ -724,6 +725,14 @@ await check('an unlisted source folder that is a symlink has no known login, so 
   assert.match(w.notices[0] || '', /every other account/);
 });
 
+await check('a newer conversation in the folder (a /clear in this process) means nothing is resumed automatically', async () => {
+  const { w, svc } = world();
+  w.newerSession = true;
+  w.claude = { ...w.claude, sessionId: 's1' };
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+});
+
 await check('a Claude whose folder the process scan cannot read is not moved automatically', async () => {
   const { w, svc } = world();
   w.procKey = null; // its environment could not be read
@@ -771,6 +780,27 @@ await check('old usage records and stray temp files are pruned, nothing else', a
   const removed = await pruneUsageRecords(ud, 8 * 86400_000);
   assert.equal(removed, 2);
   assert.deepEqual(fs.readdirSync(dir).sort(), ['fresh.json', 'keep.txt']);
+});
+
+// ---- the transcript folder check, on real files ----
+
+await check('anotherSessionSince sees a conversation born after the limit, and fails closed', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-newer-'));
+  const realHome = process.env.HOME;
+  process.env.HOME = home;
+  const { anotherSessionSince } = await import('../data-service.js');
+  process.env.HOME = realHome;
+  const proj = '/proj-newer';
+  const dir = path.join(home, '.claude', 'projects', '-proj-newer');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 's1.jsonl'), '{}\n');
+  fs.writeFileSync(path.join(dir, 'older.jsonl'), '{}\n');
+  const before = Date.now() + 60_000; // later than both files were born
+  assert.equal(await anotherSessionSince('s1', proj, before), false);
+  fs.writeFileSync(path.join(dir, 'newer.jsonl'), '{}\n');
+  const bornAt = fs.statSync(path.join(dir, 'newer.jsonl')).birthtimeMs;
+  assert.equal(await anotherSessionSince('s1', proj, bornAt - 1), true);
+  assert.equal(await anotherSessionSince('missing', proj, 0), true, 'no transcript: fails closed');
 });
 
 console.log(`\n${pass} passed`);
