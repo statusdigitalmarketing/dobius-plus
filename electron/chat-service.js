@@ -180,13 +180,14 @@ export function cancelQueuedSubmits(id) {
 // tabId -> Map(sendId -> { written }). A send is open from its first part
 // until its end mark is processed IN QUEUE ORDER, so it stays open while
 // main still holds parts of it; a submit never pastes into an open send.
-// written: some part of it reached the PTY.
+// written: some part of it reached the PTY. sender: the window that sent its
+// first part, which may still end it after the tab moved to another window.
 const openSends = new Map();
-function sendState(id, s) {
+function sendState(id, s, sender = null) {
   let m = openSends.get(id);
   if (!m) openSends.set(id, (m = new Map()));
   let st = m.get(s);
-  if (!st) m.set(s, (st = { written: false }));
+  if (!st) m.set(s, (st = { written: false, sender }));
   return st;
 }
 function closeSend(id, s) {
@@ -205,8 +206,11 @@ const sendOpen = (id) => !!openSends.get(id)?.size;
  * queued here are dropped and only submits not yet pasted go with them
  * (dropGen); a message already in the box keeps its Enter.
  */
-export function endSend(id, send, { cut = false } = {}) {
+export function endSend(id, send, { cut = false, sender = null, owns = true } = {}) {
   if (typeof send !== 'string' || !send) return;
+  // Only the tab's owner, or the window that started this send (a tear-off
+  // moves the tab before the old pane can say its send was cut).
+  if (!owns && openSends.get(id)?.get(send)?.sender !== sender) return;
   const q = submitQueues.get(id);
   if (cut) {
     const written = !!openSends.get(id)?.get(send)?.written;
@@ -317,11 +321,11 @@ const refused = (reason) => ({ ok: false, reason });
  * signal says the program read it (docs/mobile-ws-protocol.md). Callers that
  * do not care ignore it.
  */
-export function writeRawInput(id, data, stillOk = () => true, { promptOnly = false, send = null } = {}) {
+export function writeRawInput(id, data, stillOk = () => true, { promptOnly = false, send = null, sender = null } = {}) {
   if (typeof data !== 'string' || !data) return Promise.resolve(refused('empty'));
   // A part of a multi-part send (endSend): the send is open from now on.
   if (typeof send !== 'string' || !send) send = null;
-  else sendState(id, send);
+  else sendState(id, send, sender);
   // A frame already in flight when its phone was revoked: not even a cancel
   // key, which would also throw away the desktop's pending submit.
   if (!stillOk()) return Promise.resolve(refused('not_allowed'));
@@ -383,11 +387,21 @@ export function submitPending(id) {
   return !!submitQueues.get(id)?.running;
 }
 
-// Why a queued item must not be written now, or '' when it may be.
+// Why a queued item must not be written now, or '' when it may be. A part
+// of a send that was cut (or given up) meanwhile, even one already taken off
+// the queue and waiting out its pacing gap, never goes.
 function skipReason(id, q, it) {
   if (terminalInstance(id) !== it.pty || terminalClosing(id)) return 'tab_exited';
   if (it.gen !== q.gen) return 'cancelled';
+  if (it.send && !openSends.get(id)?.has(it.send)) return 'cancelled';
   return it.stillOk() ? '' : 'not_allowed';
+}
+
+// A queued part that will not be written: its send can no longer arrive
+// whole, so it is cut here (its other parts and its end go with it).
+function skipPart(id, x, reason) {
+  x.resolve(refused(reason));
+  if (x.send && openSends.get(id)?.has(x.send)) endSend(id, x.send, { cut: true });
 }
 
 // A raw item the queue writes now (or the end mark of a send, which only
@@ -410,13 +424,13 @@ async function drainSubmits(id, q) {
       q.current = it;
       if (it.endSend) { deliver(id, it); continue; } // closes even when cancelled
       let skip = skipReason(id, q, it);
-      if (skip) { it.resolve(refused(skip)); continue; }
+      if (skip) { if (it.raw !== undefined) skipPart(id, it, skip); else it.resolve(refused(skip)); continue; }
       if (it.raw !== undefined) {
         // Keys that waited behind a submit go out as separate keystrokes, not
         // one burst Claude would read as a paste (an Enter in it becomes a newline).
         await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
         skip = skipReason(id, q, it);
-        if (skip) { it.resolve(refused(skip)); continue; }
+        if (skip) { skipPart(id, it, skip); continue; }
         it.touched = true;
         deliver(id, it);
         it.resolve(DONE);
@@ -435,7 +449,7 @@ async function drainSubmits(id, q) {
           if (x.endSend) { deliver(id, x); continue; }
           await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
           const xSkip = skipReason(id, q, x);
-          if (xSkip) { x.resolve(refused(xSkip)); continue; }
+          if (xSkip) { skipPart(id, x, xSkip); continue; }
           try {
             deliver(id, x);
           } catch (err) {

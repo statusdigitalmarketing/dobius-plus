@@ -511,6 +511,44 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.equal(await ea, false);
   assert.deepEqual(writes.map((w) => w[1]), ['y1']);
 
+  // After a tear-off the window that started a send can still end or cut it;
+  // any other non-owner cannot, and a cut send no longer holds Chat up.
+  reset(); ptys.set('h', {});
+  writeRawInput('h', 'p1', () => true, { send: 'F', sender: 7 }); // written (idle)
+  endSend('h', 'F', { cut: true, sender: 8, owns: false });
+  const fa = submitPromptToTab('h', 'A');
+  await tick(100);
+  assert.equal(writes.length, 1, 'another window cannot end it: A still waits');
+  endSend('h', 'F', { cut: true, sender: 7, owns: false });
+  const fRes = await Promise.race([fa, tick(500).then(() => 'still waiting')]);
+  assert.equal(fRes, false, 'the starting window cut it: A is answered at once, and goes with it');
+  reset(); ptys.set('h', {});
+  assert.equal(await submitPromptToTab('h', 'B'), true, 'nothing left open: the next send goes at once');
+
+  // Parts main refuses (the tab moved, stillOk false) cut their send: its
+  // end mark cannot close it as complete, and C is not pasted beside the
+  // prefix that did go out.
+  reset(); ptys.set('h', {});
+  let allowed = true;
+  const ga = submitPromptToTab('h', 'A');
+  writeRawInput('h', 'q1', () => allowed, { send: 'G', sender: 7 });
+  writeRawInput('h', 'q2', () => allowed, { send: 'G', sender: 7 });
+  endSend('h', 'G');
+  const gc = submitPromptToTab('h', 'C');
+  await tick(290); // A's Enter is out and q1 written
+  allowed = false;
+  assert.deepEqual(await Promise.all([ga, gc]), [true, false]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r', 'q1'], 'q2 refused, C never pasted');
+
+  // A cut while a part waits out its pacing gap: that part never goes.
+  reset(); ptys.set('h', {});
+  const ha = submitPromptToTab('h', 'A');
+  writeRawInput('h', 'r1', () => true, { send: 'H', sender: 7 });
+  await ha; // A done; r1 is now off the queue, in its 20ms gap
+  endSend('h', 'H', { cut: true, sender: 7, owns: true });
+  await tick(60);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r'], 'the part in its gap did not go out');
+
   // A window that held input is gone with it half sent: a waiting submit is
   // cancelled, never appended to the half.
   const { cancelQueuedSubmits } = await import('../chat-service.js');

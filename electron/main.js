@@ -287,11 +287,17 @@ function setupTerminalHandlers() {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
     if (typeof data !== 'string') return;
     if (data.length > TERMINAL_WRITE_MAX_BYTES) return;
-    if (!ownsTerminal(event.sender.id, id)) return; // not yours, drop silently
+    const owns = ownsTerminal(event.sender.id, id);
     // A multi-part send (the command bar): each part names it, and its end
-    // (or cut) mark tells chat-service it is complete (or abandoned).
+    // (or cut) mark tells chat-service it is complete (or abandoned). The
+    // mark is also taken from the window that started the send after the
+    // tab moved away from it (chat-service checks that).
     const send = typeof opts?.send === 'string' && opts.send.length <= 64 ? opts.send : null;
-    if (send && (opts.end === true || opts.cut === true)) { endSend(id, send, { cut: opts.cut === true }); return; }
+    if (send && (opts.end === true || opts.cut === true)) {
+      endSend(id, send, { cut: opts.cut === true, sender: event.sender.id, owns });
+      return;
+    }
+    if (!owns) return; // not yours, drop silently
     // Auto-resume cancellation: if the user types into a tab BEFORE its
     // scheduled `claude --resume` fires, skip that tab. The store's own
     // resumeSession path also writes here (it's how the staggered queue is
@@ -303,7 +309,7 @@ function setupTerminalHandlers() {
     // Waits behind a pending Chat submit so keys land in the order typed.
     // promptOnly: a path prompt editing pasted into Claude's prompt, which
     // must not land later in whatever replaced it (chat-service).
-    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id), { promptOnly: opts?.promptOnly === true, send });
+    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id), { promptOnly: opts?.promptOnly === true, send, sender: event.sender.id });
   });
 
   ipcMain.on('terminal:resize', (event, id, cols, rows) => {
