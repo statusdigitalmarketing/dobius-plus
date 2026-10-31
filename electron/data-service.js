@@ -9,6 +9,7 @@ import {
   parseJsonl, streamJsonl, timeAgo, pathExists, mapLimit,
 } from './data-utils.js';
 import { listCodexSessions, codexTranscript } from './codex-sessions.js';
+import { presenceSessionId } from './claude-presence.js';
 import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects, getAllProjectsWithTabs, getSessionTabMap, getSessionTabNames } from './config-manager.js';
 
 /**
@@ -694,10 +695,12 @@ async function sessionTranscriptBirth(projectPath, sessionId) {
  *                                  resolved id is added so a later tab in the
  *                                  same pass cannot claim the same transcript.
  * @param {() => boolean} [isAborted]  checked between tabs (quit has a 2s cap)
+ * @param {Set<string>} [provenTabs]  MUTATED: tabs whose id came from Claude's
+ *                                  own record, not from timing
  * @returns {Promise<Map<string, string>>} tabId -> resolved sessionId
  */
 export async function resolveFreshSessionsForTabs(
-  liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds, isAborted,
+  liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds, isAborted, provenTabs = new Set(),
 ) {
   const out = new Map();
   // Claim every id a LIVE tab names in its OWN argv before any inference runs.
@@ -708,15 +711,15 @@ export async function resolveFreshSessionsForTabs(
   // `--resume X` into the wrong terminal. Done HERE, not in the callers, so
   // the periodic tick and the quit-time reconcile cannot drift apart.
   // Codex High (Brett v1.0.56 follow-up).
-  const argvByTab = new Map();
+  const namedByTab = new Map();
   for (const t of liveTabs) {
     const argvSid = infoByTab.get(t.id)?.sessionId;
-    if (argvSid) { claimedIds.add(argvSid); argvByTab.set(t.id, argvSid); }
+    if (argvSid) { claimedIds.add(argvSid); namedByTab.set(t.id, argvSid); }
   }
-  // Ids named in the argv of every live tab EXCEPT the given one.
-  const argvOwnedByOthers = (tabId) => {
+  // Ids a live tab's process names itself, for every tab EXCEPT the given one.
+  const namedByOthers = (tabId) => {
     const s = new Set();
-    for (const [id, sid] of argvByTab) if (id !== tabId) s.add(sid);
+    for (const [id, sid] of namedByTab) if (id !== tabId) s.add(sid);
     return s;
   };
   // Earliest-started first. The earliest bare `claude` in a project owns the
@@ -748,7 +751,30 @@ export async function resolveFreshSessionsForTabs(
       linkedTabs.add(t.id);
     }
   }
+  // Claude's own record comes first: it names the exact session, whatever the
+  // start order and however many bare claudes share the project. A tab with a
+  // valid record is settled here. It is nobody's rival for a transcript, and
+  // it never reaches the timing below, even with nothing to link yet (no
+  // transcript until the first message, or the session is another tab's).
+  const recordIds = new Map();
   for (const t of freshTabs) {
+    if (isAborted?.()) return out;
+    const sid = await presenceSessionId(infoByTab.get(t.id), t.claudeConfigDir);
+    if (!sid) continue;
+    recordIds.set(t.id, sid);
+    linkedTabs.add(t.id);
+    // One session, one tab. Its own link is the only claim it can pass.
+    const ownLink = tabToSessionId.get(t.id) === sid && !namedByOthers(t.id).has(sid);
+    if (claimedIds.has(sid) && !ownLink) continue;
+    if (!(await sessionTranscriptBirth(cwdByTab.get(t.id), sid))) continue;
+    out.set(t.id, sid);
+    claimedIds.add(sid);
+    provenTabs.add(t.id);
+  }
+  // Held from here on, so timing cannot hand them to a tab with no record.
+  for (const [id, sid] of recordIds) { claimedIds.add(sid); namedByTab.set(id, sid); }
+  for (const t of freshTabs) {
+    if (recordIds.has(t.id)) continue;
     if (isAborted?.()) return out;
     const cwd = cwdByTab.get(t.id);
     const info = infoByTab.get(t.id);
@@ -764,7 +790,7 @@ export async function resolveFreshSessionsForTabs(
     // a stale map entry pointing this tab at X while tab B actually runs
     // `--resume X` would otherwise re-expose X and hand B's conversation to
     // this tab. Codex round 2 (mislink class).
-    if (ownSid && !argvOwnedByOthers(t.id).has(ownSid)) claimedByOthers.delete(ownSid);
+    if (ownSid && !namedByOthers(t.id).has(ownSid)) claimedByOthers.delete(ownSid);
     // Ambiguity set: ONLY the other fresh claudes in this same project that are
     // not yet linked. An already-linked one owns its own transcript and so
     // cannot also own this candidate. Counting it (as we did) declined every

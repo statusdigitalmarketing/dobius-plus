@@ -1010,9 +1010,11 @@ export function getSessionTabMap() {
 /**
  * Link a session to the terminal tab it is running in.
  *
- * @param {'argv'|'fresh'} [resolvedBy] how we know this link is true.
+ * @param {'argv'|'presence'|'fresh'} [resolvedBy] how we know this link is true.
  *   'argv'  the tab's own `claude --resume <id>` command line carries the id.
- *           CERTAIN, and the only kind auto-resume will act on.
+ *           CERTAIN, and auto-resume acts on it.
+ *   'presence' the process's own <configDir>/sessions/<pid>.json names the id,
+ *           pid and start time matching. CERTAIN too, and auto-resume acts on it.
  *   'fresh' a bare `claude` with no id in its argv, matched to a transcript by
  *           correlating process start time to file birth time. A HEURISTIC:
  *           the transcript records no pid (checked), so when two claudes in a
@@ -1036,7 +1038,7 @@ export function setSessionTabLink(sessionId, tabId, projectPath, resolvedBy = 'a
   config.sessionTabMap[sessionId] = {
     tabId,
     projectPath: typeof projectPath === 'string' ? projectPath : '',
-    resolvedBy: resolvedBy === 'fresh' ? 'fresh' : 'argv',
+    resolvedBy: resolvedBy === 'fresh' || resolvedBy === 'presence' ? resolvedBy : 'argv',
     capturedAt: Date.now(),
     // Freshness stamp: updated every Tier-2 capture tick while the session is
     // ACTIVELY running in the tab. Auto-resume only trusts links whose

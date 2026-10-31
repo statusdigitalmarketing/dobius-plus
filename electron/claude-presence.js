@@ -35,6 +35,16 @@ export const GRACE_MS = 3000;
 const CACHE_MS = 4000; // several windows poll the same tabs
 const MAX_FILE_BYTES = 64 * 1024;
 
+// Does this record describe this very process? Same pid AND the same start
+// time as ps reports, so a pid the system reused never reads as the old claude.
+function recordIsProcess(rec, proc) {
+  if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return false;
+  if (!proc || !Number.isInteger(proc.pid) || rec.pid !== proc.pid) return false;
+  if (typeof rec.procStart !== 'string' || !Number.isFinite(proc.startedAt)) return false;
+  // Both sides are `ps lstart` text ("Tue Oct 27 13:39:54 2026").
+  return Date.parse(rec.procStart) === proc.startedAt;
+}
+
 /**
  * Pure: what background work a presence record proves for a turn that ended.
  * @param {unknown} rec  parsed `<pid>.json`
@@ -44,11 +54,7 @@ const MAX_FILE_BYTES = 64 * 1024;
  * @returns {'shells'|'agents'|null}
  */
 export function waitingFrom(rec, proc, doneAt, now) {
-  if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return null;
-  if (!proc || !Number.isInteger(proc.pid) || rec.pid !== proc.pid) return null;
-  if (typeof rec.procStart !== 'string' || !Number.isFinite(proc.startedAt)) return null;
-  // Both sides are `ps lstart` text ("Tue Oct 27 13:39:54 2026").
-  if (Date.parse(rec.procStart) !== proc.startedAt) return null;
+  if (!recordIsProcess(rec, proc)) return null;
   if (!(doneAt > 0) || proc.startedAt + 1000 > doneAt || now - doneAt < GRACE_MS) return null;
   if (rec.status === 'shell') return 'shells';
   if (rec.status === 'busy' && Number.isFinite(rec.statusUpdatedAt) && rec.statusUpdatedAt <= doneAt - GRACE_MS) {
@@ -73,6 +79,34 @@ async function readPresenceFile(file) {
   }
 }
 
+// The claude's record, parsed, or null: no file, mid-rewrite, or a relative
+// config dir (the CLI resolves that against its own cwd, not known here).
+async function readPresenceRecord(pid, configDir, readFile = readPresenceFile) {
+  const dir = configDir || path.join(os.homedir(), '.claude');
+  if (!path.isAbsolute(dir)) return null;
+  try { return JSON.parse(await readFile(path.join(dir, 'sessions', `${pid}.json`))); }
+  catch { return null; }
+}
+
+// Claude Code's session ids are UUIDs. Checked before the id reaches a path.
+const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The session a claude process says it is on right now, from its own record:
+ * exact where start-time matching can only guess, and it moves with /clear
+ * (verified on 2.1.314). Null when there is no record, it names another
+ * process, or the id is not a session id: older Claude versions, a config dir
+ * changed inside the shell. Never throws.
+ * @param {{pid:number, startedAt:number|null}|null} proc  the tab's claude (ps)
+ * @param {string|null} [configDir]  the tab's CLAUDE_CONFIG_DIR, null = default
+ */
+export async function presenceSessionId(proc, configDir, readFile) {
+  if (!proc || !Number.isInteger(proc.pid)) return null;
+  const rec = await readPresenceRecord(proc.pid, configDir, readFile);
+  if (!recordIsProcess(rec, proc)) return null;
+  return typeof rec.sessionId === 'string' && SESSION_ID_RE.test(rec.sessionId) ? rec.sessionId : null;
+}
+
 /**
  * Background work for a tab whose hook status is 'done', or null. One lookup
  * per tab in flight (concurrent asks share it), answers cached CACHE_MS and
@@ -94,13 +128,7 @@ export function createWaitingReader({ claudeInfo, configDirFor, readFile = readP
     if (sampledAt - doneAt < GRACE_MS) return null;
     const info = await claudeInfo(tabId);
     if (!info || !Number.isInteger(info.pid)) return null;
-    const dir = configDirFor(tabId) || path.join(os.homedir(), '.claude');
-    // A relative dir is resolved by the CLI against its own cwd, which is not
-    // known here: no claim.
-    if (!path.isAbsolute(dir)) return null;
-    let rec;
-    try { rec = JSON.parse(await readFile(path.join(dir, 'sessions', `${info.pid}.json`))); }
-    catch { return null; } // no presence file, or mid-rewrite: no claim
+    const rec = await readPresenceRecord(info.pid, configDirFor(tabId), readFile);
     return waitingFrom(rec, info, doneAt, sampledAt);
   }
 

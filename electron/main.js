@@ -2633,12 +2633,13 @@ function setupSessionTabCapture() {
         }
       }
       // FRESH sessions (bare `claude`, no --resume): the id is not in the argv,
-      // so correlate process start time to the transcript the process created
-      // inside its own project. Without this a fresh tab never gets linked,
-      // which is why the sidebar showed no tab name for it and auto-resume
-      // could not restore it. v1.0.39.
+      // so read it from Claude's own record, else correlate process start time
+      // to the transcript the process created inside its own project. Without
+      // this a fresh tab never gets linked, which is why the sidebar showed no
+      // tab name for it and auto-resume could not restore it. v1.0.39.
+      const provenTabs = new Set();
       const freshByTab = await resolveFreshSessionsForTabs(
-        liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds,
+        liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds, undefined, provenTabs,
       );
       // Name each running session after its tab (History shows it). Read as
       // the tick sees it, so a session keeps the name its tab had while it
@@ -2658,33 +2659,46 @@ function setupSessionTabCapture() {
           continue;
         }
         claimedIds.add(runningSessionId);
+        // Tag how we know: an id read out of `claude --resume <id>` or out of
+        // the process's own record is certain, one inferred from start/birth
+        // timing is not. Auto-resume acts only on the certain kinds. v1.0.39.
+        const how = claudeInfo?.sessionId ? 'argv' : (provenTabs.has(t.id) ? 'presence' : 'fresh');
+        // A link for a bare `claude` must persist the cwd the transcript was
+        // actually resolved against (the tab's LIVE cwd), not t.cwd, which is
+        // only where the terminal was originally opened. `cd`ing to another
+        // project and running a bare `claude` is normal, and storing t.cwd
+        // then pointed projectPath at the wrong ~/.claude/projects dir, so
+        // anything loading the transcript from the link (Cmd+R size check,
+        // copy/speak last response) looked in the wrong place.
+        // Codex v1.0.39 r11 P2.
+        const linkPath = how === 'argv' ? t.cwd : (cwdByTab.get(t.id) || t.cwd);
         const label = labelsAfter.get(t.id);
         // An unknown label (tab not persisted yet) says nothing; a default one
         // ("Tab 3") clears the name so the summary shows again.
         if (label !== undefined && label === labelsBefore.get(t.id)) {
-          // A bare `claude` is matched by timing, and after /clear its process
-          // writes a NEW transcript while the match stays on the old one. Skip
-          // an inferred session once a newer unclaimed transcript appeared, so
-          // a renamed tab cannot relabel a conversation it has moved past.
+          // A bare `claude` matched by TIMING: after /clear its process writes
+          // a NEW transcript while the match stays on the old one. Skip it
+          // once a newer unclaimed transcript appeared, so a renamed tab cannot
+          // relabel a conversation it has moved past. Claude's own record
+          // follows /clear, so a tab linked by it needs none of this.
           // ponytail: the name follows whatever session this loop believes
           // the tab runs. Where that belief is wrong (/clear under
-          // `claude --resume A`, whose argv still says A; two bare claudes in
-          // one project racing a /clear) the link, auto-resume and the phone
-          // are wrong too; the fix belongs in the resolver, not here.
-          const movedPast = !claudeInfo?.sessionId && await sessionMovedPast(
+          // `claude --resume A`, whose argv still says A) the link, auto-resume
+          // and the phone are wrong too; the fix belongs in the resolver.
+          const movedPast = how === 'fresh' && await sessionMovedPast(
             cwdByTab.get(t.id) || t.cwd, runningSessionId, claudeInfo?.startedAt, claimedIds);
           if (!movedPast) namePairs.push([runningSessionId, sessionNameFromTabLabel(label)]);
         }
         const mappedSessionId = tabToSessionId.get(t.id);
         if (mappedSessionId === runningSessionId) {
           // UPGRADE provenance: the link was inferred from timing, but the tab's
-          // argv now names this very id, so it is certain. Without this the
-          // 'fresh' tag sticks forever and the r8 auto-resume gate keeps
-          // skipping a session argv has since proven, e.g. Sam Ctrl-Cs a bare
+          // argv or Claude's record now names this very id, so it is certain.
+          // Without this the 'fresh' tag sticks forever and the r8 auto-resume
+          // gate keeps skipping a session since proven, e.g. Sam Ctrl-Cs a bare
           // `claude` and reruns it as `claude --resume <same-id>`.
           // Codex v1.0.39 r12 P2.
-          if (claudeInfo?.sessionId && fresh[runningSessionId]?.resolvedBy === 'fresh') {
-            setSessionTabLink(runningSessionId, t.id, t.cwd, 'argv', probedAt.get(t.id));
+          if (how !== 'fresh' && fresh[runningSessionId]?.resolvedBy === 'fresh') {
+            setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
             continue;
           }
           // Still running: refresh the lastRunningAt stamp so auto-resume
@@ -2695,19 +2709,6 @@ function setupSessionTabCapture() {
         // Tab is running a different (or new) session than the map says.
         if (mappedSessionId) removeSessionTabLink(mappedSessionId);
         if (!fresh[runningSessionId]) {
-          // Tag how we know: an id read out of `claude --resume <id>` is
-          // certain, one inferred from start/birth timing is not. Auto-resume
-          // acts only on the certain kind. v1.0.39.
-          const how = claudeInfo?.sessionId ? 'argv' : 'fresh';
-          // A fresh link must persist the cwd the transcript was actually
-          // resolved against (the tab's LIVE cwd), not t.cwd, which is only
-          // where the terminal was originally opened. `cd`ing to another
-          // project and running a bare `claude` is normal, and storing t.cwd
-          // then pointed projectPath at the wrong ~/.claude/projects dir, so
-          // anything loading the transcript from the link (Cmd+R size check,
-          // copy/speak last response) looked in the wrong place.
-          // Codex v1.0.39 r11 P2.
-          const linkPath = how === 'fresh' ? (cwdByTab.get(t.id) || t.cwd) : t.cwd;
           setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
         }
       }
@@ -4169,8 +4170,9 @@ app.on('before-quit', (e) => {
         // Without this, a tab mapped to A that starts a bare `claude` (B) and
         // quits before the next 15s tick would leave A's stamp fresh and
         // auto-resume would reopen A instead of B. Codex v1.0.39 r3 P2.
+        const provenTabs = new Set();
         const freshByTab = await resolveFreshSessionsForTabs(
-          liveTabs, infoByTab, cwdByTab, tabToSidAll, claimedIds, () => reconcileAborted,
+          liveTabs, infoByTab, cwdByTab, tabToSidAll, claimedIds, () => reconcileAborted, provenTabs,
         );
         for (const t of liveTabs) {
           if (reconcileAborted) return;
@@ -4180,6 +4182,9 @@ app.on('before-quit', (e) => {
           // from the fresh correlation. Null means we cannot name what (if
           // anything) this tab is running.
           const running = info?.sessionId || freshByTab.get(t.id) || null;
+          // Same tagging and resolved-cwd rule as the tick. Codex v1.0.39 r11 P2.
+          const howQ = info?.sessionId ? 'argv' : (provenTabs.has(t.id) ? 'presence' : 'fresh');
+          const linkPathQ = howQ === 'argv' ? t.cwd : (cwdByTab.get(t.id) || t.cwd);
           if (sid && !running) {
             // The mapped session is NOT what this tab is running now. Covers
             // both "no claude at all" (stopped before quit) and "a claude we
@@ -4199,23 +4204,20 @@ app.on('before-quit', (e) => {
             clearSessionTabRunning(sid);
           } else if (
             running && running === sid
-            && info?.sessionId && mapQ[sid]?.resolvedBy === 'fresh'
+            && howQ !== 'fresh' && mapQ[sid]?.resolvedBy === 'fresh'
           ) {
-            // Same provenance upgrade as the tick: argv now proves an id we had
-            // only inferred, so re-link it as certain. Quitting right after
-            // `claude --resume <same-id>` would otherwise leave it 'fresh' and
-            // the r8 gate would skip restoring it. Codex v1.0.39 r12 P2.
-            setSessionTabLink(sid, t.id, t.cwd, 'argv');
+            // Same provenance upgrade as the tick: argv or Claude's record now
+            // proves an id we had only inferred, so re-link it as certain.
+            // Quitting right after `claude --resume <same-id>` would otherwise
+            // leave it 'fresh' and the r8 gate would skip restoring it.
+            // Codex v1.0.39 r12 P2.
+            setSessionTabLink(sid, t.id, linkPathQ, howQ);
           } else if (running && running !== sid) {
             // Tab switched sessions since the last capture tick (user ran
             // `claude --resume B` in a tab mapped to A, then quit fast).
             // Mirror the tick: drop the stale link, record the live one so
             // auto-resume revives B, not A. Codex v1.0.35 r11 P2.
             if (sid) removeSessionTabLink(sid);
-            // Same argv-vs-inferred tagging as the tick, and the same
-            // resolved-cwd rule for fresh links. Codex v1.0.39 r11 P2.
-            const howQ = info?.sessionId ? 'argv' : 'fresh';
-            const linkPathQ = howQ === 'fresh' ? (cwdByTab.get(t.id) || t.cwd) : t.cwd;
             setSessionTabLink(running, t.id, linkPathQ, howQ);
           }
         }
