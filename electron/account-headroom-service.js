@@ -129,15 +129,18 @@ export function createHeadroomService(d) {
   // belongs to the folder on disk. So another spelling (a symlink, /p/b/., /p/b/,
   // another case) has its own credential reading the same address, which says
   // nothing about it. Only the canonical spelling is trusted, and only while no
-  // listed spelling of that folder has a credential of its own. A credential
-  // FILE outside its folder is the same problem. All of these read as unknown.
+  // listed spelling of that folder has a credential of its own. A credential or
+  // metadata FILE linked out of its folder is the same problem. All read as unknown.
   async function markSharedFolders(rows) {
     const nfc = (p) => p.normalize('NFC');
     await Promise.all(rows.map(async (r) => {
       r.real = await d.realpath(r.dir).catch(() => null);
-      const cred = await d.realpath(path.join(r.dir, '.credentials.json')).catch(() => null);
       if (!r.real) return;
-      if (nfc(r.real) !== nfc(r.dir) || (cred && cred !== path.join(r.real, '.credentials.json'))) r.email = null;
+      if (nfc(r.real) !== nfc(r.dir)) r.email = null;
+      await Promise.all(['.credentials.json', '.config.json', '.claude.json'].map(async (name) => {
+        const at = await d.realpath(path.join(r.dir, name)).catch(() => null);
+        if (at && at !== path.join(r.real, name)) r.email = null;
+      }));
     }));
     const keysOf = new Map();
     for (const r of rows) {
@@ -222,7 +225,8 @@ export function createHeadroomService(d) {
   // (null meaning CLAUDE_CONFIG_DIR unset). A Claude whose folder cannot be
   // read, or a folder that is not a listed account, has no login to compare.
   function sourceOf(tab, rows, pid, scan) {
-    const g = pid !== null ? groupOf(scan, pid) : null;
+    // pid null: no child Claude, but `exec claude` runs as the shell's own pid.
+    const g = groupOf(scan, pid ?? tab.pid);
     let key = null;
     if (g) key = g.key;
     else if (pid === null) key = d.keyFor(tab.claudeConfigDir === null ? d.cliDefaultDir() : tab.claudeConfigDir);
@@ -312,7 +316,7 @@ export function createHeadroomService(d) {
     else if (info.soleChild === false) running = 'other';
     const act = d.activity(tabId);
     return {
-      tabId, running, session,
+      tabId, running, session, hasClaude: !!info,
       busy: tabBusy(act, d.now(), presence?.status),
       status: act?.status || null,
       // Unsent text in Claude's box, or input the window still holds (an image

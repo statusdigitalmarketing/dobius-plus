@@ -99,10 +99,10 @@ export function noteLogin(hist, key, email, now, records = []) {
   const who = email === UNKNOWN_LOGIN ? email : email.trim().toLowerCase();
   const k = hist.keys[key];
   // No entry yet: remember who it is now, so figures that arrive later are
-  // that login's and a later login is seen as a change. Unknown also takes a
-  // boundary: a record published while nobody can be named belongs to no one.
+  // that login's and a later login is seen as a change. Records already on disk
+  // may be an earlier login's, so they count only once refreshed.
   if (!k) {
-    hist.keys[key] = { windows: bare(), email: who, ...(who === UNKNOWN_LOGIN ? { since: now } : {}) };
+    hist.keys[key] = { windows: bare(), email: who, since: now };
     return true;
   }
   if (k.email === who) return false;
@@ -161,8 +161,9 @@ export function updateHistory(hist, records, now) {
         k.windows[name] = ent;
         changed = true;
       }
-      if (rec.receivedAt > ent.seenAt) { ent.seenAt = rec.receivedAt; changed = true; }
       const last = ent.samples[ent.samples.length - 1];
+      if (last && p < last.p) continue; // an older figure republished: it confirms nothing
+      if (rec.receivedAt > ent.seenAt) { ent.seenAt = rec.receivedAt; changed = true; }
       if (!last || p > last.p) {
         ent.samples.push({ t: last ? Math.max(last.t, rec.receivedAt) : rec.receivedAt, p });
         if (ent.samples.length > MAX_SAMPLES) ent.samples.splice(0, ent.samples.length - MAX_SAMPLES);

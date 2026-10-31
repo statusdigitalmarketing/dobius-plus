@@ -2335,7 +2335,8 @@ function setupHeadroomHandlers() {
       // of every tab that has been working for a while reads as unreadable (a
       // possible draft). The caller has checked a claude runs in the tab.
       const lines = await renderScreenLines(`\x1b[?2004h${trimToEscapeBoundary(getTerminalBuffer(id) || '', 262144)}`, { cols: terminalCols(id) });
-      return lines ? { lines, modes: lines.modes } : null;
+      // Claude's dim placeholder or ghost suggestion is not unsent text.
+      return lines ? { lines: lines.map((l, i) => (lines.dimFrom[i] >= 0 ? l.slice(0, lines.dimFrom[i]) : l)), modes: lines.modes } : null;
     },
     promptBox: (lines, modes) => promptBoxText(lines, modes),
   });

@@ -682,6 +682,7 @@ export const useStore = create((set, get) => ({
       ...(typeof closed.labelLocked === 'boolean' ? { labelLockedByUser: closed.labelLocked } : {}),
       projectPath: closed.projectPath,
       kind: closed.kind || 'terminal',
+      ...(closed.claudeAccountPin ? { claudeAccountPin: closed.claudeAccountPin } : {}),
       ...(closed.url ? { url: closed.url } : {}),
       ...(closed.viewMode === 'chat' ? { viewMode: 'chat' } : {}),
       createdAt: Date.now(),
@@ -728,6 +729,10 @@ export const useStore = create((set, get) => ({
     const tab = (get().terminalTabs || []).find((t) => t.id === tabId);
     if (!tab) return { ok: false, error: 'the tab is closed' };
     const tabProject = tab.projectPath || get().currentProjectPath || null;
+    // Respawn HARD-kills whatever runs in this tab (build, editor, claude).
+    if (confirm && typeof window.confirm === 'function') {
+      if (!window.confirm(`Restart this tab on ${label} and resume its conversation, if it has one? Whatever is running in this tab now will be stopped.`)) return { ok: false, cancelled: true };
+    }
     // Main judges the tab at the moment of the move, not when a dialog opened:
     // which conversation it runs now, and whether it may go to that account. No
     // answer is a refusal: the same-login rule is not checked anywhere else.
@@ -741,7 +746,7 @@ export const useStore = create((set, get) => ({
     // A Claude is running but main cannot name its conversation yet (just
     // started): the map below would name an OLDER one, and resuming that would
     // kill this one and revive the wrong conversation.
-    if (!sessionId && c.running === 'claude') return { ok: false, error: 'its conversation could not be identified yet; try again in a few seconds' };
+    if (!sessionId && c.hasClaude) return { ok: false, error: 'its conversation could not be identified yet; try again in a few seconds' };
     if (!sessionId) {
       try {
         const map = (await api.configGetSessionTabMap?.()) || {};
@@ -749,15 +754,6 @@ export const useStore = create((set, get) => ({
         sessionId = link?.sessionId || null;
         sessionProject = link?.projectPath || null;
       } catch { /* no map: still respawn to switch the account for a fresh session */ }
-    }
-    // Respawn HARD-kills whatever runs in this tab (build, editor, claude).
-    if (confirm && typeof window.confirm === 'function') {
-      const ok = window.confirm(
-        sessionId
-          ? `Restart this tab on ${label} and resume the conversation? Whatever is running in this tab now will be stopped.`
-          : `Restart this tab on ${label}? Whatever is running in this tab now will be stopped, and no linked session was found to resume.`
-      );
-      if (!ok) return { ok: false, cancelled: true };
     }
     const pin = { id: accountId };
     const hadPin = Object.prototype.hasOwnProperty.call(tab, 'claudeAccountPin');
@@ -770,14 +766,16 @@ export const useStore = create((set, get) => ({
         return rest;
       }),
     }));
+    // Only this move's own pin: another move may have finished meanwhile.
+    const undoPin = () => { if ((get().terminalTabs || []).find((t) => t.id === tabId)?.claudeAccountPin === pin) setPin(prevPin, hadPin); };
     setPin(pin, true);
     if (!background) set({ activeView: 'terminal', activeTabId: tabId });
     let created;
     // main refuses the restart if anything reached the tab since it was judged
     try { created = await api.terminalCreate?.(tabId, tabProject || undefined, { claudeAccountPin: pin, strictPin: true, expectInputSeq: c.inputSeq }); }
-    catch (err) { setPin(prevPin, hadPin); return { ok: false, error: `the tab could not restart: ${err?.message || err}` }; }
+    catch (err) { undoPin(); return { ok: false, error: `the tab could not restart: ${err?.message || err}` }; }
     if (created === null) {
-      setPin(prevPin, hadPin); // not restarted: it stays where it was, on relaunch too
+      undoPin(); // not restarted: it stays where it was, on relaunch too
       return { ok: false, error: 'the tab was not restarted (someone typed in it, or that account no longer exists)' };
     }
     if (!sessionId) return { ok: true, resumed: false };

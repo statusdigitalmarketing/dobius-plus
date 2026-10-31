@@ -60,7 +60,7 @@ check('history keeps the FIRST time each value was seen, and a republished lower
   updateHistory(h, [rec(KEY_A, T0 + 10 * MIN, 20), rec(KEY_A, T0 + 11 * MIN, 15)], T0 + 11 * MIN);
   const w = h.keys[KEY_A].windows.five_hour;
   assert.deepEqual(w.samples, [{ t: T0, p: 10 }, { t: T0 + 10 * MIN, p: 20 }]);
-  assert.equal(w.seenAt, T0 + 11 * MIN);
+  assert.equal(w.seenAt, T0 + 10 * MIN, 'the lower figure says nothing about when 20 was last true');
 });
 
 check('a figure with no reset time is not kept (it would never expire)', () => {
@@ -188,6 +188,17 @@ check('an account with no live five-hour figure is unknown, never 0%', () => {
   const none = usageForKeys(h, [KEY_B], T0);
   assert.equal(none.known, false);
   assert.equal(none.lastReportedAt, null);
+});
+
+check('a lower figure republished later does not refresh an older, higher one', () => {
+  const h = emptyHistory();
+  updateHistory(h, [rec(KEY_A, T0, 90)], T0);
+  updateHistory(h, [rec(KEY_A, T0 + 70 * MIN, 10)], T0 + 70 * MIN);
+  const u = usageForKeys(h, [KEY_A], T0 + 70 * MIN);
+  assert.equal(u.windows.five_hour.used, 90);
+  assert.equal(u.ageMs, 70 * MIN);
+  updateHistory(h, [rec(KEY_A, T0 + 71 * MIN, 90)], T0 + 71 * MIN);
+  assert.equal(usageForKeys(h, [KEY_A], T0 + 71 * MIN).ageMs, 0, 'the same figure again does');
 });
 
 check('a weekly-only report does not make an old five-hour figure look fresh', () => {

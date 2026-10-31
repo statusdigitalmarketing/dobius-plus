@@ -10,6 +10,8 @@ import { createHeadroomService, draftOnScreen, writePrivateFileSync } from '../a
 import { keychainServiceFor } from '../account-identity.js';
 import { resolveClaudeAccountPin } from '../spawn-account-env.js';
 import { readUsageRecords } from '../claude-usage.js';
+import { renderScreenLines } from '../screen-render.js';
+import { promptBoxText } from '../bridge-open-tab.js';
 
 let pass = 0;
 const check = async (label, fn) => { await fn(); pass += 1; console.log(`PASS  ${label}`); };
@@ -69,10 +71,7 @@ function world(over = {}) {
       if (w.links[p]) return w.links[p];
       const r = path.resolve(p);
       if (w.links[r]) return w.links[r];
-      if (p.endsWith('.credentials.json')) {
-        if (w.creds === 'none') throw new Error('ENOENT');
-        return path.join(path.dirname(r), '.credentials.json');
-      }
+      if (/\/\.(credentials|config|claude)\.json$/.test(p)) return r;
       if (w.missing.has(r)) throw new Error('ENOENT');
       return r;
     },
@@ -96,8 +95,24 @@ function world(over = {}) {
 }
 const target = (r, label) => r.targets.find((t) => t.label === label);
 
+// First sight of a folder sets its boundary, so a world's records count once
+// they are refreshed after that.
+const settled = async (w) => {
+  await w.svc.tick();
+  w.now += 1000;
+  w.records = w.records.map((r) => ({ ...r, receivedAt: r.receivedAt + 60_000 + 1000 }));
+};
+
+await check('records already on disk when a folder is first seen count only once refreshed', async () => {
+  const w = world();
+  assert.equal((await w.svc.usage()).accounts.find((x) => x.label === 'A').usage.known, false);
+  await settled(w);
+  assert.equal((await w.svc.usage()).accounts.find((x) => x.label === 'A').usage.windows.five_hour.used, 90);
+});
+
 await check('the panel: live figures, stale ones, and Unknown (never 0%) for an account with no report', async () => {
   const w = world({ accounts: [acct('a', DIR_A), acct('b', DIR_B), acct('c', '/profiles/c')], emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', '/profiles/c': 'c@x.com' } });
+  await settled(w);
   const r = await w.svc.usage();
   assert.equal(r.ok, true);
   const row = (l) => r.accounts.find((x) => x.label === l);
@@ -112,15 +127,29 @@ await check('the panel: live figures, stale ones, and Unknown (never 0%) for an 
 
 await check('a failed process scan never reads as idle', async () => {
   const w = world({ scanThrows: true });
+  await settled(w);
   const r = await w.svc.usage();
   assert.equal(r.scanFailed, true);
   assert.equal(r.accounts.find((x) => x.label === 'B').stale, false);
   assert.equal(r.accounts.find((x) => x.label === 'B').sessionsRunning, null);
 });
 
+await check('a real idle 2.1.314 frame: the dim placeholder is no draft once dim text is dropped', async () => {
+  const raw = fs.readFileSync(new URL('./fixtures/opentab-idle-2.1.314-raw.bin', import.meta.url));
+  const lines = await renderScreenLines(new Uint8Array(raw));
+  assert.match(promptBoxText(lines, lines.modes), /^Try "/, 'as drawn, it reads as text');
+  const clean = lines.map((l, i) => (lines.dimFrom[i] >= 0 ? l.slice(0, lines.dimFrom[i]) : l));
+  assert.equal(promptBoxText(clean, lines.modes), '');
+  assert.equal(draftOnScreen(promptBoxText(clean, lines.modes)), false);
+  // Typed text is not dim: nothing is dropped from it.
+  const typed = await renderScreenLines(`\x1b[?2004h${'─'.repeat(40)}\r\n❯\u00a0half a thought\r\n${'─'.repeat(40)}\x1b[1A\r\x1b[16C`);
+  assert.equal(typed.dimFrom.every((c) => c === -1), true);
+});
+
 await check('figures from an unlisted folder are not kept', async () => {
   const w = world();
-  w.records = [...w.records, { key: keychainServiceFor('/elsewhere'), sessionId: 'x', receivedAt: T0, windows: five(5) }];
+  await settled(w);
+  w.records = [...w.records, { key: keychainServiceFor('/elsewhere'), sessionId: 'x', receivedAt: w.now, windows: five(5) }];
   await w.svc.tick();
   w.svc.flushSync();
   const saved = JSON.parse(fs.readFileSync(path.join(w.ud, 'usage-history.json'), 'utf8'));
@@ -130,6 +159,7 @@ await check('figures from an unlisted folder are not kept', async () => {
 
 await check('a re-logged folder drops the old figures, and a running session republishing them is ignored', async () => {
   const w = world();
+  await settled(w);
   await w.svc.usage();
   w.emails[DIR_B] = 'new@x.com';
   w.now += 60_000;
@@ -206,6 +236,20 @@ await check('a symlinked profile folder, or a credential file linked out of it, 
   assert.match(target(await w.svc.moveTargets(TAB), 'B').refusal, /which login that account is/);
 });
 
+await check('a metadata file linked out of its folder is unknown too', async () => {
+  for (const name of ['.claude.json', '.config.json']) {
+    const w = world({ links: { [`${DIR_B}/${name}`]: `/profiles/c/${name}` } });
+    assert.match(target(await w.svc.moveTargets(TAB), 'B').refusal, /which login that account is/);
+  }
+});
+
+await check('a shell replaced by Claude (exec) is read from its own pid, not the spawn binding', async () => {
+  const w = world({ claude: null, proc: 'claude', tabs: [{ id: TAB, pid: 55, claudeConfigDir: DIR_A }], groups: [{ key: KEY_B, configDir: DIR_B, envUnset: false, pids: [55] }] });
+  const r = await w.svc.moveTargets(TAB);
+  assert.deepEqual(r.source, { label: 'B', email: 'b@x.com' });
+  assert.match(target(r, 'B').refusal, /already on/);
+});
+
 await check('the two default metadata files disagreeing, or one unreadable, makes Default unknown', async () => {
   const meta = (inner) => (dir, opts) => (dir === HOMEC ? (opts.envUnset ? 'd@x.com' : inner) : { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com' }[dir]);
   let w = world({ metaByCall: meta('other@x.com') });
@@ -258,6 +302,7 @@ await check('one login under two folders shows one set of figures', async () => 
       { key: KEY_B, sessionId: 's-b', receivedAt: T0 - 60_000, windows: five(20) },
     ],
   });
+  await settled(w);
   const r = await w.svc.usage();
   const row = r.accounts.find((x) => x.label === 'B');
   assert.equal(row.usage.windows.five_hour.used, 77);
@@ -362,6 +407,7 @@ await check('the service never follows a link at the history path, reading or qu
 
 await check('history survives a restart', async () => {
   const w = world();
+  await settled(w);
   await w.svc.usage();
   w.svc.flushSync();
   const w2 = world({ records: [] });
