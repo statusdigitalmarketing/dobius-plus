@@ -75,7 +75,7 @@ function fakeClaude(text, { placeholder = false } = {}) {
     clearSelection: () => { selection = null; },
   };
   draw();
-  const edit = attachPromptEditing(term, send, (d, dropped) => { app.held.push(d); if (d === null) app.drops.push(dropped === true); });
+  const edit = attachPromptEditing(term, send, (d, dropped) => { app.held.push(d); if (d === null) app.drops.push(dropped); });
   return {
     app,
     edit,
@@ -83,6 +83,9 @@ function fakeClaude(text, { placeholder = false } = {}) {
     // A key as xterm delivers it: keydown (which arms) sees the selection,
     // xterm clears the selection, then the bytes reach onData.
     type: (data) => { dom.keydown?.({}); selection = null; edit.handleData(data); },
+    // A keydown that arms the selection whose bytes never reach onData
+    // (Cmd+V: the paste handler takes it).
+    armOnly: () => { dom.keydown?.({}); },
     exit: () => { app.alive = false; draw(); },
     hasSelection: () => !!selection,
     scrollUp: () => { term.buffer.active.viewportY = 0; },
@@ -392,7 +395,7 @@ test('a drain that threw held input away says so; a full drain does not', async 
   t.exit(); // the prompt goes away: the paste and the Enter are dropped
   resolve("'/tmp/shot.png'");
   await wait();
-  assert.deepEqual(t.app.drops, [true]);
+  assert.deepEqual(t.app.drops, ['unsent']);
   const u = fakeClaude('ok');
   u.edit.pasteWhenReady(Promise.resolve("'/tmp/a.png'"));
   u.type('\r');
@@ -405,7 +408,7 @@ test('a pane that goes away while holding input reports the drop', async () => {
   t.edit.pasteWhenReady(new Promise(() => {}));
   t.type('\r');
   t.edit.dispose();
-  assert.deepEqual(t.app.drops, [true]);
+  assert.deepEqual(t.app.drops, ['unsent']);
 });
 
 test('input that waited behind a paste goes out paced, not in one burst', async () => {
@@ -426,12 +429,68 @@ test('a paste whose save failed, or a key typed onto a selection made mid-edit, 
   t.edit.pasteWhenReady(Promise.resolve(null));
   t.type('x');
   await wait();
-  assert.deepEqual(t.app.drops, [true], 'save failed');
+  assert.deepEqual(t.app.drops, ['unsent'], 'save failed: nothing was sent');
   const u = fakeClaude('one two');
   u.select(2, 5);
   u.type('X'); // an edit starts
   u.select(6, 9); // selection made while it runs
   u.type('\x15');
   await wait();
-  assert.deepEqual(u.app.drops, [true], 'the key on the mid-edit selection was lost');
+  assert.deepEqual(u.app.drops, ['unsent'], 'the key on the mid-edit selection was lost');
+});
+
+test('a command-bar send cut off midway reports a partial drop; one cut before any of it went out, unsent', async () => {
+  const t = fakeClaude('draft ');
+  const send = t.edit.reserve('rm -- x\r');
+  send.write('rm'); // goes out at once
+  await wait(10);
+  let resolve;
+  t.edit.pasteWhenReady(new Promise((r) => { resolve = r; }));
+  send.write(' -- x');
+  t.exit(); // the prompt goes away under the pending paste
+  resolve("'/tmp/a.png'");
+  await wait(50);
+  send.write('\r');
+  send.release();
+  await wait(50);
+  assert.deepEqual(t.app.writes, ['rm']);
+  assert.deepEqual(t.app.drops, ['partial']);
+  const u = fakeClaude('draft ');
+  let r2;
+  u.edit.pasteWhenReady(new Promise((r) => { r2 = r; }));
+  const send2 = u.edit.reserve('hi\r');
+  send2.write('hi');
+  u.exit();
+  r2("'/tmp/a.png'");
+  await wait(50);
+  send2.release();
+  await wait(20);
+  assert.deepEqual(u.app.drops, ['unsent']);
+});
+
+test('after Cmd+V takes a selection, input with no keydown of its own does not act on it again', async () => {
+  const t = fakeClaude('hello world foo');
+  t.select(8, 13); // "world"
+  // Cmd+V: its keydown arms the selection, then the paste takes it.
+  t.armOnly();
+  t.edit.pasteWhenReady(Promise.resolve('X'));
+  await wait();
+  assert.equal(t.app.text, 'hello X foo');
+  const n = t.app.writes.length;
+  t.edit.handleData('k'); // e.g. input that reaches onData without a keydown
+  await wait();
+  assert.equal(t.app.text, 'hello Xk foo', 'typed at the caret');
+  assert.deepEqual(t.app.writes.slice(n), ['k'], 'no selection edit (no arrows, no backspaces)');
+  assert.deepEqual(t.app.drops.filter(Boolean), []);
+});
+
+test('a command-bar send never acts on a live prompt selection either', async () => {
+  const t = fakeClaude('hello world');
+  t.select(8, 13);
+  t.armOnly(); // a key was armed but its bytes went elsewhere
+  const send = t.edit.reserve('z');
+  send.write('z');
+  send.release();
+  await wait(50);
+  assert.equal(t.app.text, 'hello worldz');
 });

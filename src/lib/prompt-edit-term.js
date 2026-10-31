@@ -51,13 +51,17 @@ const PROMPT_ONLY = Object.freeze({ promptOnly: true });
  * @param {import('@xterm/xterm').Terminal} term
  * @param {(data: string, opts?: { promptOnly: boolean }) => void} send writes to
  *   the PTY; promptOnly marks a paste meant only for Claude's prompt
- * @param {(data: string | null, dropped?: boolean) => void} [held] input the
- *   queue HOLDS (behind an edit or a pending paste) reaches the PTY late, so
- *   nothing in main sees it yet: each such input is reported the moment it is
- *   accepted, and null once the queue has drained, with dropped = true when
- *   some of it was thrown away instead of sent (the prompt changed, a paste
- *   timed out, the pane went away). /openTab counts it as a person typing;
- *   Chat waits for it, and gives up its own send after a drop.
+ * @param {(data: string | null, dropped?: false | 'unsent' | 'partial') => void} [held]
+ *   input the queue HOLDS (behind an edit or a pending paste) reaches the PTY
+ *   late, so nothing in main sees it yet: each such input is reported the
+ *   moment it is accepted, and null once the queue has drained, with dropped
+ *   saying whether some of it was thrown away instead of sent (the prompt
+ *   changed, a paste timed out or failed, the pane went away): 'unsent' when
+ *   nothing of the lost input reached the PTY, 'partial' when part of one
+ *   send did (a command-bar send cut off midway). /openTab counts it as a
+ *   person typing; Chat waits for it and gives up its own sends after a drop
+ *   (bridge-open-main.js: a partial drop also withholds a message already in
+ *   the box).
  */
 export function attachPromptEditing(term, send, held = () => {}) {
   // Everything bound for the PTY goes through one ordered queue: typed input
@@ -72,11 +76,16 @@ export function attachPromptEditing(term, send, held = () => {}) {
   let armed = null;
   let columnSelect = false; // xterm's Option+drag selects a rectangle, not a range
   let holding = false; // held input was reported and the drain was not yet
-  let dropped = false; // some held input was thrown away since the last drain
+  // Since the last drain: null, or what was thrown away ('unsent': none of
+  // it reached the PTY; 'partial': part of a send did). Partial wins.
+  let lost = null;
+  const lose = (kind) => { if (lost !== 'partial') lost = kind; };
+  // Dropping these queued items cuts a send some of which already went out.
+  const cutsSend = (items) => items.some((it) => it.res?.sent);
   const reserved = new Set(); // sends accepted elsewhere whose input is still to come
   const hold = (data) => { holding = true; held(data); };
   const drained = () => {
-    if (holding && !busy && !queue.length && !reserved.size) { holding = false; held(null, dropped); dropped = false; }
+    if (holding && !busy && !queue.length && !reserved.size) { holding = false; held(null, lost || false); lost = null; }
   };
   const app = () => !!term.modes.applicationCursorKeysMode;
 
@@ -162,7 +171,7 @@ export function attachPromptEditing(term, send, held = () => {}) {
       if (disposed || !inPrompt()) return false;    // the prompt it was pasted into is gone
       // Nothing pasted (the save failed), or pasted onto a selection we
       // could not read: the rest goes on, but this input was lost.
-      if (!text || item.sel === MID_EDIT) { dropped = true; return true; }
+      if (!text || item.sel === MID_EDIT) { lose('unsent'); return true; }
       // Checked against Claude's prompt just now; main drops it rather than
       // deliver it late to whatever replaced the prompt.
       if (item.sel) return replace(item.sel, pasteData(text), PROMPT_ONLY);
@@ -170,12 +179,13 @@ export function attachPromptEditing(term, send, held = () => {}) {
       return true;
     }
     const { data, sel } = item;
+    if (item.res) item.res.sent = true;
     // Keys that can submit or quit: Enter, Ctrl+C, Ctrl+D. Option+Enter
     // (ESC CR) is a newline in Claude, not a submit.
     if (/(^|[^\x1b])\r|[\x03\x04]/.test(data) && classifyInput(data) === 'other') lastEnterAt = performance.now();
     if (sel === MID_EDIT) {
       if (classifyInput(data) === 'other') send(data);
-      else dropped = true; // a key typed onto that selection is lost
+      else lose('unsent'); // a key typed onto that selection is lost
       return true;
     }
     if (sel && Date.now() - sel.at < ARM_TTL_MS && classifyInput(data) !== 'other') {
@@ -192,8 +202,8 @@ export function attachPromptEditing(term, send, held = () => {}) {
       while (queue.length && !disposed) {
         if (!(await run(queue.shift()))) {
           console.debug(`[prompt-edit] prompt changed under an edit or paste; ${queue.length} queued input(s) dropped`);
+          lose(cutsSend(queue) || [...reserved].some((r) => r.sent) ? 'partial' : 'unsent');
           queue.length = 0;
-          dropped = true;
           // A paced send still arriving loses its rest too, Enter included.
           for (const r of reserved) r.cancelled = true;
         }
@@ -207,16 +217,22 @@ export function attachPromptEditing(term, send, held = () => {}) {
     }
   };
 
+  // Behind a running edit or a pending paste this input waits, and on a
+  // selection it STARTS an edit, which waits on Claude's caret before its
+  // own keys go out (its first leg can be empty). res: the reserved send
+  // (command bar) it belongs to.
+  const enqueue = (data, sel, res = null) => {
+    const waits = busy || queue.length > 0 || sel !== null;
+    queue.push({ data, sel, res });
+    if (waits) hold(data);
+    pump();
+  };
+
+  // A key from xterm: it may act on the selection its keydown armed.
   function handleData(data) {
     const sel = armed;
     armed = null;
-    // Behind a running edit or a pending paste this input waits, and on a
-    // selection it STARTS an edit, which waits on Claude's caret before its
-    // own keys go out (its first leg can be empty).
-    const waits = busy || queue.length > 0 || sel !== null;
-    queue.push({ data, sel });
-    if (waits) hold(data);
-    pump();
+    enqueue(data, sel);
   }
 
   // An image paste resolves to a path only after the image is saved. It
@@ -232,6 +248,9 @@ export function attachPromptEditing(term, send, held = () => {}) {
     });
     if (!inPrompt()) return false;
     let sel = null;
+    // The paste takes the selection its Cmd+V armed: no later input (a
+    // command-bar send) may act on it again.
+    armed = null;
     if (term.hasSelection()) {
       sel = busy || queue.length ? MID_EDIT : selectedRange();
       // xterm never saw this paste (it was taken before reaching xterm), so
@@ -321,7 +340,8 @@ export function attachPromptEditing(term, send, held = () => {}) {
       reserved.add(r);
       hold(data);
       return {
-        write: (d) => { if (!r.cancelled && !disposed) handleData(d); },
+        // Never acts on a selection: the command bar asked for no edit.
+        write: (d) => { if (!r.cancelled && !disposed) enqueue(d, null, r); },
         release: () => { if (reserved.delete(r)) drained(); },
       };
     },
@@ -329,10 +349,11 @@ export function attachPromptEditing(term, send, held = () => {}) {
       disposed = true;
       for (const type of armEvents) el?.removeEventListener(type, arm, true);
       el?.removeEventListener('mousedown', onMouseDown, true);
-      const lost = dropped || busy || queue.length > 0 || reserved.size > 0;
+      if (cutsSend(queue) || [...reserved].some((r) => r.sent)) lose('partial');
+      else if (busy || queue.length > 0 || reserved.size > 0) lose('unsent');
       queue.length = 0;
       reserved.clear();
-      if (holding) { holding = false; held(null, lost); }
+      if (holding) { holding = false; held(null, lost || false); }
     },
   };
 }
