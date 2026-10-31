@@ -30,6 +30,10 @@ const PENDING_MAX_MS = 3 * 60_000;
 const POLL_MS = 500;
 const MAX_NOTICED = 200;
 const MAX_HANDLED_PER_TAB = 20;
+const DEFAULT_SERVICE = 'Claude Code-credentials';
+// After its last input, how long a tab's screen may stay unchanged before it
+// is taken as current (Claude echoes typed input at once).
+const QUIET_SETTLE_MS = 3000;
 const MAX_CANDIDATE_TABS = 64;
 // A tab that looked limited is looked at closely (screen render, transcript)
 // at most this often: a limited tab can sit for hours.
@@ -50,6 +54,15 @@ export const isDraft = (box) => typeof box === 'string' && !!box.trim();
  * question) is known to hold no typed text; anything else counts as a
  * possible draft, because guessing "empty" is what loses one.
  */
+// Only a selector at the bottom of the screen is Claude's live one; one
+// quoted in earlier output proves nothing about the input box.
+export function bottomRows(lines, n = 20) {
+  if (!Array.isArray(lines)) return [];
+  let last = lines.length - 1;
+  while (last >= 0 && !String(lines[last] || '').trim()) last -= 1;
+  return lines.slice(Math.max(0, last - n + 1), last + 1);
+}
+
 export function draftOnScreen(box, selectorShown) {
   if (typeof box === 'string') return isDraft(box);
   return !selectorShown;
@@ -115,7 +128,7 @@ export function createHeadroomService(d) {
     // folder re-logged since the last look must not have the old login's
     // samples carried over to the new one (metadata file only, no secrets).
     const logins = await readLogins();
-    applyLogins(h, logins);
+    applyLogins(h, logins, records);
     if (updateHistory(h, records, d.now())) dirty = true;
     // Again for keys this sample created, so a new key never starts without
     // the login its first figures belong to.
@@ -124,26 +137,38 @@ export function createHeadroomService(d) {
     return h;
   }
 
+  // The login address a folder's metadata names. The bare default Keychain
+  // service is shared by two spellings with two metadata files (CLAUDE_CONFIG_DIR
+  // unset reads ~/.claude.json, an explicit ~/.claude reads the inner one), and
+  // a login through either replaces the one credential: when the two files
+  // name different addresses, who that credential is cannot be told, so null.
+  async function loginEmail(dir, envUnset) {
+    let a;
+    try { a = await d.email(dir, { envUnset }); } catch { a = null; }
+    if (!a || d.keyFor(dir) !== DEFAULT_SERVICE) return a || null;
+    let b;
+    try { b = await d.email(dir, { envUnset: !envUnset }); } catch { b = null; }
+    return b && b.toLowerCase() !== a.toLowerCase() ? null : a;
+  }
+
   // Two rows on one credential can read two metadata files (Default with
   // the home-level file, an explicit ~/.claude with the inner one) and name
   // two logins: that credential's owner is undecidable, so it is left alone
   // rather than flipped back and forth.
-  function applyLogins(h, rows) {
+  function applyLogins(h, rows, records = []) {
     const loginOf = new Map();
     for (const r of rows) {
       if (!r.key || !r.email) continue;
       const e = r.email.toLowerCase();
       loginOf.set(r.key, loginOf.has(r.key) && loginOf.get(r.key) !== e ? null : e);
     }
-    for (const [key, email] of loginOf) if (email && noteLogin(h, key, email, d.now())) dirty = true;
+    for (const [key, email] of loginOf) if (email && noteLogin(h, key, email, d.now(), records)) dirty = true;
   }
 
   async function readLogins() {
     const { default: def, accounts: rows } = accountKeyRows(d.getAccounts(), { defaultDir: d.defaultDir() });
     const all = [{ ...def, envUnset: d.defaultEnvUnset() }, ...rows.filter(Boolean).map((r) => ({ ...r, envUnset: false }))];
-    await Promise.all(all.map(async (r) => {
-      try { r.email = await d.email(r.dir, { envUnset: r.envUnset }); } catch { r.email = null; }
-    }));
+    await Promise.all(all.map(async (r) => { r.email = await loginEmail(r.dir, r.envUnset); }));
     return all;
   }
 
@@ -161,8 +186,8 @@ export function createHeadroomService(d) {
     ];
     await Promise.all(all.map(async (r) => {
       try {
-        const ident = await d.identity(r.dir, { envUnset: r.envUnset });
-        r.email = ident?.email || null;
+        const [ident, email] = await Promise.all([d.identity(r.dir, { envUnset: r.envUnset }), loginEmail(r.dir, r.envUnset)]);
+        r.email = email;
         r.login = ident?.login || 'unknown';
       } catch {
         r.email = null;
@@ -173,12 +198,6 @@ export function createHeadroomService(d) {
     // with CLAUDE_CONFIG_DIR=~/.claude explicitly writes the inner file under
     // the SAME credential. Two different addresses there: who the credential
     // belongs to is unknown, and it is shown and treated that way.
-    const def0 = all[0];
-    if (def0.envUnset && def0.email) {
-      let inner;
-      try { inner = await d.email(def0.dir, { envUnset: false }); } catch { inner = null; }
-      if (inner && inner.toLowerCase() !== def0.email.toLowerCase()) def0.email = null;
-    }
     const byEmail = new Map();
     for (const r of all) {
       if (!r.email) continue;
@@ -262,6 +281,9 @@ export function createHeadroomService(d) {
     };
   }
 
+  // One quota per login: reservations are counted per login, not per folder.
+  const loginId = (r) => (r.email ? `e:${r.email.toLowerCase()}` : `k:${r.key}`);
+
   // A limit just hit holds every folder of that login, not only the folder
   // the tab was on.
   function heldNow(r, rows, now) {
@@ -279,7 +301,7 @@ export function createHeadroomService(d) {
     return rankTargets(rows.map((r) => {
       const usage = usageForRow(r, rows, now);
       if (heldNow(r, rows, now)) { usage.limited = true; usage.headroom = 0; }
-      const less = reserved?.get(r.key) || 0;
+      const less = reserved?.get(loginId(r)) || 0;
       if (less && usage.known) usage.headroom = Math.max(0, usage.headroom - less);
       return {
         id: r.id,
@@ -340,11 +362,12 @@ export function createHeadroomService(d) {
   async function draftIn(tabId) {
     try {
       const sc = await d.screen(tabId);
-      return sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), !!d.selector(sc.lines)) : true;
+      return sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), !!d.selector(bottomRows(sc.lines))) : true;
     } catch { return true; }
   }
 
   async function tabInfo(tabId) {
+    const seqAtStart = d.inputSeq(tabId);
     let info;
     try { info = await d.claudeInfo(tabId); } catch { info = null; }
     let session = null;
@@ -379,8 +402,13 @@ export function createHeadroomService(d) {
       tabId, running, session, busy, status: act?.status || null,
       // Unsent text in Claude's box: a respawn would throw it away. A plain
       // shell's half-typed command cannot be read reliably at all.
-      draft: info ? await draftIn(tabId) : running === 'shell',
+      // Input the window still holds (an image paste being saved, the words
+      // typed after it) is a draft too.
+      draft: d.inputHeld(tabId) || (info ? await draftIn(tabId) : running === 'shell'),
       pid: info?.pid ?? null,
+      // Read FIRST would be better; read here it still bounds the restart:
+      // terminal:create refuses if anything reached the tab after this.
+      inputSeq: seqAtStart,
     };
   }
 
@@ -474,19 +502,24 @@ export function createHeadroomService(d) {
       try { cwd = await d.processCwd(info.pid); } catch { cwd = null; }
       const project = cwd || ses.sessionProject || tab.cwd;
       let rec;
+      let recProject = project;
       try {
         rec = await d.limitRecord(ses.sessionId, project);
-        if (!rec?.found && ses.sessionProject && ses.sessionProject !== project) rec = await d.limitRecord(ses.sessionId, ses.sessionProject);
+        if (!rec?.found && ses.sessionProject && ses.sessionProject !== project) {
+          rec = await d.limitRecord(ses.sessionId, ses.sessionProject);
+          if (rec?.found) recProject = ses.sessionProject;
+        }
       } catch { rec = null; }
       if (!rec?.found || !rec.limit) continue;
       if (Number.isFinite(info.startedAt) && rec.limit.at < info.startedAt + 1000) continue; // see decideAutoMove
       let sc;
       try { sc = await d.screen(tab.id); } catch { sc = null; }
       const screenHit = !!liveLimitLine(sc?.lines, d.rows(tab.id));
-      const draft = sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), !!d.selector(sc.lines)) : true;
+      const draft = sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), !!d.selector(bottomRows(sc.lines))) : true;
       // A token or key exported into this Claude (a shell rc) signs it in
       // whatever its profile folder says: moving it would change nothing.
-      const tabOverride = await d.processAuthOverride(info.pid);
+      const tabOverride = await d.processAuthOverride(info.pid); // a name, 'unreadable', or null
+      if (tabOverride === 'unreadable') continue; // cannot tell: not moved, looked at again later
       if (tabOverride) {
         const k = `${tab.id}|override|${rec.limit.at}`;
         if (!noticed.has(k)) {
@@ -526,12 +559,12 @@ export function createHeadroomService(d) {
         st.lastMoveAt = d.now();
         recentMoves.push(st.lastMoveAt);
         while (recentMoves.length > 50) recentMoves.shift();
-        reserved.set(dec.target.key, (reserved.get(dec.target.key) || 0) + AUTO.RESERVE_PER_TAB);
+        reserved.set(loginId(dec.target), (reserved.get(loginId(dec.target)) || 0) + AUTO.RESERVE_PER_TAB);
         const p = {
           eventId: dec.eventId, eventAt: rec.limit.at, sessionId: ses.sessionId, project, wcId: d.windowOf(tab.id), at: d.now(),
           targetLabel: dec.target.label, targetKey: dec.target.key, sourceLabel: source.label,
           inputSeq: d.inputSeq(tab.id), pty: d.pty(tab.id), started: false,
-          targetDir: dec.target.dir, targetEnvUnset: dec.target.envUnset, targetEmail: dec.target.email, prevLastMoveAt,
+          targetDir: dec.target.dir, targetEnvUnset: dec.target.envUnset, targetEmail: dec.target.email, prevLastMoveAt, recProject,
         };
         pending.set(tab.id, p);
         d.log('accounts.auto-move', `tab=${tab.id} from=${source.label} to=${dec.target.label} event=${dec.eventId} result=moving`);
@@ -582,6 +615,9 @@ export function createHeadroomService(d) {
     if (!p || p.eventId !== eventId || p.wcId !== senderId || p.started) return { ok: false, error: 'no automatic move is waiting for that tab' };
     const stop = (why) => {
       pending.delete(tabId);
+      // Nothing happened to the tab: its event and cooldown are given back.
+      const st = tabStates.get(tabId);
+      if (st) { st.handled.delete(p.eventId); st.lastMoveAt = p.prevLastMoveAt || 0; st.nextLookAt = d.now() + RECHECK_MS; }
       d.log('accounts.auto-move', `tab=${tabId} from=${p.sourceLabel} to=${p.targetLabel} event=${eventId} result=not-moved (${why})`);
       return { ok: false, error: why };
     };
@@ -602,8 +638,7 @@ export function createHeadroomService(d) {
   // The target folder is still logged into the login main chose it for.
   async function targetStillSame(p) {
     if (!p.targetEmail) return false;
-    let now;
-    try { now = await d.email(p.targetDir, { envUnset: !!p.targetEnvUnset }); } catch { now = null; }
+    const now = await loginEmail(p.targetDir, !!p.targetEnvUnset);
     return !!now && now.toLowerCase() === p.targetEmail.toLowerCase();
   }
 
@@ -655,17 +690,26 @@ export function createHeadroomService(d) {
     if (hits < 2 || !stillHere()) return done('no-continue (Claude\'s prompt did not appear)', false, `Moved this tab to ${p.targetLabel}, but its prompt did not appear in time, so "continue" was not sent.`);
     if (d.inputSeq(tabId) !== baseline) return done('no-continue (someone typed in the tab)', false, `Moved this tab to ${p.targetLabel}. Someone typed in it since, so "continue" was not sent.`);
     let rec;
-    try { rec = await d.limitRecord(p.sessionId, p.project); } catch { rec = null; }
+    try { rec = await d.limitRecord(p.sessionId, p.recProject || p.project); } catch { rec = null; }
     if (!rec?.found || rec.limit?.at !== p.eventAt) return done('no-continue (the conversation moved on)', false, `Moved this tab to ${p.targetLabel}. The conversation had moved on, so "continue" was not sent.`);
     if (d.inputSeq(tabId) !== baseline || d.inputHeld(tabId) || !stillHere()) return done('no-continue (someone typed in the tab)');
     // Claude's box must be EMPTY: input that reached it before this check
     // began (a phone, a late window) would otherwise go out with "continue".
+    // The screen must postdate every input the tab has received, or an
+    // empty box may be one Claude has not redrawn yet.
+    if (!d.settled(tabId) && d.inputAgeMs(tabId) < QUIET_SETTLE_MS) {
+      await d.sleep(QUIET_SETTLE_MS);
+      if (!d.settled(tabId) && d.inputAgeMs(tabId) < QUIET_SETTLE_MS) return done('no-continue (the screen did not catch up with input)', false, `Moved this tab to ${p.targetLabel}, but its screen did not settle, so "continue" was not sent.`);
+    }
+    if (d.inputSeq(tabId) !== baseline || !stillHere()) return done('no-continue (someone typed in the tab)');
     let box;
     try { const sc = await d.screen(tabId); box = sc ? d.promptBox(sc.lines, sc.modes) : null; } catch { box = null; }
     if (box === null || box.trim() !== '') return done('no-continue (the prompt was not empty)', false, `Moved this tab to ${p.targetLabel}, but its prompt was not empty, so "continue" was not sent.`);
-    if (!(await targetStillSame(p))) return done('no-continue (the target folder is logged into another account now)', false, `Moved this tab to ${p.targetLabel}, but that folder is logged into a different account now, so "continue" was not sent.`);
     const override = await d.processAuthOverride(started.pid);
+    if (override === 'unreadable') return done('no-continue (its environment could not be checked for an auth override)', false, `Moved this tab to ${p.targetLabel}, but its environment could not be checked, so "continue" was not sent.`);
     if (override) return done(`no-continue (${override} set in its environment)`, false, `Moved this tab to ${p.targetLabel}, but ${override} is set in its shell and signs Claude in the same way on every account, so "continue" was not sent.`);
+    // Last, so as little as possible runs between it and the paste.
+    if (!(await targetStillSame(p))) return done('no-continue (the target folder is logged into another account now)', false, `Moved this tab to ${p.targetLabel}, but that folder is logged into a different account now, so "continue" was not sent.`);
     // Still the Claude that was checked above, not one started after it.
     let now;
     try { now = await d.claudeInfo(tabId); } catch { now = null; }

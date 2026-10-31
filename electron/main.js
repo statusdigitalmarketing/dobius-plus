@@ -37,7 +37,7 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputAgeMs, terminalInputSeq, terminalRawOutputSeq, terminalClosing, sendToTerminalWindow, terminalRows } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputAgeMs, terminalInputSeq, terminalRawOutputSeq, terminalClosing, sendToTerminalWindow, terminalRows, terminalSettledSinceInput } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, setInputHeldCheck } from './chat-service.js';
@@ -2298,6 +2298,7 @@ function setupHeadroomHandlers() {
     },
     processCwd: (pid) => getProcessCwd(pid),
     processAuthOverride: (pid) => processAuthOverride(pid),
+    settled: (id) => terminalSettledSinceInput(id),
     email: (dir, opts) => accountEmail(dir, opts),
     inputHeld: (id) => heldInputFor(id),
     samePath: async (a, b) => {
@@ -2367,15 +2368,17 @@ function setupHeadroomHandlers() {
 // Which auth override (a token or API key that signs Claude in regardless of
 // its profile folder) a process carries, by NAME only: its environment is
 // read through ps and only checked for the variable being set; no value is
-// kept or logged. null when none, or when it cannot be read.
+// kept or logged. null when none, 'unreadable' when it cannot be read (the
+// caller must then not assume there is none).
 const execFileP = promisify(execFile);
 const AUTH_OVERRIDE_NAMES = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
 async function processAuthOverride(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
     const { stdout } = await execFileP('/bin/ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 1500, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+    if (!stdout.trim()) return 'unreadable';
     return AUTH_OVERRIDE_NAMES.find((n) => new RegExp(`(?:^|\\s)${n}=\\S`).test(stdout)) || null;
-  } catch { return null; }
+  } catch { return 'unreadable'; }
 }
 
 function setupConfigHandlers() {

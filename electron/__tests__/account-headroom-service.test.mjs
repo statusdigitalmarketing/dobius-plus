@@ -15,6 +15,8 @@ let pass = 0;
 const check = async (label, fn) => { await fn(); pass += 1; console.log(`PASS  ${label}`); };
 
 const TAB = 'term-/proj-1';
+const TAB2 = 'term-/proj-2';
+const HOMEC = path.join(os.homedir(), '.claude');
 const DIR_A = '/profiles/a';
 const DIR_B = '/profiles/b';
 const KEY_A = keychainServiceFor(DIR_A);
@@ -36,7 +38,7 @@ function world(over = {}) {
       { key: KEY_A, receivedAt: T0 - 30_000, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } },
       { key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 20, resetsAt: R5 } } },
     ],
-    emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', '/home/.claude': 'd@x.com' },
+    emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', [HOMEC]: 'd@x.com' },
     autoMove: true,
     tail: "You've hit your 5-hour limit",
     ...over,
@@ -49,21 +51,23 @@ function world(over = {}) {
       { id: 'a', type: 'claude', name: 'A', claudeJsonPath: `${DIR_A}/.claude.json` },
       { id: 'b', type: 'claude', name: 'B', claudeJsonPath: `${DIR_B}/.claude.json` },
       ...(w.extraAccount ? [{ id: 7, type: 'claude', name: 'Seven', claudeJsonPath: '/profiles/seven/.claude.json' }] : []),
+      ...(w.extraAccounts || []),
     ],
-    defaultDir: () => '/home/.claude',
+    defaultDir: () => HOMEC,
     defaultEnvUnset: () => true,
-    cliDefaultDir: () => '/home/.claude',
+    cliDefaultDir: () => HOMEC,
     keyFor: (dir) => keychainServiceFor(dir),
     identity: async (dir) => ({ email: w.emails[dir] ?? null, login: 'in' }),
-    email: async (dir) => w.emails[dir] ?? null,
+    email: async (dir, opts) => (opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null)),
     inputHeld: () => !!w.held,
     processAuthOverride: async (pid) => (w.override && w.override[pid]) || null,
+    settled: () => w.settled ?? true,
     selector: () => null,
     readRecords: async () => w.records,
     pruneRecords: async () => 0,
     scan: async () => ({ groups: [{ key: w.procKey, pids: [w.claude.pid] }], unresolved: [] }),
     autoMoveEnabled: () => w.autoMove,
-    tabs: () => [{ id: TAB, cwd: '/proj', claudeConfigDir: DIR_A }],
+    tabs: () => [{ id: TAB, cwd: '/proj', claudeConfigDir: DIR_A }, ...(w.secondTab ? [{ id: TAB2, cwd: '/proj', claudeConfigDir: DIR_A }] : [])],
     activity: () => ({ status: 'done', lastActivityAt: w.now - 60_000 }),
     claudeInfo: async () => w.claude,
     resolveSession: async () => ({ sessionId: 's1', sessionProject: '/proj' }),
@@ -78,7 +82,7 @@ function world(over = {}) {
       if (channel === 'accounts:autoMoveNotice') w.notices.push(payload.text); else w.sent.push({ id, channel, payload });
       return 'sent';
     },
-    inputAgeMs: () => 10 * 60_000,
+    inputAgeMs: () => w.inputAge ?? 10 * 60_000,
     inputSeq: () => w.inputSeq,
     outputSeq: () => 1,
     pty: () => w.pty,
@@ -399,6 +403,58 @@ await check('a move the window never started gives its event back when it expire
   w.now += 61_000;
   await svc.tick(); // the same limit, still there, is acted on again
   assert.equal(w.sent.length, 2);
+});
+
+await check('an auth environment that cannot be read stops "continue" (never read as "none")', async () => {
+  const { w, svc } = world();
+  const eventId = await moved(w, svc);
+  w.override = { 200: 'unreadable' };
+  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
+  assert.deepEqual(w.submits, []);
+});
+
+await check('a screen that has not caught up with input is not trusted to show an empty box', async () => {
+  const { w, svc } = world();
+  const eventId = await moved(w, svc);
+  w.settled = false;
+  w.inputAge = 100; // input just arrived and the screen has not redrawn since
+  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
+  assert.deepEqual(w.submits, []);
+});
+
+await check('a move called off before it started gives its event back', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  w.inputSeq += 1;
+  assert.equal((await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7)).ok, false);
+  w.now += 2 * 60_000;
+  await svc.tick();
+  assert.equal(w.sent.length, 2, 'the same limit is acted on again later');
+});
+
+await check('the default credential whose two metadata files disagree has no known login', async () => {
+  const { w, svc } = world();
+  w.innerEmails = { [HOMEC]: 'other@x.com' };
+  const u = await svc.usage();
+  assert.equal(u.accounts.find((r) => r.isDefault).email, null);
+});
+
+await check('reservations count per login: two folders of one login cannot both take tabs on the same headroom', async () => {
+  const { w, svc } = world();
+  // A third account C, a fresh figure of 75% (25% headroom), and B also has a second folder B2.
+  w.extraAccounts = [
+    { id: 'b2', type: 'claude', name: 'B2', claudeJsonPath: '/profiles/b2/.claude.json' },
+    { id: 'c', type: 'claude', name: 'C', claudeJsonPath: '/profiles/c/.claude.json' },
+  ];
+  w.emails['/profiles/b2'] = 'b@x.com';
+  w.emails['/profiles/c'] = 'c@x.com';
+  w.records[1].windows.five_hour.usedPercentage = 72; // B: 28% headroom
+  w.records.push({ key: keychainServiceFor('/profiles/c'), receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 76, resetsAt: R5 } } });
+  w.secondTab = true;
+  await svc.tick();
+  const targets = w.sent.map((m) => m.payload.accountId);
+  assert.equal(targets.length, 2);
+  assert.ok(targets.includes('c'), `second tab must go to the other login, got ${targets}`);
 });
 
 // ---- pin at the spawn choke point ----

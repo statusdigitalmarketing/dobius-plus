@@ -78,7 +78,19 @@ export function sanitizeHistory(raw) {
     if (Object.keys(windows).length || Number.isFinite(raw.keys[key]?.since)) {
       const email = raw.keys[key]?.email;
       const since = raw.keys[key]?.since;
-      out.keys[key] = { windows, ...(typeof email === 'string' && email.length <= 320 ? { email } : {}), ...(Number.isFinite(since) ? { since } : {}) };
+      const ignore = bare();
+      const rawIgnore = raw.keys[key]?.ignore;
+      if (rawIgnore && typeof rawIgnore === 'object') {
+        for (const sid of Object.keys(rawIgnore).slice(0, MAX_IGNORED)) {
+          if (SID_RE.test(sid) && typeof rawIgnore[sid] === 'string' && rawIgnore[sid].length <= 2000) ignore[sid] = rawIgnore[sid];
+        }
+      }
+      out.keys[key] = {
+        windows,
+        ...(typeof email === 'string' && email.length <= 320 ? { email } : {}),
+        ...(Number.isFinite(since) ? { since } : {}),
+        ...(Object.keys(ignore).length ? { ignore } : {}),
+      };
     }
   }
   return out;
@@ -91,7 +103,13 @@ export function sanitizeHistory(raw) {
  * login's samples are dropped rather than carried over. Returns whether it
  * changed anything.
  */
-export function noteLogin(hist, key, email, now) {
+// What a record says, for telling a republished figure from a new one.
+const figureOf = (windows) => JSON.stringify(Object.keys(windows || {}).sort()
+  .map((n) => [n, windows[n]?.usedPercentage, windows[n]?.resetsAt]));
+const SID_RE = /^[A-Za-z0-9_-]{1,100}$/;
+const MAX_IGNORED = 50;
+
+export function noteLogin(hist, key, email, now, records = []) {
   if (!isCredentialKey(key) || typeof email !== 'string' || !email.trim()) return false;
   const k = hist.keys[key];
   if (!k) return false;
@@ -99,7 +117,20 @@ export function noteLogin(hist, key, email, now) {
   if (k.email === who) return false;
   // Records the old login's sessions left on disk keep their old figures;
   // anything received before the change is ignored from now on.
-  if (k.email && k.email !== who) { k.windows = bare(); k.since = now; }
+  if (k.email && k.email !== who) {
+    k.windows = bare();
+    k.since = now;
+    // A session still running on the folder keeps re-rendering the OLD
+    // login's cached figure (with a fresh file time) until its next API
+    // call. Its records are ignored while they say exactly what they said at
+    // the re-login.
+    k.ignore = bare();
+    for (const r of Array.isArray(records) ? records : []) {
+      if (r?.key !== key || !SID_RE.test(String(r.sessionId || ''))) continue;
+      if (Object.keys(k.ignore).length >= MAX_IGNORED) break;
+      k.ignore[r.sessionId] = figureOf(r.windows);
+    }
+  }
   k.email = who;
   return true;
 }
@@ -128,6 +159,10 @@ export function updateHistory(hist, records, now) {
       if (r === null || expired(r, now)) continue;
       let k = hist.keys[rec.key];
       if (k?.since && rec.receivedAt < k.since) continue; // from before a re-login (noteLogin)
+      if (k?.ignore && typeof rec.sessionId === 'string' && rec.sessionId in k.ignore) {
+        if (k.ignore[rec.sessionId] === figureOf(rec.windows)) continue;
+        delete k.ignore[rec.sessionId]; // a new figure: that session made a call on the new login
+      }
       if (!k) { k = { windows: bare() }; hist.keys[rec.key] = k; changed = true; }
       let ent = k.windows[name];
       if (ent && r !== null && ent.r !== null) {

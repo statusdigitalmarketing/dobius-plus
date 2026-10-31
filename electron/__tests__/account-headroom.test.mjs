@@ -117,6 +117,18 @@ check('a re-login of the same folder drops the old login\'s figures and ignores 
   assert.equal(reloaded.keys[KEY_A].since, T0 + MIN);
 });
 
+check('after a re-login, a running session republishing the old login\'s cached figure is ignored until it says something new', () => {
+  const h = emptyHistory();
+  const old = { ...rec(KEY_A, T0, 90), sessionId: 'live1' };
+  updateHistory(h, [old], T0);
+  noteLogin(h, KEY_A, 'a@x', T0);
+  assert.equal(noteLogin(h, KEY_A, 'b@x', T0 + MIN, [old]), true);
+  updateHistory(h, [{ ...old, receivedAt: T0 + 2 * MIN }], T0 + 2 * MIN); // same figure, new file time
+  assert.equal(usageForKey(h, KEY_A, T0 + 2 * MIN).known, false);
+  updateHistory(h, [{ ...rec(KEY_A, T0 + 3 * MIN, 4), sessionId: 'live1' }], T0 + 3 * MIN); // its first call on the new login
+  assert.equal(usageForKey(h, KEY_A, T0 + 3 * MIN).windows.five_hour.used, 4);
+});
+
 // ---- pace and forecast ----
 
 check('pace is percent per hour over the lookback, from the step value at its start', () => {

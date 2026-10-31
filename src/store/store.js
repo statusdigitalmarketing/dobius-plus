@@ -750,13 +750,26 @@ export const useStore = create((set, get) => ({
       if (!ok) return { ok: false, cancelled: true };
     }
     const pin = { id: accountId };
-    set((s) => ({ terminalTabs: s.terminalTabs.map((t) => (t.id === tabId ? { ...t, claudeAccountPin: pin } : t)) }));
+    const hadPin = Object.prototype.hasOwnProperty.call(tab, 'claudeAccountPin');
+    const prevPin = tab.claudeAccountPin;
+    const setPin = (value, has) => set((s) => ({
+      terminalTabs: s.terminalTabs.map((t) => {
+        if (t.id !== tabId) return t;
+        if (has) return { ...t, claudeAccountPin: value };
+        const { claudeAccountPin: _drop, ...rest } = t;
+        return rest;
+      }),
+    }));
+    setPin(pin, true);
     if (!background) set({ activeView: 'terminal', activeTabId: tabId });
     const expect = Number.isInteger(opts.expectInputSeq) ? { expectInputSeq: opts.expectInputSeq } : {};
     let created;
     try { created = await api.terminalCreate?.(tabId, tabProject || undefined, { claudeAccountPin: pin, ...expect }); }
     catch (err) { return { ok: false, error: `the tab could not restart: ${err?.message || err}` }; }
-    if (created === null && expect.expectInputSeq !== undefined) return { ok: false, error: 'someone typed in the tab, so it was not restarted' };
+    if (created === null && expect.expectInputSeq !== undefined) {
+      setPin(prevPin, hadPin); // not restarted: it stays where it was, on relaunch too
+      return { ok: false, error: 'someone typed in the tab, so it was not restarted' };
+    }
     if (!sessionId) return { ok: true, resumed: false };
     // Wait so the old claude has exited (claimSessionResume refuses while its
     // process is still visible) and the new shell is ready.
@@ -767,7 +780,7 @@ export const useStore = create((set, get) => ({
     const typedSince = await api.terminalInputCount?.(tabId);
     if (Number.isInteger(typedSince) && typedSince > 0) return { ok: false, error: 'someone typed in the restarted tab, so the conversation was not resumed there' };
     if (!background) set({ activeTabId: tabId }); // re-assert in case focus moved during the wait
-    const typed = await get().resumeSession({ sessionId, project: sessionProject || tabProject || undefined, tabId, background });
+    const typed = await get().resumeSession({ sessionId, project: sessionProject || tabProject || undefined, tabId, background, freshShell: true });
     return typed === true ? { ok: true, resumed: true } : { ok: false, error: typeof typed === 'string' ? typed : 'the conversation could not be resumed' };
   },
 
@@ -805,6 +818,8 @@ export const useStore = create((set, get) => ({
       if (!c || why(c)) { failed.push({ label: name(c0.tabId), reason: c ? why(c) : 'it is gone' }); continue; }
       const r = await get().moveTabToAccount(c.tabId, accountId, {
         confirm: false, background: true, label, sessionId: c.session?.sessionId, project: c.session?.project,
+        // main refuses the restart if anything reached the tab since it was judged
+        ...(Number.isInteger(c.inputSeq) ? { expectInputSeq: c.inputSeq } : {}),
       });
       if (r.ok) moved += 1; else failed.push({ label: name(c.tabId), reason: r.error || 'failed' });
     }
@@ -947,9 +962,20 @@ export const useStore = create((set, get) => ({
     //
     // The claim is bound to this tab, so retrying here after a failed resume
     // is granted, and killing the tab frees the session at once.
+    // A resume into a shell an account move just started: if anyone typed
+    // into it meanwhile, the command would be glued onto their line and run.
+    const shellUntouched = async () => {
+      if (session.freshShell !== true) return true;
+      const n = await window.electronAPI.terminalInputCount?.(termId);
+      return !(Number.isInteger(n) && n > 0);
+    };
     const claim = window.electronAPI.dataClaimSessionResume?.(sessionId, termId);
     if (!claim?.then) { typeIt(); return done; } // older preload: behave as before
-    claim.then((okToRun) => {
+    claim.then(async (okToRun) => {
+      if (okToRun !== false && !(await shellUntouched())) {
+        typed('someone typed in the restarted tab, so the conversation was not resumed there');
+        return;
+      }
       if (okToRun === false) {
         if (typeof window !== 'undefined' && !background) {
           window.alert('That session is already running somewhere else.\n\nSwitch to the tab (or the phone) that has it rather than starting a second copy.');
