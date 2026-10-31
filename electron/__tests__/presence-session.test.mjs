@@ -14,7 +14,7 @@ process.env.TZ = 'America/New_York';
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-presence-home-'));
 process.env.HOME = home;
 process.env.DOBIUS_TEST_USERDATA = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-presence-ud-'));
-const { resolveFreshSessionsForTabs } = await import('../data-service.js');
+const { resolveFreshSessionsForTabs, provenanceChanged } = await import('../data-service.js');
 const { presenceSessionId } = await import('../claude-presence.js');
 
 let pass = 0;
@@ -212,6 +212,18 @@ ok('a malformed session id is ignored');
   await resolveFreshSessionsForTabs(liveTabs, info, new Map([['A', PROJ]]), new Map(), new Set(), undefined, proven);
   assert.deepEqual([...proven], ['A']);
   ok('a claude that is not the shell\'s only child is named, not proven');
+}
+
+// What a tab's saved link is re-tagged to, on the tick and at quit alike.
+{
+  assert.equal(provenanceChanged('fresh', 'presence'), true, 'proven now');
+  assert.equal(provenanceChanged('fresh', 'argv'), true);
+  assert.equal(provenanceChanged('presence', 'fresh'), true, 'proof lapsed: auto-resume must stop typing it');
+  assert.equal(provenanceChanged('argv', 'fresh'), false, 'argv is never lowered');
+  assert.equal(provenanceChanged('presence', 'presence'), false);
+  assert.equal(provenanceChanged('presence', 'argv'), false);
+  assert.equal(provenanceChanged('fresh', 'fresh'), false);
+  ok('a saved link is re-tagged when its proof changes');
 }
 
 // A valid record whose transcript is not in THIS project: no link, no timing.

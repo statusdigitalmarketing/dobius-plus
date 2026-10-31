@@ -822,6 +822,16 @@ export async function resolveFreshSessionsForTabs(
 }
 
 /**
+ * Should a link to the session this tab is running now be re-tagged? Up when
+ * argv or Claude's record now proves one inferred from timing. Down when a
+ * 'presence' link's proof has lapsed (another program now shares the shell, the
+ * record is gone), or auto-resume would keep typing it. 'argv' is never lowered.
+ */
+export function provenanceChanged(saved, how) {
+  return how === 'fresh' ? saved === 'presence' : saved === 'fresh';
+}
+
+/**
  * Per-session size probe used by Cmd+R / tab-map resume to feed the
  * >80MB dead-session guard. Checks both encoder forms (legacy + new).
  * Returns sizeMB as a number, or null if the file can't be found.

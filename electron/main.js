@@ -44,7 +44,7 @@ import { launchCommandFor } from '../shared/new-tab.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, sessionMovedPast, findLooseEnds, getTranscriptSig,
+  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, provenanceChanged, sessionMovedPast, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
   getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
 import {
@@ -2696,8 +2696,8 @@ function setupSessionTabCapture() {
           // Without this the 'fresh' tag sticks forever and the r8 auto-resume
           // gate keeps skipping a session since proven, e.g. Sam Ctrl-Cs a bare
           // `claude` and reruns it as `claude --resume <same-id>`.
-          // Codex v1.0.39 r12 P2.
-          if (how !== 'fresh' && fresh[runningSessionId]?.resolvedBy === 'fresh') {
+          // Codex v1.0.39 r12 P2. Lapsed proof comes back down the same way.
+          if (provenanceChanged(fresh[runningSessionId]?.resolvedBy, how)) {
             setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
             continue;
           }
@@ -4204,9 +4204,9 @@ app.on('before-quit', (e) => {
             clearSessionTabRunning(sid);
           } else if (
             running && running === sid
-            && howQ !== 'fresh' && mapQ[sid]?.resolvedBy === 'fresh'
+            && provenanceChanged(mapQ[sid]?.resolvedBy, howQ)
           ) {
-            // Same provenance upgrade as the tick: argv or Claude's record now
+            // Same provenance change as the tick: argv or Claude's record now
             // proves an id we had only inferred, so re-link it as certain.
             // Quitting right after `claude --resume <same-id>` would otherwise
             // leave it 'fresh' and the r8 gate would skip restoring it.
