@@ -507,6 +507,14 @@ await check('the real trust prompt on the target ends the wait at once and says 
   assert.match(r.error, /asking whether to trust this folder/);
   assert.deepEqual(r.pin, { id: 'b' });
   assert.equal(w.now - t0 < 2000, true, 'no long wait');
+  // A token decides the login even behind the prompt: never just "answer it".
+  const w2 = world();
+  const o2 = moveOpts(w2);
+  const restart2 = o2.restart;
+  o2.restart = (...a) => { w2.lines = lines; w2.override = 'CLAUDE_CODE_OAUTH_TOKEN'; return restart2(...a); };
+  const r2 = await w2.svc.move(TAB, 'b', o2);
+  assert.match(r2.error, /CLAUDE_CODE_OAUTH_TOKEN is set/);
+  assert.doesNotMatch(r2.error, /trust this folder/);
 });
 
 await check('Claude exiting right after it started is reported at once', async () => {
@@ -556,9 +564,20 @@ await check('after the restart: a wrong account outranks a trust prompt, an exit
   o.restart = (...a) => { const ok = r2(...a); w.presence = null; w.onSleep = () => { w.claude = null; }; return ok; };
   await w.svc.move(TAB, 'b', o);
   assert.equal(w.events.at(-1), 'release sess-now');
+  // No transcript: nothing was at risk, so never a resume command with no id.
+  w = world({ transcript: false });
+  o = moveOpts(w);
+  const r4 = o.restart;
+  o.restart = (...a) => { const ok = r4(...a); w.presence = null; w.onSleep = () => { w.claude = null; }; return ok; };
+  r = await w.svc.move(TAB, 'b', o);
+  assert.match(r.error, /no conversation to lose/);
+  assert.doesNotMatch(r.error, /--resume/);
+  // A slow shell can still run the queued resume: the claim must hold.
   w = world({ neverStarts: true });
-  await moveB(w);
-  assert.equal(w.events.at(-1), 'release sess-now');
+  r = await moveB(w);
+  assert.equal(w.events.includes('release sess-now'), false);
+  assert.match(r.error, /has not started/);
+  assert.doesNotMatch(r.error, /--resume/);
   w = world();
   o = moveOpts(w);
   const r3 = o.restart;
@@ -647,7 +666,7 @@ await check('nothing confirmed within the bound fails visibly, and says how to g
   let w = world({ neverStarts: true });
   let r = await moveB(w);
   assert.equal(r.ok, false);
-  assert.match(r.error, /did not start.*claude --resume sess-now in \/proj\/worktree/);
+  assert.match(r.error, /has not started.*give it a moment/);
   assert.deepEqual(r.pin, { id: 'b' }, 'the shell did start on B');
   w = world({ presenceAfter: null });
   r = await moveB(w);
@@ -811,10 +830,14 @@ await check('records past the age limit are deleted hourly, and stray temp files
   const dir = path.join(ud, 'usage');
   fs.mkdirSync(dir);
   const old = (Date.now() - 10 * 86400_000) / 1000;
-  for (const n of ['old.json', 'fresh.json', '.tmp.s1.123', 'keep.txt']) fs.writeFileSync(path.join(dir, n), 'x');
-  for (const n of ['old.json', '.tmp.s1.123', 'keep.txt']) fs.utimesSync(path.join(dir, n), old, old);
+  const OLD = '11111111-2222-4333-8444-555555555555.json';
+  const FRESH = '66666666-7777-4888-8999-aaaaaaaaaaaa.json';
+  // auth.json and .credentials.json are what a swapped folder would expose.
+  const notOurs = ['auth.json', '.credentials.json', 'settings.json', 'keep.txt'];
+  for (const n of [OLD, FRESH, '.tmp.s1.123', ...notOurs]) fs.writeFileSync(path.join(dir, n), 'x');
+  for (const n of [OLD, '.tmp.s1.123', ...notOurs]) fs.utimesSync(path.join(dir, n), old, old);
   assert.equal(await pruneUsageRecords(ud, 8 * 86400_000), 2);
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['fresh.json', 'keep.txt']);
+  assert.deepEqual(fs.readdirSync(dir).sort(), [FRESH, ...notOurs].sort());
   const real = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prunereal-'));
   fs.writeFileSync(path.join(real, 'x.json'), 'x');
   fs.utimesSync(path.join(real, 'x.json'), old, old);

@@ -410,7 +410,9 @@ export function createHeadroomService(d) {
     const { project, hasTranscript } = info.session;
     // No transcript means nothing to resume: a plain Claude starts on the target.
     const sessionId = hasTranscript ? info.session.sessionId : null;
-    const manual = `The conversation is safe: run claude --resume ${sessionId} in ${project}, in this tab.`;
+    const manual = sessionId
+      ? `The conversation is safe: run claude --resume ${sessionId} in ${project}, in this tab.`
+      : `There was no conversation to lose: run claude in ${project}, in this tab.`;
     try { d.stop(info.pid); } catch (err) { if (err?.code !== 'ESRCH') return fail(`Claude could not be stopped: ${err.message}`); }
     // Everything above left the tab untouched. From here it only ever reports.
     const stopBy = d.now() + STOP_MS;
@@ -427,6 +429,8 @@ export function createHeadroomService(d) {
     } catch (err) { return abort(`Claude stopped, but the tab could not restart on ${target.label}: ${err.message}. ${manual}`); }
     return verifyMove(tabId, sessionId, target, rows, pin, manual);
   }
+
+  const tokenDecides = (target, name) => `Claude runs in ${target.label}'s folder, but ${name} is set in the tab's shell and decides its login instead of the folder, so it did not change login.`;
 
   // What is really running in the tab now, from the process's own environment
   // and Claude's own record, never from what was asked for. Polled: nothing
@@ -446,7 +450,12 @@ export function createHeadroomService(d) {
         }
         // Nothing more can be confirmed until a person answers this, behind the dialog.
         const sc = g ? await d.screen(tabId).catch(() => null) : null;
-        if (sc && trustPromptOn(sc.lines)) return { ok: false, pin, error: `Claude on ${target.label} is asking whether to trust this folder. Answer it in the tab; the conversation carries on after that.` };
+        if (sc && trustPromptOn(sc.lines)) {
+          const token = await d.processAuthOverride(info.pid);
+          return { ok: false, pin, error: token && token !== 'unreadable'
+            ? tokenDecides(target, token)
+            : `Claude on ${target.label} is asking whether to trust this folder. Answer it in the tab; the conversation carries on after that.` };
+        }
         const seen = g ? await d.presence(info, g.envUnset ? null : g.configDir).catch(() => null) : null;
         if (sessionId && seen?.sessionId && seen.sessionId !== sessionId) return { ok: false, pin, error: `Claude is on ${target.label}, but running conversation ${seen.sessionId}, not ${sessionId}. ${manual}` };
         if (seen?.sessionId) {
@@ -454,7 +463,7 @@ export function createHeadroomService(d) {
           if (override) {
             return { ok: false, pin, error: override === 'unreadable'
               ? `Claude runs in ${target.label}'s folder, but its environment could not be read, so its login cannot be confirmed.`
-              : `Claude runs in ${target.label}'s folder, but ${override} is set in the tab's shell and decides its login instead of the folder, so it did not change login.` };
+              : tokenDecides(target, override) };
           }
           // The folder may have been logged into something else during the move.
           const now = { dir: target.dir, key: target.key, email: await loginEmail(target.dir, target.envUnset) };
@@ -465,10 +474,11 @@ export function createHeadroomService(d) {
       }
       await d.sleep(POLL_MS);
     }
-    if (!started && sessionId) d.release(sessionId, tabId);
+    // Not started is not given up: a slow shell can still run the queued resume,
+    // so the conversation stays claimed or a second tab could write to it too.
     return { ok: false, pin, error: started
       ? `Claude started, but what it is running could not be confirmed within ${VERIFY_MS / 1000} seconds. Check the tab before relying on it.`
-      : `Claude did not start within ${VERIFY_MS / 1000} seconds. The tab is a shell on ${target.label}. ${manual}` };
+      : `Claude has not started after ${VERIFY_MS / 1000} seconds. The tab's shell on ${target.label} may still start it, so give it a moment before doing anything there.` };
   }
 
   async function move(tabId, targetId, opts) {

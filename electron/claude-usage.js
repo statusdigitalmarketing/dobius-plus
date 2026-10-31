@@ -311,7 +311,9 @@ export async function pruneUsageRecords(userDataDir, maxAgeMs, now = Date.now())
   let removed = 0;
   await mapLimit(names, 16, async (name) => {
     const tmp = /^\.tmp\.[A-Za-z0-9_-]+\.\d+$/.test(name);
-    if (!tmp && !/^[A-Za-z0-9_-]+\.json$/.test(name)) return;
+    // A session id, never just any .json: the folder could be swapped for a link
+    // between the lstat above and here, and auth.json must not match.
+    if (!tmp && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i.test(name)) return;
     const file = path.join(dir, name);
     try {
       const st = await fs.lstat(file);
