@@ -419,3 +419,15 @@
 - **FIX**: With the caret in the box, rows above it are transcript and are not checked. A real dialog replaces the input box, so its caret is never in one. With no cursor position the old check stands. Below the box the footer and selector checks stand.
 - **CONTEXT**: Text matching on anything above the prompt is matching the user's own words.
 - **DETECTION**: `grep -n "dialogOnScreen" electron/bridge-open-tab.js`
+
+### Performance - 2026-10-31 (2.0.0: idle CPU from the Tabs sidebar)
+- **MISTAKE**: `data:getAllProjectTabs` polls every 5s per window and called `loadAllSessions`, which parsed the tail of every transcript on every call: 8s of wall clock and 9s of CPU with 10,300 files, about 130% of a core at idle.
+- **FIX**: `transcriptCache` in data-service.js keeps what a tail told it, per file, while size and mtime hold. Clock, settings and caller choices (status, age, project names, hidden paths, excludeAutomated) stay outside it. `getAllProjectTabs` shares one session load in flight and for 3s; its rows are built per caller. Runs 1 and 2 went from 7.5s to under 0.2s, and rss fell.
+- **CONTEXT**: The cache walks every file on every scan, so a least-recently-used cap would miss on every scan: past the cap it stops adding. Only a full scan may evict, since a scoped scan sees one project. parseJsonl answers [] on ANY error, so a tail that parsed to nothing is never cached. Strings in it must be detached (`detached()`): a slice keeps its parent alive for the life of the cache.
+- **DETECTION**: `npm run test:sessioncache`; `grep -n "transcriptCache\|sharedAllSessions" electron/data-service.js`
+
+### Testing - 2026-10-31 (a stand-in that agrees with you proves nothing)
+- **MISTAKE**: My stand-in claude wrote `procStart` from local `ps`, so the ship-test passed while every real record was rejected on this Mac: Claude writes that field under TZ=UTC with no zone. The sidebar's Waiting status had the same bug from the day it shipped and never showed outside UTC. The same harness also inherited `CLAUDE_CONFIG_DIR` from the session that launched it, so one run wrote a stand-in record into a real profile's sessions dir (removed when the stand-in stopped; nothing else landed there). Codex caught the zone by reading the binary, not by reading the diff.
+- **FIX**: Parse `procStart` as UTC. Before trusting a fixture or stand-in for a third-party file format, compare it with a REAL file on this machine: `scratchpad/.../real-check.mjs` read 22 live records and accepted all 22. A harness with a throwaway HOME must also `unset CLAUDE_CONFIG_DIR CODEX_HOME`.
+- **CONTEXT**: Any stand-in that writes a format the real program owns. Any harness launched from inside a Claude session.
+- **DETECTION**: `grep -n "procStart" electron/claude-presence.js`; `env | grep -E "CLAUDE_CONFIG_DIR|CODEX_HOME"` before launching a harness.
