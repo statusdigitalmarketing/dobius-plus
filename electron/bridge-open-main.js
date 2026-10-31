@@ -17,7 +17,7 @@ import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProj
 import { terminalInstance, getTerminalBuffer, terminalCols, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint, JS_RUNTIMES, CLAUDE_SCRIPT_RE } from './claude-argv.js';
 import { isKeyboardInput, isUserInput } from './bridge-open-tab.js';
-import { submitPending, noteHeldInput, cancelQueuedSubmits } from './chat-service.js';
+import { submitPending, noteHeldInput, cancelQueuedSubmits, dropUnpastedSubmits } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
 import { parseTabId } from './tab-id-util.js';
@@ -194,7 +194,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // old and the new window can both hold. tabId -> Set of wcIds
   const heldInput = new Map();
   // Tabs whose current hold lost input in main (chat-service dropped a
-  // prompt-only paste of it): its drain counts as dropped.
+  // prompt-only paste of it): its drain drops the Chat sends not yet pasted.
   const lostHolds = new Set();
   const dropHold = (t, w) => {
     const set = heldInput.get(t);
@@ -212,7 +212,11 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     if (data === null) {
       // Some of it was thrown away (a tear-off, a timed-out paste): what
       // reached the terminal is half of it, so Chat must not append to it.
-      if (dropHold(id, wc.id) && (dropped === true || lostHolds.has(id))) cancelQueuedSubmits(id);
+      if (dropHold(id, wc.id)) {
+        if (dropped === true) cancelQueuedSubmits(id);
+        // Lost in main, before the terminal: nothing of it is in the box.
+        else if (lostHolds.has(id)) dropUnpastedSubmits(id);
+      }
       if (!heldInput.has(id)) lostHolds.delete(id);
       return;
     }

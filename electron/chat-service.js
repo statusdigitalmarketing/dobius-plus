@@ -174,6 +174,16 @@ export function cancelQueuedSubmits(id) {
   const q = submitQueues.get(id);
   if (q) q.gen += 1;
 }
+
+/**
+ * Input the person meant to go first was dropped before it reached the
+ * terminal (a prompt-only paste): submits not yet pasted are dropped, the
+ * one already in the box (which that input never touched) keeps its Enter.
+ */
+export function dropUnpastedSubmits(id) {
+  const q = submitQueues.get(id);
+  if (q) q.dropGen += 1;
+}
 const HELD_WAIT_MS = 16_000; // prompt editing gives up on a paste after 15s
 const HELD_POLL_MS = 50;
 // When this queue last delivered an Enter to each tab (a submit's, or a key

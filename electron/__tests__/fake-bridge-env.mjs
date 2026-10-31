@@ -85,6 +85,8 @@ export const heldNotes = [];
 export function noteHeldInput(id, data) { heldNotes.push([id, data]); }
 export const cancelled = [];
 export function cancelQueuedSubmits(id) { cancelled.push(id); }
+export const unpastedDrops = [];
+export function dropUnpastedSubmits(id) { unpastedDrops.push(id); }
 
 // data-service
 export async function listProjects() { return []; }

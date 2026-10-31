@@ -464,6 +464,18 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   writeRawInput('h', "\x1b[200~'/p/2.png'\x1b[201~", () => true, { promptOnly: true });
   assert.deepEqual(lostMarks, ['h']);
 
+  // Dropping unpasted submits spares the one already in the box.
+  const { dropUnpastedSubmits } = await import('../chat-service.js');
+  setInputHeldCheck(() => false);
+  await tick(1100);
+  reset(); ptys.set('h', {});
+  const v1 = submitPromptToTab('h', 'A');
+  const v2 = submitPromptToTab('h', 'B');
+  dropUnpastedSubmits('h'); // A is pasted and waiting for its Enter
+  assert.deepEqual(await Promise.all([v1, v2]), [true, false]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r']);
+  setInputHeldCheck((id) => id === 'h' && held);
+
   // A window that held input is gone with it half sent: a waiting submit is
   // cancelled, never appended to the half.
   const { cancelQueuedSubmits } = await import('../chat-service.js');

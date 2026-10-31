@@ -85,15 +85,18 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   assert.equal(deps.inputBusy(opened.tabId), false);
 
   // Input main dropped from the current hold (a prompt-only paste) makes its
-  // drain a dropped one, even when the window reports it clean.
+  // drain drop the Chat sends not yet pasted, even when the window reports
+  // it clean; the one already in the box is not cancelled.
   env.emit('terminal:inputHeld', wc, opened.tabId, 'p');
   deps.markHeldLost(opened.tabId);
   const c2 = env.cancelled.length;
+  const u2 = env.unpastedDrops.length;
   env.emit('terminal:inputHeld', wc, opened.tabId, null, false);
-  assert.deepEqual(env.cancelled.slice(c2), [opened.tabId]);
+  assert.deepEqual(env.unpastedDrops.slice(u2), [opened.tabId]);
+  assert.equal(env.cancelled.length, c2, 'not a full cancel');
   env.emit('terminal:inputHeld', wc, opened.tabId, 'q');
   env.emit('terminal:inputHeld', wc, opened.tabId, null, false);
-  assert.equal(env.cancelled.length, c2 + 1, 'the next hold starts clean');
+  assert.equal(env.unpastedDrops.length, u2 + 1, 'the next hold starts clean');
   deps.markHeldLost(opened.tabId); // no hold: nothing to mark
 
   // A reload forgets a hold the old page never released.
