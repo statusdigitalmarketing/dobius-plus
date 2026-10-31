@@ -4,7 +4,6 @@ import { groupByStage } from '../lib/stages';
 import { makeTabId } from '../lib/tab-id';
 import { onScreenTabIds, becomesUnread, clearSeen } from '../lib/tab-unread';
 import { windowFocused } from '../lib/window-focus';
-import { latestSessionForTab } from '../../shared/session-tab.js';
 import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.js';
 import { NEW_TAB_TOOLS, resumeNeedsNewTab } from '../../shared/new-tab.js';
 import { setPendingLaunch, clearPendingLaunches } from '../lib/pending-launch';
@@ -682,6 +681,7 @@ export const useStore = create((set, get) => ({
       ...(typeof closed.labelLocked === 'boolean' ? { labelLockedByUser: closed.labelLocked } : {}),
       projectPath: closed.projectPath,
       kind: closed.kind || 'terminal',
+      ...(closed.claudeAccountPin ? { claudeAccountPin: closed.claudeAccountPin } : {}),
       ...(closed.url ? { url: closed.url } : {}),
       ...(closed.viewMode === 'chat' ? { viewMode: 'chat' } : {}),
       createdAt: Date.now(),
@@ -713,54 +713,48 @@ export const useStore = create((set, get) => ({
   // don't silently no-op when a browser tab is active. Audit Medium.
   getActiveTerminalTabId: () => resolveActiveTerminalTabId(get()),
 
-  // Continue the running conversation in THIS tab on the currently ACTIVE
-  // account. The reason this exists: switching accounts (Settings > Accounts)
-  // only changes NEW terminals, so hitting a session limit and switching left
-  // the current tab still bound to the maxed-out account (Sam: "stays on
-  // original account and says i still dont have credits left"). This respawns
-  // the tab's PTY, which re-reads the active account at the spawn choke point
-  // (CLAUDE_CONFIG_DIR), then resumes the same session from the shared
-  // transcript store, so the conversation continues on fresh quota.
-  continueTabOnActiveAccount: async (tabId) => {
-    const api = typeof window !== 'undefined' ? window.electronAPI : null;
-    if (!api || !tabId) return;
-    // The tab's REAL project, read from the live tab list (not the persisted
-    // map), so the lookup is project-guarded and the respawn's cwd is right for
-    // a worktree/subdir tab rather than the active project (reviewer MED-HIGH).
-    const tab = (get().terminalTabs || []).find((t) => t.id === tabId);
-    const tabProject = tab?.projectPath || get().currentProjectPath || null;
-    let sessionId = null;
-    try {
-      const map = (await api.configGetSessionTabMap?.()) || {};
-      sessionId = latestSessionForTab(map, tabId, tabProject)?.sessionId || null;
-    } catch { /* no map: still respawn to switch the account for a fresh session */ }
-    // Respawn HARD-kills whatever runs in this tab (build, editor, claude), so
-    // confirm first (reviewer MED). Non-interactive callers (tests) proceed.
-    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
-      const ok = window.confirm(
-        sessionId
-          ? 'Restart this tab on the switched account and resume the conversation? Whatever is running in this tab now will be stopped.'
-          : 'Restart this tab on the switched account? Whatever is running in this tab now will be stopped, and no linked session was found to resume.'
-      );
-      if (!ok) return;
+  // Move tabs to a Claude account (null = Default), one call for one tab or a
+  // whole window. Main judges and does the move (accounts:move): it stops Claude,
+  // restarts the tab on that account and reports what is really running there.
+  // The global active account is untouched. Resolves { moved, skipped, failed,
+  // cancelled }, each entry { label, reason }.
+  // single: the one tab the person picked, who is told about a turn or unsent
+  // text and may go ahead. Move all skips and names those tabs, never interrupts.
+  moveTabsToAccount: async (tabIds, accountId, label = 'the chosen account', { single = false } = {}) => {
+    const api = window.electronAPI;
+    const name = (id) => (get().terminalTabs.find((t) => t.id === id)?.label) || id;
+    // Read now, at the click: what the dialog showed may be out of date.
+    const cands = (await api?.accountsMoveCandidates?.(tabIds, accountId)) || [];
+    const reason = (c) => c.refusal || (single ? c.hardBlock : c.block);
+    const go = cands.filter((c) => !reason(c));
+    const skipped = cands.filter(reason).map((c) => ({ label: name(c.tabId), reason: reason(c) }));
+    if (!go.length) return { moved: 0, skipped, failed: [] };
+    const left = skipped.length ? `\n\nLeft where they are:\n${skipped.map((x) => `${x.label}: ${x.reason}`).join('\n')}` : '';
+    const loses = single ? `${go[0].busy ? ' Its turn in progress stops.' : ''}${go[0].draft ? ' The unsent text in its prompt is lost.' : ''}` : '';
+    const count = go.length === 1 ? 'this tab' : `${go.length} tabs`;
+    if (!window.confirm(`Restart ${count} on ${label} and resume the conversation, if there is one? Whatever runs there now is stopped.${loses}${left}`)) return { moved: 0, skipped, failed: [], cancelled: true };
+    let moved = 0;
+    const failed = [];
+    for (const c of go) {
+      const { tabId } = c;
+      // Only what the person was just told: main refuses anything newer.
+      const r = await api.accountsMove(tabId, accountId, { allowBusy: single && c.busy, allowDraft: single && c.draft }).catch((err) => ({ ok: false, error: err?.message || String(err) }));
+      // The pin says what main found running, not what was asked for. Set at
+      // once: a later tab's wait must not leave this one's saved account stale.
+      if (r.pin !== undefined) {
+        set((s) => ({
+          terminalTabs: s.terminalTabs.map((t) => {
+            if (t.id !== tabId) return t;
+            if (r.pin) return { ...t, claudeAccountPin: r.pin };
+            const { claudeAccountPin: _drop, ...rest } = t;
+            return rest;
+          }),
+        }));
+      }
+      if (r.ok) moved += 1; else failed.push({ label: name(tabId), reason: r.error || 'something went wrong' });
     }
-    set({ activeView: 'terminal', activeTabId: tabId });
-    // Respawn: main kills the old PTY and creates a new one, reading the live
-    // active account (CLAUDE_CONFIG_DIR) at the spawn choke point.
-    try { await api.terminalCreate?.(tabId, tabProject || undefined); } catch { return; }
-    if (!sessionId) return; // account switched; user continues fresh
-    // Delegate the actual resume to resumeSession, which owns the claim gate
-    // (refuses if the session runs on the phone/another window: reviewer HIGH),
-    // the worktree/cross-project cwd rules, and char-by-char typing. Wait first
-    // so the old claude has exited (claimSessionResume refuses while its process
-    // is still visible) and the new shell is ready.
-    setTimeout(() => {
-      if (!(get().terminalTabs || []).some((t) => t.id === tabId)) return; // tab closed (reviewer LOW)
-      set({ activeTabId: tabId }); // re-assert in case focus moved during the wait
-      get().resumeSession({ sessionId, project: tabProject || undefined });
-    }, 900);
+    return { moved, skipped, failed };
   },
-
 
   // Resume a Codex session in the active terminal tab. Separate from
   // resumeSession because Codex owns its own session lifecycle (no Claude

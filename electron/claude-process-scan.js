@@ -258,6 +258,25 @@ async function mapLimit(items, limit, fn) {
  *   A caller must treat a non-empty `unresolved` or a true `discoveryFailed` as
  *   "I cannot claim to have covered everything".
  */
+/**
+ * A process's environment text from `ps eww`, without its argv (same reads and
+ * same rule as inspect above: argv read twice must agree), or null if it cannot
+ * be told apart.
+ */
+export async function processEnvironment(pid) {
+  const argv = async () => {
+    try { return psOut(await execFileP('/bin/ps', ['-p', String(pid), '-o', 'command='], { timeout: 2000, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })); }
+    catch { return null; }
+  };
+  const command = await argv();
+  let envLine = null;
+  try { envLine = psOut(await execFileP('/bin/ps', ['eww', '-p', String(pid), '-o', 'command='], { timeout: 2000, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })); }
+  catch (err) { console.warn('[process-scan] environment unreadable:', err?.message); }
+  if (!command || !envLine?.startsWith(command) || (await argv()) !== command) return null;
+  const tail = envLine.slice(command.length);
+  return /^\s*[A-Za-z_][A-Za-z0-9_]*=/.test(tail) ? tail : null;
+}
+
 export async function scanClaudeProcesses() {
   const { pids, failed } = await claudePids();
   const rows = await mapLimit(pids, 8, inspect);

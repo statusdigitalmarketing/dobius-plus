@@ -117,11 +117,15 @@ function renderScreenLinesNow(raw, { timeoutMs = 750, cols } = {}) {
         // columns (U+1160, direction marks) made a string count say no.
         const ends = [];
         const firstWords = [];
+        // Where each row's trailing dim text starts, or -1: Claude draws its
+        // placeholder and ghost suggestion dim, and typed text never.
+        const dimFrom = [];
         for (let i = 0; i < ROWS; i += 1) {
           const line = buf.getLine(i);
           let end = 0;
           let start = -1;
           let wordEnd = -1;
+          let dimAt = -1;
           for (let x = 0; x < width; x += 1) {
             const cell = line?.getCell(x);
             if (!cell) break;
@@ -132,15 +136,19 @@ function renderScreenLinesNow(raw, { timeoutMs = 750, cols } = {}) {
             const chars = cell.getChars();
             const blank = !chars || chars[0] === ' ';
             if (!blank) {
+              if (!cell.isDim()) dimAt = -1;
+              else if (dimAt === -1) dimAt = x;
               end = x + w;
               if (start === -1) start = x;
               if (wordEnd === -1) continue;
             } else if (start !== -1 && wordEnd === -1) wordEnd = x;
           }
           ends.push(end);
+          dimFrom.push(dimAt);
           firstWords.push(start === -1 ? 0 : (wordEnd === -1 ? end : wordEnd) - start);
         }
         Object.defineProperty(out, 'ends', { value: ends });
+        Object.defineProperty(out, 'dimFrom', { value: dimFrom });
         Object.defineProperty(out, 'firstWords', { value: firstWords });
         // Whether the program asked for bracketed paste: /openTab only pastes
         // into a Claude that turned it on (bridge-open-tab.js).

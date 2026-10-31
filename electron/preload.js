@@ -198,12 +198,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Account management
   accountsList: () => ipcRenderer.invoke('accounts:list'),
   accountsIdentities: () => ipcRenderer.invoke('accounts:identities'),
+  // Per-account usage and Move to account (account-headroom-service.js).
+  accountsUsage: () => ipcRenderer.invoke('accounts:usage'),
+  accountsMoveTargets: (tabId) => ipcRenderer.invoke('accounts:moveTargets', tabId),
+  accountsMoveCandidates: (tabIds, targetId) => ipcRenderer.invoke('accounts:moveCandidates', tabIds, targetId),
+  accountsMove: (tabId, targetId, opts) => ipcRenderer.invoke('accounts:move', tabId, targetId, opts),
   accountsSave: (account) => ipcRenderer.invoke('accounts:save', account),
   accountsDelete: (accountId) => ipcRenderer.invoke('accounts:delete', accountId),
   claudeUsageGetStatus: () => ipcRenderer.invoke('claudeUsage:getStatus'),
   claudeUsageEnable: (opts) => ipcRenderer.invoke('claudeUsage:enable', opts),
   claudeUsageDisable: () => ipcRenderer.invoke('claudeUsage:disable'),
-  claudeUsageRead: () => ipcRenderer.invoke('claudeUsage:read'),
   modelLineGetStatus: () => ipcRenderer.invoke('modelLine:getStatus'),
   modelLineSet: (on, opts) => ipcRenderer.invoke('modelLine:set', on, opts),
   accountsSwitchPlan: (targetEmail) => ipcRenderer.invoke('accounts:switchPlan', targetEmail),

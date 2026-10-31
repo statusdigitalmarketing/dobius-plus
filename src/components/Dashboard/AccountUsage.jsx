@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { orderedWindows, windowLabel, ago, untilText, paceText, forecastText, barColor } from '../../lib/usage-format';
 
 /**
  * How much of each account's quota is gone, as LAST REPORTED by a session.
@@ -14,38 +15,13 @@ import { useState, useEffect, useRef, useCallback } from 'react';
  * with its age, never "current". A window past its reset is dropped rather than
  * shown as zero, and a credential with no running session is called historical
  * instead of being quietly presented as live.
+ *
+ * Shown per ACCOUNT (name and login), each report attributed by the Keychain
+ * service its session ran under, with pace (percent per hour) and when the
+ * window runs out at that pace (electron/account-headroom.js).
  */
 const AMBER = '#fbbf24';
 const RED = '#f87171';
-const shortName = (p) => String(p).split('/').filter(Boolean).pop() || String(p);
-
-const WINDOW_LABEL = {
-  five_hour: '5 hour',
-  seven_day: '7 day',
-  seven_day_opus: '7 day (Opus)',
-  seven_day_sonnet: '7 day (Sonnet)',
-};
-const labelFor = (name) => WINDOW_LABEL[name] || name.replace(/_/g, ' ');
-
-function ago(ms) {
-  const s = Math.round(ms / 1000);
-  if (s < 90) return `${s}s ago`;
-  const m = Math.round(s / 60);
-  if (m < 90) return `${m}m ago`;
-  return `${Math.round(m / 60)}h ago`;
-}
-
-function until(epochSeconds) {
-  const ms = epochSeconds * 1000 - Date.now();
-  if (ms <= 0) return 'now';
-  const m = Math.round(ms / 60000);
-  if (m < 90) return `in ${m}m`;
-  const h = ms / 3600000;
-  return h < 48 ? `in ${Math.round(h)}h` : `in ${Math.round(h / 24)}d`;
-}
-
-const barColor = (pct) => (pct >= 90 ? RED : pct >= 75 ? AMBER : 'var(--accent)');
-
 export default function AccountUsage() {
   const [rows, setRows] = useState(null);
   const [scanFailed, setScanFailed] = useState(false);
@@ -58,11 +34,11 @@ export default function AccountUsage() {
   const load = useCallback(async () => {
     const [st, usage] = await Promise.all([
       window.electronAPI?.claudeUsageGetStatus?.(),
-      window.electronAPI?.claudeUsageRead?.(),
+      window.electronAPI?.accountsUsage?.(),
     ]);
     if (!mounted.current) return;
     if (st) { setInstalled(!!st.installed); setElsewhere(!!st.installedElsewhere); }
-    if (usage?.ok) { setRows(usage.usage); setScanFailed(!!usage.scanFailed); }
+    if (usage?.ok) { setRows(usage.accounts); setScanFailed(!!usage.scanFailed); }
   }, []);
 
   useEffect(() => {
@@ -142,48 +118,53 @@ export default function AccountUsage() {
 
       {error && <div className="text-xs mt-1" style={{ color: RED }}>{error}</div>}
 
-      {installed && rows !== null && rows.length === 0 && (
-        <div className="text-xs" style={{ color: 'var(--dim)' }}>
-          Nothing reported yet. The numbers only arrive after a session has sent at least one
-          message, so use Claude for a moment and they will show up here.
-        </div>
-      )}
-
       {installed && scanFailed && (
         <div className="text-xs mb-1" style={{ color: AMBER }}>
           Could not check which sessions are running, so these may be older than they look.
         </div>
       )}
 
-      {installed && (rows || []).map((r) => (
-        <div key={r.key} className="mb-2">
-          <div className="text-xs mb-0.5" style={{ color: 'var(--fg)', fontFamily: 'monospace' }}>
-            {r.envUnset ? 'default' : shortName(r.configDir)}
-            <span style={{ color: 'var(--dim)', fontFamily: 'inherit' }}>
-              {' '}last reported {ago(r.ageMs)}
-              {r.historical
-                ? ', no session running now'
-                : r.sessionsRunning > 0 ? `, ${r.sessionsRunning} running` : ''}
-            </span>
-          </div>
-          {Object.entries(r.windows).map(([name, w]) => (
-            <div key={name} className="flex items-center gap-2 text-xs" style={{ color: 'var(--dim)' }}>
-              <span style={{ width: 96, flexShrink: 0 }}>{labelFor(name)}</span>
-              <span style={{
-                flex: 1, height: 6, borderRadius: 3, backgroundColor: 'var(--border)',
-                overflow: 'hidden', maxWidth: 220,
-              }}>
-                <span style={{
-                  display: 'block', height: '100%', width: `${w.usedPercentage}%`,
-                  backgroundColor: barColor(w.usedPercentage),
-                }} />
+      {installed && (rows || []).map((r, i) => {
+        const u = r.usage || {};
+        return (
+          <div key={`${r.id ?? 'default'}-${i}`} data-usage-account={r.label} className="mb-2">
+            <div className="text-xs mb-0.5" style={{ color: 'var(--fg)' }}>
+              <span className="font-medium">{r.label}</span>
+              {r.email && <span style={{ color: 'var(--dim)' }}> {r.email}</span>}
+              <span style={{ color: 'var(--dim)' }}>
+                {u.known
+                  ? <> · last reported {ago(u.ageMs)}{r.sessionsRunning > 0 ? `, ${r.sessionsRunning} running` : ''}{r.stale ? <span style={{ color: AMBER }}> · stale{r.sessionsRunning === 0 ? ', no session running' : ''}</span> : ''}</>
+                  : ' · usage unknown'}
               </span>
-              <span style={{ width: 38, textAlign: 'right', flexShrink: 0 }}>{Math.round(w.usedPercentage)}%</span>
-              {w.resetsAt && <span style={{ flexShrink: 0 }}>resets {until(w.resetsAt)}</span>}
             </div>
-          ))}
-        </div>
-      ))}
+            {!u.known && (
+              <div className="text-xs" style={{ color: 'var(--dim)' }}>
+                No session on this account has reported yet. Unknown is not zero: it fills in once a session here sends a message.
+              </div>
+            )}
+            {u.known && orderedWindows(u.windows).map(([name, w]) => (!w ? (
+              <div key={name} className="flex items-center gap-2 text-xs" style={{ color: 'var(--dim)' }}>
+                <span style={{ width: 96, flexShrink: 0 }}>{windowLabel(name)}</span>
+                <span>Unknown</span>
+              </div>
+            ) : (
+              <div key={name} className="flex items-center gap-2 text-xs" style={{ color: 'var(--dim)', flexWrap: 'wrap' }}>
+                <span style={{ width: 96, flexShrink: 0 }} title={`Reported ${ago(w.ageMs)}`}>{windowLabel(name)}{Math.abs(w.ageMs - (u.ageMs ?? w.ageMs)) > 60_000 ? `, ${ago(w.ageMs)}` : ''}</span>
+                <span style={{ flex: 1, minWidth: 80, height: 6, borderRadius: 3, backgroundColor: 'var(--border)', overflow: 'hidden', maxWidth: 180 }}>
+                  <span style={{ display: 'block', height: '100%', width: `${w.used}%`, backgroundColor: barColor(w.used) }} />
+                </span>
+                <span style={{ width: 38, textAlign: 'right', flexShrink: 0 }}>{Math.round(w.used)}%</span>
+                <span style={{ flexShrink: 0 }}>{paceText(w.pace)}</span>
+                <span style={{ flexShrink: 0, color: w.forecast?.limited ? RED : w.forecast?.at ? AMBER : 'var(--dim)' }}>{forecastText(w.forecast)}</span>
+                {w.resetsAt && <span style={{ flexShrink: 0 }}>resets {untilText(w.resetsAt)}</span>}
+              </div>
+            )))}
+            {r.sameAs?.length > 0 && (
+              <div className="text-xs" style={{ color: AMBER }}>Same login as {r.sameAs.join(', ')}: one limit between them.</div>
+            )}
+          </div>
+        );
+      })}
 
       {installed && (rows || []).length > 0 && (
         <div className="text-xs" style={{ color: 'var(--dim)' }}>

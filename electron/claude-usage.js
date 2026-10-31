@@ -22,6 +22,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { keychainServiceFor, defaultClaudeDir } from './account-identity.js';
 import { shQuote } from '../shared/sh-quote.js';
+import { mapLimit } from './data-utils.js';
 
 // Bumped when the on-disk record format changes, so a stale reporter left by an
 // older build is ignored rather than misparsed.
@@ -264,13 +265,17 @@ function normalizeWindows(raw) {
   return Object.keys(out).length ? out : null;
 }
 
-/** Every record currently on disk, newest receipt first. Never throws. */
-export async function readUsageRecords(userDataDir) {
+/**
+ * Every record on disk (optionally only those refreshed in the last `maxAgeMs`),
+ * newest receipt first. Never throws.
+ */
+export async function readUsageRecords(userDataDir, maxAgeMs = Infinity, now = Date.now()) {
   const dir = usageDirPath(userDataDir);
   let names;
   try { names = await fs.readdir(dir); } catch { return []; }
   const out = [];
-  await Promise.all(names.map(async (name) => {
+  // Bounded: thousands of records must not open thousands of files at once.
+  await mapLimit(names, 16, async (name) => {
     if (!name.endsWith('.json') || name.startsWith('.')) return; // .tmp.* is mid-write
     const file = path.join(dir, name);
     let fh;
@@ -281,63 +286,43 @@ export async function readUsageRecords(userDataDir) {
       // reading look like it arrived a moment ago (reviewer HIGH).
       fh = await fs.open(file, 'r');
       const st = await fh.stat();
+      if (now - st.mtimeMs > maxAgeMs) return;
       const text = await fh.readFile('utf8');
       const rec = parseRecord(text, st.mtimeMs);
       if (rec) out.push(rec);
     } catch { /* vanished or unreadable: it simply does not contribute */ }
     finally { await fh?.close().catch(() => {}); }
-  }));
+  });
   return out.sort((a, b) => b.receivedAt - a.receivedAt);
 }
 
 /**
- * Fold records into one reading per CREDENTIAL.
- *
- * The rule is NEWEST RECEIPT, and nothing else.
- *
- * An earlier version preferred a reading from a still-running session over one
- * from an exited session. That precedence cannot be fed honestly: a record
- * names a session id, the process scan names pids, and nothing links the two.
- * Judging liveness at the CREDENTIAL level instead does not rescue it, because
- * knowing that some session on this credential is alive says nothing about
- * which session produced the reading that won (reviewer HIGH). Claiming that
- * distinction while being unable to compute it is precisely the confident wrong
- * answer this project keeps paying for, so it is gone.
- *
- * What remains is defensible: this is the most recent report anyone made, and
- * its age travels with it. Highest-percentage was also rejected, because it
- * preserves an obsolete reading forever, including across an account change on
- * the directory.
+ * Delete records nobody has refreshed in `maxAgeMs` (one file per session is
+ * written forever) and temp files a killed reporter left behind. Only names this
+ * module writes, only inside our own real folder.
  */
-export function aggregateUsage(records, { now = Date.now() } = {}) {
-  const byKey = new Map();
-  for (const r of records) {
-    if (!r.key || !r.windows) continue;
-    const prev = byKey.get(r.key);
-    if (prev && prev.receivedAt >= r.receivedAt) continue;
-    byKey.set(r.key, {
-      key: r.key,
-      configDir: r.configDir,
-      envUnset: r.envUnset,
-      sessionId: r.sessionId,
-      receivedAt: r.receivedAt,
-      windows: r.windows,
-    });
-  }
-
-  const out = [];
-  for (const g of byKey.values()) {
-    // A window past its own reset tells you nothing about the new window, and
-    // showing 0% there would invent a measurement nobody made.
-    const windows = {};
-    for (const [name, w] of Object.entries(g.windows)) {
-      if (w.resetsAt !== null && w.resetsAt * 1000 <= now) continue;
-      windows[name] = w;
-    }
-    if (!Object.keys(windows).length) continue;
-    out.push({ ...g, windows, ageMs: Math.max(0, now - g.receivedAt) });
-  }
-  return out;
+export async function pruneUsageRecords(userDataDir, maxAgeMs, now = Date.now()) {
+  const dir = usageDirPath(userDataDir);
+  let names;
+  try {
+    if (!(await fs.lstat(dir)).isDirectory()) return 0;
+    names = await fs.readdir(dir);
+  } catch { return 0; }
+  let removed = 0;
+  await mapLimit(names, 16, async (name) => {
+    const tmp = /^\.tmp\.[A-Za-z0-9_-]+\.\d+$/.test(name);
+    // A session id, never just any .json: the folder could be swapped for a link
+    // between the lstat above and here, and auth.json must not match.
+    if (!tmp && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i.test(name)) return;
+    const file = path.join(dir, name);
+    try {
+      const st = await fs.lstat(file);
+      if (!st.isFile() || now - st.mtimeMs < (tmp ? 3600_000 : maxAgeMs)) return;
+      await fs.unlink(file);
+      removed += 1;
+    } catch { /* vanished or not ours to remove */ }
+  });
+  return removed;
 }
 
 /** Is this settings value OUR reporter? Judged by the command, not the shape. */
