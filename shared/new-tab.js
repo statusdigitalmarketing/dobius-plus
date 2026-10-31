@@ -94,6 +94,15 @@ export function resumeNeedsNewTab(proc, tab, now = Date.now()) {
   return !!tab?.startsTool && now - (tab.createdAt || 0) < NEW_TAB_START_MS;
 }
 
+// The PTY's own process as ps names it: null when it is still a shell (a login
+// shell reads -zsh, and the user's own $SHELL counts), otherwise the program
+// that replaced it with `exec`.
+export function ptyProgramName(comm, shellPath = '') {
+  const name = String(comm || '').trim().replace(/^-/, '').split('/').pop();
+  const own = String(shellPath).split('/').pop();
+  return !name || name === own || ['zsh', 'bash', 'sh'].includes(name) ? null : name;
+}
+
 // How to spawn a new PTY's login shell: { args, env }. With a startCommand
 // (only a bare tool name from launchCommandFor) the shell runs it after its rc
 // files, so PATH and the account env are the user's own, then replaces itself

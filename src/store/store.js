@@ -793,23 +793,25 @@ export const useStore = create((set, get) => ({
         window.electronAPI.terminalWrite(target.id, chars[i]); i += 1;
         if (i < chars.length) setTimeout(sendNext, 8);
       };
-      setTimeout(sendNext, target.delayMs);
+      setTimeout(sendNext, 15);
     });
   },
 
   // The tab a resume types into: the given one if it is at a shell prompt,
-  // otherwise a new plain-shell tab (resumeNeedsNewTab). { id, delayMs, fresh }
-  // or null. delayMs: a new tab's pane needs a moment to spawn its PTY (writes
-  // before that are dropped), the same wait the agent launch uses.
+  // otherwise a new plain-shell tab (resumeNeedsNewTab). { id, fresh } or null.
+  // A new tab's pane needs a moment to spawn its PTY, and nothing works before
+  // that: writes are dropped and a session claim bound to a tab with no PTY
+  // counts as dead. The same wait the agent launch uses.
   resumeTargetTab: async (termId) => {
     let proc = null;
     try { proc = await window.electronAPI.terminalGetProcess?.(termId); } catch { proc = null; }
     const tab = (get().terminalTabs || []).find((t) => t.id === termId);
-    if (!resumeNeedsNewTab(proc, tab)) return { id: termId, delayMs: 15, fresh: false };
+    if (!resumeNeedsNewTab(proc, tab)) return { id: termId, fresh: false };
     const fresh = get().openNewTab(tab?.projectPath || get().currentProjectPath, 'shell');
     if (!fresh) return null;
     get().showTab?.(fresh.id);
-    return { id: fresh.id, delayMs: 500, fresh: true };
+    await new Promise((r) => setTimeout(r, 500));
+    return { id: fresh.id, fresh: true };
   },
 
   resumeSession: (arg) => {
@@ -878,7 +880,7 @@ export const useStore = create((set, get) => ({
             if (i < chars.length) setTimeout(sendNext, 8);
           }
         };
-        setTimeout(sendNext, target.delayMs);
+        setTimeout(sendNext, 15);
       };
 
       // CLAIM the session before typing. `claude --resume` is not visible as a
