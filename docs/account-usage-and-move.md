@@ -37,3 +37,14 @@ Accepted, not fixed. Each is a wrong or missing figure, or a refusal that does n
 7. **Report right after a login.** A valid report that arrives just before the next sample is taken for the old login's and ignored until its figure changes. The row stays Unknown meanwhile, which is the safe direction.
 8. **Placeholder drawn without dim.** Claude's placeholder and ghost suggestion are recognised by the dim attribute, confirmed on a 2.1.314 frame. A version that draws them otherwise reads as unsent text, so Move all skips that tab and names it.
 9. **Token no process shows.** A token set inside Claude's own settings files (an `env` block, `apiKeyHelper`) is applied inside Claude and never appears in its process environment, so step 3 cannot see it and reports success. A token exported by the shell is seen and reported, by name only.
+
+## Open, for Sam to judge
+
+Found by Codex on the final pass, not fixed, not accepted.
+
+- **A resume queued for more than 10 minutes (rated High by all three lenses).** The hold on a conversation expires after 10 minutes. If the target's shell startup is blocked that long, and the same conversation is resumed in another tab meanwhile, the queued resume also starts when the shell finishes, and two Claudes write one transcript. Needs a shell blocked over 10 minutes and a manual resume of that conversation.
+- **Cleanup racing a swapped folder.** Replacing the usage folder with a symlink between the check and the listing could delete a file named like a session record in the other folder. Needs local write access, and a file with a session-id name.
+- **A shell wrapper that changes the resume** keeps the hold after the mismatch, so that conversation can't be moved for up to 10 minutes.
+- **A phone replacing a draft during the confirm** can lose the new text.
+- **`USER='sam TAG=x'`** passes the environment check as `sam`. Needs a crafted Keychain item.
+

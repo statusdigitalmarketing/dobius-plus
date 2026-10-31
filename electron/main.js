@@ -2305,7 +2305,12 @@ function setupHeadroomHandlers() {
     hasTranscript: async (sessionId) => {
       const root = path.join(defaultClaudeDir(), 'projects');
       const dirs = await fs.promises.readdir(root);
-      const hits = await mapLimit(dirs, 16, (dir) => fs.promises.access(path.join(root, dir, `${sessionId}.jsonl`)).then(() => true, () => false));
+      const hits = await mapLimit(dirs, 16, (dir) => fs.promises.access(path.join(root, dir, `${sessionId}.jsonl`)).then(() => true, (err) => {
+        // Only "not there" means no transcript: a folder that cannot be read is
+        // unknown, and treating it as empty would drop a real resume.
+        if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return false;
+        throw err;
+      }));
       return hits.includes(true);
     },
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -2369,7 +2374,9 @@ function setupHeadroomHandlers() {
     };
     const restart = (id, cwd, pin, resume) => {
       if (cannotRestart(id, pin)) return false;
-      if (resume.sessionId) setSessionTabLink(resume.sessionId, id, resume.cwd);
+      // Keep the project the link already names: a conversation resumed from a
+      // subfolder has its transcript under where it began, and auto-resume looks there.
+      if (resume.sessionId) setSessionTabLink(resume.sessionId, id, getSessionTabMap()?.[resume.sessionId]?.projectPath || resume.cwd);
       createTerminal(id, cwd, sender, resolveAccountEnvForCwd(cwd, { claudeAccountPin: pin }), { resume });
       return true;
     };

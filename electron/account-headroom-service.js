@@ -446,7 +446,9 @@ export function createHeadroomService(d) {
         const g = groupOf(await readScan(), info.pid);
         if (g && g.key !== target.key) {
           const actual = rows.find((r) => r.key === g.key);
-          return { ok: false, pin: actual ? pinOf(actual) : null, error: `Claude resumed on ${actual ? named(actual) : g.configDir}, not ${target.label}. Something in the shell's startup files sets CLAUDE_CONFIG_DIR, so this tab stays there.` };
+          const token = await d.processAuthOverride(info.pid);
+          const also = token && token !== 'unreadable' ? ` ${token} is set too, and that decides its login, not the folder.` : '';
+          return { ok: false, pin: actual ? pinOf(actual) : null, error: `Claude resumed on ${actual ? named(actual) : g.configDir}, not ${target.label}. Something in the shell's startup files sets CLAUDE_CONFIG_DIR, so this tab stays there.${also}` };
         }
         // Nothing more can be confirmed until a person answers this, behind the dialog.
         const sc = g ? await d.screen(tabId).catch(() => null) : null;

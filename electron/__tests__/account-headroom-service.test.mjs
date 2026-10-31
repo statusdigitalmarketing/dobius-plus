@@ -558,6 +558,14 @@ await check('after the restart: a wrong account outranks a trust prompt, an exit
   let r = await w.svc.move(TAB, 'b', o);
   assert.match(r.error, /resumed on A/);
   assert.deepEqual(r.pin, { id: 'a' });
+  // The wrong-folder answer must still name a token that decides the login.
+  w = world({ groupsAfter: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [200] }] });
+  o = moveOpts(w);
+  const r5 = o.restart;
+  o.restart = (...a) => { w.override = 'CLAUDE_CODE_OAUTH_TOKEN'; return r5(...a); };
+  const tok = await w.svc.move(TAB, 'b', o);
+  assert.match(tok.error, /resumed on A/);
+  assert.match(tok.error, /CLAUDE_CODE_OAUTH_TOKEN is set too/);
   w = world();
   o = moveOpts(w);
   const r2 = o.restart;
