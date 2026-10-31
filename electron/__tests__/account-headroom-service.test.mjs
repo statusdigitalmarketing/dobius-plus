@@ -758,10 +758,57 @@ await check('a conversation opened with /resume after its limit is not moved: th
   // The process reports s2 for the first time AFTER s2's limit was recorded.
   const { w, svc } = world();
   w.reported = 's2';
-  w.reportedAt = T0; // first report after the limit below
+  w.reportedAt = T0; // first report after the limit below, and argv names nothing
   w.limitsBySession = { s2: { at: T0 - 5000, text: 'x' } };
   await svc.tick();
   assert.equal(w.sent.length, 0);
+});
+
+await check('a limit right after a --resume start is that process\'s own, however late it was first sampled', async () => {
+  const { w, svc } = world();
+  w.claude = { pid: 100, sessionId: 's1', startedAt: T0 - 120_000 };
+  w.reportedAt = T0; // only seen after the limit, because the report file was overwritten
+  await svc.tick();
+  assert.equal(w.sent.length, 1);
+});
+
+await check('a process that left a conversation and came back is judged from its return', async () => {
+  const { w, svc } = world();
+  w.claude = { pid: 100, sessionId: null, startedAt: T0 - 3600_000 };
+  w.reported = 's1'; w.reportedAt = T0 - 600_000; w.tail = 'quiet';
+  await svc.tick();             // on s1
+  w.reported = 's2'; w.reportedAt = T0 - 300_000;
+  await svc.tick();             // left for s2
+  // Another process hit a limit on s1 at T0 - 60s; this process returns to s1 now.
+  w.reported = 's1'; w.reportedAt = T0 - 10_000;
+  w.tail = "You've hit your 5-hour limit";
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+});
+
+await check('--resume in argv only vouches until the process leaves that conversation', async () => {
+  const { w, svc } = world();
+  w.claude = { pid: 100, sessionId: 's1', startedAt: T0 - 3600_000 };
+  w.reportedAt = T0 - 600_000; w.tail = 'quiet';
+  await svc.tick();             // on s1, as argv says
+  w.reported = 's2'; w.reportedAt = T0 - 300_000;
+  await svc.tick();             // /resume s2
+  w.reported = 's1'; w.reportedAt = T0 - 10_000; // back on s1, after a limit another process hit on it
+  w.tail = "You've hit your 5-hour limit";
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+});
+
+await check('a limit is corroborated by the login, through any of its folders', async () => {
+  const { w, svc } = world();
+  w.extraAccounts = [{ id: 'a2', type: 'claude', name: 'A2', claudeJsonPath: '/profiles/a2/.claude.json' }];
+  w.emails['/profiles/a2'] = 'a@x.com';
+  w.records[0] = { key: KEY_A, receivedAt: T0 - 30_000, windows: { five_hour: { usedPercentage: 99, resetsAt: R5 } } };
+  w.records.push({ key: keychainServiceFor('/profiles/a2'), receivedAt: T0 - 30_000, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } });
+  w.limit = { at: T0 - 11 * 60_000, text: 'x' }; // older than the screen alone may vouch for
+  w.reportedAt = T0 - 3000_000;
+  await svc.tick();
+  assert.equal(w.sent.length, 1);
 });
 
 await check('with no report from this process there is no automatic move', async () => {

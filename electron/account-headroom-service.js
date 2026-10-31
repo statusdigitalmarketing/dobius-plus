@@ -31,7 +31,6 @@ const PENDING_MAX_MS = 3 * 60_000;
 const POLL_MS = 500;
 const MAX_NOTICED = 200;
 const MAX_HANDLED_PER_TAB = 20;
-const MAX_FIRST_REPORTED = 2000;
 const DEFAULT_SERVICE = 'Claude Code-credentials';
 // After its last input, how long a tab's screen may stay unchanged before it
 // is taken as current (Claude echoes typed input at once).
@@ -419,8 +418,10 @@ export function createHeadroomService(d) {
   function runningFor(r, rows, live) {
     if (!live) return null;
     const e = r.email ? r.email.toLowerCase() : null;
-    let n = live.get(r.key) ?? 0;
-    if (e) for (const o of rows) if (o.key !== r.key && o.email && o.email.toLowerCase() === e) n += live.get(o.key) ?? 0;
+    const keys = new Set([r.key]);
+    if (e) for (const o of rows) if (o.email && o.email.toLowerCase() === e) keys.add(o.key);
+    let n = 0;
+    for (const k of keys) n += live.get(k) ?? 0;
     return n;
   }
 
@@ -467,21 +468,33 @@ export function createHeadroomService(d) {
     } catch { return true; }
   }
 
-  // When this process was first seen reporting each conversation. A limit
+  // When each process was first seen on the conversation it is on now. A limit
   // older than that is not one it hit: `/resume` inside a running Claude opens
   // a conversation whose limit another process hit, on an account that may be
-  // fine, and its screen shows that old line.
-  const firstReported = new Map(); // `${pid}|${sessionId}` -> receipt time
+  // fine, and its screen shows that old line. Reports overwrite one file per
+  // conversation, so only each pid's NEWEST counts; a conversation it left
+  // and came back to starts again.
+  const onConversation = new Map(); // pid -> { sessionId, since }
   function noteReports(records) {
+    const newest = new Map();
     for (const r of records) {
-      if (!Number.isInteger(r?.reporterPid) || typeof r.sessionId !== 'string') continue;
-      const k = `${r.reporterPid}|${r.sessionId}`;
-      const had = firstReported.get(k);
-      if (had === undefined || r.receivedAt < had) firstReported.set(k, r.receivedAt);
+      if (!Number.isInteger(r?.reporterPid) || typeof r.sessionId !== 'string' || !r.sessionId) continue;
+      if (!newest.has(r.reporterPid) || r.receivedAt > newest.get(r.reporterPid).receivedAt) newest.set(r.reporterPid, r);
     }
-    if (firstReported.size > MAX_FIRST_REPORTED) {
-      for (const k of firstReported.keys()) { firstReported.delete(k); if (firstReported.size <= MAX_FIRST_REPORTED) break; }
+    for (const [pid, r] of newest) {
+      const was = onConversation.get(pid);
+      if (was?.sessionId !== r.sessionId) onConversation.set(pid, { sessionId: r.sessionId, since: r.receivedAt, reentered: !!was });
     }
+    for (const pid of onConversation.keys()) if (!newest.has(pid)) onConversation.delete(pid);
+  }
+  // Was this limit hit by this process on this conversation? --resume in argv
+  // names the conversation it started on, so while it has not left it, any
+  // limit after its start is its own (which also covers a limit within the
+  // first poll interval).
+  function limitIsOwn(info, sessionId, at) {
+    const on = onConversation.get(info.pid);
+    if (info.sessionId === sessionId && on?.sessionId === sessionId && on.reentered !== true) return true;
+    return !!on && on.sessionId === sessionId && on.since < at;
   }
 
   // Newest report made by this very process (pid, not older than its start).
@@ -657,7 +670,7 @@ export function createHeadroomService(d) {
       } catch { rec = null; }
       if (!rec?.found || !rec.limit) continue;
       if (Number.isFinite(info.startedAt) && rec.limit.at < info.startedAt + 1000) continue; // see decideAutoMove
-      if (!(firstReported.get(`${info.pid}|${current}`) < rec.limit.at)) continue; // not this process's limit
+      if (!limitIsOwn(info, current, rec.limit.at)) continue; // not this process's limit
       let sc;
       try { sc = await d.screen(tab.id); } catch { sc = null; }
       const screenHit = !!liveLimitLine(sc?.lines, d.rows(tab.id));
@@ -679,7 +692,10 @@ export function createHeadroomService(d) {
       live ??= await liveByKey();
       const source = await sourceOf(tab, rows, info.pid);
       if (!source.resolved) continue; // which login this Claude is on is unknown: looked at again later
-      const u = usageForKey(hist, source.key, now); // the account it really runs on, not the tab's spawn binding
+      // The account it really runs on, not the tab's spawn binding, and that
+      // login's figures through any of its folders.
+      const sourceRow = rows.find((r) => r.key === source.key);
+      const u = sourceRow ? usageForRow(sourceRow, rows, now) : usageForKey(hist, source.key, now);
       const dec = decideAutoMove({
         enabled: true,
         now: d.now(),

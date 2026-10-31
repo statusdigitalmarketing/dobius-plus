@@ -479,3 +479,9 @@
 - **FIX**: The caller knows a claude runs in the tab, so the replay starts with the mode on (`\x1b[?2004h` + tail, electron/main.js). Confirmed against a real 2.1.314 frame with 300KB of filler: null before, the box text after.
 - **CONTEXT**: Any reader of a TAIL of the PTY buffer. Modes set once at startup are not in it. Stand-ins prove the flow, not the volume.
 - **DETECTION**: `grep -n "renderScreenLines(" electron/*.js`, and ask of each what mode it assumes.
+
+### Testing - 2026-10-31 (account headroom)
+- **MISTAKE**: Added "this process must have been reporting the conversation before the limit" and read that from when a poll first SAW the report. One report file is overwritten per conversation and polled every 15s, so a limit within the first poll interval looked older than the report and the tab never moved. The harness caught it (the stand-in hits its limit seconds after a move); Codex rated it Medium in the same round.
+- **FIX**: `limitIsOwn`: `--resume` in argv vouches for a process that has not left that conversation; otherwise the time this pid was first seen on its CURRENT conversation (only each pid's newest report counts, and coming back starts the clock again).
+- **CONTEXT**: A timestamp read by polling a file that gets overwritten is "seen by", never "happened at".
+- **DETECTION**: `grep -n "limitIsOwn\|onConversation" electron/account-headroom-service.js`
