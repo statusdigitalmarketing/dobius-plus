@@ -6,7 +6,7 @@ import { onScreenTabIds, becomesUnread, clearSeen } from '../lib/tab-unread';
 import { windowFocused } from '../lib/window-focus';
 import { latestSessionForTab } from '../../shared/session-tab.js';
 import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.js';
-import { NEW_TAB_TOOLS } from '../../shared/new-tab.js';
+import { NEW_TAB_TOOLS, resumeNeedsNewTab } from '../../shared/new-tab.js';
 import { setPendingLaunch, clearPendingLaunches } from '../lib/pending-launch';
 
 
@@ -207,7 +207,13 @@ export const useStore = create((set, get) => ({
     if (!get().tabsReady) { queuedNewTabs.push([projectPath, tool]); return null; }
     const tab = get().addTab(projectPath);
     // main reads the setting at spawn ('default'); an unknown tool starts nothing.
-    setPendingLaunch(tab.id, tool === undefined ? 'default' : (NEW_TAB_TOOLS.includes(tool) ? tool : 'shell'));
+    const launch = tool === undefined ? 'default' : (NEW_TAB_TOOLS.includes(tool) ? tool : 'shell');
+    setPendingLaunch(tab.id, launch);
+    // Its shell is about to start a tool: nothing may be typed at it for now
+    // (resumeNeedsNewTab). 'default' may turn out to be a plain shell: harmless.
+    if (launch !== 'shell') {
+      set((s) => ({ terminalTabs: s.terminalTabs.map((t) => (t.id === tab.id ? { ...t, startsTool: true } : t)) }));
+    }
     return tab;
   },
 
@@ -778,14 +784,32 @@ export const useStore = create((set, get) => ({
     } else {
       return;
     }
-    const chars = `${cmd}\r`.split('');
-    let i = 0;
-    const sendNext = () => {
-      if (i >= chars.length) return;
-      window.electronAPI.terminalWrite(termId, chars[i]); i += 1;
-      if (i < chars.length) setTimeout(sendNext, 8);
-    };
-    setTimeout(sendNext, 15);
+    get().resumeTargetTab(termId).then((target) => {
+      if (!target) return;
+      const chars = `${cmd}\r`.split('');
+      let i = 0;
+      const sendNext = () => {
+        if (i >= chars.length) return;
+        window.electronAPI.terminalWrite(target.id, chars[i]); i += 1;
+        if (i < chars.length) setTimeout(sendNext, 8);
+      };
+      setTimeout(sendNext, target.delayMs);
+    });
+  },
+
+  // The tab a resume types into: the given one if it is at a shell prompt,
+  // otherwise a new plain-shell tab (resumeNeedsNewTab). { id, delayMs, fresh }
+  // or null. delayMs: a new tab's pane needs a moment to spawn its PTY (writes
+  // before that are dropped), the same wait the agent launch uses.
+  resumeTargetTab: async (termId) => {
+    let proc = null;
+    try { proc = await window.electronAPI.terminalGetProcess?.(termId); } catch { proc = null; }
+    const tab = (get().terminalTabs || []).find((t) => t.id === termId);
+    if (!resumeNeedsNewTab(proc, tab)) return { id: termId, delayMs: 15, fresh: false };
+    const fresh = get().openNewTab(tab?.projectPath || get().currentProjectPath, 'shell');
+    if (!fresh) return null;
+    get().showTab?.(fresh.id);
+    return { id: fresh.id, delayMs: 500, fresh: true };
   },
 
   resumeSession: (arg) => {
@@ -835,49 +859,54 @@ export const useStore = create((set, get) => ({
     }
     const projectForLink = projectPath || get().currentProjectPath;
 
-    const typeIt = () => {
-      // Tier 1 capture: link the session to the tab only once the resume is
-      // actually GOING to happen, so neither an aborted nor a refused resume
-      // persists a bad link (Codex v1.0.35 P2, extended in round 8). A link
-      // written for a refused resume is not inert: if that tab is running some
-      // other fresh claude, liveClaudeSessionIds would believe the link and
-      // suppress this session from loose ends entirely.
-      window.electronAPI.configSetSessionTabLink?.(sessionId, termId, projectForLink);
-      const chars = cmd.split('');
-      chars.push('\r');
-      let i = 0;
-      const sendNext = () => {
-        if (i < chars.length) {
-          window.electronAPI.terminalWrite(termId, chars[i]);
-          i++;
-          if (i < chars.length) setTimeout(sendNext, 8);
-        }
+    const startResume = (target) => {
+      const typeIt = () => {
+        // Tier 1 capture: link the session to the tab only once the resume is
+        // actually GOING to happen, so neither an aborted nor a refused resume
+        // persists a bad link (Codex v1.0.35 P2, extended in round 8). A link
+        // written for a refused resume is not inert: if that tab is running some
+        // other fresh claude, liveClaudeSessionIds would believe the link and
+        // suppress this session from loose ends entirely.
+        window.electronAPI.configSetSessionTabLink?.(sessionId, target.id, projectForLink);
+        const chars = cmd.split('');
+        chars.push('\r');
+        let i = 0;
+        const sendNext = () => {
+          if (i < chars.length) {
+            window.electronAPI.terminalWrite(target.id, chars[i]);
+            i++;
+            if (i < chars.length) setTimeout(sendNext, 8);
+          }
+        };
+        setTimeout(sendNext, target.delayMs);
       };
-      setTimeout(sendNext, 15);
-    };
 
-    // CLAIM the session before typing. `claude --resume` is not visible as a
-    // process for a second or two, and inside that window a second surface
-    // (the phone, another window, another tab) would be told the session is
-    // free and resume it too, leaving two processes appending to one
-    // transcript. Every desktop resume path (Cmd+R, ResumeBanner, Sessions,
-    // Search, sidebar, Loose Ends) funnels through here, so this one call
-    // covers all of them. An earlier version merely RESERVED, which cannot
-    // refuse: a second tab silently took ownership and both ran. Codex
-    // Critical, round 7.
-    //
-    // The claim is bound to this tab, so retrying here after a failed resume
-    // is granted, and killing the tab frees the session at once.
-    const claim = window.electronAPI.dataClaimSessionResume?.(sessionId, termId);
-    if (!claim?.then) { typeIt(); return; } // older preload: behave as before
-    claim.then((okToRun) => {
-      if (okToRun === false) {
-        if (typeof window !== 'undefined') {
-          window.alert('That session is already running somewhere else.\n\nSwitch to the tab (or the phone) that has it rather than starting a second copy.');
+      // CLAIM the session before typing. `claude --resume` is not visible as a
+      // process for a second or two, and inside that window a second surface
+      // (the phone, another window, another tab) would be told the session is
+      // free and resume it too, leaving two processes appending to one
+      // transcript. Every desktop resume path (Cmd+R, ResumeBanner, Sessions,
+      // Search, sidebar, Loose Ends) funnels through here, so this one call
+      // covers all of them. An earlier version merely RESERVED, which cannot
+      // refuse: a second tab silently took ownership and both ran. Codex
+      // Critical, round 7.
+      //
+      // The claim is bound to this tab, so retrying here after a failed resume
+      // is granted, and killing the tab frees the session at once.
+      const claim = window.electronAPI.dataClaimSessionResume?.(sessionId, target.id);
+      if (!claim?.then) { typeIt(); return; } // older preload: behave as before
+      claim.then((okToRun) => {
+        if (okToRun === false) {
+          // A tab opened just for this resume has no other purpose.
+          if (target.fresh) get().removeTab(target.id);
+          if (typeof window !== 'undefined') {
+            window.alert('That session is already running somewhere else.\n\nSwitch to the tab (or the phone) that has it rather than starting a second copy.');
+          }
+          return;
         }
-        return;
-      }
-      typeIt();
-    }).catch(() => typeIt()); // if we cannot tell, do what the user asked
+        typeIt();
+      }).catch(() => typeIt()); // if we cannot tell, do what the user asked
+    };
+    get().resumeTargetTab(termId).then((target) => { if (target) startResume(target); });
   },
 }));

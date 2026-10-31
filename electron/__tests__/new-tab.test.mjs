@@ -177,3 +177,14 @@ test('one shell quoting for every generated command survives /bin/sh, quotes inc
   const script = spawnFor("/opt/it's/zsh", launchFor('claude', 'claude')).args.at(-1);
   assert.ok(script.endsWith(` exec ${shQuote("/opt/it's/zsh")} -l`), script);
 });
+
+test('a resume never types into a running program or a tab about to start one', async () => {
+  const { resumeNeedsNewTab, NEW_TAB_START_MS } = await import('../../shared/new-tab.js');
+  const now = 1_000_000;
+  assert.equal(resumeNeedsNewTab(null, { createdAt: now - 5 }, now), false, 'a plain tab at its shell prompt');
+  assert.equal(resumeNeedsNewTab('claude', { createdAt: now - 5 }, now), true, 'Claude is running there');
+  assert.equal(resumeNeedsNewTab('2.1.314', {}, now), true, 'the native binary names itself by version');
+  assert.equal(resumeNeedsNewTab(null, { startsTool: true, createdAt: now - 1000 }, now), true, 'New Tab is still starting its tool');
+  assert.equal(resumeNeedsNewTab(null, { startsTool: true, createdAt: now - NEW_TAB_START_MS - 1 }, now), false, 'its tool exited long ago: a shell again');
+  assert.equal(resumeNeedsNewTab(null, undefined, now), false);
+});

@@ -81,6 +81,19 @@ export function pickerShortcutIndex(e) {
   return e.key >= '1' && e.key <= '9' && e.key.length === 1 ? Number(e.key) - 1 : -1;
 }
 
+// A resume types `claude --resume <id>` at a shell prompt, so it must not go
+// into a tab where a program is running (typed into Claude, it is submitted as
+// a prompt) or about to run (a New Tab whose shell is still starting its tool).
+// proc: terminal:getProcess's answer, the name of a non-shell child or null.
+// ponytail: the start is judged by a 15s window from the tab's creation, not
+// tracked; a slower start than that is missed, and resuming in a tab whose tool
+// already exited opens one tab more than needed.
+export const NEW_TAB_START_MS = 15_000;
+export function resumeNeedsNewTab(proc, tab, now = Date.now()) {
+  if (proc) return true;
+  return !!tab?.startsTool && now - (tab.createdAt || 0) < NEW_TAB_START_MS;
+}
+
 // How to spawn a new PTY's login shell: { args, env }. With a startCommand
 // (only a bare tool name from launchCommandFor) the shell runs it after its rc
 // files, so PATH and the account env are the user's own, then replaces itself
