@@ -1,6 +1,6 @@
 import pty from 'node-pty';
 import { isTerminalReply, createVisibleOutputScanner } from './terminal-reply.js';
-import { isClaudeCommand } from './claude-argv.js';
+import { isClaudeCommand, classifyClaudeProcess } from './claude-argv.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -18,11 +18,13 @@ import { getSessionTabMap } from './config-manager.js';
 import { loginShellSpawn } from '../shared/new-tab.js';
 
 const terminals = new Map();
+// getTerminalClaudeInfo { unique }: a shell with more children answers nothing.
+const MAX_UNIQUE_CHILDREN = 16;
 
 // Global terminal observers (v1.0.43): sinks that see EVERY terminal's data +
 // exit, independent of window/mobile attachment. Used by the main-process
 // status authority. Each observer is { onData(id, data, cwd), onExit(id,
-// {exitCode, signal, cwd}) }.
+// {exitCode, signal, cwd}), onSpawn(id) }.
 const terminalObservers = new Set();
 export function addTerminalObserver(observer) {
   if (observer) terminalObservers.add(observer);
@@ -167,6 +169,10 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   // Kill existing terminal with this ID if any
   if (terminals.has(id)) {
     killTerminal(id);
+  }
+  // A respawn under the same id starts fresh for observers (status timing).
+  for (const obs of terminalObservers) {
+    try { obs.onSpawn?.(id); } catch { /* never let an observer break the PTY */ }
   }
 
   // Validate cwd is an existing directory; fall back to home
@@ -532,8 +538,9 @@ export async function getTerminalProcessArgv(id) {
  * tabs got no name badge in the sidebar, and auto-resume could never restore
  * them either. startedAt lets the caller correlate the process to the
  * transcript it created (see resolveFreshSessionId in main.js).
+ * `unique: true` answers null when more than one claude runs in the shell.
  */
-export async function getTerminalClaudeInfo(id) {
+export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;
   try {
@@ -544,6 +551,10 @@ export async function getTerminalClaudeInfo(id) {
       encoding: 'utf8',
     });
     const children = pgrepOut.trim().split('\n').filter(Boolean);
+    // `unique`: one ps per child, so a shell with many children is not
+    // walked (each poll would spawn them all again): no answer.
+    if (unique && children.length > MAX_UNIQUE_CHILDREN) return null;
+    let found = null;
     for (const childPid of children) {
       // `lstart` is the process start time; `command` is the argv. One ps
       // call gets both so the fresh-session correlation costs nothing extra.
@@ -557,13 +568,29 @@ export async function getTerminalClaudeInfo(id) {
       // rest is the command.
       const lstart = line.slice(0, 24);
       const command = line.slice(24).trim();
-      if (!isClaudeCommand(command)) continue;
+      if (!isClaudeCommand(command)) {
+        // `unique`: anything else that so much as names claude (a path with
+        // spaces such as `/x/CLI Tools/claude[/versions/N]` fails
+        // isClaudeCommand) may be one, so the shell is ambiguous. Fails
+        // closed: a child like `vim claude.md` also costs the Waiting label.
+        if (unique && /claude/i.test(command)) return null;
+        continue;
+      }
+      // `unique`: the strict reading too, so a process that only names the CLI
+      // (`node watcher.js /path/claude`) is not taken for it. Capped, since
+      // classifyClaudeProcess's cost grows with the square of the length and
+      // a claude command line is short.
+      if (unique && (command.length > 4096 || classifyClaudeProcess(command).kind !== 'claude')) return null;
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
-      return { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid) };
+      const info = { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid) };
+      if (!unique) return info;
+      // `unique`: two claudes in one shell cannot be told apart, so no answer.
+      if (found) return null;
+      found = info;
     }
-    return null;
+    return found;
   } catch {
     return null;
   }

@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import {
   cleanLabel, labelFromTitle, applyAutoLabel, lockLabel, unlockLabel, isLabelLocked, labelMeta, parseLabelMeta, MAX_TAB_LABEL,
+  sessionNameFromTabLabel, MAX_SESSION_NAME,
 } from '../../shared/tab-label.js';
 
 let pass = 0;
@@ -116,5 +117,17 @@ assert.equal(unlockLabel(tornLocked).label, 'Ship the release');
 assert.deepEqual(parseLabelMeta('not json'), {});
 assert.deepEqual(parseLabelMeta('{"labelSource":"evil","labelLockedByUser":"yes"}'), {});
 ok('label state survives a tear-off');
+
+// 11. History names a session after its tab, but only a REAL name: the
+// app's own defaults fall through to Claude's summary.
+assert.equal(sessionNameFromTabLabel('Email'), 'Email');
+assert.equal(sessionNameFromTabLabel('  refund\n commish \u0007'), 'refund commish');
+assert.equal(sessionNameFromTabLabel('* urgent'), '* urgent');
+for (const d of ['Tab', 'Tab 3', 'Tab 104', 'Browser', '', '   ', null, undefined, 42]) {
+  assert.equal(sessionNameFromTabLabel(d), null, String(d));
+}
+assert.equal(sessionNameFromTabLabel('Tab 3 billing'), 'Tab 3 billing');
+assert.equal(Array.from(sessionNameFromTabLabel('😀'.repeat(80))).length, MAX_SESSION_NAME);
+ok('a tab name becomes a session name, default names do not');
 
 console.log(`\n${pass} passed`);

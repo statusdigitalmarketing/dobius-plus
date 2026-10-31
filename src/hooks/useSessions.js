@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { sessionAutoName } from '../lib/session-shelves';
 
 /**
  * Hook for loading and filtering session history.
@@ -70,11 +71,12 @@ export function useSessions({ projectFilter = null, excludeAutomated = false } =
       const data = (raw || []).map((s) => ({
         ...s,
         project: s.projectPath || s.project,
-        // Claude Code's own title first, then the newest prompt, then the
-        // project. The prompt alone left most rows reading "No preview
-        // available" or a pasted tool echo. Using projectName as primary made
-        // every card in one project identical (Codex PR#3 r4 P2).
-        display: s.title || s.preview || s.projectName || 'Untitled',
+        // The tab's name first, then Claude Code's own title, the newest
+        // prompt, the project (sessionAutoName). The prompt alone left most
+        // rows reading "No preview available" or a pasted tool echo. Using
+        // projectName as primary made every card in one project identical
+        // (Codex PR#3 r4 P2).
+        display: sessionAutoName(s),
       }));
       setSessions(data);
       setSessionTabMap(tabMap || {});
@@ -95,7 +97,12 @@ export function useSessions({ projectFilter = null, excludeAutomated = false } =
     const remove = window.electronAPI.onDataUpdated(() => {
       loadSessions();
     });
-    return remove;
+    // Main renamed a running session after its tab: no transcript write
+    // announces that, so it has its own event.
+    const removeNames = window.electronAPI.onSessionNamesChanged?.(() => {
+      loadSessions();
+    });
+    return () => { remove(); removeNames?.(); };
   }, [loadSessions]);
 
   // Apply tags + project filter without re-fetching. displayName is what the
@@ -116,10 +123,11 @@ export function useSessions({ projectFilter = null, excludeAutomated = false } =
   const filtered = useMemo(() => {
     if (!search) return scoped;
     const q = search.toLowerCase();
-    // The prompt stays searchable now that the title is what the row shows.
+    // The prompt and Claude's title stay searchable when the row shows
+    // something else (the tab's name, a custom label).
     return scoped.filter((s) =>
       s.displayName?.toLowerCase().includes(q) || s.project?.toLowerCase().includes(q)
-      || s.preview?.toLowerCase().includes(q));
+      || s.preview?.toLowerCase().includes(q) || s.title?.toLowerCase().includes(q));
   }, [scoped, search]);
 
   // Optimistic local update + persist. On persist failure, ROLL BACK to the

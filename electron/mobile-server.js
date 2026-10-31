@@ -24,7 +24,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { app, powerSaveBlocker } from 'electron';
 import { createAutoStart, createStartGate, listenSettled, attachWebSocketServer, dualProtocolServer } from './mobile-autostart.js';
-import { getMobileServerConfig, updateMobileServerConfig, setSessionTabLink, removePushSubscriptionsByToken, getSessionTabMap, getAllProjectsWithTabs, loadConfig } from './config-manager.js';
+import { getMobileServerConfig, updateMobileServerConfig, setSessionTabLink, removePushSubscriptionsByToken, getSessionTabMap, getTabLabelsById, loadConfig } from './config-manager.js';
 import {
   listTerminals, subscribeTerminal, writeTerminal, terminalHasDesktopAttached,
   resizeTerminal, killTerminal, createTerminal, getTerminalBuffer,
@@ -259,30 +259,9 @@ function wsSend(socket, obj) {
 // config.projects[*].tabs, not in the terminal id. Id-derived "Tab <counter>"
 // made every renamed tab unrecognizable on the phone, which read as "my tabs
 // aren't popping up" (Asana 1217257328849820: all six desktop tabs WERE
-// listed, as Tab 104/109/...). Map tab id -> persisted label; callers fall
-// back to the id-derived label when a tab has no (or a blank) rename.
-function configTabLabels() {
-  const labelByTabId = new Map();
-  const take = (id, label) => {
-    if (typeof id === 'string' && typeof label === 'string' && label.trim()) labelByTabId.set(id, label);
-  };
-  try {
-    for (const proj of getAllProjectsWithTabs()) {
-      for (const tab of (Array.isArray(proj.tabs) ? proj.tabs : [])) take(tab?.id, tab?.label);
-    }
-    // Tabs living in TEAR-OFF windows are absent from config.projects[*].tabs:
-    // their labels come from the tear-off tab bucket (when present) and from
-    // lastTearOffs (the torn tab's label survives there even without a bucket).
-    const cfg = loadConfig();
-    for (const st of Object.values(cfg?.tearOffWindows || {})) {
-      for (const tab of (Array.isArray(st?.tabs) ? st.tabs : [])) take(tab?.id, tab?.label);
-    }
-    for (const t of (Array.isArray(cfg?.lastTearOffs) ? cfg.lastTearOffs : [])) {
-      if (!labelByTabId.has(t?.tabId)) take(t?.tabId, t?.label);
-    }
-  } catch { /* config unavailable; id-derived labels still work */ }
-  return labelByTabId;
-}
+// listed, as Tab 104/109/...). Callers fall back to the id-derived label when
+// a tab has no (or a blank) rename.
+const configTabLabels = getTabLabelsById;
 
 // Chrome that only Claude Code's interactive TUI draws at the bottom of the
 // screen. Presence in the PTY tail means a Claude is LIVE in that tab right
