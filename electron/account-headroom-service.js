@@ -831,9 +831,12 @@ export function createHeadroomService(d) {
         return done('no-continue (Claude resumed in another folder)', false, `Moved this tab to ${p.targetLabel}, but Claude came back in a different folder from the one it was working in, so "continue" was not sent.`);
       }
     }
-    // Checked again where the submit queue decides to paste: input held by
-    // the window (an image paste) or typed meanwhile cancels it.
-    const sent = await d.submit(tabId, 'continue', () => stillHere() && d.inputSeq(tabId) === baseline && !d.inputHeld(tabId));
+    // Checked again where the submit queue decides to paste. Not inputHeld
+    // here: that is /openTab's inputBusy, which also reads "a submit is
+    // pending", and inside the queue that is this very submit, so it would
+    // always cancel itself (the ship-test caught it). The queue is idle
+    // (checked just above), so it pastes in this same tick.
+    const sent = await d.submit(tabId, 'continue', () => stillHere() && d.inputSeq(tabId) === baseline);
     return sent
       ? done('continued', true)
       : done('no-continue (the submit was interrupted)', false, `Moved this tab to ${p.targetLabel}, but "continue" did not go through. Check the tab.`);

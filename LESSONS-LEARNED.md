@@ -425,3 +425,9 @@
 - **FIX**: Run the harness with `HOME=<scratch>/home` (fake ~/.claude, ~/.claude-profiles, transcripts) and CLAUDE_CONFIG_DIR unset, fake profiles holding a `.claude.json` (oauthAccount.emailAddress) and a `.credentials.json` with a `claudeAiOauth` key (loginState reads 'in' without the Keychain), PATH starting with a stand-in `claude` node script that writes DOBIUS1 usage records and transcript lines. A stand-in must park the cursor on its prompt row right of the ❯ or promptBoxText never sees the box. Never click the Running sessions "Move" button in such a harness: the process scan still sees the REAL sessions on the Mac.
 - **CONTEXT**: scratchpad/brett/accounts/h (seed.mjs, bin/claude, p1-p12 probes, up.sh/down.sh).
 - **DETECTION**: `pgrep -fl "accounts/h/bin/claude"` after teardown must print nothing.
+
+### Testing - 2026-10-30 (account headroom)
+- **MISTAKE**: The auto-move continue passed `submitPromptToTab` a `stillOk` that read `inputHeld`. After the 2.0.0 merge that dep had to become /openTab's `inputBusy`, which is `submitPending(tab) || held`. Inside the submit queue `submitPending` is true because of this very submit, so every automatic "continue" cancelled itself ("the submit was interrupted"). All unit tests passed because the fake submit never called `stillOk`; three Codex lenses read that line and did not flag it. Only the harness re-run after the merge caught it.
+- **FIX**: A `stillOk` runs INSIDE the queue: never read "is a submit pending" from it. The fake `submit` in account-headroom-service.test.mjs now evaluates `stillOk` while `inputHeld` reads true, as main does.
+- **CONTEXT**: Any guard handed to chat-service. And re-run the end-to-end ship-test after every merge from the release branch, not just `npm test`.
+- **DETECTION**: `grep -n "d.submit(" electron/account-headroom-service.js`

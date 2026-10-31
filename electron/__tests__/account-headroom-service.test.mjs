@@ -58,7 +58,8 @@ function world(over = {}) {
     cliDefaultDir: () => HOMEC,
     keyFor: (dir) => keychainServiceFor(dir),
     login: async () => 'in',
-    inputHeld: () => !!w.held,
+    // As in main: /openTab's inputBusy, which is also true during a submit.
+    inputHeld: () => !!w.held || !!w.submitting,
     metadata: async (dir, opts) => {
       if (w.unreadableInner && opts?.envUnset === false) return { email: null, state: 'unreadable' };
       const email = opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null);
@@ -105,7 +106,13 @@ function world(over = {}) {
     samePath: async (a, b) => a === b,
     rows: () => 40,
     authOverride: () => w.authOverride ?? null,
-    submit: async (id, text) => { w.submits.push(text); return true; },
+    submit: async (id, text, stillOk) => {
+      w.submitting = true;
+      const ok = stillOk();
+      w.submitting = false;
+      if (ok) w.submits.push(text);
+      return ok;
+    },
     log: (kind, detail) => w.logs.push(detail),
   });
   return { w, svc };
