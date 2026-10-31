@@ -283,7 +283,14 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
           })
           .catch((err) => console.warn('[useTerminal] claim failed:', err?.message));
       } else {
-        window.electronAPI.terminalCreate(id, cwd, launchTool !== undefined ? { launch: launchTool } : undefined);
+        // A tab moved to another account keeps it across relaunches: its pin
+        // rides on the tab and main resolves it (spawn-account-env.js).
+        const pin = useStore.getState().terminalTabs.find((t) => t.id === id)?.claudeAccountPin;
+        const opts = {
+          ...(launchTool !== undefined ? { launch: launchTool } : {}),
+          ...(pin && typeof pin === 'object' ? { claudeAccountPin: pin } : {}),
+        };
+        window.electronAPI.terminalCreate(id, cwd, Object.keys(opts).length ? opts : undefined);
       }
     });
 

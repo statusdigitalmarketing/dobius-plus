@@ -9,6 +9,7 @@ import {
   parseJsonl, streamJsonl, timeAgo, pathExists, mapLimit,
 } from './data-utils.js';
 import { listCodexSessions, codexTranscript } from './codex-sessions.js';
+import { limitFromEntries } from './account-headroom.js';
 import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects, getAllProjectsWithTabs, getSessionTabMap } from './config-manager.js';
 
 /**
@@ -1339,6 +1340,19 @@ export async function getLastAssistantMessage(sessionId, projectPath) {
     if (text) return text;
   }
   return null;
+}
+
+/**
+ * Does this session's transcript END in Claude's own limit record (the
+ * synthetic "You've hit your 5-hour limit" message)? { found: false } when
+ * the transcript cannot be resolved, else { found: true, limit: {at, text} | null }.
+ * Tail only: the record, if it matters, is the newest turn.
+ */
+export async function getSessionLimitRecord(sessionId, projectPath) {
+  if (typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) return { found: false };
+  const p = await resolveTranscriptPath(sessionId, projectPath);
+  if (!p) return { found: false };
+  return { found: true, limit: limitFromEntries(await parseJsonl(p, 40)) };
 }
 
 function extractAssistantText(entry) {

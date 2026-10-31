@@ -707,53 +707,107 @@ export const useStore = create((set, get) => ({
   // don't silently no-op when a browser tab is active. Audit Medium.
   getActiveTerminalTabId: () => resolveActiveTerminalTabId(get()),
 
-  // Continue the running conversation in THIS tab on the currently ACTIVE
-  // account. The reason this exists: switching accounts (Settings > Accounts)
-  // only changes NEW terminals, so hitting a session limit and switching left
-  // the current tab still bound to the maxed-out account (Sam: "stays on
-  // original account and says i still dont have credits left"). This respawns
-  // the tab's PTY, which re-reads the active account at the spawn choke point
-  // (CLAUDE_CONFIG_DIR), then resumes the same session from the shared
-  // transcript store, so the conversation continues on fresh quota.
-  continueTabOnActiveAccount: async (tabId) => {
+  // Move a tab to a chosen Claude account and continue its conversation
+  // there (generalised from "Continue on switched account"). Switching
+  // accounts only changes NEW terminals, so a tab that hit its limit stayed on
+  // the maxed-out account (Sam: "stays on original account and says i still
+  // dont have credits left"). This pins the tab to `accountId` (null =
+  // Default) WITHOUT touching the global active account, respawns its PTY
+  // (main resolves the pin at the spawn choke point), then hands the resume
+  // to resumeSession, which owns the claim gate and the cwd rules.
+  //
+  // opts: { sessionId, project } from main (what the tab runs now), else the
+  // newest map link; confirm: ask first (manual single-tab moves); auto: an
+  // automatic move, which never asks, never steals the active tab, and
+  // resolves { ok, resumed, error }.
+  moveTabToAccount: async (tabId, accountId, opts = {}) => {
     const api = typeof window !== 'undefined' ? window.electronAPI : null;
-    if (!api || !tabId) return;
+    if (!api || !tabId) return { ok: false, error: 'no tab' };
+    if (accountId !== null && typeof accountId !== 'string') return { ok: false, error: 'no account' };
+    const { auto = false, confirm = !auto, background = auto, label = 'the chosen account' } = opts;
     // The tab's REAL project, read from the live tab list (not the persisted
-    // map), so the lookup is project-guarded and the respawn's cwd is right for
-    // a worktree/subdir tab rather than the active project (reviewer MED-HIGH).
+    // map), so the lookup is project-guarded and the respawn's cwd is right.
     const tab = (get().terminalTabs || []).find((t) => t.id === tabId);
-    const tabProject = tab?.projectPath || get().currentProjectPath || null;
-    let sessionId = null;
-    try {
-      const map = (await api.configGetSessionTabMap?.()) || {};
-      sessionId = latestSessionForTab(map, tabId, tabProject)?.sessionId || null;
-    } catch { /* no map: still respawn to switch the account for a fresh session */ }
-    // Respawn HARD-kills whatever runs in this tab (build, editor, claude), so
-    // confirm first (reviewer MED). Non-interactive callers (tests) proceed.
-    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+    if (!tab) return { ok: false, error: 'the tab is closed' };
+    const tabProject = tab.projectPath || get().currentProjectPath || null;
+    let sessionId = typeof opts.sessionId === 'string' ? opts.sessionId : null;
+    let sessionProject = typeof opts.project === 'string' ? opts.project : null;
+    if (!sessionId) {
+      try {
+        const map = (await api.configGetSessionTabMap?.()) || {};
+        const link = latestSessionForTab(map, tabId, tabProject);
+        sessionId = link?.sessionId || null;
+        sessionProject = link?.projectPath || null;
+      } catch { /* no map: still respawn to switch the account for a fresh session */ }
+    }
+    // Respawn HARD-kills whatever runs in this tab (build, editor, claude).
+    if (confirm && typeof window.confirm === 'function') {
       const ok = window.confirm(
         sessionId
-          ? 'Restart this tab on the switched account and resume the conversation? Whatever is running in this tab now will be stopped.'
-          : 'Restart this tab on the switched account? Whatever is running in this tab now will be stopped, and no linked session was found to resume.'
+          ? `Restart this tab on ${label} and resume the conversation? Whatever is running in this tab now will be stopped.`
+          : `Restart this tab on ${label}? Whatever is running in this tab now will be stopped, and no linked session was found to resume.`
       );
-      if (!ok) return;
+      if (!ok) return { ok: false, cancelled: true };
     }
-    set({ activeView: 'terminal', activeTabId: tabId });
-    // Respawn: main kills the old PTY and creates a new one, reading the live
-    // active account (CLAUDE_CONFIG_DIR) at the spawn choke point.
-    try { await api.terminalCreate?.(tabId, tabProject || undefined); } catch { return; }
-    if (!sessionId) return; // account switched; user continues fresh
-    // Delegate the actual resume to resumeSession, which owns the claim gate
-    // (refuses if the session runs on the phone/another window: reviewer HIGH),
-    // the worktree/cross-project cwd rules, and char-by-char typing. Wait first
-    // so the old claude has exited (claimSessionResume refuses while its process
-    // is still visible) and the new shell is ready.
-    setTimeout(() => {
-      if (!(get().terminalTabs || []).some((t) => t.id === tabId)) return; // tab closed (reviewer LOW)
-      set({ activeTabId: tabId }); // re-assert in case focus moved during the wait
-      get().resumeSession({ sessionId, project: tabProject || undefined });
-    }, 900);
+    const pin = { id: accountId };
+    set((s) => ({ terminalTabs: s.terminalTabs.map((t) => (t.id === tabId ? { ...t, claudeAccountPin: pin } : t)) }));
+    if (!background) set({ activeView: 'terminal', activeTabId: tabId });
+    try { await api.terminalCreate?.(tabId, tabProject || undefined, { claudeAccountPin: pin }); }
+    catch (err) { return { ok: false, error: `the tab could not restart: ${err?.message || err}` }; }
+    if (!sessionId) return { ok: true, resumed: false };
+    // Wait so the old claude has exited (claimSessionResume refuses while its
+    // process is still visible) and the new shell is ready.
+    await new Promise((r) => setTimeout(r, 900));
+    if (!(get().terminalTabs || []).some((t) => t.id === tabId)) return { ok: false, error: 'the tab closed' };
+    if (!background) set({ activeTabId: tabId }); // re-assert in case focus moved during the wait
+    const typed = await get().resumeSession({ sessionId, project: sessionProject || tabProject || undefined, tabId, background });
+    return typed === true ? { ok: true, resumed: true } : { ok: false, error: typeof typed === 'string' ? typed : 'the conversation could not be resumed' };
   },
+
+  // Move several tabs (this window's) to one account. Tabs that are mid-turn
+  // or waiting on a permission prompt, tabs running some other program, and
+  // tabs with unsent text in Claude's box are SKIPPED and named, never
+  // interrupted: a respawn kills what runs in the tab. Main judges each tab
+  // (accounts:moveCandidates), including whether it may go to that account.
+  moveTabsToAccount: async (tabIds, accountId, label = 'the chosen account') => {
+    const api = typeof window !== 'undefined' ? window.electronAPI : null;
+    if (!api?.accountsMoveCandidates) return { moved: 0, skipped: [] };
+    const cands = (await api.accountsMoveCandidates(tabIds, accountId)) || [];
+    const name = (id) => (get().terminalTabs.find((t) => t.id === id)?.label) || id;
+    const why = (c) => (c.refusal ? c.refusal
+      : c.busy ? (c.status === 'needs' ? 'waiting on a question' : 'in the middle of a turn')
+        : c.running === 'other' ? 'running another program'
+          : c.draft ? 'has unsent text in the prompt' : null);
+    const movable = cands.filter((c) => !why(c));
+    const skipped = cands.filter((c) => why(c)).map((c) => ({ tabId: c.tabId, label: name(c.tabId), reason: why(c) }));
+    if (!movable.length) {
+      window.alert?.(`No tab can move to ${label} right now.${skipped.length ? `\n\n${skipped.map((x) => `${x.label}: ${x.reason}`).join('\n')}` : ''}`);
+      return { moved: 0, skipped };
+    }
+    const ok = window.confirm?.(`Move ${movable.length} tab${movable.length === 1 ? '' : 's'} to ${label} and resume ${movable.length === 1 ? 'its conversation' : 'their conversations'}? Whatever runs in ${movable.length === 1 ? 'it' : 'them'} now is restarted.${skipped.length ? `\n\nLeft where they are:\n${skipped.map((x) => `${x.label}: ${x.reason}`).join('\n')}` : ''}`);
+    if (ok === false) return { moved: 0, skipped, cancelled: true };
+    let moved = 0;
+    const failed = [];
+    // One at a time: each resume claims its session and types into its own tab.
+    for (const c of movable) {
+      const r = await get().moveTabToAccount(c.tabId, accountId, {
+        confirm: false, background: true, label, sessionId: c.session?.sessionId, project: c.session?.project,
+      });
+      if (r.ok) moved += 1; else failed.push({ label: name(c.tabId), reason: r.error || 'failed' });
+    }
+    if (failed.length) window.alert?.(`Moved ${moved}. These did not move cleanly:\n${failed.map((x) => `${x.label}: ${x.reason}`).join('\n')}`);
+    return { moved, skipped, failed };
+  },
+
+  // Unpin: the tab follows the active account (and the project's) again on
+  // its next start. Nothing is restarted.
+  clearTabAccountPin: (tabId) => set((s) => ({
+    terminalTabs: s.terminalTabs.map((t) => {
+      if (t.id !== tabId || !t.claudeAccountPin) return t;
+      const { claudeAccountPin: _drop, ...rest } = t;
+      return rest;
+    }),
+  })),
 
 
   // Resume a Codex session in the active terminal tab. Separate from
@@ -788,25 +842,34 @@ export const useStore = create((set, get) => ({
     setTimeout(sendNext, 15);
   },
 
+  // Resolves true once the resume command is typed, or a reason (string) /
+  // false when it was not. `tabId` targets a specific tab; `background` (an
+  // automatic move) leaves the active tab and view alone and never opens a
+  // dialog. Existing callers ignore the result.
   resumeSession: (arg) => {
     const session = typeof arg === 'string' ? { sessionId: arg } : (arg || {});
     const { sessionId, sizeMB } = session;
-    if (!sessionId || sessionId.length > 100 || !/^[a-zA-Z0-9][\w-]*$/.test(sessionId)) return;
+    const background = session.background === true;
+    if (!sessionId || sessionId.length > 100 || !/^[a-zA-Z0-9][\w-]*$/.test(sessionId)) return Promise.resolve(false);
     // Large-transcript heads-up, NOT a hard block. Sam: "we should always be
     // able to resume a session." Big transcripts can be slow to load and may
     // trigger compaction, so warn once, but always let the user proceed rather
     // than refusing outright the way v1.0.28's dead-session guard did. A
     // non-interactive caller (no window, e.g. tests) proceeds without asking.
-    if (sizeMB && sizeMB > 80 && typeof window !== 'undefined') {
+    if (sizeMB && sizeMB > 80 && typeof window !== 'undefined' && !background) {
       const proceed = window.confirm(`This session's transcript is ${sizeMB.toFixed(0)}MB. Large transcripts can take a while for Claude to load and may get compacted.\n\nResume anyway?`);
-      if (!proceed) return;
+      if (!proceed) return Promise.resolve(false);
     }
-    set({ activeView: 'terminal' });
+    if (!background) set({ activeView: 'terminal' });
     // Target a terminal tab, not a browser tab (which would drop the command).
     // Focus it too so the resume is visible. Audit Medium.
-    const termId = resolveActiveTerminalTabId(get());
-    if (!window.electronAPI || !termId) return;
-    if (termId !== get().activeTabId) set({ activeTabId: termId });
+    const named = typeof session.tabId === 'string'
+      ? (get().terminalTabs || []).find((t) => t.id === session.tabId && (t.kind || 'terminal') === 'terminal')
+      : null;
+    if (typeof session.tabId === 'string' && !named) return Promise.resolve('the tab is gone');
+    const termId = named ? named.id : resolveActiveTerminalTabId(get());
+    if (!window.electronAPI || !termId) return Promise.resolve(false);
+    if (!background && termId !== get().activeTabId) set({ activeTabId: termId });
     // cd BEFORE resume only for CROSS-project resumes (Sessions dashboard /
     // Search into a tab belonging to a different project), where wrong-cwd
     // is guaranteed. For SAME-project resumes (Cmd+R, ResumeBanner, sidebar
@@ -828,13 +891,15 @@ export const useStore = create((set, get) => ({
       cmd = `claude --resume ${sessionId}`;
     } else {
       console.warn(`[resume] aborting, invalid project path for session ${sessionId}`);
-      if (typeof window !== 'undefined') {
+      if (typeof window !== 'undefined' && !background) {
         window.alert(`Can't resume this session, its project path is missing or invalid.\n\nOpen the session's project window directly first.`);
       }
-      return;
+      return Promise.resolve('its project path is missing or invalid');
     }
     const projectForLink = projectPath || get().currentProjectPath;
 
+    let typed;
+    const done = new Promise((r) => { typed = r; });
     const typeIt = () => {
       // Tier 1 capture: link the session to the tab only once the resume is
       // actually GOING to happen, so neither an aborted nor a refused resume
@@ -851,6 +916,7 @@ export const useStore = create((set, get) => ({
           window.electronAPI.terminalWrite(termId, chars[i]);
           i++;
           if (i < chars.length) setTimeout(sendNext, 8);
+          else typed(true);
         }
       };
       setTimeout(sendNext, 15);
@@ -869,15 +935,17 @@ export const useStore = create((set, get) => ({
     // The claim is bound to this tab, so retrying here after a failed resume
     // is granted, and killing the tab frees the session at once.
     const claim = window.electronAPI.dataClaimSessionResume?.(sessionId, termId);
-    if (!claim?.then) { typeIt(); return; } // older preload: behave as before
+    if (!claim?.then) { typeIt(); return done; } // older preload: behave as before
     claim.then((okToRun) => {
       if (okToRun === false) {
-        if (typeof window !== 'undefined') {
+        if (typeof window !== 'undefined' && !background) {
           window.alert('That session is already running somewhere else.\n\nSwitch to the tab (or the phone) that has it rather than starting a second copy.');
         }
+        typed('that conversation is already running somewhere else');
         return;
       }
       typeIt();
     }).catch(() => typeIt()); // if we cannot tell, do what the user asked
+    return done;
   },
 }));

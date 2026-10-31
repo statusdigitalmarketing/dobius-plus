@@ -3,6 +3,7 @@ import { isLabelLocked, labelMeta } from '../../../shared/tab-label.js';
 import { useStore } from '../../store/store';
 import { markDoNotKill, unmarkDoNotKill } from '../../hooks/useTerminal';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
+import MoveAccountDialog from './MoveAccountDialog';
 
 // Tab ids with a tear-off gesture already in flight. A tab stays in this window's
 // tab bar until its tear-off confirms (H5), so a rapid SECOND drag of the same
@@ -46,6 +47,8 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
   const [contextMenu, setContextMenu] = useState(null); // { x, y, tabId }
+  const [moveAccountTabId, setMoveAccountTabId] = useState(null);
+  const closeMoveAccount = useCallback(() => setMoveAccountTabId(null), []);
   const [dragTabId, setDragTabId] = useState(null);
   const [dragOverIdx, setDragOverIdx] = useState(null);
   const [showLeftArrow, setShowLeftArrow] = useState(false);
@@ -680,6 +683,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
       </button>
 
       {/* Context menu (#25) */}
+      {moveAccountTabId && <MoveAccountDialog tabId={moveAccountTabId} onClose={closeMoveAccount} />}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -743,10 +747,10 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
           onContinueAccount={() => {
             const targetTabId = contextMenu.tabId;
             setContextMenu(null);
-            // Respawns the tab on the account switched to in Settings and
-            // resumes its session. Solves "switch does nothing when I hit a
-            // limit" (the current tab kept the maxed-out account).
-            useStore.getState().continueTabOnActiveAccount?.(targetTabId);
+            // Pick one of your Claude logins for this tab (or the whole
+            // window) and resume its conversation there. Replaces "Continue
+            // on switched account": the global active account is untouched.
+            setMoveAccountTabId(targetTabId);
           }}
           onCopyLastResponse={async () => {
             const targetTabId = contextMenu.tabId;
@@ -829,7 +833,7 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored,
     { label: isSplit ? 'Unsplit' : 'Split View', onClick: onSplit, disabled: tabCount <= 1 },
     { type: 'divider' },
     { label: 'Copy Last Claude Response', onClick: onCopyLastResponse },
-    { label: 'Continue on switched account', onClick: onContinueAccount },
+    { label: 'Move to account…', onClick: onContinueAccount },
     { type: 'divider' },
     { label: 'Close', onClick: onClose, disabled: tabCount <= 1 },
     { label: 'Close Others', onClick: onCloseOthers, disabled: tabCount <= 1 },

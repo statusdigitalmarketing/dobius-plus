@@ -42,6 +42,25 @@ function pathWithinRoot(p, root) {
 }
 
 /**
+ * The account a tab's pin names: undefined for no usable pin (the normal
+ * resolution applies), null for Default, or the one Claude account with that
+ * id and a profile path. The pin comes from the renderer, so it is only ever
+ * an id looked up in config, never a directory: a pin that names nothing, or
+ * an id two rows share, is ignored rather than guessed at.
+ */
+export function resolveClaudeAccountPin(pin, accounts) {
+  if (!pin || typeof pin !== 'object' || !('id' in pin)) return undefined;
+  if (pin.id === null) return null;
+  if (typeof pin.id !== 'string' || !pin.id) return undefined;
+  const matches = (Array.isArray(accounts) ? accounts : []).filter((a) => a?.type === 'claude' && a.id === pin.id);
+  if (matches.length !== 1 || typeof matches[0].claudeJsonPath !== 'string' || !matches[0].claudeJsonPath) {
+    console.warn('[account-pin] ignoring a tab pin that names no single Claude account');
+    return undefined;
+  }
+  return matches[0];
+}
+
+/**
  * Build the spawn env for a terminal opened in `cwd`. Resolution: a project's
  * assigned account wins for its OWN tool type; otherwise the globally active
  * Claude and Codex accounts apply independently. Also performs the idempotent
@@ -49,10 +68,11 @@ function pathWithinRoot(p, root) {
  * the default dir) at the spawn choke point, so an account reached only through
  * a per-project override still has its history/skills/hooks linked.
  */
-export function resolveAccountEnvForCwd(cwd) {
+export function resolveAccountEnvForCwd(cwd, { claudeAccountPin } = {}) {
   const projectAccount = cwd ? getProjectAccount(cwd) : null;
   let activeAccount = null;
   let codexAccount = null;
+  let pinned;
   {
     const cfgNow = loadConfig();
     const accts = cfgNow.accounts || [];
@@ -61,9 +81,13 @@ export function resolveAccountEnvForCwd(cwd) {
     const activeCodexId = cfgNow.activeCodexAccountId;
     if (projectAccount && projectAccount.type === 'codex') codexAccount = projectAccount;
     else if (activeCodexId) codexAccount = accts.find((a) => a.id === activeCodexId && a.type === 'codex') || null;
+    pinned = resolveClaudeAccountPin(claudeAccountPin, accts);
   }
   const claudeProjectAccount = (projectAccount && projectAccount.type === 'claude') ? projectAccount : null;
-  const account = resolveTerminalAccount(claudeProjectAccount, activeAccount);
+  // A tab moved to an account by hand (or by auto-move) keeps that account
+  // over the project's and the active one: the move is the most specific
+  // choice there is. undefined = no pin; null = pinned to Default.
+  const account = pinned !== undefined ? pinned : resolveTerminalAccount(claudeProjectAccount, activeAccount);
 
   if (account?.type === 'claude' && account.claudeJsonPath) {
     try { shareProfile(path.dirname(expandTilde(account.claudeJsonPath))); }

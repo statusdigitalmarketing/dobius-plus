@@ -21,6 +21,7 @@ import QuitOverlay from '../shared/QuitOverlay';
 import CommandPalette from '../shared/CommandPalette';
 import NewTabPicker from './NewTabPicker';
 import ResumeBanner from './ResumeBanner';
+import AccountMoveBanner from './AccountMoveBanner';
 import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
@@ -1209,6 +1210,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
           >
             <TerminalTabBar tearOffTabId={tearOffTabId || null} />
             <ResumeBanner projectPath={projectPath} />
+            <AccountMoveBanner />
             {(() => {
               // Single layout engine for all modes. Every TerminalPane mounts ONCE
               // in this container and is positioned purely by CSS — never moved

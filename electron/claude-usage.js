@@ -291,6 +291,30 @@ export async function readUsageRecords(userDataDir) {
 }
 
 /**
+ * Delete records nobody has refreshed in `maxAgeMs` (one file per session is
+ * written forever, and every one is read on each sample), and temp files a
+ * killed reporter left behind. Only names this module writes are touched.
+ */
+export async function pruneUsageRecords(userDataDir, maxAgeMs, now = Date.now()) {
+  const dir = usageDirPath(userDataDir);
+  let names;
+  try { names = await fs.readdir(dir); } catch { return 0; }
+  let removed = 0;
+  await Promise.all(names.map(async (name) => {
+    const tmp = /^\.tmp\.[A-Za-z0-9_-]+\.\d+$/.test(name);
+    if (!tmp && !/^[A-Za-z0-9_-]+\.json$/.test(name)) return;
+    const file = path.join(dir, name);
+    try {
+      const st = await fs.lstat(file);
+      if (!st.isFile() || now - st.mtimeMs < (tmp ? 3600_000 : maxAgeMs)) return;
+      await fs.unlink(file);
+      removed += 1;
+    } catch { /* vanished or not ours to remove */ }
+  }));
+  return removed;
+}
+
+/**
  * Fold records into one reading per CREDENTIAL.
  *
  * The rule is NEWEST RECEIPT, and nothing else.

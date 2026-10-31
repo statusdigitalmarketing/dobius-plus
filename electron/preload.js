@@ -189,6 +189,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Account management
   accountsList: () => ipcRenderer.invoke('accounts:list'),
   accountsIdentities: () => ipcRenderer.invoke('accounts:identities'),
+  // Per-account usage, Move to account, auto-move (account-headroom-service.js).
+  accountsUsage: () => ipcRenderer.invoke('accounts:usage'),
+  accountsMoveTargets: (tabId) => ipcRenderer.invoke('accounts:moveTargets', tabId),
+  accountsMoveCandidates: (tabIds, targetId) => ipcRenderer.invoke('accounts:moveCandidates', tabIds, targetId),
+  accountsAutoMoveContinue: (tabId, eventId, failed) => ipcRenderer.invoke('accounts:autoMoveContinue', tabId, eventId, failed),
+  onAccountsAutoMove: (callback) => {
+    const handler = (_event, tabId, payload) => callback(tabId, payload);
+    ipcRenderer.on('accounts:autoMove', handler);
+    return () => ipcRenderer.removeListener('accounts:autoMove', handler);
+  },
+  onAccountsAutoMoveNotice: (callback) => {
+    const handler = (_event, tabId, payload) => callback(tabId, payload);
+    ipcRenderer.on('accounts:autoMoveNotice', handler);
+    return () => ipcRenderer.removeListener('accounts:autoMoveNotice', handler);
+  },
   accountsSave: (account) => ipcRenderer.invoke('accounts:save', account),
   accountsDelete: (accountId) => ipcRenderer.invoke('accounts:delete', accountId),
   claudeUsageGetStatus: () => ipcRenderer.invoke('claudeUsage:getStatus'),

@@ -20,7 +20,8 @@ const stallWatchdog = createStallWatchdog({ log: logLine });
 stallWatchdog.wrapIpc(ipcMain);
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
-import { accountIdentities } from './account-identity.js';
+import { accountIdentities, identityFor, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
+import { createHeadroomService } from './account-headroom-service.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
@@ -28,24 +29,27 @@ import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses } from './claude-process-scan.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
-  readUsageRecords, aggregateUsage,
+  readUsageRecords, aggregateUsage, pruneUsageRecords,
   planStatusLineInstall, planStatusLineRemove, ownsStatusLine, chainFromScript, scriptPathFromCommand, MODEL_LINE_MARKER,
 } from './claude-usage.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputAgeMs, terminalInputSeq, terminalRawOutputSeq, terminalClosing, sendToTerminalWindow } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, setInputHeldCheck } from './chat-service.js';
 import { launchCommandFor } from '../shared/new-tab.js';
+import { renderScreenLines } from './screen-render.js';
+import { isClaudePromptReady, promptBoxText } from './bridge-open-tab.js';
+import { stripAnsi } from './selector-parser.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
-  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
+  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage, getSessionLimitRecord } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
 } from './build-monitor-service.js';
@@ -263,7 +267,10 @@ function setupTerminalHandlers() {
     // Per-account env (codex/claude), resolved at the one spawn choke point.
     // Shared with the mobile spawn paths via resolveAccountEnvForCwd so a phone
     // terminal lands on the same active accounts as a desktop one (reviewer P2).
-    const accountEnv = resolveAccountEnvForCwd(cwd);
+    // A tab moved to an account carries a pin naming it (an account id, looked
+    // up in config there; never a directory).
+    const claudeAccountPin = opts && typeof opts === 'object' ? opts.claudeAccountPin : undefined;
+    const accountEnv = resolveAccountEnvForCwd(cwd, { claudeAccountPin });
     // A New Tab (store.openNewTab) starts its tool: 'default' is the Settings
     // choice, read here; anything outside the fixed set starts nothing.
     const launch = opts && typeof opts === 'object' ? opts.launch : undefined;
@@ -2247,6 +2254,72 @@ function setupFileHandlers() {
   });
 }
 
+// Per-account usage with pace and forecast, Move to account, and the opt-in
+// auto-move when a tab hits a limit. Rules: account-headroom.js; the service
+// (account-headroom-service.js) gets everything system-facing from here.
+let headroom = null;
+function setupHeadroomHandlers() {
+  const ownsTab = (event, tabId) => typeof tabId === 'string' && TERMINAL_ID_RE.test(tabId) && ownsTerminal(event.sender.id, tabId);
+  headroom = createHeadroomService({
+    userDataDir: app.getPath('userData'),
+    now: () => Date.now(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    getAccounts: () => loadConfig().accounts || [],
+    // The Default row is what a Default terminal inherits; a tab whose shell
+    // had CLAUDE_CONFIG_DIR unset is on the CLI's own ~/.claude.
+    defaultDir: () => effectiveDefaultDir(),
+    defaultEnvUnset: () => !process.env.CLAUDE_CONFIG_DIR,
+    cliDefaultDir: () => defaultClaudeDir(),
+    keyFor: (dir) => { try { return keychainServiceFor(dir); } catch { return null; } },
+    identity: (dir, opts) => identityFor(dir, opts),
+    readRecords: () => readUsageRecords(app.getPath('userData')),
+    scan: () => scanClaudeProcesses(),
+    autoMoveEnabled: () => getSettings().autoMoveOnLimit === true,
+    tabs: () => listTerminals(),
+    activity: (id) => terminalStatus.statusFor(id),
+    claudeInfo: (id) => getTerminalClaudeInfo(id),
+    resolveSession: (id) => resolveSessionForTab(id),
+    process: (id) => getTerminalProcess(id),
+    limitRecord: (sessionId, projectPath) => getSessionLimitRecord(sessionId, projectPath),
+    strippedTail: (id) => stripAnsi((getTerminalBuffer(id) || '').slice(-16384)),
+    screen: async (id) => {
+      const lines = await renderScreenLines((getTerminalBuffer(id) || '').slice(-262144), { cols: terminalCols(id) });
+      return lines ? { lines, modes: lines.modes } : null;
+    },
+    promptReady: (lines, modes) => isClaudePromptReady(lines, modes),
+    promptBox: (lines, modes) => promptBoxText(lines, modes),
+    pruneRecords: (maxAgeMs) => pruneUsageRecords(app.getPath('userData'), maxAgeMs),
+    windowOf: (id) => getTerminalWebContentsId(id),
+    send: (id, channel, payload) => sendToTerminalWindow(id, channel, payload),
+    inputAgeMs: (id) => terminalInputAgeMs(id),
+    inputSeq: (id) => terminalInputSeq(id),
+    outputSeq: (id) => terminalRawOutputSeq(id),
+    pty: (id) => terminalInstance(id),
+    closing: (id) => terminalClosing(id),
+    submit: (id, text, stillOk) => submitPromptToTab(id, text, stillOk),
+    log: (kind, detail) => { console.log(`[${kind}] ${detail}`); logLine(kind, detail); },
+  });
+  ipcMain.handle('accounts:usage', async () => {
+    try { return await headroom.usage(); } catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('accounts:moveTargets', async (event, tabId) => {
+    if (!ownsTab(event, tabId)) return { ok: false, error: 'not your tab' };
+    try { return await headroom.moveTargets(tabId); } catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('accounts:moveCandidates', async (event, tabIds, targetId) => {
+    const mine = (Array.isArray(tabIds) ? tabIds : []).filter((id) => ownsTab(event, id));
+    if (targetId !== null && typeof targetId !== 'string') return [];
+    try { return await headroom.moveCandidates(mine, targetId); } catch { return []; }
+  });
+  ipcMain.handle('accounts:autoMoveContinue', async (event, tabId, eventId, failed) => {
+    if (!ownsTab(event, tabId) || typeof eventId !== 'string') return { ok: false };
+    return headroom.continueAfterMove(tabId, eventId, event.sender.id, typeof failed === 'string' ? failed : null);
+  });
+  // Sampling keeps pace honest even while no panel is open; auto-move rides
+  // the same tick. unref'd: never keeps the app alive.
+  setInterval(() => { headroom.tick(); }, 15_000).unref();
+}
+
 function setupConfigHandlers() {
   ipcMain.handle('config:load', () => loadConfig());
   ipcMain.handle('config:save', (_event, config) => saveConfig(config));
@@ -3681,6 +3754,7 @@ app.whenReady().then(() => {
   setupBuildMonitorHandlers();
   setupGitHandlers();
   setupFileWatcherHandlers();
+  setupHeadroomHandlers();
   setupMenu();
   createWindow();
   initAutoUpdater();
