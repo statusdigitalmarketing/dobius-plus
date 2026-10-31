@@ -142,15 +142,66 @@ export async function answerSelector(id, data, token, stillOk = () => true, befo
 
 const SUBMIT_ENTER_DELAY_MS = 250;
 const RAW_KEY_GAP_MS = 20;
-// tabId -> { running, items, gen }. gen bumps on a cancel key; an item queued
-// under an older gen is dropped instead of written.
+// Input a terminal window still holds back for the tab (prompt editing: an
+// image paste being saved, the keys typed after it). A submit waits for it at
+// the head of this queue, so its paste never lands between that input's
+// parts. main.js wires the check (bridge-open-main.js inputHeld).
+let inputHeld = () => false;
+// And marks the window's current hold as having lost input, so its drain
+// cancels every submit waiting on it, including ones accepted later.
+let markHeldLost = () => {};
+export function setInputHeldCheck(fn, lost) {
+  inputHeld = typeof fn === 'function' ? fn : () => false;
+  markHeldLost = typeof lost === 'function' ? lost : () => {};
+}
+
+/**
+ * A key a window took but still holds (bridge-open-main.js terminal:inputHeld).
+ * A cancel key among it cancels queued submits NOW, as it would on arrival:
+ * the window may still drop it (its paste timed out) and never send it.
+ */
+export function noteHeldInput(id, data) {
+  const q = submitQueues.get(id);
+  if (q && typeof data === 'string' && isCancelKey(data)) q.gen += 1;
+}
+
+/**
+ * A window that held input for the tab is gone (crashed, reloaded, closed)
+ * with that input half sent: queued submits are cancelled, never appended
+ * to whatever part of it reached the terminal.
+ */
+export function cancelQueuedSubmits(id) {
+  const q = submitQueues.get(id);
+  if (q) q.gen += 1;
+}
+
+/**
+ * Input the person meant to go first was dropped before it reached the
+ * terminal (a prompt-only paste): submits not yet pasted are dropped, the
+ * one already in the box (which that input never touched) keeps its Enter.
+ */
+export function dropUnpastedSubmits(id) {
+  const q = submitQueues.get(id);
+  if (q) q.dropGen += 1;
+}
+const HELD_WAIT_MS = 16_000; // prompt editing gives up on a paste after 15s
+const HELD_POLL_MS = 50;
+// When this queue last delivered an Enter to each tab (a submit's, or a key
+// that waited behind one: the window that typed it cannot see when it really
+// went out). A prompt-only paste arriving within PROMPT_SETTLE_MS of it is
+// dropped (writeRawInput).
+const lastSubmitEnterAt = new Map();
+const PROMPT_SETTLE_MS = 1000; // src/lib/prompt-edit-term.js AFTER_ENTER_MS
+// tabId -> { running, items, gen, dropGen }. gen bumps on a cancel key; an item queued
+// under an older gen is dropped instead of written. dropGen bumps when a
+// prompt-only paste is dropped; it drops only submits not yet pasted.
 const submitQueues = new Map();
 
 const isCancelKey = (data) => data === '\x1b' || data.includes('\x03') || data.includes('\x15');
 
 function queueFor(id) {
   let q = submitQueues.get(id);
-  if (!q) { q = { running: false, items: [], gen: 0 }; submitQueues.set(id, q); }
+  if (!q) { q = { running: false, items: [], gen: 0, dropGen: 0 }; submitQueues.set(id, q); }
   return q;
 }
 
@@ -195,7 +246,7 @@ export function submitPromptDetailed(id, text, stillOk = () => true, onStranded 
   if (!stillOk()) return Promise.resolve(refused('not_allowed'));
   const q = queueFor(id);
   return new Promise((resolve) => {
-    q.items.push({ clean, pty, stillOk, gen: q.gen, resolve, onStranded });
+    q.items.push({ clean, pty, stillOk, gen: q.gen, dropGen: q.dropGen, resolve, onStranded });
     if (!q.running) drainSubmits(id, q);
   });
 }
@@ -216,7 +267,7 @@ const refused = (reason) => ({ ok: false, reason });
  * signal says the program read it (docs/mobile-ws-protocol.md). Callers that
  * do not care ignore it.
  */
-export function writeRawInput(id, data, stillOk = () => true) {
+export function writeRawInput(id, data, stillOk = () => true, { promptOnly = false } = {}) {
   if (typeof data !== 'string' || !data) return Promise.resolve(refused('empty'));
   // A frame already in flight when its phone was revoked: not even a cancel
   // key, which would also throw away the desktop's pending submit.
@@ -242,7 +293,21 @@ export function writeRawInput(id, data, stillOk = () => true) {
     }
     return Promise.resolve(r);
   }
-  if (!q || !q.running) { const r = written(); writeTerminal(id, data); return Promise.resolve(r); }
+  // A submit waiting for held input lets keys through: that input arriving
+  // is what it waits for, and it was taken before the submit.
+  // Prompt editing checked that Claude's prompt was showing when it sent
+  // this (a file path pasted into it). Behind a submit it would land later,
+  // maybe in the shell a "/exit" left behind; and just after a submit's
+  // Enter that check may have read the screen from before it: dropped.
+  // (Prompt editing waits the same second after its own Enter.)
+  // A dropped paste is input lost: queued submits are cancelled with it,
+  // never sent without the attachment the person meant to go first.
+  // Only submits not yet pasted (dropGen): the one already in the box is
+  // what the box holds, the dropped paste never reached it.
+  const dropPaste = () => { if (q) q.dropGen += 1; markHeldLost(id); return Promise.resolve(refused('prompt_dropped')); };
+  if (promptOnly && Date.now() - (lastSubmitEnterAt.get(id) ?? -Infinity) < PROMPT_SETTLE_MS) return dropPaste();
+  if (!q || !q.running || q.waitingHeld) { const r = written(); writeTerminal(id, data); return Promise.resolve(r); }
+  if (promptOnly) return dropPaste();
   return new Promise((resolve) => {
     q.items.push({ raw: data, pty: terminalInstance(id), stillOk, gen: q.gen, resolve });
   });
@@ -279,9 +344,44 @@ async function drainSubmits(id, q) {
         if (skip) { it.resolve(refused(skip)); continue; }
         it.touched = true;
         writeTerminal(id, it.raw);
+        if (it.raw.includes('\r')) lastSubmitEnterAt.set(id, Date.now());
         it.resolve(DONE);
         continue;
       }
+      if (inputHeld(id)) {
+        // Keys already queued behind this submit came while that input was
+        // held: they go now, in order, ahead of the keys still to come, and
+        // paced like any queued key (a burst would read as a paste, its Enter
+        // as a newline). Keys arriving meanwhile queue behind them.
+        for (let k; (k = q.items.findIndex((x) => x.raw !== undefined)) >= 0;) {
+          const [x] = q.items.splice(k, 1);
+          await new Promise((r) => setTimeout(r, RAW_KEY_GAP_MS));
+          const xSkip = skipReason(id, q, x);
+          if (xSkip) { x.resolve(refused(xSkip)); continue; }
+          try {
+            writeTerminal(id, x.raw);
+          } catch (err) {
+            // Spliced out of the queue, so the catch below would not reach it.
+            x.resolve({ ...refused('write_failed'), uncertain: true });
+            throw err;
+          }
+          if (x.raw.includes('\r')) lastSubmitEnterAt.set(id, Date.now());
+          x.resolve(DONE);
+        }
+        q.waitingHeld = true;
+        const end = Date.now() + HELD_WAIT_MS;
+        while (inputHeld(id) && Date.now() < end && it.gen === q.gen && terminalInstance(id) === it.pty && !terminalClosing(id)) {
+          await new Promise((r) => setTimeout(r, HELD_POLL_MS));
+        }
+        q.waitingHeld = false;
+        // Still held, cancelled (Ctrl+C), or the shell replaced meanwhile:
+        // nothing is typed, so nothing about it is uncertain.
+        skip = skipReason(id, q, it) || (inputHeld(id) ? 'cancelled' : '');
+        if (skip) { it.resolve(refused(skip)); continue; }
+      }
+      // A prompt-only paste was dropped since this was accepted (writeRawInput):
+      // the person's attachment never went in, so this does not go either.
+      if (it.dropGen !== q.dropGen) { it.resolve(refused('cancelled')); continue; }
       it.touched = true;
       writeTerminal(id, `\x1b[200~${it.clean}\x1b[201~`);
       const pastedAt = terminalInputSeq(id);
@@ -315,6 +415,7 @@ async function drainSubmits(id, q) {
         continue;
       }
       writeTerminal(id, '\r');
+      lastSubmitEnterAt.set(id, Date.now());
       it.resolve(DONE);
     }
   } catch (err) {
@@ -329,6 +430,7 @@ async function drainSubmits(id, q) {
     for (const it of q.items.splice(0)) it.resolve(refused('write_failed'));
   } finally {
     q.current = null;
+    q.waitingHeld = false;
     q.running = false;
     if (submitQueues.get(id) === q) submitQueues.delete(id);
   }

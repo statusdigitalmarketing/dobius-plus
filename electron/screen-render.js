@@ -26,6 +26,10 @@ const { Terminal } = headless;
 // a full frame always fits without scrolling rows off mid-frame.
 const COLS = 220;
 const ROWS = 120;
+// A caller that knows the PTY's real width passes it (opts.cols): a window
+// wider than COLS (a big display, a small font) would otherwise wrap Claude's
+// full-width rules here and misplace every row after them. Capped.
+const MAX_COLS = 1000;
 
 let pooled = null;
 
@@ -51,15 +55,17 @@ export function renderScreenLines(raw, opts) {
   return run;
 }
 
-function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
+function renderScreenLinesNow(raw, { timeoutMs = 750, cols } = {}) {
+  const width = Math.min(MAX_COLS, Math.max(COLS, Number.isInteger(cols) ? cols : 0));
   return new Promise((resolve) => {
     let term;
     try {
       if (!pooled) {
-        pooled = new Terminal({ cols: COLS, rows: ROWS, scrollback: 0, allowProposedApi: true, logLevel: 'off' });
+        pooled = new Terminal({ cols: width, rows: ROWS, scrollback: 0, allowProposedApi: true, logLevel: 'off' });
       }
       term = pooled;
       term.reset();
+      if (term.cols !== width) term.resize(width, ROWS);
     } catch {
       resolve(null);
       return;
@@ -88,7 +94,7 @@ function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
           let run = '';
           let col = 0;
           let at = -1;
-          for (let x = 0; x < COLS; x += 1) {
+          for (let x = 0; x < width; x += 1) {
             const cell = line?.getCell(x);
             if (!cell) break;
             if (cell.getWidth() === 0) continue; // second half of a wide char
@@ -116,7 +122,7 @@ function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
           let end = 0;
           let start = -1;
           let wordEnd = -1;
-          for (let x = 0; x < COLS; x += 1) {
+          for (let x = 0; x < width; x += 1) {
             const cell = line?.getCell(x);
             if (!cell) break;
             const w = cell.getWidth();
@@ -136,6 +142,12 @@ function renderScreenLinesNow(raw, { timeoutMs = 750 } = {}) {
         }
         Object.defineProperty(out, 'ends', { value: ends });
         Object.defineProperty(out, 'firstWords', { value: firstWords });
+        // Whether the program asked for bracketed paste: /openTab only pastes
+        // into a Claude that turned it on (bridge-open-tab.js).
+        // And where the cursor is (row and column of the screen): Claude's
+        // default renderer keeps it on the caret, so it tells the real input
+        // box from a lookalike drawn elsewhere (a status line, a selector).
+        Object.defineProperty(out, 'modes', { value: { bracketedPaste: !!term.modes?.bracketedPasteMode, cursor: { x: buf.cursorX, y: buf.cursorY } } });
         resolve(out);
       } catch {
         resolve(null);

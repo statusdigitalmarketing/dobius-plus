@@ -8,8 +8,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Terminal
-  terminalCreate: (id, cwd) => ipcRenderer.invoke('terminal:create', id, cwd),
-  terminalWrite: (id, data) => ipcRenderer.send('terminal:write', id, data),
+  terminalCreate: (id, cwd, opts) => ipcRenderer.invoke('terminal:create', id, cwd, opts),
+  terminalWrite: (id, data, opts) => ipcRenderer.send('terminal:write', id, data, opts),
+  // Input prompt editing holds back (data), or null once it is all gone
+  // (dropped: some of it was thrown away rather than sent).
+  terminalInputHeld: (id, data, dropped) => ipcRenderer.send('terminal:inputHeld', id, data, dropped),
   chatPoll: (id, have) => ipcRenderer.invoke('chat:poll', id, have),
   chatSelector: (id) => ipcRenderer.invoke('chat:selector', id),
   chatImage: (sessionId, projectPath, ref) => ipcRenderer.invoke('chat:image', sessionId, projectPath, ref),
@@ -113,6 +116,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataListProjects: () => ipcRenderer.invoke('data:listProjects'),
   dataLoadAllSessions: (projectFilter, opts) => ipcRenderer.invoke('data:loadAllSessions', projectFilter, opts),
   dataGetAllProjectTabs: () => ipcRenderer.invoke('data:getAllProjectTabs'),
+  tabsActivity: (tabIds) => ipcRenderer.invoke('tabs:activity', tabIds),
+  // Mirror this window's unread tab ids so other windows' sidebars can show Done.
+  tabsReportUnread: (ids) => ipcRenderer.send('tabs:reportUnread', ids),
   dataGetSessionSize: (sessionId, projectPath) => ipcRenderer.invoke('data:getSessionSize', sessionId, projectPath),
   dataGetLooseEnds: (opts) => ipcRenderer.invoke('data:getLooseEnds', opts),
   dataClaimSessionResume: (sessionId, tabId) => ipcRenderer.invoke('data:claimSessionResume', sessionId, tabId),
@@ -155,6 +161,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('data:updated', handler);
     return () => ipcRenderer.removeListener('data:updated', handler);
   },
+  // A running session's tab name changed (History names sessions by tab).
+  onSessionNamesChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('sessions:namesChanged', handler);
+    return () => ipcRenderer.removeListener('sessions:namesChanged', handler);
+  },
 
   // File change watcher
   filewatcherWatch: (projectPath) => ipcRenderer.invoke('filewatcher:watch', projectPath),
@@ -192,6 +204,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   claudeUsageEnable: (opts) => ipcRenderer.invoke('claudeUsage:enable', opts),
   claudeUsageDisable: () => ipcRenderer.invoke('claudeUsage:disable'),
   claudeUsageRead: () => ipcRenderer.invoke('claudeUsage:read'),
+  modelLineGetStatus: () => ipcRenderer.invoke('modelLine:getStatus'),
+  modelLineSet: (on, opts) => ipcRenderer.invoke('modelLine:set', on, opts),
   accountsSwitchPlan: (targetEmail) => ipcRenderer.invoke('accounts:switchPlan', targetEmail),
   accountsSwitchRun: (targetEmail, cliPath, allowKeys) => ipcRenderer.invoke('accounts:switchRun', targetEmail, cliPath, allowKeys),
   accountsSwitchCancel: () => ipcRenderer.invoke('accounts:switchCancel'),
@@ -216,6 +230,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Window management
   windowOpenProject: (projectPath) => ipcRenderer.invoke('window:openProject', projectPath),
+  // New Tab picker: a new tab in ANOTHER project's window (opened if needed).
+  // That window takes the request once its tabs are ready.
+  windowOpenProjectNewTab: (projectPath) => ipcRenderer.invoke('window:openProjectNewTab', projectPath),
+  windowTakePendingNewTab: () => ipcRenderer.invoke('window:takePendingNewTab'),
+  onWindowNewTabRequest: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('window:newTabRequest', handler);
+    return () => ipcRenderer.removeListener('window:newTabRequest', handler);
+  },
   windowFocusTabOwner: (projectPath, tabId) => ipcRenderer.invoke('window:focusTabOwner', projectPath, tabId),
   windowIsFocused: () => ipcRenderer.invoke('window:isFocused'),
   onWindowFocusChanged: (callback) => {
@@ -293,6 +316,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('tab:adoptFailed', handler);
   },
   terminalClaimPty: (tabId) => ipcRenderer.invoke('terminal:claimPty', tabId),
+  // /openTab on the local bridge: main asks a primary window for a new tab
+  // and the window answers with its id; a repeat brings that tab forward.
+  onBridgeOpenTab: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('bridge:openTab', handler);
+    return () => ipcRenderer.removeListener('bridge:openTab', handler);
+  },
+  bridgeTabOpened: (nonce, tabId) => ipcRenderer.send('bridge:tabOpened', nonce, tabId),
+  // True (once) when /openTab opened this window: its request's tab is the first.
+  windowOpenedForBridge: () => ipcRenderer.invoke('window:openedForBridge'),
+  onBridgeDropTab: (callback) => {
+    const handler = (_event, tabId) => callback(tabId);
+    ipcRenderer.on('bridge:dropTab', handler);
+    return () => ipcRenderer.removeListener('bridge:dropTab', handler);
+  },
+  onBridgeFocusTab: (callback) => {
+    const handler = (_event, tabId) => callback(tabId);
+    ipcRenderer.on('bridge:focusTab', handler);
+    return () => ipcRenderer.removeListener('bridge:focusTab', handler);
+  },
 
   // Build Monitor
   buildMonitorLoadProgress: (projectDir) => ipcRenderer.invoke('buildMonitor:loadProgress', projectDir),

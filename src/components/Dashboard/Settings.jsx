@@ -4,6 +4,7 @@ import { buildPairingWebLink } from '../../../shared/pairing-link.js';
 import { useStore } from '../../store/store';
 import { CURATED_TERMINAL_FONTS, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
+import { normalizeNewTabTool } from '../../../shared/new-tab.js';
 import AccountsSection from './AccountsSection';
 import GwsAccounts from './GwsAccounts';
 
@@ -17,6 +18,7 @@ export default function Settings() {
     terminalFontSize: 13,
     terminalFontFamily: '',
     sidebarDefaultOpen: false,
+    newTabTool: 'claude',
   });
   const [loaded, setLoaded] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -37,6 +39,10 @@ export default function Settings() {
   const [statusHooks, setStatusHooks] = useState(false);
   const [statusHooksBusy, setStatusHooksBusy] = useState(false);
   const [statusHooksError, setStatusHooksError] = useState('');
+  // Model + effort on Claude's status line, under the prompt
+  const [modelLine, setModelLine] = useState(null);
+  const [modelLineBusy, setModelLineBusy] = useState(false);
+  const [modelLineError, setModelLineError] = useState('');
   const [voiceConductor, setVoiceConductor] = useState(false);
   const [errorLogPath, setErrorLogPath] = useState('');
 
@@ -82,6 +88,35 @@ export default function Settings() {
     if (r?.error) setStatusHooksError(r.error);
     else setStatusHooks(!!r?.installed);
     setStatusHooksBusy(false);
+  }, []);
+
+  // Account usage (in the Accounts section) installs the same status line, so
+  // it announces changes and this re-reads rather than showing a stale switch.
+  // Focus covers a change made from another window.
+  useEffect(() => {
+    const refresh = () => window.electronAPI?.modelLineGetStatus?.().then((r) => { if (r) setModelLine(r); });
+    refresh();
+    window.addEventListener('dobius:statusline-changed', refresh);
+    window.addEventListener('focus', refresh);
+    return () => {
+      window.removeEventListener('dobius:statusline-changed', refresh);
+      window.removeEventListener('focus', refresh);
+    };
+  }, []);
+
+  const toggleModelLine = useCallback(async (on) => {
+    setModelLineBusy(true);
+    setModelLineError('');
+    let r = await window.electronAPI?.modelLineSet?.(on);
+    // Same consent as the status dots: never create settings.json unasked.
+    if (r?.error === 'needs-confirm-create') {
+      if (window.confirm(`${r.message}\n\nCreate it now?`)) r = await window.electronAPI?.modelLineSet?.(on, { confirmCreate: true });
+      else r = null;
+    }
+    if (r?.error) setModelLineError(r.error);
+    // Account usage shares the status line; this also refreshes the switch here.
+    window.dispatchEvent(new Event('dobius:statusline-changed'));
+    setModelLineBusy(false);
   }, []);
 
   // iMessage Bridge state
@@ -256,11 +291,11 @@ export default function Settings() {
       </div>
 
       {/* Accounts */}
-      <AccountsSection />
-      <GwsAccounts />
+      <div data-settings-section="accounts"><AccountsSection /></div>
+      <div data-settings-section="gws"><GwsAccounts /></div>
 
       {/* Appearance */}
-      <Section title="Appearance">
+      <Section id="appearance" title="Appearance">
         <SettingRow label="Theme" description="Terminal and UI color theme">
           <div className="flex items-center gap-2">
             <select
@@ -282,8 +317,10 @@ export default function Settings() {
               ))}
             </select>
             <div
-              className="flex gap-0.5 rounded overflow-hidden"
-              style={{ border: '1px solid var(--border)' }}
+              className="flex flex-wrap gap-0.5 rounded overflow-hidden"
+              // Two rows of 16 swatches: one row of every theme ran past the
+              // settings column, and off a narrow window beside the side nav.
+              style={{ border: '1px solid var(--border)', maxWidth: 288 }}
             >
               {THEMES.map((t, i) => (
                 <button
@@ -364,7 +401,31 @@ export default function Settings() {
       </Section>
 
       {/* Terminal */}
-      <Section title="Terminal">
+      <Section id="terminal" title="Terminal">
+        <SettingRow
+          label="New Tab Starts"
+          description="What a new tab runs in its project folder (Cmd+T, or the + project picker), back to your shell when it exits. Needs zsh or bash. Restored tabs are left alone."
+        >
+          <select
+            value={normalizeNewTabTool(settings.newTabTool)}
+            onChange={(e) => updateSetting('newTabTool', e.target.value)}
+            data-testid="new-tab-tool"
+            style={{
+              backgroundColor: 'var(--bg)',
+              color: 'var(--fg)',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              padding: '4px 8px',
+              fontSize: 12,
+              fontFamily: "'SF Mono', monospace",
+              outline: 'none',
+            }}
+          >
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+            <option value="shell">Plain shell</option>
+          </select>
+        </SettingRow>
         <SettingRow label="Scrollback Lines" description={`Save up to ${settings.scrollbackLines.toLocaleString()} lines on window close`}>
           <select
             value={settings.scrollbackLines}
@@ -390,7 +451,7 @@ export default function Settings() {
       </Section>
 
       {/* Projects */}
-      <Section title="Projects">
+      <Section id="projects" title="Projects">
         <SettingRow label="Project Scan Directory" description="Dobius+ scans this folder to find your projects">
           <div className="flex items-center gap-2">
             <input
@@ -452,6 +513,28 @@ export default function Settings() {
           </div>
         </SettingRow>
 
+        <SettingRow
+          label="Show model under the prompt"
+          description={
+            modelLine?.installedElsewhere
+              ? 'Another copy of Dobius owns Claude\'s status line. Turn this on here to take it over.'
+              : modelLine?.theirs && !modelLine?.on
+                ? 'You have your own Claude status line. Turning this on puts the model in front of it; yours keeps working and is restored when you turn this off.'
+                : 'Shows the model and effort (e.g. Opus 5.5 · extra high) on Claude\'s status line, under the prompt, so it stays visible after the startup banner scrolls away.'
+          }
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {modelLineError && (
+              <span style={{ color: 'var(--danger)', fontSize: 10, maxWidth: 180 }}>{modelLineError}</span>
+            )}
+            <Toggle
+              checked={!!modelLine?.on}
+              disabled={modelLineBusy || modelLine === null}
+              onChange={(v) => toggleModelLine(v)}
+            />
+          </div>
+        </SettingRow>
+
         {Array.isArray(settings.hiddenSessionPaths) && settings.hiddenSessionPaths.length > 0 && (
           <SettingRow
             label="Hidden session sources"
@@ -493,7 +576,7 @@ export default function Settings() {
       </Section>
 
       {/* Integrations */}
-      <Section title="Integrations">
+      <Section id="integrations" title="Integrations">
         <SettingRow label="Asana PAT" description="Personal access token for the Asana sync button in Tasks">
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <input
@@ -549,7 +632,7 @@ export default function Settings() {
       </Section>
 
       {/* Mobile Access */}
-      <Section title="Mobile Access">
+      <Section id="mobile" title="Mobile Access">
         <SettingRow
           label="Mobile Server"
           description="Reach your terminals from your phone or iPad"
@@ -722,7 +805,7 @@ export default function Settings() {
       </Section>
 
       {/* iMessage Bridge — text yourself to drive Dobius */}
-      <Section title="iMessage Bridge">
+      <Section id="imessage" title="iMessage Bridge">
         <SettingRow
           label="Enable bridge"
           description="Text yourself in iMessage with the prefix below to drive Dobius."
@@ -818,7 +901,7 @@ export default function Settings() {
       </Section>
 
       {/* Keyboard Shortcuts */}
-      <Section title="Keyboard Shortcuts">
+      <Section id="shortcuts" title="Keyboard Shortcuts">
         <div className="space-y-1.5">
           <ShortcutRow keys="Cmd+T" action="New Tab" />
           <ShortcutRow keys="Cmd+W" action="Close Tab" />
@@ -837,7 +920,7 @@ export default function Settings() {
         </div>
       </Section>
 
-      <Section title="Diagnostics">
+      <Section id="diagnostics" title="Diagnostics">
         <SettingRow
           label="Voice Conductor"
           description="A background Opus session for iPhone voice routing. Off by default: leave it off unless you use the voice Shortcut. When on it self-recycles so it never fills memory."
@@ -865,9 +948,9 @@ export default function Settings() {
   );
 }
 
-function Section({ title, children }) {
+function Section({ id, title, children }) {
   return (
-    <div>
+    <div data-settings-section={id}>
       <div
         className="text-xs font-medium uppercase tracking-wider mb-3 pb-1"
         style={{ color: 'var(--dim)', fontSize: 10, borderBottom: '1px solid var(--border)' }}

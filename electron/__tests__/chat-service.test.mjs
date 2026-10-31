@@ -326,4 +326,169 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   ok('tokens from another app process never match');
 }
 
+// A window still holds input for the tab (prompt editing: an image paste
+// being saved, keys typed after it). A Chat send, from the desktop or the
+// phone, waits for it at the head of the queue, in order, and is cancelled
+// by Ctrl+C or a replaced shell meanwhile.
+{
+  const { setInputHeldCheck } = await import('../chat-service.js');
+  let held = true;
+  setInputHeldCheck((id) => id === 'h' && held);
+  const tick = (ms) => new Promise((res) => setTimeout(res, ms));
+  reset(); ptys.set('h', {});
+  const a = submitPromptToTab('h', 'A');
+  const b = submitPromptToTab('h', 'B');
+  await tick(120);
+  assert.equal(writes.length, 0, 'nothing pasted while input is held');
+  assert.equal(submitPending('h'), true);
+  writeRawInput('h', "\x1b[200~'/tmp/shot.png'\x1b[201~"); // the held paste arrives first
+  writeRawInput('h', '\r');
+  held = false;
+  assert.deepEqual(await Promise.all([a, b]), [true, true]);
+  assert.deepEqual(writes.map((w) => w[1]), ["\x1b[200~'/tmp/shot.png'\x1b[201~", '\r', PASTE('A'), '\r', PASTE('B'), '\r']);
+
+  held = true;
+  reset(); ptys.set('h', {});
+  const c = submitPromptToTab('h', 'C');
+  await tick(80);
+  writeRawInput('h', '\x03');
+  held = false;
+  assert.equal(await c, false, 'Ctrl+C while it waited cancels it');
+  assert.deepEqual(writes.map((w) => w[1]), ['\x03']);
+
+  held = true;
+  reset(); ptys.set('h', { gen: 1 });
+  const d = submitPromptToTab('h', 'echo reviewed');
+  await tick(80);
+  ptys.set('h', { gen: 2 }); // the shell was replaced while it waited
+  held = false;
+  assert.equal(await d, false);
+  assert.equal(writes.length, 0, 'nothing typed into the replacement');
+  // Keys queued behind a submit that then waits for held input go first, in
+  // order, before keys that come later (no suffix ahead of its prefix).
+  const { noteHeldInput } = await import('../chat-service.js');
+  held = false;
+  reset(); ptys.set('h', {});
+  const e1 = submitPromptToTab('h', 'one');
+  const e2 = submitPromptToTab('h', 'two');
+  writeRawInput('h', 'ab'); // queued behind both while "one" is running
+  held = true;
+  await tick(400); // "one" done; "two" now waits for the held input
+  writeRawInput('h', 'cd');
+  held = false;
+  assert.deepEqual(await Promise.all([e1, e2]), [true, true]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('one'), '\r', 'ab', 'cd', PASTE('two'), '\r']);
+
+  // A cancel key the window took and holds cancels a waiting submit at once,
+  // even if the window later drops it.
+  held = true;
+  reset(); ptys.set('h', {});
+  const f = submitPromptToTab('h', 'F');
+  await tick(80);
+  noteHeldInput('h', '\x03');
+  held = false;
+  assert.equal(await f, false);
+  assert.equal(writes.length, 0);
+
+  // A path prompt editing pasted into Claude's prompt is dropped, not
+  // delivered after a submit that may end Claude (/exit); idle it goes.
+  reset(); ptys.set('h', {});
+  const g = submitPromptToTab('h', '/exit');
+  writeRawInput('h', "\x1b[200~'/p/deploy.sh'\x1b[201~", () => true, { promptOnly: true });
+  writeRawInput('h', '\r');
+  await g;
+  await tick(100);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('/exit'), '\r', '\r'], 'the path never went out');
+  // ...and so is one that comes just after the submit's Enter, even with the
+  // queue finished (the screen it was checked on may predate that Enter).
+  writeRawInput('h', "\x1b[200~'/p/a.png'\x1b[201~", () => true, { promptOnly: true });
+  assert.equal(writes.length, 3, 'within a second of the Enter: dropped');
+  await tick(1050);
+  writeRawInput('h', "\x1b[200~'/p/a.png'\x1b[201~", () => true, { promptOnly: true });
+  assert.equal(writes.at(-1)[1], "\x1b[200~'/p/a.png'\x1b[201~", 'later it goes');
+
+  // Keys flushed ahead of a waiting submit are paced like queued keys: an
+  // Enter right behind its text would read as a pasted newline.
+  const stamps = [];
+  const push0 = writes.push;
+  writes.push = function (...a) { stamps.push(Date.now()); return push0.apply(this, a); };
+  held = false;
+  reset(); ptys.set('h', {});
+  const k1 = submitPromptToTab('h', 'one');
+  const k2 = submitPromptToTab('h', 'two');
+  writeRawInput('h', 'x');
+  writeRawInput('h', '\r');
+  held = true;
+  await tick(400);
+  held = false;
+  await Promise.all([k1, k2]);
+  writes.push = push0;
+  const order = writes.map((w) => w[1]);
+  assert.deepEqual(order, [PASTE('one'), '\r', 'x', '\r', PASTE('two'), '\r']);
+  assert.ok(stamps[2] - stamps[1] >= 15 && stamps[3] - stamps[2] >= 15, `paced: ${stamps.map((t) => t - stamps[0])}`);
+
+  // An Enter this queue delivered late (a key that waited behind a submit)
+  // starts the same one-second window: the window that typed it could not
+  // see when it went out.
+  held = false;
+  reset(); ptys.set('h', {});
+  const s1 = submitPromptToTab('h', 'A');
+  for (const k of 'abcdefghijklmnopqrstuvwxyz') writeRawInput('h', k);
+  writeRawInput('h', '\r');
+  await s1;
+  await tick(1100); // A's Enter is over a second old; the queued Enter is not
+  writeRawInput('h', "\x1b[200~'/p/deploy.sh'\x1b[201~", () => true, { promptOnly: true });
+  assert.equal(writes.at(-1)[1], '\r', 'dropped: the queued Enter went out under a second ago');
+
+  // A prompt-only paste main drops cancels the submit waiting for it: never
+  // sent without the attachment.
+  held = false;
+  await tick(1100); // clear of the previous case's Enter
+  reset(); ptys.set('h', {});
+  const t1 = submitPromptToTab('h', 'A');
+  const t2 = submitPromptToTab('h', 'Describe this image');
+  held = true; // an image paste is accepted while A waits for its Enter
+  await t1;
+  await tick(100); // B waits for the held paste
+  writeRawInput('h', "\x1b[200~'/p/shot.png'\x1b[201~", () => true, { promptOnly: true }); // within a second of A's Enter
+  held = false;
+  assert.equal(await t2, false);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r']);
+
+  // The drop also marks the window's hold as lost, for submits accepted later.
+  const lostMarks = [];
+  setInputHeldCheck((id) => id === 'h' && held, (id) => lostMarks.push(id));
+  await tick(1100);
+  reset(); ptys.set('h', {});
+  await submitPromptToTab('h', 'C');
+  writeRawInput('h', "\x1b[200~'/p/2.png'\x1b[201~", () => true, { promptOnly: true });
+  assert.deepEqual(lostMarks, ['h']);
+
+  // Dropping unpasted submits spares the one already in the box.
+  const { dropUnpastedSubmits } = await import('../chat-service.js');
+  setInputHeldCheck(() => false);
+  await tick(1100);
+  reset(); ptys.set('h', {});
+  const v1 = submitPromptToTab('h', 'A');
+  const v2 = submitPromptToTab('h', 'B');
+  dropUnpastedSubmits('h'); // A is pasted and waiting for its Enter
+  assert.deepEqual(await Promise.all([v1, v2]), [true, false]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r']);
+  setInputHeldCheck((id) => id === 'h' && held);
+
+  // A window that held input is gone with it half sent: a waiting submit is
+  // cancelled, never appended to the half.
+  const { cancelQueuedSubmits } = await import('../chat-service.js');
+  held = true;
+  reset(); ptys.set('h', {});
+  const w = submitPromptToTab('h', './backup.sh');
+  await tick(80);
+  held = false;
+  cancelQueuedSubmits('h');
+  assert.equal(await w, false);
+  assert.equal(writes.length, 0);
+  setInputHeldCheck(() => false);
+  ok('a Chat send waits for held input, keeps its order, and is cancelled by Ctrl+C or a new shell');
+}
+
 console.log(`\n${pass} passed`);

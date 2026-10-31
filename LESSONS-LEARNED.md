@@ -350,6 +350,52 @@
 - **CONTEXT**: Bash tool commands run under zsh here.
 - **DETECTION**: `grep -nE "for path in|\bpath=" scratchpad/**/*.sh`
 
+### Architecture - 2026-10-30
+- **MISTAKE**: Assumed Claude Code's prompt in a Dobius tab is always the same kind of screen. It is not: with `"tui": "fullscreen"` (Sam's settings, or the `tengu_pewter_brook` rollout when unset) Claude runs in the ALTERNATE buffer with mouse tracking on and handles click, drag-select, Backspace-over-selection and copy itself; the default renderer draws in the NORMAL buffer with no mouse support at all, which is what Brett sees. A probe that runs plain `claude` on Sam's Mac tests the wrong renderer.
+- **FIX**: Probe both with `claude --settings '{"tui":"default"}'` and `'{"tui":"fullscreen"}'`. Anything that edits Claude's prompt from Dobius (src/lib/prompt-edit-term.js) stands down unless `buffer.active.type === 'normal'` and `term.modes.mouseTrackingMode === 'none'`.
+- **CONTEXT**: Any terminal-side feature that reads or drives Claude's TUI.
+- **DETECTION**: `grep -n "mouseTrackingMode" src/lib/*.js src/hooks/*.js`
+
+### Architecture - 2026-10-30
+- **MISTAKE**: The prompt-box reader treated only `''` and `' '` as blank, so it never recognised Claude's prompt row: Claude draws `❯` followed by U+00A0 (no-break space), not a space. Every gesture silently did nothing in the first live run while all unit tests passed.
+- **FIX**: Blank = `''`, `' '` or `' '` (src/lib/prompt-edit.js), with a test pinned to the real bytes. Dump the real cells (`getChars()` code points per cell) before writing a screen parser's fixtures.
+- **CONTEXT**: Also: xterm 6 (unicode v6 widths) draws an emoji one cell wide where Claude counts two, so a prompt containing emoji is already drawn out of step with Claude's caret. The prompt editor refuses such prompts.
+- **DETECTION**: `grep -n "u00a0" src/lib/prompt-edit.js`
+
+### Testing - 2026-10-30
+- **MISTAKE**: Edited src/hooks/useTerminal.js while a harness tab ran a real `claude`; Vite HMR remounted TerminalPane, which kills the tab's PTY and the claude in it, and the next probe drove a bare shell.
+- **FIX**: After any edit under src/hooks or src/lib that TerminalPane imports, reload the harness page and start claude again before probing (`p10-reload.mjs` pattern: reload, then type the claude command).
+- **CONTEXT**: Every harness ship-test of terminal behaviour.
+- **DETECTION**: `pgrep -fl 'claude --settings'` returns nothing after an HMR update.
+
+### Process - 2026-10-30
+- **MISTAKE**: Harness teardown killed the CDP listener PID read once, then removed the userData and released the shared harness lock. A second Electron main from the same `npm run electron:dev` (concurrently parent still alive) was still listening on the CDP port, and another agent's Vite took 5173 seconds later while it was up.
+- **FIX**: Kill the `concurrently` parent of YOUR worktree too (`ps aux | grep "[<worktree-name>]/node_modules/.bin/concurrently"`), then re-run `lsof -nP -iTCP:<cdp> -sTCP:LISTEN` AND confirm zero processes from your worktree path BEFORE `rm -rf <ud>` and releasing the lock.
+- **CONTEXT**: Shared-lock harness runs with several agents on one machine (Brett batch, 1.0.88).
+- **DETECTION**: `ps aux | grep "[d]obius-plus-<branch>" | grep -v codex`
+
+### Security - 2026-10-30
+- **MISTAKE**: A free-form `DOBIUS_CLAUDE_HOME=<path>` for redirecting an isolated instance's settings.json writes was aliased back onto the real `~/.claude` in three Codex rounds (symlink, different case on a case-insensitive volume, `..` through a symlink, a dangling link).
+- **FIX**: Make it a switch (`DOBIUS_CLAUDE_HOME=1`) that places the throwaway home at `<DOBIUS_USERDATA_DIR>/claude-home`, the one place that cannot be the real home, and re-check by dev+inode before each write.
+- **CONTEXT**: Any harness redirect of a write away from a shared real file. Do not accept a path when a fixed location inside the harness's own scratch works.
+- **DETECTION**: `grep -n "DOBIUS_CLAUDE_HOME" electron/main.js`
+
+- **MISTAKE**: In /openTab's `tabAlive` (electron/bridge-open-main.js) I wrote `!(getWindowEntryByWcId(id)?.closing ?? true)` to mean "a window exists and is not closing". A window entry whose `closing` is simply unset gives `undefined ?? true` = true, so every live tab read as dead and the harness dropped from 36/36 to 16/36. Three Codex lenses had just answered "No bugs found." on that exact line; only the ship-test caught it.
+- **FIX**: Spell the two conditions out: `const win = getWindowEntryByWcId(...); return !!win && !win.closing`. `?? default` on an optional-chained boolean conflates "no object" with "property unset".
+- **CONTEXT**: Any guard that combines "exists" and "flag not set" on a value whose flag is only ever set to true (window-manager sets `closing = true`, never false). Re-run the harness after every guard change, even one Codex cleared.
+- **DETECTION**: `grep -n "?\.[a-zA-Z]* ?? true" electron/*.js src -r`
+
+### Architecture - 2026-10-30 (2.0.0 integration)
+- **MISTAKE**: Five features built on separate branches each read Claude's screen and the tab's input their own way, and only met on release/2.0.0. /openTab found Claude's input box as the LOWEST rule/❯/rule match, so a chained statusLine drawing a box under the prompt (possible once the model line kept the user's status output) and a numbered card ("1. Review README") both fooled it; and it counted keys only at terminal:write, while prompt editing holds a person's input in its own queue behind an image paste.
+- **FIX**: The input box is the one holding the terminal CURSOR right of the ❯ (screen-render reports `modes.cursor`; prompt-edit's promptFrame already worked this way). Input a renderer holds back is reported to main the moment it is accepted (`terminal:inputHeld`), not when it drains.
+- **CONTEXT**: Any new reader of Claude's screen or of a tab's input. A selector ALSO parks the cursor on its ❯ row, at column 0 or 1, so the caret test needs the column too, not just the row.
+- **DETECTION**: `grep -rn "promptBoxText\|promptFrame\|terminal:inputHeld" electron src --include=*.js`
+
+### Architecture - 2026-10-30 (2.0.0 follow-ups, left as is)
+- **MISTAKE**: Not a mistake yet, deliberately deferred: two window-readiness signals (window:tabsReady for docks and /openTab, store tabsReady/markTabsReady for New Tab requests) and several window-focus helpers (bringToFront in bridge-open-main.js, focus paths in window-manager.js and main.js) do overlapping jobs. Selector-parser.js, prompt-edit.js and bridge-open-tab.js each define their own prompt/rule constants.
+- **FIX**: Follow-up after 2.0.0: one readiness signal per window, one bring-to-front helper, and one module for Claude's prompt/rule shapes. Only what the integration fixes needed was shared (the caret rule, the bridge-opened first tab).
+- **CONTEXT**: Integration review of release/2.0.0; judged too risky to unify this late.
+- **DETECTION**: `grep -rn "tabsReady\|bringToFront\|RULE_RE\|PROMPT_ROW_RE" electron src`
 ### API - 2026-10-30
 - **MISTAKE**: `electron/mobile-server.js` handled `authorizeTab` / `input` / `submitPrompt` with a bare `break` on any bad request (unknown tab id, unauthorized, oversized). The orchestrator client could not tell delivered from dropped and printed SENT for an afternoon of relays to short ids that never arrived.
 - **FIX**: every write request is answered (`electron/mobile-tab-ops.js`): `ack` after the PTY write, `opError` with a code otherwise, and `uncertain: true` when the text may have landed anyway. Refusals use type `opError`, never `error`: the phone's Board alerts on every `error` frame. Docs: `docs/mobile-ws-protocol.md`.

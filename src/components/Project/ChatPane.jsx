@@ -906,6 +906,7 @@ export default function ChatPane({ tabId, visible }) {
   useEffect(() => {
     if (!visible) return undefined;
     const dropIsMine = (target) => {
+      if (target?.closest?.('[role="dialog"], [data-dialog-backdrop]')) return false; // dropped on a dialog
       const pane = target?.closest?.('[data-chat-tab]');
       if (!pane) return useStore.getState().activeTabId === tabId;
       // Dropped right here: type into this composer next, even as split's

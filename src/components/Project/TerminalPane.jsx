@@ -40,7 +40,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     return () => window.removeEventListener('dobius:terminal-font', onFont);
   }, []);
 
-  const { containerRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, fontFamily: termFontFamily, maxScrollbackLines: scrollbackLines, claimExisting });
+  const { containerRef, promptEditRef, searchAddonRef } = useTerminal({ id, cwd, theme, fontSize: termFontSize, fontFamily: termFontFamily, maxScrollbackLines: scrollbackLines, claimExisting });
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
   const mountedRef = useRef(true);
@@ -136,7 +136,13 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     const trimmed = input.trim();
     const text = (trimmed || '').replace(/\n/g, '\r');
 
-    const done = () => { if (mountedRef.current) setIsSending(false); };
+    // Through the terminal's ordered input queue, like typed keys: behind an
+    // image paste still being saved into Claude's prompt, not ahead of it.
+    // Reserved there from this moment, so the paced writes below count as
+    // input already taken (/openTab must not paste before them).
+    const send = promptEditRef.current?.reserve(text || '\r');
+    const write = (data) => (send ? send.write(data) : window.electronAPI.terminalWrite(id, data));
+    const done = () => { send?.release(); if (mountedRef.current) setIsSending(false); };
 
     // Short text (< 80 chars): char-by-char for Claude TUI raw-mode compat
     // Long text (>= 80 chars): chunked sending — keeps the UI responsive
@@ -154,7 +160,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       const sendNext = () => {
         if (!mountedRef.current) { done(); return; }
         if (i < chars.length) {
-          window.electronAPI.terminalWrite(id, chars[i]);
+          write(chars[i]);
           i++;
           if (i < chars.length) setTimeout(sendNext, 5);
           else done();
@@ -171,14 +177,14 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       const sendNextChunk = () => {
         if (!mountedRef.current) { done(); return; }
         if (i < chunks.length) {
-          window.electronAPI.terminalWrite(id, chunks[i]);
+          write(chunks[i]);
           i++;
           if (i < chunks.length) {
             setTimeout(sendNextChunk, 2);
           } else {
             // All text sent — send Enter after a brief pause
             setTimeout(() => {
-              if (mountedRef.current) window.electronAPI.terminalWrite(id, '\r');
+              if (mountedRef.current) write('\r');
               done();
             }, 10);
           }
@@ -196,7 +202,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     }
     setInput('');
     setHistoryIndex(-1);
-  }, [id, input, isSending]);
+  }, [id, input, isSending, promptEditRef]);
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -280,23 +286,33 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       if (e.target?.closest?.('[role="dialog"], [data-chat-tab]')) return;
       const items = e.clipboardData?.items;
       if (!items) return;
+      // Cmd+V with Claude's prompt focused in the terminal pastes the path
+      // there, like text: Claude turns a pasted image path into an
+      // attachment. Anywhere else it goes to the command bar.
+      const promptEdit = containerRef.current?.contains(e.target) ? promptEditRef.current : null;
+      // pathPromise resolves to a file path or null. The terminal takes its
+      // place in the input queue now, so keys typed while it saves wait.
+      const insertPath = async (pathPromise) => {
+        if (promptEdit?.pasteWhenReady(pathPromise.then((p) => (p ? shellEscape(p) : null)))) return;
+        const p = await pathPromise;
+        if (!p) return;
+        setInput((prev) => {
+          const needsSpace = prev.length > 0 && !prev.endsWith(' ');
+          return prev + (needsSpace ? ' ' : '') + shellEscape(p);
+        });
+        setHistoryIndex(-1);
+        inputRef.current?.focus();
+      };
       for (const item of items) {
         if (item.type.startsWith('image/')) {
           e.preventDefault();
           e.stopPropagation();
           const blob = item.getAsFile();
           if (!blob) return;
-          const arrayBuffer = await blob.arrayBuffer();
-          const base64 = arrayBufferToBase64(arrayBuffer);
-          const filePath = await window.electronAPI.saveClipboardImage(base64, item.type);
-          if (filePath) {
-            setInput((prev) => {
-              const needsSpace = prev.length > 0 && !prev.endsWith(' ');
-              return prev + (needsSpace ? ' ' : '') + shellEscape(filePath);
-            });
-            setHistoryIndex(-1);
-            inputRef.current?.focus();
-          }
+          insertPath((async () => {
+            const base64 = arrayBufferToBase64(await blob.arrayBuffer());
+            return window.electronAPI.saveClipboardImage(base64, item.type);
+          })());
           return;
         }
         // Non-image files (PDF, etc.) — insert as path
@@ -305,12 +321,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
           if (file?.path) {
             e.preventDefault();
             e.stopPropagation();
-            setInput((prev) => {
-              const needsSpace = prev.length > 0 && !prev.endsWith(' ');
-              return prev + (needsSpace ? ' ' : '') + shellEscape(file.path);
-            });
-            setHistoryIndex(-1);
-            inputRef.current?.focus();
+            insertPath(Promise.resolve(file.path));
             return;
           }
         }
@@ -325,7 +336,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
     const handler = (e) => {
       // Only the active tab handles the drop (ChatPane does, in Chat)
       if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
-      if (e.detail?.target?.closest?.('[data-chat-tab]')) return; // dropped on a chat pane
+      if (e.detail?.target?.closest?.('[data-chat-tab], [role="dialog"], [data-dialog-backdrop]')) return; // dropped on a chat pane or a dialog
       const paths = e.detail?.paths;
       if (!paths || paths.length === 0) return;
       const escaped = paths.map((p) => shellEscape(p)).join(' ');
@@ -344,7 +355,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   useEffect(() => {
     const handler = (e) => {
       if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
-      if (e.detail?.target?.closest?.('[data-chat-tab]')) return; // dropped on a chat pane
+      if (e.detail?.target?.closest?.('[data-chat-tab], [role="dialog"], [data-dialog-backdrop]')) return; // dropped on a chat pane or a dialog
       const text = e.detail?.text;
       if (!text) return;
       setInput((prev) => {

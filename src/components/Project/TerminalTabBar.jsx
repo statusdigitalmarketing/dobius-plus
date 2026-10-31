@@ -26,7 +26,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
   const removeTab = useStore((s) => s.removeTab);
   const renameTab = useStore((s) => s.renameTab);
   const unlockTabLabel = useStore((s) => s.unlockTabLabel);
-  const addTab = useStore((s) => s.addTab);
+  const setNewTabPickerOpen = useStore((s) => s.setNewTabPickerOpen);
   const addBrowserTab = useStore((s) => s.addBrowserTab);
   const reorderTabs = useStore((s) => s.reorderTabs);
   const closeOtherTabs = useStore((s) => s.closeOtherTabs);
@@ -648,12 +648,13 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
         </button>
       )}
 
-      {/* New tab buttons — terminal (default click) + browser (alt/right-click,
-          or the dedicated globe button for discoverability). */}
+      {/* New tab buttons: the project picker (default click; Cmd+T is the
+          instant tab here) + browser (right-click, or the dedicated globe
+          button for discoverability). */}
       <button
-        onClick={() => addTab(currentProjectPath)}
+        onClick={() => setNewTabPickerOpen(true)}
         onContextMenu={(e) => { e.preventDefault(); addBrowserTab(currentProjectPath); }}
-        title="New Tab (Cmd+T) — right-click for Browser tab"
+        title="New Tab: pick a project (Cmd+T opens one here). Right-click for a Browser tab"
         style={{
           width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center',
           marginLeft: 2, borderRadius: 4, fontSize: 16, lineHeight: 1,

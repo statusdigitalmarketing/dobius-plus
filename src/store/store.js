@@ -6,6 +6,8 @@ import { onScreenTabIds, becomesUnread, clearSeen } from '../lib/tab-unread';
 import { windowFocused } from '../lib/window-focus';
 import { latestSessionForTab } from '../../shared/session-tab.js';
 import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.js';
+import { NEW_TAB_TOOLS } from '../../shared/new-tab.js';
+import { setPendingLaunch, clearPendingLaunches } from '../lib/pending-launch';
 
 
 // Drop any grid entries whose tab is no longer present. Returns null when the
@@ -25,6 +27,9 @@ function nextFreeCounter(state, projectPath) {
 function idSpace(state) {
   return state.tabIdSpace || state.windowKey;
 }
+
+// New Tab requests made before this window's tabs were restored (openNewTab).
+const queuedNewTabs = [];
 
 function pruneGrid(gridSlots, keptIds) {
   if (!gridSlots) return null;
@@ -169,6 +174,10 @@ export const useStore = create((set, get) => ({
   // Board notification
   boardNotification: null,
 
+  // The New Tab project picker, opened by the tab bar's + button.
+  newTabPickerOpen: false,
+  setNewTabPickerOpen: (open) => set({ newTabPickerOpen: !!open }),
+
   // Tab actions
   addTab: (projectPath) => {
     const state = get();
@@ -184,6 +193,30 @@ export const useStore = create((set, get) => ({
       tabCounter: counter,
     });
     return tab;
+  },
+
+  // New Tab (the + picker, Cmd+T, the menu, the palette): a terminal tab that
+  // starts the tool chosen in Settings (Claude Code by default) in its project.
+  // `tool` ('claude' | 'codex' | 'shell') overrides the setting. Every other
+  // addTab caller (reopen, agents, checkpoints, orchestrator, restored tabs)
+  // types its own command or none, so it must not come through here.
+  // Before the window's saved tabs are restored the request waits (a tab made
+  // then could share an id with a restored one) and opens once they are;
+  // it returns null in that case.
+  openNewTab: (projectPath, tool) => {
+    if (!get().tabsReady) { queuedNewTabs.push([projectPath, tool]); return null; }
+    const tab = get().addTab(projectPath);
+    // main reads the setting at spawn ('default'); an unknown tool starts nothing.
+    setPendingLaunch(tab.id, tool === undefined ? 'default' : (NEW_TAB_TOOLS.includes(tool) ? tool : 'shell'));
+    return tab;
+  },
+
+  // Set once this window's tabs are restored (or it starts fresh).
+  tabsReady: false,
+  markTabsReady: () => {
+    if (get().tabsReady) return;
+    set({ tabsReady: true });
+    for (const [projectPath, tool] of queuedNewTabs.splice(0)) get().openNewTab(projectPath, tool);
   },
 
   // Add a browser pane (embedded webview). Slots into the same terminalTabs
@@ -396,6 +429,7 @@ export const useStore = create((set, get) => ({
   // previous project, and the next render references tab ids that don't
   // exist. Codex audit HIGH (store.js:227).
   initTabs: (tabs, counter) => set((s) => {
+    clearPendingLaunches();
     const liveIds = new Set(tabs.map((t) => t.id));
     // tabStatus + hookOwnedTabs are keyed by tab id directly.
     const pruneByTabId = (obj) => {
