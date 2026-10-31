@@ -75,7 +75,7 @@ export function createHeadroomService(d) {
   let loading = null;
   // What the last sample read: a login change noticed outside a sample needs it.
   let lastRecords = [];
-  // One move at a time, Move all included, across every window.
+  // One move at a time, across every window.
   let moving = false;
 
   async function history() {
@@ -220,7 +220,9 @@ export function createHeadroomService(d) {
     if (r.sharedHistory !== true) return 'its conversation history is not linked to the shared one, so the conversation cannot be resumed there';
     return null;
   }
-  const rowRefusal = (source, r) => targetRefusal(r) || moveRefusal(source, r);
+  const rowRefusal = (source, r) => targetRefusal(r)
+    || (source.sharedHistory === false ? 'this tab\'s conversation is in a private copy of its account\'s history, so it may not resume the same elsewhere' : null)
+    || moveRefusal(source, r);
 
   async function readScan() {
     try { return await d.scan(); }
@@ -239,7 +241,7 @@ export function createHeadroomService(d) {
     if (g) key = g.key;
     else if (pid === null) key = d.keyFor(tab.claudeConfigDir === null ? d.cliDefaultDir() : tab.claudeConfigDir);
     const row = key && rows.find((r) => r.key === key);
-    return row ? { key, email: row.email, login: row.login, label: row.label }
+    return row ? { key, email: row.email, login: row.login, label: row.label, sharedHistory: row.sharedHistory }
       : { key, email: null, login: 'unknown', label: 'an unlisted account' };
   }
 
@@ -304,6 +306,7 @@ export function createHeadroomService(d) {
     try { info = await d.claudeInfo(tabId); } catch { info = null; }
     let session = null;
     let presence = null;
+    let override = null;
     if (info) {
       const g = groupOf(scan, info.pid);
       // Claude's own record names the conversation it is on now (argv keeps
@@ -314,6 +317,7 @@ export function createHeadroomService(d) {
         const cwd = await d.processCwd(info.pid).catch(() => null);
         session = { sessionId: presence.sessionId, project: cwd && d.isDir(cwd) ? cwd : null };
       }
+      override = await d.processAuthOverride(info.pid);
     }
     // A Claude sharing its shell with another program (suspended behind an
     // editor) is not all a restart would stop.
@@ -322,7 +326,7 @@ export function createHeadroomService(d) {
     else if (info.soleChild === false) running = 'other';
     const act = d.activity(tabId);
     return {
-      tabId, running, session, hasClaude: !!info,
+      tabId, running, session, override,
       busy: tabBusy(act, d.now(), presence?.status),
       status: act?.status || null,
       // Unsent text in Claude's box, or input the window still holds (an image
@@ -372,7 +376,7 @@ export function createHeadroomService(d) {
   const pinOf = (r) => ({ id: r.isDefault ? null : r.id });
   const named = (r) => (r.email ? `${r.label} (${r.email})` : r.label);
 
-  async function moveOne(tabId, targetId, { allowBusy, canRestart, restart }) {
+  async function moveOne(tabId, targetId, { allowBusy, cannotRestart, restart }) {
     const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
     const tab = d.tabs().find((t) => t.id === tabId);
     if (!tab) return fail('the tab has no terminal running');
@@ -389,17 +393,24 @@ export function createHeadroomService(d) {
     if (refusal) return fail(refusal);
     // No await from here to the signal.
     if (d.inputSeq(tabId) !== info.inputSeq || d.inputHeld(tabId)) return fail('something was typed in the tab, so it was left alone');
-    if (!canRestart(tabId)) return fail('the tab is moving to another window');
+    const pin = pinOf(target);
+    const cannot = cannotRestart(tabId, pin);
+    if (cannot) return fail(cannot);
     const { sessionId, project } = info.session;
-    const manual = `The conversation is safe: run claude --resume ${sessionId} in ${project}.`;
+    const manual = `The conversation is safe: run claude --resume ${sessionId} in ${project}, in this tab.`;
     try { d.stop(info.pid); } catch (err) { if (err?.code !== 'ESRCH') return fail(`Claude could not be stopped: ${err.message}`); }
     // Everything above left the tab untouched. From here it only ever reports.
     const stopBy = d.now() + STOP_MS;
     while (d.alive(info.pid) && d.now() < stopBy) await d.sleep(100);
     if (d.alive(info.pid)) return fail(`Claude did not stop within ${STOP_MS / 1000} seconds, so nothing else was changed. It may still be closing.`);
     if (!(await d.claim(sessionId, tabId))) return fail(`Claude stopped, but something else is resuming that conversation, so this tab was not restarted. ${manual}`);
-    const pin = pinOf(target);
-    if (!restart(tabId, tab.cwd, pin, { sessionId, cwd: project })) return fail(`Claude stopped, but the tab could not restart on ${target.label}. ${manual}`);
+    // Input since it was judged may be a program started in the shell Claude left.
+    if (d.inputSeq(tabId) !== info.inputSeq) return fail(`Claude stopped, but something was typed in the tab, so it was not restarted. ${manual}`);
+    // The shell's folder may have been deleted since it started.
+    const cwd = d.isDir(tab.cwd) ? tab.cwd : project;
+    try {
+      if (!restart(tabId, cwd, pin, { sessionId, cwd: project })) return fail(`Claude stopped, but the tab could not restart on ${target.label}. ${manual}`);
+    } catch (err) { return fail(`Claude stopped, but the tab could not restart on ${target.label}: ${err.message}. ${manual}`); }
     return verifyMove(tabId, sessionId, target, rows, pin, manual);
   }
 
@@ -411,7 +422,7 @@ export function createHeadroomService(d) {
     let started = false;
     while (d.now() < end) {
       const info = await d.claudeInfo(tabId).catch(() => null);
-      if (info?.sessionId === sessionId) {
+      if (info) {
         started = true;
         const g = groupOf(await readScan(), info.pid);
         if (g && g.key !== target.key) {
@@ -427,6 +438,9 @@ export function createHeadroomService(d) {
               ? `Claude runs in ${target.label}'s folder, but its environment could not be read, so its login cannot be confirmed.`
               : `Claude runs in ${target.label}'s folder, but ${override} is set in the tab's shell and signs it in the same way on every account, so it did not change login.` };
           }
+          // The folder may have been logged into something else during the move.
+          const now = await loginEmail(target.dir, target.envUnset);
+          if (now?.toLowerCase() !== target.email.toLowerCase()) return { ok: false, pin, error: `Claude runs on ${target.label}, but that folder now names ${now || 'no login'}, not ${target.email}. Check it is the login you meant.` };
           return { ok: true, pin };
         }
       }
@@ -437,14 +451,11 @@ export function createHeadroomService(d) {
       : `Claude did not start within ${VERIFY_MS / 1000} seconds. The tab is a shell on ${target.label}. ${manual}` };
   }
 
-  async function move(tabIds, targetId, opts) {
+  async function move(tabId, targetId, opts) {
     if (moving) return { ok: false, error: 'another account move is still running; try again when it finishes' };
     moving = true;
-    try {
-      const results = [];
-      for (const tabId of tabIds.slice(0, MAX_CANDIDATE_TABS)) results.push({ tabId, ...(await moveOne(tabId, targetId, opts)) });
-      return { ok: true, results };
-    } finally { moving = false; }
+    try { return await moveOne(tabId, targetId, opts); }
+    finally { moving = false; }
   }
 
   return {

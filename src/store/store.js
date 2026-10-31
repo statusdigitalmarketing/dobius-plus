@@ -731,20 +731,25 @@ export const useStore = create((set, get) => ({
     const left = skipped.length ? `\n\nLeft where they are:\n${skipped.map((x) => `${x.label}: ${x.reason}`).join('\n')}` : '';
     const count = ids.length === 1 ? 'this tab' : `${ids.length} tabs`;
     if (!window.confirm(`Restart ${count} on ${label} and resume the conversation? Whatever runs there now is stopped.${left}`)) return { moved: 0, skipped, failed: [], cancelled: true };
-    const res = await api.accountsMove(ids, accountId, { allowBusy });
-    if (!res?.ok) return { moved: 0, skipped, failed: [{ label: 'Not moved', reason: res?.error || 'something went wrong' }] };
-    // The pin says what main found running, not what was asked for.
-    set((s) => ({
-      terminalTabs: s.terminalTabs.map((t) => {
-        const r = res.results.find((x) => x.tabId === t.id);
-        if (!r || r.pin === undefined) return t;
-        if (r.pin) return { ...t, claudeAccountPin: r.pin };
-        const { claudeAccountPin: _drop, ...rest } = t;
-        return rest;
-      }),
-    }));
-    const failed = res.results.filter((r) => !r.ok).map((r) => ({ label: name(r.tabId), reason: r.error }));
-    return { moved: res.results.length - failed.length, skipped, failed };
+    let moved = 0;
+    const failed = [];
+    for (const tabId of ids) {
+      const r = await api.accountsMove(tabId, accountId, { allowBusy }).catch((err) => ({ ok: false, error: err?.message || String(err) }));
+      // The pin says what main found running, not what was asked for. Set at
+      // once: a later tab's wait must not leave this one's saved account stale.
+      if (r.pin !== undefined) {
+        set((s) => ({
+          terminalTabs: s.terminalTabs.map((t) => {
+            if (t.id !== tabId) return t;
+            if (r.pin) return { ...t, claudeAccountPin: r.pin };
+            const { claudeAccountPin: _drop, ...rest } = t;
+            return rest;
+          }),
+        }));
+      }
+      if (r.ok) moved += 1; else failed.push({ label: name(tabId), reason: r.error || 'something went wrong' });
+    }
+    return { moved, skipped, failed };
   },
 
   // Resume a Codex session in the active terminal tab. Separate from

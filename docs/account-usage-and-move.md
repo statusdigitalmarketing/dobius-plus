@@ -13,13 +13,13 @@ Only one move runs at a time, across all windows. A second one is refused.
 **1. Check before touching anything.** Any failure refuses the move with a plain reason and leaves the tab running:
 
 - Exactly one Claude, as a child of the tab's shell. `exec claude`, no Claude, or another program beside it are refused.
-- Its conversation named by Claude's own `<configDir>/sessions/<pid>.json`, and its working folder readable and present.
-- The target logged in (read last, right before Claude is stopped), linked to the shared conversation store, not the tab's own credential and not the same login. A login that cannot be named is refused, on either side: another spelling of a folder (`/p/b/.`, `/p/b/`, a symlink), a credential or metadata file linked out of its folder, or two default metadata files that disagree.
+- Its conversation named by Claude's own `<configDir>/sessions/<pid>.json`, and its working folder readable and present. No auth token in its environment (its login could not be named), and the shell is zsh or bash, which are what can start the resume.
+- The target logged in (read last, right before Claude is stopped), and both sides linked to the shared conversation store, not the tab's own credential and not the same login. A login that cannot be named is refused, on either side: another spelling of a folder (`/p/b/.`, `/p/b/`, a symlink), a credential or metadata file linked out of its folder, or two default metadata files that disagree.
 - No input since the tab was judged. Move all also skips tabs mid-turn, on a question, or with unsent text, and names them. A single-tab move warns about those in the dialog and asks.
 
 **2. Stop and restart.** SIGHUP to Claude, a bounded wait for it to exit, a claim on the conversation, then a new login shell on the target with the resume started by the launch path (`loginShellSpawn` in `shared/new-tab.js`). Nothing is typed, so keys pressed meanwhile cannot mix into a command, and a slow shell rc only uses up the wait.
 
-**3. Verify.** Success is reported only when the new process's own environment (`claude-process-scan.js`) names the target's credential and its own `sessions/<pid>.json` names the conversation. Otherwise the dialog says what is really running, and the pin follows that rather than the request.
+**3. Verify.** Success is reported only when the new process's own environment (`claude-process-scan.js`) names the target's credential, carries no auth token, its own `sessions/<pid>.json` names the conversation, and the target folder still names the same login. Otherwise the dialog says what is really running, and the pin follows that rather than the request.
 
 IPC, all owner-checked per tab: `accounts:usage`, `accounts:moveTargets`, `accounts:moveCandidates`, `accounts:move`.
 

@@ -83,7 +83,7 @@ function world(over = {}) {
     activity: () => w.activity,
     claudeInfo: async () => w.claude,
     presence: async () => w.presence,
-    stop: (pid) => { w.events.push(`stop ${pid}`); if (w.stopThrows) throw w.stopThrows; },
+    stop: (pid) => { w.events.push(`stop ${pid}`); w.onStop?.(); if (w.stopThrows) throw w.stopThrows; },
     alive: () => w.stillAlive === true,
     claim: async (sid) => { w.events.push(`claim ${sid}`); return w.claimOk !== false; },
     sleep: async (ms) => { w.now += ms; w.onSleep?.(); },
@@ -361,9 +361,10 @@ await check('the conversation comes from Claude\'s own record, and only that', a
 // What restarting does in this fake: a new process under the new shell.
 const moveOpts = (w, { allowBusy = false, group = (t) => t } = {}) => ({
   allowBusy,
-  canRestart: () => w.canRestart !== false,
+  cannotRestart: () => w.cannotRestart || null,
   restart: (id, cwd, pin, resume) => {
     w.events.push(`restart ${id} ${cwd} ${JSON.stringify(pin)} ${resume.sessionId} ${resume.cwd}`);
+    if (w.restartThrows) throw new Error('no ptys');
     if (w.restartOk === false) return false;
     if (w.neverStarts) w.claude = null;
     else {
@@ -374,13 +375,13 @@ const moveOpts = (w, { allowBusy = false, group = (t) => t } = {}) => ({
     return true;
   },
 });
-const moveB = async (w, o) => (await w.svc.move([TAB], 'b', moveOpts(w, o))).results[0];
+const moveB = (w, o) => w.svc.move(TAB, 'b', moveOpts(w, o));
 const untouched = (w) => assert.deepEqual(w.events, [], 'nothing was stopped or restarted');
 
 await check('a normal move stops Claude, claims, restarts in its folder, verifies and pins the target', async () => {
   const w = world();
   const r = await moveB(w);
-  assert.deepEqual(r, { tabId: TAB, ok: true, pin: { id: 'b' } });
+  assert.deepEqual(r, { ok: true, pin: { id: 'b' } });
   assert.deepEqual(w.events, ['stop 100', 'claim sess-now', `restart ${TAB} /proj {"id":"b"} sess-now /proj/worktree`]);
 });
 
@@ -427,10 +428,19 @@ await check('same login, unknown identity, a draft and typing are all refused be
   w = world({ held: false });
   const held = moveOpts(w);
   w.onScreen = () => { w.held = true; };
-  assert.match((await w.svc.move([TAB], 'b', { ...held, allowBusy: true })).results[0].error, /typed/);
+  assert.match((await w.svc.move(TAB, 'b', { ...held, allowBusy: true })).error, /typed/);
   untouched(w);
-  w = world({ canRestart: false });
-  assert.match((await moveB(w)).error, /another window/);
+  w = world({ cannotRestart: 'that account is gone, or two accounts share its id' });
+  assert.match((await moveB(w)).error, /two accounts share/);
+  untouched(w);
+  w = world({ override: 'CLAUDE_CODE_OAUTH_TOKEN' });
+  assert.match((await moveB(w, { allowBusy: true })).error, /CLAUDE_CODE_OAUTH_TOKEN is set in its environment/);
+  untouched(w);
+  w = world({ override: 'unreadable' });
+  assert.match((await moveB(w, { allowBusy: true })).error, /could not be read/);
+  untouched(w);
+  w = world({ unshared: new Set([DIR_A]) });
+  assert.match((await moveB(w, { allowBusy: true })).error, /private copy/);
   untouched(w);
 });
 
@@ -459,14 +469,52 @@ await check('another conversation running is a failure, and a token in the shell
   let r = await moveB(w);
   assert.equal(r.ok, false);
   assert.match(r.error, /other-one/);
-  w = world({ override: 'CLAUDE_CODE_OAUTH_TOKEN' });
-  r = await moveB(w);
+  // Set by the replacement's shell only, as a .zshrc would.
+  const tokenAfter = (value) => {
+    const x = world();
+    const o = moveOpts(x);
+    const restart = o.restart;
+    o.restart = (...a) => { x.override = value; return restart(...a); };
+    return x.svc.move(TAB, 'b', o);
+  };
+  r = await tokenAfter('CLAUDE_CODE_OAUTH_TOKEN');
   assert.equal(r.ok, false);
   assert.match(r.error, /CLAUDE_CODE_OAUTH_TOKEN is set/);
-  w = world({ override: 'unreadable' });
-  r = await moveB(w);
+  r = await tokenAfter('unreadable');
   assert.equal(r.ok, false);
   assert.match(r.error, /could not be read/);
+});
+
+await check('a Claude that ignored the resume is still read: wrong account, wrong conversation', async () => {
+  let w = world({ groupsAfter: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [200] }] });
+  const o = moveOpts(w);
+  const restart = o.restart;
+  o.restart = (...a) => { const ok = restart(...a); w.claude = { ...w.claude, sessionId: null }; return ok; };
+  assert.match((await w.svc.move(TAB, 'b', o)).error, /resumed on A/);
+});
+
+await check('the target folder re-logged during the move is a failure, not a success', async () => {
+  const w = world();
+  const o = moveOpts(w);
+  const restart = o.restart;
+  o.restart = (...a) => { w.emails[DIR_B] = 'a@x.com'; return restart(...a); };
+  const r = await w.svc.move(TAB, 'b', o);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /now names a@x\.com/);
+});
+
+await check('input after Claude stopped is not restarted over; a deleted shell folder falls back to the conversation\'s', async () => {
+  let w = world();
+  w.onStop = () => { w.inputSeq += 1; };
+  let r = await moveB(w);
+  assert.match(r.error, /something was typed.*claude --resume/);
+  assert.equal(w.events.some((e) => e.startsWith('restart')), false);
+  w = world({ goneDir: '/proj' });
+  assert.equal((await moveB(w)).ok, true);
+  assert.match(w.events.at(-1), / \/proj\/worktree \{"id":"b"\} sess-now \/proj\/worktree$/);
+  w = world({ restartThrows: true });
+  r = await moveB(w);
+  assert.match(r.error, /could not restart on B: no ptys.*claude --resume/);
 });
 
 await check('nothing confirmed within the bound fails visibly, and says how to get the conversation back', async () => {
@@ -494,7 +542,7 @@ await check('a slow start inside the bound still ends in success', async () => {
     w.onSleep = () => { if (w.now >= at) w.claude = started; };
     return ok;
   };
-  assert.equal((await w.svc.move([TAB], 'b', o)).results[0].ok, true);
+  assert.equal((await w.svc.move(TAB, 'b', o)).ok, true);
 });
 
 await check('Claude not stopping changes nothing else; a conversation claimed elsewhere is not restarted', async () => {
@@ -523,23 +571,16 @@ await check('Claude not stopping changes nothing else; a conversation claimed el
 
 await check('one move at a time: a second is refused untouched, and the lock frees afterwards, also after a throw', async () => {
   const w = world();
-  const [first, second] = await Promise.all([w.svc.move([TAB], 'b', moveOpts(w)), w.svc.move([TAB], 'b', moveOpts(w))]);
+  const [first, second] = await Promise.all([w.svc.move(TAB, 'b', moveOpts(w)), w.svc.move(TAB, 'b', moveOpts(w))]);
   assert.equal(first.ok, true);
   assert.equal(second.ok, false);
   assert.match(second.error, /another account move/);
   assert.equal(w.events.filter((e) => e.startsWith('stop')).length, 1);
   const w2 = world();
-  await assert.rejects(w2.svc.move(null, 'b', moveOpts(w2)));
-  assert.equal((await w2.svc.move([TAB], 'b', moveOpts(w2))).ok, true);
-});
-
-await check('Move all moves each tab and reports each one', async () => {
-  const TAB2 = 'term-/proj-2';
-  const w = world();
-  w.tabs = [...w.tabs, { id: TAB2, cwd: '/proj', claudeConfigDir: DIR_A }];
-  w.claude = { pid: 100, sessionId: null, startedAt: T0, soleChild: true };
-  const res = await w.svc.move([TAB, TAB2, 'term-/gone-1'], 'b', moveOpts(w));
-  assert.deepEqual(res.results.map((r) => [r.tabId, r.ok]), [[TAB, true], [TAB2, false], ['term-/gone-1', false]]);
+  w2.tabs = null;
+  await assert.rejects(w2.svc.move(TAB, 'b', moveOpts(w2)));
+  w2.tabs = [{ id: TAB, cwd: '/proj', claudeConfigDir: DIR_A }];
+  assert.equal((await w2.svc.move(TAB, 'b', moveOpts(w2))).ok, true);
 });
 
 await check('draftOnScreen: only an empty readable box is no draft', async () => {

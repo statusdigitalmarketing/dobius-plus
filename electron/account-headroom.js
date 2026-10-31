@@ -349,6 +349,7 @@ export function moveBlock(info, { allowBusy = false } = {}) {
   if (info.running !== 'claude') return 'something other than one Claude runs in its shell';
   if (!info.session?.sessionId) return 'its conversation could not be identified';
   if (!info.session.project) return 'the folder its conversation runs in could not be read';
+  if (info.override) return info.override === 'unreadable' ? 'its environment could not be read, so its login cannot be named' : `${info.override} is set in its environment, so its login cannot be named`;
   if (allowBusy) return null;
   if (info.busy) return info.status === 'needs' ? 'waiting on a question' : 'in the middle of a turn';
   return info.draft ? 'has unsent text in the prompt' : null;

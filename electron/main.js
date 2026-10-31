@@ -2355,18 +2355,22 @@ function setupHeadroomHandlers() {
   });
   // The move itself. restart is the one thing the service cannot do alone: it
   // needs this window as the new PTY's owner.
-  ipcMain.handle('accounts:move', async (event, tabIds, targetId, opts) => {
-    const mine = (Array.isArray(tabIds) ? tabIds : []).filter((id) => ownsTab(event, id));
+  ipcMain.handle('accounts:move', async (event, tabId, targetId, opts) => {
+    if (!ownsTab(event, tabId)) return { ok: false, error: 'not your tab' };
     if (targetId !== null && typeof targetId !== 'string') return { ok: false, error: 'no account' };
     const sender = event.sender;
-    const canRestart = (id) => !sender.isDestroyed() && terminalOwners.get(id) === sender.id && !tearOffGrants.has(id) && !dockingTabs.has(id);
+    const cannotRestart = (id, pin) => {
+      if (!/\/(zsh|bash)$/.test(process.env.SHELL || '/bin/zsh')) return 'a conversation can only be resumed through zsh or bash';
+      if (sender.isDestroyed() || terminalOwners.get(id) !== sender.id || tearOffGrants.has(id) || dockingTabs.has(id)) return 'the tab is moving to another window';
+      return resolveClaudeAccountPin(pin, loadConfig().accounts) === undefined ? 'that account is gone, or two accounts share its id' : null;
+    };
     const restart = (id, cwd, pin, resume) => {
-      if (!canRestart(id) || resolveClaudeAccountPin(pin, loadConfig().accounts) === undefined) return false;
+      if (cannotRestart(id, pin)) return false;
       setSessionTabLink(resume.sessionId, id, resume.cwd);
       createTerminal(id, cwd, sender, resolveAccountEnvForCwd(cwd, { claudeAccountPin: pin }), { resume });
       return true;
     };
-    try { return await headroom.move(mine, targetId, { allowBusy: opts?.allowBusy === true, canRestart, restart }); }
+    try { return await headroom.move(tabId, targetId, { allowBusy: opts?.allowBusy === true, cannotRestart, restart }); }
     catch (err) { return { ok: false, error: err.message }; }
   });
   // Sampling keeps pace honest while no panel is open. unref'd: never keeps the

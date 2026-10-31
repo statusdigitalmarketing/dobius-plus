@@ -202,7 +202,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   accountsUsage: () => ipcRenderer.invoke('accounts:usage'),
   accountsMoveTargets: (tabId) => ipcRenderer.invoke('accounts:moveTargets', tabId),
   accountsMoveCandidates: (tabIds, targetId) => ipcRenderer.invoke('accounts:moveCandidates', tabIds, targetId),
-  accountsMove: (tabIds, targetId, opts) => ipcRenderer.invoke('accounts:move', tabIds, targetId, opts),
+  accountsMove: (tabId, targetId, opts) => ipcRenderer.invoke('accounts:move', tabId, targetId, opts),
   accountsSave: (account) => ipcRenderer.invoke('accounts:save', account),
   accountsDelete: (accountId) => ipcRenderer.invoke('accounts:delete', accountId),
   claudeUsageGetStatus: () => ipcRenderer.invoke('claudeUsage:getStatus'),

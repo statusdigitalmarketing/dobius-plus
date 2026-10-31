@@ -262,6 +262,8 @@ check('a move needs one child Claude, its conversation and its folder; a warned 
   assert.match(moveBlock({ ...ok, busy: true, status: 'needs' }), /question/);
   assert.match(moveBlock({ ...ok, draft: true }), /unsent text/);
   assert.equal(moveBlock({ ...ok, busy: true, draft: true }, { allowBusy: true }), null);
+  assert.match(moveBlock({ ...ok, override: 'ANTHROPIC_API_KEY' }, { allowBusy: true }), /ANTHROPIC_API_KEY is set/);
+  assert.match(moveBlock({ ...ok, override: 'unreadable' }, { allowBusy: true }), /could not be read/);
 });
 
 const cand = (id, known, headroom, lastReportedAt = T0, extra = {}) => ({
