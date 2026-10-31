@@ -74,13 +74,15 @@ export const isLimitMenu = (sel) => !!sel && Array.isArray(sel.options) && sel.o
  * input prompt ("❯ some text" that is not a numbered option). A menu quoted in
  * output with a real prompt under it fails the second half.
  */
-const PROMPT_LIKE_RE = /^\s*[❯>]\s+(?!\d+[.)]\s)\S/;
+// The menu has ONE pointer row (its highlighted option). A second row that
+// starts with the prompt character, numbered or not, may be a real input box.
+const POINTER_ROW_RE = /^\s*[❯>]\s/;
 export function limitMenuOnly(lines, parse) {
   const bottom = bottomRows(lines);
   let sel;
   try { sel = parse(bottom); } catch { sel = null; }
   if (!isLimitMenu(sel)) return false;
-  return !bottom.some((l) => PROMPT_LIKE_RE.test(String(l || '')));
+  return bottom.filter((l) => POINTER_ROW_RE.test(String(l || ''))).length === 1;
 }
 
 export function draftOnScreen(box, limitMenuShown) {
@@ -323,20 +325,23 @@ export function createHeadroomService(d) {
     };
   }
 
+  // A hold ends at its time limit, or early when the folder's five-hour
+  // window is a LATER one than the window the hold was taken in (a reset).
+  // A hold taken with no known window ends only at its time limit.
+  function keyHeld(key, now) {
+    const h = limitedUntil.get(key);
+    if (!h || h.until <= now) return false;
+    const r = hist?.keys?.[key]?.windows?.five_hour?.r;
+    return !(Number.isFinite(h.r) && Number.isFinite(r) && r > h.r + 60);
+  }
+
   // One quota per login: reservations are counted per login, not per folder.
   const loginId = (r) => (r.email ? `e:${r.email.toLowerCase()}` : `k:${r.key}`);
 
   // A limit just hit holds every folder of that login, not only the folder
   // the tab was on.
   function heldNow(r, rows, now) {
-    // A hold ends early when that folder's five-hour window has reset since
-    // (a new window's first figure came after the hold began).
-    const held = (key) => {
-      const h = limitedUntil.get(key);
-      if (!h || h.until <= now) return false;
-      const first = hist?.keys?.[key]?.windows?.five_hour?.samples?.[0]?.t;
-      return !(Number.isFinite(first) && first > h.at);
-    };
+    const held = (key) => keyHeld(key, now);
     if (held(r.key)) return true;
     if (!r.email) return false;
     const e = r.email.toLowerCase();
@@ -598,7 +603,12 @@ export function createHeadroomService(d) {
       // A real limit on this tab's account: it is limited for everyone else
       // in this pass and for a while after, whatever its last report said.
       if (dec.action === 'move' || dec.action === 'notice' || dec.action === 'wait') {
-        if (source.key && !limitedUntil.has(source.key)) limitedUntil.set(source.key, { at: d.now(), until: d.now() + AUTO.LIMITED_HOLD_MS });
+        // A new hold replaces one that no longer holds (expired, or a reset
+        // since): a limit in the new window must hold again.
+        if (source.key && !keyHeld(source.key, d.now())) {
+          const r = hist?.keys?.[source.key]?.windows?.five_hour?.r;
+          limitedUntil.set(source.key, { at: d.now(), until: d.now() + AUTO.LIMITED_HOLD_MS, r: Number.isFinite(r) ? r : null });
+        }
       }
       for (const [k, h] of limitedUntil) if (h.until <= d.now()) limitedUntil.delete(k);
       if (dec.action === 'wait') st.nextLookAt = d.now() + 5_000;

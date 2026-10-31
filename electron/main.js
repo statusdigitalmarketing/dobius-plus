@@ -23,6 +23,7 @@ import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending a
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities, accountEmail, accountMetadata, loginStatePresenceOnly, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
+import { userOverrideIn } from './account-headroom.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
 import { resolveAccountEnvForCwd, resolveClaudeAccountPin } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
@@ -2403,12 +2404,12 @@ async function processAuthOverride(pid) {
     // another item under the same service, i.e. possibly another login.
     // An unset USER falls back to the OS user name, which need not be the
     // USER Dobius itself (and so the rest of this check) runs with.
+    // Fail closed on anything ambiguous: USER= appearing twice (an argument
+    // or another variable's value can contain it), or a value that is not
+    // exactly ours followed by the next variable or the end.
     let osUser = null;
     try { osUser = os.userInfo().username; } catch { osUser = null; }
-    const user = stdout.match(/(?:^|\s)USER=(\S+)/)?.[1] || osUser;
-    const own = process.env.USER || osUser;
-    if (!user || !own) return 'unreadable';
-    return user !== own ? 'USER' : null;
+    return userOverrideIn(stdout, process.env.USER || osUser, osUser);
   } catch { return 'unreadable'; }
 }
 

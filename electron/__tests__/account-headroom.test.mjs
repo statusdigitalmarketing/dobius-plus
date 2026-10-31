@@ -5,8 +5,8 @@ import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  emptyHistory, sanitizeHistory, updateHistory, noteLogin, paceFor, forecastFor, usageForKey,
-  accountKeyRows, moveRefusal, rankTargets, limitFromEntries, liveLimitLine, decideAutoMove, AUTO, tabBusy, autoRefusal, freshUsage,
+  emptyHistory, sanitizeHistory, updateHistory, noteLogin, pruneHistory, paceFor, forecastFor, usageForKey,
+  accountKeyRows, moveRefusal, rankTargets, limitFromEntries, liveLimitLine, decideAutoMove, AUTO, tabBusy, autoRefusal, freshUsage, userOverrideIn,
 } from '../account-headroom.js';
 import { keychainServiceFor } from '../account-identity.js';
 
@@ -129,6 +129,22 @@ check('after a re-login, a running session republishing the old login\'s cached 
   assert.equal(usageForKey(h, KEY_A, T0 + 3 * MIN).windows.five_hour.used, 4);
 });
 
+check('a key kept only for its re-login boundary is not the one the key cap evicts', () => {
+  const h = emptyHistory();
+  const recs = [];
+  for (let i = 0; i < 40; i += 1) recs.push(rec(`Claude Code-credentials-${(0x10000000 + i).toString(16)}`, T0 + i, 10));
+  recs.push({ ...rec(KEY_A, T0 + 100, 50), sessionId: 'old' });
+  updateHistory(h, recs, T0 + MIN);
+  noteLogin(h, KEY_A, 'a@x', T0 + MIN);
+  noteLogin(h, KEY_A, 'b@x', T0 + 2 * MIN, [recs.at(-1)]);
+  // One more credential reports: the cap must evict someone, never the boundary.
+  updateHistory(h, [rec('Claude Code-credentials-2fffffff', T0 + 2 * MIN, 10)], T0 + 2 * MIN);
+  pruneHistory(h, T0 + 2 * MIN);
+  assert.ok(h.keys[KEY_A], 'the re-login boundary survives');
+  updateHistory(h, [{ ...recs.at(-1), receivedAt: T0 + 3 * MIN }], T0 + 3 * MIN);
+  assert.equal(usageForKey(h, KEY_A, T0 + 3 * MIN).known, false);
+});
+
 // ---- pace and forecast ----
 
 check('pace is percent per hour over the lookback, from the step value at its start', () => {
@@ -233,6 +249,16 @@ check('the live region is never taller than the real terminal', () => {
   screen[30] = "You've hit your 5-hour limit";
   assert.match(liveLimitLine(screen, 24), /5-hour/);
   assert.equal(liveLimitLine(screen, 8), null);
+});
+
+check('a USER in the resumed Claude\'s environment that is not exactly ours is an override; anything ambiguous is unreadable', () => {
+  assert.equal(userOverrideIn('node /x/claude --resume s HOME=/h USER=sam PATH=/b', 'sam', 'sam'), null);
+  assert.equal(userOverrideIn('node /x/claude HOME=/h USER=sam', 'sam', 'sam'), null);
+  assert.equal(userOverrideIn('node /x/claude HOME=/h USER=other PATH=/b', 'sam', 'sam'), 'USER');
+  assert.equal(userOverrideIn('node /x/claude HOME=/h USER=sam spare PATH=/b', 'sam', 'sam'), 'USER');
+  assert.equal(userOverrideIn('node /x/claude --x USER=sam HOME=/h USER=other', 'sam', 'sam'), 'unreadable');
+  assert.equal(userOverrideIn('node /x/claude HOME=/h', 'alias', 'sam'), 'USER', 'unset USER falls back to the OS user');
+  assert.equal(userOverrideIn('node /x/claude HOME=/h', 'sam', 'sam'), null);
 });
 
 // ---- auto-move guard rails ----

@@ -505,6 +505,19 @@ await check('a folder whose conversations are not the shared store is refused (t
   assert.equal(w.sent.length, 0);
 });
 
+await check('a hold taken with no known window is not released by a late cached figure', async () => {
+  const { w, svc } = world();
+  w.records = [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 20, resetsAt: R5 } } }]; // A has no figure
+  w.tail = "You've hit your 5-hour limit";
+  w.claude = { ...w.claude, sessionId: 's1' };
+  await svc.tick(); // A (no figure) is held, tab moves to B
+  w.now += 60_000;
+  w.records.push({ key: KEY_A, receivedAt: w.now - 1000, windows: { five_hour: { usedPercentage: 20, resetsAt: R5 } } });
+  await svc.usage();
+  const r = await svc.moveTargets(TAB);
+  assert.equal(r.targets.find((t) => t.label === 'A').usage.limited, true);
+});
+
 await check('a limit hold ends when that folder\'s five-hour window has reset since', async () => {
   const { w, svc } = world();
   // Tab 1 on A hits a limit: A is held. Then A's window resets and reports 1%.
@@ -526,6 +539,7 @@ await check('Claude\'s limit menu stands in for the box only when no prompt row 
   const parse = (ls) => (ls.some((l) => /Wait for limit to reset/.test(l)) ? { options: [{ num: 1, label: 'Wait for limit to reset' }] } : null);
   assert.equal(limitMenuOnly(['❯ 1. Wait for limit to reset', '  2. Upgrade', 'Enter to select'], parse), true);
   assert.equal(limitMenuOnly(['❯ 1. Wait for limit to reset', 'Enter to select', '────', '❯ half a draft', '────'], parse), false);
+  assert.equal(limitMenuOnly(['❯ 1. Wait for limit to reset', 'Enter to select', '────', '❯ 1. Fix the tests', '────'], parse), false, 'a numbered draft too');
 });
 
 // ---- pin at the spawn choke point ----

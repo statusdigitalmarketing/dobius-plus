@@ -194,7 +194,10 @@ export function updateHistory(hist, records, now) {
 /** Drop windows past their reset, empty keys, and the oldest beyond the caps. */
 export function pruneHistory(hist, now) {
   let changed = false;
-  const latest = (k) => Math.max(0, ...Object.values(k.windows).map((w) => w.seenAt));
+  // A key kept only for its re-login boundary (no windows, `since`) counts
+  // as recent as that boundary, so the cap cannot evict it first and let the
+  // old login's records refill it.
+  const latest = (k) => Math.max(0, k.since || 0, ...Object.values(k.windows).map((w) => w.seenAt));
   for (const key of Object.keys(hist.keys)) {
     const k = hist.keys[key];
     for (const name of Object.keys(k.windows)) {
@@ -343,6 +346,26 @@ export function rankTargets(candidates) {
     }
     return 0;
   });
+}
+
+/**
+ * Does a process's environment text (ps eww: argv, then NAME=value pairs)
+ * select a different Keychain account than Dobius's own USER? Claude picks
+ * its item by USER, falling back to the OS user name when it is unset.
+ * 'USER' when it does, null when it provably does not, 'unreadable' when the
+ * text cannot say: USER= appearing twice (an argument or another variable's
+ * value can contain it), or no own user to compare with. A value counts as
+ * ours only if it is exactly ours, followed by the next NAME= or the end.
+ */
+export function userOverrideIn(text, ownUser, osUser) {
+  if (typeof text !== 'string' || !ownUser) return 'unreadable';
+  const hits = [...text.matchAll(/(?:^|\s)USER=/g)];
+  if (hits.length > 1) return 'unreadable';
+  if (hits.length === 0) return osUser === ownUser ? null : 'USER';
+  const rest = text.slice(hits[0].index + hits[0][0].length).replace(/\s+$/, '');
+  if (rest === ownUser) return null;
+  if (!rest.startsWith(ownUser)) return 'USER';
+  return /^\s+[A-Za-z_][A-Za-z0-9_]*=/.test(rest.slice(ownUser.length)) ? null : 'USER';
 }
 
 // ---- auto-move ----------------------------------------------------------

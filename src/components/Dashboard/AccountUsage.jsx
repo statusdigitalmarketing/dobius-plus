@@ -151,7 +151,7 @@ export default function AccountUsage() {
                 Unknown is not zero: it fills in once a session here sends a message.
               </div>
             )}
-            {u.known && orderedWindows(u.windows).map(([name, w]) => (
+            {orderedWindows(u.windows).map(([name, w]) => (
               <div key={name} className="flex items-center gap-2 text-xs" style={{ color: 'var(--dim)', flexWrap: 'wrap' }}>
                 <span style={{ width: 96, flexShrink: 0 }}>{windowLabel(name)}</span>
                 <span style={{ flex: 1, minWidth: 80, height: 6, borderRadius: 3, backgroundColor: 'var(--border)', overflow: 'hidden', maxWidth: 180 }}>

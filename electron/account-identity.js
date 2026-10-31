@@ -191,7 +191,8 @@ async function probeKeychain(service) {
  */
 export async function loginStatePresenceOnly(configDir) {
   try {
-    const st = await fs.lstat(path.join(configDir, '.credentials.json'));
+    // stat follows a symlinked credential file (as Claude does); nothing is opened.
+    const st = await fs.stat(path.join(configDir, '.credentials.json'));
     if (st.isFile() && st.size > 0) return 'in';
   } catch { /* none: ask the Keychain */ }
   return probeKeychain(keychainServiceFor(configDir));
