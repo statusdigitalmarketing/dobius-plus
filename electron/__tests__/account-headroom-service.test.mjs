@@ -533,9 +533,46 @@ await check('every abort after the claim gives it back', async () => {
   assert.equal(w.events.at(-1), 'release sess-now');
 });
 
-await check('a hard-linked credential file makes the login unknown', async () => {
-  const w = world({ nlinks: { [`${DIR_B}/.credentials.json`]: 2 } });
-  assert.match(target(await w.svc.moveTargets(TAB), 'B').refusal, /which login that account is/);
+await check('a hard-linked credential or metadata file makes the login unknown', async () => {
+  for (const name of ['.credentials.json', '.claude.json', '.config.json']) {
+    const w = world({ nlinks: { [`${DIR_B}/${name}`]: 2 } });
+    assert.match(target(await w.svc.moveTargets(TAB), 'B').refusal, /which login that account is/, name);
+  }
+});
+
+await check('after the restart: a wrong account outranks a trust prompt, an exit gives back the claim, a link made meanwhile fails', async () => {
+  const raw = fs.readFileSync(new URL('./fixtures/trust-prompt-2.1.316-raw.bin', import.meta.url));
+  const lines = await renderScreenLines(new Uint8Array(raw), { cols: 120 });
+  let w = world({ groupsAfter: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [200] }] });
+  let o = moveOpts(w);
+  const r1 = o.restart;
+  o.restart = (...a) => { w.lines = lines; return r1(...a); };
+  let r = await w.svc.move(TAB, 'b', o);
+  assert.match(r.error, /resumed on A/);
+  assert.deepEqual(r.pin, { id: 'a' });
+  w = world();
+  o = moveOpts(w);
+  const r2 = o.restart;
+  o.restart = (...a) => { const ok = r2(...a); w.presence = null; w.onSleep = () => { w.claude = null; }; return ok; };
+  await w.svc.move(TAB, 'b', o);
+  assert.equal(w.events.at(-1), 'release sess-now');
+  w = world({ neverStarts: true });
+  await moveB(w);
+  assert.equal(w.events.at(-1), 'release sess-now');
+  w = world();
+  o = moveOpts(w);
+  const r3 = o.restart;
+  o.restart = (...a) => { w.links[`${DIR_B}/.credentials.json`] = `${DIR_A}/.credentials.json`; return r3(...a); };
+  r = await w.svc.move(TAB, 'b', o);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /no login that can be confirmed/);
+});
+
+await check('every tab asked about is answered, however many', async () => {
+  const w = world();
+  const ids = Array.from({ length: 70 }, (_, i) => `term-/proj-${i + 1}`);
+  w.tabs = ids.map((id) => ({ id, cwd: '/proj', claudeConfigDir: DIR_A }));
+  assert.equal((await w.svc.moveCandidates(ids, 'b')).length, 70);
 });
 
 await check('.zshrc putting Claude back on its old folder is a failure naming it, and the pin says so', async () => {

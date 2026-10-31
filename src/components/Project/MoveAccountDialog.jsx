@@ -92,10 +92,10 @@ export default function MoveAccountDialog({ tabId, onClose }) {
                   ? <>
                       {orderedWindows(u.windows).map(([name, w]) => (
                         <span key={name} style={{ marginRight: 10 }}>
-                          {windowLabel(name)} {w ? <span style={{ color: barColor(w.used) }}>{Math.round(w.used)}%</span> : 'Unknown'}
+                          {windowLabel(name)} {w ? <><span style={{ color: barColor(w.used) }}>{Math.round(w.used)}%</span>, {ago(w.ageMs)}</> : 'Unknown'}
                         </span>
                       ))}
-                      <span>{u.headroom}% headroom, reported {ago(u.ageMs)}</span>
+                      <span>{u.headroom}% headroom</span>
                     </>
                   : <span>Usage unknown: no session has reported on it yet</span>}
               </div>

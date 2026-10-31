@@ -357,16 +357,19 @@ export function moveBlock(info, { allowBusy = false, allowDraft = false } = {}) 
 /**
  * What a process's environment text (claude-process-scan's processEnvironment,
  * no argv) says would stop its account folder deciding its login: one of `names`
- * set, or a HOME other than `home` (the credential key is derived from HOME).
+ * set, or a HOME or USER other than ours (`own`, what the credential is found by).
  * By name only; 'unreadable' with no text to read.
  */
-export function authOverrideIn(env, names, home) {
+export function authOverrideIn(env, names, own) {
   if (typeof env !== 'string') return 'unreadable';
   const named = names.find((n) => new RegExp(`(?:^|\\s)${n}=\\S`).test(env));
   if (named) return named;
-  const value = env.match(/(?:^|\s)HOME=(.*)/)?.[1];
-  if (value === undefined || value === home) return null;
-  return value.startsWith(home) && /^\s+[A-Za-z_][A-Za-z0-9_]*=/.test(value.slice(home.length)) ? null : 'HOME';
+  for (const [name, mine] of Object.entries(own)) {
+    const value = env.match(new RegExp(`(?:^|\\s)${name}=(.*)`))?.[1];
+    if (value === undefined || value === mine) continue;
+    if (!value.startsWith(mine) || !/^\s+[A-Za-z_][A-Za-z0-9_]*=/.test(value.slice(mine.length))) return name;
+  }
+  return null;
 }
 
 // Claude's own dialogs, read by structure from the live bottom of the screen as

@@ -23,6 +23,7 @@ import { shareConfiguredProfiles, shareProfile } from './account-profile-share.j
 import { accountIdentities, accountMetadata, loginState, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
 import { authOverrideIn } from './account-headroom.js';
+import { mapLimit } from './data-utils.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
 import { resolveAccountEnvForCwd, resolveClaudeAccountPin } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
@@ -2280,7 +2281,7 @@ const AUTH_OVERRIDE_NAMES = [
 ];
 // A token set inside Claude's own settings files never shows here
 // (docs/account-usage-and-move.md).
-const processAuthOverride = async (pid) => authOverrideIn(await processEnvironment(pid), AUTH_OVERRIDE_NAMES, os.homedir());
+const processAuthOverride = async (pid) => authOverrideIn(await processEnvironment(pid), AUTH_OVERRIDE_NAMES, { HOME: os.homedir(), USER: process.env.USER || os.userInfo().username });
 function setupHeadroomHandlers() {
   const ownsTab = (event, tabId) => typeof tabId === 'string' && TERMINAL_ID_RE.test(tabId) && ownsTerminal(event.sender.id, tabId);
   const userData = app.getPath('userData');
@@ -2300,7 +2301,13 @@ function setupHeadroomHandlers() {
     alive: (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } },
     claim: (sessionId, tabId) => claimSessionResume(sessionId, tabId),
     release: (sessionId, tabId) => releaseSessionResume(sessionId, tabId),
-    hasTranscript: async (sessionId, cwd) => (await getSessionSize(sessionId, cwd)) !== null,
+    // Under any project: a resume from a subfolder keeps its transcript where it began.
+    hasTranscript: async (sessionId) => {
+      const root = path.join(defaultClaudeDir(), 'projects');
+      const dirs = await fs.promises.readdir(root);
+      const hits = await mapLimit(dirs, 16, (dir) => fs.promises.access(path.join(root, dir, `${sessionId}.jsonl`)).then(() => true, () => false));
+      return hits.includes(true);
+    },
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     processAuthOverride,
     isDir: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },

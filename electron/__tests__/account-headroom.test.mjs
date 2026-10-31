@@ -272,17 +272,19 @@ check('a move needs one child Claude, its conversation and its folder; a warned 
   assert.match(moveBlock({ ...ok, override: 'unreadable' }, { allowBusy: true }), /could not be read/);
 });
 
-check('an auth override is read from the environment only, and a HOME other than ours counts', () => {
+check('an auth override is read from the environment only, and a HOME or USER other than ours counts', () => {
   const names = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
-  assert.equal(authOverrideIn(null, names, '/Users/x'), 'unreadable');
-  assert.equal(authOverrideIn(' PATH=/bin HOME=/Users/x USER=x', names, '/Users/x'), null);
-  assert.equal(authOverrideIn(' PATH=/bin HOME=/Users/x', names, '/Users/x'), null);
-  assert.equal(authOverrideIn(' PATH=/bin', names, '/Users/x'), null);
-  assert.equal(authOverrideIn(' ANTHROPIC_API_KEY=abc HOME=/Users/x', names, '/Users/x'), 'ANTHROPIC_API_KEY');
-  assert.equal(authOverrideIn(' ANTHROPIC_API_KEY= HOME=/Users/x', names, '/Users/x'), null, 'set empty signs nothing in');
-  assert.equal(authOverrideIn(' HOME=/Users/x/.claude-profiles/b USER=x', names, '/Users/x'), 'HOME');
-  assert.equal(authOverrideIn(' HOME=/Users/xy USER=x', names, '/Users/x'), 'HOME');
-  assert.equal(authOverrideIn(' HOME=/Users/x more USER=x', names, '/Users/x'), 'HOME');
+  const own = { HOME: '/Users/x', USER: 'x' };
+  assert.equal(authOverrideIn(null, names, own), 'unreadable');
+  assert.equal(authOverrideIn(' PATH=/bin HOME=/Users/x USER=x', names, own), null);
+  assert.equal(authOverrideIn(' PATH=/bin HOME=/Users/x', names, own), null);
+  assert.equal(authOverrideIn(' PATH=/bin', names, own), null);
+  assert.equal(authOverrideIn(' ANTHROPIC_API_KEY=abc HOME=/Users/x', names, own), 'ANTHROPIC_API_KEY');
+  assert.equal(authOverrideIn(' ANTHROPIC_API_KEY= HOME=/Users/x', names, own), null, 'set empty signs nothing in');
+  assert.equal(authOverrideIn(' HOME=/Users/x/.claude-profiles/b USER=x', names, own), 'HOME');
+  assert.equal(authOverrideIn(' HOME=/Users/xy USER=x', names, own), 'HOME');
+  assert.equal(authOverrideIn(' HOME=/Users/x more USER=x', names, own), 'HOME');
+  assert.equal(authOverrideIn(' HOME=/Users/x USER=alternate', names, own), 'USER');
 });
 
 // The menu exactly as the real frame draws it (fixture in the service test).
@@ -295,11 +297,11 @@ check('the limit menu is read by structure from the live bottom, not by its word
   assert.equal(limitMenuOn([...MENU, ...BOX]), false, 'transcript or tool output above an input box');
   assert.equal(limitMenuOn(['────────', '❯ What do you want to do?', '  ❯ 1. Stop and wait for limit to reset', '    2. Wait here', '  Enter to confirm · Esc to cancel', '────────', '  ⏵⏵ auto mode on']), false, 'a draft quoting it');
   assert.equal(limitMenuOn(['⎿ What do you want to do?', '  ❯ 1. Stop and wait for limit to reset', '    2. Wait here', '  Enter to confirm · Esc to cancel']), false, 'tool output as the last rows, no top edge');
-  assert.equal(limitMenuOn(['▔▔▔▔', 'What do you want to do? (limit to reset, usage credits)', '❯ 1. Yes', '  2. No', 'Enter to confirm · Esc to cancel']), false, 'the old word match');
-  assert.equal(limitMenuOn(['▔▔▔▔', 'What do you want to do?', '  1. Stop and wait for limit to reset', '  2. Wait here', 'Enter to confirm · Esc to cancel']), false, 'no pointer');
-  assert.equal(limitMenuOn(['▔▔▔▔', 'What do you want to do?', '❯ 1. Yes', '  2. No', 'Enter to confirm · Esc to cancel']), false, 'some other question');
+  assert.equal(limitMenuOn(['▔▔▔▔▔▔▔▔', 'What do you want to do? (limit to reset, usage credits)', '❯ 1. Yes', '  2. No', 'Enter to confirm · Esc to cancel']), false, 'the old word match');
+  assert.equal(limitMenuOn(['▔▔▔▔▔▔▔▔', 'What do you want to do?', '  1. Stop and wait for limit to reset', '  2. Wait here', 'Enter to confirm · Esc to cancel']), false, 'no pointer');
+  assert.equal(limitMenuOn(['▔▔▔▔▔▔▔▔', 'What do you want to do?', '❯ 1. Yes', '  2. No', 'Enter to confirm · Esc to cancel']), false, 'some other question');
   assert.equal(limitMenuOn([...MENU.slice(0, -1)]), false, 'no footer');
-  assert.equal(limitMenuOn(['▔▔▔▔', 'printed by a tool', '❯ 1. Stop and wait for limit to reset', '  2. Wait here', 'Enter to confirm · Esc to cancel']), false, 'no question row');
+  assert.equal(limitMenuOn(['▔▔▔▔▔▔▔▔', 'printed by a tool', '❯ 1. Stop and wait for limit to reset', '  2. Wait here', 'Enter to confirm · Esc to cancel']), false, 'no question row');
   assert.equal(limitMenuOn(['printed by a tool', 'What do you want to do?', '❯ 1. Stop and wait for limit to reset', '  2. Wait here', 'Enter to confirm · Esc to cancel']), false, 'no top edge');
   assert.equal(limitMenuOn(null), false);
 });

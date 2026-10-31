@@ -19,7 +19,6 @@ import {
 } from './account-headroom.js';
 
 const SAVE_EVERY_MS = 30_000;
-const MAX_CANDIDATE_TABS = 64;
 const MAX_HISTORY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_SERVICE = 'Claude Code-credentials';
 const STOP_MS = 8000;
@@ -155,7 +154,7 @@ export function createHeadroomService(d) {
         const at = await d.realpath(path.join(r.dir, name)).catch(() => null);
         if (at && at !== path.join(r.real, name)) r.email = null;
         // A hard link looks like the folder's own file, and realpath cannot tell.
-        if (at && name === '.credentials.json' && (await d.nlink(at).catch(() => 2)) > 1) r.email = null;
+        if (at && (await d.nlink(at).catch(() => 2)) > 1) r.email = null;
       }));
     }));
     const keysOf = new Map();
@@ -274,9 +273,10 @@ export function createHeadroomService(d) {
 
   async function usage() {
     await sample();
-    const now = d.now();
-    const rows = await accountRows();
+    // Last and together: identities and the history they read must be one moment.
     const scan = await readScan();
+    const rows = await accountRows();
+    const now = d.now();
     const live = new Map((scan?.groups || []).map((g) => [g.key, g.pids.length]));
     // An unresolved process is not an absent one: never call a credential idle
     // on that evidence.
@@ -320,7 +320,7 @@ export function createHeadroomService(d) {
           sessionId: presence.sessionId,
           project: cwd && d.isDir(cwd) ? cwd : null,
           // A Claude that never got a message has no transcript to resume.
-          hasTranscript: cwd ? await d.hasTranscript(presence.sessionId, cwd).catch(() => true) : true,
+          hasTranscript: await d.hasTranscript(presence.sessionId).catch(() => true),
         };
       }
       override = await d.processAuthOverride(info.pid);
@@ -362,7 +362,7 @@ export function createHeadroomService(d) {
   // Move all: every tab's state, and why it may not go to `targetId` (null =
   // Default). Each tab is judged from its own current account.
   async function moveCandidates(tabIds, targetId) {
-    const ids = [...new Set((Array.isArray(tabIds) ? tabIds : []).filter((x) => typeof x === 'string'))].slice(0, MAX_CANDIDATE_TABS);
+    const ids = [...new Set((Array.isArray(tabIds) ? tabIds : []).filter((x) => typeof x === 'string'))];
     const tabs = new Map(d.tabs().map((t) => [t.id, t]));
     await sample();
     const [rows, scan] = await Promise.all([accountRows(), readScan()]);
@@ -436,17 +436,17 @@ export function createHeadroomService(d) {
     let started = false;
     while (d.now() < end) {
       const info = await d.claudeInfo(tabId).catch(() => null);
-      if (started && !info) return { ok: false, pin, error: `Claude started on ${target.label} and exited. The tab is a shell there. ${manual}` };
+      if (started && !info) { if (sessionId) d.release(sessionId, tabId); return { ok: false, pin, error: `Claude started on ${target.label} and exited. The tab is a shell there. ${manual}` }; }
       if (info) {
         started = true;
-        // Nothing can be confirmed until a person answers this, behind the dialog.
-        const sc = await d.screen(tabId).catch(() => null);
-        if (sc && trustPromptOn(sc.lines)) return { ok: false, pin, error: `Claude on ${target.label} is asking whether to trust this folder. Answer it in the tab; the conversation carries on after that.` };
         const g = groupOf(await readScan(), info.pid);
         if (g && g.key !== target.key) {
           const actual = rows.find((r) => r.key === g.key);
           return { ok: false, pin: actual ? pinOf(actual) : null, error: `Claude resumed on ${actual ? named(actual) : g.configDir}, not ${target.label}. Something in the shell's startup files sets CLAUDE_CONFIG_DIR, so this tab stays there.` };
         }
+        // Nothing more can be confirmed until a person answers this, behind the dialog.
+        const sc = g ? await d.screen(tabId).catch(() => null) : null;
+        if (sc && trustPromptOn(sc.lines)) return { ok: false, pin, error: `Claude on ${target.label} is asking whether to trust this folder. Answer it in the tab; the conversation carries on after that.` };
         const seen = g ? await d.presence(info, g.envUnset ? null : g.configDir).catch(() => null) : null;
         if (sessionId && seen?.sessionId && seen.sessionId !== sessionId) return { ok: false, pin, error: `Claude is on ${target.label}, but running conversation ${seen.sessionId}, not ${sessionId}. ${manual}` };
         if (seen?.sessionId) {
@@ -454,16 +454,18 @@ export function createHeadroomService(d) {
           if (override) {
             return { ok: false, pin, error: override === 'unreadable'
               ? `Claude runs in ${target.label}'s folder, but its environment could not be read, so its login cannot be confirmed.`
-              : `Claude runs in ${target.label}'s folder, but ${override} is set in the tab's shell and signs it in the same way on every account, so it did not change login.` };
+              : `Claude runs in ${target.label}'s folder, but ${override} is set in the tab's shell and decides its login instead of the folder, so it did not change login.` };
           }
           // The folder may have been logged into something else during the move.
-          const now = await loginEmail(target.dir, target.envUnset);
-          if (now?.toLowerCase() !== target.email.toLowerCase()) return { ok: false, pin, error: `Claude runs on ${target.label}, but that folder now names ${now || 'no login'}, not ${target.email}. Check it is the login you meant.` };
+          const now = { dir: target.dir, key: target.key, email: await loginEmail(target.dir, target.envUnset) };
+          await markSharedFolders([now]);
+          if (now.email?.toLowerCase() !== target.email.toLowerCase()) return { ok: false, pin, error: `Claude runs on ${target.label}, but that folder now names ${now.email || 'no login that can be confirmed'}, not ${target.email}. Check it is the login you meant.` };
           return { ok: true, pin };
         }
       }
       await d.sleep(POLL_MS);
     }
+    if (!started && sessionId) d.release(sessionId, tabId);
     return { ok: false, pin, error: started
       ? `Claude started, but what it is running could not be confirmed within ${VERIFY_MS / 1000} seconds. Check the tab before relying on it.`
       : `Claude did not start within ${VERIFY_MS / 1000} seconds. The tab is a shell on ${target.label}. ${manual}` };
