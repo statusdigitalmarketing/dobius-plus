@@ -389,7 +389,7 @@ await check('a normal move stops Claude, claims, restarts in its folder, verifie
   const w = world();
   const r = await moveB(w);
   assert.deepEqual(r, { ok: true, pin: { id: 'b' } });
-  assert.deepEqual(w.events, ['stop 100', 'claim sess-now', `restart ${TAB} /proj {"id":"b"} sess-now /proj/worktree`]);
+  assert.deepEqual(w.events, ['stop 100', 'claim sess-now', `restart ${TAB} /proj {"id":"b"} sess-now /proj/worktree`, 'release sess-now']);
 });
 
 await check('refused with the tab untouched: no Claude, exec claude, another program, no conversation, no folder', async () => {
@@ -671,7 +671,7 @@ await check('input after Claude stopped is not restarted over; a deleted shell f
   assert.equal(w.events.some((e) => e.startsWith('restart')), false);
   w = world({ goneDir: '/proj' });
   assert.equal((await moveB(w)).ok, true);
-  assert.match(w.events.at(-1), / \/proj\/worktree \{"id":"b"\} sess-now \/proj\/worktree$/);
+  assert.match(w.events.findLast((e) => e.startsWith('restart')), / \/proj\/worktree \{"id":"b"\} sess-now \/proj\/worktree$/);
   w = world({ restartThrows: true });
   r = await moveB(w);
   assert.match(r.error, /could not restart on B: no ptys.*claude --resume/);

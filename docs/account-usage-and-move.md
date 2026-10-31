@@ -38,6 +38,9 @@ Accepted, not fixed. Each is a wrong or missing figure, or a refusal that does n
 8. **Placeholder drawn without dim.** Claude's placeholder and ghost suggestion are recognised by the dim attribute, confirmed on a 2.1.314 frame. A version that draws them otherwise reads as unsent text, so Move all skips that tab and names it.
 9. **Token no process shows.** A token set inside Claude's own settings files (an `env` block, `apiKeyHelper`) is applied inside Claude and never appears in its process environment, so step 3 cannot see it and reports success. A token exported by the shell is seen and reported, by name only.
 
+10. **Relaunch folder after a subfolder resume.** Auto-resume restores a moved conversation with the right id and account, but in the project folder rather than the subfolder it was resumed from: it does this for any conversation resumed from a subfolder, moved or not.
+11. **A subfolder conversation with no link yet.** Moved before Dobius has linked it (the first 15 seconds or so), its link names the subfolder, so auto-resume cannot find the transcript after a relaunch and skips it. Nothing is lost: it can be resumed by hand from History.
+
 ## Open, for Sam to judge
 
 Found by Codex on the final pass, not fixed, not accepted.
