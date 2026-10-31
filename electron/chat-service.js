@@ -197,6 +197,23 @@ function closeSend(id, s) {
 }
 const sendOpen = (id) => !!openSends.get(id)?.size;
 
+// Sends main cut on its own (a refused part, a send given up): the window
+// does not know and keeps handing over parts, which must not reopen it. Kept
+// until that window's own end or cut mark (its last word on the send).
+// tabId -> Set of sendIds, capped.
+const cutByMain = new Map();
+const MAX_CUT_SENDS = 64;
+function markCut(id, s) {
+  let set = cutByMain.get(id);
+  if (!set) cutByMain.set(id, (set = new Set()));
+  set.add(s);
+  if (set.size > MAX_CUT_SENDS) set.delete(set.values().next().value);
+}
+function unmarkCut(id, s) {
+  const set = cutByMain.get(id);
+  if (set?.delete(s) && !set.size) cutByMain.delete(id);
+}
+
 /**
  * The end of a multi-part send (terminal:write with { send, end } or
  * { send, cut }). end: its last part was handed over; it closes once that is
@@ -206,11 +223,15 @@ const sendOpen = (id) => !!openSends.get(id)?.size;
  * queued here are dropped and only submits not yet pasted go with them
  * (dropGen); a message already in the box keeps its Enter.
  */
-export function endSend(id, send, { cut = false, sender = null, owns = true } = {}) {
+export function endSend(id, send, { cut = false, sender = null, owns = true, byMain = false } = {}) {
   if (typeof send !== 'string' || !send) return;
   // Only the tab's owner, or the window that started this send (a tear-off
   // moves the tab before the old pane can say its send was cut).
   if (!owns && openSends.get(id)?.get(send)?.sender !== sender) return;
+  // Main cutting it: its window's later parts stay refused (markCut). The
+  // window's own mark is its last word: a send main already cut is done.
+  if (byMain) markCut(id, send);
+  else if (cutByMain.get(id)?.has(send)) { unmarkCut(id, send); return; }
   const q = submitQueues.get(id);
   if (cut) {
     const written = !!openSends.get(id)?.get(send)?.written;
@@ -325,6 +346,8 @@ export function writeRawInput(id, data, stillOk = () => true, { promptOnly = fal
   if (typeof data !== 'string' || !data) return Promise.resolve(refused('empty'));
   // A part of a multi-part send (endSend): the send is open from now on.
   if (typeof send !== 'string' || !send) send = null;
+  // A part of a send main already cut: refused, never reopening it.
+  else if (cutByMain.get(id)?.has(send)) return Promise.resolve(refused('cancelled'));
   else sendState(id, send, sender);
   // A frame already in flight when its phone was revoked: not even a cancel
   // key, which would also throw away the desktop's pending submit.
@@ -401,7 +424,7 @@ function skipReason(id, q, it) {
 // whole, so it is cut here (its other parts and its end go with it).
 function skipPart(id, x, reason) {
   x.resolve(refused(reason));
-  if (x.send && openSends.get(id)?.has(x.send)) endSend(id, x.send, { cut: true });
+  if (x.send && openSends.get(id)?.has(x.send)) endSend(id, x.send, { cut: true, byMain: true });
 }
 
 // A raw item the queue writes now (or the end mark of a send, which only
@@ -470,7 +493,10 @@ async function drainSubmits(id, q) {
         // never ended in all that time is given up, so it cannot block the
         // next submit too.
         const stuck = waits();
-        if (stuck && Date.now() >= end) openSends.delete(id);
+        if (stuck && Date.now() >= end) {
+          for (const s of openSends.get(id)?.keys() || []) markCut(id, s);
+          openSends.delete(id);
+        }
         skip = skipReason(id, q, it) || (stuck ? 'cancelled' : '');
         if (skip) { it.resolve(refused(skip)); continue; }
       }

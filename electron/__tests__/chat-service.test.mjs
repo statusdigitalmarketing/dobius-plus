@@ -549,6 +549,25 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   await tick(60);
   assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r'], 'the part in its gap did not go out');
 
+  // Main cut a send (Ctrl+C dropped its queued prefix): the parts its window
+  // keeps handing over afterwards are refused, never reopening it, until
+  // that window's own end mark; then nothing of it ever reached the shell.
+  reset(); ptys.set('h', {});
+  const ka = submitPromptToTab('h', 'echo ready');
+  writeRawInput('h', 'ec', () => true, { send: 'K', sender: 7 });
+  writeRawInput('h', '\x03'); // Ctrl+C from the phone, during A's Enter delay
+  await ka;
+  await tick(60); // the drain refuses the prefix and cuts K
+  const late = await writeRawInput('h', 'ho; touch /tmp/probe', () => true, { send: 'K', sender: 7 });
+  const lateEnter = await writeRawInput('h', '\r', () => true, { send: 'K', sender: 7 });
+  assert.equal(late.ok, false);
+  assert.equal(lateEnter.ok, false);
+  endSend('h', 'K', { sender: 7, owns: true }); // the window's own last word
+  await tick(60);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('echo ready'), '\x03'], 'no part of K, before or after the cut');
+  const next = await writeRawInput('h', 'z', () => true, { send: 'K', sender: 7 });
+  assert.equal(next.ok, true, 'once the window ended it, the id is free again');
+
   // A window that held input is gone with it half sent: a waiting submit is
   // cancelled, never appended to the half.
   const { cancelQueuedSubmits } = await import('../chat-service.js');
