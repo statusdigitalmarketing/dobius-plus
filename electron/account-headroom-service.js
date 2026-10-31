@@ -332,7 +332,10 @@ export function createHeadroomService(d) {
     else if (info.soleChild === false) running = 'other';
     const act = d.activity(tabId);
     const sc = info ? await d.screen(tabId).catch(() => null) : null;
-    const limited = !!sc && limitMenuOn(sc.lines);
+    // The screen and Claude's own record must agree. A real limited tab's record
+    // says 'waiting', with the hook on 'working' then 'idle', never 'needs': a
+    // permission prompt is never read through as a limit.
+    const limited = !!sc && presence?.status === 'waiting' && act?.status !== 'needs' && limitMenuOn(sc.lines);
     return {
       tabId, running, session, override,
       busy: !limited && tabBusy(act, d.now(), presence?.status),

@@ -285,15 +285,33 @@ check('an auth override is read from the environment only, and a HOME other than
   assert.equal(authOverrideIn(' HOME=/Users/x more USER=x', names, '/Users/x'), 'HOME');
 });
 
-check('Claude\'s limit menu and trust prompt are told from anything else near the bottom', () => {
-  const pad = Array(30).fill('');
-  assert.equal(limitMenuOn([...pad, 'What do you want to do?', '', '❯ 1. Stop and wait for limit to reset', '  3. Switch to usage credits', 'Enter to confirm']), true);
-  assert.equal(limitMenuOn([...pad, '  ⎿  You\'ve hit your weekly limit · resets Nov 4', '❯ ']), false, 'the line alone, back at the prompt');
-  assert.equal(limitMenuOn([...pad, 'What do you want to do?', '❯ 1. Yes', '  2. No']), false, 'some other question');
-  assert.equal(limitMenuOn(['What do you want to do?', '1. Stop and wait for limit to reset', ...Array(20).fill('x')]), false, 'scrolled away');
+// The menu exactly as the real frame draws it (fixture in the service test).
+const MENU = ['▔▔▔▔▔▔▔▔', '   What do you want to do?', '   ❯ 1. Stop and wait for limit to reset', '     2. Wait here, then continue automatically at Nov 4 at 12am', '     3. Switch to usage credits', '   Enter to confirm · Esc to cancel'];
+const BOX = ['────────', '❯ ', '────────', '  ⏵⏵ auto mode on'];
+check('the limit menu is read by structure from the live bottom, not by its words', () => {
+  assert.equal(limitMenuOn(['some transcript', '', ...MENU, '']), true);
+  assert.equal(limitMenuOn([...MENU.slice(0, 2), '     1. Stop and wait for limit to reset', '   ❯ 2. Wait here', ...MENU.slice(4)]), true, 'pointer moved down');
+  // Lookalikes: the same words where a person or a tool can put them.
+  assert.equal(limitMenuOn([...MENU, ...BOX]), false, 'transcript or tool output above an input box');
+  assert.equal(limitMenuOn(['────────', '❯ What do you want to do?', '  ❯ 1. Stop and wait for limit to reset', '    2. Wait here', '  Enter to confirm · Esc to cancel', '────────', '  ⏵⏵ auto mode on']), false, 'a draft quoting it');
+  assert.equal(limitMenuOn(['⎿ What do you want to do?', '  ❯ 1. Stop and wait for limit to reset', '    2. Wait here', '  Enter to confirm · Esc to cancel']), false, 'tool output as the last rows, no top edge');
+  assert.equal(limitMenuOn(['▔▔▔▔', 'What do you want to do? (limit to reset, usage credits)', '❯ 1. Yes', '  2. No', 'Enter to confirm · Esc to cancel']), false, 'the old word match');
+  assert.equal(limitMenuOn(['▔▔▔▔', 'What do you want to do?', '  1. Stop and wait for limit to reset', '  2. Wait here', 'Enter to confirm · Esc to cancel']), false, 'no pointer');
+  assert.equal(limitMenuOn(['▔▔▔▔', 'What do you want to do?', '❯ 1. Yes', '  2. No', 'Enter to confirm · Esc to cancel']), false, 'some other question');
+  assert.equal(limitMenuOn([...MENU.slice(0, -1)]), false, 'no footer');
+  assert.equal(limitMenuOn(['▔▔▔▔', 'printed by a tool', '❯ 1. Stop and wait for limit to reset', '  2. Wait here', 'Enter to confirm · Esc to cancel']), false, 'no question row');
+  assert.equal(limitMenuOn(['printed by a tool', 'What do you want to do?', '❯ 1. Stop and wait for limit to reset', '  2. Wait here', 'Enter to confirm · Esc to cancel']), false, 'no top edge');
   assert.equal(limitMenuOn(null), false);
-  assert.equal(trustPromptOn([...pad, '❯ No, exit', '  Yes, I trust this folder', 'Enter to confirm']), true);
-  assert.equal(trustPromptOn([...pad, '❯ ']), false);
+});
+
+check('the trust prompt is read the same way', () => {
+  const T = [' ❯ No, exit', '   Yes, I trust this folder', ' Enter to confirm · Esc to cancel'];
+  assert.equal(trustPromptOn(['Security guide', ...T, '']), true);
+  assert.equal(trustPromptOn(['   No, exit', ' ❯ Yes, I trust this folder', T[2]]), true);
+  assert.equal(trustPromptOn([...T, ...BOX]), false, 'quoted above an input box');
+  assert.equal(trustPromptOn(['Yes, I trust this folder', ...BOX]), false);
+  assert.equal(trustPromptOn(['   No, exit', '   Yes, I trust this folder', T[2]]), false, 'no pointer');
+  assert.equal(trustPromptOn(null), false);
 });
 
 const cand = (id, known, headroom, lastReportedAt = T0, extra = {}) => ({

@@ -369,9 +369,29 @@ export function authOverrideIn(env, names, home) {
   return value.startsWith(home) && /^\s+[A-Za-z_][A-Za-z0-9_]*=/.test(value.slice(home.length)) ? null : 'HOME';
 }
 
-// Claude's own screens, as drawn by 2.1.316 (fixtures: limit-menu and
-// trust-prompt). The limit menu is why a tab moves at all, so it is neither a
-// turn nor a draft even though Claude's record says a dialog is open.
-const bottomRows = (lines) => (Array.isArray(lines) ? lines : []).map(String).filter((l) => l.trim()).slice(-12).join('\n');
-export const limitMenuOn = (lines) => /What do you want to do\?[\s\S]*(limit to reset|usage credits)/.test(bottomRows(lines));
-export const trustPromptOn = (lines) => /Yes, I trust this folder/.test(bottomRows(lines));
+// Claude's own dialogs, read by structure from the live bottom of the screen as
+// 2.1.316 draws them (fixtures: limit-menu, trust-prompt). Words alone prove
+// nothing: a transcript, tool output or a draft can quote them, and an input box
+// always ends below any of those. A wrapped row, or a version drawing these
+// differently, simply does not match: the tab then reads as busy, the safe way.
+const drawnRows = (lines) => (Array.isArray(lines) ? lines : []).map(String).filter((l) => l.trim());
+const FOOTER = /^\s*Enter to confirm · Esc to cancel\s*$/;
+const pointed = (rows) => rows.filter((r) => /^\s*❯/.test(r)).length === 1;
+
+export function limitMenuOn(lines) {
+  const rows = drawnRows(lines);
+  let i = rows.length - 1;
+  if (i < 0 || !FOOTER.test(rows[i])) return false;
+  const options = [];
+  for (i -= 1; i >= 0 && /^\s*(?:❯\s*)?\d+\.\s/.test(rows[i]); i -= 1) options.unshift(rows[i]);
+  return options.length >= 2 && pointed(options)
+    && /^\s*(?:❯\s*)?1\. Stop and wait for limit to reset\s*$/.test(options[0])
+    && /^\s*What do you want to do\?\s*$/.test(rows[i] ?? '')
+    && /^\s*▔{8,}/.test(rows[i - 1] ?? ''); // the effort badge can sit on this row
+}
+
+export function trustPromptOn(lines) {
+  const rows = drawnRows(lines).slice(-3);
+  return rows.length === 3 && FOOTER.test(rows[2]) && pointed(rows.slice(0, 2))
+    && /^\s*(?:❯\s*)?No, exit\s*$/.test(rows[0]) && /^\s*(?:❯\s*)?Yes, I trust this folder\s*$/.test(rows[1]);
+}

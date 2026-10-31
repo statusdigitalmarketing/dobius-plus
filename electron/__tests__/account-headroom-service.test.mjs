@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHeadroomService, draftOnScreen, writePrivateFileSync } from '../account-headroom-service.js';
+import { limitMenuOn } from '../account-headroom.js';
 import { keychainServiceFor } from '../account-identity.js';
 import { resolveClaudeAccountPin } from '../spawn-account-env.js';
 import { readUsageRecords, pruneUsageRecords } from '../claude-usage.js';
@@ -461,12 +462,23 @@ await check('a warned person can move a tab with a draft, Move all cannot', asyn
 await check('a tab on Claude\'s real limit menu is neither busy nor a draft, so Move all takes it', async () => {
   const raw = fs.readFileSync(new URL('./fixtures/limit-menu-2.1.316-raw.bin', import.meta.url));
   const lines = await renderScreenLines(new Uint8Array(raw), { cols: 120 });
+  // The same menu right after a resume, with the effort badge on its top edge.
+  const resumed = fs.readFileSync(new URL('./fixtures/limit-menu-resumed-2.1.316-raw.bin', import.meta.url));
+  assert.equal(limitMenuOn(await renderScreenLines(new Uint8Array(resumed), { cols: 140 })), true);
   const w = world({ lines, presence: { sessionId: 'sess-now', status: 'waiting' }, box: null, activity: { status: 'working', lastActivityAt: T0 } });
   const [c] = await w.svc.moveCandidates([TAB], 'b');
   assert.equal(c.busy, false);
   assert.equal(c.draft, false);
   assert.equal(c.block, null);
   assert.equal((await moveB(w)).ok, true);
+  // The menu on screen with Claude's record not on a dialog, or a permission
+  // prompt from the hook: the words cannot clear either.
+  for (const over of [{ presence: { sessionId: 'sess-now', status: 'busy' } }, { presence: { sessionId: 'sess-now', status: 'idle' } }, { presence: { sessionId: 'sess-now', status: 'waiting' }, activity: { status: 'needs', lastActivityAt: T0 } }]) {
+    const y = world({ lines, box: 'half a thought', ...over });
+    const [e] = await y.svc.moveCandidates([TAB], 'b');
+    assert.equal(e.draft, true, JSON.stringify(over));
+    assert.match(e.block, /middle of a turn|question|unsent/, JSON.stringify(over));
+  }
   // Without the menu, the same record is a dialog and a box that cannot be read.
   const x = world({ presence: { sessionId: 'sess-now', status: 'waiting' }, box: null });
   const [d] = await x.svc.moveCandidates([TAB], 'b');

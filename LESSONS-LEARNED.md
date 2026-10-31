@@ -503,3 +503,9 @@
 - **FIX**: Main does it in one place: every check before anything is stopped, SIGHUP to Claude (the shell stays alive, so a Claude that will not stop changes nothing else), the resume through `loginShellSpawn` so nothing is typed, then success only from the new process's own environment and `sessions/<pid>.json`. The pin is set from that result, one move at a time, so there is nothing to roll back. Deleted: `terminal:inputCount`, `expectInputSeq`, `strictPin`, `freshShell`, every resumeSession change, `shared/session-tab.js`.
 - **CONTEXT**: Any action that kills something it then has to rebuild. Order it check, act, verify from the system.
 - **DETECTION**: `grep -n "accounts:move" electron/main.js`, and ask of any report of success what it actually read.
+
+### Testing - 2026-10-31 (account move, real accounts)
+- **MISTAKE**: Three bugs lived through about 25 Codex rounds and every stand-in run, and the first real logins found them in minutes: a tab on Claude's limit menu read as busy with a draft (record `waiting`, box unreadable), so Move all skipped the tabs it exists for; a Claude that never got a message has no transcript, so `--resume` printed "No conversation found" after 45s; and real records often carry only `seven_day`, so a live 99% read "usage unknown". A stand-in only does what its author imagined.
+- **FIX**: Capture real frames as fixtures (`limit-menu-*`, `trust-prompt-*`). Then a word match on that frame was too loose, and the strict parser's top-edge regex failed on the real frame right after a resume, because Claude draws its effort badge on that same row. Only a second real capture showed it.
+- **CONTEXT**: Anything reading Claude's screen or records. Prove it on a real frame at each moment it can appear, not one.
+- **DETECTION**: `ls electron/__tests__/fixtures/ | grep 2.1.316`
