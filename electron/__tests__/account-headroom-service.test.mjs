@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHeadroomService, isDraft, draftOnScreen, isLimitMenu, limitMenuOnly } from '../account-headroom-service.js';
+import { createHeadroomService, isDraft, draftOnScreen } from '../account-headroom-service.js';
 import { keychainServiceFor } from '../account-identity.js';
 import { resolveClaudeAccountPin } from '../spawn-account-env.js';
 import { pruneUsageRecords } from '../claude-usage.js';
@@ -61,13 +61,14 @@ function world(over = {}) {
     email: async (dir, opts) => (opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null)),
     inputHeld: () => !!w.held,
     metadata: async (dir, opts) => (w.unreadableInner && opts?.envUnset === false ? { email: null, state: 'unreadable' } : { email: (opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null)), state: 'address' }),
+    realpath: async (p) => (w.links?.[p] ?? p),
     sharesHistory: async (dir) => !(w.privateHistory && w.privateHistory.includes(dir)),
     processAuthOverride: async (pid) => (w.override && w.override[pid]) || null,
     settled: () => w.settled ?? true,
     selector: () => null,
     readRecords: async () => w.records,
     pruneRecords: async () => 0,
-    scan: async () => ({ groups: [{ key: w.procKey, configDir: w.procDir ?? { [KEY_A]: DIR_A, [KEY_B]: DIR_B }[w.procKey], envUnset: false, pids: [w.claude.pid] }], unresolved: [] }),
+    scan: async () => ({ groups: w.procKey === null ? [] : [{ key: w.procKey, configDir: w.procDir ?? { [KEY_A]: DIR_A, [KEY_B]: DIR_B }[w.procKey], envUnset: false, pids: [w.claude.pid] }], unresolved: w.procKey === null ? [{ pid: w.claude.pid }] : [] }),
     autoMoveEnabled: () => w.autoMove,
     tabs: () => [{ id: TAB, cwd: '/proj', claudeConfigDir: DIR_A }, ...(w.secondTab ? [{ id: TAB2, cwd: '/proj', claudeConfigDir: DIR_A }] : [])],
     activity: () => ({ status: 'done', lastActivityAt: w.now - 60_000 }),
@@ -263,10 +264,9 @@ await check('unsent text in the prompt holds an automatic move', async () => {
   assert.equal(isDraft('Try "git status"'), true, 'placeholder-shaped text is still treated as the person\'s');
   assert.equal(isDraft('Try "git status" first, then explain'), true);
   assert.equal(isDraft(null), false);
-  // A box that cannot be read is a possible draft, unless a selector holds the screen.
-  assert.equal(draftOnScreen(null, false), true);
-  assert.equal(draftOnScreen(null, true), false);
-  assert.equal(draftOnScreen('', false), false);
+  // A box that cannot be read is always a possible draft.
+  assert.equal(draftOnScreen(null), true);
+  assert.equal(draftOnScreen(''), false);
 });
 
 await check('the window must confirm right before restarting: typing, a draft or a busy tab since the decision cancels it', async () => {
@@ -482,13 +482,6 @@ await check('a restart the window could not do gives the event back', async () =
   assert.equal(w.sent.length, 2);
 });
 
-await check('only Claude\'s own limit menu stands in for an unreadable box', async () => {
-  assert.equal(isLimitMenu({ options: [{ num: 1, label: 'Stop and wait for limit to reset' }] }), true);
-  assert.equal(isLimitMenu({ options: [{ num: 1, label: 'Yes' }, { num: 2, label: 'No' }] }), false);
-  assert.equal(draftOnScreen(null, false), true);
-  assert.equal(draftOnScreen(null, true), false);
-});
-
 await check('an unreadable second metadata file on the default credential makes its login unknown', async () => {
   const { w, svc } = world();
   w.unreadableInner = true;
@@ -535,11 +528,39 @@ await check('a limit hold ends when that folder\'s five-hour window has reset si
   assert.equal(r.targets.find((t) => t.label === 'A').usage.limited, false, 'the new window is not held');
 });
 
-await check('Claude\'s limit menu stands in for the box only when no prompt row sits under it', async () => {
-  const parse = (ls) => (ls.some((l) => /Wait for limit to reset/.test(l)) ? { options: [{ num: 1, label: 'Wait for limit to reset' }] } : null);
-  assert.equal(limitMenuOnly(['❯ 1. Wait for limit to reset', '  2. Upgrade', 'Enter to select'], parse), true);
-  assert.equal(limitMenuOnly(['❯ 1. Wait for limit to reset', 'Enter to select', '────', '❯ half a draft', '────'], parse), false);
-  assert.equal(limitMenuOnly(['❯ 1. Wait for limit to reset', 'Enter to select', '────', '❯ 1. Fix the tests', '────'], parse), false, 'a numbered draft too');
+await check('two configured folders that are one folder on disk have no known login', async () => {
+  const { w, svc } = world();
+  w.links = { [DIR_B]: DIR_A }; // B is a symlink to A: one metadata file, two Keychain items
+  const u = await svc.usage();
+  assert.equal(u.accounts.find((r) => r.label === 'A').email, null);
+  assert.equal(u.accounts.find((r) => r.label === 'B').email, null);
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+});
+
+await check('a credential whose login becomes unknown loses its figures', async () => {
+  const { w, svc } = world({ records: [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 30, resetsAt: R5 } } }] });
+  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, true);
+  w.links = { [DIR_B]: DIR_A };
+  w.now += 1000;
+  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
+});
+
+await check('a Claude whose folder the process scan cannot read is not moved automatically', async () => {
+  const { w, svc } = world();
+  w.procKey = null; // its environment could not be read
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+});
+
+await check('a hold ends at the reset of the window it was taken in, whichever folder reports next', async () => {
+  const { w, svc } = world();
+  const soon = T0 / 1000 + 600; // A's five-hour window resets ten minutes from now
+  w.records[0].windows.five_hour.resetsAt = soon;
+  await svc.tick(); // A held (30 minutes), taken in the window that resets at `soon`
+  w.now = soon * 1000 + 60_000;
+  const r = await svc.moveTargets(TAB);
+  assert.notEqual(r.targets.find((t) => t.label === 'A').usage.limited, true);
 });
 
 // ---- pin at the spawn choke point ----

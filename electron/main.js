@@ -23,7 +23,7 @@ import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending a
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities, accountEmail, accountMetadata, loginStatePresenceOnly, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
-import { userOverrideIn } from './account-headroom.js';
+import { userOverrideIn, envOverrideIn } from './account-headroom.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
 import { resolveAccountEnvForCwd, resolveClaudeAccountPin } from './spawn-account-env.js';
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
@@ -2310,6 +2310,7 @@ function setupHeadroomHandlers() {
     },
     processCwd: (pid) => getProcessCwd(pid),
     processAuthOverride: (pid) => processAuthOverride(pid),
+    realpath: (p) => fs.promises.realpath(p),
     settled: (id) => terminalSettledSinceInput(id),
     email: (dir, opts) => accountEmail(dir, opts),
     metadata: (dir, opts) => accountMetadata(dir, opts),
@@ -2409,7 +2410,15 @@ async function processAuthOverride(pid) {
     // exactly ours followed by the next variable or the end.
     let osUser = null;
     try { osUser = os.userInfo().username; } catch { osUser = null; }
-    return userOverrideIn(stdout, process.env.USER || osUser, osUser);
+    const userOverride = userOverrideIn(stdout, process.env.USER || osUser, osUser);
+    if (userOverride) return userOverride;
+    // HOME decides where an UNSET or ~-relative profile folder lands (the
+    // bare default Keychain item belongs to ~/.claude): a shell that moves
+    // HOME can put the resumed Claude on another login.
+    let osHome = null;
+    try { osHome = os.userInfo().homedir; } catch { osHome = null; }
+    const home = envOverrideIn(stdout, 'HOME', os.homedir(), osHome);
+    return home ? (home === 'unreadable' ? home : 'HOME') : null;
   } catch { return 'unreadable'; }
 }
 

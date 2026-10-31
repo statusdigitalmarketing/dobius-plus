@@ -48,49 +48,18 @@ const PRUNE_EVERY_MS = 3600_000;
 export const isDraft = (box) => typeof box === 'string' && !!box.trim();
 
 /**
- * Could a restart lose unsent text? The box's text when it can be read. When
- * it cannot (promptBoxText refuses screens with a dialog-like line anywhere
- * above the box), only a selector on screen (Claude's own limit menu, a
- * question) is known to hold no typed text; anything else counts as a
- * possible draft, because guessing "empty" is what loses one.
+ * Could a restart lose unsent text? The box's text when it can be read; when
+ * it cannot (promptBoxText refuses screens with a dialog-like line above the
+ * box, Claude's own limit menu included), always yes: guessing "empty" is
+ * what loses a draft, and every exception tried (a selector, the limit menu,
+ * a single pointer row) was shown to hide one. The cost is that a tab with a
+ * menu open waits instead of moving.
  */
-// Only a selector at the bottom of the screen is Claude's live one; one
-// quoted in earlier output proves nothing about the input box.
-export function bottomRows(lines, n = 20) {
-  if (!Array.isArray(lines)) return [];
-  let last = lines.length - 1;
-  while (last >= 0 && !String(lines[last] || '').trim()) last -= 1;
-  return lines.slice(Math.max(0, last - n + 1), last + 1);
-}
-
-// Claude's own menu when a limit stops a turn ("Stop and wait for limit to
-// reset", "Wait for limit to reset", "/usage-credits ..."). Its box is hidden
-// while it is open and holds no typed text.
-const LIMIT_MENU_RE = /wait for (?:the )?limit to reset|usage-credits|Continue now at lower priority/i;
-export const isLimitMenu = (sel) => !!sel && Array.isArray(sel.options) && sel.options.some((o) => LIMIT_MENU_RE.test(String(o?.label ?? o?.text ?? o ?? '')));
-
-/**
- * Claude's limit menu is at the bottom AND nothing below it looks like an
- * input prompt ("❯ some text" that is not a numbered option). A menu quoted in
- * output with a real prompt under it fails the second half.
- */
-// The menu has ONE pointer row (its highlighted option). A second row that
-// starts with the prompt character, numbered or not, may be a real input box.
-const POINTER_ROW_RE = /^\s*[❯>]\s/;
-export function limitMenuOnly(lines, parse) {
-  const bottom = bottomRows(lines);
-  let sel;
-  try { sel = parse(bottom); } catch { sel = null; }
-  if (!isLimitMenu(sel)) return false;
-  return bottom.filter((l) => POINTER_ROW_RE.test(String(l || ''))).length === 1;
-}
-
-export function draftOnScreen(box, limitMenuShown) {
+export function draftOnScreen(box) {
   if (typeof box === 'string') return isDraft(box);
-  // Unreadable: only Claude's own limit menu is known to hold no text. Any
-  // other selector may be quoted output above a real prompt with a draft.
-  return !limitMenuShown;
+  return true;
 }
+
 // Desktop tabs only: phone and bridge PTYs have no window to move them.
 const DESKTOP_TAB_RE = /^term-\/.+-\d+$/;
 
@@ -170,18 +139,38 @@ export function createHeadroomService(d) {
   // unset reads ~/.claude.json, an explicit ~/.claude reads the inner one), and
   // a login through either replaces the one credential: when the two files
   // name different addresses, who that credential is cannot be told, so null.
-  async function loginEmail(dir, envUnset) {
+  async function loginInfo(dir, envUnset) {
     let a;
     try { a = await d.email(dir, { envUnset }); } catch { a = null; }
-    if (!a || d.keyFor(dir) !== DEFAULT_SERVICE) return a || null;
+    if (!a || d.keyFor(dir) !== DEFAULT_SERVICE) return { email: a || null, conflict: false };
     // The other file must be readable to agree: an unreadable one may name
     // the login the credential now belongs to.
     let other;
     try { other = await d.metadata(dir, { envUnset: !envUnset }); } catch { other = { state: 'unreadable' }; }
-    if (other?.state === 'unreadable') return null;
+    if (other?.state === 'unreadable') return { email: null, conflict: true };
     const b = other?.email;
-    return b && b.toLowerCase() !== a.toLowerCase() ? null : a;
+    return b && b.toLowerCase() !== a.toLowerCase() ? { email: null, conflict: true } : { email: a, conflict: false };
   }
+  const loginEmail = async (dir, envUnset) => (await loginInfo(dir, envUnset)).email;
+
+  // Two configured folders that are one folder on disk (a symlink) share one
+  // metadata file but have TWO Keychain items (Claude hashes the spelling):
+  // the address that file names cannot be trusted for either.
+  async function markSharedFolders(rows) {
+    const byReal = new Map();
+    await Promise.all(rows.map(async (r) => { r.real = await d.realpath(r.dir).catch(() => null); }));
+    for (const r of rows) {
+      if (!r.real) continue;
+      const other = byReal.get(r.real);
+      if (other && other.key !== r.key) {
+        for (const x of [other, r]) { x.email = null; x.loginConflict = true; }
+      } else if (!other) byReal.set(r.real, r);
+    }
+  }
+
+  // Sentinel login for a credential whose owner cannot be told: recording it
+  // clears that credential's figures like any other change of login.
+  const UNKNOWN_LOGIN = '(unknown login)';
 
   // Two rows on one credential can read two metadata files (Default with
   // the home-level file, an explicit ~/.claude with the inner one) and name
@@ -190,12 +179,12 @@ export function createHeadroomService(d) {
   function applyLogins(h, rows, records = []) {
     const loginOf = new Map();
     for (const r of rows) {
-      if (!r.key || !r.email) continue;
-      const e = r.email.toLowerCase();
-      loginOf.set(r.key, loginOf.has(r.key) && loginOf.get(r.key) !== e ? null : e);
+      if (!r.key) continue;
+      const e = r.loginConflict ? UNKNOWN_LOGIN : (r.email ? r.email.toLowerCase() : null);
+      if (!e) continue;
+      loginOf.set(r.key, loginOf.has(r.key) && loginOf.get(r.key) !== e ? UNKNOWN_LOGIN : e);
     }
     for (const [key, email] of loginOf) {
-      if (!email) continue;
       const before = h.keys[key]?.email;
       if (noteLogin(h, key, email, d.now(), records)) {
         dirty = true;
@@ -208,7 +197,12 @@ export function createHeadroomService(d) {
   async function readLogins() {
     const { default: def, accounts: rows } = accountKeyRows(d.getAccounts(), { defaultDir: d.defaultDir() });
     const all = [{ ...def, envUnset: d.defaultEnvUnset() }, ...rows.filter(Boolean).map((r) => ({ ...r, envUnset: false }))];
-    await Promise.all(all.map(async (r) => { r.email = await loginEmail(r.dir, r.envUnset); }));
+    await Promise.all(all.map(async (r) => {
+      const li = await loginInfo(r.dir, r.envUnset);
+      r.email = li.email;
+      r.loginConflict = li.conflict;
+    }));
+    await markSharedFolders(all);
     return all;
   }
 
@@ -226,8 +220,9 @@ export function createHeadroomService(d) {
     ];
     await Promise.all(all.map(async (r) => {
       try {
-        const [ident, email, shared] = await Promise.all([d.identity(r.dir, { envUnset: r.envUnset }), loginEmail(r.dir, r.envUnset), d.sharesHistory(r.dir)]);
-        r.email = email;
+        const [ident, li, shared] = await Promise.all([d.identity(r.dir, { envUnset: r.envUnset }), loginInfo(r.dir, r.envUnset), d.sharesHistory(r.dir)]);
+        r.email = li.email;
+        r.loginConflict = li.conflict;
         r.sharedHistory = shared;
         r.login = ident?.login || 'unknown';
       } catch {
@@ -239,6 +234,7 @@ export function createHeadroomService(d) {
     // with CLAUDE_CONFIG_DIR=~/.claude explicitly writes the inner file under
     // the SAME credential. Two different addresses there: who the credential
     // belongs to is unknown, and it is shown and treated that way.
+    await markSharedFolders(all);
     const byEmail = new Map();
     for (const r of all) {
       if (!r.email) continue;
@@ -274,9 +270,12 @@ export function createHeadroomService(d) {
     const envUnset = g ? !!g.envUnset : tab.claudeConfigDir === null;
     const dir = g ? g.configDir : (envUnset ? d.cliDefaultDir() : tab.claudeConfigDir);
     const key = g ? g.key : d.keyFor(dir);
+    // `resolved`: the running Claude's own folder was read (not guessed from
+    // the tab's spawn binding). Auto-move acts only on a resolved source.
+    const resolved = pid === null || !!g;
     const row = rows.find((r) => r.key === key);
-    if (row) return { key, email: row.email, label: row.label };
-    return { key, email: await loginEmail(dir, envUnset), label: path.basename(dir) };
+    if (row) return { key, email: row.email, label: row.label, resolved };
+    return { key, email: await loginEmail(dir, envUnset), label: path.basename(dir), resolved };
   }
 
   // One login under two folders is one limit: a folder with no live figure
@@ -331,6 +330,7 @@ export function createHeadroomService(d) {
   function keyHeld(key, now) {
     const h = limitedUntil.get(key);
     if (!h || h.until <= now) return false;
+    if (Number.isFinite(h.r) && h.r * 1000 <= now) return false; // that window has reset
     const r = hist?.keys?.[key]?.windows?.five_hour?.r;
     return !(Number.isFinite(h.r) && Number.isFinite(r) && r > h.r + 60);
   }
@@ -417,7 +417,7 @@ export function createHeadroomService(d) {
   async function draftIn(tabId) {
     try {
       const sc = await d.screen(tabId);
-      return sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), limitMenuOnly(sc.lines, d.selector)) : true;
+      return sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes)) : true;
     } catch { return true; }
   }
 
@@ -570,7 +570,7 @@ export function createHeadroomService(d) {
       let sc;
       try { sc = await d.screen(tab.id); } catch { sc = null; }
       const screenHit = !!liveLimitLine(sc?.lines, d.rows(tab.id));
-      const draft = sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes), limitMenuOnly(sc.lines, d.selector)) : true;
+      const draft = sc ? draftOnScreen(d.promptBox(sc.lines, sc.modes)) : true;
       // A token or key exported into this Claude (a shell rc) signs it in
       // whatever its profile folder says: moving it would change nothing.
       const tabOverride = await d.processAuthOverride(info.pid); // a name, 'unreadable', or null
@@ -587,6 +587,7 @@ export function createHeadroomService(d) {
       rows ??= await accountRows();
       live ??= await liveByKey();
       const source = await sourceOf(tab, rows, info.pid);
+      if (!source.resolved) continue; // which login this Claude is on is unknown: looked at again later
       const dec = decideAutoMove({
         enabled: true,
         now: d.now(),

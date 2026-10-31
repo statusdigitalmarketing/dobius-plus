@@ -350,23 +350,26 @@ export function rankTargets(candidates) {
 
 /**
  * Does a process's environment text (ps eww: argv, then NAME=value pairs)
- * select a different Keychain account than Dobius's own USER? Claude picks
+ * set `name` differently from Dobius's own value (`fallback`: what an unset
+ * variable means)? For USER: does it select a different Keychain account? Claude picks
  * its item by USER, falling back to the OS user name when it is unset.
  * 'USER' when it does, null when it provably does not, 'unreadable' when the
  * text cannot say: USER= appearing twice (an argument or another variable's
  * value can contain it), or no own user to compare with. A value counts as
  * ours only if it is exactly ours, followed by the next NAME= or the end.
  */
-export function userOverrideIn(text, ownUser, osUser) {
-  if (typeof text !== 'string' || !ownUser) return 'unreadable';
-  const hits = [...text.matchAll(/(?:^|\s)USER=/g)];
+export function envOverrideIn(text, name, own, fallback) {
+  if (typeof text !== 'string' || !own) return 'unreadable';
+  const hits = [...text.matchAll(new RegExp(`(?:^|\\s)${name}=`, 'g'))];
   if (hits.length > 1) return 'unreadable';
-  if (hits.length === 0) return osUser === ownUser ? null : 'USER';
+  if (hits.length === 0) return fallback === own ? null : name;
   const rest = text.slice(hits[0].index + hits[0][0].length).replace(/\s+$/, '');
-  if (rest === ownUser) return null;
-  if (!rest.startsWith(ownUser)) return 'USER';
-  return /^\s+[A-Za-z_][A-Za-z0-9_]*=/.test(rest.slice(ownUser.length)) ? null : 'USER';
+  if (rest === own) return null;
+  if (!rest.startsWith(own)) return name;
+  return /^\s+[A-Za-z_][A-Za-z0-9_]*=/.test(rest.slice(own.length)) ? null : name;
 }
+
+export const userOverrideIn = (text, ownUser, osUser) => envOverrideIn(text, 'USER', ownUser, osUser);
 
 // ---- auto-move ----------------------------------------------------------
 
