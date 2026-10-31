@@ -21,7 +21,7 @@ const stallWatchdog = createStallWatchdog({ log: logLine });
 stallWatchdog.wrapIpc(ipcMain);
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
-import { accountIdentities, accountEmail, accountMetadata, loginStatePresenceOnly, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
+import { accountIdentities, accountMetadata, loginStatePresenceOnly, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
 import { userOverrideIn, envOverrideIn } from './account-headroom.js';
 import { shareCodexProfile, codexProfilesRoot, codexDefaultDir } from './codex-account-env.js';
@@ -2304,15 +2304,11 @@ function setupHeadroomHandlers() {
     keyFor: (dir) => { try { return keychainServiceFor(dir); } catch { return null; } },
     // Read-only and token-free: the metadata file for the address, and only
     // the EXISTENCE of a credential (account-identity.js).
-    identity: async (dir, opts) => {
-      const [email, login] = await Promise.all([accountEmail(dir, opts), loginStatePresenceOnly(dir)]);
-      return { email, login };
-    },
+    login: (dir) => loginStatePresenceOnly(dir),
     processCwd: (pid) => getProcessCwd(pid),
     processAuthOverride: (pid) => processAuthOverride(pid),
     realpath: (p) => fs.promises.realpath(p),
     settled: (id) => terminalSettledSinceInput(id),
-    email: (dir, opts) => accountEmail(dir, opts),
     metadata: (dir, opts) => accountMetadata(dir, opts),
     // This folder's conversations are the shared store (account-profile-share
     // links projects into ~/.claude): a resume there finds the same

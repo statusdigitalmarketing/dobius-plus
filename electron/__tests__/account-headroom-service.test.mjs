@@ -57,10 +57,13 @@ function world(over = {}) {
     defaultEnvUnset: () => true,
     cliDefaultDir: () => HOMEC,
     keyFor: (dir) => keychainServiceFor(dir),
-    identity: async (dir) => ({ email: w.emails[dir] ?? null, login: 'in' }),
-    email: async (dir, opts) => (opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null)),
+    login: async () => 'in',
     inputHeld: () => !!w.held,
-    metadata: async (dir, opts) => (w.unreadableInner && opts?.envUnset === false ? { email: null, state: 'unreadable' } : { email: (opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null)), state: 'address' }),
+    metadata: async (dir, opts) => {
+      if (w.unreadableInner && opts?.envUnset === false) return { email: null, state: 'unreadable' };
+      const email = opts?.envUnset === false && w.innerEmails?.[dir] !== undefined ? w.innerEmails[dir] : (w.emails[dir] ?? null);
+      return { email, state: email ? 'address' : 'none' };
+    },
     realpath: async (p) => (w.links?.[p] ?? p),
     sharesHistory: async (dir) => !(w.privateHistory && w.privateHistory.includes(dir)),
     processAuthOverride: async (pid) => (w.override && w.override[pid]) || null,
@@ -544,6 +547,59 @@ await check('a credential whose login becomes unknown loses its figures', async 
   w.links = { [DIR_B]: DIR_A };
   w.now += 1000;
   assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
+});
+
+await check('while a login stays unknown, new reports are not kept for it', async () => {
+  const { w, svc } = world({ records: [{ key: KEY_B, receivedAt: T0 - 60_000, windows: { five_hour: { usedPercentage: 30, resetsAt: R5 } }, sessionId: 'x1' }] });
+  await svc.usage();
+  w.emails[DIR_B] = null; // its metadata no longer names anyone
+  w.now += 1000;
+  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
+  w.records = [{ key: KEY_B, receivedAt: w.now, windows: { five_hour: { usedPercentage: 35, resetsAt: R5 } }, sessionId: 'x1' }];
+  w.now += 1000;
+  assert.equal((await svc.usage()).accounts.find((r) => r.label === 'B').usage.known, false);
+});
+
+await check('every row on a folder that another spelling links to loses its login, duplicates included', async () => {
+  const { w, svc } = world();
+  w.extraAccounts = [
+    { id: 'a2', type: 'claude', name: 'A2', claudeJsonPath: `${DIR_A}/.claude.json` },
+    { id: 'l', type: 'claude', name: 'L', claudeJsonPath: '/profiles/l/.claude.json' },
+  ];
+  w.links = { '/profiles/l': DIR_A };
+  w.emails['/profiles/l'] = 'b@x.com';
+  const u = await svc.usage();
+  for (const label of ['A', 'A2', 'L']) assert.equal(u.accounts.find((r) => r.label === label).email, null, label);
+});
+
+await check('a credential file linked between two folders makes both logins unknown', async () => {
+  const { w, svc } = world();
+  w.links = { [`${DIR_B}/.credentials.json`]: `${DIR_A}/.credentials.json` };
+  const u = await svc.usage();
+  assert.equal(u.accounts.find((r) => r.label === 'B').email, null);
+  assert.equal(u.accounts.find((r) => r.label === 'A').email, null);
+});
+
+await check('a move request that outlived its expiry cannot be taken for a later retry of the same limit', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  const first = w.sent[0].payload.eventId;
+  w.now += 4 * 60_000;
+  await svc.tick();
+  w.now += 61_000;
+  await svc.tick();
+  const second = w.sent[1].payload.eventId;
+  assert.notEqual(first, second);
+  assert.equal((await svc.startAutoMove(TAB, first, 7)).ok, false);
+  assert.equal((await svc.startAutoMove(TAB, second, 7)).ok, true);
+});
+
+await check('Move all stays available on the account this tab is already on', async () => {
+  const { svc } = world();
+  const r = await svc.moveTargets(TAB);
+  const a = r.targets.find((t) => t.label === 'A');
+  assert.match(a.refusal, /already on/);
+  assert.equal(a.allRefusal, null);
 });
 
 await check('a Claude whose folder the process scan cannot read is not moved automatically', async () => {

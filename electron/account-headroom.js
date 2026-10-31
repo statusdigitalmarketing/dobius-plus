@@ -111,12 +111,19 @@ const SID_RE = /^[A-Za-z0-9_-]{1,100}$/;
 // pruned, so this is far above what one folder ever has).
 const MAX_IGNORED = 1000;
 
+// A credential whose owner cannot be told. Its figures are cleared when it
+// becomes this, and none are kept while it stays this.
+export const UNKNOWN_LOGIN = '(unknown login)';
+
 export function noteLogin(hist, key, email, now, records = []) {
   if (!isCredentialKey(key) || typeof email !== 'string' || !email.trim()) return false;
   const k = hist.keys[key];
   if (!k) return false;
   const who = email.trim().toLowerCase();
   if (k.email === who) return false;
+  // Never owned, and now unknown: figures from a sample that created this key
+  // cannot be attributed either.
+  if (!k.email && who === UNKNOWN_LOGIN) k.windows = bare();
   // Records the old login's sessions left on disk keep their old figures;
   // anything received before the change is ignored from now on.
   if (k.email && k.email !== who) {
@@ -161,6 +168,7 @@ export function updateHistory(hist, records, now) {
       if (r === null || expired(r, now)) continue;
       let k = hist.keys[rec.key];
       if (k?.since && rec.receivedAt < k.since) continue; // from before a re-login (noteLogin)
+      if (k?.email === UNKNOWN_LOGIN) continue; // nobody to attribute it to until the login is known again
       if (k?.ignore && typeof rec.sessionId === 'string' && rec.sessionId in k.ignore) {
         if (k.ignore[rec.sessionId] === figureOf(rec.windows)) continue;
         delete k.ignore[rec.sessionId]; // a new figure: that session made a call on the new login

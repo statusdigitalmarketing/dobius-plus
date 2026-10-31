@@ -79,6 +79,9 @@ export default function MoveAccountDialog({ tabId, onClose }) {
         {(data?.targets || []).map((t, i) => {
           const u = t.usage;
           const ok = !t.refusal && !busy;
+          // Consolidating: the tab this dialog opened from may already be on
+          // the target; every other tab is judged by itself when it moves.
+          const okAll = !t.allRefusal && !busy;
           return (
             <div key={`${t.id ?? 'default'}-${i}`} data-move-target={t.label} style={{ border: '1px solid var(--border)', borderRadius: 6, padding: '7px 9px', marginBottom: 6, opacity: t.refusal ? 0.6 : 1 }}>
               <div className="flex items-center justify-between gap-2">
@@ -88,7 +91,7 @@ export default function MoveAccountDialog({ tabId, onClose }) {
                 </div>
                 <div className="flex gap-1" style={{ flexShrink: 0 }}>
                   <button style={btn(ok)} disabled={!ok} onClick={() => moveOne(t)}>Move tab</button>
-                  <button style={btn(ok)} disabled={!ok} onClick={() => moveAll(t)}>Move all in window</button>
+                  <button style={btn(okAll)} disabled={!okAll} onClick={() => moveAll(t)}>Move all in window</button>
                 </div>
               </div>
               <div className="text-xs mt-1" style={{ color: 'var(--dim)' }}>

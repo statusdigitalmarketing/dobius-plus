@@ -21,7 +21,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   emptyHistory, sanitizeHistory, updateHistory, usageForKey, accountKeyRows, moveRefusal, autoRefusal,
-  rankTargets, liveLimitLine, decideAutoMove, tabBusy, noteLogin, freshUsage, STALE_MS, LIMIT_LINE_RE, AUTO,
+  rankTargets, liveLimitLine, decideAutoMove, tabBusy, noteLogin, freshUsage, UNKNOWN_LOGIN, STALE_MS, LIMIT_LINE_RE, AUTO,
 } from './account-headroom.js';
 
 const SAVE_EVERY_MS = 30_000;
@@ -79,6 +79,9 @@ export function createHeadroomService(d) {
   let ticking = false;
   let loading = null;
   let lastPrune = 0;
+  // Each move gets its own id: a request queued in the window past its expiry
+  // must not be taken for a later retry of the same limit.
+  let moveCounter = 0;
   // The records the last sample read: a login change noticed outside a
   // sample still needs them to know which sessions carry the old figures.
   let lastRecords = [];
@@ -140,9 +143,13 @@ export function createHeadroomService(d) {
   // a login through either replaces the one credential: when the two files
   // name different addresses, who that credential is cannot be told, so null.
   async function loginInfo(dir, envUnset) {
-    let a;
-    try { a = await d.email(dir, { envUnset }); } catch { a = null; }
-    if (!a || d.keyFor(dir) !== DEFAULT_SERVICE) return { email: a || null, conflict: false };
+    let meta;
+    try { meta = await d.metadata(dir, { envUnset }); } catch { meta = { state: 'unreadable' }; }
+    const a = meta?.email || null;
+    // No readable address: the folder's login cannot be told (unreadable,
+    // logged out, or never logged in), so any figures it has are not trusted.
+    if (!a) return { email: null, conflict: true };
+    if (d.keyFor(dir) !== DEFAULT_SERVICE) return { email: a, conflict: false };
     // The other file must be readable to agree: an unreadable one may name
     // the login the credential now belongs to.
     let other;
@@ -156,21 +163,26 @@ export function createHeadroomService(d) {
   // Two configured folders that are one folder on disk (a symlink) share one
   // metadata file but have TWO Keychain items (Claude hashes the spelling):
   // the address that file names cannot be trusted for either.
+  // A credential FILE linked between folders is the same problem.
   async function markSharedFolders(rows) {
-    const byReal = new Map();
-    await Promise.all(rows.map(async (r) => { r.real = await d.realpath(r.dir).catch(() => null); }));
-    for (const r of rows) {
-      if (!r.real) continue;
-      const other = byReal.get(r.real);
-      if (other && other.key !== r.key) {
-        for (const x of [other, r]) { x.email = null; x.loginConflict = true; }
-      } else if (!other) byReal.set(r.real, r);
+    await Promise.all(rows.map(async (r) => {
+      r.real = await d.realpath(r.dir).catch(() => null);
+      r.realCred = await d.realpath(path.join(r.dir, '.credentials.json')).catch(() => null);
+    }));
+    for (const field of ['real', 'realCred']) {
+      const groups = new Map();
+      for (const r of rows) {
+        if (!r[field]) continue;
+        if (!groups.has(r[field])) groups.set(r[field], []);
+        groups.get(r[field]).push(r);
+      }
+      for (const group of groups.values()) {
+        if (new Set(group.map((x) => x.key)).size < 2) continue;
+        for (const x of group) { x.email = null; x.loginConflict = true; }
+      }
     }
   }
 
-  // Sentinel login for a credential whose owner cannot be told: recording it
-  // clears that credential's figures like any other change of login.
-  const UNKNOWN_LOGIN = '(unknown login)';
 
   // Two rows on one credential can read two metadata files (Default with
   // the home-level file, an explicit ~/.claude with the inner one) and name
@@ -220,11 +232,11 @@ export function createHeadroomService(d) {
     ];
     await Promise.all(all.map(async (r) => {
       try {
-        const [ident, li, shared] = await Promise.all([d.identity(r.dir, { envUnset: r.envUnset }), loginInfo(r.dir, r.envUnset), d.sharesHistory(r.dir)]);
+        const [login, li, shared] = await Promise.all([d.login(r.dir), loginInfo(r.dir, r.envUnset), d.sharesHistory(r.dir)]);
         r.email = li.email;
         r.loginConflict = li.conflict;
         r.sharedHistory = shared;
-        r.login = ident?.login || 'unknown';
+        r.login = login || 'unknown';
       } catch {
         r.email = null;
         r.login = 'unknown';
@@ -373,6 +385,10 @@ export function createHeadroomService(d) {
             : (!r.isDefault && typeof r.id !== 'string') ? 'this account has no usable id; re-add it in Settings'
               : r.sharedHistory === false ? 'its conversation history is not linked to the shared one, so the conversation cannot be resumed there'
                 : moveRefusal(source, r),
+        // For "Move all": what stops ANY tab going there, whichever account it
+        // is on now (each tab is judged again by itself when it moves).
+        allRefusal: override ? `${override} is set` : r.duplicateId ? 'two accounts share this id' : (!r.isDefault && typeof r.id !== 'string') ? 'no usable id'
+          : r.sharedHistory === false ? 'its conversation history is not linked' : (r.login !== 'in' ? 'not logged in' : null),
         autoRefusal: autoRefusal(source, r, { fresh: freshUsage(usage, live ? (live.get(r.key) ?? 0) : null) }),
       };
     }));
@@ -622,6 +638,7 @@ export function createHeadroomService(d) {
         while (recentMoves.length > 50) recentMoves.shift();
         reserved.set(loginId(dec.target), (reserved.get(loginId(dec.target)) || 0) + AUTO.RESERVE_PER_TAB);
         const p = {
+          moveId: `${dec.eventId}#${++moveCounter}`,
           eventId: dec.eventId, eventAt: rec.limit.at, sessionId: ses.sessionId, project, wcId: d.windowOf(tab.id), at: d.now(),
           targetLabel: dec.target.label, targetKey: dec.target.key, sourceLabel: source.label,
           inputSeq: d.inputSeq(tab.id), pty: d.pty(tab.id), started: false,
@@ -630,7 +647,7 @@ export function createHeadroomService(d) {
         pending.set(tab.id, p);
         d.log('accounts.auto-move', `tab=${tab.id} from=${source.label} to=${dec.target.label} event=${dec.eventId} result=moving`);
         const sent = d.send(tab.id, 'accounts:autoMove', {
-          accountId: dec.target.id, sessionId: ses.sessionId, project, eventId: dec.eventId, targetLabel: dec.target.label,
+          accountId: dec.target.id, sessionId: ses.sessionId, project, eventId: p.moveId, targetLabel: dec.target.label,
         });
         if (sent !== 'sent') {
           pending.delete(tab.id);
@@ -673,7 +690,7 @@ export function createHeadroomService(d) {
   // queued it behind other moves for a minute or more).
   async function startAutoMove(tabId, eventId, senderId) {
     const p = pending.get(tabId);
-    if (!p || p.eventId !== eventId || p.wcId !== senderId || p.started) return { ok: false, error: 'no automatic move is waiting for that tab' };
+    if (!p || p.moveId !== eventId || p.wcId !== senderId || p.started) return { ok: false, error: 'no automatic move is waiting for that tab' };
     const stop = (why) => {
       pending.delete(tabId);
       // Nothing happened to the tab: its event and cooldown are given back.
@@ -705,7 +722,7 @@ export function createHeadroomService(d) {
 
   async function continueAfterMove(tabId, eventId, senderId, failed) {
     const p = pending.get(tabId);
-    if (!p || p.eventId !== eventId || p.wcId !== senderId) return { ok: false, error: 'no automatic move is waiting for that tab' };
+    if (!p || p.moveId !== eventId || p.wcId !== senderId) return { ok: false, error: 'no automatic move is waiting for that tab' };
     if (!p.started && !(typeof failed === 'string' && failed)) return { ok: false, error: 'that move was never started' };
     pending.delete(tabId);
     const done = (result, ok = false, text = null) => {
