@@ -780,6 +780,17 @@ await check('the restart is called off when the conversation changed since main 
   assert.match((await b.svc.startAutoMove(TAB, b.w.sent[0].payload.eventId, 7)).error, /another window/);
 });
 
+await check('a target whose figure went out of date while the move waited is called off', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  w.now += 20 * 60_000; // past the 15-minute bar, and no session runs on B
+  w.reported = 's1';
+  w.claude = { ...w.claude, startedAt: T0 - 3600_000 };
+  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
+  assert.equal(st.ok, false);
+  assert.match(st.error, /out of date/);
+});
+
 await check('a target that no longer has room (not just limited) is called off', async () => {
   const { w, svc } = world();
   await svc.tick();

@@ -461,3 +461,9 @@
 - **FIX**: Ask the process. The statusLine reporter writes `$PPID` into its record header, and `$PPID` IS the claude process (verified live on 2.1.314 with `claude --settings` through a pty, no prompt sent). The newest record with that pid names the conversation it is on now (`reportedSession`, electron/account-headroom-service.js). With no such record there is no automatic move. A wrong source of truth is what makes guards pile up: replacing it let `anotherSessionSince` be deleted.
 - **CONTEXT**: Anything that must know which conversation a live Claude is in. `tab-context.resolveSessionForTab` still has the argv limitation for its other callers.
 - **DETECTION**: `grep -n "reporterPid" electron/*.js`
+
+### Testing - 2026-10-31 (account headroom)
+- **MISTAKE**: `promptBoxText` requires `modes.bracketedPaste`, and the headroom service rendered a tail of the PTY buffer. Claude turns that mode on once at startup, so on any tab with a few hundred KB of output since then the box read as unreadable, every long-running tab looked like it held a draft, and auto-move and Move all would have skipped exactly the tabs that hit limits. The stand-in claude never produced that much output, so nine ship-tests passed; Codex lens 3 found it in round 17.
+- **FIX**: The caller knows a claude runs in the tab, so the replay starts with the mode on (`\x1b[?2004h` + tail, electron/main.js). Confirmed against a real 2.1.314 frame with 300KB of filler: null before, the box text after.
+- **CONTEXT**: Any reader of a TAIL of the PTY buffer. Modes set once at startup are not in it. Stand-ins prove the flow, not the volume.
+- **DETECTION**: `grep -n "renderScreenLines(" electron/*.js`, and ask of each what mode it assumes.

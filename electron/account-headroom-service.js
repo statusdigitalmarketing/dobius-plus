@@ -44,8 +44,9 @@ const RECHECK_MS = 60_000;
 const RECORD_MAX_AGE_MS = 8 * 24 * 3600_000;
 const PRUNE_EVERY_MS = 3600_000;
 // Any text in Claude's input box is treated as the person's. Claude's own
-// placeholder ("Try ...") reads the same in plain text, and guessing wrong
-// throws a real draft away; the cost of never guessing is a move that waits.
+// "Try ..." placeholder shows only with no submit and no messages (2.1.314
+// binary: `x<1&&!L`), so never on a conversation that hit a limit or was
+// resumed; a prompt suggestion drawn there only makes a move wait.
 export const isDraft = (box) => typeof box === 'string' && !!box.trim();
 
 /**
@@ -766,6 +767,7 @@ export function createHeadroomService(d) {
     const row = rows.find((r) => r.key === p.targetKey);
     const fresh = row ? usageForRow(row, rows, d.now()) : null;
     if (!fresh?.known || fresh.limited || fresh.headroom < AUTO.MIN_HEADROOM || heldNow(row, rows, d.now())) return stop(`${p.targetLabel} no longer has room`);
+    if (!freshUsage(fresh, runningFor(row, rows, await liveByKey()))) return stop(`the figures for ${p.targetLabel} are out of date now`);
     // Still the conversation main decided on (a /clear since then is not).
     let info;
     try { info = await d.claudeInfo(tabId); } catch { info = null; }
