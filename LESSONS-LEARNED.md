@@ -431,3 +431,9 @@
 - **FIX**: A `stillOk` runs INSIDE the queue: never read "is a submit pending" from it. The fake `submit` in account-headroom-service.test.mjs now evaluates `stillOk` while `inputHeld` reads true, as main does.
 - **CONTEXT**: Any guard handed to chat-service. And re-run the end-to-end ship-test after every merge from the release branch, not just `npm test`.
 - **DETECTION**: `grep -n "d.submit(" electron/account-headroom-service.js`
+
+### Architecture - 2026-10-30 (account headroom)
+- **MISTAKE**: Identified a tab's conversation from `claude --resume <id>` in argv (and from recent-link heuristics for a fresh `claude`). `/clear` and `/resume` change the conversation inside the same process and argv keeps naming the old one, so Codex broke every guard built on it for three rounds (a limit on the new conversation's screen plus the old transcript's limit record would revive and "continue" the abandoned conversation).
+- **FIX**: Ask the process. The statusLine reporter writes `$PPID` into its record header, and `$PPID` IS the claude process (verified live on 2.1.314 with `claude --settings` through a pty, no prompt sent). The newest record with that pid names the conversation it is on now (`reportedSession`, electron/account-headroom-service.js). With no such record there is no automatic move. A wrong source of truth is what makes guards pile up: replacing it let `anotherSessionSince` be deleted.
+- **CONTEXT**: Anything that must know which conversation a live Claude is in. `tab-context.resolveSessionForTab` still has the argv limitation for its other callers.
+- **DETECTION**: `grep -n "reporterPid" electron/*.js`

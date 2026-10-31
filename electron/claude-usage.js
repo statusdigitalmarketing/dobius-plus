@@ -193,7 +193,10 @@ if [ "$rest" != "$payload" ]; then
     t="$d/.tmp.$sid.$$"
     # Write to a unique temp file then rename: a reader must never catch a
     # record mid-write, and a shared temp name would just move the collision.
-    if printf '${FORMAT} %s\\n%s\\n%s' "$s" "\${CLAUDE_CONFIG_DIR-}" "$payload" > "$t" 2>/dev/null; then
+    # $PPID is the claude process itself (verified on 2.1.314): the only link
+    # from a pid to the conversation it is on NOW (/clear and /resume leave
+    # argv naming the old one).
+    if printf '${FORMAT} %s %s\\n%s\\n%s' "$s" "$PPID" "\${CLAUDE_CONFIG_DIR-}" "$payload" > "$t" 2>/dev/null; then
       mv -f "$t" "$d/$sid.json" 2>/dev/null || rm -f "$t" 2>/dev/null
     else
       rm -f "$t" 2>/dev/null
@@ -206,7 +209,8 @@ fi
 /**
  * Parse one record file.
  *
- * Line 1 is the format marker and whether CLAUDE_CONFIG_DIR was SET. Line 2 is
+ * Line 1 is the format marker, whether CLAUDE_CONFIG_DIR was SET, and (newer
+ * reporters) the claude process's pid. Line 2 is
  * its raw value. Everything after is the payload verbatim. Deliberately not a
  * JSON envelope: embedding a pathname into JSON from a shell script means
  * escaping it correctly in shell, and getting that subtly wrong is how a
@@ -239,6 +243,7 @@ export function parseRecord(text, receivedAtMs) {
 
   return {
     sessionId: typeof payload.session_id === 'string' ? payload.session_id : null,
+    reporterPid: /^\d+$/.test(header[2] || '') ? Number(header[2]) : null,
     key,
     configDir: usable ? dir : configDir,
     envUnset: !bindingSet,
@@ -298,7 +303,11 @@ export async function readUsageRecords(userDataDir) {
 export async function pruneUsageRecords(userDataDir, maxAgeMs, now = Date.now()) {
   const dir = usageDirPath(userDataDir);
   let names;
-  try { names = await fs.readdir(dir); } catch { return 0; }
+  // Only ever inside our own real folder: a linked one could be anything.
+  try {
+    if (!(await fs.lstat(dir)).isDirectory()) return 0;
+    names = await fs.readdir(dir);
+  } catch { return 0; }
   let removed = 0;
   await Promise.all(names.map(async (name) => {
     const tmp = /^\.tmp\.[A-Za-z0-9_-]+\.\d+$/.test(name);

@@ -31,6 +31,25 @@ const rec = ({ sid = 's1', set = 1, dir = '/Users/x/.claude-profiles/a', limits,
 };
 const FIVE = { five_hour: { used_percentage: 38, resets_at: 4000000000 } };
 
+check('the reporter writes the pid of the process that ran it', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-rep-pid-'));
+  const file = path.join(dir, 'r.sh');
+  fs.writeFileSync(file, reporterScript(dir, null, { capture: true, model: false }), { mode: 0o755 });
+  // /bin/sh runs the file directly here, so its parent is this test process,
+  // as it is the claude process for a real status line.
+  const r = spawnSync('/bin/sh', [file], { input: JSON.stringify({ session_id: 'pidcheck' }), encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  const rec2 = parseRecord(fs.readFileSync(path.join(dir, 'pidcheck.json'), 'utf8'), 1);
+  assert.equal(rec2.reporterPid, process.pid);
+});
+
+check('a record names the claude process that wrote it, when the reporter says', () => {
+  const payload = JSON.stringify({ session_id: 's1' });
+  assert.equal(parseRecord(`DOBIUS1 1 4242\n/d\n${payload}`, 1).reporterPid, 4242);
+  assert.equal(parseRecord(`DOBIUS1 1\n/d\n${payload}`, 1).reporterPid, null);
+  assert.equal(parseRecord(`DOBIUS1 1 x9\n/d\n${payload}`, 1).reporterPid, null);
+});
+
 check('a record carries the binding, the windows and the session', () => {
   const r = parseRecord(rec({ limits: FIVE }), 1000);
   assert.equal(r.sessionId, 's1');

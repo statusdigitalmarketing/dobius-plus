@@ -79,7 +79,8 @@ function world(over = {}) {
     processAuthOverride: async (pid) => (w.override && w.override[pid]) || null,
     settled: () => w.settled ?? true,
     selector: () => null,
-    readRecords: async () => w.records,
+    // The running Claude's own report names its conversation.
+    readRecords: async () => [...w.records, ...(w.reported === null ? [] : [{ sessionId: w.reported ?? (w.claude.sessionId || 's1'), reporterPid: w.claude.pid, receivedAt: w.now, windows: null }])],
     pruneRecords: async () => 0,
     scan: async () => ({ groups: w.procKey === null ? [] : [{ key: w.procKey, configDir: w.procDir ?? { [KEY_A]: DIR_A, [KEY_B]: DIR_B }[w.procKey], envUnset: false, pids: [w.claude.pid] }], unresolved: w.procKey === null ? [{ pid: w.claude.pid }] : [] }),
     autoMoveEnabled: () => w.autoMove,
@@ -88,8 +89,7 @@ function world(over = {}) {
     claudeInfo: async () => w.claude,
     resolveSession: async () => ({ sessionId: 's1', sessionProject: '/proj' }),
     process: async () => null,
-    limitRecord: async () => ({ found: true, limit: w.limit }),
-    newerSession: async () => !!w.newerSession,
+    limitRecord: async (sid) => ({ found: true, limit: w.limitsBySession ? (w.limitsBySession[sid] ?? null) : w.limit }),
     strippedTail: () => w.tail,
     screen: async () => ({ lines: [w.screenLine ?? "You've hit your 5-hour limit", '────', '❯ ', '────'], modes: { bracketedPaste: true } }),
     promptReady: () => true,
@@ -130,6 +130,7 @@ async function moved(w, svc) {
   assert.equal(st.inputSeq, w.inputSeq, 'the restart is conditional on this input count');
   w.claude = { pid: 200, sessionId: 's1', startedAt: T0 + 1000 };
   w.procKey = KEY_B;
+  w.now += 2000; // the resumed Claude has started
   return eventId;
 }
 
@@ -725,12 +726,60 @@ await check('an unlisted source folder that is a symlink has no known login, so 
   assert.match(w.notices[0] || '', /every other account/);
 });
 
-await check('a newer conversation in the folder (a /clear in this process) means nothing is resumed automatically', async () => {
+await check('the conversation is the one the process last reported: /clear or /resume leave argv naming the old one', async () => {
+  // argv s1, reporting s2, s1's transcript ends in a limit but s2's does not.
+  const a = world();
+  a.w.claude = { ...a.w.claude, sessionId: 's1' };
+  a.w.reported = 's2';
+  a.w.limitsBySession = { s1: a.w.limit };
+  await a.svc.tick();
+  assert.equal(a.w.sent.length, 0, 's1 must not be revived');
+  // s2 hit the limit: s2 is what moves.
+  const b = world();
+  b.w.claude = { ...b.w.claude, sessionId: 's1' };
+  b.w.reported = 's2';
+  b.w.limitsBySession = { s1: b.w.limit, s2: b.w.limit };
+  await b.svc.tick();
+  assert.equal(b.w.sent[0].payload.sessionId, 's2');
+  // Move all resumes the same one.
+  const c = world();
+  c.w.claude = { ...c.w.claude, sessionId: 's1' };
+  c.w.reported = 's2';
+  await c.svc.tick();
+  const [cand] = await c.svc.moveCandidates([TAB], 'b');
+  assert.equal(cand.session.sessionId, 's2');
+});
+
+await check('with no report from this process there is no automatic move', async () => {
   const { w, svc } = world();
-  w.newerSession = true;
-  w.claude = { ...w.claude, sessionId: 's1' };
+  w.reported = null;
   await svc.tick();
   assert.equal(w.sent.length, 0);
+});
+
+await check('a report from before this process started says nothing about it (a reused pid)', async () => {
+  const { w, svc } = world();
+  w.reported = null;
+  w.records.push({ sessionId: 'old', reporterPid: w.claude.pid, receivedAt: w.claude.startedAt - 1000, windows: null });
+  await svc.tick();
+  assert.equal(w.sent.length, 0);
+});
+
+await check('no "continue" once the process reports another conversation', async () => {
+  const { w, svc } = world();
+  const eventId = await moved(w, svc);
+  w.reported = 'other';
+  assert.equal((await svc.continueAfterMove(TAB, eventId, 7, null)).ok, false);
+  assert.deepEqual(w.submits, []);
+});
+
+await check('a target that filled up while the move waited is called off', async () => {
+  const { w, svc } = world();
+  await svc.tick();
+  w.records[1] = { ...w.records[1], receivedAt: w.now, windows: { five_hour: { usedPercentage: 100, resetsAt: R5 } } };
+  const st = await svc.startAutoMove(TAB, w.sent[0].payload.eventId, 7);
+  assert.equal(st.ok, false);
+  assert.match(st.error, /limit too/);
 });
 
 await check('a Claude whose folder the process scan cannot read is not moved automatically', async () => {
@@ -770,6 +819,17 @@ await check('a tab pin names exactly one Claude account, or Default, or nothing'
 
 // ---- record pruning ----
 
+await check('pruning refuses a usage folder that is a link', async () => {
+  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prunelink-'));
+  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prunereal-'));
+  fs.writeFileSync(path.join(real, 'package.json'), 'x');
+  const old = (Date.now() - 10 * 86400_000) / 1000;
+  fs.utimesSync(path.join(real, 'package.json'), old, old);
+  fs.symlinkSync(real, path.join(ud, 'usage'));
+  assert.equal(await pruneUsageRecords(ud, 8 * 86400_000), 0);
+  assert.equal(fs.existsSync(path.join(real, 'package.json')), true);
+});
+
 await check('old usage records and stray temp files are pruned, nothing else', async () => {
   const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prune-'));
   const dir = path.join(ud, 'usage');
@@ -780,27 +840,6 @@ await check('old usage records and stray temp files are pruned, nothing else', a
   const removed = await pruneUsageRecords(ud, 8 * 86400_000);
   assert.equal(removed, 2);
   assert.deepEqual(fs.readdirSync(dir).sort(), ['fresh.json', 'keep.txt']);
-});
-
-// ---- the transcript folder check, on real files ----
-
-await check('anotherSessionSince sees a conversation born after the limit, and fails closed', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-newer-'));
-  const realHome = process.env.HOME;
-  process.env.HOME = home;
-  const { anotherSessionSince } = await import('../data-service.js');
-  process.env.HOME = realHome;
-  const proj = '/proj-newer';
-  const dir = path.join(home, '.claude', 'projects', '-proj-newer');
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 's1.jsonl'), '{}\n');
-  fs.writeFileSync(path.join(dir, 'older.jsonl'), '{}\n');
-  const before = Date.now() + 60_000; // later than both files were born
-  assert.equal(await anotherSessionSince('s1', proj, before), false);
-  fs.writeFileSync(path.join(dir, 'newer.jsonl'), '{}\n');
-  const bornAt = fs.statSync(path.join(dir, 'newer.jsonl')).birthtimeMs;
-  assert.equal(await anotherSessionSince('s1', proj, bornAt - 1), true);
-  assert.equal(await anotherSessionSince('missing', proj, 0), true, 'no transcript: fails closed');
 });
 
 console.log(`\n${pass} passed`);

@@ -1451,30 +1451,6 @@ export async function getSessionLimitRecord(sessionId, projectPath) {
   return { found: true, limit: limitFromEntries(await parseJsonl(p, 40)) };
 }
 
-/**
- * Did another conversation start in this session's project folder after
- * `atMs`? `/clear` starts a new conversation inside the same process, whose
- * argv still names the old one, so a limit on screen may be the NEW
- * conversation's while the old transcript also ends in a limit. Which one the
- * tab is really showing cannot be told then: true (also when the folder cannot
- * be read), so nothing is resumed automatically. Another tab starting a
- * conversation in the same project in that short window is a false positive
- * that only means this tab is not moved automatically.
- */
-export async function anotherSessionSince(sessionId, projectPath, atMs) {
-  try {
-    const p = await resolveTranscriptPath(sessionId, projectPath);
-    if (!p) return true;
-    const dir = path.dirname(p);
-    const names = await fs.readdir(dir);
-    const own = path.basename(p);
-    const stats = await mapLimit(names.filter((n) => n.endsWith('.jsonl') && n !== own), 16, async (n) => {
-      try { return await fs.stat(path.join(dir, n)); } catch { return null; }
-    });
-    return stats.some((st) => st && st.birthtimeMs > atMs);
-  } catch { return true; }
-}
-
 function extractAssistantText(entry) {
   const msg = entry.message ?? entry;
   if (typeof msg === 'string') return msg;

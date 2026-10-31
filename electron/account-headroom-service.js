@@ -456,6 +456,18 @@ export function createHeadroomService(d) {
     } catch { return true; }
   }
 
+  // Newest report made by this very process (pid, not older than its start).
+  function reportedSession(info) {
+    if (!info || !Number.isInteger(info.pid)) return null;
+    let best = null;
+    for (const r of lastRecords) {
+      if (r?.reporterPid !== info.pid || typeof r.sessionId !== 'string' || !r.sessionId) continue;
+      if (Number.isFinite(info.startedAt) && r.receivedAt < info.startedAt) continue;
+      if (!best || r.receivedAt > best.receivedAt) best = r;
+    }
+    return best ? best.sessionId : null;
+  }
+
   async function tabInfo(tabId) {
     const seqAtStart = d.inputSeq(tabId);
     let info;
@@ -469,7 +481,12 @@ export function createHeadroomService(d) {
         // the checkout it was working in.
         let cwd = null;
         try { cwd = await d.processCwd(info.pid); } catch { cwd = null; }
-        if (r?.sessionId) session = { sessionId: r.sessionId, project: cwd || r.sessionProject || null };
+        // Its own report first (see reportedSession); the resolver when the
+        // reporter is off.
+        const current = reportedSession(info);
+        if (current || r?.sessionId) {
+          session = { sessionId: current || r.sessionId, project: cwd || (r?.sessionId === current || !current ? r?.sessionProject : null) || null };
+        }
       } catch { session = null; }
     }
     let running = 'claude';
@@ -588,9 +605,14 @@ export function createHeadroomService(d) {
       // The Claude the keys and the screen belong to, not one suspended
       // behind it in the same shell (the session would be the wrong one).
       if (!(await d.isForeground(info.pid))) continue;
-      let ses;
-      try { ses = await d.resolveSession(tab.id); } catch { ses = null; }
-      if (!ses?.sessionId) continue;
+      // The conversation this process is on NOW, from its own report: argv
+      // goes on naming the old one after /clear or /resume, and a recent-link
+      // match is a guess. With no report there is no automatic move.
+      const current = reportedSession(info);
+      if (!current) continue;
+      let linked;
+      try { linked = await d.resolveSession(tab.id); } catch { linked = null; }
+      const ses = { sessionId: current, sessionProject: linked?.sessionId === current ? linked.sessionProject : null };
       let cwd;
       try { cwd = await d.processCwd(info.pid); } catch { cwd = null; }
       const project = cwd || ses.sessionProject || tab.cwd;
@@ -605,11 +627,6 @@ export function createHeadroomService(d) {
       } catch { rec = null; }
       if (!rec?.found || !rec.limit) continue;
       if (Number.isFinite(info.startedAt) && rec.limit.at < info.startedAt + 1000) continue; // see decideAutoMove
-      // A newer conversation in this folder: possibly /clear in this very
-      // process, and the limit on screen could be that one's. Not moved.
-      let newer;
-      try { newer = await d.newerSession(ses.sessionId, recProject, rec.limit.at); } catch { newer = true; }
-      if (newer) continue;
       let sc;
       try { sc = await d.screen(tab.id); } catch { sc = null; }
       const screenHit = !!liveLimitLine(sc?.lines, d.rows(tab.id));
@@ -733,6 +750,9 @@ export function createHeadroomService(d) {
     if (tabBusy(d.activity(tabId), d.now())) return stop('the tab got busy');
     if (await draftIn(tabId)) return stop('there is unsent text in the prompt');
     if (!(await targetStillSame(p))) return stop(`${p.targetLabel} is logged into a different account now`);
+    // It may have filled up while this move waited its turn.
+    await sample();
+    if (usageForKey(hist, p.targetKey, d.now()).limited) return stop(`${p.targetLabel} has hit its limit too`);
     if (d.inputSeq(tabId) !== p.inputSeq) return stop('someone typed in the tab');
     p.started = true;
     p.at = d.now();
@@ -823,6 +843,11 @@ export function createHeadroomService(d) {
     if (override) return done(`no-continue (${override} set in its environment)`, false, `Moved this tab to ${p.targetLabel}, but ${override} is set in its shell and signs Claude in the same way on every account, so "continue" was not sent.`);
     // Last, so as little as possible runs between it and the paste.
     if (!(await targetStillSame(p))) return done('no-continue (the target folder is logged into another account now)', false, `Moved this tab to ${p.targetLabel}, but that folder is logged into a different account now, so "continue" was not sent.`);
+    // Its latest report, if any, must still name this conversation (a /clear
+    // since the resume means "continue" would go to the new one).
+    await sample();
+    const reported = reportedSession(started);
+    if (reported && reported !== p.sessionId) return done('no-continue (the conversation changed)', false, `Moved this tab to ${p.targetLabel}, but its conversation changed, so "continue" was not sent.`);
     // Still the Claude that was checked above, not one started after it.
     let now;
     try { now = await d.claudeInfo(tabId); } catch { now = null; }

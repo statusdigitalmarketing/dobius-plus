@@ -53,7 +53,7 @@ import {
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, sessionMovedPast, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
-  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage, getSessionLimitRecord, anotherSessionSince } from './data-service.js';
+  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage, getSessionLimitRecord } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
 } from './build-monitor-service.js';
@@ -2388,7 +2388,6 @@ function setupHeadroomHandlers() {
     resolveSession: (id) => resolveSessionForTab(id),
     process: (id) => getTerminalProcess(id),
     limitRecord: (sessionId, projectPath) => getSessionLimitRecord(sessionId, projectPath),
-    newerSession: (sessionId, projectPath, atMs) => anotherSessionSince(sessionId, projectPath, atMs),
     strippedTail: (id) => stripAnsi((getTerminalBuffer(id) || '').slice(-16384)),
     screen: async (id) => {
       const lines = await renderScreenLines((getTerminalBuffer(id) || '').slice(-262144), { cols: terminalCols(id) });
