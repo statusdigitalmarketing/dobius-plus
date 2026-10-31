@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   emptyHistory, sanitizeHistory, updateHistory, noteLogin, pruneHistory, UNKNOWN_LOGIN, paceFor, forecastFor, usageForKeys,
-  accountKeyRows, moveRefusal, rankTargets, tabBusy,
+  accountKeyRows, moveRefusal, moveBlock, rankTargets, tabBusy,
 } from '../account-headroom.js';
 import { keychainServiceFor } from '../account-identity.js';
 
@@ -249,6 +249,19 @@ check('a login nobody can name fails closed, on either side', () => {
   assert.match(moveRefusal({ key: null, email: null, login: 'unknown' }, { key: KEY_B, email: 'b@x', login: 'in' }), /which login this tab is on/);
   // A source with no credential at all is on no login: nothing can be shared.
   assert.equal(moveRefusal({ key: KEY_A, email: null, login: 'out' }, { key: KEY_B, email: 'b@x', login: 'in' }), null);
+});
+
+check('a move needs one child Claude, its conversation and its folder; a warned person may move a busy tab', () => {
+  const ok = { running: 'claude', session: { sessionId: 's', project: '/p' }, busy: false, draft: false };
+  assert.equal(moveBlock(ok), null);
+  assert.match(moveBlock({ ...ok, running: 'shell' }), /no Claude/);
+  assert.match(moveBlock({ ...ok, running: 'other' }, { allowBusy: true }), /other than one Claude/);
+  assert.match(moveBlock({ ...ok, session: null }, { allowBusy: true }), /could not be identified/);
+  assert.match(moveBlock({ ...ok, session: { sessionId: 's', project: null } }, { allowBusy: true }), /folder/);
+  assert.match(moveBlock({ ...ok, busy: true }), /middle of a turn/);
+  assert.match(moveBlock({ ...ok, busy: true, status: 'needs' }), /question/);
+  assert.match(moveBlock({ ...ok, draft: true }), /unsent text/);
+  assert.equal(moveBlock({ ...ok, busy: true, draft: true }, { allowBusy: true }), null);
 });
 
 const cand = (id, known, headroom, lastReportedAt = T0, extra = {}) => ({

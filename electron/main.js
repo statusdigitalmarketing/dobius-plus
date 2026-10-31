@@ -2,7 +2,8 @@ import './dev-userdata.js'; // MUST stay first: userData override before config-
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor } from 'electron';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -281,13 +282,6 @@ function setupTerminalHandlers() {
     // terminal lands on the same active accounts as a desktop one (reviewer P2).
     // A tab moved to an account carries a pin naming it (an id, never a path).
     const claudeAccountPin = opts && typeof opts === 'object' ? opts.claudeAccountPin : undefined;
-    // An account move restarts the tab only if nothing reached it since main
-    // last judged it: no await between this check and the kill. Input a window
-    // still holds (an image paste being saved) counts too.
-    if (opts && Number.isInteger(opts.expectInputSeq) && (terminalInputSeq(id) !== opts.expectInputSeq || heldInputFor(id))) return null;
-    // A move's account being gone (or its id ambiguous) refuses the restart
-    // rather than landing on another account. A relaunch (not strict) falls back.
-    if (opts?.strictPin === true && resolveClaudeAccountPin(claudeAccountPin, loadConfig().accounts) === undefined) return null;
     const accountEnv = resolveAccountEnvForCwd(cwd, { claudeAccountPin });
     // A New Tab (store.openNewTab) starts its tool: 'default' is the Settings
     // choice, read here; anything outside the fixed set starts nothing.
@@ -311,15 +305,6 @@ function setupTerminalHandlers() {
     cancelAutoResumeTab(id);
     // Waits behind a pending Chat submit so keys land in the order typed.
     writeRawInput(id, data, () => ownsTerminal(event.sender.id, id));
-  });
-
-  // Writes to this tab's shell since it started (terminal replies excluded). An
-  // account move asks before typing its resume, which would be glued onto
-  // anything a person started typing in the new shell.
-  ipcMain.handle('terminal:inputCount', (event, id) => {
-    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
-    if (!ownsTerminal(event.sender.id, id)) return null;
-    return terminalInputSeq(id);
   });
 
   ipcMain.on('terminal:resize', (event, id, cols, rows) => {
@@ -2293,6 +2278,17 @@ const AUTH_OVERRIDE_NAMES = [
   'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
   'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BASE_URL',
 ];
+// Which of those a running process carries, by name only, from `ps eww`. null
+// when none, 'unreadable' when its environment cannot be read. A token set
+// inside Claude's own settings files never shows here (docs/account-usage-and-move.md).
+const execFileP = promisify(execFile);
+async function processAuthOverride(pid) {
+  try {
+    const { stdout } = await execFileP('/bin/ps', ['eww', '-o', 'command=', '-p', String(pid)], { timeout: 1500, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+    if (!stdout.trim()) return 'unreadable';
+    return AUTH_OVERRIDE_NAMES.find((n) => new RegExp(`(?:^|\\s)${n}=\\S`).test(stdout)) || null;
+  } catch { return 'unreadable'; }
+}
 function setupHeadroomHandlers() {
   const ownsTab = (event, tabId) => typeof tabId === 'string' && TERMINAL_ID_RE.test(tabId) && ownsTerminal(event.sender.id, tabId);
   const userData = app.getPath('userData');
@@ -2307,6 +2303,12 @@ function setupHeadroomHandlers() {
     cliDefaultDir: () => defaultClaudeDir(),
     keyFor: (dir) => { try { return keychainServiceFor(dir); } catch { return null; } },
     login: (dir) => loginState(dir),
+    stop: (pid) => process.kill(pid, 'SIGHUP'), // what closing its PTY would send
+    alive: (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } },
+    claim: (sessionId, tabId) => claimSessionResume(sessionId, tabId),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    processAuthOverride,
+    isDir: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
     metadata: (dir, opts) => accountMetadata(dir, opts),
     realpath: (p) => fs.promises.realpath(p),
     // This folder's conversations are the shared store (account-profile-share
@@ -2324,7 +2326,6 @@ function setupHeadroomHandlers() {
     activity: (id) => terminalStatus.statusFor(id),
     claudeInfo: (id) => getTerminalClaudeInfo(id),
     presence: (info, configDir) => presenceOf(info, configDir),
-    resolveSession: (id) => resolveSessionForTab(id),
     process: (id) => getTerminalProcess(id),
     processCwd: (pid) => getProcessCwd(pid),
     inputSeq: (id) => terminalInputSeq(id),
@@ -2351,6 +2352,22 @@ function setupHeadroomHandlers() {
     const mine = (Array.isArray(tabIds) ? tabIds : []).filter((id) => ownsTab(event, id));
     if (targetId !== null && typeof targetId !== 'string') return [];
     try { return await headroom.moveCandidates(mine, targetId); } catch { return []; }
+  });
+  // The move itself. restart is the one thing the service cannot do alone: it
+  // needs this window as the new PTY's owner.
+  ipcMain.handle('accounts:move', async (event, tabIds, targetId, opts) => {
+    const mine = (Array.isArray(tabIds) ? tabIds : []).filter((id) => ownsTab(event, id));
+    if (targetId !== null && typeof targetId !== 'string') return { ok: false, error: 'no account' };
+    const sender = event.sender;
+    const canRestart = (id) => !sender.isDestroyed() && terminalOwners.get(id) === sender.id && !tearOffGrants.has(id) && !dockingTabs.has(id);
+    const restart = (id, cwd, pin, resume) => {
+      if (!canRestart(id) || resolveClaudeAccountPin(pin, loadConfig().accounts) === undefined) return false;
+      setSessionTabLink(resume.sessionId, id, resume.cwd);
+      createTerminal(id, cwd, sender, resolveAccountEnvForCwd(cwd, { claudeAccountPin: pin }), { resume });
+      return true;
+    };
+    try { return await headroom.move(mine, targetId, { allowBusy: opts?.allowBusy === true, canRestart, restart }); }
+    catch (err) { return { ok: false, error: err.message }; }
   });
   // Sampling keeps pace honest while no panel is open. unref'd: never keeps the
   // app alive.
@@ -3336,8 +3353,8 @@ function setupWindowHandlers() {
     ownerOf: (tabId) => terminalOwners.get(tabId),
   });
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
-  // /openTab's own "is another surface typing into this tab" (a submit, or
-  // input a window still holds): an account move must not restart under it.
+  // /openTab's own "is another surface typing into this tab": an account move
+  // must not stop Claude under it.
   heldInputFor = bridgeOpenDeps.inputBusy;
 
   // Record the docked tab in the target window's saved tab list BEFORE the

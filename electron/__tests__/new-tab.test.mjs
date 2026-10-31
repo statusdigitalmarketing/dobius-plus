@@ -166,6 +166,39 @@ test('a prompt hook rewriting the tool runs nothing but the allowlisted tool', (
   }
 });
 
+// A move's resume goes through the wrapper: the real shells, with a hostile
+// folder name and a prompt hook trying to change what runs.
+test('a resume runs exactly claude --resume <id> in that folder, nothing typed or evaluated', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-resume-'));
+  try {
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\necho "RAN $* IN $(pwd -P)"\n', { mode: 0o755 });
+    const cwd = path.join(dir, "wt $(touch PWNED) 'x");
+    fs.mkdirSync(cwd);
+    const real = fs.realpathSync(cwd);
+    const assigns = `DOBIUS_NEW_TAB_TOOL_ID=evil; export DOBIUS_NEW_TAB_TOOL_ID; set -- evil evil evil`;
+    const base = { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, ZDOTDIR: dir, BASH_SILENCE_DEPRECATION_WARNING: '1' };
+    for (const [shell, prelude, env] of [['/bin/zsh', `_evil() { ${assigns}; }; precmd_functions=(_evil); `, {}], ['/bin/bash', '', { PROMPT_COMMAND: assigns }]]) {
+      if (!fs.existsSync(shell)) continue;
+      const spawn = loginShellSpawn(shell, null, { sessionId: 'abc-123', cwd });
+      assert.equal(spawn.env.DOBIUS_NEW_TAB_TOOL, 'resume');
+      assert.equal(isNewTabWrapperCommand([shell, ...spawn.args].join(' ')), true, 'argv scans still skip it');
+      const script = prelude + spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+      const r = spawnSync(shell, ['-c', script], { cwd: dir, env: { ...base, ...env, ...spawn.env }, encoding: 'utf8', timeout: 10000, input: '' });
+      assert.equal(r.stdout.trim(), `RAN --resume abc-123 IN ${real}`, shell);
+      assert.equal(fs.existsSync(path.join(dir, 'PWNED')) || fs.existsSync(path.join(cwd, 'PWNED')), false);
+    }
+    // A bad id or folder is no resume at all.
+    for (const bad of [{ sessionId: 'x; rm -rf ~', cwd: '/tmp' }, { sessionId: 'abc', cwd: 'relative' }, { sessionId: 'abc', cwd: '/tmp/a\nb' }, { sessionId: '', cwd: '/tmp' }]) {
+      assert.deepEqual(loginShellSpawn('/bin/zsh', null, bad), { args: ['-l'], env: {} }, JSON.stringify(bad));
+    }
+    assert.equal(loginShellSpawn('/bin/zsh', 'claude').args[3].includes('--resume'), false, 'a plain tool start is unchanged');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('one shell quoting for every generated command survives /bin/sh, quotes included', async () => {
   const { shQuote } = await import('../../shared/sh-quote.js');
   for (const s of ["plain", "with space", "it's", "'", "''x''", "$HOME `id` $(id) \\ \"q\"", "Library/Application Support/dobius-plus", '']) {

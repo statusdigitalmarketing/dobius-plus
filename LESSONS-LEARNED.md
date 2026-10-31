@@ -497,3 +497,9 @@
 - **FIX**: Compare `realpath(dir)` with the literal configured string (NFC). Any other spelling reads as an unknown login, and `moveRefusal` fails closed on unknown. Files go through `writePrivateFileSync`: parent is a real dir this user owns, `O_CREAT|O_EXCL|O_NOFOLLOW` at 0600 under a random name, then rename, which replaces a link rather than writing into it. Reads use `O_NOFOLLOW`.
 - **CONTEXT**: Anything comparing config dirs, and anything writing into userData.
 - **DETECTION**: `grep -n "path.resolve(r.dir)\|writeFile(tmp" electron/*.js`
+
+### Architecture - 2026-10-31 (account move)
+- **MISTAKE**: The move ran in the renderer: pin the tab, respawn, wait a fixed 900ms, type `claude --resume` into the new shell, report success once typed. So every failure happened after the kill, and each guard (input counts, pin rollback, re-judging after the confirm) only narrowed a window the next review reopened. Nothing ever looked at what was really running, so a `.zshrc` exporting CLAUDE_CONFIG_DIR reported success on the wrong account.
+- **FIX**: Main does it in one place: every check before anything is stopped, SIGHUP to Claude (the shell stays alive, so a Claude that will not stop changes nothing else), the resume through `loginShellSpawn` so nothing is typed, then success only from the new process's own environment and `sessions/<pid>.json`. The pin is set from that result, one move at a time, so there is nothing to roll back. Deleted: `terminal:inputCount`, `expectInputSeq`, `strictPin`, `freshShell`, every resumeSession change, `shared/session-tab.js`.
+- **CONTEXT**: Any action that kills something it then has to rebuild. Order it check, act, verify from the system.
+- **DETECTION**: `grep -n "accounts:move" electron/main.js`, and ask of any report of success what it actually read.

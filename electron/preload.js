@@ -9,7 +9,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Terminal
   terminalCreate: (id, cwd, opts) => ipcRenderer.invoke('terminal:create', id, cwd, opts),
-  terminalInputCount: (id) => ipcRenderer.invoke('terminal:inputCount', id),
   terminalWrite: (id, data) => ipcRenderer.send('terminal:write', id, data),
   // Input prompt editing holds back (data), or null once its queue drained.
   // Only /openTab reads this (electron/bridge-open-main.js).
@@ -203,6 +202,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   accountsUsage: () => ipcRenderer.invoke('accounts:usage'),
   accountsMoveTargets: (tabId) => ipcRenderer.invoke('accounts:moveTargets', tabId),
   accountsMoveCandidates: (tabIds, targetId) => ipcRenderer.invoke('accounts:moveCandidates', tabIds, targetId),
+  accountsMove: (tabIds, targetId, opts) => ipcRenderer.invoke('accounts:move', tabIds, targetId, opts),
   accountsSave: (account) => ipcRenderer.invoke('accounts:save', account),
   accountsDelete: (accountId) => ipcRenderer.invoke('accounts:delete', accountId),
   claudeUsageGetStatus: () => ipcRenderer.invoke('claudeUsage:getStatus'),

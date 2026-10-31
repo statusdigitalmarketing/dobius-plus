@@ -100,7 +100,8 @@ export function noteLogin(hist, key, email, now, records = []) {
   const k = hist.keys[key];
   // No entry yet: remember who it is now, so figures that arrive later are
   // that login's and a later login is seen as a change. Records already on disk
-  // may be an earlier login's, so they count only once refreshed.
+  // may be an earlier login's, so they count only once refreshed (known limit 1,
+  // docs/account-usage-and-move.md).
   if (!k) {
     hist.keys[key] = { windows: bare(), email: who, since: now };
     return true;
@@ -112,7 +113,7 @@ export function noteLogin(hist, key, email, now, records = []) {
     // A session still running on the folder keeps re-rendering the OLD
     // login's cached figure (with a fresh file time) until its next API call.
     // Its records are ignored while they say exactly what they said at the
-    // re-login.
+    // re-login (known limit 7).
     k.ignore = bare();
     for (const r of Array.isArray(records) ? records : []) {
       if (r?.key !== key || !SID_RE.test(String(r.sessionId || ''))) continue;
@@ -162,7 +163,7 @@ export function updateHistory(hist, records, now) {
         changed = true;
       }
       const last = ent.samples[ent.samples.length - 1];
-      if (last && p < last.p) continue; // an older figure republished: it confirms nothing
+      if (last && p < last.p) continue; // an older figure republished: it confirms nothing (known limit 2)
       if (rec.receivedAt > ent.seenAt) { ent.seenAt = rec.receivedAt; changed = true; }
       if (!last || p > last.p) {
         ent.samples.push({ t: last ? Math.max(last.t, rec.receivedAt) : rec.receivedAt, p });
@@ -335,4 +336,20 @@ export function tabBusy(activity, now, presenceStatus = null) {
   if (!activity) return false;
   if (activity.status === 'needs') return true;
   return activity.status === 'working' && Number.isFinite(activity.lastActivityAt) && now - activity.lastActivityAt < BUSY_OUTPUT_MS;
+}
+
+/**
+ * Why a tab's own state stops a move, or null. A move needs a Claude that is a
+ * plain child of the tab's shell, its conversation, and the folder it runs in:
+ * without all three it could not be resumed, so nothing is touched. allowBusy:
+ * the person was warned about the turn or the unsent text on this tab.
+ */
+export function moveBlock(info, { allowBusy = false } = {}) {
+  if (info.running === 'shell') return 'no Claude is running in it';
+  if (info.running !== 'claude') return 'something other than one Claude runs in its shell';
+  if (!info.session?.sessionId) return 'its conversation could not be identified';
+  if (!info.session.project) return 'the folder its conversation runs in could not be read';
+  if (allowBusy) return null;
+  if (info.busy) return info.status === 'needs' ? 'waiting on a question' : 'in the middle of a turn';
+  return info.draft ? 'has unsent text in the prompt' : null;
 }

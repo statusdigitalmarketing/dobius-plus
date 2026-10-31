@@ -1,7 +1,9 @@
 // Main-process side of account headroom (pure rules: account-headroom.js):
 // keeps a per-credential usage history from the statusLine records for the
-// panel, and answers "where can this tab move" for the Move to account dialog.
-// The window does the move itself (store.moveTabToAccount).
+// panel, answers "where can this tab move" for the Move to account dialog, and
+// does the move: every check BEFORE anything is stopped, and success reported
+// only from what the new process itself shows afterwards.
+// Known limits: docs/account-usage-and-move.md.
 //
 // Everything system-facing arrives through `d`. Identity comes from
 // account-identity's read-only metadata and credential-presence checks, and
@@ -13,18 +15,21 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   emptyHistory, sanitizeHistory, updateHistory, usageForKeys, accountKeyRows, moveRefusal,
-  rankTargets, tabBusy, noteLogin, UNKNOWN_LOGIN, STALE_MS,
+  rankTargets, tabBusy, noteLogin, moveBlock, UNKNOWN_LOGIN, STALE_MS,
 } from './account-headroom.js';
 
 const SAVE_EVERY_MS = 30_000;
 const MAX_CANDIDATE_TABS = 64;
 const MAX_HISTORY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_SERVICE = 'Claude Code-credentials';
+const STOP_MS = 8000;
+const VERIFY_MS = 45_000;
+const POLL_MS = 1000;
 // Older than the longest window a usage record says nothing.
 const RECORD_MAX_AGE_MS = 8 * 24 * 3600_000;
 
 // Could a restart lose unsent text? A box that cannot be read (a menu is open)
-// always could: guessing "empty" is what loses a draft.
+// always could: guessing "empty" is what loses a draft (known limit 8).
 export const draftOnScreen = (box) => (typeof box === 'string' ? !!box.trim() : true);
 
 /**
@@ -70,6 +75,8 @@ export function createHeadroomService(d) {
   let loading = null;
   // What the last sample read: a login change noticed outside a sample needs it.
   let lastRecords = [];
+  // One move at a time, Move all included, across every window.
+  let moving = false;
 
   async function history() {
     if (hist) return hist;
@@ -131,6 +138,7 @@ export function createHeadroomService(d) {
   // nothing about it. Only the canonical spelling is trusted, and only while no
   // listed spelling of that folder has a credential of its own. A credential or
   // metadata FILE linked out of its folder is the same problem. All read as unknown.
+  // Known limits 4 and 5: ~/.claude.json, and a spelling not listed anywhere.
   async function markSharedFolders(rows) {
     const nfc = (p) => p.normalize('NFC');
     await Promise.all(rows.map(async (r) => {
@@ -299,14 +307,12 @@ export function createHeadroomService(d) {
     if (info) {
       const g = groupOf(scan, info.pid);
       // Claude's own record names the conversation it is on now (argv keeps
-      // naming the old one after /clear); the resolver is for older versions.
+      // naming the old one after /clear).
       presence = await d.presence(info, g ? (g.envUnset ? null : g.configDir) : tab.claudeConfigDir).catch(() => null);
-      const r = await d.resolveSession(tabId).catch(() => null);
-      const sessionId = presence?.sessionId || r?.sessionId || null;
-      if (sessionId) {
+      if (presence?.sessionId) {
         // Resumed where it runs (a worktree, a subfolder), not at the project root.
         const cwd = await d.processCwd(info.pid).catch(() => null);
-        session = { sessionId, project: cwd || (r?.sessionId === sessionId ? r.sessionProject : null) || null };
+        session = { sessionId: presence.sessionId, project: cwd && d.isDir(cwd) ? cwd : null };
       }
     }
     // A Claude sharing its shell with another program (suspended behind an
@@ -333,6 +339,7 @@ export function createHeadroomService(d) {
     await sample();
     const [rows, scan] = await Promise.all([accountRows(), readScan()]);
     const { pid, ...info } = await tabInfo(tab, scan);
+    info.hardBlock = moveBlock(info, { allowBusy: true });
     const source = sourceOf(tab, rows, pid, scan);
     return { ok: true, source: { label: source.label, email: source.email }, targets: candidatesFor(source, rows, d.now()), tab: info };
   }
@@ -344,19 +351,104 @@ export function createHeadroomService(d) {
     const tabs = new Map(d.tabs().map((t) => [t.id, t]));
     await sample();
     const [rows, scan] = await Promise.all([accountRows(), readScan()]);
-    const target = targetId === null ? rows.find((r) => r.isDefault) : rows.find((r) => !r.isDefault && r.id === targetId);
+    const target = targetRow(rows, targetId);
     const out = [];
     for (const id of ids) {
       const tab = tabs.get(id);
       if (!tab) continue;
       const { pid, ...info } = await tabInfo(tab, scan);
       const source = sourceOf(tab, rows, pid, scan);
-      out.push({ ...info, refusal: target ? rowRefusal(source, target) : 'that account no longer exists' });
+      out.push({
+        ...info,
+        block: moveBlock(info),
+        hardBlock: moveBlock(info, { allowBusy: true }),
+        refusal: target ? rowRefusal(source, target) : 'that account no longer exists',
+      });
     }
     return out;
   }
 
+  const targetRow = (rows, id) => (id === null ? rows.find((r) => r.isDefault) : rows.find((r) => !r.isDefault && r.id === id));
+  const pinOf = (r) => ({ id: r.isDefault ? null : r.id });
+  const named = (r) => (r.email ? `${r.label} (${r.email})` : r.label);
+
+  async function moveOne(tabId, targetId, { allowBusy, canRestart, restart }) {
+    const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
+    const tab = d.tabs().find((t) => t.id === tabId);
+    if (!tab) return fail('the tab has no terminal running');
+    await sample();
+    const scan = await readScan();
+    const info = await tabInfo(tab, scan);
+    const block = moveBlock(info, { allowBusy });
+    if (block) return fail(block);
+    // Read last, so the target's login is as fresh as it can be when Claude stops.
+    const rows = await accountRows();
+    const target = targetRow(rows, targetId);
+    if (!target) return fail('that account no longer exists');
+    const refusal = rowRefusal(sourceOf(tab, rows, info.pid, scan), target);
+    if (refusal) return fail(refusal);
+    // No await from here to the signal.
+    if (d.inputSeq(tabId) !== info.inputSeq || d.inputHeld(tabId)) return fail('something was typed in the tab, so it was left alone');
+    if (!canRestart(tabId)) return fail('the tab is moving to another window');
+    const { sessionId, project } = info.session;
+    const manual = `The conversation is safe: run claude --resume ${sessionId} in ${project}.`;
+    try { d.stop(info.pid); } catch (err) { if (err?.code !== 'ESRCH') return fail(`Claude could not be stopped: ${err.message}`); }
+    // Everything above left the tab untouched. From here it only ever reports.
+    const stopBy = d.now() + STOP_MS;
+    while (d.alive(info.pid) && d.now() < stopBy) await d.sleep(100);
+    if (d.alive(info.pid)) return fail(`Claude did not stop within ${STOP_MS / 1000} seconds, so nothing else was changed. It may still be closing.`);
+    if (!(await d.claim(sessionId, tabId))) return fail(`Claude stopped, but something else is resuming that conversation, so this tab was not restarted. ${manual}`);
+    const pin = pinOf(target);
+    if (!restart(tabId, tab.cwd, pin, { sessionId, cwd: project })) return fail(`Claude stopped, but the tab could not restart on ${target.label}. ${manual}`);
+    return verifyMove(tabId, sessionId, target, rows, pin, manual);
+  }
+
+  // What is really running in the tab now, from the process's own environment
+  // and Claude's own record, never from what was asked for. Polled: nothing
+  // announces a process starting, and a slow shell rc only uses up the bound.
+  async function verifyMove(tabId, sessionId, target, rows, pin, manual) {
+    const end = d.now() + VERIFY_MS;
+    let started = false;
+    while (d.now() < end) {
+      const info = await d.claudeInfo(tabId).catch(() => null);
+      if (info?.sessionId === sessionId) {
+        started = true;
+        const g = groupOf(await readScan(), info.pid);
+        if (g && g.key !== target.key) {
+          const actual = rows.find((r) => r.key === g.key);
+          return { ok: false, pin: actual ? pinOf(actual) : null, error: `Claude resumed on ${actual ? named(actual) : g.configDir}, not ${target.label}. Something in the shell's startup files sets CLAUDE_CONFIG_DIR, so this tab stays there.` };
+        }
+        const seen = g ? await d.presence(info, g.envUnset ? null : g.configDir).catch(() => null) : null;
+        if (seen?.sessionId && seen.sessionId !== sessionId) return { ok: false, pin, error: `Claude is on ${target.label}, but running conversation ${seen.sessionId}, not ${sessionId}. ${manual}` };
+        if (seen?.sessionId) {
+          const override = await d.processAuthOverride(info.pid);
+          if (override) {
+            return { ok: false, pin, error: override === 'unreadable'
+              ? `Claude runs in ${target.label}'s folder, but its environment could not be read, so its login cannot be confirmed.`
+              : `Claude runs in ${target.label}'s folder, but ${override} is set in the tab's shell and signs it in the same way on every account, so it did not change login.` };
+          }
+          return { ok: true, pin };
+        }
+      }
+      await d.sleep(POLL_MS);
+    }
+    return { ok: false, pin, error: started
+      ? `Claude started, but what it is running could not be confirmed within ${VERIFY_MS / 1000} seconds. Check the tab before relying on it.`
+      : `Claude did not start within ${VERIFY_MS / 1000} seconds. The tab is a shell on ${target.label}. ${manual}` };
+  }
+
+  async function move(tabIds, targetId, opts) {
+    if (moving) return { ok: false, error: 'another account move is still running; try again when it finishes' };
+    moving = true;
+    try {
+      const results = [];
+      for (const tabId of tabIds.slice(0, MAX_CANDIDATE_TABS)) results.push({ tabId, ...(await moveOne(tabId, targetId, opts)) });
+      return { ok: true, results };
+    } finally { moving = false; }
+  }
+
   return {
+    move,
     tick: async () => {
       if (ticking) return;
       ticking = true;

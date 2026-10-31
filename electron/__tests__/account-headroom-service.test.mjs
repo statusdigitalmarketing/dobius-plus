@@ -43,11 +43,11 @@ function world(over = {}) {
     links: {}, // path -> where it really is
     missing: new Set(),
     unshared: new Set(),
-    tabs: [{ id: TAB, claudeConfigDir: DIR_A }],
+    tabs: [{ id: TAB, cwd: '/proj', claudeConfigDir: DIR_A }],
+    events: [],
     claude: { pid: 100, sessionId: null, startedAt: T0 - 3600_000, soleChild: true },
     groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }],
     presence: { sessionId: 'sess-now', status: 'idle' },
-    resolved: null,
     box: '',
     inputSeq: 5,
     activity: null,
@@ -83,12 +83,17 @@ function world(over = {}) {
     activity: () => w.activity,
     claudeInfo: async () => w.claude,
     presence: async () => w.presence,
-    resolveSession: async () => w.resolved,
+    stop: (pid) => { w.events.push(`stop ${pid}`); if (w.stopThrows) throw w.stopThrows; },
+    alive: () => w.stillAlive === true,
+    claim: async (sid) => { w.events.push(`claim ${sid}`); return w.claimOk !== false; },
+    sleep: async (ms) => { w.now += ms; w.onSleep?.(); },
+    processAuthOverride: async () => w.override || null,
+    isDir: (p) => p !== w.goneDir,
     process: async () => w.proc || null,
-    processCwd: async () => '/proj/worktree',
+    processCwd: async () => w.cwd === undefined ? '/proj/worktree' : w.cwd,
     inputSeq: () => w.inputSeq,
     inputHeld: () => w.held,
-    screen: async () => (w.noScreen ? null : { lines: [], modes: {} }),
+    screen: async () => { w.onScreen?.(); return w.noScreen ? null : { lines: [], modes: {} }; },
     promptBox: () => w.box,
   });
   return w;
@@ -243,11 +248,11 @@ await check('a metadata file linked out of its folder is unknown too', async () 
   }
 });
 
-await check('a shell replaced by Claude (exec) is read from its own pid, not the spawn binding', async () => {
+await check('the dialog names the account of a shell replaced by Claude (exec), from its own pid', async () => {
   const w = world({ claude: null, proc: 'claude', tabs: [{ id: TAB, pid: 55, claudeConfigDir: DIR_A }], groups: [{ key: KEY_B, configDir: DIR_B, envUnset: false, pids: [55] }] });
   const r = await w.svc.moveTargets(TAB);
   assert.deepEqual(r.source, { label: 'B', email: 'b@x.com' });
-  assert.match(target(r, 'B').refusal, /already on/);
+  assert.match(r.tab.hardBlock, /other than one Claude/);
 });
 
 await check('the two default metadata files disagreeing, or one unreadable, makes Default unknown', async () => {
@@ -324,9 +329,13 @@ await check('Move all judges each tab: busy, draft, another program, no Claude',
   assert.equal(c.inputSeq, 5);
   assert.equal(c.refusal, null);
   assert.equal(c.pid, undefined, 'no pid leaves main');
+  assert.equal(c.block, null);
+  assert.equal(c.hardBlock, null);
   assert.equal((await one({ presence: { sessionId: 'sess-now', status: 'busy' } })).busy, true);
   assert.equal((await one({ activity: { status: 'needs', lastActivityAt: 0 } })).busy, true);
   assert.equal((await one({ box: 'half a thought' })).draft, true);
+  assert.match((await one({ box: 'half a thought' })).block, /unsent/);
+  assert.equal((await one({ box: 'half a thought' })).hardBlock, null);
   assert.equal((await one({ box: null })).draft, true, 'a box that cannot be read might hold text');
   assert.equal((await one({ held: true })).draft, true);
   assert.equal((await one({ claude: { pid: 100, sessionId: null, startedAt: T0, soleChild: false } })).running, 'other');
@@ -338,13 +347,199 @@ await check('Move all judges each tab: busy, draft, another program, no Claude',
   assert.match((await w.svc.moveCandidates([TAB], 'gone'))[0].refusal, /no longer exists/);
 });
 
-await check('the conversation comes from Claude\'s own record first, then the resolver', async () => {
-  const w = world({ presence: { sessionId: 'on-now', status: 'idle' }, resolved: { sessionId: 'stale-argv', sessionProject: '/p' } });
+await check('the conversation comes from Claude\'s own record, and only that', async () => {
+  const w = world({ presence: { sessionId: 'on-now', status: 'idle' } });
   assert.equal((await w.svc.moveCandidates([TAB], 'b'))[0].session.sessionId, 'on-now');
   w.presence = null;
-  assert.equal((await w.svc.moveCandidates([TAB], 'b'))[0].session.sessionId, 'stale-argv');
-  w.resolved = null;
-  assert.equal((await w.svc.moveCandidates([TAB], 'b'))[0].session, null);
+  const [c] = await w.svc.moveCandidates([TAB], 'b');
+  assert.equal(c.session, null);
+  assert.match(c.hardBlock, /could not be identified/);
+});
+
+// ---- the move ----
+
+// What restarting does in this fake: a new process under the new shell.
+const moveOpts = (w, { allowBusy = false, group = (t) => t } = {}) => ({
+  allowBusy,
+  canRestart: () => w.canRestart !== false,
+  restart: (id, cwd, pin, resume) => {
+    w.events.push(`restart ${id} ${cwd} ${JSON.stringify(pin)} ${resume.sessionId} ${resume.cwd}`);
+    if (w.restartOk === false) return false;
+    if (w.neverStarts) w.claude = null;
+    else {
+      w.claude = { pid: 200, sessionId: resume.sessionId, startedAt: T0, soleChild: true };
+      w.groups = w.groupsAfter || [{ key: KEY_B, configDir: DIR_B, envUnset: false, pids: [200] }];
+      if (w.presenceAfter !== undefined) w.presence = w.presenceAfter;
+    }
+    return true;
+  },
+});
+const moveB = async (w, o) => (await w.svc.move([TAB], 'b', moveOpts(w, o))).results[0];
+const untouched = (w) => assert.deepEqual(w.events, [], 'nothing was stopped or restarted');
+
+await check('a normal move stops Claude, claims, restarts in its folder, verifies and pins the target', async () => {
+  const w = world();
+  const r = await moveB(w);
+  assert.deepEqual(r, { tabId: TAB, ok: true, pin: { id: 'b' } });
+  assert.deepEqual(w.events, ['stop 100', 'claim sess-now', `restart ${TAB} /proj {"id":"b"} sess-now /proj/worktree`]);
+});
+
+await check('refused with the tab untouched: no Claude, exec claude, another program, no conversation, no folder', async () => {
+  for (const [over, re] of [
+    [{ claude: null, proc: null }, /no Claude/],
+    [{ claude: null, proc: '2.1.314' }, /other than one Claude/], // exec claude: the shell itself
+    [{ claude: { pid: 100, sessionId: null, startedAt: T0, soleChild: false } }, /other than one Claude/],
+    [{ presence: null }, /could not be identified/],
+    [{ cwd: null }, /folder/],
+    [{ goneDir: '/proj/worktree' }, /folder/],
+  ]) {
+    const w = world(over);
+    const r = await moveB(w, { allowBusy: true });
+    assert.equal(r.ok, false);
+    assert.match(r.error, re);
+    assert.equal('pin' in r, false);
+    untouched(w);
+  }
+});
+
+await check('a target logged out while the tab is being judged is refused, untouched', async () => {
+  const w = world();
+  w.onScreen = () => { w.logins[DIR_B] = 'out'; };
+  const r = await moveB(w);
+  assert.match(r.error, /not logged in/);
+  untouched(w);
+});
+
+await check('same login, unknown identity, a draft and typing are all refused before anything stops', async () => {
+  let w = world({ emails: { [DIR_A]: 'same@x.com', [DIR_B]: 'SAME@x.com', [HOMEC]: 'd@x.com' } });
+  assert.match((await moveB(w)).error, /same login/);
+  untouched(w);
+  w = world({ emails: { [DIR_A]: 'a@x.com', [HOMEC]: 'd@x.com' } });
+  assert.match((await moveB(w)).error, /which login that account is/);
+  untouched(w);
+  w = world({ box: 'half a thought' });
+  assert.match((await moveB(w)).error, /unsent text/);
+  untouched(w);
+  w = world();
+  w.onScreen = () => { w.inputSeq += 1; };
+  assert.match((await moveB(w)).error, /typed/);
+  untouched(w);
+  w = world({ held: false });
+  const held = moveOpts(w);
+  w.onScreen = () => { w.held = true; };
+  assert.match((await w.svc.move([TAB], 'b', { ...held, allowBusy: true })).results[0].error, /typed/);
+  untouched(w);
+  w = world({ canRestart: false });
+  assert.match((await moveB(w)).error, /another window/);
+  untouched(w);
+});
+
+await check('a warned person can move a tab with a draft, Move all cannot', async () => {
+  const w = world({ box: 'half a thought' });
+  assert.equal((await moveB(w, { allowBusy: true })).ok, true);
+});
+
+await check('.zshrc putting Claude back on its old folder is a failure naming it, and the pin says so', async () => {
+  const w = world({ groupsAfter: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [200] }] });
+  const r = await moveB(w);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /resumed on A \(a@x\.com\), not B/);
+  assert.deepEqual(r.pin, { id: 'a' });
+});
+
+await check('landing on a folder that is no listed account clears the pin and names the folder', async () => {
+  const w = world({ groupsAfter: [{ key: keychainServiceFor('/elsewhere'), configDir: '/elsewhere', envUnset: false, pids: [200] }] });
+  const r = await moveB(w);
+  assert.match(r.error, /resumed on \/elsewhere/);
+  assert.equal(r.pin, null);
+});
+
+await check('another conversation running is a failure, and a token in the shell is named, by name only', async () => {
+  let w = world({ presenceAfter: { sessionId: 'other-one', status: 'idle' } });
+  let r = await moveB(w);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /other-one/);
+  w = world({ override: 'CLAUDE_CODE_OAUTH_TOKEN' });
+  r = await moveB(w);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /CLAUDE_CODE_OAUTH_TOKEN is set/);
+  w = world({ override: 'unreadable' });
+  r = await moveB(w);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /could not be read/);
+});
+
+await check('nothing confirmed within the bound fails visibly, and says how to get the conversation back', async () => {
+  let w = world({ neverStarts: true });
+  let r = await moveB(w);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /did not start.*claude --resume sess-now in \/proj\/worktree/);
+  assert.deepEqual(r.pin, { id: 'b' }, 'the shell did start on B');
+  w = world({ presenceAfter: null });
+  r = await moveB(w);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /could not be confirmed/);
+});
+
+await check('a slow start inside the bound still ends in success', async () => {
+  const w = world();
+  const o = moveOpts(w);
+  const restart = o.restart;
+  let started;
+  o.restart = (...a) => {
+    const ok = restart(...a);
+    started = w.claude;
+    w.claude = null;
+    const at = w.now + 5000;
+    w.onSleep = () => { if (w.now >= at) w.claude = started; };
+    return ok;
+  };
+  assert.equal((await w.svc.move([TAB], 'b', o)).results[0].ok, true);
+});
+
+await check('Claude not stopping changes nothing else; a conversation claimed elsewhere is not restarted', async () => {
+  let w = world({ stillAlive: true });
+  let r = await moveB(w);
+  assert.match(r.error, /did not stop/);
+  assert.deepEqual(w.events, ['stop 100']);
+  assert.equal('pin' in r, false);
+  w = world({ claimOk: false });
+  r = await moveB(w);
+  assert.match(r.error, /something else is resuming.*claude --resume sess-now/);
+  assert.deepEqual(w.events, ['stop 100', 'claim sess-now']);
+  assert.equal('pin' in r, false);
+  w = world({ restartOk: false });
+  r = await moveB(w);
+  assert.match(r.error, /could not restart/);
+  assert.equal('pin' in r, false);
+  const gone = Object.assign(new Error('gone'), { code: 'ESRCH' });
+  w = world({ stopThrows: gone });
+  assert.equal((await moveB(w)).ok, true, 'already gone is fine');
+  w = world({ stopThrows: new Error('EPERM') });
+  r = await moveB(w);
+  assert.match(r.error, /could not be stopped/);
+  assert.equal(w.events.length, 1);
+});
+
+await check('one move at a time: a second is refused untouched, and the lock frees afterwards, also after a throw', async () => {
+  const w = world();
+  const [first, second] = await Promise.all([w.svc.move([TAB], 'b', moveOpts(w)), w.svc.move([TAB], 'b', moveOpts(w))]);
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, false);
+  assert.match(second.error, /another account move/);
+  assert.equal(w.events.filter((e) => e.startsWith('stop')).length, 1);
+  const w2 = world();
+  await assert.rejects(w2.svc.move(null, 'b', moveOpts(w2)));
+  assert.equal((await w2.svc.move([TAB], 'b', moveOpts(w2))).ok, true);
+});
+
+await check('Move all moves each tab and reports each one', async () => {
+  const TAB2 = 'term-/proj-2';
+  const w = world();
+  w.tabs = [...w.tabs, { id: TAB2, cwd: '/proj', claudeConfigDir: DIR_A }];
+  w.claude = { pid: 100, sessionId: null, startedAt: T0, soleChild: true };
+  const res = await w.svc.move([TAB, TAB2, 'term-/gone-1'], 'b', moveOpts(w));
+  assert.deepEqual(res.results.map((r) => [r.tabId, r.ok]), [[TAB, true], [TAB2, false], ['term-/gone-1', false]]);
 });
 
 await check('draftOnScreen: only an empty readable box is no draft', async () => {

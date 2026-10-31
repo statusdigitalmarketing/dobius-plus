@@ -129,10 +129,14 @@ export function ptyProgramName(comm, shellPath = '') {
 //   only (the replacement shell reads the rc again), so an unset hook array
 //   or the tool's exit status cannot abort it before it becomes a shell.
 // Only zsh and bash are driven this way; any other shell opens plain.
+// resume ({ sessionId, cwd }, an account move): the same wrapper runs
+// `cd <cwd> && claude --resume <id>`, nothing typed. Both values travel in env
+// and reach the fixed command as $2 and $3, never eval'd.
 export const START_TOOL_ENV = 'DOBIUS_NEW_TAB_TOOL';
-export function loginShellSpawn(shell, startCommand) {
+export function loginShellSpawn(shell, startCommand, resume = null) {
   const plain = { args: ['-l'], env: {} };
-  if (!NEW_TAB_TOOLS.some((x) => newTabCommand(x) && newTabCommand(x) === startCommand)) return plain;
+  const resuming = !!resume && /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(resume.sessionId)) && String(resume.cwd).startsWith('/') && !/[\x00-\x1F\x7F]/.test(resume.cwd);
+  if (!resuming && !NEW_TAB_TOOLS.some((x) => newTabCommand(x) && newTabCommand(x) === startCommand)) return plain;
   const name = String(shell).split('/').pop();
   // The tool name is read before the hooks (a hook or a project .env could set
   // the variable) into the positional parameter $1, which no variable
@@ -140,10 +144,12 @@ export function loginShellSpawn(shell, startCommand) {
   // the launch is a fixed allowlist dispatch, so whatever a hook assigns can
   // only select one of these commands or none. A literal command word keeps
   // the user's alias or function for it, as when typed.
-  const take = `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV};`;
+  const take = resuming
+    ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_ID" "$${START_TOOL_ENV}_CWD"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_ID ${START_TOOL_ENV}_CWD;`
+    : `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV};`;
   // An and-list, not case/if: zsh forks a suspended compound command off as
   // its own job, so a Ctrl+Z inside one ended the whole wrapper (and the tab).
-  const launch = NEW_TAB_TOOLS.filter((x) => newTabCommand(x))
+  const launch = resuming ? '[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2";' : NEW_TAB_TOOLS.filter((x) => newTabCommand(x))
     .map((x) => `[[ $1 == ${x} ]] && ${newTabCommand(x)};`).join(' ');
   let run;
   if (name === 'zsh') {
@@ -161,7 +167,10 @@ export function loginShellSpawn(shell, startCommand) {
     return plain;
   }
   const script = `trap : INT; ${run} exec ${shQuote(shell)} -l`;
-  return { args: ['-l', '-i', '-c', script], env: { [START_TOOL_ENV]: startCommand } };
+  const env = resuming
+    ? { [START_TOOL_ENV]: 'resume', [`${START_TOOL_ENV}_ID`]: resume.sessionId, [`${START_TOOL_ENV}_CWD`]: resume.cwd }
+    : { [START_TOOL_ENV]: startCommand };
+  return { args: ['-l', '-i', '-c', script], env };
 }
 
 // True for a `pgrep -lf` / ps line that is a New Tab wrapper shell (it names
@@ -171,5 +180,5 @@ export function loginShellSpawn(shell, startCommand) {
 export function isNewTabWrapperCommand(line) {
   // Anchored on argv0 (after an optional pgrep pid), so the same text inside
   // some other program's arguments never matches.
-  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"; /.test(String(line));
+  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD")?; /.test(String(line));
 }

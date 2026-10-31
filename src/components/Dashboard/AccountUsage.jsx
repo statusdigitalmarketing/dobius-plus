@@ -145,7 +145,7 @@ export default function AccountUsage() {
             )}
             {orderedWindows(u.windows).map(([name, w]) => (
               <div key={name} className="flex items-center gap-2 text-xs" style={{ color: 'var(--dim)', flexWrap: 'wrap' }}>
-                <span style={{ width: 96, flexShrink: 0 }}>{windowLabel(name)}</span>
+                <span style={{ width: 96, flexShrink: 0 }} title={`Reported ${ago(w.ageMs)}`}>{windowLabel(name)}{Math.abs(w.ageMs - (u.ageMs ?? w.ageMs)) > 60_000 ? `, ${ago(w.ageMs)}` : ''}</span>
                 <span style={{ flex: 1, minWidth: 80, height: 6, borderRadius: 3, backgroundColor: 'var(--border)', overflow: 'hidden', maxWidth: 180 }}>
                   <span style={{ display: 'block', height: '100%', width: `${w.used}%`, backgroundColor: barColor(w.used) }} />
                 </span>
@@ -153,7 +153,6 @@ export default function AccountUsage() {
                 <span style={{ flexShrink: 0 }}>{paceText(w.pace)}</span>
                 <span style={{ flexShrink: 0, color: w.forecast?.limited ? RED : w.forecast?.at ? AMBER : 'var(--dim)' }}>{forecastText(w.forecast)}</span>
                 {w.resetsAt && <span style={{ flexShrink: 0 }}>resets {untilText(w.resetsAt)}</span>}
-                {Math.abs(w.ageMs - (u.ageMs ?? w.ageMs)) > 60_000 && <span style={{ flexShrink: 0 }}>reported {ago(w.ageMs)}</span>}
               </div>
             ))}
             {r.sameAs?.length > 0 && (
