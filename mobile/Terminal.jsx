@@ -144,6 +144,10 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         setActiveId((cur) => (cur === msg.id ? null : cur));
       } else if (msg.type === 'exit') {
         refreshList();
+      } else if (msg.type === 'opError' && msg.code === 'unknown_tab') {
+        // A write or authorize named a tab the Mac no longer has (v1.0.88
+        // answers instead of dropping it): refresh so the list stops offering it.
+        refreshList();
       } else if (msg.type === 'error') {
         creatingRef.current = false; // let the user retry a failed create
       }

@@ -455,6 +455,161 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.equal(await t2, false);
   assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r']);
 
+  // The drop also marks the window's hold as lost, for submits accepted later.
+  const lostMarks = [];
+  setInputHeldCheck((id) => id === 'h' && held, (id) => lostMarks.push(id));
+  await tick(1100);
+  reset(); ptys.set('h', {});
+  await submitPromptToTab('h', 'C');
+  writeRawInput('h', "\x1b[200~'/p/2.png'\x1b[201~", () => true, { promptOnly: true });
+  assert.deepEqual(lostMarks, ['h']);
+
+  // Dropping unpasted submits spares the one already in the box.
+  const { dropUnpastedSubmits } = await import('../chat-service.js');
+  setInputHeldCheck(() => false);
+  await tick(1100);
+  reset(); ptys.set('h', {});
+  const v1 = submitPromptToTab('h', 'A');
+  const v2 = submitPromptToTab('h', 'B');
+  dropUnpastedSubmits('h'); // A is pasted and waiting for its Enter
+  assert.deepEqual(await Promise.all([v1, v2]), [true, false]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r']);
+  setInputHeldCheck((id) => id === 'h' && held);
+
+  // A command-bar send B whose parts main still holds is kept whole: a Chat
+  // message C accepted meanwhile is never pasted into the middle of it.
+  const { endSend } = await import('../chat-service.js');
+  held = false;
+  await tick(1100);
+  reset(); ptys.set('h', {});
+  const ca = submitPromptToTab('h', 'A');
+  writeRawInput('h', 'b1', () => true, { send: 'B' });
+  const cc = submitPromptToTab('h', 'C');
+  writeRawInput('h', 'b2', () => true, { send: 'B' });
+  writeRawInput('h', '\r', () => true, { send: 'B' });
+  endSend('h', 'B');
+  assert.deepEqual(await Promise.all([ca, cc]), [true, true]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r', 'b1', 'b2', '\r', PASTE('C'), '\r']);
+
+  // A send cut while main still held all of it: nothing of it reached the
+  // terminal, so its parts are dropped, A (already pasted) keeps its Enter,
+  // and only the submit not yet pasted (C) goes.
+  reset(); ptys.set('h', {});
+  const da = submitPromptToTab('h', 'A');
+  writeRawInput('h', 'x1', () => true, { send: 'D' });
+  const dc = submitPromptToTab('h', 'C');
+  endSend('h', 'D', { cut: true });
+  assert.deepEqual(await Promise.all([da, dc]), [true, false]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r'], 'none of the cut send, A sent');
+
+  // Cut after part of it reached the terminal: the box holds half a
+  // command, so everything queued is cancelled.
+  reset(); ptys.set('h', {});
+  writeRawInput('h', 'y1', () => true, { send: 'E' }); // written at once (idle)
+  const ea = submitPromptToTab('h', 'A');
+  endSend('h', 'E', { cut: true });
+  assert.equal(await ea, false);
+  assert.deepEqual(writes.map((w) => w[1]), ['y1']);
+
+  // After a tear-off the window that started a send can still end or cut it;
+  // any other non-owner cannot, and a cut send no longer holds Chat up.
+  reset(); ptys.set('h', {});
+  writeRawInput('h', 'p1', () => true, { send: 'F', sender: 7 }); // written (idle)
+  endSend('h', 'F', { cut: true, sender: 8, owns: false });
+  const fa = submitPromptToTab('h', 'A');
+  await tick(100);
+  assert.equal(writes.length, 1, 'another window cannot end it: A still waits');
+  endSend('h', 'F', { cut: true, sender: 7, owns: false });
+  const fRes = await Promise.race([fa, tick(500).then(() => 'still waiting')]);
+  assert.equal(fRes, false, 'the starting window cut it: A is answered at once, and goes with it');
+  reset(); ptys.set('h', {});
+  assert.equal(await submitPromptToTab('h', 'B'), true, 'nothing left open: the next send goes at once');
+
+  // Parts main refuses (the tab moved, stillOk false) cut their send: its
+  // end mark cannot close it as complete, and C is not pasted beside the
+  // prefix that did go out.
+  reset(); ptys.set('h', {});
+  let allowed = true;
+  const ga = submitPromptToTab('h', 'A');
+  writeRawInput('h', 'q1', () => allowed, { send: 'G', sender: 7 });
+  writeRawInput('h', 'q2', () => allowed, { send: 'G', sender: 7 });
+  endSend('h', 'G');
+  const gc = submitPromptToTab('h', 'C');
+  await tick(290); // A's Enter is out and q1 written
+  allowed = false;
+  assert.deepEqual(await Promise.all([ga, gc]), [true, false]);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r', 'q1'], 'q2 refused, C never pasted');
+
+  // A cut while a part waits out its pacing gap: that part never goes.
+  reset(); ptys.set('h', {});
+  const ha = submitPromptToTab('h', 'A');
+  writeRawInput('h', 'r1', () => true, { send: 'H', sender: 7 });
+  await ha; // A done; r1 is now off the queue, in its 20ms gap
+  endSend('h', 'H', { cut: true, sender: 7, owns: true });
+  await tick(60);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('A'), '\r'], 'the part in its gap did not go out');
+
+  // Main cut a send (Ctrl+C dropped its queued prefix): the parts its window
+  // keeps handing over afterwards are refused, never reopening it, until
+  // that window's own end mark; then nothing of it ever reached the shell.
+  reset(); ptys.set('h', {});
+  const ka = submitPromptToTab('h', 'echo ready');
+  writeRawInput('h', 'ec', () => true, { send: 'K', sender: 7 });
+  writeRawInput('h', '\x03'); // Ctrl+C from the phone, during A's Enter delay
+  await ka;
+  await tick(60); // the drain refuses the prefix and cuts K
+  const late = await writeRawInput('h', 'ho; touch /tmp/probe', () => true, { send: 'K', sender: 7 });
+  const lateEnter = await writeRawInput('h', '\r', () => true, { send: 'K', sender: 7 });
+  assert.equal(late.ok, false);
+  assert.equal(lateEnter.ok, false);
+  endSend('h', 'K', { sender: 7, owns: true }); // the window's own last word
+  await tick(60);
+  assert.deepEqual(writes.map((w) => w[1]), [PASTE('echo ready'), '\x03'], 'no part of K, before or after the cut');
+  const next = await writeRawInput('h', 'z', () => true, { send: 'K', sender: 7 });
+  assert.equal(next.ok, true, 'once the window ended it, the id is free again');
+
+  // A send that never ends is given up after the held-input wait like any
+  // cut: its prefix is in the box, so the NEXT waiting submit is cancelled
+  // too and never pastes onto it.
+  {
+    const realNow = Date.now;
+    let skew = 0;
+    Date.now = () => realNow() + skew;
+    try {
+      reset(); ptys.set('h', {});
+      writeRawInput('h', "echo '", () => true, { send: 'L', sender: 7 }); // written (idle)
+      const l1 = submitPromptToTab('h', 'echo first');
+      const l2 = submitPromptToTab('h', 'printf x');
+      await tick(60);
+      skew = 17_000; // past the 16s wait
+      assert.deepEqual(await Promise.all([l1, l2]), [false, false]);
+      assert.deepEqual(writes.map((w) => w[1]), ["echo '"], 'neither message touched the half command');
+      const rest = await writeRawInput('h', "safe'\r", () => true, { send: 'L', sender: 7 });
+      assert.equal(rest.ok, false, 'and its rest stays refused');
+    } finally {
+      Date.now = realNow;
+    }
+  }
+
+  // A cut by main marks the window's hold lost, and so does every later
+  // part it refuses: a message accepted afterwards, waiting on that hold, is
+  // dropped when it drains (bridge-open-main) instead of pasting onto the prefix.
+  {
+    const marks = [];
+    setInputHeldCheck(() => false, (id) => marks.push(id));
+    reset(); ptys.set('h', {});
+    const ma = submitPromptToTab('h', 'A');
+    writeRawInput('h', 'pr', () => true, { send: 'M', sender: 7 });
+    writeRawInput('h', '\x03');
+    await ma;
+    await tick(60); // M cut by main
+    assert.ok(marks.includes('h'), 'the cut marks the hold lost');
+    marks.length = 0;
+    await writeRawInput('h', 'intf', () => true, { send: 'M', sender: 7 });
+    assert.deepEqual(marks, ['h'], 'a refused later part marks it again');
+    setInputHeldCheck((id) => id === 'h' && held);
+  }
+
   // A window that held input is gone with it half sent: a waiting submit is
   // cancelled, never appended to the half.
   const { cancelQueuedSubmits } = await import('../chat-service.js');

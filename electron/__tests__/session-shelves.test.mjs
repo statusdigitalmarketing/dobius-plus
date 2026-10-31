@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { bucketSessions, liveStatusBySession, DISK_WORKING_MS } from '../../src/lib/session-shelves.js';
+import { bucketSessions, liveStatusBySession, sessionAutoName, DISK_WORKING_MS } from '../../src/lib/session-shelves.js';
 
 const NOW = 1_000_000_000;
 const s = (id, status = 'done', ageMs = 1000) => ({ sessionId: id, status, timestamp: NOW - ageMs });
@@ -68,4 +68,22 @@ test("a future disk timestamp (clock moved back) is not working", () => {
   const b = bucketSessions({ now: NOW, sessions: [s("future", "working", -3600 * 1000), s("skew", "working", -30 * 1000)] });
   assert.deepEqual(ids(b.working), ["skew"]);
   assert.deepEqual(ids(b.recent), ["future"]);
+});
+
+test('disk "working" is judged by the newest write, not the last message', () => {
+  // A long tool call: Claude's last message is old, but records still land.
+  const busy = { sessionId: 'b', status: 'working', timestamp: NOW - DISK_WORKING_MS - 5000, activityAt: NOW - 1000 };
+  const stale = { sessionId: 's', status: 'working', timestamp: NOW - 1000, activityAt: NOW - DISK_WORKING_MS - 5000 };
+  const b = bucketSessions({ now: NOW, sessions: [busy, stale] });
+  assert.deepEqual(ids(b.working), ['b']);
+  assert.deepEqual(ids(b.recent), ['s']);
+});
+
+test('a History row is named after its tab first, then the summary', () => {
+  const full = { tabName: 'Email', title: 'Fix login bug', preview: 'fix it', projectName: 'portal' };
+  assert.equal(sessionAutoName(full), 'Email');
+  assert.equal(sessionAutoName({ ...full, tabName: undefined }), 'Fix login bug');
+  assert.equal(sessionAutoName({ ...full, tabName: '', title: '' }), 'fix it');
+  assert.equal(sessionAutoName({ projectName: 'portal' }), 'portal');
+  assert.equal(sessionAutoName(null), 'Untitled');
 });

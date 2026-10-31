@@ -61,6 +61,24 @@ export function labelFromTitle(title) {
 // a browser pane.
 const DEFAULT_LABEL_RE = /^(Tab( \d+)?|Browser)$/;
 
+// History names a session after the tab it ran in, capped like the session
+// tag labels a user types in by hand.
+export const MAX_SESSION_NAME = 50;
+
+/**
+ * The name a session takes from the tab it ran in, or null when the tab has
+ * no real name. App-assigned defaults ("Tab 3", "Tab", "Browser") say nothing
+ * about the work, so History keeps Claude's own summary for those rather than
+ * listing a column of "Tab 1". Only control characters and runs of whitespace
+ * are touched: a hand-typed name keeps its leading symbols.
+ */
+export function sessionNameFromTabLabel(label) {
+  if (typeof label !== 'string') return null;
+  const s = label.replace(CONTROL_RE, ' ').replace(/\s+/g, ' ').trim();
+  if (!s || DEFAULT_LABEL_RE.test(s)) return null;
+  return Array.from(s).slice(0, MAX_SESSION_NAME).join('');
+}
+
 /**
  * Is this tab's label the user's (or a launch-assigned agent name)? A tab
  * persisted before automatic labels existed has no flags at all; a

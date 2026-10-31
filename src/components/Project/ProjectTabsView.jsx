@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useStore } from '../../store/store';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
+import { tabActivityLabel } from '../../lib/tab-activity';
 
 function timeAgo(ts) {
   if (!ts) return '';
@@ -9,6 +10,47 @@ function timeAgo(ts) {
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
   return `${Math.floor(diff / 86400000)}d ago`;
+}
+
+const ACTIVITY_COLORS = {
+  working: 'var(--fg)',
+  input: 'var(--accent)',
+  waiting: 'var(--dim)',
+  done: 'var(--success)',
+};
+
+function ActivityIcon({ kind }) {
+  const box = { width: 10, height: 10, flexShrink: 0 };
+  if (kind === 'working') {
+    return (
+      <svg className="animate-spin" style={box} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="6" stroke="var(--warning)" strokeOpacity="0.3" strokeWidth="2.5" />
+        <path d="M14 8a6 6 0 0 0-6-6" stroke="var(--warning)" strokeWidth="2.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (kind === 'input') {
+    return (
+      <svg style={box} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M6.2 6.3a1.9 1.9 0 1 1 2.6 1.75c-.5.2-.8.6-.8 1.1v.4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        <circle cx="8" cy="11.6" r="0.9" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (kind === 'waiting') {
+    return (
+      <svg style={box} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="6.5" stroke="var(--warning)" strokeWidth="1.6" />
+        <path d="M8 4.5V8l2.3 1.6" stroke="var(--warning)" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg style={box} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3.5 8.5l3 3 6-7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
 }
 
 /**
@@ -30,24 +72,75 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
   const currentProjectPath = useStore((s) => s.currentProjectPath);
   const terminalTabs = useStore((s) => s.terminalTabs);
   const tabStatus = useStore((s) => s.tabStatus);
+  const unreadTabs = useStore((s) => s.unreadTabs);
   const setActiveTab = useStore((s) => s.setActiveTab);
   const setActiveView = useStore((s) => s.setActiveView);
   const [collapsed, setCollapsed] = useState({}); // path -> true when collapsed
 
+  // The aggregate reads session history and can be slow on a big history, so
+  // a tick is skipped while one is still out (overlapping asks piled up).
+  const groupsInFlight = useRef(false);
   const refresh = useCallback(() => {
     if (!window.electronAPI?.dataGetAllProjectTabs) { setGroups([]); return; }
+    if (groupsInFlight.current) return;
+    groupsInFlight.current = true;
     window.electronAPI.dataGetAllProjectTabs()
       .then((g) => setGroups(Array.isArray(g) ? g : []))
-      .catch(() => setGroups([]));
+      .catch(() => setGroups([]))
+      .finally(() => { groupsInFlight.current = false; });
   }, []);
 
   // Refresh on open, then poll: the aggregate spans other windows, so there's no
-  // in-window event for their changes. 5s is cheap (one read-only IPC).
+  // in-window event for their changes.
   useEffect(() => {
     refresh();
     const i = setInterval(refresh, 5000);
     return () => clearInterval(i);
   }, [refresh]);
+
+  // Live row status (Working / Input / Waiting / Done) comes from main's cheap
+  // tabs:activity, keyed by tab id. One ask at a time; an ask requested while
+  // one is out runs once when it lands, so the newest state always arrives.
+  const [activity, setActivity] = useState(() => new Map());
+  const activityIdsRef = useRef([]);
+  const activityState = useRef({ inFlight: false, again: false });
+  const refreshActivity = useCallback(() => {
+    if (!window.electronAPI?.tabsActivity) return;
+    const st = activityState.current;
+    if (st.inFlight) { st.again = true; return; }
+    st.inFlight = true;
+    st.again = false;
+    window.electronAPI.tabsActivity(activityIdsRef.current)
+      .then((list) => setActivity(new Map((Array.isArray(list) ? list : []).map((r) => [r.id, r]))))
+      .catch((err) => console.warn('[ProjectTabsView] activity lookup failed:', err?.message))
+      .finally(() => {
+        st.inFlight = false;
+        if (st.again) refreshActivity();
+      });
+  }, []);
+
+  // Ask about every tab that may be live: this window's, and any the
+  // aggregate says has a PTY in another window.
+  const activityIdsKey = useMemo(() => {
+    const ids = new Set(terminalTabs.map((t) => t.id));
+    for (const g of groups || []) for (const t of g.tabs || []) if (t.live) ids.add(t.id);
+    return [...ids].join('\n');
+  }, [terminalTabs, groups]);
+  // A status or unread change in THIS window re-asks at once, so a new turn's
+  // start time (main records it) shows without waiting for the tick.
+  const localKey = useMemo(
+    () => terminalTabs.map((t) => `${t.id}:${tabStatus[t.id] || ''}:${unreadTabs[t.id] ? 1 : 0}`).join('|'),
+    [terminalTabs, tabStatus, unreadTabs],
+  );
+  useEffect(() => {
+    activityIdsRef.current = activityIdsKey ? activityIdsKey.split('\n') : [];
+    refreshActivity();
+  }, [activityIdsKey, localKey, refreshActivity]);
+  // The tick also re-renders, which is what advances "Working 4m".
+  useEffect(() => {
+    const i = setInterval(refreshActivity, 3000);
+    return () => clearInterval(i);
+  }, [refreshActivity]);
 
   const liveHere = useCallback(
     (projectPath, tabId) => projectPath === currentProjectPath && terminalTabs.some((t) => t.id === tabId),
@@ -132,6 +225,7 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
     );
   }
 
+  const now = Date.now(); // the activity tick re-renders, which advances "Working 4m"
   return (
     <div className="flex-1 overflow-y-auto">
       {filtered.map((g) => {
@@ -164,8 +258,29 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
               <div className="pb-1">
                 {g.tabs.map((t) => {
                   const live = liveHere(g.path, t.id);
-                  const status = (live ? tabStatus[t.id] : t.status) || 'idle';
+                  // A PTY runs for the tab only if main says so (a tab still
+                  // listed here can have an exited shell). Status and timing
+                  // come from main, where the hook markers are recorded for
+                  // every window (a tear-off, a respawn and auto-resume's
+                  // status broadcasts all leave the store behind). Unread is
+                  // this window's own for its tabs, main's mirror for others.
+                  const row = activity.get(t.id);
+                  const a = row?.activity;
+                  // Dot: this window's tabs keep the store (it also carries
+                  // auto-resume's queued state); another window's live tab
+                  // uses main's hook status rather than a transcript guess.
+                  const status = (live ? tabStatus[t.id] : (a?.status || t.status)) || 'idle';
                   const dot = STATUS_COLORS[status] || 'var(--dim)';
+                  const label = tabActivityLabel({
+                    live: !!a,
+                    status: a?.status,
+                    hookOwned: !!a?.hookOwned,
+                    since: a?.since,
+                    lastWorkMs: a?.lastWorkMs,
+                    background: a?.background,
+                    unread: live ? !!unreadTabs[t.id] : !!row?.unread,
+                    now,
+                  });
                   return (
                     <button
                       key={t.id}
@@ -197,9 +312,25 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                               open, so it was redundant and it contradicted the
                               gray idle dot on an open-but-idle tab (Sam). The
                               status dot conveys activity; HERE conveys the window. */}
-                          <span style={{ fontSize: 9, color: 'var(--dim)', marginLeft: 'auto', flexShrink: 0 }}>
-                            {timeAgo(t.lastActiveAt)}
-                          </span>
+                          {label ? (
+                            <span
+                              data-testid="tab-activity"
+                              data-kind={label.kind}
+                              title={label.title}
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 4,
+                                marginLeft: 'auto', flexShrink: 0, whiteSpace: 'nowrap',
+                                fontSize: 10, fontWeight: 600, color: ACTIVITY_COLORS[label.kind],
+                              }}
+                            >
+                              <ActivityIcon kind={label.kind} />
+                              {label.text}
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: 9, color: 'var(--dim)', marginLeft: 'auto', flexShrink: 0 }}>
+                              {timeAgo(t.lastActiveAt)}
+                            </span>
+                          )}
                         </span>
                         {t.preview && (
                           <span

@@ -292,7 +292,9 @@ export default function ConversationCard({
                 maxWidth: 72,
               }}
             >
-              {tabLabel}
+              {/* The row title is often this same tab name now: say where it is, not the name twice. */}
+              {tabLabel === session.displayName ? 'open'
+                : tabLabel === `${session.displayName} (closed)` ? 'closed' : tabLabel}
             </span>
           )}
           {pinned && (

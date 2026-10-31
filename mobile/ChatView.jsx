@@ -438,6 +438,19 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
   );
 });
 
+// What the chat input says when the Mac refuses a send (opError codes, see
+// docs/mobile-ws-protocol.md). Codes not listed here stay silent.
+const SEND_REFUSED = {
+  unknown_tab: 'Not sent: this tab is no longer running.',
+  tab_exited: 'Not sent: this tab is no longer running.',
+  not_authorized: 'Not sent: the connection lost this tab. Send it again.',
+  too_large: 'Not sent: the message is too long.',
+  cancelled: 'Not sent: a cancel key dropped it.',
+};
+// uncertain (stranded is always uncertain): the text reached the tab but its
+// Enter was withheld, so it may be in the input line or already sent.
+const SEND_UNCERTAIN = 'Maybe sent: it was pasted but the tab changed before Enter. Check the terminal before resending.';
+
 /**
  * Responsive conversation view for a session on mobile. Instead of mirroring the
  * width-locked raw terminal (a full-screen TUI drawn at the desktop's ~200 cols,
@@ -570,6 +583,13 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const [shellText, setShellText] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
+  // A chat send the Mac refused (opError). Shown in the input row, which is on
+  // screen in every state; the selector card's note is only shown with a card.
+  const [sendNote, setSendNote] = useState('');
+  const sendNoteTimer = useRef(null);
+  // reqId of the latest chat send: only ITS refusal is shown, so a late answer
+  // to an earlier send cannot mark a later, delivered one as unsent.
+  const lastSendRef = useRef(null);
   // Local echoes: a just-sent message renders IMMEDIATELY instead of waiting
   // for the transcript poll (a mid-turn send used to look eaten: it sat in
   // Claude's queue and never appeared here; the server now also surfaces
@@ -776,6 +796,17 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         setTimeout(() => connection.send({ type: 'selectorSnapshot', id: tabId }), msg.ok ? 700 : 0);
       } else if (msg.type === 'terminalText' && msg.id === tabId) {
         setShellText(typeof msg.text === 'string' ? msg.text : '');
+      } else if (msg.type === 'opError' && msg.op === 'submitPrompt' && msg.id === tabId
+          && msg.reqId != null && msg.reqId === lastSendRef.current) {
+        // Macs from v1.0.88 answer a send that did not go through; older ones
+        // dropped it without a word. Say so instead of leaving the echo bubble
+        // looking delivered.
+        const note = msg.uncertain ? SEND_UNCERTAIN : SEND_REFUSED[msg.code];
+        if (note) {
+          setSendNote(note);
+          clearTimeout(sendNoteTimer.current);
+          sendNoteTimer.current = setTimeout(() => setSendNote(''), 6000);
+        }
       }
     });
     return off;
@@ -900,7 +931,10 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     // a DISCRETE keypress after the paste settles. Sending `text\r` in one
     // chunk made Claude's Ink TUI treat the \r as pasted newline, so messages
     // sat in the input box unsubmitted (Sam's v1.0.51 bug 3).
-    connection.send({ type: 'submitPrompt', id: tabId, text });
+    const reqId = `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    lastSendRef.current = reqId;
+    connection.send({ type: 'submitPrompt', id: tabId, text, reqId });
+    setSendNote(''); // a refusal note is about the PREVIOUS send
     sentAtRef.current = Date.now();
     setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
     setDraft('');
@@ -1108,6 +1142,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   const inputRow = (
     <>
       {uploadMsg && <div className="chat-upload-msg">{uploadMsg}</div>}
+      {sendNote && <div className="chat-upload-msg" role="alert">{sendNote}</div>}
       {suggestions.length > 0 && (
         <div className="chat-skill-suggest">
           {suggestions.map((sk) => (

@@ -77,12 +77,31 @@ test('input prompt editing holds back counts as a person typing, and keeps the t
   assert.equal(deps.inputBusy(opened.tabId), false, 'released by the window that held it');
   env.terminals.get(opened.tabId).wcId = wc.id;
 
-  // A drain that threw some of the input away cancels Chat's waiting sends.
+  // A drain where held input was thrown away before it was sent (an image
+  // over the size limit) leaves a message already in the box alone: only
+  // sends not yet pasted are dropped, never a full cancel.
   env.emit('terminal:inputHeld', wc, opened.tabId, 'z');
   const c1 = env.cancelled.length;
-  env.emit('terminal:inputHeld', wc, opened.tabId, null, true);
-  assert.deepEqual(env.cancelled.slice(c1), [opened.tabId]);
+  const u1 = env.unpastedDrops.length;
+  env.emit('terminal:inputHeld', wc, opened.tabId, null, 'unsent');
+  assert.equal(env.cancelled.length, c1, 'no full cancel');
+  assert.deepEqual(env.unpastedDrops.slice(u1), [opened.tabId]);
   assert.equal(deps.inputBusy(opened.tabId), false);
+
+  // Input main dropped from the current hold (a prompt-only paste) makes its
+  // drain drop the Chat sends not yet pasted, even when the window reports
+  // it clean; the one already in the box is not cancelled.
+  env.emit('terminal:inputHeld', wc, opened.tabId, 'p');
+  deps.markHeldLost(opened.tabId);
+  const c2 = env.cancelled.length;
+  const u2 = env.unpastedDrops.length;
+  env.emit('terminal:inputHeld', wc, opened.tabId, null, false);
+  assert.deepEqual(env.unpastedDrops.slice(u2), [opened.tabId]);
+  assert.equal(env.cancelled.length, c2, 'not a full cancel');
+  env.emit('terminal:inputHeld', wc, opened.tabId, 'q');
+  env.emit('terminal:inputHeld', wc, opened.tabId, null, false);
+  assert.equal(env.unpastedDrops.length, u2 + 1, 'the next hold starts clean');
+  deps.markHeldLost(opened.tabId); // no hold: nothing to mark
 
   // A reload forgets a hold the old page never released.
   env.emit('terminal:inputHeld', wc, opened.tabId, 'x');

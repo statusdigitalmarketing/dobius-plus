@@ -29,6 +29,7 @@ import { resolveAccountEnvForCwd, resolveClaudeAccountPin } from './spawn-accoun
 import { planAccountSwitch, runAccountSwitch, cancelAccountSwitch, isSwitchRunning, runningSwitchTarget, interruptedSwitches, lastSwitchResult, runningSwitchOutput, killAuthChildren, resetAuthShutdown } from './account-switch-job.js';
 import { codexIdentityFor } from './codex-account-identity.js';
 import { scanClaudeProcesses } from './claude-process-scan.js';
+import { createWaitingReader, boundedIds, activityRow, freshenRows } from './claude-presence.js';
 import {
   reporterScript, reporterScriptPath, reporterCommand, usageDirPath,
   readUsageRecords, aggregateUsage, pruneUsageRecords,
@@ -41,7 +42,7 @@ import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-in
 import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputAgeMs, terminalInputSeq, terminalRawOutputSeq, terminalClosing, sendToTerminalWindow, terminalRows, terminalSettledSinceInput } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
-import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, setInputHeldCheck } from './chat-service.js';
+import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, setInputHeldCheck, endSend } from './chat-service.js';
 import { launchCommandFor } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
@@ -50,7 +51,7 @@ import { stripAnsi, parseSelectorFromScreen } from './selector-parser.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
-  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, findLooseEnds, getTranscriptSig,
+  loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, sessionMovedPast, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
   getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage, getSessionLimitRecord } from './data-service.js';
 import {
@@ -74,6 +75,7 @@ import {
   getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig, flushConfigAsync, persistConfigNow,
   getSessionTags, setSessionTag, removeSessionTag,
   getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink, clearSessionTabRunning,
+  getTabLabelsById, recordSessionTabNames,
   getAgentMemory, setAgentMemory, appendJournalEntry,
   getOrchestrationRuns, saveOrchestrationRun, deleteOrchestrationRun,
   getMobileServerConfig,
@@ -106,6 +108,7 @@ import {
   sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus,
 } from './imessage-bridge.js';
 import { pairingText } from '../shared/pairing-link.js';
+import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
@@ -236,6 +239,15 @@ const tearOffGrants = new Map();
 // WebContents and the list grew with tab churn for the life of the window.
 const ownerCleanup = createOwnerCleanup(terminalOwners);
 
+// Tabs sidebar status (Working / Input / Waiting / Done). Each window mirrors
+// its unread tab ids here, keyed by webContents.id: the renderer's unreadTabs
+// is the only unread system, this copy lets OTHER windows show Done.
+const unreadByWindow = new Map();
+const waitingForTab = createWaitingReader({
+  claudeInfo: (id) => getTerminalClaudeInfo(id, { unique: true }),
+  configDirFor: (id) => listTerminals().find((t) => t.id === id)?.claudeConfigDir || null,
+});
+
 // Settle tick for the main-process terminal status authority (v1.0.43).
 let statusSettleTimer = null;
 
@@ -293,7 +305,17 @@ function setupTerminalHandlers() {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
     if (typeof data !== 'string') return;
     if (data.length > TERMINAL_WRITE_MAX_BYTES) return;
-    if (!ownsTerminal(event.sender.id, id)) return; // not yours, drop silently
+    const owns = ownsTerminal(event.sender.id, id);
+    // A multi-part send (the command bar): each part names it, and its end
+    // (or cut) mark tells chat-service it is complete (or abandoned). The
+    // mark is also taken from the window that started the send after the
+    // tab moved away from it (chat-service checks that).
+    const send = typeof opts?.send === 'string' && opts.send.length <= 64 ? opts.send : null;
+    if (send && (opts.end === true || opts.cut === true)) {
+      endSend(id, send, { cut: opts.cut === true, sender: event.sender.id, owns });
+      return;
+    }
+    if (!owns) return; // not yours, drop silently
     // Auto-resume cancellation: if the user types into a tab BEFORE its
     // scheduled `claude --resume` fires, skip that tab. The store's own
     // resumeSession path also writes here (it's how the staggered queue is
@@ -305,7 +327,7 @@ function setupTerminalHandlers() {
     // Waits behind a pending Chat submit so keys land in the order typed.
     // promptOnly: a path prompt editing pasted into Claude's prompt, which
     // must not land later in whatever replaced it (chat-service).
-    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id), { promptOnly: opts?.promptOnly === true });
+    writeRawInput(id, data, () => ownsTerminal(event.sender.id, id), { promptOnly: opts?.promptOnly === true, send, sender: event.sender.id });
   });
 
   // How many writes reached this tab's shell since it started (terminal
@@ -529,6 +551,36 @@ function setupDataHandlers() {
       return [w];
     });
     return getAllProjectTabs({ liveTabIds, tearOffTabs });
+  });
+  // Live row status for the Tabs sidebar, apart from the aggregate above
+  // (which reads session history and is slow): main's hook status and the
+  // working stretch timing, Waiting for a 'done' tab with proven background
+  // work, and whether a window that owns the PTY has it unread. Any window may
+  // ask about any tab, like the aggregate. Returns an ARRAY.
+  ipcMain.handle('tabs:activity', async (_event, ids) => {
+    const live = new Set(listTerminals().map((t) => t.id));
+    const wanted = [...new Set(boundedIds(ids, 1000).filter((id) => live.has(id)))];
+    const unreadAnywhere = (id) => {
+      for (const [wcId, set] of unreadByWindow) if (set.has(id) && ownsTerminal(wcId, id)) return true;
+      return false;
+    };
+    const rows = await Promise.all(wanted.map((id) => activityRow(id, {
+      activityFor: terminalStatus.activityFor, waitingForTab, unreadAnywhere,
+    })));
+    const stillLive = new Set(listTerminals().map((t) => t.id));
+    return freshenRows(rows, terminalStatus.activityFor, (id) => stillLive.has(id), unreadAnywhere);
+  });
+  ipcMain.on('tabs:reportUnread', (event, ids) => {
+    // ipcMain.on has no rejection path: a throw here would reach the
+    // uncaughtException handler, which exits the app.
+    try {
+      const wcId = event.sender.id;
+      const list = new Set(boundedIds(ids, 1000));
+      if (!unreadByWindow.has(wcId)) event.sender.once('destroyed', () => unreadByWindow.delete(wcId));
+      unreadByWindow.set(wcId, list);
+    } catch (err) {
+      console.warn('[tabs:reportUnread] ignored a malformed report:', err?.message);
+    }
   });
   // Focus the window that currently owns a live tab (a tear-off window if the id
   // is torn off, otherwise the project's primary window). Lets the sidebar reveal
@@ -2744,6 +2796,11 @@ function setupSessionTabCapture() {
       // ambiguity, and doing it here keeps it to one ps per tab per tick.
       // Codex v1.0.39 r4 P2.
       const liveTabs = listTerminals();
+      // Tab labels before AND after the probes below: a session is named only
+      // when its tab's label held still across the whole tick, so a rename
+      // landing mid-tick (often with a new claude) cannot pair the new name
+      // with the session the probe saw before it.
+      const labelsBefore = getTabLabelsById();
       const infoByTab = new Map();
       const probedAt = new Map(); // when each tab was looked at: the link stamp
       for (const t of liveTabs) {
@@ -2766,6 +2823,11 @@ function setupSessionTabCapture() {
       const freshByTab = await resolveFreshSessionsForTabs(
         liveTabs, infoByTab, cwdByTab, tabToSessionId, claimedIds,
       );
+      // Name each running session after its tab (History shows it). Read as
+      // the tick sees it, so a session keeps the name its tab had while it
+      // ran, not whatever the tab is renamed to for later work.
+      const labelsAfter = getTabLabelsById();
+      const namePairs = [];
       for (const t of liveTabs) {
         const claudeInfo = infoByTab.get(t.id);
         const runningSessionId = claudeInfo?.sessionId || freshByTab.get(t.id) || null;
@@ -2779,6 +2841,23 @@ function setupSessionTabCapture() {
           continue;
         }
         claimedIds.add(runningSessionId);
+        const label = labelsAfter.get(t.id);
+        // An unknown label (tab not persisted yet) says nothing; a default one
+        // ("Tab 3") clears the name so the summary shows again.
+        if (label !== undefined && label === labelsBefore.get(t.id)) {
+          // A bare `claude` is matched by timing, and after /clear its process
+          // writes a NEW transcript while the match stays on the old one. Skip
+          // an inferred session once a newer unclaimed transcript appeared, so
+          // a renamed tab cannot relabel a conversation it has moved past.
+          // ponytail: the name follows whatever session this loop believes
+          // the tab runs. Where that belief is wrong (/clear under
+          // `claude --resume A`, whose argv still says A; two bare claudes in
+          // one project racing a /clear) the link, auto-resume and the phone
+          // are wrong too; the fix belongs in the resolver, not here.
+          const movedPast = !claudeInfo?.sessionId && await sessionMovedPast(
+            cwdByTab.get(t.id) || t.cwd, runningSessionId, claudeInfo?.startedAt, claimedIds);
+          if (!movedPast) namePairs.push([runningSessionId, sessionNameFromTabLabel(label)]);
+        }
         const mappedSessionId = tabToSessionId.get(t.id);
         if (mappedSessionId === runningSessionId) {
           // UPGRADE provenance: the link was inferred from timing, but the tab's
@@ -2813,6 +2892,14 @@ function setupSessionTabCapture() {
           // Codex v1.0.39 r11 P2.
           const linkPath = how === 'fresh' ? (cwdByTab.get(t.id) || t.cwd) : t.cwd;
           setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
+        }
+      }
+      // A name changed (a rename, a new title): History lists re-read now
+      // rather than on the next transcript write, which an idle chat never
+      // makes. Its own event: data:updated also reloads projects and stats.
+      if (recordSessionTabNames(namePairs)) {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send('sessions:namesChanged');
         }
       }
     } catch { /* best-effort */ }
@@ -3362,7 +3449,7 @@ function setupWindowHandlers() {
   });
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
   // Chat sends (desktop and phone) wait for input a window still holds.
-  setInputHeldCheck(bridgeOpenDeps.inputHeld);
+  setInputHeldCheck(bridgeOpenDeps.inputHeld, bridgeOpenDeps.markHeldLost);
   heldInputFor = bridgeOpenDeps.inputHeld;
 
   // Record the docked tab in the target window's saved tab list BEFORE the
@@ -3874,6 +3961,7 @@ app.whenReady().then(() => {
   addTerminalObserver({
     onData: (id, data) => terminalStatus.ingest(id, data),
     onExit: (id, info) => terminalStatus.noteExit(id, info),
+    onSpawn: (id) => terminalStatus.forget(id),
   });
   statusSettleTimer = setInterval(() => terminalStatus.settle(), 1000);
   startVoiceBridge();

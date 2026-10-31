@@ -8,7 +8,11 @@ import os from 'os';
 
 const TMP_HOME = await fs.mkdtemp(path.join(os.tmpdir(), 'dobius-automated-home-'));
 process.env.HOME = TMP_HOME;
-const { loadAllSessions } = await import('../data-service.js');
+// Own config dir: this suite records tab names through config-manager.
+process.env.DOBIUS_TEST_USERDATA = path.join(TMP_HOME, 'userdata');
+await fs.mkdir(process.env.DOBIUS_TEST_USERDATA, { recursive: true });
+const { loadAllSessions, sessionMovedPast, getLatestSession } = await import('../data-service.js');
+const { recordSessionTabNames, getSessionTabNames, flushConfig } = await import('../config-manager.js');
 
 let pass = 0, fail = 0;
 const check = (label, got, want) => {
@@ -61,9 +65,79 @@ await write('clock-skew', [
   rec('assistant', 'cli', 'done', now - 599_000),
 ]);
 
+// Ordering is by the last MESSAGE (Brett: "in order from the most recently
+// messaged one"). Resuming a chat writes hook output, file snapshots and
+// queue records; none of them is a message, so none may float it up.
+const meta = (type, t, extra = {}) => JSON.stringify({ type, timestamp: new Date(t).toISOString(), ...extra });
+await write('resumed-old', [
+  rec('user', 'cli', 'old question', now - 3_600_000),
+  rec('assistant', 'cli', 'old answer', now - 3_590_000),
+  meta('attachment', now - 100, { attachment: { type: 'hook_success' } }),
+  meta('file-history-snapshot', now - 90),
+  meta('queue-operation', now - 80),
+  meta('system', now - 70, { subtype: 'local_command' }),
+  JSON.stringify({ type: 'user', isMeta: true, timestamp: new Date(now - 60).toISOString(), message: { role: 'user', content: 'SessionStart hook context' } }),
+  rec('user', 'cli', '<task-notification><task-id>x</task-id>', now - 50),
+]);
+await write('messaged-later', [
+  rec('user', 'cli', 'newer question', now - 1_800_000),
+  rec('assistant', 'cli', 'newer answer', now - 1_790_000),
+]);
+await write('only-meta', [meta('file-history-snapshot', now - 7_200_000)]);
+// A tool finishing is not a message: the trailing tool result keeps the
+// session at its last reply.
+await write('trailing-tool', [
+  rec('user', 'cli', 'run the long migration', now - 5_400_010),
+  rec('assistant', 'cli', 'running', now - 5_400_000),
+  JSON.stringify({ type: 'user', timestamp: new Date(now - 30).toISOString(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'ok' }] } }),
+]);
+// A pasted image with no words is still the user messaging.
+await write('image-only', [
+  rec('assistant', 'cli', 'what does it look like?', now - 5_500_000),
+  JSON.stringify({ type: 'user', timestamp: new Date(now - 5_000_000).toISOString(), message: { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }] } }),
+]);
+// 250 bookkeeping records after the last message push it past the 200-record
+// tail; the deeper look must still find it.
+await write('buried', [
+  rec('user', 'cli', 'buried question', now - 4_000_010),
+  rec('assistant', 'cli', 'buried answer', now - 4_000_000),
+  ...Array.from({ length: 250 }, (_, i) => meta('progress', now - 1000 + i)),
+]);
+
+// Request blobs are dropped by parseJsonl, so a tail of blobs and progress
+// parses SHORT of 200 entries without the file having been read whole.
+await write('blob-buried', [
+  rec('user', 'cli', 'blob question', now - 4_100_010),
+  rec('assistant', 'cli', 'blob answer', now - 4_100_000),
+  ...Array.from({ length: 400 }, (_, i) => (i % 2
+    ? JSON.stringify({ type: 'api-request-blob', timestamp: new Date(now - 900 + i).toISOString(), body: 'x'.repeat(900) })
+    : meta('progress', now - 900 + i, { pad: 'y'.repeat(900) }))),
+]);
+
+// A tail that is nothing but request blobs parses to NO entries at all.
+await write('all-blobs', [
+  rec('user', 'cli', 'all blobs question', now - 4_200_010),
+  rec('assistant', 'cli', 'all blobs answer', now - 4_200_000),
+  ...Array.from({ length: 400 }, (_, i) => JSON.stringify({ type: 'api-request-blob', timestamp: new Date(now - 900 + i).toISOString(), body: 'x'.repeat(1000) })),
+]);
+
 const all = await loadAllSessions();
 const ids = (arr) => arr.map((s) => s.sessionId).sort();
-const ALL = ['cli-chat', 'clock-skew', 'newest-unmarked', 'no-entrypoint', 'remote-control', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta'];
+const ALL = ['all-blobs', 'blob-buried', 'buried', 'cli-chat', 'clock-skew', 'image-only', 'messaged-later', 'newest-unmarked', 'no-entrypoint', 'only-meta', 'remote-control', 'resumed-old', 'sdk-review', 'sdk-then-cli', 'titled', 'trailing-meta', 'trailing-tool'];
+const byId = (id) => all.find((s) => s.sessionId === id);
+check('timestamp is the last real message, not later metadata', byId('resumed-old')?.timestamp, now - 3_590_000);
+check('activityAt still sees the newest write', byId('resumed-old')?.activityAt, now - 50);
+check('a later message sorts above a later metadata write',
+  all.map((s) => s.sessionId).filter((id) => id === 'resumed-old' || id === 'messaged-later'), ['messaged-later', 'resumed-old']);
+check('a trailing system record does not move the timestamp', byId('trailing-meta')?.timestamp, now - 8500);
+check('no message at all falls back to the newest record', byId('only-meta')?.timestamp, now - 7_200_000);
+check('a trailing tool result is not a message', byId('trailing-tool')?.timestamp, now - 5_400_000);
+check('an image-only prompt is a message', byId('image-only')?.timestamp, now - 5_000_000);
+check('a message buried past the tail is still found', byId('buried')?.timestamp, now - 4_000_000);
+check('a tail thinned by dropped request blobs still looks deeper', byId('blob-buried')?.timestamp, now - 4_100_000);
+check('a tail of only request blobs still looks deeper', byId('all-blobs')?.timestamp, now - 4_200_000);
+check('list is sorted newest message first',
+  all.every((s, i) => i === 0 || (all[i - 1].timestamp || 0) >= (s.timestamp || 0)), true);
 const skew = all.find((s) => s.sessionId === 'clock-skew');
 check('untitled session keeps the newest pair\'s timestamp and status', [skew?.timestamp === now - 599_000, skew?.status], [true, 'done']);
 const titled = all.find((s) => s.sessionId === 'titled');
@@ -75,12 +149,58 @@ check('default includes everything', ids(all), ALL);
 check('automated flag comes from the newest user/assistant record only',
   Object.fromEntries(all.map((s) => [s.sessionId, s.automated]).sort(([a], [b]) => a.localeCompare(b))),
   {
-    'cli-chat': false, 'clock-skew': false, 'newest-unmarked': false, 'no-entrypoint': false, 'remote-control': false,
-    'sdk-review': true, 'sdk-then-cli': false, 'titled': false, 'trailing-meta': false,
+    'all-blobs': false, 'blob-buried': false, 'buried': false, 'cli-chat': false, 'clock-skew': false, 'image-only': false, 'messaged-later': false, 'newest-unmarked': false, 'no-entrypoint': false,
+    'only-meta': false, 'remote-control': false, 'resumed-old': false,
+    'sdk-review': true, 'sdk-then-cli': false, 'titled': false, 'trailing-meta': false, 'trailing-tool': false,
   });
 
 const real = await loadAllSessions(undefined, { excludeAutomated: true });
 check('excludeAutomated drops only Agent SDK runs', ids(real), ALL.filter((x) => x !== 'sdk-review'));
+
+// Tab names: recorded by main while a session runs, merged onto the list.
+check('no tab name until one is recorded', byId('cli-chat')?.tabName, undefined);
+check('recording a name reports a change', recordSessionTabNames([['cli-chat', 'Email'], ['__proto__', 'x'], ['constructor', 'y'], ['titled', '']]), true);
+check('the same name again is not a change', recordSessionTabNames([['cli-chat', 'Email']]), false);
+const named = await loadAllSessions();
+check('the tab name rides on the session', named.find((s) => s.sessionId === 'cli-chat')?.tabName, 'Email');
+check('unsafe ids and empty names are never stored', [...getSessionTabNames().keys()], ['cli-chat']);
+check('one id twice keeps the last pair; a net no-op is no change',
+  recordSessionTabNames([['cli-chat', 'Billing'], ['cli-chat', 'Email']]), false);
+check('a default-labelled tab clears the name', [recordSessionTabNames([['cli-chat', null]]), getSessionTabNames().has('cli-chat')], [true, false]);
+check('clearing a name that is not there is no change', recordSessionTabNames([['cli-chat', null]]), false);
+recordSessionTabNames([['cli-chat', 'Email']], 1);
+const many = Array.from({ length: 1005 }, (_, i) => [`s-${i}`, `n${i}`]);
+recordSessionTabNames(many.slice(0, 600), 2);
+// cli-chat is still running: seen again, unchanged, it must not be the one evicted.
+recordSessionTabNames([...many.slice(600), ['cli-chat', 'Email']], 3);
+const kept = getSessionTabNames();
+check('names are capped, the session seen longest ago goes first', [kept.size, kept.has('cli-chat'), kept.has('s-0'), kept.has('s-1004')], [1000, true, false, true]);
+// /clear: a bare claude matched to A by timing has moved on once an
+// unclaimed transcript is born after A's last write.
+const movedDir = path.join(TMP_HOME, '.claude', 'projects', '-tmp-movedproj');
+await fs.mkdir(movedDir, { recursive: true });
+await fs.writeFile(path.join(movedDir, 'a.jsonl'), rec('user', 'cli', 'first chat', now - 1000) + '\n');
+const startedAt = now - 60_000;
+check('no newer transcript: not moved past', await sessionMovedPast('/tmp/movedproj', 'a', startedAt, new Set()), false);
+await new Promise((r) => setTimeout(r, 30));
+await fs.writeFile(path.join(movedDir, 'b.jsonl'), rec('user', 'cli', 'after clear', now) + '\n');
+check('a newer unclaimed transcript: moved past', await sessionMovedPast('/tmp/movedproj', 'a', startedAt, new Set()), true);
+check('a newer transcript another tab owns does not count', await sessionMovedPast('/tmp/movedproj', 'a', startedAt, new Set(['b'])), false);
+check('a missing transcript is never named', await sessionMovedPast('/tmp/movedproj', 'zz', startedAt, new Set()), true);
+
+// The "Resume last session?" pick follows the same rule as History.
+const latestDir = path.join(TMP_HOME, '.claude', 'projects', '-tmp-latestproj');
+await fs.mkdir(latestDir, { recursive: true });
+await fs.writeFile(path.join(latestDir, 'resumed.jsonl'), [
+  rec('user', 'cli', 'old ask', now - 3_600_000), rec('assistant', 'cli', 'old reply', now - 3_590_000),
+  meta('attachment', now - 100), meta('file-history-snapshot', now - 90),
+].join('\n') + '\n');
+await fs.writeFile(path.join(latestDir, 'talked.jsonl'), [
+  rec('user', 'cli', 'newer ask', now - 600_000), rec('assistant', 'cli', 'newer reply', now - 590_000),
+].join('\n') + '\n');
+check('the latest session is the last one messaged', (await getLatestSession('/tmp/latestproj'))?.sessionId, 'talked');
+
+flushConfig?.();
 
 await fs.rm(TMP_HOME, { recursive: true, force: true });
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);

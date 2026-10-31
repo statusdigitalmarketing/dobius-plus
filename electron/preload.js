@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   terminalInputCount: (id) => ipcRenderer.invoke('terminal:inputCount', id),
   terminalWrite: (id, data, opts) => ipcRenderer.send('terminal:write', id, data, opts),
   // Input prompt editing holds back (data), or null once it is all gone
-  // (dropped: some of it was thrown away rather than sent).
+  // (dropped: false or 'unsent', see src/lib/prompt-edit-term.js).
   terminalInputHeld: (id, data, dropped) => ipcRenderer.send('terminal:inputHeld', id, data, dropped),
   chatPoll: (id, have) => ipcRenderer.invoke('chat:poll', id, have),
   chatSelector: (id) => ipcRenderer.invoke('chat:selector', id),
@@ -117,6 +117,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataListProjects: () => ipcRenderer.invoke('data:listProjects'),
   dataLoadAllSessions: (projectFilter, opts) => ipcRenderer.invoke('data:loadAllSessions', projectFilter, opts),
   dataGetAllProjectTabs: () => ipcRenderer.invoke('data:getAllProjectTabs'),
+  tabsActivity: (tabIds) => ipcRenderer.invoke('tabs:activity', tabIds),
+  // Mirror this window's unread tab ids so other windows' sidebars can show Done.
+  tabsReportUnread: (ids) => ipcRenderer.send('tabs:reportUnread', ids),
   dataGetSessionSize: (sessionId, projectPath) => ipcRenderer.invoke('data:getSessionSize', sessionId, projectPath),
   dataGetLooseEnds: (opts) => ipcRenderer.invoke('data:getLooseEnds', opts),
   dataClaimSessionResume: (sessionId, tabId) => ipcRenderer.invoke('data:claimSessionResume', sessionId, tabId),
@@ -159,6 +162,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_event, changedPath) => callback(changedPath);
     ipcRenderer.on('data:updated', handler);
     return () => ipcRenderer.removeListener('data:updated', handler);
+  },
+  // A running session's tab name changed (History names sessions by tab).
+  onSessionNamesChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('sessions:namesChanged', handler);
+    return () => ipcRenderer.removeListener('sessions:namesChanged', handler);
   },
 
   // File change watcher

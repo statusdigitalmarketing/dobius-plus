@@ -21,6 +21,17 @@ export const EARLIER_PAGE = 25;
 export const DISK_WORKING_MS = 120 * 1000;
 const FUTURE_SLACK_MS = 60 * 1000;
 
+/**
+ * The automatic name a History row shows (a user's own label still wins, in
+ * useSessions). The tab the session ran in comes first, as the user named it
+ * (Brett: "it should be whatever you actually name the tab"); then Claude's
+ * own title, the newest prompt, the project. A bare "Tab N" never reaches
+ * tabName (main drops it), so an unnamed tab falls through to the summary.
+ */
+export function sessionAutoName(s) {
+  return s?.tabName || s?.title || s?.preview || s?.projectName || 'Untitled';
+}
+
 export function liveStatusBySession(liveSessions) {
   const out = new Map();
   for (const l of liveSessions || []) {
@@ -39,7 +50,9 @@ export function bucketSessions({
   const out = { needs: [], pinned: [], working: [], recent: [], earlier: [] };
   for (const s of sessions) {
     // A timestamp from the future (clock moved back) is not evidence of work.
-    const age = now - (Number(s.timestamp) || 0);
+    // activityAt is the newest write of any kind (what main judged 'working'
+    // by); timestamp is the last MESSAGE, which a long tool call leaves behind.
+    const age = now - (Number(s.activityAt ?? s.timestamp) || 0);
     const diskWorking = s.status === 'working' && age >= -FUTURE_SLACK_MS && age < DISK_WORKING_MS;
     const status = live.get(s.sessionId) || (diskWorking ? 'working' : null);
     if (status === 'needs') out.needs.push(s);

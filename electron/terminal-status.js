@@ -29,7 +29,13 @@ const DONE_GUARD_MS = 800;      // after a hook 'done', ignore its own trailing 
 const TAIL_KEEP = 64;           // bytes retained to catch a marker split across chunks
 const MAX_RECENT_EXITS = 50;
 
-// id -> { status, lastActivityAt, hookOwned, doneAt, tail }
+// id -> { status, lastActivityAt, hookOwned, doneAt, tail, workingSince, lastWorkMs }
+// workingSince: when the current stretch began (entering 'working'; a
+// permission prompt inside a turn keeps it, 0 while none has begun).
+// lastWorkMs: how long the stretch lasted when the hook reported 'done'.
+// Both follow the same status the tab dots show, nothing more: if a hook never
+// sends Stop (a crash, an Esc interrupt) the stretch runs on exactly as the
+// yellow dot does today. Accepted; there is no reliable signal to end it.
 const live = new Map();
 // bounded FIFO of { id, cwd, project, exitCode, signal, status, at }
 const recentExits = [];
@@ -51,14 +57,27 @@ function projectFromId(id, cwd) {
 export function ingest(id, data, now = Date.now()) {
   if (!id || typeof data !== 'string') return null;
   let st = live.get(id);
-  if (!st) { st = { status: 'working', lastActivityAt: now, hookOwned: false, doneAt: 0, tail: '' }; live.set(id, st); }
+  if (!st) {
+    // timingStatus starts 'idle' so this very chunk's status (plain output, or
+    // a marker such as a lone 'needs') decides whether a stretch begins.
+    st = {
+      status: 'working', lastActivityAt: now, hookOwned: false, doneAt: 0, tail: '',
+      timingStatus: 'idle', workingSince: 0, lastWorkMs: 0,
+    };
+    live.set(id, st);
+  }
   st.lastActivityAt = now;
 
   const combined = st.tail + data;
   MARKER_RE.lastIndex = 0;
   let lastMatch = null;
   let m;
-  while ((m = MARKER_RE.exec(combined)) !== null) lastMatch = m;
+  // Every marker in order: one chunk can carry a turn's 'done' and the next
+  // turn's 'working', and the stretch timing must see both.
+  while ((m = MARKER_RE.exec(combined)) !== null) {
+    lastMatch = m;
+    enterStatus(st, m[1], now);
+  }
 
   if (lastMatch) {
     // The marker is authoritative for this chunk.
@@ -75,10 +94,28 @@ export function ingest(id, data, now = Date.now()) {
     // so a finished Claude turn stays green instead of settling to idle).
     // Mirrors useTabActivity + the recentHookDone guard on the desktop.
     const recentlyDone = st.status === 'done' && st.doneAt && now - st.doneAt < DONE_GUARD_MS;
-    if (st.status !== 'needs' && !st.hookOwned && !recentlyDone) st.status = 'working';
+    if (st.status !== 'needs' && !st.hookOwned && !recentlyDone) {
+      enterStatus(st, 'working', now);
+      st.status = 'working';
+    }
     st.tail = combined.slice(-TAIL_KEEP);
   }
   return st.status;
+}
+
+// Stretch bookkeeping on a status change (the status itself is set by ingest).
+function enterStatus(st, next, now) {
+  const prev = st.timingStatus || st.status;
+  // The timer starts on entering 'working'; a permission prompt inside a turn
+  // (working <-> needs) keeps it. A 'needs' from outside a stretch clears it,
+  // so the 'working' after it starts a new one rather than reusing an old.
+  const inStretch = (s) => s === 'working' || s === 'needs';
+  if (next === 'needs' && !inStretch(prev)) st.workingSince = 0;
+  if (next === 'working' && (!inStretch(prev) || !st.workingSince)) st.workingSince = now;
+  if (next === 'done' && inStretch(prev)) {
+    st.lastWorkMs = st.workingSince ? Math.max(0, now - st.workingSince) : 0;
+  }
+  st.timingStatus = next;
 }
 
 /** Settle tick: a non-hook-owned working tab (a plain shell) goes IDLE (gray)
@@ -88,6 +125,7 @@ export function settle(now = Date.now()) {
   for (const st of live.values()) {
     if (st.status === 'working' && !st.hookOwned && now - st.lastActivityAt > QUIET_MS) {
       st.status = 'idle';
+      st.timingStatus = 'idle';
     }
   }
 }
@@ -108,6 +146,29 @@ export function noteExit(id, info = {}, now = Date.now()) {
     at: now,
   });
   while (recentExits.length > MAX_RECENT_EXITS) recentExits.shift();
+  live.delete(id);
+}
+
+/**
+ * Sidebar timing for one live terminal: its status, when the current working
+ * stretch began (null unless working or needs), and how long the last one
+ * the hook ended with 'done' lasted.
+ */
+export function activityFor(id) {
+  const st = live.get(id);
+  if (!st) return null;
+  const inStretch = st.status === 'working' || st.status === 'needs';
+  return {
+    status: st.status,
+    hookOwned: st.hookOwned,
+    since: inStretch ? st.workingSince || null : null,
+    lastWorkMs: st.lastWorkMs || 0,
+    doneAt: st.status === 'done' ? st.doneAt || 0 : 0,
+  };
+}
+
+/** A new PTY under this id (a respawn): nothing from the old one carries over. */
+export function forget(id) {
   live.delete(id);
 }
 

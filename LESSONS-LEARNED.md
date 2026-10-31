@@ -396,6 +396,11 @@
 - **FIX**: Follow-up after 2.0.0: one readiness signal per window, one bring-to-front helper, and one module for Claude's prompt/rule shapes. Only what the integration fixes needed was shared (the caret rule, the bridge-opened first tab).
 - **CONTEXT**: Integration review of release/2.0.0; judged too risky to unify this late.
 - **DETECTION**: `grep -rn "tabsReady\|bringToFront\|RULE_RE\|PROMPT_ROW_RE" electron src`
+### API - 2026-10-30
+- **MISTAKE**: `electron/mobile-server.js` handled `authorizeTab` / `input` / `submitPrompt` with a bare `break` on any bad request (unknown tab id, unauthorized, oversized). The orchestrator client could not tell delivered from dropped and printed SENT for an afternoon of relays to short ids that never arrived.
+- **FIX**: every write request is answered (`electron/mobile-tab-ops.js`): `ack` after the PTY write, `opError` with a code otherwise, and `uncertain: true` when the text may have landed anyway. Refusals use type `opError`, never `error`: the phone's Board alerts on every `error` frame. Docs: `docs/mobile-ws-protocol.md`.
+- **CONTEXT**: Five Codex rounds were almost all about classifying outcomes as sent / not sent / unknown. Anything after the paste that is not a proven erase is unknown; a cancel must be written before its counters move; a replaced PTY's counters prove nothing. Never put an `await` between a queue's drain loop ending and its cleanup: a caller resumed in that microtask queues onto a queue that is then deleted.
+- **DETECTION**: `grep -n "break; *//\|) break;" electron/mobile-server.js` for silent drops in new WS handlers; `npm run test:tabops`.
 
 ### Architecture - 2026-10-30 (account headroom)
 - **MISTAKE**: The first auto-move design keyed a limit event on the transcript's newest record alone. `claude --resume` leaves the transcript ending in the PREVIOUS process's limit record (on the account the tab just left) until something new is written, and its screen redraws the old "You've hit your 5-hour limit" line, so every move, manual move or relaunch would have looked like a fresh limit and moved the tab again (independent design review, High).
