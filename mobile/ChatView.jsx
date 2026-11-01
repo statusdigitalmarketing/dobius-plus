@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo, createContext, useContext } from 'react';
-import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import SpecialKeys from './SpecialKeys';
+import Lightbox from './Lightbox';
 import remarkGfm from 'remark-gfm';
 import { pairingKey } from './pairings';
 import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
@@ -317,34 +317,6 @@ function ToolImages({ images }) {
         : <div key={i.ref} className={`chat-img ${failed[i.ref] ? 'failed' : 'loading'}`}>{failed[i.ref] ? 'Image unavailable' : null}</div>))}
       {big && <Lightbox url={big.url} onClose={() => { const from = big.from; setBig(null); from?.focus?.(); }} />}
     </div>
-  );
-}
-
-// Full size, modal: it takes focus and keeps it (Tab cannot reach the chat or
-// a selector card behind it, Codex), Escape/Enter or a click/tap closes it.
-function Lightbox({ url, onClose }) {
-  const ref = useRef(null);
-  useEffect(() => { ref.current?.focus(); }, []);
-  // Rendered on <body>: inside a collapsed message, the clamp's mask would
-  // crop a fixed overlay to the message (Codex P2).
-  return createPortal(
-    <div
-      ref={ref}
-      className="chat-lightbox"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Image"
-      tabIndex={-1}
-      onClick={onClose}
-      onKeyDown={(e) => {
-        e.stopPropagation();
-        if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); onClose(); } else if (e.key === 'Tab') e.preventDefault();
-      }}
-    >
-      <img src={url} alt="Tool output, full size" />
-      <span className="chat-lightbox-close">✕</span>
-    </div>,
-    document.body,
   );
 }
 
