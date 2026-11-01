@@ -1,4 +1,5 @@
 import { parseTabId } from './tab-id-util.js';
+import { answersPrompt } from '../shared/prompt-answer.js';
 // Main-process terminal STATUS authority (v1.0.43, remote-control Phase 1).
 //
 // Today the tab status (working / done / needs-input) is derived in the
@@ -101,6 +102,17 @@ export function ingest(id, data, now = Date.now()) {
     st.tail = combined.slice(-TAIL_KEEP);
   }
   return st.status;
+}
+
+/** Input written INTO a terminal: an answer to a red tab's prompt turns it back
+ * to working (shared/prompt-answer.js). Returns true when it changed. */
+export function noteInput(id, data, now = Date.now()) {
+  const st = live.get(id);
+  if (!st || st.status !== 'needs' || !answersPrompt(data)) return false;
+  enterStatus(st, 'working', now);
+  st.status = 'working';
+  st.hookOwned = true; // still Claude's turn: quiet output must not settle it
+  return true;
 }
 
 // Stretch bookkeeping on a status change (the status itself is set by ingest).

@@ -264,6 +264,22 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       }
     });
 
+    // main saw this tab's permission prompt answered (desktop keys, Chat, the
+    // phone): red goes back to working, as a hook marker would set it. Only a
+    // tab still red changes, so a newer marker always wins.
+    const removeStatusHint = window.electronAPI.onTerminalStatusHint?.((termId, status) => {
+      if (termId !== id || status !== 'working' || !termRef.current) return;
+      // After xterm has parsed everything already written: the red marker for
+      // this very prompt may still be queued (an answer from the phone can
+      // beat the desktop's own parsing).
+      termRef.current.write('', () => {
+        const s = useStore.getState();
+        if (s.tabStatus[id] !== 'needs') return;
+        s.setTabStatus(id, 'working', { fromHook: true });
+        s.markHookOwned(id, 'working');
+      });
+    });
+
     restorePromise.then(() => {
       // Guard against the effect having unmounted between the restore and
       // this callback. terminalCreate/terminalClaimPty would otherwise spawn
@@ -392,6 +408,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       removeAutoLabelListener?.();
       removeDataListener();
       removeExitListener();
+      removeStatusHint?.();
       removeRequestSave?.();
       // Don't kill PTY if: (a) this is a claimed terminal, or (b) it was marked
       // as do-not-kill by the tear-off handler (old window unmounting torn-off tab)

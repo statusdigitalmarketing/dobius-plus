@@ -1,6 +1,7 @@
 // Main-process terminal status authority (v1.0.43, remote Phase 1). Verifies it
 // reproduces the renderer's OSC-marker + output-flow status logic.
 import * as ts from '../terminal-status.js';
+import { answersPrompt } from '../../shared/prompt-answer.js';
 
 let pass = 0, fail = 0;
 const check = (label, got, want) => {
@@ -86,6 +87,32 @@ ts.ingest('term-a-1', mk('working'), 100);
 ts.ingest('term-b-2', mk('needs'), 100);
 const s2 = ts.snapshot();
 check('snapshot lists both live tabs', Object.keys(s2.live).sort(), ['term-a-1', 'term-b-2']);
+
+// Answering a permission prompt clears red: main injects a 'working' marker
+// (terminal-manager injectStatusMarker) when answersPrompt says so.
+check('Enter answers', answersPrompt('\r'), true);
+check('an option number answers', answersPrompt('2'), true);
+check('an arrow does not answer', answersPrompt('\x1b[B'), false);
+check('Esc does not (Stop turns it green)', answersPrompt('\x1b'), false);
+check('a multi-line paste does not', answersPrompt('\x1b[200~line one\rline two\x1b[201~'), false);
+check('a number inside typed text does not', answersPrompt('12'), false);
+{
+  const A = 'term-answer-1';
+  ts.ingest(A, mk('working'), 5000);
+  ts.ingest(A, mk('needs'), 5010);
+  check('an arrow keeps red', ts.noteInput(A, '\x1b[B', 5020), false);
+  check('still red', ts.statusFor(A).status, 'needs');
+  check('Enter answers (reported changed)', ts.noteInput(A, '\r', 5030), true);
+  check('back to working', ts.statusFor(A).status, 'working');
+  ts.ingest(A, 'long command output...\r\n', 5040);
+  check('approved command output stays working (hook-owned)', ts.statusFor(A).status, 'working');
+  ts.ingest(A, mk('needs'), 5050);
+  check('a newer prompt turns it red again', ts.statusFor(A).status, 'needs');
+  check('an option number answers', ts.noteInput(A, '2', 5060), true);
+  ts.ingest(A, mk('done'), 5070);
+  check('Enter on a green tab changes nothing', ts.noteInput(A, '\r', 5080), false);
+  check('a tab never seen changes nothing', ts.noteInput('term-unknown-9', '\r', 5090), false);
+}
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);
 process.exit(fail === 0 ? 0 : 1);
