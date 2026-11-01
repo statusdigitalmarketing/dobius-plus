@@ -9,8 +9,15 @@
 //   DOBIUS_DEV_CDP       open a CDP port (for Playwright screenshots).
 import { app } from 'electron';
 
+export const HARNESS_APP_NAME = 'Dobius+ Harness';
+
 if (process.env.DOBIUS_USERDATA_DIR) {
   app.setPath('userData', process.env.DOBIUS_USERDATA_DIR);
+  // Its own name too, so its Keychain item ("<name> Safe Storage", used by
+  // safeStorage for the Fireflies key) is never the real app's: a harness
+  // creating "Dobius+ Safe Storage" would make the signed app ask for
+  // Keychain access later.
+  app.setName(HARNESS_APP_NAME);
 }
 if (process.env.DOBIUS_DEV_CDP) {
   app.commandLine.appendSwitch('remote-debugging-port', String(parseInt(process.env.DOBIUS_DEV_CDP, 10) || 9223));
