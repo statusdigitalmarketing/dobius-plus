@@ -18,3 +18,11 @@ export function answersPrompt(data) {
   if (typeof data !== 'string' || data.includes(PASTE_START)) return false;
   return data.includes('\r') || /^[1-9]$/.test(data);
 }
+
+// A line SUBMITTED: a carriage return that is not Option+Enter (ESC then CR,
+// a newline inside the prompt) and not part of a paste. What answers a
+// handed-back `! command` (shared/handoff.js), and what marks the tab where
+// a prompt was sent from (codex-status.js).
+export function submitsInput(data) {
+  return typeof data === 'string' && !data.includes(PASTE_START) && /(^|[^\x1b])\r/.test(data);
+}

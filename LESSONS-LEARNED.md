@@ -558,3 +558,10 @@
 - **FIX**: Seed the harness config with `"settings":{"newTabTool":"shell"}`. Before typing into a Codex TUI, read the screen and stop on "Update available". Drive step by step (type/key/wait/watch/shot over CDP) rather than one blind script.
 - **CONTEXT**: Every harness run that types into a terminal. Restore `~/.codex/config.toml` after any Codex trust test: trusting writes `[hooks.state]` entries keyed to the test hooks.json path.
 - **DETECTION**: `grep -n newTabTool <harness>/config.json`
+
+### Testing - 2026-11-01 (`claude --settings` ADDS to the user's settings)
+- **MISTAKE**: A ship-test ran a real Claude with `--settings <isolated settings.json>` to exercise new status hooks. The tab went green at ~54s when it should have stayed red: `--settings` merges with `~/.claude/settings.json`, which still held the OLD Dobius block (untagged `done` on idle_prompt), so both blocks ran and the old one won.
+- **FIX**: Run the probe with `--setting-sources local --settings <file>` so only the file under test supplies hooks. Then the red held through Claude's idle signal as designed.
+- **CONTEXT**: Any test of hook behaviour on a Mac whose real settings already carry a Dobius block (every Dobius user).
+- **DETECTION**: `grep -rn -- "--settings" scratchpad/*.mjs scratchpad/*.py | grep -v setting-sources`
+

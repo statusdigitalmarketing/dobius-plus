@@ -19,6 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { shQuote } from '../shared/sh-quote.js';
+import { isHandoff } from '../shared/handoff.js';
 
 export const CODEX_HOOK_MARKER = 'dobius-codex-status';
 export const CODEX_HOOK_STATES = Object.freeze({
@@ -173,6 +174,8 @@ export function parseHookHead(text) {
     sessionId: sid[1].toLowerCase(),
     transcriptPath,
     event: str('hook_event_name'),
+    // Stop carries the turn's last reply: a `! command` handed back is red.
+    lastMessage: str('last_assistant_message'),
     // Bounded: these are kept per session.
     toolUseId: id && id.length <= 128 ? id : null,
     // The whole command (as far as the head reaches), hashed: two commands
@@ -190,7 +193,8 @@ export function parseHookHead(text) {
  *     that is really that session's file under the sessions root, else null
  *   lastEnterAt(id), lastAnswerAt(id): ms of the last Enter / prompt answer
  *     typed into that tab (any surface), 0 if none
- *   apply(id, state): set the tab's status
+ *   apply(id, state, tag): set the tab's status (tag 'handoff': a red from a
+ *     turn that ended handing back a `! command`)
  *   now(): ms; later(fn, ms): setTimeout
  */
 export const CLAIM_WINDOW_MS = 15000;
@@ -304,7 +308,11 @@ export function createCodexStatusRouter(deps) {
   function step(s, ev) {
     switch (ev.event) {
       case 'UserPromptSubmit': s.pending = null; s.running.clear(); s.promptAt = ev.at; return 'working';
-      case 'Stop': s.pending = null; s.running.clear(); return 'done';
+      case 'Stop':
+        s.pending = null; s.running.clear();
+        // A turn that ended handing the person a command to run waits on them.
+        ev.tag = isHandoff(ev.lastMessage) ? 'handoff' : undefined;
+        return ev.tag ? 'needs' : 'done';
       case 'PreToolUse':
         if (ev.toolUseId) {
           s.running.delete(ev.toolUseId);
@@ -357,8 +365,11 @@ export function createCodexStatusRouter(deps) {
     if (!now || now.pid !== who.pid || s.seq !== ev.seq) return { ok: true, tabId: null, superseded: true };
     // An answer typed after this event arrived means its prompt is gone.
     const answeredAfter = Number.isFinite(who.resumedAt) ? Math.max(ev.at, who.resumedAt + RESUME_LAUNCH_MS) : ev.at;
-    if (ev.state === 'needs' && (deps.lastAnswerAt(who.tabId) || 0) > answeredAfter) { s.pending = null; return { ok: true, tabId: who.tabId, answered: true }; }
-    deps.apply(who.tabId, ev.state);
+    // A handoff is answered only by running the command (Enter), never by a
+    // digit typed while copying it.
+    const answeredAt = ev.tag === 'handoff' ? deps.lastEnterAt(who.tabId) : deps.lastAnswerAt(who.tabId);
+    if (ev.state === 'needs' && (answeredAt || 0) > answeredAfter) { s.pending = null; return { ok: true, tabId: who.tabId, answered: true }; }
+    deps.apply(who.tabId, ev.state, ev.tag);
     return { ok: true, tabId: who.tabId };
   }
 
@@ -395,7 +406,7 @@ export function createCodexStatusRouter(deps) {
       if (!state) return { ok: true, tabId: null, held: true };
       nextSeq += 1;
       s.seq = nextSeq;
-      return run(sessionId, { seq: s.seq, state, event: ev.event, transcriptPath: ev.transcriptPath, at: ev.at }, 0);
+      return run(sessionId, { seq: s.seq, state, tag: ev.tag, event: ev.event, transcriptPath: ev.transcriptPath, at: ev.at }, 0);
     });
   }
 

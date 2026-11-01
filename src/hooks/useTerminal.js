@@ -231,6 +231,9 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       const parts = String(payload).split(';');
       if (parts[0] === 'dobius' && TAB_STATUS_VALUES.has(parts[1])) {
         const store = useStore.getState();
+        // done;idle is Claude idle for a minute: a red tab (an open prompt, or
+        // a `! command` handed back) still waits on the person.
+        if (parts[1] === 'done' && parts[2] === 'idle' && store.tabStatus[id] === 'needs') return true;
         store.setTabStatus(id, parts[1], { fromHook: true });
         // Claim hook-ownership so useTabActivity's silence settler doesn't
         // flip this tab to 'done' during a long quiet tool call. 'done' or
@@ -281,7 +284,10 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
         });
         return;
       }
-      if (termId !== id || status !== 'working' || !termRef.current) return;
+      // 'working-free': a handed-back `! command` was run. The turn had ended,
+      // so no hook may follow: yellow, but output flow settles it.
+      const free = status === 'working-free';
+      if (termId !== id || (status !== 'working' && !free) || !termRef.current) return;
       // After xterm has parsed everything already written: the red marker for
       // this very prompt may still be queued (an answer from the phone can
       // beat the desktop's own parsing).
@@ -289,7 +295,8 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
         const s = useStore.getState();
         if (s.tabStatus[id] !== 'needs') return;
         s.setTabStatus(id, 'working', { fromHook: true });
-        s.markHookOwned(id, 'working');
+        // Not hook-owned when free: the settler takes it to idle if nothing follows.
+        s.markHookOwned(id, free ? 'free' : 'working');
       });
     });
 

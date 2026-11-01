@@ -53,6 +53,7 @@ Session notes and learnings live in `.dobius/NOTES.md` (also editable from the D
 - Claude: hooks in `~/.claude/settings.json` print `OSC 777;dobius;<state>` into the PTY (main.js `addDobiusHooks`). PermissionRequest gives the instant red.
 - Codex: hooks in `~/.codex/hooks.json` run `<userData>/bin/dobius-codex-status`, which posts the hook's stdin head to the bridge `/codexStatus`. `electron/codex-status.js` routes it BY SESSION (never the hook's DOBIUS_TAB_ID: hooks run under Codex's shared daemon) and main sends `terminal:hookStatus` to the window. Codex asks the user once to trust the hooks. Our hooks are rewritten in place and removed as inert placeholders, because Codex keys trust by position.
 - A hook 'done' (green) holds against later output until Enter is typed in the tab (`terminal-status.releaseDone`, statusHint 'release').
+- A turn that ENDS handing the person a `! command` (a classifier-blocked action handed back) is red, not green (`shared/handoff.js`, one rule in two forms: `isHandoff` for Codex, `HANDOFF_SHELL` (plutil + grep) inside Claude's Stop hook). Marker `needs;handoff`; it clears only on a real Enter (`submitsInput`), not hook-owned afterwards. Claude's idle_prompt prints `done;idle`, which never clears a red.
 - Both blocks install and remove together from Settings > Tab status dots, and upgrade on launch when the Claude block is present.
 
 ## Checkpoints

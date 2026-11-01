@@ -1,5 +1,5 @@
 import { parseTabId } from './tab-id-util.js';
-import { answersPrompt } from '../shared/prompt-answer.js';
+import { answersPrompt, submitsInput } from '../shared/prompt-answer.js';
 // Main-process terminal STATUS authority (v1.0.43, remote-control Phase 1).
 //
 // Today the tab status (working / done / needs-input) is derived in the
@@ -24,7 +24,10 @@ import { answersPrompt } from '../shared/prompt-answer.js';
 // wiring, so this is unit-testable without Electron.
 
 const TAB_STATUS_VALUES = new Set(['working', 'done', 'needs']);
-const MARKER_RE = /\x1b\]777;dobius;(working|done|needs)\x07/g;
+// An optional tag after the state: needs;handoff (a turn that ended handing
+// the person a `! command`, shared/handoff.js) and done;idle (Claude idle for
+// a minute, which must never clear a red).
+const MARKER_RE = /\x1b\]777;dobius;(working|done|needs)(?:;(handoff|idle))?\x07/g;
 const QUIET_MS = 1500;          // silence before a working tab settles to IDLE
 const DONE_GUARD_MS = 800;      // after a hook 'done', ignore its own trailing bytes
 const TAIL_KEEP = 64;           // bytes retained to catch a marker split across chunks
@@ -77,12 +80,13 @@ export function ingest(id, data, now = Date.now()) {
   // turn's 'working', and the stretch timing must see both.
   while ((m = MARKER_RE.exec(combined)) !== null) {
     lastMatch = m;
+    if (skipsRed(st, m[1], m[2])) continue;
     enterStatus(st, m[1], now);
+    applyHookState(st, m[1], now, m[2]);
   }
 
   if (lastMatch) {
-    // The marker is authoritative for this chunk.
-    applyHookState(st, lastMatch[1], now);
+    // The markers were authoritative for this chunk (applied above, in order).
     // Keep only what follows the processed marker so it is not re-matched.
     st.tail = combined.slice(lastMatch.index + lastMatch[0].length).slice(-TAIL_KEEP);
   } else {
@@ -106,21 +110,29 @@ export function ingest(id, data, now = Date.now()) {
 // A hook 'done' also stays green against later output (an agent's TUI
 // repaints when the window is resized) until Enter is next typed in the tab
 // (releaseDone): a finished turn is finished until somebody does something.
-function applyHookState(st, state, now) {
+function applyHookState(st, state, now, tag) {
   st.status = state;
   st.hookOwned = state !== 'done';
   st.doneAt = state === 'done' ? now : 0;
   st.doneSticky = state === 'done';
+  st.needsKind = state === 'needs' ? (tag === 'handoff' ? 'handoff' : 'prompt') : null;
+}
+
+// Claude's idle-for-a-minute 'done' while the tab is red: the person still
+// owes an answer, so it changes nothing.
+function skipsRed(st, state, tag) {
+  return state === 'done' && tag === 'idle' && st.status === 'needs';
 }
 
 /** A hook state delivered out of band (Codex hooks reach main over the bridge,
  * not as a marker in the PTY stream; electron/codex-status.js). Same effect as
  * the marker in ingest. Returns true when the terminal is known. */
-export function noteHookStatus(id, state, now = Date.now()) {
+export function noteHookStatus(id, state, now = Date.now(), tag = undefined) {
   const st = live.get(id);
   if (!st || !TAB_STATUS_VALUES.has(state)) return false;
+  if (skipsRed(st, state, tag)) return false;
   enterStatus(st, state, now);
-  applyHookState(st, state, now);
+  applyHookState(st, state, now, tag);
   return true;
 }
 
@@ -146,10 +158,20 @@ export function releaseDone(id, data, now = Date.now()) {
 export function noteInput(id, data, now = Date.now()) {
   const st = live.get(id);
   if (!st || st.status !== 'needs' || !answersPrompt(data)) return false;
+  const handoff = st.needsKind === 'handoff';
+  // A handed-back command is answered by running it: Enter, never a digit
+  // typed while copying it (`gh pr merge 12`), a paste's line breaks, or
+  // Option+Enter (a newline in the prompt).
+  if (handoff && !submitsInput(data)) return false;
   enterStatus(st, 'working', now);
   st.status = 'working';
-  st.hookOwned = true; // still Claude's turn: quiet output must not settle it
-  return true;
+  st.needsKind = null;
+  st.lastActivityAt = now;
+  // An answered permission prompt: still Claude's turn, so quiet output must
+  // not settle it. An answered handoff (the `!` command was run): the turn
+  // had ended, so no hook may follow; output flow settles it.
+  st.hookOwned = !handoff;
+  return handoff ? 'handoff' : 'prompt';
 }
 
 // Stretch bookkeeping on a status change (the status itself is set by ingest).

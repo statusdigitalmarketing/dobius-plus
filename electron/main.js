@@ -100,7 +100,8 @@ import {
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler } from './voice-bridge.js';
 import { createCodexStatusRouter, withCodexHooks, stripCodexHooks, hasCodexHooks } from './codex-status.js';
-import { answersPrompt } from '../shared/prompt-answer.js';
+import { answersPrompt, submitsInput } from '../shared/prompt-answer.js';
+import { HANDOFF_SHELL } from '../shared/handoff.js';
 import { findCodexSessionForProcess, readRolloutMeta } from './codex-sessions.js';
 import { createOpenTabService } from './bridge-open-tab.js';
 import { createBridgeOpenDeps } from './bridge-open-main.js';
@@ -1690,6 +1691,16 @@ function setupFileHandlers() {
   const statusCmd = (state) =>
     `printf '%s' '{"terminalSequence":"\\u001b]777;dobius;${state}\\u0007"}'`;
   const cmdEntry = (state) => ({ type: 'command', command: statusCmd(state) });
+  // Stop: a reply ending in a `! command` for the person to run (a
+  // classifier-blocked action handed back) is waiting on them: red, tagged
+  // handoff, instead of green. Decided inside the hook from its stdin
+  // (last_assistant_message), one rule with Codex's (shared/handoff.js).
+  const stopEntry = {
+    type: 'command',
+    command: `if ${HANDOFF_SHELL}; then ${statusCmd('needs;handoff')}; else ${statusCmd('done')}; fi`,
+  };
+  const hasHandoffStop = (hooks) => Array.isArray(hooks?.Stop)
+    && hooks.Stop.some((g) => g?.hooks?.some?.((h) => typeof h?.command === 'string' && h.command.includes('dobius;needs;handoff')));
   // SessionStart: tell Claude, only when it runs inside a Dobius tab, that it
   // can label its tab. SessionStart stdout is added to the session's context.
   // The trailing comment is the marker that identifies this group as ours.
@@ -1718,8 +1729,10 @@ function setupFileHandlers() {
     // (verified: the dialog still showed).
     add('PermissionRequest', { hooks: [cmdEntry('needs')] }); // no matcher = all tools
     add('Notification', { matcher: 'permission_prompt', hooks: [cmdEntry('needs')] });
-    add('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
-    add('Stop', { hooks: [cmdEntry('done')] });
+    // 'done;idle': Claude idle for a minute. It never clears a red: a handed-
+    // back command or an open prompt is still waiting on the person.
+    add('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done;idle')] });
+    add('Stop', { hooks: [stopEntry] });
     add('SessionStart', { hooks: [tabHintEntry] });
     return hooks;
   };
@@ -2069,7 +2082,7 @@ function setupFileHandlers() {
     const installed = exists && settings && Object.values(hooks || {})
       .some((groups) => Array.isArray(groups) && groups.some(isStatusGroup));
     // Also blocks from before the instant red (PermissionRequest).
-    if (installed && (!hasTabHint(hooks) || !hasPermissionRequest(hooks))) {
+    if (installed && (!hasTabHint(hooks) || !hasPermissionRequest(hooks) || !hasHandoffStop(hooks))) {
       const r = enableClaudeHooks();
       if (r?.error) console.warn(`[claudeHooks] status hook upgrade skipped: ${r.error}`);
     }
@@ -4093,9 +4106,12 @@ app.whenReady().then(() => {
   const lastAnswerAt = new Map();
   addInputObserver((id, data) => {
     const now = Date.now();
-    if (typeof data === 'string' && data.includes('\r')) lastEnterAt.set(id, now);
+    if (submitsInput(data)) lastEnterAt.set(id, now);
     if (answersPrompt(data)) lastAnswerAt.set(id, now);
-    if (terminalStatus.noteInput(id, data, now)) sendToTerminalWindow(id, 'terminal:statusHint', 'working');
+    const answered = terminalStatus.noteInput(id, data, now);
+    // 'working-free': a handed-back command was run; no hook may follow, so
+    // the window lets output settle it instead of holding it yellow.
+    if (answered) sendToTerminalWindow(id, 'terminal:statusHint', answered === 'handoff' ? 'working-free' : 'working');
     else if (terminalStatus.releaseDone(id, data, now)) sendToTerminalWindow(id, 'terminal:statusHint', 'release');
   });
   addTerminalObserver({ onExit: (id) => { lastEnterAt.delete(id); lastAnswerAt.delete(id); } });
@@ -4109,8 +4125,8 @@ app.whenReady().then(() => {
     rolloutMeta: readRolloutMeta,
     lastEnterAt: (id) => lastEnterAt.get(id) || 0,
     lastAnswerAt: (id) => lastAnswerAt.get(id) || 0,
-    apply: (id, state) => {
-      if (terminalStatus.noteHookStatus(id, state)) sendToTerminalWindow(id, 'terminal:hookStatus', state);
+    apply: (id, state, tag) => {
+      if (terminalStatus.noteHookStatus(id, state, Date.now(), tag)) sendToTerminalWindow(id, 'terminal:hookStatus', state);
     },
     now: () => Date.now(),
     later: (fn, ms) => setTimeout(fn, ms).unref?.(),
