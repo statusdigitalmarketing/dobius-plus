@@ -21,7 +21,7 @@
 // head), so it is unit-tested without touching the filesystem.
 
 import fs from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { createReadStream, constants as fsConstants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -177,10 +177,23 @@ export function parseCodexCommand(command) {
   return { sessionId: id, cd };
 }
 
+// Open for reading only if it is a regular file. O_NONBLOCK so a FIFO planted
+// as a .jsonl can never block a libuv worker in open() (a hook's rollout path
+// is untrusted input); the type is checked on the open descriptor.
+async function openRegular(filePath) {
+  const fh = await fs.open(filePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    if ((await fh.stat()).isFile()) return fh;
+  } catch { /* fall through to close */ }
+  await fh.close();
+  return null;
+}
+
 // The first `n` bytes of a file as text, or null.
 async function readStart(filePath, n) {
   try {
-    const fh = await fs.open(filePath, 'r');
+    const fh = await openRegular(filePath);
+    if (!fh) return null;
     try {
       const buf = Buffer.alloc(n);
       const { bytesRead } = await fh.read(buf, 0, n, 0);
@@ -196,7 +209,8 @@ async function readStart(filePath, n) {
 // prompt sit well within it and a newline is present.
 async function readRolloutHead(filePath) {
   try {
-    const fh = await fs.open(filePath, 'r');
+    const fh = await openRegular(filePath);
+    if (!fh) return null;
     try {
       const st = await fh.stat();
       let head = '';
@@ -212,6 +226,26 @@ async function readRolloutHead(filePath) {
       return { head, size: st.size };
     } finally { await fh.close(); }
   } catch { return null; }
+}
+
+/**
+ * A hook's rollout, for the Codex tab dots (codex-status.js): { sessionId,
+ * cwd, isExec } only when `file` really is that session's rollout inside the
+ * sessions dir (real paths on both sides, the session id in the filename and
+ * in session_meta), else null. A hook's transcript_path is untrusted input.
+ */
+export async function readRolloutMeta(file, sessionId) {
+  if (typeof file !== 'string' || !path.isAbsolute(file) || typeof sessionId !== 'string') return null;
+  if (sessionIdFromFilename(path.basename(file)) !== sessionId) return null;
+  let real, root;
+  try { [real, root] = await Promise.all([fs.realpath(file), fs.realpath(CODEX_SESSIONS_DIR())]); } catch { return null; }
+  if (!real.startsWith(root + path.sep)) return null;
+  // A FIFO or device would block the read (and a libuv worker) forever.
+  try { if (!(await fs.stat(real)).isFile()) return null; } catch { return null; }
+  const got = await readRolloutHead(real);
+  const parsed = got && parseCodexSessionHead(got.head);
+  if (!parsed || parsed.sessionId !== sessionId) return null;
+  return { sessionId, cwd: parsed.cwd, isExec: parsed.isExec };
 }
 
 /**

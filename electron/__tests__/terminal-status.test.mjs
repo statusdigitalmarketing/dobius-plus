@@ -114,5 +114,50 @@ check('a number inside typed text does not', answersPrompt('12'), false);
   check('a tab never seen changes nothing', ts.noteInput('term-unknown-9', '\r', 5090), false);
 }
 
+// Out-of-band hook status (Codex hooks arrive over the bridge, not in the PTY).
+{
+  const C = 'term-codex-1';
+  check('unknown terminal is not applied', ts.noteHookStatus(C, 'needs', 6000), false);
+  ts.ingest(C, 'codex banner\r\n', 6000);
+  check('working applies', ts.noteHookStatus(C, 'working', 6010), true);
+  check('working is hook-owned', ts.statusFor(C).hookOwned, true);
+  ts.settle(6010 + 5000);
+  check('hook-owned working survives a quiet tool call', ts.statusFor(C).status, 'working');
+  check('needs applies', ts.noteHookStatus(C, 'needs', 7000), true);
+  ts.ingest(C, 'approval overlay repaint\r\n', 7010);
+  check('output does not clear red', ts.statusFor(C).status, 'needs');
+  check('stretch (begun by the first output) kept across the prompt', ts.activityFor(C).since, 6000);
+  check('Enter answers a Codex approval too', ts.noteInput(C, '\r', 7020), true);
+  ts.noteHookStatus(C, 'done', 9010);
+  check('done releases', [ts.statusFor(C).status, ts.statusFor(C).hookOwned], ['done', false]);
+  check('stretch timed to done', ts.activityFor(C).lastWorkMs, 3010);
+  ts.ingest(C, 'trailing prompt bytes\r\n', 9100);
+  check('done guard keeps green against its own trailing bytes', ts.statusFor(C).status, 'done');
+  check('a bad state is refused', ts.noteHookStatus(C, 'bogus', 9200), false);
+  check('and changes nothing', ts.statusFor(C).status, 'done');
+}
+
+// A hook 'done' holds against later output (a resize repaint) until Enter.
+{
+  const G = 'term-green-1';
+  ts.ingest(G, mk('working'), 10000);
+  ts.ingest(G, mk('done'), 10100);
+  ts.ingest(G, 'repaint after a resize\r\n', 15000);
+  check('green survives a repaint long after the turn', ts.statusFor(G).status, 'done');
+  check('typing without Enter keeps it', ts.releaseDone(G, 'ls'), false);
+  check('a pasted line break is not Enter', ts.releaseDone(G, '\x1b[200~one\rtwo\x1b[201~'), false);
+  check('Enter releases it', ts.releaseDone(G, '\r', 15050), true);
+  check('released once only', ts.releaseDone(G, '\r'), false);
+  check('Enter itself is activity', ts.statusFor(G).status, 'working');
+  ts.ingest(G, 'shell command output\r\n', 15100);
+  check('output after Enter drives the dot again', ts.statusFor(G).status, 'working');
+  ts.settle(15100 + 5000);
+  check('and settles to idle', ts.statusFor(G).status, 'idle');
+  ts.noteHookStatus(G, 'done', 21000);
+  ts.ingest(G, 'codex idle repaint\r\n', 25000);
+  check('an out-of-band done holds the same way', ts.statusFor(G).status, 'done');
+  check('a tab never seen releases nothing', ts.releaseDone('term-unknown-7', '\r'), false);
+}
+
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);
 process.exit(fail === 0 ? 0 : 1);

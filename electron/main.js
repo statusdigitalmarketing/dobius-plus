@@ -39,7 +39,7 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, trimToEscapeBoundary } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, trimToEscapeBoundary } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
@@ -98,7 +98,10 @@ import {
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
   deriveDeviceId,
 } from './mobile-server.js';
-import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService } from './voice-bridge.js';
+import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler } from './voice-bridge.js';
+import { createCodexStatusRouter, withCodexHooks, stripCodexHooks, hasCodexHooks } from './codex-status.js';
+import { answersPrompt } from '../shared/prompt-answer.js';
+import { findCodexSessionForProcess, readRolloutMeta } from './codex-sessions.js';
 import { createOpenTabService } from './bridge-open-tab.js';
 import { createBridgeOpenDeps } from './bridge-open-main.js';
 import { ensureVoiceConductor, stopVoiceConductor } from './voice-conductor.js';
@@ -1824,14 +1827,18 @@ function setupFileHandlers() {
   }
 
   ipcMain.handle('claudeHooks:getStatus', () => {
+    const c = readCodexHooks();
+    const codex = c.error ? { error: c.error } : c.absent ? { absent: true } : { installed: hasCodexHooks(c.doc) };
     const { settings, exists } = readClaudeSettings();
-    if (settings === null) return { installed: false, error: 'settings.json is not valid JSON' };
-    if (!exists) return { installed: false, exists: false };
+    if (settings === null) return { installed: !!codex.installed, error: 'settings.json is not valid JSON', codex };
+    if (!exists) return { installed: !!codex.installed, exists: false, codex };
     const hooks = settings.hooks || {};
     const installed = Object.values(hooks).some(
       (groups) => Array.isArray(groups) && groups.some(isStatusGroup)
     );
-    return { installed, exists: true };
+    // The switch is on while either block is: a Codex block left behind by a
+    // failed removal must not hide behind an off switch.
+    return { installed: installed || !!codex.installed, exists: true, codex };
   });
 
   function enableClaudeHooks(opts) {
@@ -1887,7 +1894,124 @@ function setupFileHandlers() {
     }
     return { error: 'enable failed after retry' };
   }
-  ipcMain.handle('claudeHooks:enable', (_evt, opts) => enableClaudeHooks(opts));
+  // --- Codex status hooks (the same dots for Codex tabs) ----------------------
+  // ~/.codex/hooks.json, a JSON file Codex reads beside config.toml. Installed
+  // and removed together with the Claude block, only where Codex is installed
+  // (~/.codex exists). Codex runs a new or changed hook only after the user
+  // trusts it once ("Hooks need review" when Codex starts); Dobius never
+  // writes that trust itself. Same isolation rule as the Claude home: an
+  // isolated instance writes <userData>/codex-home only with DOBIUS_CODEX_HOME=1
+  // and never the real file.
+  const isolatedCodexHome = process.env.DOBIUS_USERDATA_DIR && process.env.DOBIUS_CODEX_HOME
+    ? path.join(path.resolve(process.env.DOBIUS_USERDATA_DIR), 'codex-home') : '';
+  const codexHomeDir = isolatedCodexHome || path.join(homedir, '.codex');
+  const codexHooksPath = path.join(codexHomeDir, 'hooks.json');
+  const codexStatusScript = () => path.join(tabBinDir(), 'dobius-codex-status');
+  // The same aliasing guard as realClaudeHomeRefusal: a throwaway home that
+  // is (or leads to) the real ~/.codex, by inode or symlink, is refused.
+  const realCodexHomeRefusal = () => {
+    if (!process.env.DOBIUS_USERDATA_DIR) return '';
+    if (!isolatedCodexHome) return 'an isolated Dobius never writes the real ~/.codex (set DOBIUS_CODEX_HOME=1)';
+    const id = (p) => { try { const st = fs.statSync(p); return `${st.dev}:${st.ino}`; } catch { return null; } };
+    const realDir = path.join(homedir, '.codex');
+    const realFile = path.join(realDir, 'hooks.json');
+    const dir = id(isolatedCodexHome);
+    if (dir && dir === id(realDir)) return 'the isolated Codex home is the real ~/.codex, refused';
+    const file = id(codexHooksPath);
+    if (file && file === id(realFile)) return 'the isolated hooks.json is the real one, refused';
+    // A dangling link on EITHER side could be waiting for this very write:
+    // the real hooks.json pointing into the throwaway home, or the reverse.
+    for (const p of [isolatedCodexHome, codexHooksPath, realDir, realFile]) {
+      let dangling = false;
+      try { dangling = fs.lstatSync(p).isSymbolicLink() && !id(p); } catch { dangling = false; }
+      if (dangling) return `${p} is a broken symlink, refused`;
+    }
+    return '';
+  };
+  function readCodexHooks() {
+    const refused = realCodexHomeRefusal();
+    if (refused) return { error: refused };
+    if (!fs.existsSync(codexHomeDir)) return { absent: true };
+    // A symlinked hooks.json whose target is missing (dotfiles not linked
+    // yet) is not "no file": writing would replace the link with a plain file.
+    try {
+      if (fs.lstatSync(codexHooksPath).isSymbolicLink() && !fs.existsSync(codexHooksPath)) {
+        return { error: `${codexHooksPath} is a broken symlink, left untouched` };
+      }
+    } catch { /* no hooks.json at all */ }
+    let raw = null;
+    try { raw = fs.readFileSync(codexHooksPath, 'utf8'); } catch (err) {
+      if (err.code !== 'ENOENT') return { error: `could not read ${codexHooksPath}: ${err.message}` };
+    }
+    if (raw === null) return { doc: {}, raw: null };
+    try {
+      const doc = JSON.parse(raw);
+      if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return { error: `${codexHooksPath} is not a JSON object, left untouched` };
+      // A shape we do not understand is the user's to fix, never ours to overwrite.
+      const h = doc.hooks;
+      if (h !== undefined && (!h || typeof h !== 'object' || Array.isArray(h) || Object.values(h).some((g) => !Array.isArray(g)))) {
+        return { error: `${codexHooksPath} has a hooks entry that is not a list, left untouched` };
+      }
+      return { doc, raw };
+    } catch { return { error: `${codexHooksPath} is not valid JSON, left untouched` }; }
+  }
+  // Content-guarded atomic write, through a symlink, like writeClaudeSettings.
+  function writeCodexHooks(doc, expectedRaw) {
+    const current = () => { try { return fs.readFileSync(codexHooksPath, 'utf8'); } catch { return null; } };
+    if (current() !== expectedRaw) throw new Error('hooks.json changed under us, retry');
+    let target = codexHooksPath;
+    try { target = fs.realpathSync(codexHooksPath); } catch { /* absent: create it here */ }
+    const tmp = `${target}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(doc, null, 2) + '\n', 'utf8');
+      if (current() !== expectedRaw) throw new Error('hooks.json changed under us, retry');
+      fs.renameSync(tmp, target);
+    } catch (err) {
+      try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
+      throw err;
+    }
+  }
+  function changeCodexHooks(transform) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const r = readCodexHooks();
+      if (r.error) return { error: r.error };
+      if (r.absent) return { ok: true, codexAbsent: true };
+      const next = transform(r.doc);
+      if (JSON.stringify(next) === JSON.stringify(r.doc)) return { ok: true, unchanged: true };
+      // Removing our block from a file that held nothing else: delete the
+      // file we created rather than leave an empty one behind.
+      try {
+        let linked = false;
+        try { linked = fs.lstatSync(codexHooksPath).isSymbolicLink(); } catch { linked = false; }
+        // A symlinked hooks.json (dotfiles) is written through, never unlinked:
+        // deleting the link would leave our block alive in its target.
+        if (r.raw !== null && Object.keys(next).length === 0 && !linked) {
+          if (fs.readFileSync(codexHooksPath, 'utf8') !== r.raw) throw new Error('hooks.json changed under us, retry');
+          fs.unlinkSync(codexHooksPath);
+        } else {
+          writeCodexHooks(next, r.raw);
+        }
+        return { ok: true };
+      } catch (err) {
+        if (err.message.includes('changed under us') && attempt === 0) continue;
+        return { error: err.message };
+      }
+    }
+    return { error: 'hooks.json keeps changing, try again in a moment' };
+  }
+  const enableCodexHooks = () => changeCodexHooks((doc) => withCodexHooks(doc, codexStatusScript()));
+  const disableCodexHooks = () => changeCodexHooks((doc) => stripCodexHooks(doc));
+  const codexHooksCurrent = (doc) => JSON.stringify(withCodexHooks(doc, codexStatusScript())) === JSON.stringify(doc);
+
+  ipcMain.handle('claudeHooks:enable', (_evt, opts) => {
+    const r = enableClaudeHooks(opts);
+    if (r?.ok) {
+      const c = enableCodexHooks();
+      if (c.error) console.warn(`[codexHooks] install skipped: ${c.error}`);
+      return { ...r, codex: c.error ? { error: c.error } : { ok: true, absent: !!c.codexAbsent } };
+    }
+    return r;
+  });
 
   // --- Shared keys (Settings > Integrations): ASANA_PAT, FIREFLIES_API_KEY --
   // They live in the env block of this same settings.json, the one place Claude
@@ -1949,9 +2073,18 @@ function setupFileHandlers() {
       const r = enableClaudeHooks();
       if (r?.error) console.warn(`[claudeHooks] status hook upgrade skipped: ${r.error}`);
     }
+    // The Codex dots arrived after many people had the Claude ones on: give
+    // them the Codex block too (Codex asks once to trust it).
+    if (installed) {
+      const c = readCodexHooks();
+      if (!c.error && !c.absent && !codexHooksCurrent(c.doc)) {
+        const r = enableCodexHooks();
+        if (r?.error) console.warn(`[codexHooks] install skipped: ${r.error}`);
+      }
+    }
   }
 
-  ipcMain.handle('claudeHooks:disable', () => {
+  function disableClaudeHooks() {
     const { settings, raw, exists } = readClaudeSettings();
     if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
     // No file = nothing to disable. Don't create an empty file just to remove
@@ -1987,6 +2120,17 @@ function setupFileHandlers() {
       }
     }
     return { error: 'disable failed after retry' };
+  }
+  ipcMain.handle('claudeHooks:disable', () => {
+    const r = disableClaudeHooks();
+    // The Codex block goes with it, whatever happened to the Claude one.
+    const c = disableCodexHooks();
+    if (c.error) {
+      console.warn(`[codexHooks] removal skipped: ${c.error}`);
+      // Reported as an error so the switch stays on: the Codex hooks are still there.
+      return { error: `Codex tabs: ${c.error}`, codex: { error: c.error } };
+    }
+    return r;
   });
 
   // --- Account usage reporting ----------------------------------------------
@@ -3942,9 +4086,36 @@ app.whenReady().then(() => {
   // Answering a permission prompt clears red. Claude sends no hook for the
   // answer, so main's tracker (phone, board) changes here and the tab's window
   // is told, whichever surface sent the answer (shared/prompt-answer.js).
+  // Per tab, when Enter / a prompt answer was last typed (any surface): the
+  // Codex dots use them to tell which tab submitted a session's prompt and to
+  // drop a red whose prompt was already answered (codex-status.js).
+  const lastEnterAt = new Map();
+  const lastAnswerAt = new Map();
   addInputObserver((id, data) => {
-    if (terminalStatus.noteInput(id, data)) sendToTerminalWindow(id, 'terminal:statusHint', 'working');
+    const now = Date.now();
+    if (typeof data === 'string' && data.includes('\r')) lastEnterAt.set(id, now);
+    if (answersPrompt(data)) lastAnswerAt.set(id, now);
+    if (terminalStatus.noteInput(id, data, now)) sendToTerminalWindow(id, 'terminal:statusHint', 'working');
+    else if (terminalStatus.releaseDone(id, data, now)) sendToTerminalWindow(id, 'terminal:statusHint', 'release');
   });
+  addTerminalObserver({ onExit: (id) => { lastEnterAt.delete(id); lastAnswerAt.delete(id); } });
+  // Codex tabs: Codex hooks reach main over the bridge, by session, never by
+  // the hook's DOBIUS_TAB_ID (it names whichever tab started Codex's shared
+  // daemon). codex-status.js finds the tab running that session.
+  const codexStatusRouter = createCodexStatusRouter({
+    liveIds: () => listTerminals().map((t) => t.id),
+    codexInfo: getTerminalCodexInfo,
+    sessionFor: findCodexSessionForProcess,
+    rolloutMeta: readRolloutMeta,
+    lastEnterAt: (id) => lastEnterAt.get(id) || 0,
+    lastAnswerAt: (id) => lastAnswerAt.get(id) || 0,
+    apply: (id, state) => {
+      if (terminalStatus.noteHookStatus(id, state)) sendToTerminalWindow(id, 'terminal:hookStatus', state);
+    },
+    now: () => Date.now(),
+    later: (fn, ms) => setTimeout(fn, ms).unref?.(),
+  });
+  setCodexStatusHandler((state, head) => codexStatusRouter.handle(state, head));
   statusSettleTimer = setInterval(() => terminalStatus.settle(), 1000);
   startVoiceBridge();
   // Hand the built-in agent list to voice-bridge so dobius-spawn can find

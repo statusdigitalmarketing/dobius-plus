@@ -82,10 +82,7 @@ export function ingest(id, data, now = Date.now()) {
 
   if (lastMatch) {
     // The marker is authoritative for this chunk.
-    const state = lastMatch[1];
-    st.status = state;
-    st.hookOwned = state !== 'done'; // working/needs own; done releases
-    st.doneAt = state === 'done' ? now : 0; // stamp so trailing bytes don't clobber green
+    applyHookState(st, lastMatch[1], now);
     // Keep only what follows the processed marker so it is not re-matched.
     st.tail = combined.slice(lastMatch.index + lastMatch[0].length).slice(-TAIL_KEEP);
   } else {
@@ -94,7 +91,7 @@ export function ingest(id, data, now = Date.now()) {
     // a managed 'done' was just set and this is its own trailing output (guard,
     // so a finished Claude turn stays green instead of settling to idle).
     // Mirrors useTabActivity + the recentHookDone guard on the desktop.
-    const recentlyDone = st.status === 'done' && st.doneAt && now - st.doneAt < DONE_GUARD_MS;
+    const recentlyDone = st.status === 'done' && (st.doneSticky || (st.doneAt && now - st.doneAt < DONE_GUARD_MS));
     if (st.status !== 'needs' && !st.hookOwned && !recentlyDone) {
       enterStatus(st, 'working', now);
       st.status = 'working';
@@ -102,6 +99,46 @@ export function ingest(id, data, now = Date.now()) {
     st.tail = combined.slice(-TAIL_KEEP);
   }
   return st.status;
+}
+
+// A hook state is authoritative: working/needs claim the tab, done releases it
+// and is stamped so its own trailing bytes don't clobber green.
+// A hook 'done' also stays green against later output (an agent's TUI
+// repaints when the window is resized) until Enter is next typed in the tab
+// (releaseDone): a finished turn is finished until somebody does something.
+function applyHookState(st, state, now) {
+  st.status = state;
+  st.hookOwned = state !== 'done';
+  st.doneAt = state === 'done' ? now : 0;
+  st.doneSticky = state === 'done';
+}
+
+/** A hook state delivered out of band (Codex hooks reach main over the bridge,
+ * not as a marker in the PTY stream; electron/codex-status.js). Same effect as
+ * the marker in ingest. Returns true when the terminal is known. */
+export function noteHookStatus(id, state, now = Date.now()) {
+  const st = live.get(id);
+  if (!st || !TAB_STATUS_VALUES.has(state)) return false;
+  enterStatus(st, state, now);
+  applyHookState(st, state, now);
+  return true;
+}
+
+/** Input written INTO a terminal: Enter on a tab a hook left green lets output
+ * drive its dot again (a shell command typed after the agent exited, say).
+ * Returns true when it released. */
+export function releaseDone(id, data, now = Date.now()) {
+  const st = live.get(id);
+  // A carriage return inside a paste is a line of the paste, not Enter.
+  if (!st || !st.doneSticky || typeof data !== 'string' || !data.includes('\r') || data.includes('\x1b[200~')) return false;
+  st.doneSticky = false;
+  st.doneAt = 0; // and the trailing-bytes guard: output after Enter is new work
+  // Enter is activity: working now, idle after the usual quiet, so nothing
+  // depends on output arriving after the release to move the dot.
+  enterStatus(st, 'working', now);
+  st.status = 'working';
+  st.lastActivityAt = now;
+  return true;
 }
 
 /** Input written INTO a terminal: an answer to a red tab's prompt turns it back

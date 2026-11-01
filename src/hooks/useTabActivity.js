@@ -34,11 +34,10 @@ export function useTabActivity() {
       const st = tabStatus[termId];
       // 'needs' (red) is hook-owned and must survive dialog repaints.
       if (st === 'needs') return;
-      // Don't clobber a managed turn's green 'done' back to yellow: the 'done'
-      // OSC marker's own trailing bytes also arrive here (either listener order),
-      // and clobbering would let the settler turn a finished Claude turn gray.
-      // Real plain-shell activity after this brief window still flows yellow.
-      if (st === 'done' && recentHookDone[termId] && Date.now() - recentHookDone[termId] < 800) return;
+      // Don't clobber a managed turn's green 'done' back to yellow: the marker's
+      // own trailing bytes and later repaints (a resize) also arrive here. It
+      // holds until Enter is typed in the tab (main sends 'release').
+      if (st === 'done' && recentHookDone[termId]) return;
       // Output flowing → working (yellow).
       setTabStatus(termId, 'working');
     });

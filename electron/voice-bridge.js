@@ -11,6 +11,7 @@
  *   /tabSend   { tabId: string, message: string }  -> writeTerminal(tabId, message + '\r')
  *   /tabList   {}                                  -> { tabs: listTerminals() }
  *   /tabRename { tabId: string, label: string }    -> label that tab (dobius-tab)
+ *   /codexStatus <a Codex hook's stdin head>        -> that session's tab status dot (dobius-codex-status)
  *   /openTab   { projectPath, message, requestId } -> new visible tab, Claude
  *              started, message typed then sent with one Enter (dobius-open,
  *              docs/bridge-open-tab.md)
@@ -30,6 +31,7 @@ import crypto from 'crypto';
 import { app, BrowserWindow } from 'electron';
 import { writeTerminal, listTerminals, sendToTerminalWindow, tabBinDir } from './terminal-manager.js';
 import { validateTabRename, buildTabCliScript } from './tab-rename.js';
+import { buildCodexStatusScript, HOOK_HEAD_BYTES } from './codex-status.js';
 import { buildOpenCliScript } from './bridge-open-tab.js';
 import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
 import { STAGES } from './task-pipeline.js';
@@ -133,6 +135,33 @@ async function handleTabRename(req, res) {
   if (result === 'no-terminal') return sendJson(res, 404, { ok: false, error: 'no such tab' });
   if (result === 'no-window') return sendJson(res, 409, { ok: false, error: 'tab is not open in a window' });
   return sendJson(res, 200, { ok: true });
+}
+
+// /codexStatus: a Codex hook's stdin (only its head, possibly cut mid-JSON),
+// with the state in a header. main installs the router (codex-status.js).
+// Answered at once: events of one session are queued in arrival order inside
+// the router, and the hook (which Codex waits on) must stay quick.
+let codexStatusHandler = null;
+export function setCodexStatusHandler(fn) { codexStatusHandler = fn; }
+
+function handleCodexStatus(req, res) {
+  let bytes = 0;
+  const chunks = [];
+  req.on('data', (chunk) => {
+    bytes += chunk.length;
+    if (bytes > HOOK_HEAD_BYTES) { sendJson(res, 413, { ok: false, error: 'body too large' }); req.destroy(); return; }
+    chunks.push(chunk);
+  });
+  req.on('end', () => {
+    if (res.writableEnded) return;
+    const state = String(req.headers['x-dobius-codex-state'] || '');
+    if (codexStatusHandler) {
+      Promise.resolve(codexStatusHandler(state, Buffer.concat(chunks).toString('utf8')))
+        .catch((err) => console.warn(`[voice-bridge] codexStatus: ${err?.message || err}`));
+    }
+    sendJson(res, 200, { ok: true });
+  });
+  req.on('error', () => {});
 }
 
 // /openTab: main.js installs the service once the window handlers exist.
@@ -564,6 +593,7 @@ function handleRequest(req, res) {
   if (req.url === '/tabSend') return handleTabSend(req, res);
   if (req.url === '/tabList') return handleTabList(req, res);
   if (req.url === '/tabRename') return handleTabRename(req, res);
+  if (req.url === '/codexStatus') return handleCodexStatus(req, res);
   if (req.url === '/openTab') return handleOpenTab(req, res);
   if (req.url === '/setReply') return handleSetReply(req, res);
   if (req.url === '/getReply') return handleGetReply(req, res);
@@ -639,6 +669,7 @@ function installTabCli() {
     fs.mkdirSync(tabBinDir(), { recursive: true });
     writeIfChanged(path.join(tabBinDir(), 'dobius-tab'), buildTabCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
     writeIfChanged(path.join(tabBinDir(), 'dobius-open'), buildOpenCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
+    writeIfChanged(path.join(tabBinDir(), 'dobius-codex-status'), buildCodexStatusScript({ port: PORT, tokenFile: TOKEN_FILE }));
   } catch (err) {
     console.warn(`[voice-bridge] dobius-tab install failed: ${err.message}`);
   }

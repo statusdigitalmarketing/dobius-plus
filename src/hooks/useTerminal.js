@@ -268,6 +268,19 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     // phone): red goes back to working, as a hook marker would set it. Only a
     // tab still red changes, so a newer marker always wins.
     const removeStatusHint = window.electronAPI.onTerminalStatusHint?.((termId, status) => {
+      // Enter typed into a tab a hook left green: output drives it again.
+      // After xterm has parsed what is queued, so a 'done' still waiting
+      // there cannot land after the release and hold green again.
+      if (termId === id && status === 'release') {
+        termRef.current?.write('', () => {
+          const s = useStore.getState();
+          s.releaseHookDone(id);
+          // Enter is activity: yellow now, the settler takes it to idle, so the
+          // dot moves even if the command's output already went by.
+          if (s.tabStatus[id] === 'done') s.setTabStatus(id, 'working');
+        });
+        return;
+      }
       if (termId !== id || status !== 'working' || !termRef.current) return;
       // After xterm has parsed everything already written: the red marker for
       // this very prompt may still be queued (an answer from the phone can
@@ -277,6 +290,18 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
         if (s.tabStatus[id] !== 'needs') return;
         s.setTabStatus(id, 'working', { fromHook: true });
         s.markHookOwned(id, 'working');
+      });
+    });
+
+    // A Codex hook's state for this tab, applied exactly like the OSC 777
+    // marker above. After xterm has parsed what is already written, so output
+    // queued before the hook cannot be counted after it.
+    const removeHookStatus = window.electronAPI.onTerminalHookStatus?.((termId, status) => {
+      if (termId !== id || !TAB_STATUS_VALUES.has(status) || !termRef.current) return;
+      termRef.current.write('', () => {
+        const s = useStore.getState();
+        s.setTabStatus(id, status, { fromHook: true });
+        s.markHookOwned(id, status);
       });
     });
 
@@ -409,6 +434,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       removeDataListener();
       removeExitListener();
       removeStatusHint?.();
+      removeHookStatus?.();
       removeRequestSave?.();
       // Don't kill PTY if: (a) this is a claimed terminal, or (b) it was marked
       // as do-not-kill by the tear-off handler (old window unmounting torn-off tab)
