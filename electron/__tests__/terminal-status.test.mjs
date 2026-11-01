@@ -102,13 +102,13 @@ check('a number inside typed text does not', answersPrompt('12'), false);
   ts.ingest(A, mk('needs'), 5010);
   check('an arrow keeps red', ts.noteInput(A, '\x1b[B', 5020), false);
   check('still red', ts.statusFor(A).status, 'needs');
-  check('Enter answers (reported changed)', ts.noteInput(A, '\r', 5030), true);
+  check('Enter answers (reported changed)', ts.noteInput(A, '\r', 5030), 'prompt');
   check('back to working', ts.statusFor(A).status, 'working');
   ts.ingest(A, 'long command output...\r\n', 5040);
   check('approved command output stays working (hook-owned)', ts.statusFor(A).status, 'working');
   ts.ingest(A, mk('needs'), 5050);
   check('a newer prompt turns it red again', ts.statusFor(A).status, 'needs');
-  check('an option number answers', ts.noteInput(A, '2', 5060), true);
+  check('an option number answers', ts.noteInput(A, '2', 5060), 'prompt');
   ts.ingest(A, mk('done'), 5070);
   check('Enter on a green tab changes nothing', ts.noteInput(A, '\r', 5080), false);
   check('a tab never seen changes nothing', ts.noteInput('term-unknown-9', '\r', 5090), false);
@@ -127,7 +127,7 @@ check('a number inside typed text does not', answersPrompt('12'), false);
   ts.ingest(C, 'approval overlay repaint\r\n', 7010);
   check('output does not clear red', ts.statusFor(C).status, 'needs');
   check('stretch (begun by the first output) kept across the prompt', ts.activityFor(C).since, 6000);
-  check('Enter answers a Codex approval too', ts.noteInput(C, '\r', 7020), true);
+  check('Enter answers a Codex approval too', ts.noteInput(C, '\r', 7020), 'prompt');
   ts.noteHookStatus(C, 'done', 9010);
   check('done releases', [ts.statusFor(C).status, ts.statusFor(C).hookOwned], ['done', false]);
   check('stretch timed to done', ts.activityFor(C).lastWorkMs, 3010);
@@ -157,6 +157,36 @@ check('a number inside typed text does not', answersPrompt('12'), false);
   ts.ingest(G, 'codex idle repaint\r\n', 25000);
   check('an out-of-band done holds the same way', ts.statusFor(G).status, 'done');
   check('a tab never seen releases nothing', ts.releaseDone('term-unknown-7', '\r'), false);
+}
+
+// A turn that ended handing back a `! command` (needs;handoff).
+{
+  const H = 'term-handoff-1';
+  ts.ingest(H, mk('working'), 30000);
+  ts.ingest(H, '\x1b]777;dobius;needs;handoff\x07', 31000);
+  check('handoff turns the tab red', ts.statusFor(H).status, 'needs');
+  ts.ingest(H, '\x1b]777;dobius;done;idle\x07', 91000);
+  check("Claude's idle-a-minute signal does not clear it", ts.statusFor(H).status, 'needs');
+  check('the idle signal changes nothing out of band either', ts.noteHookStatus(H, 'done', 91500, 'idle'), false);
+  check('a digit typed while copying the command is no answer', ts.noteInput(H, '1', 91800), false);
+  check('Option+Enter (a newline in the prompt) is no answer', ts.noteInput(H, '\x1b\r', 91850), false);
+  check('a paste with a line break is no answer', ts.noteInput(H, '\x1b[200~a\rb\x1b[201~', 91900), false);
+  check('still red', ts.statusFor(H).status, 'needs');
+  check('running the command (Enter) answers it as a handoff', ts.noteInput(H, '\r', 92000), 'handoff');
+  check('yellow while it runs', ts.statusFor(H).status, 'working');
+  check('but not held: no hook may follow', ts.statusFor(H).hookOwned, false);
+  ts.settle(92000 + 5000);
+  check('and it settles if none does', ts.statusFor(H).status, 'idle');
+  ts.ingest(H, mk('done'), 99000);
+  check('a later Stop turns it green as usual', ts.statusFor(H).status, 'done');
+  // a plain 'done;idle' on a tab that is not red still turns it green
+  ts.ingest(H, mk('working'), 100000);
+  ts.ingest(H, '\x1b]777;dobius;done;idle\x07', 160000);
+  check('the idle signal still settles a working tab green', ts.statusFor(H).status, 'done');
+  // a permission prompt answered is still Claude's turn
+  ts.ingest(H, mk('needs'), 170000);
+  check('a permission prompt is answered as a prompt', ts.noteInput(H, '\r', 171000), 'prompt');
+  check('and stays held', ts.statusFor(H).hookOwned, true);
 }
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);

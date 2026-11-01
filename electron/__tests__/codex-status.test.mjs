@@ -89,7 +89,7 @@ function mkRouter(over = {}) {
       : sid === SID2 ? { sessionId: SID2, cwd: '/p/two', isExec: false } : null),
     lastEnterAt: (id) => enter[id] || 0,
     lastAnswerAt: (id) => answer[id] || 0,
-    apply: (id, s) => applied.push([id, s]),
+    apply: (id, s, tag) => applied.push(tag ? [id, s, tag] : [id, s]),
     now: () => t,
     later: (fn, ms) => timers.push({ fn, ms }),
     ...over,
@@ -365,6 +365,28 @@ const flush = async (timers) => { while (timers.length) { const { fn } = timers.
   resumed = true; m.answer.tabA = 100000 + 6000; // approved 4s after the resume started
   await p;
   check('a real answer after the resume still cancels the red', m.applied, []);
+}
+
+{
+  // A Codex turn that ends handing back a `! command` is red, tagged handoff.
+  const { router, applied } = mkRouter();
+  await send(router, SID, 'UserPromptSubmit');
+  await router.handle('done', `{"session_id":"${SID}","transcript_path":"/x/rollout-${SID}.jsonl","hook_event_name":"Stop","last_assistant_message":"Blocked by the sandbox. Run this yourself:\\n! gh pr merge 12 --squash"}`);
+  check('handoff Stop is red', applied.at(-1), ['tabA', 'needs', 'handoff']);
+  await send(router, SID, 'UserPromptSubmit');
+  await router.handle('done', `{"session_id":"${SID}","transcript_path":"/x/rollout-${SID}.jsonl","hook_event_name":"Stop","last_assistant_message":"Done, the tests pass."}`);
+  check('a plain Stop is green', applied.at(-1), ['tabA', 'done']);
+}
+
+{
+  // A digit typed while copying a handed-back command is no answer to it.
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const m = mkRouter({ rolloutMeta: async (_p, sid) => { await gate; return { sessionId: sid, cwd: '/p/one', isExec: false }; } });
+  const p = m.router.handle('done', `{"session_id":"${SID}","transcript_path":"/x/rollout-${SID}.jsonl","hook_event_name":"Stop","last_assistant_message":"Run:\\n! gh pr merge 12"}`);
+  m.tick(500); m.answer.tabA = 100000 + 500; // a digit, recorded as a prompt answer
+  release(); await p;
+  check('a handoff survives a digit typed while it was routed', m.applied.at(-1), ['tabA', 'needs', 'handoff']);
 }
 
 // --- the installed script against a real HTTP server ---------------------------
