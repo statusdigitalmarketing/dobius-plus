@@ -1171,9 +1171,11 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
       {showKeys && tabId && (
         <SpecialKeys onKey={(seq) => connection.send({ type: 'input', id: tabId, data: seq })} />
       )}
-      {/* One rounded composer on one row: the tools, the message, then Send, or
-          Stop while Claude works and nothing is typed (Stop is Esc to the TUI:
-          it interrupts the turn and pops queued messages back, v1.0.53). */}
+      {/* One rounded card on the keyboard, like Asana's comment box: the
+          message on top across the full width, the tools underneath, Send on
+          the right, or Stop while Claude works and nothing is typed (Stop is
+          Esc to the TUI: it interrupts the turn and pops queued messages
+          back, v1.0.53). */}
       <div className="chat-composer">
         <input
           ref={fileInputRef}
@@ -1182,23 +1184,6 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           style={{ display: 'none' }}
           onChange={(e) => { uploadFiles(e.target.files); e.target.value = ''; }}
         />
-        <button
-          className="chat-attach"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-          aria-label="Attach a screenshot or file"
-          title="Attach a screenshot or file (uploads to the Mac, path goes into the prompt)"
-        >
-          {uploading ? '…' : '+'}
-        </button>
-        <button
-          className={`chat-keys-toggle${showKeys ? ' on' : ''}`}
-          onClick={() => setShowKeys((v) => !v)}
-          aria-label="Toggle terminal keys"
-          title="Arrow/Enter/Esc/Tab keys for interactive dialogs like /permissions"
-        >
-          ⌨
-        </button>
         {/* Placeholder truth: a session-linked chat whose Claude has EXITED
             still sends input to the underlying shell, where it executes as a
             command (observed live 8/15: a prompt ran in zsh as `Reply ...`).
@@ -1223,18 +1208,40 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
             : 'Type into the terminal...'}
           rows={1}
         />
-        {tab?.status === 'working' && !input.trim() ? (
+        <div className="chat-composer-tools">
           <button
-            key="stop"
-            className="chat-stop"
-            onKeyDown={(e) => { if (e.repeat) e.preventDefault(); }}
-            onClick={() => { if (tabId && Date.now() - sentAtRef.current > 800) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
-            aria-label="Stop Claude (escape)"
-            title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
-          ><span /></button>
-        ) : (
-          <button key="send" className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
-        )}
+            className="chat-attach"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            aria-label="Attach a screenshot or file"
+            title="Attach a screenshot or file (uploads to the Mac, path goes into the prompt)"
+          >
+            {uploading ? '…' : (
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            )}
+          </button>
+          <button
+            className={`chat-keys-toggle${showKeys ? ' on' : ''}`}
+            onClick={() => setShowKeys((v) => !v)}
+            aria-label="Toggle terminal keys"
+            title="Arrow/Enter/Esc/Tab keys for interactive dialogs like /permissions"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2" /><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10" /></svg>
+          </button>
+          <span className="chat-composer-gap" />
+          {tab?.status === 'working' && !input.trim() ? (
+            <button
+              key="stop"
+              className="chat-stop"
+              onKeyDown={(e) => { if (e.repeat) e.preventDefault(); }}
+              onClick={() => { if (tabId && Date.now() - sentAtRef.current > 800) connection.send({ type: 'input', id: tabId, data: '\x1b' }); }}
+              aria-label="Stop Claude (escape)"
+              title="Interrupt Claude / cancel queued messages. Tap again to clear its input."
+            ><span /></button>
+          ) : (
+            <button key="send" className="chat-send" onClick={send} aria-label="Send" disabled={!input.trim()}>↑</button>
+          )}
+        </div>
       </div>
     </>
   );

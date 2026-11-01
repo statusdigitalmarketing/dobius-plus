@@ -1026,33 +1026,46 @@ button.primary:disabled { opacity: 0.4; }
 .chat-activity .chat-act-verb { font-weight: 500; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .chat-activity .chat-act-glyph { display: none; }
 
+/* Asana's comment box: one rounded card on the keyboard, the message across
+ * the full width on top, a row of quiet line icons underneath, Send on the
+ * right of that row. */
 .chat-composer {
-  display: flex; align-items: flex-end; gap: 6px; flex-shrink: 0;
-  margin: 6px 10px calc(8px + env(safe-area-inset-bottom, 0px)); padding: 5px;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 24px;
+  display: flex; flex-direction: column; flex-shrink: 0;
+  margin: 6px 10px calc(8px + env(safe-area-inset-bottom, 0px)); padding: 12px 10px 8px 16px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 22px;
 }
 /* The keyboard covers the home indicator, so its inset is empty space there. */
 .keyboard-open .chat-composer { margin-bottom: 6px; }
 /* One line: a long hint is cut at the edge, never wrapped out of the box. */
-.chat-composer .chat-input::placeholder { white-space: nowrap; }
+.chat-composer .chat-input::placeholder { white-space: nowrap; color: var(--dim); }
+/* flex: none: the base .chat-input rule's flex: 1 would take its height from
+ * the column instead of the auto-grow (it stayed one line). The cap leaves
+ * room for the tools row under it (46px), so on a short screen with the
+ * keyboard up the whole card, Send included, still fits. */
 .chat-composer .chat-input {
-  flex: 1; min-width: 0; min-height: 0; max-height: calc(var(--app-height, 100dvh) * 0.4); padding: 7px 4px; border: 0; outline: none; resize: none;
-  box-sizing: border-box; overflow-y: auto; background: transparent; color: var(--fg); font-size: 16px; line-height: 22px;
+  flex: none; width: 100%; min-width: 0; min-height: 26px; max-height: max(24px, calc(var(--app-height, 100dvh) * 0.4 - 46px)); padding: 2px 6px 6px 0; border: 0; outline: none; resize: none;
+  box-sizing: border-box; overflow-y: auto; background: transparent; color: var(--fg); font-size: 17px; line-height: 24px;
 }
+.chat-composer-tools { display: flex; align-items: center; gap: 14px; margin-top: 2px; }
+.chat-composer-gap { flex: 1; }
 .chat-composer .chat-attach, .chat-composer .chat-keys-toggle {
-  display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0;
-  border: 0; border-radius: 18px; background: var(--surface-2); color: var(--fg); font-size: 20px;
+  display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; margin-left: -4px;
+  border: 0; border-radius: 16px; background: transparent; color: var(--dim); font-size: 18px;
 }
-.chat-composer .chat-keys-toggle { color: var(--dim); font-size: 15px; }
+.chat-composer .chat-attach + .chat-keys-toggle { margin-left: 0; }
+.chat-composer .chat-attach svg, .chat-composer .chat-keys-toggle svg {
+  width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+}
+.chat-composer .chat-attach:active, .chat-composer .chat-keys-toggle:active { background: var(--surface-2); }
 .chat-composer .chat-keys-toggle.on { background: var(--accent-soft); color: var(--fg); }
 .chat-composer .chat-send {
-  flex-shrink: 0; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 18px;
+  flex-shrink: 0; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 17px;
   background: var(--accent); color: var(--on-accent); font-size: 18px; font-weight: 700;
 }
 .chat-composer .chat-send:disabled { background: var(--surface-2); color: var(--dim); opacity: 1; }
 .chat-stop {
-  display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0;
-  border: 0; border-radius: 18px; background: var(--fg); cursor: pointer;
+  display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0;
+  border: 0; border-radius: 17px; background: var(--fg); cursor: pointer;
 }
 .chat-stop span { width: 13px; height: 13px; border-radius: 3px; background: var(--bg); }
 @media (prefers-reduced-motion: reduce) {
