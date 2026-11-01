@@ -1,4 +1,4 @@
-import './dev-userdata.js'; // MUST stay first: userData override before config-manager loads
+import { HARNESS_APP_NAME } from './dev-userdata.js'; // MUST stay first: userData override before config-manager loads
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor } from 'electron';
@@ -112,6 +112,7 @@ import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
+import { firefliesKeyStatus, setFirefliesKey } from './fireflies-key.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages, getVisualProjectPath } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
 
@@ -1297,6 +1298,16 @@ function setupOrchestrationHandlers() {
   });
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());
   ipcMain.handle('asana:updateConfig', (_event, updates) => updateAsanaQueue(updates));
+  // Fireflies key: status out (set + last 4), the key itself only ever in.
+  ipcMain.handle('fireflies:keyStatus', () => firefliesKeyStatus());
+  // Only a full app window may change it: a torn-off tab window or an
+  // embedded web page must not swap the key every new terminal receives.
+  ipcMain.handle('fireflies:setKey', (event, key) => {
+    if (event.sender.getType?.() !== 'window' || getWindowEntryByWcId(event.sender.id)?.isTearOff) {
+      return { ok: false, error: 'Change the Fireflies key from Settings in a main window.' };
+    }
+    return setFirefliesKey(key);
+  });
   ipcMain.handle('automode:get', () => getAutoMode());
   ipcMain.handle('automode:setEnabled', (_event, on) => setAutoModeEnabled(on));
 
@@ -2389,8 +2400,20 @@ function setupHeadroomHandlers() {
 }
 
 function setupConfigHandlers() {
-  ipcMain.handle('config:load', () => loadConfig());
-  ipcMain.handle('config:save', (_event, config) => saveConfig(config));
+  // `secrets` (the encrypted Fireflies key) never goes to a renderer and a
+  // renderer's whole-config save can never replace or delete it: only
+  // fireflies:setKey, from a main window, changes it.
+  ipcMain.handle('config:load', () => {
+    const { secrets: _secrets, ...rest } = loadConfig();
+    return rest;
+  });
+  // (saveConfig merges only a renderer object's top-level scalars and never
+  // deletes a key it lacks, so dropping `secrets` here is enough.)
+  ipcMain.handle('config:save', (_event, config) => {
+    if (!config || typeof config !== 'object') return saveConfig(config);
+    const { secrets: _ignored, ...rest } = config;
+    return saveConfig(rest);
+  });
   ipcMain.handle('config:getProject', (_event, projectPath) => getProjectConfig(projectPath));
   ipcMain.handle('config:setProject', (_event, projectPath, settings) => setProjectConfig(projectPath, settings));
   ipcMain.handle('config:getPinned', () => getPinnedSessions());
@@ -3652,7 +3675,7 @@ function sendToFocused(channel, ...args) {
 }
 
 function setupMenu() {
-  app.setName('Dobius+');
+  app.setName(process.env.DOBIUS_USERDATA_DIR ? HARNESS_APP_NAME : 'Dobius+');
 
   const template = [
     {

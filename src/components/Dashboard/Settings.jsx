@@ -623,6 +623,8 @@ export default function Settings() {
           </div>
         </SettingRow>
 
+        <FirefliesKeyRow />
+
         <SettingRow
           label="Auto Mode"
           description={`Poll Asana every ${autoMode.intervalMinutes || 10} min and auto-run new tasks (build mine + review Sam's). Stops only for your OK before posting to Asana or deploying.`}
@@ -945,6 +947,68 @@ export default function Settings() {
         </SettingRow>
       </Section>
     </div>
+  );
+}
+
+// Fireflies API key. Main stores it encrypted and only ever tells this page
+// whether one is set and its last four characters; the key goes one way, in.
+function FirefliesKeyRow() {
+  const [status, setStatus] = useState({ set: false, hint: null });
+  const [value, setValue] = useState('');
+  const [msg, setMsg] = useState('');
+  useEffect(() => {
+    window.electronAPI?.firefliesKeyStatus?.().then((s) => { if (s) setStatus(s); })
+      .catch((err) => console.warn('[Settings] Fireflies key status failed:', err?.message));
+  }, []);
+  const apply = async (key) => {
+    let r;
+    try {
+      r = await window.electronAPI?.firefliesSetKey?.(key);
+    } catch (err) {
+      r = { ok: false, error: `Not saved: ${err?.message || 'unknown error'}` };
+    }
+    if (!r?.ok) { setMsg(r?.error || 'Not saved.'); return; }
+    setStatus({ set: r.set, hint: r.hint, unreadable: !!r.unreadable });
+    setValue('');
+    setMsg(r.set ? 'Saved. New terminal tabs get it.' : 'Removed.');
+    setTimeout(() => setMsg(''), 3000);
+  };
+  const btn = (primary) => ({
+    padding: '4px 10px', fontSize: 11, fontFamily: "'SF Mono', monospace", borderRadius: 5, cursor: 'pointer',
+    color: primary ? 'var(--bg)' : 'var(--fg)', backgroundColor: primary ? 'var(--accent)' : 'transparent',
+    border: primary ? 'none' : '1px solid var(--border)',
+  });
+  return (
+    <SettingRow
+      label="Fireflies API Key"
+      description="Every terminal tab gets it as FIREFLIES_API_KEY, so Claude and Codex can read your calls. Kept encrypted in your Keychain."
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 300 }}>
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && value.trim()) apply(value); }}
+          placeholder={status.set ? 'Paste to replace…' : 'Paste your Fireflies key…'}
+          autoComplete="off"
+          spellCheck={false}
+          data-testid="fireflies-key-input"
+          style={{
+            width: status.set || status.unreadable ? 150 : 200, backgroundColor: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--border)',
+            borderRadius: 6, padding: '4px 8px', fontSize: 12, fontFamily: "'SF Mono', monospace", outline: 'none',
+          }}
+        />
+        <button type="button" onClick={() => apply(value)} disabled={!value.trim()} style={{ ...btn(true), opacity: value.trim() ? 1 : 0.5 }}>Save</button>
+        {(status.set || status.unreadable) && <button type="button" onClick={() => apply('')} style={btn(false)}>Remove</button>}
+        {msg ? (
+          <span role="status" style={{ flexBasis: '100%', textAlign: 'right', fontSize: 11, color: 'var(--dim)' }}>{msg}</span>
+        ) : (status.set || status.unreadable) && (
+          <span data-testid="fireflies-key-status" style={{ flexBasis: '100%', textAlign: 'right', fontSize: 11, color: status.set ? 'var(--dim)' : 'var(--danger)', fontFamily: "'SF Mono', monospace" }}>
+            {status.set ? `Saved, ends in ${status.hint}` : "Saved key can't be read. Relaunch Dobius+, or paste it again"}
+          </span>
+        )}
+      </div>
+    </SettingRow>
   );
 }
 
