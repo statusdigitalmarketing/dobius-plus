@@ -1,4 +1,4 @@
-import { HARNESS_APP_NAME } from './dev-userdata.js'; // MUST stay first: userData override before config-manager loads
+import './dev-userdata.js'; // MUST stay first: userData override before config-manager loads
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor } from 'electron';
@@ -112,7 +112,7 @@ import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
-import { firefliesKeyStatus, setFirefliesKey } from './fireflies-key.js';
+import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError } from './claude-settings-env.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages, getVisualProjectPath } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
 
@@ -1298,16 +1298,6 @@ function setupOrchestrationHandlers() {
   });
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());
   ipcMain.handle('asana:updateConfig', (_event, updates) => updateAsanaQueue(updates));
-  // Fireflies key: status out (set + last 4), the key itself only ever in.
-  ipcMain.handle('fireflies:keyStatus', () => firefliesKeyStatus());
-  // Only a full app window may change it: a torn-off tab window or an
-  // embedded web page must not swap the key every new terminal receives.
-  ipcMain.handle('fireflies:setKey', (event, key) => {
-    if (event.sender.getType?.() !== 'window' || getWindowEntryByWcId(event.sender.id)?.isTearOff) {
-      return { ok: false, error: 'Change the Fireflies key from Settings in a main window.' };
-    }
-    return setFirefliesKey(key);
-  });
   ipcMain.handle('automode:get', () => getAutoMode());
   ipcMain.handle('automode:setEnabled', (_event, on) => setAutoModeEnabled(on));
 
@@ -1889,6 +1879,51 @@ function setupFileHandlers() {
   }
   ipcMain.handle('claudeHooks:enable', (_evt, opts) => enableClaudeHooks(opts));
 
+  // --- Shared keys (Settings > Integrations): ASANA_PAT, FIREFLIES_API_KEY --
+  // They live in the env block of this same settings.json, the one place Claude
+  // sessions, SamKnows and every Dobius terminal read them (claude-settings-env.js).
+  // The page only ever gets set + last 4; a key goes one way, in.
+  setClaudeSettingsReader(() => readClaudeSettings().settings);
+  ipcMain.handle('sharedKeys:status', () => {
+    const out = Object.fromEntries(SHARED_KEYS.map((k) => [k, sharedKeyStatus(k)]));
+    // An Asana PAT saved by an older Dobius, only in its own config, still
+    // syncs: show it (and offer Remove) until it is saved here or removed.
+    const legacy = typeof getAsanaQueue().pat === 'string' ? getAsanaQueue().pat.trim() : '';
+    if (!out.ASANA_PAT.set && legacy) out.ASANA_PAT = { set: true, hint: legacy.slice(-4), legacy: true };
+    return out;
+  });
+  ipcMain.handle('sharedKeys:set', (event, name, value) => {
+    // Only a full app window: not a torn-off tab window, not an embedded page.
+    if (event.sender.getType?.() !== 'window' || getWindowEntryByWcId(event.sender.id)?.isTearOff) {
+      return { ok: false, error: 'Change keys from Settings in a main window.' };
+    }
+    const bad = sharedKeyError(name, value);
+    if (bad) return { ok: false, error: bad };
+    const v = value.trim();
+    // Removing clears the older Dobius-only PAT first, so it goes even when
+    // settings.json itself cannot be written.
+    if (name === 'ASANA_PAT' && !v && getAsanaQueue().pat) updateAsanaQueue({ pat: '' });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const { settings, raw } = readClaudeSettings();
+      if (settings === null) return { ok: false, error: '~/.claude/settings.json is not valid JSON, so it was left untouched.' };
+      const env = { ...(settings.env && typeof settings.env === 'object' ? settings.env : {}) };
+      if (v) env[name] = v; else delete env[name];
+      const next = { ...settings };
+      if (Object.keys(env).length) next.env = env; else delete next.env;
+      try {
+        writeClaudeSettings(next, raw);
+        // The older Dobius-only Asana PAT would otherwise keep working, hidden,
+        // after a Remove: the shared spot is now the only one.
+        if (name === 'ASANA_PAT' && getAsanaQueue().pat) updateAsanaQueue({ pat: '' });
+        return { ok: true, ...sharedKeyStatus(name) };
+      } catch (err) {
+        if (err.message.includes('changed under us') && attempt === 0) continue; // Claude saved meanwhile: redo on top of it
+        return { ok: false, error: err.message.includes('changed under us') ? 'settings.json keeps changing, try again in a moment.' : err.message };
+      }
+    }
+    return { ok: false, error: 'Not saved, try again.' };
+  });
+
   // Upgrade in place: a status block installed before the tab-label hint
   // existed gets the SessionStart hint on the next launch, without the user
   // having to toggle the Settings switch. Only an ALREADY-installed block is
@@ -2400,20 +2435,8 @@ function setupHeadroomHandlers() {
 }
 
 function setupConfigHandlers() {
-  // `secrets` (the encrypted Fireflies key) never goes to a renderer and a
-  // renderer's whole-config save can never replace or delete it: only
-  // fireflies:setKey, from a main window, changes it.
-  ipcMain.handle('config:load', () => {
-    const { secrets: _secrets, ...rest } = loadConfig();
-    return rest;
-  });
-  // (saveConfig merges only a renderer object's top-level scalars and never
-  // deletes a key it lacks, so dropping `secrets` here is enough.)
-  ipcMain.handle('config:save', (_event, config) => {
-    if (!config || typeof config !== 'object') return saveConfig(config);
-    const { secrets: _ignored, ...rest } = config;
-    return saveConfig(rest);
-  });
+  ipcMain.handle('config:load', () => loadConfig());
+  ipcMain.handle('config:save', (_event, config) => saveConfig(config));
   ipcMain.handle('config:getProject', (_event, projectPath) => getProjectConfig(projectPath));
   ipcMain.handle('config:setProject', (_event, projectPath, settings) => setProjectConfig(projectPath, settings));
   ipcMain.handle('config:getPinned', () => getPinnedSessions());
@@ -3675,7 +3698,7 @@ function sendToFocused(channel, ...args) {
 }
 
 function setupMenu() {
-  app.setName(process.env.DOBIUS_USERDATA_DIR ? HARNESS_APP_NAME : 'Dobius+');
+  app.setName('Dobius+');
 
   const template = [
     {

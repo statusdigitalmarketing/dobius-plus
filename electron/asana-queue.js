@@ -24,6 +24,7 @@
  */
 import https from 'https';
 import { loadConfig, saveConfig, getAsanaQueue } from './config-manager.js';
+import { asanaToken as sharedAsanaToken } from './claude-settings-env.js';
 
 const ASANA_BASE = 'app.asana.com';
 const ASANA_TIMEOUT_MS = 10_000;
@@ -61,10 +62,10 @@ export function removeAllowedProject(gid) {
 
 // --- Asana REST ---------------------------------------------------------
 
-// Prefer the env var (Sam's global env per CLAUDE.md); fall back to the Settings
-// PAT so a GUI-launched app works even when shell exports don't reach it.
+// The shared spot (Claude's settings.json env, edited in Settings > Integrations)
+// decides while readable, so a GUI-launched app has it (claude-settings-env.js).
 function asanaToken() {
-  return process.env.ASANA_PAT || getAsanaQueue().pat || null;
+  return sharedAsanaToken(getAsanaQueue().pat);
 }
 
 function asanaGet(path) {

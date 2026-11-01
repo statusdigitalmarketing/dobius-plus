@@ -22,18 +22,7 @@ export const nativeTheme = { on: () => {} };
 // mobile-server.js imports this at module load (it holds a power assertion
 // while the phone bridge is up); the pure helpers under test never call it.
 export const powerSaveBlocker = { start: () => 0, stop: () => {}, isStarted: () => false };
-// A reversible stand-in for Keychain encryption; DOBIUS_TEST_NO_ENCRYPTION=1
-// makes it report encryption unavailable.
-export const safeStorage = {
-  isEncryptionAvailable: () => process.env.DOBIUS_TEST_NO_ENCRYPTION !== '1',
-  encryptString: (s) => Buffer.from(`enc:${Buffer.from(s).toString('base64')}`),
-  decryptString: (b) => {
-    const t = Buffer.from(b).toString();
-    if (!t.startsWith('enc:')) throw new Error('not encrypted by this stub');
-    return Buffer.from(t.slice(4), 'base64').toString();
-  },
-};
 export default {
   app, ipcMain, BrowserWindow, shell, dialog, Notification,
-  powerMonitor, nativeTheme, powerSaveBlocker, safeStorage,
+  powerMonitor, nativeTheme, powerSaveBlocker,
 };

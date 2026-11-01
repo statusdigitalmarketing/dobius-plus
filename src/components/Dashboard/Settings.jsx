@@ -29,10 +29,6 @@ export default function Settings() {
   const [mobileBusy, setMobileBusy] = useState(false);
   const [mobileError, setMobileError] = useState('');
 
-  // Asana state
-  const [asanaPat, setAsanaPat] = useState('');
-  const [asanaPatSaved, setAsanaPatSaved] = useState(false);
-  const [asanaPatVisible, setAsanaPatVisible] = useState(false);
   const [autoMode, setAutoMode] = useState({ enabled: false, intervalMinutes: 10 });
 
   // Terminal-tab status dots — managed Claude Notification hook
@@ -47,9 +43,6 @@ export default function Settings() {
   const [errorLogPath, setErrorLogPath] = useState('');
 
   useEffect(() => {
-    window.electronAPI?.asanaGetConfig?.().then((cfg) => {
-      if (cfg?.pat) setAsanaPat(cfg.pat);
-    });
     window.electronAPI?.autoModeGet?.().then((a) => { if (a) setAutoMode(a); });
     window.electronAPI?.claudeHooksGetStatus?.().then((r) => { if (r) setStatusHooks(!!r.installed); });
     window.electronAPI?.voiceConductorGet?.().then((r) => { if (r) setVoiceConductor(!!r.enabled); });
@@ -61,11 +54,6 @@ export default function Settings() {
     setVoiceConductor(r?.enabled ?? on);
   }, []);
 
-  const saveAsanaPat = useCallback(async () => {
-    await window.electronAPI?.asanaUpdateConfig?.({ pat: asanaPat.trim() });
-    setAsanaPatSaved(true);
-    setTimeout(() => setAsanaPatSaved(false), 2000);
-  }, [asanaPat]);
 
   const toggleAutoMode = useCallback(async (on) => {
     const r = await window.electronAPI?.autoModeSetEnabled?.(on);
@@ -577,53 +565,18 @@ export default function Settings() {
 
       {/* Integrations */}
       <Section id="integrations" title="Integrations">
-        <SettingRow label="Asana PAT" description="Personal access token for the Asana sync button in Tasks">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type={asanaPatVisible ? 'text' : 'password'}
-              value={asanaPat}
-              onChange={(e) => setAsanaPat(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') saveAsanaPat(); }}
-              placeholder="Paste your Asana PAT…"
-              style={{
-                width: 200,
-                backgroundColor: 'var(--bg)',
-                color: 'var(--fg)',
-                border: '1px solid var(--border)',
-                borderRadius: 6,
-                padding: '4px 8px',
-                fontSize: 12,
-                fontFamily: "'SF Mono', monospace",
-                outline: 'none',
-              }}
-            />
-            <button
-              onClick={() => setAsanaPatVisible((v) => !v)}
-              title={asanaPatVisible ? 'Hide' : 'Show'}
-              style={{ background: 'none', border: 'none', color: 'var(--dim)', cursor: 'pointer', fontSize: 13, padding: '0 2px' }}
-            >
-              {asanaPatVisible ? '🙈' : '👁'}
-            </button>
-            <button
-              onClick={saveAsanaPat}
-              style={{
-                padding: '4px 10px',
-                fontSize: 11,
-                fontFamily: "'SF Mono', monospace",
-                color: 'var(--bg)',
-                backgroundColor: asanaPatSaved ? 'var(--success, #3fb950)' : 'var(--accent)',
-                border: 'none',
-                borderRadius: 5,
-                cursor: 'pointer',
-                transition: 'background 300ms',
-              }}
-            >
-              {asanaPatSaved ? 'Saved' : 'Save'}
-            </button>
-          </div>
-        </SettingRow>
-
-        <FirefliesKeyRow />
+        <SharedKeyRow
+          name="ASANA_PAT"
+          label="Asana PAT"
+          description="For Tasks' Asana sync, Claude, Codex and SamKnows. Saved as ASANA_PAT in ~/.claude/settings.json."
+          placeholder="Paste your Asana PAT…"
+        />
+        <SharedKeyRow
+          name="FIREFLIES_API_KEY"
+          label="Fireflies API Key"
+          description="So Claude, Codex and SamKnows can read your calls. Saved as FIREFLIES_API_KEY in ~/.claude/settings.json."
+          placeholder="Paste your Fireflies key…"
+        />
 
         <SettingRow
           label="Auto Mode"
@@ -950,27 +903,31 @@ export default function Settings() {
   );
 }
 
-// Fireflies API key. Main stores it encrypted and only ever tells this page
-// whether one is set and its last four characters; the key goes one way, in.
-function FirefliesKeyRow() {
+// A key kept in the env block of ~/.claude/settings.json, the one spot Claude,
+// SamKnows and every Dobius terminal read. Main tells this page only whether
+// it is set and its last four characters; the key goes one way, in.
+function SharedKeyRow({ name, label, description, placeholder }) {
   const [status, setStatus] = useState({ set: false, hint: null });
   const [value, setValue] = useState('');
   const [msg, setMsg] = useState('');
   useEffect(() => {
-    window.electronAPI?.firefliesKeyStatus?.().then((s) => { if (s) setStatus(s); })
-      .catch((err) => console.warn('[Settings] Fireflies key status failed:', err?.message));
-  }, []);
+    window.electronAPI?.sharedKeysStatus?.().then((s) => { if (s?.[name]) setStatus(s[name]); })
+      .catch((err) => console.warn('[Settings] shared key status failed:', err?.message));
+  }, [name]);
   const apply = async (key) => {
     let r;
-    try {
-      r = await window.electronAPI?.firefliesSetKey?.(key);
-    } catch (err) {
-      r = { ok: false, error: `Not saved: ${err?.message || 'unknown error'}` };
+    try { r = await window.electronAPI?.sharedKeySet?.(name, key); } catch (err) { r = { ok: false, error: `Not saved: ${err?.message || 'unknown error'}` }; }
+    if (!r?.ok) {
+      setMsg(r?.error || 'Not saved.');
+      // A failed save can still have changed something (a Remove clears the
+      // older Dobius-only PAT first), so show what is really saved now.
+      window.electronAPI?.sharedKeysStatus?.().then((s) => { if (s?.[name]) setStatus(s[name]); })
+        .catch((err) => console.warn('[Settings] shared key status failed:', err?.message));
+      return;
     }
-    if (!r?.ok) { setMsg(r?.error || 'Not saved.'); return; }
-    setStatus({ set: r.set, hint: r.hint, unreadable: !!r.unreadable });
+    setStatus({ set: r.set, hint: r.hint, legacy: false });
     setValue('');
-    setMsg(r.set ? 'Saved. New terminal tabs get it.' : 'Removed.');
+    setMsg(r.set ? 'Saved. New terminal tabs and Claude sessions get it.' : 'Removed.');
     setTimeout(() => setMsg(''), 3000);
   };
   const btn = (primary) => ({
@@ -979,32 +936,28 @@ function FirefliesKeyRow() {
     border: primary ? 'none' : '1px solid var(--border)',
   });
   return (
-    <SettingRow
-      label="Fireflies API Key"
-      description="Every terminal tab gets it as FIREFLIES_API_KEY, so Claude and Codex can read your calls. Kept encrypted in your Keychain."
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 300 }}>
+    <SettingRow label={label} description={description}>
+      <div data-testid={`key-${name}`} style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 300 }}>
         <input
           type="password"
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && value.trim()) apply(value); }}
-          placeholder={status.set ? 'Paste to replace…' : 'Paste your Fireflies key…'}
+          placeholder={status.set ? 'Paste to replace…' : placeholder}
           autoComplete="off"
           spellCheck={false}
-          data-testid="fireflies-key-input"
           style={{
-            width: status.set || status.unreadable ? 150 : 200, backgroundColor: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--border)',
+            width: status.set ? 150 : 200, backgroundColor: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--border)',
             borderRadius: 6, padding: '4px 8px', fontSize: 12, fontFamily: "'SF Mono', monospace", outline: 'none',
           }}
         />
         <button type="button" onClick={() => apply(value)} disabled={!value.trim()} style={{ ...btn(true), opacity: value.trim() ? 1 : 0.5 }}>Save</button>
-        {(status.set || status.unreadable) && <button type="button" onClick={() => apply('')} style={btn(false)}>Remove</button>}
+        {status.set && <button type="button" onClick={() => apply('')} style={btn(false)}>Remove</button>}
         {msg ? (
           <span role="status" style={{ flexBasis: '100%', textAlign: 'right', fontSize: 11, color: 'var(--dim)' }}>{msg}</span>
-        ) : (status.set || status.unreadable) && (
-          <span data-testid="fireflies-key-status" style={{ flexBasis: '100%', textAlign: 'right', fontSize: 11, color: status.set ? 'var(--dim)' : 'var(--danger)', fontFamily: "'SF Mono', monospace" }}>
-            {status.set ? `Saved, ends in ${status.hint}` : "Saved key can't be read. Relaunch Dobius+, or paste it again"}
+        ) : status.set && (
+          <span className="key-status" style={{ flexBasis: '100%', textAlign: 'right', fontSize: 11, color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}>
+            {status.legacy ? `Saved in Dobius only, ends in ${status.hint}. Save it again to share it` : `Saved, ends in ${status.hint}`}
           </span>
         )}
       </div>
