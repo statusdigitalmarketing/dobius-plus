@@ -24,7 +24,7 @@ Session notes and learnings live in `.dobius/NOTES.md` (also editable from the D
 - **Multi-window**: each project gets its own BrowserWindow, project ID passed via URL query param
 - **Multi-tab terminals**: Chrome-style tab bar, all tabs stay mounted (CSS display:none) to preserve xterm buffer + PTY
 - **Tab ID format**: `term-${projectPath}-${counter}` — extends existing scheme, window-manager cleanup via prefix match
-- **Themes**: 24 themes (dark + light) in `src/lib/themes.js`, originally ported from `claude-terminal/themes.sh`, applied per window. Author only the 8 base keys per theme; xterm + CSS vars are derived. Referenced by index, so only APPEND new themes.
+- **Themes**: 34 themes (dark + light, incl. brand themes Better Health and Blue Atlas) in `src/lib/themes.js`, originally ported from `claude-terminal/themes.sh`, applied per window. Author only the 8 base keys per theme; xterm + CSS vars are derived. Referenced by index, so only APPEND new themes.
 
 ## Multi-Tab Architecture
 - Tab state in Zustand: `terminalTabs[]`, `activeTabId`, `tabCounter`
