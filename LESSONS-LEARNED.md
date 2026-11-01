@@ -522,3 +522,15 @@
 - **FIX**: The title is a `flex-1 min-w-0` item between two `shrink-0` groups; its parts truncate (branch first via flexShrink 4, tab 2, project 1) and it hides below 680px. Prove no overlap by measuring rects (left group right edge <= title left, title right <= right group left) at 600/700/930/1280, not by one screenshot.
 - **CONTEXT**: Any absolutely centered element in a bar whose sides can grow. Remove the cause, then measure at the narrowest supported window (tear-off windows go to 600px).
 - **DETECTION**: `grep -rn "absolute left-1/2 -translate-x-1/2" src/components`
+
+### Architecture - 2026-11-01 (red tab dot: measure the hook, don't assume it)
+- **MISTAKE**: The red "needs you" dot came only from Claude's Notification[permission_prompt], assumed to fire when the dialog opens. Measured on 2.1.316 it arrives ~6s later, so a prompt answered (or glanced at) in those seconds never showed red. Sam: "sometimes it works and other times it doesn't".
+- **FIX**: PermissionRequest -> needs (fires ~30ms after PreToolUse, only for real dialogs, makes no decision when it prints only the marker). Measure hook timing with a real session in a pty: `claude --settings <file>` adding timestamped loggers for PreToolUse / PermissionRequest / Notification, plus `permissions.ask` for Edit/Write so a prompt appears even though the shared settings allow them.
+- **CONTEXT**: Anything driven by Claude hook timing. The binary is bytecode; its strings list event names but not when they fire.
+- **DETECTION**: `grep -n "PermissionRequest" electron/main.js`
+
+### Architecture - 2026-11-01 (never splice bytes into a live PTY stream)
+- **MISTAKE**: To clear red when a prompt is answered, a synthetic `OSC 777;dobius;working` was routed down the PTY output path. Five Codex rounds kept breaking it: a half-sent CSI/OSC cut in two, C1 controls, the trimmed replay buffer losing escape state, a deferred marker stranded or overriding a newer one.
+- **FIX**: Status changes that do not come from the program travel beside the stream, never in it: terminal-status.noteInput updates main's tracker and `terminal:statusHint` tells the window, which applies it after `term.write('', cb)` so queued output is parsed first.
+- **CONTEXT**: Any feature tempted to "just inject an escape sequence" into terminal output shared by desktop, phone and replay.
+- **DETECTION**: `grep -rn "route(.*true)\|injectStatusMarker" electron/`
