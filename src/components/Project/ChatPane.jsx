@@ -13,11 +13,32 @@ const POLL_MS = 1500;
 // A tab that leaves this window (closed, torn off) takes nothing with it, and
 // must not find an old draft here if it is ever docked back.
 const drafts = new Map(); // tabId -> text
+// Images waiting in a composer (pasted or dropped), kept per tab like drafts.
+// Each shows as a thumbnail and is sent as its file path in front of the text,
+// which Claude Code attaches as an image. `url` is an object URL for the
+// preview, revoked once the image is removed, sent or its tab is gone.
+const attachments = new Map(); // tabId -> [{ path, url }]
+const attachAdders = new Map(); // tabId -> (att) => void, the pane on screen
+const IMAGE_PATH = /\.(png|jpe?g|gif|webp|heic|bmp|tiff?)$/i;
+const revokeAll = (list) => { for (const a of list || []) if (a?.url) URL.revokeObjectURL(a.url); };
 useStore.subscribe((s, prev) => {
-  if (s.terminalTabs === prev.terminalTabs || drafts.size === 0) return;
+  if (s.terminalTabs === prev.terminalTabs || (drafts.size === 0 && attachments.size === 0)) return;
   const ids = new Set(s.terminalTabs.map((t) => t.id));
   for (const id of drafts.keys()) if (!ids.has(id)) drafts.delete(id);
+  for (const [id, list] of attachments) if (!ids.has(id)) { revokeAll(list); attachments.delete(id); }
 });
+// The map is the source of truth and is written at once, so an image saved
+// just before the pane unmounts (or after it remounted) is never lost; the
+// pane on screen, if any, then re-reads it.
+function setTabAttachments(tabId, list) {
+  if (list.length) attachments.set(tabId, list); else attachments.delete(tabId);
+  attachAdders.get(tabId)?.();
+}
+function deliverAttachment(tabId, att) {
+  const cur = attachments.get(tabId) || [];
+  if (!useStore.getState().terminalTabs.some((t) => t.id === tabId) || cur.some((a) => a.path === att.path)) { revokeAll([att]); return; }
+  setTabAttachments(tabId, [...cur, att]);
+}
 // Text that reaches a composer late (a failed send, a slow image save) goes
 // to the pane showing that tab NOW (it may have remounted meanwhile), else to
 // the saved draft, and nowhere once the tab has left this window.
@@ -146,7 +167,7 @@ function ToolImages({ images }) {
 
 // Full size, modal: it takes focus and keeps it (Tab cannot reach the chat or
 // a selector card behind it, Codex), Escape/Enter or a click/tap closes it.
-function Lightbox({ url, onClose }) {
+function Lightbox({ url, onClose, alt = 'Tool output, full size' }) {
   const ref = useRef(null);
   // Modal for real: anything that grabs focus while it is open (a new tab's
   // terminal in the other split pane) hands it straight back, so typing and
@@ -173,7 +194,7 @@ function Lightbox({ url, onClose }) {
         if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); onClose(); } else if (e.key === 'Tab') e.preventDefault();
       }}
     >
-      <img src={url} alt="Tool output, full size" />
+      <img src={url} alt={alt} />
     </div>,
     document.body,
   );
@@ -453,6 +474,13 @@ export default function ChatPane({ tabId, visible }) {
   const [sessionId, setSessionId] = useState(undefined); // undefined = first poll pending
   const [shellText, setShellText] = useState(null);
   const [claudeLive, setClaudeLive] = useState(false);
+  // Read by paste and drop handlers that outlive a render.
+  const claudeLiveRef = useRef(false);
+  claudeLiveRef.current = claudeLive;
+  // An image becomes a thumbnail only for a message to Claude. A shell, or
+  // Claude's own `!` shell mode, takes it as a path where you are typing,
+  // because argument order matters there (`cp a b`).
+  const imageAsThumbnail = () => claudeLiveRef.current && !(drafts.get(tabId) || '').trimStart().startsWith('!');
   const [status, setStatus] = useState(null);
   const [activity, setActivity] = useState(null);
   const [selector, setSelector] = useState(null); // { prompt, options, token, fp }
@@ -485,6 +513,16 @@ export default function ChatPane({ tabId, visible }) {
   useEffect(() => {
     if (draft) drafts.set(tabId, draft); else drafts.delete(tabId);
   }, [draft, tabId]);
+  const [atts, setAtts] = useState(() => attachments.get(tabId) || []);
+  useEffect(() => {
+    const sync = () => setAtts(attachments.get(tabId) || []);
+    attachAdders.set(tabId, sync);
+    sync(); // anything delivered between the first render and now
+    return () => { if (attachAdders.get(tabId) === sync) attachAdders.delete(tabId); };
+  }, [tabId]);
+  const [bigAtt, setBigAtt] = useState(null); // { url, from } open in the lightbox
+  // The enlarged image lives on <body>: it closes with the pane, as tool images do.
+  useEffect(() => { if (!visible) setBigAtt(null); }, [visible]);
   const [notice, setNotice] = useState('');
   useEffect(() => {
     const restore = (update, notice) => {
@@ -818,15 +856,34 @@ export default function ChatPane({ tabId, visible }) {
   };
 
   const send = async () => {
-    const text = draft.trim();
+    const typed = draft.trim();
+    // From the map, not the last render: an image saved just before Enter is in it.
+    const imgs = attachments.get(tabId) || [];
+    // Images go AFTER the text as their paths, the way pasting a path into
+    // Claude's prompt attaches an image; after, so a shell command typed while
+    // Claude is not running (`open `) still gets the path as its argument.
+    const text = [typed, ...imgs.map((a) => shellEscape(a.path))].filter(Boolean).join(' ');
     if (!text) return;
     setDraft('');
+    setTabAttachments(tabId, []);
+    setBigAtt(null);
     atBottomRef.current = true;
     const ok = await submit(text, { echo: !!sessionId });
     // Typed but not entered: the text is already in the terminal's input
     // line, so handing it back here would send it twice.
-    if (ok === 'stranded') deliverDraft(tabId, (cur) => cur, STRANDED);
-    else if (!ok) deliverDraft(tabId, withUnsent(text), NOT_SENT); // keep what they wrote
+    if (ok === 'stranded') { revokeAll(imgs); deliverDraft(tabId, (cur) => cur, STRANDED); } else if (!ok) {
+      // Keep what they wrote, images back as thumbnails.
+      for (const a of imgs) deliverAttachment(tabId, a);
+      deliverDraft(tabId, typed ? withUnsent(typed) : (cur) => cur, NOT_SENT);
+    } else revokeAll(imgs);
+  };
+
+  const removeAtt = (path) => {
+    const gone = atts.find((a) => a.path === path);
+    if (bigAtt && gone && bigAtt.url === gone.url) setBigAtt(null);
+    revokeAll(gone ? [gone] : []);
+    setTabAttachments(tabId, (attachments.get(tabId) || []).filter((a) => a.path !== path));
+    inputRef.current?.focus();
   };
 
   // Answer the prompt on screen. Main delivers the key only if nothing has
@@ -879,24 +936,26 @@ export default function ChatPane({ tabId, visible }) {
     if (useStore.getState().activeTabId === tabId) inputRef.current?.focus();
   };
 
+  // With Claude running, a pasted image is saved to a temp file and waits as a
+  // thumbnail. With only a shell, where argument order matters (`cp a b`), it
+  // goes in as its path where you are typing, as does any other file.
   const onPaste = async (e) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.kind !== 'file') continue;
-      const file = item.getAsFile();
-      if (!file) continue;
-      e.preventDefault();
-      if (item.type.startsWith('image/')) {
+    const files = [...(e.clipboardData?.items || [])].filter((i) => i.kind === 'file').map((i) => i.getAsFile()).filter(Boolean);
+    if (!files.length) return;
+    e.preventDefault();
+    for (const file of files) {
+      if (file.type.startsWith('image/')) {
         const base64 = arrayBufferToBase64(await file.arrayBuffer());
-        const saved = await window.electronAPI?.saveClipboardImage?.(base64, item.type);
-        if (saved) insertText(shellEscape(saved));
-        else flash('Could not save the pasted image.');
+        const saved = await window.electronAPI?.saveClipboardImage?.(base64, file.type);
+        if (saved && !imageAsThumbnail()) insertText(shellEscape(saved));
+        else if (saved) {
+          deliverAttachment(tabId, { path: saved, url: URL.createObjectURL(file) });
+          if (useStore.getState().activeTabId === tabId) inputRef.current?.focus();
+        } else flash('Could not save the pasted image.');
       } else {
         const p = window.electronAPI?.getPathForFile?.(file);
         if (p) insertText(shellEscape(p));
       }
-      return;
     }
   };
 
@@ -914,10 +973,19 @@ export default function ChatPane({ tabId, visible }) {
       if (pane.dataset.chatTab === tabId) { requestAnimationFrame(focusInput); return true; }
       return false;
     };
+    // A dropped image waits as a thumbnail while Claude runs; other files, and
+    // everything when only a shell is there, go in as their paths.
     const onFiles = (e) => {
       if (!dropIsMine(e.detail?.target)) return;
-      const paths = e.detail?.paths;
-      if (paths?.length) insertText(paths.map((p) => shellEscape(p)).join(' '));
+      const items = e.detail?.items || (e.detail?.paths || []).map((path) => ({ path }));
+      const others = [];
+      const thumbs = imageAsThumbnail();
+      let attached = false;
+      for (const { path, file } of items) {
+        if (thumbs && file && IMAGE_PATH.test(path) && /^image\//.test(file.type)) { deliverAttachment(tabId, { path, url: URL.createObjectURL(file) }); attached = true; } else others.push(shellEscape(path));
+      }
+      if (others.length) insertText(others.join(' '));
+      else if (attached && useStore.getState().activeTabId === tabId) inputRef.current?.focus(); // type next to the image
     };
     const onText = (e) => {
       if (!dropIsMine(e.detail?.target)) return;
@@ -1045,6 +1113,24 @@ export default function ChatPane({ tabId, visible }) {
         )}
         {notice && <div className="chatp-notice">{notice}</div>}
         <div className="chatp-composer">
+          {atts.length > 0 && (
+            <div className="chatp-atts">
+              {atts.map((a) => (
+                <div key={a.path} className="chatp-att">
+                  <button type="button" className="chatp-att-open" onClick={(e) => setBigAtt({ url: a.url, from: e.currentTarget })} title="View larger" aria-label="View image larger">
+                    <img src={a.url} alt="" />
+                    <span className="chatp-att-zoom" aria-hidden="true">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><circle cx="11" cy="11" r="7" /><path d="M20 20l-4-4M11 8v6M8 11h6" /></svg>
+                    </span>
+                  </button>
+                  <button type="button" className="chatp-att-x" onClick={() => removeAtt(a.path)} title="Remove image" aria-label="Remove image">
+                    <svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M2 2l6 6M8 2l-6 6" /></svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {bigAtt && visible && <Lightbox url={bigAtt.url} alt="Attached image, full size" onClose={() => { const from = bigAtt.from; setBigAtt(null); requestAnimationFrame(() => from?.focus?.()); }} />}
           <textarea
             ref={inputRef}
             value={draft}
@@ -1062,7 +1148,7 @@ export default function ChatPane({ tabId, visible }) {
           {working && (
             <button type="button" className="chatp-btn stop" onClick={interrupt} title="Interrupt Claude (Esc)">Stop</button>
           )}
-          <button type="button" className="chatp-btn primary" onClick={send} disabled={!draft.trim()} title="Send (Enter). Shift+Enter for a new line">
+          <button type="button" className="chatp-btn primary" onClick={send} disabled={!draft.trim() && !atts.length} title="Send (Enter). Shift+Enter for a new line">
             Send
           </button>
         </div>

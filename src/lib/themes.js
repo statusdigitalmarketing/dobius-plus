@@ -204,6 +204,20 @@ const themes = [
     bg: '#140A08', fg: '#FFE0C2', cursor: '#FF6B1A',
     accent1: '#FF6B1A', accent2: '#6BA368', accent3: '#FFB627', accent4: '#FF3B1F',
   },
+  // --- Brand themes (Bryan, 2026-10-31), colors taken from each brand's own
+  //     code: Better Health Now (better-telehealth index.css: navy ink
+  //     #1A365D, sky #0EA5E9 / #0284C7) and Blue Atlas Biologics (b2b-portal:
+  //     brand blue #1E5A9E, orange #EA580C / hsl(33 85% 53%)). ---
+  {
+    name: 'Better Health',
+    bg: '#F5FAFF', fg: '#1A365D', cursor: '#0EA5E9',
+    accent1: '#0284C7', accent2: '#2F855A', accent3: '#B7791F', accent4: '#C53030',
+  },
+  {
+    name: 'Blue Atlas',
+    bg: '#0B1F3A', fg: '#E6EEF8', cursor: '#F28C28',
+    accent1: '#F28C28', accent2: '#4FB477', accent3: '#F5B841', accent4: '#F2617A',
+  },
 ];
 
 // Add xtermTheme and CSS variables to each theme

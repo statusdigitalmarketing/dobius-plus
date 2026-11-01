@@ -32,11 +32,14 @@ export default function App() {
       // 1. File drops (from Finder, etc.)
       const files = e.dataTransfer?.files;
       if (files && files.length > 0) {
-        const paths = Array.from(files).map((f) => {
-          try { return window.electronAPI?.getPathForFile?.(f); } catch { return ''; }
-        }).filter(Boolean);
+        // items keeps each File beside its path, so Chat can preview a
+        // dropped image without reading it back from disk.
+        const items = Array.from(files).map((file) => {
+          try { return { path: window.electronAPI?.getPathForFile?.(file), file }; } catch { return { path: '', file }; }
+        }).filter((it) => it.path);
+        const paths = items.map((it) => it.path);
         if (paths.length > 0) {
-          window.dispatchEvent(new CustomEvent('dobius:drop-files', { detail: { paths, target: e.target } }));
+          window.dispatchEvent(new CustomEvent('dobius:drop-files', { detail: { paths, items, target: e.target } }));
           return;
         }
       }
