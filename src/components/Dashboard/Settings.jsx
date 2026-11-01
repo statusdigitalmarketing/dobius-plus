@@ -44,7 +44,12 @@ export default function Settings() {
 
   useEffect(() => {
     window.electronAPI?.autoModeGet?.().then((a) => { if (a) setAutoMode(a); });
-    window.electronAPI?.claudeHooksGetStatus?.().then((r) => { if (r) setStatusHooks(!!r.installed); });
+    window.electronAPI?.claudeHooksGetStatus?.().then((r) => {
+      if (!r) return;
+      setStatusHooks(!!r.installed);
+      // Say when the Codex half cannot be read, instead of a silent off switch.
+      if (r.codex?.error) setStatusHooksError(`Codex tabs: ${r.codex.error}`);
+    });
     window.electronAPI?.voiceConductorGet?.().then((r) => { if (r) setVoiceConductor(!!r.enabled); });
     window.electronAPI?.errorLogInfo?.().then((r) => { if (r?.path) setErrorLogPath(r.path); });
   }, []);
@@ -74,7 +79,11 @@ export default function Settings() {
       r = await window.electronAPI?.claudeHooksEnable?.({ confirmCreate: true });
     }
     if (r?.error) setStatusHooksError(r.error);
-    else setStatusHooks(!!r?.installed);
+    else {
+      setStatusHooks(!!r?.installed);
+      // Claude's half worked; say so if Codex's did not, instead of hiding it.
+      if (r?.codex?.error) setStatusHooksError(`Codex tabs: ${r.codex.error}`);
+    }
     setStatusHooksBusy(false);
   }, []);
 
@@ -487,7 +496,7 @@ export default function Settings() {
 
         <SettingRow
           label="Tab status dots"
-          description="Green = done, yellow = working, red = needs you. Installs a Claude notification hook in ~/.claude/settings.json (your other hooks are left untouched)."
+          description="Green = done, yellow = working, red = needs you, for Claude and Codex tabs. Adds hooks to ~/.claude/settings.json and ~/.codex/hooks.json (your own hooks are left alone). Codex asks you once to trust its hooks the next time it starts: choose Trust all."
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {statusHooksError && (

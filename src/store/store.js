@@ -120,12 +120,18 @@ export const useStore = create((set, get) => ({
   // can clear hook-owned status, so a long quiet tool call no longer flips
   // 'working' → 'done' while Claude is mid-turn.
   hookOwnedTabs: {},
-  // tabId -> epoch ms the OSC hook last set 'done'. useTabActivity uses this to
-  // avoid clobbering a just-finished managed turn's green dot back to yellow:
-  // the 'done' marker's own trailing bytes also hit the output listener, and
-  // without this guard the quiet settler would then turn the tab gray. Genuine
-  // plain-shell activity after the window still flows yellow -> gray.
+  // tabId -> epoch ms the hook last set 'done'. While set, useTabActivity
+  // leaves the green dot alone: the marker's own trailing bytes and any later
+  // repaint (a resize makes Claude and Codex redraw) are not new work. Main
+  // releases it when Enter is next typed in the tab (releaseHookDone), so a
+  // shell command after the agent exits flows yellow -> gray again.
   recentHookDone: {},
+  releaseHookDone: (tabId) => set((s) => {
+    if (!s.recentHookDone[tabId]) return {};
+    const done = { ...s.recentHookDone };
+    delete done[tabId];
+    return { recentHookDone: done };
+  }),
   // tabId -> true: Claude finished a turn there while it was off screen or the
   // window was unfocused. Cleared by markTabsSeen (ProjectView) once the tab is
   // on screen in a focused window. Ephemeral, like tabStatus.

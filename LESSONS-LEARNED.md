@@ -534,3 +534,27 @@
 - **FIX**: Status changes that do not come from the program travel beside the stream, never in it: terminal-status.noteInput updates main's tracker and `terminal:statusHint` tells the window, which applies it after `term.write('', cb)` so queued output is parsed first.
 - **CONTEXT**: Any feature tempted to "just inject an escape sequence" into terminal output shared by desktop, phone and replay.
 - **DETECTION**: `grep -rn "route(.*true)\|injectStatusMarker" electron/`
+
+### Process - 2026-11-01 (a fix that shipped is not a fix that is running)
+- **MISTAKE**: Sam reported the 2.1.2 red-dot fix as still broken. His live app was 2.0.0, started Oct 31 and never quit; 2.1.2 sat downloaded in `~/Library/Caches/dobius-plus-updater/pending`, and his settings.json still had only the slow Notification hook.
+- **FIX**: Before debugging a "still broken" report, check what is actually running: the live process start time, `/Applications/Dobius+.app` CFBundleShortVersionString, the pending update, and the installed hook block. The update installs on quit; hooks reach a Claude session on its next start or resume.
+- **CONTEXT**: Every bug report right after a release.
+- **DETECTION**: `defaults read "/Applications/Dobius+.app/Contents/Info" CFBundleShortVersionString; ls ~/Library/Caches/dobius-plus-updater/pending`
+
+### Architecture - 2026-11-01 (Codex hooks: route by session, never by the hook's env)
+- **MISTAKE**: The obvious design for Codex tab dots used DOBIUS_TAB_ID inside the hook. Measured: Codex runs hooks under a shared app-server daemon (`~/.codex/packages/app-server-daemon`), whose environment is the tab that first started it, so every hook named that one tab. Hooks also have no tty, and Codex has no terminalSequence output.
+- **FIX**: `dobius-codex-status` posts the hook's stdin head to the bridge; `electron/codex-status.js` maps session_id to the tab whose Codex TUI runs it (argv `resume <id>`, else the tab where Enter submitted that session's prompt, else the single rollout writer), re-checking the Codex pid on every event. `codex exec` sessions (originator codex_exec) are dropped in the helper before any network.
+- **CONTEXT**: Anything that gets a signal from inside Codex. Since 0.166 a session keeps running in the daemon after its window quits (Ctrl+C only detaches), so a session whose process is gone is detached until `codex resume <id>`.
+- **DETECTION**: `grep -rn "DOBIUS_TAB_ID" electron/codex-status.js` (must only appear in comments)
+
+### Configuration - 2026-11-01 (Codex trusts a hook by its POSITION)
+- **MISTAKE**: Removing our hook group the way stripStatusHooks does for Claude (filter it out) would shift the user's later hooks down one index. Codex keys trust as `<file>:<event>:<group>:<handler>` with a sha256, so the user's hook would silently stop running, including inside `codex exec` reviews (Codex design review, High).
+- **FIX**: withCodexHooks rewrites our group IN PLACE; stripCodexHooks leaves an inert `true # dobius-codex-status off` placeholder wherever removal would shift something, and only drops trailing ones.
+- **CONTEXT**: Any edit to ~/.codex/hooks.json. Trust lives in ~/.codex/config.toml `[hooks.state."<key>"] trusted_hash`, written when the user picks Trust all; Dobius never writes it. Untrusted hooks are skipped silently, `codex exec` included.
+- **DETECTION**: `grep -n "CODEX_HOOK_OFF" electron/codex-status.js`
+
+### Testing - 2026-11-01 (a harness tab starts Claude, and a real Codex can update itself)
+- **MISTAKE**: Two Codex-dots ship-test runs went wrong. (1) Since 2.0 a window's first tab auto-starts `settings.newTabTool` (claude), so the commands typed into the harness tab went to a REAL Claude on the default account as prompts. (2) The first Codex launch showed its update prompt and the typed prompt answered it, so Codex ran `npm install -g @openai/codex` (0.162 to 0.166).
+- **FIX**: Seed the harness config with `"settings":{"newTabTool":"shell"}`. Before typing into a Codex TUI, read the screen and stop on "Update available". Drive step by step (type/key/wait/watch/shot over CDP) rather than one blind script.
+- **CONTEXT**: Every harness run that types into a terminal. Restore `~/.codex/config.toml` after any Codex trust test: trusting writes `[hooks.state]` entries keyed to the test hooks.json path.
+- **DETECTION**: `grep -n newTabTool <harness>/config.json`

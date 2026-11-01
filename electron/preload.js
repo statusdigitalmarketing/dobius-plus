@@ -54,6 +54,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('terminal:statusHint', handler);
     return () => ipcRenderer.removeListener('terminal:statusHint', handler);
   },
+  // main: a Codex hook reported this tab's state (codex-status.js), the
+  // out-of-band twin of Claude's OSC 777 marker.
+  onTerminalHookStatus: (callback) => {
+    const handler = (_event, id, status) => callback(id, status);
+    ipcRenderer.on('terminal:hookStatus', handler);
+    return () => ipcRenderer.removeListener('terminal:hookStatus', handler);
+  },
   // `dobius-tab "<summary>"` run inside a tab (voice bridge /tabRename).
   onTerminalAutoLabel: (callback) => {
     const handler = (_event, id, label) => callback(id, label);

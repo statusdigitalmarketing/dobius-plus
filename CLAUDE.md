@@ -49,6 +49,12 @@ Session notes and learnings live in `.dobius/NOTES.md` (also editable from the D
 - Sessions: a bare `claude` links through its own `<configDir>/sessions/<pid>.json` (tag `presence`), with start-time correlation only as the fallback. History rows lead with the tab name (`config.sessionTabNames`) and sort by the last real message.
 - Mobile WS: `authorizeTab`, `input` and `submitPrompt` always answer with `ack` or `opError` (`docs/mobile-ws-protocol.md`).
 
+## Tab Status Dots (Claude and Codex, 2.1.3)
+- Claude: hooks in `~/.claude/settings.json` print `OSC 777;dobius;<state>` into the PTY (main.js `addDobiusHooks`). PermissionRequest gives the instant red.
+- Codex: hooks in `~/.codex/hooks.json` run `<userData>/bin/dobius-codex-status`, which posts the hook's stdin head to the bridge `/codexStatus`. `electron/codex-status.js` routes it BY SESSION (never the hook's DOBIUS_TAB_ID: hooks run under Codex's shared daemon) and main sends `terminal:hookStatus` to the window. Codex asks the user once to trust the hooks. Our hooks are rewritten in place and removed as inert placeholders, because Codex keys trust by position.
+- A hook 'done' (green) holds against later output until Enter is typed in the tab (`terminal-status.releaseDone`, statusHint 'release').
+- Both blocks install and remove together from Settings > Tab status dots, and upgrade on launch when the Claude block is present.
+
 ## Checkpoints
 - Save terminal scrollback as named checkpoints: `config.projects[path].checkpoints[]`
 - IPC: `checkpoint:save`, `checkpoint:list`, `checkpoint:delete`, `checkpoint:rename`
