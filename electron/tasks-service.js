@@ -14,6 +14,7 @@ import os from 'os';
 import https from 'https';
 import crypto from 'crypto';
 import { getAsanaQueue } from './config-manager.js';
+import { asanaToken } from './claude-settings-env.js';
 import * as pipeline from './task-pipeline.js';
 
 const TASKS_DIR = path.join(os.homedir(), '.claude', 'project-tasks');
@@ -375,7 +376,7 @@ function asanaGet(urlPath, token) {
 export async function syncAsanaTasks(projectPath) {
   if (!projectPath) return { ok: false, error: 'projectPath required' };
   const { pat } = getAsanaQueue();
-  const token = pat || process.env.ASANA_PAT;
+  const token = asanaToken(pat); // the shared spot decides (claude-settings-env.js)
   if (!token) return { ok: false, error: 'No Asana PAT configured. Add it in Settings > Integrations.' };
 
   try {

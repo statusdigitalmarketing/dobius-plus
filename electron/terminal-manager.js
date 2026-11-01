@@ -17,6 +17,7 @@ import { app } from 'electron';
 import { getSessionTabMap } from './config-manager.js';
 import { loginShellSpawn, ptyProgramName } from '../shared/new-tab.js';
 import { parseCodexCommand } from './codex-sessions.js';
+import { sharedKeyEnv, SHARED_KEYS } from './claude-settings-env.js';
 
 const terminals = new Map();
 // getTerminalClaudeInfo { unique }: a shell with more children answers nothing.
@@ -204,6 +205,13 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     }
     extraEnv.HISTFILE = path.join(histDir, '.zsh_history');
   }
+  // ASANA_PAT / FIREFLIES_API_KEY from Claude's settings.json env, so Codex and
+  // plain shells have them too (Claude sessions read that file themselves).
+  // The file decides: one it lacks is dropped from what Dobius inherited (see
+  // below), so Remove in Settings really removes it; a shell rc that exports
+  // it still sets it, since the login shell runs that rc.
+  const sharedKeys = sharedKeyEnv(); // null: settings.json unreadable, leave inherited values
+  if (sharedKeys) Object.assign(extraEnv, sharedKeys);
 
   // Electron's process.env.PATH is minimal when launched from Finder/Dock.
   // Prepend Homebrew paths so tools like zoxide, fzf, brew etc. are available.
@@ -243,6 +251,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   // would override its stored login. (A key re-exported by the login shell
   // profile is outside our reach; this clears the inherited case.)
   for (const [k, v] of Object.entries(termEnv)) { if (v === undefined) delete spawnEnv[k]; }
+  if (sharedKeys) for (const k of SHARED_KEYS) { if (!(k in sharedKeys)) delete spawnEnv[k]; }
   // What this shell ACTUALLY launched with. Recorded from the FINAL spawn env,
   // after the undefined-means-delete pass above, so it reflects reality rather
   // than intent.

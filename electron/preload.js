@@ -463,6 +463,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   asanaGetConfig: () => ipcRenderer.invoke('asana:getConfig'),
   asanaUpdateConfig: (updates) => ipcRenderer.invoke('asana:updateConfig', updates),
+  // ASANA_PAT / FIREFLIES_API_KEY in ~/.claude/settings.json env: status out
+  // (set + last 4), the key itself only ever in.
+  sharedKeysStatus: () => ipcRenderer.invoke('sharedKeys:status'),
+  sharedKeySet: (name, value) => ipcRenderer.invoke('sharedKeys:set', name, value),
   autoModeGet: () => ipcRenderer.invoke('automode:get'),
   autoModeSetEnabled: (on) => ipcRenderer.invoke('automode:setEnabled', on),
   visualOpenWindow: (projectPath) => ipcRenderer.invoke('visual:openWindow', projectPath),
