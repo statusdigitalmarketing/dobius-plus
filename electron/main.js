@@ -39,7 +39,7 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, trimToEscapeBoundary } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, trimToEscapeBoundary } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
@@ -1643,7 +1643,8 @@ function setupFileHandlers() {
   // We install an opt-in block into ~/.claude/settings.json that makes Claude emit
   // a hidden marker (OSC 777;dobius;<state>) into each session's terminal:
   //   UserPromptSubmit / PreToolUse        -> working (yellow)
-  //   Notification[permission_prompt]      -> needs   (red)
+  //   PermissionRequest                    -> needs   (red, the instant a dialog opens)
+  //   Notification[permission_prompt]      -> needs   (red, ~6s later: backstop)
   //   Notification[idle_prompt] / Stop     -> done    (green)
   // Markers are identified by the ']777;dobius;' substring so the block can be
   // removed cleanly without ever touching the user's own hooks.
@@ -1699,11 +1700,20 @@ function setupFileHandlers() {
   const isStatusGroup = (group) => Array.isArray(group?.hooks) && group.hooks.some(isDobiusCommand);
   const hasTabHint = (hooks) => Array.isArray(hooks?.SessionStart)
     && hooks.SessionStart.some((g) => g?.hooks?.some?.((h) => typeof h?.command === 'string' && h.command.includes(TAB_HINT_MARKER)));
+  const hasPermissionRequest = (hooks) => Array.isArray(hooks?.PermissionRequest)
+    && hooks.PermissionRequest.some(isStatusGroup);
   // Append the whole Dobius block to an already-stripped hooks object.
   const addDobiusHooks = (hooks) => {
     const add = (event, group) => { hooks[event] = [...(hooks[event] || []), group]; };
     add('UserPromptSubmit', { hooks: [cmdEntry('working')] });
     add('PreToolUse', { hooks: [cmdEntry('working')] }); // no matcher = all tools
+    // PermissionRequest runs the instant a permission dialog opens (main
+    // session and subagents alike); Claude's permission_prompt Notification
+    // only arrives ~6s later (measured on 2.1.316), so answering within those
+    // seconds left the tab yellow. The Notification stays as a backstop.
+    // A hook that prints only terminalSequence makes no permission decision
+    // (verified: the dialog still showed).
+    add('PermissionRequest', { hooks: [cmdEntry('needs')] }); // no matcher = all tools
     add('Notification', { matcher: 'permission_prompt', hooks: [cmdEntry('needs')] });
     add('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done')] });
     add('Stop', { hooks: [cmdEntry('done')] });
@@ -1934,9 +1944,10 @@ function setupFileHandlers() {
     const hooks = settings?.hooks;
     const installed = exists && settings && Object.values(hooks || {})
       .some((groups) => Array.isArray(groups) && groups.some(isStatusGroup));
-    if (installed && !hasTabHint(hooks)) {
+    // Also blocks from before the instant red (PermissionRequest).
+    if (installed && (!hasTabHint(hooks) || !hasPermissionRequest(hooks))) {
       const r = enableClaudeHooks();
-      if (r?.error) console.warn(`[claudeHooks] tab hint upgrade skipped: ${r.error}`);
+      if (r?.error) console.warn(`[claudeHooks] status hook upgrade skipped: ${r.error}`);
     }
   }
 
@@ -3927,6 +3938,12 @@ app.whenReady().then(() => {
     onData: (id, data) => terminalStatus.ingest(id, data),
     onExit: (id, info) => terminalStatus.noteExit(id, info),
     onSpawn: (id) => terminalStatus.forget(id),
+  });
+  // Answering a permission prompt clears red. Claude sends no hook for the
+  // answer, so main's tracker (phone, board) changes here and the tab's window
+  // is told, whichever surface sent the answer (shared/prompt-answer.js).
+  addInputObserver((id, data) => {
+    if (terminalStatus.noteInput(id, data)) sendToTerminalWindow(id, 'terminal:statusHint', 'working');
   });
   statusSettleTimer = setInterval(() => terminalStatus.settle(), 1000);
   startVoiceBridge();

@@ -48,6 +48,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('terminal:exit', handler);
     return () => ipcRenderer.removeListener('terminal:exit', handler);
   },
+  // main: a red tab's prompt was answered (from any surface), so it is working.
+  onTerminalStatusHint: (callback) => {
+    const handler = (_event, id, status) => callback(id, status);
+    ipcRenderer.on('terminal:statusHint', handler);
+    return () => ipcRenderer.removeListener('terminal:statusHint', handler);
+  },
   // `dobius-tab "<summary>"` run inside a tab (voice bridge /tabRename).
   onTerminalAutoLabel: (callback) => {
     const handler = (_event, id, label) => callback(id, label);
