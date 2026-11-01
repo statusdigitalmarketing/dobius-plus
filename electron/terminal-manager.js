@@ -17,7 +17,6 @@ import { app } from 'electron';
 import { getSessionTabMap } from './config-manager.js';
 import { loginShellSpawn, ptyProgramName } from '../shared/new-tab.js';
 import { parseCodexCommand } from './codex-sessions.js';
-import { firefliesKey } from './fireflies-key.js';
 
 const terminals = new Map();
 // getTerminalClaudeInfo { unique }: a shell with more children answers nothing.
@@ -205,10 +204,6 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     }
     extraEnv.HISTFILE = path.join(histDir, '.zsh_history');
   }
-  // The Fireflies key from Settings, for sessions that read call transcripts.
-  // The Settings value wins over one Dobius itself inherited.
-  const ffKey = firefliesKey();
-  if (ffKey) extraEnv.FIREFLIES_API_KEY = ffKey;
 
   // Electron's process.env.PATH is minimal when launched from Finder/Dock.
   // Prepend Homebrew paths so tools like zoxide, fzf, brew etc. are available.

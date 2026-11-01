@@ -463,8 +463,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   asanaGetConfig: () => ipcRenderer.invoke('asana:getConfig'),
   asanaUpdateConfig: (updates) => ipcRenderer.invoke('asana:updateConfig', updates),
-  firefliesKeyStatus: () => ipcRenderer.invoke('fireflies:keyStatus'),
-  firefliesSetKey: (key) => ipcRenderer.invoke('fireflies:setKey', key),
   autoModeGet: () => ipcRenderer.invoke('automode:get'),
   autoModeSetEnabled: (on) => ipcRenderer.invoke('automode:setEnabled', on),
   visualOpenWindow: (projectPath) => ipcRenderer.invoke('visual:openWindow', projectPath),
