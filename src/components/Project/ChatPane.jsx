@@ -6,6 +6,7 @@ import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
 import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
+import ModelMenu from './ModelMenu';
 import './ChatPane.css';
 
 const POLL_MS = 1500;
@@ -1000,6 +1001,64 @@ export default function ChatPane({ tabId, visible }) {
   }, [visible, tabId, focusInput]);
 
   const working = status === 'working';
+
+  // The model chip (Asana 1220098108555124): what this tab's Claude runs, read
+  // from its session's statusLine record, and the catalog it can switch to.
+  // Polled while the chat is on screen; a change re-reads at once.
+  const [modelState, setModelState] = useState(null);
+  const [modelMenu, setModelMenu] = useState(false);
+  const [modelBusy, setModelBusy] = useState(false);
+  const modelReq = useRef(0);
+  const modelChipRef = useRef(null);
+  const loadModel = useCallback(async () => {
+    if (!tabId || !sessionId) { setModelState(null); return; }
+    const req = ++modelReq.current;
+    const r = await window.electronAPI?.chatModelState?.(tabId, sessionId).catch(() => null);
+    if (req === modelReq.current) setModelState(r?.current ? r : null);
+  }, [tabId, sessionId]);
+  // A tab whose session is unknown (a fresh Claude not linked yet) or whose
+  // Claude has gone shows no chip: never the previous session's model.
+  useEffect(() => { if (!claudeLive || !sessionId) { modelReq.current += 1; setModelState(null); } }, [claudeLive, sessionId]);
+  const loadModelRef = useRef(loadModel);
+  loadModelRef.current = loadModel;
+  const modelTimers = useRef([]);
+  useEffect(() => () => { modelTimers.current.forEach(clearTimeout); modelTimers.current = []; }, [tabId, sessionId]);
+  useEffect(() => {
+    if (!visible || !claudeLive || !sessionId) return undefined;
+    loadModel();
+    const iv = setInterval(loadModel, 5000);
+    return () => clearInterval(iv);
+  }, [visible, claudeLive, sessionId, loadModel]);
+  useEffect(() => { setModelMenu(false); }, [tabId, sessionId]);
+  const modelLabel = (() => {
+    const c = modelState?.current;
+    if (!c) return null;
+    const m = modelState.catalog?.models?.find((x) => x.id === c.modelId || c.modelId.startsWith(`${x.id}-`));
+    const effort = m?.efforts?.find((e) => e.id === c.effort)?.name || null;
+    return { name: m?.name || c.modelName || c.modelId, effort };
+  })();
+  const modelBlocked = !claudeLive ? 'Claude is not running in this tab'
+    : working ? 'Claude is working: change the model when this turn ends'
+      : status === 'needs' ? 'Answer Claude first' : null;
+  const pickModel = async (choice) => {
+    setModelMenu(false);
+    setModelBusy(true);
+    const r = await window.electronAPI?.chatSetModel?.(tabId, sessionId, choice).catch(() => null);
+    setModelBusy(false);
+    if (!r?.ok) flash(r?.error || 'Could not change the model');
+    // Claude redraws its status line right away; read it back shortly, with
+    // the loader of whatever session is on screen THEN (timers are cleared
+    // when the session changes).
+    modelTimers.current.push(setTimeout(() => loadModelRef.current(), 700), setTimeout(() => loadModelRef.current(), 2500));
+    refocusIfFree();
+  };
+  // Back to the message box only if focus is not somewhere the person put it
+  // meanwhile (another tab's box, the sidebar search).
+  const refocusIfFree = () => requestAnimationFrame(() => {
+    const a = document.activeElement;
+    if (!a || a === document.body || a === modelChipRef.current) inputRef.current?.focus();
+  });
+
   const placeholder = sessionId
     ? (claudeLive ? 'Message Claude...' : 'Claude exited. Input goes to the terminal...')
     : (claudeLive ? 'Message Claude...' : 'Type a command for the terminal...');
@@ -1145,12 +1204,42 @@ export default function ChatPane({ tabId, visible }) {
               }
             }}
           />
-          {working && (
-            <button type="button" className="chatp-btn stop" onClick={interrupt} title="Interrupt Claude (Esc)">Stop</button>
-          )}
-          <button type="button" className="chatp-btn primary" onClick={send} disabled={!draft.trim() && !atts.length} title="Send (Enter). Shift+Enter for a new line">
-            Send
-          </button>
+          <div className="chatp-composer-foot">
+            {modelLabel && (
+              <div className="chatp-model-wrap">
+                <button
+                  type="button"
+                  ref={modelChipRef}
+                  className={`chatp-model${modelMenu ? ' open' : ''}`}
+                  onClick={() => { if (!modelBlocked) setModelMenu((v) => !v); else flash(modelBlocked); }}
+                  aria-haspopup="menu"
+                  aria-expanded={modelMenu}
+                  aria-disabled={!!modelBlocked || modelBusy}
+                  title={modelBlocked || 'Change the model or effort'}
+                >
+                  <span>{modelLabel.name}</span>
+                  {modelLabel.effort && <span className="chatp-model-effort">{modelLabel.effort}</span>}
+                  {modelBusy && <span className="chatp-model-effort">…</span>}
+                </button>
+                {modelMenu && !modelBlocked && (
+                  <ModelMenu
+                    anchor={modelChipRef.current}
+                    current={modelState.current}
+                    catalog={modelState.catalog}
+                    onPick={pickModel}
+                    onClose={(why) => { setModelMenu(false); if (why !== 'away') refocusIfFree(); }}
+                  />
+                )}
+              </div>
+            )}
+            <span className="chatp-composer-gap" />
+            {working && (
+              <button type="button" className="chatp-btn stop" onClick={interrupt} title="Interrupt Claude (Esc)">Stop</button>
+            )}
+            <button type="button" className="chatp-btn primary" onClick={send} disabled={!draft.trim() && !atts.length} title="Send (Enter). Shift+Enter for a new line">
+              Send
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -277,7 +277,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
       if (useStore.getState().activeTabId !== id || isChatTab(id)) return;
       // A paste into a modal (e.g. the command palette) or another tab's chat
       // pane (split view) belongs there.
-      if (e.target?.closest?.('[role="dialog"], [data-chat-tab]')) return;
+      if (e.target?.closest?.('[role="dialog"], [role="menu"], [data-chat-tab]')) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       // Cmd+V with Claude's prompt focused in the terminal pastes the path
