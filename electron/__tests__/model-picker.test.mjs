@@ -58,6 +58,13 @@ const file = (fetchedAt, extra = []) => ({
   fs.writeFileSync(path.join(acct, 'cache', 'model-catalog', 'broken-cc.json'), '{not json');
   check("the session's account first, its newest file", (await readModelCatalog([acct, home]))?.fetchedAt, 900);
   check('relative or missing dirs are skipped', await readModelCatalog(['rel/dir', path.join(root, 'nope')]), null);
+  // One cache dir can hold several organisations' catalogs: with the account's
+  // organisation known, only ITS file counts, however fresh another is.
+  fs.writeFileSync(path.join(acct, 'cache', 'model-catalog', '1ac35652-aaaa-cc.json'), JSON.stringify(file(800)));
+  fs.writeFileSync(path.join(acct, 'cache', 'model-catalog', '33dd719e-bbbb-cc.json'), JSON.stringify(file(950)));
+  check("the account's organisation, not the freshest file", (await readModelCatalog([acct], '1ac35652'))?.fetchedAt, 800);
+  check('an organisation with no catalog gets none, never another account\'s', await readModelCatalog([acct, home], '99999999'), null);
+  check('a malformed organisation id is ignored (newest file)', (await readModelCatalog([acct], '../x'))?.fetchedAt, 950);
   fs.rmSync(root, { recursive: true, force: true });
 }
 

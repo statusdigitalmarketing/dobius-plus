@@ -60,16 +60,20 @@ export function normalizeCatalog(json) {
 }
 
 /**
- * The newest catalog Claude cached for the first config dir that has one.
- * `dirs` are Claude config dirs, most specific first (the session's account,
- * then the default ~/.claude). Never throws; null when none is readable.
+ * The catalog Claude cached for an account. Files are named
+ * <organizationUuid>-<hash>-cc.json, and one cache dir can hold several
+ * organisations' catalogs, so with `orgUuid` known ONLY that organisation's
+ * files count (never another account's list, however fresh); unknown, the
+ * newest file. `dirs` are Claude config dirs to look in, most specific first.
+ * Never throws; null when none is readable.
  */
-export async function readModelCatalog(dirs) {
+export async function readModelCatalog(dirs, orgUuid = null) {
+  const org = typeof orgUuid === 'string' && /^[0-9a-f-]{8,64}$/i.test(orgUuid) ? orgUuid.toLowerCase() : null;
   for (const dir of dirs) {
     if (typeof dir !== 'string' || !path.isAbsolute(dir)) continue;
     const cache = path.join(dir, 'cache', 'model-catalog');
     let names;
-    try { names = (await fs.readdir(cache)).filter((n) => n.endsWith('-cc.json')); } catch { continue; }
+    try { names = (await fs.readdir(cache)).filter((n) => n.endsWith('-cc.json') && (!org || n.toLowerCase().startsWith(`${org}-`))); } catch { continue; }
     let best = null;
     for (const n of names.slice(0, 50)) {
       try {

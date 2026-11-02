@@ -48,6 +48,7 @@ import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
 import { promptBoxText } from './bridge-open-tab.js';
 import { readModelCatalog, currentFromRecord, pickerCommand } from './model-picker.js';
+import { claudeJsonCandidates } from './account-identity.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -808,9 +809,39 @@ function setupDataHandlers() {
       return currentFromRecord(await fs.promises.readFile(file, 'utf8'));
     } catch { return null; }
   };
-  const catalogFor = (current) => readModelCatalog([current?.configDir, path.join(os.homedir(), '.claude')].filter(Boolean));
+  // The session's account: its config dir from the record ('' = unset, the
+  // default), and the organisation its metadata file names, which is how
+  // Claude names its catalog files. Only that organisation's catalog is used.
+  const orgFor = async (current) => {
+    if (!current || current.configDir === null) return null;
+    const envUnset = current.configDir === '';
+    for (const file of claudeJsonCandidates(envUnset ? defaultClaudeDir() : current.configDir, { envUnset })) {
+      try {
+        const st = await fs.promises.stat(file);
+        if (!st.isFile() || st.size > 4 * 1024 * 1024) return null;
+        const org = JSON.parse(await fs.promises.readFile(file, 'utf8'))?.oauthAccount?.organizationUuid;
+        return typeof org === 'string' ? org : null;
+      } catch (err) {
+        if (err?.code === 'ENOENT') continue; // the next candidate, as Claude does
+        return null;
+      }
+    }
+    return null;
+  };
+  const catalogFor = async (current) => {
+    if (!current || current.configDir === null) return null;
+    const dir = current.configDir || defaultClaudeDir();
+    const org = await orgFor(current);
+    // Without a known organisation, only the session's own dir: a catalog
+    // from another account's cache is never shown or allowed.
+    return readModelCatalog(org ? [dir, defaultClaudeDir()] : [dir], org);
+  };
+  // The session a tab runs NOW is main's call (tab-context), never the
+  // window's: a stale sessionId must not name another session's model.
+  const tabSessionIs = async (tabId, sessionId) => (await resolveSessionForTab(tabId))?.sessionId === sessionId;
   ipcMain.handle('chat:modelState', async (event, tabId, sessionId) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId) || !ownsTerminal(event.sender.id, tabId)) return null;
+    if (typeof sessionId !== 'string' || !(await tabSessionIs(tabId, sessionId))) return { current: null, catalog: null };
     const current = await sessionModel(sessionId);
     const catalog = await catalogFor(current);
     return { current: current ? { modelId: current.modelId, modelName: current.modelName, effort: current.effort } : null, catalog };
@@ -827,12 +858,17 @@ function setupDataHandlers() {
     if (!(await getTerminalClaudeInfo(tabId))) return { ok: false, error: 'Claude is not running in this tab' };
     const st = terminalStatus.statusFor(tabId)?.status;
     if (st === 'working' || st === 'needs') return { ok: false, error: st === 'working' ? 'Claude is working: change it when this turn ends' : 'Answer Claude first' };
+    if (typeof sessionId !== 'string' || !(await tabSessionIs(tabId, sessionId))) return { ok: false, error: 'This chat is catching up with the tab: try again in a moment' };
     const current = await sessionModel(sessionId);
     const cmd = pickerCommand(choice, await catalogFor(current), current?.modelId);
     if (!cmd) return { ok: false, error: 'That choice is not available for this session' };
+    // Input arriving while the screen is read (the phone, the keyboard) would
+    // make the empty box a stale reading: the command must not join it.
+    const seq = terminalInputSeq(tabId);
     const box = await claudePromptBox(tabId);
     if (box === null) return { ok: false, error: "Claude's prompt is not showing" };
     if (box.trim()) return { ok: false, error: "Clear what is typed in Claude's prompt first" };
+    if (terminalInputSeq(tabId) !== seq || !ownsTerminal(senderId, tabId)) return { ok: false, error: 'Something was typed into the tab meanwhile: try again' };
     cancelAutoResumeTab(tabId);
     let stranded = false;
     const ok = await submitPromptToTab(tabId, cmd, () => ownsTerminal(senderId, tabId), () => { stranded = true; });

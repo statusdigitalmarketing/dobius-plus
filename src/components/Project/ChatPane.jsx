@@ -1016,6 +1016,13 @@ export default function ChatPane({ tabId, visible }) {
     const r = await window.electronAPI?.chatModelState?.(tabId, sessionId).catch(() => null);
     if (req === modelReq.current) setModelState(r?.current ? r : null);
   }, [tabId, sessionId]);
+  // A tab whose session is unknown (a fresh Claude not linked yet) or whose
+  // Claude has gone shows no chip: never the previous session's model.
+  useEffect(() => { if (!claudeLive || !sessionId) { modelReq.current += 1; setModelState(null); } }, [claudeLive, sessionId]);
+  const loadModelRef = useRef(loadModel);
+  loadModelRef.current = loadModel;
+  const modelTimers = useRef([]);
+  useEffect(() => () => { modelTimers.current.forEach(clearTimeout); modelTimers.current = []; }, [tabId, sessionId]);
   useEffect(() => {
     if (!visible || !claudeLive || !sessionId) return undefined;
     loadModel();
@@ -1039,11 +1046,18 @@ export default function ChatPane({ tabId, visible }) {
     const r = await window.electronAPI?.chatSetModel?.(tabId, sessionId, choice).catch(() => null);
     setModelBusy(false);
     if (!r?.ok) flash(r?.error || 'Could not change the model');
-    // Claude redraws its status line right away; read it back shortly.
-    setTimeout(loadModel, 700);
-    setTimeout(loadModel, 2500);
-    requestAnimationFrame(() => inputRef.current?.focus());
+    // Claude redraws its status line right away; read it back shortly, with
+    // the loader of whatever session is on screen THEN (timers are cleared
+    // when the session changes).
+    modelTimers.current.push(setTimeout(() => loadModelRef.current(), 700), setTimeout(() => loadModelRef.current(), 2500));
+    refocusIfFree();
   };
+  // Back to the message box only if focus is not somewhere the person put it
+  // meanwhile (another tab's box, the sidebar search).
+  const refocusIfFree = () => requestAnimationFrame(() => {
+    const a = document.activeElement;
+    if (!a || a === document.body || a === modelChipRef.current) inputRef.current?.focus();
+  });
 
   const placeholder = sessionId
     ? (claudeLive ? 'Message Claude...' : 'Claude exited. Input goes to the terminal...')
@@ -1213,7 +1227,7 @@ export default function ChatPane({ tabId, visible }) {
                     current={modelState.current}
                     catalog={modelState.catalog}
                     onPick={pickModel}
-                    onClose={() => { setModelMenu(false); requestAnimationFrame(() => inputRef.current?.focus()); }}
+                    onClose={(why) => { setModelMenu(false); if (why !== 'away') refocusIfFree(); }}
                   />
                 )}
               </div>

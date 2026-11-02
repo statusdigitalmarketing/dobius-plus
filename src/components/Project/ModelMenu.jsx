@@ -54,16 +54,29 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
     if (r) setPos({ left: Math.max(8, r.left - 8), bottom: window.innerHeight - r.top + 8 });
   }, [anchor]);
   useEffect(() => {
-    const close = () => onClose();
+    const close = () => onClose('away');
     window.addEventListener('resize', close);
     return () => window.removeEventListener('resize', close);
   }, [onClose]);
   useEffect(() => { rootRef.current?.focus(); }, [pos]);
+  // Keep the whole menu (submenu included) inside the window: shift it left
+  // when it would run past the right edge.
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el || !pos) return;
+    const over = el.getBoundingClientRect().right - (window.innerWidth - 8);
+    if (over > 0) el.style.left = `${Math.max(8, pos.left - over)}px`;
+    else el.style.left = `${pos.left}px`;
+  }, [pos, sub]);
+  // The keyboard's row stays in view in a long list.
+  useEffect(() => {
+    rootRef.current?.querySelector('.chatp-mm-row.focused')?.scrollIntoView?.({ block: 'nearest' });
+  }, [focus, sub]);
   useEffect(() => { setFocus(0); }, [sub]);
 
   const activate = (row) => {
     if (!row) return;
-    if (row.kind === 'current') return onClose();
+    if (row.kind === 'current') return onClose('done');
     if (row.kind === 'sub') return setSub(row.sub);
     if (row.kind === 'effort') return onPick({ effort: row.item.id });
     if (row.kind === 'model') return onPick({ model: row.item.id });
@@ -78,7 +91,7 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
     else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(rows[focus]); }
     else if (e.key === 'ArrowRight' && !sub && rows[focus]?.kind === 'sub') { e.preventDefault(); setSub(rows[focus].sub); }
     else if ((e.key === 'ArrowLeft' || e.key === 'Escape') && sub) { e.preventDefault(); setSub(null); }
-    else if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); onClose(); }
+    else if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); onClose('done'); }
   };
 
   const rowClass = (list, i) => `chatp-mm-row${(sub ? list === 'sub' : list === 'main') && focus === i ? ' focused' : ''}`;
@@ -94,7 +107,8 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
       tabIndex={-1}
       onKeyDown={onKeyDown}
       onMouseDown={(e) => e.preventDefault()}
-      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) onClose(); }}
+      // Focus went somewhere else (a click elsewhere): close and leave it there.
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) onClose('away'); }}
     >
       <div className="chatp-mm-panel">
         <button type="button" role="menuitemradio" aria-checked="true" className={`${rowClass('main', 0)} chatp-mm-current`} onClick={() => activate(mainRows[0])} onMouseEnter={() => { if (!sub) setFocus(0); }}>
@@ -113,7 +127,7 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
             aria-haspopup="menu"
             aria-expanded={sub === row.sub}
             className={`${rowClass('main', k + 1)}${sub === row.sub ? ' open' : ''}`}
-            onClick={() => setSub(sub === row.sub ? null : row.sub)}
+            onClick={() => setSub(row.sub)}
             onMouseEnter={() => { setSub(row.sub); }}
           >
             <span className="chatp-mm-label">{SUBMENUS[row.sub]}</span>

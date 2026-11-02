@@ -202,7 +202,7 @@
 }
 /* Under the text, like Bryan's screenshot (Asana 1220098108555124): the model
  * chip on the left, Stop and Send on the right. */
-.chatp-composer-foot { flex: 1 1 100%; display: flex; align-items: center; gap: 8px; min-height: 30px; }
+.chatp-composer-foot { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 30px; }
 .chatp-composer-gap { flex: 1; }
 .chatp-model-wrap { position: relative; flex-shrink: 0; }
 .chatp-model {
