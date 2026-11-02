@@ -3,7 +3,7 @@
 // paste-then-Enter submit. Main-process only.
 
 import { randomBytes } from 'node:crypto';
-import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalInputAgeMs, terminalRawOutputSeq, terminalSettledSinceInput, terminalClosing } from './terminal-manager.js';
+import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalInputAgeMs, terminalRawOutputSeq, terminalSettledSinceInput, terminalClosing, terminalCols } from './terminal-manager.js';
 import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, spinnerStatus } from './selector-parser.js';
 export { selectorFingerprint };
 import { renderScreenLines } from './screen-render.js';
@@ -55,10 +55,41 @@ export async function activityForTab(id) {
 // (plain shells, a Claude that has not linked its session yet). Trailing blank
 // padding per line and the all-blank tail are dropped.
 export function terminalTextTail(id, maxLines = 60) {
-  const raw = stripAnsi(getTerminalBuffer(id) || '');
+  return textTailOf(getTerminalBuffer(id) || '', maxLines);
+}
+
+function textTailOf(rawBuffer, maxLines) {
+  const raw = stripAnsi(rawBuffer);
   const lines = raw.split('\n').map((l) => l.replace(/\s+$/, ''));
   while (lines.length && !lines[lines.length - 1]) lines.pop();
   return lines.slice(-maxLines).join('\n');
+}
+
+/**
+ * What the tab's terminal SHOWS right now, as text: the output replayed
+ * through the screen emulator at the tab's own width (screen-render.js), so a
+ * TUI that repaints in place (Claude's spinner, its prompt box) reads as its
+ * screen, not as every frame it ever drew. The stripped byte stream it
+ * replaces printed stray spinner frames ("Doodling…") with blank gaps between
+ * them (Bryan, Asana 1220098108555131). Falls back to that stream only when
+ * the render fails.
+ */
+export async function terminalScreenText(id, maxLines = 60) {
+  const raw = getTerminalBuffer(id) || '';
+  let start = Math.max(0, raw.length - 262144);
+  if (start > 0) {
+    // Never start inside an escape sequence (see activityForTab).
+    const esc = raw.lastIndexOf('\x1b', start);
+    if (esc !== -1 && start - esc <= ESC_BACKUP_CHARS) start = esc;
+  }
+  const tail = raw.slice(start);
+  let lines;
+  try { lines = await renderScreenLines(tail, { cols: terminalCols(id) }); } catch { lines = null; }
+  if (!lines) return textTailOf(raw, maxLines);
+  const rows = lines.map((l) => String(l).replace(/\s+$/, ''));
+  while (rows.length && !rows[rows.length - 1]) rows.pop();
+  while (rows.length && !rows[0]) rows.shift();
+  return rows.slice(-maxLines).join('\n');
 }
 
 // A selector read is stamped with the PTY and the count of writes it has

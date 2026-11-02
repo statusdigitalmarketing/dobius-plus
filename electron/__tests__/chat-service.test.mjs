@@ -4,7 +4,7 @@
 // Run: node --import ./electron/__tests__/chat-service-register.mjs ./electron/__tests__/chat-service.test.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges } from './fake-terminal-manager.mjs';
+import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges, cols } from './fake-terminal-manager.mjs';
 
 const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector } = await import('../chat-service.js');
 let pass = 0;
@@ -324,6 +324,22 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.ok(a && b, 'both settled');
   assert.notEqual(a, b, 'same counters, different process');
   ok('tokens from another app process never match');
+}
+
+// The Chat view's fallback shows the rendered SCREEN, not every frame a TUI
+// drew (Bryan, Asana 1220098108555131: stray "Doodling…" frames, blank gaps).
+{
+  const { terminalScreenText, terminalTextTail } = await import('../chat-service.js');
+  const id = 'term-screen-1';
+  // Claude repaints its spinner line in place, then replaces it.
+  buffers.set(id, 'Brewed earlier\r\n✻ Doodling…\r\n\x1b[1A\x1b[2K✻ Doodling… (2s)\r\n\x1b[1A\x1b[2K⏺ Done for real\r\n');
+  cols.set(id, 80);
+  assert.ok(terminalTextTail(id).includes('Doodling'), 'the raw stream keeps the stale frames');
+  assert.equal(await terminalScreenText(id), 'Brewed earlier\n⏺ Done for real');
+  ok('fallback text is the rendered screen, not the stale frames');
+  buffers.set(id, '');
+  assert.equal(await terminalScreenText(id), '');
+  ok('an empty tab reads as empty');
 }
 
 console.log(`\n${pass} passed`);

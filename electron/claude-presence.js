@@ -106,7 +106,8 @@ export async function presenceSessionId(proc, configDir, readFile) {
   return (await presenceOf(proc, configDir, readFile))?.sessionId ?? null;
 }
 
-/** The same record's { sessionId (or null), status (or null) }, or null. */
+/** The same record's { sessionId (or null), status (or null), cwd (Claude's
+ * own working directory, absolute, or null) }, or null. */
 export async function presenceOf(proc, configDir, readFile) {
   if (!proc || !Number.isInteger(proc.pid)) return null;
   const rec = await readPresenceRecord(proc.pid, configDir, readFile);
@@ -114,6 +115,7 @@ export async function presenceOf(proc, configDir, readFile) {
   return {
     sessionId: typeof rec.sessionId === 'string' && SESSION_ID_RE.test(rec.sessionId) ? rec.sessionId : null,
     status: typeof rec.status === 'string' ? rec.status : null,
+    cwd: typeof rec.cwd === 'string' && path.isAbsolute(rec.cwd) ? rec.cwd : null,
   };
 }
 

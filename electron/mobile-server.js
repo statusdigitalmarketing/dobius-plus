@@ -32,7 +32,7 @@ import {
   addTerminalObserver, terminalInstance,
 } from './terminal-manager.js';
 import { stripAnsi, spinnerStatus } from './selector-parser.js';
-import { terminalTextTail, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
+import { terminalTextTail, terminalScreenText, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
 import { TAB_OPS, ACK_FEATURES, handleTabOp } from './mobile-tab-ops.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills, loadTranscriptImage } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
@@ -803,7 +803,10 @@ function handleAuthedMessage(socket, msg, subs) {
       if (typeof msg.id !== 'string') break;
       socket._authedTabs.add(msg.id);
       // Last ~60 lines so the payload stays small on a 1s-ish poll.
-      wsSend(socket, { type: 'terminalText', id: msg.id, text: terminalTextTail(msg.id) });
+      // The rendered screen (chat-service terminalScreenText); the raw tail if that fails.
+      terminalScreenText(msg.id)
+        .catch(() => terminalTextTail(msg.id))
+        .then((text) => wsSend(socket, { type: 'terminalText', id: msg.id, text }));
       break;
     }
 
