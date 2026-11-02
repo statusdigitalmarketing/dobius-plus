@@ -601,3 +601,9 @@
 - **FIX**: Before TaskStop, confirm the id against the command it was started with (the harness lines start with `cd <worktree>; H=...`).
 - **CONTEXT**: Sessions juggling several harness and review tasks.
 - **DETECTION**: read the TaskStop result's echoed command.
+
+### API - 2026-11-02 (ps comm is the name a process was started with, not its file)
+- **MISTAKE**: `isClaudeProcess` in `electron/bridge-open-main.js` required `ps -o comm=` to start with `/`. A tab starts plain `claude`, so comm is just `claude` and /openTab never recognised a normal session (Brett, Asana 1220127101442652).
+- **FIX**: Only when comm is exactly `claude`, read the real program image with `lsof -a -p <pid> -d txt -Fn` (first `n/` line) and require Anthropic's signature: `codesign --verify --strict -R='anchor apple generic and identifier "com.anthropic.claude-code" and certificate leaf[subject.OU] = "Q6L2SF6YDW"'` (about 2s on 300MB, cache per path+inode+size+mtime). Judge by signer, never by folder: path patterns lost both ways (look-alikes passed, Homebrew @latest, npm claude.exe, XDG and symlinked installs failed). Do not resolve other names: `node` can resolve to `node-v22`.
+- **CONTEXT**: Any check that judges a process by its executable path. Basename-only checks (terminalBusy, ptyProgramName) are unaffected.
+- **DETECTION**: `grep -rn "comm.startsWith('/')" electron`

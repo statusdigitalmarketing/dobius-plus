@@ -4,7 +4,10 @@
 // Run: node --import ./electron/__tests__/bridge-open-main-register.mjs ./electron/__tests__/bridge-open-main.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createBridgeOpenDeps } from '../bridge-open-main.js';
+import { createBridgeOpenDeps, isClaudeProcess, isSignedClaude } from '../bridge-open-main.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import * as env from './fake-bridge-env.mjs';
 
 // A window is ready once its page has restored its tabs (window:tabsReady).
@@ -185,4 +188,50 @@ test('a window answering with another project\'s tab id is refused, prefix looka
     env.addWindow('/p/ab', wc);
     assert.equal((await deps.openTab('/p/ab')).tabId, right);
   }
+});
+
+// Brett 2026-11-02: a tab starts plain `claude`, so ps reports comm "claude"
+// with no path, and /openTab never recognised it. The real file decides, by
+// Anthropic's signature, whatever folder it lives in.
+test('isClaudeProcess finds Claude started by name through its real, signed executable', async () => {
+  const ps = (comm) => async (_pid, field) => (field === 'comm' ? comm : '');
+  let asked = 0;
+  const exe = (file) => async () => { asked += 1; return file; };
+  const signedOnly = (good) => async (f) => f === good;
+  const real = '/Users/a/.local/share/claude/versions/2.1.316';
+
+  assert.equal(await isClaudeProcess(1, { ps: ps('claude'), exe: exe(real), signed: signedOnly(real) }), true);
+  // the same name, an unsigned real file (a copied shell, a look-alike folder)
+  assert.equal(await isClaudeProcess(1, { ps: ps('claude'), exe: exe('/tmp/claude/versions/2.1.316'), signed: signedOnly(real) }), false);
+  // the real file could not be read: not recognised (fails closed)
+  assert.equal(await isClaudeProcess(1, { ps: ps('claude'), exe: exe(''), signed: async () => true }), false);
+  // any other bare name never asks for the real file (a runtime alias stays `node`)
+  asked = 0;
+  assert.equal(await isClaudeProcess(1, { ps: ps('node'), exe: exe('/opt/runtime/node-v22'), signed: async () => true }), false);
+  assert.equal(asked, 0);
+});
+
+test('isSignedClaude verifies once per exact file and re-checks a failure later', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sig-'));
+  try {
+    const f = path.join(dir, 'claude');
+    fs.writeFileSync(f, '#!/bin/sh\n', { mode: 0o755 });
+    let calls = 0;
+    const yes = async () => { calls += 1; return true; };
+    assert.equal(await isSignedClaude(f, { verify: yes }), true);
+    assert.equal(await isSignedClaude(f, { verify: yes }), true);
+    assert.equal(calls, 1, 'a pass is cached for the same file');
+    fs.writeFileSync(f, '#!/bin/sh\necho changed\n', { mode: 0o755 }); // new size: verified again
+    assert.equal(await isSignedClaude(f, { verify: async () => { calls += 1; return false; } }), false);
+    assert.equal(calls, 2);
+    fs.chmodSync(f, 0o644);
+    assert.equal(await isSignedClaude(f, { verify: yes }), false, 'not executable');
+    assert.equal(await isSignedClaude(path.join(dir, 'gone'), { verify: yes }), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the real codesign check rejects a system shell', { skip: !fs.existsSync('/usr/bin/codesign') }, async () => {
+  assert.equal(await isSignedClaude('/bin/sh'), false);
 });

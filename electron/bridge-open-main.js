@@ -54,17 +54,78 @@ function isExecutableFile(f) {
   }
 }
 
-// Is this process REALLY claude? Judged on the executable the kernel ran
-// (`comm`, the full path when it is the only column), not only on the
-// command line, which splits at spaces: `/tmp/claude tools/zsh` reads as
-// `/tmp/claude` to every argv parser. Either the executable itself is a
-// claude entrypoint that exists, or it is node/bun/deno running a claude
-// entrypoint (the npm install, and the ship-test stand-in) that exists.
-async function isClaudeProcess(pid) {
-  const comm = await psField(pid, 'comm');
+// The file the kernel is actually running for pid: lsof's first text (txt)
+// entry is the program image, symlinks already resolved. '' when unknown.
+async function executablePath(pid) {
+  try {
+    // UTF-8 locale: under C, lsof escapes every non-ASCII byte (/Users/rené).
+    const env = { ...process.env, LC_ALL: 'en_US.UTF-8', LANG: 'en_US.UTF-8' };
+    const { stdout } = await execFileP('/usr/sbin/lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn'], { timeout: 1500, encoding: 'utf8', env });
+    const line = stdout.split('\n').find((l) => l.startsWith('n/'));
+    // lsof escapes odd characters (a tab becomes the two characters \t), so a
+    // name with a backslash is not a usable path: refuse it, never guess.
+    return line && !line.includes('\\') ? line.slice(1) : '';
+  } catch (err) {
+    console.warn(`[bridge-open] could not read the executable of pid ${pid}:`, err?.message || err);
+    return '';
+  }
+}
+
+// Is this process REALLY claude? Judged on the executable the kernel ran,
+// not only on the command line, which splits at spaces: `/tmp/claude
+// tools/zsh` reads as `/tmp/claude` to every argv parser. Either the
+// executable itself is a claude entrypoint that exists, or it is
+// node/bun/deno running a claude entrypoint (the npm install, and the
+// ship-test stand-in) that exists.
+//
+// `ps -o comm=` is the path the process was STARTED with, so a tab that runs
+// plain `claude` (how a new tab starts it) reports just "claude" (Brett,
+// 2026-11-02: /openTab never saw Claude). Only for that bare name, the real
+// file decides, by WHO SIGNED IT rather than where it sits: Anthropic's
+// Developer ID signature on com.anthropic.claude-code. Location patterns
+// were tried and lost both ways in review (look-alike folders passed;
+// Homebrew @latest, npm's claude.exe, XDG_DATA_HOME and symlinked install
+// folders failed). Every other name keeps the old path, so a runtime alias
+// (`node` -> node-v22) is never renamed out of JS_RUNTIMES.
+// Accepted residuals: lsof's first txt entry is assumed to be the image (a
+// helper named `claude` that maps Claude's binary below its own would pass),
+// a genuine Claude of 2.1.34 or older started with BUN_BE_BUN=1 runs an
+// arbitrary script under the real binary, and a same-user attacker swapping
+// folders during the ~2s codesign run could cache a pass for the wrong file.
+// All need deliberate local action as this user, who could type into the
+// terminal directly anyway, and must still show Claude's prompt on screen.
+const CLAUDE_SIGNATURE = 'anchor apple generic and identifier "com.anthropic.claude-code" and certificate leaf[subject.OU] = "Q6L2SF6YDW"';
+const signedCache = new Map(); // path|ino|size|mtime|ctime -> { ok, at }
+const UNSIGNED_RECHECK_MS = 30_000;
+
+// Verifying a 300MB binary takes about 2s, so a pass is kept for that exact
+// file (a replaced or updated binary has a new inode, size or mtime); a fail
+// is re-checked after 30s in case it was a timeout.
+export async function isSignedClaude(file, { verify } = {}) {
+  let st;
+  try { st = fs.statSync(file); } catch { return false; } // gone: not a running Claude we can vouch for
+  if (!st.isFile() || (st.mode & 0o111) === 0) return false;
+  // ctime too: an owner can restore mtime after rewriting the same inode, but
+  // not ctime.
+  const key = `${file}|${st.ino}|${st.size}|${st.mtimeMs}|${st.ctimeMs}`;
+  const hit = signedCache.get(key);
+  if (hit && (hit.ok || Date.now() - hit.at < UNSIGNED_RECHECK_MS)) return hit.ok;
+  const check = verify || ((f) => execFileP('/usr/bin/codesign', ['--verify', '--strict', `-R=${CLAUDE_SIGNATURE}`, f], { timeout: 20_000 }).then(() => true, () => false));
+  const ok = await check(file);
+  if (signedCache.size > 50) signedCache.clear();
+  signedCache.set(key, { ok, at: Date.now() });
+  return ok;
+}
+
+export async function isClaudeProcess(pid, { ps = psField, exe = executablePath, signed = isSignedClaude } = {}) {
+  const comm = await ps(pid, 'comm');
+  if (comm === 'claude') {
+    const real = await exe(pid);
+    return real.startsWith('/') && await signed(real);
+  }
   if (comm.startsWith('/') && isClaudeEntrypoint(comm)) return isExecutableFile(comm);
   if (!JS_RUNTIMES.has(comm.split('/').pop())) return false;
-  const { kind, token } = classifyClaudeProcess(await psField(pid, 'command'));
+  const { kind, token } = classifyClaudeProcess(await ps(pid, 'command'));
   if (kind !== 'claude' || typeof token !== 'string' || !token.startsWith('/')) return false;
   // The command line splits at spaces (`node "/tmp/claude tools/x.js"` reads
   // as `/tmp/claude`), so the token must RESOLVE to Claude's own script.
