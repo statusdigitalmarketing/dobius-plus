@@ -41,3 +41,14 @@ test('matchesQuery needs every word, in any field, any case', () => {
   assert.equal(matchesQuery('fix bob', 'Fix the login bug', 'From Kim'), false);
   assert.equal(matchesQuery('kim', null, undefined, 'kim'), true);
 });
+
+test('sameProject matches board project names to folders loosely', async () => {
+  const { sameProject } = await import('../task-due.js');
+  assert.equal(sameProject('Dobius+', '/Users/x/Projects (Code)/dobius-plus'), true);
+  assert.equal(sameProject('Better Health', '/p/better-health-now'), true);
+  assert.equal(sameProject('Pocket Cologne', '/p/pocket-cologne/'), true);
+  assert.equal(sameProject('Axiom', '/p/b2b-portal'), false);
+  assert.equal(sameProject('AB', '/p/ab'), false);
+  assert.equal(sameProject('', '/p/dobius-plus'), false);
+  assert.equal(sameProject('Personal', null), false);
+});

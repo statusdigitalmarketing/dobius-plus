@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useStore } from '../../store/store';
-import { dueLabel, localDay, sortOpenTasks, matchesQuery } from '../../../shared/task-due.js';
+import { dueLabel, localDay, sortOpenTasks, matchesQuery, sameProject } from '../../../shared/task-due.js';
 
 const MONO = "'SF Mono', monospace";
 
@@ -45,12 +45,13 @@ const STAGE_CHIPS = {
 
 const INBOX_ERRORS = {
   'not-installed': "The Inbox board isn't set up on this Mac.",
-  'not-running': "The Inbox board isn't running. Start it from its menu bar app, then retry.",
+  'not-running': "The Inbox board isn't running.",
   denied: 'The Inbox board refused the request. Its token may have changed: retry.',
   'bad-response': "The Inbox board sent something Dobius couldn't read.",
 };
 
 const INBOX_RENDER_CAP = 120;
+const INBOX_REFRESH_MS = 60_000;
 
 function readPref(key, fallback) {
   try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
@@ -75,6 +76,9 @@ export default function TasksDropdown() {
   const [showDone, setShowDone] = useState(false);
   const [inbox, setInbox] = useState({ state: 'idle' });
   const [inboxSource, setInboxSource] = useState('all');
+  // null until main answers; { installed, canStart }. No board here: no Inbox tab.
+  const [board, setBoard] = useState(null);
+  const [starting, setStarting] = useState(false);
   const dropdownRef = useRef(null);
   const inputRef = useRef(null);
   const inboxReq = useRef(0);
@@ -109,8 +113,27 @@ export default function TasksDropdown() {
   }, [open, load]);
 
   useEffect(() => {
-    if (open && tab === 'inbox') loadInbox();
-  }, [open, tab, loadInbox]);
+    if (!open || !window.electronAPI?.inboxStatus) return;
+    let live = true;
+    window.electronAPI.inboxStatus()
+      .then((s) => { if (live) setBoard(s || { installed: false, canStart: false }); })
+      .catch((err) => {
+        console.error('[TasksDropdown] inbox status failed:', err);
+        if (live) setBoard({ installed: false, canStart: false });
+      });
+    return () => { live = false; };
+  }, [open]);
+
+  const inboxShown = !!board?.installed;
+  const view = tab === 'inbox' && inboxShown ? 'inbox' : 'project';
+
+  // Read on open, then about once a minute while the Inbox tab stays open.
+  useEffect(() => {
+    if (!open || view !== 'inbox') return;
+    loadInbox();
+    const timer = setInterval(loadInbox, INBOX_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [open, view, loadInbox]);
 
   // Prime the badge count on mount + when the project changes, so the
   // trigger never shows 0 while real tasks are waiting. PR#3 r1 LOW.
@@ -133,8 +156,20 @@ export default function TasksDropdown() {
     const handler = (e) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target)) setOpen(false);
     };
+    // Escape from anywhere (the trigger keeps focus after a click); inside the
+    // panel onPanelKeyDown runs first and stops it, so a query clears first.
+    // Capture phase: xterm stops Escape from bubbling, so a bubbling listener
+    // never hears it from the terminal. It still reaches the terminal; this
+    // only closes the panel. Inside the panel onPanelKeyDown decides.
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !e.target?.closest?.('[role="dialog"][aria-label="Tasks"]')) setOpen(false);
+    };
     document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+    document.addEventListener('keydown', onKey, true);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('keydown', onKey, true);
+    };
   }, [open]);
 
   const switchTab = (next) => {
@@ -207,6 +242,21 @@ export default function TasksDropdown() {
     setOpen(false);
   };
 
+  const startBoard = async () => {
+    if (!window.electronAPI?.inboxStart || starting) return;
+    setStarting(true);
+    let result;
+    try {
+      result = await window.electronAPI.inboxStart();
+    } catch (err) {
+      console.error('[TasksDropdown] starting the board failed:', err);
+      result = { ok: false };
+    }
+    setStarting(false);
+    if (!result?.ok) console.error('[TasksDropdown] the board did not start:', result?.reason);
+    loadInbox(); // either way: shows the cards, or the same error with Start again
+  };
+
   const openLink = (url) => {
     if (url) window.electronAPI?.openExternal?.(url);
   };
@@ -252,7 +302,11 @@ export default function TasksDropdown() {
     for (const c of cards) counts[c.source] = (counts[c.source] || 0) + 1;
     return counts;
   }, [cards]);
-  const shownCards = cards.filter((c) => (inboxSource === 'all' || c.source === inboxSource)
+  const isHere = (c) => sameProject(c.project, currentProjectPath);
+  const hereCount = cards.filter(isHere).length;
+  // A filter whose pill has gone (its cards were closed on the board) falls back to All.
+  const sourceNow = inboxSource === 'all' || (inboxSource === 'here' ? hereCount > 0 : sourceCounts[inboxSource] > 0) ? inboxSource : 'all';
+  const shownCards = cards.filter((c) => (sourceNow === 'all' || (sourceNow === 'here' ? isHere(c) : c.source === sourceNow))
     && matchesQuery(query, c.who, c.subject, c.summary, c.project, c.meeting));
 
   return (
@@ -308,17 +362,19 @@ export default function TasksDropdown() {
             {/* Header: segment switch + the segment's action */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '9px 10px 8px', borderBottom: '1px solid var(--border)' }}>
               <div role="tablist" style={{ display: 'flex', gap: 2, padding: 2, borderRadius: 7, backgroundColor: 'var(--bg)', border: '1px solid var(--border)' }}>
-                <Segment active={tab === 'project'} onClick={() => switchTab('project')} label="Project" count={pendingCount} />
-                <Segment
-                  active={tab === 'inbox'}
-                  onClick={() => switchTab('inbox')}
-                  label="Inbox"
-                  count={inbox.data ? inbox.data.total : null}
-                  alert={inbox.data?.overdue > 0}
-                />
+                <Segment active={view === 'project'} onClick={() => switchTab('project')} label="Project" count={pendingCount} />
+                {inboxShown && (
+                  <Segment
+                    active={view === 'inbox'}
+                    onClick={() => switchTab('inbox')}
+                    label="Inbox"
+                    count={inbox.data ? inbox.data.total : null}
+                    alert={inbox.data?.overdue > 0}
+                  />
+                )}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                {tab === 'project' ? (
+                {view === 'project' ? (
                   <>
                     {syncMsg && (
                       <span style={{ fontSize: 9, color: syncMsg.startsWith('+') || syncMsg === 'Up to date' ? '#3FB950' : 'var(--danger)', fontFamily: MONO }}>
@@ -334,9 +390,11 @@ export default function TasksDropdown() {
                     <HeaderButton onClick={loadInbox} disabled={inbox.state === 'loading' || inbox.state === 'refreshing'} color="var(--dim)" title="Read the board again">
                       {inbox.state === 'refreshing' || inbox.state === 'loading' ? '…' : '⟳'}
                     </HeaderButton>
-                    <HeaderButton onClick={openBoard} disabled={!currentProjectPath} color="#3FB950" title="Open the Inbox board in a Dobius browser tab">
-                      Open board
-                    </HeaderButton>
+                    {(inbox.data || inbox.state !== 'error') && (
+                      <HeaderButton onClick={openBoard} disabled={!currentProjectPath} color="#3FB950" title="Open the Inbox board in a Dobius browser tab">
+                        Open board
+                      </HeaderButton>
+                    )}
                   </>
                 )}
               </div>
@@ -347,17 +405,17 @@ export default function TasksDropdown() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={tab === 'project' ? 'Filter tasks…' : 'Search the inbox…'}
+                placeholder={view === 'project' ? 'Filter tasks…' : 'Search the inbox…'}
                 aria-label="Filter"
                 style={inputStyle}
               />
             </div>
 
-            {tab === 'project' ? (
+            {view === 'project' ? (
               <>
                 <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0 6px' }}>
                   {tasks.length === 0 && (
-                    <Empty>No tasks yet. Add one below, sync from Asana, or add a card from the Inbox.</Empty>
+                    <Empty>No tasks yet. Add one below{inboxShown ? ', sync from Asana, or add a card from the Inbox.' : ' or sync from Asana.'}</Empty>
                   )}
                   {tasks.length > 0 && shownPending.length === 0 && !query && (
                     <Empty>Everything here is done.</Empty>
@@ -438,7 +496,11 @@ export default function TasksDropdown() {
                 cards={shownCards}
                 total={cards.length}
                 sourceCounts={sourceCounts}
-                source={inboxSource}
+                hereCount={hereCount}
+                canStart={!!board?.canStart}
+                starting={starting}
+                onStart={startBoard}
+                source={sourceNow}
                 onSource={setInboxSource}
                 query={query}
                 today={today}
@@ -651,7 +713,7 @@ function TaskRow({ task, today, expanded, onExpand, onToggle, onDelete, onOpenLi
   );
 }
 
-function InboxList({ inbox, cards, total, sourceCounts, source, onSource, query, today, expanded, onExpand, onList, canAdd, onAdd, onOpenLink, onOpenBoard, onRetry }) {
+function InboxList({ inbox, cards, total, sourceCounts, hereCount, canStart, starting, onStart, source, onSource, query, today, expanded, onExpand, onList, canAdd, onAdd, onOpenLink, onOpenBoard, onRetry }) {
   if (inbox.state === 'idle' || (inbox.state === 'loading' && !inbox.data)) {
     return <div style={{ flex: 1 }}><Empty>Reading the Inbox board…</Empty></div>;
   }
@@ -661,7 +723,12 @@ function InboxList({ inbox, cards, total, sourceCounts, source, onSource, query,
         <div style={{ fontSize: 11, color: 'var(--dim)', lineHeight: 1.5, marginBottom: 10 }}>
           {INBOX_ERRORS[inbox.reason] || INBOX_ERRORS['bad-response']}
         </div>
-        {inbox.reason !== 'not-installed' && <LinkButton onClick={onRetry}>Retry</LinkButton>}
+        <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
+          {inbox.reason === 'not-running' && canStart && (
+            <LinkButton onClick={onStart} color="#3FB950">{starting ? 'Starting…' : 'Start board'}</LinkButton>
+          )}
+          {inbox.reason !== 'not-installed' && !starting && <LinkButton onClick={onRetry}>Retry</LinkButton>}
+        </div>
       </div>
     );
   }
@@ -673,6 +740,9 @@ function InboxList({ inbox, cards, total, sourceCounts, source, onSource, query,
     <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px 6px', flexWrap: 'wrap' }}>
         <FilterPill active={source === 'all'} onClick={() => onSource('all')} label="All" count={total} />
+        {hereCount > 0 && (
+          <FilterPill active={source === 'here'} onClick={() => onSource('here')} label="This project" count={hereCount} dot="var(--accent)" />
+        )}
         {sources.map((k) => (
           <FilterPill key={k} active={source === k} onClick={() => onSource(k)} label={INBOX_SOURCES[k].label} count={sourceCounts[k]} dot={INBOX_SOURCES[k].color} />
         ))}
@@ -683,8 +753,11 @@ function InboxList({ inbox, cards, total, sourceCounts, source, onSource, query,
         </span>
       </div>
       {inbox.state === 'error' && (
-        <div style={{ margin: '0 10px 6px', fontSize: 10, color: 'var(--danger)' }}>
-          Couldn't refresh: {INBOX_ERRORS[inbox.reason] || INBOX_ERRORS['bad-response']} Showing the last read.
+        <div style={{ margin: '0 10px 6px', fontSize: 10, color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span>Couldn't refresh: {INBOX_ERRORS[inbox.reason] || INBOX_ERRORS['bad-response']} Showing the last read.</span>
+          {inbox.reason === 'not-running' && canStart && (
+            <LinkButton onClick={onStart} color="#3FB950">{starting ? 'Starting…' : 'Start board'}</LinkButton>
+          )}
         </div>
       )}
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 0 6px', borderTop: '1px solid var(--border)' }}>

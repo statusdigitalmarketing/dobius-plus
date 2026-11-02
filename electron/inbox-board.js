@@ -12,12 +12,23 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import http from 'http';
+import net from 'net';
 import { execFile } from 'child_process';
 import { localDay } from '../shared/task-due.js';
 
-export const BOARD_PORT = 8765; // fixed in the board's server.py (PORT, TS_PORT = 8765, 8767)
+// Harness only (an isolated DOBIUS_USERDATA_DIR instance): point at another
+// port or folder to show the not-running and no-board states without
+// touching the real board. Ignored in a normal launch.
+const HARNESS = process.env.DOBIUS_USERDATA_DIR ? process.env : {};
+// The port override applies only together with the folder override, so a
+// harness pointed elsewhere only ever holds a throwaway token, never the real one.
+const harnessDirSet = !!(HARNESS.DOBIUS_INBOX_DIR && path.isAbsolute(HARNESS.DOBIUS_INBOX_DIR));
+const harnessPort = harnessDirSet && /^\d{2,5}$/.test(HARNESS.DOBIUS_INBOX_PORT || '') ? Number(HARNESS.DOBIUS_INBOX_PORT) : null;
+
+export const BOARD_PORT = harnessPort || 8765; // fixed in the board's server.py (PORT, TS_PORT = 8765, 8767)
 const PLIST = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.brett.inbox-server.plist');
 const DEFAULT_DIR = path.join(os.homedir(), 'Projects (Code)', 'inbox-board');
+const HARNESS_DIR = HARNESS.DOBIUS_INBOX_DIR && path.isAbsolute(HARNESS.DOBIUS_INBOX_DIR) ? HARNESS.DOBIUS_INBOX_DIR : null;
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_CARDS = 300;
 const SOURCES = new Set(['email', 'asana', 'text', 'whatsapp', 'meeting']);
@@ -42,8 +53,9 @@ export function boardUrl() {
 }
 
 /** Where the board lives: its launchd WorkingDirectory, else the usual folder. */
-export function findBoardDir({ plist = PLIST, fallback = DEFAULT_DIR, run = execFile } = {}) {
+export function findBoardDir({ plist = PLIST, fallback = DEFAULT_DIR, run = execFile, harnessDir = HARNESS_DIR } = {}) {
   return new Promise((resolve) => {
+    if (harnessDir) return resolve(harnessDir);
     if (!fs.existsSync(plist)) return resolve(fallback);
     run('/usr/bin/plutil', ['-extract', 'WorkingDirectory', 'raw', '-o', '-', plist], { timeout: 3000 }, (err, out) => {
       const dir = !err && typeof out === 'string' ? out.trim() : '';
@@ -235,4 +247,64 @@ export async function readBoard(opts = {}) {
   const got = await getJson(tok, opts);
   if (!got.ok) return { ok: false, reason: got.reason, url };
   return { ok: true, url, ...withoutToken(cardsFrom(got.payload, opts.today || localDay()), tok) };
+}
+
+const LABEL = 'com.brett.inbox-server';
+
+/**
+ * 'closed' only when a plain connect to 127.0.0.1:<port> is refused (nothing
+ * listens). Sends no bytes, so no token. 'open' when something accepts;
+ * 'unknown' on a timeout or any other error. Only 'closed' may start a board.
+ */
+export function portState({ port = BOARD_PORT, connect = net.connect, timeoutMs = 1500 } = {}) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; sock.destroy(); resolve(v); };
+    const sock = connect({ host: '127.0.0.1', port });
+    sock.setTimeout?.(timeoutMs, () => finish('unknown'));
+    sock.once('connect', () => finish('open'));
+    sock.once('error', (err) => finish(err?.code === 'ECONNREFUSED' ? 'closed' : 'unknown'));
+  });
+}
+
+/** { installed, canStart }: the board has run here (it made its token), and its launchd job exists. */
+export async function boardStatus(opts = {}) {
+  const dir = opts.dir || await findBoardDir(opts);
+  return { installed: !!readToken(dir), canStart: fs.existsSync(opts.plist || PLIST) };
+}
+
+function launchctl(args, run) {
+  return new Promise((resolve) => {
+    run('/bin/launchctl', args, { timeout: 5000 }, (err) => resolve(!err));
+  });
+}
+
+/**
+ * Start the board through its own launchd job, the way its menu bar app
+ * does: kickstart if the job is loaded (a running board is left alone, no -k),
+ * else bootstrap it from its plist. Then wait for our listener on 8765.
+ * { ok } or { ok: false, reason: 'not-installed' | 'not-started' }.
+ */
+export async function startBoard(opts = {}) {
+  const { plist = PLIST, run = execFile, uid = process.getuid?.(), waitMs = 10000, isMine = listenerIsMine, probe = portState } = opts;
+  if (typeof uid !== 'number' || !fs.existsSync(plist)) return { ok: false, reason: 'not-installed' };
+  // A harness pointed at another port must never start the REAL board's job:
+  // it would check the wrong port and launch a second board beside a running one.
+  if (harnessPort && !opts.allowHarness) return { ok: false, reason: 'not-started' };
+  // A board already answering (started by hand, outside launchd) must not get
+  // a second copy: its startup clears shared temp files and marks in-flight
+  // sends unknown before it fails to bind.
+  if (await isMine()) return { ok: true };
+  // Launch only into a CONFIRMED empty port. A failed or slow lsof says
+  // nothing, so it must never be read as "no board".
+  const port = await probe();
+  if (port !== 'closed') return { ok: false, reason: port === 'open' ? 'busy' : 'not-started' };
+  if (!await launchctl(['kickstart', `gui/${uid}/${LABEL}`], run)) {
+    await launchctl(['bootstrap', `gui/${uid}`, plist], run);
+  }
+  for (const until = Date.now() + waitMs; Date.now() < until;) {
+    if (await isMine()) return { ok: true };
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return { ok: false, reason: 'not-started' };
 }

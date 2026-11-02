@@ -52,3 +52,17 @@ export function matchesQuery(query, ...fields) {
   const hay = fields.filter((f) => typeof f === 'string').join(' ').toLowerCase();
   return words.every((w) => hay.includes(w));
 }
+
+const projectKey = (s) => String(s || '').toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9]/g, '');
+
+/**
+ * Does an Inbox board project name ("Dobius+", "Better Health") belong to
+ * this project folder ("dobius-plus", "better-health-now")? Loose on purpose,
+ * compared on letters and digits only; names under 4 characters never match.
+ */
+export function sameProject(boardProject, folderPath) {
+  const a = projectKey(boardProject);
+  const b = projectKey(String(folderPath || '').split('/').filter(Boolean).pop());
+  if (a.length < 4 || b.length < 4) return false;
+  return a === b || b.startsWith(a) || a.startsWith(b);
+}

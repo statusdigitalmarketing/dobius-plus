@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { cardsFrom, readToken, readBoard as readBoardRaw, findBoardDir, listenerIsMine } from '../inbox-board.js';
+import { cardsFrom, readToken, readBoard as readBoardRaw, findBoardDir, listenerIsMine, boardStatus, startBoard, portState } from '../inbox-board.js';
 
 // Tests drive fake listeners; ownership has its own test below.
 const readBoard = (opts) => readBoardRaw({ listenerIsMine: async () => true, ...opts });
@@ -257,4 +257,62 @@ test('readBoard sends nothing when the listener is not ours', async () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('boardStatus: installed means the board made its token; canStart means its plist exists', async () => {
+  const dir = tmpDir();
+  try {
+    const plist = path.join(dir, 'job.plist');
+    assert.deepEqual(await boardStatus({ dir, plist }), { installed: false, canStart: false });
+    fs.writeFileSync(path.join(dir, 'token.txt'), 'tokTOKtokTOKtokTOK');
+    fs.writeFileSync(plist, '');
+    assert.deepEqual(await boardStatus({ dir, plist }), { installed: true, canStart: true });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('startBoard kickstarts the job, bootstraps it if not loaded, then waits for our listener', async () => {
+  const dir = tmpDir();
+  try {
+    const plist = path.join(dir, 'job.plist');
+    assert.equal((await startBoard({ plist, uid: 501 })).reason, 'not-installed');
+    fs.writeFileSync(plist, '');
+    const calls = [];
+    const run = (fails) => (bin, args, _o, cb) => { calls.push(args.join(' ')); cb(fails.includes(args[0]) ? new Error('x') : null); };
+    let checks = 0;
+    const upSoon = async () => (checks += 1) >= 3; // down at the pre-check and once after
+    // already running (e.g. started by hand): launchctl is never called
+    assert.deepEqual(await startBoard({ plist, uid: 501, run: run([]), isMine: async () => true }), { ok: true });
+    assert.deepEqual(calls, []);
+    const closed = async () => 'closed';
+    assert.deepEqual(await startBoard({ plist, uid: 501, run: run([]), isMine: upSoon, probe: closed }), { ok: true });
+    assert.deepEqual(calls, ['kickstart gui/501/com.brett.inbox-server']);
+    calls.length = 0;
+    checks = 0;
+    assert.deepEqual(await startBoard({ plist, uid: 501, run: run(['kickstart']), isMine: upSoon, probe: closed }), { ok: true });
+    assert.deepEqual(calls, ['kickstart gui/501/com.brett.inbox-server', `bootstrap gui/501 ${plist}`]);
+    const never = await startBoard({ plist, uid: 501, run: run([]), isMine: async () => false, waitMs: 50, probe: closed });
+    assert.equal(never.reason, 'not-started');
+    // lsof failed (false) but the port answers, or the probe is unsure: never launch
+    calls.length = 0;
+    assert.equal((await startBoard({ plist, uid: 501, run: run([]), isMine: async () => false, probe: async () => 'open' })).reason, 'busy');
+    assert.equal((await startBoard({ plist, uid: 501, run: run([]), isMine: async () => false, probe: async () => 'unknown' })).reason, 'not-started');
+    assert.deepEqual(calls, []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('portState: refused is closed, a connect is open, anything else unknown', async () => {
+  const fake = (event, code) => () => {
+    const sock = new EventEmitter();
+    sock.destroy = () => {};
+    sock.setTimeout = () => {};
+    setImmediate(() => (event === 'error' ? sock.emit('error', Object.assign(new Error(code), { code })) : sock.emit(event)));
+    return sock;
+  };
+  assert.equal(await portState({ connect: fake('error', 'ECONNREFUSED') }), 'closed');
+  assert.equal(await portState({ connect: fake('connect') }), 'open');
+  assert.equal(await portState({ connect: fake('error', 'EPERM') }), 'unknown');
 });
