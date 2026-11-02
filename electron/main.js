@@ -39,10 +39,10 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, trimToEscapeBoundary } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, trimToEscapeBoundary } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
-import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
+import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending } from './chat-service.js';
 import { launchCommandFor } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
@@ -800,6 +800,7 @@ function setupDataHandlers() {
   // What a tab's Claude runs (from its session's usage record) and what it can
   // switch to (the catalog Claude cached for that account). model-picker.js.
   const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,100}$/;
+  const MODEL_INPUT_QUIET_MS = 500;
   const sessionModel = async (sessionId) => {
     if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) return null;
     const file = path.join(usageDirPath(app.getPath('userData')), `${sessionId}.json`);
@@ -834,7 +835,13 @@ function setupDataHandlers() {
     const org = await orgFor(current);
     // Without a known organisation, only the session's own dir: a catalog
     // from another account's cache is never shown or allowed.
-    return readModelCatalog(org ? [dir, defaultClaudeDir()] : [dir], org);
+    if (org) return readModelCatalog([dir, defaultClaudeDir()], org);
+    // Organisation unknown (metadata missing or unreadable, an API-key login):
+    // only a cache holding ONE organisation's catalogs can be this account's.
+    let names = [];
+    try { names = (await fs.promises.readdir(path.join(dir, 'cache', 'model-catalog'))).filter((n) => n.endsWith('-cc.json')); } catch { return null; }
+    const orgs = new Set(names.map((n) => n.split('-')[0]));
+    return orgs.size === 1 ? readModelCatalog([dir], [...orgs][0]) : null;
   };
   // The session a tab runs NOW is main's call (tab-context), never the
   // window's: a stale sessionId must not name another session's model.
@@ -855,6 +862,14 @@ function setupDataHandlers() {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false, error: 'bad tab' };
     const senderId = event.sender.id;
     if (!ownsTerminal(senderId, tabId)) return { ok: false, error: 'not your tab' };
+    // NO input may reach the tab from here to the paste: anything typed (the
+    // phone, the keyboard, a resume) would make every check below stale. And
+    // the last input must be old enough that its echo has been drawn, or an
+    // empty-looking box may already hold it.
+    const seq = terminalInputSeq(tabId);
+    const typedMeanwhile = () => terminalInputSeq(tabId) !== seq;
+    if (submitPending(tabId)) return { ok: false, error: 'Something is still being typed into the tab: try again' };
+    if (terminalInputAgeMs(tabId) < MODEL_INPUT_QUIET_MS) return { ok: false, error: 'Something was just typed into the tab: try again in a moment' };
     if (!(await getTerminalClaudeInfo(tabId))) return { ok: false, error: 'Claude is not running in this tab' };
     const st = terminalStatus.statusFor(tabId)?.status;
     if (st === 'working' || st === 'needs') return { ok: false, error: st === 'working' ? 'Claude is working: change it when this turn ends' : 'Answer Claude first' };
@@ -862,13 +877,12 @@ function setupDataHandlers() {
     const current = await sessionModel(sessionId);
     const cmd = pickerCommand(choice, await catalogFor(current), current?.modelId);
     if (!cmd) return { ok: false, error: 'That choice is not available for this session' };
-    // Input arriving while the screen is read (the phone, the keyboard) would
-    // make the empty box a stale reading: the command must not join it.
-    const seq = terminalInputSeq(tabId);
     const box = await claudePromptBox(tabId);
     if (box === null) return { ok: false, error: "Claude's prompt is not showing" };
     if (box.trim()) return { ok: false, error: "Clear what is typed in Claude's prompt first" };
-    if (terminalInputSeq(tabId) !== seq || !ownsTerminal(senderId, tabId)) return { ok: false, error: 'Something was typed into the tab meanwhile: try again' };
+    // The same session still, right before the paste (a resume changes it).
+    if (!(await tabSessionIs(tabId, sessionId))) return { ok: false, error: 'This chat is catching up with the tab: try again in a moment' };
+    if (typedMeanwhile() || submitPending(tabId) || !ownsTerminal(senderId, tabId)) return { ok: false, error: 'Something was typed into the tab meanwhile: try again' };
     cancelAutoResumeTab(tabId);
     let stranded = false;
     const ok = await submitPromptToTab(tabId, cmd, () => ownsTerminal(senderId, tabId), () => { stranded = true; });

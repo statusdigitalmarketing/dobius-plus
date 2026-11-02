@@ -216,12 +216,13 @@
 .chatp-model:hover .chatp-model-effort, .chatp-model.open .chatp-model-effort { color: var(--dim); }
 
 /* The model menu, after the Claude app's: a panel above the chip, submenus to its right. */
-.chatp-mm { position: fixed; z-index: 1000; display: flex; align-items: flex-end; gap: 6px; outline: none; }
+.chatp-mm { position: fixed; z-index: 1000; outline: none; }
 .chatp-mm-panel {
   min-width: 248px; max-width: 320px; padding: 6px; border: 1px solid var(--border); border-radius: 12px;
   background: var(--surface); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); display: flex; flex-direction: column; gap: 1px;
 }
-.chatp-mm-sub { min-width: 180px; max-height: 360px; overflow-y: auto; }
+.chatp-mm-sub { position: absolute; bottom: 0; left: calc(100% + 6px); min-width: 180px; max-height: 360px; overflow-y: auto; }
+.chatp-mm-sub.flip { left: auto; right: calc(100% + 6px); }
 .chatp-mm-row {
   display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px;
   background: transparent; color: var(--fg); font: inherit; font-size: 13px; text-align: left; cursor: pointer;

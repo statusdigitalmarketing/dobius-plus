@@ -59,15 +59,25 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
     return () => window.removeEventListener('resize', close);
   }, [onClose]);
   useEffect(() => { rootRef.current?.focus(); }, [pos]);
-  // Keep the whole menu (submenu included) inside the window: shift it left
-  // when it would run past the right edge.
+  // The main panel is fitted ONCE, when it opens, and never moves while open:
+  // moving it put another row under the pointer, so a click meant for a row
+  // could pick a model. A submenu that would run past the right edge opens on
+  // the left of the panel instead.
   useLayoutEffect(() => {
     const el = rootRef.current;
     if (!el || !pos) return;
     const over = el.getBoundingClientRect().right - (window.innerWidth - 8);
     if (over > 0) el.style.left = `${Math.max(8, pos.left - over)}px`;
-    else el.style.left = `${pos.left}px`;
-  }, [pos, sub]);
+  }, [pos]);
+  const [flip, setFlip] = useState(false);
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    const subEl = el?.querySelector('.chatp-mm-sub');
+    if (!subEl) { setFlip(false); return; }
+    const panel = el.querySelector('.chatp-mm-panel').getBoundingClientRect();
+    const w = subEl.getBoundingClientRect().width;
+    setFlip(panel.right + 6 + w > window.innerWidth - 8 && panel.left - 6 - w >= 8);
+  }, [sub, pos]);
   // The keyboard's row stays in view in a long list.
   useEffect(() => {
     rootRef.current?.querySelector('.chatp-mm-row.focused')?.scrollIntoView?.({ block: 'nearest' });
@@ -138,7 +148,7 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
         <div className="chatp-mm-note">Also your default for new sessions</div>
       </div>
       {sub && (
-        <div className={`chatp-mm-panel chatp-mm-sub chatp-mm-sub-${sub}`} role="menu" aria-label={SUBMENUS[sub]}>
+        <div className={`chatp-mm-panel chatp-mm-sub chatp-mm-sub-${sub}${flip ? ' flip' : ''}`} role="menu" aria-label={SUBMENUS[sub]}>
           {subRows.map((row, i) => {
             const checked = row.kind === 'effort' ? row.item.id === current?.effort : false;
             return (
