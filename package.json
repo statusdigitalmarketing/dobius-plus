@@ -31,7 +31,7 @@
     "test:preview": "node --import ./electron/__tests__/register.mjs ./electron/__tests__/preview-sanitize.test.mjs",
     "test:gws": "node --import ./electron/__tests__/register.mjs ./electron/__tests__/gws-accounts.test.mjs",
     "test:shim": "node ./electron/__tests__/gws-shim.test.mjs",
-    "test:status": "node ./electron/__tests__/terminal-status.test.mjs",
+    "test:status": "node --import ./electron/__tests__/register.mjs ./electron/__tests__/terminal-status.test.mjs",
     "test:conn": "node ./electron/__tests__/connection.test.mjs",
     "test:selector": "node ./electron/__tests__/selector-parser.test.mjs",
     "test:modellabel": "node ./electron/__tests__/model-label.test.mjs",

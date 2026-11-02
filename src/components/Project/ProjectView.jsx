@@ -382,7 +382,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       useStore.getState().removeTab(tabId);
     };
     const pending = new Map(); // tabId -> timer for an adopt not added yet
-    const offAdopt = window.electronAPI?.onTabAdopt?.(({ tab, status, hookOwned }) => {
+    const offAdopt = window.electronAPI?.onTabAdopt?.(({ tab, status, hookOwned, background }) => {
       if (!tab || tab.projectPath !== projectPath) return;
       // Already listed (this window reloaded mid-dock and restored it from
       // disk): main only docks a tab the SOURCE owns, so that pane could not
@@ -394,7 +394,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       pending.set(tab.id, setTimeout(() => {
         pending.delete(tab.id);
         markAdopting(tab.id);
-        if (!useStore.getState().adoptTab(tab, status, hookOwned)) takeAdopting(tab.id);
+        if (!useStore.getState().adoptTab(tab, status, hookOwned, background)) takeAdopting(tab.id);
       }, exists ? 50 : 0));
     });
     const giveUp = (tabId) => {

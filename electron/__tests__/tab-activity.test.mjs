@@ -257,3 +257,17 @@ test('freshenRows: a row settled early is re-read when the whole reply is ready'
   ts.forget(ID);
   assert.deepEqual(freshenRows([row], ts.activityFor), [], 'gone: dropped');
 });
+
+test('a turn that ended with background work running reads Waiting, not Working', () => {
+  const B = 'term-/p/bg-1';
+  ts.ingest(B, '\x1b]777;dobius;working\x07', 1000);
+  ts.ingest(B, '\x1b]777;dobius;working;background\x07', 2000);
+  const a = ts.activityFor(B);
+  assert.equal(a.waiting, 'background');
+  const label = tabActivityLabel({ live: true, ...a, now: 3000 });
+  assert.equal(label.kind, 'waiting');
+  assert.equal(label.text, 'Waiting');
+  ts.ingest(B, '\x1b]777;dobius;working\x07', 4000);
+  assert.equal(tabActivityLabel({ live: true, ...ts.activityFor(B), now: 5000 }).kind, 'working', 'the next turn is Working again');
+  ts.forget(B);
+});

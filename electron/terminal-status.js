@@ -27,7 +27,8 @@ const TAB_STATUS_VALUES = new Set(['working', 'done', 'needs']);
 // An optional tag after the state: needs;handoff (a turn that ended handing
 // the person a `! command`, shared/handoff.js) and done;idle (Claude idle for
 // a minute, which must never clear a red).
-const MARKER_RE = /\x1b\]777;dobius;(working|done|needs)(?:;(handoff|idle))?\x07/g;
+// working;background: a turn ended with background work still running.
+const MARKER_RE = /\x1b\]777;dobius;(working|done|needs)(?:;(handoff|idle|background))?\x07/g;
 const QUIET_MS = 1500;          // silence before a working tab settles to IDLE
 const DONE_GUARD_MS = 800;      // after a hook 'done', ignore its own trailing bytes
 const TAIL_KEEP = 64;           // bytes retained to catch a marker split across chunks
@@ -116,13 +117,18 @@ function applyHookState(st, state, now, tag) {
   st.doneAt = state === 'done' ? now : 0;
   st.doneSticky = state === 'done';
   st.needsKind = state === 'needs' ? (tag === 'handoff' ? 'handoff' : 'prompt') : null;
+  // What a working tab is waiting on: 'background' once a turn ended with
+  // background work running; any other hook state clears it.
+  st.waiting = state === 'working' && tag === 'background' ? 'background' : null;
   st.handoffAt = st.needsKind === 'handoff' ? now : 0;
 }
 
 // Claude's idle-for-a-minute 'done' while the tab is red: the person still
 // owes an answer, so it changes nothing.
 function skipsRed(st, state, tag) {
-  return state === 'done' && tag === 'idle' && st.status === 'needs';
+  // Nor while a turn's background work runs: Claude sits at its prompt, so
+  // its idle notification fires, but the work has not come back yet.
+  return state === 'done' && tag === 'idle' && (st.status === 'needs' || (st.status === 'working' && st.waiting === 'background'));
 }
 
 /** A hook state delivered out of band (Codex hooks reach main over the bridge,
@@ -149,6 +155,24 @@ export function clearHandoff(id, shownSince = Infinity, now = Date.now()) {
   if (!(st.handoffAt <= shownSince)) return false;
   enterStatus(st, 'done', now);
   applyHookState(st, 'done', now);
+  return true;
+}
+
+/** Whether a tab is waiting on a turn's background work (working;background). */
+export function waitingOnBackground(id) {
+  const st = live.get(id);
+  return !!st && st.status === 'working' && st.waiting === 'background';
+}
+
+/** End a background wait: Claude is gone from the tab (killed mid-wait), so
+ * nothing will report the work's end. Output and quiet drive the dot again.
+ * Returns true when it released. */
+export function releaseWait(id, now = Date.now()) {
+  const st = live.get(id);
+  if (!st || st.waiting !== 'background') return false;
+  st.waiting = null;
+  st.hookOwned = false;
+  st.lastActivityAt = now;
   return true;
 }
 
@@ -251,6 +275,8 @@ export function activityFor(id) {
     since: inStretch ? st.workingSince || null : null,
     lastWorkMs: st.lastWorkMs || 0,
     doneAt: st.status === 'done' ? st.doneAt || 0 : 0,
+    // 'background': the turn ended with background work still running.
+    waiting: st.status === 'working' ? st.waiting || null : null,
   };
 }
 
@@ -263,14 +289,14 @@ export function forget(id) {
 export function statusFor(id) {
   const st = live.get(id);
   if (!st) return null;
-  return { status: st.status, lastActivityAt: st.lastActivityAt, hookOwned: st.hookOwned };
+  return { status: st.status, lastActivityAt: st.lastActivityAt, hookOwned: st.hookOwned, waiting: st.waiting || null, needsKind: st.needsKind || null };
 }
 
 /** Snapshot of all live statuses + the recent-exit cache. */
 export function snapshot() {
   const liveOut = {};
   for (const [id, st] of live) {
-    liveOut[id] = { status: st.status, lastActivityAt: st.lastActivityAt, hookOwned: st.hookOwned };
+    liveOut[id] = { status: st.status, lastActivityAt: st.lastActivityAt, hookOwned: st.hookOwned, waiting: st.waiting || null };
   }
   return { live: liveOut, recentExits: recentExits.slice() };
 }

@@ -434,6 +434,8 @@ function buildTerminalsPayload() {
       projectName: meta.projectName,
       label: labelByTabId.get(t.id) || meta.label,
       status: st?.status || 'idle',
+      // 'background': the turn ended with background work still running.
+      waiting: st?.status === 'working' ? (st?.waiting || null) : null,
       // The spinner's whimsical gerund ("Flibbertigibbeting"), Sam-requested:
       // it is the most alive thing on the desktop screen and the phone showed
       // a flat "working" instead. Only read for tabs that are actually
@@ -476,7 +478,7 @@ function terminalsSignature(payload) {
     // The source flag pushes once when the rendered-screen reading replaces
     // the raw-stream fallback, which can be stale (Codex Medium); a seconds
     // bucket that doubles bounds any remaining drift without per-second pushes.
-    .map((t) => `${t.id}:${t.label}:${t.status}:${t.verb}:${activitySig(t)}:${t.model}:${t.sessionId || ''}:${t.claudeLive ? 1 : 0}:${t.ctxPct == null ? '' : Math.round(t.ctxPct / 5)}`)
+    .map((t) => `${t.id}:${t.label}:${t.status}:${t.waiting || ''}:${t.verb}:${activitySig(t)}:${t.model}:${t.sessionId || ''}:${t.claudeLive ? 1 : 0}:${t.ctxPct == null ? '' : Math.round(t.ctxPct / 5)}`)
     .sort().join('|');
   const exits = payload.recentExits.map((e) => `${e.id}:${e.exitCode}:${e.at}`).join('|');
   return `${tabs}#${exits}`;

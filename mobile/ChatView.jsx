@@ -1492,7 +1492,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         {echoes.map((e) => (
           <Bubble key={`echo-${e.at}`} role="user" content={e.content} timestamp={e.at} sending />
         ))}
-        {sessionId && working && <Activity activity={activity} />}
+        {sessionId && working && <Activity activity={tab?.waiting === 'background' ? { verb: 'Waiting on background task' } : activity} />}
       </main>
       {unseen !== 0 && (
         <button type="button" className="chat-jump" onClick={jumpToLatest}>

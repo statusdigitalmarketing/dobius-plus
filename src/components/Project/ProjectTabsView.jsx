@@ -278,6 +278,7 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                     since: a?.since,
                     lastWorkMs: a?.lastWorkMs,
                     background: a?.background,
+                    waiting: a?.waiting,
                     unread: live ? !!unreadTabs[t.id] : !!row?.unread,
                     now,
                   });

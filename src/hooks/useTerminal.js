@@ -233,8 +233,9 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
         const store = useStore.getState();
         // done;idle is Claude idle for a minute: a red tab (an open prompt, or
         // a `! command` handed back) still waits on the person.
-        if (parts[1] === 'done' && parts[2] === 'idle' && store.tabStatus[id] === 'needs') return true;
-        store.setTabStatus(id, parts[1], { fromHook: true, handoff: parts[2] === 'handoff' });
+        // Nor a tab whose turn ended with background work still running.
+        if (parts[1] === 'done' && parts[2] === 'idle' && (store.tabStatus[id] === 'needs' || store.backgroundTabs[id])) return true;
+        store.setTabStatus(id, parts[1], { fromHook: true, handoff: parts[2] === 'handoff', background: parts[2] === 'background' });
         // Claim hook-ownership so useTabActivity's silence settler doesn't
         // flip this tab to 'done' during a long quiet tool call. 'done' or
         // unknown payload releases the claim back to output-flow inference.
@@ -274,10 +275,29 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       // Enter typed into a tab a hook left green: output drives it again.
       // After xterm has parsed what is queued, so a 'done' still waiting
       // there cannot land after the release and hold green again.
+      // The tab moved into this window: main's live status for it wins over
+      // whatever came along with the move (main.js terminal:claimPty).
+      if (termId === id && typeof status === 'string' && status.startsWith('sync;')) {
+        const [, st, owned, bg, handoff] = status.split(';');
+        if (!['working', 'needs', 'done', 'idle'].includes(st)) return;
+        const s = useStore.getState();
+        // A 'working' that only output flow decided is this window's to infer
+        // from the output it now receives: taking it here would hold yellow,
+        // since nothing starts this window's quiet timer (Codex, round 7).
+        // Nor does it keep hook ownership the move carried along: main says no
+        // hook owns this tab now, so quiet output must be able to settle it.
+        // So the tab starts idle here: the next output it receives makes it
+        // working again, and the quiet after that settles it (Codex, round 9).
+        if (st === 'working' && owned !== '1') { s.releaseBackground(id); s.markHookOwned(id, 'idle'); s.setTabStatus(id, 'idle'); return; }
+        s.setTabStatus(id, st, { syncBackground: bg === '1', handoff: handoff === '1' });
+        s.markHookOwned(id, owned === '1' ? st : (st === 'done' ? 'done' : 'idle'));
+        return;
+      }
       if (termId === id && status === 'release') {
         termRef.current?.write('', () => {
           const s = useStore.getState();
           s.releaseHookDone(id);
+          s.releaseBackground(id);
           // Enter is activity: yellow now, the settler takes it to idle, so the
           // dot moves even if the command's output already went by.
           if (s.tabStatus[id] === 'done') s.setTabStatus(id, 'working');

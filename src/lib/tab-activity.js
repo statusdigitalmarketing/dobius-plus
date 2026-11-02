@@ -35,6 +35,12 @@ export function tabActivityLabel(x) {
   if (x.status === 'needs') {
     return { kind: 'input', text: 'Input', title: 'Needs your input (a permission prompt or a question)' };
   }
+  // A turn that ended with background work still running (the Stop hook's
+  // working;background): the same Waiting the sidebar shows for a finished
+  // turn's background shells and agents.
+  if (x.status === 'working' && x.waiting === 'background') {
+    return { kind: 'waiting', text: 'Waiting', title: 'Turn finished, background work it started is still running' };
+  }
   // Working whenever the status is, like the yellow dot (plain output too).
   if (x.status === 'working') {
     const elapsed = Number.isFinite(x.since) && x.since > 0 && x.since <= now ? now - x.since : null;

@@ -39,7 +39,7 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending } from './chat-service.js';
@@ -103,7 +103,7 @@ import {
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler } from './voice-bridge.js';
 import { createCodexStatusRouter, withCodexHooks, stripCodexHooks, hasCodexHooks } from './codex-status.js';
 import { answersPrompt, submitsInput } from '../shared/prompt-answer.js';
-import { HANDOFF_SHELL } from '../shared/handoff.js';
+import { stopHookCommand } from '../shared/handoff.js';
 import { findCodexSessionForProcess, readRolloutMeta } from './codex-sessions.js';
 import { createOpenTabService } from './bridge-open-tab.js';
 import { createBridgeOpenDeps } from './bridge-open-main.js';
@@ -1824,9 +1824,11 @@ function setupFileHandlers() {
   // classifier-blocked action handed back) is waiting on them: red, tagged
   // handoff, instead of green. Decided inside the hook from its stdin
   // (last_assistant_message), one rule with Codex's (shared/handoff.js).
+  // A turn that ends with background work still running is not done: it
+  // stays working, tagged background ("waiting on background task").
   const stopEntry = {
     type: 'command',
-    command: `if ${HANDOFF_SHELL}; then ${statusCmd('needs;handoff')}; else ${statusCmd('done')}; fi`,
+    command: stopHookCommand(statusCmd),
   };
   // The installed Stop command must be exactly the current one: any change
   // to it (the background-work guard, say) then reaches existing installs.
@@ -3653,11 +3655,28 @@ function setupWindowHandlers() {
 
   // Claim an existing PTY for a new window (used after tear-off). Requires
   // an active grant for THIS tab issued to THIS webContents.
+  // The window that owns a PTY takes main's live status for it: markers that
+  // landed while the tab moved (a background wait ending, a turn finishing)
+  // went to the old window, neither a tear-off nor a dock carried the
+  // background wait reliably, and a reloaded window starts empty (Codex,
+  // rounds 5 and 6). Sent again half a second later, so a marker split across
+  // the move (its first half to the old window) is taken in too, as long as
+  // the same window still owns the tab.
+  const syncStatusTo = (wc, tabId) => {
+    const send = () => {
+      if (wc.isDestroyed() || getTerminalWebContentsId(tabId) !== wc.id) return;
+      const st = terminalStatus.statusFor(tabId);
+      if (st) wc.send('terminal:statusHint', tabId, `sync;${st.status};${st.hookOwned ? 1 : 0};${st.waiting === 'background' ? 1 : 0};${st.needsKind === 'handoff' ? 1 : 0}`);
+    };
+    send();
+    setTimeout(send, 500).unref?.();
+  };
   ipcMain.handle('terminal:claimPty', (event, tabId) => {
     if (!tabId || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
-    // A repeat claim by the window that already owns it is a no-op success.
+    // A repeat claim by the window that already owns it is a no-op success
+    // (a reloaded window): it still needs the live status.
     if (!tearOffGrants.has(tabId) && terminalOwners.get(tabId) === event.sender.id
-      && getTerminalWebContentsId(tabId) === event.sender.id) return { ok: true };
+      && getTerminalWebContentsId(tabId) === event.sender.id) { syncStatusTo(event.sender, tabId); return { ok: true }; }
     if (tearOffGrants.get(tabId) !== event.sender.id) return { ok: false };
     // A dock target mid-reload: this claim comes from the page being torn
     // down, which would take the PTY and then restart it. The dock offers
@@ -3673,6 +3692,7 @@ function setupWindowHandlers() {
       // claiming window's webContents id so the right window is confirmed. Codex.
       markTearOffConfirmed(tabId, event.sender.id);
       ownerCleanup.hook(event.sender);
+      syncStatusTo(event.sender, tabId);
     } else {
       // Claim failed (the PTY exited between window creation and claim, so
       // reassignTerminal found no entry). Revoke the grant and close the now
@@ -3865,6 +3885,10 @@ function setupWindowHandlers() {
     tearOffGrants.set(tabId, twc.id);
     const token = {};
     const payload = { tab, status, hookOwned: state?.hookOwned === true };
+    // The background wait from main's own record, read at EACH send (a retry
+    // after the target reloads included): the source window's snapshot, or
+    // an earlier send, can predate the work finishing (Codex, twice).
+    const withWait = () => ({ ...payload, background: status === 'working' && terminalStatus.statusFor(tabId)?.waiting === 'background' });
     return new Promise((resolve) => {
       let settled = false;
       const fail = () => {
@@ -3885,7 +3909,7 @@ function setupWindowHandlers() {
         // dead copy before re-adding): put the record back first.
         recordDockedTab(target, tab);
         tearOffGrants.set(tabId, twc.id);
-        twc.send('tab:adopt', payload);
+        twc.send('tab:adopt', withWait());
       };
       const waiter = {
         timer: setTimeout(fail, 10000),
@@ -3919,7 +3943,7 @@ function setupWindowHandlers() {
       twc.once('destroyed', fail);
       twc.on('did-start-loading', onReload);
       tearOffClaimWaiters.set(tabId, waiter);
-      twc.send('tab:adopt', payload);
+      twc.send('tab:adopt', withWait());
     });
   };
 }
@@ -4234,7 +4258,12 @@ app.whenReady().then(() => {
   addTerminalObserver({
     onData: (id, data) => terminalStatus.ingest(id, data),
     onExit: (id, info) => terminalStatus.noteExit(id, info),
-    onSpawn: (id) => terminalStatus.forget(id),
+    // A new shell under this id (an account move respawns the tab without
+    // typing anything): main starts its status over, and the window drops
+    // any hook state it still holds, a background wait included (Codex).
+    // Deferred one tick: onSpawn runs after the old PTY is gone and before
+    // createTerminal (synchronous) registers the new one with its window.
+    onSpawn: (id) => { terminalStatus.forget(id); setImmediate(() => sendToTerminalWindow(id, 'terminal:statusHint', 'release')); },
   });
   // Answering a permission prompt clears red. Claude sends no hook for the
   // answer, so main's tracker (phone, board) changes here and the tab's window
@@ -4253,6 +4282,17 @@ app.whenReady().then(() => {
     // the window lets output settle it instead of holding it yellow.
     if (answered) sendToTerminalWindow(id, 'terminal:statusHint', answered === 'handoff' ? 'working-free' : 'working');
     else if (terminalStatus.releaseDone(id, data, now)) sendToTerminalWindow(id, 'terminal:statusHint', 'release');
+    // Enter in a tab waiting on a turn's background work ends the wait only
+    // when Claude is no longer running there (killed mid-wait): an Enter at
+    // Claude's own prompt starts nothing, or starts a turn its hooks report
+    // (Codex, round 10). Checked once the Enter has gone through.
+    if (terminalStatus.waitingOnBackground(id) && submitsInput(data)) {
+      const pty = terminalInstance(id);
+      terminalRunsClaude(id).then((runs) => {
+        if (runs || terminalInstance(id) !== pty) return;
+        if (terminalStatus.releaseWait(id)) sendToTerminalWindow(id, 'terminal:statusHint', 'release');
+      }, (err) => console.warn('[status] background-wait check failed:', err?.message || err));
+    }
   });
   addTerminalObserver({ onExit: (id) => { lastEnterAt.delete(id); lastAnswerAt.delete(id); } });
   // Codex tabs: Codex hooks reach main over the bridge, by session, never by
