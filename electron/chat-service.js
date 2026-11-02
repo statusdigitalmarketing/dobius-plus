@@ -3,7 +3,7 @@
 // paste-then-Enter submit. Main-process only.
 
 import { randomBytes } from 'node:crypto';
-import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalInputAgeMs, terminalRawOutputSeq, terminalSettledSinceInput, terminalClosing } from './terminal-manager.js';
+import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalInputAgeMs, terminalRawOutputSeq, terminalSettledSinceInput, terminalClosing, terminalCols, terminalAltAtBufferStart } from './terminal-manager.js';
 import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, spinnerStatus } from './selector-parser.js';
 export { selectorFingerprint };
 import { renderScreenLines } from './screen-render.js';
@@ -55,10 +55,74 @@ export async function activityForTab(id) {
 // (plain shells, a Claude that has not linked its session yet). Trailing blank
 // padding per line and the all-blank tail are dropped.
 export function terminalTextTail(id, maxLines = 60) {
-  const raw = stripAnsi(getTerminalBuffer(id) || '');
+  return textTailOf(getTerminalBuffer(id) || '', maxLines);
+}
+
+function textTailOf(rawBuffer, maxLines) {
+  const raw = stripAnsi(rawBuffer);
   const lines = raw.split('\n').map((l) => l.replace(/\s+$/, ''));
   while (lines.length && !lines[lines.length - 1]) lines.pop();
   return lines.slice(-maxLines).join('\n');
+}
+
+/**
+ * What the tab's terminal SHOWS right now, as text: the output replayed
+ * through the screen emulator at the tab's own width (screen-render.js), so a
+ * TUI that repaints in place (Claude's spinner, its prompt box) reads as its
+ * screen, not as every frame it ever drew. The stripped byte stream it
+ * replaces printed stray spinner frames ("Doodling…") with blank gaps between
+ * them (Bryan, Asana 1220098108555131). Falls back to that stream only when
+ * the render fails.
+ */
+export async function terminalScreenText(id, maxLines = 60) {
+  const raw = getTerminalBuffer(id) || '';
+  const start = screenTailStart(raw, 262144);
+  let tail = raw.slice(start);
+  // Inside a full-screen program (vim, less) at the cut, whose ENTRY is not in
+  // the tail: replay it as entered, or its screen paints the normal buffer and
+  // stays there after it exits. The state at the cut comes from the part of
+  // the buffer before it, else from what the terminal recorded when it
+  // trimmed its buffer (the entry may be gone from the buffer altogether).
+  const before = lastAltScreenSwitch(raw.slice(0, start));
+  const inAltAtCut = before ? before === 'h' : terminalAltAtBufferStart(id);
+  if (inAltAtCut) tail = `\x1b[?1049h${tail}`;
+  let lines;
+  try { lines = await renderScreenLines(tail, { cols: terminalCols(id), exact: true }); } catch { lines = null; }
+  if (!lines) return textTailOf(raw, maxLines);
+  const rows = lines.map((l) => String(l).replace(/\s+$/, ''));
+  while (rows.length && !rows[rows.length - 1]) rows.pop();
+  while (rows.length && !rows[0]) rows.shift();
+  return rows.slice(-maxLines).join('\n');
+}
+
+// Where to cut a raw tail so it never starts inside an escape sequence: back
+// up to a nearby ESC that opens a short sequence, and skip FORWARD past the end
+// of a long control string (an OSC title can run past any backup limit) whose
+// opening ESC is before the cut and whose terminator is after it.
+export function screenTailStart(raw, max) {
+  let start = Math.max(0, raw.length - max);
+  if (start === 0) return 0;
+  const esc = raw.lastIndexOf('\x1b', start - 1);
+  if (esc === -1) return start;
+  const kind = raw[esc + 1];
+  if (kind === ']' || kind === 'P' || kind === '_' || kind === '^' || kind === 'X') {
+    // A control string: is it still open at the cut?
+    const body = raw.slice(esc + 2, start);
+    if (!/\x07|\x1b\\/.test(body)) {
+      const rest = raw.slice(start);
+      const m = /\x07|\x1b\\/.exec(rest);
+      return m ? start + m.index + m[0].length : raw.length;
+    }
+    return start;
+  }
+  return start - esc <= ESC_BACKUP_CHARS ? esc : start;
+}
+
+// 'h' (entered) or 'l' (left) for the last alternate-screen switch, or null.
+export function lastAltScreenSwitch(text) {
+  let last = null;
+  for (const m of text.matchAll(/\x1b\[\?(?:1049|1047|47)([hl])/g)) last = m[1];
+  return last;
 }
 
 // A selector read is stamped with the PTY and the count of writes it has

@@ -42,7 +42,7 @@ import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-in
 import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
-import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending } from './chat-service.js';
+import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending } from './chat-service.js';
 import { launchCommandFor } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
@@ -733,14 +733,21 @@ function setupDataHandlers() {
     // from a subdir keeps the transcript under the project root). A tab that
     // has moved elsewhere is reading a transcript of ITS project.
     let projectPath = resolved?.sessionProject || null;
-    if (!projectPath || (cwd && cwd !== projectPath && !cwd.startsWith(`${projectPath}/`))) projectPath = cwd;
-    // A tab inside the mapped project that has its OWN copy of the session
-    // (a git worktree under the repo) is reading that copy, not the parent's.
-    else if (cwd && cwd !== projectPath && resolved && await getTranscriptSig(resolved.sessionId, cwd)) projectPath = cwd;
+    if (!projectPath) projectPath = cwd;
+    else if (cwd && cwd !== projectPath && resolved) {
+      // The session's own copy under Claude's cwd wins (a git worktree under
+      // the repo, or a tab that moved elsewhere and is on THAT project's
+      // transcript). Otherwise the mapped project stays whenever the
+      // transcript is really there: the session lives where it was started,
+      // whatever folder Claude's process is in now (Bryan, Asana
+      // 1220098108555131: "No messages" over a live conversation).
+      if (await getTranscriptSig(resolved.sessionId, cwd)) projectPath = cwd;
+      else if (!cwd.startsWith(`${projectPath}/`) && !(await getTranscriptSig(resolved.sessionId, projectPath))) projectPath = cwd;
+    }
     if (!resolved || !projectPath) {
       const claudeLive = !!resolved || !!(await getTerminalClaudeInfo(tabId));
       if (!stillSame()) return null;
-      return { sessionId: null, claudeLive, status, shellText: terminalTextTail(tabId) };
+      return { sessionId: null, claudeLive, status, shellText: await terminalScreenText(tabId) };
     }
     const { sessionId } = resolved;
     const sig = await getTranscriptSig(sessionId, projectPath);
@@ -755,7 +762,7 @@ function setupDataHandlers() {
     return {
       sessionId, projectPath, sig, claudeLive: true, status, entries,
       // A linked session with nothing parsed yet still shows what is on screen.
-      ...(entries.length === 0 ? { shellText: terminalTextTail(tabId) } : {}),
+      ...(entries.length === 0 ? { shellText: await terminalScreenText(tabId) } : {}),
     };
   };
   ipcMain.handle('chat:poll', async (event, tabId, have) => {
@@ -3137,8 +3144,16 @@ function setupSessionTabCapture() {
           // gate keeps skipping a session since proven, e.g. Sam Ctrl-Cs a bare
           // `claude` and reruns it as `claude --resume <same-id>`.
           // Codex v1.0.39 r12 P2. Lapsed proof comes back down the same way.
-          if (provenanceChanged(fresh[runningSessionId]?.resolvedBy, how)) {
-            setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
+          // ...or the folder its transcript is under has been found to be
+          // another (a link saved before Claude's record was read by folder).
+          if (provenanceChanged(fresh[runningSessionId]?.resolvedBy, how)
+            || (how === 'presence' && fresh[runningSessionId]?.projectPath !== linkPath)) {
+            // Re-read the owner now: the awaits above leave time for the
+            // session to move to another tab (resumed there), which this
+            // snapshot would undo.
+            if (getSessionTabMap()?.[runningSessionId]?.tabId === t.id) {
+              setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
+            }
             continue;
           }
           // Still running: refresh the lastRunningAt stamp so auto-resume
@@ -4704,14 +4719,15 @@ app.on('before-quit', (e) => {
             clearSessionTabRunning(sid);
           } else if (
             running && running === sid
-            && provenanceChanged(mapQ[sid]?.resolvedBy, howQ)
+            && (provenanceChanged(mapQ[sid]?.resolvedBy, howQ)
+              || (howQ === 'presence' && mapQ[sid]?.projectPath !== linkPathQ))
           ) {
             // Same provenance change as the tick: argv or Claude's record now
             // proves an id we had only inferred, so re-link it as certain.
             // Quitting right after `claude --resume <same-id>` would otherwise
             // leave it 'fresh' and the r8 gate would skip restoring it.
             // Codex v1.0.39 r12 P2.
-            setSessionTabLink(sid, t.id, linkPathQ, howQ);
+            if (getSessionTabMap()?.[sid]?.tabId === t.id) setSessionTabLink(sid, t.id, linkPathQ, howQ);
           } else if (running && running !== sid) {
             // Tab switched sessions since the last capture tick (user ran
             // `claude --resume B` in a tab mapped to A, then quit fast).

@@ -3,9 +3,10 @@
 // BOTH that handler and the mobile board (v1.0.43 Phase 3b) share one
 // implementation with the same stale-link safeguards. Main-process only.
 
-import { getTerminalClaudeInfo, getTerminalCwd } from './terminal-manager.js';
+import { getTerminalClaudeInfo, getTerminalCwd, listTerminals } from './terminal-manager.js';
 import { getSessionTabMap } from './config-manager.js';
-import { estimateContextForSession } from './data-service.js';
+import { estimateContextForSession, sessionTranscriptBirth } from './data-service.js';
+import { presenceOf } from './claude-presence.js';
 import { snapshot as terminalStatusSnapshot } from './terminal-status.js';
 
 const RECENT_MS = 90 * 1000;
@@ -29,6 +30,11 @@ export async function resolveSessionForTab(tabId) {
   // has no argv id; fall back to the newest ACTIVELY-RUNNING map link.
   let sessionId = info.sessionId;
   let sessionProject;
+  let sessionFromRecord = null;
+  // Two children in the shell and none named by argv: which claude is in use
+  // cannot be told, so no session is named at all (neither the record nor a
+  // saved link may speak for it).
+  if (!sessionId && info.soleChild === false) return null;
   if (sessionId) {
     // The transcript lives under the SESSION's project, not necessarily the
     // tab's live cwd (a same-project resume from a subdir keeps it under the
@@ -37,6 +43,10 @@ export async function resolveSessionForTab(tabId) {
     // and another tab's link would name the other project's transcript.
     const link = map[sessionId];
     sessionProject = link?.tabId === tabId ? (link.projectPath || null) : null;
+  } else if ((sessionFromRecord = await recordSession(tabId, info))) {
+    // Claude's own record for THIS process names the session exactly (and
+    // follows /clear), and its transcript was found where the record says.
+    ({ sessionId, sessionProject } = sessionFromRecord);
   } else {
     // Only trust a link whose session is currently running, and only if it
     // was stamped at/after this process started (a link stamped earlier
@@ -59,6 +69,32 @@ export async function resolveSessionForTab(tabId) {
   }
   if (!sessionId) return null;
   return { sessionId, sessionProject, pid: info.pid, startedAt: info.startedAt ?? null };
+}
+
+/**
+ * The session a tab's fresh `claude` is on, from Claude's own record
+ * (<configDir>/sessions/<pid>.json, claude-presence.js), when that session's
+ * transcript exists under the directory the record names (or the tab's). The
+ * 15s link scan used to be the only way a bare `claude` got linked, so a
+ * session it could not place (Claude's cwd differing from the shell's) left
+ * the Chat view on "starting up" for good (Bryan, Asana 1220098108555131).
+ * @returns {Promise<{sessionId:string, sessionProject:string}|null>}
+ */
+async function recordSession(tabId, info) {
+  // With other children in the shell the record may not be the claude in use
+  // (one of two, one suspended): the scan's rule, so a name only, never here.
+  if (info.soleChild === false) return null;
+  const terminals = listTerminals();
+  const configDir = terminals.find((t) => t.id === tabId)?.claudeConfigDir ?? null;
+  const rec = await presenceOf(info, configDir);
+  if (!rec?.sessionId) return null;
+  // One session, one tab: a session another LIVE tab is linked to stays its.
+  const link = (getSessionTabMap() || {})[rec.sessionId];
+  if (link?.tabId && link.tabId !== tabId && terminals.some((t) => t.id === link.tabId)) return null;
+  for (const dir of [rec.cwd, await getTerminalCwd(tabId)]) {
+    if (dir && await sessionTranscriptBirth(dir, rec.sessionId)) return { sessionId: rec.sessionId, sessionProject: dir };
+  }
+  return null; // no transcript yet: nothing said in this session
 }
 
 /**

@@ -4,7 +4,7 @@
 // Run: node --import ./electron/__tests__/chat-service-register.mjs ./electron/__tests__/chat-service.test.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges } from './fake-terminal-manager.mjs';
+import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges, cols, altAtStart } from './fake-terminal-manager.mjs';
 
 const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector } = await import('../chat-service.js');
 let pass = 0;
@@ -324,6 +324,62 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.ok(a && b, 'both settled');
   assert.notEqual(a, b, 'same counters, different process');
   ok('tokens from another app process never match');
+}
+
+// The Chat view's fallback shows the rendered SCREEN, not every frame a TUI
+// drew (Bryan, Asana 1220098108555131: stray "Doodling…" frames, blank gaps).
+{
+  const { terminalScreenText, terminalTextTail } = await import('../chat-service.js');
+  const id = 'term-screen-1';
+  // Claude repaints its spinner line in place, then replaces it.
+  buffers.set(id, 'Brewed earlier\r\n✻ Doodling…\r\n\x1b[1A\x1b[2K✻ Doodling… (2s)\r\n\x1b[1A\x1b[2K⏺ Done for real\r\n');
+  cols.set(id, 80);
+  assert.ok(terminalTextTail(id).includes('Doodling'), 'the raw stream keeps the stale frames');
+  assert.equal(await terminalScreenText(id), 'Brewed earlier\n⏺ Done for real');
+  ok('fallback text is the rendered screen, not the stale frames');
+  buffers.set(id, '');
+  assert.equal(await terminalScreenText(id), '');
+  ok('an empty tab reads as empty');
+}
+{
+  const { terminalScreenText, screenTailStart } = await import('../chat-service.js');
+  const id = 'term-screen-2';
+  // At the tab's own width: an 80-column row wraps before the erase.
+  buffers.set(id, `${'A'.repeat(80)}B\r\x1b[2KDone\r\n`);
+  cols.set(id, 80);
+  assert.equal(await terminalScreenText(id), `${'A'.repeat(80)}\nDone`);
+  ok('rendered at the tab\'s own width, not 220 columns');
+  // A cut that drops a full-screen program's ENTRY: its screen must not stay.
+  const before = 'shell prompt $ \r\n';
+  const big = `${before}\x1b[?1049h${'file line\r\n'.repeat(30000)}\x1b[?1049l$ back at the shell\r\n`;
+  buffers.set(id, big);
+  assert.ok(!(await terminalScreenText(id)).includes('file line'), 'the editor screen is gone after it exits');
+  ok('a full-screen program whose entry was cut off leaves no screen behind');
+  // A stray `tput rmcup` in ordinary shell output (no entry before the cut)
+  // must not throw that output away.
+  const plain = `${'shell output line\r\n'.repeat(20000)}\x1b[?1049lstill visible\r\n`;
+  buffers.set(id, plain);
+  // (The exit restores the cursor to the top, as a real terminal does, so the
+  // line after it lands above the rows shown; what matters is that the
+  // shell's output is not replayed into an alternate screen and discarded.)
+  assert.ok((await terminalScreenText(id)).includes('shell output line'));
+  ok('a stray alt-screen exit in plain output keeps the output');
+  // The editor's entry trimmed out of the buffer altogether: the terminal's
+  // record of the state at the buffer start decides.
+  buffers.set(id, `${'editor line\r\n'.repeat(500)}\x1b[?1049l$ shell again\r\n`);
+  altAtStart.add(id);
+  assert.ok(!(await terminalScreenText(id)).includes('editor line'));
+  altAtStart.delete(id);
+  ok('an editor whose entry was trimmed from the buffer leaves no screen behind');
+  // A cut inside a long OSC title starts after it, never in its payload.
+  const title = `\x1b]0;${'T'.repeat(1024)}\x07`;
+  const raw = `${'x'.repeat(100)}${title}after\r\n`;
+  const cut = screenTailStart(raw, raw.length - 100 - 600); // lands 600 chars into the title
+  assert.equal(raw.slice(cut), 'after\r\n');
+  // A short CSI cut in half backs up to its ESC.
+  const csi = `${'y'.repeat(50)}\x1b[31mred`;
+  assert.equal(csi.slice(screenTailStart(csi, csi.length - 52)), '\x1b[31mred');
+  ok('the cut never starts inside an escape sequence or a long title');
 }
 
 console.log(`\n${pass} passed`);

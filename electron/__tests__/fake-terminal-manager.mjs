@@ -28,3 +28,9 @@ export const buffers = new Map(); // id -> raw PTY tail
 export function getTerminalBuffer(id) { return buffers.get(id) || ''; }
 export const closing = new Set();
 export function terminalClosing(id) { return closing.has(id); }
+/** Tests set a tab's width; unset reads as unknown (the emulator's default). */
+export const cols = new Map();
+export function terminalCols(id) { return cols.has(id) ? cols.get(id) : null; }
+/** Tests set whether a tab's buffer begins inside the alternate screen. */
+export const altAtStart = new Set();
+export function terminalAltAtBufferStart(id) { return altAtStart.has(id); }
