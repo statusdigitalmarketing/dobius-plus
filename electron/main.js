@@ -39,7 +39,7 @@ import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './v
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, trimToEscapeBoundary } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary } from './terminal-manager.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending } from './chat-service.js';
@@ -801,6 +801,7 @@ function setupDataHandlers() {
   // switch to (the catalog Claude cached for that account). model-picker.js.
   const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,100}$/;
   const MODEL_INPUT_QUIET_MS = 500;
+  const MODEL_INPUT_SETTLE_MS = 5000;
   const sessionModel = async (sessionId) => {
     if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) return null;
     const file = path.join(usageDirPath(app.getPath('userData')), `${sessionId}.json`);
@@ -840,7 +841,9 @@ function setupDataHandlers() {
     // only a cache holding ONE organisation's catalogs can be this account's.
     let names = [];
     try { names = (await fs.promises.readdir(path.join(dir, 'cache', 'model-catalog'))).filter((n) => n.endsWith('-cc.json')); } catch { return null; }
-    const orgs = new Set(names.map((n) => n.split('-')[0]));
+    // The FULL organisation id (a uuid) opens each name; two organisations
+    // sharing a short prefix are still two.
+    const orgs = new Set(names.map((n) => /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-/i.exec(n)?.[1]?.toLowerCase() || n));
     return orgs.size === 1 ? readModelCatalog([dir], [...orgs][0]) : null;
   };
   // The session a tab runs NOW is main's call (tab-context), never the
@@ -869,7 +872,13 @@ function setupDataHandlers() {
     const seq = terminalInputSeq(tabId);
     const typedMeanwhile = () => terminalInputSeq(tabId) !== seq;
     if (submitPending(tabId)) return { ok: false, error: 'Something is still being typed into the tab: try again' };
-    if (terminalInputAgeMs(tabId) < MODEL_INPUT_QUIET_MS) return { ok: false, error: 'Something was just typed into the tab: try again in a moment' };
+    // The last keypress must have been DRAWN (Claude produced output since it)
+    // or be long past: a stalled screen can still show an empty box over text
+    // that is in fact typed. The same rule as a question card's read.
+    if (terminalInputAgeMs(tabId) < MODEL_INPUT_QUIET_MS
+      || !(terminalSettledSinceInput(tabId) || terminalInputAgeMs(tabId) >= MODEL_INPUT_SETTLE_MS)) {
+      return { ok: false, error: 'Something was just typed into the tab: try again in a moment' };
+    }
     if (!(await getTerminalClaudeInfo(tabId))) return { ok: false, error: 'Claude is not running in this tab' };
     const st = terminalStatus.statusFor(tabId)?.status;
     if (st === 'working' || st === 'needs') return { ok: false, error: st === 'working' ? 'Claude is working: change it when this turn ends' : 'Answer Claude first' };

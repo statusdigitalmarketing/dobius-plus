@@ -69,14 +69,19 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
     const over = el.getBoundingClientRect().right - (window.innerWidth - 8);
     if (over > 0) el.style.left = `${Math.max(8, pos.left - over)}px`;
   }, [pos]);
-  const [flip, setFlip] = useState(false);
+  // 'right' (beside the panel), 'left' (flipped), or a pixel offset from the
+  // panel's left when neither side has room (pinned to the window's edge,
+  // over the panel: clipped never).
+  const [place, setPlace] = useState('right');
   useLayoutEffect(() => {
     const el = rootRef.current;
     const subEl = el?.querySelector('.chatp-mm-sub');
-    if (!subEl) { setFlip(false); return; }
+    if (!subEl) { setPlace('right'); return; }
     const panel = el.querySelector('.chatp-mm-panel').getBoundingClientRect();
     const w = subEl.getBoundingClientRect().width;
-    setFlip(panel.right + 6 + w > window.innerWidth - 8 && panel.left - 6 - w >= 8);
+    if (panel.right + 6 + w <= window.innerWidth - 8) setPlace('right');
+    else if (panel.left - 6 - w >= 8) setPlace('left');
+    else setPlace(Math.max(8, window.innerWidth - 8 - w) - panel.left);
   }, [sub, pos]);
   // The keyboard's row stays in view in a long list.
   useEffect(() => {
@@ -148,7 +153,12 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
         <div className="chatp-mm-note">Also your default for new sessions</div>
       </div>
       {sub && (
-        <div className={`chatp-mm-panel chatp-mm-sub chatp-mm-sub-${sub}${flip ? ' flip' : ''}`} role="menu" aria-label={SUBMENUS[sub]}>
+        <div
+          className={`chatp-mm-panel chatp-mm-sub chatp-mm-sub-${sub}${place === 'left' ? ' flip' : ''}`}
+          style={typeof place === 'number' ? { left: place, right: 'auto', bottom: 'calc(100% + 6px)' } : undefined}
+          role="menu"
+          aria-label={SUBMENUS[sub]}
+        >
           {subRows.map((row, i) => {
             const checked = row.kind === 'effort' ? row.item.id === current?.effort : false;
             return (
