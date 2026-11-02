@@ -3,7 +3,7 @@
 // paste-then-Enter submit. Main-process only.
 
 import { randomBytes } from 'node:crypto';
-import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalInputAgeMs, terminalRawOutputSeq, terminalSettledSinceInput, terminalClosing, terminalCols } from './terminal-manager.js';
+import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalInputAgeMs, terminalRawOutputSeq, terminalSettledSinceInput, terminalClosing, terminalCols, terminalAltAtBufferStart } from './terminal-manager.js';
 import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, spinnerStatus } from './selector-parser.js';
 export { selectorFingerprint };
 import { renderScreenLines } from './screen-render.js';
@@ -78,10 +78,14 @@ export async function terminalScreenText(id, maxLines = 60) {
   const raw = getTerminalBuffer(id) || '';
   const start = screenTailStart(raw, 262144);
   let tail = raw.slice(start);
-  // A full-screen program (vim, less) whose ENTRY fell before the cut: replay
-  // it as entered, or its screen paints the normal buffer and stays there
-  // after it exits.
-  if (start > 0 && firstAltScreenSwitchIsExit(tail) && lastAltScreenSwitch(raw.slice(0, start)) === 'h') tail = `\x1b[?1049h${tail}`;
+  // Inside a full-screen program (vim, less) at the cut, whose ENTRY is not in
+  // the tail: replay it as entered, or its screen paints the normal buffer and
+  // stays there after it exits. The state at the cut comes from the part of
+  // the buffer before it, else from what the terminal recorded when it
+  // trimmed its buffer (the entry may be gone from the buffer altogether).
+  const before = lastAltScreenSwitch(raw.slice(0, start));
+  const inAltAtCut = before ? before === 'h' : terminalAltAtBufferStart(id);
+  if (inAltAtCut) tail = `\x1b[?1049h${tail}`;
   let lines;
   try { lines = await renderScreenLines(tail, { cols: terminalCols(id), exact: true }); } catch { lines = null; }
   if (!lines) return textTailOf(raw, maxLines);
@@ -119,13 +123,6 @@ export function lastAltScreenSwitch(text) {
   let last = null;
   for (const m of text.matchAll(/\x1b\[\?(?:1049|1047|47)([hl])/g)) last = m[1];
   return last;
-}
-
-// Does the first alternate-screen switch in this text LEAVE the alternate
-// screen (so the entry was cut off)?
-export function firstAltScreenSwitchIsExit(text) {
-  const m = /\x1b\[\?(?:1049|1047|47)([hl])/.exec(text);
-  return !!m && m[1] === 'l';
 }
 
 // A selector read is stamped with the PTY and the count of writes it has

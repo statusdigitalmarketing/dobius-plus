@@ -4,7 +4,7 @@
 // Run: node --import ./electron/__tests__/chat-service-register.mjs ./electron/__tests__/chat-service.test.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges, cols } from './fake-terminal-manager.mjs';
+import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges, cols, altAtStart } from './fake-terminal-manager.mjs';
 
 const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector } = await import('../chat-service.js');
 let pass = 0;
@@ -342,7 +342,7 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   ok('an empty tab reads as empty');
 }
 {
-  const { terminalScreenText, screenTailStart, firstAltScreenSwitchIsExit } = await import('../chat-service.js');
+  const { terminalScreenText, screenTailStart } = await import('../chat-service.js');
   const id = 'term-screen-2';
   // At the tab's own width: an 80-column row wraps before the erase.
   buffers.set(id, `${'A'.repeat(80)}B\r\x1b[2KDone\r\n`);
@@ -353,7 +353,6 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   const before = 'shell prompt $ \r\n';
   const big = `${before}\x1b[?1049h${'file line\r\n'.repeat(30000)}\x1b[?1049l$ back at the shell\r\n`;
   buffers.set(id, big);
-  assert.ok(firstAltScreenSwitchIsExit(big.slice(big.length - 262144)), 'the cut drops the entry');
   assert.ok(!(await terminalScreenText(id)).includes('file line'), 'the editor screen is gone after it exits');
   ok('a full-screen program whose entry was cut off leaves no screen behind');
   // A stray `tput rmcup` in ordinary shell output (no entry before the cut)
@@ -365,6 +364,13 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   // shell's output is not replayed into an alternate screen and discarded.)
   assert.ok((await terminalScreenText(id)).includes('shell output line'));
   ok('a stray alt-screen exit in plain output keeps the output');
+  // The editor's entry trimmed out of the buffer altogether: the terminal's
+  // record of the state at the buffer start decides.
+  buffers.set(id, `${'editor line\r\n'.repeat(500)}\x1b[?1049l$ shell again\r\n`);
+  altAtStart.add(id);
+  assert.ok(!(await terminalScreenText(id)).includes('editor line'));
+  altAtStart.delete(id);
+  ok('an editor whose entry was trimmed from the buffer leaves no screen behind');
   // A cut inside a long OSC title starts after it, never in its payload.
   const title = `\x1b]0;${'T'.repeat(1024)}\x07`;
   const raw = `${'x'.repeat(100)}${title}after\r\n`;

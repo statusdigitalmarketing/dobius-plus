@@ -3031,7 +3031,12 @@ function setupSessionTabCapture() {
           // another (a link saved before Claude's record was read by folder).
           if (provenanceChanged(fresh[runningSessionId]?.resolvedBy, how)
             || (how === 'presence' && fresh[runningSessionId]?.projectPath !== linkPath)) {
-            setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
+            // Re-read the owner now: the awaits above leave time for the
+            // session to move to another tab (resumed there), which this
+            // snapshot would undo.
+            if (getSessionTabMap()?.[runningSessionId]?.tabId === t.id) {
+              setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
+            }
             continue;
           }
           // Still running: refresh the lastRunningAt stamp so auto-resume
@@ -4605,7 +4610,7 @@ app.on('before-quit', (e) => {
             // Quitting right after `claude --resume <same-id>` would otherwise
             // leave it 'fresh' and the r8 gate would skip restoring it.
             // Codex v1.0.39 r12 P2.
-            setSessionTabLink(sid, t.id, linkPathQ, howQ);
+            if (getSessionTabMap()?.[sid]?.tabId === t.id) setSessionTabLink(sid, t.id, linkPathQ, howQ);
           } else if (running && running !== sid) {
             // Tab switched sessions since the last capture tick (user ran
             // `claude --resume B` in a tab mapped to A, then quit fast).

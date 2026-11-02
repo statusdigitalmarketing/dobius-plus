@@ -144,6 +144,13 @@ const ESC_RESYNC_WINDOW = 2048;
  * some payload text. OSC payloads are titles, they do not move the cursor, so
  * that is cosmetic rather than the screen-destroying cursor desync above.
  */
+const ALT_SCREEN_RE = /\x1b\[\?(?:1049|1047|47)([hl])/g;
+
+/** Whether the tab's rolling output buffer begins inside the alternate screen. */
+export function terminalAltAtBufferStart(id) {
+  return !!terminals.get(id)?.altAtBufferStart;
+}
+
 export function trimToEscapeBoundary(buf, cap) {
   if (buf.length <= cap) return buf;
   const cut = buf.slice(-cap);
@@ -304,7 +311,16 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     // allocation either way, and the idle 64KB case is cheaper than the 1MB case
     // that was already accepted for subscribed tabs.
     const cap = entry.subscribers.size > 0 ? OUTPUT_BUFFER_BYTES : IDLE_BUFFER_BYTES;
-    entry.outputBuffer = trimToEscapeBoundary(entry.outputBuffer + data, cap);
+    const combined = entry.outputBuffer + data;
+    entry.outputBuffer = trimToEscapeBoundary(combined, cap);
+    // Whether the KEPT buffer begins inside the alternate screen (vim, less):
+    // its entry may have been trimmed away, and only the dropped part can say.
+    if (entry.outputBuffer.length < combined.length) {
+      const dropped = combined.slice(0, combined.length - entry.outputBuffer.length);
+      let last = null;
+      for (const m of dropped.matchAll(ALT_SCREEN_RE)) last = m[1];
+      if (last) entry.altAtBufferStart = last === 'h';
+    }
     for (const sub of entry.subscribers) {
       try { sub.onData?.(id, data); } catch { /* drop bad subscriber silently */ }
     }
