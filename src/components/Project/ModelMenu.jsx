@@ -167,7 +167,7 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
           className={`chatp-mm-panel chatp-mm-sub chatp-mm-sub-${sub}${place === 'left' ? ' flip' : ''}`}
           style={{
             ...(typeof place === 'number' ? { left: place, right: 'auto', bottom: 'calc(100% + 6px)' } : {}),
-            ...(subMax ? { maxHeight: subMax } : {}),
+            ...(subMax !== null ? { maxHeight: subMax } : {}), // 0 is a real cap
           }}
           role="menu"
           aria-label={SUBMENUS[sub]}
