@@ -583,3 +583,21 @@
 - **FIX**: For the Asana API, a small Python script file (urllib, ASANA_PAT from env) that prints only the needed fields and saves attachments to disk; `gh` for GitHub; `gh release download` + `cmp` to verify a release's DMG.
 - **CONTEXT**: Release verification and Asana task reads.
 - **DETECTION**: `ls scratchpad/asana_task.py`
+
+### Testing - 2026-11-02 (a harness tab's `claude` is the REAL one unless the shell config says otherwise)
+- **MISTAKE**: Putting a stand-in `claude` in `<userData>/bin` was assumed to win on PATH. In a harness tab `which claude` gave `~/.local/bin/claude`: the user's zsh config prepends it after Dobius sets PATH. Seeding a session link with a real session id would have resumed one of Sam's real sessions.
+- **FIX**: Launch the harness with `ZDOTDIR=<scratch dir>` whose `.zshrc` prepends the stand-in's dir, and check `which claude` in a harness tab BEFORE seeding anything that types `claude`.
+- **CONTEXT**: Any harness test of auto-resume, resume or New Tab, which type `claude` into a shell.
+- **DETECTION**: `which claude` typed into a harness tab over CDP, written to a scratch file and read back.
+
+### Testing - 2026-11-02 (a filtered test run hides a test file that does not even load)
+- **MISTAKE**: `npm run test:chatsvc | grep -E "Assertion|passed"` printed nothing; a duplicate `const` had made the test file fail to compile, and the grep dropped the SyntaxError. It looked like silence, not failure.
+- **FIX**: Check the exit code (`; echo exit=$?`) or require the summary line ("N passed") to appear, never only grep for failures.
+- **CONTEXT**: Every filtered test run in this repo.
+- **DETECTION**: `npm run -s test:<name> > out 2>&1; echo exit=$?`
+
+### Process - 2026-11-02 (stop the task by its id after reading what it is)
+- **MISTAKE**: TaskStop on the wrong background id killed a Codex review in flight instead of the harness.
+- **FIX**: Before TaskStop, confirm the id against the command it was started with (the harness lines start with `cd <worktree>; H=...`).
+- **CONTEXT**: Sessions juggling several harness and review tasks.
+- **DETECTION**: read the TaskStop result's echoed command.

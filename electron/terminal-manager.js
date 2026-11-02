@@ -177,7 +177,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   const prevRows = prev?.rows;
   // Kill existing terminal with this ID if any
   if (terminals.has(id)) {
-    killTerminal(id);
+    killTerminal(id, { respawn: true });
   }
   // A respawn under the same id starts fresh for observers (status timing).
   for (const obs of terminalObservers) {
@@ -552,6 +552,51 @@ export async function getTerminalProcess(id) {
   } catch {
     return null;
   }
+}
+
+// Programs that run under an IDLE interactive shell: the shells themselves
+// and Powerlevel10k's prompt helper, which lives under every p10k zsh.
+const IDLE_SHELL_PROCS = /^-?(zsh|bash|sh|fish|dash|ksh|tcsh)$|^gitstatusd/;
+
+/**
+ * Whether anything but an idle shell runs in a tab, for a caller about to type
+ * into it unasked (auto-resume): the PTY's own process or anything under it,
+ * however deep (a shell wrapper running ssh). null when idle; the program's
+ * name when busy; 'unknown' when it could not be told, which a caller must
+ * treat as busy (Codex, restore round 9).
+ */
+export async function terminalBusy(id) {
+  const root = terminals.get(id)?.pty?.pid;
+  if (typeof root !== 'number' || root <= 0) return 'unknown';
+  let stdout;
+  try {
+    ({ stdout } = await execFileP('/bin/ps', ['-axo', 'pid=,ppid=,comm='], { timeout: 2000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
+  } catch (err) {
+    console.warn(`[terminal-manager] busy check failed for ${id}:`, err?.message || err);
+    return 'unknown';
+  }
+  const kids = new Map();
+  const name = new Map();
+  for (const line of stdout.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    name.set(pid, path.basename(m[3].trim()));
+    if (!kids.has(Number(m[2]))) kids.set(Number(m[2]), []);
+    kids.get(Number(m[2])).push(pid);
+  }
+  if (!name.has(root)) return 'unknown';
+  const queue = [root];
+  const seen = new Set();
+  while (queue.length) {
+    const pid = queue.shift();
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    const n = name.get(pid) || '';
+    if (!IDLE_SHELL_PROCS.test(n)) return n || 'unknown';
+    for (const k of kids.get(pid) || []) queue.push(k);
+  }
+  return null;
 }
 
 /**
@@ -931,7 +976,7 @@ export async function getProcessCwd(pid) {
 /**
  * Kill a specific terminal.
  */
-export function killTerminal(id) {
+export function killTerminal(id, { respawn = false } = {}) {
   const entry = terminals.get(id);
   if (entry) {
     try {
@@ -944,6 +989,11 @@ export function killTerminal(id) {
       console.error(`[terminal-manager] kill error for ${id}:`, err.message);
     }
     terminals.delete(id);
+    // A kill skips onExit (its identity guard sees the entry gone), so
+    // observers that care that a shell went away hear it here.
+    for (const obs of terminalObservers) {
+      try { obs.onKill?.(id, { respawn }); } catch (err) { console.warn('[terminal-manager] kill observer:', err?.message || err); }
+    }
   }
 }
 

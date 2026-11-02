@@ -1,7 +1,7 @@
 import './dev-userdata.js'; // MUST stay first: userData override before config-manager loads
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
-import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor, screen } from 'electron';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
@@ -18,7 +18,7 @@ import { startErrorReporter, noteFault, isReportable } from './error-reporter.js
 // once the error log exists to write to. See electron/stall-watchdog.js.
 const stallWatchdog = createStallWatchdog({ log: logLine });
 stallWatchdog.wrapIpc(ipcMain);
-import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab } from './auto-resume.js';
+import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities, accountMetadata, loginState, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
@@ -308,7 +308,15 @@ function setupTerminalHandlers() {
     // choice, read here; anything outside the fixed set starts nothing.
     const launch = opts && typeof opts === 'object' ? opts.launch : undefined;
     const startCommand = launch === undefined ? null : launchCommandFor(launch, getSettings().newTabTool);
-    return createTerminal(id, cwd, event.sender, accountEnv, { startCommand });
+    const created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand });
+    // A tab restored with its saved scrollback in a window opened after
+    // launch: resume the Claude session it ran at the last quit, under the
+    // launch-time rules (auto-resume.js resumeRestoredTab). Never for a new
+    // tab, which starts its own tool.
+    if (created && startCommand == null && opts && typeof opts === 'object' && opts.restored === true) {
+      resumeRestoredTab(id).catch((err) => console.warn('[auto-resume] restored tab:', err?.message || err));
+    }
+    return created;
   });
 
   ipcMain.on('terminal:write', (event, id, data) => {
@@ -3067,6 +3075,11 @@ function setupSessionTabCapture() {
       const labelsBefore = getTabLabelsById();
       const infoByTab = new Map();
       const probedAt = new Map(); // when each tab was looked at: the link stamp
+      // A link is written only while the tab still has the shell it had when
+      // probed: a window closed during the awaits below has had its running
+      // stamp cleared, and writing this observation back would undo that
+      // (Codex, restore round 5).
+      const sameShell = (tab) => (listTerminals().find((x) => x.id === tab.id)?.pid ?? null) === tab.pid;
       for (const t of liveTabs) {
         probedAt.set(t.id, Date.now());
         infoByTab.set(t.id, await getTerminalClaudeInfo(t.id));
@@ -3151,17 +3164,21 @@ function setupSessionTabCapture() {
             // Re-read the owner now: the awaits above leave time for the
             // session to move to another tab (resumed there), which this
             // snapshot would undo.
-            if (getSessionTabMap()?.[runningSessionId]?.tabId === t.id) {
+            if (getSessionTabMap()?.[runningSessionId]?.tabId === t.id && sameShell(t)) {
               setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
             }
             continue;
           }
           // Still running: refresh the lastRunningAt stamp so auto-resume
           // can tell "was live at quit" from "linked weeks ago" (v1.0.35).
-          touchSessionTabLink(runningSessionId, probedAt.get(t.id));
+          // And only through a link that still names this tab: the session
+          // may have moved (resumed in another tab, maybe closed there) while
+          // this tick was probing (Codex, restore round 10).
+          if (sameShell(t) && getSessionTabMap()?.[runningSessionId]?.tabId === t.id) touchSessionTabLink(runningSessionId, probedAt.get(t.id));
           continue;
         }
         // Tab is running a different (or new) session than the map says.
+        if (!sameShell(t)) continue;
         if (mappedSessionId) removeSessionTabLink(mappedSessionId);
         if (!fresh[runningSessionId]) {
           setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
@@ -4255,6 +4272,29 @@ app.whenReady().then(() => {
     else if (terminalStatus.releaseDone(id, data, now)) sendToTerminalWindow(id, 'terminal:statusHint', 'release');
   });
   addTerminalObserver({ onExit: (id) => { lastEnterAt.delete(id); lastAnswerAt.delete(id); } });
+  // A tab's shell gone while Dobius is running (its window or tab closed, the
+  // shell exited): whatever session it ran is no longer running, so a later
+  // launch must not resume it when that window is opened again. A quit's own
+  // teardown is not this (quitting is set before it kills the shells), so
+  // sessions live at quit keep their stamps (Codex, restore round 4).
+  // A window closing kills its shells (onKill); a shell exiting on its own
+  // ends with onExit. Either way the same.
+  const clearClosedTabRunning = (id, info) => {
+    // A respawn under the same id (an account move) replaces the shell with
+    // one resuming the same conversation: its link was just recorded and
+    // must stay (Codex, restore round 5).
+    if (info?.respawn) return;
+    if (getQuitting() || getQuittingForUpdate()) return;
+    forgetClosedTab(id);
+    try {
+      for (const [sid, entry] of Object.entries(getSessionTabMap() || {})) {
+        if (entry?.tabId === id && entry.lastRunningAt) clearSessionTabRunning(sid);
+      }
+    } catch (err) {
+      console.warn('[auto-resume] could not clear a closed tab\'s running stamp:', err?.message || err);
+    }
+  };
+  addTerminalObserver({ onExit: (id) => clearClosedTabRunning(id), onKill: (id, info) => clearClosedTabRunning(id, info) });
   // Codex tabs: Codex hooks reach main over the bridge, by session, never by
   // the hook's DOBIUS_TAB_ID (it names whichever tab started Codex's shared
   // daemon). codex-status.js finds the tab running that session.
@@ -4376,6 +4416,21 @@ app.whenReady().then(() => {
     return true;
   });
   const willRestore = toRestore.length > 0 || tears.length > 0 || extras.length > 0;
+  // Kept in the log (never reported), so "my windows did not reopen" can be
+  // traced: what was saved, what reopens, what was skipped, the displays and
+  // how the last session ended (Brett, Asana 1220099565720834).
+  try {
+    const shown = (list) => list.map((p) => path.basename(String(p))).join(',') || '-';
+    const displays = screen.getAllDisplays().map((d) => `${d.workArea.width}x${d.workArea.height}@${d.workArea.x},${d.workArea.y}`).join(' ');
+    const ended = typeof config.lastQuitReason === 'string' ? config.lastQuitReason : 'unknown (no clean quit recorded)';
+    // Read once: a later crash must not inherit this quit's reason (Codex).
+    if (typeof config.lastQuitReason === 'string') {
+      try { const c2 = loadConfig(); delete c2.lastQuitReason; saveConfig(c2); } catch (err) { console.warn('[restore] could not clear the quit reason:', err?.message || err); }
+    }
+    logLine('diag.restore', `saved projects=${savedProjects.length} [${shown(savedProjects)}] tearoffs=${savedTears.length} extras=${savedExtras.length}; reopening projects=${toRestore.length} [${shown(toRestore)}] tearoffs=${tears.length} extras=${extras.length}; skipped missing-path=${savedProjects.length - toRestore.length}; last quit: ${ended}; displays: ${displays}`);
+  } catch (err) {
+    console.warn('[restore] diagnostics failed:', err?.message || err);
+  }
   if (willRestore) setRestoring(true);
   if (toRestore.length > 0) {
     const missing = savedProjects.length - toRestore.length;
@@ -4469,6 +4524,39 @@ app.whenReady().then(() => {
 
 // Hold-to-quit gate: require two Cmd+Q presses within 1 second
 let quitConfirmed = false;
+// Why this quit happened, recorded for the next launch's restore log.
+let quitReason = null;
+// macOS restarting or shutting down: there is nobody to press Cmd+Q twice,
+// and the first press's prompt cancelled the restart (or got Dobius force
+// quit before it saved which sessions were running). Treat the OS's quit as
+// confirmed and run the full graceful quit: Claude sessions are ended
+// resumably, the running stamps reconciled, scrollback, the window lists and
+// lastQuitAt saved (Brett, Asana 1220099565720834; Codex design review).
+// Electron delays the shutdown while this runs.
+let quitForShutdown = false;
+app.whenReady().then(() => {
+  try {
+    powerMonitor.on('shutdown', (e) => {
+      if (quitForShutdown || getQuittingForUpdate()) return;
+      e.preventDefault();
+      quitForShutdown = true;
+      // A confirmed quit already past its first step (Ctrl+C sent, sessions
+      // reconciled) just finishes: starting it over would see the sessions it
+      // stopped as idle and clear their running stamps (Codex).
+      if (quitConfirmed && savedBeforeQuit) {
+        logLine('diag.quit', 'macOS is restarting or shutting down: a confirmed quit is already finishing');
+        return;
+      }
+      quitReason = 'system restart or shutdown';
+      logLine('diag.quit', 'macOS is restarting or shutting down: quitting without the two-press prompt');
+      clearTimeout(quitTimer);
+      quitConfirmed = true;
+      app.quit();
+    });
+  } catch (err) {
+    console.warn('[quit] shutdown handler unavailable:', err?.message || err);
+  }
+});
 let quitTimer = null;
 let savedBeforeQuit = false;
 
@@ -4543,6 +4631,7 @@ app.on('before-quit', (e) => {
         cfgUp.lastPrimaryWindows = mergedUp.lastPrimaryWindows;
       }
       cfgUp.lastQuitAt = Date.now();
+      cfgUp.lastQuitReason = quitReason = 'update restart';
       saveConfig(cfgUp);
       flushConfig();
     } catch { /* best-effort */ }
@@ -4586,6 +4675,9 @@ app.on('before-quit', (e) => {
     // this to only revive sessions that were ACTUALLY running at quit
     // (v1.0.35 stale-link fix).
     config.lastQuitAt = Date.now();
+    if (!quitReason) quitReason = 'quit (Cmd+Q twice)';
+    config.lastQuitReason = quitReason;
+    logLine('diag.quit', `${quitReason}: saved projects=${merged.lastOpenProjects.length} tearoffs=${merged.lastTearOffs.length} extras=${merged.lastPrimaryWindows.length}`);
     saveConfig(config);
     // Tear down listeners/servers in parallel with the config drain — none
     // of them depend on config writes finishing.
@@ -4806,6 +4898,11 @@ app.on('will-quit', (e) => {
     setQuitting(true);
     const cfg = loadConfig();
     cfg.lastQuitAt = Date.now();
+    if (!quitReason) {
+      quitReason = 'quit without the two-press prompt (force quit, or the last window closed)';
+      logLine('diag.quit', quitReason);
+    }
+    cfg.lastQuitReason = quitReason;
     saveConfig(cfg);
   } catch { /* best-effort */ }
   // Drain pending debounced config writes BEFORE the OS reaps the process.

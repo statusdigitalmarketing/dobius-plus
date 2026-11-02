@@ -6,6 +6,7 @@ import { watchFiles } from './watcher-service.js';
 import { getProjectConfig, setProjectConfig, loadConfig, saveConfig, getTearOffWindowState, setPrimaryWindowState, deletePrimaryWindowState } from './config-manager.js';
 import { getQuittingForUpdate, getQuitting } from './quit-state.js';
 import { dockingTabs } from './docking-state.js';
+import { fitToDisplays } from './window-bounds.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -618,6 +619,18 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
   persistOpenProjects();
 }
 
+// The work areas of the displays connected now, the primary one first.
+function displayWorkAreas() {
+  try {
+    const primary = screen.getPrimaryDisplay();
+    const rest = screen.getAllDisplays().filter((d) => d.id !== primary.id);
+    return [primary, ...rest].map((d) => d.workArea);
+  } catch (err) {
+    console.warn('[window] display list unavailable, keeping saved bounds:', err?.message || err);
+    return [];
+  }
+}
+
 /**
  * Open a window for a project. If one already exists, focus it.
  * @param {string} projectPath
@@ -632,6 +645,15 @@ export function openProjectWindow(projectPath, opts = {}) {
   if (!newWindow && !existingKey) {
     const existing = getWindowForProject(projectPath);
     if (existing) {
+      // Bring it where it can be seen: minimised, hidden, or left on a
+      // display that is gone, a bare focus() showed nothing (Brett).
+      if (existing.isMinimized()) existing.restore();
+      const now = existing.getBounds();
+      const fit = fitToDisplays(now, displayWorkAreas());
+      if (fit.x !== now.x || fit.y !== now.y || fit.width !== now.width || fit.height !== now.height) {
+        if (Number.isFinite(fit.x)) existing.setBounds(fit); else { existing.setSize(fit.width || now.width, fit.height || now.height); existing.center(); }
+      }
+      existing.show();
       existing.focus();
       return existing;
     }
@@ -645,7 +667,9 @@ export function openProjectWindow(projectPath, opts = {}) {
   const projectConfig = getProjectConfig(projectPath) || {};
   // Extra windows remember their own bounds (in the primaryWindows bucket);
   // the first window keeps using the per-project windowBounds.
-  const bounds = restoreBounds || (isExtra ? {} : (projectConfig.windowBounds || {}));
+  // On a display that is connected now (saved on a monitor that is gone, it
+  // would open off-screen).
+  const bounds = fitToDisplays(restoreBounds || (isExtra ? {} : (projectConfig.windowBounds || {})), displayWorkAreas());
   const folderName = path.basename(projectPath);
 
   const win = new BrowserWindow({
@@ -710,7 +734,8 @@ function randomKey() {
 // Shared creator for a torn-off tab window at explicit bounds. Used by the
 // cursor-drag tear-off AND the launch-time tear-off restore (v1.0.46), so the
 // two can't drift.
-function createTornOffWindow(projectPath, tabId, tabLabel, bounds = {}, restore = false, labelMeta = null, identityDocked = false) {
+function createTornOffWindow(projectPath, tabId, tabLabel, savedBounds = {}, restore = false, labelMeta = null, identityDocked = false) {
+  const bounds = fitToDisplays(savedBounds || {}, displayWorkAreas());
   const folderName = path.basename(projectPath);
   // Count existing windows for this project to generate "folder (2)" style title
   const windowNumber = getWindowIdsForProject(projectPath).length + 1;

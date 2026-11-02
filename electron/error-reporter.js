@@ -46,7 +46,10 @@ const MAX_GH_FAILURES = 3; // in a row: GitHub is down or rate limiting, back of
 // main.stall-watchdog is the watchdog's own status (armed, clock jumped over a
 // sleep), not a stall; main.stall is the real one.
 // guest.* is a <webview> pane's third-party page (error-log.js): never ours.
-const SKIP_KIND = /^(app|error-log|main\.warn|main\.stall-watchdog|crash\.render-process-gone|crash\.child-process-gone|guest\..*)$/;
+// diag.* is a diagnostic record (what a restore or a quit did), kept in the
+// log so a report like "my windows did not reopen" can be traced, never a
+// fault in itself.
+const SKIP_KIND = /^(app|error-log|main\.warn|main\.stall-watchdog|crash\.render-process-gone|crash\.child-process-gone|guest\..*|diag\..*)$/;
 
 /** Pure: should this log entry be reported? */
 export function isReportable(kind, detail) {

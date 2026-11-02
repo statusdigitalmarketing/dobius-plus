@@ -33,6 +33,7 @@ import { getAutoResume, getSessionTabMap, loadConfig } from './config-manager.js
 import {
   listTerminals, writeTerminal, releaseSessionResume, claimSessionResume,
   getTerminalWebContentsId,
+  terminalInputSeq, terminalBusy,
 } from './terminal-manager.js';
 import { getSessionSize } from './data-service.js';
 import { BrowserWindow } from 'electron';
@@ -43,6 +44,29 @@ import { dockingTabs } from './docking-state.js';
 // `timer` is the setTimeout handle so we can cancel before it fires.
 const queue = new Map();
 let started = false;
+// The launch pass has finished deciding (resumeRestoredTab waits for it).
+let startupDone = false;
+// The sessions that were running at the last quit, as decided AT LAUNCH: the
+// periodic capture later rewrites links and clears idle stamps, so a tab
+// restored later is judged by this snapshot (Codex design review).
+let launchEligible = new Map();
+// Tabs already resumed, queued, skipped or cancelled this launch: a later
+// restore of the same tab never types into it again.
+const handled = new Set();
+// Bumped by cancelAll (Cmd+Shift+R): a resume still being prepared when it is
+// pressed (a transcript lookup, a claim) is dropped too (Codex).
+let cancelGen = 0;
+// Restored tabs that came up while the launch pass was still deciding (a
+// window opened from the launcher in the first seconds): looked at once it
+// is done, unless that pass took them (the harness caught the gap).
+const restoredDuringStartup = new Set();
+function finishStartup() {
+  startupDone = true;
+  for (const tabId of restoredDuringStartup) {
+    resumeRestoredTab(tabId).catch((err) => console.warn('[auto-resume] restored tab:', err?.message || err));
+  }
+  restoredDuringStartup.clear();
+}
 
 /**
  * Push a tabStatus update to every open window so the dot reflects the
@@ -93,6 +117,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   const cfg = getAutoResume();
   if (!cfg.enabled) {
     console.log('[auto-resume] disabled in config, skipping');
+    finishStartup();
     return;
   }
 
@@ -183,8 +208,10 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   if (skippedStale > 0) {
     console.log(`[auto-resume] skipped ${skippedStale} stale/mismatched link(s); ${tabToBest.size} fresh candidate(s)`);
   }
+  launchEligible = tabToBest;
   if (tabToBest.size === 0) {
     console.log('[auto-resume] no sessions were running at last quit, nothing to resume');
+    finishStartup();
     return;
   }
 
@@ -197,6 +224,13 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   const TOTAL_BUDGET_MS = 15_000;
   const deadline = Date.now() + TOTAL_BUDGET_MS;
   let candidates = [];
+  // The PTY each tab had when it was FIRST seen, kept across polls: a later
+  // poll must not adopt a shell that replaced it (Codex P1, round 2). The
+  // cancel generation is the one this launch pass STARTED with: a Cmd+Shift+R
+  // at any point during it, even before a tab's first poll, cancels that tab
+  // (Codex P1, round 4).
+  const firstSeen = new Map();
+  const launchGen = cancelGen;
   let lastCount = -1;
   let stableTicks = 0;
   while (Date.now() < deadline) {
@@ -205,7 +239,14 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     const liveIds = new Set(live.map((t) => t.id));
     candidates = [];
     for (const [tabId, info] of tabToBest) {
-      if (liveIds.has(tabId)) candidates.push({ tabId, ...info });
+      // The shell this resume is for, pinned the moment it is seen: every
+      // later check compares against THIS PTY (Codex).
+      if (!liveIds.has(tabId)) continue;
+      // Closed (and maybe reopened) since launch: never this pass's to resume
+      // (Codex, restore round 6).
+      if (handled.has(tabId) && !firstSeen.has(tabId)) continue;
+      if (!firstSeen.has(tabId)) firstSeen.set(tabId, { pidAt: live.find((t) => t.id === tabId)?.pid ?? null, gen: launchGen });
+      candidates.push({ tabId, ...info, ...firstSeen.get(tabId) });
     }
     // Done: every mapped tab is now alive.
     if (candidates.length === tabToBest.size) break;
@@ -219,6 +260,13 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     }
   }
 
+  // Every tab seen during the polls is the launch pass's to decide (one seen,
+  // cancelled and closed before the last poll included: Codex P1, round 3);
+  // the rest wait for their window to be opened (resumeRestoredTab).
+  for (const tabId of firstSeen.keys()) handled.add(tabId);
+  finishStartup();
+  const waiting = tabToBest.size - candidates.length;
+  if (waiting > 0) console.log(`[auto-resume] ${waiting} session(s) wait for their window to be opened`);
   if (candidates.length === 0) {
     console.log('[auto-resume] no live tabs with mapped sessions after 15s budget, nothing to do');
     return;
@@ -246,19 +294,46 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
 
   console.log(`[auto-resume] queueing ${eligible.length} session(s) with ${cfg.staggerMs}ms stagger`);
 
-  // Schedule the writes. Each gets a setTimeout with cumulative delay.
-  // Mark queued NOW so the user sees the dot immediately, then flip to
-  // working when the write fires.
   // Space the writes by SIZE, not a flat tick. The old 80MB cap hid this by
   // skipping big transcripts outright; now that they resume (a 725MB one in
   // 10s), a flat 50ms would fire two dozen heavy `claude --resume` processes
   // inside about a second (Codex Medium). Tiny sessions still go at full
   // speed; only the expensive ones buy extra room.
   let cumulativeMs = 0;
-  for (let i = 0; i < eligible.length; i += 1) {
-    const e = eligible[i];
+  for (const e of eligible) {
     const delayMs = cumulativeMs;
     cumulativeMs += cfg.staggerMs + Math.round(Math.min(e.sizeMB || 0, 2000) * 2);
+    await queueResume(e, delayMs);
+  }
+}
+
+/**
+ * Schedule one tab's `claude --resume`, with every guard: a claim at queue
+ * time and again at write time, the same PTY at write time as at queue time,
+ * and cancellation by input, the user, or the tab closing. Shared by the
+ * launch-time pass and a tab restored later (resumeRestoredTab).
+ */
+async function queueResume(e, delayMs) {
+  handled.add(e.tabId);
+  // A resume only ever goes into the shell it was decided for (pinned when
+  // the tab was first seen: e.pidAt) and only while nothing at all has been
+  // typed into that shell since it started, since a restored shell starts
+  // with an input count of 0. Anything typed while this was being prepared
+  // (a transcript lookup, a claim) found no queue entry to cancel; this
+  // catches it (Codex, design review and round 1).
+  // And the session is still this tab's: resumed in another tab meanwhile
+  // (and maybe stopped there), its link names that tab now (Codex, restore
+  // round 7). The running stamp is NOT asked here: the 15s capture zeroes it
+  // for a fresh shell that is only waiting for this very resume.
+  const untouched = () => cancelGen === e.gen
+    && (listTerminals().find((t) => t.id === e.tabId)?.pid ?? null) === e.pidAt && e.pidAt !== null
+    && terminalInputSeq(e.tabId) === 0
+    && (getSessionTabMap() || {})[e.sessionId]?.tabId === e.tabId;
+  if (!untouched()) {
+    console.log(`[auto-resume] ${e.tabId}: in use, replaced or cancelled before queueing, skipping`);
+    return;
+  }
+  {
     // CLAIM at queue time, not write time, and not a bare reserve. The stagger
     // means a tab sits scheduled for many seconds: reserving only at the write
     // left that window open for another surface to take the session (Codex
@@ -270,15 +345,18 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     if (!claimed) {
       console.log(`[auto-resume] ${e.tabId}: ${e.sessionId} is already running or claimed, skipping`);
       broadcastStatus(e.tabId, 'done');
-      continue;
+      return;
+    }
+    if (!untouched()) {
+      releaseSessionResume(e.sessionId, e.tabId);
+      console.log(`[auto-resume] ${e.tabId}: in use, replaced or cancelled during the claim, skipping`);
+      return;
     }
     broadcastStatus(e.tabId, 'queued');
-    // Pin the entry to the PTY that exists RIGHT NOW. Tab ids are
+    // The PTY was pinned when the tab was first seen (e.pidAt). Tab ids are
     // deterministic per-project counters, so a window closed and reopened
-    // during the stagger recycles the same id for a brand-new shell, and a
-    // write keyed on id alone would type `claude --resume` into it (Codex
-    // High, round 11). The pid distinguishes the two.
-    const pidAtQueue = listTerminals().find((t) => t.id === e.tabId)?.pid ?? null;
+    // recycles the same id for a brand-new shell, and a write keyed on id
+    // alone would type `claude --resume` into it (Codex High, round 11).
     // The entry is created BEFORE the timer so the callback can consult its own
     // `cancelled` flag. The callback awaits, and a cancel arriving during that
     // await used to be a no-op (the entry had already been removed from the
@@ -303,12 +381,16 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
       // dequeued, so just do not write.
       if (entry.cancelled) return;
       if (!ok) { giveUp(`${e.sessionId} is already running elsewhere, skipping`); return; }
-      // Same tab id, same SHELL? A window closed and reopened during the
-      // stagger recycles the id for a new PTY that has nothing to do with
-      // this resume.
-      const pidNow = listTerminals().find((t) => t.id === e.tabId)?.pid ?? null;
-      if (pidNow === null || pidNow !== pidAtQueue) {
-        giveUp('tab was closed (or replaced) before the write, skipping');
+      // Nothing but the shell running in the tab: a shell profile that starts
+      // Claude (or anything) on its own, even by exec, would get the resume
+      // typed into it (Codex, restore round 8).
+      let busy = null;
+      try { busy = await terminalBusy(e.tabId); } catch (err) { busy = 'unknown'; console.warn(`[auto-resume] ${e.tabId}: could not check the tab's program: ${err?.message || err}`); }
+      if (entry.cancelled) return;
+      if (busy) { giveUp(`${busy} is already running in the tab, skipping`); return; }
+      // The same shell, untouched, and no cancel-all since it was decided.
+      if (!untouched()) {
+        giveUp('tab was typed into, replaced or cancelled before the write, skipping');
         return;
       }
       queue.delete(e.tabId);
@@ -323,6 +405,59 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     }, delayMs);
     queue.set(e.tabId, entry);
   }
+}
+
+// A restored shell needs a moment before it reads what is typed into it.
+const RESTORED_TAB_DELAY_MS = 1500;
+// When the next later-restored resume may fire: a window opened with several
+// eligible tabs spaces them like the launch pass does (by transcript size),
+// rather than starting every heavy `claude --resume` at once (Codex).
+let nextRestoredAt = 0;
+
+/**
+ * A tab restored with its saved scrollback AFTER the launch pass (its window
+ * opened later, from the launcher): resume the Claude session it was running
+ * at the last quit, once, under every launch-time guard (Brett, Asana
+ * 1220099565720834: "Should this automatically reopen?").
+ */
+export async function resumeRestoredTab(tabId) {
+  // After a Cmd+Shift+R this launch, nothing resumes on its own any more.
+  if (!startupDone) { restoredDuringStartup.add(tabId); return; }
+  if (handled.has(tabId) || cancelGen > 0) return;
+  const info = launchEligible.get(tabId);
+  if (!info) return;
+  handled.add(tabId);
+  // And still so NOW: the session's link still names this tab and its running
+  // stamp was not cleared since launch (resumed in another tab and stopped
+  // there, say: Codex, restore round 6).
+  const current = (getSessionTabMap() || {})[info.sessionId];
+  if (!current || current.tabId !== tabId || !current.lastRunningAt) {
+    console.log(`[auto-resume] ${tabId}: ${info.sessionId} moved or stopped since launch, not resuming`);
+    return;
+  }
+  // Pinned before any await: this shell, this cancel generation.
+  const pidAt = listTerminals().find((t) => t.id === tabId)?.pid ?? null;
+  const gen = cancelGen;
+  const cfg = getAutoResume();
+  if (!cfg.enabled) return;
+  const sizeMB = await getSessionSize(info.sessionId, info.projectPath);
+  if (sizeMB == null) { console.log(`[auto-resume] skip ${tabId}: transcript not found for ${info.sessionId}`); return; }
+  if (sizeMB > cfg.skipOversizedMB) { console.log(`[auto-resume] skip ${tabId}: transcript ${sizeMB.toFixed(0)}MB > ${cfg.skipOversizedMB}MB cap`); return; }
+  const now = Date.now();
+  const at = Math.max(now + RESTORED_TAB_DELAY_MS, nextRestoredAt);
+  nextRestoredAt = at + cfg.staggerMs + Math.round(Math.min(sizeMB || 0, 2000) * 2);
+  console.log(`[auto-resume] ${tabId}: window opened later, resuming ${info.sessionId} in ${at - now}ms`);
+  await queueResume({ tabId, ...info, sizeMB, pidAt, gen }, at - now);
+}
+
+/**
+ * A tab's shell went away (its window or the tab closed) while Dobius runs:
+ * whatever happens to that tab id later is not the launch's resume to make
+ * (Codex, restore round 5). Cancels a pending write too.
+ */
+export function forgetClosedTab(tabId) {
+  handled.add(tabId);
+  cancelTabIfPending(tabId);
 }
 
 /**
@@ -382,6 +517,7 @@ export function cancelTabsForProject(projectPath) {
  * Cancel the entire queue. Called by Cmd+Shift+R from any window.
  */
 export function cancelAll() {
+  cancelGen += 1; // and every resume still being prepared
   let cancelled = 0;
   for (const [tabId, entry] of queue) {
     entry.cancelled = true;
