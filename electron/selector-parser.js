@@ -414,9 +414,10 @@ export function parseSelectorFromScreen(lines) {
   // and a numbered list in prose (even one followed by "Press Enter to
   // confirm when ready", which trips the hint regex: Codex High) never does.
   let sel = -1;
+  let cursorRow = -1;
   for (let i = blockTop; i < hintIdx; i += 1) {
     const m = lines[i]?.match(SCREEN_OPTION_RE);
-    if (m && m[1]) { sel = Number(m[2]) - 1; break; }
+    if (m && m[1]) { sel = Number(m[2]) - 1; cursorRow = i; break; }
   }
   if (sel === -1) return null;
 
@@ -435,8 +436,31 @@ export function parseSelectorFromScreen(lines) {
   // For selectorFingerprint only: the uncapped screen above the block, so two
   // same-worded prompts for different commands or edits never match. Not
   // enumerable, so it stays out of every JSON payload and card.
+  // The WHOLE screen above the block: a card may be answered after the screen
+  // repainted (an unattended-session timer ticking), so everything visible
+  // has to match, not only the rows nearest the options (Codex Critical).
   Object.defineProperty(out, 'context', {
-    value: lines.slice(Math.max(0, blockTop - SCREEN_CONTEXT_ROWS), blockTop).map((l) => l.trimEnd()).join('\n'),
+    value: lines.slice(0, blockTop).map((l) => l.trimEnd()).join('\n'),
+  });
+  // Where Claude's own chrome starts: the cursor row's indent. Claude draws
+  // the unattended-session timer in the same box as the options (2.1.316),
+  // while a command or edit preview sits deeper or behind a bar.
+  // The prompt's own box, screen rows `top` (the rule it is drawn under) to
+  // `bottom` (its hint line), or null when no rule bounds it close above.
+  // Claude draws the whole box when a prompt appears, so a different prompt
+  // differs inside it; chat-service checks a replay covers these rows.
+  let boxTop = -1;
+  for (let i = blockTop - 1; i >= 0 && i >= blockTop - 60; i -= 1) {
+    if (SCREEN_RULE_RE.test(lines[i].trim())) { boxTop = i; break; }
+  }
+  Object.defineProperty(out, 'boxRows', { value: boxTop === -1 ? null : { top: boxTop, bottom: hintIdx } });
+  // Which raw rows above the block start in a colour (null without the
+  // emulator's cell data): the timer row is Claude's warning colour.
+  Object.defineProperty(out, 'contextColored', {
+    value: Array.isArray(lines.firstColored) ? lines.firstColored.slice(0, blockTop) : null,
+  });
+  Object.defineProperty(out, 'chromeIndent', {
+    value: (lines[cursorRow] || '').search(/\S/),
   });
   return out;
 }
@@ -574,7 +598,6 @@ function screenSteps(lines, blockTop, hintIdx = blockTop, frameW = 0) {
  * the paragraph touching the block, so transcript prose is never swept in.
  */
 const PROMPT_MAX_ROWS = 15;
-const SCREEN_CONTEXT_ROWS = 40;
 const PROMPT_MAX_CHARS = 1500;
 /**
  * Rows Claude wrapped, back into one line. Claude's TUI breaks a row only at
@@ -636,16 +659,80 @@ function screenPrompt(lines, blockTop, prose = false, frameW = 0) {
   return text;
 }
 
+// Claude Code's unattended-session timer under a permission prompt: "Claude
+// Code will automatically block this request in 1:26, to avoid holding up an
+// unattended session" (2.1.316 counts down to a fixed per-request deadline
+// and repaints every second; its "about N minutes" wording for another
+// setting is not read, so those prompts keep the strict rule). Only Claude's
+// own row counts: the warning sign first, no further in than the options'
+// cursor row (the timer shares their box), anywhere above the options (a
+// denial-limit prompt puts it above its edit preview: Codex, round 22). A
+// command or edit preview sits deeper or behind a bar, so a
+// heredoc holding that exact sentence is never read as the timer (Codex
+// Critical, twice). The sentence may wrap onto the next row.
+const TIMER_ROW_RE = /^( *\u26a0\ufe0f?[ \t]*Claude Code will automatically \w+ this request in )(\d{1,3}):([0-5]\d)\b/;
+const TIMER_END_RE = /this request in \d{1,3}:[0-5]\d, to avoid holding up an unattended session\.?$/;
+
+// The timer row in a selector's raw screen rows (indentation intact), as
+// { index, seconds, text }, or null when there is none or more than one.
+function timerRow(sel) {
+  // Permission dialogs only: a question dialog (its tab bar gives it steps)
+  // never draws the timer, so its text can never pass for one (Codex Critical).
+  if (!sel || sel.steps) return null;
+  const rows = String(sel.context || '').split('\n');
+  const chrome = Number.isInteger(sel?.chromeIndent) && sel.chromeIndent >= 0 ? sel.chromeIndent : 2;
+  // No colour information at all (a fallback parse): no timer.
+  if (!Array.isArray(sel.contextColored)) return null;
+  // Every rule first, then count: a quoted copy in a command must not cancel
+  // Claude's real row (Codex, round 23).
+  let found = null;
+  for (let i = 0; i < rows.length; i += 1) {
+    const m = rows[i].match(TIMER_ROW_RE);
+    if (!m) continue;
+    // No further in than the cursor row, and drawn in Claude's warning
+    // colour: question or command text holding the same words is neither
+    // (Codex Critical, round 6).
+    if (rows[i].search(/\S/) > chrome || sel.contextColored[i] !== true) continue;
+    // The whole sentence, through its last word (it may wrap onto the rows
+    // below): a fragment of the words is not the timer (Codex Critical).
+    let sentence = rows[i].trim();
+    for (let j = i + 1; j < rows.length && rows[j].trim() && !TIMER_END_RE.test(sentence); j += 1) sentence += ` ${rows[j].trim()}`;
+    if (!TIMER_END_RE.test(sentence)) continue;
+    if (found) return null; // two that pass every rule: undecidable
+    found = { index: i, seconds: Number(m[2]) * 60 + Number(m[3]), text: rows[i].trim() };
+  }
+  return found;
+}
+
+/** Seconds left on a prompt's unattended-session timer, or null for none. */
+export function selectorCountdown(sel) {
+  return timerRow(sel)?.seconds ?? null;
+}
+
 /**
  * What a selector card shows: the question and its numbered options, not
  * which option the cursor is on (arrow keys move that without changing the
- * prompt). '' for no selector.
+ * prompt), nor the seconds on its unattended-session timer (the same prompt,
+ * a second later). '' for no selector.
  */
 export function selectorFingerprint(sel) {
   if (!sel || !Array.isArray(sel.options)) return '';
   const opts = sel.options.map((o) => `${o?.num}.${o?.label}\n${o?.detail || ''}`);
+  // Only the timer row itself loses its seconds: in the raw rows by position,
+  // in the card's prompt where a row reads exactly as it does.
+  const timer = timerRow(sel);
+  const mask = (row) => row.replace(/(this request in )\d{1,3}:[0-5]\d/, '$1#:##');
+  const context = String(sel.context || '').split('\n').map((r, i) => (timer && i === timer.index ? mask(r) : r)).join('\n');
+  // The card's text can start partway into the timer row (a long preview
+  // pushes the row's start past the card's character limit): a row that is
+  // the END of the timer's text is masked too (Codex, round 25).
+  const tailOfTimer = (r) => { const s = r.trim(); return s.length >= 12 && timer.text.endsWith(s); };
+  // Whatever is left of the time when the cut lands inside it (":26"): all
+  // the digits and colons before the sentence's fixed ending (Codex, 26).
+  const maskAny = (row) => row.replace(/[\d:]+(?=, to avoid holding up)/, '#:##');
+  const prompt = String(sel.prompt || '').split('\n').map((r) => (!timer ? r : r.trim() === timer.text ? mask(r) : tailOfTimer(r) ? maskAny(r) : r)).join('\n');
   // context: the raw rows above the options (non-enumerable, never sent to a
   // client). Two Bash prompts both read "Do you want to proceed?" with the
   // same labels; the command above them is what tells them apart.
-  return createHash('sha1').update(JSON.stringify([sel.prompt || '', opts, sel.context || ''])).digest('hex').slice(0, 16);
+  return createHash('sha1').update(JSON.stringify([prompt, opts, context])).digest('hex').slice(0, 16);
 }

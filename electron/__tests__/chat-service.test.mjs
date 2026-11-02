@@ -4,12 +4,12 @@
 // Run: node --import ./electron/__tests__/chat-service-register.mjs ./electron/__tests__/chat-service.test.mjs
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges, cols, altAtStart } from './fake-terminal-manager.mjs';
+import { writes, ptys, writeTerminal, emitOutput, emitRawOutput, closing, buffers, inputAges, cols, altAtStart, trimmed } from './fake-terminal-manager.mjs';
 
 const { submitPromptToTab, writeRawInput, selectorToken, submitPending, selectorFingerprint, readSelectorForAnswer, answerSelector } = await import('../chat-service.js');
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
-const reset = () => { writes.length = 0; ptys.clear(); closing.clear(); buffers.clear(); inputAges.clear(); };
+const reset = () => { writes.length = 0; ptys.clear(); closing.clear(); buffers.clear(); inputAges.clear(); trimmed.clear(); };
 const PASTE = (t) => `\x1b[200~${t}\x1b[201~`;
 
 // 1. An idle tab is pasted into synchronously; Enter follows on its own.
@@ -283,6 +283,254 @@ ok('a foreign write before the erase is stranded, not unsent');
   assert.equal(writes.length, 2);
 }
 ok('a card answers once, and never after the tab moved');
+
+// 22b. A permission prompt with Claude's unattended-session timer repaints
+// every second. The timer ticking down is the one output that does not make
+// a card stale (Sam: every phone tap said "the prompt changed"). A prompt
+// whose timer started over, any input, or a prompt that reads differently
+// still does. (Accepted risk: an identical replacement in the same timer
+// second is indistinguishable and gets the tap; see answerSelector.)
+{
+  const frame = (t, cmd = 'mv a b') => [
+    '', ' Bash command', '', `   ${cmd}`, '   Move the file aside', '',
+    ` \x1b[33m\u26a0 Claude Code will automatically block this request in ${t}, to avoid holding up an unattended session\x1b[39m`, '',
+    ' Do you want to proceed?', ' \u276f 1. Yes', '   2. No', '', ' Esc to cancel \u00b7 Tab to amend', '',
+  ].join('\r\n');
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => clock;
+  // An ordinary 120 x 40 terminal: a full redraw fits what a read replays.
+  const open = (t, cmd) => { reset(); ptys.set('a', {}); cols.set('a', 120); buffers.set('a', frame(t, cmd)); emitOutput('a'); };
+  const tick = (t, cmd) => { buffers.set('a', frame(t, cmd)); emitRawOutput('a'); };
+  try {
+    open('1:26');
+    const r = await readSelectorForAnswer('a');
+    assert.ok(r && r.token, 'the timed prompt parses with a token');
+    clock += 1000; tick('1:25');
+    const later = await readSelectorForAnswer('a');
+    assert.equal(later.token.split('|')[1], r.token.split('|')[1], 'the timer is not part of the fingerprint');
+    clock += 3000; tick('1:22');
+    const ans = await answerSelector('a', '1', r.token);
+    assert.equal(ans.ok, true, 'a tap four seconds later still lands');
+    assert.deepEqual([...writes], [['a', '1']]);
+
+    // The timer starting over, or off by more than the slack.
+    open('1:26');
+    const r2 = await readSelectorForAnswer('a');
+    clock += 2000; tick('1:30');
+    assert.deepEqual(await answerSelector('a', '1', r2.token), { ok: false, stale: true });
+    tick('1:15');
+    assert.deepEqual(await answerSelector('a', '1', r2.token), { ok: false, stale: true });
+    // A different command under the same timer.
+    tick('1:24', 'rm -rf b');
+    assert.deepEqual(await answerSelector('a', '1', r2.token), { ok: false, stale: true });
+    // Input from anywhere, even with the timer exactly right.
+    buffers.set('a', frame('1:24')); writeTerminal('a', 'x'); emitOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', r2.token), { ok: false, stale: true });
+    assert.deepEqual([...writes], [['a', 'x']]);
+    // A token this Mac never handed out has no reading to go by.
+    open('1:26');
+    const r3 = await readSelectorForAnswer('a');
+    const [b3, f3] = r3.token.split('|');
+    const forged = `${b3.slice(0, b3.lastIndexOf(':'))}:999|${f3}`;
+    clock += 1000; tick('1:25');
+    assert.deepEqual(await answerSelector('a', '1', forged), { ok: false, stale: true });
+    // A screen too big for a full redraw to fit what a read replays keeps
+    // the strict rule, timer or not.
+    open('1:26'); cols.set('a', 1000);
+    const big = await readSelectorForAnswer('a');
+    clock += 1000; tick('1:25');
+    assert.deepEqual(await answerSelector('a', '1', big.token), { ok: false, stale: true });
+    // Accented text redrawn many times (thousands of combining marks over the
+    // session) while the replay holds everything: the tap lands (Codex,
+    // round 24: a history-wide budget refused it).
+    const accents = (t2) => `${'cafe\u0301 '.repeat(3000)}\r\n${frame(t2)}`;
+    open('1:26'); buffers.set('a', accents('1:26')); emitOutput('a');
+    const ac = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', accents('1:25')); emitRawOutput('a');
+    assert.equal((await answerSelector('a', '1', ac.token)).ok, true, 'accents alone are fine');
+    writes.length = 0;
+    // Marks that really push the command out of a trimmed replay: the
+    // coverage check refuses it.
+    const pushed = (cmd, t2) => `${cmd}\r\n${'\u0301'.repeat(300000)}\x1b[3;1H${frame(t2).replace(/^\r\n/, '')}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', pushed('rm -rf ./cache', '1:26')); emitOutput('a');
+    const pm = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', pushed('rm -rf ./vault', '1:25')); emitRawOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', pm.token), { ok: false, stale: true });
+    // A link longer than the replay, so the cut lands inside its URL.
+    const huge = `\x1b]8;;https://x/${'a'.repeat(300000)}\x07L\x1b]8;;\x07`;
+    open('1:26'); buffers.set('a', `rm -rf ./cache\r\n${huge}\r\n${frame('1:26')}`); emitOutput('a');
+    const cut = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', `rm -rf ./vault\r\n${huge}\r\n${frame('1:25')}`); emitRawOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', cut.token), { ok: false, stale: true });
+    // Visible output from before the replay (a flood of style resets pushed
+    // the command out of it, in a buffer that has dropped its start): not
+    // every cell was redrawn in the replay, so strict again.
+    const flood = (cmd, t2) => `${cmd}\r\n${'\x1b[0m'.repeat(70000)}\x1b[3;1H${frame(t2).replace(/^\r\n/, '')}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', flood('rm -rf ./cache', '1:26')); emitOutput('a');
+    const fl = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', flood('rm -rf ./vault', '1:25')); emitRawOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', fl.token), { ok: false, stale: true });
+    // A long session whose buffer was trimmed but whose replay redrew the
+    // whole screen (enough output scrolled every row through it): the tap
+    // lands. (Fewer lines than that leave the ends of rows from before.)
+    const scrolled = (t2) => `${'older line\r\n'.repeat(200)}${frame(t2)}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', scrolled('1:26')); emitOutput('a');
+    const sc = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', scrolled('1:25')); emitRawOutput('a');
+    assert.equal((await answerSelector('a', '1', sc.token)).ok, true, 'a fully redrawn screen');
+    writes.length = 0;
+    // An erase that redraws the screen only from where the replay happens to
+    // start (the top-left) proves nothing: the real cursor stood elsewhere.
+    const erase = (cmd, t2) => `${cmd}\r\n\x1b[3;1H${'\x1b[0m'.repeat(70000)}\x1b[J\x1b[5;1H${frame(t2).replace(/^\r\n/, '')}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', erase('rm -rf ./cache', '1:26')); emitOutput('a');
+    const er = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', erase('rm -rf ./vault', '1:25')); emitRawOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', er.token), { ok: false, stale: true });
+    // The alternate screen already active where the replay begins: a further
+    // switch keeps the real content but shows a blank screen in the replay.
+    const alt = (t2) => `\x1b[?1049hrm -rf ./cache\r\n${'\x1b[0m'.repeat(70000)}\x1b[?1049h\x1b[5;1H${frame(t2).replace(/^\r\n/, '')}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', alt('1:26')); emitOutput('a');
+    const al = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', alt('1:25')); emitRawOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', al.token), { ok: false, stale: true });
+    // A session that simply runs on the alternate screen (no further switch
+    // in the replay), fully redrawn: the tap lands.
+    const altRun = (t2) => `\x1b[?1049h${'older line\r\n'.repeat(200)}${frame(t2)}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', altRun('1:26')); emitOutput('a');
+    const ar = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', altRun('1:25')); emitRawOutput('a');
+    assert.equal((await answerSelector('a', '1', ar.token)).ok, true, 'a session on the alternate screen');
+    writes.length = 0;
+    // A combined mode list switching buffers after an alternate-screen cut.
+    const comb = (t2) => `\x1b[?1049hrm -rf ./cache\r\n${'\x1b[0m'.repeat(70000)}\x1b[?25;1049h\x1b[5;1H${frame(t2).replace(/^\r\n/, '')}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', comb('1:26')); emitOutput('a');
+    const cb = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', comb('1:25')); emitRawOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', cb.token), { ok: false, stale: true });
+    // A cursor restore with no save in the replay: the save was before it.
+    const restore = (t2) => `rm -rf ./cache\r\n\x1b[3;1H\x1b7${'\x1b[0m'.repeat(70000)}\x1b8\x1b[J${frame(t2).replace(/^\r\n/, '')}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', restore('1:26')); emitOutput('a');
+    const rr = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', restore('1:25')); emitRawOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', rr.token), { ok: false, stale: true });
+    // A restore whose save was cut off, then Claude entering and redrawing
+    // the alternate screen: fully redrawn, the tap lands.
+    const late = (t2) => `\x1b7${'\x1b[0m'.repeat(70000)}\x1b8\x1b[?1049h${'older line\r\n'.repeat(200)}${frame(t2)}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', late('1:26')); emitOutput('a');
+    const lt = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', late('1:25')); emitRawOutput('a');
+    assert.equal((await answerSelector('a', '1', lt.token)).ok, true, 'a cut-off restore, then a full redraw');
+    writes.length = 0;
+    // Claude's own save then restore inside the replay is fine.
+    const paired = (t2) => `${'older line\r\n'.repeat(200)}\x1b7\x1b[2;1Hx\x1b8${frame(t2)}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', paired('1:26')); emitOutput('a');
+    const pr = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', paired('1:25')); emitRawOutput('a');
+    assert.equal((await answerSelector('a', '1', pr.token)).ok, true, 'a save and restore inside the replay');
+    writes.length = 0;
+    // Claude quit and started again in an alternate-screen session: leave,
+    // then enter, clears the alternate screen in both; the tap lands.
+    const restart = (t2) => `\x1b[?1049hold screen\r\n${'\x1b[0m'.repeat(70000)}\x1b[?1049l$ claude\r\n\x1b[?1049h${'older line\r\n'.repeat(200)}${frame(t2)}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', restart('1:26')); emitOutput('a');
+    const rsx = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', restart('1:25')); emitRawOutput('a');
+    assert.equal((await answerSelector('a', '1', rsx.token)).ok, true, 'Claude restarted on the alternate screen');
+    writes.length = 0;
+    // A narrowed scroll region in the replay: strict. Claude's own reset to
+    // the full screen (ESC [ r) is not.
+    const region = (t2) => `${'older line\r\n'.repeat(200)}\x1b[2;30r${frame(t2)}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', region('1:26')); emitOutput('a');
+    const rg = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', region('1:25')); emitRawOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', rg.token), { ok: false, stale: true });
+    const reset = (t2) => `${'older line\r\n'.repeat(200)}\x1b[r${frame(t2)}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', reset('1:26')); emitOutput('a');
+    const rs = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', reset('1:25')); emitRawOutput('a');
+    assert.equal((await answerSelector('a', '1', rs.token)).ok, true, "Claude's scroll-region reset");
+    writes.length = 0;
+    // A long fullscreen session: a static header drawn long before the replay
+    // (never redrawn), the prompt's own box (under its rule) drawn inside it.
+    // Only the box has to be covered: the tap lands.
+    const rule = '\u2500'.repeat(60);
+    // Drawn as Claude 2.1.316 does: to the frame's top, erase below, write.
+    const boxed = (t2, cmd = 'mv a b') => `\x1b[1;1H Claude Code v2.1.316 header${'\x1b[0m'.repeat(70000)}\x1b[8;1H\x1b[J${rule}\r\n${frame(t2, cmd).replace(/^\r\n/, '')}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', boxed('1:26')); emitOutput('a');
+    const bx = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', boxed('1:25')); emitRawOutput('a');
+    assert.equal((await answerSelector('a', '1', bx.token)).ok, true, 'static header, box redrawn in the replay');
+    writes.length = 0;
+    // A real icon-font glyph (U+E000) in the box is output, not a marker.
+    open('1:26'); trimmed.add('a'); buffers.set('a', boxed('1:26', 'echo \ue000 icon')); emitOutput('a');
+    const gl = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', boxed('1:25', 'echo \ue000 icon')); emitRawOutput('a');
+    assert.equal((await answerSelector('a', '1', gl.token)).ok, true, 'a U+E000 glyph in the box');
+    writes.length = 0;
+    // The box's top (its rule and command) drawn BEFORE the replay, only the
+    // timer and options after: the box is not covered, strict.
+    const split = (cmd, t2) => `\x1b[8;1H${rule}\r\n Bash command\r\n\r\n   ${cmd}${'\x1b[0m'.repeat(70000)}\x1b[13;1H\x1b[J ${frame(t2).split('\r\n').slice(6).join('\r\n')}`;
+    open('1:26'); trimmed.add('a'); buffers.set('a', split('rm -rf ./cache', '1:26')); emitOutput('a');
+    const sp = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', split('rm -rf ./vault', '1:25')); emitRawOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', sp.token), { ok: false, stale: true });
+    // An ordinary file link costs nothing: the tap still lands.
+    open('1:26'); buffers.set('a', `\x1b]8;;file:///Users/x/a.js\x07a.js\x1b]8;;\x07\r\n${frame('1:26')}`); emitOutput('a');
+    const small = await readSelectorForAnswer('a');
+    clock += 1000; buffers.set('a', `\x1b]8;;file:///Users/x/a.js\x07a.js\x1b]8;;\x07\r\n${frame('1:25')}`); emitRawOutput('a');
+    assert.equal((await answerSelector('a', '1', small.token)).ok, true);
+    writes.length = 0;
+    // A prompt WITHOUT the timer keeps the strict rule: any output is stale.
+    reset(); ptys.set('a', {}); buffers.set('a', frame('1:26').replace(/ \x1b\[33m\u26a0 Claude Code[^\r]*/, '')); emitOutput('a');
+    const r4 = await readSelectorForAnswer('a');
+    assert.ok(r4 && r4.token);
+    emitRawOutput('a');
+    assert.deepEqual(await answerSelector('a', '1', r4.token), { ok: false, stale: true });
+    assert.deepEqual([...writes], []);
+    // A command that only MENTIONS the timer's words is not a timer: two
+    // different such commands never share a fingerprint.
+    const { selectorCountdown } = await import('../selector-parser.js');
+    const mention = (n) => ({ prompt: `rm -rf 'automatically block this request in 1:${n}'`, options: [{ num: 1, label: 'Yes' }] });
+    assert.equal(selectorCountdown(mention(26)), null);
+    // The sentence wrapped onto a second row still reads as the timer.
+    const row = (n) => ` \u26a0 Claude Code will automatically block this request in 1:${n}, to avoid holding up an unattended`;
+    const wrapped = (n) => ({ prompt: `${row(n).trim()}\nsession`, context: `${row(n)}\n session`, contextColored: [true, true], options: [{ num: 1, label: 'Yes' }] });
+    assert.equal(selectorCountdown(wrapped(26)), 86);
+    assert.equal(selectorFingerprint(wrapped(26)), selectorFingerprint(wrapped(25)));
+    // The same sentence INSIDE a command (a heredoc row, indented like every
+    // command row) is not the timer, and its digits stay in the fingerprint.
+    const heredoc = (n) => ({ prompt: 'cat <<X', context: ` Bash command\n\n   cat <<X\n   \u26a0 Claude Code will automatically block this request in 1:${n}, to avoid holding up an unattended session\n   X`, options: [{ num: 1, label: 'Yes' }] });
+    assert.equal(selectorCountdown(heredoc(26)), null);
+    // A quoted copy in a command next to Claude's real timer: the real one
+    // still counts (Codex, round 23).
+    const both = { prompt: 'x', chromeIndent: 1, contextColored: [false, false, false, false, true, false], context: [' Bash command', '   cat <<X', '   \u26a0 Claude Code will automatically block this request in 9:99, to avoid holding up an unattended session', '   X', ' \u26a0 Claude Code will automatically block this request in 1:26, to avoid holding up an unattended session', ' Do you want to proceed?'].join('\n'), options: [{ num: 1, label: 'Yes' }] };
+    assert.equal(selectorCountdown(both), 86, 'the real timer beside a quoted copy');
+    // The card's text cut off partway into the timer row: still masked.
+    const cutRow = (n) => ({ prompt: `request in 1:${n}, to avoid holding up an unattended session\nDo you want to proceed?`, chromeIndent: 1, contextColored: [true, false], context: ` \u26a0 Claude Code will automatically block this request in 1:${n}, to avoid holding up an unattended session\n Do you want to proceed?`, options: [{ num: 1, label: 'Yes' }] });
+    assert.equal(selectorFingerprint(cutRow(26)), selectorFingerprint(cutRow(25)), 'a truncated timer row in the card text');
+    const midTime = (n) => ({ ...cutRow(n), prompt: `${n}, to avoid holding up an unattended session\nDo you want to proceed?` });
+    assert.equal(selectorFingerprint(midTime(26)), selectorFingerprint(midTime(25)), 'cut inside the time itself');
+    // Above a long edit preview (a denial-limit prompt draws it there): still
+    // the timer, wherever it sits above the options (Codex, round 22).
+    const far = { prompt: 'x', chromeIndent: 1, contextColored: Array(8).fill(true), context: [' \u26a0 Claude Code will automatically block this request in 1:26, to avoid holding up an unattended session', ' a', ' b', ' c', ' d', ' e', '', ' Do you want to proceed?'].join('\n'), options: [{ num: 1, label: 'Yes' }] };
+    assert.equal(selectorCountdown(far), 86);
+    assert.equal(selectorCountdown({ ...far, context: far.context.replace(/ a\n b\n c\n d\n e\n/, '') }), 86);
+    // Only the whole sentence counts, and never in a question dialog.
+    const near = far.context.replace(/ a\n b\n c\n d\n e\n/, '');
+    assert.equal(selectorCountdown({ ...far, context: near.replace(', to avoid holding up an unattended session', '') }), null, 'a fragment of the words');
+    assert.equal(selectorCountdown({ ...far, context: near, steps: { current: 0, total: 1 } }), null, 'a question dialog');
+    // The same row drawn plain (question or command text) is not the timer,
+    // and neither is a parse without colour information.
+    assert.equal(selectorCountdown({ ...far, context: near, contextColored: Array(8).fill(false) }), null, 'plain text');
+    assert.equal(selectorCountdown({ ...far, context: near, contextColored: null }), null, 'no colour data');
+    // Further in than the cursor row: not Claude's chrome.
+    assert.equal(selectorCountdown({ ...far, chromeIndent: 0, context: far.context.replace(/ a\n b\n c\n d\n e\n/, '') }), null);
+    assert.notEqual(selectorFingerprint(heredoc(26)), selectorFingerprint(heredoc(25)));
+  } finally {
+    Date.now = realNow;
+  }
+}
+ok('a ticking timer does not make a card stale, a new prompt does');
 
 // 23. One frame holding Enter AND Ctrl+U (an Enter that sent the paste, then
 // an erase) is another writer's input, so the paste is stranded, not unsent.

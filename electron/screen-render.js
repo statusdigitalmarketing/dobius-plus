@@ -30,6 +30,10 @@ const ROWS = 120;
 // wider than COLS (a big display, a small font) would otherwise wrap Claude's
 // full-width rules here and misplace every row after them. Capped.
 const MAX_COLS = 1000;
+// A caller that knows the PTY's real height passes it (opts.rows): a terminal
+// taller than ROWS would otherwise lose its top rows, and a permission card
+// is matched against everything visible (Codex Critical). Capped.
+const MAX_ROWS = 400;
 
 let pooled = null;
 
@@ -43,7 +47,8 @@ let renderChain = Promise.resolve();
 
 /**
  * @param raw string | Uint8Array of raw PTY output (a rolling-buffer tail)
- * @returns Promise<string[] | null> the ROWS screen lines (right-trimmed),
+ * @returns Promise<string[] | null> the screen lines, ROWS or opts.rows of
+ *          them (right-trimmed),
  *          or null when the emulator failed; callers fall back to the old
  *          strip-and-regex path so a headless bug can never LOSE a popup
  *          that path would have found.
@@ -55,22 +60,32 @@ export function renderScreenLines(raw, opts) {
   return run;
 }
 
-function renderScreenLinesNow(raw, { timeoutMs = 750, cols, exact = false } = {}) {
+// A character no real output uses, filled into every cell before a coverage
+// replay (opts.fillCheck): any left afterwards is a cell the replay never
+// wrote, i.e. one still showing output from before it.
+export const FILL = '\uE000';
+
+function renderScreenLinesNow(raw, { timeoutMs = 750, cols, rows, exact = false, exactRows = false, fillCheck = false, fillStart = 'top', startAt = null } = {}) {
   // exact: the tab's own width, for showing its screen as it is (wrapping and
   // in-line erases differ at another width). Otherwise at least COLS, so a
   // parser never sees a long row wrapped.
   const width = exact && Number.isInteger(cols) && cols >= 20
     ? Math.min(MAX_COLS, cols)
     : Math.min(MAX_COLS, Math.max(COLS, Number.isInteger(cols) ? cols : 0));
+  // fillCheck and exactRows render at the tab's exact height when it is
+  // known: rows below it never exist, and moves to the last row land there.
+  const height = (fillCheck || exactRows) && Number.isInteger(rows) && rows > 0
+    ? Math.min(MAX_ROWS, rows)
+    : Math.min(MAX_ROWS, Math.max(ROWS, Number.isInteger(rows) ? rows : 0));
   return new Promise((resolve) => {
     let term;
     try {
       if (!pooled) {
-        pooled = new Terminal({ cols: width, rows: ROWS, scrollback: 0, allowProposedApi: true, logLevel: 'off' });
+        pooled = new Terminal({ cols: width, rows: height, scrollback: 0, allowProposedApi: true, logLevel: 'off' });
       }
       term = pooled;
       term.reset();
-      if (term.cols !== width) term.resize(width, ROWS);
+      if (term.cols !== width || term.rows !== height) term.resize(width, height);
     } catch {
       resolve(null);
       return;
@@ -83,14 +98,20 @@ function renderScreenLinesNow(raw, { timeoutMs = 750, cols, exact = false } = {}
       try {
         const out = [];
         const buf = term.buffer.active;
-        for (let i = 0; i < ROWS; i += 1) out.push(buf.getLine(i)?.translateToString(true) ?? '');
+        for (let i = 0; i < height; i += 1) out.push(buf.getLine(i)?.translateToString(true) ?? '');
+        if (fillCheck) {
+          let untouched = 0;
+          const perRow = out.map((l) => { let n = 0; for (const ch of l) if (ch === FILL) n += 1; untouched += n; return n; });
+          Object.defineProperty(out, 'untouched', { value: untouched });
+          Object.defineProperty(out, 'untouchedRows', { value: perRow });
+        }
         // The multi-question tab bar (`← ☐ Color ☐ Size ✔ Submit →`) marks
         // the CURRENT question with a background colour, which plain text
         // loses. Report, per tab-bar row, the runs of highlighted text, so
         // the parser knows which question is showing. Non-enumerable: it
         // never rides along in a payload.
         const highlights = {};
-        for (let i = 0; i < ROWS; i += 1) {
+        for (let i = 0; i < height; i += 1) {
           if (!/[☐☒✔]/.test(out[i])) continue;
           const line = buf.getLine(i);
           // { text, col }: col is the string index of the run's first cell
@@ -125,8 +146,13 @@ function renderScreenLinesNow(raw, { timeoutMs = 750, cols, exact = false } = {}
         // Where each row's trailing dim text starts, or -1: Claude draws its
         // placeholder and ghost suggestion dim, and typed text never.
         const dimFrom = [];
-        for (let i = 0; i < ROWS; i += 1) {
+        // Whether each row's first visible character is drawn in a colour
+        // (not the default foreground): Claude's own warnings are, typed and
+        // quoted text is not (chat-service's timer check).
+        const firstColored = [];
+        for (let i = 0; i < height; i += 1) {
           const line = buf.getLine(i);
+          let colored = false;
           let end = 0;
           let start = -1;
           let wordEnd = -1;
@@ -144,17 +170,19 @@ function renderScreenLinesNow(raw, { timeoutMs = 750, cols, exact = false } = {}
               if (!cell.isDim()) dimAt = -1;
               else if (dimAt === -1) dimAt = x;
               end = x + w;
-              if (start === -1) start = x;
+              if (start === -1) { start = x; colored = !cell.isFgDefault(); }
               if (wordEnd === -1) continue;
             } else if (start !== -1 && wordEnd === -1) wordEnd = x;
           }
           ends.push(end);
           dimFrom.push(dimAt);
+          firstColored.push(colored);
           firstWords.push(start === -1 ? 0 : (wordEnd === -1 ? end : wordEnd) - start);
         }
         Object.defineProperty(out, 'ends', { value: ends });
         Object.defineProperty(out, 'dimFrom', { value: dimFrom });
         Object.defineProperty(out, 'firstWords', { value: firstWords });
+        Object.defineProperty(out, 'firstColored', { value: firstColored });
         // Whether the program asked for bracketed paste: /openTab only pastes
         // into a Claude that turned it on (bridge-open-tab.js).
         // And where the cursor is (row and column of the screen): Claude's
@@ -177,7 +205,23 @@ function renderScreenLinesNow(raw, { timeoutMs = 750, cols, exact = false } = {}
       finish(false);
     }, timeoutMs);
     try {
-      term.write(raw, () => { clearTimeout(t); finish(true); });
+      let data = raw;
+      // Where the real cursor stood when the replay begins is unknown, so a
+      // caller checks from both corners: an erase that only covers from the
+      // top-left must not count as having redrawn the screen. The saved
+      // cursor too (ESC 7): a restore whose save came before the replay lands
+      // on this pass's corner, like any unknown position. A coverage pass
+      // (fillCheck) fills the screen with markers first; the plain replay
+      // that goes with it (startAt) only starts from the same corner.
+      const corner = fillCheck ? fillStart : startAt;
+      if (corner) {
+        if (typeof raw !== 'string') { clearTimeout(t); finish(false); return; }
+        let fill = '';
+        if (fillCheck) for (let r = 1; r <= height; r += 1) fill += `\x1b[${r};1H${FILL.repeat(width)}`;
+        const start = corner === 'bottom' ? `\x1b[${height};${width}H` : '\x1b[H';
+        data = `${fill}${start}\x1b7${raw}`;
+      }
+      term.write(data, () => { clearTimeout(t); finish(true); });
     } catch {
       clearTimeout(t);
       finish(false);
