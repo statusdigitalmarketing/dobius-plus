@@ -972,17 +972,31 @@ function handleAuthedMessage(socket, msg, subs) {
             wsSend(socket, { type: 'transcript', sessionId, projectPath, blocks, sig, unchanged: true });
             return null;
           }
-          if (sig && hit && hit.sig === sig) return { entries: hit.entries, sig };
+          if (sig && hit && hit.sig === sig) return { entries: hit.entries, sig, atStart: hit.atStart };
           const entries = (await loadTranscript(sessionId, projectPath, limit, undefined, { blocks })) || [];
-          if (sig) txCache.set(cacheKey, { sig, entries });
-          return { entries, sig };
+          const atStart = typeof entries.atStart === 'boolean' ? entries.atStart : undefined;
+          // An empty read (a transcript briefly unreadable) is never cached:
+          // it would be served for that file until it changed (Codex).
+          if (sig && entries.length) {
+            // One window per conversation: paging older messages walks the
+            // limit up in steps, and each step's rows must not stay cached.
+            const base = `${sessionId}:${projectPath}:`;
+            for (const k of txCache.keys()) {
+              if (k !== cacheKey && k.startsWith(base) && k.endsWith(blocks ? ':b' : ':') && !k.endsWith(':0:b') && !k.endsWith(':0:')) txCache.delete(k);
+            }
+            txCache.set(cacheKey, { sig, entries, atStart });
+          }
+          return { entries, sig, atStart };
         })
         .then((res) => {
           if (!res) return; // unchanged reply already sent
           // `blocks` names the shape, so a History reply (plain rows) for the
           // same session can never land in the Chat view or vice versa: both
           // share this socket and the same sig (Codex Medium).
-          wsSend(socket, { type: 'transcript', sessionId, projectPath, blocks, sig: res.sig || null, entries: res.entries || [] });
+          // limit: the window this reply covers, so a phone that asked for older
+          // messages meanwhile can tell a smaller, stale reply apart.
+          // atStart: these rows reach back to the conversation's first message.
+          wsSend(socket, { type: 'transcript', sessionId, projectPath, blocks, limit: limit || 0, atStart: res.atStart, sig: res.sig || null, entries: res.entries || [] });
         })
         .catch((err) => wsSend(socket, { type: 'error', message: String(err?.message || err) }));
       break;

@@ -34,13 +34,14 @@ const TAIL_CHUNK_BYTES = 64 * 1024;
  * least `minLines` complete lines (or the whole file if it is smaller).
  * Reads backwards in chunks so memory stays bounded regardless of file size.
  */
-async function readTail(filePath, minLines) {
+async function readTail(filePath, minLines, info = null) {
   const handle = await fs.open(filePath, 'r');
   try {
     const { size } = await handle.stat();
     if (size <= TAIL_CHUNK_BYTES) {
       const buf = Buffer.alloc(size);
       await handle.read(buf, 0, size, 0);
+      if (info) info.fromStart = true;
       return buf.toString('utf8');
     }
     let pos = size;
@@ -67,6 +68,7 @@ async function readTail(filePath, minLines) {
         if (chunk[i] === 0x0a) newlines++;
       }
     }
+    if (info) info.fromStart = pos === 0;
     return Buffer.concat(chunks).toString('utf8');
   } finally {
     await handle.close();
@@ -87,11 +89,15 @@ const isRequestBlob = (obj) => obj?.type === 'api-request-blob';
  * Parse a JSONL file asynchronously, skipping malformed lines.
  * When `limit > 0`, only the last `limit` parsed entries are returned, and the
  * file is read from the tail so memory stays bounded on huge transcripts.
+ * An `info` object gets `whole: true` when the entries returned are every
+ * record in the file (the read reached its start and nothing was cut), which
+ * is how the phone chat knows it has reached the start of a conversation.
  */
-export async function parseJsonl(filePath, limit = 0) {
+export async function parseJsonl(filePath, limit = 0, info = null) {
   try {
+    const read = {};
     const content = limit > 0
-      ? await readTail(filePath, limit)
+      ? await readTail(filePath, limit, read)
       : await fs.readFile(filePath, 'utf8');
     const lines = content.trim().split('\n').filter(Boolean);
     // The first line of a tail read may be truncated mid-record; JSON.parse
@@ -107,6 +113,7 @@ export async function parseJsonl(filePath, limit = 0) {
         continue;
       }
     }
+    if (info) info.whole = limit > 0 ? read.fromStart === true && parsedLines.length <= limit : true;
     if (limit > 0) {
       return parsedLines.slice(-limit);
     }

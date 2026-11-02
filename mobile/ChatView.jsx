@@ -4,7 +4,7 @@ import SpecialKeys from './SpecialKeys';
 import Lightbox from './Lightbox';
 import remarkGfm from 'remark-gfm';
 import { pairingKey } from './pairings';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
@@ -16,6 +16,11 @@ import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } fr
 // never eats typed-but-unsent text (Sam's report). One localStorage key holds
 // a { tabId: { text, at } } map, pruned to 40 entries / 7 days on write.
 const DRAFTS_KEY = 'dobius-mobile-drafts';
+// Older messages load a page at a time when the reader reaches the top (Sam:
+// "when I scroll to the top I can't find older stuff"), never all at once.
+// The Mac caps one request at 2000 entries.
+const HISTORY_PAGE = 200;
+const HISTORY_MAX = 2000;
 
 // A multi-select option row ("[ ] Foo", "☐ Foo"): its keys row stays open.
 const MULTI_OPTION = /^(\[[ x✓✔]\]|[☐☒])\s/;
@@ -431,6 +436,30 @@ const SEND_UNCERTAIN = 'Maybe sent: it was pasted but the tab changed before Ent
  * desktop terminal is never resized or touched. Live-ish: it re-requests the
  * transcript on a short poll so new turns appear as Claude writes them.
  */
+// Where a row sits on screen, from the top of the chat. Measured on screen,
+// not in content coordinates: whatever the browser already did (its own scroll
+// anchoring, clamping a scroll position that no longer fits) is already in it,
+// so the correction is only what is still left over (Codex round 4).
+function viewY(body, row) {
+  return row.getBoundingClientRect().top - body.getBoundingClientRect().top;
+}
+
+// The rows the reader is looking at: the first few on screen that carry a
+// transcript id, each with where it sits. Several, because a row can vanish on
+// the next render (an older page brings the start of a turn, and the merged
+// turn takes the earlier record's id); an index-keyed row is skipped because
+// React gives its node to a different message once rows are added above.
+function captureAnchor(body, keys) {
+  const rows = body.querySelectorAll(':scope > .chat-msg:not(.chat-echo)');
+  const top = body.getBoundingClientRect().top;
+  const picked = [];
+  for (let i = 0; i < rows.length && picked.length < 6; i += 1) {
+    if (picked.length === 0 && rows[i].getBoundingClientRect().bottom <= top) continue;
+    if (typeof keys[i] === 'string' && keys[i].startsWith('id:')) picked.push({ row: rows[i], y: viewY(body, rows[i]) });
+  }
+  return picked.length ? picked : null;
+}
+
 export default function ChatView({ connection, tab, onOpenTerminal }) {
   const sessionId = tab?.sessionId || null;
   const projectPath = tab?.sessionProject || null;
@@ -597,6 +626,30 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // unchanged file gets a ~100-byte reply instead of the full payload again.
   const sigRef = useRef(null);
 
+  // How many recent entries to ask for. Starts at a page and grows by one
+  // each time the reader reaches the top (older messages load on demand, never
+  // the whole transcript at once), up to the Mac's cap.
+  const limitRef = useRef(HISTORY_PAGE);
+  // The window the rows on screen came from. sigRef names THAT payload, so it
+  // is only sent back for the same window: the Mac keeps one cached window per
+  // conversation, and a sig claimed for another one answered "unchanged" to a
+  // bigger request (Codex).
+  const heldLimitRef = useRef(0);
+  // A page of older entries asked for and not yet answered (cleared by a
+  // timeout so the reader can ask again), and the window that page asked for,
+  // which only its reply clears: a reply that comes after the timeout still
+  // keeps the reader's place (Codex).
+  const olderRef = useRef(null);
+  const pageLimitRef = useRef(0);
+
+  // The row the reader is looking at and where it sat, taken just before new
+  // rows render, so it stays put when rows are added above it.
+  const anchorRef = useRef(null);
+  // 'more' | 'loading' | 'start' | 'cap', or 'none' until the Mac shows it can
+  // page (it echoes the window it served). An older Mac gets no paging at all:
+  // its rows can lack ids, which no scroll anchor or unread mark can follow.
+  const [history, setHistory] = useState('none');
+
   const request = useCallback(() => {
     if (!sessionId || !projectPath) return;
     wantRef.current = sessionId;
@@ -605,8 +658,13 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     // tabId authorizes this socket to send input to the tab (server gates
     // input/kill on the socket's touched-tab set, and the Chat view never
     // attaches). Audit Medium.
-    connection.send({ type: 'loadTranscript', sessionId, projectPath, tabId, limit: 200, blocks: 1, sig: sigRef.current || undefined });
+    const sig = heldLimitRef.current === limitRef.current ? sigRef.current : null;
+    connection.send({ type: 'loadTranscript', sessionId, projectPath, tabId, limit: limitRef.current, blocks: 1, sig: sig || undefined });
   }, [connection, sessionId, projectPath, tabId]);
+  // The message listener outlives a session switch in this tab: it must ask
+  // for the CURRENT session, never the one it was set up under (Codex).
+  const requestRef = useRef(request);
+  requestRef.current = request;
 
   // Ask the server whether the tab's live PTY is showing a selection prompt.
   const probeSelector = useCallback(() => {
@@ -616,6 +674,13 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   useEffect(() => {
     setMessages(null);
     emptyStreakRef.current = 0;
+    limitRef.current = HISTORY_PAGE; // a new session starts from its latest page
+    heldLimitRef.current = 0;
+    clearTimeout(olderRef.current?.timer);
+    olderRef.current = null;
+    pageLimitRef.current = 0;
+    anchorRef.current = null;
+    setHistory('none');
     sigRef.current = null; // new session: never claim we hold its payload
     if (!sessionId || !projectPath) return undefined;
     request();
@@ -649,6 +714,8 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // The newest Claude reply stays open even when long: it is what you came to read.
   const lastClaude = messages ? messages.findLastIndex((m) => m.role === 'assistant') : -1;
   const messageKeys = useMemo(() => (messages ? rowKeys(messages) : []), [messages]);
+  const keysRef = useRef(messageKeys);
+  keysRef.current = messageKeys;
   const messagesRef = useRef(messages); // the rows now, for timers
   messagesRef.current = messages;
   const working = tab?.status === 'working';
@@ -703,11 +770,64 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
           });
           return;
         }
+        // A reply for a smaller window than the one now asked for (a poll still
+        // in flight when an older page was requested) would drop the older
+        // rows again. Macs that do not say which window they served are taken
+        // as they come.
+        // A bigger one can only be left over from before this view reopened
+        // or switched session, and would leave rows the next page drops (Codex).
+        if (typeof msg.limit === 'number' && msg.limit !== limitRef.current) return;
         // Claim the sig ONLY for a non-empty payload (below): claiming it for
         // an empty parse would freeze the empty-streak debounce (server says
         // unchanged forever, streak never reaches 2, stale messages pinned;
         // Codex High).
         const next = msg.entries || [];
+        // Where the start of the conversation is, as the Mac reports it on every
+        // reply (live rows can push the first message back out of the window).
+        // An empty reply (a transcript briefly unreadable) says nothing.
+        const pages = typeof msg.limit === 'number' && typeof msg.atStart === 'boolean';
+        const forOlder = pages && pageLimitRef.current > 0 && msg.limit === pageLimitRef.current;
+        if (next.length > 0) {
+          if (forOlder) pageLimitRef.current = 0;
+          setHistory((cur) => {
+            if (!pages) return 'none';
+            if (msg.atStart) return 'start';
+            // Not the start: more can be asked for until the Mac's cap. A page
+            // that brought nothing new is not the end either (metadata records
+            // between turns use up a window), so the reader can ask again.
+            if (limitRef.current >= HISTORY_MAX) return 'cap';
+            return forOlder || cur === 'none' || cur === 'start' ? 'more' : cur;
+          });
+        }
+        // Keep the reader's place when these rows render. An older page keeps
+        // it even for a reader 'at the bottom' of a short window, or the
+        // auto-scroll would carry them past the rows they asked for (Codex).
+        const body = bodyRef.current;
+        // Only while the request is still waiting: once it has timed out the
+        // reader may have gone back to the bottom, which wins (Codex).
+        // Accepted residual: a reader who never moved, in a window short
+        // enough to sit at its bottom, whose page answers after the 10s
+        // timeout along with new output, is followed to the new bottom.
+        const pending = forOlder && next.length > 0 && !!olderRef.current;
+        if (forOlder && next.length > 0) {
+          clearTimeout(olderRef.current?.timer);
+          olderRef.current = null;
+        }
+        if (pending) atBottomRef.current = false;
+        if (next.length > 0 && body && !atBottomRef.current) {
+          // Two replies can land before one render: the first one's anchor (the
+          // place before ANY of them) and its page flag are what count (Codex).
+          const prev = anchorRef.current;
+          anchorRef.current = { rows: prev?.rows || captureAnchor(body, keysRef.current), page: !!prev?.page || pending };
+        }
+        // A window of only non-message records shows nothing: reach further
+        // back on its own until rows appear, up to the cap (Codex).
+        if (pages && next.length === 0 && !msg.atStart && limitRef.current < HISTORY_MAX) {
+          const stepped = pageLimitRef.current === limitRef.current;
+          limitRef.current = Math.min(HISTORY_MAX, limitRef.current + HISTORY_PAGE);
+          if (stepped) pageLimitRef.current = limitRef.current; // still the reader's page
+          setTimeout(() => requestRef.current(), 0);
+        }
         // Prune echoes the transcript now covers (same trimmed text, queued or
         // real) and any older than 90s.
         setEchoes((cur) => {
@@ -729,6 +849,7 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
         if (next.length > 0) {
           emptyStreakRef.current = 0;
           sigRef.current = msg.sig || null;
+          heldLimitRef.current = typeof msg.limit === 'number' ? msg.limit : limitRef.current;
           setMessages(next);
         } else {
           emptyStreakRef.current += 1;
@@ -805,12 +926,58 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     // No mark (a new session loaded in this tab while the reader was scrolled
     // up): none of it was seen, so say so until they reach the bottom
     // (Codex Medium, twice: a null mark used to hide the pill for good).
+    seenKeyRef.current = widenMark(rows, messageKeys, seenKeyRef.current);
+    // A jump to the latest can be cut short, restoring this mark: it must have
+    // taken in the same rows, or it takes them in later, after they changed.
+    preJumpMarkRef.current = widenMark(rows, messageKeys, preJumpMarkRef.current);
     setUnseen(seenKeyRef.current ? unseenSince(rows, messageKeys, seenKeyRef.current) : -1);
   }, [messages, messageKeys, echoes, shellText]);
+
+  // New rows rendered while the reader is scrolled up (an older page, or the
+  // window sliding as live rows arrive): put the rows they were looking at back
+  // where they were, before the browser paints. Measured on the rows
+  // themselves, so growth below them cannot throw it off (Codex). The anchor
+  // is taken when the reply arrives, so scrolling done while a page loaded is
+  // kept. Accepted residuals: a window of ONE row whose turn merges with the
+  // older page has no row left to anchor on; momentum scrolling in the few
+  // milliseconds between a reply and its render is undone by the correction.
+  useLayoutEffect(() => {
+    const a = anchorRef.current;
+    const el = bodyRef.current;
+    anchorRef.current = null;
+    if (!a || !el || atBottomRef.current) return;
+    const hit = a.rows?.find((c) => c.row.isConnected);
+    const shift = hit ? viewY(el, hit.row) - hit.y : 0;
+    if (Math.abs(shift) >= 1) {
+      el.scrollTop += shift;
+      lastTopRef.current = el.scrollTop;
+    }
+    // An older page set the reader as 'not at the bottom' so it would not be
+    // carried past the rows it asked for. Where it really is decides from
+    // here on: a page that added nothing must not stop the chat following
+    // new messages (Codex).
+    if (a.page) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  }, [messages]);
+
+  const loadOlder = () => {
+    const el = bodyRef.current;
+    if (!el || olderRef.current || history !== 'more' || !messages?.length) return;
+    if (limitRef.current >= HISTORY_MAX) { setHistory('cap'); return; }
+    limitRef.current = Math.min(HISTORY_MAX, limitRef.current + HISTORY_PAGE);
+    const older = { timer: null };
+    // No answer (an old Mac, a dropped socket): let the next pull try again.
+    older.timer = setTimeout(() => { if (olderRef.current === older) { olderRef.current = null; setHistory('more'); } }, 10000);
+    olderRef.current = older;
+    pageLimitRef.current = limitRef.current;
+    setHistory('loading');
+    request();
+  };
 
   const onScroll = () => {
     const el = bodyRef.current;
     if (!el) return;
+    // Near the top: fetch the next older page.
+    if (el.scrollTop < 120) loadOlder();
     const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     // A smooth jump passes through scroll positions above the bottom; they
     // must not count as the reader scrolling back up. The hold ends when the
@@ -1285,6 +1452,14 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
     <div className="chat-view">
       <div className="chat-body-wrap">
       <main className="chat-body" ref={bodyRef} onScroll={onScroll}>
+        {messages && messages.length > 0 && history !== 'none' && (
+          <div className="chat-history-edge" aria-live="polite">
+            {history === 'loading' && 'Loading earlier messages…'}
+            {history === 'start' && 'Start of conversation'}
+            {history === 'cap' && 'Older messages are in History on your Mac.'}
+            {history === 'more' && <button type="button" className="chat-history-more" onClick={loadOlder}>Load earlier messages</button>}
+          </div>
+        )}
         {messages === null && <p className="muted pad">Loading conversation...</p>}
         {messages && messages.length === 0 && (
           // A linked session whose transcript resolves to nothing used to be a

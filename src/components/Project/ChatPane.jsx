@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useStore } from '../../store/store';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
-import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache } from '../../../shared/chat-rows.js';
+import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache } from '../../../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import ModelMenu from './ModelMenu';
 import './ChatPane.css';
@@ -748,6 +748,9 @@ export default function ChatPane({ tabId, visible }) {
     // No mark (a new session loaded in this tab while the reader was scrolled
     // up): none of it was seen, so say so until they reach the bottom
     // (Codex Medium, twice: a null mark used to hide the pill for good).
+    // Rows a longer tail read exposed above the mark are taken in as they are
+    // now, so a result that later lands in one of them is news (Codex).
+    seenKeyRef.current = widenMark(rows, keys, seenKeyRef.current);
     setUnseen(seenKeyRef.current ? unseenSince(rows, keys, seenKeyRef.current) : -1);
   }, [messages, echoes, shellText, status, selector]);
 
