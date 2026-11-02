@@ -472,6 +472,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   tasksReopen: (p, id, opts) => ipcRenderer.invoke('tasks:reopen', p, id, opts),
   tasksBlock: (p, id, reason, opts) => ipcRenderer.invoke('tasks:block', p, id, reason, opts),
   tasksUnblock: (p, id, opts) => ipcRenderer.invoke('tasks:unblock', p, id, opts),
+  inboxRead: () => ipcRenderer.invoke('inbox:read'),
   // Fires when a task is completed from a terminal via dobius-task-done, so an
   // open Tasks panel can re-check the box live. Callback receives projectPath.
   onTasksUpdated: (cb) => {

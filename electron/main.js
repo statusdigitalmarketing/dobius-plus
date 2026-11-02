@@ -116,6 +116,7 @@ import { pairingText } from '../shared/pairing-link.js';
 import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
+import { readBoard as readInboxBoard } from './inbox-board.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError } from './claude-settings-env.js';
@@ -1437,6 +1438,8 @@ function setupOrchestrationHandlers() {
     if (result?.ok) broadcastTasksUpdated(projectPath);
     return result;
   });
+  // Brett's Inbox board, read only. The board's token stays in main.
+  ipcMain.handle('inbox:read', () => readInboxBoard());
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());
   ipcMain.handle('asana:updateConfig', (_event, updates) => updateAsanaQueue(updates));
   ipcMain.handle('automode:get', () => getAutoMode());

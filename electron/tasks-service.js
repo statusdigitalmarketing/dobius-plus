@@ -54,7 +54,7 @@ function tasksPath(projectPath) {
   return newPath;
 }
 
-function readTasks(projectPath) {
+function readTasks(projectPath, { strict = false } = {}) {
   const p = tasksPath(projectPath);
   try {
     fs.mkdirSync(TASKS_DIR, { recursive: true });
@@ -71,6 +71,7 @@ function readTasks(projectPath) {
       const backup = `${p}.corrupt-${Date.now()}`;
       try { fs.renameSync(p, backup); } catch { /* leave the file in place if the move fails */ }
       console.error(`[tasks-service] Corrupt task file for ${projectPath}; backed up to ${backup}: ${parseErr.message}`);
+      if (strict) throw parseErr; // a sync must not write a fresh list over it
       return [];
     }
     // Normalize legacy (done-only) tasks to the current stage shape on read.
@@ -78,6 +79,8 @@ function readTasks(projectPath) {
     return Array.isArray(parsed) ? parsed.map((t) => pipeline.migrate(t)) : [];
   } catch (err) {
     console.error(`[tasks-service] Failed to read tasks for ${projectPath}: ${err.message}`);
+    // strict: a caller about to write must not replace an unreadable file with [].
+    if (strict) throw err;
     return [];
   }
 }
@@ -104,27 +107,50 @@ export function listTasks(projectPath) {
   return readTasks(projectPath);
 }
 
-export function addTask(projectPath, { title, source = 'manual', dueOn = null, asanaGid = null, lane = null, assignee = null } = {}) {
+const SOURCES = new Set(['manual', 'asana', 'bot', 'inbox']);
+const MAX_NOTES = 4000;
+
+// Preview text and a link for the dropdown. Only an https link survives, and
+// it opens through shell:openExternal, never inside Dobius.
+function extraFields({ notes, url } = {}) {
+  return {
+    notes: typeof notes === 'string' && notes.trim() ? notes.slice(0, MAX_NOTES) : null,
+    url: typeof url === 'string' && /^https:\/\//i.test(url) ? url.slice(0, 2000) : null,
+  };
+}
+
+function newTask(clean, { source, dueOn, asanaGid, inboxId, lane, assignee, notes, url }) {
+  return {
+    id: `task-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    title: clean,
+    done: false,
+    source: SOURCES.has(source) ? source : 'manual',
+    dueOn: dueOn || null,
+    asanaGid: asanaGid || null,
+    inboxId: inboxId || null,    // the Inbox board card it came from
+    lane: lane || null,          // 'build' (mine) | 'review' (Sam's)
+    assignee: assignee || null,  // display name
+    ...extraFields({ notes, url }),
+    createdAt: Date.now(),
+    ...pipeline.pipelineFields(), // stage, events, runs, stagedAt, sessionId, tabId
+  };
+}
+
+export function addTask(projectPath, { title, source = 'manual', dueOn = null, asanaGid = null, inboxId = null, lane = null, assignee = null, notes = null, url = null } = {}) {
   if (!projectPath || !title) return { ok: false, error: 'projectPath and title required' };
   const clean = String(title).slice(0, MAX_TITLE).trim();
   if (!clean) return { ok: false, error: 'title empty' };
   const tasks = readTasks(projectPath);
-  // Dedupe by asanaGid
+  // Dedupe by asanaGid, and by Inbox card
   if (asanaGid && tasks.some((t) => t.asanaGid === asanaGid)) {
     return { ok: false, error: 'duplicate asanaGid' };
   }
-  const task = {
-    id: `task-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    title: clean,
-    done: false,
-    source,
-    dueOn: dueOn || null,
-    asanaGid: asanaGid || null,
-    lane: lane || null,          // 'build' (mine) | 'review' (Sam's)
-    assignee: assignee || null,  // display name
-    createdAt: Date.now(),
-    ...pipeline.pipelineFields(), // stage, events, runs, stagedAt, sessionId, tabId
-  };
+  // Any task, done or not: reopening the old one is the way back, and two
+  // tasks for one card would make completeTaskByRef ambiguous.
+  if (inboxId && tasks.some((t) => t.inboxId === inboxId)) {
+    return { ok: false, error: 'already on this list' };
+  }
+  const task = newTask(clean, { source, dueOn, asanaGid, inboxId, lane, assignee, notes, url });
   tasks.push(task);
   try {
     writeTasks(projectPath, tasks);
@@ -373,7 +399,19 @@ function asanaGet(urlPath, token) {
  * then upsert any not already in the local list.
  * Returns { ok, added, total } or { ok: false, error }.
  */
-export async function syncAsanaTasks(projectPath) {
+// One sync per project at a time: a second click joins the running one, so an
+// older Asana answer can never land after a newer one and revert it.
+const syncing = new Map();
+
+export function syncAsanaTasks(projectPath) {
+  const key = projectPath ? tasksPath(projectPath) : '';
+  if (syncing.has(key)) return syncing.get(key);
+  const run = syncAsanaTasksOnce(projectPath).finally(() => syncing.delete(key));
+  syncing.set(key, run);
+  return run;
+}
+
+async function syncAsanaTasksOnce(projectPath) {
   if (!projectPath) return { ok: false, error: 'projectPath required' };
   const { pat } = getAsanaQueue();
   const token = asanaToken(pat); // the shared spot decides (claude-settings-env.js)
@@ -403,8 +441,7 @@ export async function syncAsanaTasks(projectPath) {
     // Codex PR#3 r5 P2. For the build lane, keep the original incomplete-only
     // filter (`completed_since=now`).
     const sinceISO = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
-    let added = 0;
-    let total = 0;
+    const fetched = [];
     for (const { gid, lane, assignee } of lanes) {
       for (const ws of workspaces) {
         const isReview = lane === 'review';
@@ -421,21 +458,38 @@ export async function syncAsanaTasks(projectPath) {
           // completed_since=<iso> returns tasks "completed since OR still open
           // and modified since", so we still have to filter).
           if (isReview && !t.completed) continue;
-          total++;
-          const result = addTask(projectPath, {
-            title: t.name,
-            source: 'asana',
-            dueOn: t.due_on || null,
-            asanaGid: t.gid,
-            lane,
-            assignee,
-          });
-          if (result.ok) added++;
+          fetched.push({ t, lane, assignee });
         }
       }
     }
 
-    return { ok: true, added, total };
+    // One read and one write, with no await between them, so a task completed
+    // from a terminal while Asana was answering is not overwritten. A task
+    // already here gets its due date, notes and link refreshed; its title,
+    // stage and done state stay as they are.
+    const tasks = readTasks(projectPath, { strict: true });
+    const byGid = new Map(tasks.filter((x) => x.asanaGid).map((x) => [x.asanaGid, x]));
+    let added = 0;
+    let changed = false;
+    for (const { t, lane, assignee } of fetched) {
+      const extra = { dueOn: t.due_on || null, ...extraFields({ notes: t.notes, url: t.permalink_url }) };
+      const have = byGid.get(t.gid);
+      if (have) {
+        for (const [k, v] of Object.entries(extra)) {
+          if (have[k] !== v) { have[k] = v; changed = true; }
+        }
+        continue;
+      }
+      const clean = String(t.name).slice(0, MAX_TITLE).trim();
+      if (!clean) continue;
+      const task = newTask(clean, { source: 'asana', asanaGid: t.gid, lane, assignee, notes: t.notes, url: t.permalink_url, dueOn: t.due_on });
+      tasks.push(task);
+      byGid.set(t.gid, task);
+      added++;
+      changed = true;
+    }
+    if (changed) writeTasks(projectPath, tasks);
+    return { ok: true, added, total: fetched.length };
   } catch (err) {
     return { ok: false, error: err.message };
   }
