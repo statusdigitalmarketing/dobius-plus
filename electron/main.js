@@ -525,7 +525,13 @@ function setupDataHandlers() {
       }
       return [w];
     });
-    return getAllProjectTabs({ liveTabIds, tearOffTabs });
+    // Only windows open now: a closed project's or worktree's saved tabs are
+    // how it reopens, not tabs anyone has open (Brett, Asana 1220099565720840).
+    const openWindows = {
+      mainPaths: new Set(getOpenProjectsForRestore()),
+      windowKeys: new Set(getOpenPrimaryWindowsForRestore().map((w) => w.windowKey)),
+    };
+    return getAllProjectTabs({ liveTabIds, tearOffTabs, openWindows });
   });
   // Live row status for the Tabs sidebar, apart from the aggregate above
   // (which reads session history and is slow): main's hook status and the

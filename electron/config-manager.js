@@ -585,11 +585,23 @@ export function getProjectConfig(projectPath) {
  * is the currently-open set per project (closed tabs live in the separate
  * recentlyClosedTabs store), and survives quit/restart via the debounced config.
  */
-export function getAllProjectsWithTabs() {
-  const config = loadConfig();
+export function getAllProjectsWithTabs(onlyOpen = null) {
+  return projectsWithTabsFrom(loadConfig(), onlyOpen);
+}
+
+/**
+ * Every project's saved tabs, main window plus extra windows (see below).
+ * With `onlyOpen` ({ mainPaths: Set, windowKeys: Set }) only the windows open
+ * RIGHT NOW count: a project's main-window tabs if its main window is open,
+ * an extra window's tabs if that window is. The saved tabs of a closed project
+ * or worktree are what reopens it, not tabs anyone has open (Brett, Asana
+ * 1220099565720840: the Tabs list showed every worktree he ever opened).
+ */
+export function projectsWithTabsFrom(config, onlyOpen = null) {
   const byPath = new Map();
   for (const [path, proj] of Object.entries(config.projects || {})) {
     if (UNSAFE_KEYS.has(path)) continue;
+    if (onlyOpen && !onlyOpen.mainPaths?.has(path)) continue;
     const tabs = Array.isArray(proj?.tabs) ? proj.tabs : [];
     if (tabs.length === 0) continue;
     byPath.set(path, { path, tabs: [...tabs], tabCounter: proj.tabCounter || 0 });
@@ -598,8 +610,9 @@ export function getAllProjectsWithTabs() {
   // the cross-window "tabs by project" sidebar lists every window's tabs and
   // configTabLabels picks up renamed extra-window tabs. Tab ids are globally
   // unique, so concatenation never duplicates.
-  for (const w of Object.values(config.primaryWindows || {})) {
+  for (const [key, w] of Object.entries(config.primaryWindows || {})) {
     if (!w || typeof w.projectPath !== 'string' || !Array.isArray(w.tabs) || w.tabs.length === 0) continue;
+    if (onlyOpen && !onlyOpen.windowKeys?.has(key)) continue;
     const entry = byPath.get(w.projectPath)
       || { path: w.projectPath, tabs: [], tabCounter: 0 };
     entry.tabs = entry.tabs.concat(w.tabs);
