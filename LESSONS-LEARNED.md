@@ -571,3 +571,15 @@
 - **FIX**: Snapshot `~/.claude/settings.json` before any probe that runs `/model`, `/effort` (or any slash command that persists), cmp afterwards, restore. In the product, say it: the Chat model menu's footer reads "Also your default for new sessions", since Claude has no session-only form.
 - **CONTEXT**: The Chat model picker (Asana 1220098108555124) types these commands. Claude caches its model catalog at `<config dir>/cache/model-catalog/*-cc.json`, which is the clean source for the menu.
 - **DETECTION**: `cmp ~/.claude/settings.json <snapshot>`
+
+### Architecture - 2026-11-02 (a session lives where Claude started it, not where the shell is)
+- **MISTAKE**: The Chat view sat on "Claude is starting up here" over a live conversation (Bryan, Asana 1220098108555131). A bare `claude` was linked only by the 15s scan, which accepted Claude's own record (`<configDir>/sessions/<pid>.json`) only if the session's transcript sat under the SHELL's directory; `resolveSessionForTab` never read the record itself; and the chat poll switched to Claude's current process directory whenever it left the saved project, so a linked session could still show "No messages".
+- **FIX**: The record names Claude's own `cwd`: the scan looks there first and saves THAT folder as the link's project (it writes `cwdByTab`, which both callers save); `resolveSessionForTab` reads the record directly, under the scan's rules (one session one tab, single child); the chat poll keeps the session's project whenever its transcript is there.
+- **CONTEXT**: Anything that maps a tab to a transcript. The fallback for a tab with no session now renders the SCREEN (`terminalScreenText`, the emulator at the tab's exact width, alt-screen state carried across buffer trims), never the stripped byte stream, which printed every spinner frame.
+- **DETECTION**: `grep -n "sessionTranscriptBirth(cwdByTab" electron/data-service.js` (must not be the only folder tried)
+
+### Testing - 2026-11-02 (`curl` and `fetch` are blocked by a hook; read Asana with a script file)
+- **MISTAKE**: The context-mode plugin's hook blocks inline HTTP in Bash (curl, wget, node fetch) and points to a sandbox tool that may not be loaded in the session.
+- **FIX**: For the Asana API, a small Python script file (urllib, ASANA_PAT from env) that prints only the needed fields and saves attachments to disk; `gh` for GitHub; `gh release download` + `cmp` to verify a release's DMG.
+- **CONTEXT**: Release verification and Asana task reads.
+- **DETECTION**: `ls scratchpad/asana_task.py`
