@@ -213,7 +213,14 @@ export function tokenFingerprint(token) {
  */
 export function selectorKey(sel) {
   if (!sel || !Array.isArray(sel.options)) return 'none';
-  return JSON.stringify([String(sel.fp ?? ''), String(sel.prompt ?? ''), sel.options.map((o) => [o?.num, String(o?.label ?? ''), String(o?.detail ?? '')])]);
+  // A timed prompt's seconds tick in its text: the same card, not a new one
+  // (a remount every second dropped a press mid-tap: Codex, round 16).
+  const prompt = String(sel.prompt ?? '');
+  // Also when the card text starts partway into the timer row, even inside
+  // the time itself: the digits and colons before its fixed ending (Codex, 26).
+  // The sentence may wrap anywhere around the time (Codex, round 27).
+  const shown = sel.timed ? prompt.replace(/[\d:]+(?=\s*,\s*to\s+avoid\s+holding)/g, '#:##') : prompt;
+  return JSON.stringify([String(sel.fp ?? ''), shown, sel.options.map((o) => [o?.num, String(o?.label ?? ''), String(o?.detail ?? '')])]);
 }
 
 /**
@@ -243,13 +250,31 @@ const RELEASE_MS = 500;
 // when its release never reaches this window (it was released elsewhere).
 const ORPHAN_MS = 10000;
 const ACTIVATION_KEYS = new Set(['Enter', ' ']);
+// A selector token `<run>:<pty>:<input>:<output>|<fingerprint>` without its
+// output count; '' for anything else.
+function withoutOutput(token) {
+  if (typeof token !== 'string') return '';
+  const base = token.split('|')[0];
+  const at = base.lastIndexOf(':');
+  return at > 0 ? base.slice(0, at) : '';
+}
+
 export function createPressGuard({ defer = (fn) => setTimeout(fn, RELEASE_MS), now = () => Date.now() } = {}) {
   // A FRESH poison object each time: a release timer captured for an older
   // poison must never clear a newer one (Codex Critical, round 18).
   const POISON = Symbol('poison');
   const poison = () => ({ [POISON]: true });
   const poisoned = (c) => !!c && c[POISON] === true;
-  const same = (a, b) => a !== undefined && !poisoned(a) && (b?.token == null ? a === b : a?.token === b.token);
+  // A timed card (Claude's unattended-session timer) gets a new token every
+  // tick, so it is the same card while its fingerprint (timer masked) is;
+  // the Mac then checks the click against the timer itself. Untimed cards
+  // keep the exact token (Codex, round 16).
+  // Only the OUTPUT count may differ (the timer repainting): the same app
+  // run, PTY and INPUT count, so nothing was typed or selected anywhere in
+  // between, an arrow key from another surface included (Codex P1, round 17).
+  const same = (a, b) => a !== undefined && !poisoned(a) && (b?.token == null ? a === b
+    : a?.token === b.token || (!!a?.timed && !!b?.timed && !!a.fp && a.fp === b.fp
+      && typeof a.token === 'string' && withoutOutput(a.token) === withoutOutput(b.token)));
   // held: pressed here and not yet released. orphans: id -> time, pressed
   // before a blur and not yet seen released (Codex Critical, rounds 16-19).
   const slot = () => ({ card: undefined, held: new Set(), orphans: new Map(), clearing: 0 });
@@ -264,7 +289,12 @@ export function createPressGuard({ defer = (fn) => setTimeout(fn, RELEASE_MS), n
   const down = (sl, id, card) => {
     if (sl.held.has(id)) return; // auto-repeat, or a re-press never released
     sl.orphans.delete(id); // a fresh (non-repeat) press proves it was released
-    sl.card = !busy(sl) || same(sl.card, card) ? card : poison();
+    // While anything is held, the record keeps the card the FIRST press
+    // began on: a second press can confirm it or poison it, never replace it
+    // (a second finger on a refreshed timed card swapped in its token: Codex
+    // P1, round 19).
+    if (!busy(sl)) sl.card = card;
+    else if (!same(sl.card, card)) sl.card = poison();
     sl.held.add(id);
   };
   const clearSoon = (sl) => {
@@ -308,6 +338,17 @@ export function createPressGuard({ defer = (fn) => setTimeout(fn, RELEASE_MS), n
       if (e && e.detail > 0) return same(settled(ptr), card);
       const k = settled(key);
       return k === undefined || same(k, card);
+    },
+    /**
+     * After take() said yes: the card the press BEGAN on, whose token is the
+     * one to send (or `card` when no press was recorded). A timed card's
+     * token moves every tick; sending the press-start token makes the Mac
+     * check the timer against that reading, so a held press cannot approve
+     * a replacement whose timer started over (Codex P1, round 18).
+     */
+    pressedCard(e, card) {
+      const c = e && e.detail > 0 ? ptr.card : key.card;
+      return c !== undefined && !poisoned(c) && same(c, card) ? c : card;
     },
   };
 }

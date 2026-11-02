@@ -3,10 +3,10 @@
 // paste-then-Enter submit. Main-process only.
 
 import { randomBytes } from 'node:crypto';
-import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalInputAgeMs, terminalRawOutputSeq, terminalSettledSinceInput, terminalClosing, terminalCols, terminalAltAtBufferStart } from './terminal-manager.js';
-import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, spinnerStatus } from './selector-parser.js';
+import { getTerminalBuffer, writeTerminal, terminalInstance, terminalInputSeq, terminalInputAgeMs, terminalRawOutputSeq, terminalSettledSinceInput, terminalClosing, terminalCols, terminalRows, terminalAltAtBufferStart, terminalBufferTrimmed } from './terminal-manager.js';
+import { parseSelector, parseSelectorFromScreen, stripAnsi, selectorFingerprint, selectorCountdown, spinnerStatus } from './selector-parser.js';
 export { selectorFingerprint };
-import { renderScreenLines } from './screen-render.js';
+import { renderScreenLines, FILL } from './screen-render.js';
 
 // The live selector for a tab, via the headless-xterm SCREEN render (v1.0.62).
 // The old strip-and-regex path missed Ink's incremental repaints entirely: on
@@ -16,9 +16,138 @@ import { renderScreenLines } from './screen-render.js';
 // selector": it honors the erase sequences that REMOVE answered prompts, so
 // it also kills the stale-popup class); the regex path remains only for a
 // render failure.
+// How much of a tab's output a selector read replays: enough to hold a full
+// redraw of its screen (cells x a generous 24 bytes for colour codes), at
+// least 256KB, and never more than an idle tab keeps (512KB).
+const SELECTOR_TAIL = 262144;
+const BYTES_PER_CELL = 24;
+const MAX_REPLAY = 512 * 1024;
+const MAX_REPLAY_ROWS = 400; // screen-render's own cap
+function screenCells(id) {
+  const c = terminalCols(id);
+  const r = terminalRows(id);
+  return Number.isInteger(c) && Number.isInteger(r) && c > 0 && r > 0 && r <= MAX_REPLAY_ROWS ? c * r : null;
+}
+function selectorTailChars(id) {
+  const cells = screenCells(id);
+  return cells ? Math.min(MAX_REPLAY, Math.max(SELECTOR_TAIL, cells * BYTES_PER_CELL)) : SELECTOR_TAIL;
+}
+// Whether a full redraw of the tab's screen is sure to be inside what a read
+// replays. A replacement prompt is a fresh full redraw, so then any visible
+// difference reaches the fingerprint; on a screen too big for that, a timer
+// is no reason to accept output (Codex Critical, round 7).
+function screenFitsReplay(id) {
+  const cells = screenCells(id);
+  if (!cells || cells * BYTES_PER_CELL > MAX_REPLAY) return false;
+  // A cut INSIDE a control string (a hyperlink's hidden URL, a title)
+  // leaves its payload with no introducer, so the replay prints it as text
+  // and may cover cells the real screen never showed it in (Codex High,
+  // round 11). A long run up to the first terminator with no escape before it
+  // is that payload. (A plain bell after plain text reads the same and only
+  // costs the strict rule.) Everything else that pushes visible content out
+  // of the replay is caught by the coverage check (screenCovered), so marks
+  // and link payloads are no longer budgeted here (Codex, round 24).
+  const tail = (getTerminalBuffer(id) || '').slice(-selectorTailChars(id));
+  const firstEnd = tail.search(/\x07|\x1b\\|\x9c/);
+  if (firstEnd > MAX_HIDDEN_CHARS && !/[\x1b\x90\x98\x9d\x9e\x9f]/.test(tail.slice(0, firstEnd))) return false;
+  return true;
+}
+// The longest control-string payload a replay may begin inside.
+const MAX_HIDDEN_CHARS = 64 * 1024;
+// Whether the replay a read is built from accounts for EVERY visible cell:
+// it holds everything the tab ever printed, or replaying it over a screen
+// filled with a marker leaves no marker behind. A cell it never wrote shows
+// output from before the replay, which no fingerprint saw: whatever pushed it
+// out (styling floods, hidden payloads, anything else), a timer is then no
+// reason to accept output (Codex High, round 12).
+async function screenCovered(id, box = null) {
+  const buffer = getTerminalBuffer(id) || '';
+  const raw = buffer.slice(-selectorTailChars(id));
+  if (!terminalBufferTrimmed(id) && raw.length === buffer.length) return true;
+  // Terminal state a replay cannot reproduce from a cut (Codex High, round
+  // 13). The alternate screen already active where the replay begins, and
+  // the replay switching buffers again: the real terminal keeps (or returns
+  // to) content from before the cut, while the replay shows a blank or
+  // marker-filled one. Staying on one screen is fine: the replay's stands in
+  // for it, and a switch the replay itself makes from the normal screen
+  // clears the alternate one in both (Claude Code 2.1.31x runs there).
+  // Origin mode, or a scroll region narrower than the screen, moves output
+  // where the replay does not; Claude only ever resets the region (ESC [ r),
+  // which is the replay's own default.
+  // Mode switches may be combined (ESC [ ? 25 ; 1049 h): any list naming one
+  // counts (Codex High, round 14).
+  const before = buffer.slice(0, buffer.length - raw.length);
+  let sw = null;
+  for (const m of before.matchAll(ALT_SWITCH_ALL_RE)) sw = m[1];
+  const altAtCut = sw ? sw === 'h' : terminalAltAtBufferStart(id);
+  if (altAtCut) {
+    // Unless the last switch in the replay ENTERS the alternate screen from
+    // the normal one (leave, then enter: Claude quitting and starting again):
+    // that entry clears the alternate screen in the real terminal and the
+    // replay alike, so everything after it is the replay's own (Codex P2,
+    // round 20).
+    const seq = [...raw.matchAll(ALT_SWITCH_ALL_RE)].map((m) => m[1]);
+    const n = seq.length;
+    if (n > 0 && !(seq[n - 1] === 'h' && n >= 2 && seq[n - 2] === 'l')) return false;
+  }
+  if (ORIGIN_MODE_RE.test(raw)) return false;
+  const height = terminalRows(id);
+  for (const m of raw.matchAll(SCROLL_REGION_RE)) {
+    const top = Number(m[1]) || 1;
+    const bottom = Number(m[2]) || height;
+    if (top !== 1 || bottom !== height) return false;
+  }
+  // From both corners, the cursor AND its saved position: where the real
+  // ones stood when the replay begins is unknown (an erase or a restore whose
+  // save came before the cut: Codex, rounds 13, 14 and 21).
+  const size = { cols: terminalCols(id), rows: terminalRows(id), exact: true, exactRows: true };
+  for (const fillStart of ['top', 'bottom']) {
+    let lines = null;
+    let plain = null;
+    try {
+      lines = await renderScreenLines(raw, { ...size, fillCheck: true, fillStart });
+      // The same replay without the markers, from the same corner: where the
+      // prompt's box lands (it depends on the start), and which marker-looking
+      // characters are real output (an icon-font glyph is U+E000 too: Codex,
+      // round 25).
+      plain = await renderScreenLines(raw, { ...size, startAt: fillStart });
+    } catch { lines = null; }
+    if (!lines || !plain) return false;
+    // Only the prompt's own box when the parse found one: Claude draws all of
+    // it when the prompt appears (well inside the replay), so a different
+    // prompt differs there, while a long fullscreen session's untouched
+    // header and margins would otherwise refuse every tap (Codex, round 23).
+    let top = 0;
+    let bottom = lines.length - 1;
+    if (box) {
+      let s = null;
+      try { s = parseSelectorFromScreen(plain); } catch { s = null; }
+      if (!s?.boxRows) return false; // no box where this replay puts the prompt
+      ({ top, bottom } = s.boxRows);
+    }
+    for (let r = top; r <= bottom; r += 1) {
+      const filled = String(lines[r] ?? '');
+      const shown = String(plain[r] ?? '');
+      for (let i = 0; i < filled.length; i += 1) {
+        if (filled[i] === FILL && shown[i] !== FILL) return false; // a cell the replay never wrote
+      }
+    }
+  }
+  return true;
+}
+const ALT_SWITCH_RE = /\x1b\[\?(?:[0-9;]*;)?(?:47|1047|1049)(?:;[0-9;]*)?[hl]/;
+const ALT_SWITCH_ALL_RE = /\x1b\[\?(?:[0-9;]*;)?(?:47|1047|1049)(?:;[0-9;]*)?([hl])/g;
+const ORIGIN_MODE_RE = /\x1b\[\?(?:[0-9;]*;)?6(?:;[0-9;]*)?[hl]/;
+const SCROLL_REGION_RE = /\x1b\[([0-9]*);?([0-9]*)r/g;
+
+
 export async function liveSelectorForTab(id) {
   const raw = getTerminalBuffer(id) || '';
-  const lines = await renderScreenLines(raw.slice(-262144));
+  // The tab's real size: a card is matched against the whole visible screen
+  // (a narrower or shorter emulator wraps long rows and drops the top ones).
+  // At exactly its height too: absolute moves to the last row ("row 999")
+  // land where the real terminal puts them (Codex High, round 15).
+  const lines = await renderScreenLines(raw.slice(-selectorTailChars(id)), { cols: terminalCols(id), rows: terminalRows(id), exactRows: true });
   if (lines) return parseSelectorFromScreen(lines);
   return parseSelector(raw);
 }
@@ -121,7 +250,7 @@ export function screenTailStart(raw, max) {
 // 'h' (entered) or 'l' (left) for the last alternate-screen switch, or null.
 export function lastAltScreenSwitch(text) {
   let last = null;
-  for (const m of text.matchAll(/\x1b\[\?(?:1049|1047|47)([hl])/g)) last = m[1];
+  for (const m of text.matchAll(ALT_SWITCH_ALL_RE)) last = m[1];
   return last;
 }
 
@@ -180,28 +309,109 @@ export async function readSelectorForAnswer(id, stillOk = () => true) {
   // phone shows it, as it always did); nothing can answer it without a token.
   // A read that found no prompt hides the card, which is always safe.
   if (!token || selectorToken(id) !== token) return selector && terminalInstance(id) ? { unsettled: true, selector } : null;
-  return selector ? { selector, token: `${token}|${selectorFingerprint(selector)}` } : null;
+  if (!selector) return null;
+  const full = `${token}|${selectorFingerprint(selector)}`;
+  const countdown = selectorCountdown(selector);
+  stampRead(id, full, countdown);
+  // timed: the card's token moves with every tick of its timer, so the
+  // clients' press guard compares such cards by fingerprint (chat-rows).
+  return { selector: countdown != null ? { ...selector, timed: true } : selector, token: full };
 }
+
+// When each card was read, and the seconds its unattended-session timer
+// showed then. A prompt with that timer repaints every second, which moves
+// the output count in its token, so without this every tap that took more
+// than a second to arrive was refused as "the prompt changed" (Sam, phone).
+// Kept here, never in the token, so a client cannot claim a reading time.
+const readStamps = new Map(); // tab id -> Map(token -> { at, countdown })
+// Enough for a press held through several reads (each read stamps one).
+const STAMPS_PER_TAB = 32;
+const STAMP_TTL_MS = 10 * 60_000;
+
+function stampRead(id, token, countdown) {
+  const now = Date.now();
+  // Expired readings go for every tab, so tabs long closed leave nothing.
+  for (const [tab, tm] of readStamps) {
+    for (const [k, v] of tm) if (now - v.at > STAMP_TTL_MS) tm.delete(k);
+    if (tm.size === 0) readStamps.delete(tab);
+  }
+  let m = readStamps.get(id);
+  if (!m) { m = new Map(); readStamps.set(id, m); }
+  m.delete(token);
+  m.set(token, { at: now, countdown });
+  while (m.size > STAMPS_PER_TAB) m.delete(m.keys().next().value);
+}
+
+// How far the timer may be from where a steady countdown would have it: it
+// shows whole seconds, and each of the two readings can be up to a second off.
+const COUNTDOWN_SLACK_S = 2;
+
+// The token minus its output count: same app run, same PTY, same input count.
+const withoutOutput = (base) => base.slice(0, base.lastIndexOf(':'));
 
 /**
  * Answer a card read by readSelectorForAnswer: `data` is written only while
- * neither input nor output has reached the tab since that read, no submit is
- * typing into it, and a fresh parse still shows the prompt the card showed.
+ * no input has reached the tab since that read, no submit is typing into it,
+ * a fresh parse still shows the prompt the card showed, and no output landed
+ * either, except the prompt's own unattended-session timer ticking down.
  * `beforeWrite` runs after every check passes (main cancels a queued resume).
  * Returns { ok, stale?, token? } with the token for the next key on this prompt.
  */
 export async function answerSelector(id, data, token, stillOk = () => true, beforeWrite = () => {}) {
   if (typeof data !== 'string' || !data || data.length > 16 || typeof token !== 'string') return { ok: false };
   const [base, fp] = token.split('|');
-  const unchanged = () => !!base && !!fp && selectorToken(id) === base && !submitPending(id) && stillOk();
-  if (!unchanged()) return { ok: false, stale: true };
-  let live;
-  try { live = await liveSelectorForTab(id); } catch { live = null; }
-  if (!unchanged() || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
+  if (!base || !fp) return { ok: false, stale: true };
+  // The prompt's own timer ticking is the one kind of output allowed since
+  // the card was read: nothing typed anywhere (the input count is in the
+  // token), the prompt reading exactly the same apart from the timer, and the
+  // timer down by just the time that passed (one that started over is a
+  // later prompt).
+  //
+  // ACCEPTED RISK (Sam, 2026-11-02, over a Codex Critical): a prompt replaced
+  // without any input by a second one that reads word for word the same, in
+  // the same timer second, gets the tap. Nothing on screen can tell the two
+  // apart (Claude can queue identical requests, and a hook can approve one
+  // with no typing). A prompt that reads differently in any way is refused.
+  const stamp = readStamps.get(id)?.get(token);
+  const ticking = !!stamp && stamp.countdown != null && screenFitsReplay(id);
+  let live = null;
+  let now = '';
+  // A tick can land while the screen is being read; read it again then
+  // (a ticking prompt only), rather than refuse a good tap.
+  // Each attempt reads the screen and, when output moved, checks the timer
+  // and that the replay covers the screen. A tick landing during any of
+  // those reads it all again (a ticking prompt only) rather than refusing a
+  // good tap (Codex, rounds 2 and 22).
+  let settled = false;
+  for (let attempt = 0; attempt < 3 && !settled; attempt += 1) {
+    now = selectorToken(id);
+    if (!now || submitPending(id) || !stillOk()) return { ok: false, stale: true };
+    if (now !== base && !(ticking && withoutOutput(now) === withoutOutput(base))) return { ok: false, stale: true };
+    try { live = await liveSelectorForTab(id); } catch { live = null; }
+    // Nothing at all may land while the screen is being read: what was read
+    // is what gets answered.
+    if (selectorToken(id) !== now) { if (!ticking) return { ok: false, stale: true }; live = null; continue; }
+    if (!live || submitPending(id) || !stillOk() || selectorFingerprint(live) !== fp) return { ok: false, stale: true };
+    if (now !== base) {
+      const left = selectorCountdown(live);
+      const expected = stamp.countdown - (Date.now() - stamp.at) / 1000;
+      if (left == null || left > stamp.countdown || Math.abs(left - expected) > COUNTDOWN_SLACK_S) return { ok: false, stale: true };
+      // Same buffer as the read just made (checked again right after), so
+      // the coverage answer is about the screen just matched.
+      const covered = await screenCovered(id, live.boxRows || null);
+      if (selectorToken(id) !== now) { live = null; continue; }
+      if (!covered) return { ok: false, stale: true };
+    }
+    settled = true;
+  }
+  if (!settled || !live || selectorToken(id) !== now || submitPending(id) || !stillOk()) return { ok: false, stale: true };
   beforeWrite();
   writeRawInput(id, data, stillOk);
   const next = selectorToken(id);
-  return { ok: true, token: next ? `${next}|${fp}` : '' };
+  if (!next) return { ok: true, token: '' };
+  // The next key on this prompt (an arrow, then Enter) is read as of now.
+  stampRead(id, `${next}|${fp}`, selectorCountdown(live));
+  return { ok: true, token: `${next}|${fp}` };
 }
 
 const SUBMIT_ENTER_DELAY_MS = 250;

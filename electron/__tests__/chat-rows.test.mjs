@@ -118,6 +118,14 @@ console.log('PASS  row keys survive a sliding window');
   assert.equal(tokenFingerprint(null), '');
   assert.equal(tokenFingerprint('nofp'), '');
   assert.equal(selectorKey(null), 'none');
+  const timed = (s) => ({ timed: true, fp: 'f', prompt: `Bash command\n\u26a0 Claude Code will automatically block this request in ${s}, to avoid holding up an unattended session\nDo you want to proceed?`, options: [{ num: 1, label: 'Yes' }] });
+  assert.equal(selectorKey(timed('1:26')), selectorKey(timed('1:25')), 'a ticking timer keeps the card');
+  const wrapKey = (s) => ({ ...timed(s), prompt: `\u26a0 Claude Code will automatically block this request in ${s}\n, to avoid holding up an unattended session` });
+  assert.equal(selectorKey(wrapKey('1:26')), selectorKey(wrapKey('1:25')), 'the sentence wrapped right after the time');
+  const cutKey = (s) => ({ ...timed(s), prompt: `request in ${s}, to avoid holding up an unattended session\nDo you want to proceed?` });
+  assert.equal(selectorKey(cutKey('1:26')), selectorKey(cutKey('1:25')), 'card text cut before the timer row');
+  assert.equal(selectorKey({ ...cutKey('1:26'), prompt: '26, to avoid holding up an unattended session' }), selectorKey({ ...cutKey('1:25'), prompt: '25, to avoid holding up an unattended session' }), 'cut inside the time');
+  assert.notEqual(selectorKey({ ...timed('1:26'), timed: false }), selectorKey({ ...timed('1:25'), timed: false }), 'untimed text changes remount');
   console.log('PASS  selector card keys');
 }
 
@@ -140,6 +148,36 @@ console.log('PASS  row keys survive a sliding window');
   g.pointerDown(pd(), A); g.pointerUp(pd());
   assert.equal(g.take(click, B), false, 'mouse press on A, B arrived: refused');
   assert.equal(g.take(click, A2), true, 'a re-read of the same prompt still lands');
+  settle();
+  // A timed prompt (Claude's unattended-session timer) gets a new token each
+  // tick: still the same card while its fingerprint holds; a different
+  // fingerprint, or an untimed card with a new token, is refused.
+  g = make();
+  const T1 = { token: 'n:1:2:3|tfp', fp: 'tfp', timed: true };
+  const T2 = { token: 'n:1:2:9|tfp', fp: 'tfp', timed: true };
+  const T3 = { token: 'n:1:2:11|other', fp: 'other', timed: true };
+  g.pointerDown(pd(), T1); g.pointerUp(pd());
+  assert.equal(g.take(click, T3), false, 'timed, different fingerprint: refused');
+  assert.equal(g.take(click, T2), true, 'timed, the timer ticked: lands');
+  assert.equal(g.pressedCard(click, T2), T1, 'and answers with the press-start token');
+  settle();
+  assert.equal(g.pressedCard(click, A), A, 'no press recorded: the card shown');
+  // A second finger on the refreshed card keeps the first press's card.
+  g = make();
+  g.pointerDown(pd(1), T1); g.pointerDown(pd(2), T2); g.pointerUp(pd(2)); g.pointerUp(pd(1));
+  assert.equal(g.take(click, T2), true, 'two fingers, same timed card: lands');
+  assert.equal(g.pressedCard(click, T2), T1, 'with the FIRST press\'s token');
+  settle();
+  // Input reached the tab meanwhile (another surface moved the selection):
+  // its input count moved, so the press is refused though nothing else did.
+  g = make();
+  g.pointerDown(pd(), T1); g.pointerUp(pd());
+  assert.equal(g.take(click, { ...T2, token: 'n:1:3:9|tfp' }), false, 'timed, input in between: refused');
+  assert.equal(g.take(click, { ...T2, token: 'n:2:2:9|tfp' }), false, 'timed, another PTY: refused');
+  settle();
+  g = make();
+  g.pointerDown(pd(), { ...T1, timed: false }); g.pointerUp(pd());
+  assert.equal(g.take(click, { ...T2, timed: false }), false, 'untimed, new token: refused');
   settle();
   assert.equal(g.take(click, A), false, 'a pointer click with no press is refused');
   // Shift during a mouse hold does not move the press (round 14).

@@ -894,12 +894,13 @@ export default function ChatPane({ tabId, visible }) {
   // typed into the tab since this card was read (the phone, the terminal),
   // so these buttons can never land on a prompt the user has not seen.
   const selectorKey = async (seq, closes = false, e = null) => {
-    const token = selector?.token;
-    // A press must END on the card it began on (shared createPressGuard).
+    // A press must END on the card it began on (shared createPressGuard),
+    // and it answers with THAT card's token.
     if (!pressGuard.current.take(e, selector)) {
       flash('The prompt changed while you were clicking. Nothing was sent, check the card again.');
       return;
     }
+    const token = pressGuard.current.pressedCard(e, selector)?.token;
     dropPendingSelector();
     if (closes) setSelector(null);
     inputRef.current?.focus(); // a clicked key button must not keep focus

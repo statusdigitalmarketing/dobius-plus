@@ -1089,13 +1089,14 @@ export default function ChatView({ connection, tab, onOpenTerminal }) {
   // write. Returns false when the card is not answerable right now.
   const sendSelector = (card, data, e = null) => {
     if (!tabId || !card || selBusy) return false;
-    const { token } = card;
-    // A tap must END on the card it began on (shared createPressGuard).
+    // A tap must END on the card it began on (shared createPressGuard), and
+    // it answers with THAT card's token.
     if (!pressGuard.current.take(e, card)) {
       setSelNote('The prompt changed while you were tapping. Nothing was sent, check the card again.');
       setTimeout(() => setSelNote(''), 4000);
       return false;
     }
+    const { token } = pressGuard.current.pressedCard(e, card);
     if (token === null || token === undefined) {
       connection.send({ type: 'input', id: tabId, data });
       return true;

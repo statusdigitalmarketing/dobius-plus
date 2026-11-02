@@ -513,5 +513,15 @@ sv2('screen: null input safe', parseSelectorFromScreen(null), null);
   sv2('fingerprint: diff above the rule counts', selectorFingerprint(edit('a = 1')) === selectorFingerprint(edit('a = 2')), false);
 }
 
+// A terminal taller than the emulator's default keeps its top rows: a
+// permission card is matched against the whole visible screen.
+{
+  const tall = Array.from({ length: 150 }, (_, i) => `row ${i}`).join('\r\n');
+  const short = await renderScreenLines(tall);
+  const full = await renderScreenLines(tall, { rows: 150 });
+  sv2('render: default height drops the top of a 150-row screen', short.includes('row 0'), false);
+  sv2('render: the real height keeps it', full.length === 150 && full[0] === 'row 0', true);
+}
+
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);
 process.exit(fail === 0 ? 0 : 1);

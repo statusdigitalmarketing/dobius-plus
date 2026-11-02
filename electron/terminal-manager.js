@@ -144,11 +144,17 @@ const ESC_RESYNC_WINDOW = 2048;
  * some payload text. OSC payloads are titles, they do not move the cursor, so
  * that is cosmetic rather than the screen-destroying cursor desync above.
  */
-const ALT_SCREEN_RE = /\x1b\[\?(?:1049|1047|47)([hl])/g;
+// Also inside a combined mode list (ESC [ ? 25 ; 1049 h): Codex High.
+const ALT_SCREEN_RE = /\x1b\[\?(?:[0-9;]*;)?(?:1049|1047|47)(?:;[0-9;]*)?([hl])/g;
 
 /** Whether the tab's rolling output buffer begins inside the alternate screen. */
 export function terminalAltAtBufferStart(id) {
   return !!terminals.get(id)?.altAtBufferStart;
+}
+
+/** Whether the tab's output buffer has dropped its oldest output. */
+export function terminalBufferTrimmed(id) {
+  return !!terminals.get(id)?.bufferTrimmed;
 }
 
 export function trimToEscapeBoundary(buf, cap) {
@@ -316,6 +322,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     // Whether the KEPT buffer begins inside the alternate screen (vim, less):
     // its entry may have been trimmed away, and only the dropped part can say.
     if (entry.outputBuffer.length < combined.length) {
+      // The buffer no longer holds everything this PTY printed (chat-service
+      // then checks a replay covers the whole screen before trusting it).
+      entry.bufferTrimmed = true;
       // Plus the kept buffer's first 8 characters (the longest switch is 8):
       // a switch split by the cut is seen whole here, whereas scanning only the
       // dropped part would miss it in both halves. Seeing one twice is harmless:
@@ -1117,6 +1126,11 @@ export function getTerminalBuffer(id) {
 /** The PTY's current width in columns (last spawn or resize), or null. */
 export function terminalCols(id) {
   return terminals.get(id)?.cols ?? null;
+}
+
+/** The PTY's current height in rows (last spawn or resize), or null. */
+export function terminalRows(id) {
+  return terminals.get(id)?.rows ?? null;
 }
 
 // The live pty object behind a tab id, or null. Identity, not a handle to
