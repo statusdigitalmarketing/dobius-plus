@@ -73,15 +73,23 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
   // panel's left when neither side has room (pinned to the window's edge,
   // over the panel: clipped never).
   const [place, setPlace] = useState('right');
+  // Never taller than the room it has: beside the panel it ends at the
+  // panel's bottom, above the panel it ends at the panel's top (a short or
+  // zoomed window must not put options above the window).
+  const [subMax, setSubMax] = useState(null);
   useLayoutEffect(() => {
     const el = rootRef.current;
     const subEl = el?.querySelector('.chatp-mm-sub');
-    if (!subEl) { setPlace('right'); return; }
+    if (!subEl) { setPlace('right'); setSubMax(null); return; }
     const panel = el.querySelector('.chatp-mm-panel').getBoundingClientRect();
     const w = subEl.getBoundingClientRect().width;
-    if (panel.right + 6 + w <= window.innerWidth - 8) setPlace('right');
-    else if (panel.left - 6 - w >= 8) setPlace('left');
-    else setPlace(Math.max(8, window.innerWidth - 8 - w) - panel.left);
+    let next;
+    if (panel.right + 6 + w <= window.innerWidth - 8) next = 'right';
+    else if (panel.left - 6 - w >= 8) next = 'left';
+    else next = Math.max(8, window.innerWidth - 8 - w) - panel.left;
+    setPlace(next);
+    const room = typeof next === 'number' ? panel.top - 6 - 8 : panel.bottom - 8;
+    setSubMax(Math.max(80, Math.min(360, Math.floor(room))));
   }, [sub, pos]);
   // The keyboard's row stays in view in a long list.
   useEffect(() => {
@@ -155,7 +163,10 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
       {sub && (
         <div
           className={`chatp-mm-panel chatp-mm-sub chatp-mm-sub-${sub}${place === 'left' ? ' flip' : ''}`}
-          style={typeof place === 'number' ? { left: place, right: 'auto', bottom: 'calc(100% + 6px)' } : undefined}
+          style={{
+            ...(typeof place === 'number' ? { left: place, right: 'auto', bottom: 'calc(100% + 6px)' } : {}),
+            ...(subMax ? { maxHeight: subMax } : {}),
+          }}
           role="menu"
           aria-label={SUBMENUS[sub]}
         >
