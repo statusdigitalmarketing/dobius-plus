@@ -136,6 +136,14 @@ export const useStore = create((set, get) => ({
   // window was unfocused. Cleared by markTabsSeen (ProjectView) once the tab is
   // on screen in a focused window. Ephemeral, like tabStatus.
   unreadTabs: {},
+  // tabId -> ms the red arrived: red because a turn ended handing the person a
+  // `! command` (shared/handoff.js), not a permission prompt. Such a red clears
+  // once the tab has been seen (ProjectView), a prompt's only when answered.
+  // The stamp tells one handoff red from the next.
+  handoffTabs: {},
+  // tabId -> ms of the latest red (any kind): tells one red from the next, so
+  // a late answer about an older red never touches a newer one (ProjectView).
+  redAt: {},
   // opts.fromHook: the status came from the Claude hook's OSC marker
   // (useTerminal), the only source whose 'done' means a turn finished.
   setTabStatus: (tabId, status, opts) => set((s) => {
@@ -148,6 +156,13 @@ export const useStore = create((set, get) => ({
     const unread = !s.unreadTabs[tabId] && becomesUnread(status, seen, s.hookOwnedTabs[tabId], opts?.fromHook);
     const out = {};
     if (s.tabStatus[tabId] !== status) out.tabStatus = { ...s.tabStatus, [tabId]: status };
+    if (status === 'needs' && (s.tabStatus[tabId] !== 'needs' || opts?.fromHook)) out.redAt = { ...s.redAt, [tabId]: Date.now() };
+    const handoff = status === 'needs' && !!opts?.handoff;
+    if (handoff || s.handoffTabs[tabId]) {
+      const h = { ...s.handoffTabs };
+      if (handoff) h[tabId] = Date.now(); else delete h[tabId];
+      out.handoffTabs = h;
+    }
     if (unread) out.unreadTabs = { ...s.unreadTabs, [tabId]: true };
     return out;
   }),
@@ -305,6 +320,10 @@ export const useStore = create((set, get) => ({
     delete hot[tabId];
     const rhd = { ...state.recentHookDone };
     delete rhd[tabId];
+    const hand = { ...state.handoffTabs };
+    delete hand[tabId];
+    const red = { ...state.redAt };
+    delete red[tabId];
     const unread = clearSeen(state.unreadTabs, new Set([tabId]));
     set({
       terminalTabs: tabs,
@@ -314,6 +333,8 @@ export const useStore = create((set, get) => ({
       tabStatus: ts,
       hookOwnedTabs: hot,
       recentHookDone: rhd,
+      handoffTabs: hand,
+      redAt: red,
       unreadTabs: unread,
       splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
       gridSlots: pruneGrid(state.gridSlots, new Set(tabs.map((t) => t.id))),
@@ -482,6 +503,8 @@ export const useStore = create((set, get) => ({
       agentActivity: aa,
       tabStatus: pruneByTabId(s.tabStatus),
       hookOwnedTabs: pruneByTabId(s.hookOwnedTabs),
+      handoffTabs: pruneByTabId(s.handoffTabs),
+      redAt: pruneByTabId(s.redAt),
       unreadTabs: pruneByTabId(s.unreadTabs),
       monitoredTabs: (s.monitoredTabs || []).filter((id) => liveIds.has(id)),
     };
@@ -511,11 +534,15 @@ export const useStore = create((set, get) => ({
     for (const id of removedIds) delete ts[id];
     const hot = { ...state.hookOwnedTabs };
     for (const id of removedIds) delete hot[id];
+    const hand = { ...state.handoffTabs };
+    for (const id of removedIds) delete hand[id];
+    const red = { ...state.redAt };
+    for (const id of removedIds) delete red[id];
     // Clear splitTabId if the split pane was killed — otherwise the layout
     // stays stuck in split mode pointing at a dead tab and the surviving
     // active terminal is constrained to half-width with no header to exit.
     const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
-    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, unreadTabs: clearSeen(state.unreadTabs, removedIds), gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, handoffTabs: hand, redAt: red, unreadTabs: clearSeen(state.unreadTabs, removedIds), gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {

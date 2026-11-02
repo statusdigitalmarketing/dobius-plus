@@ -49,6 +49,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('terminal:exit', handler);
   },
   // main: a red tab's prompt was answered (from any surface), so it is working.
+  // A handed-back command's red was seen in this window: main clears it.
+  terminalHandoffSeen: (id, shownSince) => ipcRenderer.invoke('terminal:handoffSeen', id, shownSince),
   onTerminalStatusHint: (callback) => {
     const handler = (_event, id, status) => callback(id, status);
     ipcRenderer.on('terminal:statusHint', handler);
@@ -57,7 +59,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // main: a Codex hook reported this tab's state (codex-status.js), the
   // out-of-band twin of Claude's OSC 777 marker.
   onTerminalHookStatus: (callback) => {
-    const handler = (_event, id, status) => callback(id, status);
+    const handler = (_event, id, status, tag) => callback(id, status, tag);
     ipcRenderer.on('terminal:hookStatus', handler);
     return () => ipcRenderer.removeListener('terminal:hookStatus', handler);
   },

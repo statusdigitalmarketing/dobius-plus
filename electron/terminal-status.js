@@ -116,6 +116,7 @@ function applyHookState(st, state, now, tag) {
   st.doneAt = state === 'done' ? now : 0;
   st.doneSticky = state === 'done';
   st.needsKind = state === 'needs' ? (tag === 'handoff' ? 'handoff' : 'prompt') : null;
+  st.handoffAt = st.needsKind === 'handoff' ? now : 0;
 }
 
 // Claude's idle-for-a-minute 'done' while the tab is red: the person still
@@ -133,6 +134,21 @@ export function noteHookStatus(id, state, now = Date.now(), tag = undefined) {
   if (skipsRed(st, state, tag)) return false;
   enterStatus(st, state, now);
   applyHookState(st, state, now, tag);
+  return true;
+}
+
+/** The person has seen a handed-back command (its tab sat on screen in a
+ * focused window): a handoff red has done its job and becomes a finished,
+ * green turn. A permission prompt's red is NOT cleared by seeing it: Claude
+ * is stuck until it is answered. Returns true when it changed. */
+export function clearHandoff(id, shownSince = Infinity, now = Date.now()) {
+  const st = live.get(id);
+  if (!st || st.status !== 'needs' || st.needsKind !== 'handoff') return false;
+  // Only a red that was already there when the person started looking: a new
+  // handoff that landed after that (a new turn) has not been seen yet.
+  if (!(st.handoffAt <= shownSince)) return false;
+  enterStatus(st, 'done', now);
+  applyHookState(st, 'done', now);
   return true;
 }
 
