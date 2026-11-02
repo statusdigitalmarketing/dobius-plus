@@ -4,7 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { cardsFrom, readToken, readBoard, findBoardDir } from '../inbox-board.js';
+import { cardsFrom, readToken, readBoard as readBoardRaw, findBoardDir, listenerIsMine } from '../inbox-board.js';
+
+// Tests drive fake listeners; ownership has its own test below.
+const readBoard = (opts) => readBoardRaw({ listenerIsMine: async () => true, ...opts });
 
 const TODAY = '2026-11-02';
 
@@ -224,6 +227,33 @@ test('the request uses a private agent, never the global (proxy-aware) one', asy
     const http = await import('node:http');
     assert.ok(seen[0].agent instanceof http.Agent);
     assert.notEqual(seen[0].agent, http.globalAgent);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('listenerIsMine needs a listener, all owned by this uid', async () => {
+  const fake = (out, err = null) => (_bin, _args, _o, cb) => cb(err, out);
+  const own = 'p1\nu501\nf4\nn127.0.0.1:8765\n';
+  assert.equal(await listenerIsMine({ uid: 501, run: fake(own) }), true);
+  assert.equal(await listenerIsMine({ uid: 501, run: fake('p1\nu502\nf4\nn127.0.0.1:8765\n') }), false);
+  assert.equal(await listenerIsMine({ uid: 501, run: fake(own + 'p2\nu0\nf3\nn127.0.0.1:8765\n') }), false);
+  // ours on another address proves nothing about 127.0.0.1 (lsof hides other users)
+  assert.equal(await listenerIsMine({ uid: 501, run: fake('p1\nu501\nf4\nn[::1]:8765\n') }), false);
+  assert.equal(await listenerIsMine({ uid: 501, run: fake('p1\nu501\nf4\nn*:8765\n') }), false);
+  assert.equal(await listenerIsMine({ uid: 501, run: fake('p1\nu501\nf4\n') }), false);
+  assert.equal(await listenerIsMine({ uid: 501, run: fake('', new Error('exit 1')) }), false);
+  assert.equal(await listenerIsMine({ uid: null, run: fake('p1\nu501\n') }), false);
+});
+
+test('readBoard sends nothing when the listener is not ours', async () => {
+  const dir = tmpDir();
+  try {
+    fs.writeFileSync(path.join(dir, 'token.txt'), 'tokTOKtokTOKtokTOK');
+    const seen = [];
+    const r = await readBoardRaw({ dir, request: fakeRequest({ seen }), listenerIsMine: async () => false });
+    assert.equal(r.reason, 'not-running');
+    assert.equal(seen.length, 0);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

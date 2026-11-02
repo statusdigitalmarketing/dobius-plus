@@ -52,6 +52,37 @@ export function findBoardDir({ plist = PLIST, fallback = DEFAULT_DIR, run = exec
   });
 }
 
+/**
+ * True only when a process of THIS user listens on exactly 127.0.0.1:<port>,
+ * the address getJson connects to, and every listener lsof shows there is
+ * ours. Another account on this Mac could bind it while the board is down and
+ * must never be handed the token. lsof silently omits other users' processes,
+ * so a listener of ours on another address (::1, *) proves nothing; only an
+ * exact 127.0.0.1 bind does, because while ours holds it no one else can
+ * (the board sets no SO_REUSEPORT). Fails closed on no match or any error.
+ * A listener swapped in between this check and the connect is an accepted
+ * residual.
+ */
+export function listenerIsMine({ port = BOARD_PORT, run = execFile, uid = process.getuid?.() } = {}) {
+  return new Promise((resolve) => {
+    if (typeof uid !== 'number') return resolve(false);
+    run('/usr/sbin/lsof', ['-nP', '-a', `-iTCP@127.0.0.1:${port}`, '-sTCP:LISTEN', '-Fpun'], { timeout: 3000 }, (err, out) => {
+      if (err || typeof out !== 'string') return resolve(false);
+      // -F records: p<pid>, u<uid>, then one n<address> per listening socket.
+      let current = null;
+      let ownExact = false;
+      for (const line of out.split('\n')) {
+        if (line.startsWith('u')) current = Number(line.slice(1));
+        else if (line.startsWith('n')) {
+          if (current !== uid) return resolve(false);
+          if (line.slice(1) === `127.0.0.1:${port}`) ownExact = true;
+        }
+      }
+      resolve(ownExact);
+    });
+  });
+}
+
 /** The board's API token, or null. A symlink or an odd-sized file is refused. */
 export function readToken(dir) {
   const p = path.join(dir, 'token.txt');
@@ -200,6 +231,7 @@ export async function readBoard(opts = {}) {
   const url = boardUrl();
   const tok = readToken(dir);
   if (!tok) return { ok: false, reason: 'not-installed', url };
+  if (!await (opts.listenerIsMine || listenerIsMine)(opts)) return { ok: false, reason: 'not-running', url };
   const got = await getJson(tok, opts);
   if (!got.ok) return { ok: false, reason: got.reason, url };
   return { ok: true, url, ...withoutToken(cardsFrom(got.payload, opts.today || localDay()), tok) };
