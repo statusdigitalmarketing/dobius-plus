@@ -132,6 +132,18 @@ export const useStore = create((set, get) => ({
     delete done[tabId];
     return { recentHookDone: done };
   }),
+  // Enter typed into a tab waiting on background work: whatever happens next
+  // (a new prompt, or a shell command after Claude was killed) is new, so the
+  // wait ends and output drives the dot again (Codex: a killed Claude, or a
+  // respawned tab, left it yellow for good).
+  releaseBackground: (tabId) => set((s) => {
+    if (!s.backgroundTabs[tabId]) return {};
+    const bg = { ...s.backgroundTabs };
+    delete bg[tabId];
+    const hot = { ...s.hookOwnedTabs };
+    delete hot[tabId];
+    return { backgroundTabs: bg, hookOwnedTabs: hot };
+  }),
   // tabId -> true: Claude finished a turn there while it was off screen or the
   // window was unfocused. Cleared by markTabsSeen (ProjectView) once the tab is
   // on screen in a focused window. Ephemeral, like tabStatus.
@@ -141,6 +153,9 @@ export const useStore = create((set, get) => ({
   // once the tab has been seen (ProjectView), a prompt's only when answered.
   // The stamp tells one handoff red from the next.
   handoffTabs: {},
+  // tabId -> true while its turn ended with background work still running
+  // (working;background): Claude's idle notification must not turn it green.
+  backgroundTabs: {},
   // tabId -> ms of the latest red (any kind): tells one red from the next, so
   // a late answer about an older red never touches a newer one (ProjectView).
   redAt: {},
@@ -162,6 +177,16 @@ export const useStore = create((set, get) => ({
       const h = { ...s.handoffTabs };
       if (handoff) h[tabId] = Date.now(); else delete h[tabId];
       out.handoffTabs = h;
+    }
+    // Only the hook's own markers move it: plain output also reports
+    // 'working' and must not clear it.
+    // A sync from main (a tab moving between windows) sets it outright.
+    const background = typeof opts?.syncBackground === 'boolean' ? status === 'working' && opts.syncBackground
+      : opts?.fromHook ? status === 'working' && !!opts.background : !!s.backgroundTabs[tabId] && status === 'working';
+    if (background !== !!s.backgroundTabs[tabId]) {
+      const b = { ...s.backgroundTabs };
+      if (background) b[tabId] = true; else delete b[tabId];
+      out.backgroundTabs = b;
     }
     if (unread) out.unreadTabs = { ...s.unreadTabs, [tabId]: true };
     return out;
@@ -281,7 +306,7 @@ export const useStore = create((set, get) => ({
 
   // A tab docked back from a tear-off window, keeping its id (its PTY, session
   // links and scrollback are keyed by it). Returns false for a duplicate.
-  adoptTab: (tab, status, hookOwned) => {
+  adoptTab: (tab, status, hookOwned, background) => {
     const state = get();
     if (!tab?.id || state.terminalTabs.some((t) => t.id === tab.id)) return false;
     // Its id is in this window's id space only if it was born here (so below
@@ -290,6 +315,9 @@ export const useStore = create((set, get) => ({
       terminalTabs: [...state.terminalTabs, tab],
       tabStatus: status ? { ...state.tabStatus, [tab.id]: status } : state.tabStatus,
       hookOwnedTabs: hookOwned ? { ...state.hookOwnedTabs, [tab.id]: true } : state.hookOwnedTabs,
+      // A turn's background work still running travels with the tab, or the
+      // receiving window takes Claude's idle notification as the end (Codex).
+      backgroundTabs: background && status === 'working' ? { ...state.backgroundTabs, [tab.id]: true } : state.backgroundTabs,
     });
     get().showTab(tab.id);
     return true;
@@ -322,6 +350,8 @@ export const useStore = create((set, get) => ({
     delete rhd[tabId];
     const hand = { ...state.handoffTabs };
     delete hand[tabId];
+    const bg = { ...state.backgroundTabs };
+    delete bg[tabId];
     const red = { ...state.redAt };
     delete red[tabId];
     const unread = clearSeen(state.unreadTabs, new Set([tabId]));
@@ -334,6 +364,7 @@ export const useStore = create((set, get) => ({
       hookOwnedTabs: hot,
       recentHookDone: rhd,
       handoffTabs: hand,
+      backgroundTabs: bg,
       redAt: red,
       unreadTabs: unread,
       splitTabId: state.splitTabId === tabId ? null : state.splitTabId,
@@ -504,6 +535,7 @@ export const useStore = create((set, get) => ({
       tabStatus: pruneByTabId(s.tabStatus),
       hookOwnedTabs: pruneByTabId(s.hookOwnedTabs),
       handoffTabs: pruneByTabId(s.handoffTabs),
+      backgroundTabs: pruneByTabId(s.backgroundTabs),
       redAt: pruneByTabId(s.redAt),
       unreadTabs: pruneByTabId(s.unreadTabs),
       monitoredTabs: (s.monitoredTabs || []).filter((id) => liveIds.has(id)),
@@ -536,13 +568,15 @@ export const useStore = create((set, get) => ({
     for (const id of removedIds) delete hot[id];
     const hand = { ...state.handoffTabs };
     for (const id of removedIds) delete hand[id];
+    const bg = { ...state.backgroundTabs };
+    for (const id of removedIds) delete bg[id];
     const red = { ...state.redAt };
     for (const id of removedIds) delete red[id];
     // Clear splitTabId if the split pane was killed — otherwise the layout
     // stays stuck in split mode pointing at a dead tab and the surviving
     // active terminal is constrained to half-width with no header to exit.
     const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;
-    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, handoffTabs: hand, redAt: red, unreadTabs: clearSeen(state.unreadTabs, removedIds), gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
+    set({ terminalTabs: kept, activeTabId: tabId, splitTabId, runningAgents: ra, agentActivity: aa, tabStatus: ts, hookOwnedTabs: hot, handoffTabs: hand, backgroundTabs: bg, redAt: red, unreadTabs: clearSeen(state.unreadTabs, removedIds), gridSlots: pruneGrid(state.gridSlots, new Set(kept.map((t) => t.id))), monitoredTabs: state.monitoredTabs.filter((id) => !removedIds.has(id)) });
   },
 
   closeTabsToRight: (tabId) => {

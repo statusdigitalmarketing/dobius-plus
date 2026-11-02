@@ -31,6 +31,11 @@ export const HANDOFF_LINE_GREP = '^[ ]*([-*] |[0-9]+\\. )?`?! [^[:space:]]';
 // running task is listed as {"status":"running"} in background_tasks; the
 // message's own quotes are escaped in the JSON, so its text cannot match.
 export const BACKGROUND_RUNNING_GREP = '"status"[[:space:]]*:[[:space:]]*"(running|pending)"';
+// The Stop input again ($P, read by HANDOFF_SHELL just before): background
+// work still running. The turn ended but Claude is waiting on that work (a
+// Codex review, a build), so the tab stays working, tagged background, and
+// the phone says so instead of "done" (Sam). The next turn decides again.
+export const BACKGROUND_SHELL = `printf '%s' "$P" | /usr/bin/grep -qE '${BACKGROUND_RUNNING_GREP}'`;
 export const HANDOFF_SHELL = `P=$(cat); printf '%s' "$P" | /usr/bin/plutil -extract last_assistant_message raw -o - - 2>/dev/null | /usr/bin/grep -qE '${HANDOFF_LINE_GREP}' && ! printf '%s' "$P" | /usr/bin/grep -qE '${BACKGROUND_RUNNING_GREP}'`;
 
 /** The same decision on a decoded Stop input (tests; Codex has no background tasks). */
@@ -38,4 +43,14 @@ export function isHandoffStop(input) {
   const running = Array.isArray(input?.background_tasks)
     && input.background_tasks.some((t) => t && (t.status === 'running' || t.status === 'pending'));
   return !running && isHandoff(input?.last_assistant_message);
+}
+
+/**
+ * The Claude Stop hook's command: a handed-back `! command` is red
+ * (needs;handoff), a turn that ended with background work still running stays
+ * working (working;background), anything else is done. `statusCmd(state)`
+ * prints the marker for a state (main.js addDobiusHooks).
+ */
+export function stopHookCommand(statusCmd) {
+  return `if ${HANDOFF_SHELL}; then ${statusCmd('needs;handoff')}; elif ${BACKGROUND_SHELL}; then ${statusCmd('working;background')}; else ${statusCmd('done')}; fi`;
 }

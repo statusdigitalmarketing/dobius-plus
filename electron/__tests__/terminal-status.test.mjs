@@ -205,5 +205,55 @@ check('a number inside typed text does not', answersPrompt('12'), false);
   check('an unknown tab', ts.clearHandoff('term-nope-3', 1), false);
 }
 
+// A turn that ends with background work running (working;background) stays
+// working and says what it waits on; Claude's idle notification does not turn
+// it green; the next turn's hooks clear it.
+{
+  ts._reset();
+  const B = 'term-/bg-1';
+  ts.ingest(B, '\x1b]777;dobius;working\x07', 1000);
+  ts.ingest(B, '\x1b]777;dobius;working;background\x07', 2000);
+  check('background: stays working', ts.statusFor(B).status, 'working');
+  check('background: says what it waits on', ts.statusFor(B).waiting, 'background');
+  check('background: in the snapshot too', ts.snapshot().live[B].waiting, 'background');
+  ts.ingest(B, 'quiet prompt repaint', 3000);
+  ts.settle(9000);
+  check('background: quiet does not settle it', ts.statusFor(B).status, 'working');
+  ts.ingest(B, '\x1b]777;dobius;done;idle\x07', 62000);
+  check('background: idle notification does not turn it green', ts.statusFor(B).status, 'working');
+  // Enter does not end the wait by itself (main asks whether Claude is still
+  // running first): releaseDone leaves it alone.
+  check('background: Enter alone keeps the wait', (ts.releaseDone(B, 'ls\r', 64000), ts.statusFor(B).waiting), 'background');
+  check('background: still waiting per the check', ts.waitingOnBackground(B), true);
+  // Claude gone from the tab: main releases it, and quiet then settles it.
+  check('background: released once Claude is gone', ts.releaseWait(B, 64500), true);
+  check('background: no longer waiting', ts.statusFor(B).waiting, null);
+  ts.settle(70000);
+  check('background: settles once released', ts.statusFor(B).status, 'idle');
+  check('background: nothing to release twice', ts.releaseWait(B, 70500), false);
+  ts.ingest(B, '\x1b]777;dobius;working\x07', 72000);
+  check('background: the next turn clears the wait', ts.statusFor(B).waiting, null);
+  ts.ingest(B, '\x1b]777;dobius;done\x07', 80000);
+  check('background: then a plain finish is done', ts.statusFor(B).status, 'done');
+}
+
+// Whether Claude still runs in a tab: anywhere under its PTY (a nested bash),
+// or as the PTY itself (exec claude); another tab's Claude does not count.
+{
+  const { claudeInTree } = await import('../terminal-manager.js');
+  const ps = [
+    '  100     1 -zsh',
+    '  200   100 bash',
+    '  300   200 claude --resume 0123abcd-0000-0000-0000-000000000000',
+    '  400     1 -zsh',
+    '  500   400 vim notes.md',
+    '  600     1 claude',
+  ].join('\n');
+  check('tree: Claude under a nested shell', claudeInTree(ps, 100), true);
+  check('tree: another tab\'s Claude does not count', claudeInTree(ps, 400), false);
+  check('tree: the PTY itself is Claude (exec claude)', claudeInTree(ps, 600), true);
+  check('tree: a gone PTY', claudeInTree(ps, 999), false);
+}
+
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);
 process.exit(fail === 0 ? 0 : 1);

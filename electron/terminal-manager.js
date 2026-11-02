@@ -580,6 +580,49 @@ export async function getTerminalProcessArgv(id) {
  * soleChild: this is the shell's only child, so no other program in the tab
  * (a suspended claude, say) can be the one the person is really working in.
  */
+/**
+ * Whether Claude runs anywhere in a tab: the PTY's own process (started with
+ * `exec claude`) or any process under it (a child of the shell, or deeper,
+ * from a nested `bash`: Codex, rounds 11 and 12). One ps of the whole table.
+ */
+export async function terminalRunsClaude(id) {
+  const root = terminals.get(id)?.pty?.pid;
+  if (typeof root !== 'number' || root <= 0) return false;
+  let stdout;
+  try {
+    ({ stdout } = await execFileP('/bin/ps', ['-axo', 'pid=,ppid=,command='], { timeout: 2000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
+  } catch (err) {
+    console.warn('[terminal] claude check failed:', err?.message || err);
+    return true; // unknown: keep the wait rather than end it on a guess
+  }
+  return claudeInTree(stdout, root);
+}
+
+/** Whether `ps -axo pid=,ppid=,command=` output shows Claude at `root` or
+ * anywhere under it. */
+export function claudeInTree(psText, root) {
+  const kids = new Map();
+  const cmd = new Map();
+  for (const line of String(psText).split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    cmd.set(pid, m[3]);
+    if (!kids.has(Number(m[2]))) kids.set(Number(m[2]), []);
+    kids.get(Number(m[2])).push(pid);
+  }
+  const seen = new Set();
+  const queue = [root];
+  while (queue.length) {
+    const pid = queue.shift();
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    if (cmd.has(pid) && isClaudeCommand(cmd.get(pid))) return true;
+    for (const k of kids.get(pid) || []) queue.push(k);
+  }
+  return false;
+}
+
 export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;

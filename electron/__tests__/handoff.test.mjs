@@ -1,6 +1,6 @@
 // The "run this yourself" rule (shared/handoff.js): the JS form and the grep
 // form the Claude Stop hook runs must agree on every case.
-import { isHandoff, isHandoffStop, HANDOFF_SHELL } from '../../shared/handoff.js';
+import { isHandoff, isHandoffStop, HANDOFF_SHELL, stopHookCommand } from '../../shared/handoff.js';
 import { spawnSync } from 'node:child_process';
 
 let pass = 0, fail = 0;
@@ -53,6 +53,22 @@ const bgCases = [
 for (const [label, input, want] of bgCases) {
   check(`js:    ${label}`, isHandoffStop(input), want);
   check(`shell: ${label}`, shellSays(input), want);
+}
+
+// The whole Stop command, run as the hook runs it: which marker it prints.
+// A turn that ends with background work running stays working (Sam: the
+// phone said "done" while a Codex review was still going).
+{
+  const stop = stopHookCommand((state) => `printf '%s' '${state}'`);
+  const says = (input) => spawnSync('/bin/sh', ['-c', stop], { input: JSON.stringify(input) }).stdout.toString();
+  const bg = [{ id: 'b1', status: 'running' }];
+  check('stop: plain turn is done', says({ last_assistant_message: 'All set.', background_tasks: [] }), 'done');
+  check('stop: handoff is red', says({ last_assistant_message: 'Run this:\n! npm run deploy', background_tasks: [] }), 'needs;handoff');
+  check('stop: background running stays working', says({ last_assistant_message: 'Codex is reviewing.', background_tasks: bg }), 'working;background');
+  check('stop: pending counts too', says({ last_assistant_message: 'x', background_tasks: [{ status: 'pending' }] }), 'working;background');
+  check('stop: handoff with background running waits', says({ last_assistant_message: '! npm run deploy', background_tasks: bg }), 'working;background');
+  check('stop: finished background is done', says({ last_assistant_message: 'Done.', background_tasks: [{ status: 'completed' }] }), 'done');
+  check('stop: no field is done', says({ last_assistant_message: 'Done.' }), 'done');
 }
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);

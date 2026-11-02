@@ -31,7 +31,8 @@ export default function SessionCard({ term, onOpen, pinned, onTogglePin, titlePr
                 beats a flat "working": it is what the desktop shows and it
                 tells you the session is genuinely mid-thought. */}
             <span className="card-status">
-              {term.status === 'working' && term.verb ? `${term.verb}…` : s.label}
+              {term.status === 'working' && term.waiting === 'background' ? 'waiting on background task'
+                : term.status === 'working' && term.verb ? `${term.verb}…` : s.label}
             </span>
             {term.lastActivityAt ? <span className="card-time"> · {timeAgo(term.lastActivityAt)}</span> : null}
             {term.model ? <span className="card-time"> · {term.model}</span> : null}
