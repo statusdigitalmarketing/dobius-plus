@@ -76,20 +76,49 @@ function textTailOf(rawBuffer, maxLines) {
  */
 export async function terminalScreenText(id, maxLines = 60) {
   const raw = getTerminalBuffer(id) || '';
-  let start = Math.max(0, raw.length - 262144);
-  if (start > 0) {
-    // Never start inside an escape sequence (see activityForTab).
-    const esc = raw.lastIndexOf('\x1b', start);
-    if (esc !== -1 && start - esc <= ESC_BACKUP_CHARS) start = esc;
-  }
-  const tail = raw.slice(start);
+  const start = screenTailStart(raw, 262144);
+  let tail = raw.slice(start);
+  // A full-screen program (vim, less) whose ENTRY fell before the cut: replay
+  // it as entered, or its screen paints the normal buffer and stays there
+  // after it exits.
+  if (start > 0 && firstAltScreenSwitchIsExit(tail)) tail = `\x1b[?1049h${tail}`;
   let lines;
-  try { lines = await renderScreenLines(tail, { cols: terminalCols(id) }); } catch { lines = null; }
+  try { lines = await renderScreenLines(tail, { cols: terminalCols(id), exact: true }); } catch { lines = null; }
   if (!lines) return textTailOf(raw, maxLines);
   const rows = lines.map((l) => String(l).replace(/\s+$/, ''));
   while (rows.length && !rows[rows.length - 1]) rows.pop();
   while (rows.length && !rows[0]) rows.shift();
   return rows.slice(-maxLines).join('\n');
+}
+
+// Where to cut a raw tail so it never starts inside an escape sequence: back
+// up to a nearby ESC that opens a short sequence, and skip FORWARD past the end
+// of a long control string (an OSC title can run past any backup limit) whose
+// opening ESC is before the cut and whose terminator is after it.
+export function screenTailStart(raw, max) {
+  let start = Math.max(0, raw.length - max);
+  if (start === 0) return 0;
+  const esc = raw.lastIndexOf('\x1b', start - 1);
+  if (esc === -1) return start;
+  const kind = raw[esc + 1];
+  if (kind === ']' || kind === 'P' || kind === '_' || kind === '^' || kind === 'X') {
+    // A control string: is it still open at the cut?
+    const body = raw.slice(esc + 2, start);
+    if (!/\x07|\x1b\\/.test(body)) {
+      const rest = raw.slice(start);
+      const m = /\x07|\x1b\\/.exec(rest);
+      return m ? start + m.index + m[0].length : raw.length;
+    }
+    return start;
+  }
+  return start - esc <= ESC_BACKUP_CHARS ? esc : start;
+}
+
+// Does the first alternate-screen switch in this text LEAVE the alternate
+// screen (so the entry was cut off)?
+export function firstAltScreenSwitchIsExit(text) {
+  const m = /\x1b\[\?(?:1049|1047|47)([hl])/.exec(text);
+  return !!m && m[1] === 'l';
 }
 
 // A selector read is stamped with the PTY and the count of writes it has

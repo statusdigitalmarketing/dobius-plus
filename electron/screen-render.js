@@ -55,8 +55,13 @@ export function renderScreenLines(raw, opts) {
   return run;
 }
 
-function renderScreenLinesNow(raw, { timeoutMs = 750, cols } = {}) {
-  const width = Math.min(MAX_COLS, Math.max(COLS, Number.isInteger(cols) ? cols : 0));
+function renderScreenLinesNow(raw, { timeoutMs = 750, cols, exact = false } = {}) {
+  // exact: the tab's own width, for showing its screen as it is (wrapping and
+  // in-line erases differ at another width). Otherwise at least COLS, so a
+  // parser never sees a long row wrapped.
+  const width = exact && Number.isInteger(cols) && cols >= 20
+    ? Math.min(MAX_COLS, cols)
+    : Math.min(MAX_COLS, Math.max(COLS, Number.isInteger(cols) ? cols : 0));
   return new Promise((resolve) => {
     let term;
     try {

@@ -77,9 +77,16 @@ export async function resolveSessionForTab(tabId) {
  * @returns {Promise<{sessionId:string, sessionProject:string}|null>}
  */
 async function recordSession(tabId, info) {
-  const configDir = listTerminals().find((t) => t.id === tabId)?.claudeConfigDir ?? null;
+  // With other children in the shell the record may not be the claude in use
+  // (one of two, one suspended): the scan's rule, so a name only, never here.
+  if (info.soleChild === false) return null;
+  const terminals = listTerminals();
+  const configDir = terminals.find((t) => t.id === tabId)?.claudeConfigDir ?? null;
   const rec = await presenceOf(info, configDir);
   if (!rec?.sessionId) return null;
+  // One session, one tab: a session another LIVE tab is linked to stays its.
+  const link = (getSessionTabMap() || {})[rec.sessionId];
+  if (link?.tabId && link.tabId !== tabId && terminals.some((t) => t.id === link.tabId)) return null;
   for (const dir of [rec.cwd, await getTerminalCwd(tabId)]) {
     if (dir && await sessionTranscriptBirth(dir, rec.sessionId)) return { sessionId: rec.sessionId, sessionProject: dir };
   }

@@ -341,5 +341,30 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.equal(await terminalScreenText(id), '');
   ok('an empty tab reads as empty');
 }
+{
+  const { terminalScreenText, screenTailStart, firstAltScreenSwitchIsExit } = await import('../chat-service.js');
+  const id = 'term-screen-2';
+  // At the tab's own width: an 80-column row wraps before the erase.
+  buffers.set(id, `${'A'.repeat(80)}B\r\x1b[2KDone\r\n`);
+  cols.set(id, 80);
+  assert.equal(await terminalScreenText(id), `${'A'.repeat(80)}\nDone`);
+  ok('rendered at the tab\'s own width, not 220 columns');
+  // A cut that drops a full-screen program's ENTRY: its screen must not stay.
+  const before = 'shell prompt $ \r\n';
+  const big = `${before}\x1b[?1049h${'file line\r\n'.repeat(30000)}\x1b[?1049l$ back at the shell\r\n`;
+  buffers.set(id, big);
+  assert.ok(firstAltScreenSwitchIsExit(big.slice(big.length - 262144)), 'the cut drops the entry');
+  assert.ok(!(await terminalScreenText(id)).includes('file line'), 'the editor screen is gone after it exits');
+  ok('a full-screen program whose entry was cut off leaves no screen behind');
+  // A cut inside a long OSC title starts after it, never in its payload.
+  const title = `\x1b]0;${'T'.repeat(1024)}\x07`;
+  const raw = `${'x'.repeat(100)}${title}after\r\n`;
+  const cut = screenTailStart(raw, raw.length - 100 - 600); // lands 600 chars into the title
+  assert.equal(raw.slice(cut), 'after\r\n');
+  // A short CSI cut in half backs up to its ESC.
+  const csi = `${'y'.repeat(50)}\x1b[31mred`;
+  assert.equal(csi.slice(screenTailStart(csi, csi.length - 52)), '\x1b[31mred');
+  ok('the cut never starts inside an escape sequence or a long title');
+}
 
 console.log(`\n${pass} passed`);
