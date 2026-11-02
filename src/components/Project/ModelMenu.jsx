@@ -89,7 +89,9 @@ export default function ModelMenu({ anchor, current, catalog, onPick, onClose })
     else next = Math.max(8, window.innerWidth - 8 - w) - panel.left;
     setPlace(next);
     const room = typeof next === 'number' ? panel.top - 6 - 8 : panel.bottom - 8;
-    setSubMax(Math.max(80, Math.min(360, Math.floor(room))));
+    // No minimum: in a tiny window the list scrolls in what room there is,
+    // and an option is never placed off screen.
+    setSubMax(Math.max(0, Math.min(360, Math.floor(room))));
   }, [sub, pos]);
   // The keyboard's row stays in view in a long list.
   useEffect(() => {
