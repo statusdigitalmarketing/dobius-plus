@@ -3027,7 +3027,10 @@ function setupSessionTabCapture() {
           // gate keeps skipping a session since proven, e.g. Sam Ctrl-Cs a bare
           // `claude` and reruns it as `claude --resume <same-id>`.
           // Codex v1.0.39 r12 P2. Lapsed proof comes back down the same way.
-          if (provenanceChanged(fresh[runningSessionId]?.resolvedBy, how)) {
+          // ...or the folder its transcript is under has been found to be
+          // another (a link saved before Claude's record was read by folder).
+          if (provenanceChanged(fresh[runningSessionId]?.resolvedBy, how)
+            || (how === 'presence' && fresh[runningSessionId]?.projectPath !== linkPath)) {
             setSessionTabLink(runningSessionId, t.id, linkPath, how, probedAt.get(t.id));
             continue;
           }
@@ -4594,7 +4597,8 @@ app.on('before-quit', (e) => {
             clearSessionTabRunning(sid);
           } else if (
             running && running === sid
-            && provenanceChanged(mapQ[sid]?.resolvedBy, howQ)
+            && (provenanceChanged(mapQ[sid]?.resolvedBy, howQ)
+              || (howQ === 'presence' && mapQ[sid]?.projectPath !== linkPathQ))
           ) {
             // Same provenance change as the tick: argv or Claude's record now
             // proves an id we had only inferred, so re-link it as certain.

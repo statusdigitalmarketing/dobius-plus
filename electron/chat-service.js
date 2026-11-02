@@ -81,7 +81,7 @@ export async function terminalScreenText(id, maxLines = 60) {
   // A full-screen program (vim, less) whose ENTRY fell before the cut: replay
   // it as entered, or its screen paints the normal buffer and stays there
   // after it exits.
-  if (start > 0 && firstAltScreenSwitchIsExit(tail)) tail = `\x1b[?1049h${tail}`;
+  if (start > 0 && firstAltScreenSwitchIsExit(tail) && lastAltScreenSwitch(raw.slice(0, start)) === 'h') tail = `\x1b[?1049h${tail}`;
   let lines;
   try { lines = await renderScreenLines(tail, { cols: terminalCols(id), exact: true }); } catch { lines = null; }
   if (!lines) return textTailOf(raw, maxLines);
@@ -112,6 +112,13 @@ export function screenTailStart(raw, max) {
     return start;
   }
   return start - esc <= ESC_BACKUP_CHARS ? esc : start;
+}
+
+// 'h' (entered) or 'l' (left) for the last alternate-screen switch, or null.
+export function lastAltScreenSwitch(text) {
+  let last = null;
+  for (const m of text.matchAll(/\x1b\[\?(?:1049|1047|47)([hl])/g)) last = m[1];
+  return last;
 }
 
 // Does the first alternate-screen switch in this text LEAVE the alternate

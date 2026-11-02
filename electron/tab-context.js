@@ -31,6 +31,10 @@ export async function resolveSessionForTab(tabId) {
   let sessionId = info.sessionId;
   let sessionProject;
   let sessionFromRecord = null;
+  // Two children in the shell and none named by argv: which claude is in use
+  // cannot be told, so no session is named at all (neither the record nor a
+  // saved link may speak for it).
+  if (!sessionId && info.soleChild === false) return null;
   if (sessionId) {
     // The transcript lives under the SESSION's project, not necessarily the
     // tab's live cwd (a same-project resume from a subdir keeps it under the

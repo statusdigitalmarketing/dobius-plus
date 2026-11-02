@@ -356,6 +356,15 @@ ok('an Enter riding with a cancel key is not counted as our own erase');
   assert.ok(firstAltScreenSwitchIsExit(big.slice(big.length - 262144)), 'the cut drops the entry');
   assert.ok(!(await terminalScreenText(id)).includes('file line'), 'the editor screen is gone after it exits');
   ok('a full-screen program whose entry was cut off leaves no screen behind');
+  // A stray `tput rmcup` in ordinary shell output (no entry before the cut)
+  // must not throw that output away.
+  const plain = `${'shell output line\r\n'.repeat(20000)}\x1b[?1049lstill visible\r\n`;
+  buffers.set(id, plain);
+  // (The exit restores the cursor to the top, as a real terminal does, so the
+  // line after it lands above the rows shown; what matters is that the
+  // shell's output is not replayed into an alternate screen and discarded.)
+  assert.ok((await terminalScreenText(id)).includes('shell output line'));
+  ok('a stray alt-screen exit in plain output keeps the output');
   // A cut inside a long OSC title starts after it, never in its payload.
   const title = `\x1b]0;${'T'.repeat(1024)}\x07`;
   const raw = `${'x'.repeat(100)}${title}after\r\n`;
