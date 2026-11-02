@@ -1182,3 +1182,10 @@ button.primary:disabled { opacity: 0.4; }
 .session-card:active .card-ctx::before { background: var(--surface); }
 .session-card .card-chevron { display: none; }
 .board-title-needs { color: var(--status-needs); font-weight: 600; }
+
+/* The top of a conversation: older messages load a page at a time. */
+/* One fixed height in every state: a row that changed size as "Load" became
+ * "Loading" moved the conversation under the reader. */
+.chat-history-edge { height: 44px; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 13px; }
+.chat-history-more { border: 0; background: none; color: var(--accent); font: inherit; font-size: 13px; padding: 6px 10px; cursor: pointer; }
+

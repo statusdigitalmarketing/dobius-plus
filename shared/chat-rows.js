@@ -151,17 +151,46 @@ export function unseenSince(rows, keys, mark) {
   const at = keys.lastIndexOf(mark.key);
   if (at === -1) return -1;
   if (at < keys.length - 1) return keys.length - 1 - at;
-  return tailSig(rows, at) !== mark.sig ? -1 : 0;
+  // Only the rows the mark covered, counted back from it: older rows loaded
+  // ABOVE it (the phone paging back through history) are not news (Codex).
+  const first = markedFirst(at, mark);
+  if (first < 0) return -1; // rows it covered are gone from the top
+  return sigOf(rows, first, at) !== mark.sig ? -1 : 0;
 }
 
-// The whole window's rows: a result can land in ANY row still open (queued
+// The window's rows: a result can land in ANY row still open (queued
 // messages can sit between two live turns), and only new content changes a
-// row, so any change is news (Codex Medium, four times). 200 rows at most.
-const tailSig = (rows, at) => rows.slice(0, at + 1).map(rowSig).join('|');
+// row, so any change is news (Codex Medium, four times). 2000 rows at most.
+const sigOf = (rows, from, to) => (from > to ? '' : rows.slice(from, to + 1).map(rowSig).join('|'));
+// Where the rows a mark covered begin (a mark without a count covered the
+// whole window it was made on).
+const markedFirst = (at, mark) => (typeof mark.n === 'number' ? at - mark.n + 1 : 0);
 
 /** The reading mark for the newest row, or null for none. */
 export function markLatest(rows, keys) {
-  return keys.length ? { key: keys[keys.length - 1], sig: tailSig(rows, rows.length - 1) } : null;
+  return keys.length ? { key: keys[keys.length - 1], n: keys.length, sig: sigOf(rows, 0, rows.length - 1) } : null;
+}
+
+/**
+ * The same mark, stretched over rows that appeared ABOVE the rows it covered
+ * (an older page, or a tail read reaching further back), taking those rows as
+ * they are now. The rows it already covered keep the state the reader saw,
+ * so an unseen change there still counts, and a result that later lands in
+ * one of the new rows is news too (Codex, twice). Run it on every render, so
+ * new rows are captured the moment they first appear.
+ *
+ * Accepted residual: a window that starts partway through a turn gets that
+ * turn's start merged into its first row when an older page loads, which
+ * reads as a change and shows "New messages" once (cleared at the bottom).
+ * Leaving the first row out to avoid it hid real tool results (Codex round 4).
+ */
+export function widenMark(rows, keys, mark) {
+  if (!mark || !mark.key || typeof mark.n !== 'number' || !keys.length) return mark;
+  const at = keys.lastIndexOf(mark.key);
+  const first = at === -1 ? -1 : markedFirst(at, mark);
+  if (first <= 0) return mark;
+  const added = sigOf(rows, 0, first - 1);
+  return { key: mark.key, n: at + 1, sig: mark.sig ? `${added}|${mark.sig}` : added };
 }
 
 /** The fingerprint half of a selector token (`base|fingerprint`), or ''. */

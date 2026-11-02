@@ -495,4 +495,45 @@ fs.rmSync(process.env.DOBIUS_TEST_USERDATA, { recursive: true, force: true });
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-console.log('queued-messages: 30 groups pass');
+// 31. The tail read says when it holds the whole conversation, so the phone
+// knows where older-message paging ends. A window that cut anything (rows,
+// raw lines, or a file bigger than the tail read) is never the start.
+{
+  const { parseTranscriptTail } = await import('../data-service.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'start-'));
+  const f = path.join(dir, 't.jsonl');
+  const turn = (i) => [
+    JSON.stringify({ type: 'user', uuid: `u-${i}`, message: { role: 'user', content: `q${i}` } }),
+    JSON.stringify({ type: 'assistant', uuid: `a-${i}`, message: { role: 'assistant', content: [{ type: 'text', text: `a${i}` }] } }),
+  ].join('\n');
+  fs.writeFileSync(f, Array.from({ length: 10 }, (_, i) => turn(i)).join('\n') + '\n');
+  const all = await parseTranscriptTail(f, 200, true);
+  assert.equal(all.length, 20);
+  assert.equal(all.atStart, true, 'every row returned');
+  const cut = await parseTranscriptTail(f, 5, true);
+  assert.equal(cut.length, 5);
+  assert.equal(cut.atStart, false, 'rows cut by the limit');
+  // Bigger than one tail chunk and more turns than one page: the first page
+  // is not the start, a big enough limit is, and paging past 500 works.
+  fs.writeFileSync(f, Array.from({ length: 400 }, (_, i) => turn(i)).join('\n') + '\n');
+  const p1 = await parseTranscriptTail(f, 200, true);
+  assert.equal(p1.length, 200);
+  assert.equal(p1.atStart, false);
+  const p4 = await parseTranscriptTail(f, 800, true);
+  assert.equal(p4.length, 800, 'a window past the old 500-row cap');
+  assert.equal(p4.atStart, true);
+  assert.equal(p4[0].content, 'q0');
+  // Mostly non-message records between the turns: the raw-line budget cuts
+  // before the row limit does, and that is not the start either.
+  const noise = JSON.stringify({ type: 'system', subtype: 'x' });
+  fs.writeFileSync(f, turn(0) + '\n' + Array(3000).fill(noise).join('\n') + '\n' + turn(1) + '\n');
+  const sparse = await parseTranscriptTail(f, 200, true);
+  assert.equal(sparse.length, 2);
+  assert.equal(sparse.atStart, false, 'raw-line budget cut the first turn');
+  const wide = await parseTranscriptTail(f, 400, true);
+  assert.equal(wide.length, 4);
+  assert.equal(wide.atStart, true);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+console.log('queued-messages: 31 groups pass');

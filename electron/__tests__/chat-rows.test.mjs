@@ -78,6 +78,32 @@ console.log('PASS  row keys survive a sliding window');
   const interMark = markLatest(inter, rowKeys(inter));
   const interDone = [done[0], ...inter.slice(1)];
   assert.equal(unseenSince(interDone, rowKeys(interDone), interMark), -1, 'a result two live turns up');
+  // Older rows loaded ABOVE the marked window (the phone paging back) are
+  // not news; a change inside the window still is.
+  const page = [{ id: 'o1', role: 'user', content: 'old' }, { id: 'o2', role: 'assistant', content: 'older' }, ...rows];
+  assert.equal(unseenSince(page, rowKeys(page), mark), 0, 'an older page is not news');
+  const pageGrown = [page[0], page[1], ...grown];
+  assert.equal(unseenSince(pageGrown, rowKeys(pageGrown), mark), -1, 'growth in the window still is');
+  // Widened over the older page, a result landing in an older row is news.
+  const { widenMark } = await import('../../shared/chat-rows.js');
+  const oldLive = [{ id: 'o1', role: 'assistant', content: 'w', blocks: [{ type: 'tool', name: 'Bash' }] }, ...rows];
+  const wide = widenMark(oldLive, rowKeys(oldLive), mark);
+  assert.equal(wide.n, 3);
+  assert.equal(unseenSince(oldLive, rowKeys(oldLive), wide), 0);
+  const oldDone = [{ ...oldLive[0], blocks: [{ type: 'tool', name: 'Bash', result: 'ok' }] }, ...rows];
+  assert.equal(unseenSince(oldDone, rowKeys(oldDone), wide), -1, 'a result in a paged-in row');
+  assert.equal(widenMark(oldDone, rowKeys(oldDone), wide), wide, 'nothing new above: unchanged');
+  // Widening while the reader's own rows hold an unseen change keeps it news.
+  const pagedGrown = [oldLive[0], ...grown];
+  const wideGrown = widenMark(pagedGrown, rowKeys(pagedGrown), mark);
+  assert.equal(unseenSince(pagedGrown, rowKeys(pagedGrown), wideGrown), -1, 'unseen change survives widening');
+  // The first row of a window is compared too: a result landing in it is news.
+  const firstLive = [{ id: 'f1', role: 'assistant', content: 'x', blocks: [{ type: 'tool', name: 'Bash' }] }, { id: 'fq', role: 'user', content: 'q', queued: true }];
+  const firstMark = markLatest(firstLive, rowKeys(firstLive));
+  const firstDone = [{ ...firstLive[0], blocks: [{ type: 'tool', name: 'Bash', result: 'ok' }] }, firstLive[1]];
+  assert.equal(unseenSince(firstDone, rowKeys(firstDone), firstMark), -1, 'a result in the first row');
+  // A mark from before the count existed still works.
+  assert.equal(unseenSince(rows, keys, { key: mark.key, sig: mark.sig }), 0);
   console.log('PASS  new-messages mark');
 }
 

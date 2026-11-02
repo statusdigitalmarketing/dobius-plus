@@ -2218,22 +2218,29 @@ async function parseTranscriptFile(filePath, blocks = false) {
 // few or zero messages (Codex). The same aggregate payload cap as the full path
 // is enforced by trimming oldest-first, so a tail of huge pasted turns can't blow
 // past MAX_PAYLOAD_BYTES per poll (Codex).
+// The returned array carries `atStart`: true only when it holds the whole
+// conversation (every record read, nothing cut by the row, line or byte caps).
+// The phone chat pages older messages by asking for a bigger limit and stops
+// on that flag; guessing "no more" from row counts stopped early (Codex).
 export async function parseTranscriptTail(filePath, messageLimit, blocks = false) {
-  const want = Math.max(1, Math.min(messageLimit, 500));
-  const rawBudget = Math.min(want * 8, 8000); // overscan raw lines to find enough visible turns
-  const entries = await parseJsonl(filePath, rawBudget);
+  const want = Math.max(1, Math.min(messageLimit, 2000));
+  const rawBudget = Math.min(want * 8, 16000); // overscan raw lines to find enough visible turns
+  const read = {};
+  const entries = await parseJsonl(filePath, rawBudget, read);
   const msgs = [];
   for (const entry of entries) {
     const m = entryToMessage(entry, { blocks });
     if (m) msgs.push(withMeta(m, entry, blocks));
   }
   const deduped = dedupeQueuedMessages(msgs);
-  let tail = (blocks ? mergeTurns(deduped) : deduped).slice(-want);
+  const all = blocks ? mergeTurns(deduped) : deduped;
+  let tail = all.slice(-want);
   let bytes = tail.reduce((n, m) => n + messageBytes(m), 0);
   while (tail.length > 1 && bytes > MAX_PAYLOAD_BYTES) {
     bytes -= messageBytes(tail[0]);
     tail = tail.slice(1);
   }
+  tail.atStart = read.whole === true && tail.length === all.length;
   return tail;
 }
 
