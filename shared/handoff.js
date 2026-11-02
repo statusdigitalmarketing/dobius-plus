@@ -25,4 +25,17 @@ export function isHandoff(text) {
 }
 
 export const HANDOFF_LINE_GREP = '^[ ]*([-*] |[0-9]+\\. )?`?! [^[:space:]]';
-export const HANDOFF_SHELL = `/usr/bin/plutil -extract last_assistant_message raw -o - - 2>/dev/null | /usr/bin/grep -qE '${HANDOFF_LINE_GREP}'`;
+// Not while Claude still has background work running (a Codex review it
+// started, say): it comes back on its own when that ends (measured: a new
+// turn, then a Stop with background_tasks []), and THAT reply decides. A
+// running task is listed as {"status":"running"} in background_tasks; the
+// message's own quotes are escaped in the JSON, so its text cannot match.
+export const BACKGROUND_RUNNING_GREP = '"status"[[:space:]]*:[[:space:]]*"(running|pending)"';
+export const HANDOFF_SHELL = `P=$(cat); printf '%s' "$P" | /usr/bin/plutil -extract last_assistant_message raw -o - - 2>/dev/null | /usr/bin/grep -qE '${HANDOFF_LINE_GREP}' && ! printf '%s' "$P" | /usr/bin/grep -qE '${BACKGROUND_RUNNING_GREP}'`;
+
+/** The same decision on a decoded Stop input (tests; Codex has no background tasks). */
+export function isHandoffStop(input) {
+  const running = Array.isArray(input?.background_tasks)
+    && input.background_tasks.some((t) => t && (t.status === 'running' || t.status === 'pending'));
+  return !running && isHandoff(input?.last_assistant_message);
+}

@@ -234,7 +234,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
         // done;idle is Claude idle for a minute: a red tab (an open prompt, or
         // a `! command` handed back) still waits on the person.
         if (parts[1] === 'done' && parts[2] === 'idle' && store.tabStatus[id] === 'needs') return true;
-        store.setTabStatus(id, parts[1], { fromHook: true });
+        store.setTabStatus(id, parts[1], { fromHook: true, handoff: parts[2] === 'handoff' });
         // Claim hook-ownership so useTabActivity's silence settler doesn't
         // flip this tab to 'done' during a long quiet tool call. 'done' or
         // unknown payload releases the claim back to output-flow inference.
@@ -303,11 +303,11 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     // A Codex hook's state for this tab, applied exactly like the OSC 777
     // marker above. After xterm has parsed what is already written, so output
     // queued before the hook cannot be counted after it.
-    const removeHookStatus = window.electronAPI.onTerminalHookStatus?.((termId, status) => {
+    const removeHookStatus = window.electronAPI.onTerminalHookStatus?.((termId, status, tag) => {
       if (termId !== id || !TAB_STATUS_VALUES.has(status) || !termRef.current) return;
       termRef.current.write('', () => {
         const s = useStore.getState();
-        s.setTabStatus(id, status, { fromHook: true });
+        s.setTabStatus(id, status, { fromHook: true, handoff: tag === 'handoff' });
         s.markHookOwned(id, status);
       });
     });

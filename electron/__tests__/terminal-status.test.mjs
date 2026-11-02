@@ -189,5 +189,21 @@ check('a number inside typed text does not', answersPrompt('12'), false);
   check('and stays held', ts.statusFor(H).hookOwned, true);
 }
 
+// Seeing a handoff clears it; seeing a permission prompt does not.
+{
+  const V = 'term-seen-1';
+  ts.ingest(V, mk('working'), 200000);
+  ts.ingest(V, '\x1b]777;dobius;needs;handoff\x07', 201000);
+  check('a handoff that arrived after you started looking is not cleared', ts.clearHandoff(V, 200500, 204000), false);
+  check('a seen handoff turns green', ts.clearHandoff(V, 201000, 204000), true);
+  check('status done', ts.statusFor(V).status, 'done');
+  check('and holds green against a repaint', (ts.ingest(V, 'repaint\r\n', 210000), ts.statusFor(V).status), 'done');
+  ts.ingest(V, mk('working'), 220000);
+  ts.ingest(V, mk('needs'), 221000);
+  check('a seen permission prompt stays red', ts.clearHandoff(V, 221000, 224000), false);
+  check('still red', ts.statusFor(V).status, 'needs');
+  check('an unknown tab', ts.clearHandoff('term-nope-3', 1), false);
+}
+
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);
 process.exit(fail === 0 ? 0 : 1);

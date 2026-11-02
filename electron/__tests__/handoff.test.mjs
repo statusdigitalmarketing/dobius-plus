@@ -1,6 +1,6 @@
 // The "run this yourself" rule (shared/handoff.js): the JS form and the grep
 // form the Claude Stop hook runs must agree on every case.
-import { isHandoff, HANDOFF_SHELL } from '../../shared/handoff.js';
+import { isHandoff, isHandoffStop, HANDOFF_SHELL } from '../../shared/handoff.js';
 import { spawnSync } from 'node:child_process';
 
 let pass = 0, fail = 0;
@@ -38,6 +38,21 @@ const cases = [
 for (const [label, msg, want] of cases) {
   check(`js:   ${label}`, isHandoff(msg), want);
   check(`grep: ${label}`, grepSays(msg), want);
+}
+
+// Background work still running: not yet (measured payload shape, 2.1.316).
+const shellSays = (input) => spawnSync('/bin/sh', ['-c', HANDOFF_SHELL], { input: JSON.stringify(input) }).status === 0;
+const running = { id: 'bhm3ebyw0', type: 'shell', status: 'running', description: 'Sleep 20 seconds in the background', command: 'sleep 20' };
+const bgCases = [
+  ['a handoff while a background task runs', { last_assistant_message: 'The background sleep is running.\n\nRun this yourself:\n! echo after-bg', background_tasks: [running] }, false],
+  ['the same handoff once it has finished', { last_assistant_message: 'It finished.\n\nRun this yourself:\n! echo after-bg', background_tasks: [] }, true],
+  ['a finished task still listed', { last_assistant_message: 'Run:\n! git push', background_tasks: [{ ...running, status: 'completed' }] }, true],
+  ['no background_tasks field (older Claude)', { last_assistant_message: 'Run:\n! git push' }, true],
+  ['a reply that QUOTES "status":"running" is still a handoff', { last_assistant_message: 'The API said {"status":"running"}.\nRun:\n! git push', background_tasks: [] }, true],
+];
+for (const [label, input, want] of bgCases) {
+  check(`js:    ${label}`, isHandoffStop(input), want);
+  check(`shell: ${label}`, shellSays(input), want);
 }
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);

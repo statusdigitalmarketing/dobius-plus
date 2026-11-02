@@ -1699,8 +1699,10 @@ function setupFileHandlers() {
     type: 'command',
     command: `if ${HANDOFF_SHELL}; then ${statusCmd('needs;handoff')}; else ${statusCmd('done')}; fi`,
   };
+  // The installed Stop command must be exactly the current one: any change
+  // to it (the background-work guard, say) then reaches existing installs.
   const hasHandoffStop = (hooks) => Array.isArray(hooks?.Stop)
-    && hooks.Stop.some((g) => g?.hooks?.some?.((h) => typeof h?.command === 'string' && h.command.includes('dobius;needs;handoff')));
+    && hooks.Stop.some((g) => g?.hooks?.some?.((h) => h?.command === stopEntry.command));
   // SessionStart: tell Claude, only when it runs inside a Dobius tab, that it
   // can label its tab. SessionStart stdout is added to the session's context.
   // The trailing comment is the marker that identifies this group as ours.
@@ -4126,12 +4128,27 @@ app.whenReady().then(() => {
     lastEnterAt: (id) => lastEnterAt.get(id) || 0,
     lastAnswerAt: (id) => lastAnswerAt.get(id) || 0,
     apply: (id, state, tag) => {
-      if (terminalStatus.noteHookStatus(id, state, Date.now(), tag)) sendToTerminalWindow(id, 'terminal:hookStatus', state);
+      if (terminalStatus.noteHookStatus(id, state, Date.now(), tag)) sendToTerminalWindow(id, 'terminal:hookStatus', state, tag);
     },
     now: () => Date.now(),
     later: (fn, ms) => setTimeout(fn, ms).unref?.(),
   });
   setCodexStatusHandler((state, head) => codexStatusRouter.handle(state, head));
+  // The window showing a tab reports a handed-back command seen (on screen,
+  // focused, a few seconds): main turns that red green and tells the window,
+  // so the phone and the board agree. Only the window that owns the tab.
+  ipcMain.handle('terminal:handoffSeen', (event, id, shownSince) => {
+    if (typeof id !== 'string' || getTerminalWebContentsId(id) !== event.sender.id) return false;
+    if (!Number.isFinite(shownSince)) return { changed: false };
+    if (!terminalStatus.clearHandoff(id, shownSince)) {
+      // Not cleared: say what main shows, so a window holding a stale red
+      // (main already moved on, or a docked copy of a red cleared meanwhile)
+      // can take main's word for it.
+      return { changed: false, status: terminalStatus.statusFor(id)?.status || null };
+    }
+    sendToTerminalWindow(id, 'terminal:hookStatus', 'done');
+    return { changed: true };
+  });
   statusSettleTimer = setInterval(() => terminalStatus.settle(), 1000);
   startVoiceBridge();
   // Hand the built-in agent list to voice-bridge so dobius-spawn can find

@@ -28,6 +28,9 @@ import { onScreenTabIds } from '../../lib/tab-unread';
 import { windowFocused, onWindowFocus } from '../../lib/window-focus';
 import { markAdopting, takeAdopting, markDoNotKill } from '../../hooks/useTerminal';
 
+// How long a handed-back command's red tab must be on screen (focused) to count as seen.
+const HANDOFF_SEEN_MS = 3000;
+
 // A window /openTab opened waits this long for that request's tab (main gives
 // up after 15s for the window plus 10s for the tab) before making its own.
 const BRIDGE_FIRST_TAB_WAIT_MS = 30_000;
@@ -586,6 +589,55 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       offFocus();
     };
   }, [activeView, activeTabId, splitTabId, gridSlots, tabs, unreadTabs]);
+
+  // A handed-back `! command` (handoff red) is cleared by SEEING it: once a
+  // red tab has been on screen in a focused window for HANDOFF_SEEN_MS, the
+  // window tells main when it started looking, and main turns it green only
+  // if it is a handoff that was already there then (a permission prompt's
+  // red is untouched: only answering it clears it). Every visible red tab is
+  // reported, not only ones this window knows are handoffs, because main is
+  // the one that knows (a tab docked from a tear-off arrives without the
+  // flag). Not on the first frame, or a red that lands while you are looking
+  // would never show at all.
+  const anyRed = useStore((s) => Object.values(s.tabStatus).includes('needs'));
+  // tabId -> { from: ms on screen while red (Infinity once asked), red: the
+  // stamp of the red it is about (store redAt) }. A different red starts over.
+  const seenSince = useRef(new Map());
+  useEffect(() => {
+    if (!anyRed) { seenSince.current.clear(); return undefined; }
+    const since = seenSince.current;
+    const tick = () => {
+      const s = useStore.getState();
+      const shown = windowFocused() ? onScreenTabIds(s) : new Set();
+      const now = Date.now();
+      for (const [id, e] of [...since]) {
+        if (!shown.has(id) || s.tabStatus[id] !== 'needs' || e.red !== s.redAt[id]) since.delete(id);
+      }
+      for (const id of shown) {
+        if (s.tabStatus[id] !== 'needs') continue;
+        const stamp = s.redAt[id];
+        if (!since.has(id)) { since.set(id, { from: now, red: stamp }); continue; }
+        const { from } = since.get(id);
+        if (now - from < HANDOFF_SEEN_MS) continue;
+        since.set(id, { from: Infinity, red: stamp }); // asked: not again until this red changes
+        Promise.resolve(window.electronAPI?.terminalHandoffSeen?.(id, from)).then((res) => {
+          if (!res || res.changed) return;
+          // main is not red for this tab any more (it moved on, or this is a
+          // docked copy of a red it already cleared): take main's word, but
+          // only for the very red asked about, and never for a newer one.
+          const st = useStore.getState();
+          const main = res.status;
+          if (!main || main === 'needs') return;
+          if (st.tabStatus[id] !== 'needs' || st.redAt[id] !== stamp) return;
+          st.setTabStatus(id, main === 'done' ? 'done' : main, { fromHook: main === 'done' });
+          st.markHookOwned(id, main === 'done' ? 'done' : 'free');
+        }).catch(() => {});
+      }
+    };
+    tick();
+    const iv = setInterval(tick, 500);
+    return () => clearInterval(iv);
+  }, [anyRed]);
 
   // Mirror the unread ids to main so the Tabs sidebar in OTHER windows can
   // show "Done" for this window's tabs (main keeps only this copy).
