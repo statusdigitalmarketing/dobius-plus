@@ -195,6 +195,9 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
     // Restore saved scrollback before creating pty. A checkpoint fork hands
     // its scrollback over in memory, so it never races the disk save.
     let restorePromise = Promise.resolve();
+    // Whether this tab came back with its saved scrollback (a restored tab,
+    // not a new or moved one): main may resume its Claude session then.
+    let restoredFromDisk = false;
     const forked = takePendingScrollback(id);
     // A New Tab asks main to start its tool (Claude Code, Codex) in the PTY it
     // creates. A claimed (moved) tab is never new.
@@ -209,6 +212,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
           }
           // A moved tab (tear-off or dock) keeps its live session: no divider.
           if (!claimExisting) termRef.current.write('\x1b[2m\x1b[38;5;240m── previous session ──\x1b[0m\r\n\r\n');
+          if (!forked && !claimExisting) restoredFromDisk = true;
         }
       }).catch(() => {});
     }
@@ -357,6 +361,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
         const opts = {
           ...(launchTool !== undefined ? { launch: launchTool } : {}),
           ...(pin && typeof pin === 'object' ? { claudeAccountPin: pin } : {}),
+          ...(restoredFromDisk && launchTool === undefined ? { restored: true } : {}),
         };
         window.electronAPI.terminalCreate(id, cwd, Object.keys(opts).length ? opts : undefined);
       }
