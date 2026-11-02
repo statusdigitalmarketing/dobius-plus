@@ -17,6 +17,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chatSelector: (id) => ipcRenderer.invoke('chat:selector', id),
   chatImage: (sessionId, projectPath, ref) => ipcRenderer.invoke('chat:image', sessionId, projectPath, ref),
   chatSubmit: (id, text) => ipcRenderer.invoke('chat:submit', id, text),
+  // Chat model picker: what this tab's Claude runs and can switch to, and the switch.
+  chatModelState: (id, sessionId) => ipcRenderer.invoke('chat:modelState', id, sessionId),
+  chatSetModel: (id, sessionId, choice) => ipcRenderer.invoke('chat:setModel', id, sessionId, choice),
   chatKey: (id, data, token) => ipcRenderer.invoke('chat:key', id, data, token),
   terminalResize: (id, cols, rows) => ipcRenderer.send('terminal:resize', id, cols, rows),
   terminalKill: (id) => ipcRenderer.send('terminal:kill', id),

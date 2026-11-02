@@ -565,3 +565,9 @@
 - **CONTEXT**: Any test of hook behaviour on a Mac whose real settings already carry a Dobius block (every Dobius user).
 - **DETECTION**: `grep -rn -- "--settings" scratchpad/*.mjs scratchpad/*.py | grep -v setting-sources`
 
+
+### Configuration - 2026-11-01 (`/model` and `/effort` save themselves as the default)
+- **MISTAKE**: A probe typed `/model claude-sonnet-5-5` and `/effort high` into a real Claude to see whether they switch a running session. They do, and they ALSO rewrote the shared `~/.claude/settings.json`: `model` changed from Sam's `fable` to the last one typed, and `modelSettings[<id>].effortLevel` was added ("saved as your default for new sessions"). Restored byte-identical from a snapshot.
+- **FIX**: Snapshot `~/.claude/settings.json` before any probe that runs `/model`, `/effort` (or any slash command that persists), cmp afterwards, restore. In the product, say it: the Chat model menu's footer reads "Also your default for new sessions", since Claude has no session-only form.
+- **CONTEXT**: The Chat model picker (Asana 1220098108555124) types these commands. Claude caches its model catalog at `<config dir>/cache/model-catalog/*-cc.json`, which is the clean source for the menu.
+- **DETECTION**: `cmp ~/.claude/settings.json <snapshot>`

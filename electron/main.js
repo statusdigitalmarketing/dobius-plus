@@ -47,6 +47,7 @@ import { launchCommandFor } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
 import { promptBoxText } from './bridge-open-tab.js';
+import { readModelCatalog, currentFromRecord, pickerCommand } from './model-picker.js';
 import {
   loadHistory, loadStats, loadSettings, loadBridgeServers, loadPlans, loadSkills,
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
@@ -257,6 +258,19 @@ let statusSettleTimer = null;
 
 // gws shim, staged once and reused for every terminal's env. Lazy so it only
 // runs when the first terminal is created. v1.0.41.
+// What Claude's input box in a tab holds right now, '' when empty, or null
+// when the screen is not an idle Claude prompt (a dialog, a selector, a login,
+// no Claude). Claude's dim placeholder or ghost suggestion is not text.
+async function claudePromptBox(id) {
+  // A long-running Claude turned bracketed paste on long before this tail
+  // begins, and promptBoxText requires it: say so, or a tab that has been
+  // working a while reads as unreadable. Callers check a claude runs there.
+  const lines = await renderScreenLines(`\x1b[?2004h${trimToEscapeBoundary(getTerminalBuffer(id) || '', 262144)}`, { cols: terminalCols(id) });
+  if (!lines) return null;
+  const text = lines.map((l, i) => (lines.dimFrom[i] >= 0 ? l.slice(0, lines.dimFrom[i]) : l));
+  return promptBoxText(text, lines.modes);
+}
+
 function ownsTerminal(senderId, id) {
   if (!terminalOwners.has(id)) return false; // tab not created via IPC by ANY window
   return terminalOwners.get(id) === senderId;
@@ -780,6 +794,49 @@ function setupDataHandlers() {
     let stranded = false;
     const ok = await submitPromptToTab(tabId, text, () => ownsTerminal(senderId, tabId), () => { stranded = true; });
     return ok ? true : (stranded ? 'stranded' : false);
+  });
+  // --- Chat model picker (Asana 1220098108555124) ------------------------------
+  // What a tab's Claude runs (from its session's usage record) and what it can
+  // switch to (the catalog Claude cached for that account). model-picker.js.
+  const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,100}$/;
+  const sessionModel = async (sessionId) => {
+    if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) return null;
+    const file = path.join(usageDirPath(app.getPath('userData')), `${sessionId}.json`);
+    try {
+      const st = await fs.promises.stat(file);
+      if (!st.isFile() || st.size > 2 * 1024 * 1024) return null;
+      return currentFromRecord(await fs.promises.readFile(file, 'utf8'));
+    } catch { return null; }
+  };
+  const catalogFor = (current) => readModelCatalog([current?.configDir, path.join(os.homedir(), '.claude')].filter(Boolean));
+  ipcMain.handle('chat:modelState', async (event, tabId, sessionId) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId) || !ownsTerminal(event.sender.id, tabId)) return null;
+    const current = await sessionModel(sessionId);
+    const catalog = await catalogFor(current);
+    return { current: current ? { modelId: current.modelId, modelName: current.modelName, effort: current.effort } : null, catalog };
+  });
+  // Switch a tab's Claude by typing ONE allowlisted command (pickerCommand),
+  // only into an EMPTY input box of an idle Claude: never mid-turn, never over
+  // a dialog or a selector, never appended to something the person typed.
+  // `/model` and `/effort` also become the default for new sessions on that
+  // account (Claude's own behaviour, measured on 2.1.316).
+  ipcMain.handle('chat:setModel', async (event, tabId, sessionId, choice) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false, error: 'bad tab' };
+    const senderId = event.sender.id;
+    if (!ownsTerminal(senderId, tabId)) return { ok: false, error: 'not your tab' };
+    if (!(await getTerminalClaudeInfo(tabId))) return { ok: false, error: 'Claude is not running in this tab' };
+    const st = terminalStatus.statusFor(tabId)?.status;
+    if (st === 'working' || st === 'needs') return { ok: false, error: st === 'working' ? 'Claude is working: change it when this turn ends' : 'Answer Claude first' };
+    const current = await sessionModel(sessionId);
+    const cmd = pickerCommand(choice, await catalogFor(current), current?.modelId);
+    if (!cmd) return { ok: false, error: 'That choice is not available for this session' };
+    const box = await claudePromptBox(tabId);
+    if (box === null) return { ok: false, error: "Claude's prompt is not showing" };
+    if (box.trim()) return { ok: false, error: "Clear what is typed in Claude's prompt first" };
+    cancelAutoResumeTab(tabId);
+    let stranded = false;
+    const ok = await submitPromptToTab(tabId, cmd, () => ownsTerminal(senderId, tabId), () => { stranded = true; });
+    return ok ? { ok: true } : { ok: false, error: stranded ? 'Typed but not entered: something else reached the tab' : 'Not sent' };
   });
   ipcMain.handle('data:deleteSession', async (_event, sessionId, projectPath) => {
     const result = await deleteSession(sessionId, projectPath);
@@ -2559,6 +2616,7 @@ function setupHeadroomHandlers() {
       // begins, and promptBoxText requires it: without saying so here, the box
       // of every tab that has been working for a while reads as unreadable (a
       // possible draft). The caller has checked a claude runs in the tab.
+      // (claudePromptBox does the same for the Chat model picker.)
       const lines = await renderScreenLines(`\x1b[?2004h${trimToEscapeBoundary(getTerminalBuffer(id) || '', 262144)}`, { cols: terminalCols(id) });
       // Claude's dim placeholder or ghost suggestion is not unsent text.
       return lines ? { lines: lines.map((l, i) => (lines.dimFrom[i] >= 0 ? l.slice(0, lines.dimFrom[i]) : l)), modes: lines.modes } : null;
