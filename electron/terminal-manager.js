@@ -316,7 +316,12 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     // Whether the KEPT buffer begins inside the alternate screen (vim, less):
     // its entry may have been trimmed away, and only the dropped part can say.
     if (entry.outputBuffer.length < combined.length) {
-      const dropped = combined.slice(0, combined.length - entry.outputBuffer.length);
+      // Plus the kept buffer's first 8 characters (the longest switch is 8):
+      // a switch split by the cut is seen whole here, whereas scanning only the
+      // dropped part would miss it in both halves. Seeing one twice is harmless:
+      // the state is the last switch either way.
+      const cutAt = combined.length - entry.outputBuffer.length;
+      const dropped = combined.slice(0, cutAt + 8);
       let last = null;
       for (const m of dropped.matchAll(ALT_SCREEN_RE)) last = m[1];
       if (last) entry.altAtBufferStart = last === 'h';
