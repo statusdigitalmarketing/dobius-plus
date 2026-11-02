@@ -430,12 +430,15 @@ function sharedAllSessions() {
  * @param {Array<{projectPath:string,tabId:string,label?:string}>} [opts.tearOffTabs]
  *   currently-open tear-off windows. Their torn tab is removed from the primary
  *   window's persisted tabs, so without this the aggregate omits it entirely. M4.
+ * @param {{mainPaths:Set<string>, windowKeys:Set<string>}} [opts.openWindows]
+ *   the windows open now: only their tabs are listed (Asana 1220099565720840).
+ *   Omitted means every saved tab, the old behaviour.
  */
-export async function getAllProjectTabs({ liveTabIds = null, tearOffTabs = [] } = {}) {
+export async function getAllProjectTabs({ liveTabIds = null, tearOffTabs = [], openWindows = null } = {}) {
   // Respect the same hidden/removed-project suppression the project list uses, so
   // a project the user deliberately hid doesn't reappear here. Codex.
   const hidden = new Set(getHiddenProjects());
-  const projects = getAllProjectsWithTabs().filter((p) => !hidden.has(p.path)); // [{ path, tabs, tabCounter }]
+  const projects = getAllProjectsWithTabs(openWindows).filter((p) => !hidden.has(p.path)); // [{ path, tabs, tabCounter }]
   const tornOffIds = new Set((Array.isArray(tearOffTabs) ? tearOffTabs : []).map((t) => t && t.tabId).filter(Boolean));
   if (projects.length === 0 && tornOffIds.size === 0) return [];
   const displayNames = getProjectDisplayNames() || {};
