@@ -4,7 +4,7 @@
 // Run: node --import ./electron/__tests__/bridge-open-main-register.mjs ./electron/__tests__/bridge-open-main.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createBridgeOpenDeps, isClaudeProcess, isSignedClaude } from '../bridge-open-main.js';
+import { createBridgeOpenDeps, isClaudeProcess, isSignedClaude, ttyReaderUnder } from '../bridge-open-main.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -234,4 +234,18 @@ test('isSignedClaude verifies once per exact file and re-checks a failure later'
 
 test('the real codesign check rejects a system shell', { skip: !fs.existsSync('/usr/bin/codesign') }, async () => {
   assert.equal(await isSignedClaude('/bin/sh'), false);
+});
+
+test('ttyReaderUnder: an editor or shell command under claude reading the terminal blocks; pipes and other ttys do not', async () => {
+  const ps = ' 100   1 ttys004\n 200 100 ttys004\n 300 200 ttys004\n 400 100 ??\n 500 100 ttys009\n';
+  const fake = (stdin) => async (bin, args) => {
+    if (bin === '/bin/ps') return { stdout: ps };
+    assert.deepEqual(args.slice(0, 4), ['-a', '-d', '0', '-p']);
+    assert.equal(args[4], '200,300', 'only descendants on this terminal are asked about');
+    return { stdout: stdin };
+  };
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: fake('p300\nf0\nn/dev/ttys004\n') }), true, 'vim from Ctrl+G');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: fake('p200\nf0\nn->0x1234\np300\nf0\nn/dev/null\n') }), false, 'MCP server on a pipe');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: async () => { throw new Error('ps failed'); } }), true, 'doubt blocks');
+  assert.equal(await ttyReaderUnder(999, 'ttys004', { exec: async (bin) => ({ stdout: bin === '/bin/ps' ? ps : '' }) }), false, 'no children');
 });

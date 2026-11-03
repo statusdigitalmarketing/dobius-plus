@@ -251,8 +251,11 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
 
   // The outcome of a delivery is written until it lands: a requeued job would skip a row still saying 'routing'
   // (it may have typed), so a failed write here is retried on its own, never by delivering again.
+  // Only over a row still 'routing': a person may have dismissed it while the retry waited.
   function saveResult(peer, id, patch) {
     try {
+      const row = store.messages().find((x) => x.dir === 'in' && x.peer === peer && x.id === id);
+      if (!row || row.state !== 'routing') return;
       store.patchMessage('in', peer, id, patch);
       changed();
     } catch (err) {
@@ -452,15 +455,19 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     for (const m of store.messages()) {
       if (m.dir !== 'in' || !m.hash || now() - m.at > P.RETAIN_MS) continue;
       const key = `${m.peer}|${m.id}`;
-      if (!store.records.get(key)) {
-        try { store.records.set(key, { hash: m.hash, firstAcceptedAt: m.at }); } catch (err) { console.error('[team] could not restore a dedupe record:', err.message); }
+      // Per row: a failed read or write here must not stop the recovery below (deliverJob writes a missing record
+      // itself before typing anything).
+      try {
+        if (!store.records.get(key)) store.records.set(key, { hash: m.hash, firstAcceptedAt: m.at });
+      } catch (err) {
+        console.error('[team] could not restore a dedupe record:', err.message);
       }
     }
     // A delivery cut short by a quit may have pasted: never repeat it blindly. Each row on its own: a failed write
     // here must never stop the app from starting (the pump treats a leftover 'sending' row as maybe-arrived anyway).
     for (const m of store.messages()) {
       try {
-        if (m.dir === 'in' && m.state === 'routing') store.patchMessage('in', m.peer, m.id, { state: 'needs attention', note: 'Dobius quit while this was being typed; check the orchestrator tab' });
+        if (m.dir === 'in' && m.state === 'routing') saveResult(m.peer, m.id, { state: 'needs attention', note: 'Dobius quit while this was being typed; check the orchestrator tab' });
         if (m.dir === 'in' && m.state === 'waiting') enqueueDelivery(m.peer, m.id);
         if (m.dir === 'out' && m.state === 'sending') store.patchMessage('out', m.peer, m.id, { state: 'queued', reached: true });
       } catch (err) {

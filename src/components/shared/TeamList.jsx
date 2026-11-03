@@ -124,7 +124,7 @@ export default function TeamList({ query }) {
                 {m.dir === 'out' && ['unconfirmed', 'not delivered', 'conflict'].includes(m.state) && (
                   <button style={small('var(--dim)')} title="A new message: they may see it twice" onClick={() => act(api.teamSendAgain(m.id))}>Send again</button>
                 )}
-                {needsPerson(m) && (
+                {(needsPerson(m) || m.state === 'routing') && (
                   <button style={small('var(--dim)')} title="Done with it: it stops counting and can leave the list" onClick={() => act(api.teamDismiss(m.dir, m.peer, m.id))}>Dismiss</button>
                 )}
               </div>

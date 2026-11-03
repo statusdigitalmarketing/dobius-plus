@@ -190,26 +190,20 @@ export function promptBoxText(lines, modes) {
   // The box's CLOSING edge must be near the bottom; its top is the nearest
   // rule above it, with the prompt row right under that. The box may be
   // tall once a message is typed into it.
-  // Two guards against a fake box a person typed into a draft ("────" / "❯ " /
+  // The guard against a fake box a person typed into a draft ("────" / "❯ " /
   // "────" rows inside the real box; Codex team review, Critical, three rounds):
-  // 1. Claude draws its box's rules from COLUMN 0; everything typed into the box
+  // Claude draws its box's rules from COLUMN 0; everything typed into the box
   //    starts at column 2 or later ("❯ " on the first row, an indent on the
   //    rest). So a flat box's edges must start at column 0. This holds with or
   //    without colour (NO_COLOR).
-  // 2. Claude draws its rules in a colour and typed text never is. When any rule
-  //    on screen is coloured, only coloured rules can be edges. (Plain string
-  //    arrays in tests carry no colour; a coloured status line alone does not
-  //    switch this on.)
-  const isRuleRow = (i) => RULE_RE.test(lines[i] || '') || BOX_TOP_RE.test(lines[i] || '') || BOX_BOTTOM_RE.test(lines[i] || '');
-  const colored = Array.isArray(lines.firstColored) && lines.some((_, i) => isRuleRow(i) && lines.firstColored[i] === true) ? lines.firstColored : null;
-  const edge = (i) => !colored || colored[i] === true;
+  //    (A colour requirement was tried first and dropped: NO_COLOR and coloured
+  //    status lines made it refuse real prompts, and column 0 alone covers it.)
   for (let j = last; j >= 1 && j >= last - PROMPT_BOTTOM_ROWS; j -= 1) {
     const flat = EDGE_RE.test(lines[j]);
     if (!flat && !BOX_BOTTOM_RE.test(lines[j])) continue;
-    if (!edge(j)) continue;
-    const isTop = flat ? (r, i) => EDGE_RE.test(r) && edge(i) : (r, i) => BOX_TOP_RE.test(r) && edge(i);
+    const isTop = flat ? (r) => EDGE_RE.test(r) : (r) => BOX_TOP_RE.test(r);
     let top = j - 1;
-    while (top >= 0 && j - top <= MAX_BOX_ROWS && !isTop(lines[top] || '', top)) top -= 1;
+    while (top >= 0 && j - top <= MAX_BOX_ROWS && !isTop(lines[top] || '')) top -= 1;
     if (top < 0 || top === j - 1 || j - top > MAX_BOX_ROWS) continue;
     const row = lines[top + 1] || '';
     const caret = caretInBox(modes.cursor, top, j, row);

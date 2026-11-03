@@ -132,6 +132,40 @@ export async function isClaudeProcess(pid, { ps = psField, exe = executablePath,
   try { return CLAUDE_SCRIPT_RE.test(fs.realpathSync(token)) && fs.statSync(token).isFile(); } catch { return false; }
 }
 
+// Is anything Claude started reading THIS terminal on its stdin (an external
+// editor from Ctrl+G, a `!` shell command)? Then the screen is not Claude's
+// prompt, whatever it looks like, and nothing may be pasted (Codex team
+// review r4, Critical). MCP servers and tool commands run on pipes, so they do
+// not count. Any doubt (ps or lsof failing) counts as yes.
+export async function ttyReaderUnder(pid, tty, { exec = execFileP } = {}) {
+  try {
+    const { stdout } = await exec('/bin/ps', ['-A', '-o', 'pid=,ppid=,tty='], { timeout: 1500, encoding: 'utf8' });
+    const kids = new Map();
+    for (const line of stdout.split('\n')) {
+      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
+      if (!m) continue;
+      if (!kids.has(m[2])) kids.set(m[2], []);
+      kids.get(m[2]).push({ pid: m[1], tty: m[3] });
+    }
+    const onTty = [];
+    const queue = [String(pid)];
+    for (let n = 0; queue.length && n < 500; n += 1) {
+      for (const k of kids.get(queue.shift()) || []) {
+        queue.push(k.pid);
+        if (k.tty === tty) onTty.push(k.pid);
+      }
+    }
+    if (!onTty.length) return false;
+    const r = await exec('/usr/sbin/lsof', ['-a', '-d', '0', '-p', onTty.join(','), '-Fn'], { timeout: 1500, encoding: 'utf8' })
+      .catch((err) => (err?.code === 1 && !err.stdout ? { stdout: '' } : Promise.reject(err)));
+    const dev = `/dev/${tty}`;
+    return r.stdout.split('\n').some((l) => l === `n${dev}`);
+  } catch (err) {
+    console.warn('[bridge-open] could not check what reads the terminal:', err?.message || err);
+    return true;
+  }
+}
+
 async function childPids(pid) {
   try {
     const { stdout } = await execFileP('/usr/bin/pgrep', ['-P', String(pid)], { timeout: 1000, encoding: 'utf8' });
@@ -478,10 +512,15 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
         // act just like auto mode"); only that this really is claude.
         if (pgid !== tpgid || pgid !== String(pid) || stat.startsWith('T') || (await psField(pid, 'tty')) !== tty || !(await isClaudeProcess(pid))) continue;
         // No project (team delivery into the pinned orchestrator tab, which
-        // can work in any folder): claude in the foreground is enough.
-        if (projectPath === null) return true;
-        const cwd = await getProcessCwd(pid);
-        if (cwd && (await fs.promises.realpath(cwd)) === (await fs.promises.realpath(projectPath))) return true;
+        // can work in any folder): no working-folder check.
+        if (projectPath !== null) {
+          const cwd = await getProcessCwd(pid);
+          if (!cwd || (await fs.promises.realpath(cwd)) !== (await fs.promises.realpath(projectPath))) continue;
+        }
+        // Claude leads the foreground group, but an editor or shell command it
+        // started may be the one reading the keyboard.
+        if (await ttyReaderUnder(pid, tty)) continue;
+        return true;
       } catch { /* this candidate is unreadable: not claude */ }
     }
     return false;

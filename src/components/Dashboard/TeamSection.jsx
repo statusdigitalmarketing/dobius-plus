@@ -36,7 +36,10 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
     load();
     const off = api.onTeamChanged?.(load);
     const t = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => { off?.(); clearInterval(t); };
+    // The phone server can come up while this page is open (Mobile Access switched on): re-read every 5 s so the
+    // endpoint, and with it Invite and Join, appear without leaving the page.
+    const poll = setInterval(load, 5000);
+    return () => { off?.(); clearInterval(t); clearInterval(poll); };
   }, [load]);
 
   if (!st) return <Section id="team" title="Team"><div className="text-xs" style={{ color: 'var(--dim)' }}>Loading...</div></Section>;

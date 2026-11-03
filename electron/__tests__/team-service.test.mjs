@@ -534,7 +534,7 @@ test('review: a typed lookalike box inside a draft is not an empty prompt (rende
   const { renderScreenLines } = await import('../screen-render.js');
   const R = (n) => `\x1b[38;5;244m${'─'.repeat(n)}\x1b[0m`;
   const enc = (s) => new TextEncoder().encode(s);
-  const fake = await renderScreenLines(enc(`\x1b[?2004h${R(60)}\r\n❯ my note\r\n${'─'.repeat(20)}\r\n❯ \r\n${'─'.repeat(20)}\r\n${R(60)}\r\n  ? for shortcuts\x1b[4;3H`), { cols: 80 });
+  const fake = await renderScreenLines(enc(`\x1b[?2004h${R(60)}\r\n❯ my note\r\n  ${'─'.repeat(20)}\r\n  ❯ \r\n  ${'─'.repeat(20)}\r\n${R(60)}\r\n  ? for shortcuts\x1b[4;5H`), { cols: 80 });
   assert.equal(boxIsEmpty({ lines: fake, modes: fake.modes }), false);
   const empty = await renderScreenLines(enc(`\x1b[?2004h${R(60)}\r\n❯ \x1b[2mTry "fix lint"\x1b[0m\r\n${R(60)}\r\n  ? for shortcuts\x1b[2;3H`), { cols: 80 });
   assert.equal(boxIsEmpty({ lines: empty, modes: empty.modes }), true, 'placeholder only');
@@ -699,4 +699,30 @@ test('r3: start-up recovery never throws, and a stuck routing row can be dismiss
   a.store.patchMessage = real;
   assert.equal(a.svc.dismiss('in', 'p', '22222222-0000-4000-8000-000000000000').ok, true);
   a.svc.stop();
+});
+
+test('r4: a failed start-up recovery leaves a dismissable row, and the retried write never overrides Dismiss', async () => {
+  const { a, b } = await linked();
+  const id = '33333333-0000-4000-8000-000000000000';
+  a.store.putMessage({ dir: 'in', id, peer: 'p', text: 'x', state: 'routing', at: clock });
+  const real = a.store.patchMessage;
+  let writes = 0;
+  a.store.patchMessage = (dir, peer, mid, patch) => {
+    if (patch.state === 'needs attention') { writes += 1; if (writes === 1) throw new Error('EIO'); }
+    return real(dir, peer, mid, patch);
+  };
+  const timers = [];
+  const realTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms) => { if (ms === 30_000) { timers.push(fn); return { unref() {} }; } return realTimeout(fn, ms); };
+  try {
+    a.svc.start(); // the recovery write fails once and is scheduled again
+  } finally {
+    globalThis.setTimeout = realTimeout;
+  }
+  assert.equal(timers.length, 1, 'the failed write is retried later');
+  assert.equal(a.svc.dismiss('in', 'p', id).ok, true, 'the stuck row can be dismissed meanwhile');
+  timers[0](); // the retry fires
+  assert.equal(a.store.messages().find((m) => m.id === id).state, 'dismissed', 'Dismiss stands');
+  a.store.patchMessage = real;
+  a.svc.stop(); b.svc.stop();
 });

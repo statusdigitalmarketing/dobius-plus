@@ -132,7 +132,7 @@ ok('Claude ready check on real screens');
   // A person's draft holding a typed lookalike box (default colour) inside the real one, caret on the fake ❯:
   // the box found is the REAL one, holding the whole draft, so it is never read as empty or as just our message
   // (Codex team review, Critical).
-  const fake = new TextEncoder().encode(`\x1b[?2004h${R(60)}\r\n❯ my half-written note\r\n${'─'.repeat(20)}\r\n❯ \r\n${'─'.repeat(20)}\r\n${R(60)}\r\n  ? for shortcuts\x1b[4;3H`);
+  const fake = new TextEncoder().encode(`\x1b[?2004h${R(60)}\r\n❯ my half-written note\r\n  ${'─'.repeat(20)}\r\n  ❯ \r\n  ${'─'.repeat(20)}\r\n${R(60)}\r\n  ? for shortcuts\x1b[4;3H`);
   const fakeScreen = await renderScreenLines(fake, { cols: 80 });
   const held = promptBoxText(fakeScreen, fakeScreen.modes);
   assert.equal(held.startsWith('my half-written note'), true, 'a typed rule is not a box edge');
