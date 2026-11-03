@@ -114,6 +114,8 @@ export function validateOpenTabBody(body) {
 
 // A horizontal rule row: Claude draws one above and one below its prompt.
 const RULE_RE = /^\s*─{8,}/;
+// A flat box's edge: a rule from column 0 (typed text in the box never starts there).
+const EDGE_RE = /^─{8,}/;
 // The prompt row itself. Told from a selector row ("❯ 1. Yes") by where the
 // caret is (caretInBox); a screen with no cursor position (tests that pass
 // plain rows) falls back to refusing any numbered row.
@@ -188,20 +190,24 @@ export function promptBoxText(lines, modes) {
   // The box's CLOSING edge must be near the bottom; its top is the nearest
   // rule above it, with the prompt row right under that. The box may be
   // tall once a message is typed into it.
-  // Claude draws its own rules in a colour; anything a person types (a draft
-  // holding literal "────" / "❯ " / "────" rows) is drawn in the default
-  // colour. When the render says which rows start coloured, only coloured
-  // rules can be the box's edges, so a fake box inside a draft never counts
-  // (Codex team review, Critical). Plain string arrays (tests) skip this, and so
-  // does a screen with no coloured row at all (Claude run with NO_COLOR): there
-  // the old rule applies, a stated residual for colourless terminals.
-  const colored = Array.isArray(lines.firstColored) && lines.firstColored.some(Boolean) ? lines.firstColored : null;
+  // Two guards against a fake box a person typed into a draft ("────" / "❯ " /
+  // "────" rows inside the real box; Codex team review, Critical, three rounds):
+  // 1. Claude draws its box's rules from COLUMN 0; everything typed into the box
+  //    starts at column 2 or later ("❯ " on the first row, an indent on the
+  //    rest). So a flat box's edges must start at column 0. This holds with or
+  //    without colour (NO_COLOR).
+  // 2. Claude draws its rules in a colour and typed text never is. When any rule
+  //    on screen is coloured, only coloured rules can be edges. (Plain string
+  //    arrays in tests carry no colour; a coloured status line alone does not
+  //    switch this on.)
+  const isRuleRow = (i) => RULE_RE.test(lines[i] || '') || BOX_TOP_RE.test(lines[i] || '') || BOX_BOTTOM_RE.test(lines[i] || '');
+  const colored = Array.isArray(lines.firstColored) && lines.some((_, i) => isRuleRow(i) && lines.firstColored[i] === true) ? lines.firstColored : null;
   const edge = (i) => !colored || colored[i] === true;
   for (let j = last; j >= 1 && j >= last - PROMPT_BOTTOM_ROWS; j -= 1) {
-    const flat = RULE_RE.test(lines[j]);
+    const flat = EDGE_RE.test(lines[j]);
     if (!flat && !BOX_BOTTOM_RE.test(lines[j])) continue;
     if (!edge(j)) continue;
-    const isTop = flat ? (r, i) => RULE_RE.test(r) && edge(i) : (r, i) => BOX_TOP_RE.test(r) && edge(i);
+    const isTop = flat ? (r, i) => EDGE_RE.test(r) && edge(i) : (r, i) => BOX_TOP_RE.test(r) && edge(i);
     let top = j - 1;
     while (top >= 0 && j - top <= MAX_BOX_ROWS && !isTop(lines[top] || '', top)) top -= 1;
     if (top < 0 || top === j - 1 || j - top > MAX_BOX_ROWS) continue;

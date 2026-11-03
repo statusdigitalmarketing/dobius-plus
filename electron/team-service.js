@@ -31,6 +31,7 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
   const deliveryQueue = [];
   let delivering = false;
   let stopped = false;
+  let current = null; // `${peer}|${id}` of the delivery typing right now
 
   const identity = () => store.loadIdentity();
   const myFp = () => fpOf(identity());
@@ -232,7 +233,8 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
   /** A person is done with a row that needed them: it stops counting and can leave the list. */
   function dismiss(dir, peer, id) {
     const msg = store.messages().find((x) => x.dir === dir && x.peer === peer && x.id === id);
-    if (!msg || !['held', 'needs attention', 'unconfirmed', 'not delivered'].includes(msg.state)) return { ok: false, error: 'nothing to dismiss' };
+    const stuck = msg?.state === 'routing' && current !== `${peer}|${id}`;
+    if (!msg || (!stuck && !['held', 'needs attention', 'unconfirmed', 'not delivered'].includes(msg.state))) return { ok: false, error: 'nothing to dismiss' };
     store.patchMessage(dir, peer, id, { state: 'dismissed', note: null });
     changed();
     return { ok: true };
@@ -245,6 +247,18 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     for (const v of invites.values()) if (v.joiner?.id === id) v.decision = 'declined';
     changed();
     return { ok };
+  }
+
+  // The outcome of a delivery is written until it lands: a requeued job would skip a row still saying 'routing'
+  // (it may have typed), so a failed write here is retried on its own, never by delivering again.
+  function saveResult(peer, id, patch) {
+    try {
+      store.patchMessage('in', peer, id, patch);
+      changed();
+    } catch (err) {
+      console.error('[team] could not save a delivery result, retrying in 30s:', err.message);
+      setTimeout(() => saveResult(peer, id, patch), 30_000).unref?.();
+    }
   }
 
   async function deliverJob({ peer, id, manual }) {
@@ -277,9 +291,9 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     store.patchMessage('in', peer, id, { state: 'routing', note: null });
     changed();
     let result;
-    try { result = await deliver(deps, tabId, card.text); } catch (err) { result = { state: 'needs attention', note: `delivery failed: ${err.message}` }; }
-    store.patchMessage('in', peer, id, { state: result.state, note: result.note || null, routedAt: result.state === 'routed' ? now() : undefined });
-    changed();
+    current = `${peer}|${id}`;
+    try { result = await deliver(deps, tabId, card.text); } catch (err) { result = { state: 'needs attention', note: `delivery failed: ${err.message}` }; } finally { current = null; }
+    saveResult(peer, id, { state: result.state, note: result.note || null, routedAt: result.state === 'routed' ? now() : undefined });
   }
 
   /** A person routes a held message now (Auto-route off, or it gave up waiting). */
@@ -320,8 +334,13 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     return { ok: true, id: msg.id, short: msg.id.slice(0, 8), to: peer.name };
   }
 
+  // `ref` is a full message id, or `<id>@<sender fingerprint>` as the card prints it (ids are unique only per sender).
   function reply(ref, text, peer = null) {
-    const orig = store.findById(ref, 'in', peer);
+    let id = typeof ref === 'string' ? ref.trim() : '';
+    let from = peer;
+    const at = id.indexOf('@');
+    if (at > 0) { from = id.slice(at + 1); id = id.slice(0, at); }
+    const orig = store.findById(id, 'in', from);
     if (!orig) return { ok: false, error: `no single received message has the id ${ref}` };
     return send(orig.peer, text, { kind: 'reply', replyTo: orig.id });
   }
@@ -359,17 +378,19 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
       const t = now();
       for (const msg of store.messages().filter((x) => x.dir === 'out' && (x.state === 'queued' || x.state === 'sending'))) {
         if (stopped) return;
-        if (t >= msg.deadline) {
-          store.patchMessage('out', msg.peer, msg.id, { state: msg.reached || msg.state === 'sending' ? 'unconfirmed' : 'not delivered' });
-          changed();
-          continue;
-        }
-        if ((msg.nextAt || 0) > t) continue;
         try {
+          if (t >= msg.deadline) {
+            const maybe = msg.reached || msg.state === 'sending';
+            store.patchMessage('out', msg.peer, msg.id, { state: maybe ? 'unconfirmed' : 'not delivered', reached: maybe });
+            changed();
+            continue;
+          }
+          if ((msg.nextAt || 0) > t) continue;
           await attemptSend(msg);
         } catch (err) {
-          // A failed write mid-attempt (disk full): the row may still say 'sending'; the pump comes back for it.
-          console.error('[team] send attempt failed:', err.message);
+          // A failed write (disk full) at any step: the row may still say 'sending' or be past its deadline; the
+          // pump comes back for it after the back-off, and the other rows are still processed.
+          console.error('[team] outbox step failed:', err.message);
           retryLater = true;
         }
       }
@@ -395,7 +416,8 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     const backoff = BACKOFF_MS[Math.min(n - 1, BACKOFF_MS.length - 1)];
     if (!peer || !peer.enabled) {
       // An earlier attempt may have arrived (its receipt lost): that stays "unconfirmed", never "not delivered".
-      store.patchMessage('out', msg.peer, msg.id, { state: msg.reached || msg.state === 'sending' ? 'unconfirmed' : 'not delivered', note: peer ? 'teammate disabled' : 'no longer linked' });
+      const maybe = msg.reached || msg.state === 'sending';
+      store.patchMessage('out', msg.peer, msg.id, { state: maybe ? 'unconfirmed' : 'not delivered', reached: maybe, note: peer ? 'teammate disabled' : 'no longer linked' });
       changed();
       return;
     }
@@ -419,6 +441,11 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
   // ---------- lifecycle ----------
 
   function start() {
+    try { recover(); } catch (err) { console.error('[team] start-up recovery failed:', err.message); }
+    schedulePump(0);
+  }
+
+  function recover() {
     stopped = false;
     // Every stored incoming message keeps its dedupe record: a crash between writing the row and the record must not
     // let a retry of it be accepted (and routed) again once the row is gone, or acknowledge different content.
@@ -429,13 +456,17 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
         try { store.records.set(key, { hash: m.hash, firstAcceptedAt: m.at }); } catch (err) { console.error('[team] could not restore a dedupe record:', err.message); }
       }
     }
-    // A delivery cut short by a quit may have pasted: never repeat it blindly.
+    // A delivery cut short by a quit may have pasted: never repeat it blindly. Each row on its own: a failed write
+    // here must never stop the app from starting (the pump treats a leftover 'sending' row as maybe-arrived anyway).
     for (const m of store.messages()) {
-      if (m.dir === 'in' && m.state === 'routing') store.patchMessage('in', m.peer, m.id, { state: 'needs attention', note: 'Dobius quit while this was being typed; check the orchestrator tab' });
-      if (m.dir === 'in' && m.state === 'waiting') enqueueDelivery(m.peer, m.id);
-      if (m.dir === 'out' && m.state === 'sending') store.patchMessage('out', m.peer, m.id, { state: 'queued', reached: true });
+      try {
+        if (m.dir === 'in' && m.state === 'routing') store.patchMessage('in', m.peer, m.id, { state: 'needs attention', note: 'Dobius quit while this was being typed; check the orchestrator tab' });
+        if (m.dir === 'in' && m.state === 'waiting') enqueueDelivery(m.peer, m.id);
+        if (m.dir === 'out' && m.state === 'sending') store.patchMessage('out', m.peer, m.id, { state: 'queued', reached: true });
+      } catch (err) {
+        console.error('[team] start-up recovery step failed:', err.message);
+      }
     }
-    schedulePump(0);
   }
 
   function stop() {

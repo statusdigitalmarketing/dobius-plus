@@ -84,7 +84,7 @@ export default function TasksDropdown() {
   const [board, setBoard] = useState(null);
   const [starting, setStarting] = useState(false);
   // Team communicator: the segment shows once a teammate is linked. { peers, attention } (docs/team-communicator.md)
-  const [team, setTeam] = useState({ peers: 0, attention: 0 });
+  const [team, setTeam] = useState({ peers: 0, attention: 0, total: 0 });
   const dropdownRef = useRef(null);
   const inputRef = useRef(null);
   const inboxReq = useRef(0);
@@ -131,7 +131,8 @@ export default function TasksDropdown() {
   }, [open]);
 
   const inboxShown = !!board?.installed;
-  const teamShown = team.peers > 0;
+  // Also with no teammate left: messages from an unlinked one may still need a Dismiss.
+  const teamShown = team.peers > 0 || team.total > 0;
   const view = tab === 'inbox' && inboxShown ? 'inbox' : (tab === 'team' && teamShown ? 'team' : 'project');
 
   useEffect(() => {
@@ -143,7 +144,7 @@ export default function TasksDropdown() {
         const [st, msgs] = await Promise.all([a.teamStatus(), a.teamMessages()]);
         if (!live) return;
         const attention = msgs?.ok ? msgs.list.filter(needsPerson).length : 0;
-        setTeam({ peers: st?.ok ? st.peers.length : 0, attention });
+        setTeam({ peers: st?.ok ? st.peers.length : 0, attention, total: msgs?.ok ? msgs.list.length : 0 });
       } catch (err) {
         console.error('[TasksDropdown] team status failed:', err);
       }

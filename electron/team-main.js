@@ -88,7 +88,7 @@ export function initTeam({ bridgeOpenDeps: w, endpoint }) {
     },
   });
   registerIpc();
-  service.start();
+  try { service.start(); } catch (err) { console.error('[team] could not start:', err?.message || err); }
   return service;
 }
 
@@ -160,7 +160,7 @@ export function handleTeamBridge(body) {
       // Printed into a terminal: teammate-supplied text never carries an escape or control character.
       const who = oneLine(m.peerName, 80) || shortFp(m.peer);
       const head = m.dir === 'in' ? `<- ${who}` : `-> ${who}`;
-      return `${m.id}  ${head}  [${m.state}]  ${oneLine(m.text, 400).replace(/\s+/g, ' ').slice(0, 120)}`;
+      return `${m.id}@${m.peer}  ${head}  [${m.state}]  ${oneLine(m.text, 400).replace(/\s+/g, ' ').slice(0, 120)}`;
     });
     return { status: 200, json: { ok: true, lines: lines.length ? lines : ['no team messages yet'] } };
   }
@@ -168,6 +168,11 @@ export function handleTeamBridge(body) {
   const pinned = st.settings.orchestratorTab;
   if (!pinned || tabId !== pinned) {
     return { status: 403, json: { ok: false, error: 'only the team orchestrator tab can send (tab menu > Use as team orchestrator)' } };
+  }
+  // A reply names its sender (id@fingerprint, as the card prints it): ids are unique only per sender, and a bare id
+  // could come to match another teammate's message once the original row has left the list.
+  if (cmd === 'reply' && !String(arg || '').includes('@')) {
+    return { status: 400, json: { ok: false, error: 'reply needs the id@fingerprint form printed on the message card (or by dobius-team inbox)' } };
   }
   const r = cmd === 'send' ? service.send(String(arg || ''), String(text || '')) : service.reply(String(arg || ''), String(text || ''));
   if (!r.ok) return { status: 400, json: { ok: false, error: r.error } };

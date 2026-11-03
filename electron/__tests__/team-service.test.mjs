@@ -253,7 +253,7 @@ test('delivery card: framed, sanitized, short id to reply with', () => {
   assert.equal(c.error, undefined);
   assert.equal(c.text.includes('\x1b'), false);
   assert.match(c.text, /^\[Dobius team message, signature verified\]\nFrom: Bryan \[2J \(AAAAA-AAAAA\)/);
-  assert.match(c.text, /dobius-team reply 0123abcd/);
+  assert.match(c.text, new RegExp(`dobius-team reply 0123abcd-0000-4000-8000-000000000000@${'A'.repeat(43)}`));
 });
 
 test('delivery card: a teammate cannot forge the frame, another sender or another reply id', () => {
@@ -632,4 +632,71 @@ test('r2: a colourless screen (NO_COLOR) still has a prompt box', async () => {
   const { renderScreenLines } = await import('../screen-render.js');
   const scr = await renderScreenLines(new TextEncoder().encode(`\x1b[?2004h${'─'.repeat(60)}\r\n❯ \r\n${'─'.repeat(60)}\r\n  ? for shortcuts\x1b[2;3H`), { cols: 80 });
   assert.equal(boxIsEmpty({ lines: scr, modes: scr.modes }), true);
+});
+
+test('r3: a REAL Claude 2.1.317 screen with a typed fake box in the draft is not empty (with and without colour)', async () => {
+  const { renderScreenLines } = await import('../screen-render.js');
+  const { promptBoxText } = await import('../bridge-open-tab.js');
+  const raw = fs.readFileSync(new URL('./fixtures/draft-fakebox-2.1.317-raw.bin', import.meta.url));
+  for (const [label, bytes] of [['colour', raw], ['NO_COLOR', Buffer.from(raw.toString('latin1').replace(/\x1b\[[0-9;]*m/g, ''), 'latin1')]]) {
+    const scr = await renderScreenLines(new Uint8Array(bytes), { cols: 100 });
+    const box = promptBoxText(scr, scr.modes);
+    assert.equal(box.startsWith('my half written note'), true, label);
+    assert.equal(box.includes('❯ x'), true, `${label}: the typed lookalike is part of the draft`);
+    assert.equal(boxIsEmpty({ lines: scr, modes: scr.modes }), false, label);
+  }
+});
+
+// ---------- regressions from Codex round 3 ----------
+
+test('r3: a reply by id@fingerprint goes to that sender even when another reused the id', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  const c = install('Brett', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  assert.equal((await linkPair(a, c)).ok, true);
+  b.svc.send('Sam', 'from bryan');
+  await b.svc.pump();
+  const id = a.store.messages().find((m) => m.dir === 'in').id;
+  const bryanFp = b.svc.status().fp;
+  assert.equal(a.svc.reply(`${id}@${bryanFp}`, 'for bryan').ok, true);
+  await a.svc.pump();
+  assert.equal(b.store.messages().some((m) => m.dir === 'in' && m.text === 'for bryan'), true);
+  assert.equal(a.svc.reply(`${id}@${c.svc.status().fp}`, 'x').ok, false, 'Brett never sent that id');
+  a.svc.stop(); b.svc.stop(); c.svc.stop();
+});
+
+test('r3: a failed deadline write backs off and later rows are still processed; Retry keeps "may have arrived"', async () => {
+  const { a, b } = await linked();
+  b.svc.send('Sam', 'first');
+  b.svc.send('Sam', 'second');
+  const [first, second] = b.store.messages().filter((m) => m.dir === 'out');
+  b.store.patchMessage('out', first.peer, first.id, { deadline: clock - 1, state: 'sending', reached: false });
+  const real = b.store.patchMessage;
+  b.store.patchMessage = (dir, peer, id, patch) => { if (id === first.id) throw new Error('ENOSPC'); return real(dir, peer, id, patch); };
+  await b.svc.pump();
+  b.store.patchMessage = real;
+  assert.equal(b.store.messages().find((m) => m.id === second.id).state, 'delivered', 'the next row was not blocked');
+  await b.svc.pump();
+  const f = b.store.messages().find((m) => m.id === first.id);
+  assert.equal(f.state, 'unconfirmed');
+  assert.equal(f.reached, true);
+  b.store.updatePeer(f.peer, { enabled: false });
+  assert.equal(b.svc.retry(f.id).ok, true);
+  await b.svc.pump();
+  assert.equal(b.store.messages().find((m) => m.id === first.id).state, 'unconfirmed', 'Retry did not turn it into "not delivered"');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('r3: start-up recovery never throws, and a stuck routing row can be dismissed', async () => {
+  const { a } = await linked();
+  a.store.putMessage({ dir: 'out', id: '11111111-0000-4000-8000-000000000000', peer: 'p', text: 'x', state: 'sending', at: clock, deadline: clock + 1e6, nextAt: 0 });
+  a.store.putMessage({ dir: 'in', id: '22222222-0000-4000-8000-000000000000', peer: 'p', text: 'x', state: 'routing', at: clock });
+  const real = a.store.patchMessage;
+  a.store.patchMessage = () => { throw new Error('EIO'); };
+  assert.doesNotThrow(() => a.svc.start());
+  a.store.patchMessage = real;
+  assert.equal(a.svc.dismiss('in', 'p', '22222222-0000-4000-8000-000000000000').ok, true);
+  a.svc.stop();
 });

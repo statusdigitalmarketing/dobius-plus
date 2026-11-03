@@ -59,11 +59,12 @@ The bridge's usual rules (loopback, exact Host, no Origin, JSON, `Authorization:
 `dobius-team` in `<userData>/bin`.
 
 ```json
-{ "cmd": "peers" | "inbox" | "send" | "reply", "arg": "<name|fingerprint|short id>", "text": "...", "tabId": "$DOBIUS_TAB_ID" }
+{ "cmd": "peers" | "inbox" | "send" | "reply", "arg": "<name|fingerprint>" or "<message id>@<sender fingerprint>", "text": "...", "tabId": "$DOBIUS_TAB_ID" }
 ```
 
 Reply: `{ ok: true, lines: ["..."] }` or `{ ok: false, error }`. `send` and `reply` are refused (`403`) unless
-`tabId` is the pinned orchestrator tab (a guard against a stray session, not a security boundary).
+`tabId` is the pinned orchestrator tab (a guard against a stray session, not a security boundary). `reply` needs the
+`id@fingerprint` form the card and `dobius-team inbox` print: ids are unique only per sender.
 
 ```bash
 dobius-team peers
@@ -71,7 +72,7 @@ dobius-team inbox
 dobius-team send Bryan <<'EOF'
 where does the Axiom catalog stand?
 EOF
-dobius-team reply 0123abcd <<'EOF'
+dobius-team reply 0123abcd-4567-4890-8abc-0123456789ab@<sender fingerprint> <<'EOF'
 live since this morning
 EOF
 ```
