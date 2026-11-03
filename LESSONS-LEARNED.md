@@ -619,3 +619,26 @@
 - **FIX**: Each session's folder is its own transcript's top-level `cwd`, accepted only when it encodes back to its dir under one of Claude's encodings (`claudeDirNames`: all non-alphanumerics, Dobius's dot-keeping one, legacy slash-only). Read from the tail already parsed; fall back to a bounded scan of the first 8MB only when the tail has none. Filter project windows by encoding the filter, never by decoding the dir.
 - **CONTEXT**: A per-dir raw-byte scan was tried first and dropped: two folders can share one dir name, nested tool-input cwds matched, and reading 4 huge transcripts whole (1.6GB) made the first History load 13-27s.
 - **DETECTION**: `grep -n "replace(/-/g, '/')" electron/data-service.js`
+
+### Security - 2026-11-03 (telling Claude's prompt box from a draft that imitates it)
+- **MISTAKE**: Team delivery read "is Claude's input box empty?" off the rendered screen. A person's half-typed draft containing literal `────` / `❯ ` / `────` rows made an inner fake box that `promptBoxText` accepted, so a teammate's message would be pasted into the draft and Enter would send both. My first fix (only coloured rules count) had a NO_COLOR fallback I accepted as a residual; all three Codex lenses broke it next round. A second idea (refuse a box enclosed by rules) refused real prompts once a stale frame sat above.
+- **FIX**: Claude 2.1.317 draws its box edges from column 0 and indents every typed row by 2 (verified by typing a draft into a real Claude in a pty, never submitting; fixture `electron/__tests__/fixtures/draft-fakebox-2.1.317-raw.bin`). Flat-box edges must match `EDGE_RE = /^─{8,}/`. The colour rule was dropped.
+- **CONTEXT**: Verify a layout assumption on a real capture before building a guard on it. A residual "accepted" against a Critical is usually the next round's Critical.
+- **DETECTION**: `grep -n "EDGE_RE" electron/bridge-open-tab.js`
+
+### Security - 2026-11-03 (Claude leading the foreground group does not mean Claude reads the keys)
+- **MISTAKE**: `claudeRunning` checked that claude leads the terminal's foreground process group. An editor Claude opens (Ctrl+G), a `!` command, a helper reading fd 3 or `/dev/tty`, or `sudo vim` (another uid, which macOS hides from lsof) all leave that true while something else reads the keyboard.
+- **FIX**: `ttyReaderUnder` (bridge-open-main.js): walk every descendant, refuse if any is owned by another user, and refuse if lsof `-n -P -Fan` shows any readable descriptor on `/dev/<tty>` or `/dev/tty`. Run for team delivery only: some MCP wrappers (`zsh -lc`) keep the terminal open, which would stop /openTab sending forever. Checked on a live Claude session first: none of its descendants hold the terminal.
+- **CONTEXT**: Five Codex rounds iterated this one guard (fd 0 only, then the walk cap, then other fds, then other uids). Every fix to a guard needs that lens re-run.
+- **DETECTION**: `grep -n "ttyReaderUnder" electron/bridge-open-main.js`
+
+### Database - 2026-11-03 (a receipt is a promise the message is on disk)
+- **MISTAKE**: `receive()` recorded the dedupe entry and returned a signed receipt while the inbox cap could drop the new row, a crash between the row and the record let a later retry be routed twice or acknowledged with different content, and a failed record write stayed in the in-memory cache.
+- **FIX**: The stored row carries the content hash and is the source of truth; the receipt goes out only after row AND record are written; a full inbox answers 503; the record cache updates after the write; start-up rebuilds missing records; nothing is typed until its record is on disk.
+- **CONTEXT**: All three Codex lenses converged on this independently. When several reviewers find the same bug it is real; fix the shape, not the scenario.
+- **DETECTION**: `grep -n "store.records.set(...staged)" electron/team-service.js`
+
+### Process - 2026-11-03 (a PreToolUse hook blocks em dashes even inside a match string)
+- **MISTAKE**: A python edit used an existing Settings.jsx comment containing an em dash as its anchor; the em-dash hook blocked the whole Bash call.
+- **FIX**: Anchor on an ASCII-only neighbour (find the index of a nearby ASCII line and splice).
+- **DETECTION**: `grep -nP '\x{2014}' <file>` before choosing an anchor
