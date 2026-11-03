@@ -117,6 +117,7 @@ import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { installNavGuard, isAppUrl } from './nav-guard.js';
+import { readBoard as readInboxBoard, boardStatus as inboxBoardStatus, startBoard as startInboxBoard } from './inbox-board.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError } from './claude-settings-env.js';
@@ -1441,6 +1442,10 @@ function setupOrchestrationHandlers() {
     if (result?.ok) broadcastTasksUpdated(projectPath);
     return result;
   });
+  // Brett's Inbox board, read only. The board's token stays in main.
+  ipcMain.handle('inbox:read', () => readInboxBoard());
+  ipcMain.handle('inbox:status', () => inboxBoardStatus());
+  ipcMain.handle('inbox:start', () => startInboxBoard());
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());
   ipcMain.handle('asana:updateConfig', (_event, updates) => updateAsanaQueue(updates));
   ipcMain.handle('automode:get', () => getAutoMode());
@@ -4053,6 +4058,28 @@ function sendToFocused(channel, ...args) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
 }
 
+// Settings lives in a project window's dashboard. Use the focused project
+// window, else the first open project's primary, else just show the launcher
+// (it has no Settings of its own).
+function openSettingsWindow() {
+  const focused = BrowserWindow.getFocusedWindow();
+  let win = focused && !focused.isDestroyed() && getWindowEntryByWcId(focused.webContents.id) ? focused : null;
+  if (!win) {
+    for (const p of getOpenProjects()) {
+      win = primaryDockTarget(p, null)?.win || null;
+      if (win) break;
+    }
+  }
+  if (!win || win.isDestroyed()) {
+    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
+    return;
+  }
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  win.webContents.send('menu:open-settings');
+}
+
 function setupMenu() {
   app.setName('Dobius+');
 
@@ -4061,6 +4088,8 @@ function setupMenu() {
       label: 'Dobius+',
       submenu: [
         { role: 'about' },
+        { type: 'separator' },
+        { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => openSettingsWindow() },
         { type: 'separator' },
         { role: 'hide' },
         { role: 'hideOthers' },

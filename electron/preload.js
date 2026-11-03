@@ -375,6 +375,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Menu events
+  onMenuOpenSettings: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('menu:open-settings', handler);
+    return () => ipcRenderer.removeListener('menu:open-settings', handler);
+  },
   onMenuToggleView: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('menu:toggle-view', handler);
@@ -472,6 +477,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   tasksReopen: (p, id, opts) => ipcRenderer.invoke('tasks:reopen', p, id, opts),
   tasksBlock: (p, id, reason, opts) => ipcRenderer.invoke('tasks:block', p, id, reason, opts),
   tasksUnblock: (p, id, opts) => ipcRenderer.invoke('tasks:unblock', p, id, opts),
+  inboxRead: () => ipcRenderer.invoke('inbox:read'),
+  inboxStatus: () => ipcRenderer.invoke('inbox:status'),
+  inboxStart: () => ipcRenderer.invoke('inbox:start'),
   // Fires when a task is completed from a terminal via dobius-task-done, so an
   // open Tasks panel can re-check the box live. Callback receives projectPath.
   onTasksUpdated: (cb) => {

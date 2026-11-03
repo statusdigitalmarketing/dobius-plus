@@ -1199,6 +1199,11 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         const current = useStore.getState().activeView;
         setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
       }),
+      window.electronAPI.onMenuOpenSettings?.(() => {
+        useStore.getState().setNewTabPickerOpen(false);
+        useStore.getState().setDashboardTab('settings');
+        setActiveView('dashboard');
+      }),
       window.electronAPI.onMenuToggleSidebar?.(() => { if (!useStore.getState().newTabPickerOpen) toggleSidebar(); }),
       window.electronAPI.onMenuToggleGitPanel?.(() => { if (!useStore.getState().newTabPickerOpen) toggleGitPanel(); }),
       window.electronAPI.onMenuNewTab?.(() => {
