@@ -54,7 +54,9 @@ export default function TeamList({ query }) {
     if (m?.ok) setList(m.list.slice().reverse());
     if (s?.ok) {
       setPeers(s.peers);
-      setTo((cur) => cur || s.peers.find((p) => p.enabled)?.id || '');
+      // Keep the choice only while that teammate can still be sent to; else the first one who can. What the picker
+      // shows and what Send submits must be the same person.
+      setTo((cur) => (s.peers.some((p) => p.enabled && p.id === cur) ? cur : s.peers.find((p) => p.enabled)?.id || ''));
     }
   }, []);
   useEffect(() => {

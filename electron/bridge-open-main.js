@@ -132,11 +132,17 @@ export async function isClaudeProcess(pid, { ps = psField, exe = executablePath,
   try { return CLAUDE_SCRIPT_RE.test(fs.realpathSync(token)) && fs.statSync(token).isFile(); } catch { return false; }
 }
 
-// Is anything Claude started reading THIS terminal on its stdin (an external
-// editor from Ctrl+G, a `!` shell command)? Then the screen is not Claude's
-// prompt, whatever it looks like, and nothing may be pasted (Codex team
-// review r4, Critical). MCP servers and tool commands run on pipes, so they do
-// not count. Any doubt (ps or lsof failing) counts as yes.
+// Does anything Claude started hold THIS terminal open, on any descriptor,
+// directly or through /dev/tty (an external editor from Ctrl+G, a `!` shell
+// command, a helper reading fd 3)? Then the screen may not be Claude's prompt,
+// whatever it looks like, and nothing may be pasted (Codex team review r4/r5,
+// Critical). MCP servers and tool commands run on pipes and hold no descriptor
+// on the terminal (checked on a live Claude 2.1.317 session: none of its
+// descendants did). Any doubt counts as yes: ps or lsof failing, Claude gone
+// from the process table, or a tree too large to walk.
+// Residual: a LOCAL process built to race this check (forking a reader between
+// the process snapshot and the paste) is outside the threat model, which is a
+// remote teammate's text.
 export async function ttyReaderUnder(pid, tty, { exec = execFileP } = {}) {
   try {
     const { stdout } = await exec('/bin/ps', ['-A', '-o', 'pid=,ppid=,tty='], { timeout: 1500, encoding: 'utf8' });
@@ -147,19 +153,25 @@ export async function ttyReaderUnder(pid, tty, { exec = execFileP } = {}) {
       if (!kids.has(m[2])) kids.set(m[2], []);
       kids.get(m[2]).push({ pid: m[1], tty: m[3] });
     }
-    const onTty = [];
+    // Claude itself must still be there: gone means its shell may have started
+    // something else on the terminal.
+    if (![...kids.values()].some((list) => list.some((k) => k.pid === String(pid)))) return true;
+    const desc = [];
     const queue = [String(pid)];
-    for (let n = 0; queue.length && n < 500; n += 1) {
+    while (queue.length) {
+      if (desc.length > 5000) return true;
       for (const k of kids.get(queue.shift()) || []) {
         queue.push(k.pid);
-        if (k.tty === tty) onTty.push(k.pid);
+        desc.push(k.pid);
       }
     }
-    if (!onTty.length) return false;
-    const r = await exec('/usr/sbin/lsof', ['-a', '-d', '0', '-p', onTty.join(','), '-Fn'], { timeout: 1500, encoding: 'utf8' })
+    if (!desc.length) return false;
+    // Every descriptor of every descendant: a process without this terminal as
+    // its controlling tty can still have opened it.
+    const r = await exec('/usr/sbin/lsof', ['-a', '-p', desc.join(','), '-Fn'], { timeout: 3000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
       .catch((err) => (err?.code === 1 && !err.stdout ? { stdout: '' } : Promise.reject(err)));
-    const dev = `/dev/${tty}`;
-    return r.stdout.split('\n').some((l) => l === `n${dev}`);
+    const names = new Set([`n/dev/${tty}`, 'n/dev/tty']);
+    return r.stdout.split('\n').some((l) => names.has(l));
   } catch (err) {
     console.warn('[bridge-open] could not check what reads the terminal:', err?.message || err);
     return true;

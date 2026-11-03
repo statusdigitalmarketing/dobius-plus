@@ -444,12 +444,20 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
   // ---------- lifecycle ----------
 
   function start() {
-    try { recover(); } catch (err) { console.error('[team] start-up recovery failed:', err.message); }
+    stopped = false;
+    // A failed read here (the message file momentarily unreadable) is retried, so acknowledged messages waiting for
+    // the tab are never left out of the delivery queue until the next restart.
+    const attempt = () => {
+      try { recover(); } catch (err) {
+        console.error('[team] start-up recovery failed, retrying in 30s:', err.message);
+        if (!stopped) setTimeout(attempt, 30_000).unref?.();
+      }
+    };
+    attempt();
     schedulePump(0);
   }
 
   function recover() {
-    stopped = false;
     // Every stored incoming message keeps its dedupe record: a crash between writing the row and the record must not
     // let a retry of it be accepted (and routed) again once the row is gone, or acknowledge different content.
     for (const m of store.messages()) {
