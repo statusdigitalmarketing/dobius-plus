@@ -101,6 +101,68 @@ async function transcriptFacts(filePath, st) {
   return facts;
 }
 
+const isOwnCwd = (c, dirName) => typeof c === 'string' && c.startsWith('/') && c.length <= 4096
+  && !/[\x00-\x1F\x7F]/.test(c) && claudeDirNames(c).includes(dirName);
+
+// The NEWEST top-level cwd naming this dir in the file's first 8MB, for the rare
+// transcript whose 200-record tail has none. Bounded: 1MB chunks, a manual
+// line splitter (readline would build a giant line and can throw outside any
+// try, NOTES 2026-09-15), and a line over 256KB (a pasted image) is skipped
+// without being held. { cwd, ok }: ok false means a read failed, so the
+// caller must not cache the answer.
+const CWD_CHUNK_BYTES = 1024 * 1024;
+const CWD_MAX_LINE = 256 * 1024;
+// The first 8MB only: on this Mac 4 of 500 listed transcripts needed the
+// fallback and they held 1.6GB between them; reading them whole made the
+// first History load 13-27s instead of 8.6s.
+const CWD_SCAN_MAX = 8 * 1024 * 1024;
+async function scanCwd(filePath, dirName) {
+  let fh;
+  let found = '';
+  try {
+    fh = await fs.open(filePath, 'r');
+    const buf = Buffer.alloc(CWD_CHUNK_BYTES);
+    let parts = [];
+    let partLen = 0;
+    let skipping = false;
+    const take = (line) => {
+      if (!line.includes('"cwd"')) return;
+      let rec;
+      try { rec = JSON.parse(line); } catch { return; } // a broken line: the next one
+      if (isOwnCwd(rec?.cwd, dirName)) found = rec.cwd;
+    };
+    for (let pos = 0; pos < CWD_SCAN_MAX;) {
+      // Never past the cap, even after a short read of a growing file.
+      const { bytesRead } = await fh.read(buf, 0, Math.min(CWD_CHUNK_BYTES, CWD_SCAN_MAX - pos), pos);
+      if (!bytesRead) break;
+      pos += bytesRead;
+      let from = 0;
+      for (let nl = buf.indexOf(10, from); nl !== -1 && nl < bytesRead; nl = buf.indexOf(10, from)) {
+        // Byte length checked BEFORE anything is copied or decoded.
+        if (!skipping && partLen + (nl - from) <= CWD_MAX_LINE) {
+          parts.push(Buffer.from(buf.subarray(from, nl)));
+          take(Buffer.concat(parts).toString('utf8'));
+        }
+        parts = []; partLen = 0; skipping = false;
+        from = nl + 1;
+      }
+      if (from < bytesRead && !skipping) {
+        partLen += bytesRead - from;
+        if (partLen > CWD_MAX_LINE) { skipping = true; parts = []; partLen = 0; }
+        else parts.push(Buffer.from(buf.subarray(from, bytesRead)));
+      }
+    }
+    // A last line with no newline is only whole when the file really ended.
+    if (!skipping && parts.length && (await fh.stat()).size <= CWD_SCAN_MAX) take(Buffer.concat(parts).toString('utf8'));
+    return { cwd: found ? detached(found) : '', ok: true };
+  } catch (err) {
+    console.warn('[data-service] could not scan a transcript for its cwd:', err?.message || err);
+    return { cwd: '', ok: false };
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
 async function readTranscriptFacts(filePath, st) {
     // parseJsonl is bounded since v1.0.23, uses readTail under the hood so
   // a 24MB transcript no longer pulls 95MB into memory. Read 200 entries
@@ -181,10 +243,30 @@ async function readTranscriptFacts(filePath, st) {
     }
   }
 
+  // The folder this session really runs in: the newest top-level `cwd` that
+  // names THIS transcript dir under one of Claude's encodings (a session
+  // whose cwd moved elsewhere cannot relabel the dir). Decoding the dir name
+  // instead is lossy: Brett's ".../Projects (Code)/b2b-portal" came back as
+  // "//Users/Billions/1/Projects//Code//b2b/portal" and every resume cd'd
+  // into a folder that does not exist (2026-11-02).
+  const dirName = path.basename(path.dirname(filePath));
+  let cwd = '';
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    if (isOwnCwd(entries[i]?.cwd, dirName)) {
+      cwd = detached(entries[i].cwd);
+      break;
+    }
+  }
+  // A tail of metadata only (no cwd in 200 records): the rest of the file has
+  // it. Cached with the rest, so this runs once per transcript, unless the
+  // scan failed, which keeps the facts out of the cache.
+  let cwdOk = true;
+  if (!cwd) ({ cwd, ok: cwdOk } = await scanCwd(filePath, dirName));
+
   // The boolean replaces entrypoint, an unbounded string from the file.
   const automated = AUTOMATED_ENTRYPOINTS.has(entrypoint);
   const activityAt = timestamp || st?.mtimeMs || 0;
-  return { facts: { preview, title, lastRole, automated, messageAt, activityAt }, parsed: entries.length > 0 && last.complete };
+  return { facts: { preview, title, lastRole, automated, messageAt, activityAt, cwd }, parsed: entries.length > 0 && last.complete && cwdOk };
 }
 
 /**
@@ -265,7 +347,9 @@ export async function loadAllSessions(projectFilter, opts = {}) {
       const projectPath = realPath || ('/' + dir.name.replace(/-/g, '/'));
       // Pre-filter by project so the global 500-cap applies to the matching
       // set, not to everything-then-trimmed. Codex PR#3 r8 P2.
-      if (projectFilter && projectPath !== projectFilter) continue;
+      // A dir also belongs to the filter when it is one of the filter's own
+      // encoded names: the guessed path of an unconfigured dir is often wrong.
+      if (projectFilter && projectPath !== projectFilter && !claudeDirNames(projectFilter).includes(dir.name)) continue;
       // Skip user-hidden sources (before any file reads, so 260 headless spam
       // transcripts cost zero I/O). projectFilter above already bypasses this.
       if (!projectFilter && hiddenPaths.has(projectPath)) {
@@ -310,7 +394,12 @@ export async function loadAllSessions(projectFilter, opts = {}) {
           st = await fs.stat(filePath);
         } catch { /* file vanished between readdir + stat, leave 0 */ }
         const sizeMB = st ? st.size / (1024 * 1024) : 0;
-        const { preview, title, lastRole, automated, messageAt, activityAt } = await transcriptFacts(filePath, st);
+        const { preview, title, lastRole, automated, messageAt, activityAt, cwd } = await transcriptFacts(filePath, st);
+        // The session's own folder beats the dir-level guess (it is what
+        // `claude --resume` must run in, and what decides same-project).
+        const sessionPath = cwd || projectPath;
+        if (projectFilter && sessionPath !== projectFilter) return;
+        if (!projectFilter && hiddenPaths.has(sessionPath)) return;
 
         // Dropped before the push so the 500-cap below counts only the
         // sessions the caller wants. On this machine 375 of the newest 400
@@ -337,8 +426,8 @@ export async function loadAllSessions(projectFilter, opts = {}) {
 
         sessions.push({
           sessionId,
-          projectPath,
-          projectName,
+          projectPath: sessionPath,
+          projectName: sessionPath === projectPath ? projectName : (sessionPath.split('/').filter(Boolean).pop() || projectName),
           preview: preview || 'No preview available',
           title,
           timestamp,
@@ -1454,8 +1543,7 @@ async function resolveTranscriptPath(sessionId, projectPath) {
   if (!/^[\w-]+$/.test(sessionId)) return null;
   if (typeof projectPath !== 'string' || !projectPath) return null;
   const encodings = [
-    encodePathLikeClaude(projectPath),
-    encodePathLikeClaudeLegacy(projectPath),
+    ...claudeDirNames(projectPath),
     // '/..' strips to '..' here, so this form needs the guard too.
     safeProjectSegment(projectPath.replace(/\//g, '-').replace(/^-/, '')),
   ];
@@ -2277,6 +2365,18 @@ function encodePathLikeClaude(p) {
   return safeProjectSegment(p.replace(/[^a-zA-Z0-9.-]/g, '-'));
 }
 
+// Every name Claude has given a project's transcript dir: current Claude turns
+// every non-alphanumeric, dots included, into '-' (".worktrees" -> "-worktrees");
+// Dobius's own encoder keeps dots; older Claude only replaced '/', so a dir
+// made then keeps spaces and brackets ("-Users-x-Projects (Code)-app").
+function claudeDirNames(p) {
+  return [...new Set([
+    safeProjectSegment(p.replace(/[^a-zA-Z0-9-]/g, '-')),
+    encodePathLikeClaude(p),
+    encodePathLikeClaudeLegacy(p),
+  ])];
+}
+
 // Every encoded dir is joined under PROJECTS_DIR, and several of those joins
 // take a renderer-supplied projectPath (delete, transcript, hover, context).
 // An encoding of '.' or '..' would resolve to projects/ itself or to ~/.claude,
@@ -2757,8 +2857,15 @@ export async function searchTranscripts(query) {
       // Codex PR#3 r19 P2.
       let sessionTimestamp = 0;
       let capHit = false;
+      // The session's own folder (newest top-level cwd naming this dir), as
+      // in loadAllSessions: a resume from a hit must cd somewhere real.
+      let sessionCwd = '';
+      const dirName = path.basename(projectDir);
       const buffered = []; // hold matches until end-of-file to fill in sessionTimestamp fallback
       await streamJsonl(filePath, (entry) => {
+        const c = entry?.cwd;
+        if (typeof c === 'string' && c.startsWith('/') && c.length <= 4096 && !/[\x00-\x1F\x7F]/.test(c)
+          && c !== sessionCwd && claudeDirNames(c).includes(dirName)) sessionCwd = c;
         if (capHit) return;
         if (matches.length + buffered.length >= 200) { capHit = true; return; }
         const ts = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
@@ -2797,8 +2904,8 @@ export async function searchTranscripts(query) {
         if (matches.length >= 200) break;
         matches.push({
           sessionId: m.sessionId,
-          projectName: m.projectName,
-          projectPath: m.projectPath,
+          projectName: sessionCwd ? (sessionCwd.split('/').filter(Boolean).pop() || m.projectName) : m.projectName,
+          projectPath: sessionCwd || m.projectPath,
           role: m.role,
           excerpt: m.excerpt,
           timestamp: m.ts || sessionTimestamp,

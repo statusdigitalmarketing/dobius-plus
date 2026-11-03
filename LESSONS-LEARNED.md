@@ -613,3 +613,9 @@
 - **FIX**: `electron/nav-guard.js` on `web-contents-created`: type 'window' only navigates to Dobius's own page; http(s)/mailto go to `shell.openExternal`; popups denied. Sensitive IPC also checks `event.senderFrame.url` with `isAppUrl`.
 - **CONTEXT**: Any new BrowserWindow or IPC that writes secrets. Webviews ('webview') are left alone.
 - **DETECTION**: `grep -n "installNavGuard" electron/main.js`
+
+### Architecture - 2026-11-02 (never decode a ~/.claude/projects dir name into a path)
+- **MISTAKE**: `loadAllSessions` / `searchTranscripts` fell back to `'/' + dirName.replace(/-/g, '/')` for folders outside the scan dir. The encoding is lossy (spaces, brackets, dots, slashes all become '-'), so Brett's resume ran `cd '//Users/Billions/1/Projects//Code//b2b/portal'` and failed; 351 of Sam's 500 listed sessions carried such paths.
+- **FIX**: Each session's folder is its own transcript's top-level `cwd`, accepted only when it encodes back to its dir under one of Claude's encodings (`claudeDirNames`: all non-alphanumerics, Dobius's dot-keeping one, legacy slash-only). Read from the tail already parsed; fall back to a bounded scan of the first 8MB only when the tail has none. Filter project windows by encoding the filter, never by decoding the dir.
+- **CONTEXT**: A per-dir raw-byte scan was tried first and dropped: two folders can share one dir name, nested tool-input cwds matched, and reading 4 huge transcripts whole (1.6GB) made the first History load 13-27s.
+- **DETECTION**: `grep -n "replace(/-/g, '/')" electron/data-service.js`
