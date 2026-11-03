@@ -1183,7 +1183,12 @@ async function doStartMobileServer(stillCurrent) {
   // next upload, so the dir never grows unbounded. bearerOk hoists.
   const UPLOAD_DIR = path.join(os.tmpdir(), 'dobius-mobile-uploads');
   const MAX_UPLOAD_AGE_MS = 24 * 60 * 60 * 1000;
-  expApp.post('/upload', express.raw({ type: () => true, limit: '25mb' }), (req, res) => {
+  // Auth runs BEFORE the 25 MB raw parser: it reads only headers, so an
+  // unpaired tailnet device is refused before its body is buffered (it used to
+  // be read first, letting slow large uploads exhaust main's memory; Codex
+  // design audit 2026-11-03). Checked again in the handler as before.
+  const uploadAuth = (req, res, next) => (bearerOk(req) ? next() : res.status(401).json({ ok: false, error: 'auth' }));
+  expApp.post('/upload', uploadAuth, express.raw({ type: () => true, limit: '25mb' }), (req, res) => {
     if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
     const body = Buffer.isBuffer(req.body) ? req.body : null;
     if (!body || body.length === 0) return res.status(400).json({ ok: false, error: 'empty upload' });
