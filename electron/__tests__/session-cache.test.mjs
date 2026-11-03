@@ -43,7 +43,11 @@ const rec = (role, text, t, extra = {}) => JSON.stringify({
   type: role, entrypoint: 'cli', timestamp: new Date(t).toISOString(),
   message: { role, content: role === 'user' ? text : [{ type: 'text', text }] }, ...extra,
 });
-const write = (dir, id, lines) => fs.writeFileSync(path.join(dir, `${id}.jsonl`), `${lines.join('\n')}\n`);
+// Real records carry the session's cwd, which names the dir ('-tmp-cachea' is
+// /tmp/cachea); without it every load also reads the file's start for one.
+const cwdOf = (dir) => `/${path.basename(dir).slice(1).replace(/-/g, '/')}`;
+const write = (dir, id, lines) => fs.writeFileSync(path.join(dir, `${id}.jsonl`),
+  `${lines.map((l) => JSON.stringify({ cwd: cwdOf(dir), ...JSON.parse(l) })).join('\n')}\n`);
 const byId = (list) => Object.fromEntries(list.map((s) => [s.sessionId, s]));
 
 write(dirA, 'chat', [rec('user', 'first ask', NOW - 30_000), rec('assistant', 'reply', NOW - 20_000)]);
