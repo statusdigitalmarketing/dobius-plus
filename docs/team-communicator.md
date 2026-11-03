@@ -84,9 +84,12 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
 - Receiver order: size; sender is a linked, enabled peer; signature; `to` is this install; decrypt; the inner
   `from`/`to` MUST equal the authenticated outer ones, else refuse (r2 #5); `|ts - now| < 5 min`; rate limit 20/min,
   300/day per peer. Everything shown or decided (name, Auto-route) uses the verified signer only.
-- **Immutable cutoff on the receiver (r5 #1):** a message whose signed `firstSentAt` is more than 6 days old is
-  refused, whatever its `ts`. Accepted-message records are kept for 7 days, so every message the receiver could
-  still accept (at most 6 days + 5 minutes of clock skew after its first send) is still covered by its record.
+- **Immutable cutoff on the receiver (r5 #1, r6 #1):** every acceptance requires the signed `firstSentAt` to lie
+  in `[now - 6 days, now + 5 min]` by the receiver's clock (a sender whose clock ran ahead cannot stretch the
+  window), and `firstSentAt <= ts + 5 min`. Accepted-message records are kept for 7 days from the receiver's FIRST
+  acceptance. Any later acceptance of the same message happens at most 6 days after `firstSentAt`, and
+  `firstSentAt` is at most 5 minutes after that first acceptance, so it falls within 6 days 5 minutes of the first
+  acceptance: always inside the 7-day record.
 - **Idempotent receipt (audit #15, r2 #6):** the receiver keeps accepted messages for 7 days keyed by
   `(verified sender, id)` with `sha256(kind, replyTo, text)`. A new key is stored and routed. The same key with the
   same content hash (a retry) is NOT routed again and gets the same `200 { receipt }`; the same key with different
