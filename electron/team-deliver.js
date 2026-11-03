@@ -33,7 +33,9 @@ export const oneLine = (s, max) => String(s || '').replace(/[\x00-\x1f\x7f\u0080
 
 // Every line of the teammate's text is quoted, so nothing in it can pass for the card's own frame: a fake
 // "[Dobius team message ...]" header, a "From:" naming another teammate, or a "To answer:" line with another id.
-export const quoted = (text) => String(text).split('\n').map((l) => `> ${l}`).join('\n');
+// Every line break a terminal or Claude could act on is made a \n FIRST, so the sanitizer that runs after this
+// (which turns \r into \n) cannot open a new, unquoted line.
+export const quoted = (text) => String(text).replace(/\r\n?|[\x0b\x0c\x85\u2028\u2029]/g, '\n').split('\n').map((l) => `> ${l}`).join('\n');
 
 /** The text Claude receives (design: "The text Claude receives"). Returns { text } or { error }. */
 export function deliveryCard({ fromName, fromFp, at, id, text }) {
