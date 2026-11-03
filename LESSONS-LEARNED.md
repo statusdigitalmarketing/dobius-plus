@@ -607,3 +607,9 @@
 - **FIX**: Only when comm is exactly `claude`, read the real program image with `lsof -a -p <pid> -d txt -Fn` (first `n/` line) and require Anthropic's signature: `codesign --verify --strict -R='anchor apple generic and identifier "com.anthropic.claude-code" and certificate leaf[subject.OU] = "Q6L2SF6YDW"'` (about 2s on 300MB, cache per path+inode+size+mtime). Judge by signer, never by folder: path patterns lost both ways (look-alikes passed, Homebrew @latest, npm claude.exe, XDG and symlinked installs failed). Do not resolve other names: `node` can resolve to `node-v22`.
 - **CONTEXT**: Any check that judges a process by its executable path. Basename-only checks (terminalBusy, ptyProgramName) are unaffected.
 - **DETECTION**: `grep -rn "comm.startsWith('/')" electron`
+
+### Security - 2026-11-02 (an app window must never navigate away from the app)
+- **MISTAKE**: No Dobius BrowserWindow had a `will-navigate` guard, so a plain markdown link (Notes, CLAUDE.md preview) replaced the window with that site, which then held the whole preload bridge (terminals, settings, shared keys). The sharedKeys handler papered over it by refusing torn-off windows, which only blocked Brett from saving his PAT.
+- **FIX**: `electron/nav-guard.js` on `web-contents-created`: type 'window' only navigates to Dobius's own page; http(s)/mailto go to `shell.openExternal`; popups denied. Sensitive IPC also checks `event.senderFrame.url` with `isAppUrl`.
+- **CONTEXT**: Any new BrowserWindow or IPC that writes secrets. Webviews ('webview') are left alone.
+- **DETECTION**: `grep -n "installNavGuard" electron/main.js`

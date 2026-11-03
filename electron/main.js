@@ -116,6 +116,7 @@ import { pairingText } from '../shared/pairing-link.js';
 import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
+import { installNavGuard, isAppUrl } from './nav-guard.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError } from './claude-settings-env.js';
@@ -124,6 +125,9 @@ import { deployStatus, deployPreview, promote } from './deploy-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+// Dobius's own page, the only thing an app window may navigate to.
+const APP_PAGE = { dev: !app.isPackaged, appFile: path.join(__dirname, '..', 'dist', 'index.html') };
+installNavGuard(app, shell, APP_PAGE);
 
 let mainWindow;
 
@@ -2181,9 +2185,12 @@ function setupFileHandlers() {
     return out;
   });
   ipcMain.handle('sharedKeys:set', (event, name, value) => {
-    // Only a full app window: not a torn-off tab window, not an embedded page.
-    if (event.sender.getType?.() !== 'window' || getWindowEntryByWcId(event.sender.id)?.isTearOff) {
-      return { ok: false, error: 'Change keys from Settings in a main window.' };
+    // Any Dobius window, torn-off ones included (Brett, 2026-11-02: his Save
+    // was refused with no way to tell which of his windows counted as "main"),
+    // and only while it shows Dobius's own page (nav-guard keeps it there; this
+    // is the second lock). Never an embedded page: a <webview> is not a 'window'.
+    if (event.sender.getType?.() !== 'window' || !isAppUrl(event.senderFrame?.url || '', APP_PAGE)) {
+      return { ok: false, error: 'Keys can only be changed from Dobius Settings.' };
     }
     const bad = sharedKeyError(name, value);
     if (bad) return { ok: false, error: bad };
