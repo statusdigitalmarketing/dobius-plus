@@ -188,12 +188,20 @@ export function promptBoxText(lines, modes) {
   // The box's CLOSING edge must be near the bottom; its top is the nearest
   // rule above it, with the prompt row right under that. The box may be
   // tall once a message is typed into it.
+  // Claude draws its own rules in a colour; anything a person types (a draft
+  // holding literal "────" / "❯ " / "────" rows) is drawn in the default
+  // colour. When the render says which rows start coloured, only coloured
+  // rules can be the box's edges, so a fake box inside a draft never counts
+  // (Codex team review, Critical). Plain string arrays (tests) skip this.
+  const colored = Array.isArray(lines.firstColored) ? lines.firstColored : null;
+  const edge = (i) => !colored || colored[i] === true;
   for (let j = last; j >= 1 && j >= last - PROMPT_BOTTOM_ROWS; j -= 1) {
     const flat = RULE_RE.test(lines[j]);
     if (!flat && !BOX_BOTTOM_RE.test(lines[j])) continue;
-    const isTop = flat ? (r) => RULE_RE.test(r) : (r) => BOX_TOP_RE.test(r);
+    if (!edge(j)) continue;
+    const isTop = flat ? (r, i) => RULE_RE.test(r) && edge(i) : (r, i) => BOX_TOP_RE.test(r) && edge(i);
     let top = j - 1;
-    while (top >= 0 && j - top <= MAX_BOX_ROWS && !isTop(lines[top] || '')) top -= 1;
+    while (top >= 0 && j - top <= MAX_BOX_ROWS && !isTop(lines[top] || '', top)) top -= 1;
     if (top < 0 || top === j - 1 || j - top > MAX_BOX_ROWS) continue;
     const row = lines[top + 1] || '';
     const caret = caretInBox(modes.cursor, top, j, row);

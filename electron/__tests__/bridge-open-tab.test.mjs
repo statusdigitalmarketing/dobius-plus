@@ -122,11 +122,23 @@ ok('Claude ready check on real screens');
   }
   // A terminal wider than the emulator's default: rendered at the PTY's own
   // width, Claude's full-width rules stay one row each.
-  const wide = new TextEncoder().encode(`\x1b[?2004h${'─'.repeat(230)}\r\n❯ \r\n${'─'.repeat(230)}\r\n  ? for shortcuts\x1b[2;3H`);
+  // Claude draws its rules in a colour (opentab-idle fixture: firstColored on both rule rows).
+  const R = (n) => `\x1b[38;5;244m${'─'.repeat(n)}\x1b[0m`;
+  const wide = new TextEncoder().encode(`\x1b[?2004h${R(230)}\r\n❯ \r\n${R(230)}\r\n  ? for shortcuts\x1b[2;3H`);
   const atWidth = await renderScreenLines(wide, { cols: 230 });
   assert.equal(isClaudePromptReady(atWidth, atWidth.modes), true, 'rendered at the real width');
   const narrow = await renderScreenLines(wide);
   assert.equal(isClaudePromptReady(narrow, narrow.modes), false, 'the 220-column default wraps the rules');
+  // A person's draft holding a typed lookalike box (default colour) inside the real one, caret on the fake ❯:
+  // the box found is the REAL one, holding the whole draft, so it is never read as empty or as just our message
+  // (Codex team review, Critical).
+  const fake = new TextEncoder().encode(`\x1b[?2004h${R(60)}\r\n❯ my half-written note\r\n${'─'.repeat(20)}\r\n❯ \r\n${'─'.repeat(20)}\r\n${R(60)}\r\n  ? for shortcuts\x1b[4;3H`);
+  const fakeScreen = await renderScreenLines(fake, { cols: 80 });
+  const held = promptBoxText(fakeScreen, fakeScreen.modes);
+  assert.equal(held.startsWith('my half-written note'), true, 'a typed rule is not a box edge');
+  assert.equal(held.includes('─'), true, 'the typed lookalike is part of the draft');
+  const realEmpty = await renderScreenLines(new TextEncoder().encode(`\x1b[?2004h${R(60)}\r\n❯ \r\n${R(60)}\r\n  ? for shortcuts\x1b[2;3H`), { cols: 80 });
+  assert.equal(promptBoxText(realEmpty, realEmpty.modes), '', 'coloured rules still make the box');
   const back = await renderScreenLines(new Uint8Array(fs.readFileSync(path.join(here, 'fixtures', 'opentab-idle-2.1.314-raw.bin'))));
   assert.equal(isClaudePromptReady(back, back.modes), true, 'the next render is back at the default width');
   ok('the input box is the one holding the caret');

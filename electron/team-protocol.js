@@ -163,7 +163,7 @@ export function receiveMessage({ identity, myFp, peers, records, body, sig, now,
   const key = `${outer.from}|${env.id}`;
   const receipt = sign(identity, ackBytes(outer.from, env.id, hash));
   const seen = records.get(key);
-  if (seen) return seen.hash === hash ? { status: 'duplicate', receipt } : { status: 'conflict' };
+  if (seen) return seen.hash === hash ? { status: 'duplicate', receipt, env, from: peer } : { status: 'conflict' };
   // Per-peer rate limit, counted only for a message that would be stored and routed (a retry is free).
   if (!allow(outer.from)) return refuse('rate');
   records.set(key, { hash, firstAcceptedAt: now });

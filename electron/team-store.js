@@ -87,7 +87,8 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
     const all = peers();
     const old = all[peer.id];
     all[peer.id] = {
-      id: peer.id, name: peer.name, host: peer.host, port: peer.port, ed: peer.ed, x: peer.x,
+      // Names are shown in terminals (dobius-team) and notifications: no control characters.
+      id: peer.id, name: String(peer.name || '').replace(/[\x00-\x1f\x7f\u0080-\u009f]/g, ' ').trim().slice(0, 80) || 'teammate', host: peer.host, port: peer.port, ed: peer.ed, x: peer.x,
       linkedAt: old?.linkedAt || now(), autoRoute: old ? old.autoRoute : true, enabled: old ? old.enabled : true,
     };
     writeJson(file('peers.json'), all);
@@ -97,7 +98,7 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
     const all = peers();
     if (!Object.hasOwn(all, id)) return null;
     const allowed = {};
-    if (typeof patch.name === 'string' && patch.name.trim()) allowed.name = patch.name.trim().slice(0, 80);
+    if (typeof patch.name === 'string' && patch.name.trim()) allowed.name = patch.name.replace(/[\x00-\x1f\x7f\u0080-\u009f]/g, ' ').trim().slice(0, 80);
     if (typeof patch.autoRoute === 'boolean') allowed.autoRoute = patch.autoRoute;
     if (typeof patch.enabled === 'boolean') allowed.enabled = patch.enabled;
     all[id] = { ...all[id], ...allowed };
@@ -119,11 +120,12 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
   }
   const recordStore = {
     get: (k) => (Object.hasOwn(recordMap(), k) ? recordMap()[k] : undefined),
+    // Written first, cached after: a failed write must not leave a record in memory that the disk does not have
+    // (a retry would then be answered as a duplicate without the message ever being routed).
     set: (k, v) => {
-      const m = recordMap();
-      m[k] = v;
-      pruneRecords(m, now());
-      writeJson(file('records.json'), m);
+      const next = pruneRecords({ ...recordMap(), [k]: v }, now());
+      writeJson(file('records.json'), next);
+      records = next;
     },
   };
 
@@ -144,14 +146,21 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
     const v = readJson(file('messages.json'), { list: [] });
     return Array.isArray(v.list) ? v.list : [];
   };
-  function saveMessages(list) {
-    // Keep the newest; never drop one still in flight or waiting for a person.
-    const live = new Set(['queued', 'sending', 'waiting', 'routing']);
+  // Never dropped by the cap: in flight, or waiting for a person to act.
+  const KEEP = new Set(['queued', 'sending', 'waiting', 'routing', 'held', 'needs attention']);
+  // `protect`: the row being written now. If the cap cannot be met without dropping it or a KEEP row, this throws
+  // ('inbox full') and nothing is written: a receiver must refuse such a message, never acknowledge and drop it.
+  function saveMessages(list, protect = null) {
     let out = list;
     if (out.length > MAX_MESSAGES) {
       const extra = out.length - MAX_MESSAGES;
       let dropped = 0;
-      out = out.filter((m) => (dropped < extra && !live.has(m.state) ? (dropped += 1, false) : true));
+      out = out.filter((m) => (dropped < extra && !KEEP.has(m.state) && m !== protect ? (dropped += 1, false) : true));
+      if (out.length > MAX_MESSAGES) {
+        const err = new Error('the team inbox is full of messages waiting for you');
+        err.code = 'INBOX_FULL';
+        throw err;
+      }
     }
     writeJson(file('messages.json'), { list: out });
     return out;
@@ -163,8 +172,9 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
     const list = messages();
     const i = list.findIndex((x) => keyOf(x) === keyOf(m));
     if (i >= 0) list[i] = { ...list[i], ...m }; else list.push(m);
-    saveMessages(list);
-    return i >= 0 ? list[i] : m;
+    const row = i >= 0 ? list[i] : m;
+    saveMessages(list, row);
+    return row;
   }
   function patchMessage(dir, peer, id, patch) {
     const list = messages();
@@ -174,17 +184,23 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
     saveMessages(list);
     return list[i];
   }
-  /** A message by the short id people and Claude type (first 8 of the uuid), inbound first. Ambiguous: null. */
-  function findByShortId(shortId, dir = 'in') {
-    const s = String(shortId || '').toLowerCase();
-    if (!/^[0-9a-f]{8}$/.test(s)) return null;
-    const hits = messages().filter((m) => m.dir === dir && m.id.startsWith(s));
+  /**
+   * A message by its full id (what the delivery card shows Claude) or, for a person typing, a prefix of at least 8
+   * hex digits that matches exactly one. Ambiguous or unknown: null.
+   */
+  function findById(ref, dir = 'in') {
+    const s = String(ref || '').trim().toLowerCase();
+    const rows = messages().filter((m) => m.dir === dir);
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)) return rows.find((m) => m.id === s) || null;
+    const bare = s.replace(/-/g, '');
+    if (!/^[0-9a-f]{8,31}$/.test(bare)) return null;
+    const hits = rows.filter((m) => m.id.replace(/-/g, '').startsWith(bare));
     return hits.length === 1 ? hits[0] : null;
   }
 
   return {
     dir, loadIdentity, settings, setSettings, peers, savePeer, updatePeer, removePeer,
-    records: recordStore, allow, messages, putMessage, patchMessage, findByShortId,
+    records: recordStore, allow, messages, putMessage, patchMessage, findById,
     // exposed for tests
     _retainMs: RETAIN_MS,
   };

@@ -8,7 +8,7 @@ export function buildTeamCliScript({ port, tokenFile }) {
 #   dobius-team peers                      linked teammates
 #   dobius-team inbox                      recent messages in and out
 #   dobius-team send <name|fingerprint>    message text on stdin
-#   dobius-team reply <short id>           answer a received message, text on stdin
+#   dobius-team reply <message id>         answer a received message (the id on its card), text on stdin
 # Text is read from stdin only, so it never appears in the process list:
 #   dobius-team reply 0123abcd <<'EOF'
 #   the catalog is live, link in the Axiom board

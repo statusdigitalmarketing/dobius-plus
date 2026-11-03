@@ -75,7 +75,7 @@ export default function TeamList({ query }) {
   };
   const sendReply = async (m) => {
     if (!replyText.trim()) return;
-    const r = await act(api.teamReply(m.id.slice(0, 8), replyText.trim()));
+    const r = await act(api.teamReply(m.id, replyText.trim()));
     if (r?.ok) { setReplyTo(null); setReplyText(''); }
   };
 

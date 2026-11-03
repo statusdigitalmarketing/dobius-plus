@@ -107,7 +107,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
         <div key={p.inviteId} className="flex items-center justify-between gap-3 text-xs px-3 py-2 rounded" style={{ ...box, borderColor: 'var(--accent)' }}>
           <span style={{ color: 'var(--fg)' }}>Link with <b>{p.name}</b> ({p.short}) at {p.host}?</span>
           <span className="flex gap-2 shrink-0">
-            <button className="px-2 py-1 rounded" style={btn(true)} onClick={async () => { await api.teamDecideLink(p.inviteId, true); load(); }}>Accept</button>
+            <button className="px-2 py-1 rounded" style={btn(true)} onClick={async () => { const r = await api.teamDecideLink(p.inviteId, true); if (!r?.ok) setNote({ error: r?.error || 'could not accept' }); load(); }}>Accept</button>
             <button className="px-2 py-1 rounded" style={btn(false)} onClick={async () => { await api.teamDecideLink(p.inviteId, false); load(); }}>Decline</button>
           </span>
         </div>

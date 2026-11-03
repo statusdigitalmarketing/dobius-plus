@@ -9,6 +9,8 @@ import { createTeamStore } from './team-store.js';
 import { createTeamService } from './team-service.js';
 import { teamRequest } from './team-net.js';
 import { shortFp } from './team-crypto.js';
+import { oneLine } from './team-deliver.js';
+import { terminalInstance } from './terminal-manager.js';
 import { terminalBracketedPaste } from './terminal-manager.js';
 import { statusFor } from './terminal-status.js';
 
@@ -81,6 +83,7 @@ export function initTeam({ bridgeOpenDeps: w, endpoint }) {
     notify: (event, p) => {
       if (event === 'link-request') toast('Team link request', `${p.name} (${p.short}) wants to link. Open Settings > Team to accept.`);
       if (event === 'message') toast(`Team message from ${p.name}`, p.text);
+      if (event === 'inbox-full') toast('Team inbox full', `A message from ${p.name} was refused: act on the waiting ones in Tasks > Team.`);
       broadcast('team:changed', { event });
     },
   });
@@ -96,16 +99,23 @@ export function stopTeam() {
 const str = (v, max) => (typeof v === 'string' && v.length <= max ? v : null);
 
 function registerIpc() {
+  // The pinned tab closed by the person (tab bar close, which kills its PTY): unpin, so a later tab can never inherit
+  // the pin. main's own terminal:kill listener runs first; a restart of the app keeps the pin (the tab is restored).
+  ipcMain.on('terminal:kill', (_e, id) => {
+    if (typeof id !== 'string' || store.settings().orchestratorTab !== id || terminalInstance(id)) return;
+    store.setSettings({ orchestratorTab: null });
+    broadcast('team:changed', {});
+  });
   const safe = (fn) => async (_e, ...args) => {
     try { return await fn(...args); } catch (err) { return { ok: false, error: err?.message || String(err) }; }
   };
   ipcMain.handle('team:status', safe(() => service.status()));
-  ipcMain.handle('team:messages', safe(() => ({ ok: true, list: store.messages().slice(-200) })));
+  ipcMain.handle('team:messages', safe(() => ({ ok: true, list: service.messagesForUi() })));
   ipcMain.handle('team:invite', safe(() => service.createInvite()));
   ipcMain.handle('team:join', safe((text) => service.join(str(text, 600) || '')));
   ipcMain.handle('team:decideLink', safe((inviteId, accept) => service.decideLink(str(inviteId, 64), accept === true)));
   ipcMain.handle('team:send', safe((to, text) => service.send(str(to, 100), str(text, 8000))));
-  ipcMain.handle('team:reply', safe((shortId, text) => service.reply(str(shortId, 16), str(text, 8000))));
+  ipcMain.handle('team:reply', safe((id, text) => service.reply(str(id, 64), str(text, 8000))));
   ipcMain.handle('team:retry', safe((id) => service.retry(str(id, 64))));
   ipcMain.handle('team:sendAgain', safe((id) => service.sendAgain(str(id, 64))));
   ipcMain.handle('team:routeNow', safe((peer, id) => service.routeNow(str(peer, 64), str(id, 64))));
@@ -114,11 +124,7 @@ function registerIpc() {
     broadcast('team:changed', {});
     return p ? { ok: true } : { ok: false, error: 'no such teammate' };
   }));
-  ipcMain.handle('team:unlink', safe((id) => {
-    const ok = store.removePeer(str(id, 64));
-    broadcast('team:changed', {});
-    return { ok };
-  }));
+  ipcMain.handle('team:unlink', safe((id) => service.unlink(str(id, 64))));
   ipcMain.handle('team:settings', safe((patch) => {
     const p = patch && typeof patch === 'object' ? patch : {};
     const next = {};
@@ -144,15 +150,16 @@ export function handleTeamBridge(body) {
   if (!st.ok) return { status: 503, json: { ok: false, error: st.error } };
   if (cmd === 'peers') {
     const lines = st.peers.length
-      ? st.peers.map((p) => `${p.name}  ${p.short}  ${p.host}  ${p.enabled ? (p.autoRoute ? 'auto-route' : 'held for a person') : 'disabled'}`)
+      ? st.peers.map((p) => `${oneLine(p.name, 80)}  ${p.short}  ${p.host}  ${p.enabled ? (p.autoRoute ? 'auto-route' : 'held for a person') : 'disabled'}`)
       : ['no linked teammates (Settings > Team > Invite a teammate)'];
-    return { status: 200, json: { ok: true, lines: [`this Mac: ${st.settings.name} ${st.short}`, ...lines] } };
+    return { status: 200, json: { ok: true, lines: [`this Mac: ${oneLine(st.settings.name, 80)} ${st.short}`, ...lines] } };
   }
   if (cmd === 'inbox') {
     const lines = store.messages().slice(-20).map((m) => {
-      const who = m.peerName || shortFp(m.peer);
+      // Printed into a terminal: teammate-supplied text never carries an escape or control character.
+      const who = oneLine(m.peerName, 80) || shortFp(m.peer);
       const head = m.dir === 'in' ? `<- ${who}` : `-> ${who}`;
-      return `${m.id.slice(0, 8)}  ${head}  [${m.state}]  ${m.text.replace(/\s+/g, ' ').slice(0, 120)}`;
+      return `${m.id.slice(0, 8)}  ${head}  [${m.state}]  ${oneLine(m.text, 400).replace(/\s+/g, ' ').slice(0, 120)}`;
     });
     return { status: 200, json: { ok: true, lines: lines.length ? lines : ['no team messages yet'] } };
   }
