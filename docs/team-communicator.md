@@ -39,7 +39,11 @@ name, or plain HTTP can therefore neither read a message nor forge one, and a de
 recipient's key. HTTPS is used when the peer has it and not required (audit #2, #11). All `/team/*` routes:
 
 - are registered BEFORE the global JSON parser, with `express.raw({ limit: '48kb' })`, and verify signatures over
-  the raw bytes before parsing (audit #13);
+  the raw bytes before parsing (audit #13). Two bootstrap routes are the stated exceptions (r2 #8):
+  `GET /team/hello` is unauthenticated and only returns this install's public keys signed over the caller's
+  nonce; `POST /team/link` cannot know the sender's key in advance, so its order is: size cap, per-IP rate limit,
+  AES-GCM decrypt with this install's X25519 key (the AEAD tag rejects tampering), parse at most 8 KB of JSON,
+  verify the signature over the wire bytes with the key found inside, then check the invite secret;
 - require the full MagicDNS host (strict, like `/pair`), refuse any request carrying an `Origin` header, and never
   get CORS headers: browsers on the tailnet, DNS-rebinding pages and other origins are out (audit #10);
 - are rate-limited per source IP before any crypto work.
@@ -56,8 +60,11 @@ recipient's key. HTTPS is used when the peer has it and not required (audit #2, 
    #1).
 3. B sends `POST /team/link`, encrypted to A's X25519 key and signed by B: `{ secret, name, B host, B port, B keys }`
    (B's own endpoint, so A can reach it back; audit #12).
-4. A checks the secret, then **asks its user**: "Link with <name> (fingerprint B, at <host>)?". On Accept A answers a
-   signed confirmation; both store the peer. Decline or timeout: nothing stored, secret spent.
+4. A checks the secret, then **asks its user**: "Link with <name> (fingerprint B, at <host>)?". On Accept A stores
+   the peer and answers a signed confirmation; B stores A on receiving it. Decline or timeout: nothing stored,
+   secret spent. **A lost confirmation is recoverable (r2 #9):** until the invite expires, A answers a repeat
+   request carrying the same secret AND the same B keys with the same signed confirmation (no second prompt); a
+   different key on a spent secret is refused.
 
 Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true, enabled: true }` in
 `<userData>/team/peers.json`.
@@ -67,11 +74,14 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
 - Plain envelope (inside the encryption): `{ v:1, id (uuid), from, to, kind: "ask"|"reply"|"note", replyTo?, text
   (<= 8000 chars), ts, deadline }`. Wire form: `{ v, from, to, eph, nonce, ct }` + header
   `x-dobius-team-sig` (Ed25519 over the raw wire bytes).
-- Receiver order: size; sender is a linked, enabled peer; signature; `to` is this install; decrypt; `|ts - now| < 5
-  min`; rate limit 20/min, 300/day per peer.
-- **Idempotent receipt (audit #15):** the receiver keeps accepted ids for 48 h. A new id is stored and routed; a
-  repeated id is NOT routed again but gets the same answer: `200 { receipt }`, where `receipt` = recipient's
-  signature over `"dobius-team-ack|" + id`. The sender marks "delivered" only on a valid receipt.
+- Receiver order: size; sender is a linked, enabled peer; signature; `to` is this install; decrypt; the inner
+  `from`/`to` MUST equal the authenticated outer ones, else refuse (r2 #5); `|ts - now| < 5 min`; rate limit 20/min,
+  300/day per peer. Everything shown or decided (name, Auto-route) uses the verified signer only.
+- **Idempotent receipt (audit #15, r2 #6):** the receiver keeps accepted messages for 48 h keyed by
+  `(verified sender, id)` with `sha256(kind, replyTo, text)`. A new key is stored and routed. The same key with the
+  same content hash (a retry) is NOT routed again and gets the same `200 { receipt }`; the same key with different
+  content is refused (409). `receipt` = the recipient's signature over `"dobius-team-ack|" + sender + "|" + id + "|"
+  + contentHash`, and the sender accepts it only if all three match what it sent.
 - **Retries re-sign (audit #14):** the outbox keeps the plain envelope; each attempt re-encrypts with a fresh `ts`
   and the same `id`, until `deadline` (sent + 24 h), then "failed".
 
@@ -80,11 +90,18 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
 - The owner **pins one tab** as the orchestrator (tab menu: "Use as team orchestrator"; stored by tab id, shown with
   a badge). No label or recency guessing and no fallback to another session (audit #5). If the pinned tab is gone or
   closed, messages wait in the Team inbox with a notification.
-- A new delivery routine (not Chat's submit and not `/openTab`, which assume other things; audit #6, #9) types a
-  message only when ALL hold at that moment, re-checked right before the paste and again right before Enter:
-  the tab's foreground program is Claude (`isClaudeProcess` on the PTY's foreground process), its status is idle
-  (hook 'done' or idle prompt), and the screen shows Claude's prompt box EMPTY (screen render). Otherwise it waits
-  and retries; after 30 min it stops and leaves the message in the inbox.
+- A new delivery routine (not Chat's submit and not `/openTab`, which assume other things; audit #6, #9):
+  1. **Before the paste**, ALL must hold: the tab's foreground program is Claude (`isClaudeProcess` on the PTY's
+     foreground process), its status is idle (hook 'done' or idle prompt), Claude's prompt box is EMPTY on the
+     rendered screen, there is no held or pending input for the tab (the input queue that `bridge-open-main` already
+     reports), and no keystroke reached the tab in the last 3 s. The tab's input sequence number is recorded.
+  2. Paste with bracketed paste. The text is first stripped of every control character and escape sequence (the
+     sanitizer `/openTab` uses; a bracketed-paste terminator inside a message can never reach the terminal; r2 #4).
+  3. **Before Enter**: the input sequence number is unchanged except for our own paste, and the prompt box shows
+     exactly our message (as `/openTab` verifies; r2 #2). Then Enter, once.
+  4. If anything in 1 fails it waits and retries; after 30 min it stops and leaves the message in the inbox. If 3
+     fails after the paste went in, it does NOT retry: the message is marked "needs attention" in the inbox, because
+     the prompt now holds unknown mixed input (r2 #3).
 - The text Claude receives:
 
   ```
@@ -103,11 +120,12 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
 - `dobius-team` (generated like the hardened `dobius-open`: it reads its credential from a 0600 file, passes it to
   curl via a header file, and takes message text on STDIN, so neither the token nor the text appears in process
   arguments; audit #4). Commands: `peers`, `inbox`, `send <name|fingerprint>`, `reply <short id>`.
-- Sending is allowed only from the pinned orchestrator tab: every PTY gets `DOBIUS_TAB_ID`, and the pinned tab alone
-  gets a per-tab `DOBIUS_TEAM_KEY` (random, rotated when re-pinned). The bridge route requires both the bridge token
-  and that tab key, so a session in some other tab (for example one prompt-injected by a repo it is reading) cannot
-  send as you (audit #3). Residual: a process running as the user can read another process's environment; a
-  same-user compromise already owns the Mac.
+- The bridge route requires the bridge token, like every other Dobius CLI. **Stated residual (r2 #1, #7):** any
+  process running as the user, including a Claude session in another tab that a repository prompt-injects, can send
+  team messages as this install. A per-tab key would not change that: the existing bridge already lets any token
+  holder type into any tab (`/tabSend`), and a running Claude cannot be handed a new environment variable. Dobius's
+  trust boundary is the user account; tab-level isolation would be a separate project. Every outgoing message is
+  logged and shown in the Team inbox, so an unexpected send is visible, and each receiver can switch Auto-route off.
 
 ### UI
 
