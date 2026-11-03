@@ -38,15 +38,19 @@ HKDF-SHA256, AES-256-GCM; the envelope's header fields are bound as AAD). A wron
 name, or plain HTTP can therefore neither read a message nor forge one, and a delivery receipt is a signature by the
 recipient's key. HTTPS is used when the peer has it and not required (audit #2, #11). All `/team/*` routes:
 
-- are registered BEFORE the global JSON parser, with `express.raw({ limit: '48kb' })`, and verify signatures over
-  the raw bytes before parsing (audit #13). Two bootstrap routes are the stated exceptions (r2 #8):
+- are registered BEFORE the global JSON parser. Requests must be `Content-Type: application/octet-stream`
+  (anything else 415), parsed by `express.raw({ type: 'application/octet-stream', limit: '48kb' })` (r4 #4), and
+  signatures are verified over the raw bytes before parsing (audit #13). **Admission happens before any body is
+  read (r4 #5):** a middleware ahead of the parser enforces per source IP at most 2 team requests in flight and 30
+  per minute, at most 8 in flight overall, and a 5 s deadline to receive the whole body (else the socket is
+  destroyed). Two bootstrap routes are the stated exceptions (r2 #8):
   `GET /team/hello` is unauthenticated and only returns this install's public keys signed over the caller's
   nonce; `POST /team/link` cannot know the sender's key in advance, so its order is: size cap, per-IP rate limit,
   AES-GCM decrypt with this install's X25519 key (the AEAD tag rejects tampering), parse at most 8 KB of JSON,
   verify the signature over the wire bytes with the key found inside, then check the invite secret;
 - require the full MagicDNS host (strict, like `/pair`), refuse any request carrying an `Origin` header, and never
   get CORS headers: browsers on the tailnet, DNS-rebinding pages and other origins are out (audit #10);
-- are rate-limited per source IP before any crypto work.
+- are rate-limited per source IP before any body is read (above).
 
 ### Linking (once per pair of installs, authenticated both ways)
 
@@ -80,7 +84,7 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
 - Receiver order: size; sender is a linked, enabled peer; signature; `to` is this install; decrypt; the inner
   `from`/`to` MUST equal the authenticated outer ones, else refuse (r2 #5); `|ts - now| < 5 min`; rate limit 20/min,
   300/day per peer. Everything shown or decided (name, Auto-route) uses the verified signer only.
-- **Idempotent receipt (audit #15, r2 #6):** the receiver keeps accepted messages for 48 h keyed by
+- **Idempotent receipt (audit #15, r2 #6):** the receiver keeps accepted messages for 7 days keyed by
   `(verified sender, id)` with `sha256(kind, replyTo, text)`. A new key is stored and routed. The same key with the
   same content hash (a retry) is NOT routed again and gets the same `200 { receipt }`; the same key with different
   content is refused (409). `receipt` = the recipient's signature over `"dobius-team-ack|" + sender + "|" + id + "|"
@@ -88,8 +92,9 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
 - **Retries re-sign (audit #14):** the outbox keeps the plain envelope; each attempt re-encrypts with a fresh `ts`
   and the same `id`, until `deadline` (sent + 24 h). Past the deadline the state is "unconfirmed" if any attempt
   may have reached the peer (a connection got as far as sending the body), else "not delivered"; the outbox never
-  re-sends under a new id on its own. A human can "Retry" (same id, so a delivered copy is not routed twice) or
-  "Send again" (new id, shown as a duplicate) (r3 #7).
+  re-sends under a new id on its own. A human can "Retry" (same id, so a delivered copy is not routed twice) only
+  within 7 days of the first send, matching the receiver's dedupe window; after that only "Send again" (new id,
+  shown as a duplicate) is offered (r3 #7, r4 #1).
 
 ### Receiving: delivery into the orchestrator (owner-pinned tab only)
 
@@ -97,9 +102,14 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
   a badge). No label or recency guessing and no fallback to another session (audit #5). If the pinned tab is gone or
   closed, messages wait in the Team inbox with a notification.
 - A new delivery routine (not Chat's submit and not `/openTab`, which assume other things; audit #6, #9):
-  0. **Still authorised (r3 #2):** the sender is still linked and enabled, Auto-route is still on for it, and
-     "Accept team messages" is still on, checked again at step 1 and step 3 (an unlink while the message waited
-     cancels it).
+  0. **Still authorised and still the target (r3 #2, r4 #2):** the sender is still linked and enabled, Auto-route is
+     still on for it, "Accept team messages" is still on, AND the tab is still the pinned orchestrator. Checked again
+     immediately before the paste write and immediately before the Enter write (an unlink or a re-pin while the
+     message waited or mid-delivery cancels it).
+  Prompt-reading note (r4 #3): a long-running orchestrator's "bracketed paste on" sequence scrolls out of the
+  bounded replay tail, so the prompt reader cannot learn the mode from a fresh render. `terminal-manager` therefore
+  tracks bracketed-paste mode per PTY continuously as output arrives (a small state machine over `ESC[?2004h/l`,
+  carried across chunks) and delivery reads that flag instead of inferring it from the render.
   1. **Before the paste**, ALL must hold: the tab's foreground program is Claude (`isClaudeProcess` on the PTY's
      foreground process), its status is idle (hook 'done' or idle prompt), Claude's prompt box is EMPTY on the
      rendered screen, there is no held or pending input for the tab (the input queue that `bridge-open-main` already
