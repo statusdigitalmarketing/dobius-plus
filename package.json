@@ -89,6 +89,7 @@
     "test:navguard": "node --test electron/__tests__/nav-guard.test.mjs",
     "test:projectcwd": "node --import ./electron/__tests__/register.mjs --test electron/__tests__/project-cwd.test.mjs",
     "test:inbox": "node --import ./electron/__tests__/register.mjs --test electron/__tests__/inbox-board.test.mjs electron/__tests__/tasks-inbox.test.mjs shared/__tests__/task-due.test.mjs",
+    "test:teamproto": "node --test electron/__tests__/team-protocol.test.mjs",
     "test:pairinglink": "node --test ./shared/__tests__/pairing-link.test.mjs",
     "test:dualproto": "node ./electron/__tests__/dual-protocol.test.mjs",
     "test:ownhost": "node ./electron/__tests__/own-host.test.mjs",
