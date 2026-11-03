@@ -45,10 +45,16 @@ fi
 command -v python3 >/dev/null 2>&1 || { echo "dobius-tab: python3 not found on PATH" >&2; exit 3; }
 command -v curl >/dev/null 2>&1 || { echo "dobius-tab: curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat ${shQuote(tokenFile)} 2>/dev/null) || { echo "dobius-tab: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 BODY=$(python3 -c 'import json,sys; print(json.dumps({"tabId": sys.argv[1], "label": sys.argv[2]}))' "$DOBIUS_TAB_ID" "$*")
 curl -fsS -X POST "http://127.0.0.1:${port}/tabRename" \\
   -H "Host: 127.0.0.1:${port}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$BODY" >/dev/null
 echo "dobius-tab: tab labeled"

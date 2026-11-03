@@ -587,7 +587,7 @@ function handleRequest(req, res) {
   //    bearing defense against any in-browser attack that bypasses the above.
   const auth = req.headers.authorization || '';
   const expected = `Bearer ${bridgeToken}`;
-  if (!bridgeToken || auth.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
+  if (!bridgeToken || !sameSecret(auth, expected)) {
     res.writeHead(401); res.end(); return;
   }
   if (req.url === '/tabSend') return handleTabSend(req, res);
@@ -643,6 +643,16 @@ function loadOrCreateToken() {
 /**
  * Start the local bridge server. Idempotent — calling twice is a no-op.
  */
+// Constant-time compare of two strings of ANY length or encoding. Comparing JS
+// string lengths and then timingSafeEqual on their UTF-8 buffers threw (and
+// crashed main) when a header had the right number of characters but a
+// non-ASCII byte: the buffers differ in length. Hashing first makes both
+// sides 32 bytes, so it can never throw (Codex design audit, 2026-11-03).
+export function sameSecret(a, b) {
+  const h = (v) => crypto.createHash('sha256').update(String(v), 'utf8').digest();
+  return crypto.timingSafeEqual(h(a), h(b));
+}
+
 export function startVoiceBridge() {
   if (server) return;
   loadOrCreateToken();
@@ -730,11 +740,17 @@ if [ $# -lt 2 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-send: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 TAB_ID="$1"; shift
 MESSAGE="$*"
 RESPONSE=$(curl -fsS -X POST "http://127.0.0.1:${PORT}/tabSend" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"tabId": sys.argv[1], "message": sys.argv[2]}))' "$TAB_ID" "$MESSAGE")")
 echo "$RESPONSE"
@@ -748,9 +764,15 @@ set -e
 command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
 command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-tabs: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/tabList" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   -d "{}" \\
   | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(t["id"], "-", t["cwd"]) for t in d.get("tabs", [])]'
@@ -771,11 +793,17 @@ if [ $# -lt 2 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-reply: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 REQUEST_ID="$1"; shift
 MESSAGE="$*"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/setReply" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"requestId": sys.argv[1], "message": sys.argv[2]}))' "$REQUEST_ID" "$MESSAGE")" \\
   >/dev/null
@@ -796,11 +824,17 @@ if [ $# -lt 4 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-track: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 WORK_ID="$1"; TAB_ID="$2"; REQUEST_ID="$3"; shift 3
 DESCRIPTION="$*"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/trackWork" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "tabId": sys.argv[2], "requestId": sys.argv[3], "description": sys.argv[4]}))' "$WORK_ID" "$TAB_ID" "$REQUEST_ID" "$DESCRIPTION")"
 `;
@@ -815,10 +849,16 @@ set -e
 command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
 command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-status: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 TARGET="$*"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/getStatus" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"target": sys.argv[1]}))' "$TARGET")" \\
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("snapshot",""))'
@@ -838,10 +878,16 @@ if [ $# -lt 2 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-mark-done: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 WORK_ID="$1"; SUMMARY="$2"; STATUS="\${3-completed}"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/markDone" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "summary": sys.argv[2], "status": sys.argv[3]}))' "$WORK_ID" "$SUMMARY" "$STATUS")"
 `;
@@ -863,6 +909,12 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-task-done: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 # One arg, task ref only, project defaults to the project ROOT (DOBIUS_CWD)
 # the terminal was spawned with. Using $(pwd) was wrong: after the agent
 # cd's into a subdir, tasks would be keyed on the subdir and never match
@@ -877,7 +929,7 @@ fi
 # error / candidate list and retry with a more specific title.
 curl -sS -X POST "http://127.0.0.1:${PORT}/taskDone" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2]}))' "$PROJECT" "$REF")"
 `;
@@ -897,9 +949,15 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-complete: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 curl -sS -X POST "http://127.0.0.1:${PORT}/asana/complete" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"gid": sys.argv[1]}))' "$1")"
 `;
@@ -926,6 +984,12 @@ if [ $# -lt 2 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-stage: bridge token unreadable (is Dobius+ running?)" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 # 2 args, <ref> <stage>, project defaults to DOBIUS_CWD (project ROOT) so
 # subdir cd's don't key tasks under a non-project path. Codex r25 P2.
 # 3 args, <projectPath> <ref> <stage> (Conductor staging across projects).
@@ -938,7 +1002,7 @@ fi
 # illegal-transition / human-only / candidate-list error and can react.
 curl -sS -X POST "http://127.0.0.1:${PORT}/stage" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2], "stage": sys.argv[3]}))' "$PROJECT" "$REF" "$STAGE")"
 `;
@@ -956,11 +1020,17 @@ if [ $# -lt 2 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-spawn: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 PROJECT="$1"; AGENT="$2"; shift 2
 INITIAL="$*"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/spawn" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "agentId": sys.argv[2], "initialPrompt": sys.argv[3]}))' "$PROJECT" "$AGENT" "$INITIAL")"
 `;
@@ -979,10 +1049,16 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-ask: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 QUESTION="$*"
 curl -fsS --max-time 320 -X POST "http://127.0.0.1:${PORT}/ask" \\
   -H "Host: 127.0.0.1:${PORT}" \\
-  -H "Authorization: Bearer $TOKEN" \\
+  -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"question": sys.argv[1]}))' "$QUESTION")" \\
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("answer") or ("(timeout)" if d.get("timedOut") else ""))'
@@ -999,23 +1075,29 @@ set -e
 command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
 command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-lead-tab: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 case "\${1-}" in
   get)
     [ $# -ge 2 ] || { echo "usage: dobius-lead-tab get <projectPath>" >&2; exit 1; }
     curl -fsS -X POST "http://127.0.0.1:${PORT}/getLeadTab" \\
-      -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+      -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
       --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1]}))' "$2")"
     ;;
   set)
     [ $# -ge 3 ] || { echo "usage: dobius-lead-tab set <projectPath> <tabId>" >&2; exit 1; }
     curl -fsS -X POST "http://127.0.0.1:${PORT}/setLeadTab" \\
-      -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+      -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
       --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "tabId": sys.argv[2]}))' "$2" "$3")"
     ;;
   clear)
     [ $# -ge 2 ] || { echo "usage: dobius-lead-tab clear <projectPath>" >&2; exit 1; }
     curl -fsS -X POST "http://127.0.0.1:${PORT}/setLeadTab" \\
-      -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+      -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
       --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "tabId": None}))' "$2")"
     ;;
   *)
@@ -1035,9 +1117,15 @@ command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not foun
 command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 1 ] || { echo "usage: dobius-asana-fetch <projectName>" >&2; exit 1; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-fetch: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 PROJECT="$*"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/fetch" \\
-  -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+  -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectName": sys.argv[1]}))' "$PROJECT")"
 `;
 
@@ -1051,9 +1139,15 @@ command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not foun
 command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 2 ] || { echo "usage: dobius-asana-allow <name> <gid>" >&2; exit 1; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-allow: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 NAME="$1"; GID="$2"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/allow" \\
-  -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+  -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "gid": sys.argv[2]}))' "$NAME" "$GID")"
 `;
 
@@ -1065,8 +1159,14 @@ set -e
 command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
 command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-asana-list-allowed: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/listAllowed" \\
-  -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{}" \\
+  -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" -d "{}" \\
   | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(p["name"], p["gid"]) for p in d.get("projects",[])]'
 `;
 
@@ -1083,8 +1183,14 @@ command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on P
 ACTION="$*"
 QUESTION="\${ACTION}\\nReply YES to confirm or NO to skip."
 TOKEN=\$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-confirm: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 curl -fsS --max-time 320 -X POST "http://127.0.0.1:${PORT}/ask" \\
-  -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer \$TOKEN" -H "Content-Type: application/json" \\
+  -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
   --data-binary "\$(python3 -c 'import json,sys; print(json.dumps({"question": sys.argv[1]}))' "\$QUESTION")" \\
   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("answer") or "")'
 `;
@@ -1100,10 +1206,16 @@ command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not foun
 command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 [ $# -ge 3 ] || { echo "usage: dobius-handoff <fromTabId> <toTabId> <context>" >&2; exit 1; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-handoff: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 FROM="$1"; TO="$2"; shift 2
 CONTEXT="$*"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/handoff" \\
-  -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+  -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"fromTabId": sys.argv[1], "toTabId": sys.argv[2], "context": sys.argv[3]}))' "$FROM" "$TO" "$CONTEXT")"
 `;
 
@@ -1117,10 +1229,16 @@ set -e
 command -v python3 >/dev/null 2>&1 || { echo "$(basename "$0"): python3 not found on PATH" >&2; exit 3; }
 command -v curl >/dev/null 2>&1 || { echo "$(basename "$0"): curl not found on PATH" >&2; exit 3; }
 TOKEN=$(cat "${TOKEN_FILE_PATH}" 2>/dev/null) || { echo "dobius-scheduled: bridge token unreadable" >&2; exit 2; }
+# The token never goes on a command line (any local user can read argv with ps):
+# curl reads the header from a private temp file, removed on exit.
+DOBIUS_AUTH_HDR=$(mktemp) || exit 3
+trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
+chmod 600 "$DOBIUS_AUTH_HDR"
+printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 case "\${1-list}" in
   list)
     curl -fsS -X POST "http://127.0.0.1:${PORT}/scheduled/list" \\
-      -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d "{}" \\
+      -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" -d "{}" \\
       | python3 -c 'import json,sys; d=json.load(sys.stdin); [print("[{}]".format("x" if t["enabled"] else " "), t["id"], "-", t.get("prompt","")[:60]) for t in d.get("tasks",[])]'
     ;;
   enable|disable)
@@ -1128,7 +1246,7 @@ case "\${1-list}" in
     ENABLED=\$([ "\$ACTION" = "enable" ] && echo true || echo false)
     BODY="\$(python3 -c 'import json,sys; print(json.dumps({"id": sys.argv[1], "patch": {"enabled": sys.argv[2] == "true"}}))' "\$2" "\$ENABLED")"
     curl -fsS -X POST "http://127.0.0.1:${PORT}/scheduled/update" \\
-      -H "Host: 127.0.0.1:${PORT}" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+      -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
       --data-binary "\$BODY"
     ;;
   *) echo "usage: dobius-scheduled list | enable <id> | disable <id>" >&2; exit 1 ;;
