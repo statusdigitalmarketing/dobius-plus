@@ -79,11 +79,14 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
 ### Messages
 
 - Plain envelope (inside the encryption): `{ v:1, id (uuid), from, to, kind: "ask"|"reply"|"note", replyTo?, text
-  (<= 8000 chars), ts, deadline }`. Wire form: `{ v, from, to, eph, nonce, ct }` + header
+  (<= 8000 chars), ts, firstSentAt, deadline }`. `firstSentAt` is set once and never changes across retries. Wire form: `{ v, from, to, eph, nonce, ct }` + header
   `x-dobius-team-sig` (Ed25519 over the raw wire bytes).
 - Receiver order: size; sender is a linked, enabled peer; signature; `to` is this install; decrypt; the inner
   `from`/`to` MUST equal the authenticated outer ones, else refuse (r2 #5); `|ts - now| < 5 min`; rate limit 20/min,
   300/day per peer. Everything shown or decided (name, Auto-route) uses the verified signer only.
+- **Immutable cutoff on the receiver (r5 #1):** a message whose signed `firstSentAt` is more than 6 days old is
+  refused, whatever its `ts`. Accepted-message records are kept for 7 days, so every message the receiver could
+  still accept (at most 6 days + 5 minutes of clock skew after its first send) is still covered by its record.
 - **Idempotent receipt (audit #15, r2 #6):** the receiver keeps accepted messages for 7 days keyed by
   `(verified sender, id)` with `sha256(kind, replyTo, text)`. A new key is stored and routed. The same key with the
   same content hash (a retry) is NOT routed again and gets the same `200 { receipt }`; the same key with different
@@ -93,7 +96,7 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
   and the same `id`, until `deadline` (sent + 24 h). Past the deadline the state is "unconfirmed" if any attempt
   may have reached the peer (a connection got as far as sending the body), else "not delivered"; the outbox never
   re-sends under a new id on its own. A human can "Retry" (same id, so a delivered copy is not routed twice) only
-  within 7 days of the first send, matching the receiver's dedupe window; after that only "Send again" (new id,
+  within 6 days of the first send (the receiver refuses older ones anyway); after that only "Send again" (new id,
   shown as a duplicate) is offered (r3 #7, r4 #1).
 
 ### Receiving: delivery into the orchestrator (owner-pinned tab only)
