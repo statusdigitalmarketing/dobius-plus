@@ -62,7 +62,10 @@ recipient's key. HTTPS is used when the peer has it and not required (audit #2, 
    (B's own endpoint, so A can reach it back; audit #12).
 4. A checks the secret, then **asks its user**: "Link with <name> (fingerprint B, at <host>)?". On Accept A stores
    the peer and answers a signed confirmation; B stores A on receiving it. Decline or timeout: nothing stored,
-   secret spent. **A lost confirmation is recoverable (r2 #9):** until the invite expires, A answers a repeat
+   secret spent. The confirmation is A's signature over `"dobius-team-link-ok|" + sha256(secret) + "|" + B
+   fingerprint + "|" + B's request nonce`, and B accepts only a confirmation that binds its own nonce and keys for
+   this attempt, so a replayed older confirmation cannot complete a new join (r3 #6). **A lost confirmation is
+   recoverable (r2 #9):** until the invite expires, A answers a repeat
    request carrying the same secret AND the same B keys with the same signed confirmation (no second prompt); a
    different key on a spent secret is refused.
 
@@ -83,7 +86,10 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
   content is refused (409). `receipt` = the recipient's signature over `"dobius-team-ack|" + sender + "|" + id + "|"
   + contentHash`, and the sender accepts it only if all three match what it sent.
 - **Retries re-sign (audit #14):** the outbox keeps the plain envelope; each attempt re-encrypts with a fresh `ts`
-  and the same `id`, until `deadline` (sent + 24 h), then "failed".
+  and the same `id`, until `deadline` (sent + 24 h). Past the deadline the state is "unconfirmed" if any attempt
+  may have reached the peer (a connection got as far as sending the body), else "not delivered"; the outbox never
+  re-sends under a new id on its own. A human can "Retry" (same id, so a delivered copy is not routed twice) or
+  "Send again" (new id, shown as a duplicate) (r3 #7).
 
 ### Receiving: delivery into the orchestrator (owner-pinned tab only)
 
@@ -91,14 +97,24 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
   a badge). No label or recency guessing and no fallback to another session (audit #5). If the pinned tab is gone or
   closed, messages wait in the Team inbox with a notification.
 - A new delivery routine (not Chat's submit and not `/openTab`, which assume other things; audit #6, #9):
+  0. **Still authorised (r3 #2):** the sender is still linked and enabled, Auto-route is still on for it, and
+     "Accept team messages" is still on, checked again at step 1 and step 3 (an unlink while the message waited
+     cancels it).
   1. **Before the paste**, ALL must hold: the tab's foreground program is Claude (`isClaudeProcess` on the PTY's
      foreground process), its status is idle (hook 'done' or idle prompt), Claude's prompt box is EMPTY on the
      rendered screen, there is no held or pending input for the tab (the input queue that `bridge-open-main` already
      reports), and no keystroke reached the tab in the last 3 s. The tab's input sequence number is recorded.
   2. Paste with bracketed paste. The text is first stripped of every control character and escape sequence (the
      sanitizer `/openTab` uses; a bracketed-paste terminator inside a message can never reach the terminal; r2 #4).
-  3. **Before Enter**: the input sequence number is unchanged except for our own paste, and the prompt box shows
-     exactly our message (as `/openTab` verifies; r2 #2). Then Enter, once.
+  3. **Before Enter**, with a FRESH screen render taken after this check began, ALL the guards `/openTab` uses
+     right before its Enter (r3 #1): same PTY, foreground still Claude, output sequence settled, input sequence
+     unchanged except for our own paste, no held-input notice since the paste (the separate counter
+     `bridge-open-main` tracks; r3 #3), and the prompt box shows exactly our message. A long message collapses to
+     Claude's `[Pasted text #N +L lines]` marker; any `N` is accepted with the right line count, since a running
+     orchestrator is past its first paste (r3 #4). Then Enter, once.
+  3b. **After Enter**, confirm the submission the way `/openTab` does (the prompt box empties or Claude starts
+     working within a few seconds). If not (for example Enter is set to insert a newline), mark the message "needs
+     attention" (r3 #5).
   4. If anything in 1 fails it waits and retries; after 30 min it stops and leaves the message in the inbox. If 3
      fails after the paste went in, it does NOT retry: the message is marked "needs attention" in the inbox, because
      the prompt now holds unknown mixed input (r2 #3).
