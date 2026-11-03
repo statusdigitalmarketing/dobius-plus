@@ -542,9 +542,12 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
           const cwd = await getProcessCwd(pid);
           if (!cwd || (await fs.promises.realpath(cwd)) !== (await fs.promises.realpath(projectPath))) continue;
         }
-        // Claude leads the foreground group, but an editor or shell command it
-        // started may be the one reading the keyboard.
-        if (await ttyReaderUnder(pid, tty)) continue;
+        // Team delivery only (no project): Claude leads the foreground group,
+        // but an editor or shell command it started may be the one reading the
+        // keyboard. /openTab types into a tab it just opened, where nothing can
+        // be open yet, and keeps main's behaviour (an MCP wrapper holding the
+        // terminal, e.g. `zsh -lc`, must not stop Brett's board sending).
+        if (projectPath === null && (await ttyReaderUnder(pid, tty))) continue;
         return true;
       } catch { /* this candidate is unreadable: not claude */ }
     }

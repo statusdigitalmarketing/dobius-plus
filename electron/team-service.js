@@ -252,14 +252,19 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
   // The outcome of a delivery is written until it lands: a requeued job would skip a row still saying 'routing'
   // (it may have typed), so a failed write here is retried on its own, never by delivering again.
   // Only over a row still 'routing': a person may have dismissed it while the retry waited.
+  const pendingResults = new Set(); // `${peer}|${id}` whose result write is waiting for a retry
   function saveResult(peer, id, patch) {
+    const key = `${peer}|${id}`;
     try {
       const row = store.messages().find((x) => x.dir === 'in' && x.peer === peer && x.id === id);
-      if (!row || row.state !== 'routing') return;
-      store.patchMessage('in', peer, id, patch);
-      changed();
+      if (row && row.state === 'routing') {
+        store.patchMessage('in', peer, id, patch);
+        changed();
+      }
+      pendingResults.delete(key);
     } catch (err) {
       console.error('[team] could not save a delivery result, retrying in 30s:', err.message);
+      pendingResults.add(key);
       setTimeout(() => saveResult(peer, id, patch), 30_000).unref?.();
     }
   }
@@ -476,7 +481,8 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     for (const m of store.messages()) {
       try {
         // Not the delivery typing right now (a retried recovery runs while the app is live).
-        if (m.dir === 'in' && m.state === 'routing' && current !== `${m.peer}|${m.id}`) saveResult(m.peer, m.id, { state: 'needs attention', note: 'Dobius quit while this was being typed; check the orchestrator tab' });
+        // Nor one whose real result is still waiting to be written (it would be overwritten with a false "quit").
+        if (m.dir === 'in' && m.state === 'routing' && current !== `${m.peer}|${m.id}` && !pendingResults.has(`${m.peer}|${m.id}`)) saveResult(m.peer, m.id, { state: 'needs attention', note: 'Dobius quit while this was being typed; check the orchestrator tab' });
         if (m.dir === 'in' && m.state === 'waiting') enqueueDelivery(m.peer, m.id);
         if (m.dir === 'out' && m.state === 'sending') store.patchMessage('out', m.peer, m.id, { state: 'queued', reached: true });
       } catch (err) {
