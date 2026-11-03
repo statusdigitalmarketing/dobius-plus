@@ -237,17 +237,21 @@ test('the real codesign check rejects a system shell', { skip: !fs.existsSync('/
 });
 
 test('ttyReaderUnder: an editor or shell command under claude reading the terminal blocks; pipes and other ttys do not', async () => {
-  const ps = ' 100   1 ttys004\n 200 100 ttys004\n 300 200 ttys004\n 400 100 ??\n 500 100 ttys009\n';
+  const u = process.getuid();
+  const ps = ` 100   1 ${u} ttys004\n 200 100 ${u} ttys004\n 300 200 ${u} ttys004\n 400 100 ${u} ??\n 500 100 ${u} ttys009\n`;
   const fake = (stdin) => async (bin, args) => {
     if (bin === '/bin/ps') return { stdout: ps };
-    assert.deepEqual(args.slice(0, 2), ['-a', '-p']);
-    assert.equal(args[2].split(',').sort().join(','), '200,300,400,500', 'every descendant, whatever its controlling tty');
+    assert.deepEqual(args.slice(0, 4), ['-n', '-P', '-a', '-p']);
+    assert.equal(args[4].split(',').sort().join(','), '200,300,400,500', 'every descendant, whatever its controlling tty');
     return { stdout: stdin };
   };
-  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: fake('p300\nf0\nn/dev/ttys004\n') }), true, 'vim from Ctrl+G');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: fake('p300\nf0\nau\nn/dev/ttys004\n') }), true, 'vim from Ctrl+G');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: fake('p300\nf2\naw\nn/dev/ttys004\n') }), false, 'a write-only stderr steals no keys');
+  const rootPs = ps + ` 600 100 0 ttys004\n`;
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: async (bin) => ({ stdout: bin === '/bin/ps' ? rootPs : '' }) }), true, 'sudo vim: another user is doubt');
   assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: fake('p200\nf0\nn->0x1234\np300\nf0\nn/dev/null\n') }), false, 'MCP server on a pipe');
-  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: fake('p500\nf0\nn/dev/null\nf3\nn/dev/ttys004\n') }), true, 'a helper reading fd 3');
-  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: fake('p300\nf0\nn/dev/tty\n') }), true, 'stdin reopened from /dev/tty');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: fake('p500\nf0\nar\nn/dev/null\nf3\nau\nn/dev/ttys004\n') }), true, 'a helper reading fd 3');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: fake('p300\nf0\nar\nn/dev/tty\n') }), true, 'stdin reopened from /dev/tty');
   assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: async () => { throw new Error('ps failed'); } }), true, 'doubt blocks');
   assert.equal(await ttyReaderUnder(999, 'ttys004', { exec: async (bin) => ({ stdout: bin === '/bin/ps' ? ps : '' }) }), true, 'claude gone from the process table');
   assert.equal(await ttyReaderUnder(500, 'ttys004', { exec: async (bin) => ({ stdout: bin === '/bin/ps' ? ps : '' }) }), false, 'no children');

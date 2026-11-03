@@ -12,7 +12,7 @@ import { shortFp } from './team-crypto.js';
 import { oneLine } from './team-deliver.js';
 import { terminalInstance } from './terminal-manager.js';
 import { terminalBracketedPaste } from './terminal-manager.js';
-import { statusFor } from './terminal-status.js';
+import { statusFor, waitingOnBackground } from './terminal-status.js';
 
 let service = null;
 let store = null;
@@ -66,7 +66,9 @@ export function initTeam({ bridgeOpenDeps: w, endpoint }) {
       submit: w.submit,
       sleep: w.sleep,
       now: w.now,
-      idle: (id) => statusFor(id)?.status !== 'working',
+      // Working only on background tasks (a dev server Claude started) is idle at the prompt: the screen and terminal
+      // checks still decide whether it may be typed into.
+      idle: (id) => statusFor(id)?.status !== 'working' || waitingOnBackground(id),
       watch: (id) => {
         const x = w.watchOutput(id);
         return {

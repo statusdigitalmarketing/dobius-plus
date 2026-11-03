@@ -475,7 +475,8 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     // here must never stop the app from starting (the pump treats a leftover 'sending' row as maybe-arrived anyway).
     for (const m of store.messages()) {
       try {
-        if (m.dir === 'in' && m.state === 'routing') saveResult(m.peer, m.id, { state: 'needs attention', note: 'Dobius quit while this was being typed; check the orchestrator tab' });
+        // Not the delivery typing right now (a retried recovery runs while the app is live).
+        if (m.dir === 'in' && m.state === 'routing' && current !== `${m.peer}|${m.id}`) saveResult(m.peer, m.id, { state: 'needs attention', note: 'Dobius quit while this was being typed; check the orchestrator tab' });
         if (m.dir === 'in' && m.state === 'waiting') enqueueDelivery(m.peer, m.id);
         if (m.dir === 'out' && m.state === 'sending') store.patchMessage('out', m.peer, m.id, { state: 'queued', reached: true });
       } catch (err) {
