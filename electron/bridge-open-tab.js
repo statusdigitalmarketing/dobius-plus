@@ -192,8 +192,10 @@ export function promptBoxText(lines, modes) {
   // holding literal "────" / "❯ " / "────" rows) is drawn in the default
   // colour. When the render says which rows start coloured, only coloured
   // rules can be the box's edges, so a fake box inside a draft never counts
-  // (Codex team review, Critical). Plain string arrays (tests) skip this.
-  const colored = Array.isArray(lines.firstColored) ? lines.firstColored : null;
+  // (Codex team review, Critical). Plain string arrays (tests) skip this, and so
+  // does a screen with no coloured row at all (Claude run with NO_COLOR): there
+  // the old rule applies, a stated residual for colourless terminals.
+  const colored = Array.isArray(lines.firstColored) && lines.firstColored.some(Boolean) ? lines.firstColored : null;
   const edge = (i) => !colored || colored[i] === true;
   for (let j = last; j >= 1 && j >= last - PROMPT_BOTTOM_ROWS; j -= 1) {
     const flat = RULE_RE.test(lines[j]);

@@ -115,7 +115,8 @@ function registerIpc() {
   ipcMain.handle('team:join', safe((text) => service.join(str(text, 600) || '')));
   ipcMain.handle('team:decideLink', safe((inviteId, accept) => service.decideLink(str(inviteId, 64), accept === true)));
   ipcMain.handle('team:send', safe((to, text) => service.send(str(to, 100), str(text, 8000))));
-  ipcMain.handle('team:reply', safe((id, text) => service.reply(str(id, 64), str(text, 8000))));
+  ipcMain.handle('team:reply', safe((peer, id, text) => service.reply(str(id, 64), str(text, 8000), str(peer, 64))));
+  ipcMain.handle('team:dismiss', safe((dir, peer, id) => service.dismiss(dir === 'out' ? 'out' : 'in', str(peer, 64), str(id, 64))));
   ipcMain.handle('team:retry', safe((id) => service.retry(str(id, 64))));
   ipcMain.handle('team:sendAgain', safe((id) => service.sendAgain(str(id, 64))));
   ipcMain.handle('team:routeNow', safe((peer, id) => service.routeNow(str(peer, 64), str(id, 64))));
@@ -159,7 +160,7 @@ export function handleTeamBridge(body) {
       // Printed into a terminal: teammate-supplied text never carries an escape or control character.
       const who = oneLine(m.peerName, 80) || shortFp(m.peer);
       const head = m.dir === 'in' ? `<- ${who}` : `-> ${who}`;
-      return `${m.id.slice(0, 8)}  ${head}  [${m.state}]  ${oneLine(m.text, 400).replace(/\s+/g, ' ').slice(0, 120)}`;
+      return `${m.id}  ${head}  [${m.state}]  ${oneLine(m.text, 400).replace(/\s+/g, ' ').slice(0, 120)}`;
     });
     return { status: 200, json: { ok: true, lines: lines.length ? lines : ['no team messages yet'] } };
   }

@@ -79,9 +79,10 @@ test('store: identity is encrypted at rest, stable across loads, and refused wit
 
 test('store: per-peer rate limit, 20 a minute', () => {
   const s = createTeamStore({ dir: tmp(), box, now });
-  for (let i = 0; i < 20; i += 1) assert.equal(s.allow('p'), true);
+  for (let i = 0; i < 20; i += 1) { assert.equal(s.allow('p'), true); s.countAccepted('p'); }
   assert.equal(s.allow('p'), false);
   assert.equal(s.allow('q'), true, 'per peer');
+  for (let i = 0; i < 50; i += 1) assert.equal(s.allow('q'), true, 'a check alone never uses the quota');
   clock += 61_000;
   assert.equal(s.allow('p'), true);
 });
@@ -162,7 +163,8 @@ test('messages: reply by short id goes back to the sender as a reply', async () 
   b.svc.send('Sam', 'ping');
   await b.svc.pump();
   const got = a.store.messages().find((m) => m.dir === 'in');
-  const r = a.svc.reply(got.id.slice(0, 8), 'pong');
+  assert.equal(a.svc.reply(got.id.slice(0, 8), 'pong').ok, false, 'a prefix is not an id');
+  const r = a.svc.reply(got.id, 'pong');
   assert.equal(r.ok, true, r.error);
   await a.svc.pump();
   const back = b.store.messages().find((m) => m.dir === 'in');
@@ -516,14 +518,14 @@ test('review: a failed write after a verified receipt is picked up again, not le
   a.svc.stop(); b.svc.stop();
 });
 
-test('review: reply ids: full id exact, a prefix only when unique', async () => {
+test('review: reply ids: full id only', async () => {
   const { a, b } = await linked();
   b.svc.send('Sam', 'one');
   await b.svc.pump();
   const got = a.store.messages().find((m) => m.dir === 'in');
   assert.equal(a.store.findById(got.id).id, got.id);
-  assert.equal(a.store.findById(got.id.slice(0, 8)).id, got.id);
-  assert.equal(a.store.findById('0123'), null, 'too short');
+  assert.equal(a.store.findById(got.id.slice(0, 8)), null, 'no prefixes');
+  assert.equal(a.store.findById(['x']), null);
   assert.equal(a.store.findById('ffffffff-ffff-4fff-8fff-ffffffffffff'), null);
   a.svc.stop(); b.svc.stop();
 });
@@ -536,4 +538,98 @@ test('review: a typed lookalike box inside a draft is not an empty prompt (rende
   assert.equal(boxIsEmpty({ lines: fake, modes: fake.modes }), false);
   const empty = await renderScreenLines(enc(`\x1b[?2004h${R(60)}\r\n❯ \x1b[2mTry "fix lint"\x1b[0m\r\n${R(60)}\r\n  ? for shortcuts\x1b[2;3H`), { cols: 80 });
   assert.equal(boxIsEmpty({ lines: empty, modes: empty.modes }), true, 'placeholder only');
+});
+
+
+// ---------- regressions from Codex round 2 ----------
+
+test('r2: an array where a string belongs is refused (id, host)', async () => {
+  const { a, b } = await linked();
+  const P2 = await import('../team-protocol.js');
+  const { seal, sign } = await import('../team-crypto.js');
+  const samFp = a.svc.status().fp;
+  const bFp = b.svc.status().fp;
+  const inner = { v: 1, id: ['0123abcd-0000-4000-8000-000000000000'], from: bFp, to: samFp, kind: 'ask', replyTo: null, text: 'x', ts: clock, firstSentAt: clock, deadline: clock + 1 };
+  const sealed = seal(a.store.loadIdentity().x, JSON.stringify(inner), 'msg', (e, n) => `dobius-team-msg|1|${bFp}|${samFp}|${e}|${n}`);
+  const body = Buffer.from(JSON.stringify({ v: 1, from: bFp, to: samFp, ...sealed }));
+  assert.equal(a.svc.receive(body, sign(b.store.loadIdentity(), body)).status, 403);
+  const inv = P2.makeInvite({ host: a.host, port: 8420 }, samFp, clock);
+  const nonce = P2.newNonce();
+  const conf = P2.linkConfirmation(a.store.loadIdentity(), { name: 'Sam', host: a.host, port: 8420 }, inv.secret, bFp, nonce);
+  assert.equal(P2.checkLinkConfirmation({ ...conf, host: [a.host] }, P2.parseInvite(inv.text), bFp, nonce), null);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('r2: two teammates using one id: a reply without the sender is refused, with it goes to the right one', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  const c = install('Brett', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  assert.equal((await linkPair(a, c)).ok, true);
+  b.svc.send('Sam', 'from bryan');
+  await b.svc.pump();
+  const id = a.store.messages().find((m) => m.dir === 'in').id;
+  // Brett deliberately reuses Bryan's id.
+  c.store.putMessage({ dir: 'out', id, peer: Object.keys(c.store.peers())[0], peerName: 'Sam', kind: 'ask', replyTo: null, text: 'from brett', firstSentAt: clock, deadline: clock + 864e5, at: clock, state: 'queued', attempts: 0, reached: false, nextAt: 0 });
+  await c.svc.pump();
+  assert.equal(a.store.messages().filter((m) => m.dir === 'in' && m.id === id).length, 2);
+  assert.match(a.svc.reply(id, 'answer').error, /no single/);
+  const brettId = c.svc.status().fp;
+  assert.equal(a.svc.reply(id, 'for brett', brettId).ok, true);
+  await a.svc.pump();
+  assert.equal(c.store.messages().some((m) => m.dir === 'in' && m.text === 'for brett'), true);
+  assert.equal(b.store.messages().some((m) => m.dir === 'in' && m.text === 'for brett'), false);
+  a.svc.stop(); b.svc.stop(); c.svc.stop();
+});
+
+test('r2: Unlink after Accept stops the invite confirming the link', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  const inv = a.svc.createInvite();
+  let n = 0;
+  b.hooks.onSleep = () => {
+    n += 1;
+    const p = a.svc.status().pendingLinks[0];
+    if (p) { a.svc.decideLink(p.inviteId, true); a.svc.unlink(Object.keys(a.store.peers())[0]); }
+  };
+  const r = await b.svc.join(inv.text);
+  assert.equal(r.ok, false);
+  assert.equal(Object.keys(b.store.peers()).length, 0);
+  assert.ok(n > 0);
+});
+
+test('r2: refused attempts (full inbox) do not use up the quota; Dismiss frees the inbox', async () => {
+  const { a, b, bOnA } = await linked();
+  const peer = bOnA().id;
+  for (let i = 0; i < 500; i += 1) a.store.putMessage({ dir: 'in', id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, peer, peerName: 'Bryan', text: 'old', state: 'held', at: clock });
+  b.svc.send('Sam', 'one');
+  for (let i = 0; i < 25; i += 1) {
+    b.store.patchMessage('out', outOf(b).peer, outOf(b).id, { nextAt: 0 });
+    await b.svc.pump();
+  }
+  assert.equal(outOf(b).note, 'answer 503', 'still refused, not rate limited');
+  for (const m of a.store.messages().slice(0, 3)) assert.equal(a.svc.dismiss('in', m.peer, m.id).ok, true);
+  b.store.patchMessage('out', outOf(b).peer, outOf(b).id, { nextAt: 0 });
+  await b.svc.pump();
+  assert.equal(outOf(b).state, 'delivered');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('r2: a row still "sending" at its deadline is unconfirmed, not "not delivered"', async () => {
+  const { a, b } = await linked();
+  b.svc.send('Sam', 'x');
+  const o = outOf(b);
+  b.store.patchMessage('out', o.peer, o.id, { state: 'sending', reached: false });
+  clock += 25 * 3600 * 1000;
+  await b.svc.pump();
+  assert.equal(outOf(b).state, 'unconfirmed');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('r2: a colourless screen (NO_COLOR) still has a prompt box', async () => {
+  const { renderScreenLines } = await import('../screen-render.js');
+  const scr = await renderScreenLines(new TextEncoder().encode(`\x1b[?2004h${'─'.repeat(60)}\r\n❯ \r\n${'─'.repeat(60)}\r\n  ? for shortcuts\x1b[2;3H`), { cols: 80 });
+  assert.equal(boxIsEmpty({ lines: scr, modes: scr.modes }), true);
 });

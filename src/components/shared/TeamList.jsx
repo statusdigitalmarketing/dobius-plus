@@ -18,6 +18,7 @@ const STATES = {
   routed: { label: 'sent to orchestrator', color: '#3FB950' },
   held: { label: 'waiting for you', color: '#F87300', attention: true },
   'needs attention': { label: 'check the tab', color: 'var(--danger)', attention: true },
+  dismissed: { label: 'dismissed', color: 'var(--dim)' },
 };
 export const needsPerson = (m) => !!STATES[m.state]?.attention;
 
@@ -75,7 +76,7 @@ export default function TeamList({ query }) {
   };
   const sendReply = async (m) => {
     if (!replyText.trim()) return;
-    const r = await act(api.teamReply(m.id, replyText.trim()));
+    const r = await act(api.teamReply(m.peer, m.id, replyText.trim()));
     if (r?.ok) { setReplyTo(null); setReplyText(''); }
   };
 
@@ -115,13 +116,16 @@ export default function TeamList({ query }) {
               </button>
               {m.note && <div style={{ fontSize: 10, color: 'var(--dim)', marginTop: 2 }}>{m.note}</div>}
               <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
-                {m.dir === 'in' && m.state === 'held' && <button style={small()} onClick={() => act(api.teamRouteNow(m.peer, m.id))}>Send to orchestrator</button>}
+                {m.dir === 'in' && (m.state === 'held' || m.state === 'waiting') && <button style={small()} onClick={() => act(api.teamRouteNow(m.peer, m.id))}>Send to orchestrator</button>}
                 {m.dir === 'in' && <button style={small('var(--dim)')} onClick={() => { setReplyTo(replyTo === key ? null : key); setReplyText(''); }}>Reply</button>}
                 {m.dir === 'out' && (m.state === 'unconfirmed' || m.state === 'not delivered') && (
                   <button style={small()} title="Same message id: a copy that did arrive is not delivered twice" onClick={() => act(api.teamRetry(m.id))}>Retry</button>
                 )}
                 {m.dir === 'out' && ['unconfirmed', 'not delivered', 'conflict'].includes(m.state) && (
                   <button style={small('var(--dim)')} title="A new message: they may see it twice" onClick={() => act(api.teamSendAgain(m.id))}>Send again</button>
+                )}
+                {needsPerson(m) && (
+                  <button style={small('var(--dim)')} title="Done with it: it stops counting and can leave the list" onClick={() => act(api.teamDismiss(m.dir, m.peer, m.id))}>Dismiss</button>
                 )}
               </div>
               {replyTo === key && (

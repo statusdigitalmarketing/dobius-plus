@@ -129,25 +129,30 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
     },
   };
 
-  /** Per peer: at most 20 accepted messages a minute and 300 a day. Counts only when it allows. */
+  /** Per peer: at most 20 accepted messages a minute and 300 a day. A check only: counted by countAccepted, once the
+   *  message is really stored (a refused attempt, e.g. a full inbox, must not use up the quota). */
   function allow(peerId) {
     const t = now();
     const times = (rate.get(peerId) || []).filter((x) => t - x < 864e5);
-    if (times.length >= PEER_PER_DAY || times.filter((x) => t - x < 60_000).length >= PEER_PER_MIN) {
-      rate.set(peerId, times);
-      return false;
-    }
-    times.push(t);
     rate.set(peerId, times);
-    return true;
+    return times.length < PEER_PER_DAY && times.filter((x) => t - x < 60_000).length < PEER_PER_MIN;
+  }
+  function countAccepted(peerId) {
+    const times = rate.get(peerId) || [];
+    times.push(now());
+    rate.set(peerId, times);
   }
 
   const messages = () => {
     const v = readJson(file('messages.json'), { list: [] });
     return Array.isArray(v.list) ? v.list : [];
   };
-  // Never dropped by the cap: in flight, or waiting for a person to act.
-  const KEEP = new Set(['queued', 'sending', 'waiting', 'routing', 'held', 'needs attention']);
+  // Never dropped by the cap: in flight. Kept for a week: waiting for a person (held, needs attention) or for a
+  // Retry decision (unconfirmed, not delivered; the same-id retry window is 6 days). After that, or once a person
+  // dismisses it, a row can go, so a pile of old rows can never block the inbox for good.
+  const IN_FLIGHT = new Set(['queued', 'sending', 'waiting', 'routing']);
+  const ATTENTION = new Set(['held', 'needs attention', 'unconfirmed', 'not delivered']);
+  const keep = (m) => IN_FLIGHT.has(m.state) || (ATTENTION.has(m.state) && now() - (m.at || 0) < RETAIN_MS);
   // `protect`: the row being written now. If the cap cannot be met without dropping it or a KEEP row, this throws
   // ('inbox full') and nothing is written: a receiver must refuse such a message, never acknowledge and drop it.
   function saveMessages(list, protect = null) {
@@ -155,7 +160,7 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
     if (out.length > MAX_MESSAGES) {
       const extra = out.length - MAX_MESSAGES;
       let dropped = 0;
-      out = out.filter((m) => (dropped < extra && !KEEP.has(m.state) && m !== protect ? (dropped += 1, false) : true));
+      out = out.filter((m) => (dropped < extra && !keep(m) && m !== protect ? (dropped += 1, false) : true));
       if (out.length > MAX_MESSAGES) {
         const err = new Error('the team inbox is full of messages waiting for you');
         err.code = 'INBOX_FULL';
@@ -185,22 +190,20 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
     return list[i];
   }
   /**
-   * A message by its full id (what the delivery card shows Claude) or, for a person typing, a prefix of at least 8
-   * hex digits that matches exactly one. Ambiguous or unknown: null.
+   * A message by its FULL id (what its card and `dobius-team inbox` show). Ids are only unique per sender, so with
+   * `peer` the match is exact, and without one an id two senders used is refused rather than guessed. No prefixes:
+   * after the cap drops a row a prefix could quietly start matching another teammate's message.
    */
-  function findById(ref, dir = 'in') {
-    const s = String(ref || '').trim().toLowerCase();
-    const rows = messages().filter((m) => m.dir === dir);
-    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)) return rows.find((m) => m.id === s) || null;
-    const bare = s.replace(/-/g, '');
-    if (!/^[0-9a-f]{8,31}$/.test(bare)) return null;
-    const hits = rows.filter((m) => m.id.replace(/-/g, '').startsWith(bare));
+  function findById(ref, dir = 'in', peer = null) {
+    const s = typeof ref === 'string' ? ref.trim().toLowerCase() : '';
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)) return null;
+    const hits = messages().filter((m) => m.dir === dir && m.id === s && (peer === null || m.peer === peer));
     return hits.length === 1 ? hits[0] : null;
   }
 
   return {
     dir, loadIdentity, settings, setSettings, peers, savePeer, updatePeer, removePeer,
-    records: recordStore, allow, messages, putMessage, patchMessage, findById,
+    records: recordStore, allow, countAccepted, messages, putMessage, patchMessage, findById,
     // exposed for tests
     _retainMs: RETAIN_MS,
   };

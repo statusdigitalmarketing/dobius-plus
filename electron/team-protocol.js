@@ -19,6 +19,9 @@ const FP = /^[A-Za-z0-9_-]{43}$/;
 const HOST = /^[A-Za-z0-9.-]{1,253}$/;
 const NONCE = /^[0-9a-f]{32}$/;
 const isPort = (p) => Number.isInteger(p) && p > 0 && p < 65536;
+// Strings only: RegExp.test coerces, so ["<uuid>"] would pass a bare UUID.test and then compare unequal everywhere
+// it is used as a key (Codex r2, two lenses).
+const is = (re, v) => typeof v === 'string' && re.test(v);
 const shortText = (s, max) => typeof s === 'string' && s.length > 0 && s.length <= max;
 
 function parseJson(bytes, max) {
@@ -45,7 +48,7 @@ export function makeHello(identity, me, nonce) {
 /** The keys behind a hello, only if they hash to `expectedFp` and signed our nonce. */
 export function checkHello(h, nonce, expectedFp) {
   if (!h || h.v !== V || typeof h.ed !== 'string' || typeof h.x !== 'string') return null;
-  if (!shortText(h.name, 80) || !HOST.test(h.host || '') || !isPort(h.port)) return null;
+  if (!shortText(h.name, 80) || !is(HOST, h.host || '') || !isPort(h.port)) return null;
   let fp;
   try { fp = fingerprint(h.ed, h.x); } catch { return null; } // malformed keys
   if (fp !== expectedFp || !verify(h.ed, helloBytes(nonce, h), h.sig)) return null;
@@ -87,8 +90,8 @@ export function openLinkRequest(identity, myFp, body, sig) {
   const inner = parseJson(plain, 8 * 1024);
   if (!inner) return null;
   const { secret, name, host, port, ed, x, reqNonce } = inner;
-  if (typeof secret !== 'string' || !shortText(name, 80) || !HOST.test(host || '') || !isPort(port)) return null;
-  if (typeof ed !== 'string' || typeof x !== 'string' || !NONCE.test(reqNonce || '')) return null;
+  if (typeof secret !== 'string' || !shortText(name, 80) || !is(HOST, host || '') || !isPort(port)) return null;
+  if (typeof ed !== 'string' || typeof x !== 'string' || !is(NONCE, reqNonce || '')) return null;
   let fp;
   try { fp = fingerprint(ed, x); } catch { return null; } // malformed keys
   if (!verify(ed, body, sig)) return null;
@@ -108,7 +111,7 @@ export function linkConfirmation(identity, me, secret, bFp, reqNonce) {
 /** A as a peer, only if the confirmation comes from the invite's fingerprint and binds THIS attempt (r3 #6). */
 export function checkLinkConfirmation(conf, invite, myFp, reqNonce) {
   if (!conf || conf.v !== V || typeof conf.ed !== 'string' || typeof conf.x !== 'string') return null;
-  if (!shortText(conf.name, 80) || !HOST.test(conf.host || '') || !isPort(conf.port)) return null;
+  if (!shortText(conf.name, 80) || !is(HOST, conf.host || '') || !isPort(conf.port)) return null;
   let fp;
   try { fp = fingerprint(conf.ed, conf.x); } catch { return null; } // malformed keys
   if (fp !== invite.fp || !verify(conf.ed, linkOkBytes(invite.secret, myFp, reqNonce, conf), conf.sig)) return null;
@@ -143,7 +146,7 @@ export function buildMessage(identity, myFp, peer, env, now) {
 export function receiveMessage({ identity, myFp, peers, records, body, sig, now, allow = () => true }) {
   const refuse = (reason) => ({ status: 'refused', reason });
   const outer = parseJson(body, MAX_BODY);
-  if (!outer || outer.v !== V || !FP.test(outer.from || '') || !FP.test(outer.to || '')) return refuse('shape');
+  if (!outer || outer.v !== V || !is(FP, outer.from || '') || !is(FP, outer.to || '')) return refuse('shape');
   const peer = peers[outer.from];
   if (!peer || !peer.enabled) return refuse('unknown sender');
   if (!verify(peer.ed, body, sig)) return refuse('signature');
@@ -152,8 +155,8 @@ export function receiveMessage({ identity, myFp, peers, records, body, sig, now,
   const env = parseJson(plain, MAX_BODY);
   if (!env || env.v !== V) return refuse('sealed body');
   if (env.from !== outer.from || env.to !== outer.to) return refuse('identity mismatch');
-  if (!UUID.test(env.id || '') || !KINDS.has(env.kind)) return refuse('fields');
-  if (env.replyTo != null && !UUID.test(env.replyTo)) return refuse('fields');
+  if (!is(UUID, env.id || '') || !KINDS.has(env.kind)) return refuse('fields');
+  if (env.replyTo != null && !is(UUID, env.replyTo)) return refuse('fields');
   if (!shortText(env.text, MAX_TEXT)) return refuse('text');
   const { ts, firstSentAt } = env;
   if (!Number.isFinite(ts) || Math.abs(ts - now) > SKEW_MS) return refuse('stale');

@@ -196,6 +196,7 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
       return { status: 503, json: { ok: false } };
     }
     store.records.set(...staged); // throws on a failed write: 500, and the sender's retry lands in `existing` above
+    store.countAccepted(from.id);
     notify('message', { name: from.name, text: env.text.slice(0, 200) });
     changed();
     enqueueDelivery(from.id, env.id);
@@ -206,7 +207,7 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
 
   function enqueueDelivery(peer, id, manual = false) {
     if (!deliveryQueue.some((q) => q.peer === peer && q.id === id)) deliveryQueue.push({ peer, id, manual });
-    void runDeliveries();
+    runDeliveries().catch((err) => console.error('[team] delivery queue failed:', err.message));
   }
 
   async function runDeliveries() {
@@ -214,49 +215,78 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     delivering = true;
     try {
       while (deliveryQueue.length && !stopped) {
-        const { peer, id, manual } = deliveryQueue.shift();
-        const msg = store.messages().find((x) => x.dir === 'in' && x.peer === peer && x.id === id);
-        if (!msg || (msg.state !== 'waiting' && !(manual && msg.state === 'held'))) continue;
-        const tabId = store.settings().orchestratorTab;
-        const authorized = () => {
-          const p = store.peers()[peer];
-          const s = store.settings();
-          if (!p || !p.enabled) return 'the sender is no longer linked';
-          if (!manual && !p.autoRoute) return `Auto-route is off for ${p.name}`;
-          if (!s.accept) return 'Accept team messages is off';
-          if (!s.orchestratorTab) return 'no orchestrator tab is pinned';
-          if (s.orchestratorTab !== tabId) return 'the orchestrator tab changed';
-          return null;
-        };
-        const why = authorized();
-        if (why) { store.patchMessage('in', peer, id, { state: 'held', note: why }); changed(); continue; }
-        const deps = deliverDeps(tabId, authorized);
-        if (!deps) { store.patchMessage('in', peer, id, { state: 'held', note: 'delivery is not available' }); changed(); continue; }
-        const card = deliveryCard({ fromName: msg.peerName, fromFp: peer, at: msg.at, id, text: msg.text });
-        if (card.error) { store.patchMessage('in', peer, id, { state: 'held', note: card.error }); changed(); continue; }
-        store.patchMessage('in', peer, id, { state: 'routing', note: null });
-        changed();
-        let result;
-        try { result = await deliver(deps, tabId, card.text); } catch (err) { result = { state: 'needs attention', note: `delivery failed: ${err.message}` }; }
-        store.patchMessage('in', peer, id, { state: result.state, note: result.note || null, routedAt: result.state === 'routed' ? now() : undefined });
-        changed();
+        const job = deliveryQueue.shift();
+        try {
+          await deliverJob(job);
+        } catch (err) {
+          // A failed write (disk full) must not strand an acknowledged message: it goes back on the queue.
+          console.error('[team] delivery step failed, retrying in 30s:', err.message);
+          setTimeout(() => enqueueDelivery(job.peer, job.id, job.manual), 30_000).unref?.();
+        }
       }
     } finally {
       delivering = false;
     }
   }
 
+  /** A person is done with a row that needed them: it stops counting and can leave the list. */
+  function dismiss(dir, peer, id) {
+    const msg = store.messages().find((x) => x.dir === dir && x.peer === peer && x.id === id);
+    if (!msg || !['held', 'needs attention', 'unconfirmed', 'not delivered'].includes(msg.state)) return { ok: false, error: 'nothing to dismiss' };
+    store.patchMessage(dir, peer, id, { state: 'dismissed', note: null });
+    changed();
+    return { ok: true };
+  }
+
   function unlink(id) {
     const ok = store.removePeer(id);
     if (ok) unlinkedAt.set(id, now());
+    // An accepted invite would otherwise keep confirming the link to a joiner that is no longer a teammate.
+    for (const v of invites.values()) if (v.joiner?.id === id) v.decision = 'declined';
     changed();
     return { ok };
+  }
+
+  async function deliverJob({ peer, id, manual }) {
+    const msg = store.messages().find((x) => x.dir === 'in' && x.peer === peer && x.id === id);
+    if (!msg || (msg.state !== 'waiting' && !(manual && msg.state === 'held'))) return;
+    // Typed only once its dedupe record is on disk: without it, a retry of the same message after the row is
+    // dropped would be accepted and typed again (Codex r2, three lenses).
+    const rkey = `${peer}|${id}`;
+    if (!store.records.get(rkey)) {
+      if (!msg.hash) { store.patchMessage('in', peer, id, { state: 'held', note: 'no content hash recorded; check it before routing' }); changed(); return; }
+      store.records.set(rkey, { hash: msg.hash, firstAcceptedAt: msg.at }); // throws: requeued by the caller
+    }
+    const tabId = store.settings().orchestratorTab;
+    const authorized = () => {
+      const p = store.peers()[peer];
+      const s = store.settings();
+      if (!p || !p.enabled) return 'the sender is no longer linked';
+      if (!manual && !p.autoRoute) return `Auto-route is off for ${p.name}`;
+      if (!s.accept) return 'Accept team messages is off';
+      if (!s.orchestratorTab) return 'no orchestrator tab is pinned';
+      if (s.orchestratorTab !== tabId) return 'the orchestrator tab changed';
+      return null;
+    };
+    const why = authorized();
+    if (why) { store.patchMessage('in', peer, id, { state: 'held', note: why }); changed(); return; }
+    const deps = deliverDeps(tabId, authorized);
+    if (!deps) { store.patchMessage('in', peer, id, { state: 'held', note: 'delivery is not available' }); changed(); return; }
+    const card = deliveryCard({ fromName: msg.peerName, fromFp: peer, at: msg.at, id, text: msg.text });
+    if (card.error) { store.patchMessage('in', peer, id, { state: 'held', note: card.error }); changed(); return; }
+    store.patchMessage('in', peer, id, { state: 'routing', note: null });
+    changed();
+    let result;
+    try { result = await deliver(deps, tabId, card.text); } catch (err) { result = { state: 'needs attention', note: `delivery failed: ${err.message}` }; }
+    store.patchMessage('in', peer, id, { state: result.state, note: result.note || null, routedAt: result.state === 'routed' ? now() : undefined });
+    changed();
   }
 
   /** A person routes a held message now (Auto-route off, or it gave up waiting). */
   function routeNow(peer, id) {
     const msg = store.messages().find((x) => x.dir === 'in' && x.peer === peer && x.id === id);
-    if (!msg || msg.state !== 'held') return { ok: false, error: 'that message is not waiting for you' };
+    if (!msg || (msg.state !== 'held' && msg.state !== 'waiting')) return { ok: false, error: 'that message is not waiting for you' };
+    if (msg.state === 'waiting') { enqueueDelivery(peer, id); return { ok: true }; }
     enqueueDelivery(peer, id, true);
     return { ok: true };
   }
@@ -290,8 +320,8 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     return { ok: true, id: msg.id, short: msg.id.slice(0, 8), to: peer.name };
   }
 
-  function reply(ref, text) {
-    const orig = store.findById(ref, 'in');
+  function reply(ref, text, peer = null) {
+    const orig = store.findById(ref, 'in', peer);
     if (!orig) return { ok: false, error: `no single received message has the id ${ref}` };
     return send(orig.peer, text, { kind: 'reply', replyTo: orig.id });
   }
@@ -330,7 +360,7 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
       for (const msg of store.messages().filter((x) => x.dir === 'out' && (x.state === 'queued' || x.state === 'sending'))) {
         if (stopped) return;
         if (t >= msg.deadline) {
-          store.patchMessage('out', msg.peer, msg.id, { state: msg.reached ? 'unconfirmed' : 'not delivered' });
+          store.patchMessage('out', msg.peer, msg.id, { state: msg.reached || msg.state === 'sending' ? 'unconfirmed' : 'not delivered' });
           changed();
           continue;
         }
@@ -353,7 +383,8 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
         console.error('[team] outbox unreadable:', err.message);
         retryLater = true;
       }
-      if (retryLater) next = Math.min(next, now() + 30_000);
+      // Writes failing: back off 30 s, never the past nextAt of the row that failed (a tight loop of failed writes).
+      if (retryLater) next = now() + 30_000;
       if (next !== Infinity) schedulePump(next - now());
     }
   }
@@ -364,7 +395,7 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     const backoff = BACKOFF_MS[Math.min(n - 1, BACKOFF_MS.length - 1)];
     if (!peer || !peer.enabled) {
       // An earlier attempt may have arrived (its receipt lost): that stays "unconfirmed", never "not delivered".
-      store.patchMessage('out', msg.peer, msg.id, { state: msg.reached ? 'unconfirmed' : 'not delivered', note: peer ? 'teammate disabled' : 'no longer linked' });
+      store.patchMessage('out', msg.peer, msg.id, { state: msg.reached || msg.state === 'sending' ? 'unconfirmed' : 'not delivered', note: peer ? 'teammate disabled' : 'no longer linked' });
       changed();
       return;
     }
@@ -435,7 +466,7 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
   }
 
   return {
-    unlink, messagesForUi,
+    unlink, dismiss, messagesForUi,
     status, createInvite, hello, link, decideLink, join, receive, routeNow,
     findPeer, send, reply, retry, sendAgain, start, stop, settingsChanged, pump,
     SIG_HEADER,
