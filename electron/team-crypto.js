@@ -1,8 +1,8 @@
 /**
  * Team communicator crypto (docs/team-communicator.md). Pure functions over node:crypto.
  *
- * - Identity: an Ed25519 key (signing) and an X25519 key (encryption) per install. The fingerprint is the first
- *   10 chars of base64url(sha256(ed spki || x spki)), shown as XXXXX-XXXXX.
+ * - Identity: an Ed25519 key (signing) and an X25519 key (encryption) per install. The fingerprint is
+ *   base64url(sha256(ed spki || x spki)) in full; its first 10 chars are shown as XXXXX-XXXXX for people.
  * - Sealing: X25519 ECDH with a fresh ephemeral key, HKDF-SHA256 (salt = eph spki || recipient spki, info names the
  *   purpose), AES-256-GCM with the caller's header bytes as AAD. A different purpose ("msg", "link", ...) derives a
  *   different key, so a ciphertext made for one cannot be opened as another.
@@ -45,11 +45,16 @@ function privateKey(b64, kind) {
   return key;
 }
 
+/**
+ * The install's identity: the FULL base64url sha256 of both public keys (43 chars). Every check, invite and peer
+ * key uses this; a 60-bit short form could be ground to a second preimage by someone on the path.
+ */
 export function fingerprint(ed, x) {
-  const h = crypto.createHash('sha256').update(fromB64u(ed)).update(fromB64u(x)).digest();
-  const s = b64u(h).slice(0, 10);
-  return `${s.slice(0, 5)}-${s.slice(5)}`;
+  return b64u(crypto.createHash('sha256').update(fromB64u(ed)).update(fromB64u(x)).digest());
 }
+
+/** Display only (XXXXX-XXXXX). Never compared, never used as a key. */
+export const shortFp = (fp) => `${String(fp).slice(0, 5)}-${String(fp).slice(5, 10)}`;
 
 export function sign(identity, bytes) {
   return b64u(crypto.sign(null, Buffer.from(bytes), privateKey(identity.edPriv, 'ed25519')));

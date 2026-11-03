@@ -26,8 +26,9 @@ orchestrator; all three Macs are on Sam's tailnet under Sam's own Tailscale logi
 
 - Two key pairs made on first use: Ed25519 (signing) and X25519 (encryption), `crypto.generateKeyPairSync`.
   Private keys are stored under `<userData>/team/identity.json`, encrypted with Electron `safeStorage`; they never
-  leave main. The install's fingerprint = first 10 chars of `base64url(sha256(ed25519 spki || x25519 spki))`, shown
-  as `XXXXX-XXXXX`.
+  leave main. The install's fingerprint = the full `base64url(sha256(ed25519 spki || x25519 spki))` (43 chars,
+  256 bits), used in invites, checks and peer keys. People see its first 10 chars as `XXXXX-XXXXX`; that short form
+  is never compared (a 60-bit value could be ground to a second preimage; security review 2026-11-03).
 - A display name (default `os.hostname()` without `.local`) and this install's reachable endpoint: its full
   MagicDNS name and phone-server port.
 
@@ -67,7 +68,8 @@ recipient's key. HTTPS is used when the peer has it and not required (audit #2, 
 4. A checks the secret, then **asks its user**: "Link with <name> (fingerprint B, at <host>)?". On Accept A stores
    the peer and answers a signed confirmation; B stores A on receiving it. Decline or timeout: nothing stored,
    secret spent. The confirmation is A's signature over `"dobius-team-link-ok|" + sha256(secret) + "|" + B
-   fingerprint + "|" + B's request nonce`, and B accepts only a confirmation that binds its own nonce and keys for
+   fingerprint + "|" + B's request nonce + "|" + A's name, host and port` (every field B stores about A is signed),
+   and B accepts only a confirmation that binds its own nonce and keys for
    this attempt, so a replayed older confirmation cannot complete a new join (r3 #6). **A lost confirmation is
    recoverable (r2 #9):** until the invite expires, A answers a repeat
    request carrying the same secret AND the same B keys with the same signed confirmation (no second prompt); a

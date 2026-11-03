@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { generateIdentity, fingerprint, seal, open, sign, verify, publicKey } from '../team-crypto.js';
+import { generateIdentity, fingerprint, shortFp, seal, open, sign, verify, publicKey } from '../team-crypto.js';
 import * as P from '../team-protocol.js';
 
 const mk = (name, port) => {
@@ -77,6 +77,15 @@ test('link confirmation binds this attempt: a replayed one for another nonce or 
   assert.equal(P.checkLinkConfirmation(conf, parsed, brett.fp, nonce), null, 'made for another joiner');
   const forged = P.linkConfirmation(brett.identity, sam.me, inv.secret, bryan.fp, nonce);
   assert.equal(P.checkLinkConfirmation(forged, parsed, bryan.fp, nonce), null, 'not the invite fingerprint');
+  for (const f of [{ host: 'evil.tail0.ts.net' }, { port: 8421 }, { name: 'Mallory' }]) {
+    assert.equal(P.checkLinkConfirmation({ ...conf, ...f }, parsed, bryan.fp, nonce), null, `signed ${Object.keys(f)[0]}`);
+  }
+});
+
+test('fingerprint is the full 256-bit digest; the short form is display only', () => {
+  assert.match(sam.fp, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(shortFp(sam.fp), `${sam.fp.slice(0, 5)}-${sam.fp.slice(5, 10)}`);
+  assert.equal(P.parseInvite(P.makeInvite(sam.me, shortFp(sam.fp), NOW).text), null, 'a short fingerprint is not an invite');
 });
 
 const peersOfSam = () => ({ [bryan.fp]: { ...bryan.asPeer }, [brett.fp]: { ...brett.asPeer } });

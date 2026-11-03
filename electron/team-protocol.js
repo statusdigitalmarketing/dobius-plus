@@ -15,7 +15,7 @@ export const INVITE_MS = 15 * 60 * 1000;
 export const KINDS = new Set(['ask', 'reply', 'note']);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const FP = /^[A-Za-z0-9_-]{5}-[A-Za-z0-9_-]{5}$/;
+const FP = /^[A-Za-z0-9_-]{43}$/;
 const HOST = /^[A-Za-z0-9.-]{1,253}$/;
 const NONCE = /^[0-9a-f]{32}$/;
 const isPort = (p) => Number.isInteger(p) && p > 0 && p < 65536;
@@ -60,7 +60,7 @@ export function makeInvite(me, fp, now) {
 }
 
 export function parseInvite(text) {
-  const m = /^dobius-team:1:([A-Za-z0-9.-]{1,253}):(\d{1,5}):([A-Za-z0-9_-]{5}-[A-Za-z0-9_-]{5}):([A-Za-z0-9_-]{22})$/.exec(String(text || '').trim());
+  const m = /^dobius-team:1:([A-Za-z0-9.-]{1,253}):(\d{1,5}):([A-Za-z0-9_-]{43}):([A-Za-z0-9_-]{22})$/.exec(String(text || '').trim());
   if (!m || !isPort(Number(m[2]))) return null;
   return { host: m[1], port: Number(m[2]), fp: m[3], secret: m[4] };
 }
@@ -95,11 +95,14 @@ export function openLinkRequest(identity, myFp, body, sig) {
   return { id: fp, name, host, port, ed, x, secret, reqNonce };
 }
 
-const linkOkBytes = (secret, bFp, reqNonce) => `dobius-team-link-ok|${sha256hex(secret)}|${bFp}|${reqNonce}`;
+// Binds the attempt AND every field B will store about A (name, endpoint), so nothing in the confirmation can be
+// changed on the way.
+const linkOkBytes = (secret, bFp, reqNonce, c) =>
+  `dobius-team-link-ok|${sha256hex(secret)}|${bFp}|${reqNonce}|${c.name}|${c.host}|${c.port}`;
 
 export function linkConfirmation(identity, me, secret, bFp, reqNonce) {
-  return { v: V, name: me.name, host: me.host, port: me.port, ed: identity.ed, x: identity.x,
-    sig: sign(identity, linkOkBytes(secret, bFp, reqNonce)) };
+  const c = { v: V, name: me.name, host: me.host, port: me.port, ed: identity.ed, x: identity.x };
+  return { ...c, sig: sign(identity, linkOkBytes(secret, bFp, reqNonce, c)) };
 }
 
 /** A as a peer, only if the confirmation comes from the invite's fingerprint and binds THIS attempt (r3 #6). */
@@ -108,7 +111,7 @@ export function checkLinkConfirmation(conf, invite, myFp, reqNonce) {
   if (!shortText(conf.name, 80) || !HOST.test(conf.host || '') || !isPort(conf.port)) return null;
   let fp;
   try { fp = fingerprint(conf.ed, conf.x); } catch { return null; } // malformed keys
-  if (fp !== invite.fp || !verify(conf.ed, linkOkBytes(invite.secret, myFp, reqNonce), conf.sig)) return null;
+  if (fp !== invite.fp || !verify(conf.ed, linkOkBytes(invite.secret, myFp, reqNonce, conf), conf.sig)) return null;
   return { id: fp, name: conf.name, host: conf.host, port: conf.port, ed: conf.ed, x: conf.x };
 }
 
