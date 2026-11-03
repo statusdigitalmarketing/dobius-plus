@@ -1,4 +1,5 @@
 import pty from 'node-pty';
+import { trackPasteMode } from './paste-mode.js';
 import { isTerminalReply, createVisibleOutputScanner } from './terminal-reply.js';
 import { isClaudeCommand, classifyClaudeProcess } from './claude-argv.js';
 import fs from 'fs';
@@ -146,6 +147,11 @@ const ESC_RESYNC_WINDOW = 2048;
  */
 // Also inside a combined mode list (ESC [ ? 25 ; 1049 h): Codex High.
 const ALT_SCREEN_RE = /\x1b\[\?(?:[0-9;]*;)?(?:1049|1047|47)(?:;[0-9;]*)?([hl])/g;
+
+/** Whether the tab's program has bracketed paste on right now (tracked over ALL its output, not the buffer). */
+export function terminalBracketedPaste(id) {
+  return !!terminals.get(id)?.pasteMode?.on;
+}
 
 /** Whether the tab's rolling output buffer begins inside the alternate screen. */
 export function terminalAltAtBufferStart(id) {
@@ -299,6 +305,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     if (!entry || entry.pty !== term) return;
     if (entry.visibleScan(data)) entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
     entry.rawOutputSeq = (entry.rawOutputSeq || 0) + 1; // see terminalRawOutputSeq
+    entry.pasteMode = trackPasteMode(entry.pasteMode, data); // see terminalBracketedPaste
     // Global observers (main-process status authority, v1.0.43): see EVERY
     // terminal's output regardless of whether a window or mobile client is
     // attached, so tab status is tracked centrally. Cheap: observers do a

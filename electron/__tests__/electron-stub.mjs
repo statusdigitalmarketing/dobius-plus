@@ -22,7 +22,9 @@ export const nativeTheme = { on: () => {} };
 // mobile-server.js imports this at module load (it holds a power assertion
 // while the phone bridge is up); the pure helpers under test never call it.
 export const powerSaveBlocker = { start: () => 0, stop: () => {}, isStarted: () => false };
+// team-main.js (imported via mobile-server.js): no secure storage under test, so no team identity is ever made.
+export const safeStorage = { isEncryptionAvailable: () => false, encryptString: () => { throw new Error('no safeStorage in tests'); }, decryptString: () => { throw new Error('no safeStorage in tests'); } };
 export default {
   app, ipcMain, BrowserWindow, shell, dialog, Notification,
-  powerMonitor, nativeTheme, powerSaveBlocker,
+  powerMonitor, nativeTheme, powerSaveBlocker, safeStorage,
 };

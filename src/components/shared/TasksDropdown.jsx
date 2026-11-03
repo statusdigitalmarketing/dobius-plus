@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useStore } from '../../store/store';
 import { dueLabel, localDay, sortOpenTasks, matchesQuery, sameProject } from '../../../shared/task-due.js';
+import TeamList, { needsPerson } from './TeamList';
 
 const MONO = "'SF Mono', monospace";
 
@@ -65,7 +66,10 @@ export default function TasksDropdown() {
   const addBrowserTab = useStore((s) => s.addBrowserTab);
   const setActiveView = useStore((s) => s.setActiveView);
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState(() => (readPref('dobius.tasks.tab', 'project') === 'inbox' ? 'inbox' : 'project'));
+  const [tab, setTab] = useState(() => {
+    const t = readPref('dobius.tasks.tab', 'project');
+    return t === 'inbox' || t === 'team' ? t : 'project';
+  });
   const [query, setQuery] = useState('');
   const [tasks, setTasks] = useState([]);
   const [newTitle, setNewTitle] = useState('');
@@ -79,6 +83,8 @@ export default function TasksDropdown() {
   // null until main answers; { installed, canStart }. No board here: no Inbox tab.
   const [board, setBoard] = useState(null);
   const [starting, setStarting] = useState(false);
+  // Team communicator: the segment shows once a teammate is linked. { peers, attention } (docs/team-communicator.md)
+  const [team, setTeam] = useState({ peers: 0, attention: 0, total: 0 });
   const dropdownRef = useRef(null);
   const inputRef = useRef(null);
   const inboxReq = useRef(0);
@@ -125,7 +131,28 @@ export default function TasksDropdown() {
   }, [open]);
 
   const inboxShown = !!board?.installed;
-  const view = tab === 'inbox' && inboxShown ? 'inbox' : 'project';
+  // Also with no teammate left: messages from an unlinked one may still need a Dismiss.
+  const teamShown = team.peers > 0 || team.total > 0;
+  const view = tab === 'inbox' && inboxShown ? 'inbox' : (tab === 'team' && teamShown ? 'team' : 'project');
+
+  useEffect(() => {
+    const a = window.electronAPI;
+    if (!a?.teamStatus) return undefined;
+    let live = true;
+    const loadTeam = async () => {
+      try {
+        const [st, msgs] = await Promise.all([a.teamStatus(), a.teamMessages()]);
+        if (!live) return;
+        const attention = msgs?.ok ? msgs.list.filter(needsPerson).length : 0;
+        setTeam({ peers: st?.ok ? st.peers.length : 0, attention, total: msgs?.ok ? msgs.list.length : 0 });
+      } catch (err) {
+        console.error('[TasksDropdown] team status failed:', err);
+      }
+    };
+    loadTeam();
+    const off = a.onTeamChanged?.(loadTeam);
+    return () => { live = false; off?.(); };
+  }, []);
 
   // Read on open, then about once a minute while the Inbox tab stays open.
   useEffect(() => {
@@ -372,6 +399,9 @@ export default function TasksDropdown() {
                     alert={inbox.data?.overdue > 0}
                   />
                 )}
+                {teamShown && (
+                  <Segment active={view === 'team'} onClick={() => switchTab('team')} label="Team" count={team.attention || null} alert={team.attention > 0} />
+                )}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 {view === 'project' ? (
@@ -385,7 +415,7 @@ export default function TasksDropdown() {
                       {syncing ? 'Syncing…' : '⟳ Asana'}
                     </HeaderButton>
                   </>
-                ) : (
+                ) : view === 'team' ? null : (
                   <>
                     <HeaderButton onClick={loadInbox} disabled={inbox.state === 'loading' || inbox.state === 'refreshing'} color="var(--dim)" title="Read the board again">
                       {inbox.state === 'refreshing' || inbox.state === 'loading' ? '…' : '⟳'}
@@ -405,7 +435,7 @@ export default function TasksDropdown() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={view === 'project' ? 'Filter tasks…' : 'Search the inbox…'}
+                placeholder={view === 'project' ? 'Filter tasks…' : view === 'team' ? 'Search team messages…' : 'Search the inbox…'}
                 aria-label="Filter"
                 style={inputStyle}
               />
@@ -490,6 +520,8 @@ export default function TasksDropdown() {
                   </button>
                 </div>
               </>
+            ) : view === 'team' ? (
+              <TeamList query={query} />
             ) : (
               <InboxList
                 inbox={inbox}

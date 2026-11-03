@@ -7,6 +7,7 @@ import { THEMES } from '../../lib/themes';
 import { normalizeNewTabTool } from '../../../shared/new-tab.js';
 import AccountsSection from './AccountsSection';
 import GwsAccounts from './GwsAccounts';
+import TeamSection from './TeamSection';
 
 export default function Settings() {
   const themeIndex = useStore((s) => s.themeIndex);
@@ -767,6 +768,10 @@ export default function Settings() {
           </>
         )}
       </Section>
+
+      <div data-settings-section="team">
+        <TeamSection Section={Section} SettingRow={SettingRow} Toggle={Toggle} />
+      </div>
 
       {/* iMessage Bridge — text yourself to drive Dobius */}
       <Section id="imessage" title="iMessage Bridge">

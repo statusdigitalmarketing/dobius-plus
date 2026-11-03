@@ -114,6 +114,8 @@ export function validateOpenTabBody(body) {
 
 // A horizontal rule row: Claude draws one above and one below its prompt.
 const RULE_RE = /^\s*─{8,}/;
+// A flat box's edge: a rule from column 0 (typed text in the box never starts there).
+const EDGE_RE = /^─{8,}/;
 // The prompt row itself. Told from a selector row ("❯ 1. Yes") by where the
 // caret is (caretInBox); a screen with no cursor position (tests that pass
 // plain rows) falls back to refusing any numbered row.
@@ -188,10 +190,18 @@ export function promptBoxText(lines, modes) {
   // The box's CLOSING edge must be near the bottom; its top is the nearest
   // rule above it, with the prompt row right under that. The box may be
   // tall once a message is typed into it.
+  // The guard against a fake box a person typed into a draft ("────" / "❯ " /
+  // "────" rows inside the real box; Codex team review, Critical, three rounds):
+  // Claude draws its box's rules from COLUMN 0; everything typed into the box
+  //    starts at column 2 or later ("❯ " on the first row, an indent on the
+  //    rest). So a flat box's edges must start at column 0. This holds with or
+  //    without colour (NO_COLOR).
+  //    (A colour requirement was tried first and dropped: NO_COLOR and coloured
+  //    status lines made it refuse real prompts, and column 0 alone covers it.)
   for (let j = last; j >= 1 && j >= last - PROMPT_BOTTOM_ROWS; j -= 1) {
-    const flat = RULE_RE.test(lines[j]);
+    const flat = EDGE_RE.test(lines[j]);
     if (!flat && !BOX_BOTTOM_RE.test(lines[j])) continue;
-    const isTop = flat ? (r) => RULE_RE.test(r) : (r) => BOX_TOP_RE.test(r);
+    const isTop = flat ? (r) => EDGE_RE.test(r) : (r) => BOX_TOP_RE.test(r);
     let top = j - 1;
     while (top >= 0 && j - top <= MAX_BOX_ROWS && !isTop(lines[top] || '')) top -= 1;
     if (top < 0 || top === j - 1 || j - top > MAX_BOX_ROWS) continue;
@@ -225,17 +235,19 @@ export function promptBoxText(lines, modes) {
 // Enter would send something the card did not say.
 const squash = (x) => String(x).replace(/\s+/g, '');
 // Claude's marker for a long paste names the paste's number in the session
-// and its extra lines. The tab is brand new, so the card is paste #1, and the
-// line count must be the card's: an older entry recalled into the box (shown
-// as some other marker) never passes.
+// and its extra lines. /openTab's tab is brand new, so the card is paste #1,
+// and the line count must be the card's: an older entry recalled into the box
+// (shown as some other marker) never passes. Team delivery pastes into a
+// long-running orchestrator, past its first paste: `anyPaste` accepts any
+// number, still with the message's own line count.
 const PASTE_MARKER_RE = /^\[Pasted text #(\d+)(?: \+(\d+) lines?)?\]$/;
-function boxIsMessage(boxText, message) {
+function boxIsMessage(boxText, message, anyPaste = false) {
   if (typeof boxText !== 'string') return false;
   const marker = PASTE_MARKER_RE.exec(boxText.trim());
   if (marker) {
     const lines = message.split('\n').length;
     const extra = marker[2] === undefined ? null : Number(marker[2]);
-    return marker[1] === '1' && (extra === null ? lines === 1 : (extra === lines - 1 || extra === lines));
+    return (anyPaste || marker[1] === '1') && (extra === null ? lines === 1 : (extra === lines - 1 || extra === lines));
   }
   const want = squash(message);
   return want.length > 0 && squash(boxText) === want;
@@ -246,6 +258,78 @@ export const boxHoldsMessage = boxIsMessage;
 // line) still counts as NOT sent, while an empty box or Claude's
 // placeholder ("Try ...") counts as sent.
 export const boxStillHasMessage = boxIsMessage;
+
+// Brett: "after it types the message, press Enter so Claude starts right
+// away". The Enter is the ONLY submit (the message cannot contain one) and
+// goes out as its own write, only after Claude has visibly taken the paste
+// (its echo, then quiet), and only while everything that cleared the paste
+// still holds: claude in the foreground, its prompt box on screen, no
+// output since that was read, and nothing else typed into the tab since the
+// paste (a person's keys, or their mouse over a fullscreen Claude). Any
+// doubt leaves the message typed and unsent: { ok, submitted: false }.
+export async function submitAfterPaste(deps, tabId, pty, watch, seqAtPaste, message, projectPath, opts = {}) {
+  const { anyPaste = false, beforeEnter = null } = opts;
+  // Any person's input from here on (a wheel turn included) can change what
+  // the box holds, so it withholds the Enter and voids the confirmation.
+  const inputAtPaste = watch.input();
+  const typedOnly = (why) => ({ ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: ${why}; press Enter in the tab to send it` });
+  const end = deps.now() + SUBMIT_SETTLE_MAX_MS;
+  let last = seqAtPaste;
+  let quiet = 0;
+  while (quiet < SUBMIT_QUIET_POLLS) {
+    if (deps.now() >= end) return typedOnly('Claude did not show the pasted text in time');
+    await deps.sleep(SUBMIT_POLL_MS);
+    const seq = watch.seq();
+    quiet = seq > seqAtPaste && seq === last ? quiet + 1 : 0;
+    last = seq;
+  }
+  const seqAtRead = watch.seq();
+  let screen;
+  try { screen = await watch.screen(); } catch { screen = null; }
+  const box = screen ? promptBoxText(screen.lines, screen.modes) : null;
+  const holds = boxIsMessage(box, message, anyPaste);
+  const claude = holds && (await deps.claudeRunning(tabId, projectPath));
+  // Same tick from here to the Enter.
+  if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return typedOnly('the tab closed or its shell changed');
+  if (!holds) return typedOnly('Claude\'s prompt did not show the message (a dialog may be open)');
+  if (!claude) return typedOnly('Claude was not in the foreground with its prompt on screen');
+  if (watch.seq() !== seqAtRead) return typedOnly('the screen changed while it was being checked');
+  if (watch.keys() !== 0 || deps.inputBusy(tabId)) return typedOnly('someone typed into the tab');
+  if (watch.input() !== inputAtPaste) return typedOnly('someone used the mouse or keyboard in the tab after the paste');
+  // The caller's own last-moment check (team delivery: still authorised, still
+  // the pinned tab). Synchronous, so nothing changes before the Enter.
+  const veto = beforeEnter?.();
+  if (veto) return typedOnly(veto);
+  // Security review (HIGH, "a token holder can submit a prompt"), kept on
+  // purpose: Brett asked for the send, and /tabSend with the same token
+  // already writes message + Enter into ANY tab, plain shells included.
+  // This route adds no capability the token lacks and is narrower: a fresh
+  // tab, claude verified as its foreground process, and the session's own
+  // permission mode (in bypass there are no prompts: Sam's decision). See
+  // docs/bridge-open-tab.md, Security.
+  deps.submit(tabId);
+  // Did Claude take it? A submit empties the box; an Enter bound to "new
+  // line" (Claude supports that) leaves the message sitting there.
+  const confirmEnd = deps.now() + SUBMIT_CONFIRM_MS;
+  while (deps.now() < confirmEnd) {
+    await deps.sleep(SUBMIT_POLL_MS);
+    let after;
+    try { after = await watch.screen(); } catch { after = null; }
+    // Someone typed meanwhile (a Ctrl+C can clear an unsent draft): an
+    // empty box no longer proves Claude took it.
+    if (watch.keys() !== 0 || watch.input() !== inputAtPaste) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but someone typed or used the mouse in the tab before Claude was seen taking the message; check the tab' };
+    // A closing window sends Ctrl+C straight to the PTY (no key counted),
+    // which also empties the box.
+    if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but the tab closed before Claude was seen taking the message' };
+    if (!after) continue; // a failed read proves nothing
+    // Only an input box that is SEEN and no longer holds the message
+    // confirms the send, whatever the transcript above it now shows; a frame
+    // with no recognisable box proves nothing.
+    const box = promptBoxText(after.lines, after.modes);
+    if (box !== null && !boxIsMessage(box, message, anyPaste)) return { ok: true, tabId, submitted: true };
+  }
+  return { ok: true, tabId, submitted: false, note: 'Enter was pressed but the message is still in Claude\'s prompt (is Enter set to insert a new line?); press the key that sends it' };
+}
 
 /**
  * The /openTab service. deps:
@@ -308,73 +392,6 @@ export function createOpenTabService(deps, opts = {}) {
     return 'timeout';
   }
 
-  // Brett: "after it types the message, press Enter so Claude starts right
-  // away". The Enter is the ONLY submit (the message cannot contain one) and
-  // goes out as its own write, only after Claude has visibly taken the paste
-  // (its echo, then quiet), and only while everything that cleared the paste
-  // still holds: claude in the foreground, its prompt box on screen, no
-  // output since that was read, and nothing else typed into the tab since the
-  // paste (a person's keys, or their mouse over a fullscreen Claude). Any
-  // doubt leaves the message typed and unsent: { ok, submitted: false }.
-  async function submitPasted(tabId, pty, watch, seqAtPaste, message, projectPath) {
-    // Any person's input from here on (a wheel turn included) can change what
-    // the box holds, so it withholds the Enter and voids the confirmation.
-    const inputAtPaste = watch.input();
-    const typedOnly = (why) => ({ ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: ${why}; press Enter in the tab to send it` });
-    const end = deps.now() + SUBMIT_SETTLE_MAX_MS;
-    let last = seqAtPaste;
-    let quiet = 0;
-    while (quiet < SUBMIT_QUIET_POLLS) {
-      if (deps.now() >= end) return typedOnly('Claude did not show the pasted text in time');
-      await deps.sleep(SUBMIT_POLL_MS);
-      const seq = watch.seq();
-      quiet = seq > seqAtPaste && seq === last ? quiet + 1 : 0;
-      last = seq;
-    }
-    const seqAtRead = watch.seq();
-    let screen;
-    try { screen = await watch.screen(); } catch { screen = null; }
-    const box = screen ? promptBoxText(screen.lines, screen.modes) : null;
-    const holds = boxHoldsMessage(box, message);
-    const claude = holds && (await deps.claudeRunning(tabId, projectPath));
-    // Same tick from here to the Enter.
-    if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return typedOnly('the tab closed or its shell changed');
-    if (!holds) return typedOnly('Claude\'s prompt did not show the message (a dialog may be open)');
-    if (!claude) return typedOnly('Claude was not in the foreground with its prompt on screen');
-    if (watch.seq() !== seqAtRead) return typedOnly('the screen changed while it was being checked');
-    if (watch.keys() !== 0 || deps.inputBusy(tabId)) return typedOnly('someone typed into the tab');
-    if (watch.input() !== inputAtPaste) return typedOnly('someone used the mouse or keyboard in the tab after the paste');
-    // Security review (HIGH, "a token holder can submit a prompt"), kept on
-    // purpose: Brett asked for the send, and /tabSend with the same token
-    // already writes message + Enter into ANY tab, plain shells included.
-    // This route adds no capability the token lacks and is narrower: a fresh
-    // tab, claude verified as its foreground process, and the session's own
-    // permission mode (in bypass there are no prompts: Sam's decision). See
-    // docs/bridge-open-tab.md, Security.
-    deps.submit(tabId);
-    // Did Claude take it? A submit empties the box; an Enter bound to "new
-    // line" (Claude supports that) leaves the message sitting there.
-    const confirmEnd = deps.now() + SUBMIT_CONFIRM_MS;
-    while (deps.now() < confirmEnd) {
-      await deps.sleep(SUBMIT_POLL_MS);
-      let after;
-      try { after = await watch.screen(); } catch { after = null; }
-      // Someone typed meanwhile (a Ctrl+C can clear an unsent draft): an
-      // empty box no longer proves Claude took it.
-      if (watch.keys() !== 0 || watch.input() !== inputAtPaste) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but someone typed or used the mouse in the tab before Claude was seen taking the message; check the tab' };
-      // A closing window sends Ctrl+C straight to the PTY (no key counted),
-      // which also empties the box.
-      if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return { ok: true, tabId, submitted: false, note: 'Enter was pressed, but the tab closed before Claude was seen taking the message' };
-      if (!after) continue; // a failed read proves nothing
-      // Only an input box that is SEEN and no longer holds the message
-      // confirms the send, whatever the transcript above it now shows; a frame
-      // with no recognisable box proves nothing.
-      const box = promptBoxText(after.lines, after.modes);
-      if (box !== null && !boxStillHasMessage(box, message)) return { ok: true, tabId, submitted: true };
-    }
-    return { ok: true, tabId, submitted: false, note: 'Enter was pressed but the message is still in Claude\'s prompt (is Enter set to insert a new line?); press the key that sends it' };
-  }
-
   async function run(projectPath, message) {
     const resolved = await deps.resolveProject(projectPath);
     if (resolved.error) return { ok: false, status: resolved.status || 400, error: resolved.error };
@@ -412,7 +429,7 @@ export function createOpenTabService(deps, opts = {}) {
       const lead = MODE_LEAD_RE.exec(message);
       if (lead) return { ok: true, tabId, submitted: false, note: `the message is typed into Claude's prompt but was not sent: it starts with "${lead[0].trim()}", which Claude treats as a command rather than a message; check it and press Enter in the tab yourself` };
       if (TRAILING_BACKSLASH_RE.test(message)) return { ok: true, tabId, submitted: false, note: 'the message is typed into Claude\'s prompt but was not sent: it ends with a backslash, which Claude reads as a line continuation; press Enter in the tab yourself' };
-      return await submitPasted(tabId, pty, watch, outputBeforePaste, message, resolved.path);
+      return await submitAfterPaste(deps, tabId, pty, watch, outputBeforePaste, message, resolved.path);
     } finally {
       watch.stop();
     }

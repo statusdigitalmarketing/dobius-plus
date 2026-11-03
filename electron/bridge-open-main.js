@@ -132,6 +132,65 @@ export async function isClaudeProcess(pid, { ps = psField, exe = executablePath,
   try { return CLAUDE_SCRIPT_RE.test(fs.realpathSync(token)) && fs.statSync(token).isFile(); } catch { return false; }
 }
 
+// Does anything Claude started hold THIS terminal open, on any descriptor,
+// directly or through /dev/tty (an external editor from Ctrl+G, a `!` shell
+// command, a helper reading fd 3)? Then the screen may not be Claude's prompt,
+// whatever it looks like, and nothing may be pasted (Codex team review r4/r5,
+// Critical). MCP servers and tool commands run on pipes and hold no descriptor
+// on the terminal (checked on a live Claude 2.1.317 session: none of its
+// descendants did). Only descriptors open for READING count (a write-only
+// stderr on the terminal steals no keys). Any doubt counts as yes: ps or lsof
+// failing, Claude gone from the process table, a tree too large to walk, or a
+// descendant owned by another user (sudo vim): macOS does not let lsof see
+// another user's descriptors, and it skips such a process silently.
+// Residual: a LOCAL process built to race this check (forking a reader between
+// the process snapshot and the paste) is outside the threat model, which is a
+// remote teammate's text.
+export async function ttyReaderUnder(pid, tty, { exec = execFileP } = {}) {
+  try {
+    const { stdout } = await exec('/bin/ps', ['-A', '-o', 'pid=,ppid=,uid=,tty='], { timeout: 1500, encoding: 'utf8' });
+    const kids = new Map();
+    for (const line of stdout.split('\n')) {
+      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)/);
+      if (!m) continue;
+      if (!kids.has(m[2])) kids.set(m[2], []);
+      kids.get(m[2]).push({ pid: m[1], uid: Number(m[3]), tty: m[4] });
+    }
+    const me = typeof process.getuid === 'function' ? process.getuid() : null;
+    // Claude itself must still be there: gone means its shell may have started
+    // something else on the terminal.
+    if (![...kids.values()].some((list) => list.some((k) => k.pid === String(pid)))) return true;
+    const desc = [];
+    const queue = [String(pid)];
+    while (queue.length) {
+      if (desc.length > 5000) return true;
+      for (const k of kids.get(queue.shift()) || []) {
+        if (me !== null && k.uid !== me) return true;
+        queue.push(k.pid);
+        desc.push(k.pid);
+      }
+    }
+    if (!desc.length) return false;
+    // Every descriptor of every descendant: a process without this terminal as
+    // its controlling tty can still have opened it.
+    // -n -P: no host or port name lookups (a slow resolver must not time this
+    // out on an MCP server's socket). -Fan: access mode, then name, per fd.
+    const r = await exec('/usr/sbin/lsof', ['-n', '-P', '-a', '-p', desc.join(','), '-Fan'], { timeout: 3000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+      .catch((err) => (err?.code === 1 && !err.stdout ? { stdout: '' } : Promise.reject(err)));
+    const names = new Set([`/dev/${tty}`, '/dev/tty']);
+    let mode = '';
+    for (const l of r.stdout.split('\n')) {
+      if (l.startsWith('f') || l.startsWith('p')) mode = '';
+      else if (l.startsWith('a')) mode = l.slice(1);
+      else if (l.startsWith('n') && names.has(l.slice(1)) && mode !== 'w') return true;
+    }
+    return false;
+  } catch (err) {
+    console.warn('[bridge-open] could not check what reads the terminal:', err?.message || err);
+    return true;
+  }
+}
+
 async function childPids(pid) {
   try {
     const { stdout } = await execFileP('/usr/bin/pgrep', ['-P', String(pid)], { timeout: 1000, encoding: 'utf8' });
@@ -477,8 +536,19 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
         // The permission mode is NOT checked (Sam: "bypass permissions should
         // act just like auto mode"); only that this really is claude.
         if (pgid !== tpgid || pgid !== String(pid) || stat.startsWith('T') || (await psField(pid, 'tty')) !== tty || !(await isClaudeProcess(pid))) continue;
-        const cwd = await getProcessCwd(pid);
-        if (cwd && (await fs.promises.realpath(cwd)) === (await fs.promises.realpath(projectPath))) return true;
+        // No project (team delivery into the pinned orchestrator tab, which
+        // can work in any folder): no working-folder check.
+        if (projectPath !== null) {
+          const cwd = await getProcessCwd(pid);
+          if (!cwd || (await fs.promises.realpath(cwd)) !== (await fs.promises.realpath(projectPath))) continue;
+        }
+        // Team delivery only (no project): Claude leads the foreground group,
+        // but an editor or shell command it started may be the one reading the
+        // keyboard. /openTab types into a tab it just opened, where nothing can
+        // be open yet, and keeps main's behaviour (an MCP wrapper holding the
+        // terminal, e.g. `zsh -lc`, must not stop Brett's board sending).
+        if (projectPath === null && (await ttyReaderUnder(pid, tty))) continue;
+        return true;
       } catch { /* this candidate is unreadable: not claude */ }
     }
     return false;

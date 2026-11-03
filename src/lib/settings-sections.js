@@ -10,6 +10,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'projects', label: 'Projects' },
   { id: 'integrations', label: 'Integrations' },
   { id: 'mobile', label: 'Mobile Access' },
+  { id: 'team', label: 'Team' },
   { id: 'imessage', label: 'iMessage Bridge' },
   { id: 'shortcuts', label: 'Keyboard Shortcuts' },
   { id: 'diagnostics', label: 'Diagnostics' },

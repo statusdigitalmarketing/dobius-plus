@@ -33,6 +33,7 @@ import { writeTerminal, listTerminals, sendToTerminalWindow, tabBinDir } from '.
 import { validateTabRename, buildTabCliScript } from './tab-rename.js';
 import { buildCodexStatusScript, HOOK_HEAD_BYTES } from './codex-status.js';
 import { buildOpenCliScript } from './bridge-open-tab.js';
+import { buildTeamCliScript } from './team-cli.js';
 import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
 import { STAGES } from './task-pipeline.js';
 
@@ -169,6 +170,9 @@ function handleCodexStatus(req, res) {
 // not), so a caller waits up to ~2 minutes: window, tab, Claude startup.
 let openTabService = null;
 export function setOpenTabService(svc) { openTabService = svc; }
+// POST /team (dobius-team): team-main.js handleTeamBridge, handed in by main.
+let teamBridge = null;
+export function setTeamBridge(fn) { teamBridge = fn; }
 
 async function handleOpenTab(req, res) {
   let body;
@@ -180,6 +184,19 @@ async function handleOpenTab(req, res) {
     return sendJson(res, status, reply);
   } catch (err) {
     return sendJson(res, 500, { ok: false, error: `could not open the tab: ${err.message}` });
+  }
+}
+
+async function handleTeam(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  if (!teamBridge) return sendJson(res, 503, { ok: false, error: 'Dobius+ is still starting; try again' });
+  try {
+    const { status, json } = teamBridge(body);
+    return sendJson(res, status, json);
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: `team command failed: ${err.message}` });
   }
 }
 
@@ -595,6 +612,7 @@ function handleRequest(req, res) {
   if (req.url === '/tabRename') return handleTabRename(req, res);
   if (req.url === '/codexStatus') return handleCodexStatus(req, res);
   if (req.url === '/openTab') return handleOpenTab(req, res);
+  if (req.url === '/team') return handleTeam(req, res);
   if (req.url === '/setReply') return handleSetReply(req, res);
   if (req.url === '/getReply') return handleGetReply(req, res);
   if (req.url === '/trackWork') return handleTrackWork(req, res);
@@ -680,6 +698,7 @@ function installTabCli() {
     writeIfChanged(path.join(tabBinDir(), 'dobius-tab'), buildTabCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
     writeIfChanged(path.join(tabBinDir(), 'dobius-open'), buildOpenCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
     writeIfChanged(path.join(tabBinDir(), 'dobius-codex-status'), buildCodexStatusScript({ port: PORT, tokenFile: TOKEN_FILE }));
+    writeIfChanged(path.join(tabBinDir(), 'dobius-team'), buildTeamCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
   } catch (err) {
     console.warn(`[voice-bridge] dobius-tab install failed: ${err.message}`);
   }
