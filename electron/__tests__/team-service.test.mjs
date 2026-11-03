@@ -1,0 +1,363 @@
+// Team communicator: store, service (two installs talking in memory), delivery and admission.
+// docs/team-communicator.md. Run: npm run test:teamsvc
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createTeamStore } from '../team-store.js';
+import { createTeamService } from '../team-service.js';
+import { deliver, deliveryCard, boxIsEmpty } from '../team-deliver.js';
+import { createAdmission, PER_IP_IN_FLIGHT } from '../team-routes.js';
+import { trackPasteMode } from '../paste-mode.js';
+
+const box = { available: () => true, encrypt: (s) => Buffer.from(`enc:${s}`), decrypt: (b) => b.toString().slice(4) };
+const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-team-'));
+let clock = 1_800_000_000_000;
+const now = () => clock;
+
+// An in-memory tailnet: host -> service. Records every call so a test can assert what was (not) sent.
+function net() {
+  const hosts = new Map();
+  const calls = [];
+  const request = async ({ host, method, path: p, body, headers }) => {
+    calls.push({ host, method, path: p.split('?')[0] });
+    const svc = hosts.get(host);
+    if (!svc) return { error: 'ECONNREFUSED', reached: false };
+    const sig = headers?.['x-dobius-team-sig'] || '';
+    let r;
+    if (method === 'GET' && p.startsWith('/team/hello?nonce=')) r = svc.hello(p.split('=')[1]);
+    else if (p === '/team/link') r = svc.link(body, sig);
+    else if (p === '/team/message') r = svc.receive(body, sig);
+    else r = { status: 404, json: null };
+    // A JSON round trip, like the wire.
+    return { status: r.status, json: r.json === null ? null : JSON.parse(JSON.stringify(r.json)), reached: true };
+  };
+  return { hosts, calls, request };
+}
+
+function install(name, tailnet, opts = {}) {
+  const store = createTeamStore({ dir: tmp(), box, now });
+  store.setSettings({ name });
+  const events = [];
+  const hooks = {};
+  const host = `${name.toLowerCase()}.tail0.ts.net`;
+  const svc = createTeamService({
+    store, request: tailnet.request, endpoint: () => ({ host, port: 8420 }),
+    deliverDeps: opts.deliverDeps || (() => null),
+    notify: (e, p) => { events.push([e, p]); opts.onNotify?.(e, p); },
+    now, sleep: async (ms) => { clock += ms; hooks.onSleep?.(); },
+  });
+  tailnet.hosts.set(host, svc);
+  return { store, svc, events, host, name, hooks };
+}
+
+async function linkPair(a, b) {
+  const inv = a.svc.createInvite();
+  assert.equal(inv.ok, true);
+  // A accepts as soon as the request shows up (B is polling meanwhile).
+  b.hooks.onSleep = () => { const p = a.svc.status().pendingLinks[0]; if (p) a.svc.decideLink(p.inviteId, true); };
+  try { return await b.svc.join(inv.text); } finally { b.hooks.onSleep = null; }
+}
+
+test('store: identity is encrypted at rest, stable across loads, and refused without secure storage', () => {
+  const dir = tmp();
+  const s1 = createTeamStore({ dir, box, now });
+  const id1 = s1.loadIdentity();
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'identity.json'), 'utf8'));
+  assert.equal(JSON.stringify(onDisk).includes(id1.edPriv), false, 'private key not in plaintext');
+  assert.equal((fs.statSync(path.join(dir, 'identity.json')).mode & 0o777), 0o600);
+  assert.equal(createTeamStore({ dir, box, now }).loadIdentity().edPriv, id1.edPriv);
+  assert.throws(() => createTeamStore({ dir: tmp(), box: { ...box, available: () => false }, now }).loadIdentity(), /secure storage/);
+  fs.writeFileSync(path.join(dir, 'peers.json'), '{not json');
+  assert.throws(() => s1.peers(), 'a corrupt file is never treated as empty');
+});
+
+test('store: per-peer rate limit, 20 a minute', () => {
+  const s = createTeamStore({ dir: tmp(), box, now });
+  for (let i = 0; i < 20; i += 1) assert.equal(s.allow('p'), true);
+  assert.equal(s.allow('p'), false);
+  assert.equal(s.allow('q'), true, 'per peer');
+  clock += 61_000;
+  assert.equal(s.allow('p'), true);
+});
+
+test('link: invite, hello, link request, accept; both sides store each other with signed endpoints', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  const r = await linkPair(a, b);
+  assert.equal(r.ok, true, r.error);
+  const aOnB = Object.values(b.store.peers());
+  const bOnA = Object.values(a.store.peers());
+  assert.equal(aOnB.length, 1);
+  assert.equal(aOnB[0].host, a.host);
+  assert.equal(aOnB[0].id, a.svc.status().fp);
+  assert.equal(bOnA[0].id, b.svc.status().fp);
+  assert.equal(bOnA[0].host, b.host);
+  assert.equal(a.events.some(([e]) => e === 'link-request'), true);
+});
+
+test('link: a hostile address that is not the invite fingerprint learns nothing', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  const evil = install('Evil', tn);
+  const inv = a.svc.createInvite();
+  // Same invite, but the name resolves to another install.
+  const swapped = inv.text.replace(a.host, evil.host);
+  const r = await b.svc.join(swapped);
+  assert.equal(r.ok, false);
+  assert.equal(tn.calls.some((c) => c.path === '/team/link'), false, 'stopped after hello');
+});
+
+test('link: decline, and a spent secret refuses different keys', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  const c = install('Brett', tn);
+  const inv = a.svc.createInvite();
+  b.hooks.onSleep = () => { const p = a.svc.status().pendingLinks[0]; if (p) a.svc.decideLink(p.inviteId, false); };
+  const r = await b.svc.join(inv.text);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /declined/);
+  assert.equal(Object.keys(a.store.peers()).length, 0);
+  const r2 = await c.svc.join(inv.text);
+  assert.equal(r2.ok, false, 'the secret is bound to Bryan now');
+  assert.equal(Object.keys(a.store.peers()).length, 0);
+});
+
+test('messages: delivered with a verified receipt, held when no orchestrator is pinned, a retry is not stored twice', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  const s = b.svc.send('Sam', 'where is the Axiom catalog');
+  assert.equal(s.ok, true, s.error);
+  await b.svc.pump();
+  const out = b.store.messages().find((m) => m.dir === 'out');
+  assert.equal(out.state, 'delivered');
+  const inbox = a.store.messages().filter((m) => m.dir === 'in');
+  assert.equal(inbox.length, 1);
+  assert.equal(inbox[0].state, 'held');
+  assert.equal(inbox[0].note, 'no orchestrator tab is pinned');
+  assert.equal(inbox[0].peerName, 'Bryan');
+  // The sender retries the same id (lost receipt): same receipt, no second row.
+  b.store.patchMessage('out', out.peer, out.id, { state: 'queued', nextAt: 0 });
+  await b.svc.pump();
+  assert.equal(a.store.messages().filter((m) => m.dir === 'in').length, 1);
+  assert.equal(b.store.messages().find((m) => m.dir === 'out').state, 'delivered');
+  b.svc.stop(); a.svc.stop();
+});
+
+test('messages: reply by short id goes back to the sender as a reply', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.svc.send('Sam', 'ping');
+  await b.svc.pump();
+  const got = a.store.messages().find((m) => m.dir === 'in');
+  const r = a.svc.reply(got.id.slice(0, 8), 'pong');
+  assert.equal(r.ok, true, r.error);
+  await a.svc.pump();
+  const back = b.store.messages().find((m) => m.dir === 'in');
+  assert.equal(back.kind, 'reply');
+  assert.equal(back.replyTo, got.id);
+  assert.equal(back.text, 'pong');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('messages: not accepting is 503, retried until the deadline, then unconfirmed (it may have arrived)', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.store.setSettings({ accept: false });
+  b.svc.send('Sam', 'hello?');
+  await b.svc.pump();
+  let out = b.store.messages().find((m) => m.dir === 'out');
+  assert.equal(out.state, 'queued');
+  assert.equal(out.note, 'answer 503');
+  clock += 25 * 3600 * 1000;
+  await b.svc.pump();
+  out = b.store.messages().find((m) => m.dir === 'out');
+  assert.equal(out.state, 'unconfirmed');
+  // A human Retry keeps the id, inside the receiver's cutoff.
+  a.store.setSettings({ accept: true });
+  assert.equal(b.svc.retry(out.id).ok, true);
+  await b.svc.pump();
+  assert.equal(b.store.messages().find((m) => m.dir === 'out').state, 'delivered');
+  assert.equal(a.store.messages().find((m) => m.dir === 'in').id, out.id);
+  // Past the window only "Send again" remains.
+  clock += 6 * 24 * 3600 * 1000;
+  b.store.patchMessage('out', out.peer, out.id, { state: 'unconfirmed' });
+  assert.match(b.svc.retry(out.id).error, /Send again/);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('messages: an unlinked sender is refused and the outbox gives up', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.store.removePeer(Object.keys(a.store.peers())[0]);
+  b.svc.send('Sam', 'still there?');
+  await b.svc.pump();
+  assert.equal(b.store.messages().find((m) => m.dir === 'out').note, 'answer 403');
+  assert.equal(a.store.messages().length, 0);
+  b.svc.stop();
+});
+
+// ---------- delivery ----------
+
+const RULE = '─'.repeat(40);
+function screenWith(boxText, { dialog = false } = {}) {
+  const lines = ['previous output', RULE, `❯ ${boxText}`, RULE, '  ? for shortcuts'];
+  if (dialog) lines.push('Do you want to proceed?', '❯ 1. Yes', '  2. No', 'Esc to cancel');
+  lines.dimFrom = lines.map(() => -1);
+  return { lines, modes: { bracketedPaste: true, cursor: { x: 2 + boxText.length, y: 2 } } };
+}
+
+function fakeTab({ card, revokeAfterPaste = false, keysDuringQuiet = false, enterInsertsNewline = false } = {}) {
+  const t = { box: '', seq: 0, keys: 0, input: 0, pasted: null, submitted: 0, revoked: false, pty: {} };
+  const deps = {
+    authorized: () => (t.revoked ? 'Auto-route is off for Bryan' : null),
+    tabAlive: () => true,
+    ptyOf: () => t.pty,
+    claudeRunning: async () => true,
+    idle: () => true,
+    inputBusy: () => false,
+    watch: () => ({ seq: () => t.seq, keys: () => t.keys, input: () => t.input, screen: async () => screenWith(t.box), stop: () => {} }),
+    paste: (_id, text) => {
+      t.pasted = text;
+      t.box = `[Pasted text #7 +${text.split('\n').length - 1} lines]`;
+      t.seq += 1;
+      if (revokeAfterPaste) t.revoked = true;
+    },
+    submit: () => { t.submitted += 1; t.seq += 1; if (!enterInsertsNewline) t.box = ''; },
+    sleep: async (ms) => { clock += ms; if (keysDuringQuiet && ms >= 3000) t.keys += 1; },
+    now,
+  };
+  return { t, deps };
+}
+
+test('delivery card: framed, sanitized, short id to reply with', () => {
+  const c = deliveryCard({ fromName: 'Bryan\x1b[2J', fromFp: 'A'.repeat(43), at: 0, id: '0123abcd-0000-4000-8000-000000000000', text: 'hi\x1b[201~ there' });
+  assert.equal(c.error, undefined);
+  assert.equal(c.text.includes('\x1b'), false);
+  assert.match(c.text, /^\[Dobius team message, signature verified\]\nFrom: Bryan \[2J \(AAAAA-AAAAA\)/);
+  assert.match(c.text, /dobius-team reply 0123abcd/);
+});
+
+test('delivery: pastes into an empty idle prompt and confirms the Enter', async () => {
+  const card = deliveryCard({ fromName: 'Bryan', fromFp: 'A'.repeat(43), at: 0, id: '0123abcd-0000-4000-8000-000000000000', text: 'one\ntwo' }).text;
+  const { t, deps } = fakeTab();
+  const r = await deliver(deps, 'tab', card, { giveUpMs: 60_000, retryMs: 1000 });
+  assert.deepEqual(r, { state: 'routed' });
+  assert.equal(t.pasted, card);
+  assert.equal(t.submitted, 1);
+});
+
+test('delivery: authorisation revoked between paste and Enter means no Enter and needs attention', async () => {
+  const card = deliveryCard({ fromName: 'Bryan', fromFp: 'A'.repeat(43), at: 0, id: '0123abcd-0000-4000-8000-000000000000', text: 'x' }).text;
+  const { t, deps } = fakeTab({ revokeAfterPaste: true });
+  const r = await deliver(deps, 'tab', card, { giveUpMs: 60_000, retryMs: 1000 });
+  assert.equal(r.state, 'needs attention');
+  assert.match(r.note, /Auto-route is off/);
+  assert.equal(t.submitted, 0);
+});
+
+test('delivery: someone typing keeps it out of the prompt, then it waits for a person', async () => {
+  const card = deliveryCard({ fromName: 'Bryan', fromFp: 'A'.repeat(43), at: 0, id: '0123abcd-0000-4000-8000-000000000000', text: 'x' }).text;
+  const { t, deps } = fakeTab({ keysDuringQuiet: true });
+  const r = await deliver(deps, 'tab', card, { giveUpMs: 60_000, retryMs: 1000 });
+  assert.equal(r.state, 'held');
+  assert.equal(t.pasted, null);
+});
+
+test('delivery: an Enter that only inserts a newline is reported, not retried', async () => {
+  const card = deliveryCard({ fromName: 'Bryan', fromFp: 'A'.repeat(43), at: 0, id: '0123abcd-0000-4000-8000-000000000000', text: 'x' }).text;
+  const { t, deps } = fakeTab({ enterInsertsNewline: true });
+  const r = await deliver(deps, 'tab', card, { giveUpMs: 60_000, retryMs: 1000 });
+  assert.equal(r.state, 'needs attention');
+  assert.equal(t.submitted, 1);
+});
+
+test('delivery: a box holding a draft, or dim placeholder only', () => {
+  assert.equal(boxIsEmpty(screenWith('')), true);
+  assert.equal(boxIsEmpty(screenWith('half typed')), false);
+  const ph = screenWith('Try "fix lint errors"');
+  ph.lines.dimFrom[2] = 2;
+  assert.equal(boxIsEmpty(ph), true, 'dim placeholder is not input');
+  assert.equal(boxIsEmpty(screenWith('', { dialog: true })), false);
+  assert.equal(boxIsEmpty({ ...screenWith(''), modes: { bracketedPaste: false, cursor: { x: 2, y: 2 } } }), false, 'paste mode off');
+});
+
+test('delivery through the service: pinned tab, routed, and a revoked peer holds it', async () => {
+  const tn = net();
+  let tab = null;
+  const a = install('Sam', tn, { deliverDeps: (tabId, authorized) => { const f = fakeTab(); tab = f.t; return { ...f.deps, authorized }; } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.store.setSettings({ orchestratorTab: 'term-/x-1' });
+  b.svc.send('Sam', 'run the catalog check');
+  await b.svc.pump();
+  for (let i = 0; i < 50 && a.store.messages().find((m) => m.dir === 'in')?.state !== 'routed'; i += 1) await new Promise((r) => setImmediate(r));
+  const got = a.store.messages().find((m) => m.dir === 'in');
+  assert.equal(got.state, 'routed');
+  assert.match(tab.pasted, /run the catalog check/);
+  // Auto-route off for Bryan: the next one waits for a person.
+  a.store.updatePeer(Object.keys(a.store.peers())[0], { autoRoute: false });
+  b.svc.send('Sam', 'second');
+  await b.svc.pump();
+  const second = a.store.messages().filter((m) => m.dir === 'in').find((m) => m.text === 'second');
+  assert.equal(second.state, 'held');
+  assert.match(second.note, /Auto-route is off/);
+  a.svc.stop(); b.svc.stop();
+});
+
+// ---------- paste mode and admission ----------
+
+test('bracketed paste mode is tracked across chunks and combined mode lists', () => {
+  let s = { on: false, carry: '' };
+  s = trackPasteMode(s, 'hello \x1b[?20');
+  assert.equal(s.on, false);
+  s = trackPasteMode(s, '04h prompt');
+  assert.equal(s.on, true, 'split across chunks');
+  s = trackPasteMode(s, 'x'.repeat(100000));
+  assert.equal(s.on, true, 'a long run of output later still knows');
+  s = trackPasteMode(s, '\x1b[?1004;2004l');
+  assert.equal(s.on, false, 'combined list');
+  s = trackPasteMode(s, '\x1b[?2004h\x1bc');
+  assert.equal(s.on, false, 'RIS resets');
+  s = trackPasteMode(s, '\x1b[?25h');
+  assert.equal(s.on, false, 'other modes leave it');
+});
+
+test('admission: per-IP in-flight cap before any body is read', () => {
+  const admit = createAdmission({ now });
+  const mk = () => {
+    const handlers = {};
+    return { req: { socket: { remoteAddress: '100.1.2.3', destroy() {} }, complete: true }, res: { on: (e, f) => { handlers[e] = f; }, set() {}, status(c) { this.code = c; return this; }, end() {} }, handlers };
+  };
+  const held = [];
+  for (let i = 0; i < PER_IP_IN_FLIGHT; i += 1) {
+    const x = mk();
+    let passed = false;
+    admit(x.req, x.res, () => { passed = true; });
+    assert.equal(passed, true);
+    held.push(x);
+  }
+  const over = mk();
+  let passed = false;
+  admit(over.req, over.res, () => { passed = true; });
+  assert.equal(passed, false);
+  assert.equal(over.res.code, 429);
+  held[0].handlers.close();
+  const again = mk();
+  admit(again.req, again.res, () => { passed = true; });
+  assert.equal(passed, true, 'a slot frees when a request ends');
+  for (const h of [...held, again]) h.handlers.close?.();
+});
+

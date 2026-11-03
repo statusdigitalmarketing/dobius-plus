@@ -98,9 +98,10 @@ import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCer
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
-  deriveDeviceId,
+  deriveDeviceId, getTeamEndpoint,
 } from './mobile-server.js';
-import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler } from './voice-bridge.js';
+import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
+import { initTeam, stopTeam, handleTeamBridge } from './team-main.js';
 import { createCodexStatusRouter, withCodexHooks, stripCodexHooks, hasCodexHooks } from './codex-status.js';
 import { answersPrompt, submitsInput } from '../shared/prompt-answer.js';
 import { stopHookCommand } from '../shared/handoff.js';
@@ -3770,6 +3771,10 @@ function setupWindowHandlers() {
     ownerOf: (tabId) => terminalOwners.get(tabId),
   });
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
+  // Team communicator (docs/team-communicator.md): delivery into the pinned
+  // orchestrator tab reuses these same guards.
+  initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint });
+  setTeamBridge(handleTeamBridge);
   // /openTab's own "is another surface typing into this tab": an account move
   // must not stop Claude under it.
   heldInputFor = bridgeOpenDeps.inputBusy;
@@ -4718,6 +4723,7 @@ app.on('before-quit', (e) => {
     try { stopAllBuildWatchers(); } catch { /* best-effort shutdown */ }
     try { stopAllFileWatchers(); } catch { /* best-effort shutdown */ }
     try { stopVoiceBridge(); } catch { /* best-effort shutdown */ }
+    try { stopTeam(); } catch { /* best-effort shutdown */ }
     try { stopImessageBridge(); } catch { /* best-effort shutdown */ }
     try { stopScheduledTasks(); } catch { /* best-effort shutdown */ }
     try { stopAutoMode(); } catch { /* best-effort shutdown */ }
@@ -4763,6 +4769,7 @@ app.on('before-quit', (e) => {
     stopWatching();
     stopAllBuildWatchers();
     stopVoiceBridge();
+    stopTeam();
     stopImessageBridge();
     stopScheduledTasks();
     stopMobileServer();
@@ -4953,6 +4960,7 @@ app.on('will-quit', (e) => {
   stopAllBuildWatchers();
   stopAllFileWatchers();
   stopVoiceBridge();
+  stopTeam();
   stopImessageBridge();
   stopScheduledTasks();
   stopAutoMode();

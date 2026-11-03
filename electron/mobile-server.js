@@ -1,4 +1,6 @@
 import { isAllowedMobileOrigin, isOwnHost } from './mobile-cors.js';
+import { mountTeamRoutes } from './team-routes.js';
+import { getTeamService } from './team-main.js';
 /**
  * Mobile server: embedded HTTP + WebSocket server that bridges Dobius+ to a
  * phone PWA over the user's Tailscale tailnet.
@@ -186,6 +188,8 @@ function stopPowerAssertion() {
   powerBlockerId = null;
 }
 let boundAddress = null;  // { host, port }
+// This Mac's MagicDNS name while the server runs (team communicator endpoint).
+let teamHostName = null;
 let serveInfo = null;     // { secure, url }: how clients should reach us (v1.0.43 Phase 4)
 
 /** Find the Mac's Tailscale (CGNAT 100.64.0.0/10) IPv4 address, or null. */
@@ -1084,6 +1088,16 @@ function handleAuthedMessage(socket, msg, subs) {
   }
 }
 
+/**
+ * Where teammates reach this Mac's /team routes: the full MagicDNS name (the
+ * routes accept nothing else) and the bound port. Null while the server is
+ * down or the name is unknown.
+ */
+export function getTeamEndpoint() {
+  if (!httpServer || !boundAddress || !teamHostName) return null;
+  return { host: String(teamHostName).replace(/\.$/, ''), port: boundAddress.port };
+}
+
 /** Current server status, safe to expose to the renderer. */
 export function getMobileServerStatus() {
   return {
@@ -1158,6 +1172,9 @@ async function doStartMobileServer(stillCurrent) {
     if (!hostOk(req.headers.host)) return res.status(421).end();
     return next();
   });
+  // Team communicator (docs/team-communicator.md): ahead of CORS and every
+  // body parser, with its own strict host check, admission and raw parser.
+  mountTeamRoutes(expApp, { hostOk, service: getTeamService });
   expApp.use((req, res, next) => {
     const origin = req.headers.origin;
     if (corsOk(origin)) {
@@ -1482,6 +1499,7 @@ async function doStartMobileServer(stillCurrent) {
   let secure = false;
   let certValidTo = null; // expiry of the cert this server loaded (ms)
   magicName = await getMagicDNSName();
+  teamHostName = magicName;
   corsHosts = await getTailnetHosts();
   if (quitting || !stillCurrent()) return { running: false, error: 'stopped during start' };
   if (corsHostsTimer) clearInterval(corsHostsTimer);
@@ -1490,7 +1508,7 @@ async function doStartMobileServer(stillCurrent) {
     // This Mac's own name for the Host check, refreshed too: a lookup that
     // failed at start would otherwise refuse phones paired by name until a
     // restart (Codex P1, three lenses).
-    getMagicDNSName().then((n) => { if (n) ownName = n; }).catch(() => { /* keep the last name */ });
+    getMagicDNSName().then((n) => { if (n) { ownName = n; teamHostName = n; } }).catch(() => { /* keep the last name */ });
   }, 60_000);
   corsHostsTimer.unref?.();
   // A stop (Settings off, quit, cert re-provision) landed while we waited:

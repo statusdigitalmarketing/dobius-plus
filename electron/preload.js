@@ -480,6 +480,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   inboxRead: () => ipcRenderer.invoke('inbox:read'),
   inboxStatus: () => ipcRenderer.invoke('inbox:status'),
   inboxStart: () => ipcRenderer.invoke('inbox:start'),
+  // Team communicator (docs/team-communicator.md)
+  teamStatus: () => ipcRenderer.invoke('team:status'),
+  teamMessages: () => ipcRenderer.invoke('team:messages'),
+  teamInvite: () => ipcRenderer.invoke('team:invite'),
+  teamJoin: (text) => ipcRenderer.invoke('team:join', text),
+  teamDecideLink: (inviteId, accept) => ipcRenderer.invoke('team:decideLink', inviteId, accept),
+  teamSend: (to, text) => ipcRenderer.invoke('team:send', to, text),
+  teamReply: (shortId, text) => ipcRenderer.invoke('team:reply', shortId, text),
+  teamRetry: (id) => ipcRenderer.invoke('team:retry', id),
+  teamSendAgain: (id) => ipcRenderer.invoke('team:sendAgain', id),
+  teamRouteNow: (peer, id) => ipcRenderer.invoke('team:routeNow', peer, id),
+  teamUpdatePeer: (id, patch) => ipcRenderer.invoke('team:updatePeer', id, patch),
+  teamUnlink: (id) => ipcRenderer.invoke('team:unlink', id),
+  teamSettings: (patch) => ipcRenderer.invoke('team:settings', patch),
+  onTeamChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('team:changed', handler);
+    return () => ipcRenderer.removeListener('team:changed', handler);
+  },
   // Fires when a task is completed from a terminal via dobius-task-done, so an
   // open Tasks panel can re-check the box live. Callback receives projectPath.
   onTasksUpdated: (cb) => {

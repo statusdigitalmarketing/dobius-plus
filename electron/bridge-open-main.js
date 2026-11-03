@@ -477,6 +477,9 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
         // The permission mode is NOT checked (Sam: "bypass permissions should
         // act just like auto mode"); only that this really is claude.
         if (pgid !== tpgid || pgid !== String(pid) || stat.startsWith('T') || (await psField(pid, 'tty')) !== tty || !(await isClaudeProcess(pid))) continue;
+        // No project (team delivery into the pinned orchestrator tab, which
+        // can work in any folder): claude in the foreground is enough.
+        if (projectPath === null) return true;
         const cwd = await getProcessCwd(pid);
         if (cwd && (await fs.promises.realpath(cwd)) === (await fs.promises.realpath(projectPath))) return true;
       } catch { /* this candidate is unreadable: not claude */ }

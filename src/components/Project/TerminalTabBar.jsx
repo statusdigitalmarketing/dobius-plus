@@ -47,6 +47,15 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
   const [contextMenu, setContextMenu] = useState(null); // { x, y, tabId }
+  // The tab pinned as the team orchestrator (docs/team-communicator.md): a badge, and the menu item's label.
+  const [teamTab, setTeamTab] = useState(null);
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.teamStatus) return undefined;
+    const load = () => api.teamStatus().then((st) => setTeamTab(st?.ok ? st.settings.orchestratorTab : null)).catch(() => setTeamTab(null));
+    load();
+    return api.onTeamChanged?.(load);
+  }, []);
   const [moveAccountTabId, setMoveAccountTabId] = useState(null);
   const closeMoveAccount = useCallback(() => setMoveAccountTabId(null), []);
   const [dragTabId, setDragTabId] = useState(null);
@@ -545,6 +554,13 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
                 );
               })()}
 
+              {/* Team orchestrator: teammates' messages are typed into this tab */}
+              {teamTab === tab.id && (
+                <span style={{ fontSize: 9, color: 'var(--accent)', flexShrink: 0, lineHeight: 1 }} title="Team orchestrator: teammates' messages arrive here">
+                  {'TEAM'}
+                </span>
+              )}
+
               {/* Pin indicator */}
               {tab.pinned && (
                 <span style={{ fontSize: 9, color: 'var(--dim)', flexShrink: 0, lineHeight: 1 }} title="Pinned">
@@ -692,6 +708,12 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
           tabCount={tabs.length}
           tabIndex={tabs.findIndex((t) => t.id === contextMenu.tabId)}
           isPinned={!!tabs.find((t) => t.id === contextMenu.tabId)?.pinned}
+          isTeamOrchestrator={teamTab === contextMenu.tabId}
+          onTeamOrchestrator={window.electronAPI?.teamSettings ? () => {
+            const target = contextMenu.tabId;
+            setContextMenu(null);
+            window.electronAPI.teamSettings({ orchestratorTab: teamTab === target ? null : target });
+          } : null}
           onRename={() => {
             const tab = tabs.find((t) => t.id === contextMenu.tabId);
             if (tab) handleDoubleClick(tab);
@@ -821,7 +843,7 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
+function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, onTeamOrchestrator, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
 
@@ -833,6 +855,7 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isSplit, isMonitored,
     { label: isSplit ? 'Unsplit' : 'Split View', onClick: onSplit, disabled: tabCount <= 1 },
     { type: 'divider' },
     { label: 'Copy Last Claude Response', onClick: onCopyLastResponse },
+    ...(onTeamOrchestrator ? [{ label: isTeamOrchestrator ? 'Stop being team orchestrator' : 'Use as team orchestrator', onClick: onTeamOrchestrator }] : []),
     { label: 'Move to account…', onClick: onContinueAccount },
     { type: 'divider' },
     { label: 'Close', onClick: onClose, disabled: tabCount <= 1 },

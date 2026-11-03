@@ -140,7 +140,7 @@ export function buildMessage(identity, myFp, peer, env, now) {
  *   { status: 'conflict' }                        same (sender, id), different content: 409
  *   { status: 'refused', reason }                 4xx, logged, no detail to the caller
  */
-export function receiveMessage({ identity, myFp, peers, records, body, sig, now }) {
+export function receiveMessage({ identity, myFp, peers, records, body, sig, now, allow = () => true }) {
   const refuse = (reason) => ({ status: 'refused', reason });
   const outer = parseJson(body, MAX_BODY);
   if (!outer || outer.v !== V || !FP.test(outer.from || '') || !FP.test(outer.to || '')) return refuse('shape');
@@ -164,6 +164,8 @@ export function receiveMessage({ identity, myFp, peers, records, body, sig, now 
   const receipt = sign(identity, ackBytes(outer.from, env.id, hash));
   const seen = records.get(key);
   if (seen) return seen.hash === hash ? { status: 'duplicate', receipt } : { status: 'conflict' };
+  // Per-peer rate limit, counted only for a message that would be stored and routed (a retry is free).
+  if (!allow(outer.from)) return refuse('rate');
   records.set(key, { hash, firstAcceptedAt: now });
   return { status: 'new', env, receipt, from: peer };
 }
