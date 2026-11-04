@@ -15,6 +15,8 @@ export { app };
 export const ipcMain = { handle: () => {}, on: () => {}, removeHandler: () => {} };
 export const BrowserWindow = class {};
 export const shell = {};
+// window-manager.js (imported via auto-updater.js) reads displays only when placing a window.
+export const screen = {};
 export const dialog = {};
 export const Notification = class {};
 export const powerMonitor = { on: () => {} };
@@ -25,6 +27,6 @@ export const powerSaveBlocker = { start: () => 0, stop: () => {}, isStarted: () 
 // team-main.js (imported via mobile-server.js): no secure storage under test, so no team identity is ever made.
 export const safeStorage = { isEncryptionAvailable: () => false, encryptString: () => { throw new Error('no safeStorage in tests'); }, decryptString: () => { throw new Error('no safeStorage in tests'); } };
 export default {
-  app, ipcMain, BrowserWindow, shell, dialog, Notification,
+  app, ipcMain, BrowserWindow, shell, screen, dialog, Notification,
   powerMonitor, nativeTheme, powerSaveBlocker, safeStorage,
 };

@@ -7,7 +7,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { getQuittingForUpdate, setQuitting, getQuitting } from './quit-state.js';
+import { getQuittingForUpdate, setQuitting, getQuitting, getInstallAttempted } from './quit-state.js';
 import { projectPathFromTabId } from './tab-id-util.js';
 import { claudeEnvForAccount, expandTilde, pinPluginRoot } from './claude-account-env.js';
 import { installErrorLog, logLine, errorLogPath, setLogSink } from './error-log.js';
@@ -88,7 +88,7 @@ import {
 } from './config-manager.js';
 import {
   openProjectWindow, openTornOffWindow, getOpenProjects, getOpenProjectsForRestore, closeProjectWindow, closeAllProjectWindows,
-  getOpenTearOffsForRestore, getOpenPrimaryWindowsForRestore, restoreTornOffWindow, setRestoring, persistOpenProjectsNow,
+  getOpenTearOffsForRestore, getOpenPrimaryWindowsForRestore, restoreTornOffWindow, setRestoring, persistOpenProjectsNow, saveLiveRestoreListsForUpdate,
   markTearOffConfirmed, computeRestoreLists, focusTearOffWindowForTab, focusPrimaryWindowForProject, focusWindowForTab,
   getWindowEntryByWcId, primaryDockTarget, dockingTabs, markTearOffIdentityDocked, tearOffKeyInUse, reserveTearOffKey,
   openVisualWindow, closeVisualWindow,
@@ -3815,6 +3815,9 @@ function setupWindowHandlers() {
   // tear-off grant + claim handshake, so the PTY changes owner exactly once.
   ipcMain.handle('window:dockTab', async (event, tabId, tabLabel, labelMeta, state, screenX, screenY, windowId) => {
     if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId)) return { ok: false };
+    // An install is pending: the saved lists can only grow until it finishes, so a
+    // dock could not record that its tab moved and the restart would lose the tab.
+    if (getQuittingForUpdate()) return { ok: false };
     const src = getWindowEntryByWcId(event.sender.id);
     if (!src?.isTearOff || src.closing) return { ok: false };
     const projectPath = src.projectPath;
@@ -4663,14 +4666,6 @@ app.on('before-quit', (e) => {
   if (getQuittingForUpdate()) {
     if (didTeardown) return;
     didTeardown = true;
-    // Capture the open-window list BEFORE anything tears windows down, then
-    // freeze the live snapshot. v1.0.38 (Brett-reported): this branch used to
-    // stamp lastQuitAt but never save lastOpenProjects (the only writer was
-    // the Phase-3 Cmd+Q branch below), so hitting the update Restart button
-    // relaunched into a bare launcher with every window gone.
-    const openForUpdate = getOpenProjectsForRestore();
-    const tearOffsForUpdate = getOpenTearOffsForRestore(); // Brett's tear-off restore
-    const extrasForUpdate = getOpenPrimaryWindowsForRestore(); // extra primary windows (v1.0.66)
     setQuitting(true);
     markMobileServerQuitting();
     // Best-effort scrollback flush; do NOT await, squirrel.mac needs a fast
@@ -4688,29 +4683,13 @@ app.on('before-quit', (e) => {
     // for sessions that were live during the update. Codex v1.0.35 r7 P2.
     // Sync write: squirrel.mac needs a fast exit; saveConfig's debounce may
     // not flush in time and performInstall's drain already ran.
+    //
+    // Normally every window is closed by now and performInstall already saved the
+    // lists, so this leaves them alone. Windows are still open only when the
+    // person quit while a deferred install was pending: that saves them.
+    try { saveLiveRestoreListsForUpdate(); } catch (err) { console.warn('[quit] could not save the window lists:', err?.message || err); }
     try {
       const cfgUp = loadConfig();
-      // Merge-preserve missing-path entries (unmounted drive) like the live
-      // persist does, so an update-restart doesn't drop them. Codex.
-      const mergedUp = computeRestoreLists(cfgUp, openForUpdate, tearOffsForUpdate, extrasForUpdate);
-      // An update restart must never REDUCE the restore snapshot to nothing.
-      // If the install deferred and the user closed their windows while it was
-      // pending, the live set is empty here and computeRestoreLists treats
-      // those as deliberate closes, so the app would relaunch into a bare
-      // launcher: precisely the "it didn't reopen my windows" report. Keeping
-      // the previous non-empty snapshot restores too much at worst, which is
-      // strictly the better failure. Codex blast-radius review.
-      const hadSomething = (cfgUp.lastOpenProjects?.length || 0) > 0
-        || (cfgUp.lastTearOffs?.length || 0) > 0
-        || (cfgUp.lastPrimaryWindows?.length || 0) > 0;
-      const wouldWipe = mergedUp.lastOpenProjects.length === 0
-        && mergedUp.lastTearOffs.length === 0
-        && mergedUp.lastPrimaryWindows.length === 0;
-      if (!(hadSomething && wouldWipe)) {
-        cfgUp.lastOpenProjects = mergedUp.lastOpenProjects;
-        cfgUp.lastTearOffs = mergedUp.lastTearOffs;
-        cfgUp.lastPrimaryWindows = mergedUp.lastPrimaryWindows;
-      }
       cfgUp.lastQuitAt = Date.now();
       cfgUp.lastQuitReason = quitReason = 'update restart';
       saveConfig(cfgUp);
@@ -4750,9 +4729,14 @@ app.on('before-quit', (e) => {
     // Merge-preserve missing-path entries (unmounted drive) like the live
     // persist does, so a normal quit doesn't drop them. Codex.
     const merged = computeRestoreLists(config, openProjects, tearOffs, extras);
-    config.lastOpenProjects = merged.lastOpenProjects;
-    config.lastTearOffs = merged.lastTearOffs;
-    config.lastPrimaryWindows = merged.lastPrimaryWindows;
+    // A failed install closes the windows and tells the person to quit and reopen.
+    // Nothing open then is not a choice, so the saved lists stand.
+    const installClosedThem = getInstallAttempted() && openProjects.length === 0 && tearOffs.length === 0 && extras.length === 0;
+    if (!installClosedThem) {
+      config.lastOpenProjects = merged.lastOpenProjects;
+      config.lastTearOffs = merged.lastTearOffs;
+      config.lastPrimaryWindows = merged.lastPrimaryWindows;
+    }
     // Quit timestamp: auto-resume compares each link's lastRunningAt against
     // this to only revive sessions that were ACTUALLY running at quit
     // (v1.0.35 stale-link fix).

@@ -642,3 +642,9 @@
 - **MISTAKE**: A python edit used an existing Settings.jsx comment containing an em dash as its anchor; the em-dash hook blocked the whole Bash call.
 - **FIX**: Anchor on an ASCII-only neighbour (find the index of a nearby ASCII line and splice).
 - **DETECTION**: `grep -nP '\x{2014}' <file>` before choosing an anchor
+
+### Testing: 2026-11-04
+- **MISTAKE**: Told Brett the windows-not-reopening bug was fixed in 2.1.7 from a ship-test that restarted the app without running a real update. `before-quit`'s update branch in `electron/main.js` recomputed the restore lists from live windows, but Electron closes every window before `before-quit` on `quitAndInstall`, so it read as all closed on purpose and kept only entries never opened this session. The `hadSomething && wouldWipe` guard only caught a fully empty result, so a missing folder or unopened tear-off replaced the real list. A clean setup like Sam's never showed it, and Brett's did.
+- **FIX**: Save the lists in `performInstall` while the windows are open, add only while an install is pending, and never write them when nothing is open (`saveLiveRestoreListsForUpdate`, `addLiveWindowsToRestoreLists`). Test updates through real Squirrel with signed builds, seeded with a missing folder.
+- **CONTEXT**: Anything on the update path needs a real update to prove it. Own app id, name and baked userData keep the rig off the live app (recipe in `.dobius/NOTES.md`).
+- **DETECTION**: `node electron/__tests__/update-restore-list.test.mjs`

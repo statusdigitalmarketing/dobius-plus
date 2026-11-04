@@ -9,6 +9,12 @@ let _isQuittingForUpdate = false;
 export function setQuittingForUpdate(v) { _isQuittingForUpdate = !!v; }
 export function getQuittingForUpdate() { return _isQuittingForUpdate; }
 
+// An install was started this session, even if it has since failed and the flag
+// above was reset. Its windows may be closed because of the install.
+let _installAttempted = false;
+export function markInstallAttempted() { _installAttempted = true; }
+export function getInstallAttempted() { return _installAttempted; }
+
 // Generic "a quit is underway and will not be cancelled" flag, set once a
 // quit is CONFIRMED (Cmd+Q phase 2/3, updater restart, will-quit). NOT set on
 // the first Cmd+Q press, which only shows the overlay and can be cancelled.
