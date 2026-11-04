@@ -648,3 +648,9 @@
 - **FIX**: Save the lists in `performInstall` while the windows are open, add only while an install is pending, and never write them when nothing is open (`saveLiveRestoreListsForUpdate`, `addLiveWindowsToRestoreLists`). Test updates through real Squirrel with signed builds, seeded with a missing folder.
 - **CONTEXT**: Anything on the update path needs a real update to prove it. Own app id, name and baked userData keep the rig off the live app (recipe in `.dobius/NOTES.md`).
 - **DETECTION**: `node electron/__tests__/update-restore-list.test.mjs`
+
+### Architecture: 2026-11-04
+- **MISTAKE**: The App Review demo mode lived only on `feat/ios-demo-mode` while main rebuilt the phone app around per-Mac pairings. The approved build could not be rebuilt from main, and a merge conflicted in seven files because both sides had solved "which Mac is this request for".
+- **FIX**: Ported it instead of merging: `DemoConnection` takes a pairing like `Connection`, and `isDemoPairing` needs both the demo address and the demo token. Now on main with a test.
+- **CONTEXT**: What App Review depends on has to live on main. The Mac's QR also opens Safari now (`buildPairingWebLink`), so the App Store app is paired by typing the address and code or by the `dobiusplus://` link in the texted pairing message.
+- **DETECTION**: `node electron/__tests__/mobile-demo.test.mjs`
