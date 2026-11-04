@@ -5,7 +5,7 @@ import TerminalScreen from './Terminal';
 import History from './History';
 import MacSwitcher from './MacSwitcher';
 import { Connection } from './connection';
-import { DemoConnection, isDemoOrigin } from './demo';
+import { DemoConnection, isDemoPairing } from './demo';
 import * as storage from './storage';
 import { normaliseHost, mixedContent, reachabilityMessage } from './host';
 import { forgetPush } from './push-client';
@@ -36,7 +36,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
   const { id, origin, token } = pairing;
 
   useEffect(() => {
-    const c = isDemoOrigin(origin) ? new DemoConnection({ id, origin, token }) : new Connection({ id, origin, token });
+    const c = isDemoPairing(origin, token) ? new DemoConnection({ id, origin, token }) : new Connection({ id, origin, token });
     connectionRef.current = c;
     let cancelled = false;
     let ready = false;
@@ -117,7 +117,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
   if (view === 'terminal') return <TerminalScreen connection={connection} status={status} initialId={openTabId} onBack={() => setView('board')} onShowHistory={() => setView('history')} />;
   const board = <Board connection={connection} status={status} macName={pairing.name} onMacs={onMacs}
     onOpen={openTab} onShowHistory={() => setView('history')} />;
-  if (!isDemoOrigin(origin)) return board;
+  if (!isDemoPairing(origin, token)) return board;
   // A pill over the board's last rows, so demo-board lets them scroll clear of it.
   return <>
     <div className="demo-banner" role="status">

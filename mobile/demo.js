@@ -13,14 +13,25 @@
 //     electron/mobile-server.js sends.
 
 import { pairingRequest } from './pairings.js';
+import { DEMO_ORIGIN } from './host.js';
 
-export const DEMO_ORIGIN = 'http://demo.dobius:8420';
+export { DEMO_ORIGIN };
 export const DEMO_CODE = '123456';
 // The shape every Mac issues: Pairing.jsx refuses any other.
 export const DEMO_TOKEN = 'de'.repeat(32);
 
+// Build 4's demo token: an install already in the demo migrates with it.
+const OLD_DEMO_TOKEN = 'demo-review-token';
+const isDemoToken = (token) => token === DEMO_TOKEN || token === OLD_DEMO_TOKEN;
+
 export function isDemoOrigin(origin) {
   return origin === DEMO_ORIGIN;
+}
+
+// Both halves, or it is not the demo. A real Mac's token saved beside this address
+// (an interrupted save on an older build) must never get fake answers.
+export function isDemoPairing(origin, token) {
+  return isDemoOrigin(origin) && isDemoToken(token);
 }
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
@@ -49,6 +60,9 @@ export function installDemoFetch() {
     const path = demoPath(input);
     if (path === null) return realFetch(input, init);
     await new Promise((r) => setTimeout(r, 250)); // feels like a real round trip
+    // A real Mac's token is refused like a Mac would, never answered with a fake success.
+    const auth = new Headers(init?.headers || (typeof input === 'object' ? input?.headers : undefined)).get('Authorization');
+    if (auth && !isDemoToken(auth.replace(/^Bearer /, ''))) return json({ ok: false, error: 'auth' }, 401);
     if (path === '/health') return json({ ok: true, app: 'dobius-plus', demo: true });
     if (path === '/pair') {
       let code = '';
@@ -151,6 +165,7 @@ export class DemoConnection {
     this.sessionProject = { 'demo-login': P_WEB, 'demo-tests': P_WEB, 'demo-readme': P_WEB, 'demo-sync': P_NOTES };
     this.inputLine = {}; // tab id -> characters typed in the raw terminal
     this.replyTimers = {}; // tab id -> pending reply timer (Esc cancels it)
+    this.pending = {}; // tab id -> prompts waiting for their reply, oldest first
     this.looseAt = minsAgo(300); // fixed, or a dismissal would never stick
     this.looseResolved = new Set(); // loose ends picked back up this session
     for (const t of this.tabs) this.screens[t.id] = this._initialScreen(t);
@@ -200,6 +215,7 @@ export class DemoConnection {
     this.inputLine[tab.id] = ''; // the fresh prompt below starts empty
     clearTimeout(this.replyTimers[tab.id]);
     delete this.replyTimers[tab.id];
+    delete this.pending[tab.id];
     if (tab.claudeLive && tab.sessionId) {
       (this.transcripts[tab.sessionId] || (this.transcripts[tab.sessionId] = []))
         .push({ role: 'assistant', content: 'Interrupted. What should I do instead?', timestamp: new Date().toISOString() });
@@ -296,13 +312,19 @@ export class DemoConnection {
     list.push({ role: 'user', content: text, timestamp: new Date().toISOString() });
     this._write(tab.id, `${echoed ? '' : text}\r\n`);
     this._setStatusOf(tab.id, 'working', 'Thinking');
-    clearTimeout(this.replyTimers[tab.id]);
+    // A prompt sent during a turn queues behind it, as the composer says.
+    (this.pending[tab.id] || (this.pending[tab.id] = [])).push(text);
+    if (!this.replyTimers[tab.id]) this._replyNext(tab, list);
+  }
+
+  _replyNext(tab, list) {
     this.replyTimers[tab.id] = this._later(2200, () => {
       delete this.replyTimers[tab.id];
-      const reply = cannedReply(text);
+      const reply = cannedReply(this.pending[tab.id].shift());
       list.push({ role: 'assistant', content: reply, timestamp: new Date().toISOString() });
       this._write(tab.id, `\r\n\x1b[38;5;173m●\x1b[0m ${reply.replace(/\n/g, '\r\n  ')}\r\n\r\n> `);
-      this._setStatusOf(tab.id, 'done');
+      if (this.pending[tab.id].length > 0) this._replyNext(tab, list);
+      else this._setStatusOf(tab.id, 'done');
     });
   }
 
@@ -377,6 +399,7 @@ export class DemoConnection {
         if (!t) break;
         clearTimeout(this.replyTimers[t.id]); // no reply lands after a stop
         delete this.replyTimers[t.id];
+        delete this.pending[t.id];
         this.tabs = this.tabs.filter((x) => x.id !== msg.id);
         this._emit({ type: 'exit', id: msg.id, code: 0, signal: null });
         this._pushTerminals();

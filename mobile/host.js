@@ -56,8 +56,12 @@ export function wsUrl(origin) {
   return origin.replace(/^http/, 'ws') + '/ws';
 }
 
+// The App Review demo's address (mobile/demo.js). Answered inside the page, so it
+// never touches the network and cannot be mixed content.
+export const DEMO_ORIGIN = 'http://demo.dobius:8420';
+
 export function mixedContent(origin, pageOrigin) {
-  return pageOrigin.startsWith('https:') && origin.startsWith('http:');
+  return pageOrigin.startsWith('https:') && origin.startsWith('http:') && origin !== DEMO_ORIGIN;
 }
 
 export function reachabilityMessage(origin, pageOrigin) {

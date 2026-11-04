@@ -9,7 +9,7 @@ export default function Intro({ onBack }) {
   const cards = [
     {
       title: 'Pair with your Mac',
-      body: 'Install Dobius+ on your Mac from dobepros.com/dobius-plus, open Settings › Mobile Access, and scan the QR code. Your phone connects to your own Mac over Tailscale, so terminals stay on your machine.',
+      body: 'Install Dobius+ on your Mac from dobepros.com/dobius-plus, open Settings › Mobile Access, and enter the Mac address and pairing code shown there. Your phone connects to your own Mac over Tailscale, so terminals stay on your machine.',
     },
     {
       title: 'Your terminals, anywhere',
