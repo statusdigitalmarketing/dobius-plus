@@ -128,3 +128,10 @@ Rename plan (do this as the first commit of the follow-up PR, before any mobile 
 7. Fresh Archive from the renamed project; archive now reads `DobiusPlus 1.0.80 (1)`.
 
 Risky because paths are strewn through the pbxproj. Must be its own commit, no mixed changes, verified by a round-trip Archive before merge.
+
+## Current App Store builds (read this first, the TestFlight text above is history)
+
+- The app is live on the App Store. It bundles its own phone UI, so phone changes reach users only through a new build.
+- App Review needs the built-in demo: Mac address `demo.dobius`, pairing code `123456` (`mobile/demo.js`). Put both in the review notes. A new phone message type or REST route that a screen depends on must be answered there too, or the demo breaks in review.
+- Build from the repo itself, not a worktree with a symlinked `node_modules`: `cap sync` rewrites `ios/App/CapApp-SPM/Package.swift` to the symlink's real path.
+- `npm run ios:sync`, bump `CURRENT_PROJECT_VERSION` and `MARKETING_VERSION`, archive, then upload from Xcode > Organizer.

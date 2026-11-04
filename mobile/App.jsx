@@ -5,6 +5,7 @@ import TerminalScreen from './Terminal';
 import History from './History';
 import MacSwitcher from './MacSwitcher';
 import { Connection } from './connection';
+import { DemoConnection, isDemoPairing } from './demo';
 import * as storage from './storage';
 import { normaliseHost, mixedContent, reachabilityMessage } from './host';
 import { forgetPush } from './push-client';
@@ -24,7 +25,7 @@ if (typeof navigator !== 'undefined') {
   });
 }
 
-function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
+function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, openRequest }) {
   const [connection, setConnection] = useState(null);
   const [status, setStatus] = useState('connecting');
   const [problem, setProblem] = useState('');
@@ -35,7 +36,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
   const { id, origin, token } = pairing;
 
   useEffect(() => {
-    const c = new Connection({ id, origin, token });
+    const c = isDemoPairing(origin, token) ? new DemoConnection({ id, origin, token }) : new Connection({ id, origin, token });
     connectionRef.current = c;
     let cancelled = false;
     let ready = false;
@@ -114,8 +115,17 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, openRequest }) {
   );
   if (view === 'history') return <History connection={connection} onBack={() => setView('board')} />;
   if (view === 'terminal') return <TerminalScreen connection={connection} status={status} initialId={openTabId} onBack={() => setView('board')} onShowHistory={() => setView('history')} />;
-  return <Board connection={connection} status={status} macName={pairing.name} onMacs={onMacs}
+  const board = <Board connection={connection} status={status} macName={pairing.name} onMacs={onMacs}
     onOpen={openTab} onShowHistory={() => setView('history')} />;
+  if (!isDemoPairing(origin, token)) return board;
+  // A pill over the board's last rows, so demo-board lets them scroll clear of it.
+  return <>
+    <div className="demo-banner" role="status">
+      <span>Sample data</span>
+      <button type="button" onClick={onLeaveDemo}>Pair your Mac</button>
+    </div>
+    <div className="demo-board">{board}</div>
+  </>;
 }
 
 // The ids of saved Macs (at any address, this one included) that are the same
@@ -439,7 +449,8 @@ export default function App() {
         hardware keys must not reach the session underneath (Codex). */}
     <div inert={switchingTo !== null || switcher} className="mac-session-wrap">
     <MacSession key={`${active.id}:${active.token}:${sessionEpoch}`} pairing={active} connectionRef={connectionRef} openRequest={openRequest}
-      onMacs={() => { setError(''); setSwitcher(true); }} onRepair={() => showPairing({ host: active.origin })} />
+      onMacs={() => { setError(''); setSwitcher(true); }} onRepair={() => showPairing({ host: active.origin })}
+      onLeaveDemo={() => update((s) => removePairing(s, active.id))} />
     </div>
     {switcher && <MacSwitcher state={state} busy={busy} error={error} onClose={() => setSwitcher(false)}
       onSwitch={async (id) => {
