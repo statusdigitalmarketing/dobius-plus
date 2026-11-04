@@ -3,8 +3,9 @@ import { app, BrowserWindow, Notification, ipcMain } from 'electron';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { setQuittingForUpdate } from './quit-state.js';
+import { setQuittingForUpdate, markInstallAttempted } from './quit-state.js';
 import { drainConfigWrites, backupConfigForUpdate } from './config-manager.js';
+import { saveLiveRestoreListsForUpdate } from './window-manager.js';
 import { mapRelease } from './release-info.js';
 
 const { autoUpdater } = electronUpdater;
@@ -187,6 +188,9 @@ async function performInstall() {
   // cannot stall the install.
   const windowCount = Math.max(1, BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed()).length);
   await new Promise((resolve) => setTimeout(resolve, Math.min(600 + 200 * windowCount, 3000)));
+  // Last moment the windows are known to be open: quitAndInstall closes them all
+  // before before-quit runs.
+  try { saveLiveRestoreListsForUpdate(); } catch (err) { console.warn('[updater] could not save the window lists:', err?.message || err); }
   try {
     await Promise.race([
       drainConfigWrites(), // v1.0.33: non-latching, so if quitAndInstall throws we can still persist
@@ -205,6 +209,7 @@ async function performInstall() {
   // an unrelated crash was suppressed and a user-initiated quit would take the
   // updater bypass path even though no install had started (Codex, Medium).
   setQuittingForUpdate(true);
+  markInstallAttempted();
   try {
     autoUpdater.quitAndInstall(true, true);
     // quitAndInstall does not throw when the install simply fails to take, so

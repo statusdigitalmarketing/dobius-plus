@@ -98,6 +98,28 @@ export function computeRestoreLists(config, openNow, tearsNow, extrasNow = []) {
   return { lastOpenProjects, lastTearOffs, lastPrimaryWindows };
 }
 
+// While an install is pending the lists can only grow. A window opened or torn off
+// in that gap still has to come back, but the windows may be closing for the install,
+// so one missing from the live set proves nothing and is never removed.
+function addLiveWindowsToRestoreLists() {
+  try {
+    const config = loadConfig();
+    let changed = false;
+    const add = (key, live, idOf) => {
+      const saved = Array.isArray(config[key]) ? config[key] : [];
+      const have = new Set(saved.map(idOf));
+      const extra = live.filter((x) => !have.has(idOf(x)));
+      if (extra.length > 0) { config[key] = [...saved, ...extra]; changed = true; }
+    };
+    add('lastOpenProjects', getOpenProjectsForRestore(), (p) => p);
+    add('lastTearOffs', getOpenTearOffsForRestore(), (t) => t?.tabId);
+    add('lastPrimaryWindows', getOpenPrimaryWindowsForRestore(), (e) => e?.windowKey);
+    if (changed) saveConfig(config);
+  } catch (err) {
+    console.warn('[restore] could not add a window opened during an install:', err?.message || err);
+  }
+}
+
 function persistOpenProjects() {
   // Also frozen while an update install is armed. The window-close bypass at
   // the 'close' handler lets windows close instantly during quitAndInstall
@@ -109,7 +131,8 @@ function persistOpenProjects() {
   // snapshot: the exact "it didn't reopen my windows" failure Brett reported.
   // A slightly stale snapshot is always the better error here.
   // Codex blast-radius review (pre-existing on main, fixed with this batch).
-  if (getQuitting() || restoring || getQuittingForUpdate()) return;
+  if (getQuitting() || restoring) return;
+  if (getQuittingForUpdate()) { addLiveWindowsToRestoreLists(); return; }
   try {
     const config = loadConfig();
     const merged = computeRestoreLists(config, getOpenProjectsForRestore(), getOpenTearOffsForRestore(), getOpenPrimaryWindowsForRestore());
@@ -124,6 +147,26 @@ function persistOpenProjects() {
 // latch lifts so any window the user opened DURING restore is written out even
 // though its own persistOpenProjects was suppressed by the latch. Codex.
 export function persistOpenProjectsNow() { persistOpenProjects(); }
+
+// An update restart's save, and it runs while persisting is frozen. Nothing open
+// says nothing about what the person wants: quitAndInstall closes every window
+// before before-quit runs, and a failed install leaves them closed for the retry.
+// computeRestoreLists would read that as every window closed on purpose, keep only
+// entries never opened this session (a missing folder, an unopened tear-off) and
+// replace the real list with them (Brett, Asana 1220099565720834). So it saves only
+// when something is open, and otherwise the last saved lists stand.
+export function saveLiveRestoreListsForUpdate() {
+  const open = getOpenProjectsForRestore();
+  const tears = getOpenTearOffsForRestore();
+  const extras = getOpenPrimaryWindowsForRestore();
+  if (open.length === 0 && tears.length === 0 && extras.length === 0) return;
+  const config = loadConfig();
+  const merged = computeRestoreLists(config, open, tears, extras);
+  config.lastOpenProjects = merged.lastOpenProjects;
+  config.lastTearOffs = merged.lastTearOffs;
+  config.lastPrimaryWindows = merged.lastPrimaryWindows;
+  saveConfig(config);
+}
 
 /**
  * Tear-off windows that should be recreated on next launch: [{ projectPath,
