@@ -1,11 +1,15 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import { installDemoFetch } from './demo';
 import './styles.css';
 import { attachKeyboardFit } from './keyboard-fit';
 import '@xterm/xterm/css/xterm.css';
 
 attachKeyboardFit();
+
+// Before anything can fetch: answers the App Review demo address locally.
+installDemoFetch();
 
 createRoot(document.getElementById('root')).render(
   <React.StrictMode>

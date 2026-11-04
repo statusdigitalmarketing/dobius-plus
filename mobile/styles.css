@@ -1189,3 +1189,28 @@ button.primary:disabled { opacity: 0.4; }
 .chat-history-edge { height: 44px; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 13px; }
 .chat-history-more { border: 0; background: none; color: var(--accent); font: inherit; font-size: 13px; padding: 6px 10px; cursor: pointer; }
 
+
+/* Demo mode (App Review): a pill bottom-left on the board, clear of the mic
+   button bottom-right, with the way back to real pairing. */
+.demo-banner {
+  position: fixed;
+  left: 16px; bottom: calc(env(safe-area-inset-bottom) + 28px);
+  /* Never reaches the 60px mic button 20px from the right edge. */
+  max-width: calc(100vw - 112px);
+  z-index: 16;
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 8px 8px 14px;
+  border-radius: 999px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--dim); font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.demo-banner span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.demo-banner button {
+  flex-shrink: 0; white-space: nowrap;
+  border: none; border-radius: 999px; cursor: pointer;
+  padding: 6px 12px; font-size: 13px; font-weight: 600;
+  background: var(--accent); color: var(--on-accent);
+}
+
+.demo-board .board-body { padding-bottom: calc(env(safe-area-inset-bottom) + 110px); }

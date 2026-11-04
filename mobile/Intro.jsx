@@ -1,15 +1,15 @@
 // Pre-pair explainer, reachable from Pairing.jsx with a "What is Dobius+?"
 // link. Exists primarily so an Apple reviewer who does not have a Mac
 // running Dobius+ can see what the app does: the pairing form alone is
-// opaque. Three cards describe the three main workflows; a fourth tells
-// the reviewer how to request a reviewer-tailored Mac build if they want
-// to exercise the full app. Pure JS, no network calls.
+// opaque. Three cards describe the three main workflows; a fourth gives
+// the demo credentials (mobile/demo.js) that run the full app on sample
+// data with no Mac. Pure JS, no network calls.
 
 export default function Intro({ onBack }) {
   const cards = [
     {
       title: 'Pair with your Mac',
-      body: 'Install Dobius+ on your Mac from dobiusplus.app, open Settings › Mobile Access, and scan the QR code. Your phone connects to your own Mac over Tailscale, so terminals stay on your machine.',
+      body: 'Install Dobius+ on your Mac from dobepros.com/dobius-plus, open Settings › Mobile Access, and scan the QR code. Your phone connects to your own Mac over Tailscale, so terminals stay on your machine.',
     },
     {
       title: 'Your terminals, anywhere',
@@ -20,8 +20,8 @@ export default function Intro({ onBack }) {
       body: 'Hold the voice button to speak a command. The Mac transcribes locally with whisper.cpp, routes it to the right Claude session, and reads the reply back.',
     },
     {
-      title: 'For App Store reviewers',
-      body: 'This app pairs with a copy of Dobius+ running on the user’s own Mac. If you would like temporary access to a demo Mac for review, email reviewer@dobiusplus.app and we will provision one for your Apple ID.',
+      title: 'Try it without a Mac',
+      body: 'Enter the Mac address demo.dobius and the pairing code 123456 to explore the full app with sample sessions. Nothing leaves your phone. Tap “Pair your Mac” on the session board to leave the demo.',
     },
   ];
   return (
