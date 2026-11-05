@@ -5,13 +5,14 @@
  * fields. Never reports "all clear" unless every source answered.
  */
 import http from 'http';
-import { readBoard } from './inbox-board.js';
+import { readBoard, listenerIsMine } from './inbox-board.js';
 
 export const SUGGESTED = 15;
 const RECENT_OVERDUE_DAYS = 7;
 const RECENT_WAITING_DAYS = 3;
 const NOTICED_MAX = 5;
 const NOTICED_READ = 500;
+const MAX_NOTICED_BYTES = 16 * 1024 * 1024;
 const DAY = 86_400_000;
 
 const dayNumber = (d) => Date.parse(`${d}T00:00:00Z`) / DAY;
@@ -55,6 +56,8 @@ export function planToday(cards, { today, nowMs = Date.now(), limit = SUGGESTED 
 }
 
 const text = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+const number = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const usableId = (v) => number(v) !== null || (typeof v === 'string' && v && v.length <= 100);
 
 /**
  * What SamKnows noticed, display fields only: action items marked high or urgent or due within
@@ -62,16 +65,16 @@ const text = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
  * `owner` drops items its own extraction says belong to someone else.
  */
 export function noticedFrom(actionItems, followUps, { nowMs = Date.now(), max = NOTICED_MAX } = {}) {
-  const near = (ms) => typeof ms === 'number' && Math.abs(ms - nowMs) <= 7 * DAY;
+  const near = (ms) => number(ms) !== null && Math.abs(ms - nowMs) <= 7 * DAY;
   const out = [];
   for (const a of Array.isArray(actionItems) ? actionItems : []) {
-    if (!a || typeof a !== 'object' || a.status !== 'pending') continue;
+    if (!a || typeof a !== 'object' || a.status !== 'pending' || !usableId(a.id)) continue;
     if (a.priority !== 'high' && a.priority !== 'urgent' && !near(a.dueDate)) continue;
-    out.push({ key: `action:${a.id}`, kind: 'task', title: text(a.title, 200), who: text(a.author, 80), due: typeof a.dueDate === 'number' ? a.dueDate : null, at: a.extractedAt || 0 });
+    out.push({ key: `action:${a.id}`, kind: 'task', title: text(a.title, 200), who: text(a.author, 80), due: number(a.dueDate), at: number(a.extractedAt) || 0 });
   }
   for (const f of Array.isArray(followUps) ? followUps : []) {
-    if (!f || typeof f !== 'object' || f.status !== 'pending' || f.direction !== 'outgoing' || !near(f.dueDate)) continue;
-    out.push({ key: `followup:${f.id}`, kind: 'promise', title: text(f.commitment || f.content, 200), who: text(f.person, 80), due: f.dueDate, at: f.detectedAt || 0 });
+    if (!f || typeof f !== 'object' || f.status !== 'pending' || f.direction !== 'outgoing' || !near(f.dueDate) || !usableId(f.id)) continue;
+    out.push({ key: `followup:${f.id}`, kind: 'promise', title: text(f.commitment || f.content, 200), who: text(f.person, 80), due: f.dueDate, at: number(f.detectedAt) || 0 });
   }
   const usable = out.filter((n) => n.title);
   usable.sort((a, b) => (a.due ?? Infinity) - (b.due ?? Infinity) || b.at - a.at || a.key.localeCompare(b.key));
@@ -88,9 +91,16 @@ function getLocal(path, { port = HARNESS_PORT || 9150, request = http.request, d
     const done = (v) => { if (settled) return; settled = true; clearTimeout(timer); req?.destroy(); resolve(v); };
     const timer = setTimeout(() => done(null), deadlineMs);
     req = request({ host: '127.0.0.1', port, path, method: 'GET', agent: new http.Agent({ keepAlive: false }), headers: { Accept: 'application/json' } }, (res) => {
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let chunks = [];
+      let size = 0;
+      if (Number(res.headers?.['content-length']) > MAX_NOTICED_BYTES) { done(null); return; }
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > MAX_NOTICED_BYTES) { chunks = []; done(null); return; }
+        chunks.push(c);
+      });
       res.on('end', () => {
+        if (settled) return;
         if (res.statusCode !== 200) return done(null);
         try { done(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { done(null); }
       });
@@ -101,7 +111,12 @@ function getLocal(path, { port = HARNESS_PORT || 9150, request = http.request, d
   });
 }
 
-async function readNoticed(opts) {
+// Sends nothing secret, but what comes back goes on screen, so it must come from this user's own
+// process on exactly 127.0.0.1, as the board reader checks. A swap between check and read is the
+// same accepted residual as the board's.
+export async function readNoticed(opts = {}) {
+  const port = opts.port || HARNESS_PORT || 9150;
+  if (!await (opts.listenerIsMine || listenerIsMine)({ port })) return { state: 'unavailable' };
   const [a, f] = await Promise.all([
     getLocal(`/action-items?status=pending&limit=${NOTICED_READ}`, opts),
     getLocal(`/follow-ups?status=pending&direction=outgoing&limit=${NOTICED_READ}`, opts),
