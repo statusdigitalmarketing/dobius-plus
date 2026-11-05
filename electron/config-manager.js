@@ -1776,6 +1776,24 @@ export function backupConfigForUpdate(version) {
   }
 }
 
+// The window lists and per-window tabs from the backup written just before updating to `version`, or null.
+export function readUpdateBackup(version) {
+  try {
+    const safeVer = String(version == null ? 'unknown' : version).replace(/[^\w.-]/g, '_').slice(0, 40) || 'unknown';
+    const backupPath = `${CONFIG_PATH}.pre-update-${safeVer}.bak`;
+    if (!fs.existsSync(backupPath)) return null;
+    const { lastOpenProjects, lastTearOffs, lastPrimaryWindows, tearOffWindows, primaryWindows } = JSON.parse(fs.readFileSync(backupPath, 'utf8'));
+    return {
+      lists: { lastOpenProjects, lastTearOffs, lastPrimaryWindows },
+      windowState: { tearOffWindows, primaryWindows },
+      mtimeMs: fs.statSync(backupPath).mtimeMs,
+    };
+  } catch (err) {
+    console.warn('[config-manager] could not read the pre-update backup:', err.message);
+    return null;
+  }
+}
+
 function pruneUpdateBackups(keep) {
   try {
     const backups = fs.readdirSync(CONFIG_DIR)

@@ -19,6 +19,7 @@ export const shell = {};
 export const screen = {};
 export const dialog = {};
 export const Notification = class {};
+export const autoUpdater = { on: () => {}, prependListener: () => {} };
 export const powerMonitor = { on: () => {} };
 export const nativeTheme = { on: () => {} };
 // mobile-server.js imports this at module load (it holds a power assertion
@@ -27,6 +28,6 @@ export const powerSaveBlocker = { start: () => 0, stop: () => {}, isStarted: () 
 // team-main.js (imported via mobile-server.js): no secure storage under test, so no team identity is ever made.
 export const safeStorage = { isEncryptionAvailable: () => false, encryptString: () => { throw new Error('no safeStorage in tests'); }, decryptString: () => { throw new Error('no safeStorage in tests'); } };
 export default {
-  app, ipcMain, BrowserWindow, shell, screen, dialog, Notification,
+  app, ipcMain, BrowserWindow, shell, screen, dialog, Notification, autoUpdater,
   powerMonitor, nativeTheme, powerSaveBlocker, safeStorage,
 };

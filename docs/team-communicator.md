@@ -55,7 +55,7 @@ recipient's key. HTTPS is used when the peer has it and not required (audit #2, 
 
 ### Linking (once per pair of installs, authenticated both ways)
 
-1. Mac A: Settings > Team > **Invite a teammate** shows an invite string (and QR):
+1. Mac A: Settings > Team > **Invite a teammate** shows an invite string:
    `dobius-team:1:<A host>:<A port>:<A fingerprint>:<secret>` where `secret` is 128 random bits, single use, valid
    15 minutes. It is sent to B out of band (iMessage, or shown on screen). 128 bits cannot be guessed, so wrong
    tries do not burn it; they are rate-limited per source IP (audit #10).

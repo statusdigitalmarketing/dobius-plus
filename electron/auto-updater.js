@@ -1,5 +1,5 @@
 import electronUpdater from 'electron-updater';
-import { app, BrowserWindow, Notification, ipcMain } from 'electron';
+import { app, autoUpdater as nativeUpdater, BrowserWindow, Notification, ipcMain } from 'electron';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -38,15 +38,40 @@ export function purgeUpdaterCache() {
 }
 
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const SQUIRREL_BUSY = /command is disabled/i;
 const QUIT_INSTALL_FLUSH_TIMEOUT_MS = 2500;
 let pendingUpdate = null;
 let lastStatus = { state: 'idle' };
 // Tracks the last "ready" version we already notified for, so the same
 // downloaded ZIP doesn't re-fire on every periodic check.
 let lastReadyNotifiedVersion = null;
+// The install that is running. Restart exists in every window's banner, on the
+// Updates tab and on the notification, and Squirrel takes 10s or more to stage the
+// update before anything visibly happens, so a second click is normal. Squirrel
+// refuses a second fetch ("The command is disabled and cannot be executed"), which
+// showed a red "Update error" on an update that was going fine (Brett, Asana
+// 1220218501615934).
+let installing = null;
+let installTimer = null;
+let cancelReset = null;
+
+// The install failed or timed out: Restart and Check work again, and a normal quit is normal.
+function standDownInstall() {
+  clearTimeout(installTimer);
+  // Drop the listener too, or a repeated Restart accumulates one per attempt (Codex round 4).
+  if (cancelReset) app.off('before-quit', cancelReset);
+  cancelReset = null;
+  installing = null;
+  setQuittingForUpdate(false);
+}
 
 function broadcast(channel, payload) {
-  if (channel === 'updater:status') lastStatus = payload;
+  if (channel === 'updater:status') {
+    // A check already in flight when Restart was clicked must not put a Restart
+    // button back over a running install.
+    if (installing && payload.state !== 'installing' && payload.state !== 'error') return;
+    lastStatus = payload;
+  }
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(channel, payload);
   }
@@ -142,10 +167,13 @@ async function fetchLatestRelease({ force = false } = {}) {
 }
 
 async function safeCheck() {
+  if (installing) return; // a new download would re-point Squirrel at a new proxy mid-install
   broadcast('updater:status', { state: 'checking' });
   try {
     await autoUpdater.checkForUpdates();
   } catch (err) {
+    // A check already in flight when Restart was clicked. The install is still fine.
+    if (installing) { console.warn('[updater] a check failed during the install:', err?.message || err); return; }
     broadcast('updater:status', { state: 'error', message: String(err?.message || err) });
   }
 }
@@ -168,6 +196,7 @@ async function performInstall() {
     broadcast('updater:status', { state: 'error', message: 'No update is pending.' });
     return false;
   }
+  broadcast('updater:status', { state: 'installing', version: pendingUpdate.version });
   // Belt-and-suspenders: snapshot config.json before the bundle is replaced, so
   // a bad future build that somehow wiped accounts/auth on first launch is
   // instantly recoverable from config.json.pre-update-<version>.bak. The update
@@ -223,18 +252,16 @@ async function performInstall() {
     // quit is still coming would reintroduce the graceful-close race this
     // whole fix exists to remove (Codex round 3). So the reset is cancelled
     // the moment a quit actually begins.
-    const cancelReset = () => clearTimeout(resetTimer);
-    const resetTimer = setTimeout(() => {
-      // Drop the listener too, or a repeated Restart accumulates one per
-      // attempt (Codex round 4).
-      app.off('before-quit', cancelReset);
-      setQuittingForUpdate(false);
+    if (cancelReset) app.off('before-quit', cancelReset);
+    cancelReset = () => clearTimeout(installTimer);
+    installTimer = setTimeout(() => {
+      standDownInstall();
       broadcast('updater:status', {
         state: 'error',
         message: 'The update did not install. Quit and reopen Dobius+ to try again.',
       });
     }, 60000);
-    resetTimer.unref?.();
+    installTimer.unref?.();
     app.once('before-quit', cancelReset);
     return true;
   } catch (err) {
@@ -245,6 +272,18 @@ async function performInstall() {
   }
 }
 
+// Every Restart goes through here. A click while one is running joins it.
+function installOnce() {
+  if (installing) {
+    broadcast('updater:status', lastStatus); // a window opened mid-install still shows Restart
+    return installing;
+  }
+  const run = performInstall();
+  installing = run;
+  run.then((ok) => { if (!ok && installing === run) installing = null; }, () => { if (installing === run) installing = null; });
+  return run;
+}
+
 export function initAutoUpdater() {
   ipcMain.handle('updater:check', () => {
     if (updatesEnabled()) safeCheck();
@@ -252,7 +291,7 @@ export function initAutoUpdater() {
     return { ok: updatesEnabled() };
   });
   ipcMain.handle('updater:install', async () => {
-    const ok = await performInstall();
+    const ok = await installOnce();
     return { ok };
   });
   // getPending now filters out anything that is not strictly newer than the
@@ -296,6 +335,22 @@ export function initAutoUpdater() {
   // install, for days). The full zip is ~120MB on a fast connection; the delta
   // saves seconds and cost us five releases of updates. v1.0.54.
   autoUpdater.disableDifferentialDownload = true;
+
+  // Squirrel can finish staging after the timeout above gave up, and Electron closes
+  // every window right after this event. Without the flag those closes run the normal
+  // close path, which drops them from the window lists.
+  nativeUpdater.on('before-quit-for-update', () => {
+    clearTimeout(installTimer);
+    setQuittingForUpdate(true);
+    try { saveLiveRestoreListsForUpdate(); } catch (err) { console.warn('[updater] could not save the window lists:', err?.message || err); }
+  });
+
+  // First in line, ahead of the listener that forwards Squirrel's errors to
+  // autoUpdater below: that handler tells a real install failure from a check
+  // that happened to fail during the install by whether this has stood it down.
+  nativeUpdater.prependListener('error', (err) => {
+    if (!SQUIRREL_BUSY.test(String(err?.message || err))) standDownInstall();
+  });
 
   autoUpdater.on('update-available', (info) => {
     // Only surface as "downloading" if it's actually newer than what's
@@ -341,12 +396,23 @@ export function initAutoUpdater() {
         title: `Dobius+ ${info.version} ready`,
         body: 'Click to restart and install the update.',
       });
-      n.on('click', () => { void performInstall(); });
+      n.on('click', () => { void installOnce(); });
       n.show();
     }
   });
 
   autoUpdater.on('error', (err) => {
+    // Squirrel is still staging from an earlier Restart (a retry after the 60s
+    // timeout above can land here). Nothing failed, and the quit is still coming.
+    if (SQUIRREL_BUSY.test(String(err?.message || err))) {
+      console.warn('[updater] Squirrel is still staging the update');
+      return;
+    }
+    // A check already in flight failed. The install it overlapped is still fine.
+    if (installing) {
+      console.warn('[updater] a check failed during the install:', err?.message || err);
+      return;
+    }
     broadcast('updater:status', { state: 'error', message: String(err?.message || err) });
     // Self-heal: a failed download usually means wedged cache state (partial
     // zip, stale pending). Purge so the next check starts clean. v1.0.54.
