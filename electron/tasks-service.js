@@ -70,7 +70,8 @@ function readTasks(projectPath, { strict = false } = {}) {
       // file aside so it's recoverable, and surface the problem.
       const backup = `${p}.corrupt-${Date.now()}`;
       try { fs.renameSync(p, backup); } catch { /* leave the file in place if the move fails */ }
-      console.error(`[tasks-service] Corrupt task file for ${projectPath}; backed up to ${backup}: ${parseErr.message}`);
+      // The parser's message can quote the file, and this log can reach an error report: name the failure only.
+      console.error(`[tasks-service] Corrupt task file; backed up beside it: ${parseErr.name}`);
       if (strict) throw parseErr; // a sync must not write a fresh list over it
       return [];
     }
@@ -78,7 +79,7 @@ function readTasks(projectPath, { strict = false } = {}) {
     // The upgraded shape is persisted on the next write.
     return Array.isArray(parsed) ? parsed.map((t) => pipeline.migrate(t)) : [];
   } catch (err) {
-    console.error(`[tasks-service] Failed to read tasks for ${projectPath}: ${err.message}`);
+    console.error(`[tasks-service] Failed to read a task file: ${err.code || err.name}`);
     // strict: a caller about to write must not replace an unreadable file with [].
     if (strict) throw err;
     return [];

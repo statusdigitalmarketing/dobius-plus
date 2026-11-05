@@ -119,6 +119,7 @@ import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { installNavGuard, isAppUrl } from './nav-guard.js';
+import { readToday } from './today.js';
 import { readBoard as readInboxBoard, boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo } from './inbox-board.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
@@ -1450,9 +1451,11 @@ function setupOrchestrationHandlers() {
     return result;
   });
   // Brett's Inbox board, read only. The board's token stays in main.
-  ipcMain.handle('inbox:read', () => readInboxBoard());
+  // All of them: Today's "See all" lands here, and a card past a cap would look like it does not exist.
+  ipcMain.handle('inbox:read', () => readInboxBoard({ maxCards: Infinity }));
   ipcMain.handle('inbox:act', (_event, request) => actOnInboxCard(request));
   ipcMain.handle('fleet:info', () => fleetInfo());
+  ipcMain.handle('today:read', () => readToday());
   ipcMain.handle('inbox:status', () => inboxBoardStatus());
   ipcMain.handle('inbox:start', () => startInboxBoard());
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());
