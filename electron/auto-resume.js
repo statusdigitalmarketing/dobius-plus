@@ -38,6 +38,7 @@ import {
 import { getSessionSize } from './data-service.js';
 import { BrowserWindow } from 'electron';
 import { projectPathFromTabId } from './tab-id-util.js';
+import { logLine } from './error-log.js';
 import { dockingTabs } from './docking-state.js';
 
 // Per-tab queue entry: tabId -> { sessionId, projectPath, timer }
@@ -330,6 +331,7 @@ async function queueResume(e, delayMs) {
     && terminalInputSeq(e.tabId) === 0
     && (getSessionTabMap() || {})[e.sessionId]?.tabId === e.tabId;
   if (!untouched()) {
+    noteResume(e.tabId, 'not resumed: the tab was in use, replaced or cancelled first');
     console.log(`[auto-resume] ${e.tabId}: in use, replaced or cancelled before queueing, skipping`);
     return;
   }
@@ -343,12 +345,14 @@ async function queueResume(e, delayMs) {
     let claimed = true;
     try { claimed = await claimSessionResume(e.sessionId, e.tabId); } catch { /* proceed */ }
     if (!claimed) {
+      noteResume(e.tabId, 'not resumed: the session is already running or claimed');
       console.log(`[auto-resume] ${e.tabId}: ${e.sessionId} is already running or claimed, skipping`);
       broadcastStatus(e.tabId, 'done');
       return;
     }
     if (!untouched()) {
       releaseSessionResume(e.sessionId, e.tabId);
+      noteResume(e.tabId, 'not resumed: the tab was in use, replaced or cancelled during the claim');
       console.log(`[auto-resume] ${e.tabId}: in use, replaced or cancelled during the claim, skipping`);
       return;
     }
@@ -366,7 +370,7 @@ async function queueResume(e, delayMs) {
     const giveUp = (why) => {
       queue.delete(e.tabId);
       releaseSessionResume(e.sessionId, e.tabId);
-      if (why) console.log(`[auto-resume] ${e.tabId}: ${why}`);
+      if (why) { noteResume(e.tabId, 'not resumed when its time came'); console.log(`[auto-resume] ${e.tabId}: ${why}`); }
       broadcastStatus(e.tabId, 'done');
     };
     entry.timer = setTimeout(async () => {
@@ -420,12 +424,18 @@ let nextRestoredAt = 0;
  * at the last quit, once, under every launch-time guard (Brett, Asana
  * 1220099565720834: "Should this automatically reopen?").
  */
+// Why a tab did or did not resume, for the log a person can send (folder and tab
+// number only, never the path or the session).
+const shortTab = (tabId) => String(tabId).replace(/^term-.*\//, '');
+const noteResume = (tabId, what) => logLine('diag.resume', `${shortTab(tabId)}: ${what}`);
+
 export async function resumeRestoredTab(tabId) {
   // After a Cmd+Shift+R this launch, nothing resumes on its own any more.
   if (!startupDone) { restoredDuringStartup.add(tabId); return; }
-  if (handled.has(tabId) || cancelGen > 0) return;
+  if (handled.has(tabId)) { noteResume(tabId, 'window opened later: already decided this launch'); return; }
+  if (cancelGen > 0) { noteResume(tabId, 'window opened later: resume was cancelled this launch'); return; }
   const info = launchEligible.get(tabId);
-  if (!info) return;
+  if (!info) { noteResume(tabId, 'window opened later: no session was running here at the last quit'); return; }
   handled.add(tabId);
   // And still so NOW: the session's link still names this tab and its running
   // stamp was not cleared since launch (resumed in another tab and stopped
@@ -433,19 +443,21 @@ export async function resumeRestoredTab(tabId) {
   const current = (getSessionTabMap() || {})[info.sessionId];
   if (!current || current.tabId !== tabId || !current.lastRunningAt) {
     console.log(`[auto-resume] ${tabId}: ${info.sessionId} moved or stopped since launch, not resuming`);
+    noteResume(tabId, 'window opened later: its session moved or stopped since launch');
     return;
   }
   // Pinned before any await: this shell, this cancel generation.
   const pidAt = listTerminals().find((t) => t.id === tabId)?.pid ?? null;
   const gen = cancelGen;
   const cfg = getAutoResume();
-  if (!cfg.enabled) return;
+  if (!cfg.enabled) { noteResume(tabId, 'window opened later: auto-resume is off'); return; }
   const sizeMB = await getSessionSize(info.sessionId, info.projectPath);
-  if (sizeMB == null) { console.log(`[auto-resume] skip ${tabId}: transcript not found for ${info.sessionId}`); return; }
-  if (sizeMB > cfg.skipOversizedMB) { console.log(`[auto-resume] skip ${tabId}: transcript ${sizeMB.toFixed(0)}MB > ${cfg.skipOversizedMB}MB cap`); return; }
+  if (sizeMB == null) { noteResume(tabId, 'window opened later: transcript not found'); console.log(`[auto-resume] skip ${tabId}: transcript not found for ${info.sessionId}`); return; }
+  if (sizeMB > cfg.skipOversizedMB) { noteResume(tabId, 'window opened later: transcript over the size cap'); console.log(`[auto-resume] skip ${tabId}: transcript ${sizeMB.toFixed(0)}MB > ${cfg.skipOversizedMB}MB cap`); return; }
   const now = Date.now();
   const at = Math.max(now + RESTORED_TAB_DELAY_MS, nextRestoredAt);
   nextRestoredAt = at + cfg.staggerMs + Math.round(Math.min(sizeMB || 0, 2000) * 2);
+  noteResume(tabId, 'window opened later: queued to resume');
   console.log(`[auto-resume] ${tabId}: window opened later, resuming ${info.sessionId} in ${at - now}ms`);
   await queueResume({ tabId, ...info, sizeMB, pidAt, gen }, at - now);
 }
@@ -473,6 +485,7 @@ export function cancelTabIfPending(tabId) {
   queue.delete(tabId);
   releaseSessionResume(entry.sessionId, tabId);
   broadcastStatus(tabId, 'done');
+  noteResume(tabId, 'pending resume cancelled by input in the tab');
   return true;
 }
 

@@ -40,6 +40,7 @@ import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
 import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary } from './terminal-manager.js';
+import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending } from './chat-service.js';
@@ -336,8 +337,11 @@ function setupTerminalHandlers() {
     // disambiguated from real user input we add a marker arg below later if
     // needed). Today we cancel on any incoming write that isn't the
     // orchestrator itself, which is the desired behavior: if anything
-    // touches the tab first, the queued resume defers to that.
-    cancelAutoResumeTab(id);
+    // touches the tab first, the queued resume defers to that. The terminal's
+    // own replies are not someone touching it: a focus report from the window
+    // opening, or an answer to the shell's startup query, cancelled the resume
+    // of a window opened later (Brett, Asana 1220099565720834).
+    if (!isTerminalReply(data)) cancelAutoResumeTab(id);
     // Waits behind a pending Chat submit so keys land in the order typed.
     writeRawInput(id, data, () => ownsTerminal(event.sender.id, id));
   });

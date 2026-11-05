@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { buildPairingWebLink } from '../../../shared/pairing-link.js';
+import { buildPairingDeepLink, buildPairingWebLink } from '../../../shared/pairing-link.js';
 import { useStore } from '../../store/store';
 import { CURATED_TERMINAL_FONTS, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
@@ -26,6 +26,7 @@ export default function Settings() {
 
   // Mobile server state
   const [mobileStatus, setMobileStatus] = useState(null);
+  const [qrTarget, setQrTarget] = useState('app'); // what scanning the pairing QR opens: the iPhone app or a browser
   const [mobileDevices, setMobileDevices] = useState([]);
   const [mobileBusy, setMobileBusy] = useState(false);
   const [mobileError, setMobileError] = useState('');
@@ -697,7 +698,7 @@ export default function Settings() {
               >
                 <div style={{ background: '#fff', padding: 8, borderRadius: 6, lineHeight: 0 }}>
                   <QRCodeSVG
-                    value={buildPairingWebLink(mobileStatus)}
+                    value={qrTarget === 'app' ? buildPairingDeepLink(mobileStatus) : buildPairingWebLink(mobileStatus)}
                     size={120}
                     level="M"
                     includeMargin={false}
@@ -707,9 +708,28 @@ export default function Settings() {
                   <div style={{ color: 'var(--fg)', marginBottom: 4, fontWeight: 500 }}>
                     Scan with your iPhone camera
                   </div>
-                  Opens Dobius+ in Safari with this Mac filled in{mobileStatus.url?.startsWith('https://')
-                    ? ' and this code too, so you only tap “Pair this device.”'
-                    : '; type this code there. With HTTPS on, the code is filled in too.'}
+                  <div className="flex gap-1" role="group" aria-label="What the QR code opens" style={{ marginBottom: 6 }}>
+                    {[['app', 'iPhone app'], ['browser', 'Safari or Chrome']].map(([value, label]) => (
+                      <button
+                        key={value}
+                        aria-pressed={qrTarget === value}
+                        onClick={() => setQrTarget(value)}
+                        style={{
+                          padding: '3px 8px', fontSize: 11, borderRadius: 6, cursor: 'pointer',
+                          color: qrTarget === value ? 'var(--bg)' : 'var(--fg)',
+                          backgroundColor: qrTarget === value ? 'var(--accent)' : 'var(--bg)',
+                          border: qrTarget === value ? '1px solid var(--accent)' : '1px solid var(--border)',
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  {qrTarget === 'app'
+                    ? 'Opens the Dobius+ app with this Mac and code filled in, so you only confirm. Needs the app installed: without it the camera finds nothing to open.'
+                    : <>Opens Dobius+ in your browser with this Mac filled in{mobileStatus.url?.startsWith('https://')
+                      ? ' and this code too, so you only tap “Pair this device.”'
+                      : '; type this code there. With HTTPS on, the code is filled in too.'}</>}
                   {' '}Needs Tailscale on the phone. The code rotates on regenerate.
                 </div>
               </div>
