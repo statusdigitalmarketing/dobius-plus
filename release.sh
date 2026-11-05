@@ -58,7 +58,7 @@ npm run electron:build -- --publish always
 step "Sign + notarize + staple the DMG container"
 DMG="dist-electron/dobius-plus-${V}.dmg"
 codesign --sign "$IDENTITY" --timestamp "$DMG"
-xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+./scripts/notarize-dmg.sh "$DMG"
 xcrun stapler staple "$DMG"
 # Retry: right after stapling, Gatekeeper's ticket lookup can transiently
 # fail (v1.0.61 release: stapler said "validate action worked" and spctl
