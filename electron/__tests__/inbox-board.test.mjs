@@ -183,6 +183,32 @@ test('actOnCard posts only to the board, shaped to pass its gate, for the card a
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('cardsFrom names a failing mailbox and counts held texts, because an empty list proves nothing then', () => {
+  const r = cardsFrom({ items: [card({ id: 'held', held: true })], connections: [
+    { name: 'a@x.com', state: 'error' }, { name: 'b@x.com', state: 'ok' }, { name: 'whatsapp', state: 'not connected' }, null, { state: 'error' },
+  ] }, TODAY);
+  assert.deepEqual(r.failing, ['a@x.com']);
+  assert.equal(r.held, 1);
+  assert.equal(r.total, 0);
+  assert.deepEqual(cardsFrom({}, TODAY).failing, []);
+});
+
+test('a connection name cannot carry the token to the renderer', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inbox-conn-'));
+  fs.writeFileSync(path.join(dir, 'token.txt'), 'tok-abcdefghijklmnop');
+  try {
+    const body = JSON.stringify({ items: [], connections: [{ name: 'tok-abcdefghijklmnop', state: 'error' }, { name: 'tok%2Dabcdefghijklmnop', state: 'error' }, { name: 'real@x.com', state: 'error' }] });
+    const r = await readBoard({ dir, today: TODAY, request: fakeRequest({ body }) });
+    assert.deepEqual(r.failing, ['real@x.com']);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the Inbox list can read past the default cap, so a card is never just missing', () => {
+  const items = Array.from({ length: 320 }, (_, i) => card({ id: `c${i}` }));
+  assert.equal(cardsFrom({ items }, TODAY).cards.length, 300);
+  assert.equal(cardsFrom({ items }, TODAY, { maxCards: Infinity }).cards.length, 320);
+});
+
 test('fleetInfo offers the site only on a Mac that feeds it', () => {
   assert.deepEqual(fleetInfo({ home: '/h', exists: (p) => p === '/h/.claude/fleet-board/board.json' }), { url: 'https://fleet.dobepros.com/' });
   assert.equal(fleetInfo({ home: '/h', exists: () => false }), null);

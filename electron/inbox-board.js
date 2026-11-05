@@ -178,9 +178,11 @@ const day = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v :
  * a file path). Cards the board itself hides (held texts, meeting boxes) stay
  * hidden.
  */
-export function cardsFrom(payload, today) {
+export function cardsFrom(payload, today, { maxCards = MAX_CARDS } = {}) {
   const items = Array.isArray(payload?.items) ? payload.items : [];
   const cards = [];
+  // Texts the board is still reading: not cards yet, but not nothing either.
+  const held = items.filter((i) => i && typeof i === 'object' && i.status === 'open' && i.held).length;
   for (const i of items) {
     if (!i || typeof i !== 'object' || i.status !== 'open' || i.held || i.boxOnly) continue;
     const id = str(i.id, 200);
@@ -210,7 +212,11 @@ export function cardsFrom(payload, today) {
     || (a.since || '').localeCompare(b.since || ''));
   const overdue = cards.filter((c) => c.due && c.due < today).length;
   const dueToday = cards.filter((c) => c.due === today).length;
-  return { cards: cards.slice(0, MAX_CARDS), total: cards.length, overdue, dueToday };
+  // A check runs even when a mailbox cannot be read, so a recent check proves nothing on its own.
+  const failing = (Array.isArray(payload?.connections) ? payload.connections : [])
+    .filter((c) => c && typeof c.name === 'string' && /^[\w.@+-]{1,80}$/.test(c.name) && typeof c.state === 'string' && c.state !== 'ok' && c.state !== 'not connected')
+    .map((c) => str(c.name, 80));
+  return { cards: cards.slice(0, maxCards), total: cards.length, overdue, dueToday, today, held, failing, checkedAt: str(payload?.stats?.checkedAt, 40) || null };
 }
 
 /**
@@ -243,7 +249,7 @@ export function withoutToken(result, tok) {
     if (typeof c.url === 'string' && carries(c.url, tok)) out.url = null;
     return out;
   });
-  return { ...result, cards };
+  return { ...result, cards, failing: (result.failing || []).filter((n) => !n.includes(tok)) };
 }
 
 /** { ok, url, cards, total, overdue, dueToday } or { ok: false, reason, url }. */
@@ -255,7 +261,7 @@ export async function readBoard(opts = {}) {
   if (!await (opts.listenerIsMine || listenerIsMine)(opts)) return { ok: false, reason: 'not-running', url };
   const got = await getJson(tok, opts);
   if (!got.ok) return { ok: false, reason: got.reason, url };
-  return { ok: true, url, ...withoutToken(cardsFrom(got.payload, opts.today || localDay()), tok) };
+  return { ok: true, url, ...withoutToken(cardsFrom(got.payload, opts.today || localDay(), { maxCards: opts.maxCards }), tok) };
 }
 
 const CARD_ACTIONS = { done: 'done', complete: 'complete', undo: 'open' };

@@ -68,7 +68,7 @@ export default function TasksDropdown() {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState(() => {
     const t = readPref('dobius.tasks.tab', 'project');
-    return t === 'inbox' || t === 'team' ? t : 'project';
+    return t === 'inbox' || t === 'team' || t === 'today' ? t : 'project';
   });
   const [query, setQuery] = useState('');
   const [tasks, setTasks] = useState([]);
@@ -82,6 +82,8 @@ export default function TasksDropdown() {
   const [inboxSource, setInboxSource] = useState('all');
   const [undoCard, setUndoCard] = useState(null);
   const [fleet, setFleet] = useState(null);
+  const [todayData, setTodayData] = useState(null);
+  const todayReq = useRef(0);
   // null until main answers; { installed, canStart }. No board here: no Inbox tab.
   const [board, setBoard] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -111,6 +113,19 @@ export default function TasksDropdown() {
     const t = setTimeout(() => setUndoCard(null), 8000);
     return () => clearTimeout(t);
   }, [undoCard]);
+
+  const loadToday = useCallback(async () => {
+    if (!window.electronAPI?.todayRead) return;
+    const id = ++todayReq.current;
+    let result;
+    try {
+      result = await window.electronAPI.todayRead();
+    } catch (err) {
+      console.error('[TasksDropdown] today read failed:', err?.name);
+      result = { board: { state: 'bad-response' }, noticed: { state: 'unavailable' } };
+    }
+    if (id === todayReq.current) setTodayData(result);
+  }, []);
 
   const loadInbox = useCallback(async () => {
     if (!window.electronAPI?.inboxRead) return;
@@ -147,7 +162,7 @@ export default function TasksDropdown() {
   const inboxShown = !!board?.installed;
   // Also with no teammate left: messages from an unlinked one may still need a Dismiss.
   const teamShown = team.peers > 0 || team.total > 0;
-  const view = tab === 'inbox' && inboxShown ? 'inbox' : (tab === 'team' && teamShown ? 'team' : 'project');
+  const view = tab === 'today' && inboxShown ? 'today' : tab === 'inbox' && inboxShown ? 'inbox' : (tab === 'team' && teamShown ? 'team' : 'project');
 
   useEffect(() => {
     const a = window.electronAPI;
@@ -169,6 +184,14 @@ export default function TasksDropdown() {
   }, []);
 
   // Read on open, then about once a minute while the Inbox tab stays open.
+  useEffect(() => {
+    if (!open || view !== 'today') return undefined;
+    setTodayData(null); // an old answer on screen could read as a clear day while this one loads
+    loadToday();
+    const timer = setInterval(loadToday, INBOX_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [open, view, loadToday]);
+
   useEffect(() => {
     if (!open || view !== 'inbox') return;
     loadInbox();
@@ -288,6 +311,7 @@ export default function TasksDropdown() {
     }
     if (!result?.ok) {
       loadInbox(); // a slow close can still have worked: show what the board says now
+      loadToday();
       return result?.error || (result?.reason === 'not-running'
         ? 'The Inbox board is not running. Start it and try again.'
         : 'Could not reach the Inbox board. Nothing changed. Try again.');
@@ -302,6 +326,7 @@ export default function TasksDropdown() {
     // Closing an Asana task reaches Asana, so only a board card can be undone from here.
     if (kind === 'done') setUndoCard(card);
     loadInbox();
+    loadToday();
     return '';
   };
 
@@ -321,7 +346,9 @@ export default function TasksDropdown() {
       if (result?.ok || result?.reason === 'changed') return null; // changed: a newer decision stands
       return { ...card, undoProblem: 'Could not reach the Inbox board. Try Undo again.' };
     });
+    if (result?.ok) setTodayData(null); // the card is back: do not leave the list without it while this reads
     loadInbox();
+    loadToday();
   };
 
   const openBoard = () => {
@@ -454,6 +481,9 @@ export default function TasksDropdown() {
               <div role="tablist" style={{ display: 'flex', gap: 2, padding: 2, borderRadius: 7, backgroundColor: 'var(--bg)', border: '1px solid var(--border)' }}>
                 <Segment active={view === 'project'} onClick={() => switchTab('project')} label="Project" count={pendingCount} />
                 {inboxShown && (
+                  <Segment active={view === 'today'} onClick={() => switchTab('today')} label="Today" count={todayData?.board?.suggested ? todayData.board.suggested.length : null} />
+                )}
+                {inboxShown && (
                   <Segment
                     active={view === 'inbox'}
                     onClick={() => switchTab('inbox')}
@@ -483,7 +513,9 @@ export default function TasksDropdown() {
                       {syncing ? 'Syncing…' : '⟳ Asana'}
                     </HeaderButton>
                   </>
-                ) : view === 'team' ? null : (
+                ) : view === 'team' ? null : view === 'today' ? (
+                  <HeaderButton onClick={loadToday} color="var(--dim)" title="Read everything again">⟳</HeaderButton>
+                ) : (
                   <>
                     <HeaderButton onClick={loadInbox} disabled={inbox.state === 'loading' || inbox.state === 'refreshing'} color="var(--dim)" title="Read the board again">
                       {inbox.state === 'refreshing' || inbox.state === 'loading' ? '…' : '⟳'}
@@ -503,7 +535,7 @@ export default function TasksDropdown() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={view === 'project' ? 'Filter tasks…' : view === 'team' ? 'Search team messages…' : 'Search the inbox…'}
+                placeholder={view === 'project' ? 'Filter tasks…' : view === 'today' ? 'Filter this list…' : view === 'team' ? 'Search team messages…' : 'Search the inbox…'}
                 aria-label="Filter"
                 style={inputStyle}
               />
@@ -590,6 +622,24 @@ export default function TasksDropdown() {
               </>
             ) : view === 'team' ? (
               <TeamList query={query} />
+            ) : view === 'today' ? (
+              <TodayList
+                data={todayData}
+                query={query}
+                today={today}
+                expanded={expanded}
+                onExpand={(id) => setExpanded((v) => (v === id ? null : id))}
+                onList={onList}
+                canAdd={!!currentProjectPath}
+                onAdd={addCardToTasks}
+                onOpenLink={openLink}
+                onOpenBoard={openBoard}
+                onDone={window.electronAPI?.inboxAct ? markCardDone : null}
+                undoCard={undoCard}
+                onUndo={undoMarkDone}
+                onSeeAll={() => { setInboxSource('all'); setQuery(''); switchTab('inbox'); }}
+                onRetry={loadToday}
+              />
             ) : (
               <InboxList
                 inbox={inbox}
@@ -669,6 +719,83 @@ function HeaderButton({ onClick, disabled, color, title, children }) {
     >
       {children}
     </button>
+  );
+}
+
+const TODAY_NOTE = { fontSize: 10, color: 'var(--dim)', lineHeight: 1.45 };
+const BOARD_DOWN = {
+  'not-installed': 'No Inbox board on this Mac.',
+  'not-running': 'The Inbox board is not running, so this list is not complete. Start it from the Inbox tab.',
+};
+
+// A short list to finish, and an honest count of everything it left out. It says what the board
+// holds and never that nothing needs attention: it cannot know that about mail it could not read.
+function TodayList({ data, query, today, expanded, onExpand, onList, canAdd, onAdd, onOpenLink, onOpenBoard, onDone, undoCard, onUndo, onSeeAll, onRetry }) {
+  if (!data) return <Empty>Reading…</Empty>;
+  const { board, noticed } = data;
+  const q = query.trim().toLowerCase();
+  const matches = (...fields) => !q || fields.some((f) => String(f || '').toLowerCase().includes(q));
+  const cards = (board.suggested || []).filter((c) => matches(c.subject, c.summary, c.who, c.project));
+  const notes = (noticed.items || []).filter((n) => matches(n.title, n.who));
+  const checkedAgo = board.checkedAt ? Date.now() - Date.parse(board.checkedAt) : NaN;
+  const stale = Number.isFinite(checkedAgo) && checkedAgo > 60 * 60 * 1000;
+  const failing = board.failing || [];
+  return (
+    <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+      <div style={{ padding: '6px 12px', borderBottom: '1px solid var(--border)' }}>
+        {board.state === 'ok' ? (
+          <div style={TODAY_NOTE}>
+            {board.suggested.length} of {board.withinReach} that look pressing, by due date and priority. {board.total} open in all.{' '}
+            <LinkButton onClick={onSeeAll} color="var(--accent)">See all</LinkButton>
+          </div>
+        ) : (
+          <div role="alert" style={{ ...TODAY_NOTE, color: 'var(--danger)' }}>
+            {BOARD_DOWN[board.state] || 'Could not read the Inbox board, so this list is not complete.'}{' '}
+            <LinkButton onClick={onRetry} color="var(--accent)">Try again</LinkButton>
+          </div>
+        )}
+        {stale && <div role="alert" style={{ ...TODAY_NOTE, color: 'var(--danger)', marginTop: 2 }}>The board last checked for new messages {Math.round(checkedAgo / 3600000)}h ago, so this may be missing things.</div>}
+        {failing.length > 0 && <div role="alert" style={{ ...TODAY_NOTE, color: 'var(--danger)', marginTop: 2 }}>Can't read {failing.join(', ')} right now, so new messages there are missing. See Connections on the board.</div>}
+        {board.held > 0 && <div style={{ ...TODAY_NOTE, marginTop: 2 }}>{board.held} text{board.held === 1 ? '' : 's'} still being read, not listed yet.</div>}
+      </div>
+      {undoCard && (
+        <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', fontSize: 11, color: 'var(--fg)', backgroundColor: 'rgba(63,185,80,0.12)', borderBottom: '1px solid var(--border)' }}>
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: undoCard.undoProblem ? 'var(--danger)' : undefined }}>{undoCard.undoProblem || `Marked done: ${undoCard.subject || undoCard.summary || '(no subject)'}`}</span>
+          <button onClick={onUndo} style={{ flexShrink: 0, fontSize: 11, color: '#3FB950', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}>Undo</button>
+        </div>
+      )}
+      {board.state === 'ok' && cards.length === 0 && <Empty>{q ? 'Nothing matches.' : board.total ? 'Nothing here looks pressing, but cards are still open.' : 'No open cards on the board.'}</Empty>}
+      {cards.map((card) => (
+        <InboxCard
+          key={card.id}
+          card={card}
+          today={today}
+          expanded={expanded === card.id}
+          onExpand={() => onExpand(card.id)}
+          added={onList.has(card.id)}
+          canAdd={canAdd}
+          onAdd={() => onAdd(card)}
+          onOpenLink={onOpenLink}
+          onOpenBoard={onOpenBoard}
+          onDone={onDone}
+        />
+      ))}
+      <div style={{ padding: '8px 12px 4px' }}>
+        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--fg)' }}>SamKnows noticed</div>
+        <div style={TODAY_NOTE}>
+          {noticed.state === 'unavailable'
+            ? 'SamKnows did not answer, so nothing from it is here.'
+            : `Not sorted or checked, so treat these as hints. Showing ${notes.length} of ${noticed.found}${noticed.state === 'partial' ? '+' : ''}.`}
+        </div>
+      </div>
+      {notes.map((n) => (
+        <div key={n.key} style={{ padding: '4px 12px', borderBottom: '1px solid var(--border)', fontSize: 11, color: 'var(--fg)', lineHeight: 1.4 }}>
+          <span style={{ color: 'var(--dim)', fontSize: 9, fontFamily: MONO, textTransform: 'uppercase', marginRight: 6 }}>{n.kind}</span>
+          {n.title}
+          {n.who && <span style={{ color: 'var(--dim)' }}> · {n.who}</span>}
+        </div>
+      ))}
+    </div>
   );
 }
 

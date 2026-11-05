@@ -480,6 +480,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   inboxRead: () => ipcRenderer.invoke('inbox:read'),
   inboxAct: (request) => ipcRenderer.invoke('inbox:act', request),
   fleetInfo: () => ipcRenderer.invoke('fleet:info'),
+  todayRead: () => ipcRenderer.invoke('today:read'),
   inboxStatus: () => ipcRenderer.invoke('inbox:status'),
   inboxStart: () => ipcRenderer.invoke('inbox:start'),
   // Team communicator (docs/team-communicator.md)
