@@ -90,7 +90,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
 
   const continueFromHost = async () => {
     const normalised = normaliseHost(host);
-    if (!normalised) { setError('Enter a host like 100.89.143.67:8420 or my-mac.ts.net.'); return; }
+    if (!normalised) { setError('Enter a host like my-mac.tailnet.ts.net or 100.64.0.1:8420.'); return; }
     // A scan or Change Mac Address tap invalidates the pending health probe.
     const generation = ++generationRef.current;
     const stillCurrent = () => generation === generationRef.current;
@@ -244,7 +244,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
               autoCapitalize="none"
               autoCorrect="off"
               spellCheck={false}
-              placeholder="100.89.143.67:8420"
+              placeholder="my-mac.tailnet.ts.net"
               value={host}
               onChange={(e) => setHost(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') continueFromHost(); }}
