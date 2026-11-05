@@ -15,9 +15,10 @@ export function pairingOrigin(mobileStatus) {
   return '';
 }
 
-// What the QR code holds: the Mac's own mobile page, which any scanner opens
-// in Safari. (The dobiusplus:// link below only opens when the iPhone app is
-// installed; every other scanner reports "no usable data".) The code rides in
+// The QR's browser choice: the Mac's own mobile page, which any scanner opens
+// in Safari or Chrome. (The app choice is the dobiusplus:// link below, which
+// only opens when the iPhone app is installed; without it the camera reports
+// "no usable data", so Settings offers both.) The code rides in
 // the fragment only over HTTPS: on plain HTTP a phone off Tailscale can be
 // served an impostor page by the local network that reads the fragment, so
 // there the link prefills the Mac and the user types the code.
