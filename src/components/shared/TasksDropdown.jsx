@@ -80,6 +80,8 @@ export default function TasksDropdown() {
   const [showDone, setShowDone] = useState(false);
   const [inbox, setInbox] = useState({ state: 'idle' });
   const [inboxSource, setInboxSource] = useState('all');
+  const [undoCard, setUndoCard] = useState(null);
+  const [fleet, setFleet] = useState(null);
   // null until main answers; { installed, canStart }. No board here: no Inbox tab.
   const [board, setBoard] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -97,6 +99,18 @@ export default function TasksDropdown() {
     const list = await window.electronAPI.tasksList(currentProjectPath);
     setTasks(list || []);
   }, [currentProjectPath]);
+
+  useEffect(() => {
+    if (!open || !window.electronAPI?.fleetInfo) return;
+    window.electronAPI.fleetInfo().then(setFleet).catch((err) => console.error('[TasksDropdown] fleet info failed:', err));
+  }, [open]);
+
+  useEffect(() => {
+    // A failed Undo stays until it works or another card replaces it: the card is still closed.
+    if (!undoCard || undoCard.undoProblem) return undefined;
+    const t = setTimeout(() => setUndoCard(null), 8000);
+    return () => clearTimeout(t);
+  }, [undoCard]);
 
   const loadInbox = useCallback(async () => {
     if (!window.electronAPI?.inboxRead) return;
@@ -261,6 +275,55 @@ export default function TasksDropdown() {
     setTimeout(() => setSyncMsg(''), 4000);
   };
 
+  // Returns '' when closed, or what to show on the card. The board keeps its own rules:
+  // it refuses when something new came in since the card was read.
+  const markCardDone = async (card) => {
+    const kind = card.source === 'asana' ? 'complete' : 'done';
+    let result;
+    try {
+      result = await window.electronAPI.inboxAct({ kind, id: card.id, rev: card.rev });
+    } catch (err) {
+      console.error('[TasksDropdown] could not close inbox card:', err);
+      result = { ok: false, reason: 'bad-response' };
+    }
+    if (!result?.ok) {
+      loadInbox(); // a slow close can still have worked: show what the board says now
+      return result?.error || (result?.reason === 'not-running'
+        ? 'The Inbox board is not running. Start it and try again.'
+        : 'Could not reach the Inbox board. Nothing changed. Try again.');
+    }
+    inboxReq.current += 1; // a read already on its way would put the card back
+    setInbox((prev) => (prev.data ? {
+      ...prev,
+      // Only the revision that was closed: a newer message on the card stays visible.
+      data: { ...prev.data, cards: prev.data.cards.filter((c) => !(c.id === card.id && c.rev === card.rev)), total: Math.max(0, (prev.data.total || 0) - 1) },
+    } : prev));
+    setExpanded((v) => (v === card.id ? null : v));
+    // Closing an Asana task reaches Asana, so only a board card can be undone from here.
+    if (kind === 'done') setUndoCard(card);
+    loadInbox();
+    return '';
+  };
+
+  const undoMarkDone = async () => {
+    const card = undoCard;
+    if (!card) return;
+    let result;
+    try {
+      result = await window.electronAPI.inboxAct({ kind: 'undo', id: card.id, rev: card.rev });
+    } catch (err) {
+      console.error('[TasksDropdown] could not bring inbox card back:', err);
+      result = { ok: false };
+    }
+    // Only this card's Undo: another card closed meanwhile keeps its own.
+    setUndoCard((now) => {
+      if (now?.id !== card.id) return now;
+      if (result?.ok || result?.reason === 'changed') return null; // changed: a newer decision stands
+      return { ...card, undoProblem: 'Could not reach the Inbox board. Try Undo again.' };
+    });
+    loadInbox();
+  };
+
   const openBoard = () => {
     const url = inbox.data?.url || inbox.url || 'http://127.0.0.1:8765/';
     if (!currentProjectPath) return;
@@ -404,6 +467,11 @@ export default function TasksDropdown() {
                 )}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {fleet && (
+                  <HeaderButton onClick={() => window.electronAPI?.openExternal?.(fleet.url)} color="var(--dim)" title="Open the Fleet board in your browser">
+                    Fleet ↗
+                  </HeaderButton>
+                )}
                 {view === 'project' ? (
                   <>
                     {syncMsg && (
@@ -544,6 +612,9 @@ export default function TasksDropdown() {
                 onOpenLink={openLink}
                 onOpenBoard={openBoard}
                 onRetry={loadInbox}
+                onDone={window.electronAPI?.inboxAct ? markCardDone : null}
+                undoCard={undoCard}
+                onUndo={undoMarkDone}
               />
             )}
           </motion.div>
@@ -745,7 +816,7 @@ function TaskRow({ task, today, expanded, onExpand, onToggle, onDelete, onOpenLi
   );
 }
 
-function InboxList({ inbox, cards, total, sourceCounts, hereCount, canStart, starting, onStart, source, onSource, query, today, expanded, onExpand, onList, canAdd, onAdd, onOpenLink, onOpenBoard, onRetry }) {
+function InboxList({ inbox, cards, total, sourceCounts, hereCount, canStart, starting, onStart, source, onSource, query, today, expanded, onExpand, onList, canAdd, onAdd, onOpenLink, onOpenBoard, onRetry, onDone, undoCard, onUndo }) {
   if (inbox.state === 'idle' || (inbox.state === 'loading' && !inbox.data)) {
     return <div style={{ flex: 1 }}><Empty>Reading the Inbox board…</Empty></div>;
   }
@@ -796,6 +867,12 @@ function InboxList({ inbox, cards, total, sourceCounts, hereCount, canStart, sta
         {cards.length === 0 && (
           <Empty>{query || source !== 'all' ? 'Nothing matches.' : 'Inbox zero. Nothing open on the board.'}</Empty>
         )}
+        {undoCard && (
+          <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', fontSize: 11, color: 'var(--fg)', backgroundColor: 'rgba(63,185,80,0.12)', borderBottom: '1px solid var(--border)' }}>
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: undoCard.undoProblem ? 'var(--danger)' : undefined }}>{undoCard.undoProblem || `Marked done: ${undoCard.subject || undoCard.summary || '(no subject)'}`}</span>
+            <button onClick={onUndo} style={{ flexShrink: 0, fontSize: 11, color: '#3FB950', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 600 }}>Undo</button>
+          </div>
+        )}
         {rendered.map((card) => (
           <InboxCard
             key={card.id}
@@ -808,6 +885,7 @@ function InboxList({ inbox, cards, total, sourceCounts, hereCount, canStart, sta
             onAdd={() => onAdd(card)}
             onOpenLink={onOpenLink}
             onOpenBoard={onOpenBoard}
+            onDone={onDone}
           />
         ))}
         {cards.length > rendered.length && (
@@ -837,7 +915,30 @@ function FilterPill({ active, onClick, label, count, dot }) {
   );
 }
 
-function InboxCard({ card, today, expanded, onExpand, added, canAdd, onAdd, onOpenLink, onOpenBoard }) {
+function InboxCard({ card, today, expanded, onExpand, added, canAdd, onAdd, onOpenLink, onOpenBoard, onDone }) {
+  const [closing, setClosing] = useState(false);
+  const [confirmAsana, setConfirmAsana] = useState(false);
+  const [problem, setProblem] = useState('');
+  // A confirm answers the card as it stood, so anything new, or a few seconds, asks again.
+  useEffect(() => {
+    if (!confirmAsana) return undefined;
+    const t = setTimeout(() => setConfirmAsana(false), 5000);
+    return () => clearTimeout(t);
+  }, [confirmAsana]);
+  useEffect(() => { setConfirmAsana(false); }, [card.rev]);
+  const isAsana = card.source === 'asana';
+  const close = async (e) => {
+    e.stopPropagation();
+    if (closing) return;
+    // Closing an Asana task changes Asana for everyone on it and has no undo here.
+    if (isAsana && !confirmAsana) { setConfirmAsana(true); return; }
+    setClosing(true);
+    setProblem('');
+    const why = await onDone(card);
+    setClosing(false);
+    setConfirmAsana(false);
+    if (why) setProblem(why);
+  };
   const src = INBOX_SOURCES[card.source] || INBOX_SOURCES.other;
   const title = card.subject || card.summary || '(no subject)';
   const linkLabel = { email: 'Open in Gmail ↗', asana: 'Open in Asana ↗' }[card.source] || 'Open original ↗';
@@ -860,7 +961,25 @@ function InboxCard({ card, today, expanded, onExpand, added, canAdd, onAdd, onOp
           {title}
         </span>
         <DueChip due={card.due} today={today} />
+        {onDone && (
+          <button
+            onClick={close}
+            disabled={closing}
+            title={isAsana ? 'Mark this task done in Asana' : 'Mark done'}
+            aria-label={isAsana ? `Mark ${title} done in Asana` : `Mark ${title} done`}
+            style={{
+              flexShrink: 0, alignSelf: 'center', height: 20, minWidth: 20, padding: confirmAsana ? '0 6px' : 0,
+              fontSize: 10, lineHeight: '18px', borderRadius: 4, cursor: closing ? 'wait' : 'pointer',
+              color: confirmAsana ? 'var(--bg)' : '#3FB950',
+              backgroundColor: confirmAsana ? '#3FB950' : 'transparent',
+              border: '1px solid rgba(63,185,80,0.5)', opacity: closing ? 0.5 : 1,
+            }}
+          >
+            {closing ? '…' : confirmAsana ? 'Close in Asana?' : '✓'}
+          </button>
+        )}
       </div>
+      {problem && <div role="alert" style={{ marginTop: 3, fontSize: 10, color: 'var(--danger)', lineHeight: 1.4 }}>{problem}</div>}
       <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 2, fontSize: 10, color: 'var(--dim)', minWidth: 0 }}>
         <span style={{ color: src.color, fontFamily: MONO, fontSize: 9, textTransform: 'uppercase', letterSpacing: '0.05em', flexShrink: 0 }}>{src.label.replace(/s$/, '')}</span>
         {card.who && <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{card.who}</span>}

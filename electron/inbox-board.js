@@ -1,8 +1,9 @@
 /**
  * Brett's Inbox board (a local Python app, not part of Dobius) read from the
- * Tasks dropdown. READ ONLY: Dobius only ever GETs /api/items. Every action
- * that sends anything (email, text, Asana comment) stays on the board itself,
- * where Brett's own guards and clicks govern it.
+ * Tasks dropdown. Dobius GETs /api/items, and POSTs /api/act for exactly one
+ * thing: marking a card done, or undoing that. Every action that sends anything
+ * (email, text, Asana comment) stays on the board itself, where Brett's own
+ * guards and clicks govern it.
  *
  * The board guards its API with a per-install token in <board>/token.txt.
  * That token is read here, sent only to 127.0.0.1, and never handed to the
@@ -108,7 +109,7 @@ export function readToken(dir) {
   }
 }
 
-function getJson(tok, { port = BOARD_PORT, request = http.request, timeoutMs = 5000, deadlineMs = 8000 } = {}) {
+function getJson(tok, { port = BOARD_PORT, request = http.request, timeoutMs = 5000, deadlineMs = 8000, post = null } = {}) {
   return new Promise((done) => {
     let settled = false;
     let req = null;
@@ -128,11 +129,15 @@ function getJson(tok, { port = BOARD_PORT, request = http.request, timeoutMs = 5
       // which would carry the token off this Mac.
       agent: new http.Agent({ keepAlive: false }),
       port,
-      path: '/api/items',
-      method: 'GET',
+      path: post ? '/api/act' : '/api/items',
+      method: post ? 'POST' : 'GET',
       // The board checks Host against its own listener and the token in X-Token.
       // No Origin and no X-Visible: reading here must not mark the board "seen".
-      headers: { Host: `127.0.0.1:${port}`, 'X-Token': tok, Accept: 'application/json' },
+      // A POST must name the board's own origin and be JSON, or the board refuses it.
+      headers: {
+        Host: `127.0.0.1:${port}`, 'X-Token': tok, Accept: 'application/json',
+        ...(post ? { Origin: `http://127.0.0.1:${port}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(post) } : {}),
+      },
       timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
@@ -145,6 +150,8 @@ function getJson(tok, { port = BOARD_PORT, request = http.request, timeoutMs = 5
       res.on('end', () => {
         if (size > MAX_BODY) return;
         if (res.statusCode === 403) return resolve({ ok: false, reason: 'denied' });
+        if (post && res.statusCode === 409) return resolve({ ok: false, reason: 'changed' });
+        if (post && (res.statusCode === 400 || res.statusCode === 502)) return resolve({ ok: false, reason: 'refused' });
         if (res.statusCode !== 200) return resolve({ ok: false, reason: 'bad-response' });
         try {
           resolve({ ok: true, payload: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
@@ -158,7 +165,7 @@ function getJson(tok, { port = BOARD_PORT, request = http.request, timeoutMs = 5
     req.on('error', () => resolve({ ok: false, reason: 'not-running' }));
     req.on('upgrade', () => resolve({ ok: false, reason: 'bad-response' }));
     req.on('close', () => resolve({ ok: false, reason: 'not-running' })); // no-op once settled
-    req.end();
+    req.end(post || undefined);
   });
 }
 
@@ -181,6 +188,8 @@ export function cardsFrom(payload, today) {
     const url = safeLink(i.url);
     cards.push({
       id,
+      // Handed back on Done: the board refuses if something new came in since.
+      rev: typeof i.rev === 'number' || (typeof i.rev === 'string' && i.rev.length <= 300) ? i.rev : null,
       source: SOURCES.has(i.source) ? i.source : 'other',
       who: str(i.who, 120),
       subject: str(i.subject, 300),
@@ -247,6 +256,52 @@ export async function readBoard(opts = {}) {
   const got = await getJson(tok, opts);
   if (!got.ok) return { ok: false, reason: got.reason, url };
   return { ok: true, url, ...withoutToken(cardsFrom(got.payload, opts.today || localDay()), tok) };
+}
+
+const CARD_ACTIONS = { done: 'done', complete: 'complete', undo: 'open' };
+const CARD_CHANGED = 'Something new came in on this one, so it stays as it was.';
+
+/**
+ * Marks one card done on the board (kind 'done'), closes an Asana task as the board's
+ * own Mark task done does (kind 'complete'), or brings a card back (kind 'undo'), all
+ * only for the revision the person was looking at. The board checks that itself on
+ * 'done'. It does not on the other two, and closing a task changes Asana for everyone,
+ * so those read the card first. A change landing between that read and the write is an
+ * accepted residual. The board's error text is never shown: only a fixed message can
+ * reach the renderer, so nothing a listener answers can carry the token out.
+ */
+export async function actOnCard({ kind, id, rev } = {}, opts = {}) {
+  const action = Object.hasOwn(CARD_ACTIONS, String(kind)) ? CARD_ACTIONS[kind] : null;
+  if (!action || typeof id !== 'string' || !id || id.length > 200) return { ok: false, reason: 'bad-request' };
+  if (typeof rev !== 'number' && typeof rev !== 'string') return { ok: false, reason: 'bad-request' };
+  const dir = opts.dir || await findBoardDir(opts);
+  const tok = readToken(dir);
+  if (!tok) return { ok: false, reason: 'not-installed' };
+  if (!await (opts.listenerIsMine || listenerIsMine)(opts)) return { ok: false, reason: 'not-running' };
+  if (kind !== 'done') {
+    const now = await getJson(tok, opts);
+    if (!now.ok) return { ok: false, reason: now.reason };
+    const items = Array.isArray(now.payload?.items) ? now.payload.items : [];
+    const item = items.find((i) => i && i.id === id);
+    const expected = kind === 'undo' ? 'done' : 'open';
+    if (!item || item.rev !== rev || item.status !== expected || (kind === 'complete' && item.source !== 'asana')) {
+      return { ok: false, reason: 'changed', error: CARD_CHANGED };
+    }
+  }
+  const body = { id, action, ...(kind === 'done' ? { rev } : {}) };
+  // Longer than the board's own 30s wait on Asana, so a slow close is not called a failure.
+  const got = await getJson(tok, { ...opts, deadlineMs: 45000, timeoutMs: 40000, post: JSON.stringify(body) });
+  if (got.ok) return { ok: true };
+  if (got.reason === 'changed') return { ok: false, reason: 'changed', error: CARD_CHANGED };
+  if (got.reason === 'refused') return { ok: false, reason: 'refused', error: 'The board would not change this card. Open the board to see why.' };
+  return { ok: false, reason: got.reason };
+}
+
+// The fleet site signs in one person so far, and only their Mac runs the orchestrator
+// that feeds it. Everyone else would just hit a login they cannot pass.
+export const FLEET_URL = 'https://fleet.dobepros.com/';
+export function fleetInfo({ home = os.homedir(), exists = fs.existsSync } = {}) {
+  return exists(path.join(home, '.claude', 'fleet-board', 'board.json')) ? { url: FLEET_URL } : null;
 }
 
 const LABEL = 'com.brett.inbox-server';

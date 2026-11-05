@@ -672,3 +672,9 @@
 - **FIX**: Build the frontend in the repo and copy `dist` into the rig. Have the rig read rendered text or a screenshot, not just the URL. Why the scratch copy bundles two is not established.
 - **CONTEXT**: A blank rig still passes any check that only reads config and window URLs. Also, a Mac restart empties the scratchpad under `/private/tmp`, so copy rig scripts out first.
 - **DETECTION**: `grep -o "react.transitional.element" dist/assets/index-*.js | wc -l` should be 3 in the frontend you package.
+
+### Testing - 2026-11-05
+- **MISTAKE**: A harness cleanup killed whatever listened on port 5173 (`lsof ... -t | xargs kill`). `npx vite --strictPort` had failed because another project's dev server owned the port, so the harness window loaded that project's site and my cleanup killed its server. The "Never pkill -f vite, kill by listener PID" note in NOTES.md only moved the problem: a listener PID on a shared port can be anyone's.
+- **FIX**: Before starting, refuse if the port is busy. On cleanup, kill a listener only after `lsof -a -p <pid> -d cwd` shows this repo. Read the page you are testing: the wrong site still answered with a window, and only the screenshot showed it.
+- **CONTEXT**: Many tabs share this Mac, and Vite is pinned to 5173 for Electron dev.
+- **DETECTION**: `lsof -nP -iTCP:5173 -sTCP:LISTEN` before a harness run, and look at vite's log for "already in use".

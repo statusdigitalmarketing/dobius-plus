@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { cardsFrom, readToken, readBoard as readBoardRaw, findBoardDir, listenerIsMine, boardStatus, startBoard, portState } from '../inbox-board.js';
+import { actOnCard, fleetInfo, cardsFrom, readToken, readBoard as readBoardRaw, findBoardDir, listenerIsMine, boardStatus, startBoard, portState } from '../inbox-board.js';
 
 // Tests drive fake listeners; ownership has its own test below.
 const readBoard = (opts) => readBoardRaw({ listenerIsMine: async () => true, ...opts });
@@ -64,7 +64,7 @@ test('cardsFrom drops non-https links, unknown sources and bad dates', () => {
 
 test('cardsFrom returns only display fields', () => {
   const [c] = cardsFrom({ items: [card({ sender: 'kim@x.com', lessons: [1], hand: { job: 'j' }, recordings: [{ path: '/tmp/a' }] })] }, TODAY).cards;
-  assert.deepEqual(Object.keys(c).sort(), ['due', 'id', 'meeting', 'priority', 'project', 'since', 'source', 'subject', 'summary', 'url', 'who', 'why']);
+  assert.deepEqual(Object.keys(c).sort(), ['due', 'id', 'meeting', 'priority', 'project', 'rev', 'since', 'source', 'subject', 'summary', 'url', 'who', 'why']);
 });
 
 test('cardsFrom survives a payload with no items', () => {
@@ -111,6 +111,82 @@ function fakeRequest({ status = 200, body = '{"items":[]}', fail = null, seen = 
     return req;
   };
 }
+
+// The board's own gate (allowed() in its server.py): a POST needs its Origin, JSON and the token.
+test('actOnCard posts only to the board, shaped to pass its gate, for the card as it was seen', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inbox-act-'));
+  fs.writeFileSync(path.join(dir, 'token.txt'), 'tok-abcdefghijklmnop');
+  const act = (req, opts = {}) => actOnCard(req, { dir, listenerIsMine: async () => true, ...opts });
+  // Answers a read with `items` and a write with `status`, recording what was sent.
+  const board = ({ items = [], status = 200, answer = '{"ok":true}' } = {}) => {
+    const seen = []; const bodies = [];
+    const request = (opts, onRes) => {
+      const post = opts.method === 'POST';
+      const r = fakeRequest({ seen, status: post ? status : 200, body: post ? answer : JSON.stringify({ items }) })(opts, onRes);
+      const end = r.end; r.end = (b) => { if (post) bodies.push(b); end(); };
+      return r;
+    };
+    return { request, seen, bodies, posts: () => seen.filter((o) => o.method === 'POST') };
+  };
+  try {
+    let b = board();
+    assert.deepEqual(await act({ kind: 'done', id: 'c1', rev: 7 }, { request: b.request }), { ok: true });
+    const [p] = b.posts();
+    assert.equal(p.path, '/api/act');
+    assert.equal(p.host, '127.0.0.1');
+    assert.equal(p.headers.Origin, 'http://127.0.0.1:8765');
+    assert.equal(p.headers.Host, '127.0.0.1:8765');
+    assert.equal(p.headers['Content-Type'], 'application/json');
+    assert.equal(p.headers['X-Token'], 'tok-abcdefghijklmnop');
+    assert.deepEqual(JSON.parse(b.bodies[0]), { id: 'c1', action: 'done', rev: 7 });
+    b = board();
+    await act({ kind: 'done', id: 'c0', rev: 0 }, { request: b.request });
+    assert.equal(JSON.parse(b.bodies[0]).rev, 0, 'a rev of 0 is still checked');
+
+    const task = { id: 'a1', source: 'asana', status: 'open', rev: 3 };
+    b = board({ items: [task] });
+    assert.deepEqual(await act({ kind: 'complete', id: 'a1', rev: 3 }, { request: b.request }), { ok: true });
+    assert.deepEqual(JSON.parse(b.bodies[0]), { id: 'a1', action: 'complete' });
+    for (const [name, items, rev] of [['newer revision', [task], 2], ['already closed', [{ ...task, status: 'done' }], 3], ['gone', [], 3], ['not an Asana card', [{ ...task, source: 'email' }], 3]]) {
+      b = board({ items });
+      assert.equal((await act({ kind: 'complete', id: 'a1', rev }, { request: b.request })).reason, 'changed', name);
+      assert.equal(b.posts().length, 0, `${name}: Asana is not touched`);
+    }
+
+    const closed = { id: 'c1', source: 'email', status: 'done', rev: 5 };
+    b = board({ items: [closed] });
+    assert.deepEqual(await act({ kind: 'undo', id: 'c1', rev: 5 }, { request: b.request }), { ok: true });
+    assert.deepEqual(JSON.parse(b.bodies[0]), { id: 'c1', action: 'open' });
+    for (const [name, item] of [['a new message since', { ...closed, rev: 6 }], ['moved to Later since', { ...closed, status: 'later' }], ['reopened since', { ...closed, status: 'open' }]]) {
+      b = board({ items: [item] });
+      assert.equal((await act({ kind: 'undo', id: 'c1', rev: 5 }, { request: b.request })).reason, 'changed', name);
+      assert.equal(b.posts().length, 0, `${name}: the newer decision stands`);
+    }
+
+    const secret = '{"error":"tok-abcdefghijklmnop tok%2Dabcdefghijklmnop"}';
+    let r = await act({ kind: 'done', id: 'c1', rev: 1 }, { request: board({ status: 409, answer: secret }).request });
+    assert.equal(r.reason, 'changed');
+    assert.doesNotMatch(JSON.stringify(r), /abcdefghijklmnop/, 'nothing the listener says reaches the renderer');
+    r = await act({ kind: 'done', id: 'c1', rev: 1 }, { request: board({ status: 400, answer: secret }).request });
+    assert.equal(r.reason, 'refused');
+    assert.doesNotMatch(JSON.stringify(r), /abcdefghijklmnop/);
+    assert.equal((await act({ kind: 'done', id: 'c1', rev: 1 }, { request: fakeRequest({ status: 403 }) })).reason, 'denied');
+    assert.equal((await act({ kind: 'done', id: 'c1', rev: 1 }, { request: fakeRequest({ status: 500 }) })).reason, 'bad-response');
+    assert.equal((await act({ kind: 'done', id: 'c1', rev: 1 }, { request: fakeRequest({ fail: 'refused' }) })).reason, 'not-running');
+    assert.equal((await act({ kind: 'done', id: 'c1', rev: 1 }, { listenerIsMine: async () => false })).reason, 'not-running', 'never sends the token to a listener that is not ours');
+    let called = 0;
+    const counting = (o, cb) => { called += 1; return fakeRequest()(o, cb); };
+    for (const bad of [{}, { kind: 'send', id: 'c1', rev: 1 }, { kind: 'edit', id: 'c1', rev: 1 }, { kind: 'toString', id: 'c1', rev: 1 }, { kind: '__proto__', id: 'c1', rev: 1 }, { kind: 'done', rev: 1 }, { kind: 'done', id: 7, rev: 1 }, { kind: 'done', id: 'x'.repeat(201), rev: 1 }, { kind: 'done', id: 'c1' }, { kind: 'complete', id: 'a1' }, { kind: 'undo', id: 'c1', rev: null }]) {
+      assert.equal((await act(bad, { request: counting })).reason, 'bad-request', JSON.stringify(bad).slice(0, 40));
+    }
+    assert.equal(called, 0, 'nothing but done, complete and undo, with a revision, can reach the board');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('fleetInfo offers the site only on a Mac that feeds it', () => {
+  assert.deepEqual(fleetInfo({ home: '/h', exists: (p) => p === '/h/.claude/fleet-board/board.json' }), { url: 'https://fleet.dobepros.com/' });
+  assert.equal(fleetInfo({ home: '/h', exists: () => false }), null);
+});
 
 test('readBoard sends the token to 127.0.0.1 with the board Host and no Origin', async () => {
   const dir = tmpDir();
