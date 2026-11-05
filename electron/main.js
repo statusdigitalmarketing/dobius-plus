@@ -99,7 +99,7 @@ import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCer
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
-  deriveDeviceId, getTeamEndpoint,
+  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
 import { initTeam, stopTeam, handleTeamBridge } from './team-main.js';
@@ -122,6 +122,8 @@ import { installNavGuard, isAppUrl } from './nav-guard.js';
 import { readBoard as readInboxBoard, boardStatus as inboxBoardStatus, startBoard as startInboxBoard } from './inbox-board.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
+import { readUpdateBackup } from './config-manager.js';
+import { recoverWindowLists } from './update-window-recovery.js';
 import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError } from './claude-settings-env.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages, getVisualProjectPath } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
@@ -3777,7 +3779,7 @@ function setupWindowHandlers() {
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
   // Team communicator (docs/team-communicator.md): delivery into the pinned
   // orchestrator tab reuses these same guards.
-  initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint });
+  initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint, endpointProblem: getTeamEndpointProblem });
   setTeamBridge(handleTeamBridge);
   // /openTab's own "is another surface typing into this tab": an account move
   // must not stop Claude under it.
@@ -4439,6 +4441,15 @@ app.whenReady().then(() => {
 
   // Restore previously open project windows (Chrome-style tab restore)
   const config = loadConfig();
+  // Put back any windows the previous version's update shutdown dropped. Before the
+  // tear-off cleanup below, which has to see every tear-off.
+  try {
+    const recovered = recoverWindowLists(config, { runningVersion: app.getVersion(), read: readUpdateBackup, exists: fs.existsSync, now: Date.now() });
+    if (recovered.added > 0) logLine('diag.restore', `recovered ${recovered.added} windows from the pre-update backup`);
+    if (recovered.changed) persistConfigNow();
+  } catch (err) {
+    console.warn('[restore] could not check the pre-update backup:', err?.message || err);
+  }
   // H4: a crash/update within the 500ms config save-debounce can leave a torn
   // tab in BOTH config.projects[p].tabs AND lastTearOffs, so on relaunch the
   // primary window and the tear-off would both create the same tab id (the

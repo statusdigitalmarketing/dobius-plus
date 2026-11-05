@@ -1,13 +1,13 @@
 // Settings > Team: this Mac's identity, invites and joining, linked teammates, the pinned orchestrator tab.
 // docs/team-communicator.md. Section, SettingRow and Toggle come from Settings.jsx so the page stays one style.
 import { useState, useEffect, useCallback } from 'react';
-import { QRCodeSVG } from 'qrcode.react';
 
 const api = window.electronAPI;
 const box = { backgroundColor: 'var(--surface)', border: '1px solid var(--border)' };
-const btn = (primary, busy) => ({
+const btn = (primary, busy, off) => ({
   color: primary ? 'var(--bg)' : 'var(--fg)', backgroundColor: primary ? 'var(--accent)' : 'var(--surface)',
-  border: primary ? 'none' : '1px solid var(--border)', cursor: busy ? 'wait' : 'pointer',
+  border: primary ? 'none' : '1px solid var(--border)', cursor: off ? 'not-allowed' : busy ? 'wait' : 'pointer',
+  opacity: off ? 0.4 : 1,
 });
 
 // term-<project path>-<n>: "<folder> tab <n>" for people.
@@ -74,7 +74,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
         Message teammates&apos; Dobius orchestrators over Tailscale. Every message is signed and encrypted end to end; only linked teammates can send.
       </div>
 
-      <SettingRow label="This Mac" description={st.endpoint ? `Reachable at ${st.endpoint.host}:${st.endpoint.port}` : 'Not reachable yet: turn on Mobile Access above (Tailscale signed in)'}>
+      <SettingRow label="This Mac" description={st.endpoint ? `Reachable at ${st.endpoint.host}:${st.endpoint.port}` : `Not reachable yet. ${st.notReachable}`}>
         <div className="flex items-center gap-2">
           <input
             value={name}
@@ -116,12 +116,11 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
         </div>
       ))}
 
-      <SettingRow label="Invite a teammate" description="Send them the invite (iMessage is fine). It works once, for 15 minutes, and you confirm before anything is linked">
-        <button className="text-xs px-3 py-1 rounded" style={btn(true)} onClick={makeInvite} disabled={!st.endpoint}>New invite</button>
+      <SettingRow label="Invite a teammate" description={st.endpoint ? 'Send them the invite (iMessage is fine). It works once, for 15 minutes, and you confirm before anything is linked' : st.notReachable}>
+        <button className="text-xs px-3 py-1 rounded" style={btn(true, false, !st.endpoint)} onClick={makeInvite} disabled={!st.endpoint} title={st.endpoint ? undefined : st.notReachable}>New invite</button>
       </SettingRow>
       {invite && expiresIn > 0 && (
         <div className="flex items-start gap-3 px-3 py-2 rounded" style={box}>
-          <div className="p-1 rounded" style={{ backgroundColor: '#fff' }}><QRCodeSVG value={invite.text} size={96} /></div>
           <div className="min-w-0 flex-1">
             <code className="block text-xs break-all select-text" style={{ color: 'var(--fg)', fontFamily: "'SF Mono', monospace" }}>{invite.text}</code>
             <div className="flex items-center gap-2 mt-2">
@@ -132,7 +131,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
         </div>
       )}
 
-      <SettingRow label="Join with an invite" description="Paste the invite a teammate sent you">
+      <SettingRow label="Join with an invite" description={st.endpoint ? 'Paste the invite a teammate sent you' : st.notReachable}>
         <div className="flex items-center gap-2">
           <input
             value={joinText}
@@ -142,7 +141,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
             style={{ ...box, color: 'var(--fg)', width: 200, fontFamily: "'SF Mono', monospace" }}
             aria-label="Team invite"
           />
-          <button className="text-xs px-3 py-1 rounded" style={btn(true, busy)} disabled={busy || !joinText.trim() || !st.endpoint} onClick={join}>{busy ? 'Joining...' : 'Join'}</button>
+          <button className="text-xs px-3 py-1 rounded" style={btn(true, busy, !busy && (!joinText.trim() || !st.endpoint))} title={st.endpoint ? undefined : st.notReachable} disabled={busy || !joinText.trim() || !st.endpoint} onClick={join}>{busy ? 'Joining...' : 'Join'}</button>
         </div>
       </SettingRow>
 

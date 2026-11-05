@@ -46,4 +46,25 @@ const dock = main.slice(main.indexOf("ipcMain.handle('window:dockTab'"));
 assert.ok(dock.indexOf('getQuittingForUpdate()') < dock.indexOf('getWindowEntryByWcId'), 'no dock while an install is pending');
 console.log('PASS  a failed install and a pending dock cannot lose the lists');
 
+// A second Restart must join the running install: Squirrel refuses a second fetch, and that refusal showed a red
+// "Update error" on an update that went on to work (Brett, Asana 1220218501615934). The real proof needs Squirrel.
+const once = updater.slice(updater.indexOf('function installOnce()'), updater.indexOf('export function initAutoUpdater'));
+assert.ok(once.indexOf('return installing;') > 0 && once.indexOf('return installing;') < once.indexOf('performInstall()'), 'installOnce joins a running install before starting anything');
+assert.equal(updater.match(/performInstall\(\)/g).length, 2, 'performInstall is defined once and called only by installOnce');
+assert.ok(once.includes('performInstall()'), 'that one caller is installOnce');
+assert.ok(install.indexOf("state: 'installing'") > 0 && install.indexOf("state: 'installing'") < saved, 'every window hears about it before the slow part');
+const down = updater.slice(updater.indexOf('function standDownInstall()'), updater.indexOf('function broadcast('));
+assert.ok(down.includes('installing = null') && down.includes('setQuittingForUpdate(false)'), 'standing down allows another try');
+const timeout = install.slice(install.indexOf('installTimer = setTimeout'));
+assert.ok(timeout.indexOf('standDownInstall()') > 0 && timeout.indexOf('standDownInstall()') < timeout.indexOf("state: 'error'"), 'a timed out install can be tried again');
+const onNative = updater.slice(updater.indexOf("nativeUpdater.prependListener('error'"), updater.indexOf("autoUpdater.on('update-available'"));
+assert.ok(onNative.includes('SQUIRREL_BUSY') && onNative.indexOf('SQUIRREL_BUSY') < onNative.indexOf('standDownInstall()'), 'a real Squirrel failure stands the install down, a busy one does not');
+const onError = updater.slice(updater.indexOf("autoUpdater.on('error'"));
+assert.ok(onError.indexOf('SQUIRREL_BUSY') > 0 && onError.indexOf('SQUIRREL_BUSY') < onError.indexOf('if (installing)') && onError.indexOf('if (installing)') < onError.indexOf("state: 'error'"), 'neither Squirrel being busy nor an overlapping check shows as a failed update');
+const late = updater.slice(updater.indexOf("nativeUpdater.on('before-quit-for-update'"), updater.indexOf("autoUpdater.on('update-available'"));
+assert.ok(late.includes('setQuittingForUpdate(true)') && late.includes('saveLiveRestoreListsForUpdate()') && late.includes('clearTimeout(installTimer)'), 'a quit after the timeout still counts as an update, with the windows still open');
+const check = updater.slice(updater.indexOf('async function safeCheck()'), updater.indexOf('// Centralized install routine'));
+assert.ok(check.indexOf('if (installing)', check.indexOf('catch')) > 0 && check.indexOf('if (installing)', check.indexOf('catch')) < check.lastIndexOf("state: 'error'"), 'a check that fails during an install shows nothing');
+console.log('PASS  a second Restart joins the install');
+
 function code(s) { return s.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n'); }

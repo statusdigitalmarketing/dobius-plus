@@ -73,7 +73,7 @@ export default function Updates() {
         </div>
         <button
           onClick={handleCheck}
-          disabled={status.state === 'checking' || status.state === 'downloading'}
+          disabled={status.state === 'checking' || status.state === 'downloading' || status.state === 'installing'}
           className="px-4 py-2 text-sm rounded-md font-medium transition-colors"
           style={{
             backgroundColor: 'var(--accent)',
@@ -159,6 +159,21 @@ function Card({ label, value, accent }) {
 }
 
 function StatusBanner({ status, ready, pending, onInstall, isUpToDate }) {
+  if (status.state === 'installing') {
+    return (
+      <div
+        className="p-4 rounded-md"
+        style={{ backgroundColor: 'var(--accent-muted)', border: '1px solid var(--accent)' }}
+      >
+        <div className="text-sm font-medium" style={{ color: 'var(--fg)' }}>
+          Installing v{status.version}
+        </div>
+        <div className="text-xs mt-0.5" style={{ color: 'var(--dim)' }}>
+          Dobius+ will restart by itself in a moment. Your tabs and terminal sessions will restore.
+        </div>
+      </div>
+    );
+  }
   if (ready && pending) {
     return (
       <div

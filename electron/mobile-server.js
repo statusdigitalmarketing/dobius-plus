@@ -1098,6 +1098,15 @@ export function getTeamEndpoint() {
   return { host: String(teamHostName).replace(/\.$/, ''), port: boundAddress.port };
 }
 
+/** Why getTeamEndpoint is null, in words a person can act on. Null when it is not. */
+export function getTeamEndpointProblem() {
+  if (getTeamEndpoint()) return null;
+  if (!getMobileServerConfig().enabled) return 'Mobile Server is off. Turn it on under Mobile Access above.';
+  if (!getTailnetIp()) return 'Tailscale is not connected on this Mac. Open the Tailscale app and sign in.';
+  if (!httpServer || !boundAddress) return 'Mobile Server is still starting. This updates by itself, or try turning it off and on under Mobile Access above.';
+  return 'Tailscale has no name for this Mac. Turn on MagicDNS in the Tailscale admin console.';
+}
+
 /** Current server status, safe to expose to the renderer. */
 export function getMobileServerStatus() {
   return {

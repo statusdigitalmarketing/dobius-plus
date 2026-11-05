@@ -42,7 +42,7 @@ function toast(title, body) {
  * @param {{ bridgeOpenDeps: object, endpoint: () => ({ host, port } | null) }} opts
  *   bridgeOpenDeps: createBridgeOpenDeps(...) from main.js, the same guards /openTab uses.
  */
-export function initTeam({ bridgeOpenDeps: w, endpoint }) {
+export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem }) {
   if (service) return service;
   store = createTeamStore({
     dir: path.join(app.getPath('userData'), 'team'),
@@ -56,6 +56,7 @@ export function initTeam({ bridgeOpenDeps: w, endpoint }) {
     store,
     request: teamRequest,
     endpoint,
+    endpointProblem,
     deliverDeps: (tabId, authorized) => ({
       authorized,
       tabAlive: w.tabAlive,

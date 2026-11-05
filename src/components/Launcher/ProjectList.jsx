@@ -41,12 +41,15 @@ export default function ProjectList() {
   // Auto-focus the search input when the launcher opens, so typing goes straight
   // to the search without clicking. Fires on mount (first launch) AND on the
   // launcher:focusSearch IPC nudge (Cmd+N reshows the already-mounted window).
+  // The box does not exist while the list loads, so a fresh window focuses it when
+  // loading ends. A timer from mount fired too early and focus was simply lost.
   useEffect(() => {
+    if (loading) return undefined;
     const focusSearch = () => setTimeout(() => searchInputRef.current?.focus(), 50);
     focusSearch();
     const off = window.electronAPI?.onLauncherFocusSearch?.(focusSearch);
     return () => off?.();
-  }, []);
+  }, [loading]);
 
   useEffect(() => {
     if (!window.electronAPI) {

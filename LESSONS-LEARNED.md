@@ -654,3 +654,21 @@
 - **FIX**: Ported it instead of merging: `DemoConnection` takes a pairing like `Connection`, and `isDemoPairing` needs both the demo address and the demo token. Now on main with a test.
 - **CONTEXT**: What App Review depends on has to live on main. The Mac's QR also opens Safari now (`buildPairingWebLink`), so the App Store app is paired by typing the address and code or by the `dobiusplus://` link in the texted pairing message.
 - **DETECTION**: `node electron/__tests__/mobile-demo.test.mjs`
+
+### UI/UX - 2026-11-05
+- **MISTAKE**: Uploaded bare simulator captures as App Store screenshots for iOS 2.2.1: three sample rows on a mostly empty dark screen, a keyboard over the terminal, a charging bolt, the iPadOS window grabber, and no frame or headline. Each passed my "nothing private shows" read-back, and Sam still called them garbage on the store page.
+- **FIX**: Store images need a device frame, a one-line benefit headline and enough sample content to fill the screen. Check them as a row at thumbnail size, the way App Store Connect shows them, as well as for privacy. Use `--batteryState discharging` for the status bar override, and paint out the iPad corner grabber.
+- **CONTEXT**: Applies to any App Store Connect upload. Screenshots show no upload controls while a version is Waiting for Review, so a bad set found after submitting costs a trip out of the review queue.
+- **DETECTION**: `sips -g pixelWidth -g pixelHeight -g hasAlpha <file>` for the format, then look at the set side by side on one contact sheet before uploading.
+
+### Deployment - 2026-11-05
+- **MISTAKE**: Shipped the update-restart window fix in 2.2.1 and treated it as done. The app being replaced runs the shutdown, so every update from 2.2.0 to 2.2.1 still ran the bad code. Sam clicked Restart and his saved list became one deleted folder (`saved projects=1 [fleet-web] ... last quit: update restart`). A comment telling Brett to install the DMG instead protected nobody else.
+- **FIX**: A fix to the outgoing app's behaviour also needs a repair in the incoming app. `electron/update-window-recovery.js` adds back what the list lost, from the backup each app writes just before installing, on the first launch of each version. It only adds windows.
+- **CONTEXT**: Applies to anything in the update or quit path. Ask who runs the code: the old app or the new one. Test from a build of the real previous release, with a deleted folder in the saved list, because a clean list hides this bug.
+- **DETECTION**: `grep "diag.restore" ~/Library/Application\ Support/dobius-plus/logs/error.log | tail -3`, then compare its saved list with `lastOpenProjects` in the newest `config.json.pre-update-*.bak`.
+
+### Testing - 2026-11-05
+- **MISTAKE**: The real-update rig built its frontend inside the scratchpad copy of the repo. The bundle held two copies of React (5 `react.transitional.element` markers against 3 from the repo build), the page threw `Cannot read properties of null (reading 'useEffect')` and every window was blank. Yesterday's rig only read window URLs, so it never noticed.
+- **FIX**: Build the frontend in the repo and copy `dist` into the rig. Have the rig read rendered text or a screenshot, not just the URL. Why the scratch copy bundles two is not established.
+- **CONTEXT**: A blank rig still passes any check that only reads config and window URLs. Also, a Mac restart empties the scratchpad under `/private/tmp`, so copy rig scripts out first.
+- **DETECTION**: `grep -o "react.transitional.element" dist/assets/index-*.js | wc -l` should be 3 in the frontend you package.

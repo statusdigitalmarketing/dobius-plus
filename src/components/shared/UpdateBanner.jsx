@@ -33,13 +33,16 @@ export default function UpdateBanner() {
   // strictly newer version appears.
   const [dismissed, setDismissed] = useState(() => loadDismissedVersions());
   const [currentVersion, setCurrentVersion] = useState(null);
-  const [busyInstall, setBusyInstall] = useState(false);
 
   useEffect(() => {
     if (!window.electronAPI?.onUpdaterStatus) return;
     window.electronAPI.updaterGetCurrentVersion?.().then(setCurrentVersion).catch(() => {});
-    window.electronAPI.updaterGetPending?.().then((p) => {
-      if (p?.version) setStatus({ state: 'ready', version: p.version });
+    // A window opened during an install says so, instead of offering Restart.
+    window.electronAPI.updaterGetStatus?.().then((s) => {
+      if (s?.state === 'installing') { setStatus(s); return null; }
+      return window.electronAPI.updaterGetPending?.().then((p) => {
+        if (p?.version) setStatus({ state: 'ready', version: p.version });
+      });
     }).catch(() => {});
     return window.electronAPI.onUpdaterStatus(setStatus);
   }, []);
@@ -70,7 +73,7 @@ export default function UpdateBanner() {
       </div>
     );
   }
-  if (status.state !== 'ready' && status.state !== 'downloading') return null;
+  if (status.state !== 'ready' && status.state !== 'downloading' && status.state !== 'installing') return null;
 
   const isReady = status.state === 'ready';
   // Renderer-side version sanity check (defense in depth, main already gates).
@@ -99,19 +102,12 @@ export default function UpdateBanner() {
   };
 
   const onRestart = async () => {
-    if (busyInstall) return;
-    setBusyInstall(true);
+    // Main broadcasts 'installing' straight away, which replaces this button, and
+    // its own error status if the install fails.
     try {
-      const r = await window.electronAPI.updaterInstall();
-      if (!r?.ok) {
-        // The install handler set its own error status via broadcast,
-        // which our onUpdaterStatus listener will pick up.
-        setBusyInstall(false);
-      }
-      // On success the app is about to quit, no need to reset busy state.
+      await window.electronAPI.updaterInstall();
     } catch (err) {
       setStatus({ state: 'error', message: String(err?.message || err) });
-      setBusyInstall(false);
     }
   };
 
@@ -126,10 +122,17 @@ export default function UpdateBanner() {
     >
       <div className="flex-1 min-w-0">
         <div className="text-sm font-medium" style={{ color: 'var(--fg)' }}>
-          {isReady
-            ? `Dobius+ ${status.version} is ready`
-            : `Downloading update${status.percent ? ` ${status.percent}%` : ''}...`}
+          {status.state === 'installing'
+            ? `Installing Dobius+ ${status.version}`
+            : isReady
+              ? `Dobius+ ${status.version} is ready`
+              : `Downloading update${status.percent ? ` ${status.percent}%` : ''}...`}
         </div>
+        {status.state === 'installing' && (
+          <div className="text-xs mt-0.5" style={{ color: 'var(--dim)' }}>
+            Dobius+ will restart by itself in a moment.
+          </div>
+        )}
         {isReady && (
           <div className="text-xs mt-0.5" style={{ color: 'var(--dim)' }}>
             Restart to install.
@@ -139,11 +142,10 @@ export default function UpdateBanner() {
       {isReady && (
         <button
           onClick={onRestart}
-          disabled={busyInstall}
           className="px-3 py-1.5 text-xs rounded-md font-medium transition-colors"
-          style={{ backgroundColor: 'var(--accent)', color: 'white', opacity: busyInstall ? 0.6 : 1 }}
+          style={{ backgroundColor: 'var(--accent)', color: 'white' }}
         >
-          {busyInstall ? 'Restarting...' : 'Restart'}
+          Restart
         </button>
       )}
       <button

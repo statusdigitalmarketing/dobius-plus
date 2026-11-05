@@ -87,6 +87,16 @@ test('store: per-peer rate limit, 20 a minute', () => {
   assert.equal(s.allow('p'), true);
 });
 
+test('not reachable: status and invite say exactly why', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'team-why-'));
+  const box = { available: () => true, encrypt: (t) => Buffer.from(t), decrypt: (b) => b.toString() };
+  const store2 = createTeamStore({ dir, box });
+  const svc = createTeamService({ store: store2, request: async () => ({}), endpoint: () => null, endpointProblem: () => 'Mobile Server is off.', deliverDeps: () => ({}) });
+  assert.equal(svc.status().notReachable, 'Mobile Server is off.');
+  assert.equal(svc.createInvite().error, 'Mobile Server is off.');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('link: invite, hello, link request, accept; both sides store each other with signed endpoints', async () => {
   const tn = net();
   const a = install('Sam', tn);

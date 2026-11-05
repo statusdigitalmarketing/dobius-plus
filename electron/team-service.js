@@ -23,7 +23,7 @@ const BACKOFF_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000];
 const LINK_POLL_MS = 2000;
 const SIG_HEADER = 'x-dobius-team-sig';
 
-export function createTeamService({ store, request, endpoint, deliverDeps, notify = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export function createTeamService({ store, request, endpoint, endpointProblem = () => null, deliverDeps, notify = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   const invites = new Map(); // inviteId -> { secret, expiresAt, joiner, decision, conf? }
   const unlinkedAt = new Map(); // peer id -> when this person unlinked it (a join in flight must not undo that)
   let pumpTimer = null;
@@ -40,6 +40,7 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     const ep = endpoint();
     return ep ? { name: store.settings().name, host: ep.host, port: ep.port } : null;
   };
+  const notReachable = () => endpointProblem() || 'This Mac is not reachable yet.';
   const changed = () => notify('changed', {});
 
   // ---------- status ----------
@@ -51,7 +52,7 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     const ep = endpoint();
     const peers = Object.values(store.peers()).map(({ ed, x, ...p }) => ({ ...p, short: shortFp(p.id) }));
     return {
-      ok: true, fp, short: shortFp(fp), endpoint: ep, settings: store.settings(), peers,
+      ok: true, fp, short: shortFp(fp), endpoint: ep, notReachable: ep ? null : notReachable(), settings: store.settings(), peers,
       pendingLinks: [...invites.entries()].filter(([, v]) => v.decision === 'pending' && v.expiresAt > now())
         .map(([inviteId, v]) => ({ inviteId, name: v.joiner.name, short: shortFp(v.joiner.id), host: v.joiner.host })),
     };
@@ -61,7 +62,7 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
 
   function createInvite() {
     const m = me();
-    if (!m) return { ok: false, error: 'this Mac is not reachable yet: turn on the phone server (Settings > Mobile) with Tailscale signed in' };
+    if (!m) return { ok: false, error: notReachable() };
     const inv = P.makeInvite(m, myFp(), now());
     const inviteId = crypto.randomUUID();
     invites.set(inviteId, { secret: inv.secret, expiresAt: inv.expiresAt, joiner: null, decision: null, nonces: new Set() });
@@ -121,7 +122,7 @@ export function createTeamService({ store, request, endpoint, deliverDeps, notif
     const inv = P.parseInvite(inviteText);
     if (!inv) return { ok: false, error: 'that is not a Dobius team invite' };
     const m = me();
-    if (!m) return { ok: false, error: 'this Mac is not reachable yet: turn on the phone server (Settings > Mobile) with Tailscale signed in' };
+    if (!m) return { ok: false, error: notReachable() };
     if (inv.fp === myFp()) return { ok: false, error: 'that invite is from this Mac' };
     if (Object.hasOwn(store.peers(), inv.fp)) return { ok: false, error: 'you are already linked with that Mac' };
     const startedAt = now();
