@@ -297,6 +297,13 @@ export async function actOnCard({ kind, id, rev } = {}, opts = {}) {
   return { ok: false, reason: got.reason };
 }
 
+// The fleet site signs in one person so far, and only their Mac runs the orchestrator
+// that feeds it. Everyone else would just hit a login they cannot pass.
+export const FLEET_URL = 'https://fleet.dobepros.com/';
+export function fleetInfo({ home = os.homedir(), exists = fs.existsSync } = {}) {
+  return exists(path.join(home, '.claude', 'fleet-board', 'board.json')) ? { url: FLEET_URL } : null;
+}
+
 const LABEL = 'com.brett.inbox-server';
 
 /**

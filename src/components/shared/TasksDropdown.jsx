@@ -81,6 +81,7 @@ export default function TasksDropdown() {
   const [inbox, setInbox] = useState({ state: 'idle' });
   const [inboxSource, setInboxSource] = useState('all');
   const [undoCard, setUndoCard] = useState(null);
+  const [fleet, setFleet] = useState(null);
   // null until main answers; { installed, canStart }. No board here: no Inbox tab.
   const [board, setBoard] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -98,6 +99,11 @@ export default function TasksDropdown() {
     const list = await window.electronAPI.tasksList(currentProjectPath);
     setTasks(list || []);
   }, [currentProjectPath]);
+
+  useEffect(() => {
+    if (!open || !window.electronAPI?.fleetInfo) return;
+    window.electronAPI.fleetInfo().then(setFleet).catch((err) => console.error('[TasksDropdown] fleet info failed:', err));
+  }, [open]);
 
   useEffect(() => {
     // A failed Undo stays until it works or another card replaces it: the card is still closed.
@@ -461,6 +467,11 @@ export default function TasksDropdown() {
                 )}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {fleet && (
+                  <HeaderButton onClick={() => window.electronAPI?.openExternal?.(fleet.url)} color="var(--dim)" title="Open the Fleet board in your browser">
+                    Fleet ↗
+                  </HeaderButton>
+                )}
                 {view === 'project' ? (
                   <>
                     {syncMsg && (

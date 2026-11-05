@@ -119,7 +119,7 @@ import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { installNavGuard, isAppUrl } from './nav-guard.js';
-import { readBoard as readInboxBoard, boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard } from './inbox-board.js';
+import { readBoard as readInboxBoard, boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo } from './inbox-board.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { readUpdateBackup } from './config-manager.js';
@@ -1452,6 +1452,7 @@ function setupOrchestrationHandlers() {
   // Brett's Inbox board, read only. The board's token stays in main.
   ipcMain.handle('inbox:read', () => readInboxBoard());
   ipcMain.handle('inbox:act', (_event, request) => actOnInboxCard(request));
+  ipcMain.handle('fleet:info', () => fleetInfo());
   ipcMain.handle('inbox:status', () => inboxBoardStatus());
   ipcMain.handle('inbox:start', () => startInboxBoard());
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());

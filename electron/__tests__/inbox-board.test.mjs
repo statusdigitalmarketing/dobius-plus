@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { actOnCard, cardsFrom, readToken, readBoard as readBoardRaw, findBoardDir, listenerIsMine, boardStatus, startBoard, portState } from '../inbox-board.js';
+import { actOnCard, fleetInfo, cardsFrom, readToken, readBoard as readBoardRaw, findBoardDir, listenerIsMine, boardStatus, startBoard, portState } from '../inbox-board.js';
 
 // Tests drive fake listeners; ownership has its own test below.
 const readBoard = (opts) => readBoardRaw({ listenerIsMine: async () => true, ...opts });
@@ -181,6 +181,11 @@ test('actOnCard posts only to the board, shaped to pass its gate, for the card a
     }
     assert.equal(called, 0, 'nothing but done, complete and undo, with a revision, can reach the board');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('fleetInfo offers the site only on a Mac that feeds it', () => {
+  assert.deepEqual(fleetInfo({ home: '/h', exists: (p) => p === '/h/.claude/fleet-board/board.json' }), { url: 'https://fleet.dobepros.com/' });
+  assert.equal(fleetInfo({ home: '/h', exists: () => false }), null);
 });
 
 test('readBoard sends the token to 127.0.0.1 with the board Host and no Origin', async () => {

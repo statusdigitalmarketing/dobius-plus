@@ -479,6 +479,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   tasksUnblock: (p, id, opts) => ipcRenderer.invoke('tasks:unblock', p, id, opts),
   inboxRead: () => ipcRenderer.invoke('inbox:read'),
   inboxAct: (request) => ipcRenderer.invoke('inbox:act', request),
+  fleetInfo: () => ipcRenderer.invoke('fleet:info'),
   inboxStatus: () => ipcRenderer.invoke('inbox:status'),
   inboxStart: () => ipcRenderer.invoke('inbox:start'),
   // Team communicator (docs/team-communicator.md)
