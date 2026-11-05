@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pairingOrigin, buildPairingDeepLink, buildPairingWebLink, pairingText } from '../pairing-link.js';
+import { pairingOrigin, buildPairingDeepLink, buildPairingWebLink, pairingText, parsePairingLink } from '../pairing-link.js';
+import { normaliseHost } from '../../mobile/host.js';
 
 const http = { running: true, pairingCode: '482913', address: { host: '100.89.143.67', port: 8420 }, url: null };
 const https = { running: true, pairingCode: '482913', address: { host: '100.89.143.67', port: 8420 }, url: 'https://sams-mac.tail6addbf.ts.net:8420/' };
@@ -22,6 +23,28 @@ test('web link is a plain page on the Mac, code in the fragment only over HTTPS'
   assert.equal(buildPairingWebLink(https), 'https://sams-mac.tail6addbf.ts.net:8420/#pair=482913');
   assert.equal(buildPairingWebLink({ ...http, pairingCode: null }), '');
   assert.equal(buildPairingWebLink({ pairingCode: '482913' }), '');
+});
+
+test('the scanner reads every QR the Mac can show', () => {
+  assert.deepEqual(parsePairingLink(buildPairingDeepLink(https)), { host: 'https://sams-mac.tail6addbf.ts.net:8420', code: '482913' });
+  assert.deepEqual(parsePairingLink(buildPairingDeepLink(http)), { host: 'http://100.89.143.67:8420', code: '482913' });
+  assert.deepEqual(parsePairingLink(buildPairingWebLink(https)), { host: 'https://sams-mac.tail6addbf.ts.net:8420', code: '482913' });
+  assert.deepEqual(parsePairingLink(buildPairingWebLink(http)), { host: 'http://100.89.143.67:8420', code: '' });
+});
+
+test('a hostile address in a scanned code is refused, not thrown', () => {
+  const link = parsePairingLink('dobiusplus://pair?host=http%3A%2F%2Fmac%5C%3A65536&code=123456');
+  assert.equal(normaliseHost(link.host), '');
+  assert.equal(normaliseHost('http://user:pw@mac.ts.net:8420'), '');
+  assert.equal(normaliseHost('javascript:alert(1)'), '');
+  assert.equal(normaliseHost(buildPairingDeepLink(https) && 'https://sams-mac.tail6addbf.ts.net:8420'), 'https://sams-mac.tail6addbf.ts.net:8420');
+});
+
+test('the scanner refuses anything else', () => {
+  for (const bad of ['', 'hello', 'https://example.com', 'https://example.com/#other', 'https://example.com/#pair=12', 'dobiusplus://other?host=x', 'dobiusplus://pair',
+    'dobius-team:1:mac.ts.net:8420:abc:def', 'javascript:alert(1)//#pair=123456', 'ftp://x/#pair=123456']) {
+    assert.equal(parsePairingLink(bad), null, bad);
+  }
 });
 
 test('text names address, code and link on separate lines', () => {

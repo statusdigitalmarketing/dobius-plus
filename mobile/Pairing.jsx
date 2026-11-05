@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { absUrl, normaliseHost, mixedContent, reachabilityMessage } from './host';
 import Intro from './Intro';
+import QrScanner, { canScanQr } from './QrScanner';
 
 /** Pair a first or additional Mac. Scans always require a human confirmation. */
 export default function Pairing({ initialHost = '', initialCode = '', scanNonce = 0, requireConfirm = false, addMode = false, onCancel, onPaired }) {
@@ -10,6 +11,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [showIntro, setShowIntro] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const hostRef = useRef(null);
   const codeRef = useRef(null);
   // Monotonic counter: every submit() bumps it, and continueFromHost /
@@ -156,6 +158,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
       inFlightKeyRef.current = '';
       setBusy(false);
     }
+    setScanning(false); // a link tapped while the camera is open goes to its confirm step
     setHost(initialHost);
     setCode(initialCode || '');
     setError('');
@@ -164,11 +167,30 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
 
   useEffect(() => {
     if (showIntro) return;
-    if (step === 'host') hostRef.current?.focus();
+    if (scanning) return;
+    // With a scan button on this screen, the keyboard must not come up over it.
+    if (step === 'host') { if (!canScanQr()) hostRef.current?.focus(); }
     else codeRef.current?.focus();
-  }, [step, showIntro]);
+  }, [step, showIntro, scanning]);
+
+  // A code scanned in the app takes the same path as a scanned link: the person still
+  // confirms this is their Mac, so a stranger's QR cannot pair the phone on its own.
+  const applyScan = ({ host: scannedHost, code: scannedCode }) => {
+    const normalised = normaliseHost(scannedHost);
+    setScanning(false);
+    generationRef.current += 1;
+    requestRef.current?.abort();
+    inFlightKeyRef.current = '';
+    setBusy(false);
+    if (!normalised) { setError('That code has no Mac address in it. Enter the address instead.'); setStep('host'); return; }
+    setHost(normalised);
+    setCode(scannedCode || '');
+    setError('');
+    setStep('confirm');
+  };
 
   if (showIntro) return <Intro onBack={() => setShowIntro(false)} />;
+  if (scanning) return <QrScanner onResult={applyScan} onCancel={() => setScanning(false)} />;
 
   return (
     <div className="screen pairing">
@@ -235,7 +257,17 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
           </>
         ) : step === 'host' ? (
           <>
-            <p className="muted">Enter your Mac's Tailscale address or hostname. Open Dobius+ on your Mac &rsaquo; Settings &rsaquo; Mobile Access to see it.</p>
+            <p className="muted">
+              {canScanQr()
+                ? <>Open Dobius+ on your Mac &rsaquo; Settings &rsaquo; Mobile Access, then scan the QR code shown there.</>
+                : <>Enter your Mac's Tailscale address or hostname. Open Dobius+ on your Mac &rsaquo; Settings &rsaquo; Mobile Access to see it.</>}
+            </p>
+            {canScanQr() && (
+              <>
+                <button className="primary" onClick={() => { setError(''); setScanning(true); }}>Scan QR code</button>
+                <p className="muted pairing-or">or enter the address</p>
+              </>
+            )}
             <input
               ref={hostRef}
               className="code-input"
@@ -250,7 +282,7 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
               onKeyDown={(e) => { if (e.key === 'Enter') continueFromHost(); }}
               style={{ fontSize: 18, letterSpacing: 'normal' }}
             />
-            <button className="primary" onClick={continueFromHost} disabled={!host.trim()}>Continue</button>
+            <button className={canScanQr() ? 'secondary' : 'primary'} onClick={continueFromHost} disabled={!host.trim()}>Continue</button>
             {error && <p className="error">{error}</p>}
             <button
               className="link-button"

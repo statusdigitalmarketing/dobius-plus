@@ -82,7 +82,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Dobius+ connects to your own Mac over Tailscale so your phone can reach your terminals and Claude Code sessions.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Dobius+ uses the camera only when you tap the attach button in a chat and choose Take Photo or Video.</string>
+	<string>Dobius+ uses the camera to scan the QR code on your Mac when you pair, and when you tap the attach button in a chat and choose Take Photo or Video.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Dobius+ uses the microphone when you speak to Claude with the voice button in a chat, and when you record a video attachment with the camera.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

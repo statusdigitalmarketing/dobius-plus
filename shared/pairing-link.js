@@ -40,6 +40,23 @@ export function buildPairingDeepLink(mobileStatus) {
   return `dobiusplus://pair?${params.toString()}`;
 }
 
+// Reads either QR the Mac can show, or a dobiusplus:// link: { host, code } with the
+// address exactly as written (callers normalise it), or null if it is not a pairing link.
+export function parsePairingLink(text) {
+  let u;
+  try { u = new URL(String(text).trim()); } catch { return null; }
+  const code = (c) => String(c || '').replace(/\D/g, '').slice(0, 6);
+  if (u.protocol === 'dobiusplus:') {
+    if (u.hostname !== 'pair' && u.pathname.replace(/^\/+/, '').split('/')[0] !== 'pair') return null;
+    const host = u.searchParams.get('host') || '';
+    const c = code(u.searchParams.get('code'));
+    return host || c ? { host, code: c } : null;
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  const m = /^#pair(?:=(\d{6}))?$/.exec(u.hash);
+  return m ? { host: u.origin, code: m[1] || '' } : null;
+}
+
 // The text iMessaged to the user's own handle: everything the phone needs,
 // each on its own line so iOS linkifies the pair link by itself. '' when the
 // server has no live code or address to send.

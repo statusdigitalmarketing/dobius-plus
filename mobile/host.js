@@ -44,7 +44,8 @@ export function normaliseHost(raw) {
   // trusted verbatim (default 443/80 implied by the scheme); Settings QR
   // encodes an explicit port when the Mac is listening on 8420.
   if (!hadScheme && !explicitPort && !u.port) host += `:${DEFAULT_PORT}`;
-  return new URL(`${scheme}://${host}`).origin;
+  // Parts that parse alone can still make no address together (`mac\:65536`).
+  try { return new URL(`${scheme}://${host}`).origin; } catch { return ''; }
 }
 
 // Callers must supply an origin. Never fall back to a mutable active host.

@@ -1,3 +1,4 @@
+import { parsePairingLink } from '../shared/pairing-link.js';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Pairing from './Pairing';
 import Board from './Board';
@@ -229,11 +230,11 @@ export default function App() {
     const receive = ({ url }) => {
       if (cancelled) return;
       try {
-        const u = new URL(url);
-        if (u.protocol !== 'dobiusplus:') return;
-        if (u.hostname !== 'pair' && u.pathname.replace(/^\/+/, '').split('/')[0] !== 'pair') return;
-        const host = normaliseHost(u.searchParams.get('host') || '');
-        const code = (u.searchParams.get('code') || '').replace(/\D/g, '').slice(0, 6);
+        if (!/^dobiusplus:/i.test(String(url))) return;
+        const link = parsePairingLink(url);
+        if (!link) return;
+        const host = normaliseHost(link.host);
+        const { code } = link;
         if (!host && !code) return;
         received = true;
         // Every scan requires the existing human confirmation, even for a

@@ -134,6 +134,7 @@
     "electron-updater": "^6.8.3",
     "express": "^5.2.1",
     "framer-motion": "^12.34.3",
+    "jsqr": "^1.4.0",
     "node-pty": "^1.1.0",
     "qrcode.react": "^4.2.0",
     "react": "^19.2.4",
