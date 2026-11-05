@@ -2,7 +2,8 @@
 // Run: node --import ./electron/__tests__/register.mjs --test electron/__tests__/today.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planToday, noticedFrom, readToday, SUGGESTED } from '../today.js';
+import { EventEmitter } from 'node:events';
+import { planToday, noticedFrom, readNoticed, readToday, SUGGESTED } from '../today.js';
 
 const TODAY = '2026-11-05';
 const NOW = Date.parse('2026-11-05T15:00:00Z');
@@ -87,6 +88,55 @@ test('noticed: only near-term or high priority, only my promises, and capped', (
 test('noticed keeps urgent items, and says what it found against what is pending', () => {
   const n = noticedFrom([{ id: 1, status: 'pending', priority: 'urgent', title: 'Urgent, undated' }], [], { nowMs: NOW });
   assert.deepEqual(n.items.map((i) => i.key), ['action:1']);
+});
+
+// Stands in for http.request: one body per path, sent in the given chunk.
+function fakeSamKnows(bodies, { headers = {} } = {}) {
+  return (opts, onRes) => {
+    const req = new EventEmitter();
+    req.destroy = () => {};
+    req.end = () => setImmediate(() => {
+      const res = new EventEmitter();
+      res.statusCode = 200;
+      res.headers = headers;
+      onRes(res);
+      for (const chunk of bodies(opts.path)) res.emit('data', chunk);
+      res.emit('end');
+    });
+    return req;
+  };
+}
+const good = (path) => [Buffer.from(JSON.stringify(path.startsWith('/action-items')
+  ? { counts: { pending: 1 }, items: [{ id: 1, status: 'pending', priority: 'high', title: 'T' }] }
+  : { counts: { pending: 0 }, items: [] }))];
+
+test('SamKnows is only read from this user\'s own listener', async () => {
+  let called = 0;
+  const request = (o, cb) => { called += 1; return fakeSamKnows(good)(o, cb); };
+  const refused = await readNoticed({ request, port: 9150, listenerIsMine: async () => false });
+  assert.deepEqual(refused, { state: 'unavailable' });
+  assert.equal(called, 0, 'nothing is read from a port another account could hold');
+  const ok = await readNoticed({ request, port: 9150, listenerIsMine: async () => true });
+  assert.equal(ok.state, 'ok');
+  assert.equal(ok.items.length, 1);
+});
+
+test('an oversized SamKnows answer is dropped, not held in memory', async () => {
+  const big = () => Array.from({ length: 3 }, () => Buffer.alloc(8 * 1024 * 1024, 32));
+  assert.deepEqual(await readNoticed({ request: fakeSamKnows(big), port: 9150, listenerIsMine: async () => true }), { state: 'unavailable' });
+  const declared = { headers: { 'content-length': String(1024 * 1024 * 1024) } };
+  assert.deepEqual(await readNoticed({ request: fakeSamKnows(good, declared), port: 9150, listenerIsMine: async () => true }), { state: 'unavailable' });
+});
+
+test('noticed refuses unusable ids and odd numbers', () => {
+  const n = noticedFrom([
+    { id: { x: 1 }, status: 'pending', priority: 'high', title: 'object id' },
+    { id: 'y'.repeat(101), status: 'pending', priority: 'high', title: 'long id' },
+    { id: 3, status: 'pending', priority: 'high', title: 'keep', dueDate: 'soon', extractedAt: 'x' },
+  ], [], { nowMs: NOW });
+  assert.deepEqual(n.items.map((i) => i.key), ['action:3']);
+  assert.equal(n.items[0].due, null);
+  assert.equal(n.items[0].at, 0);
 });
 
 test('a source that is down is reported, not shown as a clear day', async () => {

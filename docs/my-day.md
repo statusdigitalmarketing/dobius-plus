@@ -19,7 +19,7 @@ Bills (renewal predictions, not bills: no invoices, no paid state). Fleet rows (
 ## Next
 
 1. Better picking, because rules cannot do it. Candidate: the same Claude judging the board picks the day's short list with a reason per card.
-2. Look at real SamKnows output with Sam. The SamKnows tab is fixing the dedupe that drops repeat requests, and adding an expected-state check.
+2. Look at real SamKnows output with Sam. SamKnows main (1ea8c3a0, not released as of 2026-11-05) fixes the dedupe that dropped repeat requests, and adds an optional expected-state check: send `expectedExtractedAt` on /action-items/:id/complete and /dismiss, `expectedDetectedAt` on /follow-ups/:id/fulfill, 409 if the row changed. A reopened row keeps its id and gets a new timestamp, so rows here must key Done on that value. Offer Done on these rows only after that is released and Sam has seen real output.
 3. Phone, through the paired connection to this Mac only.
 4. Drafted follow-up nudges that send only on a click.
 5. Brett and Bryan: everyone needs a current Dobius first, and SamKnows is not assumed.
