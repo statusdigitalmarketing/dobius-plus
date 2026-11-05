@@ -25,7 +25,7 @@ export default function Intro({ onBack }) {
     },
   ];
   return (
-    <div className="screen" style={{ padding: '16px 20px 32px', overflowY: 'auto' }}>
+    <div className="screen" style={{ padding: 'calc(env(safe-area-inset-top) + 16px) 20px 32px', overflowY: 'auto' }}>
       <div style={{ maxWidth: 540, margin: '0 auto' }}>
         <button
           onClick={onBack}
