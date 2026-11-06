@@ -19,8 +19,9 @@ test('anything else counts, including escape-only cursor moves', () => {
 test('an OSC split over chunks stays an OSC, and what follows it counts', () => {
   const st = oscScanState();
   assert.equal(chunkMayDraw('\x1b]777;dobius;ne', st), false);
-  assert.equal(chunkMayDraw('eds\x1b', st), false);
-  assert.equal(chunkMayDraw('\\', st), false); // ESC \ across the boundary ends it
+  // Trust never crosses a chunk boundary: the rest of a split marker counts.
+  assert.equal(chunkMayDraw('eds\x1b', st), true);
+  assert.equal(chunkMayDraw('\\', st), true); // ESC \ across the boundary ends it
   assert.equal(chunkMayDraw('x', st), true);
   const st2 = oscScanState();
   assert.equal(chunkMayDraw('\x1b]0;title', st2), false);
@@ -65,7 +66,8 @@ test('a non-inert OSC counts when its ESC arrives, before the backslash (Codex)'
   assert.equal(chunkMayDraw('\\', st), true);
   const st2 = oscScanState();
   assert.equal(chunkMayDraw('\x1b]777;dobius;needs\x1b', st2), false);
-  assert.equal(chunkMayDraw('\\', st2), false);
+  assert.equal(chunkMayDraw('\\', st2), true); // finished in the next chunk: counts
+  assert.equal(chunkMayDraw('\x1b]777;dobius;needs\x1b\\', st2), false); // whole: inert
 });
 
 test('a string opened earlier, by C1 or a split ESC, makes the next chunk count (Codex)', () => {
@@ -136,4 +138,10 @@ test('the CAN a new PTY opens with ends anything left open, then markers are ine
   assert.equal(chunkMayDraw('\x18$ ', screenSide), true);
   assert.equal(screenSide.mode, 'ground');
   assert.equal(chunkMayDraw('\x1b]777;dobius;needs\x07', screenSide), false);
+});
+
+test('a title left open at a chunk end makes the next chunk count, so a fresh renderer cannot be fooled (Codex)', () => {
+  const st = oscScanState();
+  assert.equal(chunkMayDraw('\x1b]0;', st), false);
+  assert.equal(chunkMayDraw('\rApprove B?\r\n1. Yes\r\n', st), true);
 });

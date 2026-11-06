@@ -8,8 +8,8 @@
 // parser across chunks, with the standard DEC/xterm transitions (C1 controls act from any state;
 // C0 controls inside an escape or CSI execute without leaving it; NUL and DEL are ignored there),
 // because a sequence opened in one chunk can take effect inside the next (Codex, five rounds). A
-// chunk is let through only when it starts in ground state, or inside a title or status OSC this
-// scan opened itself, and holds nothing but those, introduced by ESC ] in ground state.
+// chunk is let through only when it starts in ground state and holds nothing but complete title
+// and status OSCs, introduced by ESC ] in ground state and terminated in the same chunk.
 
 // Window and icon titles (0, 1, 2) and Dobius's own tab-status markers.
 const INERT = /^(?:[012];|777;dobius;)/;
@@ -25,8 +25,11 @@ const isC0Exec = (c) => (c <= 0x17 || c === 0x19 || (c >= 0x1c && c <= 0x1f));
 /** Scan `data` from `state` (mutated). Returns true when the chunk may have drawn. */
 export function chunkMayDraw(data, state) {
   const s = String(data);
-  // Not in ground state at the start: whatever was left open may act on this chunk.
-  let draws = state.mode !== 'ground' && !((state.mode === 'str' || state.mode === 'strEsc') && inertOsc(state));
+  // Not in ground state at the start: whatever was left open may act on this chunk. That includes
+  // a title or marker left open by the last chunk: trust never crosses a chunk boundary, so a
+  // renderer that started over (a respawn, a tear-off, a reload) can never disagree with this
+  // scan about what an exempt chunk did (Codex, four rounds). Real markers arrive whole.
+  let draws = state.mode !== 'ground';
   const toString = (osc, trusted) => { state.mode = 'str'; state.osc = osc; state.body = ''; state.trusted = trusted; state.len = 0; };
   const toGround = () => { state.mode = 'ground'; state.osc = false; state.body = ''; state.trusted = false; state.len = 0; };
   const endString = () => { if (!inertOsc(state)) draws = true; toGround(); };
