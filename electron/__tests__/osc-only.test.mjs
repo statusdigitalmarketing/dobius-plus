@@ -35,3 +35,26 @@ test('the real queued-question recording: nothing after the card draws', () => {
     assert.equal(chunkMayDraw(c, st), false);
   }
 });
+
+test('only titles and status markers are inert: a palette change counts (Codex)', () => {
+  assert.equal(chunkMayDraw('\x1b]4;1;#000000;2;#ffffff\x07', oscScanState()), true);
+  assert.equal(chunkMayDraw('\x1b]8;;https://x\x07', oscScanState()), true);
+  assert.equal(chunkMayDraw('\x1b]2;title\x07', oscScanState()), false);
+  // Decided at the terminator, even when the kind arrived in an earlier chunk.
+  const st = oscScanState();
+  assert.equal(chunkMayDraw('\x1b]4;1;#00', st), false);
+  assert.equal(chunkMayDraw('0000\x07', st), true);
+});
+
+test('C1 controls inside an OSC are never trusted, and what follows counts (Codex)', () => {
+  const st = oscScanState();
+  assert.equal(chunkMayDraw('\x1b]0;t\x9c\x9b2J\x9bH', st), true);
+  assert.equal(st.inOsc, false);
+  assert.equal(chunkMayDraw('next prompt', st), true);
+});
+
+test('an OSC that never ends stops being trusted', () => {
+  const st = oscScanState();
+  assert.equal(chunkMayDraw(`\x1b]0;${'x'.repeat(5000)}`, st), true);
+  assert.equal(st.inOsc, false);
+});
