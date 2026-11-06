@@ -31,7 +31,7 @@ Bills (renewal predictions, not bills: no invoices, no paid state). Fleet rows (
   home-screen web app only; the App Store app has no push yet, that needs APNs).
 - Only the installed app nudges, one process at a time (`today-nudge.lock`),
   and the decision is saved before sending, so a nudge never goes twice.
-- Known limit, for Sam to accept or not: two Dobius processes on one Mac
+- Known limit, accepted by Sam on 2026-11-06: two Dobius processes on one Mac
   sharing the same userData at the same time (Dobius has no single-instance
   lock). Dev runs never nudge, and macOS opens the installed app once, but if
   two copies did run together, Codex found they could still both send one
