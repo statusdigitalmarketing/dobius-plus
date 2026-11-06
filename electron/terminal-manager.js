@@ -1,5 +1,6 @@
 import pty from 'node-pty';
 import { trackPasteMode } from './paste-mode.js';
+import { oscScanState, chunkMayDraw } from './osc-only.js';
 import { isTerminalReply, createVisibleOutputScanner } from './terminal-reply.js';
 import { isClaudeCommand, classifyClaudeProcess } from './claude-argv.js';
 import fs from 'fs';
@@ -304,7 +305,10 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     // must not be routed as the replacement's output. Audit High.
     if (!entry || entry.pty !== term) return;
     if (entry.visibleScan(data)) entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
-    entry.rawOutputSeq = (entry.rawOutputSeq || 0) + 1; // see terminalRawOutputSeq
+    // Only output that can draw: a title or tab-status marker alone never changes the screen,
+    // and counting it made a question card read as changed (see electron/osc-only.js).
+    if (!entry.oscState) entry.oscState = oscScanState();
+    if (chunkMayDraw(data, entry.oscState)) entry.rawOutputSeq = (entry.rawOutputSeq || 0) + 1; // see terminalRawOutputSeq
     entry.pasteMode = trackPasteMode(entry.pasteMode, data); // see terminalBracketedPaste
     // Global observers (main-process status authority, v1.0.43): see EVERY
     // terminal's output regardless of whether a window or mobile client is
@@ -483,9 +487,11 @@ export function terminalInputAgeMs(id) {
 }
 
 /**
- * Count of ALL output chunks, escape-only ones included. A clear-screen plus
+ * Count of output chunks that may draw, escape-only ones included. A clear-screen plus
  * cursor moves can replace one prompt with another without a printable byte,
  * so a selector answer is only safe while this has not moved since the read.
+ * A chunk that is nothing but OSC strings (title, tab-status markers) cannot
+ * draw a cell and is not counted.
  */
 export function terminalRawOutputSeq(id) {
   return terminals.get(id)?.rawOutputSeq || 0;
