@@ -707,3 +707,9 @@
 - **FIX**: Before a release, compare against what is PUBLISHED: `git log origin/main..main`. To ship one fix alone, `git checkout -b release/x origin/main && git cherry-pick main..fix`, park the extra merges on a branch, then point main at the release branch.
 - **CONTEXT**: release.sh only checks that main is not behind origin/main; being ahead with held work passes its preflight.
 - **DETECTION**: `git log --oneline origin/main..main`
+
+### Build - 2026-11-06
+- **MISTAKE**: `npx electron-builder --win` run from the repo replaced node_modules/better-sqlite3/build/Release/better_sqlite3.node with the WINDOWS DLL (prebuild-install during its native rebuild), then failed on node-pty ("node-gyp does not support cross-compiling native modules from source"). Dev runs and the next Mac build would have loaded a Windows binary.
+- **FIX**: Cross-build only in a clonefile copy (`cp -cR`), with `prebuild-install --runtime electron --target <electron> --platform win32 --arch x64` inside its better-sqlite3 and `-c.npmRebuild=false` (node-pty already ships win32 prebuilds). build/after-pack.cjs must skip non-darwin (spawn-helper is macOS only). If the repo was hit: `npx @electron/rebuild -f -o better-sqlite3`.
+- **CONTEXT**: A test Windows installer built this way on 2026-11-06; it was never run on Windows.
+- **DETECTION**: `file node_modules/better-sqlite3/build/Release/better_sqlite3.node` must say Mach-O.
