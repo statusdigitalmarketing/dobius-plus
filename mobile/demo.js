@@ -494,11 +494,16 @@ export class DemoConnection {
         this._emit({ type: 'todayResult', reqId: msg.reqId, op: msg.kind, id: msg.id, ok: !!c });
         break;
       }
-      case 'todaySnooze':
+      case 'todaySnooze': {
         if (!this.todaySnoozed.includes(msg.id)) this.todaySnoozed.push(msg.id);
-        this.snoozedUntil = { ...(this.snoozedUntil || {}), [msg.id]: Date.now() + (msg.choice === 'week' ? 7 : 1) * 24 * 3600e3 };
+        // The Mac's rule (electron/today-snooze.js snoozeUntil): 8am tomorrow, or 8am next Monday.
+        const wake = new Date();
+        wake.setHours(8, 0, 0, 0);
+        wake.setDate(wake.getDate() + (msg.choice === 'week' ? (((8 - wake.getDay()) % 7) || 7) : 1));
+        this.snoozedUntil = { ...(this.snoozedUntil || {}), [msg.id]: wake.getTime() };
         this._emit({ type: 'todayResult', reqId: msg.reqId, op: 'snooze', id: msg.id, ok: true });
         break;
+      }
       case 'todayUnsnooze':
         this.todaySnoozed = this.todaySnoozed.filter((x) => x !== msg.id);
         this._emit({ type: 'todayResult', reqId: msg.reqId, op: 'unsnooze', id: msg.id, ok: true });
