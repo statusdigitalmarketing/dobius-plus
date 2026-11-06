@@ -128,6 +128,7 @@ try {
   await page.keyboard.press('Enter');
   await sleep(800);
   await page.keyboard.press('Control+C');
+  await sleep(2000);
   await page.keyboard.type('Write-Output ("after-" + (7*6))');
   await page.keyboard.press('Enter');
   const interrupted = await waitFor(async () => /after-42/.test(await terminalText(page)), 8000);

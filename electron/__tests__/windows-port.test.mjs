@@ -131,6 +131,18 @@ test('PowerShell new tabs: allowlisted tool from env, nothing interpolated', () 
   assert.deepEqual(loginShellSpawn('/bin/zsh', null), { args: ['-l'], env: {} });
 });
 
+test('Windows console titles are not tab names', async () => {
+  const { labelFromTitle } = await import('../../shared/tab-label.js');
+  assert.equal(labelFromTitle('Administrator: C:\\Program Files\\PowerShell\\7\\pwsh.exe'), null);
+  assert.equal(labelFromTitle('C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'), null);
+  assert.equal(labelFromTitle('Windows PowerShell'), null);
+  assert.equal(labelFromTitle('pwsh.exe'), null);
+  assert.equal(labelFromTitle('Fix login bug'), 'Fix login bug');
+  assert.equal(labelFromTitle('\u2733 cmd key handling'), 'cmd key handling');
+  assert.equal(labelFromTitle('Administrator: C:\\temp permissions'), 'Administrator: C:\\temp permissions');
+  assert.equal(labelFromTitle('powershell script cleanup'), 'powershell script cleanup');
+});
+
 test('Windows keymap: Ctrl+Shift app shortcuts, terminal keeps Ctrl', () => {
   const k = (key, o = {}) => ({ type: 'keydown', key, ctrlKey: true, shiftKey: false, altKey: false, metaKey: false, preventDefault() {}, ...o });
   assert.equal(winToMacShortcut(k('t')), null); // Ctrl+T is Claude's

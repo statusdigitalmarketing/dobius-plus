@@ -23,6 +23,7 @@ const LEADING_GLYPHS_RE = /^[\s⠀-⣿✠-❋·•∙⏺●○◐-◓*]+/u;
 const CONTROL_RE = /[\u0000-\u001F\u007F-\u009F]/g;
 
 const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'tcsh', 'csh', 'ksh', 'dash', 'nu', 'login']);
+const WIN_SHELL_TITLE_RE = /^(Administrator:\s*)?([A-Za-z]:\\(.*\\)?)?(pwsh|powershell|cmd|bash|wsl|conhost|openconsole)(\.exe)?$|^(Administrator:\s*)?Windows PowerShell$/i;
 
 /**
  * Normalise any label text: drop control characters and leading status
@@ -48,6 +49,10 @@ export function labelFromTitle(title) {
   const s = title.replace(CONTROL_RE, ' ').replace(LEADING_GLYPHS_RE, '').replace(/\s+/g, ' ').trim();
   if (!s) return null;
   if (s.startsWith('~') || s.startsWith('/')) return null;
+  // A Windows console's own title, whole: a shell's exe path (optionally after
+  // "Administrator: ") or a bare shell name. Only the WHOLE title counts, so a
+  // topic that merely starts with "cmd" or mentions C:\ stays a label.
+  if (WIN_SHELL_TITLE_RE.test(s)) return null;
   if (/^[\w.-]+@[\w.-]+(:|$)/.test(s)) return null;
   const first = s.split(' ')[0].replace(/^-/, '').split('/').pop().toLowerCase();
   if (SHELLS.has(first)) return null;

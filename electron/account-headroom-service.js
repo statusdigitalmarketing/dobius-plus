@@ -40,7 +40,7 @@ export const draftOnScreen = (box) => (typeof box === 'string' ? !!box.trim() : 
  */
 export function writePrivateFileSync(finalPath, text, tmpSuffix = crypto.randomBytes(8).toString('hex')) {
   const dir = fsSync.lstatSync(path.dirname(finalPath));
-  if (!dir.isDirectory() || dir.uid !== process.getuid()) throw new Error('the folder is a link or is not this user\'s');
+  if (!dir.isDirectory() || (typeof process.getuid === 'function' && dir.uid !== process.getuid())) throw new Error('the folder is a link or is not this user\'s');
   const tmp = `${finalPath}.tmp.${process.pid}.${tmpSuffix}`;
   const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fsSync.constants;
   const fd = fsSync.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
