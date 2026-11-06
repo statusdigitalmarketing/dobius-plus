@@ -101,3 +101,9 @@ test('C1 introducers and NUL or DEL inside an escape keep the parser in step (Co
   assert.equal(chunkMayDraw('\x1b(B', st4), true);
   assert.equal(chunkMayDraw('\x1b]777;dobius;needs\x07', st4), false);
 });
+
+test('a byte order mark is dropped, as xterm drops it (Codex)', () => {
+  const st = oscScanState();
+  assert.equal(chunkMayDraw('\x1b﻿]11;#ffffff', st), true);
+  assert.equal(chunkMayDraw('\x1b]0;t\x07', st), true);
+});

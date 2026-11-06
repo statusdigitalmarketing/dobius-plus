@@ -32,6 +32,8 @@ export function chunkMayDraw(data, state) {
   const endString = () => { if (!inertOsc(state)) draws = true; toGround(); };
   for (let i = 0; i < s.length; i += 1) {
     const c = s.charCodeAt(i);
+    // xterm's decoder drops a byte order mark before its parser sees anything, so it does too.
+    if (c === 0xfeff) continue;
     // Transitions that apply from any state.
     if (c === 0x18 || c === 0x1a) { draws = true; toGround(); continue; } // CAN, SUB
     if (c >= 0x80 && c <= 0x9f) {
