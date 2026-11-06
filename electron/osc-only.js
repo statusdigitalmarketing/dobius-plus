@@ -37,7 +37,9 @@ export function chunkMayDraw(data, state) {
         continue;
       }
       if (c === 0x07) { close(); continue; }
-      if (c === 0x1b) { state.escInOsc = true; continue; }
+      // A terminal acts on the OSC as soon as the ESC of its ESC \ arrives, so a non-inert one
+      // counts here, even when the backslash comes in the next chunk (Codex).
+      if (c === 0x1b) { state.escInOsc = true; if (!INERT.test(state.body)) draws = true; continue; }
       // C1 controls (ST 0x9c among them) and CAN / SUB: a terminal may end the string here and act
       // on what follows, so none of it is trusted (Codex P1).
       if ((c >= 0x80 && c <= 0x9f) || c === 0x18 || c === 0x1a) { abandon(); continue; }

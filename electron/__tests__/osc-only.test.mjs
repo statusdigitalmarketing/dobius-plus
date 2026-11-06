@@ -58,3 +58,12 @@ test('an OSC that never ends stops being trusted', () => {
   assert.equal(chunkMayDraw(`\x1b]0;${'x'.repeat(5000)}`, st), true);
   assert.equal(st.inOsc, false);
 });
+
+test('a non-inert OSC counts when its ESC arrives, before the backslash (Codex)', () => {
+  const st = oscScanState();
+  assert.equal(chunkMayDraw('\x1b]4;1;#000000;2;#ffffff\x1b', st), true);
+  assert.equal(chunkMayDraw('\\', st), true);
+  const st2 = oscScanState();
+  assert.equal(chunkMayDraw('\x1b]777;dobius;needs\x1b', st2), false);
+  assert.equal(chunkMayDraw('\\', st2), false);
+});
