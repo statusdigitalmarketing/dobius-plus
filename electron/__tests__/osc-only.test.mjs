@@ -108,8 +108,10 @@ test('a byte order mark is dropped, as xterm drops it (Codex)', () => {
   assert.equal(chunkMayDraw('\x1b]0;t\x07', st), true);
 });
 
-test('a respawned PTY starts unknown: its first chunk counts, then markers are inert again (Codex)', () => {
-  const st = { ...oscScanState(), mode: 'unknown' };
-  assert.equal(chunkMayDraw('\x1b]0;t\x07', st), true);
-  assert.equal(chunkMayDraw('\x1b]777;dobius;needs\x07', st), false);
+test('state carried over a respawn keeps a pending OSC pending (Codex)', () => {
+  const old = oscScanState();
+  assert.equal(chunkMayDraw('\x1b]11;#ffffff', old), false); // not applied yet
+  const carried = { ...old }; // what createTerminal hands the new PTY
+  assert.equal(chunkMayDraw('\x00', carried), true);
+  assert.equal(chunkMayDraw('\x1b]0;t\x07', carried), true);
 });

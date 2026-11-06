@@ -27,8 +27,6 @@ export function chunkMayDraw(data, state) {
   const s = String(data);
   // Not in ground state at the start: whatever was left open may act on this chunk.
   let draws = state.mode !== 'ground' && !((state.mode === 'str' || state.mode === 'strEsc') && inertOsc(state));
-  // Unknown (a fresh PTY on a screen that may hold anything): count, and read on from ground.
-  if (state.mode === 'unknown') { state.mode = 'ground'; state.osc = false; state.body = ''; state.trusted = false; }
   const toString = (osc, trusted) => { state.mode = 'str'; state.osc = osc; state.body = ''; state.trusted = trusted; };
   const toGround = () => { state.mode = 'ground'; state.osc = false; state.body = ''; state.trusted = false; };
   const endString = () => { if (!inertOsc(state)) draws = true; toGround(); };
