@@ -147,6 +147,21 @@ export default function TasksDropdown() {
     if (open) load();
   }, [open, load]);
 
+  // The phone or another window snoozed or closed a card: an open Today reads again.
+  useEffect(() => {
+    const a = window.electronAPI;
+    if (!open || !a?.onTodayChanged) return undefined;
+    return a.onTodayChanged(() => { loadToday(); if (inboxReq.current > 0) loadInbox(); });
+  }, [open, loadToday, loadInbox]);
+
+  // A Today notification was clicked.
+  useEffect(() => {
+    const a = window.electronAPI;
+    if (!a?.onTasksOpenToday) return undefined;
+    // switchTab only sets state and a saved preference, so the first one is as good as any.
+    return a.onTasksOpenToday(() => { switchTab('today'); setOpen(true); });
+  }, []);
+
   useEffect(() => {
     if (!open || !window.electronAPI?.inboxStatus) return;
     let live = true;

@@ -4,6 +4,8 @@ import Pairing from './Pairing';
 import Board from './Board';
 import TerminalScreen from './Terminal';
 import History from './History';
+import Tasks from './Tasks';
+import Settings from './Settings';
 import MacSwitcher from './MacSwitcher';
 import { Connection } from './connection';
 import { DemoConnection, isDemoPairing } from './demo';
@@ -84,7 +86,10 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
   }, [id, origin, token, attempt, connectionRef]);
 
   useEffect(() => {
-    if (openRequest?.pairingId === id) { setOpenTabId(openRequest.id); setView('terminal'); }
+    if (openRequest?.pairingId !== id) return;
+    // A Today notification opens Today; a session notification opens its session.
+    if (openRequest.view === 'tasks') setView('tasks');
+    else if (openRequest.id) { setOpenTabId(openRequest.id); setView('terminal'); }
   }, [id, openRequest]);
 
   const openTab = useCallback((tabId) => { setOpenTabId(tabId); setView('terminal'); }, []);
@@ -115,9 +120,12 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     </div>
   );
   if (view === 'history') return <History connection={connection} onBack={() => setView('board')} />;
+  if (view === 'tasks') return <Tasks connection={connection} onBack={() => setView('board')} />;
+  if (view === 'settings') return <Settings connection={connection} macName={pairing.name} onBack={() => setView('board')} />;
   if (view === 'terminal') return <TerminalScreen connection={connection} status={status} initialId={openTabId} onBack={() => setView('board')} onShowHistory={() => setView('history')} />;
   const board = <Board connection={connection} status={status} macName={pairing.name} onMacs={onMacs}
-    onOpen={openTab} onShowHistory={() => setView('history')} />;
+    onOpen={openTab} onShowHistory={() => setView('history')}
+    onShowTasks={() => setView('tasks')} onShowSettings={() => setView('settings')} />;
   if (!isDemoPairing(origin, token)) return board;
   // A pill over the board's last rows, so demo-board lets them scroll clear of it.
   return <>
@@ -360,7 +368,7 @@ export default function App() {
     // its turn, so it cannot switch Macs after a newer tap (Codex High).
     // While any tap is pending the screen is covered: nothing can be typed,
     // sent or confirmed into the Mac being left (Codex High and Medium).
-    const openSession = async ({ id, pairingId }) => {
+    const openSession = async ({ id, pairingId, view }) => {
       const seq = ++tapSeqRef.current;
       const wanted = pairingId || 'legacy';
       const target = stateRef.current.pairings.find((p) => p.id === wanted);
@@ -395,11 +403,11 @@ export default function App() {
       // keeps the same key and would keep A's closed connection, Codex). A
       // bump batched with a key change mounts once.
       if (tapClosedRef.current) { tapClosedRef.current = false; setSessionEpoch((n) => n + 1); }
-      if (ok && id) setOpenRequest({ pairingId: wanted, id });
+      if (ok && (id || view === 'tasks')) setOpenRequest({ pairingId: wanted, id, view: view === 'tasks' ? 'tasks' : undefined });
     };
     const params = new URLSearchParams(window.location.search);
-    if (params.has('open') || params.has('mac')) {
-      openSession({ id: params.get('open'), pairingId: params.get('mac') });
+    if (params.has('open') || params.has('mac') || params.get('view') === 'tasks') {
+      openSession({ id: params.get('open'), pairingId: params.get('mac'), view: params.get('view') });
       window.history.replaceState(null, '', window.location.pathname);
     }
     tapHandler = openSession;

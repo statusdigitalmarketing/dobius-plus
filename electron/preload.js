@@ -207,6 +207,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   configSetPinnedProjects: (paths) => ipcRenderer.invoke('config:setPinnedProjects', paths),
   configGetSettings: () => ipcRenderer.invoke('config:getSettings'),
   configUpdateSettings: (updates) => ipcRenderer.invoke('config:updateSettings', updates),
+  // The few settings the phone can also change, checked by main (electron/mobile-today.js).
+  settingsWriteChecked: (key, value) => ipcRenderer.invoke('settings:writeChecked', key, value),
   configGetSessionTags: () => ipcRenderer.invoke('config:getSessionTags'),
   configSetSessionTag: (sessionId, label, color) => ipcRenderer.invoke('config:setSessionTag', sessionId, label, color),
   configRemoveSessionTag: (sessionId) => ipcRenderer.invoke('config:removeSessionTag', sessionId),
@@ -483,6 +485,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
   todayRead: () => ipcRenderer.invoke('today:read'),
   todaySnooze: (id, choice, print) => ipcRenderer.invoke('today:snooze', id, choice, print),
   todayUnsnooze: (id) => ipcRenderer.invoke('today:unsnooze', id),
+  // Today changed somewhere (the phone, another window): read it again.
+  onTodayChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('today:changed', handler);
+    return () => ipcRenderer.removeListener('today:changed', handler);
+  },
+  // A Today notification was clicked: open the Tasks dropdown on Today.
+  onTasksOpenToday: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('tasks:openToday', handler);
+    return () => ipcRenderer.removeListener('tasks:openToday', handler);
+  },
+  // A setting was changed from the phone.
+  onSettingsChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('settings:changed', handler);
+    return () => ipcRenderer.removeListener('settings:changed', handler);
+  },
   inboxStatus: () => ipcRenderer.invoke('inbox:status'),
   inboxStart: () => ipcRenderer.invoke('inbox:start'),
   // Team communicator (docs/team-communicator.md)

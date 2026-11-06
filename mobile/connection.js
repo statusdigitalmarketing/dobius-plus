@@ -28,7 +28,10 @@ function combinedSignal(first, second) {
   return controller.signal;
 }
 
-const QUEUEABLE = new Set(['input', 'submitPrompt', 'kill', 'resumeSession', 'createTerminal', 'selectorKey']);
+// Today and settings writes are one-shot too. Each is safe to deliver late: a snooze carries the
+// card's print and a Done its rev, so the Mac refuses one aimed at a card that changed meanwhile.
+const QUEUEABLE = new Set(['input', 'submitPrompt', 'kill', 'resumeSession', 'createTerminal', 'selectorKey',
+  'todaySnooze', 'todayUnsnooze', 'inboxAct', 'settingsWrite']);
 
 /**
  * WebSocket client for the Dobius+ mobile bridge.
@@ -132,6 +135,8 @@ export class Connection {
       try { msg = JSON.parse(e.data); } catch { return; }
       let justAuthed = false;
       if (msg.type === 'authed') {
+        // What this Mac's server can do: an older Mac has no Today or Settings.
+        this.features = Array.isArray(msg.features) ? msg.features.filter((f) => typeof f === 'string') : [];
         this.reconnectDelay = 1000;
         this._setStatus('authed');
         this._startPing();

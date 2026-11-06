@@ -17,6 +17,7 @@ import { startErrorReporter, noteFault, isReportable } from './error-reporter.js
 // ipcMain.handle/on registration below is already tracked; armed in whenReady
 // once the error log exists to write to. See electron/stall-watchdog.js.
 const stallWatchdog = createStallWatchdog({ log: logLine });
+
 stallWatchdog.wrapIpc(ipcMain);
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
@@ -99,7 +100,7 @@ import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCer
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
-  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem,
+  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
 import { initTeam, stopTeam, handleTeamBridge } from './team-main.js';
@@ -119,7 +120,10 @@ import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { installNavGuard, isAppUrl } from './nav-guard.js';
-import { readToday, cardSeen } from './today.js';
+import { readToday, cardSeen, openCardIds } from './today.js';
+import { setTodayBridge, nudgeSettings, checkSettingWrite } from './mobile-today.js';
+import { createNudger, NUDGE_PREFIX } from './today-nudge.js';
+import { sendPush, hasPushSubscribers } from './push.js';
 import { createPicker, runClaude } from './today-pick.js';
 import { createSnoozes, cardPrint } from './today-snooze.js';
 import { localDay } from '../shared/task-due.js';
@@ -131,6 +135,86 @@ import { recoverWindowLists } from './update-window-recovery.js';
 import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError } from './claude-settings-env.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages, getVisualProjectPath } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
+
+// --- Today on the phone and Today nudges ---------------------------------
+// Something about Today changed (a snooze, a card marked done): open phone screens and desktop
+// dropdowns read again. Only the event travels, never a card.
+function todayChanged() {
+  broadcastToPhones('todayChanged');
+  for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('today:changed');
+}
+
+// What the phone's Settings screen shows. Read-only rows are facts about this Mac.
+function phoneSettings() {
+  const st = getSettings();
+  const config = loadConfig();
+  const active = (config.accounts || []).find((a) => a.id === config.activeClaudeAccountId);
+  const bridge = getImessageBridge();
+  return {
+    todayNudges: nudgeSettings(st.todayNudges),
+    newTabTool: st.newTabTool || 'claude',
+    autoMode: !!getAutoMode().enabled,
+    info: {
+      version: app.getVersion(),
+      account: active?.name ? String(active.name).slice(0, 60) : 'Default',
+      imessageReady: !!bridge.selfHandle,
+      phonePush: hasPushSubscribers(),
+    },
+  };
+}
+
+function writePhoneSetting(key, value) {
+  const st = getSettings();
+  const check = checkSettingWrite(key, value, st.todayNudges);
+  if (!check.ok) return check;
+  if (check.apply.settings) updateSettings(check.apply.settings);
+  if (typeof check.apply.autoMode === 'boolean') setAutoModeEnabled(check.apply.autoMode);
+  broadcastToPhones('settingsChanged');
+  for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('settings:changed');
+  return { ok: true };
+}
+
+// Open the Tasks dropdown on Today in the window Sam last used (a Mac notification click).
+function showTodayOnMac() {
+  const w = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows().find((x) => !x.isDestroyed() && x.isVisible()) || BrowserWindow.getAllWindows()[0];
+  if (!w || w.isDestroyed()) return;
+  if (w.isMinimized()) w.restore();
+  w.show();
+  w.focus();
+  w.webContents.send('tasks:openToday');
+}
+
+let _todayNotification = null; // held so it is not garbage collected before a click
+async function sendTodayNudge(nudge, cfg) {
+  const out = {};
+  const body = nudge.text.slice(NUDGE_PREFIX.length).trim();
+  if (cfg.mac) {
+    try {
+      if (Notification.isSupported()) {
+        const n = new Notification({ title: 'Today', body, silent: false });
+        n.on('click', showTodayOnMac);
+        n.show();
+        _todayNotification = n;
+        out.mac = 'ok';
+      } else out.mac = 'unsupported';
+    } catch { out.mac = 'failed'; }
+  }
+  if (cfg.push) {
+    if (!hasPushSubscribers()) out.push = 'none';
+    else { await sendPush({ title: 'Today', body, tag: 'today', url: './?view=tasks' }); out.push = 'sent'; }
+  }
+  if (cfg.imessage) {
+    const b = getImessageBridge();
+    const prefix = String(b.triggerPrefix || '').trim().toLowerCase();
+    if (!b.selfHandle) out.imessage = 'no-handle';
+    // Never a message the bridge would read back as a command.
+    else if (prefix && nudge.text.trim().toLowerCase().startsWith(prefix)) out.imessage = 'skipped';
+    else {
+      try { await sendImessageToSelf(nudge.text); out.imessage = 'ok'; } catch { out.imessage = 'failed'; }
+    }
+  }
+  return out;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1456,7 +1540,7 @@ function setupOrchestrationHandlers() {
   // Brett's Inbox board, read only. The board's token stays in main.
   // All of them: Today's "See all" lands here, and a card past a cap would look like it does not exist.
   ipcMain.handle('inbox:read', () => readInboxBoard({ maxCards: Infinity }));
-  ipcMain.handle('inbox:act', (_event, request) => actOnInboxCard(request));
+  ipcMain.handle('inbox:act', (_event, request) => actOnCard(request));
   ipcMain.handle('fleet:info', () => fleetInfo());
   // Claude picks run as the active account, with no tools and no saved session. An isolated
   // instance never calls the real Claude with real cards: it runs DOBIUS_TODAY_PICK_CMD or nothing.
@@ -1474,21 +1558,54 @@ function setupOrchestrationHandlers() {
     },
   });
   const todaySnoozes = createSnoozes({ file: path.join(app.getPath('userData'), 'today-snooze.json') });
-  ipcMain.handle('today:read', () => readToday({ picker: todayPicker, snoozes: todaySnoozes }));
+  const readTodayNow = () => readToday({ picker: todayPicker, snoozes: todaySnoozes });
   // Only the card as the person saw it: if it changed since, nothing is snoozed and they look again.
-  ipcMain.handle('today:snooze', (_event, id, choice, print) => {
+  const snoozeToday = (id, choice, print) => {
     const card = cardSeen(id);
     if (!card || (choice !== 'tomorrow' && choice !== 'week')) return { ok: false };
     if (typeof print !== 'string' || print !== cardPrint(card)) return { ok: false, changed: true };
-    return { ok: todaySnoozes.snooze(card, choice, localDay()) };
+    const ok = todaySnoozes.snooze(card, choice, localDay());
+    if (ok) todayChanged();
+    return { ok };
+  };
+  const unsnoozeToday = (id) => { const ok = todaySnoozes.unsnooze(id); if (ok) todayChanged(); return { ok }; };
+  const actOnCard = async (request) => { const r = await actOnInboxCard(request); if (r?.ok) todayChanged(); return r; };
+  ipcMain.handle('today:read', () => readTodayNow());
+  ipcMain.handle('today:snooze', (_event, id, choice, print) => snoozeToday(id, choice, print));
+  ipcMain.handle('today:unsnooze', (_event, id) => unsnoozeToday(id));
+  // The phone gets the same functions, never a copy of them (electron/mobile-today.js).
+  setTodayBridge({
+    readToday: readTodayNow,
+    // With each card's print, so See all can snooze too (checked against the card as main saw it).
+    readInbox: async () => { const r = await readInboxBoard({ maxCards: Infinity }); return r?.ok ? { ...r, cards: r.cards.map((c) => ({ ...c, print: cardPrint(c) })) } : r; },
+    snooze: snoozeToday,
+    unsnooze: unsnoozeToday,
+    act: actOnCard,
+    readSettings: () => phoneSettings(),
+    writeSetting: (key, value) => writePhoneSetting(key, value),
   });
-  ipcMain.handle('today:unsnooze', (_event, id) => ({ ok: todaySnoozes.unsnooze(id) }));
+  // Today comes to Sam: counts only, through the channels Settings allows (electron/today-nudge.js).
+  const todayNudger = createNudger({
+    file: path.join(app.getPath('userData'), 'today-nudge.json'),
+    settings: () => nudgeSettings(getSettings().todayNudges),
+    log: (line) => logLine('today', `nudge ${line}`),
+    read: async () => {
+      // A harness never nudges anyone about anything.
+      if (harness) return null;
+      const today = await readTodayNow();
+      if (today?.board?.state !== 'ok') return null;
+      return { today, openIds: openCardIds(), snoozedIds: new Set((today.board.snoozed || []).map((c) => c.id)) };
+    },
+    send: (nudge, cfg) => sendTodayNudge(nudge, cfg),
+  });
+  setInterval(() => { todayNudger.tick(); }, 5 * 60 * 1000).unref?.();
+  setTimeout(() => { todayNudger.tick(); }, 60 * 1000).unref?.();
   ipcMain.handle('inbox:status', () => inboxBoardStatus());
   ipcMain.handle('inbox:start', () => startInboxBoard());
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());
   ipcMain.handle('asana:updateConfig', (_event, updates) => updateAsanaQueue(updates));
   ipcMain.handle('automode:get', () => getAutoMode());
-  ipcMain.handle('automode:setEnabled', (_event, on) => setAutoModeEnabled(on));
+  ipcMain.handle('automode:setEnabled', (_event, on) => { const r = setAutoModeEnabled(on); broadcastToPhones('settingsChanged'); return r; });
 
   // --- Visual preview server ---
   ipcMain.handle('visual:openWindow', (_event, projectPath) => {
@@ -2805,7 +2922,8 @@ function setupConfigHandlers() {
   ipcMain.handle('config:getPinnedProjects', () => getPinnedProjects());
   ipcMain.handle('config:setPinnedProjects', (_event, paths) => setPinnedProjects(paths));
   ipcMain.handle('config:getSettings', () => getSettings());
-  ipcMain.handle('config:updateSettings', (_event, updates) => updateSettings(updates));
+  ipcMain.handle('config:updateSettings', (_event, updates) => { const r = updateSettings(updates); broadcastToPhones('settingsChanged'); return r; });
+  ipcMain.handle('settings:writeChecked', (_event, key, value) => writePhoneSetting(key, value));
   ipcMain.handle('config:getSessionTags', () => getSessionTags());
   ipcMain.handle('config:setSessionTag', (_event, sessionId, label, color) => setSessionTag(sessionId, label, color));
   ipcMain.handle('config:removeSessionTag', (_event, sessionId) => removeSessionTag(sessionId));

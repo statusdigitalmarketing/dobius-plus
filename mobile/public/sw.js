@@ -22,8 +22,10 @@ self.addEventListener('push', (e) => {
   const title = data.title || 'Dobius+';
   const url = new URL('./', APP_BASE);
   try {
-    const id = new URL(data.url || './', APP_BASE).searchParams.get('open');
+    const params = new URL(data.url || './', APP_BASE).searchParams;
+    const id = params.get('open');
     if (id) url.searchParams.set('open', id);
+    if (params.get('view') === 'tasks') url.searchParams.set('view', 'tasks');
   } catch { /* malformed notification URL */ }
   url.searchParams.set('mac', PAIRING_ID);
   e.waitUntil(self.registration.showNotification(title, {
@@ -42,7 +44,12 @@ self.addEventListener('notificationclick', (e) => {
   // warm client can be told to switch to it (focus() alone just brings the app
   // forward on whatever screen it last showed). Audit MED-12.
   let openId = null;
-  try { openId = new URL(url, self.location.origin).searchParams.get('open'); } catch { openId = null; }
+  let view = null;
+  try {
+    const params = new URL(url, self.location.origin).searchParams;
+    openId = params.get('open');
+    view = params.get('view') === 'tasks' ? 'tasks' : null; // a Today notification opens Today
+  } catch { openId = null; }
   e.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const c of all) {
@@ -50,7 +57,7 @@ self.addEventListener('notificationclick', (e) => {
       if ('focus' in c) {
         // Always route to the notification's Mac, even with no session to
         // open (a failure notice): focus() alone stays on whichever Mac is shown.
-        try { c.postMessage({ type: 'open-session', id: openId, pairingId: e.notification.data?.pairingId, origin: e.notification.data?.origin || APP_BASE.origin }); } catch { /* noop */ }
+        try { c.postMessage({ type: 'open-session', id: openId, ...(view ? { view } : {}), pairingId: e.notification.data?.pairingId, origin: e.notification.data?.origin || APP_BASE.origin }); } catch { /* noop */ }
         return c.focus();
       }
     }

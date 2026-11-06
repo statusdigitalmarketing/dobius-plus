@@ -158,7 +158,20 @@ export function arrange(cards, { today, nowMs, picker, snoozes, limit = SUGGESTE
   };
 }
 
-export async function readToday(opts = {}) {
+// The ids of every open card the last read saw (Today nudges ask whether a card is still open).
+export const openCardIds = () => new Set(lastCards.keys());
+
+// One read at a time. Two overlapping reads (desktop, phone, the nudge timer) could finish out of
+// order, and the older one would then judge a snooze made against the newer cards as changed and
+// drop it (Codex). Each read starts after the one before it ends.
+let readChain = Promise.resolve();
+export function readToday(opts = {}) {
+  const run = readChain.then(() => readTodayNow(opts));
+  readChain = run.catch(() => {});
+  return run;
+}
+
+async function readTodayNow(opts) {
   const [board, noticed] = await Promise.all([
     (opts.readBoard || readBoard)({ ...opts, maxCards: Infinity }),
     (opts.readNoticed || readNoticed)(opts),

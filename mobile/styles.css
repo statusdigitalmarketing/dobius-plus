@@ -1246,3 +1246,52 @@ button.secondary:disabled { opacity: 0.4; }
 }
 
 .demo-board .board-body { padding-bottom: calc(env(safe-area-inset-bottom) + 110px); }
+
+/* Today and Settings (phone). Inset cards, 44pt targets, the house palette. */
+.today-body { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  padding: 12px 16px calc(env(safe-area-inset-bottom) + 88px); }
+.today-line { margin: 4px 2px 10px; color: var(--dim); font-size: 13px; }
+.today-warn { margin: 0 2px 10px; color: var(--status-working); font-size: 13px; }
+.today-card { margin-bottom: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.today-card.high { border-left: 3px solid var(--accent); }
+.today-card.snoozed, .today-card.noticed { opacity: 0.85; }
+.today-title { display: block; color: var(--fg); font-size: 16px; font-weight: 600; line-height: 21px; text-decoration: none; overflow-wrap: anywhere; }
+a.today-title:active { opacity: 0.7; }
+.today-meta { margin-top: 3px; color: var(--dim); font-size: 13px; }
+.today-meta.overdue { color: var(--status-needs); }
+.today-reason { margin-top: 6px; color: var(--fg); opacity: 0.85; font-size: 14px; line-height: 19px; }
+.today-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.today-actions button { min-height: 36px; min-width: 64px; padding: 0 14px; border: 1px solid var(--border); border-radius: 18px;
+  background: var(--surface-2); color: var(--fg); font-size: 14px; font-weight: 500; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.today-actions button.today-done { border-color: transparent; background: var(--accent); color: var(--on-accent); }
+.today-actions button.quiet { background: none; border-color: transparent; color: var(--dim); }
+.today-actions button:active { transform: scale(0.97); opacity: 0.85; }
+.today-actions button:disabled { opacity: 0.5; }
+.today-more { display: block; width: 100%; min-height: 44px; margin: 4px 0 10px; border: 0; border-radius: 12px; background: none;
+  color: var(--accent); font-size: 15px; text-align: left; padding: 0 2px; cursor: pointer; }
+.today-search { width: 100%; min-height: 40px; margin-bottom: 10px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); color: var(--fg); font-size: 16px; }
+.today-toast { position: fixed; left: 16px; right: 16px; bottom: calc(env(safe-area-inset-bottom) + 16px); display: flex; align-items: center;
+  justify-content: space-between; gap: 12px; min-height: 48px; padding: 0 8px 0 16px; border-radius: 14px; background: var(--surface-2);
+  border: 1px solid var(--border); color: var(--fg); font-size: 15px; box-shadow: 0 6px 24px rgba(0,0,0,0.35); }
+.today-toast button { min-height: 36px; padding: 0 14px; border: 0; border-radius: 10px; background: none; color: var(--accent); font-size: 15px; font-weight: 600; }
+.link-btn { border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
+
+.settings-head { margin: 18px 4px 6px; color: var(--dim); font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; }
+.settings-head:first-child { margin-top: 4px; }
+.settings-group { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 0 14px; font-size: 16px; color: var(--fg); }
+.settings-row + .settings-row { border-top: 1px solid var(--border); }
+.settings-row select, .settings-row input[type="time"] { min-height: 34px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface-2); color: var(--fg); font-size: 16px; }
+.settings-foot { margin: 6px 4px 0; color: var(--dim); font-size: 13px; line-height: 18px; }
+.ios-switch { position: relative; flex: 0 0 auto; width: 51px; height: 31px; border: 0; border-radius: 16px; background: var(--surface-2);
+  cursor: pointer; transition: background 0.2s; -webkit-tap-highlight-color: transparent; }
+.ios-switch.on { background: var(--status-done); }
+.ios-switch:disabled { opacity: 0.5; }
+.ios-switch-knob { position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.3); transition: transform 0.2s; }
+.ios-switch.on .ios-switch-knob { transform: translateX(20px); }
+@media (prefers-reduced-motion: reduce) { .ios-switch, .ios-switch-knob { transition: none; } }
+.today-head { flex: 1 1 auto; min-width: 0; font-size: 17px; }
+.today-ask { align-self: center; color: var(--fg); font-size: 14px; }
