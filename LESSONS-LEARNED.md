@@ -713,3 +713,21 @@
 - **FIX**: Cross-build only in a clonefile copy (`cp -cR`), with `prebuild-install --runtime electron --target <electron> --platform win32 --arch x64` inside its better-sqlite3 and `-c.npmRebuild=false` (node-pty already ships win32 prebuilds). build/after-pack.cjs must skip non-darwin (spawn-helper is macOS only). If the repo was hit: `npx @electron/rebuild -f -o better-sqlite3`.
 - **CONTEXT**: A test Windows installer built this way on 2026-11-06; it was never run on Windows.
 - **DETECTION**: `file node_modules/better-sqlite3/build/Release/better_sqlite3.node` must say Mach-O.
+
+### Build - 2026-11-06
+- **MISTAKE**: The Windows CI step `npm run electron:build:win -- --publish never -c.npmRebuild=false` failed with `ENOENT ... .npmRebuild=false`: GitHub's default Windows shell is PowerShell, which splits `-c.npmRebuild=false` into `-c` and `.npmRebuild=false`, so electron-builder read a config file of that name.
+- **FIX**: Run that step with `shell: bash` (.github/workflows/windows.yml).
+- **CONTEXT**: Any dotted CLI flag (`-c.foo=bar`) in a Windows Actions step or a PowerShell tab.
+- **DETECTION**: `grep -n "\-c\." .github/workflows/*.yml` and check the step's shell.
+
+### Testing - 2026-11-06
+- **MISTAKE**: The Windows smoke test typed its next command immediately after Ctrl+C. PowerShell (PSReadLine) was still redrawing its prompt and dropped the first keys, leaving an open quote, so every later step landed at a `>>` continuation prompt and four checks failed. Ctrl+C itself worked.
+- **FIX**: Wait about 2s after Ctrl+C in a PowerShell tab before typing (scripts/windows-smoke.mjs). Read the screenshot before blaming the app.
+- **CONTEXT**: Any automation driving a PowerShell tab.
+- **DETECTION**: a `>>` prompt in a Windows smoke screenshot.
+
+### Architecture - 2026-11-06
+- **MISTAKE**: The Windows process lookup went through six Codex rounds, each breaking the last guard: a cached table naming a pid that Windows had since reused (for a shell or a Claude), a second table read pairing one process's session with another's folder, `cmd.exe` children started with `start` in their own console, `node -e`/`--title` making another script look like Claude, and POSIX quoting typed into PowerShell (typographic quotes count as quotes there; npm's .cmd launchers re-read arguments through cmd.exe).
+- **FIX**: Identity is pid PLUS exact creation FILETIME everywhere: the tab's shell is pinned on first sight (must start just after the spawn), Claude's folder comes only from its record for the pid and FILETIME the caller resolved, and no timing-based session linking on Windows. Typed commands go through shared/sh-quote.js (`cdThen`, `toolCommand`, `shellArg`, `cmdSafe`). Claude's real `procStartFt` equals the CIM FILETIME exactly (verified on windows-latest, difference 0).
+- **CONTEXT**: Any new Windows code that reads processes or types into a tab.
+- **DETECTION**: `grep -n "winProcessTable\|shellPrograms\|descendants" electron/*.js` and check each caller verifies the shell row and FILETIME.
