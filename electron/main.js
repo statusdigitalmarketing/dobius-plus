@@ -176,7 +176,11 @@ function writePhoneSetting(key, value) {
 
 // Open the Tasks dropdown on Today in the window Sam last used (a Mac notification click).
 function showTodayOnMac() {
-  const w = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows().find((x) => !x.isDestroyed() && x.isVisible()) || BrowserWindow.getAllWindows()[0];
+  // Only a project window has the Tasks dropdown (the launcher and the Visual preview do not).
+  const hasToday = (x) => { try { return !x.isDestroyed() && x.webContents.getURL().includes('project='); } catch { return false; } };
+  const focused = BrowserWindow.getFocusedWindow();
+  const all = BrowserWindow.getAllWindows().filter(hasToday);
+  const w = (focused && hasToday(focused) ? focused : null) || all.find((x) => x.isVisible()) || all[0];
   if (!w || w.isDestroyed()) return;
   if (w.isMinimized()) w.restore();
   w.show();
@@ -204,7 +208,8 @@ async function sendTodayNudge(nudge, cfg) {
     const prefix = String(b.triggerPrefix || '').trim().toLowerCase();
     if (!b.selfHandle) out.imessage = 'no-handle';
     // Never a message the bridge would read back as a command (an empty prefix matches every one).
-    else if (b.enabled && (!prefix || nudge.text.trim().toLowerCase().startsWith(prefix))) out.imessage = 'skipped';
+    // Checked even with the bridge off: turning it back on reads every message since its cursor.
+    else if (!prefix || nudge.text.trim().toLowerCase().startsWith(prefix)) out.imessage = 'skipped';
     else {
       try { await sendImessageToSelf(nudge.text); out.imessage = 'ok'; } catch { out.imessage = 'failed'; }
     }
@@ -221,17 +226,22 @@ async function sendTodayNudge(nudge, cfg) {
 }
 
 // One nudging Dobius per Mac: a lock file holding the owner's pid, taken over when that pid is gone.
+// Taken with an exclusive create, so two processes can never both win (Codex).
 function holdNudgeLock(file) {
   const mine = String(process.pid);
-  try {
-    const owner = fs.readFileSync(file, 'utf8').trim();
-    if (owner === mine) return true;
-    const pid = Number(owner);
-    if (Number.isInteger(pid) && pid > 0) {
-      try { process.kill(pid, 0); return false; } catch (err) { if (err?.code === 'EPERM') return false; }
-    }
-  } catch { /* no lock yet */ }
-  try { fs.writeFileSync(file, mine, { mode: 0o600 }); return fs.readFileSync(file, 'utf8').trim() === mine; } catch { return false; }
+  const take = () => { try { const fd = fs.openSync(file, 'wx', 0o600); fs.writeSync(fd, mine); fs.closeSync(fd); return true; } catch { return false; } };
+  if (take()) return true;
+  let owner;
+  try { owner = fs.readFileSync(file, 'utf8').trim(); } catch { return take(); }
+  if (owner === mine) return true;
+  const pid = Number(owner);
+  if (Number.isInteger(pid) && pid > 0) {
+    try { process.kill(pid, 0); return false; } catch (err) { if (err?.code === 'EPERM') return false; }
+  }
+  // The owner is gone. Rename the stale lock aside (only one process can), then take it.
+  const aside = `${file}.stale-${process.pid}`;
+  try { fs.renameSync(file, aside); fs.rmSync(aside, { force: true }); } catch { return false; }
+  return take();
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1576,7 +1586,11 @@ function setupOrchestrationHandlers() {
     },
   });
   const todaySnoozes = createSnoozes({ file: path.join(app.getPath('userData'), 'today-snooze.json') });
-  const readTodayNow = () => readToday({ picker: todayPicker, snoozes: todaySnoozes });
+  // A harness reads only a stand-in board: with none, Today says not installed rather than reading the real one.
+  const realBoardInHarness = () => harness && !boardIsStandIn();
+  const readTodayNow = () => (realBoardInHarness()
+    ? Promise.resolve({ board: { state: 'not-installed' }, noticed: { state: 'unavailable' } })
+    : readToday({ picker: todayPicker, snoozes: todaySnoozes }));
   // Only the card as the person saw it: if it changed since, nothing is snoozed and they look again.
   const snoozeToday = (id, choice, print) => {
     const card = cardSeen(id);
@@ -1586,8 +1600,18 @@ function setupOrchestrationHandlers() {
     if (ok) todayChanged();
     return { ok };
   };
-  const unsnoozeToday = (id, until) => { const ok = todaySnoozes.unsnooze(id, until); if (ok) todayChanged(); return { ok }; };
-  const actOnCard = async (request) => { const r = await actOnInboxCard(request); if (r?.ok) todayChanged(); return r; };
+  const unsnoozeToday = (id, print) => { const ok = todaySnoozes.unsnooze(id, print); if (ok) todayChanged(); return { ok }; };
+  const actOnCard = async (request) => {
+    if (realBoardInHarness()) return { ok: false, reason: 'not-installed' };
+    // The phone sends the print it showed: a card edited since (same rev) is not closed blind.
+    if (typeof request?.print === 'string') {
+      const seen = cardSeen(request.id);
+      if (!seen || cardPrint(seen) !== request.print) return { ok: false, reason: 'changed' };
+    }
+    const r = await actOnInboxCard({ kind: request?.kind, id: request?.id, rev: request?.rev });
+    if (r?.ok) todayChanged();
+    return r;
+  };
   ipcMain.handle('today:read', () => readTodayNow());
   ipcMain.handle('today:snooze', (_event, id, choice, print) => snoozeToday(id, choice, print));
   ipcMain.handle('today:unsnooze', (_event, id) => unsnoozeToday(id));
@@ -1595,7 +1619,7 @@ function setupOrchestrationHandlers() {
   setTodayBridge({
     readToday: readTodayNow,
     // With each card's print, so See all can snooze too (checked against the card as main saw it).
-    readInbox: async () => { const r = await readAllCards(); return r?.ok ? { ...r, cards: r.cards.map((c) => ({ ...c, print: cardPrint(c) })) } : r; },
+    readInbox: async () => { if (realBoardInHarness()) return { ok: false, reason: 'not-installed' }; const r = await readAllCards(); return r?.ok ? { ...r, cards: r.cards.map((c) => ({ ...c, print: cardPrint(c) })) } : r; },
     snooze: snoozeToday,
     unsnooze: unsnoozeToday,
     act: actOnCard,
@@ -1619,6 +1643,11 @@ function setupOrchestrationHandlers() {
     mayRun: () => app.isPackaged && holdNudgeLock(path.join(app.getPath('userData'), 'today-nudge.lock')),
   });
   setInterval(() => { todayNudger.tick(); }, 5 * 60 * 1000).unref?.();
+  // Hand the nudge lock back on quit, so a later launch never waits on a reused pid.
+  app.on('will-quit', () => {
+    const lock = path.join(app.getPath('userData'), 'today-nudge.lock');
+    try { if (fs.readFileSync(lock, 'utf8').trim() === String(process.pid)) fs.rmSync(lock, { force: true }); } catch { /* not ours or gone */ }
+  });
   setTimeout(() => { todayNudger.tick(); }, 60 * 1000).unref?.();
   ipcMain.handle('inbox:status', () => inboxBoardStatus());
   ipcMain.handle('inbox:start', () => startInboxBoard());

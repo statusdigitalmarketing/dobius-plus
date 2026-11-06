@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useRef, useState, useEffect, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { buildPairingDeepLink, buildPairingWebLink } from '../../../shared/pairing-link.js';
 import { useStore } from '../../store/store';
@@ -21,6 +21,8 @@ export default function Settings() {
     sidebarDefaultOpen: false,
     newTabTool: 'claude',
   });
+  // Bumped by every edit here: a settings read that began before an edit must not undo it.
+  const editSeq = useRef(0);
   const [loaded, setLoaded] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -168,7 +170,8 @@ export default function Settings() {
     // The phone can change a few settings: show those as soon as it does, and only those, so a
     // field being typed into here is never reset by an older read (Codex).
     return a.onSettingsChanged?.(() => {
-      a.configGetSettings().then((s) => setSettings((prev) => ({ ...prev, todayNudges: s.todayNudges, newTabTool: s.newTabTool })));
+      const at = editSeq.current;
+      a.configGetSettings().then((s) => { if (at === editSeq.current) setSettings((prev) => ({ ...prev, todayNudges: s.todayNudges, newTabTool: s.newTabTool })); });
       a.autoModeGet?.().then((m) => { if (m) setAutoMode(m); });
     });
   }, []);
@@ -182,8 +185,9 @@ export default function Settings() {
       return;
     }
     setNudgeError('');
+    const at = editSeq.current;
     const s = await window.electronAPI.configGetSettings();
-    setSettings((prev) => ({ ...prev, ...s }));
+    if (at === editSeq.current) setSettings((prev) => ({ ...prev, todayNudges: s.todayNudges }));
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   }, []);
@@ -274,6 +278,7 @@ export default function Settings() {
   const [customFontMode, setCustomFontMode] = useState(false);
 
   const updateSetting = useCallback((key, value) => {
+    editSeq.current += 1;
     setSettings((prev) => {
       const next = { ...prev, [key]: value };
       window.electronAPI?.configUpdateSettings?.({ [key]: value });

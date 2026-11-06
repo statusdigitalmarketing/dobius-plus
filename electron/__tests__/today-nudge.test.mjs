@@ -172,6 +172,8 @@ test('phone messages: replies carry the reqId, the board url never leaves, failu
   handleTodayMessage({ type: 'todaySnooze', reqId: 'd', id: 'x', choice: 'forever', print: 'p1' }, send);
   handleTodayMessage({ type: 'inboxAct', reqId: 'e', kind: 'delete', id: 'x', rev: 1 }, send);
   handleTodayMessage({ type: 'inboxAct', reqId: 'f', kind: 'undo', id: 'x', rev: 1 }, send);
+  handleTodayMessage({ type: 'inboxAct', reqId: 'h', kind: 'done', id: 'x', rev: 1 }, send);
+  handleTodayMessage({ type: 'todayUnsnooze', reqId: 'i', id: 'x' }, send);
   handleTodayMessage({ type: 'settingsWrite', reqId: 'g', key: 'mobileServerEnabled', value: false }, send);
   await new Promise((r) => setTimeout(r, 20));
   const by = Object.fromEntries(out.map((m) => [m.reqId, m]));
@@ -182,6 +184,8 @@ test('phone messages: replies carry the reqId, the board url never leaves, failu
   assert.equal(by.d.error, 'bad-request');
   assert.equal(by.e.error, 'bad-request');
   assert.equal(by.f.changed, true);
+  assert.equal(by.h.error, 'bad-request'); // Done without the print it showed
+  assert.equal(by.i.error, 'bad-request'); // Bring back without the snooze it saw
   assert.deepEqual(by.g, { type: 'settingsResult', reqId: 'g', key: 'mobileServerEnabled', ok: false, error: 'not-allowed' });
   setTodayBridge(null);
   out.length = 0;
@@ -229,14 +233,26 @@ test('a second Dobius never nudges, and a nudge another process sent is not sent
 test('Bring back with the snooze it saw leaves a newer snooze alone', async () => {
   const { createSnoozes } = await import('../today-snooze.js');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snz-'));
-  let t = 1000;
-  const s = createSnoozes({ file: path.join(dir, 's.json'), now: () => t });
+  const s = createSnoozes({ file: path.join(dir, 's.json'), now: () => 1000 });
   const c = { id: 'A', rev: 1, subject: 'x' };
   s.snooze(c, 'tomorrow', '2026-11-05');
-  const old = JSON.parse(fs.readFileSync(path.join(dir, 's.json'), 'utf8')).A.until;
-  t = 1000 + 8 * 24 * 3600 * 1000;
-  s.snooze({ ...c, rev: 2 }, 'week', '2026-11-13');
+  const old = JSON.parse(fs.readFileSync(path.join(dir, 's.json'), 'utf8')).A.print;
+  // A new message wakes it and the new version is snoozed again, to the very same wake time.
+  s.snooze({ ...c, rev: 2 }, 'tomorrow', '2026-11-05');
   assert.equal(s.unsnooze('A', old), false);
   assert.equal(s.unsnooze('A'), true);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a card brought back after the all-clear is nudged again (Codex)', () => {
+  const sentAt = at(8, 20).getTime();
+  const state = { day: '2026-11-05', batch: [], batchAt: sentAt, sentAt, reminded: true, seen: ['A:'] };
+  const r = planNudge({ state, now: at(9, 25), settings: cfg, today: todayOf(['A']), openIds: new Set(['A']), snoozedIds: new Set() });
+  assert.equal(r.nudge.kind, 'more');
+});
+
+test('a card the board is still reading is not taken as handled (Codex)', () => {
+  const state = { day: '2026-11-05', batch: ['A'], batchAt: at(8).getTime(), sentAt: at(8).getTime(), reminded: false, seen: ['A:'] };
+  const r = planNudge({ state, now: at(9), settings: cfg, today: todayOf([], { held: 1 }), openIds: new Set(), snoozedIds: new Set() });
+  assert.equal(r.nudge, null);
 });

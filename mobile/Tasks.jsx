@@ -111,6 +111,7 @@ export default function Tasks({ connection, onBack }) {
   const [showSnoozed, setShowSnoozed] = useState(false);
   const seq = useRef(0);
   const shown = useRef(0);
+  const doneSeq = useRef(0);
   const inFlight = useRef(false);
   const allRef = useRef(false);
   allRef.current = all;
@@ -153,6 +154,14 @@ export default function Tasks({ connection, onBack }) {
 
   useEffect(() => { if (all) load(); }, [all, load]);
 
+  // New mail reaches the board on its own schedule and sends no event: look again every two
+  // minutes while the screen is up (Codex).
+  useEffect(() => {
+    if (!supported) return undefined;
+    const t = setInterval(() => { if (document.visibilityState === 'visible' && !inFlight.current) load(); }, 120000);
+    return () => clearInterval(t);
+  }, [supported, load]);
+
   useEffect(() => {
     if (!undo || undo.problem) return undefined;
     const t = setTimeout(() => setUndo(null), 8000);
@@ -163,12 +172,15 @@ export default function Tasks({ connection, onBack }) {
   const mark = (id, on) => setBusy((b) => { const n = { ...b }; if (on) n[id] = true; else delete n[id]; return n; });
 
   const done = async (card, kind) => {
+    const mine = ++doneSeq.current;
     mark(card.id, true);
-    // Closing in Asana can take a while: Asana answers before the board does.
-    const r = await ask(connection, { type: 'inboxAct', kind, id: card.id, rev: card.rev }, 'todayResult', kind === 'complete' ? 45000 : 15000);
+    // Closing in Asana can take a while: Asana answers before the board does. The print says
+    // which version was on screen, so an edit that kept its rev is not closed blind.
+    const r = await ask(connection, { type: 'inboxAct', kind, id: card.id, rev: card.rev, print: card.print }, 'todayResult', kind === 'complete' ? 45000 : 15000);
     mark(card.id, false);
-    // Undo reopens the card on the board; a task closed in Asana stays closed there.
-    if (r?.ok) { if (kind === 'complete') say('Closed in Asana.'); else setUndo({ card }); }
+    // Undo reopens the card on the board; a task closed in Asana stays closed there. Only the
+    // newest Done offers Undo, so a slow reply never swaps the bar to another card (Codex).
+    if (r?.ok) { if (kind === 'complete') say('Closed in Asana.'); else if (mine === doneSeq.current) setUndo({ card }); }
     else if (!r && connection.status !== 'authed') say('Not connected to your Mac. Try again once it reconnects.');
     else if (r?.changed) say('Something new came in on that one. Have another look.');
     else say(r ? 'The board would not mark that done.' : 'No answer from your Mac. Try again in a moment.');
@@ -179,7 +191,7 @@ export default function Tasks({ connection, onBack }) {
     if (!card) return;
     const r = await ask(connection, { type: 'inboxAct', kind: 'undo', id: card.id, rev: card.rev }, 'todayResult');
     // Only if this card still owns the Undo bar: another card may have been marked done meanwhile.
-    setUndo((cur) => (cur?.card?.id !== card.id ? cur : r?.ok ? null : { card, problem: true }));
+    setUndo((cur) => (cur?.card?.id !== card.id || cur.card.rev !== card.rev ? cur : r?.ok ? null : { card, problem: true }));
     load();
   };
   const snooze = async (card, choice) => {
@@ -191,10 +203,10 @@ export default function Tasks({ connection, onBack }) {
     else say(r ? 'Could not snooze that one.' : 'No answer from your Mac.');
     load();
   };
-  const bringBack = async (id, until) => {
+  const bringBack = async (id, print) => {
     mark(id, true);
-    // With the snooze it saw, so a newer snooze of the same card stays put.
-    await ask(connection, { type: 'todayUnsnooze', id, until }, 'todayResult');
+    // With the snooze it saw, so a snooze of a newer version stays put.
+    await ask(connection, { type: 'todayUnsnooze', id, print }, 'todayResult');
     mark(id, false);
     load();
   };
@@ -249,7 +261,7 @@ export default function Tasks({ connection, onBack }) {
           <div key={c.id} className="today-card snoozed">
             <span className="today-title">{c.subject || c.summary || '(no subject)'}</span>
             <div className="today-meta">{[c.who, c.until ? `back ${new Date(c.until).toLocaleDateString([], { weekday: 'short' })}` : null].filter(Boolean).join(' · ')}</div>
-            <div className="today-actions"><button disabled={!!busy[c.id]} onClick={() => bringBack(c.id, c.until)}>Bring back</button></div>
+            <div className="today-actions"><button disabled={!!busy[c.id]} onClick={() => bringBack(c.id, c.print)}>Bring back</button></div>
           </div>
         ))}
       </>}

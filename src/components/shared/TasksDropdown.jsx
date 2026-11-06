@@ -84,6 +84,10 @@ export default function TasksDropdown() {
   const [fleet, setFleet] = useState(null);
   const [todayData, setTodayData] = useState(null);
   const todayReq = useRef(0);
+  const todayShown = useRef(0);
+  const todayBusy = useRef(false);
+  const todayAgain = useRef(false);
+  const loadTodayRef = useRef(null);
   // null until main answers; { installed, canStart }. No board here: no Inbox tab.
   const [board, setBoard] = useState(null);
   const [starting, setStarting] = useState(false);
@@ -116,6 +120,11 @@ export default function TasksDropdown() {
 
   const loadToday = useCallback(async () => {
     if (!window.electronAPI?.todayRead) return;
+    // Reads run one at a time on main now, so one still running is not started again; and the
+    // newest read to FINISH wins, so a slow reply never starves the panel (Codex).
+    // One asked for meanwhile (after a snooze, say) runs once this one is back.
+    if (todayBusy.current) { todayAgain.current = true; return; }
+    todayBusy.current = true;
     const id = ++todayReq.current;
     let result;
     try {
@@ -124,8 +133,11 @@ export default function TasksDropdown() {
       console.error('[TasksDropdown] today read failed:', err?.name);
       result = { board: { state: 'bad-response' }, noticed: { state: 'unavailable' } };
     }
-    if (id === todayReq.current) setTodayData(result);
+    todayBusy.current = false;
+    if (id >= todayShown.current) { todayShown.current = id; setTodayData(result); }
+    if (todayAgain.current) { todayAgain.current = false; loadTodayRef.current?.(); }
   }, []);
+  loadTodayRef.current = loadToday;
 
   const loadInbox = useCallback(async () => {
     if (!window.electronAPI?.inboxRead) return;

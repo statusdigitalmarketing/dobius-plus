@@ -91,14 +91,17 @@ export function handleTodayMessage(msg, send) {
       }
       case 'todayUnsnooze': {
         if (!idOk(msg.id)) return fail({ op: 'unsnooze', id: msg.id, error: 'bad-request' });
-        const r = bridge.unsnooze(msg.id, typeof msg.until === 'number' ? msg.until : undefined);
+        if (typeof msg.print !== 'string') return fail({ op: 'unsnooze', id: msg.id, error: 'bad-request' });
+        const r = bridge.unsnooze(msg.id, msg.print);
         return send({ type: 'todayResult', reqId, op: 'unsnooze', id: msg.id, ok: !!r?.ok });
       }
       case 'inboxAct': {
         // 'complete' closes an Asana task in Asana; the phone asks before it sends one, like the Mac.
         if (!['done', 'complete', 'undo'].includes(msg.kind) || !idOk(msg.id)) return fail({ op: msg.kind, id: msg.id, error: 'bad-request' });
         if (typeof msg.rev !== 'number' && typeof msg.rev !== 'string') return fail({ op: msg.kind, id: msg.id, error: 'bad-request' });
-        const r = await bridge.act({ kind: msg.kind, id: msg.id, rev: msg.rev });
+        // Done and Close carry the print of the card as shown: an edit that kept its rev still counts.
+        if (msg.kind !== 'undo' && typeof msg.print !== 'string') return fail({ op: msg.kind, id: msg.id, error: 'bad-request' });
+        const r = await bridge.act({ kind: msg.kind, id: msg.id, rev: msg.rev, print: msg.kind === 'undo' ? undefined : msg.print });
         // Only the fixed messages the desktop shows, never whatever came back from the board.
         return send({ type: 'todayResult', reqId, op: msg.kind, id: msg.id, ok: !!r?.ok, changed: r?.reason === 'changed', reason: typeof r?.reason === 'string' ? r.reason.slice(0, 40) : undefined });
       }

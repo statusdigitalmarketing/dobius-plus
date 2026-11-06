@@ -49,10 +49,10 @@ export function createSnoozes({ file, now = () => Date.now() }) {
       save();
       return true;
     },
-    // With `until`, only the snooze the person saw: a newer snooze of the same card stays.
-    unsnooze(id, until) {
+    // With `print`, only the snooze the person saw: a snooze of a newer version stays (Codex).
+    unsnooze(id, print) {
       if (typeof id !== 'string' || !Object.hasOwn(all, id)) return false;
-      if (until !== undefined && all[id].until !== until) return false;
+      if (print !== undefined && all[id].print !== print) return false;
       delete all[id];
       save();
       return true;

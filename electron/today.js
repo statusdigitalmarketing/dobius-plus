@@ -154,7 +154,7 @@ export function arrange(cards, { today, nowMs, picker, snoozes, limit = SUGGESTE
     withinReach: byClaude ? picked.length : rules.withinReach,
     otherCount: shown.length - (byClaude ? picked.length : rules.suggested.length),
     total: cards.length,
-    snoozed: snoozed.map((c) => ({ id: c.id, subject: c.subject, summary: c.summary, who: c.who, source: c.source, until: c.snoozedUntil })),
+    snoozed: snoozed.map((c) => ({ id: c.id, subject: c.subject, summary: c.summary, who: c.who, source: c.source, until: c.snoozedUntil, print: cardPrint(c) })),
   };
 }
 

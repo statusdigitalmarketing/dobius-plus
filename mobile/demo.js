@@ -481,12 +481,12 @@ export class DemoConnection {
         this._emit({ type: 'today', reqId: msg.reqId, ok: true, data: {
           board: { state: 'ok', mode: 'claude', picking: false, pickedAt: new Date(minsAgo(40)).toISOString(), today: day,
             suggested: open.map((c) => ({ ...c, print: `p-${c.id}` })), otherCount: 0, total: open.length, failing: [],
-            snoozed: this.todayCards.filter((c) => this.todaySnoozed.includes(c.id)).map((c) => ({ id: c.id, subject: c.subject, who: c.who, source: c.source, until: minsAgo(-24 * 60) })) },
+            snoozed: this.todayCards.filter((c) => this.todaySnoozed.includes(c.id)).map((c) => ({ id: c.id, subject: c.subject, who: c.who, source: c.source, until: minsAgo(-24 * 60), print: `p-${c.id}` })) },
           noticed: { state: 'unavailable' } } });
         break;
       }
       case 'inboxRead':
-        this._emit({ type: 'inbox', reqId: msg.reqId, ok: true, data: { ok: true, today: localDayOf(new Date()), cards: this.todayCards.filter((c) => !c.done) } });
+        this._emit({ type: 'inbox', reqId: msg.reqId, ok: true, data: { ok: true, today: localDayOf(new Date()), cards: this.todayCards.filter((c) => !c.done).map((c) => ({ ...c, print: `p-${c.id}` })) } });
         break;
       case 'inboxAct': {
         const c = this.todayCards.find((x) => x.id === msg.id);

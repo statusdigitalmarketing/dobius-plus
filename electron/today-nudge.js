@@ -59,6 +59,8 @@ export function planNudge({ state, now, settings, today, openIds, snoozedIds }) 
   }
 
   const batch = Array.isArray(s.batch) ? s.batch : [];
+  // A card the board is still reading is held out of the read: it is not done, so wait (Codex).
+  if ((board.held || 0) > 0 && batch.some((id) => !openIds.has(id))) return { state: s, nudge: null };
   const left = batch.filter((id) => !handled(id));
   const seen = new Set(Array.isArray(s.seen) ? s.seen : []);
   if (batch.length > 0 && left.length === 0) {
@@ -71,10 +73,12 @@ export function planNudge({ state, now, settings, today, openIds, snoozedIds }) 
     return { state: { ...s, batch: [], sentAt: nowMs, reminded: true }, nudge: { kind: 'done', text: textFor('done', batch.length) } };
   }
   if (batch.length === 0) {
-    // Cleared earlier: anything picked since then that was never in a nudge.
+    // Cleared earlier, so everything nudged before was handled then. Anything open and picked now
+    // is new, or came back (Bring back, reopened): either way it is work again (Codex).
     if (nowMs - (s.sentAt || 0) < MORE_GAP_MS) return { state: s, nudge: null };
     const cards = fresh(seen);
-    return cards.length > 0 ? start(cards, 'more') : { state: s, nudge: null };
+    const more = cards.length > 0 ? cards : unhandled.slice(0, BATCH);
+    return more.length > 0 ? start(more, 'more') : { state: s, nudge: null };
   }
   if (!s.reminded && nowMs - (s.batchAt || 0) >= REMIND_AFTER_MS) {
     return { state: { ...s, reminded: true, sentAt: nowMs }, nudge: { kind: 'reminder', text: textFor('reminder', left.length, undefined, batch.length) } };
