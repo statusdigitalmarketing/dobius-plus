@@ -144,6 +144,27 @@ test('actOnCard posts only to the board, shaped to pass its gate, for the card a
     assert.equal(JSON.parse(b.bodies[0]).rev, 0, 'a rev of 0 is still checked');
 
     const task = { id: 'a1', source: 'asana', status: 'open', rev: 3 };
+    // The print the phone showed is checked against the read made right before the write, and a
+    // caller no longer allowed (an unpaired phone) changes nothing (Codex).
+    {
+      const { cardPrint } = await import('../today-snooze.js');
+      const shown = cardsFrom({ items: [{ ...task, subject: 'as seen' }] }, '2026-11-05').cards[0];
+      const print = cardPrint(shown);
+      b = board({ items: [{ ...task, subject: 'edited, same rev' }] });
+      assert.equal((await act({ kind: 'complete', id: 'a1', rev: 3, print }, { request: b.request, today: '2026-11-05' })).reason, 'changed');
+      assert.equal(b.posts().length, 0);
+      b = board({ items: [{ ...task, subject: 'as seen' }] });
+      assert.equal((await act({ kind: 'complete', id: 'a1', rev: 3, print }, { request: b.request, today: '2026-11-05', stillOk: () => false })).reason, 'revoked');
+      assert.equal(b.posts().length, 0);
+      b = board({ items: [{ ...task, subject: 'as seen' }] });
+      assert.deepEqual(await act({ kind: 'complete', id: 'a1', rev: 3, print }, { request: b.request, today: '2026-11-05' }), { ok: true });
+      // Done with a print reads first too.
+      const mail = { id: 'e1', source: 'email', status: 'open', rev: 4, subject: 'hi' };
+      const mp = cardPrint(cardsFrom({ items: [mail] }, '2026-11-05').cards[0]);
+      b = board({ items: [{ ...mail, subject: 'hi again' }] });
+      assert.equal((await act({ kind: 'done', id: 'e1', rev: 4, print: mp }, { request: b.request, today: '2026-11-05' })).reason, 'changed');
+      assert.equal(b.posts().length, 0);
+    }
     b = board({ items: [task] });
     assert.deepEqual(await act({ kind: 'complete', id: 'a1', rev: 3 }, { request: b.request }), { ok: true });
     assert.deepEqual(JSON.parse(b.bodies[0]), { id: 'a1', action: 'complete' });
@@ -181,6 +202,32 @@ test('actOnCard posts only to the board, shaped to pass its gate, for the card a
     }
     assert.equal(called, 0, 'nothing but done, complete and undo, with a revision, can reach the board');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('cardsFrom names a failing mailbox and counts held texts, because an empty list proves nothing then', () => {
+  const r = cardsFrom({ items: [card({ id: 'held', held: true })], connections: [
+    { name: 'a@x.com', state: 'error' }, { name: 'b@x.com', state: 'ok' }, { name: 'whatsapp', state: 'not connected' }, null, { state: 'error' },
+  ] }, TODAY);
+  assert.deepEqual(r.failing, ['a@x.com']);
+  assert.equal(r.held, 1);
+  assert.equal(r.total, 0);
+  assert.deepEqual(cardsFrom({}, TODAY).failing, []);
+});
+
+test('a connection name cannot carry the token to the renderer', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inbox-conn-'));
+  fs.writeFileSync(path.join(dir, 'token.txt'), 'tok-abcdefghijklmnop');
+  try {
+    const body = JSON.stringify({ items: [], connections: [{ name: 'tok-abcdefghijklmnop', state: 'error' }, { name: 'tok%2Dabcdefghijklmnop', state: 'error' }, { name: 'real@x.com', state: 'error' }] });
+    const r = await readBoard({ dir, today: TODAY, request: fakeRequest({ body }) });
+    assert.deepEqual(r.failing, ['real@x.com']);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the Inbox list can read past the default cap, so a card is never just missing', () => {
+  const items = Array.from({ length: 320 }, (_, i) => card({ id: `c${i}` }));
+  assert.equal(cardsFrom({ items }, TODAY).cards.length, 300);
+  assert.equal(cardsFrom({ items }, TODAY, { maxCards: Infinity }).cards.length, 320);
 });
 
 test('fleetInfo offers the site only on a Mac that feeds it', () => {

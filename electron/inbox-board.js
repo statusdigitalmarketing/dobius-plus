@@ -16,6 +16,7 @@ import http from 'http';
 import net from 'net';
 import { execFile } from 'child_process';
 import { localDay } from '../shared/task-due.js';
+import { cardPrint } from './today-snooze.js';
 
 // Harness only (an isolated DOBIUS_USERDATA_DIR instance): point at another
 // port or folder to show the not-running and no-board states without
@@ -25,6 +26,9 @@ const HARNESS = process.env.DOBIUS_USERDATA_DIR ? process.env : {};
 // harness pointed elsewhere only ever holds a throwaway token, never the real one.
 const harnessDirSet = !!(HARNESS.DOBIUS_INBOX_DIR && path.isAbsolute(HARNESS.DOBIUS_INBOX_DIR));
 const harnessPort = harnessDirSet && /^\d{2,5}$/.test(HARNESS.DOBIUS_INBOX_PORT || '') ? Number(HARNESS.DOBIUS_INBOX_PORT) : null;
+
+/** True only when this isolated instance reads a stand-in board, never the real one. */
+export const boardIsStandIn = () => harnessDirSet;
 
 export const BOARD_PORT = harnessPort || 8765; // fixed in the board's server.py (PORT, TS_PORT = 8765, 8767)
 const PLIST = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.brett.inbox-server.plist');
@@ -178,9 +182,11 @@ const day = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v :
  * a file path). Cards the board itself hides (held texts, meeting boxes) stay
  * hidden.
  */
-export function cardsFrom(payload, today) {
+export function cardsFrom(payload, today, { maxCards = MAX_CARDS } = {}) {
   const items = Array.isArray(payload?.items) ? payload.items : [];
   const cards = [];
+  // Texts the board is still reading: not cards yet, but not nothing either.
+  const held = items.filter((i) => i && typeof i === 'object' && i.status === 'open' && i.held).length;
   for (const i of items) {
     if (!i || typeof i !== 'object' || i.status !== 'open' || i.held || i.boxOnly) continue;
     const id = str(i.id, 200);
@@ -210,7 +216,13 @@ export function cardsFrom(payload, today) {
     || (a.since || '').localeCompare(b.since || ''));
   const overdue = cards.filter((c) => c.due && c.due < today).length;
   const dueToday = cards.filter((c) => c.due === today).length;
-  return { cards: cards.slice(0, MAX_CARDS), total: cards.length, overdue, dueToday };
+  // A check runs even when a mailbox cannot be read, so a recent check proves nothing on its own.
+  const failing = (Array.isArray(payload?.connections) ? payload.connections : [])
+    .filter((c) => c && typeof c.name === 'string' && /^[\w.@+-]{1,80}$/.test(c.name) && typeof c.state === 'string' && c.state !== 'ok' && c.state !== 'not connected')
+    .map((c) => str(c.name, 80));
+  // Ids only: a held card is still open (Today nudges must not take it as handled).
+  const heldIds = items.filter((i) => i && typeof i === 'object' && i.status === 'open' && i.held).map((i) => str(i.id, 200)).filter(Boolean);
+  return { cards: cards.slice(0, maxCards), total: cards.length, overdue, dueToday, today, held, heldIds, failing, checkedAt: str(payload?.stats?.checkedAt, 40) || null };
 }
 
 /**
@@ -243,7 +255,7 @@ export function withoutToken(result, tok) {
     if (typeof c.url === 'string' && carries(c.url, tok)) out.url = null;
     return out;
   });
-  return { ...result, cards };
+  return { ...result, cards, failing: (result.failing || []).filter((n) => !n.includes(tok)) };
 }
 
 /** { ok, url, cards, total, overdue, dueToday } or { ok: false, reason, url }. */
@@ -255,7 +267,7 @@ export async function readBoard(opts = {}) {
   if (!await (opts.listenerIsMine || listenerIsMine)(opts)) return { ok: false, reason: 'not-running', url };
   const got = await getJson(tok, opts);
   if (!got.ok) return { ok: false, reason: got.reason, url };
-  return { ok: true, url, ...withoutToken(cardsFrom(got.payload, opts.today || localDay()), tok) };
+  return { ok: true, url, ...withoutToken(cardsFrom(got.payload, opts.today || localDay(), { maxCards: opts.maxCards }), tok) };
 }
 
 const CARD_ACTIONS = { done: 'done', complete: 'complete', undo: 'open' };
@@ -270,7 +282,11 @@ const CARD_CHANGED = 'Something new came in on this one, so it stays as it was.'
  * accepted residual. The board's error text is never shown: only a fixed message can
  * reach the renderer, so nothing a listener answers can carry the token out.
  */
-export async function actOnCard({ kind, id, rev } = {}, opts = {}) {
+export async function actOnCard({ kind, id, rev, print } = {}, opts = {}) {
+  // stillOk: the caller's right to act, checked again right before the board is changed (a phone
+  // unpaired meanwhile changes nothing). print: the card as the person saw it, checked against the
+  // read made right before the write, so an edit that kept its rev is never closed blind (Codex).
+  const stillOk = typeof opts.stillOk === 'function' ? opts.stillOk : () => true;
   const action = Object.hasOwn(CARD_ACTIONS, String(kind)) ? CARD_ACTIONS[kind] : null;
   if (!action || typeof id !== 'string' || !id || id.length > 200) return { ok: false, reason: 'bad-request' };
   if (typeof rev !== 'number' && typeof rev !== 'string') return { ok: false, reason: 'bad-request' };
@@ -278,7 +294,7 @@ export async function actOnCard({ kind, id, rev } = {}, opts = {}) {
   const tok = readToken(dir);
   if (!tok) return { ok: false, reason: 'not-installed' };
   if (!await (opts.listenerIsMine || listenerIsMine)(opts)) return { ok: false, reason: 'not-running' };
-  if (kind !== 'done') {
+  if (kind !== 'done' || typeof print === 'string') {
     const now = await getJson(tok, opts);
     if (!now.ok) return { ok: false, reason: now.reason };
     const items = Array.isArray(now.payload?.items) ? now.payload.items : [];
@@ -287,7 +303,12 @@ export async function actOnCard({ kind, id, rev } = {}, opts = {}) {
     if (!item || item.rev !== rev || item.status !== expected || (kind === 'complete' && item.source !== 'asana')) {
       return { ok: false, reason: 'changed', error: CARD_CHANGED };
     }
+    if (typeof print === 'string') {
+      const shown = cardsFrom({ items: [item] }, opts.today || localDay()).cards[0];
+      if (!shown || cardPrint(shown) !== print) return { ok: false, reason: 'changed', error: CARD_CHANGED };
+    }
   }
+  if (!stillOk()) return { ok: false, reason: 'revoked' };
   const body = { id, action, ...(kind === 'done' ? { rev } : {}) };
   // Longer than the board's own 30s wait on Asana, so a slow close is not called a failure.
   const got = await getJson(tok, { ...opts, deadlineMs: 45000, timeoutMs: 40000, post: JSON.stringify(body) });

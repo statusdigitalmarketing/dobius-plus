@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useRef, useState, useEffect, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { buildPairingDeepLink, buildPairingWebLink } from '../../../shared/pairing-link.js';
 import { useStore } from '../../store/store';
@@ -21,6 +21,8 @@ export default function Settings() {
     sidebarDefaultOpen: false,
     newTabTool: 'claude',
   });
+  // Bumped by every edit here: a settings read that began before an edit must not undo it.
+  const editSeq = useRef(0);
   const [loaded, setLoaded] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -158,12 +160,38 @@ export default function Settings() {
   }, []);
 
   useEffect(() => {
-    if (!window.electronAPI?.configGetSettings) return;
-    window.electronAPI.configGetSettings().then((s) => {
+    const a = window.electronAPI;
+    if (!a?.configGetSettings) return undefined;
+    const read = () => a.configGetSettings().then((s) => {
       setSettings((prev) => ({ ...prev, ...s }));
       setLoaded(true);
     });
+    read();
+    // The phone can change a few settings: show those as soon as it does, and only those, so a
+    // field being typed into here is never reset by an older read (Codex).
+    return a.onSettingsChanged?.(() => {
+      const at = editSeq.current;
+      a.configGetSettings().then((s) => { if (at === editSeq.current) setSettings((prev) => ({ ...prev, todayNudges: s.todayNudges, newTabTool: s.newTabTool })); });
+      a.autoModeGet?.().then((m) => { if (m) setAutoMode(m); });
+    });
   }, []);
+
+  // Today alerts go through main's check (same rules as the phone), never a raw settings write.
+  const [nudgeError, setNudgeError] = useState('');
+  const updateNudges = useCallback(async (patch) => {
+    const r = await window.electronAPI?.settingsWriteChecked?.('todayNudges', patch);
+    if (!r?.ok) {
+      setNudgeError(r?.error === 'quiet-before-morning' ? 'Quiet time has to be after the morning time.' : 'That time does not work. Morning is between 5:00 and 12:00.');
+      return;
+    }
+    setNudgeError('');
+    const at = editSeq.current;
+    const s = await window.electronAPI.configGetSettings();
+    if (at === editSeq.current) setSettings((prev) => ({ ...prev, todayNudges: s.todayNudges }));
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1500);
+  }, []);
+  const nudges = { imessage: true, mac: true, push: true, morningAt: '08:00', quietAfter: '20:00', ...(settings.todayNudges || {}) };
 
   const refreshMobile = useCallback(async () => {
     if (!window.electronAPI?.mobileServerStatus) return;
@@ -250,6 +278,7 @@ export default function Settings() {
   const [customFontMode, setCustomFontMode] = useState(false);
 
   const updateSetting = useCallback((key, value) => {
+    editSeq.current += 1;
     setSettings((prev) => {
       const next = { ...prev, [key]: value };
       window.electronAPI?.configUpdateSettings?.({ [key]: value });
@@ -595,6 +624,29 @@ export default function Settings() {
         >
           <Toggle checked={!!autoMode.enabled} onChange={toggleAutoMode} />
         </SettingRow>
+      </Section>
+
+      {/* Today alerts: counts only, never what a card says */}
+      <Section id="today" title="Today Alerts">
+        <SettingRow label="Mac notification" description="A notification each morning with how many things are on Today, then again as you clear them. Click it to open Today.">
+          <Toggle checked={!!nudges.mac} onChange={(v) => updateNudges({ mac: v })} />
+        </SettingRow>
+        <SettingRow label="Text to yourself" description="The same count as an iMessage to your own handle (set under iMessage Bridge). Says how many, never what they are.">
+          <Toggle checked={!!nudges.imessage} onChange={(v) => updateNudges({ imessage: v })} />
+        </SettingRow>
+        <SettingRow label="Phone notification" description="On a phone with Dobius notifications turned on (the web app added to the Home Screen).">
+          <Toggle checked={!!nudges.push} onChange={(v) => updateNudges({ push: v })} />
+        </SettingRow>
+        <SettingRow label="Morning" description="When the first five go out. Nothing is sent after quiet time.">
+          <div className="flex items-center gap-2">
+            <input type="time" value={nudges.morningAt} onChange={(e) => e.target.value && updateNudges({ morningAt: e.target.value })}
+              className="text-xs px-2 py-1 rounded" style={{ backgroundColor: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)' }} aria-label="Morning time" />
+            <span className="text-xs" style={{ color: 'var(--dim)' }}>quiet after</span>
+            <input type="time" value={nudges.quietAfter} onChange={(e) => e.target.value && updateNudges({ quietAfter: e.target.value })}
+              className="text-xs px-2 py-1 rounded" style={{ backgroundColor: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)' }} aria-label="Quiet time" />
+          </div>
+        </SettingRow>
+        {nudgeError && <div className="text-xs px-3 py-2 rounded" style={{ color: 'var(--red, #e5534b)' }}>{nudgeError}</div>}
       </Section>
 
       {/* Mobile Access */}

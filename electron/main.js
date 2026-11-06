@@ -17,6 +17,7 @@ import { startErrorReporter, noteFault, isReportable } from './error-reporter.js
 // ipcMain.handle/on registration below is already tracked; armed in whenReady
 // once the error log exists to write to. See electron/stall-watchdog.js.
 const stallWatchdog = createStallWatchdog({ log: logLine });
+
 stallWatchdog.wrapIpc(ipcMain);
 import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
@@ -99,7 +100,7 @@ import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCer
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
-  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem,
+  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
 import { initTeam, stopTeam, handleTeamBridge } from './team-main.js';
@@ -119,7 +120,14 @@ import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { installNavGuard, isAppUrl } from './nav-guard.js';
-import { readBoard as readInboxBoard, boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo } from './inbox-board.js';
+import { readToday, readAllCards, cardSeen, openCardIds } from './today.js';
+import { setTodayBridge, nudgeSettings, checkSettingWrite } from './mobile-today.js';
+import { createNudger, NUDGE_PREFIX } from './today-nudge.js';
+import { sendPush, hasPushSubscribers } from './push.js';
+import { createPicker, runClaude } from './today-pick.js';
+import { createSnoozes, cardPrint } from './today-snooze.js';
+import { localDay } from '../shared/task-due.js';
+import { boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo, boardIsStandIn } from './inbox-board.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { readUpdateBackup } from './config-manager.js';
@@ -127,6 +135,143 @@ import { recoverWindowLists } from './update-window-recovery.js';
 import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError } from './claude-settings-env.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages, getVisualProjectPath } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
+
+// --- Today on the phone and Today nudges ---------------------------------
+// Something about Today changed (a snooze, a card marked done): open phone screens and desktop
+// dropdowns read again. Only the event travels, never a card.
+function todayChanged() {
+  broadcastToPhones('todayChanged');
+  for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('today:changed');
+}
+
+// What the phone's Settings screen shows. Read-only rows are facts about this Mac.
+function phoneSettings() {
+  const st = getSettings();
+  const config = loadConfig();
+  const active = (config.accounts || []).find((a) => a.id === config.activeClaudeAccountId);
+  const bridge = getImessageBridge();
+  return {
+    todayNudges: nudgeSettings(st.todayNudges),
+    newTabTool: st.newTabTool || 'claude',
+    autoMode: !!getAutoMode().enabled,
+    info: {
+      version: app.getVersion(),
+      account: active?.name ? String(active.name).slice(0, 60) : 'Default',
+      imessageReady: !!bridge.selfHandle,
+      phonePush: hasPushSubscribers(),
+    },
+  };
+}
+
+function writePhoneSetting(key, value) {
+  const st = getSettings();
+  const check = checkSettingWrite(key, value, st.todayNudges);
+  if (!check.ok) return check;
+  if (check.apply.settings) updateSettings(check.apply.settings);
+  if (typeof check.apply.autoMode === 'boolean') setAutoModeEnabled(check.apply.autoMode);
+  broadcastToPhones('settingsChanged');
+  for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('settings:changed');
+  return { ok: true };
+}
+
+// Open the Tasks dropdown on Today in the window Sam last used (a Mac notification click).
+function showTodayOnMac() {
+  // Only a project window has the Tasks dropdown (the launcher and the Visual preview do not).
+  const hasToday = (x) => { try { const u = x.webContents.getURL(); return !x.isDestroyed() && u.includes('project=') && !u.includes('visual='); } catch { return false; } };
+  const focused = BrowserWindow.getFocusedWindow();
+  const all = BrowserWindow.getAllWindows().filter(hasToday);
+  let w = (focused && hasToday(focused) ? focused : null) || all.find((x) => x.isVisible()) || all[0];
+  if (!w) {
+    // No project window open: open the last one used, and show Today once it has loaded.
+    // lastOpenProjects empties as windows close, so pinned and known projects back it up (Codex).
+    const cfg = loadConfig();
+    const candidates = [...(cfg.lastOpenProjects || []), ...(cfg.pinnedProjects || []), ...Object.keys(cfg.projects || {}).reverse()];
+    const recent = candidates.find((p) => typeof p === 'string' && !projectDirError(p));
+    if (!recent) return;
+    const opened = openProjectWindow(recent);
+    opened?.webContents?.once('did-finish-load', () => setTimeout(() => { if (!opened.isDestroyed()) opened.webContents.send('tasks:openToday'); }, 1500));
+    return;
+  }
+  if (w.isDestroyed()) return;
+  if (w.isMinimized()) w.restore();
+  w.show();
+  w.focus();
+  w.webContents.send('tasks:openToday');
+}
+
+let _todayNotification = null; // held so it is not garbage collected before a click
+async function sendTodayNudge(nudge, _cfg) {
+  const out = {};
+  // Each channel looks at the settings as they are when its turn comes: alerts switched off while
+  // an earlier channel was sending stop the rest (Codex).
+  const on = (k) => !getQuitting() && nudgeSettings(getSettings().todayNudges)[k] === true;
+  const cfg = { get mac() { return on('mac'); }, get imessage() { return on('imessage'); }, get push() { return on('push'); } };
+  const body = nudge.text.slice(NUDGE_PREFIX.length).trim();
+  if (cfg.mac) {
+    try {
+      if (Notification.isSupported()) {
+        const n = new Notification({ title: 'Today', body, silent: false });
+        n.on('click', showTodayOnMac);
+        n.show();
+        _todayNotification = n;
+        out.mac = 'ok';
+      } else out.mac = 'unsupported';
+    } catch { out.mac = 'failed'; }
+  }
+  if (cfg.imessage) {
+    const b = getImessageBridge();
+    const prefix = String(b.triggerPrefix || '').trim().toLowerCase();
+    if (!b.selfHandle) out.imessage = 'no-handle';
+    // Never a message the bridge would read back as a command (an empty prefix matches every one).
+    // Checked even with the bridge off: turning it back on reads every message since its cursor.
+    else if (!prefix || nudge.text.trim().toLowerCase().startsWith(prefix)) out.imessage = 'skipped';
+    else {
+      try { await sendImessageToSelf(nudge.text); out.imessage = 'ok'; } catch { out.imessage = 'failed'; }
+    }
+  }
+  // Last, and bounded: one push service that never answers must not hold up every later nudge.
+  if (cfg.push) {
+    if (!hasPushSubscribers()) out.push = 'none';
+    else {
+      const done = sendPush({ title: 'Today', body, tag: 'today', url: './?view=tasks' }).then(() => 'sent', () => 'failed');
+      out.push = await Promise.race([done, new Promise((r) => setTimeout(() => r('timeout'), 20000))]);
+    }
+  }
+  return out;
+}
+
+// One nudging Dobius per Mac: a lock file holding the owner's pid, taken over when that pid is gone.
+// Taken with an exclusive create, so two processes can never both win (Codex).
+function holdNudgeLock(file) {
+  const mine = String(process.pid);
+  // Written in full first, then linked into place: link fails if the lock exists, and the lock is
+  // never seen empty (an empty one read as stale let a second process in: Codex).
+  const take = () => {
+    const tmp = `${file}.${process.pid}.tmp`;
+    try { fs.writeFileSync(tmp, mine, { mode: 0o600 }); fs.linkSync(tmp, file); return true; } catch { return false; } finally { try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ } }
+  };
+  if (take()) return true;
+  let owner;
+  try { owner = fs.readFileSync(file, 'utf8').trim(); } catch { return take(); }
+  if (owner === mine) return true;
+  const pid = Number(owner);
+  if (Number.isInteger(pid) && pid > 0) {
+    try { process.kill(pid, 0); return false; } catch (err) { if (err?.code === 'EPERM') return false; }
+  }
+  // The owner is gone. Rename the lock aside (only one process can), and check it really was the
+  // dead owner's: if another process took over first, put its lock back and stand down (Codex).
+  const aside = `${file}.stale-${process.pid}`;
+  try { fs.renameSync(file, aside); } catch { return false; }
+  let moved = '';
+  try { moved = fs.readFileSync(aside, 'utf8').trim(); } catch { /* unreadable: treat as stale */ }
+  if (moved !== owner) {
+    try { fs.linkSync(aside, file); } catch { /* someone holds it again */ }
+    try { fs.rmSync(aside, { force: true }); } catch { /* best effort */ }
+    return false;
+  }
+  try { fs.rmSync(aside, { force: true }); } catch { /* best effort */ }
+  return take();
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1450,15 +1595,102 @@ function setupOrchestrationHandlers() {
     return result;
   });
   // Brett's Inbox board, read only. The board's token stays in main.
-  ipcMain.handle('inbox:read', () => readInboxBoard());
-  ipcMain.handle('inbox:act', (_event, request) => actOnInboxCard(request));
+  // All of them: Today's "See all" lands here, and a card past a cap would look like it does not exist.
+  // A harness without a stand-in board never reads the real one (DOBIUS_USERDATA_DIR set, no DOBIUS_INBOX_DIR).
+  // With each card's print, so the Mac's own Done checks the version it showed, as the phone does.
+  ipcMain.handle('inbox:read', async () => {
+    if (process.env.DOBIUS_USERDATA_DIR && !boardIsStandIn()) return { ok: false, reason: 'not-installed' };
+    const r = await readAllCards();
+    return r?.ok ? { ...r, cards: r.cards.map((c) => ({ ...c, print: cardPrint(c) })) } : r;
+  });
+  ipcMain.handle('inbox:act', (_event, request) => actOnCard(request));
   ipcMain.handle('fleet:info', () => fleetInfo());
+  // Claude picks run as the active account, with no tools and no saved session. An isolated
+  // instance never calls the real Claude with real cards: it runs DOBIUS_TODAY_PICK_CMD or nothing.
+  const pickCwd = path.join(app.getPath('userData'), 'today-pick');
+  const harness = !!process.env.DOBIUS_USERDATA_DIR;
+  const todayPicker = createPicker({
+    file: path.join(app.getPath('userData'), 'today-pick.json'),
+    log: (...a) => logLine('today', a.join(' ')),
+    run: async (input) => {
+      // A harness picks only against a stand-in board, so real cards can never reach any command.
+      const bin = harness ? (boardIsStandIn() && process.env.DOBIUS_TODAY_PICK_CMD) : resolveActiveCliPath();
+      if (!bin) return null;
+      fs.mkdirSync(pickCwd, { recursive: true });
+      return runClaude(input, { bin, cwd: pickCwd, env: { ...process.env, ...activeClaudeAccountEnv(), PATH: `${process.env.PATH || ''}:${os.homedir()}/.local/bin:/usr/local/bin:/opt/homebrew/bin` } });
+    },
+  });
+  const todaySnoozes = createSnoozes({ file: path.join(app.getPath('userData'), 'today-snooze.json') });
+  // A harness reads only a stand-in board: with none, Today says not installed rather than reading the real one.
+  const realBoardInHarness = () => harness && !boardIsStandIn();
+  const readTodayNow = () => (realBoardInHarness()
+    ? Promise.resolve({ board: { state: 'not-installed' }, noticed: { state: 'unavailable' } })
+    : readToday({ picker: todayPicker, snoozes: todaySnoozes }));
+  // Only the card as the person saw it: if it changed since, nothing is snoozed and they look again.
+  const snoozeToday = (id, choice, print) => {
+    const card = cardSeen(id);
+    if (!card || (choice !== 'tomorrow' && choice !== 'week')) return { ok: false };
+    if (typeof print !== 'string' || print !== cardPrint(card)) return { ok: false, changed: true };
+    const ok = todaySnoozes.snooze(card, choice, localDay());
+    if (ok) todayChanged();
+    return { ok };
+  };
+  const unsnoozeToday = (id, sid) => { const ok = todaySnoozes.unsnooze(id, sid); if (ok) todayChanged(); return { ok }; };
+  const actOnCard = async (request, stillOk = () => true) => {
+    if (realBoardInHarness()) return { ok: false, reason: 'not-installed' };
+    // The board writer checks the shown print and the caller's right to act against the read it
+    // makes right before writing (electron/inbox-board.js actOnCard).
+    const r = await actOnInboxCard({ kind: request?.kind, id: request?.id, rev: request?.rev, print: typeof request?.print === 'string' ? request.print : undefined }, { stillOk });
+    if (r?.ok) todayChanged();
+    return r;
+  };
+  ipcMain.handle('today:read', () => readTodayNow());
+  ipcMain.handle('today:snooze', (_event, id, choice, print) => snoozeToday(id, choice, print));
+  ipcMain.handle('today:unsnooze', (_event, id, sid) => unsnoozeToday(id, typeof sid === 'string' ? sid : undefined));
+  // The phone gets the same functions, never a copy of them (electron/mobile-today.js).
+  setTodayBridge({
+    readToday: readTodayNow,
+    // With each card's print, so See all can snooze too (checked against the card as main saw it).
+    readInbox: async () => { if (realBoardInHarness()) return { ok: false, reason: 'not-installed' }; const r = await readAllCards(); return r?.ok ? { ...r, cards: r.cards.map((c) => ({ ...c, print: cardPrint(c) })) } : r; },
+    snooze: snoozeToday,
+    unsnooze: unsnoozeToday,
+    act: actOnCard,
+    readSettings: () => phoneSettings(),
+    writeSetting: (key, value) => writePhoneSetting(key, value),
+  });
+  // Today comes to Sam: counts only, through the channels Settings allows (electron/today-nudge.js).
+  const todayNudger = createNudger({
+    file: path.join(app.getPath('userData'), 'today-nudge.json'),
+    // This process's settings, which include a change acknowledged a moment ago and not yet on
+    // disk (Codex). Two Dobius processes at once is the accepted limit noted in docs/my-day.md.
+    settings: () => nudgeSettings(getSettings().todayNudges),
+    log: (line) => logLine('today', `nudge ${line}`),
+    read: async () => {
+      // A harness never nudges anyone about anything.
+      if (harness) return null;
+      const today = await readTodayNow();
+      if (today?.board?.state !== 'ok') return null;
+      return { today, openIds: openCardIds(), snoozedIds: new Set((today.board.snoozed || []).map((c) => c.id)) };
+    },
+    send: (nudge, cfg) => sendTodayNudge(nudge, cfg),
+    // Only the installed app nudges (a dev run shares this userData), and only one of them.
+    mayRun: () => app.isPackaged && !getQuitting() && holdNudgeLock(path.join(app.getPath('userData'), 'today-nudge.lock')),
+  });
+  setInterval(() => { todayNudger.tick(); }, 5 * 60 * 1000).unref?.();
+  // Hand the nudge lock back on quit, so a later launch never waits on a reused pid.
+  app.on('will-quit', () => {
+    // Stop first: a tick still waiting on the board never saves or sends once quitting (Codex).
+    todayNudger.stop();
+    const lock = path.join(app.getPath('userData'), 'today-nudge.lock');
+    try { if (fs.readFileSync(lock, 'utf8').trim() === String(process.pid)) fs.rmSync(lock, { force: true }); } catch { /* not ours or gone */ }
+  });
+  setTimeout(() => { todayNudger.tick(); }, 60 * 1000).unref?.();
   ipcMain.handle('inbox:status', () => inboxBoardStatus());
   ipcMain.handle('inbox:start', () => startInboxBoard());
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());
   ipcMain.handle('asana:updateConfig', (_event, updates) => updateAsanaQueue(updates));
   ipcMain.handle('automode:get', () => getAutoMode());
-  ipcMain.handle('automode:setEnabled', (_event, on) => setAutoModeEnabled(on));
+  ipcMain.handle('automode:setEnabled', (_event, on) => { const r = setAutoModeEnabled(on); broadcastToPhones('settingsChanged'); return r; });
 
   // --- Visual preview server ---
   ipcMain.handle('visual:openWindow', (_event, projectPath) => {
@@ -2775,7 +3007,8 @@ function setupConfigHandlers() {
   ipcMain.handle('config:getPinnedProjects', () => getPinnedProjects());
   ipcMain.handle('config:setPinnedProjects', (_event, paths) => setPinnedProjects(paths));
   ipcMain.handle('config:getSettings', () => getSettings());
-  ipcMain.handle('config:updateSettings', (_event, updates) => updateSettings(updates));
+  ipcMain.handle('config:updateSettings', (_event, updates) => { const r = updateSettings(updates); broadcastToPhones('settingsChanged'); return r; });
+  ipcMain.handle('settings:writeChecked', (_event, key, value) => writePhoneSetting(key, value));
   ipcMain.handle('config:getSessionTags', () => getSessionTags());
   ipcMain.handle('config:setSessionTag', (_event, sessionId, label, color) => setSessionTag(sessionId, label, color));
   ipcMain.handle('config:removeSessionTag', (_event, sessionId) => removeSessionTag(sessionId));

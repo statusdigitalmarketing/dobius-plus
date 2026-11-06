@@ -46,7 +46,7 @@ const loadList = (key) => {
 };
 const saveList = (key, list) => { try { localStorage.setItem(key, JSON.stringify(list)); } catch { /* private mode */ } };
 
-export default function Board({ connection, status, onOpen, onShowHistory, macName, onMacs }) {
+export default function Board({ connection, status, onOpen, onShowHistory, onShowTasks, onShowSettings, macName, onMacs }) {
   const pinsKey = pairingKey(connection.pairing, PINS_KEY);
   const collapsedKey = pairingKey(connection.pairing, COLLAPSED_KEY);
   const expandedKey = pairingKey(connection.pairing, EXPANDED_KEY);
@@ -215,6 +215,11 @@ export default function Board({ connection, status, onOpen, onShowHistory, macNa
                 title="Get notified when a session needs you"
               ><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z" /><path d="M10 20.5a2 2 0 0 0 4 0" /></svg></button>
             )}
+            {onShowTasks && (
+              <button onClick={onShowTasks} aria-label="Today">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="4.5" width="15" height="15" rx="3" /><path d="M8.5 12.2l2.4 2.4 4.8-5" /></svg>
+              </button>
+            )}
             <button onClick={onShowHistory} aria-label="Chat history">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></svg>
             </button>
@@ -222,6 +227,11 @@ export default function Board({ connection, status, onOpen, onShowHistory, macNa
               onClick={() => { setPickerOpen(true); connection.send({ type: 'listProjects' }); }}
               aria-label="New session"
             ><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+            {onShowSettings && (
+              <button onClick={onShowSettings} aria-label="Settings">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
+              </button>
+            )}
           </div>
         </div>
         {alertMsg && <div className="board-alert">{alertMsg}</div>}

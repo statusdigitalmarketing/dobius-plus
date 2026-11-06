@@ -36,6 +36,7 @@ import {
 import { stripAnsi, spinnerStatus } from './selector-parser.js';
 import { terminalTextTail, terminalScreenText, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
 import { TAB_OPS, ACK_FEATURES, handleTabOp } from './mobile-tab-ops.js';
+import { TODAY_FEATURES, handleTodayMessage } from './mobile-today.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills, loadTranscriptImage } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
@@ -715,6 +716,7 @@ function handleTabWrite(socket, msg) {
 
 function handleAuthedMessage(socket, msg, subs) {
   if (TAB_OPS.has(msg.type)) { handleTabWrite(socket, msg); return; }
+  if (handleTodayMessage(msg, (obj) => wsSend(socket, obj), () => knownToken(socket._authToken))) return;
   switch (msg.type) {
     case 'ping':
       wsSend(socket, { type: 'pong' });
@@ -1085,6 +1087,17 @@ function handleAuthedMessage(socket, msg, subs) {
 
     default:
       break;
+  }
+}
+
+/**
+ * Tell every authed phone that Today, the Inbox or the phone settings changed, so an open screen
+ * reads again. Carries no card content: the phone asks for what it wants to show.
+ */
+export function broadcastToPhones(type) {
+  if (type !== 'todayChanged' && type !== 'settingsChanged') return;
+  for (const set of activeSocketsByToken.values()) {
+    for (const socket of set) wsSend(socket, { type });
   }
 }
 
@@ -1603,7 +1616,7 @@ async function doStartMobileServer(stillCurrent) {
           let set = activeSocketsByToken.get(authedToken);
           if (!set) { set = new Set(); activeSocketsByToken.set(authedToken, set); }
           set.add(socket);
-          wsSend(socket, { type: 'authed', version: app.getVersion(), features: ACK_FEATURES });
+          wsSend(socket, { type: 'authed', version: app.getVersion(), features: [...ACK_FEATURES, ...TODAY_FEATURES] });
         } else {
           socket.close(4003, 'unauthorized');
         }

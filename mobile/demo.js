@@ -145,6 +145,18 @@ function cannedReply(text) {
 
 // ---- DemoConnection --------------------------------------------------------
 
+const localDayOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Sample Today cards: made up, like every other demo row.
+function demoTodayCards() {
+  const day = localDayOf(new Date());
+  return [
+    { id: 'demo-card-1', rev: 1, source: 'email', who: 'Jordan Lee', subject: 'Sign off on the launch checklist', summary: 'Needs your yes before Friday.', priority: 'high', due: day, reason: 'Due today and the launch waits on your sign-off.' },
+    { id: 'demo-card-2', rev: 1, source: 'asana', who: 'Priya Shah', subject: 'Review the onboarding copy', summary: 'Three screens, comments in the doc.', priority: 'medium', due: null, reason: 'Priya asked twice this week.' },
+    { id: 'demo-card-3', rev: 1, source: 'meeting', who: 'Design sync', subject: 'Send the logo options to the team', summary: 'You said you would after the call.', priority: 'medium', due: null, reason: 'A promise from yesterday\'s call.' },
+  ];
+}
+
 export class DemoConnection {
   constructor(pairing) {
     this.pairing = Object.freeze({ ...pairing });
@@ -168,6 +180,9 @@ export class DemoConnection {
     this.pending = {}; // tab id -> prompts waiting for their reply, oldest first
     this.looseAt = minsAgo(300); // fixed, or a dismissal would never stick
     this.looseResolved = new Set(); // loose ends picked back up this session
+    this.todayCards = demoTodayCards();
+    this.todaySnoozed = [];
+    this.demoSettings = { todayNudges: { imessage: false, mac: true, push: true, morningAt: '08:00', quietAfter: '20:00' }, newTabTool: 'claude', autoMode: false };
     for (const t of this.tabs) this.screens[t.id] = this._initialScreen(t);
   }
 
@@ -229,7 +244,8 @@ export class DemoConnection {
     this._later(150, () => {
       this._setStatus('connected');
       this._setStatus('authed');
-      this._emit({ type: 'authed', version: 'demo' });
+      this.features = ['ack', 'today', 'settings'];
+      this._emit({ type: 'authed', version: 'demo', features: this.features });
       this._pushTerminals();
     });
   }
@@ -457,6 +473,48 @@ export class DemoConnection {
       case 'loadTranscript': {
         const entries = this.transcripts[msg.sessionId] || [];
         this._emit({ type: 'transcript', sessionId: msg.sessionId, projectPath: msg.projectPath, sig: null, entries: entries.slice() });
+        break;
+      }
+      case 'todayRead': {
+        const day = localDayOf(new Date());
+        const open = this.todayCards.filter((c) => !c.done && !this.todaySnoozed.includes(c.id));
+        this._emit({ type: 'today', reqId: msg.reqId, ok: true, data: {
+          board: { state: 'ok', mode: 'claude', picking: false, pickedAt: new Date(minsAgo(40)).toISOString(), today: day,
+            suggested: open.map((c) => ({ ...c, print: `p-${c.id}` })), otherCount: 0, total: open.length, failing: [],
+            snoozed: this.todayCards.filter((c) => this.todaySnoozed.includes(c.id)).map((c) => ({ id: c.id, subject: c.subject, who: c.who, source: c.source, until: this.snoozedUntil?.[c.id] || minsAgo(-24 * 60), sid: `s-${c.id}` })) },
+          noticed: { state: 'unavailable' } } });
+        break;
+      }
+      case 'inboxRead':
+        this._emit({ type: 'inbox', reqId: msg.reqId, ok: true, data: { ok: true, today: localDayOf(new Date()), cards: this.todayCards.filter((c) => !c.done).map((c) => ({ ...c, print: `p-${c.id}` })) } });
+        break;
+      case 'inboxAct': {
+        const c = this.todayCards.find((x) => x.id === msg.id);
+        if (c) c.done = msg.kind !== 'undo';
+        this._emit({ type: 'todayResult', reqId: msg.reqId, op: msg.kind, id: msg.id, ok: !!c });
+        break;
+      }
+      case 'todaySnooze': {
+        if (!this.todaySnoozed.includes(msg.id)) this.todaySnoozed.push(msg.id);
+        // The Mac's rule (electron/today-snooze.js snoozeUntil): 8am tomorrow, or 8am next Monday.
+        const wake = new Date();
+        wake.setHours(8, 0, 0, 0);
+        wake.setDate(wake.getDate() + (msg.choice === 'week' ? (((8 - wake.getDay()) % 7) || 7) : 1));
+        this.snoozedUntil = { ...(this.snoozedUntil || {}), [msg.id]: wake.getTime() };
+        this._emit({ type: 'todayResult', reqId: msg.reqId, op: 'snooze', id: msg.id, ok: true });
+        break;
+      }
+      case 'todayUnsnooze':
+        this.todaySnoozed = this.todaySnoozed.filter((x) => x !== msg.id);
+        this._emit({ type: 'todayResult', reqId: msg.reqId, op: 'unsnooze', id: msg.id, ok: true });
+        break;
+      case 'settingsRead':
+        this._emit({ type: 'settings', reqId: msg.reqId, ok: true, data: { ...this.demoSettings, info: { version: 'demo', account: 'Sample account', imessageReady: false, phonePush: false } } });
+        break;
+      case 'settingsWrite': {
+        if (msg.key === 'todayNudges') this.demoSettings.todayNudges = { ...this.demoSettings.todayNudges, ...msg.value };
+        else if (msg.key === 'newTabTool' || msg.key === 'autoMode') this.demoSettings[msg.key] = msg.value;
+        this._emit({ type: 'settingsResult', reqId: msg.reqId, key: msg.key, ok: true });
         break;
       }
       default: break; // auth, authorizeTab, resize: nothing to do

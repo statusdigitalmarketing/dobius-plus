@@ -28,6 +28,9 @@ function combinedSignal(first, second) {
   return controller.signal;
 }
 
+// Today and settings writes are deliberately NOT queued: delivered late, "Tomorrow" can mean the
+// day after, and a Bring back can undo a newer snooze (Codex). Their screens say when the Mac
+// did not answer, and the person taps again.
 const QUEUEABLE = new Set(['input', 'submitPrompt', 'kill', 'resumeSession', 'createTerminal', 'selectorKey']);
 
 /**
@@ -132,6 +135,8 @@ export class Connection {
       try { msg = JSON.parse(e.data); } catch { return; }
       let justAuthed = false;
       if (msg.type === 'authed') {
+        // What this Mac's server can do: an older Mac has no Today or Settings.
+        this.features = Array.isArray(msg.features) ? msg.features.filter((f) => typeof f === 'string') : [];
         this.reconnectDelay = 1000;
         this._setStatus('authed');
         this._startPing();
