@@ -119,8 +119,11 @@ import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { installNavGuard, isAppUrl } from './nav-guard.js';
-import { readToday } from './today.js';
-import { readBoard as readInboxBoard, boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo } from './inbox-board.js';
+import { readToday, cardSeen } from './today.js';
+import { createPicker, runClaude } from './today-pick.js';
+import { createSnoozes, cardPrint } from './today-snooze.js';
+import { localDay } from '../shared/task-due.js';
+import { readBoard as readInboxBoard, boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo, boardIsStandIn } from './inbox-board.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { readUpdateBackup } from './config-manager.js';
@@ -1455,7 +1458,31 @@ function setupOrchestrationHandlers() {
   ipcMain.handle('inbox:read', () => readInboxBoard({ maxCards: Infinity }));
   ipcMain.handle('inbox:act', (_event, request) => actOnInboxCard(request));
   ipcMain.handle('fleet:info', () => fleetInfo());
-  ipcMain.handle('today:read', () => readToday());
+  // Claude picks run as the active account, with no tools and no saved session. An isolated
+  // instance never calls the real Claude with real cards: it runs DOBIUS_TODAY_PICK_CMD or nothing.
+  const pickCwd = path.join(app.getPath('userData'), 'today-pick');
+  const harness = !!process.env.DOBIUS_USERDATA_DIR;
+  const todayPicker = createPicker({
+    file: path.join(app.getPath('userData'), 'today-pick.json'),
+    log: (...a) => logLine('today', a.join(' ')),
+    run: async (input) => {
+      // A harness picks only against a stand-in board, so real cards can never reach any command.
+      const bin = harness ? (boardIsStandIn() && process.env.DOBIUS_TODAY_PICK_CMD) : resolveActiveCliPath();
+      if (!bin) return null;
+      fs.mkdirSync(pickCwd, { recursive: true });
+      return runClaude(input, { bin, cwd: pickCwd, env: { ...process.env, ...activeClaudeAccountEnv(), PATH: `${process.env.PATH || ''}:${os.homedir()}/.local/bin:/usr/local/bin:/opt/homebrew/bin` } });
+    },
+  });
+  const todaySnoozes = createSnoozes({ file: path.join(app.getPath('userData'), 'today-snooze.json') });
+  ipcMain.handle('today:read', () => readToday({ picker: todayPicker, snoozes: todaySnoozes }));
+  // Only the card as the person saw it: if it changed since, nothing is snoozed and they look again.
+  ipcMain.handle('today:snooze', (_event, id, choice, print) => {
+    const card = cardSeen(id);
+    if (!card || (choice !== 'tomorrow' && choice !== 'week')) return { ok: false };
+    if (typeof print !== 'string' || print !== cardPrint(card)) return { ok: false, changed: true };
+    return { ok: todaySnoozes.snooze(card, choice, localDay()) };
+  });
+  ipcMain.handle('today:unsnooze', (_event, id) => ({ ok: todaySnoozes.unsnooze(id) }));
   ipcMain.handle('inbox:status', () => inboxBoardStatus());
   ipcMain.handle('inbox:start', () => startInboxBoard());
   ipcMain.handle('asana:getConfig', () => getAsanaQueue());

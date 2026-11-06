@@ -26,6 +26,9 @@ const HARNESS = process.env.DOBIUS_USERDATA_DIR ? process.env : {};
 const harnessDirSet = !!(HARNESS.DOBIUS_INBOX_DIR && path.isAbsolute(HARNESS.DOBIUS_INBOX_DIR));
 const harnessPort = harnessDirSet && /^\d{2,5}$/.test(HARNESS.DOBIUS_INBOX_PORT || '') ? Number(HARNESS.DOBIUS_INBOX_PORT) : null;
 
+/** True only when this isolated instance reads a stand-in board, never the real one. */
+export const boardIsStandIn = () => harnessDirSet;
+
 export const BOARD_PORT = harnessPort || 8765; // fixed in the board's server.py (PORT, TS_PORT = 8765, 8767)
 const PLIST = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.brett.inbox-server.plist');
 const DEFAULT_DIR = path.join(os.homedir(), 'Projects (Code)', 'inbox-board');
