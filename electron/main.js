@@ -183,7 +183,10 @@ function showTodayOnMac() {
   let w = (focused && hasToday(focused) ? focused : null) || all.find((x) => x.isVisible()) || all[0];
   if (!w) {
     // No project window open: open the last one used, and show Today once it has loaded.
-    const recent = (loadConfig().lastOpenProjects || []).find((p) => typeof p === 'string' && !projectDirError(p));
+    // lastOpenProjects empties as windows close, so pinned and known projects back it up (Codex).
+    const cfg = loadConfig();
+    const candidates = [...(cfg.lastOpenProjects || []), ...(cfg.pinnedProjects || []), ...Object.keys(cfg.projects || {}).reverse()];
+    const recent = candidates.find((p) => typeof p === 'string' && !projectDirError(p));
     if (!recent) return;
     const opened = openProjectWindow(recent);
     opened?.webContents?.once('did-finish-load', () => setTimeout(() => { if (!opened.isDestroyed()) opened.webContents.send('tasks:openToday'); }, 1500));
@@ -1589,7 +1592,8 @@ function setupOrchestrationHandlers() {
   });
   // Brett's Inbox board, read only. The board's token stays in main.
   // All of them: Today's "See all" lands here, and a card past a cap would look like it does not exist.
-  ipcMain.handle('inbox:read', () => readInboxBoard({ maxCards: Infinity }));
+  // A harness without a stand-in board never reads the real one (DOBIUS_USERDATA_DIR set, no DOBIUS_INBOX_DIR).
+  ipcMain.handle('inbox:read', () => (process.env.DOBIUS_USERDATA_DIR && !boardIsStandIn() ? { ok: false, reason: 'not-installed' } : readInboxBoard({ maxCards: Infinity })));
   ipcMain.handle('inbox:act', (_event, request) => actOnCard(request));
   ipcMain.handle('fleet:info', () => fleetInfo());
   // Claude picks run as the active account, with no tools and no saved session. An isolated
@@ -1625,15 +1629,9 @@ function setupOrchestrationHandlers() {
   const unsnoozeToday = (id, sid) => { const ok = todaySnoozes.unsnooze(id, sid); if (ok) todayChanged(); return { ok }; };
   const actOnCard = async (request, stillOk = () => true) => {
     if (realBoardInHarness()) return { ok: false, reason: 'not-installed' };
-    // The phone sends the print it showed: a card edited since (same rev) is not closed blind.
-    // Checked against a FRESH read of the board, not the last one (Codex).
-    if (typeof request?.print === 'string') {
-      const now = await readAllCards();
-      const card = now?.ok ? now.cards.find((c) => c.id === request.id) : null;
-      if (!card || cardPrint(card) !== request.print) return { ok: false, reason: 'changed' };
-    }
-    if (!stillOk()) return { ok: false, reason: 'revoked' };
-    const r = await actOnInboxCard({ kind: request?.kind, id: request?.id, rev: request?.rev });
+    // The board writer checks the shown print and the caller's right to act against the read it
+    // makes right before writing (electron/inbox-board.js actOnCard).
+    const r = await actOnInboxCard({ kind: request?.kind, id: request?.id, rev: request?.rev, print: typeof request?.print === 'string' ? request.print : undefined }, { stillOk });
     if (r?.ok) todayChanged();
     return r;
   };
@@ -1654,11 +1652,9 @@ function setupOrchestrationHandlers() {
   // Today comes to Sam: counts only, through the channels Settings allows (electron/today-nudge.js).
   const todayNudger = createNudger({
     file: path.join(app.getPath('userData'), 'today-nudge.json'),
-    // From disk, not this process's cache: another Dobius sharing this userData (a dev run that
-    // owns the phone server) may be the one that changed them (Codex).
-    settings: () => {
-      try { return nudgeSettings(JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'config.json'), 'utf8'))?.settings?.todayNudges); } catch { return nudgeSettings(getSettings().todayNudges); }
-    },
+    // This process's settings, which include a change acknowledged a moment ago and not yet on
+    // disk (Codex). Two Dobius processes at once is the accepted limit noted in docs/my-day.md.
+    settings: () => nudgeSettings(getSettings().todayNudges),
     log: (line) => logLine('today', `nudge ${line}`),
     read: async () => {
       // A harness never nudges anyone about anything.
@@ -1674,6 +1670,8 @@ function setupOrchestrationHandlers() {
   setInterval(() => { todayNudger.tick(); }, 5 * 60 * 1000).unref?.();
   // Hand the nudge lock back on quit, so a later launch never waits on a reused pid.
   app.on('will-quit', () => {
+    // Stop first: a tick still waiting on the board never saves or sends once quitting (Codex).
+    todayNudger.stop();
     const lock = path.join(app.getPath('userData'), 'today-nudge.lock');
     try { if (fs.readFileSync(lock, 'utf8').trim() === String(process.pid)) fs.rmSync(lock, { force: true }); } catch { /* not ours or gone */ }
   });

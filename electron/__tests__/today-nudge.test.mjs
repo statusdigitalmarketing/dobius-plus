@@ -318,3 +318,14 @@ test('a phone unpaired while its write waits changes nothing', async () => {
   assert.equal(out.every((m) => m.ok === false), true);
   setTodayBridge(null);
 });
+
+test('a stopped nudger never saves or sends, even mid-read (quit)', async () => {
+  const file = path.join(os.tmpdir(), `nudge-stop-${process.pid}.json`);
+  const sent = [];
+  let n;
+  n = createNudger({ file, now: () => at(8, 5), settings: () => cfg, read: async () => { n.stop(); return { today: todayOf(ids(2)), openIds: new Set(ids(2)), snoozedIds: new Set() }; }, send: async (x) => { sent.push(x.kind); return {}; } });
+  await n.tick();
+  assert.deepEqual(sent, []);
+  assert.equal(fs.existsSync(file), false);
+});
+

@@ -190,7 +190,8 @@ export default function Tasks({ connection, onBack }) {
   const undoDone = async () => {
     const card = undo?.card;
     const key = undo?.key;
-    if (!card) return;
+    // One Undo at a time: a second tap could reopen a later Done of the same card (Codex).
+    if (!card || undo.pending) return;
     setUndo((cur) => (cur?.key === key ? { ...cur, pending: true } : cur));
     const r = await ask(connection, { type: 'inboxAct', kind: 'undo', id: card.id, rev: card.rev }, 'todayResult');
     // Only if this card still owns the Undo bar: another card may have been marked done meanwhile.
@@ -289,7 +290,7 @@ export default function Tasks({ connection, onBack }) {
         <div className="today-toast" role="status">
           {undo ? <>
             <span>{undo.problem ? 'Could not undo that.' : 'Marked done.'}</span>
-            <button onClick={undoDone}>{undo.problem ? 'Try again' : 'Undo'}</button>
+            <button onClick={undoDone} disabled={!!undo.pending}>{undo.pending ? 'Undoing…' : undo.problem ? 'Try again' : 'Undo'}</button>
           </> : <span>{note}</span>}
         </div>
       )}

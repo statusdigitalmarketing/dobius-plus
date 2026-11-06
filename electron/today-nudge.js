@@ -110,6 +110,7 @@ export function createNudger({ file, read, settings, send, log = () => {}, now =
   let state = {};
   try { state = JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch { state = {}; }
   let busy = false;
+  let stopped = false;
   const save = (next) => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp`;
@@ -117,7 +118,7 @@ export function createNudger({ file, read, settings, send, log = () => {}, now =
     fs.renameSync(tmp, file);
   };
   async function tick() {
-    if (busy) return null;
+    if (busy || stopped) return null;
     busy = true;
     try {
       const cfg = settings();
@@ -132,6 +133,8 @@ export function createNudger({ file, read, settings, send, log = () => {}, now =
       // moved, while the board was being read count (Codex).
       const latest = settings();
       if (!latest.imessage && !latest.mac && !latest.push) return null;
+      // Quitting, or another process took the lock while this one read: stand down.
+      if (stopped || !mayRun()) return null;
       const { state: next, nudge } = planNudge({ state, now: now(), settings: latest, ...got });
       if (next !== state) {
         // Saved before sending: a crash or an overlapping tick then cannot send it again.
@@ -149,5 +152,5 @@ export function createNudger({ file, read, settings, send, log = () => {}, now =
       busy = false;
     }
   }
-  return { tick, current: () => state };
+  return { tick, current: () => state, stop: () => { stopped = true; } };
 }
