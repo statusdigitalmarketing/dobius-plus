@@ -6,6 +6,7 @@
  */
 import http from 'http';
 import { readBoard, listenerIsMine } from './inbox-board.js';
+import { cardPrint } from './today-snooze.js';
 
 export const SUGGESTED = 15;
 const RECENT_OVERDUE_DAYS = 7;
@@ -128,13 +129,43 @@ export async function readNoticed(opts = {}) {
   return { state: partial ? 'partial' : 'ok', ...noticed, pending: (a.counts?.pending || 0) + (f.counts?.pending || 0) };
 }
 
+// The last cards read, so snooze uses the card as main saw it, never fields from the renderer.
+let lastCards = new Map();
+export const cardSeen = (id) => (typeof id === 'string' ? lastCards.get(id) || null : null);
+
+/**
+ * Claude's picks when there are some, else the rule list, said plainly either way. Snoozed
+ * cards are left out of both and counted. `picker` and `snoozes` are optional.
+ */
+export function arrange(cards, { today, nowMs, picker, snoozes, limit = SUGGESTED }) {
+  const { shown, snoozed } = snoozes ? snoozes.split(cards, today) : { shown: cards, snoozed: [] };
+  const pick = picker ? picker.current(shown, today) : { picks: null, picking: false };
+  const byId = new Map(shown.map((c) => [c.id, c]));
+  const picked = (pick.picks || []).filter((p) => byId.has(p.id)).slice(0, limit).map((p) => ({ ...byId.get(p.id), reason: p.reason }));
+  const rules = planToday(shown, { today, nowMs, limit });
+  const byClaude = picked.length > 0;
+  // Snooze sends this back, so it applies only to the card as it was on screen.
+  const withPrint = (c) => ({ ...c, print: cardPrint(c) });
+  return {
+    mode: byClaude ? 'claude' : 'rules',
+    picking: !!pick.picking,
+    pickedAt: byClaude ? pick.pickedAt : null,
+    suggested: (byClaude ? picked : rules.suggested).map(withPrint),
+    withinReach: byClaude ? picked.length : rules.withinReach,
+    otherCount: shown.length - (byClaude ? picked.length : rules.suggested.length),
+    total: cards.length,
+    snoozed: snoozed.map((c) => ({ id: c.id, subject: c.subject, summary: c.summary, who: c.who, source: c.source, until: c.snoozedUntil })),
+  };
+}
+
 export async function readToday(opts = {}) {
-  const today = opts.today;
   const [board, noticed] = await Promise.all([
     (opts.readBoard || readBoard)({ ...opts, maxCards: Infinity }),
     (opts.readNoticed || readNoticed)(opts),
   ]);
-  const plan = board.ok ? planToday(board.cards, { today: today || board.today, nowMs: opts.nowMs }) : null;
+  const today = opts.today || board.today;
+  if (board.ok) lastCards = new Map(board.cards.map((c) => [c.id, c]));
+  const plan = board.ok ? arrange(board.cards, { today, nowMs: opts.nowMs, picker: opts.picker, snoozes: opts.snoozes }) : null;
   return {
     board: board.ok ? { state: 'ok', ...plan, overdue: board.overdue, checkedAt: board.checkedAt || null, held: board.held || 0, failing: board.failing || [] } : { state: board.reason || 'unavailable' },
     noticed,

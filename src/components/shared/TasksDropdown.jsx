@@ -192,6 +192,23 @@ export default function TasksDropdown() {
     return () => clearInterval(timer);
   }, [open, view, loadToday]);
 
+  // While Claude is picking, look again every 10 seconds instead of every refresh.
+  const picking = !!todayData?.board?.picking;
+  useEffect(() => {
+    if (!open || view !== 'today' || !picking) return undefined;
+    const t = setInterval(loadToday, 10_000);
+    return () => clearInterval(t);
+  }, [open, view, picking, loadToday]);
+
+  const snoozeCard = async (card, choice) => {
+    try { await window.electronAPI.todaySnooze(card.id, choice, card.print); } catch (err) { console.error('[TasksDropdown] snooze failed:', err?.name); }
+    loadToday();
+  };
+  const unsnoozeCard = async (id) => {
+    try { await window.electronAPI.todayUnsnooze(id); } catch (err) { console.error('[TasksDropdown] unsnooze failed:', err?.name); }
+    loadToday();
+  };
+
   useEffect(() => {
     if (!open || view !== 'inbox') return;
     loadInbox();
@@ -638,6 +655,8 @@ export default function TasksDropdown() {
                 undoCard={undoCard}
                 onUndo={undoMarkDone}
                 onSeeAll={() => { setInboxSource('all'); setQuery(''); switchTab('inbox'); }}
+                onSnooze={window.electronAPI?.todaySnooze ? snoozeCard : null}
+                onUnsnooze={unsnoozeCard}
                 onRetry={loadToday}
               />
             ) : (
@@ -730,7 +749,8 @@ const BOARD_DOWN = {
 
 // A short list to finish, and an honest count of everything it left out. It says what the board
 // holds and never that nothing needs attention: it cannot know that about mail it could not read.
-function TodayList({ data, query, today, expanded, onExpand, onList, canAdd, onAdd, onOpenLink, onOpenBoard, onDone, undoCard, onUndo, onSeeAll, onRetry }) {
+function TodayList({ data, query, today, expanded, onExpand, onList, canAdd, onAdd, onOpenLink, onOpenBoard, onDone, undoCard, onUndo, onSeeAll, onRetry, onSnooze, onUnsnooze }) {
+  const [showSnoozed, setShowSnoozed] = useState(false);
   if (!data) return <Empty>Reading…</Empty>;
   const { board, noticed } = data;
   const q = query.trim().toLowerCase();
@@ -745,8 +765,11 @@ function TodayList({ data, query, today, expanded, onExpand, onList, canAdd, onA
       <div style={{ padding: '6px 12px', borderBottom: '1px solid var(--border)' }}>
         {board.state === 'ok' ? (
           <div style={TODAY_NOTE}>
-            {board.suggested.length} of {board.withinReach} that look pressing, by due date and priority. {board.total} open in all.{' '}
+            {board.mode === 'claude'
+              ? `${board.suggested.length} picked by Claude${board.pickedAt ? ` at ${new Date(board.pickedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ''}${board.picking ? ', picking again' : ''}. ${board.total} open in all.`
+              : `${board.picking ? 'Claude is picking your list. Until then, ' : ''}${board.suggested.length} of ${board.withinReach} sorted by due date and priority. ${board.total} open in all.`}{' '}
             <LinkButton onClick={onSeeAll} color="var(--accent)">See all</LinkButton>
+            {board.snoozed?.length > 0 && <>{' '}<LinkButton onClick={() => setShowSnoozed((v) => !v)} color="var(--dim)">{showSnoozed ? 'Hide' : `${board.snoozed.length} snoozed`}</LinkButton></>}
           </div>
         ) : (
           <div role="alert" style={{ ...TODAY_NOTE, color: 'var(--danger)' }}>
@@ -765,20 +788,38 @@ function TodayList({ data, query, today, expanded, onExpand, onList, canAdd, onA
         </div>
       )}
       {board.state === 'ok' && cards.length === 0 && <Empty>{q ? 'Nothing matches.' : board.total ? 'Nothing here looks pressing, but cards are still open.' : 'No open cards on the board.'}</Empty>}
+      {showSnoozed && (board.snoozed || []).map((s) => (
+        <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 12px', borderBottom: '1px solid var(--border)', fontSize: 11, color: 'var(--dim)' }}>
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.subject || s.summary || '(no subject)'}</span>
+          <span style={{ flexShrink: 0, fontSize: 10 }}>until {new Date(s.until).toLocaleDateString([], { weekday: 'short' })}</span>
+          <LinkButton onClick={() => onUnsnooze(s.id)} color="var(--accent)">Bring back</LinkButton>
+        </div>
+      ))}
       {cards.map((card) => (
-        <InboxCard
-          key={card.id}
-          card={card}
-          today={today}
-          expanded={expanded === card.id}
-          onExpand={() => onExpand(card.id)}
-          added={onList.has(card.id)}
-          canAdd={canAdd}
-          onAdd={() => onAdd(card)}
-          onOpenLink={onOpenLink}
-          onOpenBoard={onOpenBoard}
-          onDone={onDone}
-        />
+        <div key={card.id}>
+          <InboxCard
+            card={card}
+            today={today}
+            expanded={expanded === card.id}
+            onExpand={() => onExpand(card.id)}
+            added={onList.has(card.id)}
+            canAdd={canAdd}
+            onAdd={() => onAdd(card)}
+            onOpenLink={onOpenLink}
+            onOpenBoard={onOpenBoard}
+            onDone={onDone}
+          />
+          {(card.reason || onSnooze) && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 12px 6px 13px', marginTop: -2, borderBottom: '1px solid var(--border)', fontSize: 10, color: 'var(--dim)' }}>
+              {card.reason && <span style={{ flex: 1, minWidth: 0, color: 'var(--fg)', opacity: 0.85 }}>{card.reason}</span>}
+              {onSnooze && (
+                <span style={{ flexShrink: 0, marginLeft: 'auto' }}>
+                  Snooze <LinkButton onClick={() => onSnooze(card, 'tomorrow')} color="var(--accent)">tomorrow</LinkButton> · <LinkButton onClick={() => onSnooze(card, 'week')} color="var(--accent)">next week</LinkButton>
+                </span>
+              )}
+            </div>
+          )}
+        </div>
       ))}
       <div style={{ padding: '8px 12px 4px' }}>
         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--fg)' }}>SamKnows noticed</div>
