@@ -1,5 +1,6 @@
 import pty from 'node-pty';
 import { trackPasteMode } from './paste-mode.js';
+import { oscScanState, chunkMayDraw } from './osc-only.js';
 import { isTerminalReply, createVisibleOutputScanner } from './terminal-reply.js';
 import { isClaudeCommand, classifyClaudeProcess } from './claude-argv.js';
 import fs from 'fs';
@@ -187,6 +188,8 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   const prevSubs = prev?.subscribers;
   const prevCols = prev?.cols;
   const prevRows = prev?.rows;
+  // The screen keeps its parser state across a respawn, so the output scan does too: a fresh
+  // PTY starts where the old one left the terminal (see electron/osc-only.js, Codex).
   // Kill existing terminal with this ID if any
   if (terminals.has(id)) {
     killTerminal(id, { respawn: true });
@@ -304,7 +307,13 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     // must not be routed as the replacement's output. Audit High.
     if (!entry || entry.pty !== term) return;
     if (entry.visibleScan(data)) entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
-    entry.rawOutputSeq = (entry.rawOutputSeq || 0) + 1; // see terminalRawOutputSeq
+    // Only output that can draw: a title or tab-status marker alone never changes the screen,
+    // and counting it made a question card read as changed (see electron/osc-only.js).
+    // A new PTY's output opens with CAN, which ends any escape or string the screen still has
+    // open from an earlier PTY under this tab id (a respawn, or an exit then a re-create) and
+    // draws nothing. Screen and scan then both start in ground state (Codex, three rounds).
+    if (!entry.oscState) { entry.oscState = oscScanState(); data = `\x18${data}`; }
+    if (chunkMayDraw(data, entry.oscState)) entry.rawOutputSeq = (entry.rawOutputSeq || 0) + 1; // see terminalRawOutputSeq
     entry.pasteMode = trackPasteMode(entry.pasteMode, data); // see terminalBracketedPaste
     // Global observers (main-process status authority, v1.0.43): see EVERY
     // terminal's output regardless of whether a window or mobile client is
@@ -483,9 +492,11 @@ export function terminalInputAgeMs(id) {
 }
 
 /**
- * Count of ALL output chunks, escape-only ones included. A clear-screen plus
+ * Count of output chunks that may draw, escape-only ones included. A clear-screen plus
  * cursor moves can replace one prompt with another without a printable byte,
  * so a selector answer is only safe while this has not moved since the read.
+ * A chunk that is nothing but OSC strings (title, tab-status markers) cannot
+ * draw a cell and is not counted.
  */
 export function terminalRawOutputSeq(id) {
   return terminals.get(id)?.rawOutputSeq || 0;

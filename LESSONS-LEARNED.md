@@ -695,3 +695,9 @@
 - **MISTAKE**: `node -e` and inline commands that call fetch or curl are blocked by a context-mode hook in this environment, and the blocked command takes its other steps down with it (a `mkdir -p` in the same command never ran, which later looked like an app bug: ENOENT opening the project).
 - **FIX**: Put any HTTP or CDP probe in a script file and run it with `node file.mjs`; keep setup steps in their own command.
 - **DETECTION**: a Bash result starting with "context-mode:".
+
+### Architecture - 2026-11-06
+- **MISTAKE**: The selector token counted EVERY output chunk, so Dobius's own tab-status hooks (OSC 777;dobius;working/needs, printed when a second AskUserQuestion queued behind the first) made the phone refuse taps as "The prompt changed" while nothing on screen had moved (Sam). Then, while exempting those markers, six Codex rounds each found a byte sequence where a hand-rolled "is this OSC-only" scan disagreed with xterm (C1 ST/OSC, palette OSCs, split ESC \, NUL/DEL in escapes, a BOM, respawns, tear-offs).
+- **FIX**: electron/osc-only.js follows the DEC/xterm parser transitions across chunks and exempts a chunk only when it starts in ground state and holds nothing but complete OSC 0/1/2 or 777;dobius; strings, introduced and terminated in that one chunk. Every new PTY's first chunk is prefixed with CAN so the screen and the scan both start in ground. Repro: scratchpad queue-probe (real Claude 2.1.319, two parallel AskUserQuestion calls).
+- **CONTEXT**: Any "this output is harmless" exemption to a safety token must be decided per chunk with no state trust carried over, because renderers restart (tear-off, respawn, reload) and cannot be kept in step otherwise.
+- **DETECTION**: `grep -n "rawOutputSeq" electron/*.js`
