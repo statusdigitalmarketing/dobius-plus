@@ -701,3 +701,9 @@
 - **FIX**: electron/osc-only.js follows the DEC/xterm parser transitions across chunks and exempts a chunk only when it starts in ground state and holds nothing but complete OSC 0/1/2 or 777;dobius; strings, introduced and terminated in that one chunk. Every new PTY's first chunk is prefixed with CAN so the screen and the scan both start in ground. Repro: scratchpad queue-probe (real Claude 2.1.319, two parallel AskUserQuestion calls).
 - **CONTEXT**: Any "this output is harmless" exemption to a safety token must be decided per chunk with no state trust carried over, because renderers restart (tear-off, respawn, reload) and cannot be kept in step otherwise.
 - **DETECTION**: `grep -n "rawOutputSeq" electron/*.js`
+
+### Git - 2026-11-06
+- **MISTAKE**: The question-card fix branch was cut from local `main`, which already held merged but unreleased Today work (feat/my-day, feat/today-claude-pick). `git log main..fix` showed only the fix commits, so it looked self-contained, but merging it and running release.sh would have shipped Today, which Sam had said to hold.
+- **FIX**: Before a release, compare against what is PUBLISHED: `git log origin/main..main`. To ship one fix alone, `git checkout -b release/x origin/main && git cherry-pick main..fix`, park the extra merges on a branch, then point main at the release branch.
+- **CONTEXT**: release.sh only checks that main is not behind origin/main; being ahead with held work passes its preflight.
+- **DETECTION**: `git log --oneline origin/main..main`
