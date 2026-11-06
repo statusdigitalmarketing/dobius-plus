@@ -190,7 +190,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   const prevRows = prev?.rows;
   // The screen keeps its parser state across a respawn, so the output scan does too: a fresh
   // PTY starts where the old one left the terminal (see electron/osc-only.js, Codex).
-  const prevOscState = prev?.oscState ? { ...prev.oscState } : null;
+  // Trust is not carried: the replay buffer starts empty, so nothing the new PTY prints inside a
+  // string the old one opened may go uncounted (Codex).
+  const prevOscState = prev?.oscState ? { ...prev.oscState, trusted: false } : null;
   // Kill existing terminal with this ID if any
   if (terminals.has(id)) {
     killTerminal(id, { respawn: true });

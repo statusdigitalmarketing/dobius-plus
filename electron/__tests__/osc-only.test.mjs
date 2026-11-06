@@ -115,3 +115,16 @@ test('state carried over a respawn keeps a pending OSC pending (Codex)', () => {
   assert.equal(chunkMayDraw('\x00', carried), true);
   assert.equal(chunkMayDraw('\x1b]0;t\x07', carried), true);
 });
+
+test('ignored characters count toward the length limit, and an untrusted string counts (Codex)', () => {
+  const st = oscScanState();
+  assert.equal(chunkMayDraw('\x1b]0;' + '\x00'.repeat(5000), st), true);
+  assert.equal(chunkMayDraw('Approve A?', st), true);
+});
+
+test('trust is not carried over a respawn (Codex)', () => {
+  const old = oscScanState();
+  assert.equal(chunkMayDraw('\x1b]0;t', old), false);
+  const carried = { ...old, trusted: false };
+  assert.equal(chunkMayDraw('Approve A?', carried), true);
+});

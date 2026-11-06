@@ -17,7 +17,7 @@ const INERT = /^(?:[012];|777;dobius;)/;
 const MAX_OSC = 2048;
 
 /** Fresh state for one PTY: the terminal starts in ground state. */
-export const oscScanState = () => ({ mode: 'ground', osc: false, body: '', trusted: false });
+export const oscScanState = () => ({ mode: 'ground', osc: false, body: '', trusted: false, len: 0 });
 
 const inertOsc = (st) => st.osc && st.trusted && INERT.test(st.body);
 const isC0Exec = (c) => (c <= 0x17 || c === 0x19 || (c >= 0x1c && c <= 0x1f));
@@ -27,11 +27,14 @@ export function chunkMayDraw(data, state) {
   const s = String(data);
   // Not in ground state at the start: whatever was left open may act on this chunk.
   let draws = state.mode !== 'ground' && !((state.mode === 'str' || state.mode === 'strEsc') && inertOsc(state));
-  const toString = (osc, trusted) => { state.mode = 'str'; state.osc = osc; state.body = ''; state.trusted = trusted; };
-  const toGround = () => { state.mode = 'ground'; state.osc = false; state.body = ''; state.trusted = false; };
+  const toString = (osc, trusted) => { state.mode = 'str'; state.osc = osc; state.body = ''; state.trusted = trusted; state.len = 0; };
+  const toGround = () => { state.mode = 'ground'; state.osc = false; state.body = ''; state.trusted = false; state.len = 0; };
   const endString = () => { if (!inertOsc(state)) draws = true; toGround(); };
   for (let i = 0; i < s.length; i += 1) {
     const c = s.charCodeAt(i);
+    // Every character inside a string counts toward its length limit, ignored ones too: a long
+    // run of NULs must not keep a title open past what the replay buffer still holds (Codex).
+    if ((state.mode === 'str' || state.mode === 'strEsc') && ++state.len > MAX_OSC) { state.trusted = false; draws = true; }
     // xterm's decoder drops a byte order mark before its parser sees anything, so it does too.
     if (c === 0xfeff) continue;
     // Transitions that apply from any state.
@@ -80,8 +83,7 @@ export function chunkMayDraw(data, state) {
           if (!inertOsc(state)) draws = true;
           state.mode = 'strEsc';
         } else if (c < 0x20 || c === 0x7f) { /* ignored inside a string */ }
-        else if (state.body.length >= MAX_OSC) { draws = true; state.trusted = false; }
-        else state.body += s[i];
+        else if (state.body.length < MAX_OSC) state.body += s[i];
         break;
       case 'strEsc':
         if (c === 0x5c) endString();
