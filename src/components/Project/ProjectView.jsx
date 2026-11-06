@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { isLabelLocked, parseLabelMeta } from '../../../shared/tab-label.js';
+import { winToMacShortcut } from '../../../shared/win-keys.js';
+import { isWindows } from '../../../shared/platform.js';
 import { useStore } from '../../store/store';
 import { THEMES, applyTheme } from '../../lib/themes';
 import TopBar from '../shared/TopBar';
@@ -1068,7 +1070,11 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
 
   // Keyboard shortcuts
   useEffect(() => {
-    const handleKeyDown = (e) => {
+    const handleKeyDown = (raw) => {
+      // Windows: app shortcuts are Ctrl+Shift (shared/win-keys.js); a press
+      // that is not one belongs to the terminal and is left alone.
+      const e = isWindows() ? winToMacShortcut(raw) : raw;
+      if (!e) return;
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
 
@@ -1110,8 +1116,12 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         // Cmd+Shift+T = reopen last closed tab (in terminal view) or toggle to terminal (in dashboard)
         e.preventDefault();
         const state = useStore.getState();
-        if (state.activeView === 'terminal' && state.recentlyClosedTabs.length > 0) {
+        if (e.viewToggle) {
+          setActiveView(state.activeView === 'terminal' ? 'dashboard' : 'terminal');
+        } else if (state.activeView === 'terminal' && state.recentlyClosedTabs.length > 0) {
           reopenLastClosedTab();
+        } else if (e.reopenOnly) {
+          // nothing closed to reopen
         } else {
           const current = state.activeView;
           setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');

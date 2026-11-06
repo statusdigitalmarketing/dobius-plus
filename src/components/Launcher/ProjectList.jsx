@@ -3,6 +3,7 @@ import { AnimatePresence } from 'framer-motion';
 import ProjectCard from './ProjectCard';
 import ProjectContextMenu from './ProjectContextMenu';
 import QuitOverlay from '../shared/QuitOverlay';
+import { baseName } from '../../../shared/platform.js';
 
 const FILTERS = [
   { key: 'all', label: 'All' },
@@ -308,7 +309,7 @@ export default function ProjectList() {
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}>
               <path strokeLinejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
             </svg>
-            <span className="truncate">{scanDir ? scanDir.split('/').filter(Boolean).pop() || scanDir : 'Projects folder'}</span>
+            <span className="truncate">{scanDir ? baseName(scanDir) || scanDir : 'Projects folder'}</span>
           </button>
           <button
             onClick={handleNewProject}

@@ -5,6 +5,7 @@
 // (electron/__tests__/new-tab.test.mjs).
 
 import { shQuote } from './sh-quote.js';
+import { isAbsPath, baseName, isWindows } from './platform.js';
 
 export const NEW_TAB_TOOLS = ['claude', 'codex', 'shell'];
 export const DEFAULT_NEW_TAB_TOOL = 'claude';
@@ -31,7 +32,7 @@ export function launchCommandFor(request, settingTool) {
 }
 
 function projectName(p) {
-  return p.displayName || p.decodedPath.split('/').filter(Boolean).pop() || p.decodedPath;
+  return p.displayName || baseName(p.decodedPath) || p.decodedPath;
 }
 
 // The picker's rows: the current project first (always, even if hidden or
@@ -43,7 +44,7 @@ export function buildPickerProjects({ currentPath = null, projects = [], hidden 
   const seen = new Set();
   const rows = [];
   const add = (p, isCurrent) => {
-    if (!p || typeof p.decodedPath !== 'string' || !p.decodedPath.startsWith('/')) return;
+    if (!p || typeof p.decodedPath !== 'string' || !isAbsPath(p.decodedPath)) return;
     if (seen.has(p.decodedPath)) return;
     seen.add(p.decodedPath);
     rows.push({ path: p.decodedPath, name: projectName(p), isCurrent, hidden: !isCurrent && hiddenSet.has(p.decodedPath) });
@@ -77,7 +78,9 @@ export function toggleHiddenProject(hidden, path) {
 
 // Cmd+1..9 inside the picker: the row index it picks, or -1.
 export function pickerShortcutIndex(e) {
-  if (!e || !e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return -1;
+  // Cmd on the Mac, Ctrl on Windows.
+  const mod = isWindows() ? (e?.ctrlKey && !e?.metaKey) : (e?.metaKey && !e?.ctrlKey);
+  if (!e || !mod || e.altKey || e.shiftKey) return -1;
   return e.key >= '1' && e.key <= '9' && e.key.length === 1 ? Number(e.key) - 1 : -1;
 }
 
@@ -134,10 +137,55 @@ export function ptyProgramName(comm, shellPath = '') {
 // nothing typed. Both values travel in env and reach the fixed command as $2 and
 // $3, never eval'd.
 export const START_TOOL_ENV = 'DOBIUS_NEW_TAB_TOOL';
+
+// Windows PowerShell (powershell.exe) or PowerShell 7 (pwsh.exe).
+export function isPowerShell(shell) {
+  return /^(powershell|pwsh)\.exe$/i.test(String(shell).split(/[\\/]/).pop());
+}
+
+// PowerShell's version of the wrapper below: the profile runs first (PATH and
+// the user's setup, as with -l), then the tool, and -NoExit leaves the same
+// interactive shell when it exits. Same rules as the zsh/bash wrapper: the
+// values travel in env, are read once into locals and removed, and dispatch is
+// a fixed allowlist with nothing evaluated. The tool is resolved as an
+// Application (claude.exe, or npm's claude.cmd) so the default execution
+// policy, which blocks npm's .ps1 shims, never stops it. Passed encoded, so no
+// quoting survives into the command line to be misread.
+function powerShellSpawn(resuming) {
+  const v = START_TOOL_ENV;
+  const script = [
+    `$__dt = $env:${v}; $__di = $env:${v}_ID; $__dc = $env:${v}_CWD`,
+    `Remove-Item Env:${v}, Env:${v}_ID, Env:${v}_CWD -ErrorAction SilentlyContinue`,
+    'function __dobius_run($n) { $a = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($a) { & $a.Source @args } else { & $n @args } }',
+    resuming
+      ? "if ($__dt -eq 'resume') { Set-Location -LiteralPath $__dc; __dobius_run claude --resume $__di } elseif ($__dt -eq 'fresh') { Set-Location -LiteralPath $__dc; __dobius_run claude }"
+      : "if ($__dt -eq 'claude') { __dobius_run claude } elseif ($__dt -eq 'codex') { __dobius_run codex }",
+    'Remove-Item Function:__dobius_run -ErrorAction SilentlyContinue; Remove-Variable __dt, __di, __dc -ErrorAction SilentlyContinue',
+  ].join('; ');
+  return ['-NoLogo', '-NoExit', '-EncodedCommand', utf16Base64(script)];
+}
+
+function utf16Base64(text) {
+  const bytes = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charCodeAt(i);
+    bytes.push(c & 0xff, c >> 8);
+  }
+  if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+  return btoa(String.fromCharCode(...bytes));
+}
+
 export function loginShellSpawn(shell, startCommand, resume = null) {
-  const plain = { args: ['-l'], env: {} };
-  const resuming = !!resume && (resume.sessionId === null || /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(resume.sessionId))) && String(resume.cwd).startsWith('/') && !/[\x00-\x1F\x7F]/.test(resume.cwd);
+  const powershell = isPowerShell(shell);
+  const plain = { args: powershell ? ['-NoLogo'] : ['-l'], env: {} };
+  const resuming = !!resume && (resume.sessionId === null || /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(resume.sessionId))) && isAbsPath(String(resume.cwd)) && !/[\x00-\x1F\x7F]/.test(resume.cwd);
   if (!resuming && !NEW_TAB_TOOLS.some((x) => newTabCommand(x) && newTabCommand(x) === startCommand)) return plain;
+  if (powershell) {
+    const env = resuming
+      ? { [START_TOOL_ENV]: resume.sessionId === null ? 'fresh' : 'resume', [`${START_TOOL_ENV}_ID`]: resume.sessionId ?? '', [`${START_TOOL_ENV}_CWD`]: resume.cwd }
+      : { [START_TOOL_ENV]: startCommand };
+    return { args: powerShellSpawn(resuming), env };
+  }
   const name = String(shell).split('/').pop();
   // The tool name is read before the hooks (a hook or a project .env could set
   // the variable) into the positional parameter $1, which no variable

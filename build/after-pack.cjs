@@ -15,6 +15,8 @@ const path = require('path');
 
 exports.default = async function afterPack(context) {
   const { appOutDir, packager } = context;
+  // spawn-helper is the macOS/Linux launcher; Windows terminals use ConPTY.
+  if (context.electronPlatformName !== 'darwin') return;
   const appName = packager.appInfo.productFilename; // e.g. "Dobius+"
   const helper = path.join(
     appOutDir,

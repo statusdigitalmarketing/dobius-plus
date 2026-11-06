@@ -1,9 +1,11 @@
+import { shellArg } from '../../shared/sh-quote.js';
+import { isWindows } from '../../shared/platform.js';
 // Helpers shared by the terminal command bar and the Chat composer for turning
 // pasted or dropped files into prompt text.
 
 /** Escape a file path for safe shell usage (wraps in single quotes). */
 export function shellEscape(filePath) {
-  return "'" + filePath.replace(/'/g, "'\\''") + "'";
+  return shellArg(filePath, isWindows() ? 'win32' : 'posix');
 }
 
 /** Convert ArrayBuffer to base64 without blowing the call stack on large images. */

@@ -30,6 +30,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { sameFiletime } from './win-proc.js';
 
 export const GRACE_MS = 3000;
 const CACHE_MS = 4000; // several windows poll the same tabs
@@ -40,6 +41,12 @@ const MAX_FILE_BYTES = 64 * 1024;
 function recordIsProcess(rec, proc) {
   if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return false;
   if (!proc || !Number.isInteger(proc.pid) || rec.pid !== proc.pid) return false;
+  // Windows: Claude records its creation time as a FILETIME (procStartFt), which
+  // win-proc.js reads for the tab's claude too. Compared as digit strings: the
+  // value is past 2^53, so a Number would round it.
+  if (rec.procStartFt != null || proc.startFt != null) {
+    return proc.startFt != null && sameFiletime(rec.procStartFt, proc.startFt);
+  }
   if (typeof rec.procStart !== 'string' || !Number.isFinite(proc.startedAt)) return false;
   // `ps lstart` text ("Tue Oct 27 13:39:54 2026") with no zone: Claude takes it
   // under TZ=UTC (seen on 2.1.311 and 2.1.314), while proc.startedAt comes from
@@ -83,6 +90,12 @@ async function readPresenceFile(file) {
 
 // The claude's record, parsed, or null: no file, mid-rewrite, or a relative
 // config dir (the CLI resolves that against its own cwd, not known here).
+/** A raw record for one pid (Windows cwd lookup); the caller verifies it. */
+export async function readPresenceRecordAt(pid, configDir) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  return readPresenceRecord(pid, configDir);
+}
+
 async function readPresenceRecord(pid, configDir, readFile = readPresenceFile) {
   const dir = configDir || path.join(os.homedir(), '.claude');
   if (!path.isAbsolute(dir)) return null;

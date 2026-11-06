@@ -723,8 +723,8 @@ export function openProjectWindow(projectPath, opts = {}) {
     minWidth: 900,
     minHeight: 600,
     title: `${folderName} | Dobius+`,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 12, y: 12 },
+    // macOS draws traffic lights over the app; Windows keeps its own title bar.
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 12, y: 12 } } : { autoHideMenuBar: true }),
     backgroundColor: '#0D1117',
     acceptFirstMouse: true,
     webPreferences: {
@@ -794,8 +794,8 @@ function createTornOffWindow(projectPath, tabId, tabLabel, savedBounds = {}, res
     minWidth: 600,
     minHeight: 400,
     title,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 12, y: 12 },
+    // macOS draws traffic lights over the app; Windows keeps its own title bar.
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 12, y: 12 } } : { autoHideMenuBar: true }),
     backgroundColor: '#0D1117',
     acceptFirstMouse: true,
     webPreferences: {
@@ -899,8 +899,8 @@ export function openVisualWindow(projectPath) {
     minWidth: 431,
     minHeight: 560,
     title: `Visual — ${folderName}`,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 12, y: 12 },
+    // macOS draws traffic lights over the app; Windows keeps its own title bar.
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 12, y: 12 } } : { autoHideMenuBar: true }),
     backgroundColor: '#0D1117',
     acceptFirstMouse: true,
     webPreferences: {

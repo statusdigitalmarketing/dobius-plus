@@ -15,6 +15,7 @@
 import { stripTerminalReplies } from './terminal-reply.js';
 import { parseSelectorFromScreen } from './selector-parser.js';
 import { shQuote } from '../shared/sh-quote.js';
+import { isAbsPath } from '../shared/platform.js';
 
 // Mouse reports (X10, SGR, urxvt) are what a pointer over a fullscreen
 // Claude sends; they are not someone typing. Neither are the terminal's
@@ -103,7 +104,7 @@ export function validateOpenTabBody(body) {
     return { error: 'requestId must be 1-128 characters: letters, digits, . _ : - (starting with a letter or digit)' };
   }
   if (typeof projectPath !== 'string' || !projectPath) return { error: 'projectPath must be a non-empty string' };
-  if (!projectPath.startsWith('/')) return { error: 'projectPath must be an absolute path' };
+  if (!isAbsPath(projectPath)) return { error: 'projectPath must be an absolute path' };
   if (projectPath.length > MAX_PROJECT_PATH || /[\x00-\x1f\x7f]/.test(projectPath)) {
     return { error: 'projectPath is too long or contains control characters' };
   }

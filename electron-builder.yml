@@ -28,6 +28,24 @@ mac:
   entitlementsInherit: build/entitlements.mac.plist
   notarize: true
   artifactName: ${name}-${version}-${arch}-mac.${ext}
+# Windows (first build 2026-11-06): a per-user one-click installer, no admin
+# prompt, with Start menu and desktop shortcuts. Built on a Windows machine
+# (GitHub Actions, .github/workflows/windows.yml): node-gyp cannot cross-compile
+# node-pty from macOS. Unsigned for now, so SmartScreen shows "More info, Run
+# anyway" until a Windows code-signing certificate is added.
+win:
+  target:
+    - target: nsis
+      arch: x64
+  icon: build/icon.png
+  artifactName: Dobius-Plus-Setup-${version}.${ext}
+nsis:
+  oneClick: true
+  perMachine: false
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: "Dobius+"
+  artifactName: Dobius-Plus-Setup-${version}.${ext}
 dmg:
   title: "Dobius+"
   artifactName: ${name}-${version}.${ext}

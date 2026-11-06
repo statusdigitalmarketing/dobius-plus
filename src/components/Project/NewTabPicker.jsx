@@ -5,6 +5,7 @@ import {
   buildPickerProjects, countHiddenProjects, toggleHiddenProject, pickerShortcutIndex, normalizeNewTabTool,
 } from '../../../shared/new-tab.js';
 import Kbd from '../shared/Kbd';
+import { isWindows } from '../../../shared/platform.js';
 
 // The footer switch: what every new tab starts. It writes settings.newTabTool,
 // which main reads at each spawn, so the choice sticks for Cmd+T, the + and
@@ -148,7 +149,7 @@ export default function NewTabPicker({ projectPath }) {
       e.preventDefault(); setHighlight(rows.length ? (active - 1 + rows.length) % rows.length : 0);
     } else if (e.key === 'Enter' && e.target === inputRef.current) {
       e.preventDefault(); choose(rows[active]);
-    } else if (e.key === 'Backspace' && e.metaKey && rows[active] && !rows[active].isCurrent) {
+    } else if (e.key === 'Backspace' && (isWindows() ? e.ctrlKey : e.metaKey) && rows[active] && !rows[active].isCurrent) {
       e.preventDefault(); toggleHidden(rows[active]);
     } else if (e.key === 'Escape') {
       e.preventDefault(); close();

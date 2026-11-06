@@ -68,7 +68,7 @@ export async function resolveSessionForTab(tabId) {
     sessionProject = best?.projectPath || null;
   }
   if (!sessionId) return null;
-  return { sessionId, sessionProject, pid: info.pid, startedAt: info.startedAt ?? null };
+  return { sessionId, sessionProject, pid: info.pid, startedAt: info.startedAt ?? null, startFt: info.startFt ?? null };
 }
 
 /**

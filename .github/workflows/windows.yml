@@ -1,0 +1,73 @@
+# Builds the Windows installer on a real Windows machine and runs the packaged
+# app through scripts/windows-smoke.mjs. node-gyp cannot cross-compile node-pty
+# from macOS, so the Windows build lives here.
+name: windows
+
+on:
+  push:
+    branches: [feat/windows]
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Unit tests (Windows port)
+        run: node --import ./electron/__tests__/register.mjs --test electron/__tests__/windows-port.test.mjs electron/__tests__/osc-only.test.mjs
+
+      # node-pty ships N-API Windows prebuilds that load under Electron as is;
+      # only better-sqlite3 needs Electron's build, fetched prebuilt so nothing
+      # is compiled (electron-builder's rebuild would compile node-pty).
+      - name: Electron build of better-sqlite3
+        shell: pwsh
+        run: |
+          $ev = node -p "require('./node_modules/electron/package.json').version"
+          Push-Location node_modules/better-sqlite3
+          npx prebuild-install --runtime electron --target $ev --arch x64 --platform win32
+          Pop-Location
+
+      - name: Build installer
+        run: npm run electron:build:win -- --publish never -c.npmRebuild=false
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Smoke test the packaged app
+        run: node scripts/windows-smoke.mjs
+
+      - name: Real Claude Code session record on Windows (diagnostic)
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          node scripts/windows-claude-probe.mjs
+
+      - name: Upload installer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            dist-electron/*.exe
+            dist-electron/latest.yml
+            dist-electron/*.blockmap
+          if-no-files-found: warn
+
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-out
+          path: smoke-out/
+          if-no-files-found: warn

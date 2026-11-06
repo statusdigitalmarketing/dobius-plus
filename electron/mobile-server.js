@@ -47,6 +47,7 @@ import { estimateContextForTabId } from './tab-context.js';
 import { getMagicDNSName, certPathsFor, hasCertFor, getTailnetHosts } from './tailscale.js';
 import { transcribeAudio, transcribeAvailable } from './voice-transcribe.js';
 import { getVapidPublicKey, subscribePush, sendPush, hasPushSubscribers } from './push.js';
+import { isAbsPath } from '../shared/platform.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -616,7 +617,7 @@ async function isKnownProjectPath(pth) {
 // Bounded: projectFilter early-stops at the first match. includeExec casts the
 // widest net so any Codex activity in that dir counts.
 async function isKnownCodexProjectPath(pth) {
-  if (typeof pth !== 'string' || !pth.startsWith('/')) return false;
+  if (typeof pth !== 'string' || !isAbsPath(pth)) return false;
   try {
     const hits = await listCodexSessions({ limit: 1, includeExec: true, projectFilter: pth });
     return hits.length > 0;
@@ -626,7 +627,7 @@ async function isKnownCodexProjectPath(pth) {
 async function resolveCreateCwdCodex(cwd) {
   const v = typeof cwd === 'string' ? cwd : '';
   if (HOME_SENTINELS.has(v)) return os.homedir();
-  if (v.startsWith('/') && (await isKnownProjectPath(v) || await isKnownCodexProjectPath(v))) return v;
+  if (isAbsPath(v) && (await isKnownProjectPath(v) || await isKnownCodexProjectPath(v))) return v;
   return null;
 }
 
@@ -638,7 +639,7 @@ const HOME_SENTINELS = new Set(['', 'main', 'mobile']);
 async function resolveCreateCwd(cwd) {
   const v = typeof cwd === 'string' ? cwd : '';
   if (HOME_SENTINELS.has(v)) return os.homedir();
-  if (v.startsWith('/') && (await isKnownProjectPath(v))) return v;
+  if (isAbsPath(v) && (await isKnownProjectPath(v))) return v;
   return null;
 }
 

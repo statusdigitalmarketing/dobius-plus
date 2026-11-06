@@ -3,6 +3,7 @@ import { useStore } from '../../store/store';
 import { useTerminal, takeAdopting } from '../../hooks/useTerminal';
 import '@xterm/xterm/css/xterm.css';
 import { shellEscape, arrayBufferToBase64 } from '../../lib/paste-paths';
+import { isWindows } from '../../../shared/platform.js';
 
 
 function isChatTab(id) {
@@ -88,7 +89,8 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
   // Cmd+F to toggle search
   useEffect(() => {
     const handler = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+      // Windows: Ctrl+F belongs to the terminal, so search is Ctrl+Shift+F.
+      if (isWindows() ? (e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') : ((e.metaKey || e.ctrlKey) && e.key === 'f')) {
         if (isChatTab(id)) return;
         e.preventDefault();
         setSearchVisible((v) => {

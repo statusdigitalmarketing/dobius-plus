@@ -7,6 +7,8 @@ import { windowFocused } from '../lib/window-focus';
 import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.js';
 import { NEW_TAB_TOOLS, resumeNeedsNewTab } from '../../shared/new-tab.js';
 import { setPendingLaunch, clearPendingLaunches } from '../lib/pending-launch';
+import { isAbsPath, isWindows } from '../../shared/platform.js';
+import { cdThen, toolCommand } from '../../shared/sh-quote.js';
 
 
 // Drop any grid entries whose tab is no longer present. Returns null when the
@@ -839,9 +841,9 @@ export const useStore = create((set, get) => ({
     const sameProject = projectPath && projectPath === get().currentProjectPath;
     let cmd;
     if (sameProject || !projectPath) {
-      cmd = `codex resume ${sessionId}`;
-    } else if (projectPath.startsWith('/') && !/[\x00-\x1F\x7F]/.test(projectPath)) {
-      cmd = `cd '${projectPath.replace(/'/g, "'\\''")}' && codex resume ${sessionId}`;
+      cmd = toolCommand('codex', `resume ${sessionId}`, isWindows() ? 'win32' : 'posix');
+    } else if (isAbsPath(projectPath) && !/[\x00-\x1F\x7F]/.test(projectPath)) {
+      cmd = cdThen(projectPath, toolCommand('codex', `resume ${sessionId}`, isWindows() ? 'win32' : 'posix'), isWindows() ? 'win32' : 'posix');
     } else {
       return;
     }
@@ -905,14 +907,13 @@ export const useStore = create((set, get) => ({
     const sameProject = projectPath && projectPath === get().currentProjectPath;
     let cmd;
     if (sameProject) {
-      cmd = `claude --resume ${sessionId}`;
-    } else if (projectPath && projectPath.startsWith('/') && !/[\x00-\x1F\x7F]/.test(projectPath)) {
-      const safeProject = projectPath.replace(/'/g, "'\\''");
-      cmd = `cd '${safeProject}' && claude --resume ${sessionId}`;
+      cmd = toolCommand('claude', `--resume ${sessionId}`, isWindows() ? 'win32' : 'posix');
+    } else if (projectPath && isAbsPath(projectPath) && !/[\x00-\x1F\x7F]/.test(projectPath)) {
+      cmd = cdThen(projectPath, toolCommand('claude', `--resume ${sessionId}`, isWindows() ? 'win32' : 'posix'), isWindows() ? 'win32' : 'posix');
     } else if (!projectPath) {
       // Legacy bare-sessionId path: stay in current tab's cwd. Not ideal but
       // preserves backward compat for callers that haven't been updated.
-      cmd = `claude --resume ${sessionId}`;
+      cmd = toolCommand('claude', `--resume ${sessionId}`, isWindows() ? 'win32' : 'posix');
     } else {
       console.warn(`[resume] aborting, invalid project path for session ${sessionId}`);
       if (typeof window !== 'undefined') {

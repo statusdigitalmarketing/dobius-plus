@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
 import { motion, AnimatePresence } from 'framer-motion';
 import { modelLabel } from '../../lib/model-label';
+import { isAbsPath, isWindows } from '../../../shared/platform.js';
+import { shellArg, toolCommand, cmdSafe } from '../../../shared/sh-quote.js';
 
 const ALLOWED_MODELS = ['claude-opus-4-6', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'];
 
@@ -119,15 +121,20 @@ export default function Agents() {
       }
     }
     const promptPath = await window.electronAPI.agentsWriteTempPrompt(prompt);
-    if (!promptPath || !promptPath.startsWith('/') || /[\n\r]/.test(promptPath)) return;
+    if (!promptPath || !isAbsPath(promptPath) || /[\n\r]/.test(promptPath)) return;
+    // Windows: a .cmd launcher would re-read the path through cmd.exe.
+    if (isWindows() && !cmdSafe(promptPath)) {
+      window.alert('Cannot start the agent: the temp folder path has a character Windows would treat as a command (& | < > ^ % !). Set TEMP to a plain folder and restart Dobius+.');
+      return;
+    }
     const tab = addTab(currentProjectPath);
     renameTab(tab.id, agent.name);
     registerRunningAgent(agent.id, tab.id);
     setActiveView('terminal');
     setTimeout(() => {
       const modelFlag = agent.model && ALLOWED_MODELS.includes(agent.model) ? ` --model ${agent.model}` : '';
-      const safePath = promptPath.replace(/'/g, "'\\''");
-      const cmd = `claude --system-prompt-file '${safePath}'${modelFlag}\r`;
+      const plat = isWindows() ? 'win32' : 'posix';
+      const cmd = `${toolCommand('claude', `--system-prompt-file ${shellArg(promptPath, plat)}${modelFlag}`, plat)}\r`;
       window.electronAPI.terminalWrite(tab.id, cmd);
     }, 500);
   }, [addTab, renameTab, setActiveView, currentProjectPath, registerRunningAgent, agentMemories]);

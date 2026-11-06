@@ -20,6 +20,23 @@ import { getSessionTabMap } from './config-manager.js';
 import { loginShellSpawn, ptyProgramName } from '../shared/new-tab.js';
 import { parseCodexCommand } from './codex-sessions.js';
 import { sharedKeyEnv, SHARED_KEYS } from './claude-settings-env.js';
+import { sameFiletime, winProcessTable, shellPrograms, descendants, winClaudeCommand, winCodexCommand, winExeBase } from './win-proc.js';
+import { readPresenceRecordAt } from './claude-presence.js';
+
+const IS_WIN = process.platform === 'win32';
+
+// The shell a Windows tab runs: PowerShell 7 (pwsh) when installed, else the
+// Windows PowerShell every Windows has. $SHELL is ignored on Windows (Git
+// Bash sets it to a path Windows cannot spawn).
+function windowsShell() {
+  for (const dir of String(process.env.Path || process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    const p = path.join(dir, 'pwsh.exe');
+    try { if (fs.statSync(p).isFile()) return p; } catch { /* not here */ }
+  }
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  return path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
 
 const terminals = new Map();
 // getTerminalClaudeInfo { unique }: a shell with more children answers nothing.
@@ -55,6 +72,7 @@ export function addInputObserver(fn) {
  * executable afterward.
  */
 export function ensureSpawnHelperExecutable() {
+  if (IS_WIN) return; // spawn-helper is the macOS/Linux launcher; Windows uses ConPTY
   const candidates = [
     process.resourcesPath
       ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'node-pty', 'build', 'Release', 'spawn-helper')
@@ -250,15 +268,20 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   }
   // Per-instance helper commands (`dobius-tab`), installed by voice-bridge.
   extraPaths.push(tabBinDir());
-  const fullPath = [...extraPaths, process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'].join(':');
+  const pathKey = IS_WIN ? (Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'Path') : 'PATH';
+  const fullPath = IS_WIN
+    ? [...extraPaths.filter((p) => !p.startsWith('/')), process.env[pathKey] || ''].filter(Boolean).join(path.delimiter)
+    : [...extraPaths, process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'].join(':');
 
   // These two are consumed here (into PATH), not passed as literal env vars.
   const { DOBIUS_CLI_DIR: _ignored, DOBIUS_GWS_SHIM_DIR: _ignored2, ...termEnv } = accountEnv;
 
-  const shell = process.env.SHELL || '/bin/zsh';
+  const shell = IS_WIN ? windowsShell() : (process.env.SHELL || '/bin/zsh');
+  const baseEnv = { ...process.env };
+  if (IS_WIN) for (const k of Object.keys(baseEnv)) { if (k.toUpperCase() === 'PATH') delete baseEnv[k]; }
   const spawnEnv = {
-    ...process.env,
-    PATH: fullPath,
+    ...baseEnv,
+    [pathKey]: fullPath,
     TERM: 'xterm-256color',
     COLORTERM: 'truecolor',
     DOBIUS_CWD: safeCwd,
@@ -296,6 +319,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   const spawnCols = (Number.isInteger(prevCols) && prevCols > 0) ? prevCols : 80;
   const spawnRows = (Number.isInteger(prevRows) && prevRows > 0) ? prevRows : 24;
   const start = loginShellSpawn(shell, startCommand, resume);
+  const spawnedAt = Date.now();
   const term = pty.spawn(shell, start.args, {
     name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: { ...spawnEnv, ...start.env },
   });
@@ -410,6 +434,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     // id re-records them; tear-off and claim keep them, because the PTY and its
     // environment are unchanged by either.
     accountBinding,
+    // Taken just before pty.spawn: on Windows the table's row for the shell
+    // pid must have started no earlier, or the pid belongs to an older process.
+    spawnedAt,
     cwd: safeCwd,
     // Track the requested project path (pre-fallback) for exact-match lookup
     // in getTerminalsForProject. Carson's audit #2 (CRITICAL): the old
@@ -552,6 +579,12 @@ export function terminalHasDesktopAttached(id) {
 export async function getTerminalProcess(id) {
   const entry = terminals.get(id);
   if (!entry) return null;
+  if (IS_WIN) {
+    const rows = await winRowsFor(entry, { fresh: true });
+    if (!rows) return 'unknown'; // a caller about to type must treat this as busy
+    const prog = descendants(rows, entry.pty.pid).find((r) => !['conhost', 'openconsole'].includes(winExeBase(r.name)));
+    return prog ? (winExeBase(prog.name) || 'unknown') : null;
+  }
   try {
     const pid = entry.pty.pid;
     if (typeof pid !== 'number' || pid <= 0) return null;
@@ -595,6 +628,14 @@ const IDLE_SHELL_PROCS = /^-?(zsh|bash|sh|fish|dash|ksh|tcsh)$|^gitstatusd/;
 export async function terminalBusy(id) {
   const root = terminals.get(id)?.pty?.pid;
   if (typeof root !== 'number' || root <= 0) return 'unknown';
+  if (IS_WIN) {
+    const rows = await winRowsFor(terminals.get(id), { fresh: true });
+    if (!rows) return 'unknown';
+    // Anything under the shell but a console host is busy, a nested cmd or
+    // PowerShell included: a typed resume does not belong in either.
+    const busy = descendants(rows, root).find((r) => !['conhost', 'openconsole'].includes(winExeBase(r.name)));
+    return busy ? (winExeBase(busy.name) || 'unknown') : null;
+  }
   let stdout;
   try {
     ({ stdout } = await execFileP('/bin/ps', ['-axo', 'pid=,ppid=,comm='], { timeout: 2000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
@@ -660,6 +701,11 @@ export async function getTerminalProcessArgv(id) {
 export async function terminalRunsClaude(id) {
   const root = terminals.get(id)?.pty?.pid;
   if (typeof root !== 'number' || root <= 0) return false;
+  if (IS_WIN) {
+    const rows = await winRowsFor(terminals.get(id), { fresh: true });
+    if (!rows) return true; // unknown: keep the wait rather than end it on a guess
+    return descendants(rows, root).some((r) => winClaudeCommand(r.command));
+  }
   let stdout;
   try {
     ({ stdout } = await execFileP('/bin/ps', ['-axo', 'pid=,ppid=,command='], { timeout: 2000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
@@ -698,6 +744,7 @@ export function claudeInTree(psText, root) {
 export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;
+  if (IS_WIN) return winClaudeInfo(entry, unique);
   try {
     const pid = entry.pty.pid;
     if (typeof pid !== 'number' || pid <= 0) return null;
@@ -765,6 +812,20 @@ export async function getTerminalCodexInfo(id) {
   if (!entry) return null;
   const pid = entry.pty.pid;
   if (typeof pid !== 'number' || pid <= 0) return null;
+  if (IS_WIN) {
+    const rows = await winRowsFor(entry);
+    if (!rows) return null;
+    for (const r of shellPrograms(rows, pid).slice(0, MAX_UNIQUE_CHILDREN)) {
+      const parsed = winCodexCommand(r.command, parseCodexCommand);
+      if (!parsed) continue;
+      // ponytail: Windows has no cheap read of another process's cwd, so a
+      // Codex is taken to work in the tab's folder (or its --cd).
+      const base = entry.cwd || null;
+      const cwd = parsed.cd ? (path.isAbsolute(parsed.cd) ? path.resolve(parsed.cd) : (base ? path.resolve(base, parsed.cd) : null)) : base;
+      return { pid: r.pid, startedAt: r.startedAt, sessionId: parsed.sessionId, cwd };
+    }
+    return null;
+  }
   let pids = [];
   try {
     const { stdout } = await execFileP('/usr/bin/pgrep', ['-P', String(pid)], { timeout: 1000, encoding: 'utf8' });
@@ -1019,6 +1080,10 @@ export function bindReservationTab(sessionId, tabId) {
 export async function getTerminalCwd(id) {
   const entry = terminals.get(id);
   if (!entry) return null;
+  // ponytail: on Windows the shell's live folder cannot be read from outside
+  // it, so this is the folder the tab started in. A Claude running in the tab
+  // reports its own folder through its session record (getProcessCwd).
+  if (IS_WIN) return entry.cwd || null;
   return getProcessCwd(entry.pty.pid);
 }
 
@@ -1026,7 +1091,8 @@ export async function getTerminalCwd(id) {
  * Working directory of one process (the shell, or a claude running under it:
  * `(cd wt && exec claude)` leaves the shell elsewhere).
  */
-export async function getProcessCwd(pid) {
+export async function getProcessCwd(pid, startFt = null) {
+  if (IS_WIN) return winProcessCwd(pid, startFt);
   try {
     if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return null;
     // -Fn prints a "p<pid>" line then an "n<cwd>" line. Parse the n-prefixed one.
@@ -1249,4 +1315,80 @@ export function terminalRows(id) {
 // "same shell" from "the tab id now names a respawned PTY".
 export function terminalInstance(id) {
   return terminals.get(id)?.pty || null;
+}
+
+// ---------------------------------------------------------------------------
+// Windows (see win-proc.js). Same answers as the ps/pgrep/lsof paths above.
+// ---------------------------------------------------------------------------
+
+// A table that describes THIS entry's shell: it has the shell's pid with a
+// creation time no earlier than the spawn (taken just before pty.spawn, on the
+// same clock, so no slack: Codex showed a second of it admitted the previous
+// owner of a reused pid). A cached table that fails is read again once, fresh;
+// still wrong means no answer.
+async function winRowsFor(entry, { fresh = false } = {}) {
+  const pid = entry?.pty?.pid;
+  if (typeof pid !== 'number' || pid <= 0) return null;
+  // The first read that finds the shell pins its exact creation time; every
+  // later read must show that same process. A pid seen to start after the
+  // spawn but long after it is some later process (the shell can exit before
+  // node-pty reports it, and Windows can then give its pid away: Codex).
+  const ok = (rows) => {
+    const root = rows?.find((r) => r.pid === pid);
+    if (!root || root.startFt == null || !Number.isFinite(root.startedAt)) return false;
+    if (entry.shellStartFt) return sameFiletime(root.startFt, entry.shellStartFt);
+    if (!Number.isFinite(entry.spawnedAt) || root.startedAt < entry.spawnedAt || root.startedAt > entry.spawnedAt + 10_000) return false;
+    entry.shellStartFt = String(root.startFt);
+    return true;
+  };
+  let rows = await winProcessTable({ fresh });
+  if (!ok(rows) && !fresh) rows = await winProcessTable({ fresh: true });
+  return ok(rows) ? rows : null;
+}
+
+async function winClaudeInfo(entry, unique) {
+  const pid = entry.pty.pid;
+  if (typeof pid !== 'number' || pid <= 0) return null;
+  const rows = await winRowsFor(entry);
+  if (!rows) return null;
+  const progs = shellPrograms(rows, pid);
+  if (unique && progs.length > MAX_UNIQUE_CHILDREN) return null;
+  let found = null;
+  for (const r of progs) {
+    const c = winClaudeCommand(r.command);
+    if (!c) {
+      if (unique && /claude/i.test(r.command || '')) return null;
+      continue;
+    }
+    const info = {
+      sessionId: c.sessionId,
+      startedAt: r.startedAt,
+      startFt: r.startFt === null ? null : String(r.startFt),
+      pid: r.pid,
+      soleChild: progs.length === 1,
+    };
+    if (!unique) return info;
+    if (found) return null;
+    found = info;
+  }
+  return found;
+}
+
+// Claude's own folder, from its session record (<configDir>/sessions/<pid>.json).
+// The record must match the very process the caller resolved: its pid AND its
+// creation time (startFt), which the caller read together. Without startFt
+// there is no proof the pid still names that process, so there is no answer
+// (Codex, two rounds: a reused pid, read through a second table query or a
+// tab shell's pid, answered with another session's folder). A tab's shell
+// folder comes from getTerminalCwd, never from here.
+async function winProcessCwd(pid, startFt) {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return null;
+  if (startFt == null) return null;
+  const dirs = new Set([null]);
+  for (const entry of terminals.values()) if (entry.accountBinding?.claudeConfigDir) dirs.add(entry.accountBinding.claudeConfigDir);
+  for (const dir of dirs) {
+    const rec = await readPresenceRecordAt(pid, dir);
+    if (rec && rec.pid === pid && sameFiletime(rec.procStartFt, startFt) && typeof rec.cwd === 'string' && path.isAbsolute(rec.cwd)) return rec.cwd;
+  }
+  return null;
 }

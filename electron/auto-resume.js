@@ -40,6 +40,8 @@ import { BrowserWindow } from 'electron';
 import { projectPathFromTabId } from './tab-id-util.js';
 import { logLine } from './error-log.js';
 import { dockingTabs } from './docking-state.js';
+import { isAbsPath } from '../shared/platform.js';
+import { cdThen, toolCommand } from '../shared/sh-quote.js';
 
 // Per-tab queue entry: tabId -> { sessionId, projectPath, timer }
 // `timer` is the setTimeout handle so we can cancel before it fires.
@@ -86,7 +88,7 @@ function broadcastStatus(tabId, status) {
  * smell wrong. Matches the shape the renderer's store.resumeSession uses.
  */
 function buildResumeCommand(projectPath, sessionId, tabId) {
-  if (!projectPath || !projectPath.startsWith('/')) return null;
+  if (!projectPath || !isAbsPath(projectPath)) return null;
   if (/[\x00-\x1F\x7F]/.test(projectPath)) return null;
   if (!sessionId || !/^[a-zA-Z0-9][\w-]*$/.test(sessionId)) return null;
   // Same-project resume: bare `claude --resume`, no cd. The restored tab's
@@ -99,10 +101,9 @@ function buildResumeCommand(projectPath, sessionId, tabId) {
   // same-project bare-resume shortcut (Codex).
   const tabProject = projectPathFromTabId(tabId);
   if (tabProject && tabProject === projectPath) {
-    return `claude --resume ${sessionId}\r`;
+    return `${toolCommand('claude', `--resume ${sessionId}`, process.platform)}\r`;
   }
-  const safeProject = projectPath.replace(/'/g, "'\\''");
-  return `cd '${safeProject}' && claude --resume ${sessionId}\r`;
+  return `${cdThen(projectPath, toolCommand('claude', `--resume ${sessionId}`, process.platform), process.platform)}\r`;
 }
 
 /**
@@ -181,7 +182,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     // cd's to A first), and that link legitimately has tabId=term-B-N with
     // projectPath=A. The freshness gate below is the real staleness guard.
     // Codex v1.0.35 r2 P2.
-    if (!/^term-\/.+-\d+$/.test(entry.tabId)) { skippedStale += 1; continue; }
+    if (!/^term-(\/|[A-Za-z]:\\).+-\d+$/.test(entry.tabId)) { skippedStale += 1; continue; }
     const ranAt = typeof entry.lastRunningAt === 'number' ? entry.lastRunningAt : 0;
     // Fresh if the session was running near the last CLEAN quit, OR near
     // "now" (covers a crash: lastQuitAt is stale from an older clean quit,

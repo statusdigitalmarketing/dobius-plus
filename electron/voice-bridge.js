@@ -685,6 +685,8 @@ export function startVoiceBridge() {
   // The isolated ship-test instance must not rewrite ~/.local/bin: those
   // scripts bake in THIS instance's token path, so the live app's dobius-*
   // commands would 401 until it next restarted.
+  // Windows: these helpers are sh scripts; not installed there yet.
+  if (process.platform === 'win32') return;
   if (!process.env.DOBIUS_USERDATA_DIR) installCliScript();
   installTabCli();
 }

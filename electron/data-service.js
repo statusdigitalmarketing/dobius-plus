@@ -11,6 +11,7 @@ import {
 import { listCodexSessions, codexTranscript } from './codex-sessions.js';
 import { presenceOf } from './claude-presence.js';
 import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects, getAllProjectsWithTabs, getSessionTabMap, getSessionTabNames } from './config-manager.js';
+import { isAbsPath, isInsidePath } from '../shared/platform.js';
 
 /**
  * Load session history from ~/.claude/history.jsonl
@@ -101,7 +102,7 @@ async function transcriptFacts(filePath, st) {
   return facts;
 }
 
-const isOwnCwd = (c, dirName) => typeof c === 'string' && c.startsWith('/') && c.length <= 4096
+const isOwnCwd = (c, dirName) => typeof c === 'string' && isAbsPath(c) && c.length <= 4096
   && !/[\x00-\x1F\x7F]/.test(c) && claudeDirNames(c).includes(dirName);
 
 // The NEWEST top-level cwd naming this dir in the file's first 8MB, for the rare
@@ -942,6 +943,10 @@ export async function resolveFreshSessionsForTabs(
   }
   // Held from here on, so timing cannot hand them to a tab with no record.
   for (const [id, sid] of recordIds) { claimedIds.add(sid); namedByTab.set(id, sid); }
+  // Windows: the tab's folder here is where it STARTED (a shell's live folder
+  // cannot be read from outside), so timing a transcript against it could link
+  // a conversation from a folder the shell has left (Codex). Record or argv only.
+  if (process.platform === 'win32') return out;
   for (const t of freshTabs) {
     if (recordIds.has(t.id)) continue;
     if (isAborted?.()) return out;
@@ -2602,7 +2607,7 @@ export async function listProjects() {
             // Check if this is a subdirectory of an existing project — merge into parent
             let mergedIntoParent = false;
             for (const [key, existing] of projectMap) {
-              if (reconstructed.startsWith(key + '/')) {
+              if (reconstructed !== key && isInsidePath(reconstructed, key)) {
                 existing.sessionCount += sessionCount;
                 if (latestTimestamp > existing.latestTimestamp) {
                   existing.latestTimestamp = latestTimestamp;
@@ -2864,7 +2869,7 @@ export async function searchTranscripts(query) {
       const buffered = []; // hold matches until end-of-file to fill in sessionTimestamp fallback
       await streamJsonl(filePath, (entry) => {
         const c = entry?.cwd;
-        if (typeof c === 'string' && c.startsWith('/') && c.length <= 4096 && !/[\x00-\x1F\x7F]/.test(c)
+        if (typeof c === 'string' && isAbsPath(c) && c.length <= 4096 && !/[\x00-\x1F\x7F]/.test(c)
           && c !== sessionCwd && claudeDirNames(c).includes(dirName)) sessionCwd = c;
         if (capHit) return;
         if (matches.length + buffered.length >= 200) { capHit = true; return; }

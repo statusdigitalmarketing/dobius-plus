@@ -135,6 +135,15 @@ import { recoverWindowLists } from './update-window-recovery.js';
 import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError } from './claude-settings-env.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages, getVisualProjectPath } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
+import { isAbsPath, isInsidePath } from '../shared/platform.js';
+
+// Windows build (2026-11-06): the Claude/Codex status hooks, the model status
+// line and the dobius-* helper commands are shell scripts that need macOS tools
+// (printf to a tty, plutil, curl, /dev/fd), and account profiles are shared by
+// symlink. None of them are installed or upgraded on Windows yet; Windows tabs
+// still get status from terminal output.
+const IS_WIN = process.platform === 'win32';
+const WIN_UNSUPPORTED = { error: 'Not available on Windows yet.' };
 
 // --- Today on the phone and Today nudges ---------------------------------
 // Something about Today changed (a snooze, a card marked done): open phone screens and desktop
@@ -328,8 +337,8 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     title: 'Dobius+ Launcher',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 12, y: 12 },
+    // macOS draws traffic lights over the app; Windows keeps its own title bar.
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 12, y: 12 } } : { autoHideMenuBar: true }),
     backgroundColor: '#0D1117',
     acceptFirstMouse: true,
     webPreferences: {
@@ -883,14 +892,14 @@ function setupDataHandlers() {
     const status = terminalStatus.snapshot().live[tabId]?.status || null;
     const resolved = await resolveSessionForTab(tabId);
     // Claude's own cwd when it runs: the shell's can differ (a subshell `cd`).
-    const cwd = resolved?.pid ? await getProcessCwd(resolved.pid) : await getTerminalCwd(tabId);
+    const cwd = resolved?.pid ? await getProcessCwd(resolved.pid, resolved.startFt) : await getTerminalCwd(tabId);
     // The session and the cwd are two reads; a Claude that exited and was
     // replaced in between would pair one session with another's project.
     // Resolve again and drop the poll unless the SAME process answered both
     // times: a restart with the same `--resume` id (say, now in a worktree)
     // keeps the id, never the pid. The next poll reads fresh.
     const again = await resolveSessionForTab(tabId);
-    if (again?.sessionId !== resolved?.sessionId || again?.pid !== resolved?.pid || again?.startedAt !== resolved?.startedAt) return null;
+    if (again?.sessionId !== resolved?.sessionId || again?.pid !== resolved?.pid || again?.startedAt !== resolved?.startedAt || again?.startFt !== resolved?.startFt) return null;
     // A failed cwd read is not "still in the mapped project": with no cwd
     // there is no telling which transcript the tab is on, so wait for one.
     if (resolved && !cwd) return null;
@@ -907,7 +916,7 @@ function setupDataHandlers() {
       // whatever folder Claude's process is in now (Bryan, Asana
       // 1220098108555131: "No messages" over a live conversation).
       if (await getTranscriptSig(resolved.sessionId, cwd)) projectPath = cwd;
-      else if (!cwd.startsWith(`${projectPath}/`) && !(await getTranscriptSig(resolved.sessionId, projectPath))) projectPath = cwd;
+      else if (!isInsidePath(cwd, projectPath) && !(await getTranscriptSig(resolved.sessionId, projectPath))) projectPath = cwd;
     }
     if (!resolved || !projectPath) {
       const claudeLive = !!resolved || !!(await getTerminalClaudeInfo(tabId));
@@ -2246,6 +2255,7 @@ function setupFileHandlers() {
   });
 
   function enableClaudeHooks(opts) {
+    if (IS_WIN) return WIN_UNSUPPORTED;
     const { settings, raw, exists } = readClaudeSettings();
     if (settings === null) return { error: 'Could not parse ~/.claude/settings.json — left untouched' };
     // Refuse silent file creation: if ~/.claude/settings.json doesn't exist
@@ -2470,7 +2480,7 @@ function setupFileHandlers() {
   // having to toggle the Settings switch. Only an ALREADY-installed block is
   // touched (never a fresh opt-in), and the isolated ship-test instance never
   // writes the real ~/.claude/settings.json.
-  if (!process.env.DOBIUS_USERDATA_DIR) {
+  if (!process.env.DOBIUS_USERDATA_DIR && !IS_WIN) {
     const { settings, exists } = readClaudeSettings();
     const hooks = settings?.hooks;
     const installed = exists && settings && Object.values(hooks || {})
@@ -2808,7 +2818,7 @@ function setupFileHandlers() {
   // and persistConfigNow cannot cancel an async config write already in flight,
   // so a crash inside that sub-second window can resurrect the previous switch
   // values, which the next launch then applies to the script.
-  if (!realClaudeHomeRefusal()) {
+  if (!IS_WIN && !realClaudeHomeRefusal()) {
     const { settings, exists } = readClaudeSettings();
     if (settings && exists) {
       if (getSettings().modelUnderPrompt === undefined) {
@@ -2838,6 +2848,7 @@ function setupFileHandlers() {
   });
 
   ipcMain.handle('claudeUsage:enable', (_evt, opts) => {
+    if (IS_WIN) return WIN_UNSUPPORTED;
     const r = setStatusLinePart('usageReporting', true, opts);
     return r?.error ? r : { ok: true, installed: true };
   });
@@ -3522,7 +3533,7 @@ function setupShellHandlers() {
   });
 
   ipcMain.handle('shell:showInFinder', (_event, filePath) => {
-    if (typeof filePath === 'string' && filePath.startsWith('/')) {
+    if (typeof filePath === 'string' && isAbsPath(filePath)) {
       shell.showItemInFolder(filePath);
     }
   });
@@ -3690,7 +3701,7 @@ function setupImessageBridgeHandlers() {
 // window for a deleted / typo / sensitive path. Resolves symlinks then verifies
 // the path is an actual directory. Apple-grade audit P2. null when it is fine.
 function projectDirError(projectPath) {
-  if (typeof projectPath !== 'string' || !projectPath.startsWith('/')) {
+  if (typeof projectPath !== 'string' || !isAbsPath(projectPath)) {
     return 'projectPath must be an absolute path';
   }
   try {
@@ -4434,6 +4445,10 @@ function setupMenu() {
     { role: 'windowMenu' },
   ];
 
+  // Windows: no menu. Its Ctrl accelerators (T, W, B, G, R, N) would take keys
+  // Claude uses inside the terminal; the window handles Ctrl+Shift shortcuts
+  // itself there (shared/win-keys.js).
+  if (IS_WIN) { Menu.setApplicationMenu(null); return; }
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
@@ -4520,11 +4535,13 @@ app.whenReady().then(() => {
   // profile dir with no transcripts made every `claude --resume` answer "No
   // conversation found" while the Sessions tab kept listing those sessions
   // (Sam, 9/3). Sync on purpose: this must hold before the first PTY.
-  try { shareConfiguredProfiles(loadConfig().accounts); }
-  catch (err) { console.warn('[account-share] startup link failed:', err?.message || err); }
+  if (!IS_WIN) {
+    try { shareConfiguredProfiles(loadConfig().accounts); }
+    catch (err) { console.warn('[account-share] startup link failed:', err?.message || err); }
+  }
   // Self-heal an existing Claude Desktop MCP install: the wrapper must track
   // the CURRENT app binary across moves/updates (never creates an install).
-  healGwsMcpIfInstalled();
+  if (!IS_WIN) healGwsMcpIfInstalled();
   cleanClipboardTemp();
   setupTerminalHandlers();
   setupDataHandlers();
@@ -4716,12 +4733,12 @@ app.whenReady().then(() => {
   // a project the user opens in that window would be dropped on a crash. Codex.
   const savedProjects = Array.isArray(config.lastOpenProjects) ? config.lastOpenProjects : [];
   const toRestore = [...new Set(savedProjects.filter(
-    (p) => typeof p === 'string' && p.startsWith('/') && fs.existsSync(p),
+    (p) => typeof p === 'string' && isAbsPath(p) && fs.existsSync(p),
   ))]; // dedupe: never open two primary windows for one path. Codex
   const savedTears = Array.isArray(config.lastTearOffs) ? config.lastTearOffs : [];
   const seenTearIds = new Set();
   const tears = savedTears.filter((t) => {
-    if (!t || typeof t.projectPath !== 'string' || !t.projectPath.startsWith('/')
+    if (!t || typeof t.projectPath !== 'string' || !isAbsPath(t.projectPath)
       || !fs.existsSync(t.projectPath) || typeof t.tabId !== 'string' || !t.tabId) return false;
     if (seenTearIds.has(t.tabId)) return false; // dedupe: one window per torn tab id. Codex
     seenTearIds.add(t.tabId);
@@ -4742,7 +4759,7 @@ app.whenReady().then(() => {
   const savedExtras = Array.isArray(config.lastPrimaryWindows) ? config.lastPrimaryWindows : [];
   const seenExtraKeys = new Set();
   const extras = savedExtras.filter((e) => {
-    if (!e || typeof e.projectPath !== 'string' || !e.projectPath.startsWith('/')
+    if (!e || typeof e.projectPath !== 'string' || !isAbsPath(e.projectPath)
       || !fs.existsSync(e.projectPath) || typeof e.windowKey !== 'string'
       || !e.windowKey || e.windowKey === 'main') return false;
     if (seenExtraKeys.has(e.windowKey)) return false;
@@ -5012,6 +5029,8 @@ app.on('before-quit', (e) => {
     });
     return;
   }
+
+  if (IS_WIN && !quitConfirmed) quitConfirmed = true;
 
   if (quitConfirmed && !savedBeforeQuit) {
     // Phase 2: second Cmd+Q confirmed

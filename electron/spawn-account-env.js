@@ -87,11 +87,14 @@ export function resolveAccountEnvForCwd(cwd, { claudeAccountPin } = {}) {
   // undefined = no pin; null = pinned to Default.
   const account = pinned !== undefined ? pinned : resolveTerminalAccount(claudeProjectAccount, activeAccount);
 
-  if (account?.type === 'claude' && account.claudeJsonPath) {
+  // Windows: profiles are shared by symlink, which needs admin or Developer
+  // Mode there, so they are not linked (and accounts are not offered) yet.
+  const IS_WIN = process.platform === 'win32';
+  if (!IS_WIN && account?.type === 'claude' && account.claudeJsonPath) {
     try { shareProfile(path.dirname(expandTilde(account.claudeJsonPath))); }
     catch (err) { console.warn('[account-share] spawn-time link failed:', err?.message || err); }
   }
-  if (codexAccount?.type === 'codex' && codexAccount.authMode === 'chatgpt' && codexAccount.codexHome) {
+  if (!IS_WIN && codexAccount?.type === 'codex' && codexAccount.authMode === 'chatgpt' && codexAccount.codexHome) {
     try { shareCodexProfile(expandTilde(codexAccount.codexHome)); }
     catch (err) { console.warn('[codex-share] spawn-time link failed:', err?.message || err); }
   }
@@ -113,7 +116,10 @@ export function resolveAccountEnvForCwd(cwd, { claudeAccountPin } = {}) {
   // undefined is createTerminal's deletion signal.
   if (typeof accountEnv.CODEX_HOME !== 'string') accountEnv.CODEX_HOME = undefined;
 
-  const shim = getGwsShim();
+  // ponytail: the per-account `gws` shim is a sh wrapper, so Windows terminals
+  // run the user's own gws unchanged. Upgrade path: a gws.cmd wrapper plus a
+  // Windows-aware real-gws lookup in gws-shim.mjs.
+  const shim = IS_WIN ? { shimDir: null } : getGwsShim();
   if (shim.shimDir) {
     accountEnv.DOBIUS_GWS_SHIM_DIR = shim.shimDir;
     if (shim.realGws) accountEnv.DOBIUS_REAL_GWS = shim.realGws;

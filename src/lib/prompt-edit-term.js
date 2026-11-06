@@ -1,3 +1,4 @@
+import { winTerminalKey } from '../../shared/win-keys.js';
 // Wires the prompt-edit model (src/lib/prompt-edit.js) to a live xterm.
 // Only Claude Code's default renderer needs this: its fullscreen renderer
 // takes the mouse itself (alternate buffer + mouse tracking), and does all of
@@ -21,6 +22,7 @@ const PASTE_WAIT_MS = 15000; // longest a pending image paste holds typing back
 const AFTER_ENTER_MS = 1000; // a paste waits this long after an Enter for the screen to catch up
 const QUEUED_KEY_GAP_MS = 20; // between inputs that waited in the queue
 const IS_MAC = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
+const IS_WINDOWS = typeof navigator !== 'undefined' && /^Win/.test(navigator.platform);
 const MID_EDIT = Symbol('selection made while an edit was running');
 
 // The live page at the bottom of the buffer, where the cursor is (cursorY
@@ -270,6 +272,20 @@ export function attachPromptEditing(term, send, held = () => {}) {
   };
 
   term.attachCustomKeyEventHandler((e) => {
+    // Windows (shared/win-keys.js): Ctrl+C copies a selection (and interrupts
+    // without one), Ctrl+V pastes through the browser's own paste event, and
+    // Ctrl+Shift app shortcuts are left to the window instead of typed.
+    if (IS_WINDOWS) {
+      const act = winTerminalKey(e, term.hasSelection());
+      if (act === 'copy') {
+        e.preventDefault();
+        const text = term.getSelection();
+        if (text) navigator.clipboard?.writeText(text).catch(() => {});
+        term.clearSelection();
+        return false;
+      }
+      return act === null;
+    }
     if (!IS_MAC) return true;
     // Only in Claude's prompt: elsewhere (vim, less, even a shell's vi mode)
     // Ctrl+A/E/U are commands.

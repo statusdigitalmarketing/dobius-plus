@@ -35,7 +35,33 @@ const GWS_CLIENT_SECRET = path.join(os.homedir(), '.config', 'gws', 'client_secr
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 // gws is typically a Homebrew binary; Electron's PATH is minimal, so augment it.
 const EXEC_PATH = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'].join(':');
-const EXEC_ENV = { ...process.env, PATH: `${EXEC_PATH}:${process.env.PATH || ''}` };
+const IS_WIN = process.platform === 'win32';
+const EXEC_ENV = IS_WIN ? { ...process.env } : { ...process.env, PATH: `${EXEC_PATH}:${process.env.PATH || ''}` };
+
+// How to start gws: { file, args, env }. macOS runs the binary from PATH. On
+// Windows npm installs gws as a .cmd, which Node will not start without a
+// shell (and a shell would re-quote our arguments), so its JS entry runs under
+// Dobius's own Electron binary in node mode. Same lookup as gws-mcp.mjs.
+export function gwsCommand(args, env = process.env) {
+  if (!IS_WIN) return { file: 'gws', args, env: EXEC_ENV };
+  const candidates = [];
+  if (env.APPDATA) {
+    const pkgDir = path.join(env.APPDATA, 'npm', 'node_modules', '@googleworkspace', 'cli');
+    try {
+      const pkg = JSON.parse(fsSync.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
+      const bin = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.gws;
+      if (typeof bin === 'string' && bin) candidates.push(path.join(pkgDir, bin));
+    } catch { /* no package.json: the literals below */ }
+    candidates.push(path.join(pkgDir, 'run.js'), path.join(pkgDir, 'bin', 'gws'));
+  }
+  for (const cand of candidates) {
+    try {
+      fsSync.accessSync(cand, fsSync.constants.R_OK);
+      return { file: process.execPath, args: [cand, ...args], env: { ...EXEC_ENV, ELECTRON_RUN_AS_NODE: '1' } };
+    } catch { /* next */ }
+  }
+  return { file: 'gws.exe', args, env: EXEC_ENV }; // a native gws.exe on PATH, if any
+}
 
 // In-memory access-token cache: id -> { token, expiresAt }. Never persisted.
 const tokenCache = new Map();
@@ -155,7 +181,8 @@ function gwsAuthExport() {
     // and client_secret (e.g. an 11-char placeholder), and every refresh-grant
     // mint then fails invalid_grant, so no account could ever connect. Verified
     // against the installed gws CLI. Codex v1.0.41 r4 P1.
-    execFile('gws', ['auth', 'export', '--unmasked'], { env: EXEC_ENV, timeout: 15000 }, (err, stdout) => {
+    const cmd = gwsCommand(['auth', 'export', '--unmasked']);
+    execFile(cmd.file, cmd.args, { env: cmd.env, timeout: 15000, windowsHide: true }, (err, stdout) => {
       if (err) {
         console.warn('[gws-accounts] gws auth export failed:', err.code || 'unknown');
         return resolve(null);
@@ -365,7 +392,8 @@ async function tokenEmail(accessToken) {
 /** The email the BASE gws login currently acts as, or null. */
 function baseAuthUser() {
   return new Promise((resolve) => {
-    execFile('gws', ['auth', 'status'], { env: EXEC_ENV, timeout: 15000 }, (err, stdout) => {
+    const cmd = gwsCommand(['auth', 'status']);
+    execFile(cmd.file, cmd.args, { env: cmd.env, timeout: 15000, windowsHide: true }, (err, stdout) => {
       if (err) return resolve(null);
       try {
         // Output is a banner line then JSON; parse from the first brace.
@@ -470,13 +498,24 @@ async function runBrowserLogin(uiId, scopeMode = 'standard') {
   const login = await new Promise((resolve) => {
     let child;
     try {
-      child = spawn('gws', loginArgsFor(scopeMode), { env: EXEC_ENV, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      // Windows has no process groups and a detached child gets its own
+      // console window; the tree is ended with taskkill /T instead.
+      const cmd = gwsCommand(loginArgsFor(scopeMode));
+      child = spawn(cmd.file, cmd.args, { env: cmd.env, detached: !IS_WIN, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
       resolve({ code: -1, startError: e });
       return;
     }
     let settled = false;
+    let winKilled = false;
+    let exitedAlready = false;
     const killGroup = (sig) => {
+      if (IS_WIN) {
+        if (sig !== 'SIGTERM' || winKilled || exitedAlready || !child.pid) return;
+        winKilled = true;
+        execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {});
+        return;
+      }
       try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } }
     };
     const settle = (outcome) => {
@@ -501,6 +540,7 @@ async function runBrowserLogin(uiId, scopeMode = 'standard') {
     }, 5 * 60_000);
     child.on('error', (e) => settle({ code: -1, startError: e }));
     child.on('exit', (code) => {
+      exitedAlready = true;
       // Disarm the timeout FIRST: an approval landing in the last instant
       // must never be re-labeled "not completed" by a timer firing during
       // the output grace below (Codex P2).

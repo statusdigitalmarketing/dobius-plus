@@ -241,7 +241,8 @@ function atomicWriteSync(filePath, data) {
  */
 function getScrollbackPath(projectPath, tabId) {
   const encoded = Buffer.from(projectPath).toString('base64url');
-  return path.join(SCROLLBACK_DIR, encoded, `${tabId}.scrollback.json`);
+  const tabPart = process.platform === 'win32' ? Buffer.from(String(tabId)).toString('base64url') : tabId;
+  return path.join(SCROLLBACK_DIR, encoded, `${tabPart}.scrollback.json`);
 }
 
 /**

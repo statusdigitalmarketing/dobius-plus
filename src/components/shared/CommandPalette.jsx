@@ -6,6 +6,7 @@ import {
   filterGroups, flattenItems, reduceSearchState, initialSearchState, isLightColor,
 } from '../../lib/command-palette';
 import Kbd from './Kbd';
+import { isWindows } from '../../../shared/platform.js';
 
 const RECENT_SESSION_LIMIT = 5;
 const SEARCH_SESSION_LIMIT = 60;
@@ -202,7 +203,7 @@ export default function CommandPalette({ open, onClose, projectPath, commands })
   const onKeyDown = (e) => {
     e.stopPropagation();
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-    if (e.metaKey && !e.ctrlKey && e.key === 'p') {
+    if ((e.metaKey && !e.ctrlKey && e.key === 'p') || (isWindows() && e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'p')) {
       e.preventDefault(); close(); return;
     }
     if (e.key === 'Tab') {
