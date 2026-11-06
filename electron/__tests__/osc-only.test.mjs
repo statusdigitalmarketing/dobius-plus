@@ -85,3 +85,19 @@ test('a string opened earlier, by C1 or a split ESC, makes the next chunk count 
   assert.equal(chunkMayDraw('\x1b[3', st4), true);
   assert.equal(chunkMayDraw('\x1b]0;t\x07', st4), true);
 });
+
+test('C1 introducers and NUL or DEL inside an escape keep the parser in step (Codex)', () => {
+  const st = oscScanState();
+  assert.equal(chunkMayDraw('\x1b]0;t\x9d11;#ffffff', st), true);
+  assert.equal(chunkMayDraw('\x1b]0;t\x07', st), true);
+  const st2 = oscScanState();
+  assert.equal(chunkMayDraw('\x1b\x00]11;#ffffff', st2), true);
+  assert.equal(chunkMayDraw('\x1b]0;t\x07', st2), true);
+  const st3 = oscScanState();
+  assert.equal(chunkMayDraw('\x1b\x7f]11;#ffffff', st3), true);
+  assert.equal(chunkMayDraw('\x1b]0;t\x07', st3), true);
+  // ESC ( B (a charset), then a marker: the charset finished, so the marker is inert.
+  const st4 = oscScanState();
+  assert.equal(chunkMayDraw('\x1b(B', st4), true);
+  assert.equal(chunkMayDraw('\x1b]777;dobius;needs\x07', st4), false);
+});
