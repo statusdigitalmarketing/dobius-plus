@@ -22,7 +22,7 @@ const EPOCH_FT = 116444736000000000n;
 
 // Passed as -EncodedCommand (UTF-16LE base64): PowerShell 5.1 mis-parses
 // quotes inside a -Command argument that Node has escaped.
-export const TABLE_SCRIPT = "$ErrorActionPreference='SilentlyContinue'; "
+export const TABLE_SCRIPT = "$ErrorActionPreference='SilentlyContinue'; $ProgressPreference='SilentlyContinue'; "
   + '[Console]::OutputEncoding=[Text.Encoding]::UTF8; '
   + 'Get-CimInstance Win32_Process | ForEach-Object { '
   + '$ft = 0; if ($_.CreationDate) { $ft = $_.CreationDate.ToFileTimeUtc() }; '

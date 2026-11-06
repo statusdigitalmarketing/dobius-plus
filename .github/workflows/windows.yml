@@ -37,7 +37,9 @@ jobs:
           npx prebuild-install --runtime electron --target $ev --arch x64 --platform win32
           Pop-Location
 
+      # bash: PowerShell splits -c.npmRebuild=false into two arguments.
       - name: Build installer
+        shell: bash
         run: npm run electron:build:win -- --publish never -c.npmRebuild=false
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'

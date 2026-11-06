@@ -31,7 +31,10 @@ for (const f of fresh) {
     const rec = JSON.parse(fs.readFileSync(path.join(sessions, f), 'utf8'));
     console.log('fields:', Object.keys(rec).join(', '));
     console.log('procStart:', JSON.stringify(rec.procStart), 'procStartFt:', JSON.stringify(rec.procStartFt), typeof rec.procStartFt);
-    const ps = `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(rec.pid)}").CreationDate.ToFileTimeUtc()`;
+    // <pid>.json names its pid inside; the <pid>.<hash>.key file only in its name.
+    const pid = Number.isInteger(rec.pid) ? rec.pid : Number(String(f).split('.')[0]);
+    console.log('pid:', pid);
+    const ps = `$ProgressPreference='SilentlyContinue'; (Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CreationDate.ToFileTimeUtc()`;
     const cim = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], { encoding: 'utf8' }).trim();
     console.log('CIM FILETIME for that pid:', cim);
     if (/^\d+$/.test(String(rec.procStartFt)) && /^\d+$/.test(cim)) console.log('difference (100ns units):', String(BigInt(String(rec.procStartFt)) - BigInt(cim)));
