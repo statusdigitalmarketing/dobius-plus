@@ -127,7 +127,7 @@ import { sendPush, hasPushSubscribers } from './push.js';
 import { createPicker, runClaude } from './today-pick.js';
 import { createSnoozes, cardPrint } from './today-snooze.js';
 import { localDay } from '../shared/task-due.js';
-import { readBoard as readInboxBoard, boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo, boardIsStandIn } from './inbox-board.js';
+import { boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo, boardIsStandIn } from './inbox-board.js';
 import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { readUpdateBackup } from './config-manager.js';
@@ -200,8 +200,12 @@ function showTodayOnMac() {
 }
 
 let _todayNotification = null; // held so it is not garbage collected before a click
-async function sendTodayNudge(nudge, cfg) {
+async function sendTodayNudge(nudge, _cfg) {
   const out = {};
+  // Each channel looks at the settings as they are when its turn comes: alerts switched off while
+  // an earlier channel was sending stop the rest (Codex).
+  const on = (k) => !getQuitting() && nudgeSettings(getSettings().todayNudges)[k] === true;
+  const cfg = { get mac() { return on('mac'); }, get imessage() { return on('imessage'); }, get push() { return on('push'); } };
   const body = nudge.text.slice(NUDGE_PREFIX.length).trim();
   if (cfg.mac) {
     try {
@@ -1593,7 +1597,12 @@ function setupOrchestrationHandlers() {
   // Brett's Inbox board, read only. The board's token stays in main.
   // All of them: Today's "See all" lands here, and a card past a cap would look like it does not exist.
   // A harness without a stand-in board never reads the real one (DOBIUS_USERDATA_DIR set, no DOBIUS_INBOX_DIR).
-  ipcMain.handle('inbox:read', () => (process.env.DOBIUS_USERDATA_DIR && !boardIsStandIn() ? { ok: false, reason: 'not-installed' } : readInboxBoard({ maxCards: Infinity })));
+  // With each card's print, so the Mac's own Done checks the version it showed, as the phone does.
+  ipcMain.handle('inbox:read', async () => {
+    if (process.env.DOBIUS_USERDATA_DIR && !boardIsStandIn()) return { ok: false, reason: 'not-installed' };
+    const r = await readAllCards();
+    return r?.ok ? { ...r, cards: r.cards.map((c) => ({ ...c, print: cardPrint(c) })) } : r;
+  });
   ipcMain.handle('inbox:act', (_event, request) => actOnCard(request));
   ipcMain.handle('fleet:info', () => fleetInfo());
   // Claude picks run as the active account, with no tools and no saved session. An isolated
@@ -1665,7 +1674,7 @@ function setupOrchestrationHandlers() {
     },
     send: (nudge, cfg) => sendTodayNudge(nudge, cfg),
     // Only the installed app nudges (a dev run shares this userData), and only one of them.
-    mayRun: () => app.isPackaged && holdNudgeLock(path.join(app.getPath('userData'), 'today-nudge.lock')),
+    mayRun: () => app.isPackaged && !getQuitting() && holdNudgeLock(path.join(app.getPath('userData'), 'today-nudge.lock')),
   });
   setInterval(() => { todayNudger.tick(); }, 5 * 60 * 1000).unref?.();
   // Hand the nudge lock back on quit, so a later launch never waits on a reused pid.

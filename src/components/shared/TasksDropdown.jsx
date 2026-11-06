@@ -349,7 +349,7 @@ export default function TasksDropdown() {
     const kind = card.source === 'asana' ? 'complete' : 'done';
     let result;
     try {
-      result = await window.electronAPI.inboxAct({ kind, id: card.id, rev: card.rev });
+      result = await window.electronAPI.inboxAct({ kind, id: card.id, rev: card.rev, print: card.print });
     } catch (err) {
       console.error('[TasksDropdown] could not close inbox card:', err);
       result = { ok: false, reason: 'bad-response' };
