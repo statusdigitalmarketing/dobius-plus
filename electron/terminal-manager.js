@@ -307,7 +307,9 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     if (entry.visibleScan(data)) entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
     // Only output that can draw: a title or tab-status marker alone never changes the screen,
     // and counting it made a question card read as changed (see electron/osc-only.js).
-    if (!entry.oscState) entry.oscState = oscScanState();
+    // A new PTY under a tab id the screen already showed (an account switch respawns it) starts
+    // unknown: the terminal kept whatever the old one left open, so its first chunk counts.
+    if (!entry.oscState) entry.oscState = { ...oscScanState(), mode: 'unknown' };
     if (chunkMayDraw(data, entry.oscState)) entry.rawOutputSeq = (entry.rawOutputSeq || 0) + 1; // see terminalRawOutputSeq
     entry.pasteMode = trackPasteMode(entry.pasteMode, data); // see terminalBracketedPaste
     // Global observers (main-process status authority, v1.0.43): see EVERY
