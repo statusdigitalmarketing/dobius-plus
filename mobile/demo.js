@@ -481,7 +481,7 @@ export class DemoConnection {
         this._emit({ type: 'today', reqId: msg.reqId, ok: true, data: {
           board: { state: 'ok', mode: 'claude', picking: false, pickedAt: new Date(minsAgo(40)).toISOString(), today: day,
             suggested: open.map((c) => ({ ...c, print: `p-${c.id}` })), otherCount: 0, total: open.length, failing: [],
-            snoozed: this.todayCards.filter((c) => this.todaySnoozed.includes(c.id)).map((c) => ({ id: c.id, subject: c.subject, who: c.who, source: c.source, until: minsAgo(-24 * 60), print: `p-${c.id}` })) },
+            snoozed: this.todayCards.filter((c) => this.todaySnoozed.includes(c.id)).map((c) => ({ id: c.id, subject: c.subject, who: c.who, source: c.source, until: minsAgo(-24 * 60), sid: `s-${c.id}` })) },
           noticed: { state: 'unavailable' } } });
         break;
       }

@@ -678,3 +678,20 @@
 - **FIX**: Before starting, refuse if the port is busy. On cleanup, kill a listener only after `lsof -a -p <pid> -d cwd` shows this repo. Read the page you are testing: the wrong site still answered with a window, and only the screenshot showed it.
 - **CONTEXT**: Many tabs share this Mac, and Vite is pinned to 5173 for Electron dev.
 - **DETECTION**: `lsof -nP -iTCP:5173 -sTCP:LISTEN` before a harness run, and look at vite's log for "already in use".
+
+### Architecture - 2026-11-05
+- **MISTAKE**: Today nudges were first written assuming one Dobius process per Mac. There is no `requestSingleInstanceLock` (see electron/account-switch-job.js), and a dev run (`npm run electron:dev` without DOBIUS_USERDATA_DIR) shares the real userData, so every timer job in main runs twice. A write-then-read-back pid file was still not exclusive (Codex, all three lenses).
+- **FIX**: Anything that messages people from a timer runs only when `app.isPackaged`, takes a lock with `fs.openSync(file, 'wx')` (exclusive create), replaces a stale lock by renaming it aside, re-reads its state file every tick, and removes the lock on `will-quit` (`holdNudgeLock` in electron/main.js).
+- **CONTEXT**: Applies to any new scheduled sender (notifications, texts, pushes, emails).
+- **DETECTION**: `grep -n "setInterval" electron/main.js` and check each for a lock or isPackaged gate.
+
+### UI/UX - 2026-11-05
+- **MISTAKE**: A phone action button given `className="primary"` rendered full width: mobile/styles.css has a global `button.primary` (the pairing screen's big button) with width 100%.
+- **FIX**: Use a component-specific class (`today-done`) for buttons inside cards.
+- **CONTEXT**: The phone stylesheet styles bare element+class pairs globally.
+- **DETECTION**: `grep -n "^button\." mobile/styles.css`
+
+### Process - 2026-11-05
+- **MISTAKE**: `node -e` and inline commands that call fetch or curl are blocked by a context-mode hook in this environment, and the blocked command takes its other steps down with it (a `mkdir -p` in the same command never ran, which later looked like an app bug: ENOENT opening the project).
+- **FIX**: Put any HTTP or CDP probe in a script file and run it with `node file.mjs`; keep setup steps in their own command.
+- **DETECTION**: a Bash result starting with "context-mode:".

@@ -159,3 +159,48 @@ printf '%s\n' '{"type":"auth","token":"<token>"}' \
   `not_authorized`, `too_large`, `cancelled`), or "Maybe sent" for any
   `uncertain` refusal; its Terminal screen refreshes the tab list on
   `unknown_tab`.
+
+## Today and Settings (2.2.4)
+
+Advertised as `today` and `settings` in `authed.features`. A phone must check
+for them: an older Mac ignores these message types and never answers. Code:
+`electron/mobile-today.js` (handler and settings allowlist), wired in
+`electron/main.js` (`setTodayBridge`), which hands in the same functions the
+desktop IPC uses. Auth is the normal phone bearer token; nothing else.
+
+Every request carries a string `reqId` (at most 64 characters) and the reply
+echoes it. A failure says only `error` (a fixed code), never board text. These
+writes are NOT queued by `mobile/connection.js` across a reconnect: the phone
+says "No answer" and the person taps again.
+
+| Request | Fields | Reply |
+| --- | --- | --- |
+| `todayRead` | | `{type:'today', ok, data}`: `readToday()` without the board's loopback `url`. `data.board` has `state`, `mode` (`claude`/`rules`), `picking`, `pickedAt`, `today` (YYYY-MM-DD), `suggested[]` (cards with `reason` and `print`), `snoozed[]` (`id, subject, who, source, until, print`), `otherCount`, `total`, `failing[]`; `data.noticed` is the SamKnows hint list |
+| `inboxRead` | | `{type:'inbox', ok, data}`: every open card, each with `print` |
+| `todaySnooze` | `id`, `choice` (`tomorrow`/`week`), `print` | `{type:'todayResult', op:'snooze', id, ok, changed}`; `changed:true` when the card is no longer the version the phone showed |
+| `todayUnsnooze` | `id`, `print` (the snoozed row's) | `{type:'todayResult', op:'unsnooze', id, ok}`; refused when the snooze is of a newer version |
+| `inboxAct` | `kind` (`done`/`complete`/`undo`), `id`, `rev`, `print` (not for undo) | `{type:'todayResult', op, id, ok, changed, reason}`. `complete` closes an Asana task in Asana; the phone asks first |
+| `settingsRead` | | `{type:'settings', ok, data:{todayNudges, newTabTool, autoMode, info:{version, account, imessageReady, phonePush}}}` |
+| `settingsWrite` | `key`, `value` | `{type:'settingsResult', key, ok, error}` |
+
+`settingsWrite` keys (anything else is `not-allowed`):
+
+- `todayNudges`: a partial `{imessage, mac, push: boolean, morningAt, quietAfter: 'HH:MM'}`,
+  merged and checked as a whole: morning 05:00 to 12:00, quiet at least two
+  hours after morning (`quiet-before-morning`, `bad-time`).
+- `newTabTool`: `claude`, `codex` or `shell`.
+- `autoMode`: boolean.
+
+Pushed to every authed phone, with no content: `{type:'todayChanged'}` after a
+snooze, Bring back or Done from any device, and `{type:'settingsChanged'}` after
+any settings write. An open screen reads again.
+
+```sh
+printf '%s\n' '{"type":"auth","token":"<token>"}' '{"type":"todayRead","reqId":"r1"}' \
+  | websocat -n1 "ws://100.x.y.z:8420/ws"
+# {"type":"authed","version":"2.2.4","features":["ack","today","settings"]}
+# {"type":"today","reqId":"r1","ok":true,"data":{"board":{"state":"ok","mode":"claude",...}}}
+```
+
+Side effects: `inboxAct` changes the Inbox board (and Asana for `complete`);
+snoozes are saved in `<userData>/today-snooze.json`; settings in config.json.

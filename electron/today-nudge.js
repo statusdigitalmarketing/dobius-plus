@@ -59,8 +59,6 @@ export function planNudge({ state, now, settings, today, openIds, snoozedIds }) 
   }
 
   const batch = Array.isArray(s.batch) ? s.batch : [];
-  // A card the board is still reading is held out of the read: it is not done, so wait (Codex).
-  if ((board.held || 0) > 0 && batch.some((id) => !openIds.has(id))) return { state: s, nudge: null };
   const left = batch.filter((id) => !handled(id));
   const seen = new Set(Array.isArray(s.seen) ? s.seen : []);
   if (batch.length > 0 && left.length === 0) {
@@ -137,7 +135,10 @@ export function createNudger({ file, read, settings, send, log = () => {}, now =
         state = next;
       }
       if (!nudge) return null;
-      const outcome = await send(nudge, cfg);
+      // Settings again, as they are now: alerts switched off during the read send nothing (Codex).
+      const latest = settings();
+      if (!latest.imessage && !latest.mac && !latest.push) return null;
+      const outcome = await send(nudge, latest);
       log(`${nudge.kind} ${Object.entries(outcome || {}).map(([k, v]) => `${k}=${v}`).join(' ')}`);
       return nudge;
     } catch {

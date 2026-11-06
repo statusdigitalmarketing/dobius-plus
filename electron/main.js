@@ -177,7 +177,7 @@ function writePhoneSetting(key, value) {
 // Open the Tasks dropdown on Today in the window Sam last used (a Mac notification click).
 function showTodayOnMac() {
   // Only a project window has the Tasks dropdown (the launcher and the Visual preview do not).
-  const hasToday = (x) => { try { return !x.isDestroyed() && x.webContents.getURL().includes('project='); } catch { return false; } };
+  const hasToday = (x) => { try { const u = x.webContents.getURL(); return !x.isDestroyed() && u.includes('project=') && !u.includes('visual='); } catch { return false; } };
   const focused = BrowserWindow.getFocusedWindow();
   const all = BrowserWindow.getAllWindows().filter(hasToday);
   const w = (focused && hasToday(focused) ? focused : null) || all.find((x) => x.isVisible()) || all[0];
@@ -238,9 +238,18 @@ function holdNudgeLock(file) {
   if (Number.isInteger(pid) && pid > 0) {
     try { process.kill(pid, 0); return false; } catch (err) { if (err?.code === 'EPERM') return false; }
   }
-  // The owner is gone. Rename the stale lock aside (only one process can), then take it.
+  // The owner is gone. Rename the lock aside (only one process can), and check it really was the
+  // dead owner's: if another process took over first, put its lock back and stand down (Codex).
   const aside = `${file}.stale-${process.pid}`;
-  try { fs.renameSync(file, aside); fs.rmSync(aside, { force: true }); } catch { return false; }
+  try { fs.renameSync(file, aside); } catch { return false; }
+  let moved = '';
+  try { moved = fs.readFileSync(aside, 'utf8').trim(); } catch { /* unreadable: treat as stale */ }
+  if (moved !== owner) {
+    try { fs.linkSync(aside, file); } catch { /* someone holds it again */ }
+    try { fs.rmSync(aside, { force: true }); } catch { /* best effort */ }
+    return false;
+  }
+  try { fs.rmSync(aside, { force: true }); } catch { /* best effort */ }
   return take();
 }
 
@@ -1600,13 +1609,15 @@ function setupOrchestrationHandlers() {
     if (ok) todayChanged();
     return { ok };
   };
-  const unsnoozeToday = (id, print) => { const ok = todaySnoozes.unsnooze(id, print); if (ok) todayChanged(); return { ok }; };
+  const unsnoozeToday = (id, sid) => { const ok = todaySnoozes.unsnooze(id, sid); if (ok) todayChanged(); return { ok }; };
   const actOnCard = async (request) => {
     if (realBoardInHarness()) return { ok: false, reason: 'not-installed' };
     // The phone sends the print it showed: a card edited since (same rev) is not closed blind.
+    // Checked against a FRESH read of the board, not the last one (Codex).
     if (typeof request?.print === 'string') {
-      const seen = cardSeen(request.id);
-      if (!seen || cardPrint(seen) !== request.print) return { ok: false, reason: 'changed' };
+      const now = await readAllCards();
+      const card = now?.ok ? now.cards.find((c) => c.id === request.id) : null;
+      if (!card || cardPrint(card) !== request.print) return { ok: false, reason: 'changed' };
     }
     const r = await actOnInboxCard({ kind: request?.kind, id: request?.id, rev: request?.rev });
     if (r?.ok) todayChanged();

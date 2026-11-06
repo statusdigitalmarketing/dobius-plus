@@ -45,14 +45,15 @@ export function createSnoozes({ file, now = () => Date.now() }) {
   return {
     snooze(card, choice, today) {
       if (!card || typeof card.id !== 'string' || !card.id || card.id.length > 200 || card.id === '__proto__') return false;
-      all[card.id] = { print: cardPrint(card), due: card.due || null, day: today, until: snoozeUntil(choice, now()) };
+      // sid names this one snooze, so Bring back from an old screen cannot remove a newer one.
+      all[card.id] = { print: cardPrint(card), due: card.due || null, day: today, until: snoozeUntil(choice, now()), sid: crypto.randomUUID() };
       save();
       return true;
     },
-    // With `print`, only the snooze the person saw: a snooze of a newer version stays (Codex).
-    unsnooze(id, print) {
+    // With `sid`, only the snooze the person saw: any newer snooze of the card stays (Codex).
+    unsnooze(id, sid) {
       if (typeof id !== 'string' || !Object.hasOwn(all, id)) return false;
-      if (print !== undefined && all[id].print !== print) return false;
+      if (sid !== undefined && all[id].sid !== sid) return false;
       delete all[id];
       save();
       return true;
@@ -67,7 +68,7 @@ export function createSnoozes({ file, now = () => Date.now() }) {
       let changed = false;
       for (const c of cards) {
         const e = Object.hasOwn(all, c.id) ? all[c.id] : null;
-        if (stillSnoozed(e, c, { today, nowMs: now() })) snoozed.push({ ...c, snoozedUntil: e.until });
+        if (stillSnoozed(e, c, { today, nowMs: now() })) snoozed.push({ ...c, snoozedUntil: e.until, snoozeId: e.sid || null });
         else { shown.push(c); if (e) { delete all[c.id]; changed = true; } }
       }
       for (const [id, e] of Object.entries(all)) if (now() >= e.until) { delete all[id]; changed = true; }

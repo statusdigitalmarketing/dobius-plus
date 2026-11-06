@@ -16,6 +16,22 @@ Inbox: 212 open, 90 marked high, 190 inside the pressing windows, so due date an
 
 Bills (renewal predictions, not bills: no invoices, no paid state). Fleet rows (no field says who acts next). Merging duplicates, and fuzzy "possibly the same" (another way to hide work). Snooze, until deadlines and changes can wake an item. Done on SamKnows rows, until writes check expected state.
 
+## Shipped next: Today comes to you (2.2.4, branch feat/phone-today)
+
+- Phone: a Today screen (Claude's picks with reasons, Done, Snooze, Bring back,
+  See all with search) and a Settings screen, from new buttons on the phone's
+  home screen. Protocol in `docs/mobile-ws-protocol.md`.
+- Today alerts (`electron/today-nudge.js`): the first five at the morning time,
+  the next five once those are all done or snoozed, one reminder after three
+  hours, and new or returning cards at most hourly. COUNTS ONLY ("5 things to
+  do, 1 overdue, 2 due today"): cards can name patients and customers, and a
+  nudge lands on a lock screen and in Messages history. Channels: Mac
+  notification (click opens Today), iMessage to yourself (skipped when the
+  bridge's trigger prefix is empty or would match), phone push (Safari
+  home-screen web app only; the App Store app has no push yet, that needs APNs).
+- Only the installed app nudges, one process at a time (`today-nudge.lock`),
+  and the decision is saved before sending, so a nudge never goes twice.
+
 ## Next
 
 1. Better picking, because rules cannot do it. Candidate: the same Claude judging the board picks the day's short list with a reason per card.

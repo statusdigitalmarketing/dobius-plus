@@ -154,12 +154,14 @@ export function arrange(cards, { today, nowMs, picker, snoozes, limit = SUGGESTE
     withinReach: byClaude ? picked.length : rules.withinReach,
     otherCount: shown.length - (byClaude ? picked.length : rules.suggested.length),
     total: cards.length,
-    snoozed: snoozed.map((c) => ({ id: c.id, subject: c.subject, summary: c.summary, who: c.who, source: c.source, until: c.snoozedUntil, print: cardPrint(c) })),
+    snoozed: snoozed.map((c) => ({ id: c.id, subject: c.subject, summary: c.summary, who: c.who, source: c.source, until: c.snoozedUntil, sid: c.snoozeId })),
   };
 }
 
-// The ids of every open card the last read saw (Today nudges ask whether a card is still open).
-export const openCardIds = () => new Set(lastCards.keys());
+// The ids of every open card the last read saw, held ones included (Today nudges ask whether a
+// card is still open, and one the board is still reading has not been done).
+let lastHeld = new Set();
+export const openCardIds = () => new Set([...lastCards.keys(), ...lastHeld]);
 
 // One read at a time. Two overlapping reads (desktop, phone, the nudge timer) could finish out of
 // order, and the older one would then judge a snooze made against the newer cards as changed and
@@ -178,7 +180,7 @@ export function readToday(opts = {}) {
 export function readAllCards(opts = {}) {
   const run = readChain.then(async () => {
     const board = await (opts.readBoard || readBoard)({ ...opts, maxCards: Infinity });
-    if (board.ok) lastCards = new Map(board.cards.map((c) => [c.id, c]));
+    if (board.ok) { lastCards = new Map(board.cards.map((c) => [c.id, c])); lastHeld = new Set(board.heldIds || []); }
     return board;
   });
   readChain = run.catch(() => {});
@@ -191,7 +193,7 @@ async function readTodayNow(opts) {
     (opts.readNoticed || readNoticed)(opts),
   ]);
   const today = opts.today || board.today;
-  if (board.ok) lastCards = new Map(board.cards.map((c) => [c.id, c]));
+  if (board.ok) { lastCards = new Map(board.cards.map((c) => [c.id, c])); lastHeld = new Set(board.heldIds || []); }
   const plan = board.ok ? arrange(board.cards, { today, nowMs: opts.nowMs, picker: opts.picker, snoozes: opts.snoozes }) : null;
   return {
     board: board.ok ? { state: 'ok', ...plan, today, overdue: board.overdue, checkedAt: board.checkedAt || null, held: board.held || 0, failing: board.failing || [] } : { state: board.reason || 'unavailable' },

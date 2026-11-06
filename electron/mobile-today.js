@@ -91,8 +91,8 @@ export function handleTodayMessage(msg, send) {
       }
       case 'todayUnsnooze': {
         if (!idOk(msg.id)) return fail({ op: 'unsnooze', id: msg.id, error: 'bad-request' });
-        if (typeof msg.print !== 'string') return fail({ op: 'unsnooze', id: msg.id, error: 'bad-request' });
-        const r = bridge.unsnooze(msg.id, msg.print);
+        if (typeof msg.sid !== 'string' || !msg.sid || msg.sid.length > 64) return fail({ op: 'unsnooze', id: msg.id, error: 'bad-request' });
+        const r = bridge.unsnooze(msg.id, msg.sid);
         return send({ type: 'todayResult', reqId, op: 'unsnooze', id: msg.id, ok: !!r?.ok });
       }
       case 'inboxAct': {

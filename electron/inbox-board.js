@@ -219,7 +219,9 @@ export function cardsFrom(payload, today, { maxCards = MAX_CARDS } = {}) {
   const failing = (Array.isArray(payload?.connections) ? payload.connections : [])
     .filter((c) => c && typeof c.name === 'string' && /^[\w.@+-]{1,80}$/.test(c.name) && typeof c.state === 'string' && c.state !== 'ok' && c.state !== 'not connected')
     .map((c) => str(c.name, 80));
-  return { cards: cards.slice(0, maxCards), total: cards.length, overdue, dueToday, today, held, failing, checkedAt: str(payload?.stats?.checkedAt, 40) || null };
+  // Ids only: a held card is still open (Today nudges must not take it as handled).
+  const heldIds = items.filter((i) => i && typeof i === 'object' && i.status === 'open' && i.held).map((i) => str(i.id, 200)).filter(Boolean);
+  return { cards: cards.slice(0, maxCards), total: cards.length, overdue, dueToday, today, held, heldIds, failing, checkedAt: str(payload?.stats?.checkedAt, 40) || null };
 }
 
 /**

@@ -180,7 +180,7 @@ export default function Tasks({ connection, onBack }) {
     mark(card.id, false);
     // Undo reopens the card on the board; a task closed in Asana stays closed there. Only the
     // newest Done offers Undo, so a slow reply never swaps the bar to another card (Codex).
-    if (r?.ok) { if (kind === 'complete') say('Closed in Asana.'); else if (mine === doneSeq.current) setUndo({ card }); }
+    if (r?.ok) { if (kind === 'complete') say('Closed in Asana.'); else if (mine === doneSeq.current) setUndo({ card, key: mine }); }
     else if (!r && connection.status !== 'authed') say('Not connected to your Mac. Try again once it reconnects.');
     else if (r?.changed) say('Something new came in on that one. Have another look.');
     else say(r ? 'The board would not mark that done.' : 'No answer from your Mac. Try again in a moment.');
@@ -188,10 +188,12 @@ export default function Tasks({ connection, onBack }) {
   };
   const undoDone = async () => {
     const card = undo?.card;
+    const key = undo?.key;
     if (!card) return;
     const r = await ask(connection, { type: 'inboxAct', kind: 'undo', id: card.id, rev: card.rev }, 'todayResult');
     // Only if this card still owns the Undo bar: another card may have been marked done meanwhile.
-    setUndo((cur) => (cur?.card?.id !== card.id || cur.card.rev !== card.rev ? cur : r?.ok ? null : { card, problem: true }));
+    // Only the Undo bar this tap came from: a newer Done (even of the same card) has its own key.
+    setUndo((cur) => (cur?.key !== key ? cur : r?.ok ? null : { card, key, problem: true }));
     load();
   };
   const snooze = async (card, choice) => {
@@ -203,10 +205,10 @@ export default function Tasks({ connection, onBack }) {
     else say(r ? 'Could not snooze that one.' : 'No answer from your Mac.');
     load();
   };
-  const bringBack = async (id, print) => {
+  const bringBack = async (id, sid) => {
     mark(id, true);
-    // With the snooze it saw, so a snooze of a newer version stays put.
-    await ask(connection, { type: 'todayUnsnooze', id, print }, 'todayResult');
+    // With the snooze it saw, so a newer snooze of the card stays put.
+    await ask(connection, { type: 'todayUnsnooze', id, sid }, 'todayResult');
     mark(id, false);
     load();
   };
@@ -261,7 +263,7 @@ export default function Tasks({ connection, onBack }) {
           <div key={c.id} className="today-card snoozed">
             <span className="today-title">{c.subject || c.summary || '(no subject)'}</span>
             <div className="today-meta">{[c.who, c.until ? `back ${new Date(c.until).toLocaleDateString([], { weekday: 'short' })}` : null].filter(Boolean).join(' · ')}</div>
-            <div className="today-actions"><button disabled={!!busy[c.id]} onClick={() => bringBack(c.id, c.print)}>Bring back</button></div>
+            <div className="today-actions"><button disabled={!!busy[c.id]} onClick={() => bringBack(c.id, c.sid)}>Bring back</button></div>
           </div>
         ))}
       </>}

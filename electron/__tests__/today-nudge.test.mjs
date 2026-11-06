@@ -173,7 +173,7 @@ test('phone messages: replies carry the reqId, the board url never leaves, failu
   handleTodayMessage({ type: 'inboxAct', reqId: 'e', kind: 'delete', id: 'x', rev: 1 }, send);
   handleTodayMessage({ type: 'inboxAct', reqId: 'f', kind: 'undo', id: 'x', rev: 1 }, send);
   handleTodayMessage({ type: 'inboxAct', reqId: 'h', kind: 'done', id: 'x', rev: 1 }, send);
-  handleTodayMessage({ type: 'todayUnsnooze', reqId: 'i', id: 'x' }, send);
+  handleTodayMessage({ type: 'todayUnsnooze', reqId: 'i', id: 'x', print: 'p' }, send);
   handleTodayMessage({ type: 'settingsWrite', reqId: 'g', key: 'mobileServerEnabled', value: false }, send);
   await new Promise((r) => setTimeout(r, 20));
   const by = Object.fromEntries(out.map((m) => [m.reqId, m]));
@@ -236,9 +236,9 @@ test('Bring back with the snooze it saw leaves a newer snooze alone', async () =
   const s = createSnoozes({ file: path.join(dir, 's.json'), now: () => 1000 });
   const c = { id: 'A', rev: 1, subject: 'x' };
   s.snooze(c, 'tomorrow', '2026-11-05');
-  const old = JSON.parse(fs.readFileSync(path.join(dir, 's.json'), 'utf8')).A.print;
-  // A new message wakes it and the new version is snoozed again, to the very same wake time.
-  s.snooze({ ...c, rev: 2 }, 'tomorrow', '2026-11-05');
+  const old = JSON.parse(fs.readFileSync(path.join(dir, 's.json'), 'utf8')).A.sid;
+  // Snoozed again, unchanged and to the very same wake time: still a different snooze.
+  s.snooze(c, 'tomorrow', '2026-11-05');
   assert.equal(s.unsnooze('A', old), false);
   assert.equal(s.unsnooze('A'), true);
   fs.rmSync(dir, { recursive: true, force: true });
@@ -251,8 +251,29 @@ test('a card brought back after the all-clear is nudged again (Codex)', () => {
   assert.equal(r.nudge.kind, 'more');
 });
 
-test('a card the board is still reading is not taken as handled (Codex)', () => {
+test('held cards count as open, and do not block other cards (Codex)', async () => {
+  const { cardsFrom } = await import('../inbox-board.js');
+  const got = cardsFrom({ items: [{ id: 'A', status: 'open', held: true, subject: 'x' }, { id: 'B', status: 'open', subject: 'y' }] }, '2026-11-05');
+  assert.deepEqual(got.heldIds, ['A']);
+  assert.deepEqual(got.cards.map((c) => c.id), ['B']);
+  // Batch [A] with A held: still open, so nothing is "handled" yet.
   const state = { day: '2026-11-05', batch: ['A'], batchAt: at(8).getTime(), sentAt: at(8).getTime(), reminded: false, seen: ['A:'] };
-  const r = planNudge({ state, now: at(9), settings: cfg, today: todayOf([], { held: 1 }), openIds: new Set(), snoozedIds: new Set() });
-  assert.equal(r.nudge, null);
+  assert.equal(planNudge({ state, now: at(9), settings: cfg, today: todayOf(['B']), openIds: new Set(['A', 'B']), snoozedIds: new Set() }).nudge, null);
+  // Batch [C] done, with some unrelated card held: D still goes out.
+  const s2 = { ...state, batch: ['C'], seen: ['C:'] };
+  assert.equal(planNudge({ state: s2, now: at(9), settings: cfg, today: todayOf(['D'], { held: 1 }), openIds: new Set(['A', 'D']), snoozedIds: new Set() }).nudge.kind, 'next');
+});
+
+test('alerts switched off while a tick is reading send nothing', async () => {
+  let on = true;
+  const sent = [];
+  const n = createNudger({
+    file: path.join(os.tmpdir(), `nudge-mid-${process.pid}.json`), now: () => at(8, 5),
+    settings: () => (on ? cfg : { ...cfg, imessage: false, mac: false, push: false }),
+    read: async () => { on = false; return { today: todayOf(ids(2)), openIds: new Set(ids(2)), snoozedIds: new Set() }; },
+    send: async (x) => { sent.push(x.kind); return {}; },
+  });
+  await n.tick();
+  assert.deepEqual(sent, []);
+  fs.rmSync(path.join(os.tmpdir(), `nudge-mid-${process.pid}.json`), { force: true });
 });
