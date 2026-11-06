@@ -10,6 +10,8 @@ import { useFeature } from './Tasks';
 let reqSeq = 0;
 function ask(connection, msg, replyType, ms = 15000) {
   const reqId = `s${Date.now().toString(36)}-${++reqSeq}`;
+  // Not connected: say so now instead of waiting out the timer (writes are never queued).
+  if (connection.status !== 'authed') return Promise.resolve(null);
   return new Promise((resolve) => {
     const timer = setTimeout(() => { off(); resolve(null); }, ms);
     const off = connection.onMessage((m) => {

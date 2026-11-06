@@ -10,6 +10,8 @@ let reqSeq = 0;
 // One request, one reply matched by reqId. Resolves null when nothing came back in time.
 function ask(connection, msg, replyType, ms = 15000) {
   const reqId = `t${Date.now().toString(36)}-${++reqSeq}`;
+  // Not connected: say so now instead of waiting out the timer (writes are never queued).
+  if (connection.status !== 'authed') return Promise.resolve(null);
   return new Promise((resolve) => {
     const timer = setTimeout(() => { off(); resolve(null); }, ms);
     const off = connection.onMessage((m) => {
@@ -43,9 +45,16 @@ function clock(iso) {
 }
 
 function Card({ card, today, busy, onDone, onSnooze, showReason }) {
-  const [snoozing, setSnoozing] = useState(false);
+  // Both menus belong to the card version they were opened on: if a refresh brings a newer one,
+  // they close and the person looks again (Codex).
+  const [snoozeFor, setSnoozeFor] = useState(null);
   // An Asana card closes the task in Asana itself, so it asks first, as the Mac does.
-  const [confirmAsana, setConfirmAsana] = useState(false);
+  const [confirmFor, setConfirmFor] = useState(null);
+  const version = `${card.rev}:${card.print}`;
+  const snoozing = snoozeFor === version;
+  const confirmAsana = confirmFor === version;
+  const setSnoozing = (on) => setSnoozeFor(on ? version : null);
+  const setConfirmAsana = (on) => setConfirmFor(on ? version : null);
   const title = card.subject || card.summary || '(no subject)';
   const due = dueLabel(card.due, today);
   const meta = [card.who, SOURCE[card.source] || null, due].filter(Boolean).join(' · ');
@@ -101,18 +110,25 @@ export default function Tasks({ connection, onBack }) {
   const [undo, setUndo] = useState(null);
   const [showSnoozed, setShowSnoozed] = useState(false);
   const seq = useRef(0);
+  const shown = useRef(0);
+  const inFlight = useRef(false);
   const allRef = useRef(false);
   allRef.current = all;
 
   const load = useCallback(async () => {
     const mine = ++seq.current;
+    inFlight.current = true;
     const [t, i] = await Promise.all([
       ask(connection, { type: 'todayRead' }, 'today', 90000),
       allRef.current ? ask(connection, { type: 'inboxRead' }, 'inbox', 30000) : Promise.resolve(undefined),
     ]);
-    if (mine !== seq.current) return; // a newer read owns the screen
-    setToday(t?.ok ? t.data : { error: true });
-    if (i !== undefined) setInbox(i?.ok ? i.data : { ok: false });
+    if (mine === seq.current) inFlight.current = false;
+    // The newest read to FINISH wins, so slow replies never starve the screen (Codex).
+    if (mine < shown.current) return;
+    shown.current = mine;
+    // A failed read keeps what is on screen; only a first read that fails shows the error.
+    setToday((prev) => (t?.ok ? t.data : prev && !prev.error ? prev : { error: true }));
+    if (i !== undefined) setInbox((prev) => (i?.ok ? i.data : prev || { ok: false }));
   }, [connection]);
 
   useEffect(() => {
@@ -131,7 +147,7 @@ export default function Tasks({ connection, onBack }) {
   const picking = !!today?.board?.picking;
   useEffect(() => {
     if (!picking) return undefined;
-    const t = setInterval(load, 10000);
+    const t = setInterval(() => { if (!inFlight.current) load(); }, 10000);
     return () => clearInterval(t);
   }, [picking, load]);
 
@@ -153,6 +169,7 @@ export default function Tasks({ connection, onBack }) {
     mark(card.id, false);
     // Undo reopens the card on the board; a task closed in Asana stays closed there.
     if (r?.ok) { if (kind === 'complete') say('Closed in Asana.'); else setUndo({ card }); }
+    else if (!r && connection.status !== 'authed') say('Not connected to your Mac. Try again once it reconnects.');
     else if (r?.changed) say('Something new came in on that one. Have another look.');
     else say(r ? 'The board would not mark that done.' : 'No answer from your Mac. Try again in a moment.');
     load();
@@ -161,7 +178,8 @@ export default function Tasks({ connection, onBack }) {
     const card = undo?.card;
     if (!card) return;
     const r = await ask(connection, { type: 'inboxAct', kind: 'undo', id: card.id, rev: card.rev }, 'todayResult');
-    if (r?.ok) setUndo(null); else setUndo({ card, problem: true });
+    // Only if this card still owns the Undo bar: another card may have been marked done meanwhile.
+    setUndo((cur) => (cur?.card?.id !== card.id ? cur : r?.ok ? null : { card, problem: true }));
     load();
   };
   const snooze = async (card, choice) => {
@@ -173,9 +191,10 @@ export default function Tasks({ connection, onBack }) {
     else say(r ? 'Could not snooze that one.' : 'No answer from your Mac.');
     load();
   };
-  const bringBack = async (id) => {
+  const bringBack = async (id, until) => {
     mark(id, true);
-    await ask(connection, { type: 'todayUnsnooze', id }, 'todayResult');
+    // With the snooze it saw, so a newer snooze of the same card stays put.
+    await ask(connection, { type: 'todayUnsnooze', id, until }, 'todayResult');
     mark(id, false);
     load();
   };
@@ -230,7 +249,7 @@ export default function Tasks({ connection, onBack }) {
           <div key={c.id} className="today-card snoozed">
             <span className="today-title">{c.subject || c.summary || '(no subject)'}</span>
             <div className="today-meta">{[c.who, c.until ? `back ${new Date(c.until).toLocaleDateString([], { weekday: 'short' })}` : null].filter(Boolean).join(' · ')}</div>
-            <div className="today-actions"><button disabled={!!busy[c.id]} onClick={() => bringBack(c.id)}>Bring back</button></div>
+            <div className="today-actions"><button disabled={!!busy[c.id]} onClick={() => bringBack(c.id, c.until)}>Bring back</button></div>
           </div>
         ))}
       </>}

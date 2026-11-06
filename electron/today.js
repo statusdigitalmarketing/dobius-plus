@@ -171,6 +171,20 @@ export function readToday(opts = {}) {
   return run;
 }
 
+/**
+ * Every open card, on the same one-at-a-time chain as readToday, and remembered as the cards
+ * last seen: a snooze from See all is then checked against the read it came from (Codex).
+ */
+export function readAllCards(opts = {}) {
+  const run = readChain.then(async () => {
+    const board = await (opts.readBoard || readBoard)({ ...opts, maxCards: Infinity });
+    if (board.ok) lastCards = new Map(board.cards.map((c) => [c.id, c]));
+    return board;
+  });
+  readChain = run.catch(() => {});
+  return run;
+}
+
 async function readTodayNow(opts) {
   const [board, noticed] = await Promise.all([
     (opts.readBoard || readBoard)({ ...opts, maxCards: Infinity }),
@@ -180,7 +194,7 @@ async function readTodayNow(opts) {
   if (board.ok) lastCards = new Map(board.cards.map((c) => [c.id, c]));
   const plan = board.ok ? arrange(board.cards, { today, nowMs: opts.nowMs, picker: opts.picker, snoozes: opts.snoozes }) : null;
   return {
-    board: board.ok ? { state: 'ok', ...plan, overdue: board.overdue, checkedAt: board.checkedAt || null, held: board.held || 0, failing: board.failing || [] } : { state: board.reason || 'unavailable' },
+    board: board.ok ? { state: 'ok', ...plan, today, overdue: board.overdue, checkedAt: board.checkedAt || null, held: board.held || 0, failing: board.failing || [] } : { state: board.reason || 'unavailable' },
     noticed,
     url: board.url,
   };

@@ -26,7 +26,7 @@ export function nudgeSettings(raw) {
   const morning = minutes(r.morningAt);
   const quiet = minutes(r.quietAfter);
   // Only a pair that leaves a daytime window counts: 08:00 and 07:00 would silence every nudge.
-  if (morning !== null && quiet !== null && quiet > morning) { out.morningAt = r.morningAt; out.quietAfter = r.quietAfter; }
+  if (morning !== null && quiet !== null && quiet >= morning + 120) { out.morningAt = r.morningAt; out.quietAfter = r.quietAfter; }
   return out;
 }
 
@@ -49,7 +49,8 @@ export function checkSettingWrite(key, value, current = {}) {
     const morning = minutes(merged.morningAt);
     const quiet = minutes(merged.quietAfter);
     if (morning === null || quiet === null) return { ok: false, error: 'bad-time' };
-    if (quiet <= morning) return { ok: false, error: 'quiet-before-morning' };
+    // At least two hours, so the morning nudge (which can wait 30 minutes for Claude) has a window.
+    if (quiet < morning + 120) return { ok: false, error: 'quiet-before-morning' };
     if (morning < 5 * 60 || morning > 12 * 60) return { ok: false, error: 'bad-time' };
     const { imessage, mac, push, morningAt, quietAfter } = merged;
     return { ok: true, apply: { settings: { todayNudges: { imessage, mac, push, morningAt, quietAfter } } } };
@@ -90,7 +91,7 @@ export function handleTodayMessage(msg, send) {
       }
       case 'todayUnsnooze': {
         if (!idOk(msg.id)) return fail({ op: 'unsnooze', id: msg.id, error: 'bad-request' });
-        const r = bridge.unsnooze(msg.id);
+        const r = bridge.unsnooze(msg.id, typeof msg.until === 'number' ? msg.until : undefined);
         return send({ type: 'todayResult', reqId, op: 'unsnooze', id: msg.id, ok: !!r?.ok });
       }
       case 'inboxAct': {

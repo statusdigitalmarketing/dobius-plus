@@ -490,7 +490,7 @@ export class DemoConnection {
         break;
       case 'inboxAct': {
         const c = this.todayCards.find((x) => x.id === msg.id);
-        if (c) c.done = msg.kind === 'done';
+        if (c) c.done = msg.kind !== 'undo';
         this._emit({ type: 'todayResult', reqId: msg.reqId, op: msg.kind, id: msg.id, ok: !!c });
         break;
       }

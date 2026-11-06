@@ -165,9 +165,10 @@ export default function Settings() {
       setLoaded(true);
     });
     read();
-    // The phone can change a few settings: show them here as soon as it does.
+    // The phone can change a few settings: show those as soon as it does, and only those, so a
+    // field being typed into here is never reset by an older read (Codex).
     return a.onSettingsChanged?.(() => {
-      read();
+      a.configGetSettings().then((s) => setSettings((prev) => ({ ...prev, todayNudges: s.todayNudges, newTabTool: s.newTabTool })));
       a.autoModeGet?.().then((m) => { if (m) setAutoMode(m); });
     });
   }, []);

@@ -67,7 +67,7 @@ test('no second "next five" within 20 minutes, and an all-clear only speaks for 
 
 test('after a cleared batch, new cards come at most hourly and never repeat one already sent', () => {
   const sentAt = at(10).getTime();
-  const state = { day: '2026-11-05', batch: [], batchAt: sentAt, sentAt, reminded: true, seen: ids(5) };
+  const state = { day: '2026-11-05', batch: [], batchAt: sentAt, sentAt, reminded: true, seen: ids(5).map((i) => `${i}:`) };
   const t = todayOf([...ids(5), 'n1']);
   const open = new Set([...ids(5), 'n1']);
   assert.equal(planNudge({ state, now: at(10, 30), settings: cfg, today: t, openIds: open, snoozedIds: new Set() }).nudge, null);
@@ -124,9 +124,9 @@ test('all three channels off: the board is not even read', async () => {
 });
 
 test('text wording', () => {
-  assert.equal(textFor('morning', 1, 0), `${NUDGE_PREFIX} 1 thing to do. Open Today in Dobius to see them.`);
-  assert.equal(textFor('next', 5, 2), `${NUDGE_PREFIX} those are handled. 5 more picked for you, 2 due today.`);
-  const all = ['morning', 'next', 'more', 'reminder', 'done'].map((k) => textFor(k, 3, 1, 5)).join(' ');
+  assert.equal(textFor('morning', 1), `${NUDGE_PREFIX} 1 thing to do. Open Today in Dobius to see them.`);
+  assert.equal(textFor('next', 5, { overdue: 1, today: 2 }), `${NUDGE_PREFIX} those are handled. 5 more picked for you, 1 overdue, 2 due today.`);
+  const all = ['morning', 'next', 'more', 'reminder', 'done'].map((k) => textFor(k, 3, { overdue: 1, today: 1 }, 5)).join(' ');
   assert.equal(all.includes(EM_DASH), false);
 });
 
@@ -134,6 +134,7 @@ test('nudge settings: defaults, and a pair that leaves no daytime falls back', (
   assert.deepEqual(nudgeSettings(undefined), cfg);
   assert.deepEqual(nudgeSettings({ morningAt: '09:00', quietAfter: '07:00', mac: false }), { ...cfg, mac: false });
   assert.deepEqual(nudgeSettings({ morningAt: '07:30', quietAfter: '18:00' }), { ...cfg, morningAt: '07:30', quietAfter: '18:00' });
+  assert.deepEqual(nudgeSettings({ morningAt: '08:00', quietAfter: '08:15' }), cfg); // no room for the morning nudge
 });
 
 test('phone settings writes: only the allowlist, checked as a pair', () => {
@@ -144,6 +145,7 @@ test('phone settings writes: only the allowlist, checked as a pair', () => {
   assert.equal(checkSettingWrite('mobileServerEnabled', false).error, 'not-allowed');
   assert.equal(checkSettingWrite('__proto__', {}).error, 'not-allowed');
   assert.equal(checkSettingWrite('todayNudges', { quietAfter: '07:00' }, cfg).error, 'quiet-before-morning');
+  assert.equal(checkSettingWrite('todayNudges', { quietAfter: '09:30' }, cfg).error, 'quiet-before-morning');
   assert.equal(checkSettingWrite('todayNudges', { morningAt: '04:00' }, cfg).error, 'bad-time');
   assert.equal(checkSettingWrite('todayNudges', { mac: 'yes' }, cfg).ok, false);
   assert.equal(checkSettingWrite('todayNudges', ['x'], cfg).ok, false);
@@ -185,4 +187,56 @@ test('phone messages: replies carry the reqId, the board url never leaves, failu
   out.length = 0;
   handleTodayMessage({ type: 'todayRead', reqId: 'z' }, send);
   assert.deepEqual(out, [{ type: 'today', reqId: 'z', ok: false, error: 'unavailable' }]);
+});
+
+test('overdue and due today are counted apart', () => {
+  const t = todayOf([card('c1', { due: '2026-11-04' }), card('c2', { due: '2026-11-05' }), card('c3')]);
+  const r = planNudge({ state: {}, now: at(8, 5), settings: cfg, today: t, openIds: new Set(['c1', 'c2', 'c3']), snoozedIds: new Set() });
+  assert.equal(r.nudge.text, `${NUDGE_PREFIX} 3 things to do, 1 overdue, 1 due today. Open Today in Dobius to see them.`);
+});
+
+test('a reopened card that was already nudged comes back instead of a false all-clear (Codex)', () => {
+  const sentAt = at(9).getTime();
+  // A was nudged at 08:00, handled, then reopened; B (the current batch) is now done.
+  const state = { day: '2026-11-05', batch: ['B'], batchAt: sentAt, sentAt, reminded: false, seen: ['A:', 'B:'] };
+  const r = planNudge({ state, now: at(9, 30), settings: cfg, today: todayOf(['A']), openIds: new Set(['A']), snoozedIds: new Set() });
+  assert.equal(r.nudge.kind, 'next');
+  assert.deepEqual(r.state.batch, ['A']);
+});
+
+test('a card that woke with a new message is new work, even after a cleared batch', () => {
+  const sentAt = at(9).getTime();
+  const state = { day: '2026-11-05', batch: [], batchAt: sentAt, sentAt, reminded: true, seen: ['A:p1'] };
+  const r = planNudge({ state, now: at(10, 5), settings: cfg, today: todayOf([card('A', { print: 'p2' })]), openIds: new Set(['A']), snoozedIds: new Set() });
+  assert.equal(r.nudge.kind, 'more');
+});
+
+test('a second Dobius never nudges, and a nudge another process sent is not sent again', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nudge2-'));
+  const file = path.join(dir, 'n.json');
+  const read = async () => ({ today: todayOf(ids(2)), openIds: new Set(ids(2)), snoozedIds: new Set() });
+  const sent = [];
+  const blocked = createNudger({ file, now: () => at(8, 5), settings: () => cfg, read, send: async (x) => { sent.push(`b:${x.kind}`); return {}; }, mayRun: () => false });
+  const a = createNudger({ file, now: () => at(8, 5), settings: () => cfg, read, send: async (x) => { sent.push(`a:${x.kind}`); return {}; } });
+  const c = createNudger({ file, now: () => at(8, 6), settings: () => cfg, read, send: async (x) => { sent.push(`c:${x.kind}`); return {}; } });
+  await blocked.tick();
+  await a.tick();
+  await c.tick(); // loaded before a sent, but re-reads the file
+  assert.deepEqual(sent, ['a:morning']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('Bring back with the snooze it saw leaves a newer snooze alone', async () => {
+  const { createSnoozes } = await import('../today-snooze.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snz-'));
+  let t = 1000;
+  const s = createSnoozes({ file: path.join(dir, 's.json'), now: () => t });
+  const c = { id: 'A', rev: 1, subject: 'x' };
+  s.snooze(c, 'tomorrow', '2026-11-05');
+  const old = JSON.parse(fs.readFileSync(path.join(dir, 's.json'), 'utf8')).A.until;
+  t = 1000 + 8 * 24 * 3600 * 1000;
+  s.snooze({ ...c, rev: 2 }, 'week', '2026-11-13');
+  assert.equal(s.unsnooze('A', old), false);
+  assert.equal(s.unsnooze('A'), true);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

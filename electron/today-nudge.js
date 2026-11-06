@@ -40,11 +40,14 @@ export function planNudge({ state, now, settings, today, openIds, snoozedIds }) 
   if (mins < morning || mins >= minutesOf(cfg.quietAfter)) return { state: s, nudge: null };
   const nowMs = now.getTime();
   const handled = (id) => !openIds.has(id) || snoozedIds.has(id);
-  const fresh = (exclude) => board.suggested.filter((c) => !handled(c.id) && !exclude.has(c.id)).slice(0, BATCH);
-  const dueToday = (cards) => cards.filter((c) => c.due && c.due <= day).length;
-  const start = (cards, kind, extra = {}) => ({
-    state: { day, batch: cards.map((c) => c.id), batchAt: nowMs, sentAt: nowMs, reminded: false, seen: [...new Set([...(s.day === day ? s.seen || [] : []), ...cards.map((c) => c.id)])], ...extra },
-    nudge: { kind, text: textFor(kind, cards.length, dueToday(cards)) },
+  // Seen is kept per card VERSION: a card that woke from a snooze or got a new message is new work.
+  const seenKey = (c) => `${c.id}:${c.print || ''}`;
+  const unhandled = board.suggested.filter((c) => !handled(c.id));
+  const fresh = (exclude) => unhandled.filter((c) => !exclude.has(seenKey(c))).slice(0, BATCH);
+  const due = (cards) => ({ overdue: cards.filter((c) => c.due && c.due < day).length, today: cards.filter((c) => c.due === day).length });
+  const start = (cards, kind) => ({
+    state: { day, batch: cards.map((c) => c.id), batchAt: nowMs, sentAt: nowMs, reminded: false, seen: [...new Set([...(s.day === day ? s.seen || [] : []), ...cards.map(seenKey)])] },
+    nudge: { kind, text: textFor(kind, cards.length, due(cards)) },
   });
 
   if (s.day !== day) {
@@ -60,9 +63,12 @@ export function planNudge({ state, now, settings, today, openIds, snoozedIds }) 
   const seen = new Set(Array.isArray(s.seen) ? s.seen : []);
   if (batch.length > 0 && left.length === 0) {
     if (nowMs - (s.sentAt || 0) < NEXT_GAP_MS) return { state: s, nudge: null };
+    // Nothing new, but a card already nudged (reopened, say) is still open and picked: that is
+    // still work, so it goes out again rather than a false all-clear (Codex).
     const cards = fresh(seen);
-    if (cards.length > 0) return start(cards, 'next');
-    return { state: { ...s, batch: [], sentAt: nowMs, reminded: true }, nudge: { kind: 'done', text: textFor('done', batch.length, 0) } };
+    const next = cards.length > 0 ? cards : unhandled.slice(0, BATCH);
+    if (next.length > 0) return start(next, 'next');
+    return { state: { ...s, batch: [], sentAt: nowMs, reminded: true }, nudge: { kind: 'done', text: textFor('done', batch.length) } };
   }
   if (batch.length === 0) {
     // Cleared earlier: anything picked since then that was never in a nudge.
@@ -71,7 +77,7 @@ export function planNudge({ state, now, settings, today, openIds, snoozedIds }) 
     return cards.length > 0 ? start(cards, 'more') : { state: s, nudge: null };
   }
   if (!s.reminded && nowMs - (s.batchAt || 0) >= REMIND_AFTER_MS) {
-    return { state: { ...s, reminded: true, sentAt: nowMs }, nudge: { kind: 'reminder', text: textFor('reminder', left.length, 0, batch.length) } };
+    return { state: { ...s, reminded: true, sentAt: nowMs }, nudge: { kind: 'reminder', text: textFor('reminder', left.length, undefined, batch.length) } };
   }
   return { state: s, nudge: null };
 }
@@ -81,8 +87,9 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 // Fixed wording with numbers only. The prefix marks it as automatic for anything that reads
 // Messages, and is checked against the iMessage bridge's trigger before sending.
 export const NUDGE_PREFIX = 'Dobius Today:';
-export function textFor(kind, n, due, of = 0) {
-  const dueBit = due > 0 ? `, ${due} due today` : '';
+export function textFor(kind, n, due = {}, of = 0) {
+  const parts = [due.overdue > 0 ? `${due.overdue} overdue` : '', due.today > 0 ? `${due.today} due today` : ''].filter(Boolean);
+  const dueBit = parts.length ? `, ${parts.join(', ')}` : '';
   switch (kind) {
     case 'morning': return `${NUDGE_PREFIX} ${plural(n, 'thing', 'things')} to do${dueBit}. Open Today in Dobius to see them.`;
     case 'next': return `${NUDGE_PREFIX} those are handled. ${n} more picked for you${dueBit}.`;
@@ -97,7 +104,7 @@ export function textFor(kind, n, due, of = 0) {
  * The timer side. `read` returns { today, openIds, snoozedIds } or null; `send(nudge, cfg)` sends to
  * the channels the settings allow and returns per-channel outcomes for the log.
  */
-export function createNudger({ file, read, settings, send, log = () => {}, now = () => new Date() }) {
+export function createNudger({ file, read, settings, send, log = () => {}, now = () => new Date(), mayRun = () => true }) {
   let state = {};
   try { state = JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch { state = {}; }
   let busy = false;
@@ -113,6 +120,10 @@ export function createNudger({ file, read, settings, send, log = () => {}, now =
     try {
       const cfg = settings();
       if (!cfg.imessage && !cfg.mac && !cfg.push) return null;
+      // Only one Dobius on this Mac nudges (there is no single-instance lock).
+      if (!mayRun()) return null;
+      // Another process may have sent since this one last looked.
+      try { const disk = JSON.parse(fs.readFileSync(file, 'utf8')); if (disk && typeof disk === 'object') state = disk; } catch { /* first run */ }
       const got = await read();
       if (!got) return null;
       const { state: next, nudge } = planNudge({ state, now: now(), settings: cfg, ...got });

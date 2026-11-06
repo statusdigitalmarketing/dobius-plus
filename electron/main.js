@@ -120,7 +120,7 @@ import { sessionNameFromTabLabel } from '../shared/tab-label.js';
 import { startScheduledTasks, stopScheduledTasks } from './scheduled-tasks.js';
 import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './auto-mode.js';
 import { installNavGuard, isAppUrl } from './nav-guard.js';
-import { readToday, cardSeen, openCardIds } from './today.js';
+import { readToday, readAllCards, cardSeen, openCardIds } from './today.js';
 import { setTodayBridge, nudgeSettings, checkSettingWrite } from './mobile-today.js';
 import { createNudger, NUDGE_PREFIX } from './today-nudge.js';
 import { sendPush, hasPushSubscribers } from './push.js';
@@ -199,21 +199,39 @@ async function sendTodayNudge(nudge, cfg) {
       } else out.mac = 'unsupported';
     } catch { out.mac = 'failed'; }
   }
-  if (cfg.push) {
-    if (!hasPushSubscribers()) out.push = 'none';
-    else { await sendPush({ title: 'Today', body, tag: 'today', url: './?view=tasks' }); out.push = 'sent'; }
-  }
   if (cfg.imessage) {
     const b = getImessageBridge();
     const prefix = String(b.triggerPrefix || '').trim().toLowerCase();
     if (!b.selfHandle) out.imessage = 'no-handle';
-    // Never a message the bridge would read back as a command.
-    else if (prefix && nudge.text.trim().toLowerCase().startsWith(prefix)) out.imessage = 'skipped';
+    // Never a message the bridge would read back as a command (an empty prefix matches every one).
+    else if (b.enabled && (!prefix || nudge.text.trim().toLowerCase().startsWith(prefix))) out.imessage = 'skipped';
     else {
       try { await sendImessageToSelf(nudge.text); out.imessage = 'ok'; } catch { out.imessage = 'failed'; }
     }
   }
+  // Last, and bounded: one push service that never answers must not hold up every later nudge.
+  if (cfg.push) {
+    if (!hasPushSubscribers()) out.push = 'none';
+    else {
+      const done = sendPush({ title: 'Today', body, tag: 'today', url: './?view=tasks' }).then(() => 'sent', () => 'failed');
+      out.push = await Promise.race([done, new Promise((r) => setTimeout(() => r('timeout'), 20000))]);
+    }
+  }
   return out;
+}
+
+// One nudging Dobius per Mac: a lock file holding the owner's pid, taken over when that pid is gone.
+function holdNudgeLock(file) {
+  const mine = String(process.pid);
+  try {
+    const owner = fs.readFileSync(file, 'utf8').trim();
+    if (owner === mine) return true;
+    const pid = Number(owner);
+    if (Number.isInteger(pid) && pid > 0) {
+      try { process.kill(pid, 0); return false; } catch (err) { if (err?.code === 'EPERM') return false; }
+    }
+  } catch { /* no lock yet */ }
+  try { fs.writeFileSync(file, mine, { mode: 0o600 }); return fs.readFileSync(file, 'utf8').trim() === mine; } catch { return false; }
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1568,7 +1586,7 @@ function setupOrchestrationHandlers() {
     if (ok) todayChanged();
     return { ok };
   };
-  const unsnoozeToday = (id) => { const ok = todaySnoozes.unsnooze(id); if (ok) todayChanged(); return { ok }; };
+  const unsnoozeToday = (id, until) => { const ok = todaySnoozes.unsnooze(id, until); if (ok) todayChanged(); return { ok }; };
   const actOnCard = async (request) => { const r = await actOnInboxCard(request); if (r?.ok) todayChanged(); return r; };
   ipcMain.handle('today:read', () => readTodayNow());
   ipcMain.handle('today:snooze', (_event, id, choice, print) => snoozeToday(id, choice, print));
@@ -1577,7 +1595,7 @@ function setupOrchestrationHandlers() {
   setTodayBridge({
     readToday: readTodayNow,
     // With each card's print, so See all can snooze too (checked against the card as main saw it).
-    readInbox: async () => { const r = await readInboxBoard({ maxCards: Infinity }); return r?.ok ? { ...r, cards: r.cards.map((c) => ({ ...c, print: cardPrint(c) })) } : r; },
+    readInbox: async () => { const r = await readAllCards(); return r?.ok ? { ...r, cards: r.cards.map((c) => ({ ...c, print: cardPrint(c) })) } : r; },
     snooze: snoozeToday,
     unsnooze: unsnoozeToday,
     act: actOnCard,
@@ -1597,6 +1615,8 @@ function setupOrchestrationHandlers() {
       return { today, openIds: openCardIds(), snoozedIds: new Set((today.board.snoozed || []).map((c) => c.id)) };
     },
     send: (nudge, cfg) => sendTodayNudge(nudge, cfg),
+    // Only the installed app nudges (a dev run shares this userData), and only one of them.
+    mayRun: () => app.isPackaged && holdNudgeLock(path.join(app.getPath('userData'), 'today-nudge.lock')),
   });
   setInterval(() => { todayNudger.tick(); }, 5 * 60 * 1000).unref?.();
   setTimeout(() => { todayNudger.tick(); }, 60 * 1000).unref?.();

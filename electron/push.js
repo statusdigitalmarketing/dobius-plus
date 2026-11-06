@@ -42,7 +42,8 @@ export async function sendPush(payload) {
   const subs = getPushSubscriptions();
   if (subs.length === 0) return;
   const vapid = ensureVapid();
-  const opts = { vapidDetails: { subject: VAPID_SUBJECT, publicKey: vapid.publicKey, privateKey: vapid.privateKey }, TTL: 600 };
+  // A timeout so one push service that never answers cannot hold every send open.
+  const opts = { vapidDetails: { subject: VAPID_SUBJECT, publicKey: vapid.publicKey, privateKey: vapid.privateKey }, TTL: 600, timeout: 15000 };
   const body = JSON.stringify({
     title: String(payload?.title || 'Dobius+').slice(0, 120),
     body: String(payload?.body || '').slice(0, 300),

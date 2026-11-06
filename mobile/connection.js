@@ -28,10 +28,10 @@ function combinedSignal(first, second) {
   return controller.signal;
 }
 
-// Today and settings writes are one-shot too. Each is safe to deliver late: a snooze carries the
-// card's print and a Done its rev, so the Mac refuses one aimed at a card that changed meanwhile.
-const QUEUEABLE = new Set(['input', 'submitPrompt', 'kill', 'resumeSession', 'createTerminal', 'selectorKey',
-  'todaySnooze', 'todayUnsnooze', 'inboxAct', 'settingsWrite']);
+// Today and settings writes are deliberately NOT queued: delivered late, "Tomorrow" can mean the
+// day after, and a Bring back can undo a newer snooze (Codex). Their screens say when the Mac
+// did not answer, and the person taps again.
+const QUEUEABLE = new Set(['input', 'submitPrompt', 'kill', 'resumeSession', 'createTerminal', 'selectorKey']);
 
 /**
  * WebSocket client for the Dobius+ mobile bridge.
