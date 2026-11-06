@@ -128,16 +128,17 @@ export function createNudger({ file, read, settings, send, log = () => {}, now =
       try { const disk = JSON.parse(fs.readFileSync(file, 'utf8')); if (disk && typeof disk === 'object') state = disk; } catch { /* first run */ }
       const got = await read();
       if (!got) return null;
-      const { state: next, nudge } = planNudge({ state, now: now(), settings: cfg, ...got });
+      // Settings as they are NOW, for the plan and the send: alerts switched off, or quiet time
+      // moved, while the board was being read count (Codex).
+      const latest = settings();
+      if (!latest.imessage && !latest.mac && !latest.push) return null;
+      const { state: next, nudge } = planNudge({ state, now: now(), settings: latest, ...got });
       if (next !== state) {
         // Saved before sending: a crash or an overlapping tick then cannot send it again.
         try { save(next); } catch { log('save failed'); return null; }
         state = next;
       }
       if (!nudge) return null;
-      // Settings again, as they are now: alerts switched off during the read send nothing (Codex).
-      const latest = settings();
-      if (!latest.imessage && !latest.mac && !latest.push) return null;
       const outcome = await send(nudge, latest);
       log(`${nudge.kind} ${Object.entries(outcome || {}).map(([k, v]) => `${k}=${v}`).join(' ')}`);
       return nudge;

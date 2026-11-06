@@ -37,11 +37,15 @@ export function stillSnoozed(entry, card, { today, nowMs = Date.now() }) {
 export function createSnoozes({ file, now = () => Date.now() }) {
   let all = {};
   try { const v = JSON.parse(fs.readFileSync(file, 'utf8')); if (v && typeof v === 'object' && !Array.isArray(v)) all = v; } catch { all = {}; }
+  // Snoozes saved before snoozes had ids get one now, so Bring back can name them (Codex).
+  let migrated = false;
+  for (const e of Object.values(all)) if (e && typeof e === 'object' && !e.sid) { e.sid = crypto.randomUUID(); migrated = true; }
   const save = () => {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(`${file}.tmp`, JSON.stringify(all));
     fs.renameSync(`${file}.tmp`, file);
   };
+  if (migrated) { try { save(); } catch { /* kept in memory; saved with the next change */ } }
   return {
     snooze(card, choice, today) {
       if (!card || typeof card.id !== 'string' || !card.id || card.id.length > 200 || card.id === '__proto__') return false;

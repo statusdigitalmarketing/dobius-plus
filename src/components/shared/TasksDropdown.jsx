@@ -231,8 +231,9 @@ export default function TasksDropdown() {
     try { await window.electronAPI.todaySnooze(card.id, choice, card.print); } catch (err) { console.error('[TasksDropdown] snooze failed:', err?.name); }
     loadToday();
   };
-  const unsnoozeCard = async (id) => {
-    try { await window.electronAPI.todayUnsnooze(id); } catch (err) { console.error('[TasksDropdown] unsnooze failed:', err?.name); }
+  // With the snooze it showed, so a newer snooze (from the phone, say) stays put.
+  const unsnoozeCard = async (id, sid) => {
+    try { await window.electronAPI.todayUnsnooze(id, sid); } catch (err) { console.error('[TasksDropdown] unsnooze failed:', err?.name); }
     loadToday();
   };
 
@@ -819,7 +820,7 @@ function TodayList({ data, query, today, expanded, onExpand, onList, canAdd, onA
         <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 12px', borderBottom: '1px solid var(--border)', fontSize: 11, color: 'var(--dim)' }}>
           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.subject || s.summary || '(no subject)'}</span>
           <span style={{ flexShrink: 0, fontSize: 10 }}>until {new Date(s.until).toLocaleDateString([], { weekday: 'short' })}</span>
-          <LinkButton onClick={() => onUnsnooze(s.id)} color="var(--accent)">Bring back</LinkButton>
+          <LinkButton onClick={() => onUnsnooze(s.id, s.sid)} color="var(--accent)">Bring back</LinkButton>
         </div>
       ))}
       {cards.map((card) => (

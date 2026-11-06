@@ -716,7 +716,7 @@ function handleTabWrite(socket, msg) {
 
 function handleAuthedMessage(socket, msg, subs) {
   if (TAB_OPS.has(msg.type)) { handleTabWrite(socket, msg); return; }
-  if (handleTodayMessage(msg, (obj) => wsSend(socket, obj))) return;
+  if (handleTodayMessage(msg, (obj) => wsSend(socket, obj), () => knownToken(socket._authToken))) return;
   switch (msg.type) {
     case 'ping':
       wsSend(socket, { type: 'pong' });

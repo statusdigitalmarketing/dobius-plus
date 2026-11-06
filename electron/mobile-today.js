@@ -68,7 +68,7 @@ const withoutUrl = (r) => { if (!r || typeof r !== 'object') return r; const { u
  * Handle one phone message if it is ours. Returns true when handled. `send` writes to that one
  * socket. Every reply carries the request's reqId so a screen can match it.
  */
-export function handleTodayMessage(msg, send) {
+export function handleTodayMessage(msg, send, stillOk = () => true) {
   const type = msg?.type;
   if (!['todayRead', 'inboxRead', 'todaySnooze', 'todayUnsnooze', 'inboxAct', 'settingsRead', 'settingsWrite'].includes(type)) return false;
   const reqId = reqIdOf(msg);
@@ -86,12 +86,14 @@ export function handleTodayMessage(msg, send) {
       }
       case 'todaySnooze': {
         if (!idOk(msg.id) || (msg.choice !== 'tomorrow' && msg.choice !== 'week') || typeof msg.print !== 'string') return fail({ op: 'snooze', id: msg.id, error: 'bad-request' });
+        if (!stillOk()) return fail({ op: 'snooze', id: msg.id, error: 'unavailable' });
         const r = bridge.snooze(msg.id, msg.choice, msg.print);
         return send({ type: 'todayResult', reqId, op: 'snooze', id: msg.id, ok: !!r?.ok, changed: !!r?.changed });
       }
       case 'todayUnsnooze': {
         if (!idOk(msg.id)) return fail({ op: 'unsnooze', id: msg.id, error: 'bad-request' });
         if (typeof msg.sid !== 'string' || !msg.sid || msg.sid.length > 64) return fail({ op: 'unsnooze', id: msg.id, error: 'bad-request' });
+        if (!stillOk()) return fail({ op: 'unsnooze', id: msg.id, error: 'unavailable' });
         const r = bridge.unsnooze(msg.id, msg.sid);
         return send({ type: 'todayResult', reqId, op: 'unsnooze', id: msg.id, ok: !!r?.ok });
       }
@@ -101,13 +103,16 @@ export function handleTodayMessage(msg, send) {
         if (typeof msg.rev !== 'number' && typeof msg.rev !== 'string') return fail({ op: msg.kind, id: msg.id, error: 'bad-request' });
         // Done and Close carry the print of the card as shown: an edit that kept its rev still counts.
         if (msg.kind !== 'undo' && typeof msg.print !== 'string') return fail({ op: msg.kind, id: msg.id, error: 'bad-request' });
-        const r = await bridge.act({ kind: msg.kind, id: msg.id, rev: msg.rev, print: msg.kind === 'undo' ? undefined : msg.print });
+        // stillOk is checked again by main right before the board is changed: a phone unpaired
+        // while its action waited never closes anything (Codex).
+        const r = await bridge.act({ kind: msg.kind, id: msg.id, rev: msg.rev, print: msg.kind === 'undo' ? undefined : msg.print }, stillOk);
         // Only the fixed messages the desktop shows, never whatever came back from the board.
         return send({ type: 'todayResult', reqId, op: msg.kind, id: msg.id, ok: !!r?.ok, changed: r?.reason === 'changed', reason: typeof r?.reason === 'string' ? r.reason.slice(0, 40) : undefined });
       }
       case 'settingsRead':
         return send({ type: 'settings', reqId, ok: true, data: await bridge.readSettings() });
       case 'settingsWrite': {
+        if (!stillOk()) return fail({ key: null, error: 'unavailable' });
         const r = await bridge.writeSetting(msg.key, msg.value);
         return send({ type: 'settingsResult', reqId, key: typeof msg.key === 'string' ? msg.key.slice(0, 40) : null, ok: !!r?.ok, error: r?.ok ? undefined : (r?.error || 'failed') });
       }

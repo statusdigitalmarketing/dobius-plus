@@ -277,3 +277,44 @@ test('alerts switched off while a tick is reading send nothing', async () => {
   assert.deepEqual(sent, []);
   fs.rmSync(path.join(os.tmpdir(), `nudge-mid-${process.pid}.json`), { force: true });
 });
+
+test('snoozes saved before ids existed get one, so they can be brought back', async () => {
+  const { createSnoozes } = await import('../today-snooze.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snz-old-'));
+  const file = path.join(dir, 's.json');
+  fs.writeFileSync(file, JSON.stringify({ A: { print: 'p', due: null, day: '2026-11-05', until: Date.now() + 3600e3 } }));
+  const s = createSnoozes({ file });
+  const sid = JSON.parse(fs.readFileSync(file, 'utf8')).A.sid;
+  assert.equal(typeof sid, 'string');
+  assert.equal(s.unsnooze('A', sid), true);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('quiet time moved while a tick reads is what the plan uses', async () => {
+  let quiet = '20:00';
+  const sent = [];
+  const n = createNudger({
+    file: path.join(os.tmpdir(), `nudge-quiet-${process.pid}.json`), now: () => at(10, 5),
+    settings: () => ({ ...cfg, quietAfter: quiet }),
+    read: async () => { quiet = '10:00'; return { today: todayOf(ids(2)), openIds: new Set(ids(2)), snoozedIds: new Set() }; },
+    send: async (x) => { sent.push(x.kind); return {}; },
+  });
+  await n.tick();
+  assert.deepEqual(sent, []);
+  fs.rmSync(path.join(os.tmpdir(), `nudge-quiet-${process.pid}.json`), { force: true });
+});
+
+test('a phone unpaired while its write waits changes nothing', async () => {
+  const out = [];
+  let acted = 0;
+  setTodayBridge({ snooze: () => { acted += 1; return { ok: true }; }, unsnooze: () => { acted += 1; return { ok: true }; }, act: async (_r, ok) => (ok() ? (acted += 1, { ok: true }) : { ok: false, reason: 'revoked' }), writeSetting: async () => { acted += 1; return { ok: true }; } });
+  const no = () => false;
+  handleTodayMessage({ type: 'todaySnooze', reqId: 'a', id: 'x', choice: 'week', print: 'p' }, (m) => out.push(m), no);
+  handleTodayMessage({ type: 'todayUnsnooze', reqId: 'b', id: 'x', sid: 's' }, (m) => out.push(m), no);
+  handleTodayMessage({ type: 'inboxAct', reqId: 'c', kind: 'done', id: 'x', rev: 1, print: 'p' }, (m) => out.push(m), no);
+  handleTodayMessage({ type: 'settingsWrite', reqId: 'd', key: 'newTabTool', value: 'shell' }, (m) => out.push(m), no);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(acted, 0);
+  assert.equal(out.every((m) => m.ok === false), true);
+  setTodayBridge(null);
+});

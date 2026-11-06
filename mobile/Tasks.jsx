@@ -163,7 +163,8 @@ export default function Tasks({ connection, onBack }) {
   }, [supported, load]);
 
   useEffect(() => {
-    if (!undo || undo.problem) return undefined;
+    // Not while its own Undo is on the way, or a slow failure would land on nothing (Codex).
+    if (!undo || undo.problem || undo.pending) return undefined;
     const t = setTimeout(() => setUndo(null), 8000);
     return () => clearTimeout(t);
   }, [undo]);
@@ -190,6 +191,7 @@ export default function Tasks({ connection, onBack }) {
     const card = undo?.card;
     const key = undo?.key;
     if (!card) return;
+    setUndo((cur) => (cur?.key === key ? { ...cur, pending: true } : cur));
     const r = await ask(connection, { type: 'inboxAct', kind: 'undo', id: card.id, rev: card.rev }, 'todayResult');
     // Only if this card still owns the Undo bar: another card may have been marked done meanwhile.
     // Only the Undo bar this tap came from: a newer Done (even of the same card) has its own key.

@@ -484,7 +484,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   fleetInfo: () => ipcRenderer.invoke('fleet:info'),
   todayRead: () => ipcRenderer.invoke('today:read'),
   todaySnooze: (id, choice, print) => ipcRenderer.invoke('today:snooze', id, choice, print),
-  todayUnsnooze: (id) => ipcRenderer.invoke('today:unsnooze', id),
+  todayUnsnooze: (id, sid) => ipcRenderer.invoke('today:unsnooze', id, sid),
   // Today changed somewhere (the phone, another window): read it again.
   onTodayChanged: (callback) => {
     const handler = () => callback();

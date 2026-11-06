@@ -180,8 +180,16 @@ function showTodayOnMac() {
   const hasToday = (x) => { try { const u = x.webContents.getURL(); return !x.isDestroyed() && u.includes('project=') && !u.includes('visual='); } catch { return false; } };
   const focused = BrowserWindow.getFocusedWindow();
   const all = BrowserWindow.getAllWindows().filter(hasToday);
-  const w = (focused && hasToday(focused) ? focused : null) || all.find((x) => x.isVisible()) || all[0];
-  if (!w || w.isDestroyed()) return;
+  let w = (focused && hasToday(focused) ? focused : null) || all.find((x) => x.isVisible()) || all[0];
+  if (!w) {
+    // No project window open: open the last one used, and show Today once it has loaded.
+    const recent = (loadConfig().lastOpenProjects || []).find((p) => typeof p === 'string' && !projectDirError(p));
+    if (!recent) return;
+    const opened = openProjectWindow(recent);
+    opened?.webContents?.once('did-finish-load', () => setTimeout(() => { if (!opened.isDestroyed()) opened.webContents.send('tasks:openToday'); }, 1500));
+    return;
+  }
+  if (w.isDestroyed()) return;
   if (w.isMinimized()) w.restore();
   w.show();
   w.focus();
@@ -229,7 +237,12 @@ async function sendTodayNudge(nudge, cfg) {
 // Taken with an exclusive create, so two processes can never both win (Codex).
 function holdNudgeLock(file) {
   const mine = String(process.pid);
-  const take = () => { try { const fd = fs.openSync(file, 'wx', 0o600); fs.writeSync(fd, mine); fs.closeSync(fd); return true; } catch { return false; } };
+  // Written in full first, then linked into place: link fails if the lock exists, and the lock is
+  // never seen empty (an empty one read as stale let a second process in: Codex).
+  const take = () => {
+    const tmp = `${file}.${process.pid}.tmp`;
+    try { fs.writeFileSync(tmp, mine, { mode: 0o600 }); fs.linkSync(tmp, file); return true; } catch { return false; } finally { try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ } }
+  };
   if (take()) return true;
   let owner;
   try { owner = fs.readFileSync(file, 'utf8').trim(); } catch { return take(); }
@@ -1610,7 +1623,7 @@ function setupOrchestrationHandlers() {
     return { ok };
   };
   const unsnoozeToday = (id, sid) => { const ok = todaySnoozes.unsnooze(id, sid); if (ok) todayChanged(); return { ok }; };
-  const actOnCard = async (request) => {
+  const actOnCard = async (request, stillOk = () => true) => {
     if (realBoardInHarness()) return { ok: false, reason: 'not-installed' };
     // The phone sends the print it showed: a card edited since (same rev) is not closed blind.
     // Checked against a FRESH read of the board, not the last one (Codex).
@@ -1619,13 +1632,14 @@ function setupOrchestrationHandlers() {
       const card = now?.ok ? now.cards.find((c) => c.id === request.id) : null;
       if (!card || cardPrint(card) !== request.print) return { ok: false, reason: 'changed' };
     }
+    if (!stillOk()) return { ok: false, reason: 'revoked' };
     const r = await actOnInboxCard({ kind: request?.kind, id: request?.id, rev: request?.rev });
     if (r?.ok) todayChanged();
     return r;
   };
   ipcMain.handle('today:read', () => readTodayNow());
   ipcMain.handle('today:snooze', (_event, id, choice, print) => snoozeToday(id, choice, print));
-  ipcMain.handle('today:unsnooze', (_event, id) => unsnoozeToday(id));
+  ipcMain.handle('today:unsnooze', (_event, id, sid) => unsnoozeToday(id, typeof sid === 'string' ? sid : undefined));
   // The phone gets the same functions, never a copy of them (electron/mobile-today.js).
   setTodayBridge({
     readToday: readTodayNow,
@@ -1640,7 +1654,11 @@ function setupOrchestrationHandlers() {
   // Today comes to Sam: counts only, through the channels Settings allows (electron/today-nudge.js).
   const todayNudger = createNudger({
     file: path.join(app.getPath('userData'), 'today-nudge.json'),
-    settings: () => nudgeSettings(getSettings().todayNudges),
+    // From disk, not this process's cache: another Dobius sharing this userData (a dev run that
+    // owns the phone server) may be the one that changed them (Codex).
+    settings: () => {
+      try { return nudgeSettings(JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'config.json'), 'utf8'))?.settings?.todayNudges); } catch { return nudgeSettings(getSettings().todayNudges); }
+    },
     log: (line) => logLine('today', `nudge ${line}`),
     read: async () => {
       // A harness never nudges anyone about anything.
