@@ -128,3 +128,12 @@ test('trust is not carried over a respawn (Codex)', () => {
   const carried = { ...old, trusted: false };
   assert.equal(chunkMayDraw('Approve A?', carried), true);
 });
+
+test('the CAN a new PTY opens with ends anything left open, then markers are inert', () => {
+  // What the screen holds: an earlier PTY's unfinished palette OSC. The new PTY's first chunk.
+  const screenSide = oscScanState();
+  chunkMayDraw('\x1b]4;1;#000000;2;#ffffff;', screenSide);
+  assert.equal(chunkMayDraw('\x18$ ', screenSide), true);
+  assert.equal(screenSide.mode, 'ground');
+  assert.equal(chunkMayDraw('\x1b]777;dobius;needs\x07', screenSide), false);
+});

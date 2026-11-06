@@ -190,9 +190,6 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   const prevRows = prev?.rows;
   // The screen keeps its parser state across a respawn, so the output scan does too: a fresh
   // PTY starts where the old one left the terminal (see electron/osc-only.js, Codex).
-  // Trust is not carried: the replay buffer starts empty, so nothing the new PTY prints inside a
-  // string the old one opened may go uncounted (Codex).
-  const prevOscState = prev?.oscState ? { ...prev.oscState, trusted: false } : null;
   // Kill existing terminal with this ID if any
   if (terminals.has(id)) {
     killTerminal(id, { respawn: true });
@@ -312,7 +309,10 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     if (entry.visibleScan(data)) entry.outputSeq = (entry.outputSeq || 0) + 1; // see terminalSettledSinceInput
     // Only output that can draw: a title or tab-status marker alone never changes the screen,
     // and counting it made a question card read as changed (see electron/osc-only.js).
-    if (!entry.oscState) entry.oscState = oscScanState();
+    // A new PTY's output opens with CAN, which ends any escape or string the screen still has
+    // open from an earlier PTY under this tab id (a respawn, or an exit then a re-create) and
+    // draws nothing. Screen and scan then both start in ground state (Codex, three rounds).
+    if (!entry.oscState) { entry.oscState = oscScanState(); data = `\x18${data}`; }
     if (chunkMayDraw(data, entry.oscState)) entry.rawOutputSeq = (entry.rawOutputSeq || 0) + 1; // see terminalRawOutputSeq
     entry.pasteMode = trackPasteMode(entry.pasteMode, data); // see terminalBracketedPaste
     // Global observers (main-process status authority, v1.0.43): see EVERY
@@ -380,7 +380,6 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
 
   terminals.set(id, {
     pty: term,
-    oscState: prevOscState, // null for a new tab: the scan starts in ground with the screen
     visibleScan: createVisibleOutputScanner(), // escape state spans chunks
     // node-pty routes onData/onExit through a NAPI ThreadSafeFunction. If a
     // callback lands while Node is freeing its environment at quit, the throw
