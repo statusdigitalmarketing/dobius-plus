@@ -152,7 +152,14 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
   // dismisses it, a row can go, so a pile of old rows can never block the inbox for good.
   const IN_FLIGHT = new Set(['queued', 'sending', 'waiting', 'routing']);
   const ATTENTION = new Set(['held', 'needs attention', 'unconfirmed', 'not delivered']);
-  const keep = (m) => IN_FLIGHT.has(m.state) || (ATTENTION.has(m.state) && now() - (m.at || 0) < RETAIN_MS);
+  // Also kept while it still owes its sender a status report (lifecycle; dropped by the service after 24 h).
+  const keep = (m) => IN_FLIGHT.has(m.state) || (ATTENTION.has(m.state) && now() - (m.at || 0) < RETAIN_MS)
+    // and the one message whose working/done is being followed right now (the service says which). Pending status
+    // reports do NOT protect a row: a teammate that never acks (an older Dobius) must not fill the inbox. At the cap,
+    // the oldest such rows go, and their unsent reports with them (accepted).
+    || keepAlso(m);
+  let keepAlso = () => false;
+  function setKeepAlso(fn) { keepAlso = typeof fn === 'function' ? fn : () => false; }
   // `protect`: the row being written now. If the cap cannot be met without dropping it or a KEEP row, this throws
   // ('inbox full') and nothing is written: a receiver must refuse such a message, never acknowledge and drop it.
   function saveMessages(list, protect = null) {
@@ -202,6 +209,7 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
   }
 
   return {
+    setKeepAlso,
     dir, loadIdentity, settings, setSettings, peers, savePeer, updatePeer, removePeer,
     records: recordStore, allow, countAccepted, messages, putMessage, patchMessage, findById,
     // exposed for tests

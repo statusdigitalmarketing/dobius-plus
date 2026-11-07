@@ -30,6 +30,7 @@ function net() {
       if (method === 'GET' && p.startsWith('/team/hello?nonce=')) r = svc.hello(p.split('=')[1]);
       else if (p === '/team/link') r = svc.link(body, sig);
       else if (p === '/team/message') r = svc.receive(body, sig);
+      else if (p === '/team/status') r = svc.receiveStatus(body, sig);
       else r = { status: 404, json: null };
     } catch {
       r = { status: 500, json: null }; // what team-routes.js answers when the handler throws
@@ -254,6 +255,7 @@ function fakeTab({ card, revokeAfterPaste = false, keysDuringQuiet = false, ente
     submit: () => { t.submitted += 1; t.seq += 1; if (!enterInsertsNewline) t.box = ''; },
     sleep: async (ms) => { clock += ms; if (keysDuringQuiet && ms >= 3000) t.keys += 1; },
     now,
+    claudePid: async () => 1234, // the Claude leading the tab (lifecycle follows it by pid)
   };
   return { t, deps };
 }
@@ -1036,5 +1038,527 @@ test('handoff r5: broken UTF-16 is refused; one that expires while waiting for t
   await settle(() => a.events.some(([e]) => e === 'handoff-held'));
   assert.equal(tab.pasted, null, 'nothing typed');
   assert.match(a.events.find(([e]) => e === 'handoff-held')[1].note, /expired/);
+  a.svc.stop(); b.svc.stop();
+});
+
+// ---------- lifecycle: the receiver reports what happened to a message ----------
+
+async function pumpAll(...svcs) { for (let i = 0; i < 3; i += 1) for (const s of svcs) { await s.pump(); await s.pumpReports(); } }
+const outRow = (x) => x.store.messages().find((m) => m.dir === 'out');
+
+test('lifecycle: delivered, read, working, done reach the sender with times, in order', async () => {
+  const tn = net();
+  let tab = null;
+  const a = install('Sam', tn);
+  let b = null;
+  b = install('Brett', tn, { deliverDeps: (tabId, authorized) => {
+    const f = fakeTab();
+    tab = f.t;
+    // Claude's own 'working' lands between the paste and the confirmed Enter.
+    const submit = f.deps.submit;
+    return { ...f.deps, authorized, submit: (id) => { submit(id); b.svc.tabEvent('term-/b/orch-1', 'working', null); } };
+  } });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'check the catalog');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  b.svc.tabEvent('term-/other-1', 'done', null); // another tab: ignored
+  b.svc.tabEvent('term-/b/orch-1', 'done', 'idle'); // the idle notification: ignored
+  clock += 1000;
+  b.svc.tabEvent('term-/b/orch-1', 'done', null);
+  await pumpAll(b.svc);
+  const row = outRow(a);
+  assert.deepEqual(row.timeline.map((e) => e.state), ['read', 'working', 'done']);
+  assert.equal(row.stage, 'done');
+  assert.equal(row.timeline.every((e) => Number.isFinite(e.at)), true);
+  assert.equal(b.store.messages().find((m) => m.dir === 'in').reports.length, 0, 'every report acked');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle: replied is reported only once the reply itself is delivered, with its id', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized }) });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'question');
+  await a.svc.pump();
+  const got = await (async () => { await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed'); return b.store.messages().find((m) => m.dir === 'in'); })();
+  a.store.setSettings({ accept: false }); // Sam's Mac refuses messages for now: the reply is not delivered
+  const rep = b.svc.reply(`${got.id}@${got.peer}`, 'answer');
+  await pumpAll(b.svc);
+  assert.notEqual(outRow(a).stage, 'replied', 'not before the reply arrives');
+  a.store.setSettings({ accept: true });
+  clock += 10 * 60 * 1000;
+  await pumpAll(b.svc, a.svc);
+  const row = outRow(a);
+  assert.equal(row.stage, 'replied');
+  assert.equal(row.timeline.at(-1).replyId, rep.id);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle: held with its reason, and a teammate closing the tab is stopped, never done', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized }) });
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.svc.send('Brett', 'first');
+  await a.svc.pump();
+  await pumpAll(b.svc);
+  assert.equal(outRow(a).stage, 'held');
+  assert.match(outRow(a).stageNote, /no orchestrator tab is pinned/);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  b.svc.settingsChanged();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  b.svc.tabEvent('term-/b/orch-1', 'working', null);
+  b.svc.tabEvent('term-/b/orch-1', 'exit', null);
+  b.svc.tabEvent('term-/b/orch-1', 'done', null); // too late: no longer tracked
+  await pumpAll(b.svc);
+  assert.deepEqual(outRow(a).timeline.map((e) => e.state), ['held', 'read', 'working', 'stopped']);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle: a report from another teammate, or about another sender\'s id, changes nothing', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn);
+  const c = install('Casey', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  assert.equal((await linkPair(a, c)).ok, true);
+  a.svc.send('Brett', 'for brett only');
+  const mine = outRow(a);
+  // Casey forges a report about Sam's message to Brett (same id). It is acked as unknown and applied to nothing.
+  const P = await import('../team-protocol.js');
+  const samForCasey = Object.values(c.store.peers())[0];
+  const wire = P.buildStatus(c.store.loadIdentity(), Object.keys(a.store.peers()).find((k) => a.store.peers()[k].name === 'Casey'), samForCasey, { id: mine.id, seq: 1, state: 'done', at: clock, note: null, replyId: null }, clock);
+  const r = a.svc.receiveStatus(wire.body, wire.sig);
+  assert.equal(r.status, 200);
+  assert.equal(outRow(a).stage, undefined, 'not applied');
+  // Tampered body: refused.
+  const bad = Buffer.from(wire.body); bad[bad.length - 5] ^= 1;
+  assert.equal(a.svc.receiveStatus(bad, wire.sig).status, 403);
+  a.svc.stop(); b.svc.stop(); c.svc.stop();
+});
+
+test('lifecycle: only a signed ack ends a report; an unreachable sender is retried, then dropped after 24 h', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.svc.send('Brett', 'x');
+  await a.svc.pump();
+  tn.hosts.delete(a.host); // Sam's Mac goes away
+  await pumpAll(b.svc);
+  const owed = () => b.store.messages().find((m) => m.dir === 'in').reports.length;
+  assert.equal(owed(), 1, 'held report still owed');
+  // Something else answers 200 at that address without a valid ack.
+  tn.hosts.set(a.host, { receiveStatus: () => ({ status: 200, json: { ok: true, ack: 'forged' } }) });
+  clock += 3_600_000;
+  await pumpAll(b.svc);
+  assert.equal(owed(), 1, 'an unsigned 200 does not end it');
+  clock += 25 * 3600 * 1000;
+  await pumpAll(b.svc);
+  assert.equal(owed(), 0, 'dropped after 24 h');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle: done and failed from the orchestrator, with a reason', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized }) });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'deploy it');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  const got = b.store.messages().find((m) => m.dir === 'in');
+  assert.match(b.svc.markIncoming('nope', 'failed', 'x').error, /no single received/);
+  assert.equal(b.svc.markIncoming(`${got.id}@${got.peer}`, 'failed', 'staging is down').ok, true);
+  await pumpAll(b.svc);
+  assert.equal(outRow(a).stage, 'failed');
+  assert.equal(outRow(a).stageNote, 'staging is down');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r2: a message waiting for a busy tab does not inherit the previous turn', async () => {
+  const tn = net();
+  let firstTurnEnds = null;
+  const a = install('Sam', tn);
+  // While the second message waits for the tab, the first message's turn goes on and ends (just before the paste).
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => { const f = fakeTab(); return { ...f.deps, authorized, idle: () => { const fn = firstTurnEnds; firstTurnEnds = null; fn?.(); return true; } }; } });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'first');
+  await a.svc.pump();
+  await settle(() => b.store.messages().filter((m) => m.dir === 'in').some((m) => m.state === 'routed'));
+  b.svc.tabEvent('term-/b/orch-1', 'working', null);
+  firstTurnEnds = () => { b.svc.tabEvent('term-/b/orch-1', 'working', null); b.svc.tabEvent('term-/b/orch-1', 'done', null); };
+  a.svc.send('Brett', 'second');
+  await a.svc.pump();
+  await settle(() => b.store.messages().filter((m) => m.dir === 'in' && m.state === 'routed').length === 2);
+  await pumpAll(b.svc);
+  const rows = a.store.messages().filter((m) => m.dir === 'out');
+  const first = rows.find((m) => m.text === 'first');
+  const second = rows.find((m) => m.text === 'second');
+  assert.equal(first.stage, 'done', 'the first message gets its own completion');
+  assert.deepEqual(second.timeline.map((e) => e.state), ['read'], 'the second has only been read');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r2: new events keep a backing-off report on schedule; an outcome is not walked back', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized }) });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'x');
+  await a.svc.pump();
+  tn.hosts.delete(a.host); // Sam's Mac stops answering before any report goes back
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  await pumpAll(b.svc);
+  const inRow = () => b.store.messages().find((m) => m.dir === 'in');
+  const due = inRow().reportNextAt;
+  assert.equal(due > clock, true, 'backing off');
+  b.svc.tabEvent('term-/b/orch-1', 'working', null);
+  b.svc.tabEvent('term-/b/orch-1', 'needs', null);
+  assert.equal(inRow().reportNextAt, due, 'new events do not make it due now');
+  const got = inRow();
+  assert.equal(b.svc.markIncoming(`${got.id}@${got.peer}`, 'failed', 'no').ok, true);
+  b.svc.tabEvent('term-/b/orch-1', 'working', null);
+  assert.equal(inRow().reports.at(-1).state, 'failed', 'nothing after the outcome');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r2: after a handed-back command, the owner\'s own prompt ends following; a permission answer does not', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized, claudePid: async () => 4321 }) });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'deploy');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  const T = 'term-/b/orch-1';
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'needs', null); // a permission prompt mid-turn
+  b.svc.tabEvent(T, 'person-submit', null); // answering it
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'needs', 'handoff'); // turn ends handing a command back
+  b.svc.tabEvent(T, 'person-submit', null); // the owner types something else
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'done', null);
+  await pumpAll(b.svc);
+  assert.notEqual(outRow(a).stage, 'done', 'the unrelated prompt does not finish the request');
+  assert.match(outRow(a).stageNote, /waiting on its owner/);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r2: a status report that never answers does not hold up a message', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.svc.send('Brett', 'one');
+  await a.svc.pump();
+  // Brett owes a 'held' report; Sam's status route hangs forever.
+  const real = tn.request;
+  const hang = async (o) => (o.path === '/team/status' ? new Promise(() => {}) : real(o));
+  b.svc.stop();
+  const b2 = createTeamService({ store: b.store, request: hang, endpoint: () => ({ host: b.host, port: 8420 }), deliverDeps: () => null, notify: () => {}, now, sleep: async (ms) => { clock += ms; } });
+  void b2.pumpReports(); // stuck on the report
+  b2.send('Sam', 'from brett');
+  await b2.pump();
+  assert.equal(a.store.messages().some((m) => m.dir === 'in' && m.text === 'from brett'), true, 'the message still went');
+  a.svc.stop(); b2.stop();
+});
+
+test('lifecycle r2: failed while the Enter is still being confirmed is not walked back to read', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  let b = null;
+  b = install('Brett', tn, { deliverDeps: (tabId, authorized) => {
+    const f = fakeTab();
+    const submit = f.deps.submit;
+    return { ...f.deps, authorized, submit: (id) => {
+      submit(id);
+      const got = b.store.messages().find((m) => m.dir === 'in');
+      b.svc.markIncoming(`${got.id}@${got.peer}`, 'failed', 'cannot');
+    } };
+  } });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'x');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  await pumpAll(b.svc);
+  assert.equal(outRow(a).stage, 'failed');
+  assert.deepEqual(outRow(a).timeline.map((e) => e.state), ['failed']);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r3: typed while background work runs is read but not followed; a stop with background ends the turn', async () => {
+  const tn = net();
+  let bg = true;
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized, background: () => bg }) });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'during background');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  b.svc.tabEvent('term-/b/orch-1', 'working', null);
+  b.svc.tabEvent('term-/b/orch-1', 'done', null);
+  await pumpAll(b.svc);
+  assert.deepEqual(outRow(a).timeline.map((e) => e.state), ['read'], 'not credited with the background work');
+  // Next one, no background: a Stop that leaves background work running ends its turn for person-submit.
+  bg = false;
+  a.svc.send('Brett', 'second');
+  await a.svc.pump();
+  await settle(() => b.store.messages().filter((m) => m.dir === 'in' && m.state === 'routed').length === 2);
+  const T = 'term-/b/orch-1';
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'working', 'background');
+  b.svc.tabEvent(T, 'person-submit', null);
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'done', null);
+  await pumpAll(b.svc);
+  const second = a.store.messages().find((m) => m.dir === 'out' && m.text === 'second');
+  assert.notEqual(second.stage, 'done');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r3: a handoff card waiting for the tab does not stop following the message; its paste does', async () => {
+  const tn = net();
+  let gate = null;
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => {
+    const f = fakeTab();
+    return { ...f.deps, authorized, idle: () => (gate ? gate() : true) };
+  } });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'work');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  b.svc.tabEvent('term-/b/orch-1', 'working', null);
+  // The handoff waits; the message finishes while it does.
+  gate = () => { gate = null; b.svc.tabEvent('term-/b/orch-1', 'done', null); return true; };
+  b.svc.handoff({ cmd: 'send', arg: 'Sam', text: 'local', fromTab: 'term-/b/x-1' });
+  await settle(() => outRow(a)?.stage === 'done' || false);
+  await pumpAll(b.svc);
+  assert.equal(outRow(a).stage, 'done');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r3: a 404 pauses that teammate\'s reports (kept, not dropped); pacing caps requests', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  for (let i = 0; i < 5; i += 1) a.svc.send('Brett', `m${i}`);
+  await a.svc.pump();
+  let statusCalls = 0;
+  tn.hosts.set(a.host, { receiveStatus: () => { statusCalls += 1; return { status: 404, json: null }; } });
+  await pumpAll(b.svc);
+  assert.equal(statusCalls, 1, 'one 404, then that teammate is paused');
+  assert.equal(b.store.messages().filter((m) => m.dir === 'in' && m.reports.length).length, 5, 'reports kept');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('terminal-status: a killed or respawned terminal tells hook listeners it exited', async () => {
+  const ts = await import('../terminal-status.js');
+  ts._reset();
+  const seen = [];
+  const off = ts.onHookState((id, state) => seen.push([id, state]));
+  ts.ingest('term-/x-1', '\x1b]777;dobius;working\x07');
+  ts.forget('term-/x-1');
+  ts.forget('term-/x-1'); // already gone: nothing more
+  off();
+  assert.deepEqual(seen, [['term-/x-1', 'working'], ['term-/x-1', 'exit']]);
+});
+
+test('lifecycle r4: Claude gone from the tab is stopped, never done; an offline teammate does not hold up the others', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized }) });
+  const c = install('Casey', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  assert.equal((await linkPair(c, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'from sam');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  const T = 'term-/b/orch-1';
+  b.svc.tabEvent(T, 'working', null);
+  assert.equal(b.svc.following(T), true);
+  b.svc.tabEvent(T, 'claude-gone', null);
+  b.svc.tabEvent(T, 'working', null); // a new session's work
+  b.svc.tabEvent(T, 'done', null);
+  await pumpAll(b.svc);
+  assert.equal(outRow(a).stage, 'stopped');
+  // Sam's Mac goes offline; Casey's report still goes through.
+  tn.hosts.delete(a.host);
+  b.store.setSettings({ orchestratorTab: null });
+  c.svc.send('Brett', 'from casey');
+  await c.svc.pump();
+  const brettIn = () => b.store.messages().filter((m) => m.dir === 'in');
+  const samRow = brettIn().find((m) => m.text === 'from sam');
+  b.store.patchMessage('in', samRow.peer, samRow.id, { reports: [{ seq: 99, state: 'done', at: clock, note: null, replyId: null }], reportNextAt: 0 });
+  await pumpAll(b.svc);
+  assert.equal(outRow(c).stage, 'held', 'Casey hears back despite Sam being offline');
+  a.svc.stop(); b.svc.stop(); c.svc.stop();
+});
+
+test('lifecycle r5: the pid of the Claude that took it is recorded; expired tracking stops protecting the row', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  let pasted = false;
+  // Before the paste the tab's Claude is 4242; afterwards a replacement (9999) would be found.
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => { const f = fakeTab(); const paste = f.deps.paste; return { ...f.deps, authorized, paste: (i, t) => { pasted = true; paste(i, t); }, claudePid: async () => (pasted ? 9999 : 4242) }; } });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'x');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  assert.equal(b.svc.followedPid('term-/b/orch-1'), 4242);
+  assert.equal(b.svc.followedPid('term-/other-1'), null);
+  clock += 7 * 3600 * 1000;
+  // Fill past the cap: the expired tracked row may now go, so storing more never fails because of it.
+  const row = b.store.messages().find((m) => m.dir === 'in');
+  const realNow = row.at;
+  assert.equal(Number.isFinite(realNow), true);
+  b.svc.tabEvent('term-/b/orch-1', 'working', null); // expires the tracker
+  assert.equal(b.svc.following('term-/b/orch-1'), false);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r6: Claude started during the wait is the one recorded, not "none" from before it ran', async () => {
+  const tn = net();
+  let checks = 0;
+  const a = install('Sam', tn);
+  // The tab is at a shell for the first readiness checks, then Claude (pid 5151) is running.
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => { const f = fakeTab(); return { ...f.deps, authorized, claudeRunning: async () => { checks += 1; return checks > 3; }, claudePid: async () => (checks > 3 ? 5151 : null) }; } });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  a.svc.send('Brett', 'x');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  assert.equal(b.svc.followedPid('term-/b/orch-1'), 5151);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r7: an interrupt ends the turn; without a known pid any person Enter ends following', async () => {
+  const tn = net();
+  let pid = 777;
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized, claudePid: async () => pid }) });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  const T = 'term-/b/orch-1';
+  a.svc.send('Brett', 'one');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'person-interrupt', null);
+  b.svc.tabEvent(T, 'person-submit', null);
+  assert.equal(b.svc.following(T), false, 'interrupted, then a new prompt: not this message any more');
+  pid = null;
+  a.svc.send('Brett', 'two');
+  await a.svc.pump();
+  await settle(() => b.store.messages().filter((m) => m.dir === 'in' && m.state === 'routed').length === 2);
+  b.svc.tabEvent(T, 'working', null);
+  assert.equal(b.svc.following(T), true);
+  b.svc.tabEvent(T, 'person-submit', null); // mid-turn, but the Claude is not known
+  assert.equal(b.svc.following(T), false);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r8: background hooks after the turn ended do not reopen it; no pid means no automatic done', async () => {
+  const tn = net();
+  let pid = 1234;
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized, claudePid: async () => pid }) });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  const T = 'term-/b/orch-1';
+  a.svc.send('Brett', 'one');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'working', 'background'); // Stop with a subagent still running
+  b.svc.tabEvent(T, 'working', null); // that subagent's later tool call
+  b.svc.tabEvent(T, 'person-submit', null); // the owner's own prompt
+  assert.equal(b.svc.following(T), false, 'not reopened by the subagent');
+  b.svc.tabEvent(T, 'done', null); // the background work finishes (a plain Stop)
+  pid = null;
+  a.svc.send('Brett', 'two');
+  await a.svc.pump();
+  await settle(() => b.store.messages().filter((m) => m.dir === 'in' && m.state === 'routed').length === 2);
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'done', null);
+  await pumpAll(b.svc);
+  const two = a.store.messages().find((m) => m.dir === 'out' && m.text === 'two');
+  assert.equal(two.stage, 'working', 'no automatic done without a known Claude');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('lifecycle r9: the next message pasted while the previous one\'s background work is open is read only', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized, background: () => false }) });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  const T = 'term-/b/orch-1';
+  a.svc.send('Brett', 'one');
+  await a.svc.pump();
+  await settle(() => b.store.messages().find((m) => m.dir === 'in')?.state === 'routed');
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'working', 'background');
+  a.svc.send('Brett', 'two');
+  await a.svc.pump();
+  await settle(() => b.store.messages().filter((m) => m.dir === 'in' && m.state === 'routed').length === 2);
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'done', null);
+  await pumpAll(b.svc);
+  const two = a.store.messages().find((m) => m.dir === 'out' && m.text === 'two');
+  assert.deepEqual(two.timeline.map((e) => e.state), ['read']);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('terminal-status: Codex hook states (noteHookStatus) do not reach hook listeners', async () => {
+  const ts = await import('../terminal-status.js');
+  ts._reset();
+  const seen = [];
+  const off = ts.onHookState((id, state) => seen.push(state));
+  ts.ingest('term-/c-1', 'hello');
+  ts.noteHookStatus('term-/c-1', 'done');
+  off();
+  assert.deepEqual(seen, []);
+});
+
+test('lifecycle r10: background uncertainty survives a read-only message until a plain Stop', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('Brett', tn, { deliverDeps: (tabId, authorized) => ({ ...fakeTab().deps, authorized, background: () => false }) });
+  assert.equal((await linkPair(a, b)).ok, true);
+  b.store.setSettings({ orchestratorTab: 'term-/b/orch-1' });
+  const T = 'term-/b/orch-1';
+  const deliverOne = async (text, n) => { a.svc.send('Brett', text); await a.svc.pump(); await settle(() => b.store.messages().filter((m) => m.dir === 'in' && m.state === 'routed').length === n); };
+  await deliverOne('A', 1);
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'working', 'background'); // A ends, its background work runs on
+  await deliverOne('B', 2); // read only
+  await deliverOne('C', 3); // still read only: A's background work never reported finished
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'done', null); // a plain Stop: no background left
+  await deliverOne('D', 4); // followed again
+  b.svc.tabEvent(T, 'working', null);
+  b.svc.tabEvent(T, 'done', null);
+  await pumpAll(b.svc);
+  const st = (x) => a.store.messages().find((m) => m.dir === 'out' && m.text === x).timeline.map((e) => e.state);
+  assert.deepEqual(st('B'), ['read']);
+  assert.deepEqual(st('C'), ['read']);
+  assert.deepEqual(st('D'), ['read', 'working', 'done']);
   a.svc.stop(); b.svc.stop();
 });

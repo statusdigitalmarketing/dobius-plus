@@ -169,6 +169,49 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
   hours. At most 20 wait at a time. A card that cannot be typed (orchestrator busy 30 minutes, pin changed) raises a
   notification and nothing is sent. Waiting requests are lost when Dobius+ restarts (accepted: the tab can ask again).
 
+### Lifecycle: what happened to a message (2026-11-06)
+
+Owner: "how do we know if messages were successfully delivered, read, or being acted on, or if there's a timeline,
+or if it's pending". After the verified receipt (`delivered`), the RECEIVING Mac reports back, and the sender keeps a
+timeline per outgoing message: `held` (with the reason), `needs attention` (typed in, Enter not confirmed), `read`
+(typed into the pinned tab and Claude took it), `working` (with a note while it waits on a permission prompt, on its
+owner, or on background work), `replied` (the reply's own receipt verified; carries its id), `done`, `failed` (with a
+reason), `stopped` (the orchestrator tab closed first).
+
+- **Where working/done come from:** Claude's own hook markers for the pinned tab (`terminal-status` `onHookState`),
+  never polling. Incoming messages are typed only into an idle tab, one at a time, so hook states between a message
+  being typed and the next one belong to it (followed up to 6 hours; tracking starts before the paste so a `working`
+  that lands before the Enter is confirmed counts). `done;idle` is ignored. With the status hooks off (Settings > Tab
+  status dots, and always on Windows), a message stops at `read`; `dobius-team done|failed` still work.
+- **Transport:** `POST /team/status`, sealed to the original sender and signed like a message (own HKDF purpose
+  `status`, AAD `dobius-team-status|v|from|to|eph|nonce`). Inner `{ id, seq, state, at, note <= 300, replyId, ts }`.
+  The sender applies a report only to ITS OWN outgoing row for (that teammate, that id), only when `seq` is newer,
+  and answers with a signed ack over `dobius-team-status-ack|reporter|id|seq`. A valid report about an unknown row is
+  acked and ignored. The reporter stops only on a verified ack: anything else is retried (5 s up to 1 h) until 24 h
+  after the event, then dropped. Reports to one teammate are paced (10 a minute, so their shared `/team/*` admission
+  stays free for messages); a teammate that answers 404 (an older Dobius) is paused 15 minutes, one that does not
+  answer at all one minute, so others' reports go through. Owing a report does NOT protect a row from the 500-row
+  cap (an older teammate that never acks must not fill the inbox): at the cap the oldest such rows go, with their
+  unsent reports (accepted). Only the one message being followed is kept.
+- **Not the message's work:** following a message ends, leaving it at its last stage, on: a person's Enter (or
+  Ctrl+J) after its turn ended (Stop, a handed-back command, a Stop that left background work running; a turn that
+  ended is never reopened by later hooks); a person's Esc or Ctrl+C (an interrupt sends no Stop); a handoff card's
+  paste; the tab closing or respawning, and the Claude that took the message no longer running, at a person's Enter
+  or any later hook (both reported `stopped`). A message typed in while background work from an earlier turn may
+  still run in that tab is reported `read` only (tracked per tab from a Stop tagged background until a plain Stop,
+  which Claude sends only when no background task remains). Answering a permission prompt mid-turn keeps following.
+- **Which Claude:** the pid of the Claude leading the tab at the last readiness check before the paste, probed with
+  signal 0. When it cannot be read (two processes that name claude in the shell, an unusual install path), any
+  person's Enter ends following and `done` is never reported automatically (`dobius-team done|failed` still is).
+  Accepted limits: pid reuse within the 6 hours, and a suspended original (Ctrl+Z) with a second claude started in
+  the same shell, whose work could then be credited to the message.
+- **Older Dobius on the other side:** it has no `/team/status`, so its messages stop at `delivered`, and reports to it
+  are retried for 24 h and dropped. Nothing else changes.
+- **Commands:** `dobius-team inbox` prints each message's stage, how long it has been there and the hold reason;
+  `dobius-team show <id@fp>` prints the timeline; pinned tab only: `release <id@fp>` types a held message in now
+  (not `needs attention`: check the tab first), `done <id@fp>` and `failed <id@fp>` (reason on stdin) report back.
+  Tasks > Team shows the stage, its age and, on a row opened, the timeline.
+
 ### UI
 
 - Tasks dropdown: a **Team** segment next to Project and Inbox: messages in and out (queued, delivered with

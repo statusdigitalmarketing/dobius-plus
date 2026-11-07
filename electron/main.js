@@ -4619,7 +4619,7 @@ app.whenReady().then(() => {
       console.warn('[auto-resume] could not clear a closed tab\'s running stamp:', err?.message || err);
     }
   };
-  addTerminalObserver({ onExit: (id) => clearClosedTabRunning(id), onKill: (id, info) => clearClosedTabRunning(id, info) });
+  addTerminalObserver({ onExit: (id) => clearClosedTabRunning(id), onKill: (id, info) => { clearClosedTabRunning(id, info); terminalStatus.forget(id); } });
   // Codex tabs: Codex hooks reach main over the bridge, by session, never by
   // the hook's DOBIUS_TAB_ID (it names whichever tab started Codex's shared
   // daemon). codex-status.js finds the tab running that session.

@@ -53,13 +53,32 @@ Same content type, size and signature header. Body `{ v, from, to, eph, nonce, c
 Side effects: the message is stored in `<userData>/team/messages.json`, a notification is shown, and it is typed into
 the pinned orchestrator tab when Auto-route is on for the sender (else it waits in Tasks > Team).
 
+### POST /team/status (lifecycle reports, 2026-11-06)
+
+From the Mac that RECEIVED a message to its sender. Same envelope and checks as `/team/message`: octet-stream body
+`{ v, from, to, eph, nonce, ct }` sealed to the sender (purpose `status`, AAD `dobius-team-status|1|from|to|eph|nonce`),
+signed by the reporter in `x-dobius-team-sig`. Sealed inner:
+
+```json
+{ "v": 1, "from": "<reporter fp>", "to": "<sender fp>", "id": "<the sender's message id>", "seq": 3,
+  "state": "held|needs attention|read|working|replied|done|failed|stopped", "at": 1790000000000,
+  "note": "<= 300 chars or null", "replyId": "<uuid of the reply> or null", "ts": 1790000000000 }
+```
+
+| Status | Body | When |
+|---|---|---|
+| 200 | `{ ok: true, ack }` | valid; `ack` = sender's signature over `dobius-team-status-ack|reporter|id|seq`. Applied only to the sender's own outgoing row for (reporter, id) when `seq` is newer; acked either way |
+| 403 | `{ ok: false }` | unknown or disabled reporter, bad signature, not for us, sealed body, fields, stale `ts` (> 5 min) or `at` |
+
+The reporter stops only on a verified ack; any other answer is retried with back-off until 24 h after the event.
+
 ## Loopback bridge (127.0.0.1:8421): POST /team
 
 The bridge's usual rules (loopback, exact Host, no Origin, JSON, `Authorization: Bearer <bridge token>`). Used by
 `dobius-team` in `<userData>/bin`.
 
 ```json
-{ "cmd": "peers" | "inbox" | "send" | "reply" | "approve", "arg": "<name|fingerprint>" or "<message id>@<sender fingerprint>" or "<request id>", "text": "...", "tabId": "$DOBIUS_TAB_ID" }
+{ "cmd": "peers" | "inbox" | "show" | "send" | "reply" | "approve" | "release" | "done" | "failed", "arg": "<name|fingerprint>" or "<message id>@<sender fingerprint>" or "<request id>", "text": "...", "tabId": "$DOBIUS_TAB_ID" }
 ```
 
 Reply: `{ ok: true, lines: ["..."] }` or `{ ok: false, error }`. With no orchestrator tab pinned, `send`, `reply` and
@@ -81,7 +100,14 @@ dobius-team reply 0123abcd-4567-4890-8abc-0123456789ab@<sender fingerprint> <<'E
 live since this morning
 EOF
 dobius-team approve Xy3_aB9kLm0q   # orchestrator only: send a request another tab handed over
+dobius-team show 0123abcd-4567-4890-8abc-0123456789ab@<fingerprint>      # timeline of one message
+dobius-team release 0123abcd-4567-4890-8abc-0123456789ab@<fingerprint>   # orchestrator only: type a held message in now
+dobius-team done 0123abcd-4567-4890-8abc-0123456789ab@<fingerprint>      # orchestrator only: tell the sender it is done
+echo "staging is down" | dobius-team failed 0123abcd-4567-4890-8abc-0123456789ab@<fingerprint>
 ```
+
+`inbox` lines read `<id>@<fp>  -> Brett  [read 3m] (note)  <text>`: the stage (an outgoing message's last report from
+the teammate, else its own state), how long it has been there, and the reason when there is one.
 
 ## IPC (renderer)
 

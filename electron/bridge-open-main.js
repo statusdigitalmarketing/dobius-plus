@@ -37,6 +37,8 @@ const isTabOfProject = (tabId, projectPath) => parseTabId(tabId)?.projectPath ==
 
 // Writes made by /openTab itself, so they are not counted as a person's.
 let ownWrite = false;
+/** True while Dobius itself is typing into a tab (a /openTab or team delivery paste or Enter), not a person. */
+export const isOwnWrite = () => ownWrite;
 function writeOwn(tabId, data) {
   ownWrite = true;
   try { writeTerminal(tabId, data); } finally { ownWrite = false; }

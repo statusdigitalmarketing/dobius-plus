@@ -178,6 +178,53 @@ export function checkReceipt(peer, myFp, env, receipt) {
   return verify(peer.ed, ackBytes(myFp, env.id, contentHash(env)), receipt);
 }
 
+// ---------- status reports: the receiver tells the original sender what happened to its message ----------
+
+export const REPORT_STATES = new Set(['held', 'needs attention', 'read', 'working', 'replied', 'done', 'failed', 'stopped']);
+export const MAX_SEQ = 1000;
+const statusAad = (from, to, eph, nonce) => `dobius-team-status|${V}|${from}|${to}|${eph}|${nonce}`;
+const statusAckBytes = (reporter, id, seq) => `dobius-team-status-ack|${reporter}|${id}|${seq}`;
+
+/** Seal and sign one report ({ id, seq, state, at, note, replyId }) about `peer`'s message `id`. */
+export function buildStatus(identity, myFp, peer, rep, now) {
+  const inner = { v: V, from: myFp, to: peer.id, id: rep.id, seq: rep.seq, state: rep.state, at: rep.at,
+    note: rep.note || null, replyId: rep.replyId || null, ts: now };
+  const sealed = seal(peer.x, JSON.stringify(inner), 'status', (eph, nonce) => statusAad(myFp, peer.id, eph, nonce));
+  const body = Buffer.from(JSON.stringify({ v: V, from: myFp, to: peer.id, ...sealed }));
+  return { body, sig: sign(identity, body) };
+}
+
+/**
+ * The original sender's check of a report, in the message order (shape, known sender, signature, for us, open, fields,
+ * freshness). Returns { status: 'ok', rep, from, ack } or { status: 'refused', reason }. The ack is this Mac's signature
+ * over (reporter, id, seq): the reporter stops retrying only on a verified one.
+ */
+export function receiveStatus({ identity, myFp, peers, body, sig, now }) {
+  const refuse = (reason) => ({ status: 'refused', reason });
+  const outer = parseJson(body, MAX_BODY);
+  if (!outer || outer.v !== V || !is(FP, outer.from || '') || !is(FP, outer.to || '')) return refuse('shape');
+  const peer = peers[outer.from];
+  if (!peer || !peer.enabled) return refuse('unknown sender');
+  if (!verify(peer.ed, body, sig)) return refuse('signature');
+  if (outer.to !== myFp) return refuse('not for us');
+  const plain = open(identity, outer, 'status', statusAad(outer.from, outer.to, outer.eph, outer.nonce));
+  const r = parseJson(plain, 4096);
+  if (!r || r.v !== V || r.from !== outer.from || r.to !== outer.to) return refuse('sealed body');
+  if (!is(UUID, r.id || '') || !Number.isInteger(r.seq) || r.seq < 1 || r.seq > MAX_SEQ) return refuse('fields');
+  if (typeof r.state !== 'string' || !REPORT_STATES.has(r.state)) return refuse('fields');
+  if (r.note != null && !shortText(r.note, 300)) return refuse('fields');
+  if (r.replyId != null && !is(UUID, r.replyId)) return refuse('fields');
+  if (!Number.isFinite(r.ts) || Math.abs(r.ts - now) > SKEW_MS) return refuse('stale');
+  if (!Number.isFinite(r.at) || r.at > now + SKEW_MS || r.at < now - RETAIN_MS) return refuse('stale');
+  return { status: 'ok', from: peer, rep: { id: r.id, seq: r.seq, state: r.state, at: r.at, note: r.note || null, replyId: r.replyId || null },
+    ack: sign(identity, statusAckBytes(outer.from, r.id, r.seq)) };
+}
+
+/** The reporter's check of an ack: signed by the original sender over exactly this report. */
+export function checkStatusAck(peer, myFp, id, seq, ack) {
+  return typeof ack === 'string' && verify(peer.ed, statusAckBytes(myFp, id, seq), ack);
+}
+
 /** Drop records older than RETAIN_MS from their first acceptance. */
 export function pruneRecords(map, now) {
   for (const [k, r] of Object.entries(map)) if (!r || now - r.firstAcceptedAt > RETAIN_MS) delete map[k];
