@@ -86,6 +86,7 @@ export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem }) {
     notify: (event, p) => {
       if (event === 'link-request') toast('Team link request', `${p.name} (${p.short}) wants to link. Open Settings > Team to accept.`);
       if (event === 'message') toast(`Team message from ${p.name}`, p.text);
+      if (event === 'handoff-held') toast('Team request not handed over', `A message for ${p.to} could not be typed into the orchestrator tab: ${p.note || 'unknown reason'}. Nothing was sent.`);
       if (event === 'inbox-full') toast('Team inbox full', `A message from ${p.name} was refused: act on the waiting ones in Tasks > Team.`);
       broadcast('team:changed', { event });
     },
@@ -143,9 +144,10 @@ function registerIpc() {
 }
 
 /**
- * The loopback bridge's POST /team (dobius-team). Same token as every Dobius CLI. send and reply are accepted only
- * from the pinned orchestrator tab (DOBIUS_TAB_ID): a guard against a stray session sending by mistake, NOT a
- * security boundary (any process of the user can set that variable; the stated residual in the design).
+ * The loopback bridge's POST /team (dobius-team). Same token as every Dobius CLI. send and reply SEND only from the
+ * pinned orchestrator tab (DOBIUS_TAB_ID); from any other tab they are handed to the orchestrator as a request it
+ * approves with `dobius-team approve <id>` (pinned tab only). A guard against a stray session sending by mistake, NOT
+ * a security boundary (any process of the user can set that variable; the stated residual in the design).
  */
 export function handleTeamBridge(body) {
   if (!service) return { status: 503, json: { ok: false, error: 'Dobius+ is still starting; try again' } };
@@ -167,10 +169,26 @@ export function handleTeamBridge(body) {
     });
     return { status: 200, json: { ok: true, lines: lines.length ? lines : ['no team messages yet'] } };
   }
-  if (cmd !== 'send' && cmd !== 'reply') return { status: 400, json: { ok: false, error: 'unknown command' } };
+  if (cmd !== 'send' && cmd !== 'reply' && cmd !== 'approve') return { status: 400, json: { ok: false, error: 'unknown command' } };
   const pinned = st.settings.orchestratorTab;
-  if (!pinned || tabId !== pinned) {
-    return { status: 403, json: { ok: false, error: 'only the team orchestrator tab can send (tab menu > Use as team orchestrator)' } };
+  if (!pinned) {
+    return { status: 403, json: { ok: false, error: 'no team orchestrator tab is pinned (tab menu > Use as team orchestrator)' } };
+  }
+  if (cmd === 'approve') {
+    if (tabId !== pinned) return { status: 403, json: { ok: false, error: 'only the team orchestrator tab can approve a request' } };
+    const r = service.approveHandoff(String(arg || ''));
+    if (!r.ok) return { status: 400, json: { ok: false, error: r.error } };
+    return { status: 200, json: { ok: true, lines: [`queued ${r.short} to ${r.to}; it is retried until they confirm (dobius-team inbox shows the state)`] } };
+  }
+  if (tabId !== pinned) {
+    // Another tab: handed to the orchestrator as a request it checks and approves. Nothing is sent from here. Only from
+    // a live Dobius tab, so one caller cannot dodge the per-tab cap with made-up tab ids.
+    if (typeof tabId !== 'string' || !terminalInstance(tabId)) {
+      return { status: 403, json: { ok: false, error: 'run this in a Dobius+ tab (it hands the message to the team orchestrator tab)' } };
+    }
+    const r = service.handoff({ cmd, arg: String(arg || ''), text: String(text || ''), fromTab: tabId });
+    if (!r.ok) return { status: 400, json: { ok: false, error: r.error } };
+    return { status: 200, json: { ok: true, lines: [`handed to the team orchestrator tab (request ${r.hid}); it sends to ${r.to} once it checks and approves it. Not sent yet.`] } };
   }
   // A reply names its sender (id@fingerprint, as the card prints it): ids are unique only per sender, and a bare id
   // could come to match another teammate's message once the original row has left the list.

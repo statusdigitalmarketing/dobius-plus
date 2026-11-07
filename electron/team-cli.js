@@ -9,6 +9,9 @@ export function buildTeamCliScript({ port, tokenFile }) {
 #   dobius-team inbox                      recent messages in and out
 #   dobius-team send <name|fingerprint>    message text on stdin
 #   dobius-team reply <id>@<fingerprint>   answer a received message (exactly as its card prints it), text on stdin
+#   dobius-team approve <request id>       orchestrator only: send a request another tab handed over
+# send and reply run in any tab other than the pinned orchestrator are handed to it to approve; nothing leaves the Mac
+# until it does.
 # Text is read from stdin only, so it never appears in the process list; the token reaches curl through a pipe
 # (printf is a builtin, <( ) is not a file on disk), never argv or a temp file. curl -q (first) ignores ~/.curlrc, so
 # no user config can turn on tracing that would log the token or the text:
@@ -20,7 +23,8 @@ CMD="$1"; ARG="$2"
 case "$CMD" in
   peers|inbox) ;;
   send|reply) [ -n "$ARG" ] || { echo "usage: dobius-team $CMD <$( [ "$CMD" = send ] && echo 'name|fingerprint' || echo 'id@fingerprint')> (text on stdin)" >&2; exit 1; } ;;
-  *) echo 'usage: dobius-team peers | inbox | send <name|fingerprint> | reply <id@fingerprint>   (text on stdin)' >&2; exit 1 ;;
+  approve) [ -n "$ARG" ] || { echo "usage: dobius-team approve <request id>" >&2; exit 1; } ;;
+  *) echo 'usage: dobius-team peers | inbox | send <name|fingerprint> | reply <id@fingerprint>   (text on stdin) | approve <request id>' >&2; exit 1 ;;
 esac
 command -v python3 >/dev/null 2>&1 || { echo "dobius-team: python3 not found on PATH" >&2; exit 3; }
 command -v curl >/dev/null 2>&1 || { echo "dobius-team: curl not found on PATH" >&2; exit 3; }
@@ -38,11 +42,13 @@ RESPONSE=$(printf '%s' "$BODY" | curl -q -sS --noproxy '*' --max-time 30 -X POST
   -H "Content-Type: application/json" \\
   --data-binary @-)
 printf '%s' "$RESPONSE" | PYTHONIOENCODING=utf-8 python3 -c '
-import json, sys
+import json, re, sys
+# Never print a control character into the terminal (an echoed argument could carry escape sequences).
+clean = lambda s: re.sub("[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029]", "?", str(s))
 r = json.load(sys.stdin)
 if not r.get("ok"):
-    print("dobius-team: " + str(r.get("error", "failed")), file=sys.stderr); sys.exit(1)
-for line in r.get("lines", []): print(line)
+    print("dobius-team: " + clean(r.get("error", "failed")), file=sys.stderr); sys.exit(1)
+for line in r.get("lines", []): print(clean(line))
 '
 `;
 }

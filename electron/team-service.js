@@ -15,9 +15,14 @@
 import crypto from 'node:crypto';
 import * as P from './team-protocol.js';
 import { shortFp, fingerprint } from './team-crypto.js';
-import { deliver, deliveryCard } from './team-deliver.js';
+import { deliver, deliveryCard, handoffCard } from './team-deliver.js';
 
 export const SEND_DEADLINE_MS = 24 * 3600 * 1000;
+export const HANDOFF_TTL_MS = 24 * 3600 * 1000;
+export const MAX_HANDOFFS = 20;
+export const MAX_HANDOFFS_PER_TAB = 5;
+// Shorter than an incoming message's 30 minutes: a busy orchestrator should not hold the queue for a local request.
+export const HANDOFF_GIVE_UP_MS = 10 * 60 * 1000;
 export const RETRY_WINDOW_MS = P.CUTOFF_MS - 10 * 60 * 1000; // a human Retry stays inside the receiver's cutoff
 const BACKOFF_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000];
 const LINK_POLL_MS = 2000;
@@ -32,6 +37,9 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   let delivering = false;
   let stopped = false;
   let current = null; // `${peer}|${id}` of the delivery typing right now
+  // Sends another tab asked the orchestrator to approve (handoff / approveHandoff), by unguessable id.
+  // ponytail: in memory only, so a restart drops the waiting ones; the asking tab can ask again.
+  const handoffs = new Map();
 
   const identity = () => store.loadIdentity();
   const myFp = () => fpOf(identity());
@@ -208,7 +216,11 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   // ---------- delivery queue (one at a time) ----------
 
   function enqueueDelivery(peer, id, manual = false) {
-    if (!deliveryQueue.some((q) => q.peer === peer && q.id === id)) deliveryQueue.push({ peer, id, manual });
+    if (!deliveryQueue.some((q) => q.peer === peer && q.id === id)) {
+      // A teammate's message goes ahead of local handoff requests, so a tab's requests can never hold one up.
+      const firstLocal = deliveryQueue.findIndex((q) => q.local);
+      deliveryQueue.splice(firstLocal < 0 ? deliveryQueue.length : firstLocal, 0, { peer, id, manual });
+    }
     runDeliveries().catch((err) => console.error('[team] delivery queue failed:', err.message));
   }
 
@@ -219,8 +231,9 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
       while (deliveryQueue.length && !stopped) {
         const job = deliveryQueue.shift();
         try {
-          await deliverJob(job);
+          await (job.local ? deliverHandoff(job.local) : deliverJob(job));
         } catch (err) {
+          if (job.local) { handoffFailed(handoffs.get(job.local), `delivery failed: ${err.message}`); continue; }
           // A failed write (disk full) must not strand an acknowledged message: it goes back on the queue.
           console.error('[team] delivery step failed, retrying in 30s:', err.message);
           setTimeout(() => enqueueDelivery(job.peer, job.id, job.manual), 30_000).unref?.();
@@ -314,6 +327,147 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     return { ok: true };
   }
 
+  // ---------- handoff: a send asked for by a tab other than the pinned one ----------
+
+  function pruneHandoffs() {
+    // Never one being typed: its delivery still has to report a card left in the prompt.
+    for (const [hid, h] of handoffs) if (h.state !== 'routing' && now() - h.at >= HANDOFF_TTL_MS) handoffs.delete(hid);
+  }
+
+  /**
+   * Another tab ran `dobius-team send|reply`: check it now, then type it into the pinned orchestrator tab as a request
+   * with an approve id. Nothing leaves the Mac until the orchestrator runs `dobius-team approve <hid>`.
+   */
+  function handoff({ cmd, arg, text, fromTab }) {
+    pruneHandoffs();
+    if (!store.settings().orchestratorTab) return { ok: false, error: 'no team orchestrator tab is pinned (tab menu > Use as team orchestrator)' };
+    // Tabs as Claude's paste shows them (four spaces), so the card and the stored text match.
+    const t = String(text || '').replace(/\r\n?/g, '\n').replace(/\t/g, '    ').trim();
+    if (!t || t.length > P.MAX_TEXT) return { ok: false, error: `the message must be 1 to ${P.MAX_TEXT} characters` };
+    // The card's sanitizer, the PTY or Claude's paste would hide or change these (control and invisible format
+    // characters, broken UTF-16, Claude's own paste tags, which it escapes), and approve sends the stored text: what is
+    // approved must be what is sent.
+    if (/[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]/.test(t) || /[\p{Cf}\p{Default_Ignorable_Code_Point}\p{Cn}\p{Co}]/u.test(t) || !t.isWellFormed()
+      || /<\/?pasted_content/i.test(t)) return { ok: false, error: 'the message contains control characters or broken text; send plain text' };
+    let peer;
+    let replyTo = null;
+    if (cmd === 'reply') {
+      const ref = String(arg || '').trim();
+      const at = ref.indexOf('@');
+      const orig = at > 0 ? store.findById(ref.slice(0, at), 'in', ref.slice(at + 1)) : null;
+      if (!orig) return { ok: false, error: 'no single received message has that id@fingerprint' };
+      peer = store.peers()[orig.peer];
+      if (!peer) return { ok: false, error: 'that sender is no longer linked' };
+      replyTo = orig.id;
+    } else {
+      const found = findPeer(arg);
+      if (found.error) return { ok: false, error: found.error };
+      peer = found.peer;
+    }
+    if (!peer.enabled) return { ok: false, error: `${peer.name} is disabled` };
+    const open = [...handoffs.values()].filter((h) => h.state !== 'sent');
+    const tab = String(fromTab || '');
+    if (open.length >= MAX_HANDOFFS || open.filter((h) => h.fromTab === tab).length >= MAX_HANDOFFS_PER_TAB) {
+      return { ok: false, error: 'too many requests already wait for the orchestrator; try again later' };
+    }
+    const hid = crypto.randomBytes(9).toString('base64url');
+    handoffs.set(hid, { peer: peer.id, toName: peer.name, replyTo, text: t, fromTab: tab, at: now(), state: 'waiting', note: null });
+    deliveryQueue.push({ local: hid });
+    runDeliveries().catch((err) => console.error('[team] delivery queue failed:', err.message));
+    return { ok: true, hid, to: peer.name };
+  }
+
+  async function deliverHandoff(hid) {
+    const h = handoffs.get(hid);
+    if (!h || h.state !== 'waiting') return;
+    if (now() - h.at >= HANDOFF_TTL_MS) { handoffs.delete(hid); return; } // expired while queued: never typed
+    const tabId = store.settings().orchestratorTab;
+    h.state = 'routing';
+    // Only the pin decides. An approve (or expiry) while the card is being typed must not veto its Enter: that would
+    // leave a stale card in the prompt, and an incoming message needs that box empty.
+    const authorized = () => {
+      const s = store.settings();
+      if (!s.orchestratorTab) return 'no orchestrator tab is pinned';
+      if (s.orchestratorTab !== tabId) return 'the orchestrator tab changed';
+      return null;
+    };
+    // Built at the paste: the name this Mac uses for that fingerprint THEN (a rename while the card waited must not
+    // mislead the approver). The fingerprint is printed with it either way.
+    let name = h.toName;
+    const buildCard = () => {
+      name = store.peers()[h.peer]?.name || h.toName;
+      return handoffCard({ hid, fromTab: h.fromTab, toName: name, toFp: h.peer, replyTo: h.replyTo, text: h.text });
+    };
+    const card = buildCard();
+    const deps0 = authorized() || card.error ? null : deliverDeps(tabId, authorized);
+    // A teammate's message waiting behind this one goes first, as long as nothing of this card is typed yet.
+    const deps = deps0 && { ...deps0, yieldTo: () => deliveryQueue.some((q) => !q.local) };
+    let result;
+    if (!deps) result = { state: 'held', note: authorized() || card.error || 'delivery is not available' };
+    else {
+      current = `local|${hid}`;
+      // Expired while it waited for the tab: built as nothing, so attempt() types nothing.
+      const atPaste = () => (now() - h.at >= HANDOFF_TTL_MS ? null : buildCard().text);
+      try { result = await deliver(deps, tabId, atPaste, { giveUpMs: HANDOFF_GIVE_UP_MS }); } catch (err) { result = { state: 'needs attention', note: `delivery failed: ${err.message}` }; } finally { current = null; }
+    }
+    if (result.state === 'yield' && h.state === 'routing') {
+      h.state = 'waiting';
+      // Back at the head of the local requests (behind the teammate's message), keeping its order among them.
+      const firstLocal = deliveryQueue.findIndex((q) => q.local);
+      deliveryQueue.splice(firstLocal < 0 ? deliveryQueue.length : firstLocal, 0, { local: hid });
+      return;
+    }
+    if (h.state !== 'routing') {
+      // Approved while it was being typed. A card left in the prompt still blocks incoming messages: say so.
+      if (result.state === 'needs attention') notifyHeld(name, result.note);
+      return;
+    }
+    if (result.state === 'routed') h.state = 'typed';
+    else handoffFailed(h, result.note, result.state);
+  }
+
+  // Takes the request itself, not its id: one that expired meanwhile must still report.
+  function handoffFailed(h, note, state = 'held') {
+    if (!h || h.state === 'sent' || h.state === 'typed') return;
+    h.state = state;
+    h.note = note || null;
+    notifyHeld(h.toName, h.note);
+  }
+
+  // Never throws: it runs inside the delivery queue, and a failing notification must not stop incoming deliveries.
+  function notifyHeld(to, note) {
+    try { notify('handoff-held', { to, note: note || null }); } catch (err) { console.error('[team] handoff notification failed:', err.message); }
+  }
+
+  /** The orchestrator approves a handed-off request: sent exactly as written, once. */
+  function approveHandoff(hid) {
+    pruneHandoffs();
+    const h = handoffs.get(String(hid || '').trim());
+    if (!h) return { ok: false, error: 'no waiting request has that id (it may have expired or Dobius+ restarted)' };
+    if (h.state === 'sent') return { ok: false, error: 'that request was already sent' };
+    // Its own age too: pruning spares one being typed, and that must not stretch the 24 hours.
+    if (now() - h.at >= HANDOFF_TTL_MS) return { ok: false, error: 'that request expired; nothing was sent' };
+    // Exactly the fingerprint it was made for: findPeer would fall back to a teammate NAMED like it once it is gone.
+    if (!Object.hasOwn(store.peers(), h.peer)) return { ok: false, error: `${h.toName} is no longer linked; nothing was sent` };
+    // Marked sent BEFORE queuing: if anything throws after the row is written, a retried approve must not queue it twice.
+    const before = h.state;
+    // The id is chosen here so a failure can be judged by THIS row's presence (a row count is fooled by eviction).
+    const id = crypto.randomUUID();
+    h.state = 'sent';
+    let r;
+    try {
+      r = send(h.peer, h.text, { ...(h.replyTo ? { kind: 'reply', replyTo: h.replyTo } : {}), id });
+    } catch (err) {
+      // Nothing written (inbox full, disk full): it can be approved again. Written: it stays sent.
+      let written = true;
+      try { written = store.messages().some((m) => m.dir === 'out' && m.id === id); } catch { /* unreadable: keep it sent, never risk a second copy */ }
+      if (!written) h.state = before;
+      throw err;
+    }
+    if (!r.ok) h.state = before;
+    return r;
+  }
+
   // ---------- sending ----------
 
   function findPeer(ref) {
@@ -326,7 +480,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     return { error: hits.length ? `more than one teammate is called ${r}; use their fingerprint` : `no linked teammate called ${r}` };
   }
 
-  function send(ref, text, { kind = 'ask', replyTo = null } = {}) {
+  function send(ref, text, { kind = 'ask', replyTo = null, id = null } = {}) {
     const { peer, error } = findPeer(ref);
     if (error) return { ok: false, error };
     if (!peer.enabled) return { ok: false, error: `${peer.name} is disabled` };
@@ -334,12 +488,12 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     if (!t || t.length > P.MAX_TEXT) return { ok: false, error: `the message must be 1 to ${P.MAX_TEXT} characters` };
     const at = now();
     const msg = {
-      dir: 'out', id: crypto.randomUUID(), peer: peer.id, peerName: peer.name, kind, replyTo, text: t,
+      dir: 'out', id: id || crypto.randomUUID(), peer: peer.id, peerName: peer.name, kind, replyTo, text: t,
       firstSentAt: at, deadline: at + SEND_DEADLINE_MS, at, state: 'queued', attempts: 0, reached: false, nextAt: at,
     };
     store.putMessage(msg);
+    schedulePump(0); // before the UI notice: a notice that throws must not leave the row unsent
     changed();
-    schedulePump(0);
     return { ok: true, id: msg.id, short: msg.id.slice(0, 8), to: peer.name };
   }
 
@@ -523,6 +677,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     unlink, dismiss, messagesForUi,
     status, createInvite, hello, link, decideLink, join, receive, routeNow,
     findPeer, send, reply, retry, sendAgain, start, stop, settingsChanged, pump,
+    handoff, approveHandoff,
     SIG_HEADER,
   };
 }

@@ -59,12 +59,17 @@ The bridge's usual rules (loopback, exact Host, no Origin, JSON, `Authorization:
 `dobius-team` in `<userData>/bin`.
 
 ```json
-{ "cmd": "peers" | "inbox" | "send" | "reply", "arg": "<name|fingerprint>" or "<message id>@<sender fingerprint>", "text": "...", "tabId": "$DOBIUS_TAB_ID" }
+{ "cmd": "peers" | "inbox" | "send" | "reply" | "approve", "arg": "<name|fingerprint>" or "<message id>@<sender fingerprint>" or "<request id>", "text": "...", "tabId": "$DOBIUS_TAB_ID" }
 ```
 
-Reply: `{ ok: true, lines: ["..."] }` or `{ ok: false, error }`. `send` and `reply` are refused (`403`) unless
-`tabId` is the pinned orchestrator tab (a guard against a stray session, not a security boundary). `reply` needs the
-`id@fingerprint` form the card and `dobius-team inbox` print: ids are unique only per sender.
+Reply: `{ ok: true, lines: ["..."] }` or `{ ok: false, error }`. With no orchestrator tab pinned, `send`, `reply` and
+`approve` are refused (`403`). From the pinned tab, `send` and `reply` queue the message. From any other `tabId`
+they send nothing: the request is checked (`400` with the reason if it is not sendable), then typed into the pinned
+tab as a card ending `dobius-team approve <request id>`, and the reply says `handed to the team orchestrator tab
+(request <id>) ... Not sent yet.` `approve` is accepted only from the pinned tab (`403` otherwise) and sends the stored
+request exactly once (`400`: unknown, expired after 24 h, or already sent). The tab check is a guard against a stray
+session, not a security boundary. `reply` needs the `id@fingerprint` form the card and `dobius-team inbox` print: ids
+are unique only per sender.
 
 ```bash
 dobius-team peers
@@ -75,6 +80,7 @@ EOF
 dobius-team reply 0123abcd-4567-4890-8abc-0123456789ab@<sender fingerprint> <<'EOF'
 live since this morning
 EOF
+dobius-team approve Xy3_aB9kLm0q   # orchestrator only: send a request another tab handed over
 ```
 
 ## IPC (renderer)

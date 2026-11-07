@@ -160,6 +160,14 @@ Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true
   holder type into any tab (`/tabSend`), and a running Claude cannot be handed a new environment variable. Dobius's
   trust boundary is the user account; tab-level isolation would be a separate project. Every outgoing message is
   logged and shown in the Team inbox, so an unexpected send is visible, and each receiver can switch Auto-route off.
+- **Handoff from any other tab (2026-11-06).** Owner: "we have to make an easier way for that to happen". `send` or
+  `reply` run in a tab that is not the pinned one sends NOTHING: the request is checked (teammate known and enabled,
+  reply id resolves, 1 to MAX_TEXT characters), kept in memory under an unguessable id (12 base64url characters), and
+  typed into the pinned tab through the same one-at-a-time delivery queue and guards as an incoming message, as a
+  card that quotes the text line by line and ends `To send it exactly as written: dobius-team approve <id>`. Only the
+  pinned tab can `approve`; it sends the stored text unchanged, once. Not approving refuses it; it expires after 24
+  hours. At most 20 wait at a time. A card that cannot be typed (orchestrator busy 30 minutes, pin changed) raises a
+  notification and nothing is sent. Waiting requests are lost when Dobius+ restarts (accepted: the tab can ask again).
 
 ### UI
 

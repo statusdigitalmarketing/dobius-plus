@@ -713,3 +713,9 @@
 - **FIX**: Cross-build only in a clonefile copy (`cp -cR`), with `prebuild-install --runtime electron --target <electron> --platform win32 --arch x64` inside its better-sqlite3 and `-c.npmRebuild=false` (node-pty already ships win32 prebuilds). build/after-pack.cjs must skip non-darwin (spawn-helper is macOS only). If the repo was hit: `npx @electron/rebuild -f -o better-sqlite3`.
 - **CONTEXT**: A test Windows installer built this way on 2026-11-06; it was never run on Windows.
 - **DETECTION**: `file node_modules/better-sqlite3/build/Release/better_sqlite3.node` must say Mach-O.
+
+### Testing - 2026-11-06
+- **MISTAKE**: Writing the escape `\u2028` (and `\u2029`) in an Edit or heredoc left the LITERAL line-separator character in `electron/team-service.js`, `team-deliver.js` and the team test. JavaScript treats U+2028 as a line terminator, so every regex literal containing one failed to parse ("Invalid regular expression: missing /") and the whole test file loaded zero tests.
+- **FIX**: After writing any `\u2028`/`\u2029`, grep for the raw characters and convert them back to escapes with a script that uses `chr(0x2028)`, never by typing the character.
+- **CONTEXT**: Handoff review fixes (feat/team-handoff), stripping Unicode line separators from card fields.
+- **DETECTION**: `grep -rnP "\x{2028}|\x{2029}" electron src shared` must print nothing.
