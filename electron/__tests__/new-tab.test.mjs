@@ -257,7 +257,9 @@ test('a run starts exactly the Dobius script, in its folder; a hook cannot swap 
     for (const [shell, prelude, env] of [['/bin/zsh', `_evil() { ${assigns}; }; precmd_functions=(_evil); `, {}], ['/bin/bash', '', { PROMPT_COMMAND: assigns }]]) {
       if (!fs.existsSync(shell)) continue;
       const file = path.join(dir, `dobius-run-${'a'.repeat(20)}${path.basename(shell)}.sh`);
-      fs.writeFileSync(file, runScriptText('echo "RUN-A $(pwd -P)" & wait; echo "RUN-B $(pwd -P)"', cwd, shQuote));
+      const cmdFile = file.replace(/\.sh$/, '.cmd');
+      fs.writeFileSync(cmdFile, 'echo "RUN-A $(pwd -P)" & wait; echo "RUN-B $(pwd -P)"\n');
+      fs.writeFileSync(file, runScriptText(cmdFile, cwd, shQuote, null, 'the command'));
       const spawn = loginShellSpawn(shell, null, null, file);
       assert.equal(spawn.env.DOBIUS_NEW_TAB_TOOL, 'run');
       assert.equal(isNewTabWrapperCommand([shell, ...spawn.args].join(' ')), true, 'argv scans still skip it');
@@ -270,7 +272,8 @@ test('a run starts exactly the Dobius script, in its folder; a hook cannot swap 
     }
     // A folder that is gone: nothing runs.
     const gone = path.join(dir, `dobius-run-${'b'.repeat(20)}.sh`);
-    fs.writeFileSync(gone, runScriptText('touch "$HOME/PWNED"', path.join(dir, 'no-such-dir'), shQuote));
+    fs.writeFileSync(gone.replace(/\.sh$/, '.cmd'), 'touch "$HOME/PWNED"\n');
+    fs.writeFileSync(gone, runScriptText(gone.replace(/\.sh$/, '.cmd'), path.join(dir, 'no-such-dir'), shQuote));
     const g = loginShellSpawn('/bin/bash', null, null, gone);
     const rg = spawnSync('/bin/bash', ['-c', g.args[3].replace(/exec '[^']*' -l$/, 'exit 0')], { cwd: dir, env: { ...base, ...g.env }, encoding: 'utf8', timeout: 10000, input: '' });
     assert.match(rg.stdout, /could not open/);

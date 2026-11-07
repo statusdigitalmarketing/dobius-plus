@@ -2,7 +2,7 @@ import './dev-userdata.js'; // MUST stay first: userData override before config-
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor, screen } from 'electron';
-import { spawn, execFile } from 'child_process';
+import { spawn, spawnSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
@@ -105,12 +105,12 @@ import {
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
 import { initTeam, stopTeam, handleTeamBridge } from './team-main.js';
-import { createHandoffCommands, runScriptText } from './handoff-commands.js';
+import { createHandoffCommands, runScriptText, extractCommands } from './handoff-commands.js';
 import { shQuote } from '../shared/sh-quote.js';
 import { randomUUID } from 'node:crypto';
 import { createCodexStatusRouter, withCodexHooks, stripCodexHooks, hasCodexHooks } from './codex-status.js';
 import { answersPrompt, submitsInput } from '../shared/prompt-answer.js';
-import { stopHookCommand } from '../shared/handoff.js';
+import { stopHookCommand, commandPlaceholder } from '../shared/handoff.js';
 import { findCodexSessionForProcess, readRolloutMeta } from './codex-sessions.js';
 import { createOpenTabService } from './bridge-open-tab.js';
 import { createBridgeOpenDeps } from './bridge-open-main.js';
@@ -401,22 +401,59 @@ let handoffCommands = null;
 const runTokens = new Map(); // token -> { sender, tabId, id, at }
 const RUN_TOKEN_MS = 60_000;
 const runScriptDir = () => path.join(app.getPath('userData'), 'run');
-// The script a Run tab starts with: it deletes itself, enters the folder (or stops), shows the command, runs it.
-function writeRunScript(cmd) {
+// The script a Run tab starts with: it deletes itself, enters the folder (or stops), shows the command, runs it, and
+// writes its exit status next to itself for the card (Done / Failed).
+function writeRunScript(text, cwd, shown = text) {
   const dir = runScriptDir();
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const file = path.join(dir, `dobius-run-${randomUUID().replace(/-/g, '')}.sh`);
-  fs.writeFileSync(file, runScriptText(cmd.text, cmd.cwd, shQuote), { mode: 0o600, flag: 'wx' });
-  return file;
+  const base = path.join(dir, `dobius-run-${randomUUID().replace(/-/g, '')}`);
+  const exitFile = `${base}.exit`;
+  // The command alone in its own file (run by its own bash, then deleted), the wrapper script beside it. Both or
+  // neither: a half-written pair must not leave the command (an edited one may hold a key) on disk.
+  try {
+    // Its first line deletes it: bash already has it open, so a pasted key is on disk only until the command starts.
+    fs.writeFileSync(`${base}.cmd`, `/bin/rm -f -- "$0"\n${text}\n`, { mode: 0o600, flag: 'wx' });
+    fs.writeFileSync(`${base}.sh`, runScriptText(`${base}.cmd`, cwd, shQuote, exitFile, shown), { mode: 0o600, flag: 'wx' });
+  } catch (err) {
+    for (const f of [`${base}.cmd`, `${base}.sh`]) { try { fs.unlinkSync(f); } catch { /* not written */ } }
+    throw err;
+  }
+  return { file: `${base}.sh`, exitFile, cmdFile: `${base}.cmd` };
 }
-// A Run tab that never started leaves its script behind: cleared a day later.
+// A Run tab's own files, by its tab id: removed when that tab goes, whether or not its wrapper ever started (a
+// profile that execs tmux never runs it, and the command file may hold a pasted key).
+const runFilesByTab = new Map();
+function dropRunFiles(tabId) {
+  const files = runFilesByTab.get(tabId);
+  if (!files) return;
+  runFilesByTab.delete(tabId);
+  for (const f of files) { try { fs.unlinkSync(f); } catch { /* the wrapper already removed it */ } }
+}
+// A running command's exit status, once its script wrote it: the card turns Done or Failed.
+let runPollTimer = null;
+function pollRuns() {
+  if (!handoffCommands) return;
+  for (const r of handoffCommands.running()) {
+    let raw = null;
+    try { raw = fs.readFileSync(r.exitFile, 'utf8'); } catch { continue; } // not finished yet
+    if (!/^\d{1,3}$/.test(raw.trim())) continue; // never a partial write (renamed in), but never guess either
+    handoffCommands.finishRun(r.tabId, r.id, Number.parseInt(raw, 10));
+    try { fs.unlinkSync(r.exitFile); } catch (err) { console.warn('[commands] could not clear an exit file:', err?.message || err); }
+  }
+}
+// Left-over Run files (a crash, a tab killed before its wrapper ran) older than 10 minutes and not one of this app's
+// own active runs: at startup and every 5 minutes. Not everything at startup: another running copy of Dobius may have
+// a run starting. The command file normally deletes itself as its bash starts, so a key rarely sits here at all.
+const RUN_FILE_STALE_MS = 10 * 60 * 1000;
 function pruneRunScripts() {
   let names = [];
   try { names = fs.readdirSync(runScriptDir()); } catch { return; }
+  const mine = new Set([...runFilesByTab.values()].flat());
   for (const n of names) {
-    if (!/^dobius-run-[A-Za-z0-9_-]+\.sh$/.test(n)) continue;
+    if (!/^dobius-run-[A-Za-z0-9_-]+\.(sh|exit|cmd|exit\.tmp)$/.test(n)) continue;
     const f = path.join(runScriptDir(), n);
-    try { if (Date.now() - fs.statSync(f).mtimeMs > 24 * 3600 * 1000) fs.unlinkSync(f); } catch (err) { console.warn('[commands] could not clear an old run script:', err?.message || err); }
+    if (mine.has(f)) continue;
+    try { if (Date.now() - fs.statSync(f).mtimeMs > RUN_FILE_STALE_MS) fs.unlinkSync(f); } catch (err) { console.warn('[commands] could not clear an old run file:', err?.message || err); }
   }
 }
 // Pending tear-off / dock grants, tabId -> the webContents.id allowed to claim
@@ -501,7 +538,9 @@ function setupTerminalHandlers() {
         // or spawn keeps it listed.
         const cmd = handoffCommands.peek(t.tabId, t.id);
         if (cmd) {
-          try { runScript = writeRunScript(cmd); runCmd = t; } catch (err) { console.error('[commands] could not write the run script:', err?.message || err); }
+          // An edited command is shown in the tab as the card showed it, marked edited (it may hold a pasted key).
+          const shown = t.text === cmd.text ? cmd.text : `${cmd.text}   (edited)`;
+          try { runCmd = { ...t, ...writeRunScript(t.text, cmd.cwd, shown) }; runScript = runCmd.file; } catch (err) { console.error('[commands] could not write the run script:', err?.message || err); }
         }
       }
     }
@@ -511,8 +550,14 @@ function setupTerminalHandlers() {
       created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand, runScript });
     } finally {
       if (runScript) {
-        if (created && runCmd) handoffCommands.take(runCmd.tabId, runCmd.id);
-        else { try { fs.unlinkSync(runScript); } catch { /* cleared by pruneRunScripts */ } }
+        // The card shows it running in this tab, then Done or Failed (pollRuns).
+        if (created && runCmd) {
+          handoffCommands.startRun(runCmd.tabId, runCmd.id, id, runCmd.text, runCmd.exitFile);
+          runFilesByTab.set(id, [runCmd.file, runCmd.cmdFile]);
+        }
+        else {
+          for (const f of [runScript, runCmd?.cmdFile]) { if (f) { try { fs.unlinkSync(f); } catch { /* cleared by pruneRunScripts */ } } }
+        }
       }
     }
     // A tab restored with its saved scrollback in a window opened after
@@ -4111,24 +4156,48 @@ function setupWindowHandlers() {
     newId: () => randomUUID(),
   });
   terminalStatus.onHookState((id, state, tag) => handoffCommands.onHook(id, state, tag));
+  // A terminal that exits or is killed: its Run files go, and its card or its source's waiting commands update. On the
+  // terminal's own events, not only the status tracker's (a tab that never printed anything has no status entry).
+  const terminalGone = (id) => { dropRunFiles(id); handoffCommands.onHook(id, 'exit', null); };
+  addTerminalObserver({ onExit: (id) => terminalGone(id), onKill: (id) => terminalGone(id) });
   ipcMain.handle('handoffCommands:list', () => handoffCommands.list());
   ipcMain.handle('handoffCommands:dismiss', (_e, tabId, id) => (typeof tabId === 'string' && typeof id === 'string' ? !!handoffCommands.take(tabId, id) : false));
   // Run, step 1: a one-time token for this command (60 s, this window). The renderer opens a new tab whose
   // terminal:create carries it; there the command is taken off the list and started as the tab's own startup program
   // (a script run by /bin/bash after the login profile). Nothing is ever typed into a shell, so a profile that starts
   // tmux or reads input, or a fish login shell, cannot get it. zsh and bash only (the startup wrapper's shells).
-  ipcMain.handle('handoffCommands:prepare', (event, tabId, id) => {
+  // `edited`: the person changed the command on the card first (a placeholder filled in): it runs instead, checked by
+  // the same rules as a captured one (one line, nothing hidden).
+  // `asIs`: the person said the flagged "placeholder" is real syntax (the card's "run as is"): only that check is skipped.
+  ipcMain.handle('handoffCommands:prepare', (event, tabId, id, edited, asIs) => {
     if (typeof tabId !== 'string' || typeof id !== 'string') return { ok: false, error: 'bad request' };
-    if (!handoffCommands.peek(tabId, id)) return { ok: false, error: 'That command is no longer waiting.' };
+    const cmd = handoffCommands.peek(tabId, id);
+    if (!cmd) return { ok: false, error: 'That command is no longer waiting.' };
+    let text = cmd.text;
+    if (edited !== undefined && edited !== null) {
+      const e = typeof edited === 'string' ? edited.trim() : '';
+      const parsed = extractCommands(`! ${e}`);
+      if (!e || parsed.length !== 1 || parsed[0] !== e) return { ok: false, error: 'The edited command must be one line of plain text.' };
+      text = e;
+    }
+    const hole = commandPlaceholder(text);
+    if (hole && asIs !== true) return { ok: false, error: `Fill in ${hole} first (Edit).` };
+    // The syntax first, without running it: a typo would make bash print the whole line (an edited one may hold a
+    // pasted key) into the tab. bash -n only parses; nothing executes.
+    const syn = spawnSync('/bin/bash', ['-n'], { input: text, timeout: 3000, encoding: 'utf8' });
+    // A warning counts too (an unterminated heredoc is only a warning to bash -n).
+    if (syn.status !== 0 || String(syn.stderr || '').trim()) return { ok: false, error: edited != null ? 'That edit is not a complete shell command (check quotes and brackets).' : 'That command has a shell syntax error; Copy it and fix it, or ask the session again.' };
     const sh = path.basename(process.env.SHELL || '/bin/zsh');
     if (sh !== 'zsh' && sh !== 'bash') return { ok: false, error: `Run works with zsh and bash (your shell is ${sh}): use Copy.` };
     const now = Date.now();
     for (const [t, v] of runTokens) if (now - v.at > RUN_TOKEN_MS) runTokens.delete(t);
     const token = randomUUID();
-    runTokens.set(token, { sender: event.sender.id, tabId, id, at: now });
+    runTokens.set(token, { sender: event.sender.id, tabId, id, text, at: now });
     return { ok: true, token };
   });
   pruneRunScripts();
+  if (!runPollTimer) { runPollTimer = setInterval(pollRuns, 1500); runPollTimer.unref?.(); }
+  setInterval(pruneRunScripts, 5 * 60 * 1000).unref?.();
   // /openTab's own "is another surface typing into this tab": an account move
   // must not stop Claude under it.
   heldInputFor = bridgeOpenDeps.inputBusy;
@@ -5297,7 +5366,12 @@ app.on('before-quit', (e) => {
 // branch of before-quit, otherwise PTYs, the voice bridge, the Visual server,
 // auto-mode and the watchers leak on a force quit. Idempotent via didTeardown
 // (forward-declared above so the updater-bypass branch can share it).
+// Run files still held (a Run tab whose wrapper had not started, or whose command is running): on every way out,
+// since a quit can kill all terminals without telling their observers.
+const dropAllRunFiles = () => { for (const id of [...runFilesByTab.keys()]) dropRunFiles(id); };
+app.on('before-quit', dropAllRunFiles);
 app.on('will-quit', (e) => {
+  dropAllRunFiles();
   if (didTeardown) return;
   didTeardown = true;
   try { killAuthChildren(); } catch { /* noop */ }

@@ -1,7 +1,8 @@
 // Tasks > Commands: the `! ` commands a session handed back, per tab. Run: npm run test:handoffcmds
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractCommands, createHandoffCommands, runScriptText, MAX_COMMANDS } from '../handoff-commands.js';
+import { extractCommands, extractCommandsWithContext, createHandoffCommands, runScriptText, MAX_COMMANDS } from '../handoff-commands.js';
+import { commandPlaceholder } from '../../shared/handoff.js';
 import { isHandoff } from '../../shared/handoff.js';
 
 test('extract: the same lines shared/handoff.js treats as a handback, cleaned', () => {
@@ -80,8 +81,8 @@ test('peek keeps it, take removes it once; the tab goes with its last one', asyn
   const [a, b] = hc.list()[0].commands;
   assert.deepEqual(hc.peek('term-/p-1', a.id), { tabId: 'term-/p-1', projectPath: '/p', cwd: '/p/sub', text: 'a' });
   assert.equal(hc.list()[0].commands.length, 2, 'peek does not remove');
-  assert.equal(hc.take('term-/p-1', a.id).text, 'a');
-  assert.equal(hc.take('term-/p-1', a.id), null, 'once');
+  assert.equal(hc.take('term-/p-1', a.id), true);
+  assert.equal(hc.take('term-/p-1', a.id), false, 'once');
   hc.take('term-/p-1', b.id);
   assert.equal(hc.list().length, 0);
 });
@@ -135,14 +136,6 @@ test('a phone tab is filed under the session\'s project', async () => {
   assert.equal(hc.list()[0].projectPath, '/p');
 });
 
-test('runScriptText: enters the folder or stops, shows the command quoted, runs it verbatim, deletes itself', () => {
-  const q = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
-  const t = runScriptText("./a.sh & ./b.sh", '/repo/wt', q).split('\n');
-  assert.match(t[0], /^\/bin\/rm -f -- "\$0"/);
-  assert.match(t[1], /^builtin cd -- '\/repo\/wt' \|\| \{ printf .*exit 1; \}$/);
-  assert.match(t[2], /^printf .* '\.\/a\.sh & \.\/b\.sh'$/);
-  assert.equal(t[3], './a.sh & ./b.sh');
-});
 
 test('r2: a reply written even a moment before the turn began is not this turn\'s; a failed lookup is retried', async () => {
   const started = clock;
@@ -194,4 +187,176 @@ test('r5: markers processed late (a busy app) still find their turn\'s reply; a 
   turn(stale.hc);
   await tick(60);
   assert.equal(stale.hc.list().length, 0);
+});
+
+test('ux: each command carries what Claude said around it; the full reply is kept for display', async () => {
+  const reply = [
+    'The release is ready. This publishes 2.2.7 to GitHub and the auto-updater.',
+    'First copy the notary password into your Keychain if you have not.',
+    '',
+    '```',
+    '! ./release.sh patch',
+    '```',
+    'It takes about ten minutes.',
+    '',
+    'Then check the release page.',
+  ].join('\n');
+  const [c] = extractCommandsWithContext(reply);
+  assert.equal(c.text, './release.sh patch');
+  assert.equal(c.why, 'The release is ready. This publishes 2.2.7 to GitHub and the auto-updater.\nFirst copy the notary password into your Keychain if you have not.\nIt takes about ten minutes.');
+  const two = extractCommandsWithContext('Install it:\n! npm i\nThen start it:\n! npm start');
+  assert.deepEqual(two.map((x) => x.why), ['Install it:', 'Then start it:']);
+  const { hc } = rig({ text: reply });
+  turn(hc);
+  await tick(60);
+  const e = hc.list()[0];
+  assert.match(e.reply, /publishes 2\.2\.7/);
+  assert.equal(e.commands[0].why.split('\n').length, 3);
+  assert.equal(e.commands[0].state, 'waiting');
+});
+
+test('ux: placeholders to fill in are spotted; real commands are not', () => {
+  for (const [cmd, hole] of [['export OPENAI_API_KEY=<your-key>', '<your-key>'], ['gh secret set X --body YOUR_TOKEN', 'YOUR_TOKEN'], ['curl -H "x: xxxx" host', 'xxxx'], ['git clone git@github.com:your-org/app', 'your-org'], ['echo ...', '...']]) {
+    assert.equal(commandPlaceholder(cmd), hole, cmd);
+  }
+  for (const ok of ['./release.sh patch', 'npm test -- --watch', 'git push origin main', 'echo "a > b"', 'cat <<EOF', 'ls -la /tmp']) {
+    assert.equal(commandPlaceholder(ok), null, ok);
+  }
+});
+
+test('ux: a run is followed to Done or Failed; a new turn drops only what is still waiting; a closed run tab says so', async () => {
+  const { hc } = rig({ text: '! a\n! b\n! c' });
+  turn(hc);
+  await tick(60);
+  const [a, b, c] = hc.list()[0].commands;
+  assert.equal(hc.startRun('term-/p-1', a.id, 'term-/p-9', 'a --edited', '/run/x.exit'), true);
+  assert.equal(hc.startRun('term-/p-1', a.id, 'term-/p-9', 'a', '/run/x.exit'), false, 'only once');
+  assert.deepEqual(hc.running(), [{ tabId: 'term-/p-1', id: a.id, exitFile: '/run/x.exit' }]);
+  let row = hc.list()[0].commands.find((x) => x.id === a.id);
+  assert.equal(row.state, 'running');
+  assert.equal(row.edited, true);
+  assert.equal('exitFile' in row, false, 'internal paths are not sent to the window');
+  assert.equal('ran' in row, false, 'the edited text (it may hold a key) is not sent to the window');
+  assert.equal(hc.finishRun('term-/p-1', a.id, 2), true);
+  row = hc.list()[0].commands.find((x) => x.id === a.id);
+  assert.equal(row.state, 'failed');
+  assert.equal(row.exit, 2);
+  hc.startRun('term-/p-1', b.id, 'term-/p-8', 'b', '/run/y.exit');
+  hc.onHook('term-/p-8', 'exit', null); // the run tab closed before it finished
+  assert.equal(hc.list()[0].commands.find((x) => x.id === b.id).state, 'closed');
+  hc.onHook('term-/p-1', 'working', null); // the session moves on
+  const left = hc.list()[0].commands.map((x) => x.id);
+  assert.deepEqual(left.sort(), [a.id, b.id].sort(), 'c (still waiting) went; the ones already run stay');
+  assert.equal(hc.peek('term-/p-1', a.id), null, 'a finished command cannot be run again');
+  void c;
+  clock += 2 * 3600 * 1000;
+  assert.equal(hc.list().length, 0, 'finished ones leave after an hour');
+});
+
+
+test('ux r2: a closed run tab keeps its real result', async () => {
+  const { hc } = rig({ text: '! a' });
+  turn(hc);
+  await tick(60);
+  const [a] = hc.list()[0].commands;
+  hc.startRun('term-/p-1', a.id, 'term-/p-9', 'a', '/run/x.exit');
+  hc.onHook('term-/p-9', 'exit', null); // closed right after it finished
+  assert.equal(hc.list()[0].commands[0].state, 'closed');
+  assert.deepEqual(hc.running().map((r) => r.id), [a.id], 'still checked');
+  hc.finishRun('term-/p-1', a.id, 4);
+  assert.equal(hc.list()[0].commands[0].state, 'failed');
+});
+
+test('ux r2: prefixed placeholder keys are caught; a command keeps the folder it ran in', async () => {
+  for (const cmd of ['gh secret set API_TOKEN --body ghp_xxxxxxxxxxxxxxxxxxxx', 'export K=sk_test_xxxxxxxx', 'curl -H "Authorization: Bearer XXXXXXXX" host']) {
+    assert.notEqual(commandPlaceholder(cmd), null, cmd);
+  }
+  let folder = '/p/staging';
+  let reply = '! ./deploy.sh';
+  let n = 0;
+  const T = clock;
+  const hc = createHandoffCommands({
+    resolve: async () => ({ sessionId: 's1', sessionProject: '/p', pid: 3 }),
+    lastReply: async () => ({ text: reply, at: T + (reply === '! ./deploy.sh' ? 1 : 2) }),
+    processCwd: async () => folder, projectOf: () => '/p', now: () => clock, sleep: async (ms) => { clock += ms; }, newId: () => `k${(n += 1)}`,
+  });
+  turn(hc);
+  await tick(60);
+  const [a] = hc.list()[0].commands;
+  hc.startRun('term-/p-1', a.id, 'term-/p-9', a.text, '/run/x.exit');
+  hc.finishRun('term-/p-1', a.id, 0);
+  // The next turn hands back a command from another folder.
+  folder = '/p/production';
+  reply = '! ./deploy-prod.sh';
+  turn(hc);
+  await tick(60);
+  const e = hc.list()[0];
+  assert.equal(e.cwd, '/p/production');
+  assert.equal(e.commands.find((c) => c.text === './deploy.sh').cwd, '/p/staging', 'the earlier run keeps where it ran');
+  assert.equal(e.commands.find((c) => c.text === './deploy-prod.sh').cwd, '/p/production');
+});
+
+
+// The real script and command file, run by /bin/bash -p, as a Run tab does.
+async function runForReal(cmd, { cwd = null, shown = cmd, mkdir = true } = {}) {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const { shQuote } = await import('../../shared/sh-quote.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-run-t-'));
+  const base = path.join(dir, 'dobius-run-abcdefabcdefabcdef');
+  const exitFile = `${base}.exit`;
+  fs.writeFileSync(`${base}.cmd`, `${cmd}\n`);
+  const where = cwd || (mkdir ? dir : path.join(dir, 'gone'));
+  fs.writeFileSync(`${base}.sh`, runScriptText(`${base}.cmd`, where, shQuote, exitFile, shown));
+  const r = spawnSync('/bin/bash', ['-p', `${base}.sh`], { encoding: 'utf8', timeout: 10000 });
+  const out = { stdout: r.stdout + r.stderr, exit: fs.existsSync(exitFile) ? fs.readFileSync(exitFile, 'utf8') : null, left: fs.readdirSync(dir).filter((f) => f !== 'dobius-run-abcdefabcdefabcdef.exit'), dir };
+  fs.rmSync(dir, { recursive: true, force: true });
+  return out;
+}
+
+test('script: the real exit status whatever the command does; files cleaned up; the folder or nothing', async () => {
+  for (const [cmd, want] of [["trap 'exit 7' EXIT; true", '7'], ['exec /usr/bin/false', '1'], ['set -e; false; echo no', '1'], ['exit 3', '3'], ['true', '0'], ['echo "A $(pwd -P)" & wait', '0']]) {
+    const r = await runForReal(cmd);
+    assert.equal(r.exit, want, cmd);
+    assert.deepEqual(r.left, [], `${cmd}: the script and the command file are gone`);
+  }
+  const a = await runForReal('echo "IN $(pwd -P)"');
+  assert.match(a.stdout, /IN \/.*dobius-run-t-/);
+  // An unterminated heredoc cannot reach the wrapper: it still reports.
+  const h = await runForReal('cat <<EOF\nhello');
+  assert.notEqual(h.exit, null);
+  const gone = await runForReal('touch SHOULD_NOT', { mkdir: false });
+  assert.equal(gone.exit, '127');
+  assert.match(gone.stdout, /could not open/);
+});
+
+test('script: an edited command prints the version the card showed', async () => {
+  const r = await runForReal('true # sk-live-123', { shown: 'true # <your-key>   (edited)' });
+  assert.match(r.stdout, /<your-key>   \(edited\)/);
+  assert.equal(r.stdout.includes('sk-live-123'), false);
+});
+
+test('script: Ctrl+C stops the command and the result is still reported', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { spawn } = await import('node:child_process');
+  const { shQuote } = await import('../../shared/sh-quote.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-run-int-'));
+  try {
+    const base = path.join(dir, 'dobius-run-abcdefabcdefabcdef');
+    fs.writeFileSync(`${base}.cmd`, 'sleep 30\n');
+    fs.writeFileSync(`${base}.sh`, runScriptText(`${base}.cmd`, dir, shQuote, `${base}.exit`, 'sleep 30'));
+    // Its own process group, as a terminal's foreground job: Ctrl+C reaches the whole group.
+    const child = spawn('/bin/bash', ['-p', `${base}.sh`], { detached: true, stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 600));
+    process.kill(-child.pid, 'SIGINT');
+    await new Promise((r) => child.on('exit', r));
+    assert.equal(fs.readFileSync(`${base}.exit`, 'utf8'), '130');
+    assert.equal(fs.existsSync(`${base}.cmd`), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

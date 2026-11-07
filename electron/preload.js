@@ -528,7 +528,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Tasks > Commands: `! ` commands sessions handed back (electron/handoff-commands.js).
   handoffCommandsList: () => ipcRenderer.invoke('handoffCommands:list'),
   handoffCommandsDismiss: (tabId, id) => ipcRenderer.invoke('handoffCommands:dismiss', tabId, id),
-  handoffCommandsPrepare: (tabId, id) => ipcRenderer.invoke('handoffCommands:prepare', tabId, id),
+  handoffCommandsPrepare: (tabId, id, edited, asIs) => ipcRenderer.invoke('handoffCommands:prepare', tabId, id, edited, asIs === true),
   onHandoffCommandsChanged: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('handoffCommands:changed', handler);

@@ -34,12 +34,18 @@ const HIDDEN_RE = /[\x00-\x1f\x7f-\x9f\u2028\u2029\p{Cf}\p{Default_Ignorable_Cod
  * character the card could hide is left out.
  */
 export function extractCommands(text) {
+  return extractCommandsWithContext(text).map((c) => c.text);
+}
+
+/** The same commands, each with `why`: what Claude wrote right around it (instructions, what it does). */
+export function extractCommandsWithContext(text) {
   if (typeof text !== 'string') return [];
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
   const out = [];
   for (let i = 0; i < lines.length && out.length < MAX_COMMANDS; i += 1) {
     const m = LINE_RE.exec(lines[i]);
     if (!m) continue;
+    const first = i;
     let cmd = m[2];
     if (m[1] === '`') cmd = cmd.replace(/`\s*$/, '');
     // Shell line continuation: `cmd \` then the rest on the next line(s).
@@ -49,10 +55,44 @@ export function extractCommands(text) {
     }
     cmd = cmd.trim();
     if (!cmd || cmd.length > MAX_COMMAND_LEN || HIDDEN_RE.test(cmd) || !cmd.isWellFormed()) continue;
-    if (!out.includes(cmd)) out.push(cmd);
+    if (out.some((c) => c.text === cmd)) continue;
+    out.push({ text: cmd, why: contextAround(lines, first, i) });
   }
   return out;
 }
+
+const FENCE_RE = /^\s*```/;
+// Shown, never run: markdown markers off, anything the card could hide turned into a space.
+const plain = (l) => l.replace(HIDDEN_RE, ' ').replace(/^\s*(?:#+\s+|[-*]\s+|\d+\.\s+)/, '').replace(/\*\*|`/g, '').trim();
+
+/**
+ * The paragraph just before a command (up to 4 lines, back to a blank line or another command) and the lines just
+ * after it (up to 2, to a blank line or the next command): where Claude says what it is for and what to do first.
+ */
+export function contextAround(lines, first, last) {
+  const before = [];
+  for (let j = first - 1; j >= 0 && before.length < 4; j -= 1) {
+    if (FENCE_RE.test(lines[j])) continue;
+    if (LINE_RE.test(lines[j])) break;
+    if (!lines[j].trim()) { if (before.length) break; continue; }
+    before.unshift(plain(lines[j]));
+  }
+  const after = [];
+  for (let j = last + 1; j < lines.length && after.length < 2; j += 1) {
+    if (FENCE_RE.test(lines[j])) continue;
+    if (LINE_RE.test(lines[j]) || !lines[j].trim()) break;
+    // A line that leads straight into the next command introduces THAT one, not this.
+    let k = j + 1;
+    while (k < lines.length && FENCE_RE.test(lines[k])) k += 1;
+    if (k < lines.length && LINE_RE.test(lines[k])) break;
+    after.push(plain(lines[j]));
+  }
+  return [...before, ...after].filter(Boolean).join('\n').slice(0, 600);
+}
+
+/** The whole reply for "Show full reply": shown as text only, capped, nothing hidden. */
+export const replyForDisplay = (text) => String(text || '').replace(/\r\n?/g, '\n').split('\n').map((l) => l.replace(HIDDEN_RE, ' ')).join('\n').slice(0, 6000);
+
 
 export function createHandoffCommands({ resolve, lastReply, processCwd, projectOf, notify = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), newId }) {
   const byTab = new Map(); // tabId -> { tabId, projectPath, cwd, at, commands: [{ id, text }] }
@@ -86,12 +126,21 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
         const settled = key !== null && key === prev;
         prev = key;
         if (!settled) continue;
-        const commands = extractCommands(best.text);
+        const commands = extractCommandsWithContext(best.text);
         if (!commands.length) continue;
         const projectPath = tabProject || s.sessionProject || folder || best.project;
+        // Commands already run stay (their result is still worth seeing); waiting ones are replaced by this turn's.
+        const kept = (byTab.get(tabId)?.commands || []).filter((c) => c.state !== 'waiting');
         // Always an explicit folder: unknown Claude folder means the project folder, named, never "wherever a new
         // shell starts" (a login profile may cd).
-        byTab.set(tabId, { tabId, projectPath, cwd: folder || projectPath, at: now(), commands: commands.map((c) => ({ id: newId(), text: c })) });
+        // Each command keeps the folder and reply it came with: one run earlier stays labelled as it ran, under a newer
+        // turn's commands.
+        const cwdNow = folder || projectPath;
+        const reply = replyForDisplay(best.text);
+        byTab.set(tabId, {
+          tabId, projectPath, cwd: cwdNow, at: now(), reply,
+          commands: [...kept, ...commands.map((c) => ({ id: newId(), text: c.text, why: c.why, state: 'waiting', cwd: cwdNow, reply }))],
+        });
         notify();
         return;
       } catch (err) {
@@ -113,56 +162,116 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
     if (state === 'exit') {
       turnStart.delete(tabId);
       gen.delete(tabId);
-      if (byTab.delete(tabId)) notify();
+      let changed = dropWaiting(tabId);
+      // A Run tab closed before its command finished.
+      // A Run tab closed: 'closed' until its exit file says otherwise (it may have finished just before).
+      for (const e of byTab.values()) for (const c of e.commands) {
+        if (c.state === 'running' && c.runTabId === tabId) { c.state = 'closed'; c.endedAt = now(); changed = true; }
+      }
+      if (changed) notify();
       return;
     }
     if (state === 'working') {
-      // A new turn: what the tab handed back before is no longer what it is waiting on.
+      // A new turn: what the tab handed back before is no longer what it is waiting on (commands already run stay).
       if (!turnStart.has(tabId)) turnStart.set(tabId, now());
       bump(tabId);
-      if (byTab.delete(tabId)) notify();
+      if (dropWaiting(tabId)) notify();
       return;
     }
     if (state === 'done') turnStart.delete(tabId);
   }
 
-  /** Every tab's pending commands, newest first (the renderer shows its own project's). */
-  function list() {
-    return [...byTab.values()].sort((a, b) => b.at - a.at).map((e) => ({ ...e, commands: e.commands.map((c) => ({ ...c })) }));
+  function dropWaiting(tabId) {
+    const e = byTab.get(tabId);
+    if (!e) return false;
+    const before = e.commands.length;
+    e.commands = e.commands.filter((c) => c.state !== 'waiting');
+    if (!e.commands.length) byTab.delete(tabId);
+    return e.commands.length !== before;
   }
 
-  /** One command and where it runs, still listed. */
+  // A finished one stays on its card for an hour, then goes.
+  const DONE_KEEP_MS = 60 * 60 * 1000;
+  function prune() {
+    for (const [tabId, e] of byTab) {
+      e.commands = e.commands.filter((c) => !c.endedAt || now() - c.endedAt < DONE_KEEP_MS);
+      if (!e.commands.length) byTab.delete(tabId);
+    }
+  }
+
+  /** Every tab's commands (waiting, running, finished), newest first; the renderer shows its own project's. */
+  function list() {
+    prune();
+    // Never sent to a window: the script's exit file, and the text that actually ran (an edited one may hold a key).
+    return [...byTab.values()].sort((a, b) => b.at - a.at)
+      .map((e) => ({ ...e, commands: e.commands.map(({ exitFile: _exitFile, ran: _ran, ...c }) => ({ ...c })) }));
+  }
+
+  /** One WAITING command and where it runs. */
   function peek(tabId, id) {
     const e = byTab.get(tabId);
-    const c = e?.commands.find((x) => x.id === id);
-    return c ? { tabId, projectPath: e.projectPath, cwd: e.cwd, text: c.text } : null;
+    const c = e?.commands.find((x) => x.id === id && x.state === 'waiting');
+    return c ? { tabId, projectPath: e.projectPath, cwd: c.cwd || e.cwd, text: c.text } : null;
   }
 
-  /** Remove one command (run or dismissed). Returns it, or null. */
+  /** Remove one command, any state (Dismiss). Returns true when it was there. */
   function take(tabId, id) {
-    const found = peek(tabId, id);
-    if (!found) return null;
     const e = byTab.get(tabId);
+    if (!e || !e.commands.some((x) => x.id === id)) return false;
     e.commands = e.commands.filter((x) => x.id !== id);
     if (!e.commands.length) byTab.delete(tabId);
     notify();
-    return found;
+    return true;
   }
 
-  return { onHook, list, peek, take };
+  /** Run started in `runTabId` (text: what actually runs, edited or not). Only a waiting command. */
+  function startRun(tabId, id, runTabId, text, exitFile) {
+    const c = byTab.get(tabId)?.commands.find((x) => x.id === id && x.state === 'waiting');
+    if (!c) return false;
+    Object.assign(c, { state: 'running', runTabId, ran: text, edited: text !== c.text, startedAt: now(), exitFile });
+    notify();
+    return true;
+  }
+
+  /** Exit files to check: running commands, and ones whose tab closed (it may have finished just before). */
+  const running = () => [...byTab.values()].flatMap((e) => e.commands.filter((c) => (c.state === 'running' || c.state === 'closed') && c.exitFile).map((c) => ({ tabId: e.tabId, id: c.id, exitFile: c.exitFile })));
+
+  /** A command finished with `code` (its script wrote it): its real result, even if its tab has closed since. */
+  function finishRun(tabId, id, code) {
+    const c = byTab.get(tabId)?.commands.find((x) => x.id === id && (x.state === 'running' || x.state === 'closed'));
+    if (!c) return false;
+    Object.assign(c, { state: code === 0 ? 'done' : 'failed', exit: code, endedAt: now(), exitFile: null });
+    notify();
+    return true;
+  }
+
+  return { onHook, list, peek, take, startRun, running, finishRun };
 }
 
 /**
  * The script a Run tab starts with (run by /bin/bash after the login profile, shared/new-tab.js loginShellSpawn): it
- * deletes itself, enters the folder the card names or stops there, shows the command, then runs it as its own last
- * line, so everything in it (`&`, `;`, pipes) runs in that folder. Nothing of it is ever typed into a shell.
+ * deletes itself, enters the folder the card names or stops there, shows the command, runs the COMMAND FILE (the
+ * command alone, written next to it) with its own /bin/bash -p, deletes that file, and writes the exit status for the
+ * card. Nothing of it is ever typed into a shell.
+ * - A separate file and bash: nothing in the command (an unterminated heredoc, `exec`, `exit`, `set -e`, an EXIT trap)
+ *   can reach this script, and its real status is what is reported.
+ * - Ctrl+C or a closed tab (INT, TERM, HUP) stops the command; this script carries on to clean up and report (a
+ *   handled trap is reset to the default in the child, so the command itself still gets the signal).
+ * - `shown` is what the tab prints as the command: the version the card showed (an edited one may hold a pasted key).
+ * - The status is written to a temp name and renamed in, so the card never reads a half-written one.
  */
-export function runScriptText(text, cwd, quote) {
+export function runScriptText(cmdFile, cwd, quote, exitFile = null, shown = '') {
+  const report = (code) => (exitFile ? `printf '%s' ${code} > ${quote(`${exitFile}.tmp`)} && /bin/mv -f -- ${quote(`${exitFile}.tmp`)} ${quote(exitFile)}` : ':');
+  const dropCmd = `/bin/rm -f -- ${quote(cmdFile)}`;
   return [
     '/bin/rm -f -- "$0"', // a full path: a project .env may put its own `rm` first on PATH
-    `builtin cd -- ${quote(cwd)} || { printf 'Dobius: could not open %s, nothing was run.\\n' ${quote(cwd)}; exit 1; }`,
-    `printf '\\033[2m$ %s\\033[0m\\n' ${quote(text)}`,
-    text,
+    "trap ':' INT TERM HUP",
+    `builtin cd -- ${quote(cwd)} || { printf 'Dobius: could not open %s, nothing was run.\\n' ${quote(cwd)}; ${dropCmd}; ${report(127)}; exit 1; }`,
+    `printf '\\033[2m$ %s\\033[0m\\n' ${quote(shown)}`,
+    `/bin/bash -p -- ${quote(cmdFile)}`,
+    'code=$?',
+    dropCmd,
+    report('"$code"'),
     '',
   ].join('\n');
 }

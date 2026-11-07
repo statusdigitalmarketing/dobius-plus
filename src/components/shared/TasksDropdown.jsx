@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useStore } from '../../store/store';
 import { dueLabel, localDay, sortOpenTasks, matchesQuery, sameProject } from '../../../shared/task-due.js';
 import TeamList, { needsPerson } from './TeamList';
-import CommandsList, { useProjectCommands } from './CommandsList';
+import CommandsList, { useProjectCommands, waitingCount } from './CommandsList';
 
 const MONO = "'SF Mono', monospace";
 
@@ -101,7 +101,7 @@ export default function TasksDropdown() {
   const pendingCount = tasks.filter((t) => !t.done).length;
   // Commands this project's sessions handed back to run (Tasks > Commands).
   const commandEntries = useProjectCommands(currentProjectPath);
-  const commandCount = commandEntries.reduce((n, e) => n + e.commands.length, 0);
+  const commandCount = waitingCount(commandEntries); // still to run (finished ones stay listed, not counted)
   const today = localDay();
 
   const load = useCallback(async () => {
@@ -479,8 +479,8 @@ export default function TasksDropdown() {
     <div ref={dropdownRef} style={{ position: 'relative' }}>
       <button
         onClick={() => setOpen((v) => !v)}
-        title={`Tasks: this project's to-do list and the Inbox board${pendingCount > 0 ? ` (${pendingCount} open)` : ''}`}
-        aria-label={`Tasks${pendingCount > 0 ? `, ${pendingCount} open` : ''}`}
+        title={`Tasks: this project's to-do list and the Inbox board${pendingCount > 0 ? ` (${pendingCount} open)` : ''}${commandCount > 0 ? `. ${commandCount} command${commandCount === 1 ? '' : 's'} waiting for you to run` : ''}`}
+        aria-label={`Tasks${pendingCount > 0 ? `, ${pendingCount} open` : ''}${commandCount > 0 ? `, ${commandCount} commands to run` : ''}`}
         aria-expanded={open}
         className="no-drag"
         style={{
@@ -503,6 +503,16 @@ export default function TasksDropdown() {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}>
             {pendingCount}
+          </span>
+        )}
+        {commandCount > 0 && (
+          // A session is waiting on you to run something: its own badge, in the alert colour, with a prompt glyph.
+          <span title="Commands waiting for you to run" style={{
+            minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, backgroundColor: '#F87300',
+            color: 'var(--bg)', fontSize: 9, fontWeight: 700,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1,
+          }}>
+            {'$'}{commandCount}
           </span>
         )}
       </button>
