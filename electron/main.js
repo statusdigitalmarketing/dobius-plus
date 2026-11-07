@@ -2,7 +2,8 @@ import './dev-userdata.js'; // MUST stay first: userData override before config-
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor, screen } from 'electron';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -56,7 +57,7 @@ import {
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, provenanceChanged, sessionMovedPast, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
-  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
+  getLastAssistantMessage, getLastAssistantReply, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
 } from './build-monitor-service.js';
@@ -104,6 +105,9 @@ import {
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
 import { initTeam, stopTeam, handleTeamBridge } from './team-main.js';
+import { createHandoffCommands, runScriptText } from './handoff-commands.js';
+import { shQuote } from '../shared/sh-quote.js';
+import { randomUUID } from 'node:crypto';
 import { createCodexStatusRouter, withCodexHooks, stripCodexHooks, hasCodexHooks } from './codex-status.js';
 import { answersPrompt, submitsInput } from '../shared/prompt-answer.js';
 import { stopHookCommand } from '../shared/handoff.js';
@@ -391,6 +395,30 @@ const TERMINAL_WRITE_MAX_BYTES = 256 * 1024; // 256KB per write — plenty for a
 // IPC (they go through createTerminal directly), so they're naturally
 // excluded from renderer write access. Codex round-2 HIGH on main.js:118.
 const terminalOwners = new Map(); // id -> webContents.id
+// Tasks > Commands (set up with the bridge, below): the collector, and Run's one-time tokens (handoffCommands:prepare,
+// redeemed by terminal:create).
+let handoffCommands = null;
+const runTokens = new Map(); // token -> { sender, tabId, id, at }
+const RUN_TOKEN_MS = 60_000;
+const runScriptDir = () => path.join(app.getPath('userData'), 'run');
+// The script a Run tab starts with: it deletes itself, enters the folder (or stops), shows the command, runs it.
+function writeRunScript(cmd) {
+  const dir = runScriptDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, `dobius-run-${randomUUID().replace(/-/g, '')}.sh`);
+  fs.writeFileSync(file, runScriptText(cmd.text, cmd.cwd, shQuote), { mode: 0o600, flag: 'wx' });
+  return file;
+}
+// A Run tab that never started leaves its script behind: cleared a day later.
+function pruneRunScripts() {
+  let names = [];
+  try { names = fs.readdirSync(runScriptDir()); } catch { return; }
+  for (const n of names) {
+    if (!/^dobius-run-[A-Za-z0-9_-]+\.sh$/.test(n)) continue;
+    const f = path.join(runScriptDir(), n);
+    try { if (Date.now() - fs.statSync(f).mtimeMs > 24 * 3600 * 1000) fs.unlinkSync(f); } catch (err) { console.warn('[commands] could not clear an old run script:', err?.message || err); }
+  }
+}
 // Pending tear-off / dock grants, tabId -> the webContents.id allowed to claim
 // the PTY (see window:tearOffTab).
 const tearOffGrants = new Map();
@@ -461,8 +489,32 @@ function setupTerminalHandlers() {
     // A New Tab (store.openNewTab) starts its tool: 'default' is the Settings
     // choice, read here; anything outside the fixed set starts nothing.
     const launch = opts && typeof opts === 'object' ? opts.launch : undefined;
-    const startCommand = launch === undefined ? null : launchCommandFor(launch, getSettings().newTabTool);
-    const created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand });
+    // Run (Tasks > Commands): a one-time token from handoffCommands:prepare, from THIS window, unexpired. The command
+    // leaves the list only here, as its tab really starts; a bad or reused token starts a plain shell.
+    let runScript = null;
+    let runCmd = null;
+    if (launch && typeof launch === 'object' && typeof launch.run === 'string') {
+      const t = runTokens.get(launch.run);
+      runTokens.delete(launch.run);
+      if (t && t.sender === event.sender.id && Date.now() - t.at <= RUN_TOKEN_MS && handoffCommands) {
+        // The script first; the command leaves the list only once the PTY really spawned (below), so a failed write
+        // or spawn keeps it listed.
+        const cmd = handoffCommands.peek(t.tabId, t.id);
+        if (cmd) {
+          try { runScript = writeRunScript(cmd); runCmd = t; } catch (err) { console.error('[commands] could not write the run script:', err?.message || err); }
+        }
+      }
+    }
+    const startCommand = launch === undefined || typeof launch === 'object' ? null : launchCommandFor(launch, getSettings().newTabTool);
+    let created = null;
+    try {
+      created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand, runScript });
+    } finally {
+      if (runScript) {
+        if (created && runCmd) handoffCommands.take(runCmd.tabId, runCmd.id);
+        else { try { fs.unlinkSync(runScript); } catch { /* cleared by pruneRunScripts */ } }
+      }
+    }
     // A tab restored with its saved scrollback in a window opened after
     // launch: resume the Claude session it ran at the last quit, under the
     // launch-time rules (auto-resume.js resumeRestoredTab). Never for a new
@@ -4016,6 +4068,67 @@ function setupWindowHandlers() {
   // orchestrator tab reuses these same guards.
   initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint, endpointProblem: getTeamEndpointProblem });
   setTeamBridge(handleTeamBridge);
+  // Tasks > Commands (electron/handoff-commands.js): the `! ` commands a session handed back, per tab, read from its
+  // last reply when its Stop hook marks the handback. Run: see handoffCommands:prepare and terminal:create.
+  handoffCommands = createHandoffCommands({
+    // Claude's own record for the process follows /clear; argv (--resume) does not, so the record wins when it names
+    // another session.
+    resolve: async (tabId) => {
+      const configDir = listTerminals().find((t) => t.id === tabId)?.claudeConfigDir ?? null;
+      const r = await resolveSessionForTab(tabId);
+      if (!r) {
+        // Not resolved by the shared lookup (it gives up beside another child, a dev server, say, and does not see
+        // `exec claude`). Claude's OWN record names the session: first the one claude among the shell's children,
+        // then the tab's process itself (exec claude), each matched to its record by start time.
+        const fromRecord = async (pid, startedAt) => {
+          const rec = await presenceOf({ pid, startedAt }, configDir);
+          return rec?.sessionId ? { sessionId: rec.sessionId, sessionProject: rec.cwd || null, pid, startedAt, recordCwd: rec.cwd } : null;
+        };
+        const child = await getTerminalClaudeInfo(tabId, { unique: true });
+        if (child && Number.isInteger(child.pid)) {
+          const got = await fromRecord(child.pid, child.startedAt);
+          if (got) return got;
+        }
+        const pid = terminalInstance(tabId)?.pid;
+        if (!Number.isInteger(pid) || pid <= 0) return null;
+        let startedAt = null;
+        try {
+          const { stdout } = await promisify(execFile)('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
+          const t = Date.parse(stdout.trim());
+          startedAt = Number.isFinite(t) ? t : null;
+        } catch { return null; }
+        return fromRecord(pid, startedAt);
+      }
+      if (!Number.isInteger(r.pid)) return r;
+      const rec = await presenceOf({ pid: r.pid, startedAt: r.startedAt ?? null }, configDir);
+      if (rec?.sessionId && rec.sessionId !== r.sessionId) return { ...r, sessionId: rec.sessionId, sessionProject: rec.cwd || null, recordCwd: rec.cwd };
+      return { ...r, recordCwd: rec?.cwd || null };
+    },
+    lastReply: getLastAssistantReply,
+    processCwd: getProcessCwd,
+    projectOf: (id) => { const p = projectPathFromTabId(id); return p && p !== 'mobile' ? p : null; },
+    notify: () => { for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('handoffCommands:changed'); },
+    newId: () => randomUUID(),
+  });
+  terminalStatus.onHookState((id, state, tag) => handoffCommands.onHook(id, state, tag));
+  ipcMain.handle('handoffCommands:list', () => handoffCommands.list());
+  ipcMain.handle('handoffCommands:dismiss', (_e, tabId, id) => (typeof tabId === 'string' && typeof id === 'string' ? !!handoffCommands.take(tabId, id) : false));
+  // Run, step 1: a one-time token for this command (60 s, this window). The renderer opens a new tab whose
+  // terminal:create carries it; there the command is taken off the list and started as the tab's own startup program
+  // (a script run by /bin/bash after the login profile). Nothing is ever typed into a shell, so a profile that starts
+  // tmux or reads input, or a fish login shell, cannot get it. zsh and bash only (the startup wrapper's shells).
+  ipcMain.handle('handoffCommands:prepare', (event, tabId, id) => {
+    if (typeof tabId !== 'string' || typeof id !== 'string') return { ok: false, error: 'bad request' };
+    if (!handoffCommands.peek(tabId, id)) return { ok: false, error: 'That command is no longer waiting.' };
+    const sh = path.basename(process.env.SHELL || '/bin/zsh');
+    if (sh !== 'zsh' && sh !== 'bash') return { ok: false, error: `Run works with zsh and bash (your shell is ${sh}): use Copy.` };
+    const now = Date.now();
+    for (const [t, v] of runTokens) if (now - v.at > RUN_TOKEN_MS) runTokens.delete(t);
+    const token = randomUUID();
+    runTokens.set(token, { sender: event.sender.id, tabId, id, at: now });
+    return { ok: true, token };
+  });
+  pruneRunScripts();
   // /openTab's own "is another surface typing into this tab": an account move
   // must not stop Claude under it.
   heldInputFor = bridgeOpenDeps.inputBusy;

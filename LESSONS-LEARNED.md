@@ -719,3 +719,9 @@
 - **FIX**: After writing any `\u2028`/`\u2029`, grep for the raw characters and convert them back to escapes with a script that uses `chr(0x2028)`, never by typing the character.
 - **CONTEXT**: Handoff review fixes (feat/team-handoff), stripping Unicode line separators from card fields.
 - **DETECTION**: `grep -rnP "\x{2028}|\x{2029}" electron src shared` must print nothing.
+
+### Testing - 2026-11-07
+- **MISTAKE**: A probe of Claude Code's `!` bash mode (python pty running a real `claude`, typing `!` as a key then bracketed-pasting `echo <marker>`, then Enter) did NOT stay in bash mode: the text went to the model as a prompt on Sam's default account ("thinking with high effort") until it was interrupted with Ctrl+C about 5 s later.
+- **FIX**: Never probe input handling against a real `claude` with Enter unless a model call is acceptable. Inspect the screen BEFORE pressing Enter (bash mode shows its own prompt) and stop there. Do not type into a Claude prompt to run a shell command: run it in a shell tab instead.
+- **CONTEXT**: Designing a Run button for commands sessions hand back (Tasks > Commands).
+- **DETECTION**: a probe script that writes `\r` to a real claude pty after a paste.

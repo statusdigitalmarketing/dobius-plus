@@ -525,6 +525,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('team:changed', handler);
     return () => ipcRenderer.removeListener('team:changed', handler);
   },
+  // Tasks > Commands: `! ` commands sessions handed back (electron/handoff-commands.js).
+  handoffCommandsList: () => ipcRenderer.invoke('handoffCommands:list'),
+  handoffCommandsDismiss: (tabId, id) => ipcRenderer.invoke('handoffCommands:dismiss', tabId, id),
+  handoffCommandsPrepare: (tabId, id) => ipcRenderer.invoke('handoffCommands:prepare', tabId, id),
+  onHandoffCommandsChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('handoffCommands:changed', handler);
+    return () => ipcRenderer.removeListener('handoffCommands:changed', handler);
+  },
   // Fires when a task is completed from a terminal via dobius-task-done, so an
   // open Tasks panel can re-check the box live. Callback receives projectPath.
   onTasksUpdated: (cb) => {

@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useStore } from '../../store/store';
 import { dueLabel, localDay, sortOpenTasks, matchesQuery, sameProject } from '../../../shared/task-due.js';
 import TeamList, { needsPerson } from './TeamList';
+import CommandsList, { useProjectCommands } from './CommandsList';
 
 const MONO = "'SF Mono', monospace";
 
@@ -98,6 +99,9 @@ export default function TasksDropdown() {
   const inboxReq = useRef(0);
 
   const pendingCount = tasks.filter((t) => !t.done).length;
+  // Commands this project's sessions handed back to run (Tasks > Commands).
+  const commandEntries = useProjectCommands(currentProjectPath);
+  const commandCount = commandEntries.reduce((n, e) => n + e.commands.length, 0);
   const today = localDay();
 
   const load = useCallback(async () => {
@@ -189,7 +193,7 @@ export default function TasksDropdown() {
   const inboxShown = !!board?.installed;
   // Also with no teammate left: messages from an unlinked one may still need a Dismiss.
   const teamShown = team.peers > 0 || team.total > 0;
-  const view = tab === 'today' && inboxShown ? 'today' : tab === 'inbox' && inboxShown ? 'inbox' : (tab === 'team' && teamShown ? 'team' : 'project');
+  const view = tab === 'today' && inboxShown ? 'today' : tab === 'inbox' && inboxShown ? 'inbox' : tab === 'commands' ? 'commands' : (tab === 'team' && teamShown ? 'team' : 'project');
 
   useEffect(() => {
     const a = window.electronAPI;
@@ -540,6 +544,7 @@ export default function TasksDropdown() {
                 {teamShown && (
                   <Segment active={view === 'team'} onClick={() => switchTab('team')} label="Team" count={team.attention || null} alert={team.attention > 0} />
                 )}
+                <Segment active={view === 'commands'} onClick={() => switchTab('commands')} label="Commands" count={commandCount || null} alert={commandCount > 0} />
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 {fleet && (
@@ -558,7 +563,7 @@ export default function TasksDropdown() {
                       {syncing ? 'Syncing…' : '⟳ Asana'}
                     </HeaderButton>
                   </>
-                ) : view === 'team' ? null : view === 'today' ? (
+                ) : view === 'team' || view === 'commands' ? null : view === 'today' ? (
                   <HeaderButton onClick={loadToday} color="var(--dim)" title="Read everything again">⟳</HeaderButton>
                 ) : (
                   <>
@@ -580,7 +585,7 @@ export default function TasksDropdown() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={view === 'project' ? 'Filter tasks…' : view === 'today' ? 'Filter this list…' : view === 'team' ? 'Search team messages…' : 'Search the inbox…'}
+                placeholder={view === 'project' ? 'Filter tasks…' : view === 'today' ? 'Filter this list…' : view === 'team' ? 'Search team messages…' : view === 'commands' ? 'Filter commands…' : 'Search the inbox…'}
                 aria-label="Filter"
                 style={inputStyle}
               />
@@ -667,6 +672,8 @@ export default function TasksDropdown() {
               </>
             ) : view === 'team' ? (
               <TeamList query={query} />
+            ) : view === 'commands' ? (
+              <CommandsList query={query} />
             ) : view === 'today' ? (
               <TodayList
                 data={todayData}
