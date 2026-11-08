@@ -1,7 +1,7 @@
 // Shared keys from Claude's settings.json env (claude-settings-env.js).
 // Run: node ./electron/__tests__/claude-settings-env.test.mjs
 import assert from 'node:assert/strict';
-import { setClaudeSettingsReader, claudeSettingsEnv, sharedKeyEnv, sharedKeyStatus, sharedKeyError, asanaToken } from '../claude-settings-env.js';
+import { setClaudeSettingsReader, claudeSettingsEnv, sharedKeyEnv, sharedKeyStatus, sharedKeyError, asanaToken, asanaTokenWithSource } from '../claude-settings-env.js';
 
 let pass = 0;
 const check = (label, fn) => { fn(); pass += 1; console.log(`PASS  ${label}`); };
@@ -64,6 +64,22 @@ check('save validation: allowlisted names, empty removes, no whitespace or quote
   assert.equal(sharedKeyError('FIREFLIES_API_KEY', 'quote"1234567'), 'That does not look like a valid key.');
   assert.equal(sharedKeyError('FIREFLIES_API_KEY', ' ff_good_key_12345 '), '');
   assert.equal(sharedKeyError('ASANA_PAT', 42), 'Not a key.');
+});
+
+check('the Asana key says where it came from (so a refused one can be named)', () => {
+  const before = process.env.ASANA_PAT;
+  process.env.ASANA_PAT = 'from-launch-env';
+  try {
+    setClaudeSettingsReader(() => ({ env: { ASANA_PAT: 'shared-pat-123' } }));
+    assert.deepEqual(asanaTokenWithSource('legacy-pat'), { token: 'shared-pat-123', source: 'settings' });
+    setClaudeSettingsReader(() => ({ env: {} }));
+    assert.deepEqual(asanaTokenWithSource('legacy-pat'), { token: 'legacy-pat', source: 'dobius' });
+    assert.deepEqual(asanaTokenWithSource(''), { token: null, source: null });
+    setClaudeSettingsReader(() => null);
+    assert.deepEqual(asanaTokenWithSource(''), { token: 'from-launch-env', source: 'env' });
+  } finally {
+    if (before === undefined) delete process.env.ASANA_PAT; else process.env.ASANA_PAT = before;
+  }
 });
 
 console.log(`\nALL PASS  (${pass} passed)`);

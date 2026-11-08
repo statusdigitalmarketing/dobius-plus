@@ -70,6 +70,36 @@ const run = (env, args) => spawnSync(process.execPath, [SHIM, ...args], {
   await fs.rm(profDir, { recursive: true, force: true });
 }
 
+// 5. Quota project (Justin, 2026-11-07): an account marked noQuotaProject runs gws with the empty
+//    ~/.gws-profiles/.noquota config folder; an unmarked one keeps the normal config. A cached token keeps it offline.
+{
+  const profDir = path.join(home, '.gws-profiles');
+  await fs.mkdir(profDir, { recursive: true, mode: 0o700 });
+  const cfgGws = path.join(home, 'cfg-gws.sh');
+  await fs.writeFile(cfgGws, '#!/bin/sh\necho "CFG=${GOOGLE_WORKSPACE_CLI_CONFIG_DIR:-default} token=${GOOGLE_WORKSPACE_CLI_TOKEN:-none} PID=[${GOOGLE_WORKSPACE_PROJECT_ID-unset}] ADC=${GOOGLE_APPLICATION_CREDENTIALS:-none}"\n', { mode: 0o755 });
+  const exp = Date.now() + 3600_000;
+  for (const [id, email, mark] of [['gws-personalaaaaaaaaaaa', 'me@gmail.com', true], ['gws-workspaceaaaaaaaaaa', 'me@acme.com', false]]) {
+    await fs.writeFile(path.join(profDir, `${id}.json`), JSON.stringify({ email, client_id: 'c', client_secret: 's', refresh_token: 'r', ...(mark ? { noQuotaProject: true } : {}) }), { mode: 0o600 });
+    await fs.writeFile(path.join(profDir, `.token-${id}.json`), JSON.stringify({ token: `tok-${id}`, expiresAt: exp }), { mode: 0o600 });
+  }
+  const p1 = run({ DOBIUS_GWS_ACCOUNT_ID: 'gws-personalaaaaaaaaaaa', DOBIUS_REAL_GWS: cfgGws }, ['drive']);
+  check('a marked account runs with the empty .noquota config folder', p1.stdout.includes(`CFG=${path.join(profDir, '.noquota')}`) && p1.stdout.includes('token=tok-gws-personal'), p1.stdout + p1.stderr);
+  check('and an empty project variable and a gcloud credentials path with nothing at it', p1.stdout.includes('PID=[]') && p1.stdout.includes(`ADC=${path.join(profDir, '.noquota', 'no-adc.json')}`), p1.stdout);
+  const p1b = run({ DOBIUS_GWS_ACCOUNT_ID: 'gws-personalaaaaaaaaaaa', DOBIUS_REAL_GWS: cfgGws, GOOGLE_WORKSPACE_PROJECT_ID: 'forbidden-proj' }, ['drive']);
+  check('an inherited GOOGLE_WORKSPACE_PROJECT_ID is cleared for a marked account', p1b.stdout.includes('PID=[]'), p1b.stdout);
+  await fs.mkdir(path.join(profDir, '.noquota'), { recursive: true });
+  await fs.writeFile(path.join(profDir, '.noquota', 'client_secret.json'), '{"installed":{"project_id":"x"}}');
+  run({ DOBIUS_GWS_ACCOUNT_ID: 'gws-personalaaaaaaaaaaa', DOBIUS_REAL_GWS: cfgGws }, ['drive']);
+  check('a client file that appeared in .noquota is removed', await fs.access(path.join(profDir, '.noquota', 'client_secret.json')).then(() => false, () => true));
+  const p2 = run({ DOBIUS_GWS_ACCOUNT_ID: 'gws-workspaceaaaaaaaaaa', DOBIUS_REAL_GWS: cfgGws }, ['drive']);
+  check('an unmarked account keeps the normal gws config', p2.stdout.includes('CFG=default') && p2.stdout.includes('PID=[unset]'), p2.stdout + p2.stderr);
+  // No account named: gws runs as its own login, untouched, even when a marked profile exists (Codex round 3: running
+  // it as a stored account could act as the wrong one after a gws auth login, or override a token passed in).
+  const b1 = run({ DOBIUS_REAL_GWS: cfgGws }, ['drive', 'files', 'list']);
+  check('a bare call is a plain passthrough', b1.stdout.includes('token=none') && b1.stdout.includes('CFG=default'), b1.stdout + b1.stderr);
+  await fs.rm(profDir, { recursive: true, force: true });
+}
+
 await fs.rm(home, { recursive: true, force: true });
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);
 process.exit(fail === 0 ? 0 : 1);

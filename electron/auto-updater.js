@@ -18,7 +18,11 @@ const UPDATER_CACHE_DIR = path.join(os.homedir(), 'Library', 'Caches', 'dobius-p
 // An isolated instance (ship-test harness, DOBIUS_USERDATA_DIR) may be a packaged
 // build, but the updater cache and the installed app it would replace are the
 // real ones: it never checks, downloads, installs or purges.
-const updatesEnabled = () => app.isPackaged && !process.env.DOBIUS_USERDATA_DIR;
+// Not on Windows yet (Max, 2026-11-07, Windows beta): releases carry only the Mac files (latest-mac.yml), so every
+// Windows check ended in a 404 for latest.yml and the Updates page offered a Mac build. Windows betas come as new
+// builds until releases include the Windows files.
+const WINDOWS_BETA = process.platform === 'win32';
+const updatesEnabled = () => app.isPackaged && !process.env.DOBIUS_USERDATA_DIR && !WINDOWS_BETA;
 
 // Purge the updater cache after a download error so the NEXT periodic check
 // starts clean instead of re-wedging against the same stale state. Rate-limited
@@ -287,7 +291,7 @@ function installOnce() {
 export function initAutoUpdater() {
   ipcMain.handle('updater:check', () => {
     if (updatesEnabled()) safeCheck();
-    else broadcast('updater:status', { state: 'error', message: 'Updates only run in packaged builds (you are running dev mode).' });
+    else broadcast('updater:status', { state: 'error', message: WINDOWS_BETA ? 'Windows beta: automatic updates are not set up yet. New builds come to you directly.' : 'Updates only run in packaged builds (you are running dev mode).' });
     return { ok: updatesEnabled() };
   });
   ipcMain.handle('updater:install', async () => {

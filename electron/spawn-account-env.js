@@ -10,7 +10,7 @@ import { resolveTerminalAccount, claudeEnvForAccount, expandTilde } from './clau
 import { codexEnvForAccount, shareCodexProfile, codexProfilesRoot } from './codex-account-env.js';
 import { shareProfile } from './account-profile-share.js';
 import { loadConfig, getProjectAccount } from './config-manager.js';
-import { ensureShim } from './gws-accounts.js';
+import { ensureShim, resolveRealGws } from './gws-accounts.js';
 
 let _gwsShim = null;
 function getGwsShim() {
@@ -122,7 +122,11 @@ export function resolveAccountEnvForCwd(cwd, { claudeAccountPin } = {}) {
   const shim = IS_WIN ? { shimDir: null } : getGwsShim();
   if (shim.shimDir) {
     accountEnv.DOBIUS_GWS_SHIM_DIR = shim.shimDir;
-    if (shim.realGws) accountEnv.DOBIUS_REAL_GWS = shim.realGws;
+    // The shim folder is staged once; the real gws is looked up again for every terminal, so one installed after
+    // launch is used without a restart (the shim also reads gws-env.json when this is unset or stale).
+    // None found: clear any DOBIUS_REAL_GWS Dobius itself inherited (launched from a Dobius terminal), so the shim falls
+    // through to gws-env.json instead of a stale path. undefined is createTerminal's deletion signal.
+    accountEnv.DOBIUS_REAL_GWS = resolveRealGws(shim.shimDir) || undefined;
   }
   return accountEnv;
 }

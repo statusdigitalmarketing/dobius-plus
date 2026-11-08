@@ -818,7 +818,8 @@ export async function sessionMovedPast(projectPath, sessionId, startedAt, claime
 export async function sessionTranscriptBirth(projectPath, sessionId) {
   if (!projectPath || !sessionId) return 0;
   const seen = new Set();
-  for (const enc of [encodePathLikeClaude(projectPath), encodePathLikeClaudeLegacy(projectPath)]) {
+  // Every name Claude may have used, the dot-replacing one included (a `.worktrees/x` folder).
+  for (const enc of claudeDirNames(projectPath)) {
     if (seen.has(enc)) continue;
     seen.add(enc);
     try {
@@ -1634,6 +1635,45 @@ const MAX_PAYLOAD_BYTES = 12 * 1024 * 1024; // 12 MB JSON ceiling
  * copying the last response for a session whose transcript lives in the
  * legacy `(Code)` directory would return null.
  */
+/**
+ * The last assistant reply that has text, with WHEN it was written (its record's timestamp, ms), or null. Tasks >
+ * Commands uses the time to accept only the reply of the turn that just ended, never an older one still on disk.
+ */
+export async function getLastAssistantReply(sessionId, projectPath) {
+  if (!sessionId || typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) return null;
+  if (typeof projectPath !== 'string' || !projectPath) return null;
+  let transcriptPath = null;
+  // Every name Claude may have used for the folder (a dotted worktree path included).
+  for (const enc of claudeDirNames(projectPath)) {
+    const p = path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`);
+    if (await pathExists(p)) { transcriptPath = p; break; }
+  }
+  if (!transcriptPath) return null;
+  const entries = await parseJsonl(transcriptPath, 1000);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    const isAssistant = entry.type === 'assistant' || entry.role === 'assistant' || entry.message?.role === 'assistant';
+    if (!isAssistant) continue;
+    const text = extractAssistantText(entry);
+    if (!text) continue;
+    const at = Date.parse(entry.timestamp);
+    // A person's prompt AFTER it means this reply belongs to an earlier turn (the newer turn's reply is not written
+    // yet). Tool results and meta records are user-typed records too, but not prompts.
+    const promptAfter = entries.slice(i + 1).some(isPromptEntry);
+    return { text, at: Number.isFinite(at) ? at : null, promptAfter };
+  }
+  return null;
+}
+
+/** A transcript record that is a prompt a person (or the harness) submitted: not a tool result, not meta. */
+function isPromptEntry(e) {
+  if (!e || e.type !== 'user' || e.isMeta) return false;
+  const c = e.message?.content;
+  if (typeof c === 'string') return c.trim().length > 0;
+  // Anything but a tool result: an image-only prompt is a prompt too.
+  return Array.isArray(c) && c.some((b) => b && typeof b === 'object' && b.type !== 'tool_result');
+}
+
 export async function getLastAssistantMessage(sessionId, projectPath) {
   if (!sessionId || typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) return null;
   // Require an explicit projectPath. Codex v1.0.29 round-1 MED.

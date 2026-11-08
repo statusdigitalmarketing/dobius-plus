@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useStore } from '../../store/store';
 import { dueLabel, localDay, sortOpenTasks, matchesQuery, sameProject } from '../../../shared/task-due.js';
 import TeamList, { needsPerson } from './TeamList';
+import CommandsList, { useProjectCommands, waitingCount } from './CommandsList';
 
 const MONO = "'SF Mono', monospace";
 
@@ -66,6 +67,19 @@ export default function TasksDropdown() {
   const addBrowserTab = useStore((s) => s.addBrowserTab);
   const setActiveView = useStore((s) => s.setActiveView);
   const [open, setOpen] = useState(false);
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const place = () => {
+      const r = dropdownRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const width = Math.min(520, window.innerWidth - 24);
+      const left = Math.max(12, Math.min(r.right - width, window.innerWidth - 12 - width));
+      setPanelPos({ top: r.bottom + 6, left, width });
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [open]);
   const [tab, setTab] = useState(() => {
     const t = readPref('dobius.tasks.tab', 'project');
     return t === 'inbox' || t === 'team' || t === 'today' ? t : 'project';
@@ -75,6 +89,16 @@ export default function TasksDropdown() {
   const [newTitle, setNewTitle] = useState('');
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
+  // A failed sync stays on screen, in full, until it is dismissed or a sync works (Brett, 2026-11-07: the error was
+  // squeezed into the header corner and vanished after 4 seconds). { error, unauthorized, refused, alternative, noKey }
+  const [syncError, setSyncError] = useState(null);
+  const [keyBusy, setKeyBusy] = useState(false);
+  const projectRef = useRef(currentProjectPath);
+  projectRef.current = currentProjectPath;
+  // A new problem is shown where it can be seen: the list scrolls back to its top.
+  const listRef = useRef(null);
+  useEffect(() => { if (syncError) listRef.current?.scrollTo?.({ top: 0 }); }, [syncError]);
+  const openSettingsSection = useStore((s) => s.openSettingsSection);
   const [adding, setAdding] = useState(false);
   const [expanded, setExpanded] = useState(null);
   const [showDone, setShowDone] = useState(false);
@@ -94,10 +118,15 @@ export default function TasksDropdown() {
   // Team communicator: the segment shows once a teammate is linked. { peers, attention } (docs/team-communicator.md)
   const [team, setTeam] = useState({ peers: 0, attention: 0, total: 0 });
   const dropdownRef = useRef(null);
+  // { top, left, width } in window coordinates, from the button's place (see the panel's style).
+  const [panelPos, setPanelPos] = useState(null);
   const inputRef = useRef(null);
   const inboxReq = useRef(0);
 
   const pendingCount = tasks.filter((t) => !t.done).length;
+  // Commands this project's sessions handed back to run (Tasks > Commands).
+  const commandEntries = useProjectCommands(currentProjectPath);
+  const commandCount = waitingCount(commandEntries); // still to run (finished ones stay listed, not counted)
   const today = localDay();
 
   const load = useCallback(async () => {
@@ -189,7 +218,7 @@ export default function TasksDropdown() {
   const inboxShown = !!board?.installed;
   // Also with no teammate left: messages from an unlinked one may still need a Dismiss.
   const teamShown = team.peers > 0 || team.total > 0;
-  const view = tab === 'today' && inboxShown ? 'today' : tab === 'inbox' && inboxShown ? 'inbox' : (tab === 'team' && teamShown ? 'team' : 'project');
+  const view = tab === 'today' && inboxShown ? 'today' : tab === 'inbox' && inboxShown ? 'inbox' : tab === 'commands' ? 'commands' : (tab === 'team' && teamShown ? 'team' : 'project');
 
   useEffect(() => {
     const a = window.electronAPI;
@@ -328,19 +357,52 @@ export default function TasksDropdown() {
     inputRef.current?.focus();
   };
 
-  const handleSync = async () => {
+  const handleSync = async (opts) => {
     if (!window.electronAPI?.tasksSyncAsana) return;
     setSyncing(true);
     setSyncMsg('');
-    const result = await window.electronAPI.tasksSyncAsana(currentProjectPath);
-    if (result?.ok) {
-      setSyncMsg(result.added ? `+${result.added} from Asana` : 'Up to date');
-      await load();
-    } else {
-      setSyncMsg(result?.error || 'Sync failed');
+    const project = currentProjectPath;
+    let result;
+    try {
+      result = await window.electronAPI.tasksSyncAsana(currentProjectPath, opts);
+    } catch (err) {
+      result = { ok: false, error: err?.message || 'Sync failed' };
     }
     setSyncing(false);
-    setTimeout(() => setSyncMsg(''), 4000);
+    // An answer for a project no longer shown is dropped (its list reloads when it is shown again).
+    if (projectRef.current !== project) return;
+    if (result?.ok) {
+      setSyncError(null);
+      setSyncMsg(result.added ? `+${result.added} from Asana` : 'Up to date');
+      setTimeout(() => setSyncMsg(''), 4000);
+      await load();
+    } else {
+      setSyncError({ ...(result || { error: 'Sync failed' }), project });
+    }
+  };
+
+  // Another key on this Mac works: save it as Dobius's Asana key (main looks it up again; it never comes here), then
+  // sync again so the person sees their tasks arrive.
+  const useWorkingKey = async (alt) => {
+    if (keyBusy || syncing) return;
+    const startedOn = currentProjectPath;
+    setKeyBusy(true);
+    let switched = false;
+    try {
+      // Main saves it only if it is still the key shown here (same last four, same account).
+      const r = await window.electronAPI?.tasksUseAsanaKey?.(alt.source, { hint: alt.hint, email: alt.email || '' });
+      if (r?.ok) {
+        setSyncError(null);
+        switched = true;
+      } else {
+        // A key that changed or was refused is no longer offered; Asana being busy keeps the offer for a retry.
+        setSyncError((e) => ({ ...(e || {}), error: r?.error || 'Could not switch keys.', alternative: r?.stale ? null : e?.alternative }));
+      }
+    } finally {
+      setKeyBusy(false);
+    }
+    // Fresh: never join a sync that started with the old key. Only for the project it was asked on.
+    if (switched && projectRef.current === startedOn) await handleSync({ fresh: true });
   };
 
   // Returns '' when closed, or what to show on the card. The board keeps its own rules:
@@ -475,8 +537,8 @@ export default function TasksDropdown() {
     <div ref={dropdownRef} style={{ position: 'relative' }}>
       <button
         onClick={() => setOpen((v) => !v)}
-        title={`Tasks: this project's to-do list and the Inbox board${pendingCount > 0 ? ` (${pendingCount} open)` : ''}`}
-        aria-label={`Tasks${pendingCount > 0 ? `, ${pendingCount} open` : ''}`}
+        title={`Tasks: this project's to-do list and the Inbox board${pendingCount > 0 ? ` (${pendingCount} open)` : ''}${commandCount > 0 ? `. ${commandCount} command${commandCount === 1 ? '' : 's'} waiting for you to run` : ''}`}
+        aria-label={`Tasks${pendingCount > 0 ? `, ${pendingCount} open` : ''}${commandCount > 0 ? `, ${commandCount} commands to run` : ''}`}
         aria-expanded={open}
         className="no-drag"
         style={{
@@ -501,6 +563,16 @@ export default function TasksDropdown() {
             {pendingCount}
           </span>
         )}
+        {commandCount > 0 && (
+          // A session is waiting on you to run something: its own badge, in the alert colour, with a prompt glyph.
+          <span title="Commands waiting for you to run" style={{
+            minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, backgroundColor: '#F87300',
+            color: 'var(--bg)', fontSize: 9, fontWeight: 700,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1,
+          }}>
+            {'$'}{commandCount}
+          </span>
+        )}
       </button>
 
       <AnimatePresence>
@@ -514,16 +586,20 @@ export default function TasksDropdown() {
             exit={{ opacity: 0, y: -6, scale: 0.97 }}
             transition={{ duration: 0.15, ease: 'easeOut' }}
             style={{
-              position: 'absolute', top: 'calc(100% + 6px)', right: 0,
-              width: 400, maxWidth: 'calc(100vw - 24px)', maxHeight: 'min(620px, calc(100vh - 80px))',
+              // Placed against the window, not just the button: wherever the button sits, the popup stays inside the
+              // window with a 12px margin (Sam, 2026-11-07: it ran off the right edge in a narrow window).
+              ...(panelPos ? { position: 'fixed', top: panelPos.top, left: panelPos.left, width: panelPos.width } : { position: 'absolute', top: 'calc(100% + 6px)', right: 0, width: 'min(520px, calc(100vw - 24px))' }),
+              maxHeight: 'min(680px, calc(100vh - 80px))',
               backgroundColor: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10,
               boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
-              display: 'flex', flexDirection: 'column', overflow: 'hidden', zIndex: 9999,
+              // In a very small window the whole panel scrolls rather than squeezing the list to nothing.
+              display: 'flex', flexDirection: 'column', overflowX: 'hidden', overflowY: 'auto', zIndex: 9999,
             }}
           >
             {/* Header: segment switch + the segment's action */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '9px 10px 8px', borderBottom: '1px solid var(--border)' }}>
-              <div role="tablist" style={{ display: 'flex', gap: 2, padding: 2, borderRadius: 7, backgroundColor: 'var(--bg)', border: '1px solid var(--border)' }}>
+            {/* Wraps instead of clipping: in a narrow window the actions move under the segments (Sam, 2026-11-07). */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, rowGap: 6, padding: '9px 10px 8px', borderBottom: '1px solid var(--border)' }}>
+              <div role="tablist" style={{ display: 'flex', gap: 2, padding: 2, borderRadius: 7, backgroundColor: 'var(--bg)', border: '1px solid var(--border)', minWidth: 0, maxWidth: '100%', overflowX: 'auto', scrollbarWidth: 'none' }}>
                 <Segment active={view === 'project'} onClick={() => switchTab('project')} label="Project" count={pendingCount} />
                 {inboxShown && (
                   <Segment active={view === 'today'} onClick={() => switchTab('today')} label="Today" count={todayData?.board?.suggested ? todayData.board.suggested.length : null} />
@@ -540,8 +616,9 @@ export default function TasksDropdown() {
                 {teamShown && (
                   <Segment active={view === 'team'} onClick={() => switchTab('team')} label="Team" count={team.attention || null} alert={team.attention > 0} />
                 )}
+                <Segment active={view === 'commands'} onClick={() => switchTab('commands')} label="Commands" count={commandCount || null} alert={commandCount > 0} />
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto', flexShrink: 0 }}>
                 {fleet && (
                   <HeaderButton onClick={() => window.electronAPI?.openExternal?.(fleet.url)} color="var(--dim)" title="Open the Fleet board in your browser">
                     Fleet ↗
@@ -550,15 +627,13 @@ export default function TasksDropdown() {
                 {view === 'project' ? (
                   <>
                     {syncMsg && (
-                      <span style={{ fontSize: 9, color: syncMsg.startsWith('+') || syncMsg === 'Up to date' ? '#3FB950' : 'var(--danger)', fontFamily: MONO }}>
-                        {syncMsg}
-                      </span>
+                      <span style={{ fontSize: 9, color: '#3FB950', fontFamily: MONO }}>{syncMsg}</span>
                     )}
-                    <HeaderButton onClick={handleSync} disabled={syncing} color="#F87300" title="Pull my Asana tasks and Sam's review lane into this list">
+                    <HeaderButton onClick={() => handleSync()} disabled={syncing || keyBusy} color="#F87300" title="Pull my Asana tasks and Sam's review lane into this list">
                       {syncing ? 'Syncing…' : '⟳ Asana'}
                     </HeaderButton>
                   </>
-                ) : view === 'team' ? null : view === 'today' ? (
+                ) : view === 'team' || view === 'commands' ? null : view === 'today' ? (
                   <HeaderButton onClick={loadToday} color="var(--dim)" title="Read everything again">⟳</HeaderButton>
                 ) : (
                   <>
@@ -580,7 +655,7 @@ export default function TasksDropdown() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={view === 'project' ? 'Filter tasks…' : view === 'today' ? 'Filter this list…' : view === 'team' ? 'Search team messages…' : 'Search the inbox…'}
+                placeholder={view === 'project' ? 'Filter tasks…' : view === 'today' ? 'Filter this list…' : view === 'team' ? 'Search team messages…' : view === 'commands' ? 'Filter commands…' : 'Search the inbox…'}
                 aria-label="Filter"
                 style={inputStyle}
               />
@@ -588,7 +663,17 @@ export default function TasksDropdown() {
 
             {view === 'project' ? (
               <>
-                <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0 6px' }}>
+                {/* The problem sits in the scrolling area, so in a short window its buttons can always be scrolled to. */}
+                <div ref={listRef} style={{ flex: 1, minHeight: 110, overflowY: 'auto', padding: '4px 0 6px' }}>
+                  {syncError && syncError.project === currentProjectPath && (
+                    <SyncProblem
+                      problem={syncError}
+                      busy={keyBusy || syncing}
+                      onUseKey={useWorkingKey}
+                      onOpenSettings={() => { setOpen(false); openSettingsSection?.('integrations'); }}
+                      onDismiss={() => setSyncError(null)}
+                    />
+                  )}
                   {tasks.length === 0 && (
                     <Empty>No tasks yet. Add one below{inboxShown ? ', sync from Asana, or add a card from the Inbox.' : ' or sync from Asana.'}</Empty>
                   )}
@@ -667,6 +752,8 @@ export default function TasksDropdown() {
               </>
             ) : view === 'team' ? (
               <TeamList query={query} />
+            ) : view === 'commands' ? (
+              <CommandsList query={query} />
             ) : view === 'today' ? (
               <TodayList
                 data={todayData}
@@ -729,6 +816,36 @@ const inputStyle = {
   fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
 };
 
+// A failed Asana sync, in full: what went wrong, which key it was, and the one click that fixes it when there is one.
+function SyncProblem({ problem, busy, onUseKey, onOpenSettings, onDismiss }) {
+  const alt = problem.alternative;
+  return (
+    <div role="alert" style={{ margin: '6px 10px 2px', padding: '8px 10px', borderRadius: 7, border: '1px solid rgba(248,113,113,0.35)', backgroundColor: 'rgba(248,113,113,0.07)', fontSize: 11, lineHeight: 1.45, color: 'var(--fg)' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+        <span style={{ flex: 1, minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+          <strong style={{ color: 'var(--danger)' }}>{problem.unauthorized ? 'Asana did not accept the key. ' : problem.noKey ? 'No Asana key. ' : 'Asana sync failed. '}</strong>
+          {problem.error}
+        </span>
+        <button onClick={onDismiss} aria-label="Dismiss" title="Dismiss" style={{ background: 'none', border: 'none', color: 'var(--dim)', cursor: 'pointer', fontSize: 13, lineHeight: 1, padding: 0, flexShrink: 0 }}>×</button>
+      </div>
+      {(alt || problem.unauthorized || problem.noKey) && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 7 }}>
+          {alt && (
+            <HeaderButton wrap onClick={() => onUseKey(alt)} disabled={busy} color="#3FB950" title={`Save the key from ${alt.place} as Dobius's Asana key, then sync`}>
+              {busy ? 'Switching…' : `Use the working key${alt.email ? ` (${alt.email})` : ''}`}
+            </HeaderButton>
+          )}
+          {(problem.unauthorized || problem.noKey) && (
+            <HeaderButton onClick={onOpenSettings} color="var(--dim)" title="Paste a new Asana personal access token">
+              {problem.noKey ? 'Add a key in Settings' : 'Paste a new key in Settings'}
+            </HeaderButton>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Segment({ active, onClick, label, count, alert }) {
   return (
     <button
@@ -752,7 +869,7 @@ function Segment({ active, onClick, label, count, alert }) {
   );
 }
 
-function HeaderButton({ onClick, disabled, color, title, children }) {
+function HeaderButton({ onClick, disabled, color, title, children, wrap = false }) {
   return (
     <button
       onClick={onClick}
@@ -761,7 +878,8 @@ function HeaderButton({ onClick, disabled, color, title, children }) {
       style={{
         fontSize: 9, fontFamily: MONO, color: disabled ? 'var(--dim)' : color,
         backgroundColor: 'transparent', border: '1px solid var(--border)', borderRadius: 4,
-        padding: '2px 7px', cursor: disabled ? 'default' : 'pointer', transition: 'all 150ms', whiteSpace: 'nowrap',
+        padding: '2px 7px', cursor: disabled ? 'default' : 'pointer', transition: 'all 150ms', whiteSpace: wrap ? 'normal' : 'nowrap',
+        textAlign: 'left', maxWidth: '100%', overflowWrap: 'anywhere',
       }}
     >
       {children}

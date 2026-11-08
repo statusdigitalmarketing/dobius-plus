@@ -156,6 +156,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gwsVerify: (opts) => ipcRenderer.invoke('gws:verify', opts),
   gwsReconnect: (id, opts) => ipcRenderer.invoke('gws:reconnect', id, opts),
   gwsAddViaBrowser: (opts) => ipcRenderer.invoke('gws:addViaBrowser', opts),
+  // Setup on a fresh Mac: find or install gws, put the OAuth client file in place. Paths come from main's own dialogs.
+  gwsSetupStatus: (opts) => ipcRenderer.invoke('gwsSetup:status', opts),
+  gwsSetupInstall: () => ipcRenderer.invoke('gwsSetup:install'),
+  gwsSetupLocate: () => ipcRenderer.invoke('gwsSetup:locate'),
+  gwsSetupChooseClient: () => ipcRenderer.invoke('gwsSetup:chooseClient'),
+  gwsSetupUseClient: (p) => ipcRenderer.invoke('gwsSetup:useClient', p),
+  gwsSetupOpenNode: () => ipcRenderer.invoke('gwsSetup:openNode'),
   // Claude Desktop MCP setup (v1.0.63): status + one-click install.
   errorLogInfo: () => ipcRenderer.invoke('errorLog:info'),
   voiceConductorGet: () => ipcRenderer.invoke('voiceConductor:get'),
@@ -474,7 +481,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   tasksUpdate: (projectPath, taskId, patch) => ipcRenderer.invoke('tasks:update', projectPath, taskId, patch),
   tasksDelete: (projectPath, taskId) => ipcRenderer.invoke('tasks:delete', projectPath, taskId),
   tasksComplete: (projectPath, taskId) => ipcRenderer.invoke('tasks:complete', projectPath, taskId),
-  tasksSyncAsana: (projectPath) => ipcRenderer.invoke('tasks:syncAsana', projectPath),
+  tasksSyncAsana: (projectPath, opts) => ipcRenderer.invoke('tasks:syncAsana', projectPath, opts),
+  // A refused Asana key: switch to the working one Dobius found (by where it lives; the key stays in main).
+  tasksUseAsanaKey: (source, expect) => ipcRenderer.invoke('tasks:useAsanaKey', source, expect),
   tasksAdvance: (p, id, stage, opts) => ipcRenderer.invoke('tasks:advance', p, id, stage, opts),
   tasksReopen: (p, id, opts) => ipcRenderer.invoke('tasks:reopen', p, id, opts),
   tasksBlock: (p, id, reason, opts) => ipcRenderer.invoke('tasks:block', p, id, reason, opts),
@@ -524,6 +533,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = () => callback();
     ipcRenderer.on('team:changed', handler);
     return () => ipcRenderer.removeListener('team:changed', handler);
+  },
+  // Tasks > Commands: `! ` commands sessions handed back (electron/handoff-commands.js).
+  handoffCommandsList: () => ipcRenderer.invoke('handoffCommands:list'),
+  handoffCommandsDismiss: (tabId, id) => ipcRenderer.invoke('handoffCommands:dismiss', tabId, id),
+  handoffCommandsPrepare: (tabId, id, edited, asIs) => ipcRenderer.invoke('handoffCommands:prepare', tabId, id, edited, asIs === true),
+  onHandoffCommandsChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('handoffCommands:changed', handler);
+    return () => ipcRenderer.removeListener('handoffCommands:changed', handler);
   },
   // Fires when a task is completed from a terminal via dobius-task-done, so an
   // open Tasks panel can re-check the box live. Callback receives projectPath.

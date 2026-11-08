@@ -20,6 +20,23 @@ const STATES = {
   'needs attention': { label: 'check the tab', color: 'var(--danger)', attention: true },
   dismissed: { label: 'dismissed', color: 'var(--dim)' },
 };
+// What the teammate's Mac reported back about a message this Mac sent (docs/team-communicator.md, "Lifecycle").
+const STAGES = {
+  held: { label: 'held on their side', color: '#F87300' },
+  'needs attention': { label: 'stuck in their tab', color: 'var(--danger)' },
+  read: { label: 'read by their Claude', color: '#3FB950' },
+  working: { label: 'they are working on it', color: 'var(--accent)' },
+  replied: { label: 'replied', color: '#3FB950' },
+  done: { label: 'done', color: '#3FB950' },
+  failed: { label: 'failed', color: 'var(--danger)' },
+  stopped: { label: 'stopped (tab closed)', color: '#F87300' },
+};
+// The label, colour and start time of where a message is now.
+function stageOf(m) {
+  if (m.dir === 'out' && m.stage && STAGES[m.stage]) return { ...STAGES[m.stage], since: m.stageAt || m.at, note: m.stageNote };
+  const st = STATES[m.state] || { label: m.state, color: 'var(--dim)' };
+  return { ...st, since: (m.dir === 'out' ? m.deliveredAt : m.routedAt) || m.at, note: m.note };
+}
 export const needsPerson = (m) => !!STATES[m.state]?.attention;
 
 const ago = (t) => {
@@ -94,7 +111,7 @@ export default function TeamList({ query }) {
           </div>
         )}
         {shown.map((m) => {
-          const st = STATES[m.state] || { label: m.state, color: 'var(--dim)' };
+          const st = stageOf(m);
           const key = `${m.dir}|${m.peer}|${m.id}`;
           const open = expanded === key;
           return (
@@ -104,6 +121,7 @@ export default function TeamList({ query }) {
                 <span style={{ color: 'var(--fg)', fontWeight: 600 }}>{m.peerName || m.peer.slice(0, 10)}</span>
                 {m.kind === 'reply' && <span style={{ color: 'var(--dim)' }}>reply</span>}
                 <span style={{ color: st.color }}>{st.label}</span>
+                <span style={{ color: 'var(--dim)' }} title="How long it has been in this state">{ago(st.since)}</span>
                 <span style={{ color: 'var(--dim)', marginLeft: 'auto' }}>{m.id.slice(0, 8)} {ago(m.at)}</span>
               </div>
               <button
@@ -116,7 +134,19 @@ export default function TeamList({ query }) {
               >
                 {m.text}
               </button>
-              {m.note && <div style={{ fontSize: 10, color: 'var(--dim)', marginTop: 2 }}>{m.note}</div>}
+              {st.note && <div style={{ fontSize: 10, color: 'var(--dim)', marginTop: 2 }}>{st.note}</div>}
+              {open && m.dir === 'out' && (
+                <div style={{ marginTop: 4, fontSize: 10, fontFamily: MONO, color: 'var(--dim)', lineHeight: 1.6 }}>
+                  <div>queued {new Date(m.firstSentAt || m.at).toLocaleTimeString()}</div>
+                  {m.deliveredAt && <div>delivered {new Date(m.deliveredAt).toLocaleTimeString()}</div>}
+                  {(m.timeline || []).map((e, i) => (
+                    <div key={i}>
+                      <span style={{ color: STAGES[e.state]?.color || 'var(--dim)' }}>{STAGES[e.state]?.label || e.state}</span>
+                      {' '}{new Date(e.at).toLocaleTimeString()}{e.note ? `: ${e.note}` : ''}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
                 {m.dir === 'in' && (m.state === 'held' || m.state === 'waiting') && <button style={small()} onClick={() => act(api.teamRouteNow(m.peer, m.id))}>Send to orchestrator</button>}
                 {m.dir === 'in' && <button style={small('var(--dim)')} onClick={() => { setReplyTo(replyTo === key ? null : key); setReplyText(''); }}>Reply</button>}

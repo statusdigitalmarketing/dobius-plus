@@ -42,6 +42,18 @@ const MAX_RECENT_EXITS = 50;
 // sends Stop (a crash, an Esc interrupt) the stretch runs on exactly as the
 // yellow dot does today. Accepted; there is no reliable signal to end it.
 const live = new Map();
+// Who wants each authoritative hook state as it lands (the team service tracks what a delivered message led to).
+// Called with (id, state, tag, now); state is working | done | needs, or 'exit' when the terminal goes.
+const hookListeners = new Set();
+export function onHookState(fn) {
+  hookListeners.add(fn);
+  return () => hookListeners.delete(fn);
+}
+function emitHook(id, state, tag, now) {
+  for (const fn of hookListeners) {
+    try { fn(id, state, tag || null, now); } catch (err) { console.error('[terminal-status] hook listener failed:', err?.message || err); }
+  }
+}
 // bounded FIFO of { id, cwd, project, exitCode, signal, status, at }
 const recentExits = [];
 
@@ -84,6 +96,7 @@ export function ingest(id, data, now = Date.now()) {
     if (skipsRed(st, m[1], m[2])) continue;
     enterStatus(st, m[1], now);
     applyHookState(st, m[1], now, m[2]);
+    emitHook(id, m[1], m[2], now);
   }
 
   if (lastMatch) {
@@ -140,6 +153,7 @@ export function noteHookStatus(id, state, now = Date.now(), tag = undefined) {
   if (skipsRed(st, state, tag)) return false;
   enterStatus(st, state, now);
   applyHookState(st, state, now, tag);
+  // Not passed to hook listeners: these are Codex's, and the team lifecycle follows Claude's own markers only.
   return true;
 }
 
@@ -258,6 +272,7 @@ export function noteExit(id, info = {}, now = Date.now()) {
   });
   while (recentExits.length > MAX_RECENT_EXITS) recentExits.shift();
   live.delete(id);
+  emitHook(id, 'exit', null, now);
 }
 
 /**
@@ -282,7 +297,9 @@ export function activityFor(id) {
 
 /** A new PTY under this id (a respawn): nothing from the old one carries over. */
 export function forget(id) {
-  live.delete(id);
+  // A respawned or killed PTY: whatever ran in it is gone (the team lifecycle stops following a message there).
+  const had = live.delete(id);
+  if (had) emitHook(id, 'exit', null, Date.now());
 }
 
 /** Current status for one live terminal, or null. */

@@ -79,6 +79,7 @@ export function mountTeamRoutes(expApp, { hostOk, service }) {
   router.get('/hello', guard((req) => service().hello(typeof req.query.nonce === 'string' ? req.query.nonce : '')));
   router.post('/link', octetOnly, raw, guard((req) => service().link(Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0), sig(req))));
   router.post('/message', octetOnly, raw, guard((req) => service().receive(Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0), sig(req))));
+  router.post('/status', octetOnly, raw, guard((req) => service().receiveStatus(Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0), sig(req))));
   // Anything else under /team, and a parser error (413 too large, 400 bad length), ends here without detail.
   router.use((req, res) => res.status(404).end());
   router.use((err, req, res, _next) => res.status(err?.status && err.status < 500 ? err.status : 400).end());

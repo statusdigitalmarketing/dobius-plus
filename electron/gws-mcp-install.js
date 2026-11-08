@@ -23,6 +23,7 @@ import path from 'path';
 import os from 'os';
 import { app } from 'electron';
 import { fileURLToPath } from 'url';
+import { resolveRealGws } from './gws-accounts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,10 +47,8 @@ function claudeDesktopAppPresent() {
 }
 
 function gwsCliPresent() {
-  for (const dir of ['/opt/homebrew/bin', '/usr/local/bin']) {
-    try { fs.accessSync(path.join(dir, 'gws'), fs.constants.X_OK); return true; } catch { /* next */ }
-  }
-  return false;
+  // The same lookup every other gws caller uses (login-shell PATH, npm's prefix, nvm, volta...), not two fixed folders.
+  return !!resolveRealGws(path.join(app.getPath('userData'), 'gws-shim'));
 }
 
 /** POSIX single-quote escaping: immune to $, backticks, spaces, quotes. */
@@ -178,7 +177,7 @@ export function installGwsMcp() {
     const st = gwsMcpStatus();
     let message = 'Added to Claude Desktop. Restart Claude Desktop to load it.';
     if (!st.desktopAppPresent) message = 'Config written. Claude Desktop is not installed on this Mac yet; it will pick this up once installed.';
-    if (!st.gwsCliPresent) message += ' Note: the gws CLI is missing (npm i -g @googleworkspace/cli), calls will fail until it is installed.';
+    if (!st.gwsCliPresent) message += ' Note: the gws CLI is missing (npm i -g @googleworkspace/cli), calls will fail until it is installed (Settings > Google Accounts > Setup).';
     return { ok: true, message };
   } catch (e) {
     return { ok: false, message: `Could not set up Claude Desktop: ${e?.message || e}` };

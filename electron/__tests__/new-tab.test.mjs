@@ -239,3 +239,50 @@ test('the PTY process counts as a program only when exec replaced the shell', as
   assert.equal(ptyProgramName('/bin/cat', '/bin/zsh'), 'cat');
   assert.equal(ptyProgramName('/Users/x/.local/share/claude/versions/2.1.314\n', '/bin/zsh'), '2.1.314', 'exec\'d native claude');
 });
+
+// Tasks > Commands Run: the wrapper starts Dobius's own script with /bin/bash, the real shells, a hook trying to swap
+// the script; the script enters its folder and runs the command there, & included, and deletes itself.
+test('a run starts exactly the Dobius script, in its folder; a hook cannot swap it; bad paths start nothing', async () => {
+  const { runScriptText } = await import('../handoff-commands.js');
+  const { shQuote } = await import('../../shared/sh-quote.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-run-test-'));
+  try {
+    const cwd = path.join(dir, "wt $(touch PWNED) 'x");
+    fs.mkdirSync(cwd);
+    const real = fs.realpathSync(cwd);
+    const evil = path.join(dir, 'dobius-run-EVILEVILEVILEVIL1.sh');
+    fs.writeFileSync(evil, 'touch "$HOME/PWNED"\n');
+    const assigns = `DOBIUS_NEW_TAB_TOOL_SCRIPT=${evil}; export DOBIUS_NEW_TAB_TOOL_SCRIPT; set -- run ${evil}`;
+    const base = { PATH: '/usr/bin:/bin', HOME: dir, ZDOTDIR: dir, BASH_SILENCE_DEPRECATION_WARNING: '1' };
+    for (const [shell, prelude, env] of [['/bin/zsh', `_evil() { ${assigns}; }; precmd_functions=(_evil); `, {}], ['/bin/bash', '', { PROMPT_COMMAND: assigns }]]) {
+      if (!fs.existsSync(shell)) continue;
+      const file = path.join(dir, `dobius-run-${'a'.repeat(20)}${path.basename(shell)}.sh`);
+      const cmdFile = file.replace(/\.sh$/, '.cmd');
+      fs.writeFileSync(cmdFile, 'echo "RUN-A $(pwd -P)" & wait; echo "RUN-B $(pwd -P)"\n');
+      fs.writeFileSync(file, runScriptText(cmdFile, cwd, shQuote, null, 'the command'));
+      const spawn = loginShellSpawn(shell, null, null, file);
+      assert.equal(spawn.env.DOBIUS_NEW_TAB_TOOL, 'run');
+      assert.equal(isNewTabWrapperCommand([shell, ...spawn.args].join(' ')), true, 'argv scans still skip it');
+      const script = prelude + spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+      const r = spawnSync(shell, ['-c', script], { cwd: dir, env: { ...base, ...env, ...spawn.env }, encoding: 'utf8', timeout: 10000, input: '' });
+      assert.match(r.stdout, new RegExp(`RUN-A ${real.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), `${shell}: & ran in the folder`);
+      assert.match(r.stdout, new RegExp(`RUN-B ${real.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), `${shell}: the rest too`);
+      assert.equal(fs.existsSync(file), false, `${shell}: the script deleted itself`);
+      assert.equal(fs.existsSync(path.join(dir, 'PWNED')) || fs.existsSync(path.join(cwd, 'PWNED')), false, `${shell}: nothing a hook assigned ran`);
+    }
+    // A folder that is gone: nothing runs.
+    const gone = path.join(dir, `dobius-run-${'b'.repeat(20)}.sh`);
+    fs.writeFileSync(gone.replace(/\.sh$/, '.cmd'), 'touch "$HOME/PWNED"\n');
+    fs.writeFileSync(gone, runScriptText(gone.replace(/\.sh$/, '.cmd'), path.join(dir, 'no-such-dir'), shQuote));
+    const g = loginShellSpawn('/bin/bash', null, null, gone);
+    const rg = spawnSync('/bin/bash', ['-c', g.args[3].replace(/exec '[^']*' -l$/, 'exit 0')], { cwd: dir, env: { ...base, ...g.env }, encoding: 'utf8', timeout: 10000, input: '' });
+    assert.match(rg.stdout, /could not open/);
+    assert.equal(fs.existsSync(path.join(dir, 'PWNED')), false);
+    for (const bad of ['relative/dobius-run-aaaaaaaaaaaaaaaa.sh', '/tmp/other.sh', '/tmp/dobius-run-short.sh', '/tmp/x\n/dobius-run-aaaaaaaaaaaaaaaa.sh', 42, null]) {
+      assert.deepEqual(loginShellSpawn('/bin/zsh', null, null, bad), { args: ['-l'], env: {} }, JSON.stringify(bad));
+    }
+    assert.deepEqual(loginShellSpawn('/opt/homebrew/bin/fish', null, null, path.join(dir, `dobius-run-${'c'.repeat(20)}.sh`)), { args: ['-l'], env: {} }, 'fish: not driven');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

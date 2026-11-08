@@ -264,6 +264,16 @@ export const useStore = create((set, get) => ({
     return tab;
   },
 
+  // Tasks > Commands Run: a new tab whose startup program is the handed-back command, named by a one-time token from
+  // handoffCommands:prepare (main redeems it at terminal:create; nothing is typed). Null before the tabs are restored.
+  openRunTab: (projectPath, token, label) => {
+    if (!get().tabsReady || typeof token !== 'string') return null;
+    const tab = get().addTab(projectPath);
+    setPendingLaunch(tab.id, { run: token });
+    set((s) => ({ terminalTabs: s.terminalTabs.map((t) => (t.id === tab.id ? { ...t, startsTool: true, label: String(label || t.label).slice(0, 40) } : t)) }));
+    return tab;
+  },
+
   // Set once this window's tabs are restored (or it starts fresh).
   tabsReady: false,
   markTabsReady: () => {
@@ -616,6 +626,10 @@ export const useStore = create((set, get) => ({
   toggleGitPanel: () => set((s) => ({ gitPanelVisible: !s.gitPanelVisible })),
   toggleToolPanel: (panel) => set((s) => ({ toolPanel: s.toolPanel === panel ? null : panel })),
   setDashboardTab: (tab) => set({ dashboardTab: tab }),
+  // Open the Dashboard's Settings at one section (DashboardView scrolls to it, then clears this).
+  pendingSettingsSection: null,
+  openSettingsSection: (id) => set({ activeView: 'dashboard', dashboardTab: 'settings', pendingSettingsSection: id }),
+  clearPendingSettingsSection: () => set({ pendingSettingsSection: null }),
 
   setThemeIndex: (index) => {
     const theme = THEMES[index % THEMES.length];

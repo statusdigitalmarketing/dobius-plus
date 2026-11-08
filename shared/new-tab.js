@@ -175,11 +175,17 @@ function utf16Base64(text) {
   return btoa(String.fromCharCode(...bytes));
 }
 
-export function loginShellSpawn(shell, startCommand, resume = null) {
+// runScript (a path, Tasks > Commands): the same wrapper runs `/bin/bash -- <path>`, a file Dobius wrote in its own
+// folder (electron/main.js handoffCommands), the path in env as $2, never eval'd. The command itself is never on a
+// command line and never typed; the tab is a plain login shell afterwards. Only the shape below is accepted. Not on
+// PowerShell (Run is zsh and bash only).
+export const isRunScriptPath = (p) => typeof p === 'string' && /^\/[^\x00-\x1F\x7F]*\/dobius-run-[A-Za-z0-9_-]{16,}\.sh$/.test(p);
+export function loginShellSpawn(shell, startCommand, resume = null, runScript = null) {
   const powershell = isPowerShell(shell);
   const plain = { args: powershell ? ['-NoLogo'] : ['-l'], env: {} };
-  const resuming = !!resume && (resume.sessionId === null || /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(resume.sessionId))) && isAbsPath(String(resume.cwd)) && !/[\x00-\x1F\x7F]/.test(resume.cwd);
-  if (!resuming && !NEW_TAB_TOOLS.some((x) => newTabCommand(x) && newTabCommand(x) === startCommand)) return plain;
+  const running = !powershell && isRunScriptPath(runScript);
+  const resuming = !running && !!resume && (resume.sessionId === null || /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(resume.sessionId))) && isAbsPath(String(resume.cwd)) && !/[\x00-\x1F\x7F]/.test(resume.cwd);
+  if (!running && !resuming && !NEW_TAB_TOOLS.some((x) => newTabCommand(x) && newTabCommand(x) === startCommand)) return plain;
   if (powershell) {
     const env = resuming
       ? { [START_TOOL_ENV]: resume.sessionId === null ? 'fresh' : 'resume', [`${START_TOOL_ENV}_ID`]: resume.sessionId ?? '', [`${START_TOOL_ENV}_CWD`]: resume.cwd }
@@ -193,12 +199,17 @@ export function loginShellSpawn(shell, startCommand, resume = null) {
   // the launch is a fixed allowlist dispatch, so whatever a hook assigns can
   // only select one of these commands or none. A literal command word keeps
   // the user's alias or function for it, as when typed.
-  const take = resuming
-    ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_ID" "$${START_TOOL_ENV}_CWD"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_ID ${START_TOOL_ENV}_CWD;`
-    : `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV};`;
+  const take = running
+    ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_SCRIPT"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_SCRIPT;`
+    : resuming
+      ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_ID" "$${START_TOOL_ENV}_CWD"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_ID ${START_TOOL_ENV}_CWD;`
+      : `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV};`;
   // An and-list, not case/if: zsh forks a suspended compound command off as
   // its own job, so a Ctrl+Z inside one ended the whole wrapper (and the tab).
-  const launch = resuming ? '[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;' : NEW_TAB_TOOLS.filter((x) => newTabCommand(x))
+  // -p: bash imports no functions from the environment and reads no BASH_ENV/ENV, so a project .env (direnv) cannot
+  // redefine `cd` or run a file before the script.
+  const launch = running ? '[[ $1 == run ]] && /bin/bash -p -- "$2";'
+    : resuming ? '[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;' : NEW_TAB_TOOLS.filter((x) => newTabCommand(x))
     .map((x) => `[[ $1 == ${x} ]] && ${newTabCommand(x)};`).join(' ');
   let run;
   if (name === 'zsh') {
@@ -216,9 +227,11 @@ export function loginShellSpawn(shell, startCommand, resume = null) {
     return plain;
   }
   const script = `trap : INT; ${run} exec ${shQuote(shell)} -l`;
-  const env = resuming
-    ? { [START_TOOL_ENV]: resume.sessionId === null ? 'fresh' : 'resume', [`${START_TOOL_ENV}_ID`]: resume.sessionId ?? '', [`${START_TOOL_ENV}_CWD`]: resume.cwd }
-    : { [START_TOOL_ENV]: startCommand };
+  const env = running
+    ? { [START_TOOL_ENV]: 'run', [`${START_TOOL_ENV}_SCRIPT`]: runScript }
+    : resuming
+      ? { [START_TOOL_ENV]: resume.sessionId === null ? 'fresh' : 'resume', [`${START_TOOL_ENV}_ID`]: resume.sessionId ?? '', [`${START_TOOL_ENV}_CWD`]: resume.cwd }
+      : { [START_TOOL_ENV]: startCommand };
   return { args: ['-l', '-i', '-c', script], env };
 }
 
@@ -229,5 +242,5 @@ export function loginShellSpawn(shell, startCommand, resume = null) {
 export function isNewTabWrapperCommand(line) {
   // Anchored on argv0 (after an optional pgrep pid), so the same text inside
   // some other program's arguments never matches.
-  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD")?; /.test(String(line));
+  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD"| "\$DOBIUS_NEW_TAB_TOOL_SCRIPT")?; /.test(String(line));
 }

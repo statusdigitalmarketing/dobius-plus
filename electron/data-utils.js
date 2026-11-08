@@ -119,7 +119,8 @@ export async function parseJsonl(filePath, limit = 0, info = null) {
     }
     return parsedLines;
   } catch (err) {
-    console.warn(`[data-utils] Failed to parse ${filePath}:`, err.message);
+    // A file that does not exist yet (history.jsonl on a fresh install) is normal, not worth a line in error.log.
+    if (err?.code !== 'ENOENT') console.warn(`[data-utils] Failed to parse ${filePath}:`, err.message);
     return [];
   }
 }

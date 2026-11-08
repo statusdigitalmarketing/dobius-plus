@@ -2,7 +2,8 @@ import './dev-userdata.js'; // MUST stay first: userData override before config-
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor, screen } from 'electron';
-import { spawn } from 'child_process';
+import { spawn, spawnSync, execFile } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -39,6 +40,7 @@ import {
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
+import { gwsSetupStatus, installGws, useGwsAt, findClientFiles, useClientFile, refreshGwsEnv, setHintDir } from './gws-setup.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
 import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary } from './terminal-manager.js';
 import { isTerminalReply } from './terminal-reply.js';
@@ -56,7 +58,7 @@ import {
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, provenanceChanged, sessionMovedPast, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
-  getLastAssistantMessage, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
+  getLastAssistantMessage, getLastAssistantReply, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
 } from './build-monitor-service.js';
@@ -104,9 +106,12 @@ import {
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
 import { initTeam, stopTeam, handleTeamBridge } from './team-main.js';
+import { createHandoffCommands, runScriptText, extractCommands } from './handoff-commands.js';
+import { shQuote } from '../shared/sh-quote.js';
+import { randomUUID } from 'node:crypto';
 import { createCodexStatusRouter, withCodexHooks, stripCodexHooks, hasCodexHooks } from './codex-status.js';
 import { answersPrompt, submitsInput } from '../shared/prompt-answer.js';
-import { stopHookCommand } from '../shared/handoff.js';
+import { stopHookCommand, commandPlaceholder } from '../shared/handoff.js';
 import { findCodexSessionForProcess, readRolloutMeta } from './codex-sessions.js';
 import { createOpenTabService } from './bridge-open-tab.js';
 import { createBridgeOpenDeps } from './bridge-open-main.js';
@@ -128,11 +133,11 @@ import { createPicker, runClaude } from './today-pick.js';
 import { createSnoozes, cardPrint } from './today-snooze.js';
 import { localDay } from '../shared/task-due.js';
 import { boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo, boardIsStandIn } from './inbox-board.js';
-import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
+import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, workingAsanaKeyFrom, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { readUpdateBackup } from './config-manager.js';
 import { recoverWindowLists } from './update-window-recovery.js';
-import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError } from './claude-settings-env.js';
+import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError, asanaToken } from './claude-settings-env.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages, getVisualProjectPath } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
 import { isAbsPath, isInsidePath } from '../shared/platform.js';
@@ -400,6 +405,67 @@ const TERMINAL_WRITE_MAX_BYTES = 256 * 1024; // 256KB per write — plenty for a
 // IPC (they go through createTerminal directly), so they're naturally
 // excluded from renderer write access. Codex round-2 HIGH on main.js:118.
 const terminalOwners = new Map(); // id -> webContents.id
+// Tasks > Commands (set up with the bridge, below): the collector, and Run's one-time tokens (handoffCommands:prepare,
+// redeemed by terminal:create).
+let handoffCommands = null;
+const runTokens = new Map(); // token -> { sender, tabId, id, at }
+const RUN_TOKEN_MS = 60_000;
+const runScriptDir = () => path.join(app.getPath('userData'), 'run');
+// The script a Run tab starts with: it deletes itself, enters the folder (or stops), shows the command, runs it, and
+// writes its exit status next to itself for the card (Done / Failed).
+function writeRunScript(text, cwd, shown = text) {
+  const dir = runScriptDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const base = path.join(dir, `dobius-run-${randomUUID().replace(/-/g, '')}`);
+  const exitFile = `${base}.exit`;
+  // The command alone in its own file (run by its own bash, then deleted), the wrapper script beside it. Both or
+  // neither: a half-written pair must not leave the command (an edited one may hold a key) on disk.
+  try {
+    // Its first line deletes it: bash already has it open, so a pasted key is on disk only until the command starts.
+    fs.writeFileSync(`${base}.cmd`, `/bin/rm -f -- "$0"\n${text}\n`, { mode: 0o600, flag: 'wx' });
+    fs.writeFileSync(`${base}.sh`, runScriptText(`${base}.cmd`, cwd, shQuote, exitFile, shown), { mode: 0o600, flag: 'wx' });
+  } catch (err) {
+    for (const f of [`${base}.cmd`, `${base}.sh`]) { try { fs.unlinkSync(f); } catch { /* not written */ } }
+    throw err;
+  }
+  return { file: `${base}.sh`, exitFile, cmdFile: `${base}.cmd` };
+}
+// A Run tab's own files, by its tab id: removed when that tab goes, whether or not its wrapper ever started (a
+// profile that execs tmux never runs it, and the command file may hold a pasted key).
+const runFilesByTab = new Map();
+function dropRunFiles(tabId) {
+  const files = runFilesByTab.get(tabId);
+  if (!files) return;
+  runFilesByTab.delete(tabId);
+  for (const f of files) { try { fs.unlinkSync(f); } catch { /* the wrapper already removed it */ } }
+}
+// A running command's exit status, once its script wrote it: the card turns Done or Failed.
+let runPollTimer = null;
+function pollRuns() {
+  if (!handoffCommands) return;
+  for (const r of handoffCommands.running()) {
+    let raw = null;
+    try { raw = fs.readFileSync(r.exitFile, 'utf8'); } catch { continue; } // not finished yet
+    if (!/^\d{1,3}$/.test(raw.trim())) continue; // never a partial write (renamed in), but never guess either
+    handoffCommands.finishRun(r.tabId, r.id, Number.parseInt(raw, 10));
+    try { fs.unlinkSync(r.exitFile); } catch (err) { console.warn('[commands] could not clear an exit file:', err?.message || err); }
+  }
+}
+// Left-over Run files (a crash, a tab killed before its wrapper ran) older than 10 minutes and not one of this app's
+// own active runs: at startup and every 5 minutes. Not everything at startup: another running copy of Dobius may have
+// a run starting. The command file normally deletes itself as its bash starts, so a key rarely sits here at all.
+const RUN_FILE_STALE_MS = 10 * 60 * 1000;
+function pruneRunScripts() {
+  let names = [];
+  try { names = fs.readdirSync(runScriptDir()); } catch { return; }
+  const mine = new Set([...runFilesByTab.values()].flat());
+  for (const n of names) {
+    if (!/^dobius-run-[A-Za-z0-9_-]+\.(sh|exit|cmd|exit\.tmp)$/.test(n)) continue;
+    const f = path.join(runScriptDir(), n);
+    if (mine.has(f)) continue;
+    try { if (Date.now() - fs.statSync(f).mtimeMs > RUN_FILE_STALE_MS) fs.unlinkSync(f); } catch (err) { console.warn('[commands] could not clear an old run file:', err?.message || err); }
+  }
+}
 // Pending tear-off / dock grants, tabId -> the webContents.id allowed to claim
 // the PTY (see window:tearOffTab).
 const tearOffGrants = new Map();
@@ -470,8 +536,40 @@ function setupTerminalHandlers() {
     // A New Tab (store.openNewTab) starts its tool: 'default' is the Settings
     // choice, read here; anything outside the fixed set starts nothing.
     const launch = opts && typeof opts === 'object' ? opts.launch : undefined;
-    const startCommand = launch === undefined ? null : launchCommandFor(launch, getSettings().newTabTool);
-    const created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand });
+    // Run (Tasks > Commands): a one-time token from handoffCommands:prepare, from THIS window, unexpired. The command
+    // leaves the list only here, as its tab really starts; a bad or reused token starts a plain shell.
+    let runScript = null;
+    let runCmd = null;
+    if (launch && typeof launch === 'object' && typeof launch.run === 'string') {
+      const t = runTokens.get(launch.run);
+      runTokens.delete(launch.run);
+      if (t && t.sender === event.sender.id && Date.now() - t.at <= RUN_TOKEN_MS && handoffCommands) {
+        // The script first; the command leaves the list only once the PTY really spawned (below), so a failed write
+        // or spawn keeps it listed.
+        const cmd = handoffCommands.peek(t.tabId, t.id);
+        if (cmd) {
+          // An edited command is shown in the tab as the card showed it, marked edited (it may hold a pasted key).
+          const shown = t.text === cmd.text ? cmd.text : `${cmd.text}   (edited)`;
+          try { runCmd = { ...t, ...writeRunScript(t.text, cmd.cwd, shown) }; runScript = runCmd.file; } catch (err) { console.error('[commands] could not write the run script:', err?.message || err); }
+        }
+      }
+    }
+    const startCommand = launch === undefined || typeof launch === 'object' ? null : launchCommandFor(launch, getSettings().newTabTool);
+    let created = null;
+    try {
+      created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand, runScript });
+    } finally {
+      if (runScript) {
+        // The card shows it running in this tab, then Done or Failed (pollRuns).
+        if (created && runCmd) {
+          handoffCommands.startRun(runCmd.tabId, runCmd.id, id, runCmd.text, runCmd.exitFile);
+          runFilesByTab.set(id, [runCmd.file, runCmd.cmdFile]);
+        }
+        else {
+          for (const f of [runScript, runCmd?.cmdFile]) { if (f) { try { fs.unlinkSync(f); } catch { /* cleared by pruneRunScripts */ } } }
+        }
+      }
+    }
     // A tab restored with its saved scrollback in a window opened after
     // launch: resume the Claude session it ran at the last quit, under the
     // launch-time rules (auto-resume.js resumeRestoredTab). Never for a new
@@ -827,6 +925,27 @@ function setupDataHandlers() {
   // Add an account fully in-app (v1.0.64): browser approval + capture, no
   // terminal login dance.
   ipcMain.handle('gws:addViaBrowser', (_event, opts) => addGwsAccountViaBrowser(opts || {}));
+  // Setup on a fresh Mac (Justin, 2026-11-07): find, install or locate gws, and put the OAuth client file in place.
+  // Paths reach main only from a dialog main opened or from the list main found itself, never from the renderer.
+  ipcMain.handle('gwsSetup:status', (_event, opts) => gwsSetupStatus({ force: !!(opts && opts.force) }));
+  ipcMain.handle('gwsSetup:install', () => installGws());
+  ipcMain.handle('gwsSetup:locate', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const r = await dialog.showOpenDialog(win, { title: 'Locate gws', message: 'Pick the gws program (often in ~/.npm-global/bin or /usr/local/bin).', properties: ['openFile', 'showHiddenFiles'] });
+    if (r.canceled || !r.filePaths?.[0]) return { ok: false, canceled: true };
+    return useGwsAt(r.filePaths[0]);
+  });
+  ipcMain.handle('gwsSetup:chooseClient', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const r = await dialog.showOpenDialog(win, { title: 'Choose client_secret.json', message: 'Pick the OAuth client file (client_secret_....json) downloaded from Google Cloud.', properties: ['openFile', 'showHiddenFiles'], filters: [{ name: 'JSON', extensions: ['json'] }] });
+    if (r.canceled || !r.filePaths?.[0]) return { ok: false, canceled: true };
+    return useClientFile(r.filePaths[0]);
+  });
+  ipcMain.handle('gwsSetup:useClient', (_event, p) => {
+    const found = findClientFiles().find((c) => c.path === p);
+    return found ? useClientFile(found.path) : { ok: false, error: 'That file is no longer there. Press Check.' };
+  });
+  ipcMain.handle('gwsSetup:openNode', () => shell.openExternal('https://nodejs.org/en/download'));
   // One-click Claude Desktop MCP setup (v1.0.63): bundles the gws-mcp server
   // into userData and upserts the mcpServers.gws entry in Claude Desktop's
   // per-user config. Works on any Mac Dobius is installed on (no node needed:
@@ -1562,8 +1681,8 @@ function setupOrchestrationHandlers() {
     if (result?.ok) broadcastTasksUpdated(projectPath);
     return result;
   });
-  ipcMain.handle('tasks:syncAsana', async (_event, projectPath) => {
-    const result = await syncAsanaTasks(projectPath);
+  ipcMain.handle('tasks:syncAsana', async (_event, projectPath, opts) => {
+    const result = await syncAsanaTasks(projectPath, { fresh: !!opts?.fresh });
     // Sync can mutate tasks without a direct write call, so always broadcast
     // (no result.ok check, service may not return that shape).
     broadcastTasksUpdated(projectPath);
@@ -2448,6 +2567,38 @@ function setupFileHandlers() {
     if (event.sender.getType?.() !== 'window' || !isAppUrl(event.senderFrame?.url || '', APP_PAGE)) {
       return { ok: false, error: 'Keys can only be changed from Dobius Settings.' };
     }
+    return saveSharedKey(name, value);
+  });
+  // Brett's 401 (2026-11-07): another key on this Mac works, and he pressed "Use it". Main looks the key up again by
+  // where it lives and checks it with Asana; the key itself never passes through the renderer.
+  ipcMain.handle('tasks:useAsanaKey', async (event, source, expect) => {
+    if (event.sender.getType?.() !== 'window' || !isAppUrl(event.senderFrame?.url || '', APP_PAGE)) {
+      return { ok: false, error: 'Keys can only be changed from Dobius.' };
+    }
+    // What Dobius uses now, before the (slow) check: if it changes meanwhile (a key saved or removed in Settings),
+    // that newer decision wins and nothing is written.
+    const before = asanaToken(getAsanaQueue().pat);
+    const found = await workingAsanaKeyFrom(source, {
+      expectHint: typeof expect?.hint === 'string' ? expect.hint : '',
+      expectEmail: typeof expect?.email === 'string' ? expect.email : '',
+    });
+    if (!found.ok) return found;
+    const refusal = { ok: false, error: 'The Asana key was changed in Settings meanwhile, so nothing was switched. Press Asana to check again.', stale: true };
+    if (asanaToken(getAsanaQueue().pat) !== before) return refusal;
+    // Checked against the very settings.json snapshot each write attempt is about to replace (the same rule as
+    // asanaToken: the shared key, else the older Dobius-only one), so no save in between can be overwritten.
+    const stillOk = (snapshot) => {
+      const shared = typeof snapshot?.env?.ASANA_PAT === 'string' ? snapshot.env.ASANA_PAT.trim() : '';
+      const legacy = typeof getAsanaQueue().pat === 'string' ? getAsanaQueue().pat.trim() : '';
+      return (shared || legacy || null) === before;
+    };
+    const saved = saveSharedKey('ASANA_PAT', found.token, { stillOk });
+    if (saved.refused) return refusal;
+    return saved.ok ? { ok: true, email: found.email, hint: saved.hint } : saved;
+  });
+  // `stillOk(snapshot)`: checked on each attempt against the settings snapshot that attempt writes over; false stops
+  // the save ({ ok:false, refused:true }).
+  function saveSharedKey(name, value, { stillOk } = {}) {
     const bad = sharedKeyError(name, value);
     if (bad) return { ok: false, error: bad };
     const v = value.trim();
@@ -2456,6 +2607,7 @@ function setupFileHandlers() {
     if (name === 'ASANA_PAT' && !v && getAsanaQueue().pat) updateAsanaQueue({ pat: '' });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const { settings, raw } = readClaudeSettings();
+      if (stillOk && settings !== null && !stillOk(settings)) return { ok: false, refused: true };
       if (settings === null) return { ok: false, error: '~/.claude/settings.json is not valid JSON, so it was left untouched.' };
       const env = { ...(settings.env && typeof settings.env === 'object' ? settings.env : {}) };
       if (v) env[name] = v; else delete env[name];
@@ -2473,7 +2625,7 @@ function setupFileHandlers() {
       }
     }
     return { ok: false, error: 'Not saved, try again.' };
-  });
+  }
 
   // Upgrade in place: a status block installed before the tab-label hint
   // existed gets the SessionStart hint on the next launch, without the user
@@ -4027,6 +4179,91 @@ function setupWindowHandlers() {
   // orchestrator tab reuses these same guards.
   initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint, endpointProblem: getTeamEndpointProblem });
   setTeamBridge(handleTeamBridge);
+  // Tasks > Commands (electron/handoff-commands.js): the `! ` commands a session handed back, per tab, read from its
+  // last reply when its Stop hook marks the handback. Run: see handoffCommands:prepare and terminal:create.
+  handoffCommands = createHandoffCommands({
+    // Claude's own record for the process follows /clear; argv (--resume) does not, so the record wins when it names
+    // another session.
+    resolve: async (tabId) => {
+      const configDir = listTerminals().find((t) => t.id === tabId)?.claudeConfigDir ?? null;
+      const r = await resolveSessionForTab(tabId);
+      if (!r) {
+        // Not resolved by the shared lookup (it gives up beside another child, a dev server, say, and does not see
+        // `exec claude`). Claude's OWN record names the session: first the one claude among the shell's children,
+        // then the tab's process itself (exec claude), each matched to its record by start time.
+        const fromRecord = async (pid, startedAt) => {
+          const rec = await presenceOf({ pid, startedAt }, configDir);
+          return rec?.sessionId ? { sessionId: rec.sessionId, sessionProject: rec.cwd || null, pid, startedAt, recordCwd: rec.cwd } : null;
+        };
+        const child = await getTerminalClaudeInfo(tabId, { unique: true });
+        if (child && Number.isInteger(child.pid)) {
+          const got = await fromRecord(child.pid, child.startedAt);
+          if (got) return got;
+        }
+        const pid = terminalInstance(tabId)?.pid;
+        if (!Number.isInteger(pid) || pid <= 0) return null;
+        let startedAt = null;
+        try {
+          const { stdout } = await promisify(execFile)('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
+          const t = Date.parse(stdout.trim());
+          startedAt = Number.isFinite(t) ? t : null;
+        } catch { return null; }
+        return fromRecord(pid, startedAt);
+      }
+      if (!Number.isInteger(r.pid)) return r;
+      const rec = await presenceOf({ pid: r.pid, startedAt: r.startedAt ?? null }, configDir);
+      if (rec?.sessionId && rec.sessionId !== r.sessionId) return { ...r, sessionId: rec.sessionId, sessionProject: rec.cwd || null, recordCwd: rec.cwd };
+      return { ...r, recordCwd: rec?.cwd || null };
+    },
+    lastReply: getLastAssistantReply,
+    processCwd: getProcessCwd,
+    projectOf: (id) => { const p = projectPathFromTabId(id); return p && p !== 'mobile' ? p : null; },
+    notify: () => { for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('handoffCommands:changed'); },
+    newId: () => randomUUID(),
+  });
+  terminalStatus.onHookState((id, state, tag) => handoffCommands.onHook(id, state, tag));
+  // A terminal that exits or is killed: its Run files go, and its card or its source's waiting commands update. On the
+  // terminal's own events, not only the status tracker's (a tab that never printed anything has no status entry).
+  const terminalGone = (id) => { dropRunFiles(id); handoffCommands.onHook(id, 'exit', null); };
+  addTerminalObserver({ onExit: (id) => terminalGone(id), onKill: (id) => terminalGone(id) });
+  ipcMain.handle('handoffCommands:list', () => handoffCommands.list());
+  ipcMain.handle('handoffCommands:dismiss', (_e, tabId, id) => (typeof tabId === 'string' && typeof id === 'string' ? !!handoffCommands.take(tabId, id) : false));
+  // Run, step 1: a one-time token for this command (60 s, this window). The renderer opens a new tab whose
+  // terminal:create carries it; there the command is taken off the list and started as the tab's own startup program
+  // (a script run by /bin/bash after the login profile). Nothing is ever typed into a shell, so a profile that starts
+  // tmux or reads input, or a fish login shell, cannot get it. zsh and bash only (the startup wrapper's shells).
+  // `edited`: the person changed the command on the card first (a placeholder filled in): it runs instead, checked by
+  // the same rules as a captured one (one line, nothing hidden).
+  // `asIs`: the person said the flagged "placeholder" is real syntax (the card's "run as is"): only that check is skipped.
+  ipcMain.handle('handoffCommands:prepare', (event, tabId, id, edited, asIs) => {
+    if (typeof tabId !== 'string' || typeof id !== 'string') return { ok: false, error: 'bad request' };
+    const cmd = handoffCommands.peek(tabId, id);
+    if (!cmd) return { ok: false, error: 'That command is no longer waiting.' };
+    let text = cmd.text;
+    if (edited !== undefined && edited !== null) {
+      const e = typeof edited === 'string' ? edited.trim() : '';
+      const parsed = extractCommands(`! ${e}`);
+      if (!e || parsed.length !== 1 || parsed[0] !== e) return { ok: false, error: 'The edited command must be one line of plain text.' };
+      text = e;
+    }
+    const hole = commandPlaceholder(text);
+    if (hole && asIs !== true) return { ok: false, error: `Fill in ${hole} first (Edit).` };
+    // The syntax first, without running it: a typo would make bash print the whole line (an edited one may hold a
+    // pasted key) into the tab. bash -n only parses; nothing executes.
+    const syn = spawnSync('/bin/bash', ['-n'], { input: text, timeout: 3000, encoding: 'utf8' });
+    // A warning counts too (an unterminated heredoc is only a warning to bash -n).
+    if (syn.status !== 0 || String(syn.stderr || '').trim()) return { ok: false, error: edited != null ? 'That edit is not a complete shell command (check quotes and brackets).' : 'That command has a shell syntax error; Copy it and fix it, or ask the session again.' };
+    const sh = path.basename(process.env.SHELL || '/bin/zsh');
+    if (sh !== 'zsh' && sh !== 'bash') return { ok: false, error: `Run works with zsh and bash (your shell is ${sh}): use Copy.` };
+    const now = Date.now();
+    for (const [t, v] of runTokens) if (now - v.at > RUN_TOKEN_MS) runTokens.delete(t);
+    const token = randomUUID();
+    runTokens.set(token, { sender: event.sender.id, tabId, id, text, at: now });
+    return { ok: true, token };
+  });
+  pruneRunScripts();
+  if (!runPollTimer) { runPollTimer = setInterval(pollRuns, 1500); runPollTimer.unref?.(); }
+  setInterval(pruneRunScripts, 5 * 60 * 1000).unref?.();
   // /openTab's own "is another surface typing into this tab": an account move
   // must not stop Claude under it.
   heldInputFor = bridgeOpenDeps.inputBusy;
@@ -4542,6 +4779,12 @@ app.whenReady().then(() => {
   // Self-heal an existing Claude Desktop MCP install: the wrapper must track
   // the CURRENT app binary across moves/updates (never creates an install).
   if (!IS_WIN) healGwsMcpIfInstalled();
+  // Find gws (login-shell PATH, npm prefix, nvm...) in the background, so the first gws call and the shim's
+  // gws-env.json have it. Never blocks startup.
+  // The hint folder is set first, so the Claude Desktop server sees the result even before any terminal opens, and a
+  // gws picked with Locate before a restart comes back.
+  if (process.platform !== 'win32') setHintDir(path.join(app.getPath('userData'), 'gws-shim'));
+  refreshGwsEnv().catch((err) => console.warn('[gws-setup] startup lookup failed:', err?.message || err));
   cleanClipboardTemp();
   setupTerminalHandlers();
   setupDataHandlers();
@@ -4636,7 +4879,7 @@ app.whenReady().then(() => {
       console.warn('[auto-resume] could not clear a closed tab\'s running stamp:', err?.message || err);
     }
   };
-  addTerminalObserver({ onExit: (id) => clearClosedTabRunning(id), onKill: (id, info) => clearClosedTabRunning(id, info) });
+  addTerminalObserver({ onExit: (id) => clearClosedTabRunning(id), onKill: (id, info) => { clearClosedTabRunning(id, info); terminalStatus.forget(id); } });
   // Codex tabs: Codex hooks reach main over the bridge, by session, never by
   // the hook's DOBIUS_TAB_ID (it names whichever tab started Codex's shared
   // daemon). codex-status.js finds the tab running that session.
@@ -5203,7 +5446,12 @@ app.on('before-quit', (e) => {
 // branch of before-quit, otherwise PTYs, the voice bridge, the Visual server,
 // auto-mode and the watchers leak on a force quit. Idempotent via didTeardown
 // (forward-declared above so the updater-bypass branch can share it).
+// Run files still held (a Run tab whose wrapper had not started, or whose command is running): on every way out,
+// since a quit can kill all terminals without telling their observers.
+const dropAllRunFiles = () => { for (const id of [...runFilesByTab.keys()]) dropRunFiles(id); };
+app.on('before-quit', dropAllRunFiles);
 app.on('will-quit', (e) => {
+  dropAllRunFiles();
   if (didTeardown) return;
   didTeardown = true;
   try { killAuthChildren(); } catch { /* noop */ }

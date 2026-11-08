@@ -731,3 +731,27 @@
 - **FIX**: Identity is pid PLUS exact creation FILETIME everywhere: the tab's shell is pinned on first sight (must start just after the spawn), Claude's folder comes only from its record for the pid and FILETIME the caller resolved, and no timing-based session linking on Windows. Typed commands go through shared/sh-quote.js (`cdThen`, `toolCommand`, `shellArg`, `cmdSafe`). Claude's real `procStartFt` equals the CIM FILETIME exactly (verified on windows-latest, difference 0).
 - **CONTEXT**: Any new Windows code that reads processes or types into a tab.
 - **DETECTION**: `grep -n "winProcessTable\|shellPrograms\|descendants" electron/*.js` and check each caller verifies the shell row and FILETIME.
+
+### Testing - 2026-11-06
+- **MISTAKE**: Writing the escape `\u2028` (and `\u2029`) in an Edit or heredoc left the LITERAL line-separator character in `electron/team-service.js`, `team-deliver.js` and the team test. JavaScript treats U+2028 as a line terminator, so every regex literal containing one failed to parse ("Invalid regular expression: missing /") and the whole test file loaded zero tests.
+- **FIX**: After writing any `\u2028`/`\u2029`, grep for the raw characters and convert them back to escapes with a script that uses `chr(0x2028)`, never by typing the character.
+- **CONTEXT**: Handoff review fixes (feat/team-handoff), stripping Unicode line separators from card fields.
+- **DETECTION**: `grep -rnP "\x{2028}|\x{2029}" electron src shared` must print nothing.
+
+### Testing - 2026-11-07
+- **MISTAKE**: A probe of Claude Code's `!` bash mode (python pty running a real `claude`, typing `!` as a key then bracketed-pasting `echo <marker>`, then Enter) did NOT stay in bash mode: the text went to the model as a prompt on Sam's default account ("thinking with high effort") until it was interrupted with Ctrl+C about 5 s later.
+- **FIX**: Never probe input handling against a real `claude` with Enter unless a model call is acceptable. Inspect the screen BEFORE pressing Enter (bash mode shows its own prompt) and stop there. Do not type into a Claude prompt to run a shell command: run it in a shell tab instead.
+- **CONTEXT**: Designing a Run button for commands sessions hand back (Tasks > Commands).
+- **DETECTION**: a probe script that writes `\r` to a real claude pty after a paste.
+
+### Git - 2026-11-07
+- **MISTAKE**: Took a lint baseline with `git stash -q; npx eslint ...; git stash pop -q` while new files were staged intent-to-add (`git add -N`). The push failed ("Entry ... not uptodate. Cannot merge"), so nothing was stashed, and the pop then tried to apply an OLDER entry (stash@{0} "pre-release-untracked-ios"). It aborted without changing anything, but only by luck.
+- **FIX**: Never stash for a baseline. Lint the committed version from stdin instead: `git show HEAD:<file> | npx eslint --stdin --stdin-filename <file>`. If a stash is ever needed, check `git stash list` before and after, and pop only an entry you just created.
+- **CONTEXT**: gws fresh-Mac fixes; checking whether main.js lint errors were pre-existing.
+- **DETECTION**: `git stash` inside a compound command with `pop` after it.
+
+### Build - 2026-11-07
+- **MISTAKE**: Narrowed the PATH that `Install gws` runs npm with to "the vetted node's folder + the discovered folders" (electron/gws-setup.js installGws), dropping the inherited PATH for safety. The discovered folders do not always include /usr/bin:/bin, so npm (and its install scripts) could not find sleep, mkdir or chmod. Unit tests passed; only the packaged ship-test caught it ("sleep: command not found").
+- **FIX**: When replacing an inherited PATH with a curated one, always append the system folders `/usr/bin:/bin:/usr/sbin:/sbin` explicitly.
+- **CONTEXT**: Codex round 8 asked for npm to never run with an untrusted inherited `node`.
+- **DETECTION**: `grep -n "PATH: joinPath(" electron/*.js` and check each ends with the system folders.

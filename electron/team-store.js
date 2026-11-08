@@ -45,6 +45,11 @@ function readJson(file, fallback) {
   return v;
 }
 
+// A full fingerprint or its short form (5-5): the shapes findPeer matches before any name.
+export const looksLikeFingerprint = (v) => {
+  const t = String(v || '').normalize('NFKC').trim();
+  return /^[A-Za-z0-9_-]{5}-[A-Za-z0-9_-]{5}$/.test(t) || /^[A-Za-z0-9_+/=-]{32,}$/.test(t);
+};
 const defaultName = () => os.hostname().replace(/\.local$/i, '').slice(0, 80) || 'Dobius';
 
 /**
@@ -83,14 +88,29 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
   }
 
   const peers = () => readJson(file('peers.json'), {});
+  // One line, no control, format (bidi, zero-width) or line/paragraph separator characters, single spaces, NFC.
+  // Lone surrogate halves become U+FFFD first (removing a mark between two halves must never join them into a new,
+  // invisible character), then NFKC (so width variants and composed forms are what is stored, checked and compared), invisible characters
+  // dropped (zero-width, U+034F and the like: two names must never differ only by something no one can see), then
+  // cut, then trim: the stored name is exactly what a later lookup normalizes to.
+  const cleanName = (v) => String(v || '').toWellFormed().normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '')
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 80).trim();
+  const sameName = (a, b) => typeof a === 'string' && typeof b === 'string' && cleanName(a).toLowerCase() === cleanName(b).toLowerCase();
+  // The name to show for a message's teammate: their CURRENT name while linked (a rename since must not leave a
+  // stale label that now means someone else), else the name the row was written with.
+  const nameFor = (m) => { const p = m?.peer ? peers()[m.peer] : null; return p ? p.name : m?.peerName; };
   function savePeer(peer) {
     const all = peers();
     const old = all[peer.id];
+    // Names are shown in terminals (dobius-team) and notifications: no control or invisible characters.
+    // A Mac that calls itself something fingerprint-shaped is shown as "teammate" (sends match fingerprints first).
+    const theirName = (() => { const n = cleanName(peer.name); return n && !looksLikeFingerprint(n) ? n : 'teammate'; })();
     all[peer.id] = {
-      // Names are shown in terminals (dobius-team) and notifications: no control characters.
-      id: peer.id, name: String(peer.name || '').replace(/[\x00-\x1f\x7f\u0080-\u009f]/g, ' ').trim().slice(0, 80) || 'teammate', host: peer.host, port: peer.port, ed: peer.ed, x: peer.x,
+      id: peer.id, name: theirName, host: peer.host, port: peer.port, ed: peer.ed, x: peer.x,
       linkedAt: old?.linkedAt || now(), autoRoute: old ? old.autoRoute : true, enabled: old ? old.enabled : true,
     };
+    // A name given on this Mac survives a re-link; what their Mac now calls itself becomes the selfName.
+    if (old?.renamed && old.name) { all[peer.id].name = old.name; all[peer.id].selfName = theirName; all[peer.id].renamed = true; }
     writeJson(file('peers.json'), all);
     return all[peer.id];
   }
@@ -98,10 +118,24 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
     const all = peers();
     if (!Object.hasOwn(all, id)) return null;
     const allowed = {};
-    if (typeof patch.name === 'string' && patch.name.trim()) allowed.name = patch.name.replace(/[\x00-\x1f\x7f\u0080-\u009f]/g, ' ').trim().slice(0, 80);
+    // A rename is this Mac's own label for them (two teammates on "MacBook-Air" become "Brett" and "Max"). What their
+    // Mac calls itself is kept as selfName, so `dobius-team send <that name>` still finds them, and an empty name
+    // goes back to it. Current names stay unique and can never look like a fingerprint (sends match those first).
+    if (typeof patch.name === 'string') {
+      const clean = cleanName(patch.name);
+      const selfName = cleanName(all[id].renamed ? all[id].selfName : all[id].name) || 'teammate';
+      const next = clean || selfName;
+      if (looksLikeFingerprint(next)) throw new Error('a name cannot look like a fingerprint');
+      const taken = Object.values(all).some((p) => p.id !== id && sameName(p.name, next));
+      if (taken) throw new Error(`another teammate is already called ${next}${clean ? '' : '; rename that one first'}`);
+      // `renamed` marks a name given on this Mac (so a re-link keeps it); selfName is what their Mac calls itself.
+      if (next !== selfName) { allowed.name = next; allowed.selfName = selfName; allowed.renamed = true; } else { allowed.name = selfName; allowed.selfName = undefined; allowed.renamed = undefined; }
+    }
     if (typeof patch.autoRoute === 'boolean') allowed.autoRoute = patch.autoRoute;
     if (typeof patch.enabled === 'boolean') allowed.enabled = patch.enabled;
     all[id] = { ...all[id], ...allowed };
+    if (all[id].selfName === undefined) delete all[id].selfName;
+    if (all[id].renamed === undefined) delete all[id].renamed;
     writeJson(file('peers.json'), all);
     return all[id];
   }
@@ -152,7 +186,14 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
   // dismisses it, a row can go, so a pile of old rows can never block the inbox for good.
   const IN_FLIGHT = new Set(['queued', 'sending', 'waiting', 'routing']);
   const ATTENTION = new Set(['held', 'needs attention', 'unconfirmed', 'not delivered']);
-  const keep = (m) => IN_FLIGHT.has(m.state) || (ATTENTION.has(m.state) && now() - (m.at || 0) < RETAIN_MS);
+  // Also kept while it still owes its sender a status report (lifecycle; dropped by the service after 24 h).
+  const keep = (m) => IN_FLIGHT.has(m.state) || (ATTENTION.has(m.state) && now() - (m.at || 0) < RETAIN_MS)
+    // and the one message whose working/done is being followed right now (the service says which). Pending status
+    // reports do NOT protect a row: a teammate that never acks (an older Dobius) must not fill the inbox. At the cap,
+    // the oldest such rows go, and their unsent reports with them (accepted).
+    || keepAlso(m);
+  let keepAlso = () => false;
+  function setKeepAlso(fn) { keepAlso = typeof fn === 'function' ? fn : () => false; }
   // `protect`: the row being written now. If the cap cannot be met without dropping it or a KEEP row, this throws
   // ('inbox full') and nothing is written: a receiver must refuse such a message, never acknowledge and drop it.
   function saveMessages(list, protect = null) {
@@ -202,7 +243,8 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
   }
 
   return {
-    dir, loadIdentity, settings, setSettings, peers, savePeer, updatePeer, removePeer,
+    setKeepAlso,
+    dir, loadIdentity, settings, setSettings, peers, savePeer, updatePeer, removePeer, nameFor,
     records: recordStore, allow, countAccepted, messages, putMessage, patchMessage, findById,
     // exposed for tests
     _retainMs: RETAIN_MS,

@@ -23,6 +23,7 @@ import fsSync, { constants as FS } from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFile, spawn } from 'child_process';
+import { gwsClientSecretPath, gwsCommand as gwsPath, windowsGwsEntry, gwsExecEnv, gwsState, findIn, isInside, setHintDir, gwsSetupStatus, effectiveQuotaProject } from './gws-setup.js';
 import { randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
 import { app, shell, BrowserWindow } from 'electron';
@@ -31,36 +32,19 @@ import { getGwsAccounts, saveGwsAccount, deleteGwsAccount, isValidGwsId } from '
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PROFILES_DIR = path.join(os.homedir(), '.gws-profiles');
-const GWS_CLIENT_SECRET = path.join(os.homedir(), '.config', 'gws', 'client_secret.json');
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 // gws is typically a Homebrew binary; Electron's PATH is minimal, so augment it.
-const EXEC_PATH = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'].join(':');
 const IS_WIN = process.platform === 'win32';
-const EXEC_ENV = IS_WIN ? { ...process.env } : { ...process.env, PATH: `${EXEC_PATH}:${process.env.PATH || ''}` };
-
-// How to start gws: { file, args, env }. macOS runs the binary from PATH. On
-// Windows npm installs gws as a .cmd, which Node will not start without a
-// shell (and a shell would re-quote our arguments), so its JS entry runs under
-// Dobius's own Electron binary in node mode. Same lookup as gws-mcp.mjs.
-export function gwsCommand(args, env = process.env) {
-  if (!IS_WIN) return { file: 'gws', args, env: EXEC_ENV };
-  const candidates = [];
-  if (env.APPDATA) {
-    const pkgDir = path.join(env.APPDATA, 'npm', 'node_modules', '@googleworkspace', 'cli');
-    try {
-      const pkg = JSON.parse(fsSync.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
-      const bin = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.gws;
-      if (typeof bin === 'string' && bin) candidates.push(path.join(pkgDir, bin));
-    } catch { /* no package.json: the literals below */ }
-    candidates.push(path.join(pkgDir, 'run.js'), path.join(pkgDir, 'bin', 'gws'));
-  }
-  for (const cand of candidates) {
-    try {
-      fsSync.accessSync(cand, fsSync.constants.R_OK);
-      return { file: process.execPath, args: [cand, ...args], env: { ...EXEC_ENV, ELECTRON_RUN_AS_NODE: '1' } };
-    } catch { /* next */ }
-  }
-  return { file: 'gws.exe', args, env: EXEC_ENV }; // a native gws.exe on PATH, if any
+// Where gws is, and the PATH that runs it (node included), come from gws-setup: a Finder-launched app has no login
+// shell PATH and npm installs gws in user folders (Justin, 2026-11-07).
+// How to start gws: { file, args, env }. macOS runs the gws gws-setup found, with its PATH. On Windows npm installs gws
+// as a .cmd, which Node will not start without a shell (and a shell would re-quote our arguments), so its JS entry runs
+// under Dobius's own Electron binary in node mode (windowsGwsEntry, the same lookup as gws-mcp.mjs).
+export function gwsCommand(args) {
+  if (!IS_WIN) return { file: gwsPath(), args, env: gwsExecEnv() };
+  const entry = windowsGwsEntry();
+  if (entry) return { file: process.execPath, args: [entry, ...args], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } };
+  return { file: 'gws.exe', args, env: { ...process.env } }; // a native gws.exe on PATH, if any
 }
 
 // In-memory access-token cache: id -> { token, expiresAt }. Never persisted.
@@ -144,32 +128,42 @@ async function readProfile(id) {
   }
 }
 
-// Write a profile with no-follow, exclusive-of-symlinks semantics so a stale or
-// malicious symlink at the target can NEVER redirect the refresh-token write
-// onto another file (which we would then chmod). O_NOFOLLOW fails with ELOOP if
-// the final component is a symlink; O_CREAT|O_TRUNC creates or replaces our own
-// regular file. We fstat the opened fd before writing and fchmod it (not the
-// path) so perms are set on the actual file. Exported for the no-follow test.
-// Codex v1.0.41 r2 P2.
-export async function writeProfile(id, creds) {
+// Write a profile so a stale or malicious symlink at the target can NEVER redirect the refresh-token write onto
+// another file (Codex v1.0.41 r2 P2): a link at the profile's name is refused, the token goes into a fresh O_EXCL |
+// O_NOFOLLOW temp file created 0600, and a rename replaces the profile (rename swaps the name, never follows a link).
+// Exported for the no-follow test. `mustExist`: update only; never recreate a profile removed meanwhile.
+export async function writeProfile(id, creds, { mustExist = false } = {}) {
   ensureProfilesDir();
   const p = profilePathFor(id);
   if (!p) throw new Error('bad_id');
-  const flags = FS.O_WRONLY | FS.O_CREAT | FS.O_TRUNC | FS.O_NOFOLLOW;
+  // Never through a link at the profile's name, and with mustExist never recreate one that is gone.
+  try {
+    if ((await fs.lstat(p)).isSymbolicLink()) throw new Error('profile_open_refused');
+  } catch (e) {
+    if (e?.message === 'profile_open_refused') throw e;
+    if (e?.code !== 'ENOENT') throw new Error('profile_open_refused', { cause: e });
+    if (mustExist) throw new Error('profile_gone', { cause: e });
+  }
+  // A fresh exclusive temp file (0600, never through a link), then rename over the profile: a reader (the terminal
+  // shim, Claude Desktop) sees the old file or the new one, never a truncated one (Codex round 4).
+  const tmp = path.join(path.dirname(p), `.${path.basename(p)}.${randomBytes(6).toString('hex')}.tmp`);
   let fh;
   try {
-    fh = await fs.open(p, flags, 0o600);
-  } catch {
-    // ELOOP means the path is a symlink: refuse rather than follow it.
-    throw new Error('profile_open_refused');
+    fh = await fs.open(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW, 0o600);
+  } catch (e) {
+    throw new Error('profile_open_refused', { cause: e });
   }
   try {
-    const st = await fh.stat();
-    if (!st.isFile()) throw new Error('profile_not_regular_file');
     await fh.chmod(0o600);
     await fh.writeFile(JSON.stringify(creds));
   } finally {
     await fh.close();
+  }
+  try {
+    await fs.rename(tmp, p);
+  } catch (e) {
+    await fs.unlink(tmp).catch(() => {});
+    throw new Error('profile_write_failed', { cause: e });
   }
 }
 
@@ -201,7 +195,7 @@ function gwsAuthExport() {
 // The OAuth client from ~/.config/gws/client_secret.json (installed app form).
 async function readGwsClient() {
   try {
-    const j = JSON.parse(await fs.readFile(GWS_CLIENT_SECRET, 'utf8'));
+    const j = JSON.parse(await fs.readFile(gwsClientSecretPath(), 'utf8'));
     const c = j.installed || j.web || {};
     if (typeof c.client_id === 'string' && typeof c.client_secret === 'string') {
       return { client_id: c.client_id, client_secret: c.client_secret };
@@ -232,6 +226,89 @@ async function refreshGrant(client_id, client_secret, refresh_token) {
   }
 }
 
+// Every write to one account's profile file in this process goes through its lock, one at a time, so a slow quota
+// check can never write an older grant over a reconnect that finished meanwhile (Codex round 3).
+const profileLocks = new Map(); // id -> tail promise
+function withProfileLock(id, fn) {
+  const prev = profileLocks.get(id) || Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  const tail = run.catch(() => {});
+  profileLocks.set(id, tail);
+  tail.then(() => { if (profileLocks.get(id) === tail) profileLocks.delete(id); });
+  return run;
+}
+
+// The quota project (Justin, 2026-11-07, second report). gws reads project_id from client_secret.json and sends it as
+// x-goog-user-project on every call. The project belongs to one Google Workspace org: that org's accounts may bill to
+// it, a personal @gmail.com account may not, and Google answers that account 403 on every API even though its grant is
+// fine. So each account is asked once whether Google lets it use the project; one that is refused is marked
+// noQuotaProject in its profile, and the shim and the Claude Desktop server run gws for it with an empty config folder
+// (no client file, so no quota project). Accounts that can use it are left exactly as they were.
+const QUOTA_DENIED_RE = /serviceusage|USER_PROJECT_DENIED|required permission to use project/i;
+const QUOTA_PROBES = [
+  'https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)',
+  'https://gmail.googleapis.com/gmail/v1/users/me/profile',
+];
+/** true: Google refuses this account the project; false: it may use it (or there is none); null: could not tell. */
+export async function quotaProjectDenied(accessToken, projectId, fetchImpl = fetch) {
+  if (!projectId) return false;
+  // A refusal from either API decides. Only Drive answering OK clears it: Gmail has been seen to succeed with the
+  // same credentials Drive refuses (googleworkspace/cli#729), so a Gmail OK alone says nothing (Codex round 8).
+  for (const url of QUOTA_PROBES) {
+    try {
+      const r = await fetchImpl(url, { headers: { Authorization: `Bearer ${accessToken}`, 'x-goog-user-project': projectId } });
+      if (r.ok) {
+        if (url === QUOTA_PROBES[0]) return false;
+        continue;
+      }
+      const text = await r.text().catch(() => '');
+      if (r.status === 403 && QUOTA_DENIED_RE.test(text)) return true;
+      // Anything else (not granted, not enabled, a 5xx): ask the next one.
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** The project gws would send for quota on this Mac (env, client file, gcloud defaults, in gws's order), or null. */
+function clientProject() {
+  return effectiveQuotaProject();
+}
+
+/**
+ * Update the stored noQuotaProject mark from a fresh probe; unchanged when Google did not say. The probe takes a
+ * moment, so the profile is read again just before writing, and only rewritten when it is still there with the same
+ * grant: a Remove or a Reconnect that landed meanwhile wins (Codex round 2, all four lenses).
+ */
+async function syncQuotaMark(id, prof, accessToken) {
+  const project = clientProject();
+  const denied = await quotaProjectDenied(accessToken, project);
+  // Decided under the lock from a fresh read, so no connect, reconnect, remove or other check for this account can
+  // land between the read and the write. Kept as stored when Google did not say, when the project gws sends changed
+  // while it answered (the check for the new one decides), or when the grant or the account changed.
+  return withProfileLock(id, async () => {
+    const now = await readProfile(id);
+    if (!now) return false;
+    const stored = !!now.noQuotaProject;
+    if (clientProject() !== project || now.refresh_token !== prof.refresh_token || !getGwsAccounts().some((a) => a.id === id)) return stored;
+    // The mark records the project it was decided for. Google not saying (null) keeps a mark only for that same
+    // project; a mark made for another project no longer applies.
+    const want = denied === null ? stored && now.noQuotaFor === project : denied;
+    if (want === stored && (!want || now.noQuotaFor === project)) return stored;
+    const next = { ...now };
+    if (want) { next.noQuotaProject = true; next.noQuotaFor = project; } else { delete next.noQuotaProject; delete next.noQuotaFor; }
+    try {
+      await writeProfile(id, next, { mustExist: true });
+    } catch (e) {
+      console.warn('[gws-accounts] could not save the quota mark:', e?.message || 'unknown');
+      return stored;
+    }
+    return want;
+  });
+}
+
+
 /**
  * Connect the currently-logged-in gws account into Dobius.
  *
@@ -243,7 +320,7 @@ async function refreshGrant(client_id, client_secret, refresh_token) {
 export async function connectGwsAccount() {
   const exp = await gwsAuthExport();
   if (!exp) {
-    return { ok: false, error: 'Could not read gws credentials. Run `gws auth login` in a terminal first.' };
+    return { ok: false, error: 'Google approved the sign-in, but gws did not hand back the credentials. Press Add Google Account again.' };
   }
   // Try the export's own client first (matched set with its refresh token),
   // then the installed client from client_secret.json. Store whichever works.
@@ -262,7 +339,7 @@ export async function connectGwsAccount() {
     if (res.access_token) { working = c; minted = res; break; }
   }
   if (!working) {
-    return { ok: false, error: 'Google rejected the refresh token for every known OAuth client. Reconnect with `gws auth login`.' };
+    return { ok: false, error: 'Google rejected the sign-in for the OAuth client on this Mac. Check the client file under Setup, then press Add Google Account again.' };
   }
 
   // Identify the account email from the minted access token (userinfo).
@@ -281,12 +358,24 @@ export async function connectGwsAccount() {
   // Reuse an existing id for this email so reconnect refreshes in place.
   const existing = getGwsAccounts().find((a) => a.email === email);
   const id = existing?.id || newGwsId();
+  // Google did not say (null): keep what a reconnect already knew about this account.
+  const probedProject = clientProject();
+  const probed = await quotaProjectDenied(minted.access_token, probedProject);
+  let denied = false;
   try {
-    await writeProfile(id, {
-      email,
-      client_id: working.client_id,
-      client_secret: working.client_secret,
-      refresh_token: exp.refresh_token,
+    await withProfileLock(id, async () => {
+      // Google did not say, or the project changed while it answered: keep what is stored for this account.
+      const prior = existing ? await readProfile(id) : null;
+      denied = probed === null || clientProject() !== probedProject
+        ? !!prior?.noQuotaProject && prior?.noQuotaFor === clientProject()
+        : probed;
+      await writeProfile(id, {
+        email,
+        client_id: working.client_id,
+        client_secret: working.client_secret,
+        refresh_token: exp.refresh_token,
+        ...(denied ? { noQuotaProject: true, noQuotaFor: clientProject() } : {}),
+      });
     });
   } catch {
     return { ok: false, error: 'Could not save the account profile.' };
@@ -302,7 +391,7 @@ export async function connectGwsAccount() {
   await clearShimTokenCache(id);
   // Seed the token cache with the token we just minted.
   tokenCache.set(id, { token: minted.access_token, expiresAt: Date.now() + (minted.expires_in - 60) * 1000 });
-  return { ok: true, account: { id: meta.id, email: meta.email, name: meta.name, scopes: meta.scopes } };
+  return { ok: true, account: { id: meta.id, email: meta.email, name: meta.name, scopes: meta.scopes }, quotaSkipped: !!denied };
 }
 
 /** Public list: metadata only, NEVER tokens. */
@@ -333,11 +422,12 @@ export async function verifyGwsAccounts({ force = false } = {}) {
   for (const a of getGwsAccounts()) {
     const hit = verifyCache.get(a.id);
     if (!force && hit && Date.now() - hit.at < VERIFY_CACHE_MS) {
-      out.push({ id: a.id, email: a.email, status: hit.status, error: hit.error });
+      out.push({ id: a.id, email: a.email, status: hit.status, error: hit.error, quotaSkipped: !!hit.quotaSkipped });
       continue;
     }
     let status = 'error';
     let error = null;
+    let quotaSkipped = false;
     const prof = await readProfile(a.id);
     if (!prof) {
       error = 'profile_unreadable';
@@ -361,6 +451,7 @@ export async function verifyGwsAccounts({ force = false } = {}) {
         if (profileAgrees && who && a.email && who.toLowerCase() === String(a.email).toLowerCase()) {
           status = 'ok';
           tokenCache.set(a.id, { token: res.access_token, expiresAt: Date.now() + (res.expires_in - 60) * 1000 });
+          quotaSkipped = await syncQuotaMark(a.id, prof, res.access_token);
         } else if (who) {
           error = 'email_mismatch'; // grant works but is not this account's
         } else {
@@ -372,8 +463,8 @@ export async function verifyGwsAccounts({ force = false } = {}) {
         error = res.error; // network_error, http_5xx, ...: not proof of death
       }
     }
-    verifyCache.set(a.id, { at: Date.now(), status, error });
-    out.push({ id: a.id, email: a.email, status, error });
+    verifyCache.set(a.id, { at: Date.now(), status, error, quotaSkipped });
+    out.push({ id: a.id, email: a.email, status, error, quotaSkipped });
   }
   return out;
 }
@@ -484,8 +575,24 @@ export function loginArgsFor(scopeMode) {
   return ['auth', 'login', '--scopes', STANDARD_SCOPES.join(',')];
 }
 
+/**
+ * Before opening a browser sign-in: is gws, node and an OAuth client in place? Returns an error string naming what is
+ * missing (the Setup section above the list fixes each one), or null.
+ */
+export async function setupProblem() {
+  const st = await gwsSetupStatus();
+  if (st.windows && !st.gws) return 'gws is not installed. Install Node.js, run npm i -g @googleworkspace/cli in a terminal, then press Check again in Setup above.';
+  if (st.installing) return 'gws is still installing. Wait for Setup above to finish, then try again.';
+  if (st.halfInstalled) return 'gws did not finish installing. Use Install gws in Setup above, then try again.';
+  if (!st.gws) return 'gws is not installed on this Mac yet. Use Install gws in Setup above, then press Add again.';
+  if (st.needsNode && (!st.node || st.nodeTooOld)) return 'gws needs Node.js, which this Mac does not have. Install it from nodejs.org, then press Check again.';
+  if (!st.client) return 'This Mac has no Google OAuth client file yet. Add one in Setup above (Use this one, or Choose client_secret.json).';
+  return null;
+}
+
 async function runBrowserLogin(uiId, scopeMode = 'standard') {
   let authUrl = null;
+  let seen = ''; // what gws printed before the sign-in link (its reason when it fails early)
   let openFailed = false;
   // spawn (not execFile) in its OWN process group, resolving on exit: `gws`
   // on PATH is a node wrapper that re-execs the real binary, so a dead
@@ -551,10 +658,10 @@ async function runBrowserLogin(uiId, scopeMode = 'standard') {
       // Tiny grace so trailing output already in flight still lands.
       setTimeout(() => settle(timedOut ? { killed: true } : (code === 0 ? null : { code })), 150);
     });
-    let seen = '';
     const watch = (chunk) => {
+      // Kept after the link too: a failure to SAVE the login comes after it, and that is what gets shown and logged.
+      seen = (seen + String(chunk)).slice(-20000);
       if (authUrl) return;
-      seen += String(chunk);
       const url = extractGoogleAuthUrl(seen);
       if (url) {
         authUrl = url;
@@ -575,13 +682,18 @@ async function runBrowserLogin(uiId, scopeMode = 'standard') {
   });
   if (!login) return null;
   if (login.killed) {
-    if (!authUrl) return 'gws never produced a Google sign-in URL. Try `gws auth login` in a terminal to see why.';
+    if (!authUrl) return 'gws never produced a Google sign-in link. Press Check in Setup above to confirm gws runs, then try again.';
     // The URL is single-use and its local listener died with the timeout,
     // so never tell the user to paste it now: it can only fail.
-    if (openFailed) return 'The sign-in page could not be opened automatically and the approval window expired. Run `gws auth login` in a terminal instead.';
+    if (openFailed) return 'The sign-in page could not be opened automatically and the approval window expired. Press Add again and use the sign-in link shown here.';
     return 'The browser approval was not completed within 5 minutes. Nothing was changed.';
   }
-  return 'gws auth login failed. Try `gws auth login` in a terminal to see why.';
+  // Say what gws said (Max, 2026-11-07: "No OAuth client configured" was thrown away), and keep it in error.log.
+  // Only the last lines, one line each, no escape codes; gws prints no secrets before the sign-in link.
+  const said = seen.replace(/https?:\/\/\S+/g, '<link>').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(-3).join(' | ').slice(0, 400);
+  console.warn('[gws-accounts] gws auth login failed:', login.startError?.code || `exit ${login.code}`, said || '(no output)');
+  if (login.startError) return 'gws could not be started. Press Check again in Setup above to find it, then try again.';
+  return `gws could not finish the Google sign-in${said ? `. gws said: ${said}` : ''}. Press Check again in Setup above, then try again.`;
 }
 
 export async function reconnectGwsAccount(id, opts = {}) {
@@ -591,6 +703,8 @@ export async function reconnectGwsAccount(id, opts = {}) {
   if (reconnectInFlight) return { ok: false, error: 'A reconnect is already waiting on a browser approval. Finish or cancel that one first.' };
   reconnectInFlight = true;
   try {
+    const missing = await setupProblem();
+    if (missing) return { ok: false, error: missing, setup: true };
     const baseBefore = await baseAuthUser();
     const loginError = await runBrowserLogin(id, opts.scopeMode === 'full' ? 'full' : 'standard');
     if (loginError) return { ok: false, error: loginError };
@@ -627,6 +741,8 @@ export async function addGwsAccountViaBrowser(opts = {}) {
   if (reconnectInFlight) return { ok: false, error: 'Another browser approval is already pending. Finish or cancel that one first.' };
   reconnectInFlight = true;
   try {
+    const missing = await setupProblem();
+    if (missing) return { ok: false, error: missing, setup: true };
     const baseBefore = await baseAuthUser();
     const loginError = await runBrowserLogin('__add__', opts.scopeMode === 'full' ? 'full' : 'standard');
     if (loginError) return { ok: false, error: loginError };
@@ -650,7 +766,7 @@ export async function removeGwsAccount(id) {
   const p = profilePathFor(id);
   if (p) {
     try {
-      await fs.unlink(p);
+      await withProfileLock(id, () => fs.unlink(p));
     } catch (e) {
       // ENOENT (already gone) is fine. Any other failure means the refresh
       // token is STILL on disk, so do NOT drop the registry entry and do NOT
@@ -715,13 +831,13 @@ export async function getAccessTokenForEmail(email) {
 // --- Terminal token-broker shim (v1.0.41) ---
 
 /** Find the real gws binary (never the shim). Scans the standard dirs. */
+const isExecutable = (p) => { try { fsSync.accessSync(p, FS.X_OK); return fsSync.statSync(p).isFile(); } catch { return false; } };
 export function resolveRealGws(excludeDir = null) {
-  for (const dir of EXEC_PATH.split(':')) {
-    if (!dir || dir === excludeDir) continue;
-    const cand = path.join(dir, 'gws');
-    try { fsSync.accessSync(cand, FS.X_OK); return cand; } catch { /* next */ }
-  }
-  return null;
+  // Looked up again on every call (each terminal spawn), so a gws installed after launch is found without a restart.
+  // The gws in use (a Locate pick may be run.js, which a search by name would miss), unless it is gone or the shim.
+  const st = gwsState();
+  if (st.gws && isExecutable(st.gws) && !isInside(st.gws, excludeDir)) return st.gws;
+  return findIn(st.dirs, 'gws', excludeDir);
 }
 
 /**
@@ -735,7 +851,6 @@ export function resolveRealGws(excludeDir = null) {
  * shimDir if the source cannot be staged.
  */
 export function ensureShim() {
-  const realGws = resolveRealGws();
   let shimDir;
   try {
     shimDir = path.join(app.getPath('userData'), 'gws-shim');
@@ -753,5 +868,6 @@ export function ensureShim() {
     console.warn('[gws-accounts] could not stage gws shim:', e?.code || e?.message || 'unknown');
     shimDir = null;
   }
-  return { shimDir, realGws };
+  if (shimDir) setHintDir(shimDir);
+  return { shimDir, realGws: resolveRealGws(shimDir) };
 }

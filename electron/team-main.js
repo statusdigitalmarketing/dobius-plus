@@ -10,9 +10,11 @@ import { createTeamService } from './team-service.js';
 import { teamRequest } from './team-net.js';
 import { shortFp } from './team-crypto.js';
 import { oneLine } from './team-deliver.js';
-import { terminalInstance } from './terminal-manager.js';
+import { terminalInstance, addInputObserver, getTerminalClaudeInfo } from './terminal-manager.js';
+import { isOwnWrite } from './bridge-open-main.js';
+import { submitsInput } from '../shared/prompt-answer.js';
 import { terminalBracketedPaste } from './terminal-manager.js';
-import { statusFor, waitingOnBackground } from './terminal-status.js';
+import { statusFor, waitingOnBackground, onHookState } from './terminal-status.js';
 
 let service = null;
 let store = null;
@@ -70,6 +72,8 @@ export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem }) {
       // Working only on background tasks (a dev server Claude started) is idle at the prompt: the screen and terminal
       // checks still decide whether it may be typed into.
       idle: (id) => statusFor(id)?.status !== 'working' || waitingOnBackground(id),
+      background: (id) => waitingOnBackground(id),
+      claudePid: async (id) => (await getTerminalClaudeInfo(id, { unique: true }))?.pid ?? null,
       watch: (id) => {
         const x = w.watchOutput(id);
         return {
@@ -86,11 +90,38 @@ export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem }) {
     notify: (event, p) => {
       if (event === 'link-request') toast('Team link request', `${p.name} (${p.short}) wants to link. Open Settings > Team to accept.`);
       if (event === 'message') toast(`Team message from ${p.name}`, p.text);
+      if (event === 'handoff-held') toast('Team request not handed over', `A message for ${p.to} could not be typed into the orchestrator tab: ${p.note || 'unknown reason'}. Nothing was sent.`);
       if (event === 'inbox-full') toast('Team inbox full', `A message from ${p.name} was refused: act on the waiting ones in Tasks > Team.`);
       broadcast('team:changed', { event });
     },
   });
   registerIpc();
+  // What a delivered message led to on this Mac (working, done, the tab closing) is reported back to its sender.
+  // The Claude that took the followed message must still be the one running: a second claude chained after it
+  // (`claude; claude ...`) starts with no Enter in between, so its hooks are checked here too.
+  const claudeGone = (id) => {
+    const pid = service.followedPid(id);
+    if (!pid) return false;
+    try { process.kill(pid, 0); return false; } catch (err) { return err.code === 'ESRCH'; }
+  };
+  onHookState((id, state, tag) => {
+    if (state !== 'exit' && claudeGone(id)) service.tabEvent(id, 'claude-gone', null);
+    service.tabEvent(id, state, tag);
+  });
+  // A person pressing Enter in a tab (never Dobius's own paste and Enter): ends following a message whose turn is over.
+  addInputObserver((id, data) => {
+    // Any line break: Enter, and Ctrl+J, which a shell also runs a command on. (In Claude's box Ctrl+J is a newline in a
+    // draft; counting it only ends following sooner, the safe direction.)
+    if (isOwnWrite()) return;
+    if (data === '\x1b' || data === '\x03') { service.tabEvent(id, 'person-interrupt', null); return; }
+    if (!(submitsInput(data) || /[\r\n]/.test(data))) return;
+    // The Claude that took the followed message is gone (crashed or quit): whatever is typed now, a fresh `claude`
+    // included, is not that message's work. A signal-0 probe of THAT pid, synchronous, so it cannot race this Enter.
+    // ponytail: pid only, no start time; reuse of the same pid within the 6 hour window is the accepted ceiling, and
+    // so is a SUSPENDED original (Ctrl+Z) with a second claude started in the same shell (signal 0 still succeeds).
+    if (claudeGone(id)) service.tabEvent(id, 'claude-gone', null);
+    service.tabEvent(id, 'person-submit', null);
+  });
   try { service.start(); } catch (err) { console.error('[team] could not start:', err?.message || err); }
   return service;
 }
@@ -100,6 +131,30 @@ export function stopTeam() {
 }
 
 const str = (v, max) => (typeof v === 'string' && v.length <= max ? v : null);
+
+const ago = (ms) => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86400)}d`;
+};
+
+/** Where a message is now and since when: an outgoing one's last report from the teammate, else its own state. */
+function stageOf(m) {
+  if (m.dir === 'out' && m.stage) return { stage: m.stage, since: m.stageAt || m.at, note: m.stageNote };
+  if (m.dir === 'out' && m.state === 'delivered') return { stage: 'delivered', since: m.deliveredAt || m.at, note: null };
+  return { stage: m.state, since: m.routedAt || m.at, note: m.note };
+}
+
+/** One message by `id@fingerprint` (either direction), or null when none or more than one match. */
+function findRef(ref, dir = null) {
+  const r = String(ref || '').trim();
+  const at = r.indexOf('@');
+  if (at <= 0) return null;
+  const hits = store.messages().filter((x) => x.id === r.slice(0, at) && x.peer === r.slice(at + 1) && (!dir || x.dir === dir));
+  return hits.length === 1 ? hits[0] : null;
+}
 
 function registerIpc() {
   // The pinned tab closed by the person (tab bar close, which kills its PTY): unpin, so a later tab can never inherit
@@ -143,9 +198,10 @@ function registerIpc() {
 }
 
 /**
- * The loopback bridge's POST /team (dobius-team). Same token as every Dobius CLI. send and reply are accepted only
- * from the pinned orchestrator tab (DOBIUS_TAB_ID): a guard against a stray session sending by mistake, NOT a
- * security boundary (any process of the user can set that variable; the stated residual in the design).
+ * The loopback bridge's POST /team (dobius-team). Same token as every Dobius CLI. send and reply SEND only from the
+ * pinned orchestrator tab (DOBIUS_TAB_ID); from any other tab they are handed to the orchestrator as a request it
+ * approves with `dobius-team approve <id>` (pinned tab only). A guard against a stray session sending by mistake, NOT
+ * a security boundary (any process of the user can set that variable; the stated residual in the design).
  */
 export function handleTeamBridge(body) {
   if (!service) return { status: 503, json: { ok: false, error: 'Dobius+ is still starting; try again' } };
@@ -159,18 +215,74 @@ export function handleTeamBridge(body) {
     return { status: 200, json: { ok: true, lines: [`this Mac: ${oneLine(st.settings.name, 80)} ${st.short}`, ...lines] } };
   }
   if (cmd === 'inbox') {
+    const t = Date.now();
     const lines = store.messages().slice(-20).map((m) => {
       // Printed into a terminal: teammate-supplied text never carries an escape or control character.
-      const who = oneLine(m.peerName, 80) || shortFp(m.peer);
+      const who = oneLine(store.nameFor(m), 80) || shortFp(m.peer);
       const head = m.dir === 'in' ? `<- ${who}` : `-> ${who}`;
-      return `${m.id}@${m.peer}  ${head}  [${m.state}]  ${oneLine(m.text, 400).replace(/\s+/g, ' ').slice(0, 120)}`;
+      const { stage, since, note } = stageOf(m);
+      const why = note ? ` (${oneLine(note, 120)})` : '';
+      return `${m.id}@${m.peer}  ${head}  [${stage} ${ago(t - since)}]${why}  ${oneLine(m.text, 400).replace(/\s+/g, ' ').slice(0, 120)}`;
     });
     return { status: 200, json: { ok: true, lines: lines.length ? lines : ['no team messages yet'] } };
   }
-  if (cmd !== 'send' && cmd !== 'reply') return { status: 400, json: { ok: false, error: 'unknown command' } };
+  if (cmd === 'show') {
+    const m = findRef(arg);
+    if (!m) return { status: 400, json: { ok: false, error: 'no single message has that id@fingerprint (dobius-team inbox prints them)' } };
+    const t = Date.now();
+    const when = (x) => `${new Date(x).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')} (${ago(t - x)} ago)`;
+    const lines = [
+      `${m.dir === 'in' ? 'from' : 'to'} ${oneLine(store.nameFor(m), 80) || shortFp(m.peer)}  ${m.kind}${m.replyTo ? ` to ${m.replyTo.slice(0, 8)}` : ''}  id ${m.id}`,
+      `  ${m.dir === 'in' ? 'received' : 'queued'}  ${when(m.firstSentAt && m.dir === 'out' ? m.firstSentAt : m.at)}`,
+    ];
+    if (m.dir === 'out') {
+      if (m.deliveredAt) lines.push(`  delivered  ${when(m.deliveredAt)}`);
+      for (const e of Array.isArray(m.timeline) ? m.timeline : []) {
+        lines.push(`  ${e.state}  ${when(e.at)}${e.note ? `  ${oneLine(e.note, 200)}` : ''}${e.replyId ? `  reply ${e.replyId.slice(0, 8)}` : ''}`);
+      }
+      if (!m.deliveredAt) lines.push(`  now: ${m.state}${m.note ? ` (${oneLine(m.note, 200)})` : ''}`);
+    } else {
+      lines.push(`  now: ${m.state}${m.note ? ` (${oneLine(m.note, 200)})` : ''}`);
+      const owed = Array.isArray(m.reports) ? m.reports.length : 0;
+      if (owed) lines.push(`  ${owed} status report(s) not yet confirmed by the sender`);
+    }
+    lines.push(`  text: ${oneLine(m.text, 400).replace(/\s+/g, ' ').slice(0, 200)}`);
+    return { status: 200, json: { ok: true, lines } };
+  }
+  if (!['send', 'reply', 'approve', 'release', 'done', 'failed'].includes(cmd)) return { status: 400, json: { ok: false, error: 'unknown command' } };
   const pinned = st.settings.orchestratorTab;
-  if (!pinned || tabId !== pinned) {
-    return { status: 403, json: { ok: false, error: 'only the team orchestrator tab can send (tab menu > Use as team orchestrator)' } };
+  if (!pinned) {
+    return { status: 403, json: { ok: false, error: 'no team orchestrator tab is pinned (tab menu > Use as team orchestrator)' } };
+  }
+  if (cmd === 'release' || cmd === 'done' || cmd === 'failed') {
+    if (tabId !== pinned) return { status: 403, json: { ok: false, error: `only the team orchestrator tab can run ${cmd}` } };
+    if (cmd === 'release') {
+      const m = findRef(arg, 'in');
+      if (!m || m.dir !== 'in') return { status: 400, json: { ok: false, error: 'no single received message has that id@fingerprint' } };
+      if (m.state === 'needs attention') return { status: 400, json: { ok: false, error: 'that one was typed in but not confirmed sent: check the orchestrator tab, then dismiss it in Tasks > Team' } };
+      const r = service.routeNow(m.peer, m.id);
+      if (!r.ok) return { status: 400, json: { ok: false, error: r.error } };
+      return { status: 200, json: { ok: true, lines: [`releasing ${m.id.slice(0, 8)}: it is typed into this tab when Claude is idle`] } };
+    }
+    const r = service.markIncoming(String(arg || ''), cmd, typeof text === 'string' && text.trim() ? text.trim().slice(0, 300) : null);
+    if (!r.ok) return { status: 400, json: { ok: false, error: r.error } };
+    return { status: 200, json: { ok: true, lines: [`told ${r.to} that ${r.short} is ${cmd}`] } };
+  }
+  if (cmd === 'approve') {
+    if (tabId !== pinned) return { status: 403, json: { ok: false, error: 'only the team orchestrator tab can approve a request' } };
+    const r = service.approveHandoff(String(arg || ''));
+    if (!r.ok) return { status: 400, json: { ok: false, error: r.error } };
+    return { status: 200, json: { ok: true, lines: [`queued ${r.short} to ${r.to}; it is retried until they confirm (dobius-team inbox shows the state)`] } };
+  }
+  if (tabId !== pinned) {
+    // Another tab: handed to the orchestrator as a request it checks and approves. Nothing is sent from here. Only from
+    // a live Dobius tab, so one caller cannot dodge the per-tab cap with made-up tab ids.
+    if (typeof tabId !== 'string' || !terminalInstance(tabId)) {
+      return { status: 403, json: { ok: false, error: 'run this in a Dobius+ tab (it hands the message to the team orchestrator tab)' } };
+    }
+    const r = service.handoff({ cmd, arg: String(arg || ''), text: String(text || ''), fromTab: tabId });
+    if (!r.ok) return { status: 400, json: { ok: false, error: r.error } };
+    return { status: 200, json: { ok: true, lines: [`handed to the team orchestrator tab (request ${r.hid}); it sends to ${r.to} once it checks and approves it. Not sent yet.`] } };
   }
   // A reply names its sender (id@fingerprint, as the card prints it): ids are unique only per sender, and a bare id
   // could come to match another teammate's message once the original row has left the list.
