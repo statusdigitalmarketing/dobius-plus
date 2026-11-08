@@ -1,6 +1,6 @@
 // Settings > Team: this Mac's identity, invites and joining, linked teammates, the pinned orchestrator tab.
 // docs/team-communicator.md. Section, SettingRow and Toggle come from Settings.jsx so the page stays one style.
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 const api = window.electronAPI;
 const box = { backgroundColor: 'var(--surface)', border: '1px solid var(--border)' };
@@ -156,7 +156,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
           {st.peers.map((p) => (
             <div key={p.id} className="flex items-center justify-between gap-3 px-3 py-2 rounded text-xs" style={box}>
               <div className="min-w-0">
-                <div style={{ color: 'var(--fg)' }}>{p.name} <span style={{ color: 'var(--dim)' }}>{p.short}</span></div>
+                <PeerName peer={p} onSaved={load} />
                 <div className="truncate" style={{ color: 'var(--dim)', fontSize: 10 }}>{p.host}:{p.port}</div>
               </div>
               <div className="flex items-center gap-3 shrink-0">
@@ -177,5 +177,96 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
         </div>
       )}
     </Section>
+  );
+}
+
+// A teammate's name, renamable in place: click it (or Rename), type, Enter or click away saves, Escape cancels, and
+// an empty name goes back to what their Mac calls itself. Two teammates both on "MacBook-Air" become "Brett" and "Max"
+// here, in Tasks > Team, in notifications and for `dobius-team send` (the old name still works there).
+function PeerName({ peer, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(peer.name);
+  const [error, setError] = useState('');
+  // One save at a time (Enter then the blur it causes must not save twice), and Escape's blur never saves.
+  const savingRef = useRef(false);
+  const cancelledRef = useRef(false);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const sessionRef = useRef(0); // each Rename is its own session: a save from an earlier one never reads this one
+  const open = () => { sessionRef.current += 1; cancelledRef.current = false; setDraft(peer.name); setError(''); setEditing(true); };
+  // One save at a time; text typed while one is in flight is saved right after it, never dropped.
+  const save = async () => {
+    if (cancelledRef.current) { cancelledRef.current = false; return; }
+    if (savingRef.current) return;
+    savingRef.current = true;
+    const session = sessionRef.current;
+    let saved = null;
+    try {
+      for (;;) {
+        const next = draftRef.current.trim();
+        if (next === (saved ?? peer.name)) break;
+        const r = await window.electronAPI?.teamUpdatePeer?.(peer.id, { name: next });
+        if (session !== sessionRef.current) { if (r?.ok) onSaved(); return; } // cancelled and reopened meanwhile
+        if (!r?.ok) {
+          // A correction typed while this one was refused is tried next; otherwise say why.
+          if (draftRef.current.trim() !== next) continue;
+          setError(r?.error || 'Could not rename.');
+          return;
+        }
+        saved = next;
+        if (draftRef.current.trim() === next) break;
+      }
+      setEditing(false);
+      setError('');
+      if (saved !== null) onSaved();
+    } finally {
+      savingRef.current = false;
+    }
+  };
+  if (editing) {
+    return (
+      <div>
+        <input
+          autoFocus
+          value={draft}
+          maxLength={80}
+          placeholder={peer.selfName || peer.name}
+          aria-label={`Name for ${peer.selfName || peer.name}`}
+          onChange={(e) => { setDraft(e.target.value); setError(''); }}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return; // Enter that confirms an IME candidate
+            if (e.key === 'Enter') { e.preventDefault(); save(); }
+            if (e.key === 'Escape') { e.preventDefault(); cancelledRef.current = true; sessionRef.current += 1; setDraft(peer.name); setEditing(false); setError(''); }
+          }}
+          onBlur={save}
+          className="px-1.5 py-0.5 rounded text-xs"
+          style={{ width: 180, backgroundColor: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--fg)', outline: 'none' }}
+        />
+        {error ? (
+          <div style={{ color: 'var(--danger)', fontSize: 10, marginTop: 2 }}>{error}</div>
+        ) : (
+          <div style={{ color: 'var(--dim)', fontSize: 10, marginTop: 2 }}>Enter to save, Esc to cancel{peer.selfName ? `, empty for “${peer.selfName}”` : ''}</div>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div style={{ color: 'var(--fg)' }}>
+      <button
+        onClick={open}
+        title="Rename this teammate (only on this Mac)"
+        style={{ background: 'none', border: 'none', padding: 0, color: 'var(--fg)', cursor: 'text', font: 'inherit' }}
+      >
+        {peer.name}
+      </button>{' '}
+      <span style={{ color: 'var(--dim)' }}>{peer.short}</span>
+      {peer.selfName && <span style={{ color: 'var(--dim)' }}> · their Mac: {peer.selfName}</span>}{' '}
+      <button
+        onClick={open}
+        style={{ background: 'none', border: 'none', padding: 0, color: 'var(--dim)', cursor: 'pointer', fontSize: 10, textDecoration: 'underline' }}
+      >
+        Rename
+      </button>
+    </div>
   );
 }

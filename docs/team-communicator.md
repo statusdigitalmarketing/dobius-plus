@@ -78,6 +78,11 @@ recipient's key. HTTPS is used when the peer has it and not required (audit #2, 
 Peer record: `{ id, name, ed25519, x25519, host, port, linkedAt, autoRoute: true, enabled: true }` in
 `<userData>/team/peers.json`.
 
+Renaming (Sam, 2026-11-07: two teammates on "MacBook-Air"): Settings > Team > Rename sets `name` on THIS Mac only and
+keeps what their Mac calls itself as `selfName`. Current names are unique (a rename to another teammate's current
+name is refused); `dobius-team send <ref>` matches a fingerprint, then current names, then `selfName`; an empty name
+goes back to `selfName`. Nothing is sent to the teammate.
+
 ### Messages
 
 - Plain envelope (inside the encryption): `{ v:1, id (uuid), from, to, kind: "ask"|"reply"|"note", replyTo?, text

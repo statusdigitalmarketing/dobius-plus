@@ -880,7 +880,8 @@ test('handoff r2: approve goes to the exact fingerprint only, never to a teammat
   const brettFp = Object.values(a.store.peers()).find((p) => p.name === 'Brett').id;
   const caseyFp = Object.values(a.store.peers()).find((p) => p.name === 'Casey').id;
   const r = a.svc.handoff({ cmd: 'send', arg: 'Brett', text: 'secret', fromTab: 't1' });
-  a.store.updatePeer(caseyFp, { name: brettFp });
+  // Casey's Mac calls itself Brett's fingerprint (a rename to that is refused here, so it comes in at link time).
+  a.store.savePeer({ ...a.store.peers()[caseyFp], name: brettFp });
   a.svc.unlink(brettFp);
   assert.match(a.svc.approveHandoff(r.hid).error, /no longer linked/);
   assert.equal(a.store.messages().filter((m) => m.dir === 'out').length, 0, 'nothing sent to Casey');
@@ -975,7 +976,8 @@ test('handoff r3: the card names the fingerprint and its CURRENT name; one that 
   const brettFp = Object.values(a.store.peers()).find((p) => p.name === 'Brett').id;
   const caseyFp = Object.values(a.store.peers()).find((p) => p.name === 'Casey').id;
   let swapped = false;
-  swap = () => { if (swapped) return; swapped = true; a.store.updatePeer(brettFp, { name: 'Casey' }); a.store.updatePeer(caseyFp, { name: 'Brett' }); };
+  // Through a temporary name: two teammates can never hold the same name at once.
+  swap = () => { if (swapped) return; swapped = true; a.store.updatePeer(brettFp, { name: 'Swapping' }); a.store.updatePeer(caseyFp, { name: 'Brett' }); a.store.updatePeer(brettFp, { name: 'Casey' }); };
   a.svc.handoff({ cmd: 'send', arg: 'Brett', text: 'secret', fromTab: 't1' });
   await settle(() => a.events.some(([e]) => e === 'handoff-held'));
   const short = brettFp.slice(0, 5);
@@ -1561,4 +1563,129 @@ test('lifecycle r10: background uncertainty survives a read-only message until a
   assert.deepEqual(st('C'), ['read']);
   assert.deepEqual(st('D'), ['read', 'working', 'done']);
   a.svc.stop(); b.svc.stop();
+});
+
+test('rename a teammate: shown everywhere by the new name, still found by the old one, no two alike, empty restores', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('BrettMac', tn);
+  const c = install('MaxMac', tn);
+  // Both Macs call themselves the same thing (hostnames), as Brett's and Max's do.
+  b.store.setSettings({ name: 'MacBook-Air' });
+  c.store.setSettings({ name: 'MacBook-Air' });
+  const lb = await linkPair(b, a);
+  assert.equal(lb.ok, true, lb.error);
+  const lc = await linkPair(c, a);
+  assert.equal(lc.ok, true, lc.error);
+  const peers = Object.values(a.store.peers());
+  assert.equal(peers.length, 2);
+  // Two Macs called the same: a send by that name is ambiguous until they are renamed.
+  assert.match(a.svc.send('MacBook-Air', 'hi').error, /more than one teammate/);
+  const [brett, max] = peers;
+  a.store.updatePeer(brett.id, { name: 'Brett' });
+  assert.equal(a.store.peers()[brett.id].name, 'Brett');
+  assert.equal(a.store.peers()[brett.id].selfName, 'MacBook-Air');
+  assert.throws(() => a.store.updatePeer(max.id, { name: 'brett' }), /already called brett/);
+  a.store.updatePeer(max.id, { name: 'Max' });
+  // Found by the new name, and the old one now points at no one twice (both renamed): it is still ambiguous.
+  assert.equal(a.svc.send('Brett', 'ping').ok, true);
+  assert.match(a.svc.send('MacBook-Air', 'ping').error, /more than one teammate/);
+  // Empty restores what their Mac calls itself.
+  a.store.updatePeer(max.id, { name: '' });
+  assert.equal(a.store.peers()[max.id].name, 'MacBook-Air');
+  assert.equal(Object.hasOwn(a.store.peers()[max.id], 'selfName'), false);
+  // Max is called MacBook-Air again, and Brett's Mac also calls itself that: ambiguous, never a silent pick.
+  assert.match(a.svc.send('MacBook-Air', 'ping').error, /more than one teammate/);
+  assert.equal(a.svc.send('Brett', 'ping').ok, true);
+  a.svc.stop(); b.svc.stop(); c.svc.stop();
+});
+
+test('rename r2: fingerprint-shaped names and refs, invisible characters, clearing into a taken name, re-link keeps it', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('BrettMac', tn);
+  const c = install('MaxMac', tn);
+  b.store.setSettings({ name: 'MacBook-Air' });
+  assert.equal((await linkPair(b, a)).ok, true);
+  assert.equal((await linkPair(c, a)).ok, true);
+  const bFp = Object.values(a.store.peers()).find((p) => p.name === 'MacBook-Air').id;
+  const cFp = Object.values(a.store.peers()).find((p) => p.name === 'MaxMac').id;
+  // A name may not look like a fingerprint (sends match those first).
+  assert.throws(() => a.store.updatePeer(cFp, { name: `${bFp.slice(0, 5)}-${bFp.slice(5, 10)}` }), /fingerprint/);
+  // Line separators and zero-width characters are spaces / gone, so a lookalike of another name is caught.
+  a.store.updatePeer(bFp, { name: 'Alex Smith' });
+  assert.throws(() => a.store.updatePeer(cFp, { name: 'Alex Smith' }), /already called Alex Smith/);
+  a.store.updatePeer(cFp, { name: 'Max​' });
+  assert.equal(a.store.peers()[cFp].name, 'Max');
+  // Clearing B back to "MacBook-Air" while C is currently called that is refused.
+  a.store.updatePeer(cFp, { name: 'MacBook-Air' });
+  assert.throws(() => a.store.updatePeer(bFp, { name: '' }), /already called MacBook-Air; rename that one first/);
+  // A reference shaped like a fingerprint never matches a name.
+  assert.match(a.svc.send(`${'z'.repeat(5)}-${'z'.repeat(5)}`, 'x').error, /no linked teammate/);
+  // Re-link (savePeer again) keeps this Mac's name and records what their Mac calls itself now.
+  a.store.updatePeer(cFp, { name: 'Max' });
+  a.store.savePeer({ ...a.store.peers()[cFp], name: 'Maxs-MacBook' });
+  assert.equal(a.store.peers()[cFp].name, 'Max');
+  assert.equal(a.store.peers()[cFp].selfName, 'Maxs-MacBook');
+  a.svc.stop(); b.svc.stop(); c.svc.stop();
+});
+
+test('rename r3: fullwidth fingerprints, NFKC before the length cut, a rename survives any number of re-links', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('BrettMac', tn);
+  const c = install('MaxMac', tn);
+  assert.equal((await linkPair(b, a)).ok, true);
+  assert.equal((await linkPair(c, a)).ok, true);
+  const bFp = Object.values(a.store.peers()).find((p) => p.name === 'BrettMac').id;
+  const cFp = Object.values(a.store.peers()).find((p) => p.name === 'MaxMac').id;
+  const wide = (t) => [...t].map((ch) => (/[A-Za-z0-9]/.test(ch) ? String.fromCharCode(ch.charCodeAt(0) + 0xfee0) : ch)).join('');
+  assert.throws(() => a.store.updatePeer(cFp, { name: wide(`${bFp.slice(0, 5)}-${bFp.slice(5, 10)}`) }), /fingerprint/);
+  // A name whose NFKC form is longer than 80 is cut AFTER normalizing, so two names can never differ only past the cut.
+  const s = 'Q̈́'.repeat(26) + 'X';
+  a.store.updatePeer(bFp, { name: s });
+  assert.throws(() => a.store.updatePeer(cFp, { name: `${s} Y` }), /already called/);
+  // Renamed here, then re-linked twice (once with the same self name): still the local name.
+  a.store.updatePeer(bFp, { name: 'Brett' });
+  a.store.savePeer({ ...a.store.peers()[bFp], name: 'BrettMac' });
+  a.store.savePeer({ ...a.store.peers()[bFp], name: 'Brett-Mac' });
+  assert.equal(a.store.peers()[bFp].name, 'Brett');
+  assert.equal(a.store.peers()[bFp].selfName, 'Brett-Mac');
+  // Clearing goes back to what their Mac calls itself now.
+  a.store.updatePeer(bFp, { name: '' });
+  assert.equal(a.store.peers()[bFp].name, 'Brett-Mac');
+  assert.equal(a.store.peers()[bFp].renamed, undefined);
+  a.svc.stop(); b.svc.stop(); c.svc.stop();
+});
+
+test('rename r4: invisible marks do not make a second name, and a fingerprint-shaped self name shows as teammate', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('BrettMac', tn);
+  const c = install('MaxMac', tn);
+  assert.equal((await linkPair(b, a)).ok, true);
+  assert.equal((await linkPair(c, a)).ok, true);
+  const bFp = Object.values(a.store.peers()).find((p) => p.name === 'BrettMac').id;
+  const cFp = Object.values(a.store.peers()).find((p) => p.name === 'MaxMac').id;
+  a.store.updatePeer(bFp, { name: 'Brett' });
+  assert.throws(() => a.store.updatePeer(cFp, { name: 'Brett͏' }), /already called Brett/);
+  a.store.savePeer({ ...a.store.peers()[cFp], name: `${bFp.slice(0, 5)}-${bFp.slice(5, 10)}` });
+  assert.equal(a.store.peers()[cFp].name, 'teammate');
+  a.svc.stop(); b.svc.stop(); c.svc.stop();
+});
+
+test('rename r5: split surrogate halves around an invisible mark never join into a hidden character', async () => {
+  const tn = net();
+  const a = install('Sam', tn);
+  const b = install('BrettMac', tn);
+  const c = install('MaxMac', tn);
+  assert.equal((await linkPair(b, a)).ok, true);
+  assert.equal((await linkPair(c, a)).ok, true);
+  const bFp = Object.values(a.store.peers()).find((p) => p.name === 'BrettMac').id;
+  const cFp = Object.values(a.store.peers()).find((p) => p.name === 'MaxMac').id;
+  a.store.savePeer({ ...a.store.peers()[cFp], name: `${bFp.slice(0, 5)}-${bFp.slice(5, 10)}\uDB40͏\uDD00` });
+  const n = a.store.peers()[cFp].name;
+  assert.equal(/[\u{E0100}-\u{E01EF}]/u.test(n), false, 'no variation selector formed');
+  assert.equal(n.includes('�'), true, 'the halves became visible replacement characters');
+  a.svc.stop(); b.svc.stop(); c.svc.stop();
 });
