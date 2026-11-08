@@ -545,7 +545,8 @@ test('Windows keeps one Dobius per userData; the lock module loads right after t
   const { RELAUNCH_ARG } = await import('../single-instance.js');
   assert.equal(RELAUNCH_ARG, '--dobius-relaunch');
   assert.match(src, /app\.relaunch\(\{ args: \[\.\.\.process\.argv\.slice\(1\)\.filter\(\(a\) => a !== RELAUNCH_ARG\), RELAUNCH_ARG\] \}\)/);
-  assert.match(src, /app\.on\('second-instance', \(_e, argv\) => \{\n.*\n.*\n    if \(Array\.isArray\(argv\) && \(argv\.includes\(RELAUNCH_ARG\) \|\| argv\.includes\('--updated'\)\)\) return;/);
+  // \r?\n: a Windows checkout has CRLF line endings.
+  assert.match(src, /app\.on\('second-instance', \(_e, argv\) => \{\r?\n.*\r?\n.*\r?\n    if \(Array\.isArray\(argv\) && \(argv\.includes\(RELAUNCH_ARG\) \|\| argv\.includes\('--updated'\)\)\) return;/);
 });
 
 test('the lock: a normal second launch hands over at once; a launch after an update waits for the old copy', async () => {
