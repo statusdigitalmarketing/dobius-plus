@@ -75,7 +75,7 @@ export function initPhoneAlerts({ hasWaiting } = {}) {
       return { alerts: st.phoneAlerts, morningAt: n.morningAt, quietAfter: n.quietAfter };
     },
     statusOf: (id) => statusFor(id)?.status || null,
-    labelFor: (id) => tabLabelForNotify(id),
+    labelFor: (id, cwd) => tabLabelForNotify(id, cwd),
     handoffWaiting: (id) => (handoffWaiting ? handoffWaiting(id) : false),
     isLooking,
     hasRecipients: () => phoneAlerts.hasAnyPhone(),
@@ -96,8 +96,9 @@ export function initPhoneAlerts({ hasWaiting } = {}) {
 export const phoneAlerts = {
   tabHook: (id, state, tag) => notifier?.tabHook(id, state, tag),
   tabInput: (id) => notifier?.tabInput(id),
-  handoffAdded: (id) => notifier?.handoffAdded(id),
-  tabFailed: (id) => notifier?.tabFailed(id),
+  handoffAdded: (id, o) => notifier?.handoffAdded(id, o?.repeat === true ? { repeat: true } : undefined),
+  // cwd: the exit's own folder, for a phone-opened tab whose entry is already gone (Codex round 10).
+  tabFailed: (id, cwd) => notifier?.tabFailed(id, cwd),
   teamMessage: (name) => notifier?.teamMessage(name),
   stop: () => notifier?.stop(),
 

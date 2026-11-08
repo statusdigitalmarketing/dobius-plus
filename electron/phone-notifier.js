@@ -209,10 +209,10 @@ export function createPhoneNotifier(deps) {
    * A tab's program exited with a nonzero code (the shell or Claude crashed). Under the "needs you" switch. Its own key,
    * and the label is taken now: the tab is gone by the time it goes out.
    */
-  function tabFailed(tabId) {
+  function tabFailed(tabId, cwd) {
     if (typeof tabId !== 'string' || !tabId) return;
     let info = {};
-    try { info = d.labelFor(tabId) || {}; } catch { info = {}; }
+    try { info = d.labelFor(tabId, cwd) || {}; } catch { info = {}; }
     put({ key: `fail:${tabId}`, tabId, kind: 'failed', info, dueAt: d.now() + 500 });
   }
 

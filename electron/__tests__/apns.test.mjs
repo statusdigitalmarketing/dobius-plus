@@ -274,3 +274,20 @@ test('round 9: a key valid on one environment tries the other host while unknown
     assert.equal(opened.length, before + 1, 'key B opened its own connection instead of reusing the A one');
   } finally { sender.close(); await net.close(); fs.rmSync(a.dir, { recursive: true, force: true }); fs.rmSync(b.dir, { recursive: true, force: true }); }
 });
+
+test('round 10: a key for one environment never gets a valid token dropped; each key keeps its own provider token', async () => {
+  const { dir } = keyDir();
+  const net = await standIns((req) => (req.env === 'production' ? { status: 403, reason: 'BadEnvironmentKeyIdInToken' } : { status: 400, reason: 'BadDeviceToken' }));
+  const sender = createApnsSender({ dir, connect: net.connect, idleMs: 200 });
+  try {
+    const [r] = await sender.send([{ token: TOKEN, env: 'auto' }], { title: 'a', body: 'b' });
+    assert.equal(r.outcome, 'failed', 'kept: neither host could judge the token with this key');
+  } finally { sender.close(); await net.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  const both = keyDir();
+  const net2 = await standIns(() => ({ status: 400, reason: 'BadDeviceToken' }));
+  const s2 = createApnsSender({ dir: both.dir, connect: net2.connect, idleMs: 200 });
+  try {
+    const [r] = await s2.send([{ token: TOKEN, env: 'auto' }], { title: 'a', body: 'b' });
+    assert.equal(r.outcome, 'drop', 'both hosts refused the token itself');
+  } finally { s2.close(); await net2.close(); fs.rmSync(both.dir, { recursive: true, force: true }); }
+});

@@ -517,3 +517,29 @@ test('round 9: a repeated handback marks the red behind as listed (dismissing it
   r.cfg.alerts.handoff = false; // only "needs you" left
   assert.equal(r.sent[0].current(), false, 'the next phone does not get a "handed back" its switch now refuses');
 });
+
+test('round 10: a failed phone-opened tab is named by the folder its exit reported', () => {
+  const asked = [];
+  const sent = [];
+  let t = 5_000_000;
+  let timers = [];
+  const n = createPhoneNotifier({
+    now: () => t,
+    setTimer: (fn, ms) => { timers.push({ at: t + ms, fn }); return timers.length; },
+    clearTimer: () => {},
+    settings: () => ({ alerts: {} }),
+    minuteOfDay: () => 600,
+    statusOf: () => null,
+    labelFor: (id, cwd) => { asked.push([id, cwd]); return { label: 'new', project: cwd ? cwd.split('/').pop() : 'mobile' }; },
+    handoffWaiting: () => false,
+    isLooking: () => false,
+    quitting: () => false,
+    send: (x) => { sent.push(x); return Promise.resolve(); },
+  });
+  n.tabFailed('term-mobile-3', '/work/api');
+  t += 1000;
+  for (const x of timers.sort((a, b) => a.at - b.at)) if (x.at <= t) x.fn();
+  assert.deepEqual(asked, [['term-mobile-3', '/work/api']]);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].title, 'api');
+});

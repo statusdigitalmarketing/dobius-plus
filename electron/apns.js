@@ -179,7 +179,9 @@ function connectApple(origin) {
 
 export function createApnsSender({ dir, connect = connectApple, now = () => Date.now(), readKey = readApnsKey, idleMs = 60_000, timeoutMs = 10_000 } = {}) {
   let cached = null; // { at, result }
-  let jwt = null; // { value, iat, stamp }
+  // Provider tokens per key: an old-key send still finishing after a swap never replaces the new key's token, so
+  // neither key churns tokens faster than Apple allows (TooManyProviderTokenUpdates, Codex round 10).
+  const jwts = new Map(); // stamp -> { value, iat }
   const sessions = new Map(); // origin -> { session, timer }
   // The constant hosts, looked up by name only.
   const APNS_ORIGIN_FOR = (env) => APNS_ORIGINS[env];
@@ -190,7 +192,7 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
       let result;
       try { result = dir ? readKey(dir) : { ok: false, reason: 'no-key' }; } catch { result = { ok: false, reason: 'unsafe-file' }; }
       if (cached?.result?.stamp !== result.stamp) {
-        jwt = null; // a new key never signs with the old token
+        // a new key signs with its own token (jwts is per key)
         // Nor on the old connection: Apple refuses a different key (or key scope) on a connection a token already used,
         // so every open session is retired and the next send opens a fresh one (Codex round 8).
         if (cached) for (const [origin, s] of sessions) { clearTimeout(s.timer); sessions.delete(origin); retire(s.session); }
@@ -202,8 +204,13 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
 
   function token(k, fresh = false) {
     const nowS = Math.floor(now() / 1000);
-    if (fresh || !jwt || jwt.stamp !== k.stamp || nowS - jwt.iat >= JWT_MAX_AGE_S) jwt = { value: makeJwt(k, nowS), iat: nowS, stamp: k.stamp };
-    return jwt.value;
+    let j = jwts.get(k.stamp);
+    if (fresh || !j || nowS - j.iat >= JWT_MAX_AGE_S) {
+      j = { value: makeJwt(k, nowS), iat: nowS };
+      jwts.set(k.stamp, j);
+      if (jwts.size > 4) jwts.delete(jwts.keys().next().value); // only a key or two are ever live
+    }
+    return j.value;
   }
 
   // One connection per host AND key: a send still going on the old key after a swap opens its own, never one the new
@@ -284,6 +291,11 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
     // so Mac A's "Today" never replaces Mac B's.
     const tag = notif.tag && device.pairingId ? `${notif.tag}.${device.pairingId}` : notif.tag;
     const order = device.env === 'sandbox' ? ['sandbox'] : device.env === 'production' ? ['production'] : ['production', 'sandbox'];
+    // A token is dead only when a host that could have taken it said so: the device's own host, or for an unknown one,
+    // BOTH hosts saying BadDeviceToken. A key valid on one environment only (BadEnvironmentKeyIdInToken) proves
+    // nothing about the token, so it is kept (Codex round 10).
+    let otherSaidBadDevice = false;
+    let lastReason = '';
     for (const env of order) {
       let retried = false;
       for (;;) {
@@ -291,14 +303,15 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
         if (!stillValid(device)) return { token: device.token, outcome: 'skipped' };
         const req = buildRequest({ token: device.token, bundleId: k.bundleId, jwt: token(k, retried), payload, tag, nowSeconds: Math.floor(now() / 1000) });
         const r = await post(APNS_ORIGIN_FOR(env), req.headers, req.body, k.stamp);
-        const outcome = outcomeFor(r.status, r.reason, { envKnown: device.env === env || env === 'sandbox' });
+        const outcome = outcomeFor(r.status, r.reason, { envKnown: device.env === env || (env === 'sandbox' && otherSaidBadDevice) });
         if (outcome === 'retry-auth' && !retried) { retried = true; continue; }
-        if (outcome === 'other-host') break; // try the next host
+        if (outcome === 'other-host') { if (r.reason === 'BadDeviceToken') otherSaidBadDevice = true; lastReason = r.reason; break; } // try the next host
         if (outcome === 'retry-auth') return { token: device.token, outcome: 'failed', reason: r.reason };
         return { token: device.token, outcome, env, status: r.status, reason: r.reason };
       }
     }
-    return { token: device.token, outcome: 'drop', reason: 'BadDeviceToken' };
+    // Every host tried without a verdict on the token itself (for one, the key was for the other environment): kept.
+    return { token: device.token, outcome: 'failed', reason: lastReason || 'no-host' };
   }
 
   return {

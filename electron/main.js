@@ -4281,7 +4281,7 @@ function setupWindowHandlers() {
   initPhoneAlerts({ hasWaiting: (id) => !!handoffCommands?.hasWaiting(id) });
   terminalStatus.onHookState((id, state, tag) => phoneAlerts.tabHook(id, state, tag));
   // A tab's program ended with an error (a kill on close never reaches onExit). Never while quitting.
-  addTerminalObserver({ onExit: (id, info) => { if (typeof info?.exitCode === 'number' && info.exitCode !== 0 && !getQuitting()) phoneAlerts.tabFailed(id); } });
+  addTerminalObserver({ onExit: (id, info) => { if (typeof info?.exitCode === 'number' && info.exitCode !== 0 && !getQuitting()) phoneAlerts.tabFailed(id, info.cwd); } });
   initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint, endpointProblem: getTeamEndpointProblem, onMessage: (name) => phoneAlerts.teamMessage(name) });
   setTeamBridge(handleTeamBridge);
   // What a Claude session in a Dobius tab is told it can do (electron/agent-context.js), kept current: at launch,

@@ -339,9 +339,9 @@ function claudeIsLive(id) {
 export function isPairedToken(token) { return knownToken(token); }
 
 /** A tab's name for a notification: the renamed label (or Tab N) and the project folder's name, nothing else. */
-export function tabLabelForNotify(id) {
+export function tabLabelForNotify(id, exitCwd) {
   const t = listTerminals().find((x) => x.id === id);
-  const meta = parseTermLabel(id, t?.cwd);
+  const meta = parseTermLabel(id, t?.cwd || (typeof exitCwd === 'string' ? exitCwd : undefined));
   // The folder's own name by this platform's separators: on Windows a path split on `/` alone was the whole path
   // (Codex round 4), and a notification may name a folder, never where it lives.
   return { label: configTabLabels().get(id) || meta.label, project: baseName(meta.projectPath) || meta.projectName };
