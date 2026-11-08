@@ -339,6 +339,28 @@ test('round 6: a switch turned off mid-send stops it; a finish behind a handoff 
   assert.deepEqual(h.sent.map((s) => s.kind), ['done']);
 });
 
+test('round 7: looking at the tab mid-send stops it; a handed-back red behind a handoff goes once both commands are gone', () => {
+  let looking = false;
+  const r = rig({ status: { a: 'needs' }, looking: () => looking });
+  r.n.tabHook('a', 'needs', null);
+  r.advance(2000);
+  assert.equal(r.sent[0].current(), true);
+  looking = true;
+  assert.equal(r.sent[0].current(), false);
+  let waiting = true;
+  const h = rig({ status: { b: 'needs' }, waiting: () => waiting });
+  h.n.tabHook('b', 'needs', null);
+  h.advance(2000); // needs sent
+  h.n.tabHook('b', 'working');
+  h.n.tabHook('b', 'needs', 'handoff');
+  h.n.handoffAdded('b'); // held by the gap
+  h.n.tabHook('b', 'working');
+  h.n.tabHook('b', 'needs', 'handoff'); // another handed-back red behind it
+  waiting = false; // both commands dismissed
+  h.advance(TAB_GAP_MS + 12000);
+  assert.equal(h.sent.length, 1);
+});
+
 test('switches: each event obeys its own; a handed-back command goes out as "needs you" with only that one on', () => {
   const r = rig({ alerts: { done: false, team: false }, status: { a: 'done', b: 'needs' } });
   r.n.tabHook('a', 'done', null);

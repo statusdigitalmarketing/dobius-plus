@@ -159,7 +159,7 @@ export function createPhoneNotifier(deps) {
       // The commands are listed and still waiting: that is the better buzz. The red is remembered on it, so if the
       // command is run or dismissed before it goes out, the red still does (Codex round 2).
       // It keeps its own debounce and its own generation (Codex round 3).
-      if (liveHandoff(p)) { pending.set(key, { ...p, behind: { kind: 'needs', gen: g, at: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) } }); return; }
+      if (liveHandoff(p)) { pending.set(key, { ...p, behind: { kind: 'needs', handoff, gen: g, at: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) } }); return; }
       put({ key, tabId, kind: 'needs', gen: g, awaitHandoff: handoff, dueAt: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) });
       return;
     }
@@ -311,6 +311,9 @@ export function createPhoneNotifier(deps) {
       // A handoff whose command was run or dismissed meanwhile, with a red that arrived behind it: the red goes out,
       // as that red, after its own debounce.
       // So does it when the handoff's own switch (and "needs you") is off: what waited behind it still counts (round 6).
+      // A red that was itself a handed-back command is not news once no command waits (dismissed or run: round 7).
+      const behindStale = due0.behind?.handoff && !liveHandoff(due0);
+      if (due0.kind === 'handoff' && due0.behind && behindStale) continue;
       if (due0.kind === 'handoff' && due0.behind && (!liveHandoff(due0) || !effectiveKind('handoff', alerts))) {
         const red = { key: due0.key, tabId: due0.tabId, kind: due0.behind.kind, gen: due0.behind.gen, dueAt: due0.behind.at };
         if (red.dueAt > t) { pending.set(red.key, red); continue; }
@@ -353,7 +356,8 @@ export function createPhoneNotifier(deps) {
           const n = build(p, kind, alerts.names);
           // current(): asked by the sender before each phone, so news that stopped being true mid-send stops there. The
           // same test the flush used, on the entry as it was (a handoff sent as "needs you" is still judged by its command).
-          const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind) && isCurrent(p);
+          // And nobody started looking at the tab on the Mac meanwhile (round 7).
+          const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind) && isCurrent(p) && !(p.tabId && d.isLooking(p.tabId));
           Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId, current })).catch(() => { /* the sender logs by code */ });
         }
       }
