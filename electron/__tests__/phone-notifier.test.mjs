@@ -147,6 +147,62 @@ test('a burst across tabs becomes one summary; more than the cap in ten minutes 
   assert.equal(r2.sent.length, GLOBAL_MAX);
 });
 
+test('round 1: a burst waits for its members (never sends one early); an answer inside the wait still cancels', () => {
+  const r = rig({ status: { a: 'done', b: 'needs' } });
+  r.n.tabHook('a', 'done', null); // due at +2000
+  r.advance(1000);
+  r.n.tabHook('b', 'needs', null); // due at +2500
+  r.advance(1100); // +2100: a is due, b is not yet; the flush waits for b
+  assert.equal(r.sent.length, 0);
+  r.n.tabInput('b'); // b answered at the Mac before its own debounce ended
+  r.st.b = 'working';
+  r.advance(2000);
+  assert.deepEqual(r.sent.map((s) => s.kind), ['done']);
+});
+
+test('round 1: with no phone to tell, nothing counts against the limits', () => {
+  let phones = false;
+  // 25 finishes with nobody subscribed, then a red once a phone exists: it still goes out.
+  const sent = [];
+  let t = 0;
+  let timers = [];
+  const m = createPhoneNotifier({
+    now: () => t,
+    setTimer: (fn, ms) => { timers.push({ at: t + ms, fn }); return timers.length; },
+    clearTimer: () => {},
+    settings: () => ({}),
+    statusOf: (id) => (id === 'red' ? 'needs' : 'done'),
+    labelFor: () => ({ label: 'x', project: 'p' }),
+    hasRecipients: () => phones,
+    send: (x) => { sent.push(x); return Promise.resolve(); },
+  });
+  const run = (ms) => { const end = t + ms; for (;;) { timers.sort((a, b) => a.at - b.at); const x = timers[0]; if (!x || x.at > end) break; timers.shift(); t = x.at; x.fn(); } t = end; };
+  for (let i = 0; i < 25; i += 1) { m.tabHook(`t${i}`, 'done', null); run(3000); }
+  assert.equal(sent.length, 0);
+  phones = true;
+  m.tabHook('red', 'needs', null);
+  run(3000);
+  assert.equal(sent.length, 1);
+});
+
+test('round 1: a handoff whose command was dismissed does not swallow a new permission prompt', () => {
+  let waiting = true;
+  const r = rig({ status: { a: 'needs' }, waiting: () => waiting });
+  r.n.tabHook('a', 'needs', null);
+  r.advance(2000);
+  assert.equal(r.sent.length, 1);
+  r.n.handoffAdded('a'); // held by the 30 s gap... (already notified as needs: skipped)
+  r.n.tabHook('a', 'working');
+  r.n.tabHook('a', 'needs', 'handoff');
+  r.n.handoffAdded('a');
+  waiting = false; // dismissed on the Mac
+  r.n.tabHook('a', 'working');
+  r.n.tabHook('a', 'needs', null); // a real permission prompt now
+  r.advance(TAB_GAP_MS + 5000);
+  assert.equal(r.sent.length, 2);
+  assert.equal(r.sent[1].kind, 'needs');
+});
+
 test('switches: each event obeys its own; a handed-back command goes out as "needs you" with only that one on', () => {
   const r = rig({ alerts: { done: false, team: false }, status: { a: 'done', b: 'needs' } });
   r.n.tabHook('a', 'done', null);

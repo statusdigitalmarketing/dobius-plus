@@ -45,7 +45,10 @@ function isLooking(tabId) {
     const w = BrowserWindow.getFocusedWindow();
     if (!w || w.isDestroyed() || w.isMinimized() || !w.isVisible()) return false;
     const wcId = w.webContents.id;
-    if (getTerminalWebContentsId(tabId) !== wcId || !shownByWindow.get(wcId)?.has(tabId)) return false;
+    // A tab whose program just exited is already gone from terminal-manager (owner null) but still on screen in its
+    // window: the window's own report decides then (Codex lens B: a watched `exit 1` must not buzz the phone).
+    const owner = getTerminalWebContentsId(tabId);
+    if ((owner != null && owner !== wcId) || !shownByWindow.get(wcId)?.has(tabId)) return false;
     if (powerMonitor.getSystemIdleState(LOOKING_IDLE_S) !== 'active') return false; // idle or the screen is locked
     return true;
   } catch { return false; }
@@ -75,6 +78,7 @@ export function initPhoneAlerts({ hasWaiting } = {}) {
     labelFor: (id) => tabLabelForNotify(id),
     handoffWaiting: (id) => (handoffWaiting ? handoffWaiting(id) : false),
     isLooking,
+    hasRecipients: () => phoneAlerts.hasAnyPhone(),
     quitting: () => getQuitting(),
     send: (n) => push.send(n),
   });

@@ -167,7 +167,7 @@ function Accounts({ connection, onChanged }) {
     return connection.onMessage((m) => { if (m.type === 'authed' || m.type === 'settingsChanged') load(); });
   }, [connection, load]);
   const choose = async (row) => {
-    if (row.active || busy) return;
+    if (row.active || busy || row.selectable === false) return;
     setBusy(true);
     setError('');
     const r = await ask(connection, { type: 'accountActivate', id: row.isDefault ? null : row.id }, 'accountResult');

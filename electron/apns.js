@@ -197,9 +197,17 @@ export function createApnsSender({ dir, connect = (origin) => http2.connect(orig
       session.on('goaway', forget);
       sessions.set(origin, s);
     }
-    s.timer = setTimeout(() => { sessions.delete(origin); try { s.session.close(); } catch { /* closed */ } }, idleMs);
+    s.timer = setTimeout(() => { if (sessions.get(origin) === s) sessions.delete(origin); retire(s.session); }, idleMs);
     s.timer.unref?.();
     return s.session;
+  }
+
+  // Close gracefully, and destroy if it is still open shortly after (a stream that never got its connection, a TLS
+  // handshake that never finished, would otherwise hold the session forever).
+  function retire(session) {
+    try { session.close(); } catch { /* closed */ }
+    const t = setTimeout(() => { try { if (!session.destroyed) session.destroy(); } catch { /* gone */ } }, 5000);
+    t.unref?.();
   }
 
   function post(origin, headers, body) {
@@ -207,12 +215,21 @@ export function createApnsSender({ dir, connect = (origin) => http2.connect(orig
       let done = false;
       const finish = (r) => { if (!done) { done = true; resolve(r); } };
       let req;
+      let session;
       try {
-        req = sessionFor(origin).request(headers);
+        session = sessionFor(origin);
+        req = session.request(headers);
       } catch { finish({ status: 0, reason: 'connect' }); return; }
       let status = 0;
       let text = '';
-      req.setTimeout(timeoutMs, () => { try { req.close(http2.constants.NGHTTP2_CANCEL); } catch { /* closed */ } finish({ status: 0, reason: 'timeout' }); });
+      req.setTimeout(timeoutMs, () => {
+        try { req.close(http2.constants.NGHTTP2_CANCEL); } catch { /* closed */ }
+        // A request that timed out says the connection is not healthy: the next send starts a fresh one.
+        const s = sessions.get(origin);
+        if (s?.session === session) { clearTimeout(s.timer); sessions.delete(origin); }
+        try { session.destroy(); } catch { /* gone */ }
+        finish({ status: 0, reason: 'timeout' });
+      });
       req.on('response', (h) => { status = Number(h[':status']) || 0; });
       req.setEncoding('utf8');
       req.on('data', (c) => { if (text.length < 1024) text += c; });
@@ -226,13 +243,18 @@ export function createApnsSender({ dir, connect = (origin) => http2.connect(orig
     });
   }
 
-  async function sendOne(k, device, notif) {
+  async function sendOne(k, device, notif, stillValid) {
     const payload = apnsPayload({ ...notif, mac: device.pairingId });
+    // One phone paired with two Macs gets both Macs' notifications on one token: the collapse id names the pairing too,
+    // so Mac A's "Today" never replaces Mac B's.
+    const tag = notif.tag && device.pairingId ? `${notif.tag}.${device.pairingId}` : notif.tag;
     const order = device.env === 'sandbox' ? ['sandbox'] : device.env === 'production' ? ['production'] : ['production', 'sandbox'];
     for (const env of order) {
       let retried = false;
       for (;;) {
-        const req = buildRequest({ token: device.token, bundleId: k.bundleId, jwt: token(k, retried), payload, tag: notif.tag, nowSeconds: Math.floor(now() / 1000) });
+        // Checked before every request: a phone unpaired while an earlier request waited gets nothing more.
+        if (!stillValid(device)) return { token: device.token, outcome: 'skipped' };
+        const req = buildRequest({ token: device.token, bundleId: k.bundleId, jwt: token(k, retried), payload, tag, nowSeconds: Math.floor(now() / 1000) });
         const r = await post(APNS_ORIGIN_FOR(env), req.headers, req.body);
         const outcome = outcomeFor(r.status, r.reason, { envKnown: device.env === env || env === 'sandbox' });
         if (outcome === 'retry-auth' && !retried) { retried = true; continue; }
@@ -252,15 +274,16 @@ export function createApnsSender({ dir, connect = (origin) => http2.connect(orig
     },
     /**
      * Send one notification to each device ({ token, env, pairingId }). Never throws. Results say what to do with each
-     * token: outcome sent (env is the host that took it), drop, or failed.
+     * token: outcome sent (env is the host that took it), drop, failed, or skipped (stillValid said no).
+     * stillValid(device): asked right before each request.
      */
-    async send(devices, notif) {
+    async send(devices, notif, stillValid = () => true) {
       const k = key();
       if (!k.ok) return [];
       const list = (Array.isArray(devices) ? devices : []).filter((d) => d && isDeviceToken(d.token));
       const out = [];
       for (const d of list) {
-        try { out.push(await sendOne(k, d, notif)); } catch { out.push({ token: d.token, outcome: 'failed', reason: 'error' }); }
+        try { out.push(await sendOne(k, d, notif, stillValid)); } catch { out.push({ token: d.token, outcome: 'failed', reason: 'error' }); }
       }
       return out;
     },

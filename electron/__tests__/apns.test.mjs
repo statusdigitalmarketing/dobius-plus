@@ -170,6 +170,22 @@ test('send: one request per device to the stand-in, a sandbox-only token found a
   } finally { sender.close(); await net.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('round 1: a device unpaired while an earlier request waited gets nothing; the collapse id names the pairing', async () => {
+  const { dir } = keyDir();
+  const net = await standIns(() => ({ status: 200 }));
+  const sender = createApnsSender({ dir, connect: net.connect, idleMs: 200 });
+  try {
+    const live = new Set([TOKEN, TOKEN2]);
+    const devices = [{ token: TOKEN, env: 'production', pairingId: 'mac-a' }, { token: TOKEN2, env: 'production', pairingId: 'mac-b' }];
+    const sending = sender.send(devices, { title: 'a', body: 'b', tag: 'today' }, (d) => live.has(d.token));
+    live.delete(TOKEN2); // unpaired while the first request is in flight
+    const results = await sending;
+    assert.deepEqual(results.map((r) => r.outcome), ['sent', 'skipped']);
+    assert.equal(net.seen.length, 1);
+    assert.equal(net.seen[0].headers['apns-collapse-id'], 'today.mac-a');
+  } finally { sender.close(); await net.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('send: a refused provider token is made again once, then the send fails without dropping the device', async () => {
   const { dir } = keyDir();
   const net = await standIns(() => ({ status: 403, reason: 'ExpiredProviderToken' }));

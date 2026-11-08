@@ -12,7 +12,7 @@ import { DemoConnection, isDemoPairing } from './demo';
 import * as storage from './storage';
 import { normaliseHost, mixedContent, reachabilityMessage } from './host';
 import { forgetPush } from './push-client';
-import { onNativeTap } from './native-push';
+import { onNativeTap, unregisterNativePush } from './native-push';
 import { PAIRINGS_KEY, activePairing, loadPairings, readPairings, savePairings, upsertPairing, switchPairing, renamePairing, removePairing } from './pairings';
 
 // A keyed tree owns all state for one connection lifetime, including terminal,
@@ -104,8 +104,9 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     // Once per tap: a reconnect later (a new connection) must not jump back to that tab.
     if (resolvedRefs.current.has(openRequest)) return undefined;
     const reqId = `ref-${Date.now().toString(36)}`;
-    let asked = false;
-    const ask = () => { if (asked) return; asked = true; connection.send({ type: 'notifyResolve', ref: openRequest.ref, reqId }); };
+    // Asked again on every (re)authentication until the answer arrives: a socket dropped before the reply must not
+    // lose the tap. A late duplicate reply is ignored (the listener is gone after the first).
+    const ask = () => connection.send({ type: 'notifyResolve', ref: openRequest.ref, reqId });
     const off = connection.onMessage((m) => {
       if (m.type === 'authed') ask();
       if (m.type === 'notifyTarget' && m.reqId === reqId) {
@@ -499,7 +500,10 @@ export default function App() {
       }}
       onRename={(id, name) => update((s) => renamePairing(s, id, name))}
       onRemove={async (id) => {
+        const record = stateRef.current.pairings.find((p) => p.id === id);
         const ok = await update((s) => removePairing(s, id));
+        // The App Store app: that Mac stops sending to this phone (native-push.js).
+        if (record && !stateRef.current.pairings.some((p) => p.id === id)) unregisterNativePush(record, Connection).catch(() => { /* best effort */ });
         // A removed Mac must stop notifying this app (Codex). Decided by the
         // saved list, not the result: a save whose read-back failed may still
         // have removed it.

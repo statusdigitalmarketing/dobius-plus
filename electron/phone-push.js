@@ -58,13 +58,15 @@ export function createPhonePush({ webPush, hasWebPush, apns, tokens, now = () =>
         const ref = n.tabId ? refFor(n.tabId) : undefined;
         jobs.push((async () => {
           let results = [];
-          try { results = await apns.send(devices, { title: n.title, body: n.body, tag: n.tag, kind: n.kind, ref }); } catch { log('apns-failed'); return; }
+          // Each device is checked again right before its request: still listed (so still paired), same registration.
+          const stillValid = (dev) => { try { return tokens.list().some((x) => x.token === dev.token && x.addedAt === dev.addedAt); } catch { return false; } };
+          try { results = await apns.send(devices, { title: n.title, body: n.body, tag: n.tag, kind: n.kind, ref }, stillValid); } catch { log('apns-failed'); return; }
           for (const r of results) {
             // Only the registration this send used: the phone may have registered again while it was in flight.
             const dev = devices.find((x) => x.token === r.token);
             if (r.outcome === 'drop') { try { tokens.drop(r.token, dev?.addedAt); } catch { /* config write failed */ } log('apns-token-dropped'); }
             else if (r.outcome === 'sent') { if (dev && dev.env !== r.env) { try { tokens.setEnv(r.token, r.env, dev.addedAt); } catch { /* best effort */ } } }
-            else log(`apns-${String(r.reason || 'failed').replace(/[^\w-]/g, '').slice(0, 40)}`);
+            else if (r.outcome !== 'skipped') log(`apns-${String(r.reason || 'failed').replace(/[^\w-]/g, '').slice(0, 40)}`);
           }
         })());
       }

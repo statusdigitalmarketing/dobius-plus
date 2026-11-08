@@ -29,8 +29,13 @@ export function shapePhoneAccounts({ usage, accounts, activeClaude = null, activ
   const rows = usage?.ok && Array.isArray(usage.accounts)
     ? usage.accounts.filter((r) => r && typeof r === 'object')
     : [{ id: null, label: 'Default', isDefault: true }, ...list.filter((a) => a.type === 'claude').map((a) => ({ id: a.id, label: a.name || a.id, login: 'unknown' }))];
+  // An id is never shortened: two long ids sharing their first 200 characters would become one, and the phone would
+  // switch to the wrong account. One the phone could not send back whole (accountActivate takes 200) is shown but
+  // cannot be chosen there.
+  const fullId = (id) => (typeof id === 'string' && id.length > 0 && id.length <= 200 ? id : null);
   const claude = rows.map((r) => ({
-    id: r.isDefault ? null : short(r.id, 200),
+    id: r.isDefault ? null : fullId(r.id),
+    selectable: !!r.isDefault || fullId(r.id) !== null,
     label: short(r.label, 60) || 'Account',
     email: short(r.email, 120),
     isDefault: !!r.isDefault,
@@ -46,7 +51,7 @@ export function shapePhoneAccounts({ usage, accounts, activeClaude = null, activ
     { id: null, label: 'Default', isDefault: true, email: short(codexIds?.default?.email, 120), plan: short(codexIds?.default?.plan, 40), login: loginOf(codexIds?.default?.login), active: activeCodex === null },
     // Matched by position, then checked by id: the identities come back aligned with the codex accounts.
     ...idRows.map((row, i) => ({
-      id: short(row?.id, 200),
+      id: fullId(row?.id),
       label: short(codexAccounts[i]?.id === row?.id ? codexAccounts[i].name : null, 60) || short(row?.id, 60) || 'Account',
       isDefault: false,
       email: short(row?.email, 120),

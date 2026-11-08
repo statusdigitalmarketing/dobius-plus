@@ -104,6 +104,10 @@ test('accounts list: arrays only, a __proto__ account id is a plain value, the a
   // No usage service: the config list, the default row active when nothing is chosen.
   const bare = shapePhoneAccounts({ usage: null, accounts: [{ id: 'a1', type: 'claude', name: 'Work' }] });
   assert.deepEqual(bare.claude.map((r) => [r.id, r.label, r.active]), [[null, 'Default', true], ['a1', 'Work', false]]);
+  // Round 1: ids are never shortened; one too long to send back is shown but cannot be chosen.
+  const long = 'a'.repeat(200);
+  const twoLong = shapePhoneAccounts({ usage: null, accounts: [{ id: long, type: 'claude', name: 'L1' }, { id: `${long}b`, type: 'claude', name: 'L2' }] });
+  assert.deepEqual(twoLong.claude.map((r) => [r.id === long, r.id, r.selectable]).slice(1), [[true, long, true], [false, null, false]]);
   assert.deepEqual(usageForPhone('junk'), { known: false, headroom: null, limited: false, ageMs: null, windows: [] });
 });
 

@@ -3348,7 +3348,11 @@ function setupConfigHandlers() {
   ipcMain.handle('accounts:setForProject', (_event, projectPath, accountId) => setProjectAccount(projectPath, accountId));
 
   // Activate a Claude account by swapping ~/.claude.json
-  ipcMain.handle('accounts:activateClaude', (_event, accountId) => activateClaudeAccount(accountId));
+  ipcMain.handle('accounts:activateClaude', (_event, accountId) => {
+    const r = activateClaudeAccount(accountId);
+    if (r.ok) broadcastToPhones('settingsChanged'); // an open phone Settings shows the new check mark
+    return r;
+  });
 
   // v1.0.65: create an EMPTY per-account config dir. The old flow copied the
   // CURRENT ~/.claude.json into the new profile, which under dir-scoped
@@ -3435,6 +3439,7 @@ function setupConfigHandlers() {
     if (accountId === null) {
       config.activeCodexAccountId = null;
       saveConfig(config);
+      broadcastToPhones('settingsChanged');
       return { ok: true, isDefault: true };
     }
     const codexMatches = (config.accounts || []).filter((a) => a.id === accountId && a.type === 'codex');
@@ -3450,6 +3455,7 @@ function setupConfigHandlers() {
     }
     config.activeCodexAccountId = accountId;
     saveConfig(config);
+    broadcastToPhones('settingsChanged');
     return { ok: true, isDefault: false };
   });
   ipcMain.handle('accounts:getActiveCodex', () => {
@@ -4952,11 +4958,11 @@ app.whenReady().then(() => {
     const answered = terminalStatus.noteInput(id, data, now);
     // 'working-free': a handed-back command was run; no hook may follow, so
     // the window lets output settle it instead of holding it yellow.
-    if (answered) {
-      sendToTerminalWindow(id, 'terminal:statusHint', answered === 'handoff' ? 'working-free' : 'working');
-      phoneAlerts.tabInput(id); // answered: a red still in its debounce is no longer true
-    }
+    if (answered) sendToTerminalWindow(id, 'terminal:statusHint', answered === 'handoff' ? 'working-free' : 'working');
     else if (terminalStatus.releaseDone(id, data, now)) sendToTerminalWindow(id, 'terminal:statusHint', 'release');
+    // A prompt answered, or anything submitted in the tab (a new command after Claude exits): whatever the phone was
+    // about to be told about this tab is no longer news (Codex lens B: a held "finished" outliving new work).
+    if (answered || submitsInput(data)) phoneAlerts.tabInput(id);
     // Enter in a tab waiting on a turn's background work ends the wait only
     // when Claude is no longer running there (killed mid-wait): an Enter at
     // Claude's own prompt starts nothing, or starts a turn its hooks report

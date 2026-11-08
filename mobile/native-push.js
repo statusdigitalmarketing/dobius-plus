@@ -21,7 +21,8 @@ export async function nativePushPermission() {
 }
 
 let tokenPromise = null;
-// iOS gives the same token to every call while the app is installed; one registration is shared by every Mac.
+// Asked of iOS afresh each time (it answers with its CURRENT token, which it may rotate): only a request still in flight
+// is shared, never a token from an earlier one.
 function deviceToken() {
   if (tokenPromise) return tokenPromise;
   tokenPromise = new Promise((resolve) => {
@@ -30,8 +31,9 @@ function deviceToken() {
     const timer = setTimeout(() => finish(null), 15000);
     handles.push(PushNotifications.addListener('registration', (t) => finish(typeof t?.value === 'string' ? t.value.toLowerCase() : null)));
     handles.push(PushNotifications.addListener('registrationError', () => finish(null)));
-    PushNotifications.register().catch(() => finish(null));
-  }).then((v) => { if (!v) tokenPromise = null; return v; }); // a failed attempt may be retried
+    // Register only once both listeners are attached, so the answer cannot arrive before anyone hears it.
+    Promise.all(handles).then(() => PushNotifications.register()).catch(() => finish(null));
+  }).then((v) => { tokenPromise = null; return v; });
   return tokenPromise;
 }
 
@@ -68,6 +70,29 @@ export async function enableNativePush(connection, { prompt = true } = {}) {
   if (!token) return { ok: false, error: 'iPhone did not give this app a notification token. Try again in a moment.' };
   if (connection.closed) return { ok: false, error: 'Mac switched' };
   return sendRegister(connection, token);
+}
+
+/**
+ * A Mac removed from this app must stop sending to it: tell it so over a short-lived connection with the pairing's own
+ * token (the Mac also drops it when the phone is unpaired on the Mac). Best effort: a Mac that cannot be reached keeps
+ * the token until it is unpaired there, and a tap then says the Mac is no longer paired.
+ */
+export function unregisterNativePush(pairing, ConnectionClass) {
+  if (!isNativeApp() || !pairing?.origin || !pairing?.token) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let c;
+    try { c = new ConnectionClass({ id: pairing.id, origin: pairing.origin, token: pairing.token }); } catch { resolve(false); return; }
+    const done = (v) => { clearTimeout(timer); off(); try { c.close(); } catch { /* closed */ } resolve(v); };
+    const timer = setTimeout(() => done(false), 8000);
+    const off = c.onMessage((m) => {
+      if (m.type === 'authed') {
+        if (Array.isArray(m.features) && m.features.includes('apns')) c.send({ type: 'apnsUnregister', reqId: `unreg-${Date.now().toString(36)}` });
+        else done(false);
+      }
+      if (m.type === 'apnsResult') done(!!m.ok);
+    });
+    try { c.connect(); } catch { done(false); }
+  });
 }
 
 /** A notification tapped: { pairingId, ref, view } for App.jsx's openSession. */

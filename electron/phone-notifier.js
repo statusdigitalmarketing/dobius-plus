@@ -123,6 +123,9 @@ export function createPhoneNotifier(deps) {
     schedule();
   }
 
+  // A pending handed-back command still waiting in Tasks > Commands (one run or dismissed meanwhile is not).
+  const liveHandoff = (p) => p?.kind === 'handoff' && (typeof d.handoffWaiting !== 'function' || !!d.handoffWaiting(p.tabId));
+
   /** A hook state for a tab: Claude's marker (terminal-status onHookState) or Codex's (codex-status router). */
   function tabHook(tabId, state, tag) {
     if (typeof tabId !== 'string' || !tabId) return;
@@ -144,13 +147,13 @@ export function createPhoneNotifier(deps) {
     if (state === 'needs') {
       const handoff = tag === 'handoff';
       const p = pending.get(key);
-      if (p?.kind === 'handoff') return; // the commands are already listed: that is the better buzz
+      if (liveHandoff(p)) return; // the commands are listed and still waiting: that is the better buzz
       put({ key, tabId, kind: 'needs', awaitHandoff: handoff, dueAt: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) });
       return;
     }
     if (state === 'done') {
       if (prev === 'done') return; // the same finish told twice
-      if (pending.get(key)?.kind === 'handoff') return;
+      if (liveHandoff(pending.get(key))) return;
       put({ key, tabId, kind: 'done', dueAt: t + DONE_DEBOUNCE_MS });
     }
   }
@@ -233,9 +236,26 @@ export function createPhoneNotifier(deps) {
 
   function flush() {
     const t = d.now();
-    if (!pending.size || Math.min(...[...pending.values()].map((p) => p.dueAt)) > t) { schedule(); return; }
-    // A burst: whatever would go out within the next second goes out now, together, so it can be one summary.
-    const due = [...pending.values()].filter((p) => p.dueAt <= t + COALESCE_MS);
+    const all = [...pending.values()];
+    if (!all.length || Math.min(...all.map((p) => p.dueAt)) > t) { schedule(); return; }
+    // A burst: wait (never more than a second past the oldest due one) for whatever else falls due in that second, so
+    // they go out together and can be one summary. Waiting, not sending early: no entry ever skips its own debounce.
+    const oldest = Math.min(...all.map((p) => p.dueAt));
+    const soon = all.filter((p) => p.dueAt > t && p.dueAt <= oldest + COALESCE_MS);
+    if (soon.length) {
+      const until = Math.max(...soon.map((p) => p.dueAt));
+      if (timer) d.clearTimer(timer);
+      timerAt = until;
+      timer = d.setTimer(() => { timer = null; timerAt = Infinity; flush(); }, Math.max(0, until - t));
+      return;
+    }
+    const due = all.filter((p) => p.dueAt <= t);
+    // Nobody to tell (no subscribed phone): nothing is sent, nothing counts against the limits, nothing is held.
+    if (typeof d.hasRecipients === 'function' && !d.hasRecipients()) {
+      for (const p of due) pending.delete(p.key);
+      schedule();
+      return;
+    }
     let cfg;
     try { cfg = d.settings() || {}; } catch { cfg = {}; }
     const alerts = alertSettings(cfg.alerts);
