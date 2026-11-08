@@ -270,7 +270,8 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   extraPaths.push(tabBinDir());
   const pathKey = IS_WIN ? (Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'Path') : 'PATH';
   const fullPath = IS_WIN
-    ? [...extraPaths.filter((p) => !p.startsWith('/')), process.env[pathKey] || ''].filter(Boolean).join(path.delimiter)
+    ? [...extraPaths.filter((p) => !p.startsWith('/')), process.env[pathKey] || '', ...windowsToolDirs(process.env[pathKey] || '')]
+      .filter(Boolean).join(path.delimiter)
     : [...extraPaths, process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'].join(':');
 
   // These two are consumed here (into PATH), not passed as literal env vars.
@@ -1255,6 +1256,24 @@ export function wasWindowOwned(id) {
  * never-claimed tear-off window closing can't kill a PTY still bound to the
  * source window. Codex.
  */
+/**
+ * Windows: the usual tool folders that exist but are missing from PATH, appended after it (never ahead of what the
+ * person set up). Claude Code's installer may not add %USERPROFILE%\.local\bin (Max's README, 2026-11-07), so
+ * `claude` was not found in a new tab; npm's global folder holds gws and codex. Pure apart from the existence check.
+ */
+export function windowsToolDirs(currentPath, env = process.env, exists = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } }) {
+  const have = new Set(String(currentPath || '').split(';').map((d) => d.replace(/[\\/]+$/, '').toLowerCase()).filter(Boolean));
+  const pf = env.ProgramFiles || 'C:\\Program Files';
+  const candidates = [
+    env.USERPROFILE && path.win32.join(env.USERPROFILE, '.local', 'bin'),
+    env.APPDATA && path.win32.join(env.APPDATA, 'npm'),
+    path.win32.join(pf, 'nodejs'),
+    path.win32.join(pf, 'Git', 'cmd'),
+    path.win32.join(pf, 'Tailscale'),
+  ].filter(Boolean);
+  return candidates.filter((d) => !have.has(d.toLowerCase()) && exists(d));
+}
+
 /** Where per-instance helper commands live. On every tab's PATH. */
 export function tabBinDir() {
   return path.join(app.getPath('userData'), 'bin');

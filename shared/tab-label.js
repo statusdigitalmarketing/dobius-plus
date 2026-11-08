@@ -53,6 +53,13 @@ export function labelFromTitle(title) {
   // "Administrator: ") or a bare shell name. Only the WHOLE title counts, so a
   // topic that merely starts with "cmd" or mentions C:\ stays a label.
   if (WIN_SHELL_TITLE_RE.test(s)) return null;
+  // A Windows console titles itself after the running program's path (C:\Users\me\.local\bin\claude.exe, maybe with
+  // arguments, maybe after "Administrator: "), or a bare program.exe; that path became the tab's name (Sam, on Max's
+  // PC, 2026-11-07).
+  // Only a path that names a program (then maybe its arguments) or a bare folder path: a topic like
+  // "C:\temp permissions" (Windows puts "Administrator: " before any title) stays a label.
+  if (/^(Administrator:\s*)?(([A-Za-z]:[\\/]|\\\\)[^"<>|]*?\.(exe|cmd|bat|ps1|com)(\s.*)?|([A-Za-z]:[\\/]|\\\\)\S*)$/i.test(s)) return null;
+  if (/^[\w.-]+\.(exe|cmd|bat|ps1)(\s|$)/i.test(s)) return null;
   if (/^[\w.-]+@[\w.-]+(:|$)/.test(s)) return null;
   const first = s.split(' ')[0].replace(/^-/, '').split('/').pop().toLowerCase();
   if (SHELLS.has(first)) return null;

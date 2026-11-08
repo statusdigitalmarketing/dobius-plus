@@ -330,3 +330,27 @@ test('Add to Claude Desktop on Windows: the Store or AppData config, and an entr
     { command: 'C:\\D\\Dobius+.exe', args: ['C:\\ud\\gws-mcp\\gws-mcp.mjs'], env: { ELECTRON_RUN_AS_NODE: '1' } });
   assert.deepEqual(mcpEntryFor('darwin', '/x', '/y', '/ud/gws-mcp/gws-mcp'), { command: '/ud/gws-mcp/gws-mcp' });
 });
+
+test('tab names: a Windows program path or a bare program.exe is never a label; a real topic is', async () => {
+  const { labelFromTitle } = await import('../../shared/tab-label.js');
+  for (const t of [
+    'C:\\Users\\mrmax\\.local\\bin\\claude.exe',
+    'C:\\Users\\mrmax\\.local\\bin\\claude.exe --resume 317ac6ab',
+    'Administrator: C:\\WINDOWS\\system32\\cmd.exe',
+    '\\\\server\\share\\tool.exe',
+    'claude.exe',
+    'node.exe C:\\x\\run.js',
+  ]) assert.equal(labelFromTitle(t), null, t);
+  assert.equal(labelFromTitle('✳ Fix the C:\\ path bug'), 'Fix the C:\\ path bug');
+  assert.equal(labelFromTitle('cmd and control center'), 'cmd and control center');
+});
+
+test('Windows tab PATH: the usual tool folders that exist and are missing are appended', async () => {
+  const { windowsToolDirs } = await import('../terminal-manager.js');
+  const env = { USERPROFILE: 'C:\\Users\\u', APPDATA: 'C:\\Users\\u\\AppData\\Roaming', ProgramFiles: 'C:\\Program Files' };
+  const there = new Set(['C:\\Users\\u\\.local\\bin', 'C:\\Users\\u\\AppData\\Roaming\\npm', 'C:\\Program Files\\Tailscale']);
+  const exists = (p) => there.has(p);
+  assert.deepEqual(windowsToolDirs('C:\\Windows\\system32;C:\\Users\\u\\AppData\\Roaming\\npm\\', env, exists),
+    ['C:\\Users\\u\\.local\\bin', 'C:\\Program Files\\Tailscale'], 'npm already there (trailing slash, any case); nodejs and Git absent');
+  assert.deepEqual(windowsToolDirs('c:\\users\\u\\.local\\bin;c:\\program files\\tailscale;C:\\Users\\u\\AppData\\Roaming\\npm', env, exists), []);
+});
