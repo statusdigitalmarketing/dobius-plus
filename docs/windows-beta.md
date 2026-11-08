@@ -84,3 +84,10 @@ memory (smoke and a live PowerShell gws check pending on the release build). Shi
 | Windows sessions get no agent context (SessionStart hook is sh and hooks are Mac only) | Open, next build |
 | Claude's own PowerShell tool starts a new powershell without the gws function, so gws.cmd loses JSON quotes there | Open, next build (the tab and Claude's Bash tool are fine) |
 | History double-click also renaming (email 5) | Closed: not a bug, double-click only resumes |
+
+## From Max, email 8 (2026-11-08 03:33 ET): second launch starts a second Dobius (patch 0001)
+| Item | State |
+|---|---|
+| No single-instance lock on Windows: a second launch ran a second Dobius on the same config (two `claude --resume` on one transcript) | Shipped in v2.2.9: his patch (electron/single-instance.js, second-instance brings windows forward) plus Codex fixes: a launch while closing relaunches once gone, an --updated or relaunched copy waits up to 10 s for the lock, waiting copies never count as launches, focus target chosen before restore. Replied in his thread |
+| Windows CI | GitHub's anonymous release downloads 504'd for hours; better-sqlite3 prebuilds, Electron (checked against the lockfile's electron/checksums.json, required) and electron-builder's tools now come through the GitHub API |
+| Claude's own PowerShell tool loses gws JSON quotes; agent context on Windows | Open, next build |
