@@ -201,6 +201,9 @@ export default function CommandsList({ query }) {
   const entries = useProjectCommands(projectPath);
   const [error, setError] = useState(null);
   const [openReply, setOpenReply] = useState(null);
+  // "handed back 5m ago" stays true while the list is open.
+  const [, setTick] = useState(0);
+  useEffect(() => { const t = setInterval(() => setTick((n) => n + 1), 60_000); return () => clearInterval(t); }, []);
 
   const tabName = (id) => tabs.find((t) => t.id === id)?.label || 'a tab in another window';
   const hasTab = (id) => tabs.some((t) => t.id === id);
@@ -221,35 +224,49 @@ export default function CommandsList({ query }) {
           {q ? `Nothing matches "${query}".` : 'Nothing to run right now. When a session hands you a command (its tab dot turns red), it shows up here.'}
         </div>
       )}
-      {shown.map((e) => (
-        <div key={e.tabId} style={{ padding: '9px 12px', borderBottom: '1px solid var(--border)' }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 11 }}>
-            <span style={{ color: 'var(--fg)', fontWeight: 600 }}>{tabName(e.tabId)}</span>
-            <span style={{ color: 'var(--dim)' }} title={e.cwd || projectPath}>· runs in {folder(e.cwd)}</span>
-            <span style={{ color: 'var(--dim)', marginLeft: 'auto', fontSize: 10 }}>{ago(e.at)}</span>
-          </div>
-          {e.commands.map((c) => (
-            <CommandCard key={c.id} entry={e} c={c} projectPath={projectPath} tabName={tabName} hasTab={hasTab} folderOf={folder} onError={setError} />
-          ))}
-          {(() => {
-            // The reply the newest waiting command came with (else the newest command's): never another turn's.
-            const src = [...e.commands].reverse().find((c) => c.state === 'waiting') || e.commands[e.commands.length - 1];
-            const reply = src?.reply || e.reply;
-            return reply ? (
-            <div style={{ marginTop: 6 }}>
-              <button style={{ ...btn(), border: 'none', padding: 0, textDecoration: 'underline' }} onClick={() => setOpenReply(openReply === e.tabId ? null : e.tabId)}>
-                {openReply === e.tabId ? 'Hide Claude\'s reply' : 'Show Claude\'s full reply'}
-              </button>
-              {openReply === e.tabId && (
-                <div style={{ marginTop: 5, maxHeight: 220, overflowY: 'auto', fontSize: 11, lineHeight: 1.45, color: 'var(--fg)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 4, padding: '6px 8px' }}>
-                  {reply}
+      {shown.map((e) => {
+        // One group per reply the commands came with: each shows its own folder, age and full reply, so an older
+        // command never sits under a newer turn's folder or reply (they accumulate until run or dismissed).
+        const groups = [];
+        for (const c of e.commands) {
+          // Commands captured together share their capture time: a later handback never joins an older group.
+          const key = `${c.at || ''}|${c.reply || ''}|${c.cwd || ''}`;
+          const last = groups[groups.length - 1];
+          if (last && last.key === key) last.commands.push(c); else groups.push({ key, id: c.id, reply: c.reply || e.reply, cwd: c.cwd || e.cwd, at: c.at || e.at, commands: [c] });
+        }
+        return (
+          <div key={e.tabId} style={{ padding: '9px 12px', borderBottom: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 11, color: 'var(--fg)', fontWeight: 600 }}>{tabName(e.tabId)}</div>
+            {groups.map((g, gi) => {
+              // Keyed by its first command, never by position: dismissing another group must not reset a card's edit.
+              const id = `${e.tabId}|${g.id}`;
+              return (
+                <div key={id} style={{ marginTop: gi ? 10 : 2, paddingTop: gi ? 8 : 0, borderTop: gi ? '1px dashed var(--border)' : 'none' }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 11 }}>
+                    <span style={{ color: 'var(--dim)' }} title={g.cwd || projectPath}>runs in {folder(g.cwd)}</span>
+                    <span style={{ color: 'var(--dim)', marginLeft: 'auto', fontSize: 10 }}>{g.at ? `handed back ${ago(g.at)}` : ''}</span>
+                  </div>
+                  {g.commands.map((c) => (
+                    <CommandCard key={c.id} entry={e} c={c} projectPath={projectPath} tabName={tabName} hasTab={hasTab} folderOf={folder} onError={setError} />
+                  ))}
+                  {g.reply ? (
+                    <div style={{ marginTop: 6 }}>
+                      <button style={{ ...btn(), border: 'none', padding: 0, textDecoration: 'underline' }} onClick={() => setOpenReply(openReply === id ? null : id)}>
+                        {openReply === id ? 'Hide Claude\'s reply' : 'Show Claude\'s full reply'}
+                      </button>
+                      {openReply === id && (
+                        <div style={{ marginTop: 5, maxHeight: 220, overflowY: 'auto', fontSize: 11, lineHeight: 1.45, color: 'var(--fg)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 4, padding: '6px 8px' }}>
+                          {g.reply}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
-              )}
-            </div>
-            ) : null;
-          })()}
-        </div>
-      ))}
+              );
+            })}
+          </div>
+        );
+      })}
       {error && <div style={{ padding: '4px 12px', fontSize: 10.5, color: 'var(--danger)' }}>{error}</div>}
     </div>
   );

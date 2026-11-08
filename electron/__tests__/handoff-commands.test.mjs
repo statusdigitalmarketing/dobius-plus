@@ -57,7 +57,7 @@ function rig({ text = '! ./release.sh patch', at = null, session = { sessionId: 
 const tick = async (k = 40) => { for (let i = 0; i < k; i += 1) await new Promise((r) => setImmediate(r)); };
 const turn = (hc, tab = 'term-/p-1') => { hc.onHook(tab, 'working', null); clock += 1000; hc.onHook(tab, 'needs', 'handoff'); };
 
-test('a handback is captured for its tab and project with the Claude folder; a new turn clears it', async () => {
+test('a handback is captured for its tab and project with the Claude folder; a new turn keeps it', async () => {
   const { hc, calls, notes } = rig();
   turn(hc);
   await tick();
@@ -71,7 +71,9 @@ test('a handback is captured for its tab and project with the Claude folder; a n
   hc.onHook('term-/p-1', 'needs', null); // a permission prompt: not a handback, keeps it
   assert.equal(hc.list().length, 1);
   hc.onHook('term-/p-1', 'working', null);
-  assert.equal(hc.list().length, 0);
+  assert.equal(hc.list().length, 1, 'still waiting to be run (Sam, 2026-11-07)');
+  hc.onHook('term-/p-1', 'exit', null);
+  assert.equal(hc.list().length, 0, 'the tab closing clears it');
 });
 
 test('peek keeps it, take removes it once; the tab goes with its last one', async () => {
@@ -110,12 +112,12 @@ test('the newest reply of this turn wins across the places the transcript may be
   assert.equal(hc.list()[0].cwd, '/q');
 });
 
-test('a slow read that lands after the tab moved on is dropped; no session or a relative cwd', async () => {
+test('a slow read that lands after the tab closed is dropped; no session or a relative cwd', async () => {
   let release;
   const gate = new Promise((r) => { release = r; });
   const { hc } = rig({ text: () => gate });
   turn(hc);
-  hc.onHook('term-/p-1', 'working', null); // the next turn starts before the read finished
+  hc.onHook('term-/p-1', 'exit', null); // the tab closes before the read finished
   release('! late');
   await tick(60);
   assert.equal(hc.list().length, 0);
@@ -246,7 +248,8 @@ test('ux: a run is followed to Done or Failed; a new turn drops only what is sti
   assert.equal(hc.list()[0].commands.find((x) => x.id === b.id).state, 'closed');
   hc.onHook('term-/p-1', 'working', null); // the session moves on
   const left = hc.list()[0].commands.map((x) => x.id);
-  assert.deepEqual(left.sort(), [a.id, b.id].sort(), 'c (still waiting) went; the ones already run stay');
+  assert.deepEqual(left.sort(), [a.id, b.id, c.id].sort(), 'c still waits to be run; the ones already run stay');
+  hc.take('term-/p-1', c.id);
   assert.equal(hc.peek('term-/p-1', a.id), null, 'a finished command cannot be run again');
   void c;
   clock += 2 * 3600 * 1000;
@@ -359,4 +362,39 @@ test('script: Ctrl+C stops the command and the result is still reported', async 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('Sam 2026-11-07: a later turn (a background agent reporting in) keeps the handed-back command; later ones add', async () => {
+  let second = null;
+  const T0 = clock;
+  const { hc } = rig({ replies: () => (second && clock >= second.at ? second : { text: 'Run it:\n! ./publish.sh', at: T0 + 1000 }) });
+  hc.onHook('term-/p-1', 'working', null);
+  clock += 2000;
+  hc.onHook('term-/p-1', 'needs', 'handoff');
+  await tick(60);
+  assert.deepEqual(hc.list()[0].commands.map((c) => c.text), ['./publish.sh']);
+  // Six minutes later an agent's hand-back starts and ends a turn with no command: it stays.
+  clock += 6 * 60 * 1000;
+  hc.onHook('term-/p-1', 'working', null);
+  clock += 5000;
+  hc.onHook('term-/p-1', 'done', null);
+  assert.deepEqual(hc.list()[0].commands.map((c) => c.text), ['./publish.sh']);
+  // A later handback adds its own; the same text is not listed twice.
+  hc.onHook('term-/p-1', 'working', null);
+  clock += 2000;
+  second = { text: '! ./publish.sh\n! ./verify.sh', at: clock - 500 };
+  hc.onHook('term-/p-1', 'needs', 'handoff');
+  await tick(60);
+  assert.deepEqual(hc.list()[0].commands.map((c) => c.text), ['./publish.sh', './verify.sh']);
+  assert.equal(Number.isFinite(hc.list()[0].commands[0].at), true, 'each says when it was handed back');
+});
+
+test('a waiting command past a day is gone at Run time even if the list was not refreshed', async () => {
+  const { hc } = rig({ text: '! ./old.sh' });
+  turn(hc);
+  await tick();
+  const [c] = hc.list()[0].commands;
+  clock += 25 * 3600 * 1000;
+  assert.equal(hc.peek('term-/p-1', c.id), null);
+  assert.equal(hc.startRun('term-/p-1', c.id, 'term-/p-9', './old.sh', '/x.exit'), false);
 });
