@@ -4962,7 +4962,8 @@ app.whenReady().then(() => {
     else if (terminalStatus.releaseDone(id, data, now)) sendToTerminalWindow(id, 'terminal:statusHint', 'release');
     // A prompt answered, or anything submitted in the tab (a new command after Claude exits): whatever the phone was
     // about to be told about this tab is no longer news (Codex lens B: a held "finished" outliving new work).
-    if (answered || submitsInput(data)) phoneAlerts.tabInput(id);
+    // Any line break counts (Ctrl+J runs a shell command too: Codex round 5), as the team communicator's does.
+    if (answered || submitsInput(data) || /[\r\n]/.test(data)) phoneAlerts.tabInput(id);
     // Enter in a tab waiting on a turn's background work ends the wait only
     // when Claude is no longer running there (killed mid-wait): an Enter at
     // Claude's own prompt starts nothing, or starts a turn its hooks report

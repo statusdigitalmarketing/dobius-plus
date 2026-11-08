@@ -159,12 +159,14 @@ export function createPhoneNotifier(deps) {
       // The commands are listed and still waiting: that is the better buzz. The red is remembered on it, so if the
       // command is run or dismissed before it goes out, the red still does (Codex round 2).
       // It keeps its own debounce and its own generation (Codex round 3).
-      if (liveHandoff(p)) { pending.set(key, { ...p, alsoNeeds: { gen: g, at: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) } }); return; }
+      if (liveHandoff(p)) { pending.set(key, { ...p, behind: { kind: 'needs', gen: g, at: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) } }); return; }
       put({ key, tabId, kind: 'needs', gen: g, awaitHandoff: handoff, dueAt: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) });
       return;
     }
     if (state === 'done') {
-      if (liveHandoff(pending.get(key))) return;
+      // Behind a live handoff a finish is remembered the same way, and goes out if the command stops waiting (round 5).
+      const p = pending.get(key);
+      if (liveHandoff(p)) { pending.set(key, { ...p, behind: { kind: 'done', gen: g, at: t + DONE_DEBOUNCE_MS } }); return; }
       put({ key, tabId, kind: 'done', gen: g, dueAt: t + DONE_DEBOUNCE_MS });
     }
   }
@@ -242,6 +244,12 @@ export function createPhoneNotifier(deps) {
     return stillTrue(p);
   }
 
+  // A notification built WITH names must not reach another phone after "Show tab names" was turned off (round 5).
+  function namesStill(builtWithNames) {
+    if (!builtWithNames) return true;
+    try { return alertSettings(d.settings()?.alerts).names; } catch { return false; }
+  }
+
   // names off ("Tab names" switch): nothing but the app name and the event kind, for a lock screen others can see.
   function build(p, kind, names) {
     if (kind === 'team') {
@@ -292,8 +300,8 @@ export function createPhoneNotifier(deps) {
       let p = due0;
       // A handoff whose command was run or dismissed meanwhile, with a red that arrived behind it: the red goes out,
       // as that red, after its own debounce.
-      if (due0.kind === 'handoff' && due0.alsoNeeds && !liveHandoff(due0)) {
-        const red = { key: due0.key, tabId: due0.tabId, kind: 'needs', gen: due0.alsoNeeds.gen, dueAt: due0.alsoNeeds.at };
+      if (due0.kind === 'handoff' && due0.behind && !liveHandoff(due0)) {
+        const red = { key: due0.key, tabId: due0.tabId, kind: due0.behind.kind, gen: due0.behind.gen, dueAt: due0.behind.at };
         if (red.dueAt > t) { pending.set(red.key, red); continue; }
         p = red;
       }
@@ -324,7 +332,7 @@ export function createPhoneNotifier(deps) {
         sentTimes.push(t);
         for (const o of out) lastSent.set(gapKey(o.p), { at: t, kind: o.kind });
         // Its text is fixed, so it goes to the next phone only while ALL of what it sums up is still true (Codex round 4).
-        const current = () => !d.quitting() && out.every((o) => isCurrent(o.p));
+        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o) => isCurrent(o.p));
         Promise.resolve(d.send({ kind: 'summary', title: `${out.length} updates`, body, tag: 'summary', tabId: null, current })).catch(() => { /* the sender logs by code */ });
       } else {
         for (const { p, kind } of out) {
@@ -334,7 +342,7 @@ export function createPhoneNotifier(deps) {
           const n = build(p, kind, alerts.names);
           // current(): asked by the sender before each phone, so news that stopped being true mid-send stops there. The
           // same test the flush used, on the entry as it was (a handoff sent as "needs you" is still judged by its command).
-          const current = () => !d.quitting() && isCurrent(p);
+          const current = () => !d.quitting() && namesStill(alerts.names) && isCurrent(p);
           Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId, current })).catch(() => { /* the sender logs by code */ });
         }
       }

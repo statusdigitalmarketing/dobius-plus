@@ -299,6 +299,30 @@ test('round 4: a finish told twice still notifies once; one tab never gets two b
   assert.equal(f.sent.length, 2);
 });
 
+test('round 5: a finish behind a dismissed handoff still goes out; turning tab names off stops a names notification mid-send', () => {
+  let waiting = true;
+  const r = rig({ status: { a: 'done' }, waiting: () => waiting });
+  r.n.tabHook('a', 'needs', null);
+  r.st.a = 'needs';
+  r.advance(2000); // needs sent
+  r.n.handoffAdded('a'); // already covered by the needs a moment ago: nothing queued
+  r.n.tabHook('a', 'working');
+  r.n.tabHook('a', 'needs', 'handoff');
+  r.n.handoffAdded('a'); // held by the gap
+  r.n.tabHook('a', 'working');
+  r.n.tabHook('a', 'done', null); // behind the live handoff
+  r.st.a = 'done';
+  waiting = false; // dismissed
+  r.advance(TAB_GAP_MS + 3000);
+  assert.deepEqual(r.sent.map((s) => s.kind), ['needs', 'done']);
+  const n = rig({ status: { b: 'needs' } });
+  n.n.tabHook('b', 'needs', null);
+  n.advance(2000);
+  assert.equal(n.sent[0].current(), true);
+  n.cfg.alerts.names = false;
+  assert.equal(n.sent[0].current(), false);
+});
+
 test('switches: each event obeys its own; a handed-back command goes out as "needs you" with only that one on', () => {
   const r = rig({ alerts: { done: false, team: false }, status: { a: 'done', b: 'needs' } });
   r.n.tabHook('a', 'done', null);

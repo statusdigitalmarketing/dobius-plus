@@ -12,7 +12,7 @@ import { sendPush, hasPushSubscribers } from './push.js';
 import { getSettings, getApnsTokens, addApnsToken, removeApnsToken, setApnsTokenEnv, removeApnsTokensByPairToken } from './config-manager.js';
 import { isPairedToken, tabLabelForNotify } from './mobile-server.js';
 import { statusFor } from './terminal-status.js';
-import { getTerminalWebContentsId } from './terminal-manager.js';
+import { getTerminalWebContentsId, listTerminals } from './terminal-manager.js';
 import { nudgeSettings } from './mobile-today.js';
 import { getQuitting } from './quit-state.js';
 
@@ -129,5 +129,9 @@ export const phoneAlerts = {
     return { ok: true };
   },
   unregisterApns(pairToken) { removeApnsTokensByPairToken(pairToken); },
-  resolveRef: (ref) => (push ? push.resolve(ref) : null),
+  // Only a tab still open: a closed one must not be "opened" (the phone would fall onto another tab: Codex round 5).
+  resolveRef: (ref) => {
+    const id = push ? push.resolve(ref) : null;
+    return id && listTerminals().some((t) => t.id === id) ? id : null;
+  },
 };
