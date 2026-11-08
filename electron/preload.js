@@ -156,6 +156,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gwsVerify: (opts) => ipcRenderer.invoke('gws:verify', opts),
   gwsReconnect: (id, opts) => ipcRenderer.invoke('gws:reconnect', id, opts),
   gwsAddViaBrowser: (opts) => ipcRenderer.invoke('gws:addViaBrowser', opts),
+  // Setup on a fresh Mac: find or install gws, put the OAuth client file in place. Paths come from main's own dialogs.
+  gwsSetupStatus: (opts) => ipcRenderer.invoke('gwsSetup:status', opts),
+  gwsSetupInstall: () => ipcRenderer.invoke('gwsSetup:install'),
+  gwsSetupLocate: () => ipcRenderer.invoke('gwsSetup:locate'),
+  gwsSetupChooseClient: () => ipcRenderer.invoke('gwsSetup:chooseClient'),
+  gwsSetupUseClient: (p) => ipcRenderer.invoke('gwsSetup:useClient', p),
+  gwsSetupOpenNode: () => ipcRenderer.invoke('gwsSetup:openNode'),
   // Claude Desktop MCP setup (v1.0.63): status + one-click install.
   errorLogInfo: () => ipcRenderer.invoke('errorLog:info'),
   voiceConductorGet: () => ipcRenderer.invoke('voiceConductor:get'),

@@ -108,15 +108,72 @@ async function mintToken(email) {
   return j.access_token;
 }
 
+/** Was this account marked by Dobius as refused the client's Cloud project for quota? Read fresh each call. */
+export function skipsQuotaProject(email) {
+  return profileForEmail(email)?.noQuotaProject === true;
+}
+
+// The env that makes gws send NO quota project (Justin, 2026-11-07); the same recipe as the terminal shim. gws 0.22.5
+// picks the project from a non-empty GOOGLE_WORKSPACE_PROJECT_ID, then the client file, then gcloud's default
+// credentials; each is cleared. Verified against live gws. Null when .noquota is not a plain folder.
+export function noQuotaEnv(env, dir = path.join(PROFILES_DIR, '.noquota')) {
+  const adc = path.join(dir, 'no-adc.json');
+  // Nothing is written: gws treats a credentials path that does not exist as "no project", and creates the config
+  // folder itself for its cache (both verified live). Anything at those two names is removed (unlinking never follows a
+  // link), so neither can ever carry a project.
+  // Only inside a plain folder that is really ours: through a link, the cleanup would delete the real client file.
+  let st = null;
+  try { st = fs.lstatSync(dir); } catch { /* gws creates it */ }
+  if (st && (st.isSymbolicLink() || !st.isDirectory())) return null;
+  for (const f of [path.join(dir, 'client_secret.json'), adc]) {
+    // Gone is the goal; anything that stays (locked, no permission) could carry a project, so refuse.
+    try { fs.unlinkSync(f); } catch (e) { if (e?.code !== 'ENOENT') return null; }
+  }
+  return { ...env, GOOGLE_WORKSPACE_CLI_CONFIG_DIR: dir, GOOGLE_APPLICATION_CREDENTIALS: adc, GOOGLE_WORKSPACE_PROJECT_ID: '' };
+}
+
 // ---------------------------------------------------------------------------
 // gws invocation
 // ---------------------------------------------------------------------------
 
-/** The real gws binary; never a Dobius shim (those live under userData). */
-export function findGws() {
-  for (const dir of ['/opt/homebrew/bin', '/usr/local/bin']) {
+// What Dobius found when it looked for gws: <userData>/gws-shim/gws-env.json ({ gws, path }), written by
+// gws-setup.js. This server is copied to <userData>/gws-mcp/, so the file sits one folder over. Claude Desktop starts
+// this server with almost no PATH, and npm puts gws in user folders (nvm, ~/.npm-global), so without it a gws
+// installed with npm was never found (Justin, 2026-11-07). GWS_MCP_ENV_FILE overrides the location (tests).
+export function readGwsHint(file = process.env.GWS_MCP_ENV_FILE || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'gws-shim', 'gws-env.json')) {
+  try {
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return j && typeof j === 'object' ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+const isExec = (p) => { try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch { return false; } };
+
+const real = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+
+/** The real gws binary; never a Dobius shim (those live in a gws-shim folder), not even through a link to one. */
+export function findGws(hint = readGwsHint()) {
+  const ok = (p) => {
+    if (typeof p !== 'string' || !p.startsWith('/') || !isExec(p)) return false;
+    const rp = real(p);
+    if (!rp || path.basename(path.dirname(rp)) === 'gws-shim') return false;
+    // Any Dobius shim (another Dobius copy's too) names DOBIUS_GWS_SHIM_SELF in its wrapper.
+    try {
+      const fd = fs.openSync(rp, 'r');
+      try {
+        const buf = Buffer.alloc(512);
+        if (buf.subarray(0, fs.readSync(fd, buf, 0, 512, 0)).toString('latin1').includes('DOBIUS_GWS_SHIM_SELF')) return false;
+      } finally { fs.closeSync(fd); }
+    } catch { return false; }
+    return true;
+  };
+  if (ok(hint?.gws)) return hint.gws;
+  const dirs = [...String(hint?.path || '').split(':'), '/opt/homebrew/bin', '/usr/local/bin'].filter((d) => path.isAbsolute(d));
+  for (const dir of dirs) {
     const cand = path.join(dir, 'gws');
-    try { fs.accessSync(cand, fs.constants.X_OK); return cand; } catch { /* next */ }
+    if (ok(cand)) return cand;
   }
   return 'gws'; // PATH fallback
 }
@@ -128,8 +185,8 @@ export function findGws() {
  * through cmd.exe quoting), so we run the CLI's JS entry under the SAME node
  * that runs this server. Parameterized for tests.
  */
-export function gwsInvocation(platform = process.platform, env = process.env) {
-  if (platform !== 'win32') return { file: findGws(), argsPrefix: [] };
+export function gwsInvocation(platform = process.platform, env = process.env, hint = undefined) {
+  if (platform !== 'win32') return { file: findGws(hint === undefined ? readGwsHint() : hint), argsPrefix: [] };
   const candidates = [];
   if (env.GWS_MCP_GWS_JS) candidates.push(env.GWS_MCP_GWS_JS);
   // npm's default global prefix on Windows is %APPDATA%\npm. The package's
@@ -191,11 +248,15 @@ export function buildArgv({ command, params, body, apiVersion, format, pageAll }
   return { argv };
 }
 
-function runGws(argv, accessToken) {
+function runGws(argv, accessToken, { noQuota = false } = {}) {
   return new Promise((resolve) => {
     // path.delimiter: ':' on POSIX, ';' on Windows (a ':' join there would
     // corrupt the child's PATH).
-    const env = { ...process.env, PATH: [EXEC_PATH, process.env.PATH || ''].join(path.delimiter) };
+    // The folders Dobius found (node with them: gws from npm is a node script) first, then the usual ones.
+    // One read of the hint for the whole call, so the PATH and the gws picked always come from the same version of it.
+    const hint = process.platform !== 'win32' ? readGwsHint() : null;
+    const hintPath = typeof hint?.path === 'string' ? hint.path : '';
+    const env = { ...process.env, PATH: [hintPath, EXEC_PATH, process.env.PATH || ''].join(path.delimiter).split(path.delimiter).filter((d) => path.isAbsolute(d)).join(path.delimiter) };
     // Env hygiene (Codex): if THIS server was launched from a shell that
     // carried a token or a Dobius account binding, a no-account call would
     // silently inherit that identity instead of the base gws one. Strip
@@ -204,9 +265,12 @@ function runGws(argv, accessToken) {
     delete env.DOBIUS_GWS_ACCOUNT;
     delete env.DOBIUS_GWS_ACCOUNT_ID;
     if (accessToken) env.GOOGLE_WORKSPACE_CLI_TOKEN = accessToken;
-    const inv = gwsInvocation();
+    // No quota project for an account Google refuses it (Justin, 2026-11-07).
+    const runEnv = accessToken && noQuota ? noQuotaEnv(env) : env;
+    if (!runEnv) { resolve({ ok: false, text: `${path.join(PROFILES_DIR, '.noquota')} could not be cleared (not a plain folder, or a file in it cannot be removed), so gws cannot run without the Cloud project for this account. Remove that folder and try again.` }); return; }
+    const inv = gwsInvocation(process.platform, process.env, hint);
     if (inv.error) { resolve({ ok: false, text: inv.error }); return; }
-    execFile(inv.file, [...inv.argsPrefix, ...argv], { env, timeout: GWS_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(inv.file, [...inv.argsPrefix, ...argv], { env: runEnv, timeout: GWS_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
       let text = String(stdout || '');
       if (err && !text.trim()) text = String(stderr || err.message || 'gws failed');
       else if (err) text += `\n[gws exited with an error]\n${String(stderr || '').slice(0, 2000)}`;
@@ -258,6 +322,16 @@ const TOOLS = [
   },
 ];
 
+// Google's answer when an account may not bill to the client's Cloud project points at an IAM page, which sends people
+// the wrong way: the account and its grant are fine. Say what is going on and what fixes it.
+export function quotaHint(text, { named = true } = {}) {
+  if (!/serviceusage\.serviceUsageConsumer|USER_PROJECT_DENIED/i.test(String(text))) return text;
+  const fix = named
+    ? 'Open Dobius+ Settings > Google Accounts and press Check health: Dobius+ then stops sending that project for this account.'
+    : 'This call named no account, so it ran as gws\'s own login with the project. Call again with `account` set to that email (gws_accounts lists them); after a Check health in Dobius+ Settings > Google Accounts, Dobius+ leaves the project out for it.';
+  return `${text}\n\n[Dobius+] This account is not allowed to use the OAuth client's Google Cloud project for quota (common for a personal Gmail next to Workspace accounts). Its sign-in is fine. ${fix}`;
+}
+
 async function handleTool(name, args) {
   if (name === 'gws_accounts') {
     const accounts = listAccounts();
@@ -275,12 +349,14 @@ async function handleTool(name, args) {
     const built = buildArgv(args || {});
     if (built.error) throw new Error(built.error);
     let token = null;
-    if (args.account !== undefined) {
-      if (typeof args.account !== 'string' || !args.account.includes('@')) throw new Error('account must be an email from gws_accounts');
-      token = await mintToken(args.account); // throws rather than falling back
+    const account = args.account;
+    if (account !== undefined) {
+      if (typeof account !== 'string' || !account.includes('@')) throw new Error('account must be an email from gws_accounts');
+      token = await mintToken(account); // throws rather than falling back
     }
-    const { text } = await runGws(built.argv, token);
-    return text;
+    const noQuota = token ? skipsQuotaProject(account) : false;
+    const { text } = await runGws(built.argv, token, { noQuota });
+    return quotaHint(text, { named: account !== undefined });
   }
   throw new Error(`unknown tool ${name}`);
 }
@@ -411,7 +487,14 @@ async function cliCapture() {
   }
   if (!file) file = `${newProfileId()}.json`;
   const dest = path.join(PROFILES_DIR, file);
-  fs.writeFileSync(dest, JSON.stringify({ client_id: exp.client_id, client_secret: exp.client_secret, refresh_token: exp.refresh_token, email }), { mode: 0o600 });
+  // Keep Dobius's quota mark for this account: a re-capture changes the grant, not whether Google lets the account
+  // use the client's Cloud project (Dobius re-checks that on Check health).
+  let mark = {};
+  try {
+    const prev = JSON.parse(fs.readFileSync(dest, 'utf8'));
+    if (prev.noQuotaProject === true) mark = { noQuotaProject: true, ...(typeof prev.noQuotaFor === 'string' ? { noQuotaFor: prev.noQuotaFor } : {}) };
+  } catch { /* new file */ }
+  fs.writeFileSync(dest, JSON.stringify({ client_id: exp.client_id, client_secret: exp.client_secret, refresh_token: exp.refresh_token, email, ...mark }), { mode: 0o600 });
   try { fs.chmodSync(dest, 0o600); } catch { /* windows: no-op */ }
   console.log(`captured ${email}. Accounts now available: ${listAccounts().map((a) => a.email).join(', ')}`);
   console.log('To add another: gws auth login (pick the next account), then run --capture again.');

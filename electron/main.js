@@ -40,6 +40,7 @@ import {
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
+import { gwsSetupStatus, installGws, useGwsAt, findClientFiles, useClientFile, refreshGwsEnv, setHintDir } from './gws-setup.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
 import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary } from './terminal-manager.js';
 import { isTerminalReply } from './terminal-reply.js';
@@ -915,6 +916,27 @@ function setupDataHandlers() {
   // Add an account fully in-app (v1.0.64): browser approval + capture, no
   // terminal login dance.
   ipcMain.handle('gws:addViaBrowser', (_event, opts) => addGwsAccountViaBrowser(opts || {}));
+  // Setup on a fresh Mac (Justin, 2026-11-07): find, install or locate gws, and put the OAuth client file in place.
+  // Paths reach main only from a dialog main opened or from the list main found itself, never from the renderer.
+  ipcMain.handle('gwsSetup:status', (_event, opts) => gwsSetupStatus({ force: !!(opts && opts.force) }));
+  ipcMain.handle('gwsSetup:install', () => installGws());
+  ipcMain.handle('gwsSetup:locate', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const r = await dialog.showOpenDialog(win, { title: 'Locate gws', message: 'Pick the gws program (often in ~/.npm-global/bin or /usr/local/bin).', properties: ['openFile', 'showHiddenFiles'] });
+    if (r.canceled || !r.filePaths?.[0]) return { ok: false, canceled: true };
+    return useGwsAt(r.filePaths[0]);
+  });
+  ipcMain.handle('gwsSetup:chooseClient', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const r = await dialog.showOpenDialog(win, { title: 'Choose client_secret.json', message: 'Pick the OAuth client file (client_secret_....json) downloaded from Google Cloud.', properties: ['openFile', 'showHiddenFiles'], filters: [{ name: 'JSON', extensions: ['json'] }] });
+    if (r.canceled || !r.filePaths?.[0]) return { ok: false, canceled: true };
+    return useClientFile(r.filePaths[0]);
+  });
+  ipcMain.handle('gwsSetup:useClient', (_event, p) => {
+    const found = findClientFiles().find((c) => c.path === p);
+    return found ? useClientFile(found.path) : { ok: false, error: 'That file is no longer there. Press Check.' };
+  });
+  ipcMain.handle('gwsSetup:openNode', () => shell.openExternal('https://nodejs.org/en/download'));
   // One-click Claude Desktop MCP setup (v1.0.63): bundles the gws-mcp server
   // into userData and upserts the mcpServers.gws entry in Claude Desktop's
   // per-user config. Works on any Mac Dobius is installed on (no node needed:
@@ -4707,6 +4729,12 @@ app.whenReady().then(() => {
   // Self-heal an existing Claude Desktop MCP install: the wrapper must track
   // the CURRENT app binary across moves/updates (never creates an install).
   healGwsMcpIfInstalled();
+  // Find gws (login-shell PATH, npm prefix, nvm...) in the background, so the first gws call and the shim's
+  // gws-env.json have it. Never blocks startup.
+  // The hint folder is set first, so the Claude Desktop server sees the result even before any terminal opens, and a
+  // gws picked with Locate before a restart comes back.
+  if (process.platform !== 'win32') setHintDir(path.join(app.getPath('userData'), 'gws-shim'));
+  refreshGwsEnv().catch((err) => console.warn('[gws-setup] startup lookup failed:', err?.message || err));
   cleanClipboardTemp();
   setupTerminalHandlers();
   setupDataHandlers();
