@@ -624,6 +624,10 @@ export const useStore = create((set, get) => ({
   toggleGitPanel: () => set((s) => ({ gitPanelVisible: !s.gitPanelVisible })),
   toggleToolPanel: (panel) => set((s) => ({ toolPanel: s.toolPanel === panel ? null : panel })),
   setDashboardTab: (tab) => set({ dashboardTab: tab }),
+  // Open the Dashboard's Settings at one section (DashboardView scrolls to it, then clears this).
+  pendingSettingsSection: null,
+  openSettingsSection: (id) => set({ activeView: 'dashboard', dashboardTab: 'settings', pendingSettingsSection: id }),
+  clearPendingSettingsSection: () => set({ pendingSettingsSection: null }),
 
   setThemeIndex: (index) => {
     const theme = THEMES[index % THEMES.length];

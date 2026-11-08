@@ -474,7 +474,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   tasksUpdate: (projectPath, taskId, patch) => ipcRenderer.invoke('tasks:update', projectPath, taskId, patch),
   tasksDelete: (projectPath, taskId) => ipcRenderer.invoke('tasks:delete', projectPath, taskId),
   tasksComplete: (projectPath, taskId) => ipcRenderer.invoke('tasks:complete', projectPath, taskId),
-  tasksSyncAsana: (projectPath) => ipcRenderer.invoke('tasks:syncAsana', projectPath),
+  tasksSyncAsana: (projectPath, opts) => ipcRenderer.invoke('tasks:syncAsana', projectPath, opts),
+  // A refused Asana key: switch to the working one Dobius found (by where it lives; the key stays in main).
+  tasksUseAsanaKey: (source, expect) => ipcRenderer.invoke('tasks:useAsanaKey', source, expect),
   tasksAdvance: (p, id, stage, opts) => ipcRenderer.invoke('tasks:advance', p, id, stage, opts),
   tasksReopen: (p, id, opts) => ipcRenderer.invoke('tasks:reopen', p, id, opts),
   tasksBlock: (p, id, reason, opts) => ipcRenderer.invoke('tasks:block', p, id, reason, opts),
