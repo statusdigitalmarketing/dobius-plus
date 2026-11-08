@@ -14,11 +14,21 @@ import { X509Certificate } from 'crypto';
 import tls from 'tls';
 import { app } from 'electron';
 
-const TS_CANDIDATES = [
-  '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
-  '/usr/local/bin/tailscale',
-  '/opt/homebrew/bin/tailscale',
-];
+// Windows: the Tailscale installer puts the CLI next to the GUI in Program
+// Files (tailscale.exe). Without these, Mobile Access could never find
+// Tailscale on a Windows PC even with it installed and signed in.
+export function tailscaleCandidates(platform = process.platform, env = process.env) {
+  if (platform === 'win32') {
+    return [env.ProgramFiles, env['ProgramFiles(x86)']].filter(Boolean)
+      .map((root) => path.win32.join(root, 'Tailscale', 'tailscale.exe'));
+  }
+  return [
+    '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+    '/usr/local/bin/tailscale',
+    '/opt/homebrew/bin/tailscale',
+  ];
+}
+const TS_CANDIDATES = tailscaleCandidates();
 
 export function tailscaleBin() {
   for (const p of TS_CANDIDATES) {
