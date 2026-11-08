@@ -1681,9 +1681,13 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
   if (mine && mine.token !== token && seqOk !== null && typeof mine.seq === 'number' && seqOk < mine.seq) return { stale: true, haveSeq: mine.seq };
   // The same token again from the same pairing (a reconnect): the entry stays as it is, so a send already going out,
   // which names this registration by addedAt, still reaches it (Codex round 21).
+  // regAt is renewed every time (Apple may hand back the very token it called Unregistered, and a drop judged before
+  // this registration must not remove it, Codex round 22); addedAt, which sends use, stays.
   if (mine && mine.token === token) {
     const keepSeq = seqOk !== null && (typeof mine.seq !== 'number' || seqOk > mine.seq) ? seqOk : mine.seq;
-    if (keepSeq !== mine.seq) { mine.seq = keepSeq; saveConfig(config); }
+    mine.seq = keepSeq;
+    mine.regAt = Math.max(Date.now(), (mine.regAt || 0) + 1);
+    saveConfig(config);
     return mine;
   }
   const entry = {
@@ -1693,6 +1697,7 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
     // A token that moved to another pairing keeps the host Apple already took it on.
     env: prior && APNS_ENVS.has(prior.env) ? prior.env : 'auto',
     addedAt: Date.now(),
+    regAt: Date.now(),
     ...(seqOk !== null ? { seq: seqOk } : {}),
   };
   // One token per phone pairing: a phone that re-registers replaces its old token, never adds a second one.
@@ -1708,11 +1713,13 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
 
 // `addedAt` names the registration a send used: an answer that arrives after the phone registered again (the same token
 // moved to a new pairing, or re-sent) never removes or changes the newer entry (Codex design audit).
-export function removeApnsToken(token, addedAt) {
+// regAt: the registration the send judged. A drop never removes a registration made after it (Codex round 22).
+export function removeApnsToken(token, addedAt, regAt) {
   if (typeof token !== 'string') return;
   const config = loadConfig();
   const before = (config.apnsTokens || []).length;
-  config.apnsTokens = (config.apnsTokens || []).filter((t) => !(t?.token === token && (addedAt === undefined || t.addedAt === addedAt)));
+  config.apnsTokens = (config.apnsTokens || []).filter((t) => !(t?.token === token && (addedAt === undefined || t.addedAt === addedAt)
+    && (regAt === undefined || t.regAt === undefined || t.regAt === regAt)));
   if (config.apnsTokens.length !== before) saveConfig(config);
 }
 

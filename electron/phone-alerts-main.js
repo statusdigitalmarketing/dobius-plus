@@ -37,7 +37,7 @@ function log(code) {
 // Only phones still paired: a registration left by a phone that was unpaired while it was being stored never gets one.
 const liveTokens = () => getApnsTokens()
   .filter((t) => isPairedToken(t.pairToken))
-  .map(({ token, env, pairingId, addedAt }) => ({ token, env, pairingId, addedAt }));
+  .map(({ token, env, pairingId, addedAt, regAt }) => ({ token, env, pairingId, addedAt, regAt }));
 
 /** Whether the person is looking at this tab on the Mac right now: its window focused, showing it, and in use. */
 function isLooking(tabId) {
@@ -62,7 +62,7 @@ export function initPhoneAlerts({ hasWaiting } = {}) {
     webPush: sendPush,
     hasWebPush: hasPushSubscribers,
     apns,
-    tokens: { list: liveTokens, drop: (token, addedAt) => removeApnsToken(token, addedAt), setEnv: (token, env, addedAt) => setApnsTokenEnv(token, env, addedAt) },
+    tokens: { list: liveTokens, drop: (token, addedAt, regAt) => removeApnsToken(token, addedAt, regAt), setEnv: (token, env, addedAt) => setApnsTokenEnv(token, env, addedAt) },
     log,
   });
   notifier = createPhoneNotifier({

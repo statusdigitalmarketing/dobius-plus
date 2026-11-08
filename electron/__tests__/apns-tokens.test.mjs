@@ -115,3 +115,16 @@ test('round 21: the same token re-registered by the same pairing keeps its entry
   assert.equal(again.addedAt, first.addedAt);
   assert.equal(cm.getApnsTokens().filter((x) => x.pairToken === 'S').length, 1);
 });
+
+test('round 22: a drop judged before a re-registration of the same token does not remove it', () => {
+  const t = '9a'.repeat(32);
+  const first = cm.addApnsToken({ token: t, pairToken: 'U', seq: 1 });
+  const judged = { addedAt: first.addedAt, regAt: first.regAt };
+  const again = cm.addApnsToken({ token: t, pairToken: 'U', seq: 1 }); // iOS handed back the same token
+  assert.equal(again.addedAt, judged.addedAt, 'sends still find it');
+  assert.notEqual(again.regAt, judged.regAt);
+  cm.removeApnsToken(t, judged.addedAt, judged.regAt); // the late 410
+  assert.equal(cm.getApnsTokens().some((x) => x.token === t), true, 'the fresh registration stays');
+  cm.removeApnsToken(t, again.addedAt, again.regAt);
+  assert.equal(cm.getApnsTokens().some((x) => x.token === t), false, 'a drop for the current one removes it');
+});

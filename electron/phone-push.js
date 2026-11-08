@@ -71,7 +71,7 @@ export function createPhonePush({ webPush, hasWebPush, apns, tokens, now = () =>
           for (const r of results) {
             // Only the registration this send used: the phone may have registered again while it was in flight.
             const dev = devices.find((x) => x.token === r.token);
-            if (r.outcome === 'drop') { try { tokens.drop(r.token, dev?.addedAt); } catch { /* config write failed */ } log('apns-token-dropped'); }
+            if (r.outcome === 'drop') { try { tokens.drop(r.token, dev?.addedAt, dev?.regAt); } catch { /* config write failed */ } log('apns-token-dropped'); }
             else if (r.outcome === 'sent') { if (dev && dev.env !== r.env) { try { tokens.setEnv(r.token, r.env, dev.addedAt); } catch { /* best effort */ } } }
             else if (r.outcome !== 'skipped') log(`apns-${String(r.reason || 'failed').replace(/[^\w-]/g, '').slice(0, 40)}`);
           }
