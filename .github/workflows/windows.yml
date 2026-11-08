@@ -32,12 +32,13 @@ jobs:
           node-version: 22
           cache: npm
 
-      # better-sqlite3's prebuilt binaries (Node's for npm ci, Electron's for the step below) through the GitHub API
-      # with this run's read-only token. prebuild-install's own anonymous download from github.com/.../releases/download
-      # failed for over an hour on 2026-11-08 (504s, then "No prebuilt binaries found" and a compile with no Visual
-      # Studio) while the API kept working. prebuild-install takes a file from npm_config_<pkg>_local_prebuilds before
-      # it downloads anything; if this step fails, the install falls back to downloading as before.
-      - name: Prebuilt better-sqlite3 through the API
+      # The downloads this build needs, through the GitHub API with this run's read-only token. Anonymous downloads from
+      # github.com/.../releases/download failed for hours on 2026-11-08 (504s, then "No prebuilt binaries found", a
+      # compile with no Visual Studio, and Electron's own install failing) while the API kept working. better-sqlite3's
+      # prebuilds (Node's for npm ci, Electron's for the step below) go where prebuild-install looks before it downloads
+      # (npm_config_<pkg>_local_prebuilds); Electron's zip, checked against its SHASUMS256.txt, goes to electron-builder as
+      # electronDist. If this step fails, everything falls back to downloading as before.
+      - name: Prebuilt binaries through the API
         shell: bash
         continue-on-error: true
         env:
@@ -51,9 +52,19 @@ jobs:
             -p "better-sqlite3-v$V-node-v$ABI-win32-x64.tar.gz" -p "better-sqlite3-v$V-electron-v*-win32-x64.tar.gz"
           ls "$DIR"
           echo "npm_config_better_sqlite3_local_prebuilds=$DIR" >> "$GITHUB_ENV"
+          EV=$(node -p "require('./package-lock.json').packages['node_modules/electron'].version")
+          EDIR="$RUNNER_TEMP/electron-dist"
+          mkdir -p "$EDIR"
+          gh release download "v$EV" -R electron/electron -D "$EDIR" -p "electron-v$EV-win32-x64.zip" -p SHASUMS256.txt
+          (cd "$EDIR" && grep " \*electron-v$EV-win32-x64.zip$" SHASUMS256.txt | sha256sum -c -)
+          echo "ELECTRON_DIST=$EDIR" >> "$GITHUB_ENV"
 
       - name: Install
         run: npm ci
+        env:
+          # Nothing here runs node_modules/electron: the tests use a stub, electron-builder packs its own Electron (from
+          # ELECTRON_DIST when the step above got it) and the smoke test runs the packaged app.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
 
       - name: Unit tests (Windows port)
         run: node --import ./electron/__tests__/register.mjs --test electron/__tests__/windows-port.test.mjs electron/__tests__/osc-only.test.mjs
@@ -74,6 +85,14 @@ jobs:
       # installer is built unsigned, as before: electron-builder fails a build that has signing settings but no
       # credentials, so the settings are only passed when everything is there. No pull_request trigger runs this
       # workflow, so the secrets never reach a fork's code.
+      # electron-builder's tools (NSIS, winCodeSign) kept between runs, so a build does not depend on downloading them.
+      - name: electron-builder cache
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\electron-builder\Cache
+          key: electron-builder-win-${{ hashFiles('package-lock.json') }}
+          restore-keys: electron-builder-win-
+
       - name: Build installer
         shell: bash
         run: |
@@ -91,7 +110,9 @@ jobs:
           else
             echo "No Azure Trusted Signing settings: building unsigned"
           fi
-          npm run electron:build:win -- --publish never -c.npmRebuild=false "${SIGN[@]}"
+          DIST=()
+          if [ -n "$ELECTRON_DIST" ]; then DIST=("-c.electronDist=$ELECTRON_DIST"); fi
+          npm run electron:build:win -- --publish never -c.npmRebuild=false "${DIST[@]}" "${SIGN[@]}"
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
