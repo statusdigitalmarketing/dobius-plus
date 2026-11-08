@@ -204,3 +204,39 @@ printf '%s\n' '{"type":"auth","token":"<token>"}' '{"type":"todayRead","reqId":"
 
 Side effects: `inboxAct` changes the Inbox board (and Asana for `complete`);
 snoozes are saved in `<userData>/today-snooze.json`; settings in config.json.
+
+## Notifications, accounts, chat defaults and native push (2.3)
+
+Advertised in `authed.features` as `alerts`, `accounts`, `chatDefaults` and `apns`; a phone shows each Settings group
+only when its flag is there. Same rules as above: string `reqId`, fixed error codes, nothing queued. Every request here
+first checks the socket's pairing is still paired (a revoked phone's queued messages are refused before anything runs),
+and the writes check it again right before they change anything.
+
+| Request | Fields | Reply |
+| --- | --- | --- |
+| `settingsRead` | | adds `newTabModel`, `newTabPermissionMode`, `phoneAlerts:{needs, done, handoff, team, quiet, names}` and `info.{webPush, apnsReady, apnsReason, thisPhoneApns}` (whether THIS phone, by its pairing, has an APNs token here) |
+| `accountsRead` | | `{type:'accounts', ok, data:{claude:[{id, label, email, isDefault, login, active, usage:{known, headroom, limited, ageMs, windows:[{name, used, resetsAt, ageMs}]}, stale, sessionsRunning}], codex:[{id, label, isDefault, email, plan, login, active}], scanFailed}}`. Arrays only: account ids are user-influenced and never object keys. `data.unsupported` on Windows |
+| `accountActivate` | `id` (string, or `null` for the Mac's default login) | `{type:'accountResult', ok, error}`. The same function as the desktop's Accounts switch (`accounts:activateClaude`): NEW tabs use it, running tabs stay. Followed by `settingsChanged` |
+| `apnsRegister` | `token` (64 to 200 lowercase hex), `pairingId` (the phone's own id for this Mac, up to 64 of `[\w.:-]`) | `{type:'apnsResult', ok, error}`. Bound to the socket's pairing token, never to anything in the message; one token per pairing |
+| `apnsUnregister` | | `{type:'apnsResult', ok}`: removes this pairing's token |
+| `notifyResolve` | `ref` (32 hex, from an APNs notification) | `{type:'notifyTarget', ok, id}`: the tab the notification was about, or `null` (unknown, or older than 24 hours) |
+
+New `settingsWrite` keys:
+
+- `phoneAlerts`: a partial `{needs, done, handoff, team, quiet, names: boolean}`; any other key or a non-boolean is
+  `bad-value`. `quiet` (off by default) holds notifications between Today's `quietAfter` and `morningAt`; `names` off
+  sends only the event kind.
+- `newTabModel`: `''` (Claude's default, no flag), `opus`, `sonnet`, `fable`, `haiku`.
+- `newTabPermissionMode`: `''`, `acceptEdits`, `plan`, `auto`. `bypassPermissions` and `dontAsk` are not offered.
+  Both apply only when a new tab starts `claude` (shared/new-tab.js `loginShellSpawn`, allowlisted again there and
+  passed as separate words, nothing typed into the PTY, nothing eval'd).
+
+What a notification is (electron/phone-notifier.js): a tab needs you (a permission prompt, a turn that handed back a
+`!` command, or a tab's program exiting with an error), a tab finished, a command was handed back (listed in Tasks >
+Commands), a team message arrived. Debounced (1.5 s for a prompt, 2 s for a finish, up to 10 s for a handed-back command
+to be listed), 30 s per tab between buzzes (the newest held, sent if still true), at most 20 in 10 minutes, whatever is
+due within a second goes out together and three or more become one summary, never for a tab the person is looking at
+on the Mac (focused window, that tab on screen, keyboard or mouse used in the last two minutes). Payload: a title and
+body built from a tab, project or teammate name and a fixed phrase, and a hashed tag; Web Push adds
+`url: ./?open=<tab id>` (end-to-end encrypted to the phone), APNs adds `mac` and an opaque `ref` instead
+(docs/native-push.md).

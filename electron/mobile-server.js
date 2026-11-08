@@ -26,7 +26,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { app, powerSaveBlocker } from 'electron';
 import { createAutoStart, createStartGate, listenSettled, attachWebSocketServer, dualProtocolServer } from './mobile-autostart.js';
-import { getMobileServerConfig, updateMobileServerConfig, setSessionTabLink, removePushSubscriptionsByToken, getSessionTabMap, getTabLabelsById, loadConfig } from './config-manager.js';
+import { getMobileServerConfig, updateMobileServerConfig, setSessionTabLink, removePushSubscriptionsByToken, removeApnsTokensByPairToken, getSessionTabMap, getTabLabelsById, loadConfig } from './config-manager.js';
 import {
   listTerminals, subscribeTerminal, writeTerminal, terminalHasDesktopAttached,
   resizeTerminal, killTerminal, createTerminal, getTerminalBuffer,
@@ -46,7 +46,7 @@ import { snapshot as terminalStatusSnapshot } from './terminal-status.js';
 import { estimateContextForTabId } from './tab-context.js';
 import { getMagicDNSName, certPathsFor, hasCertFor, getTailnetHosts } from './tailscale.js';
 import { transcribeAudio, transcribeAvailable } from './voice-transcribe.js';
-import { getVapidPublicKey, subscribePush, sendPush, hasPushSubscribers } from './push.js';
+import { getVapidPublicKey, subscribePush } from './push.js';
 import { isAbsPath } from '../shared/platform.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -335,6 +335,16 @@ function claudeIsLive(id) {
   } catch { return false; }
 }
 
+/** Whether a pairing token still belongs to a paired phone (the phone notifier sends only to those). */
+export function isPairedToken(token) { return knownToken(token); }
+
+/** A tab's name for a notification: the renamed label (or Tab N) and the project folder's name, nothing else. */
+export function tabLabelForNotify(id) {
+  const t = listTerminals().find((x) => x.id === id);
+  const meta = parseTermLabel(id, t?.cwd);
+  return { label: configTabLabels().get(id) || meta.label, project: meta.projectName };
+}
+
 function parseTermLabel(id, cwd) {
   const m = typeof id === 'string' && id.match(/^term-(.+)-(\d+)$/);
   if (m && m[1] !== 'mobile') {
@@ -493,83 +503,6 @@ function terminalsSignature(payload) {
 let statusBroadcastTimer = null;
 let heartbeatTimer = null;
 let lastTerminalsSig = null;
-const prevStatusById = new Map(); // id -> last status, for push transitions
-const notifiedExits = new Set();  // `${id}:${at}` already push-notified
-const NOTIFIED_EXITS_CAP = 200;   // > MAX_RECENT_EXITS (50) so cached exits never evict
-
-// Fire push notifications for the moments worth pulling Sam back: a session
-// starts needing input, or a session exits nonzero. Runs even with no phone
-// connected (that is the point of push), but only when there are subscribers.
-// v1.0.43 Phase 5b.
-function firePushForEvents(payload) {
-  if (!hasPushSubscribers()) {
-    // Still track state so we don't blast a backlog the moment someone subscribes.
-    for (const t of payload.list) prevStatusById.set(t.id, t.status);
-    return;
-  }
-  const seen = new Set();
-  for (const t of payload.list) {
-    seen.add(t.id);
-    const prev = prevStatusById.get(t.id);
-    if (t.status === 'needs' && prev !== 'needs') {
-      // url carries ?open=<id> so tapping the notification deep-links straight to
-      // the session that needs input, not just whatever screen was last open.
-      // Audit MED-12.
-      sendPush({
-        title: t.projectName || 'Dobius+',
-        body: `${t.label} needs your input`,
-        tag: `needs:${t.id}`,
-        url: `./?open=${encodeURIComponent(t.id)}`,
-      });
-    } else if (t.status === 'done' && prev === 'working') {
-      // Finished-a-turn push (Sam's v1.0.53 ask). Only on the working->done
-      // transition (hook-driven), and tagged per tab so rapid turns replace
-      // the previous banner instead of stacking.
-      sendPush({
-        title: t.projectName || 'Dobius+',
-        body: `${t.label} finished its turn`,
-        tag: `done:${t.id}`,
-        url: `./?open=${encodeURIComponent(t.id)}`,
-      });
-    }
-    prevStatusById.set(t.id, t.status);
-  }
-  for (const id of [...prevStatusById.keys()]) if (!seen.has(id)) prevStatusById.delete(id);
-  for (const e of payload.recentExits) {
-    if (typeof e.exitCode === 'number' && e.exitCode !== 0) {
-      const key = `${e.id}:${e.at}`;
-      if (!notifiedExits.has(key)) {
-        notifiedExits.add(key);
-        sendPush({ title: e.projectName || 'Dobius+', body: `session failed (exit ${e.exitCode})`, tag: `exit:${key}` });
-      }
-    }
-  }
-  // Bound notifiedExits WITHOUT dropping keys still present in recentExits: a
-  // full .clear() emptied the dedup set while terminal-status.recentExits (a
-  // 50-entry FIFO) still held those exits, so the next tick re-fired up to 50
-  // duplicate "session failed" pushes. Set is insertion-ordered, so evict oldest
-  // first and keep a window well above MAX_RECENT_EXITS (50), which guarantees
-  // the still-cached exits are never among the evicted. Audit MED-7.
-  while (notifiedExits.size > NOTIFIED_EXITS_CAP) {
-    notifiedExits.delete(notifiedExits.values().next().value);
-  }
-}
-
-// Seed the push dedup state from the CURRENT status snapshot so a server
-// (re)start does not re-notify sessions that already need input or already
-// exited. prevStatusById/notifiedExits are cleared on stop, but
-// terminal-status.recentExits (module-level, 50-entry FIFO) survives, so without
-// this the first tick after a restart (bind-mode change, cert provision) blasted
-// stale "session failed" + "needs input" pushes. Audit MED-6.
-function seedPushBaseline() {
-  const payload = buildTerminalsPayload();
-  prevStatusById.clear();
-  notifiedExits.clear();
-  for (const t of payload.list) prevStatusById.set(t.id, t.status);
-  for (const e of payload.recentExits) {
-    if (typeof e.exitCode === 'number' && e.exitCode !== 0) notifiedExits.add(`${e.id}:${e.at}`);
-  }
-}
 
 function pollStatusTick() {
   const payload = buildTerminalsPayload();
@@ -579,8 +512,7 @@ function pollStatusTick() {
   // (Codex Medium, round 12).
   if (activeSocketsByToken.size > 0) refreshActivities(new Set(payload.list.filter((t) => t.status === 'working').map((t) => t.id)));
   else activityCache.clear();
-  // Push events fire regardless of connected sockets (phone may be closed).
-  try { firePushForEvents(payload); } catch { /* best effort */ }
+  // Phone notifications are not sent from here any more: electron/phone-notifier.js takes the events themselves.
   // WS broadcast only when a phone is connected and the board-relevant state moved.
   if (activeSocketsByToken.size === 0) return;
   const sig = terminalsSignature(payload);
@@ -717,7 +649,7 @@ function handleTabWrite(socket, msg) {
 
 function handleAuthedMessage(socket, msg, subs) {
   if (TAB_OPS.has(msg.type)) { handleTabWrite(socket, msg); return; }
-  if (handleTodayMessage(msg, (obj) => wsSend(socket, obj), () => knownToken(socket._authToken))) return;
+  if (handleTodayMessage(msg, (obj) => wsSend(socket, obj), () => knownToken(socket._authToken), { token: socket._authToken })) return;
   switch (msg.type) {
     case 'ping':
       wsSend(socket, { type: 'pong' });
@@ -1680,7 +1612,6 @@ async function doStartMobileServer(stillCurrent) {
   // Seed dedup state from the current snapshot so a (re)start does not blast
   // stale needs/exit pushes for sessions that were already in that state
   // before the server came up. Audit MED-6.
-  seedPushBaseline();
   statusBroadcastTimer = setInterval(pollStatusTick, 1000);
   // Context (model + ctx%) is transcript-derived, so recompute on a slow
   // debounce, not every status tick. Runs once now, then every 20s.
@@ -1725,8 +1656,6 @@ export function stopMobileServer({ persistDisabled = false } = {}) {
   selectorInterest.clear();
   tabContextCache.clear();
   lastTerminalsSig = null;
-  prevStatusById.clear();
-  notifiedExits.clear();
   stopPowerAssertion();
   if (wss) { try { wss.close(); } catch { /* noop */ } wss = null; }
   // Capture the server so we can AWAIT its close before a caller restarts on the
@@ -1796,6 +1725,7 @@ export function removeMobileDevice(idOrToken) {
   }
   // Revoke push too, so the removed phone stops getting notifications. Codex P1.
   removePushSubscriptionsByToken(removed.token);
+  removeApnsTokensByPairToken(removed.token); // the App Store app's native push too
   return getMobileServerStatus();
 }
 

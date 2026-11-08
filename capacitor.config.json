@@ -10,5 +10,10 @@
   "ios": {
     "contentInset": "never",
     "scrollEnabled": true
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "banner", "list"]
+    }
   }
 }

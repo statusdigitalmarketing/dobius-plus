@@ -44,7 +44,8 @@ function toast(title, body) {
  * @param {{ bridgeOpenDeps: object, endpoint: () => ({ host, port } | null) }} opts
  *   bridgeOpenDeps: createBridgeOpenDeps(...) from main.js, the same guards /openTab uses.
  */
-export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem }) {
+// onMessage(peerName): a team message arrived (the phone notifier; the name only, never the text).
+export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem, onMessage = () => {} }) {
   if (service) return service;
   store = createTeamStore({
     dir: path.join(app.getPath('userData'), 'team'),
@@ -89,7 +90,10 @@ export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem }) {
     }),
     notify: (event, p) => {
       if (event === 'link-request') toast('Team link request', `${p.name} (${p.short}) wants to link. Open Settings > Team to accept.`);
-      if (event === 'message') toast(`Team message from ${p.name}`, p.text);
+      if (event === 'message') {
+        toast(`Team message from ${p.name}`, p.text);
+        try { onMessage(p.name); } catch (err) { console.warn('[team] phone notify failed:', err?.message || err); }
+      }
       if (event === 'handoff-held') toast('Team request not handed over', `A message for ${p.to} could not be typed into the orchestrator tab: ${p.note || 'unknown reason'}. Nothing was sent.`);
       if (event === 'inbox-full') toast('Team inbox full', `A message from ${p.name} was refused: act on the waiting ones in Tasks > Team.`);
       broadcast('team:changed', { event });

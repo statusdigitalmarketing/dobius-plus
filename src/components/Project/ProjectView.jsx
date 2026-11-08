@@ -697,6 +697,21 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     );
   }, [tabs, tabsInitialized, projectPath, tearOffTabId, isExtraWindow, windowKey]);
 
+  // Tell main which tabs this window shows (the phone is not notified about a tab the person is looking at). Only
+  // when the set changes; focus and idleness are main's to judge.
+  useEffect(() => {
+    let last = '';
+    const report = () => {
+      const ids = [...onScreenTabIds(useStore.getState())].sort();
+      const key = ids.join('\n');
+      if (key === last) return;
+      last = key;
+      window.electronAPI?.tabsShown?.(ids);
+    };
+    report();
+    return useStore.subscribe(report);
+  }, []);
+
   // Persist active tab id so quit-on-tab-4 returns to tab-4 instead of tab-1.
   // configSetProject is merge-only so this won't disturb other project state.
   // Apple-grade audit P2 (state loss on quit). Tear-offs refresh their own

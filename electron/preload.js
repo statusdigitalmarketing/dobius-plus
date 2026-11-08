@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // main: a red tab's prompt was answered (from any surface), so it is working.
   // A handed-back command's red was seen in this window: main clears it.
   terminalHandoffSeen: (id, shownSince) => ipcRenderer.invoke('terminal:handoffSeen', id, shownSince),
+  // The tabs this window shows now, so the phone is not notified about one the person is looking at.
+  tabsShown: (ids) => ipcRenderer.send('tabs:shown', ids),
   onTerminalStatusHint: (callback) => {
     const handler = (_event, id, status) => callback(id, status);
     ipcRenderer.on('terminal:statusHint', handler);

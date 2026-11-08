@@ -4,7 +4,9 @@ import { buildPairingDeepLink, buildPairingWebLink } from '../../../shared/pairi
 import { useStore } from '../../store/store';
 import { curatedTerminalFontsFor, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
-import { normalizeNewTabTool } from '../../../shared/new-tab.js';
+import {
+  normalizeNewTabTool, normalizeNewTabModel, normalizeNewTabPermissionMode, NEW_TAB_MODELS, NEW_TAB_PERMISSION_MODES,
+} from '../../../shared/new-tab.js';
 import { isWindows, currentPlatform } from '../../../shared/platform.js';
 import { WINDOWS_SHORTCUT_ROWS } from '../../../shared/win-keys.js';
 import AccountsSection from './AccountsSection';
@@ -13,6 +15,19 @@ import TeamSection from './TeamSection';
 
 // The terminal fonts offered here: the Mac faces, or the ones Windows ships.
 const CURATED_TERMINAL_FONTS = curatedTerminalFontsFor(currentPlatform());
+// The new-tab Claude defaults (shared/new-tab.js allowlist), named as a person reads them.
+const MODEL_NAMES = { '': "Claude's default model", opus: 'Opus', sonnet: 'Sonnet', fable: 'Fable', haiku: 'Haiku' };
+const PERMISSION_NAMES = { '': "Claude's default mode", acceptEdits: 'Accept edits', plan: 'Plan mode', auto: 'Auto mode' };
+const SELECT_STYLE = {
+  backgroundColor: 'var(--bg)',
+  color: 'var(--fg)',
+  border: '1px solid var(--border)',
+  borderRadius: 6,
+  padding: '4px 8px',
+  fontSize: 12,
+  fontFamily: "'SF Mono', monospace",
+  outline: 'none',
+};
 
 export default function Settings() {
   const themeIndex = useStore((s) => s.themeIndex);
@@ -176,7 +191,7 @@ export default function Settings() {
     // field being typed into here is never reset by an older read (Codex).
     return a.onSettingsChanged?.(() => {
       const at = editSeq.current;
-      a.configGetSettings().then((s) => { if (at === editSeq.current) setSettings((prev) => ({ ...prev, todayNudges: s.todayNudges, newTabTool: s.newTabTool })); });
+      a.configGetSettings().then((s) => { if (at === editSeq.current) setSettings((prev) => ({ ...prev, todayNudges: s.todayNudges, newTabTool: s.newTabTool, newTabModel: s.newTabModel, newTabPermissionMode: s.newTabPermissionMode })); });
       a.autoModeGet?.().then((m) => { if (m) setAutoMode(m); });
     });
   }, []);
@@ -461,6 +476,33 @@ export default function Settings() {
             <option value="shell">Terminal (nothing starts)</option>
           </select>
         </SettingRow>
+        {!isWindows() && normalizeNewTabTool(settings.newTabTool) === 'claude' && (
+          <SettingRow
+            label="New Claude Tabs Use"
+            description="The model and permission mode a new tab's Claude starts with. Claude's own default sends no flag. Resumed and restored tabs keep what they had. Also set from the phone."
+          >
+            <div style={{ display: 'flex', gap: 6 }}>
+              <select
+                value={normalizeNewTabModel(settings.newTabModel)}
+                onChange={(e) => updateSetting('newTabModel', e.target.value)}
+                data-testid="new-tab-model"
+                aria-label="Model for new Claude tabs"
+                style={SELECT_STYLE}
+              >
+                {NEW_TAB_MODELS.map((m) => <option key={m || 'default'} value={m}>{MODEL_NAMES[m]}</option>)}
+              </select>
+              <select
+                value={normalizeNewTabPermissionMode(settings.newTabPermissionMode)}
+                onChange={(e) => updateSetting('newTabPermissionMode', e.target.value)}
+                data-testid="new-tab-permission"
+                aria-label="Permission mode for new Claude tabs"
+                style={SELECT_STYLE}
+              >
+                {NEW_TAB_PERMISSION_MODES.map((m) => <option key={m || 'default'} value={m}>{PERMISSION_NAMES[m]}</option>)}
+              </select>
+            </div>
+          </SettingRow>
+        )}
         <SettingRow label="Scrollback Lines" description={`Save up to ${settings.scrollbackLines.toLocaleString()} lines on window close`}>
           <select
             value={settings.scrollbackLines}

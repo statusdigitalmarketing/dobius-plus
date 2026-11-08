@@ -5,13 +5,27 @@
 // Card text goes only to an authed phone, as the reply to its own request. It is never logged
 // here and nothing here writes it to disk.
 
-export const TODAY_FEATURES = Object.freeze(['today', 'settings']);
+import { alertSettings } from './phone-notifier.js';
+import { NEW_TAB_MODELS, NEW_TAB_PERMISSION_MODES } from '../shared/new-tab.js';
+import { isDeviceToken } from './apns.js';
+
+// alerts: Notifications by event (phoneAlerts). accounts: accountsRead / accountActivate. chatDefaults: the newTabModel
+// and newTabPermissionMode keys. apns: apnsRegister / apnsUnregister / notifyResolve (the App Store app's push).
+export const TODAY_FEATURES = Object.freeze(['today', 'settings', 'alerts', 'accounts', 'chatDefaults', 'apns']);
 
 const MAX_REQ_ID = 64;
 const MAX_ID = 200;
 const NUDGE_DEFAULTS = Object.freeze({ imessage: true, mac: true, push: true, morningAt: '08:00', quietAfter: '20:00' });
 const NEW_TAB_TOOLS = new Set(['claude', 'codex', 'shell']);
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const PAIRING_ID_RE = /^[\w.:-]{1,64}$/;
+// The reply type for each request, also what a failure answers with.
+const REPLY = {
+  todayRead: 'today', inboxRead: 'inbox', todaySnooze: 'todayResult', todayUnsnooze: 'todayResult', inboxAct: 'todayResult',
+  settingsRead: 'settings', settingsWrite: 'settingsResult',
+  accountsRead: 'accounts', accountActivate: 'accountResult',
+  apnsRegister: 'apnsResult', apnsUnregister: 'apnsResult', notifyResolve: 'notifyTarget',
+};
 
 let bridge = null;
 export function setTodayBridge(b) { bridge = b || null; }
@@ -35,9 +49,25 @@ export function nudgeSettings(raw) {
  * what main should do, or { ok:false, error }. Nothing here can turn off the phone server, touch
  * pairing, keys or hooks: a phone must never be able to lock itself out.
  */
-export function checkSettingWrite(key, value, current = {}) {
+export function checkSettingWrite(key, value, current = {}, currentAlerts = {}) {
   if (key === 'newTabTool') {
     return NEW_TAB_TOOLS.has(value) ? { ok: true, apply: { settings: { newTabTool: value } } } : { ok: false, error: 'bad-value' };
+  }
+  // Only the words the launch allowlist knows ('' is Claude's own default): shared/new-tab.js checks them again at spawn.
+  if (key === 'newTabModel') {
+    return typeof value === 'string' && NEW_TAB_MODELS.includes(value) ? { ok: true, apply: { settings: { newTabModel: value } } } : { ok: false, error: 'bad-value' };
+  }
+  if (key === 'newTabPermissionMode') {
+    return typeof value === 'string' && NEW_TAB_PERMISSION_MODES.includes(value) ? { ok: true, apply: { settings: { newTabPermissionMode: value } } } : { ok: false, error: 'bad-value' };
+  }
+  if (key === 'phoneAlerts') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'bad-value' };
+    const base = alertSettings(currentAlerts);
+    // Own keys only, and only the five switches: anything else (__proto__ included) is refused, not merged.
+    for (const k of Object.keys(value)) if (!Object.prototype.hasOwnProperty.call(base, k) || typeof value[k] !== 'boolean') return { ok: false, error: 'bad-value' };
+    const next = {};
+    for (const k of Object.keys(base)) next[k] = Object.prototype.hasOwnProperty.call(value, k) ? value[k] : base[k];
+    return { ok: true, apply: { settings: { phoneAlerts: next } } };
   }
   if (key === 'autoMode') {
     return typeof value === 'boolean' ? { ok: true, apply: { autoMode: value } } : { ok: false, error: 'bad-value' };
@@ -68,12 +98,17 @@ const withoutUrl = (r) => { if (!r || typeof r !== 'object') return r; const { u
  * Handle one phone message if it is ours. Returns true when handled. `send` writes to that one
  * socket. Every reply carries the request's reqId so a screen can match it.
  */
-export function handleTodayMessage(msg, send, stillOk = () => true) {
+export function handleTodayMessage(msg, send, stillOk = () => true, ctx = {}) {
   const type = msg?.type;
-  if (!['todayRead', 'inboxRead', 'todaySnooze', 'todayUnsnooze', 'inboxAct', 'settingsRead', 'settingsWrite'].includes(type)) return false;
+  if (typeof type !== 'string' || !Object.prototype.hasOwnProperty.call(REPLY, type)) return false;
   const reqId = reqIdOf(msg);
-  const fail = (extra) => send({ type: type === 'settingsWrite' ? 'settingsResult' : type.endsWith('Read') ? type.replace('Read', '') : 'todayResult', reqId, ok: false, ...extra });
+  const fail = (extra) => send({ type: REPLY[type], reqId, ok: false, ...extra });
   if (!bridge) { fail({ error: 'unavailable' }); return true; }
+  // The pairing token of the socket the message came on (mobile-server): what an APNs token is bound to.
+  const token = typeof ctx.token === 'string' && ctx.token ? ctx.token : null;
+  // A revoked phone's queued messages can still be read after its socket was told to close: the newer requests check
+  // the pairing first, every time, and the writes check it again right before they change anything (Codex design audit).
+  if (['accountsRead', 'accountActivate', 'apnsRegister', 'apnsUnregister', 'notifyResolve'].includes(type) && !stillOk()) { fail({ error: 'unavailable' }); return true; }
   const run = async () => {
     switch (type) {
       case 'todayRead': {
@@ -110,7 +145,34 @@ export function handleTodayMessage(msg, send, stillOk = () => true) {
         return send({ type: 'todayResult', reqId, op: msg.kind, id: msg.id, ok: !!r?.ok, changed: r?.reason === 'changed', reason: typeof r?.reason === 'string' ? r.reason.slice(0, 40) : undefined });
       }
       case 'settingsRead':
-        return send({ type: 'settings', reqId, ok: true, data: await bridge.readSettings() });
+        return send({ type: 'settings', reqId, ok: true, data: await bridge.readSettings({ token }) });
+      case 'accountsRead': {
+        const data = await bridge.readAccounts();
+        return send({ type: 'accounts', reqId, ok: true, data });
+      }
+      case 'accountActivate': {
+        // null: back to the Mac's default login. Otherwise an account id (user-influenced: only ever compared, never
+        // used as an object key, here or in main).
+        const id = msg.id === null ? null : (typeof msg.id === 'string' && msg.id.length > 0 && msg.id.length <= MAX_ID ? msg.id : undefined);
+        if (id === undefined) return fail({ error: 'bad-request' });
+        const r = await bridge.activateAccount(id, stillOk);
+        return send({ type: 'accountResult', reqId, ok: !!r?.ok, error: r?.ok ? undefined : (typeof r?.error === 'string' ? r.error.slice(0, 160) : 'failed') });
+      }
+      case 'apnsRegister': {
+        if (!token || !isDeviceToken(msg.token)) return fail({ error: 'bad-request' });
+        const pairingId = typeof msg.pairingId === 'string' && PAIRING_ID_RE.test(msg.pairingId) ? msg.pairingId : null;
+        const r = bridge.registerApns({ deviceToken: msg.token, pairToken: token, pairingId }, stillOk);
+        return send({ type: 'apnsResult', reqId, ok: !!r?.ok, error: r?.ok ? undefined : (r?.error || 'failed') });
+      }
+      case 'apnsUnregister': {
+        if (!token) return fail({ error: 'bad-request' });
+        bridge.unregisterApns(token);
+        return send({ type: 'apnsResult', reqId, ok: true });
+      }
+      case 'notifyResolve': {
+        const id = bridge.resolveNotifyRef(msg.ref);
+        return send({ type: 'notifyTarget', reqId, ok: true, id: typeof id === 'string' ? id : null });
+      }
       case 'settingsWrite': {
         if (!stillOk()) return fail({ key: null, error: 'unavailable' });
         const r = await bridge.writeSetting(msg.key, msg.value);

@@ -48,7 +48,7 @@ import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending } from './chat-service.js';
-import { launchCommandFor } from '../shared/new-tab.js';
+import { launchCommandFor, claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
 import { promptBoxText } from './bridge-open-tab.js';
@@ -131,7 +131,10 @@ import { installNavGuard, isAppUrl } from './nav-guard.js';
 import { readToday, readAllCards, cardSeen, openCardIds } from './today.js';
 import { setTodayBridge, nudgeSettings, checkSettingWrite } from './mobile-today.js';
 import { createNudger, NUDGE_PREFIX } from './today-nudge.js';
-import { sendPush, hasPushSubscribers } from './push.js';
+import { hasPushSubscribers } from './push.js';
+import { initPhoneAlerts, phoneAlerts } from './phone-alerts-main.js';
+import { alertSettings } from './phone-notifier.js';
+import { shapePhoneAccounts } from './phone-accounts.js';
 import { createPicker, runClaude } from './today-pick.js';
 import { createSnoozes, cardPrint } from './today-snooze.js';
 import { localDay } from '../shared/task-due.js';
@@ -162,27 +165,37 @@ function todayChanged() {
 }
 
 // What the phone's Settings screen shows. Read-only rows are facts about this Mac.
-function phoneSettings() {
+// ctx.token: the asking phone's pairing token, so it can be told whether IT is set up for native push.
+function phoneSettings(ctx = {}) {
   const st = getSettings();
   const config = loadConfig();
   const active = (config.accounts || []).find((a) => a.id === config.activeClaudeAccountId);
   const bridge = getImessageBridge();
+  const channels = phoneAlerts.channels(ctx.token);
   return {
     todayNudges: nudgeSettings(st.todayNudges),
     newTabTool: st.newTabTool || 'claude',
+    newTabModel: normalizeNewTabModel(st.newTabModel),
+    newTabPermissionMode: normalizeNewTabPermissionMode(st.newTabPermissionMode),
+    phoneAlerts: alertSettings(st.phoneAlerts),
     autoMode: !!getAutoMode().enabled,
     info: {
       version: app.getVersion(),
       account: active?.name ? String(active.name).slice(0, 60) : 'Default',
       imessageReady: !!bridge.selfHandle,
-      phonePush: hasPushSubscribers(),
+      phonePush: hasPushSubscribers() || (channels.apnsReady && channels.thisPhoneApns),
+      // What can carry a notification to phones: the PWA's Web Push, and the App Store app's APNs (needs Sam's key).
+      webPush: channels.webPush,
+      apnsReady: channels.apnsReady,
+      apnsReason: channels.apnsReason,
+      thisPhoneApns: channels.thisPhoneApns,
     },
   };
 }
 
 function writePhoneSetting(key, value) {
   const st = getSettings();
-  const check = checkSettingWrite(key, value, st.todayNudges);
+  const check = checkSettingWrite(key, value, st.todayNudges, st.phoneAlerts);
   if (!check.ok) return check;
   if (check.apply.settings) updateSettings(check.apply.settings);
   if (typeof check.apply.autoMode === 'boolean') {
@@ -251,9 +264,10 @@ async function sendTodayNudge(nudge, _cfg) {
   }
   // Last, and bounded: one push service that never answers must not hold up every later nudge.
   if (cfg.push) {
-    if (!hasPushSubscribers()) out.push = 'none';
+    if (!phoneAlerts.hasAnyPhone()) out.push = 'none';
     else {
-      const done = sendPush({ title: 'Today', body, tag: 'today', url: './?view=tasks' }).then(() => 'sent', () => 'failed');
+      // Web Push and the App Store app alike (phone-push.js). Counts only, as before.
+      const done = phoneAlerts.send({ kind: 'today', title: 'Today', body, tag: 'today', url: './?view=tasks', tabId: null }).then(() => 'sent', () => 'failed');
       out.push = await Promise.race([done, new Promise((r) => setTimeout(() => r('timeout'), 20000))]);
     }
   }
@@ -563,9 +577,11 @@ function setupTerminalHandlers() {
       }
     }
     const startCommand = launch === undefined || typeof launch === 'object' ? null : launchCommandFor(launch, getSettings().newTabTool);
+    // The new tab's Claude defaults (model, permission mode), from the same fixed allowlist the phone writes through.
+    const claudeOpts = startCommand === 'claude' ? claudeLaunchOptions(getSettings()) : null;
     let created = null;
     try {
-      created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand, runScript });
+      created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand, runScript, claudeOpts });
     } finally {
       if (runScript) {
         // The card shows it running in this tab, then Done or Failed (pollRuns).
@@ -1791,8 +1807,23 @@ function setupOrchestrationHandlers() {
     snooze: snoozeToday,
     unsnooze: unsnoozeToday,
     act: actOnCard,
-    readSettings: () => phoneSettings(),
+    readSettings: (ctx) => phoneSettings(ctx),
     writeSetting: (key, value) => writePhoneSetting(key, value),
+    readAccounts: () => phoneAccounts(),
+    // The same switch the Mac's Accounts section makes (accounts:activateClaude): one function for both.
+    activateAccount: (id, stillOk) => {
+      if (IS_WIN) return { ok: false, error: WIN_UNSUPPORTED.error }; // Windows applies no saved account
+      if (!stillOk()) return { ok: false, error: 'unavailable' };
+      const r = activateClaudeAccount(id);
+      if (r.ok) {
+        broadcastToPhones('settingsChanged');
+        for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('accounts:changed');
+      }
+      return r;
+    },
+    registerApns: (reg, stillOk) => phoneAlerts.registerApns(reg, stillOk),
+    unregisterApns: (pairToken) => phoneAlerts.unregisterApns(pairToken),
+    resolveNotifyRef: (ref) => phoneAlerts.resolveRef(ref),
   });
   // Today comes to Sam: counts only, through the channels Settings allows (electron/today-nudge.js).
   const todayNudger = createNudger({
@@ -3204,6 +3235,77 @@ function setupHeadroomHandlers() {
   setInterval(() => { headroom.tick(); }, 60_000).unref();
 }
 
+// Codex account identities (email/plan/login) for the Accounts panel and the phone.
+async function codexAccountIdentities() {
+  try {
+    const accts = (loadConfig().accounts || []).filter((a) => a.type === 'codex');
+    // Array aligned by account, NOT an object keyed by id: account ids are
+    // user-influenced, and an id of __proto__/__default__ would pollute or
+    // collide an id-keyed object (same fix as the Claude accountIdentities).
+    const rows = [];
+    for (const a of accts) {
+      const effMode = a.authMode || (a.apiKey ? 'apikey' : 'chatgpt');
+      if (effMode === 'chatgpt' && a.codexHome) {
+        rows.push({ id: a.id, ...(await codexIdentityFor(expandTilde(a.codexHome))) });
+      } else {
+        rows.push({ id: a.id, email: null, plan: null, login: a.apiKey ? 'in' : 'out', apikey: true });
+      }
+    }
+    return { default: await codexIdentityFor(codexDefaultDir()), accounts: rows };
+  } catch (err) {
+    console.warn('[accounts] codex identity lookup failed:', err?.message || err);
+    return {};
+  }
+}
+
+// The phone's Accounts list: every Claude account with its usage as the Mac's Account usage panel computes it,
+// the Codex accounts by who they are, and which one is active for new tabs (shaped in electron/phone-accounts.js).
+async function phoneAccounts() {
+  if (IS_WIN) return { unsupported: true, claude: [], codex: [] };
+  const config = loadConfig();
+  let usage = null;
+  try { usage = headroom ? await headroom.usage() : null; } catch { usage = null; }
+  let codexIds = {};
+  try { codexIds = await codexAccountIdentities(); } catch { codexIds = {}; }
+  return shapePhoneAccounts({ usage, accounts: config.accounts, activeClaude: config.activeClaudeAccountId || null, activeCodex: config.activeCodexAccountId || null, codexIds });
+}
+
+// Activate a Claude account for NEW terminals (the desktop Accounts section and the phone's Settings both call this).
+function activateClaudeAccount(accountId) {
+  // v1.0.65: switching is a POINTER, not a file swap. The old handler
+  // copied the snapshot over ~/.claude.json, which never changed the real
+  // login (Claude Code scopes credentials to the CONFIG DIR, and the
+  // default dir's token lives in the Keychain), so Switch was cosmetic and
+  // left mismatched oauthAccount metadata behind. Now: set the active id;
+  // every NEW terminal in every project launches with that account's
+  // CLAUDE_CONFIG_DIR (see terminal:create). null = back to the Mac's
+  // default ~/.claude identity. ~/.claude.json is never touched.
+  const config = loadConfig();
+  if (accountId === null) {
+    config.activeClaudeAccountId = null;
+    saveConfig(config);
+    return { ok: true, isDefault: true };
+  }
+  // find() takes the FIRST match, so with two rows sharing an id the switch
+  // would activate a different account than the row the user clicked while
+  // the UI names theirs. Refuse, matching save/delete (reviewer HIGH).
+  const claudeMatches = (config.accounts || []).filter((a) => a.id === accountId && a.type === 'claude');
+  if (claudeMatches.length > 1) {
+    return { ok: false, error: `${claudeMatches.length} accounts share the id ${accountId}; fix the duplicate before switching` };
+  }
+  const account = claudeMatches[0];
+  if (!account) return { ok: false, error: 'Account not found' };
+  if (!account.claudeJsonPath) return { ok: false, error: 'No profile snapshot for this account' };
+  // Repair the shared links before the switch takes effect, so an account
+  // added by hand (or one whose links were removed) still sees your history
+  // on its first terminal rather than reporting no conversations found.
+  try { shareProfile(path.dirname(expandTilde(account.claudeJsonPath))); }
+  catch (err) { console.warn('[account-share] activate link failed:', err?.message || err); }
+  config.activeClaudeAccountId = accountId;
+  saveConfig(config);
+  return { ok: true, isDefault: false };
+}
+
 function setupConfigHandlers() {
   ipcMain.handle('config:load', () => loadConfig());
   ipcMain.handle('config:save', (_event, config) => saveConfig(config));
@@ -3231,27 +3333,7 @@ function setupConfigHandlers() {
   // the list showed only a typed name, which is how two entries over one
   // account looked like a broken Switch (Asana 1218250019314695).
   // Codex account identities (email/plan/login) for the Accounts panel.
-  ipcMain.handle('accounts:codexIdentities', async () => {
-    try {
-      const accts = (loadConfig().accounts || []).filter((a) => a.type === 'codex');
-      // Array aligned by account, NOT an object keyed by id: account ids are
-      // user-influenced, and an id of __proto__/__default__ would pollute or
-      // collide an id-keyed object (same fix as the Claude accountIdentities).
-      const rows = [];
-      for (const a of accts) {
-        const effMode = a.authMode || (a.apiKey ? 'apikey' : 'chatgpt');
-        if (effMode === 'chatgpt' && a.codexHome) {
-          rows.push({ id: a.id, ...(await codexIdentityFor(expandTilde(a.codexHome))) });
-        } else {
-          rows.push({ id: a.id, email: null, plan: null, login: a.apiKey ? 'in' : 'out', apikey: true });
-        }
-      }
-      return { default: await codexIdentityFor(codexDefaultDir()), accounts: rows };
-    } catch (err) {
-      console.warn('[accounts] codex identity lookup failed:', err?.message || err);
-      return {};
-    }
-  });
+  ipcMain.handle('accounts:codexIdentities', () => codexAccountIdentities());
   ipcMain.handle('accounts:identities', async () => {
     try {
       return await accountIdentities(getAccounts());
@@ -3266,40 +3348,7 @@ function setupConfigHandlers() {
   ipcMain.handle('accounts:setForProject', (_event, projectPath, accountId) => setProjectAccount(projectPath, accountId));
 
   // Activate a Claude account by swapping ~/.claude.json
-  ipcMain.handle('accounts:activateClaude', async (_event, accountId) => {
-    // v1.0.65: switching is a POINTER, not a file swap. The old handler
-    // copied the snapshot over ~/.claude.json, which never changed the real
-    // login (Claude Code scopes credentials to the CONFIG DIR, and the
-    // default dir's token lives in the Keychain), so Switch was cosmetic and
-    // left mismatched oauthAccount metadata behind. Now: set the active id;
-    // every NEW terminal in every project launches with that account's
-    // CLAUDE_CONFIG_DIR (see terminal:create). null = back to the Mac's
-    // default ~/.claude identity. ~/.claude.json is never touched.
-    const config = loadConfig();
-    if (accountId === null) {
-      config.activeClaudeAccountId = null;
-      saveConfig(config);
-      return { ok: true, isDefault: true };
-    }
-    // find() takes the FIRST match, so with two rows sharing an id the switch
-    // would activate a different account than the row the user clicked while
-    // the UI names theirs. Refuse, matching save/delete (reviewer HIGH).
-    const claudeMatches = (config.accounts || []).filter((a) => a.id === accountId && a.type === 'claude');
-    if (claudeMatches.length > 1) {
-      return { ok: false, error: `${claudeMatches.length} accounts share the id ${accountId}; fix the duplicate before switching` };
-    }
-    const account = claudeMatches[0];
-    if (!account) return { ok: false, error: 'Account not found' };
-    if (!account.claudeJsonPath) return { ok: false, error: 'No profile snapshot for this account' };
-    // Repair the shared links before the switch takes effect, so an account
-    // added by hand (or one whose links were removed) still sees your history
-    // on its first terminal rather than reporting no conversations found.
-    try { shareProfile(path.dirname(expandTilde(account.claudeJsonPath))); }
-    catch (err) { console.warn('[account-share] activate link failed:', err?.message || err); }
-    config.activeClaudeAccountId = accountId;
-    saveConfig(config);
-    return { ok: true, isDefault: false };
-  });
+  ipcMain.handle('accounts:activateClaude', (_event, accountId) => activateClaudeAccount(accountId));
 
   // v1.0.65: create an EMPTY per-account config dir. The old flow copied the
   // CURRENT ~/.claude.json into the new profile, which under dir-scoped
@@ -4221,7 +4270,12 @@ function setupWindowHandlers() {
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
   // Team communicator (docs/team-communicator.md): delivery into the pinned
   // orchestrator tab reuses these same guards.
-  initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint, endpointProblem: getTeamEndpointProblem });
+  // Phone notifications by event (electron/phone-alerts-main.js): first, so every source below can feed it.
+  initPhoneAlerts({ hasWaiting: (id) => !!handoffCommands?.hasWaiting(id) });
+  terminalStatus.onHookState((id, state, tag) => phoneAlerts.tabHook(id, state, tag));
+  // A tab's program ended with an error (a kill on close never reaches onExit). Never while quitting.
+  addTerminalObserver({ onExit: (id, info) => { if (typeof info?.exitCode === 'number' && info.exitCode !== 0 && !getQuitting()) phoneAlerts.tabFailed(id); } });
+  initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint, endpointProblem: getTeamEndpointProblem, onMessage: (name) => phoneAlerts.teamMessage(name) });
   setTeamBridge(handleTeamBridge);
   // What a Claude session in a Dobius tab is told it can do (electron/agent-context.js), kept current: at launch,
   // after a Google account change, and every two minutes (written only when the text changed).
@@ -4274,6 +4328,7 @@ function setupWindowHandlers() {
     processCwd: getProcessCwd,
     projectOf: (id) => { const p = projectPathFromTabId(id); return p && p !== 'mobile' ? p : null; },
     notify: () => { for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('handoffCommands:changed'); },
+    onAdded: (id) => phoneAlerts.handoffAdded(id), // the tab id only, never the command
     newId: () => randomUUID(),
   });
   terminalStatus.onHookState((id, state, tag) => handoffCommands.onHook(id, state, tag));
@@ -4897,7 +4952,10 @@ app.whenReady().then(() => {
     const answered = terminalStatus.noteInput(id, data, now);
     // 'working-free': a handed-back command was run; no hook may follow, so
     // the window lets output settle it instead of holding it yellow.
-    if (answered) sendToTerminalWindow(id, 'terminal:statusHint', answered === 'handoff' ? 'working-free' : 'working');
+    if (answered) {
+      sendToTerminalWindow(id, 'terminal:statusHint', answered === 'handoff' ? 'working-free' : 'working');
+      phoneAlerts.tabInput(id); // answered: a red still in its debounce is no longer true
+    }
     else if (terminalStatus.releaseDone(id, data, now)) sendToTerminalWindow(id, 'terminal:statusHint', 'release');
     // Enter in a tab waiting on a turn's background work ends the wait only
     // when Claude is no longer running there (killed mid-wait): an Enter at
@@ -4946,7 +5004,10 @@ app.whenReady().then(() => {
     lastEnterAt: (id) => lastEnterAt.get(id) || 0,
     lastAnswerAt: (id) => lastAnswerAt.get(id) || 0,
     apply: (id, state, tag) => {
-      if (terminalStatus.noteHookStatus(id, state, Date.now(), tag)) sendToTerminalWindow(id, 'terminal:hookStatus', state, tag);
+      if (terminalStatus.noteHookStatus(id, state, Date.now(), tag)) {
+        sendToTerminalWindow(id, 'terminal:hookStatus', state, tag);
+        phoneAlerts.tabHook(id, state, tag); // Codex's hooks reach the phone notifier here, Claude's via onHookState
+      }
     },
     now: () => Date.now(),
     later: (fn, ms) => setTimeout(fn, ms).unref?.(),

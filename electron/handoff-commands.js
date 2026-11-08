@@ -95,7 +95,9 @@ export function contextAround(lines, first, last) {
 export const replyForDisplay = (text) => String(text || '').replace(/\r\n?/g, '\n').split('\n').map((l) => l.replace(HIDDEN_RE, ' ')).join('\n').slice(0, 6000);
 
 
-export function createHandoffCommands({ resolve, lastReply, processCwd, projectOf, notify = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), newId }) {
+// onAdded(tabId): at least one NEW waiting command was listed for that tab (the phone notifier's "handed back" event;
+// it gets the tab id only, never the command).
+export function createHandoffCommands({ resolve, lastReply, processCwd, projectOf, notify = () => {}, onAdded = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), newId }) {
   const byTab = new Map(); // tabId -> { tabId, projectPath, cwd, at, commands: [{ id, text }] }
   const gen = new Map(); // tabId -> generation, so a slow read cannot land after the tab moved on
   const turnStart = new Map(); // tabId -> when its current turn's first hook came
@@ -149,6 +151,7 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
         if (waiting.length > MAX_WAITING) { const drop = new Set(waiting.slice(0, waiting.length - MAX_WAITING)); all = all.filter((c) => !drop.has(c)); }
         byTab.set(tabId, { tabId, projectPath, cwd: cwdNow, at: now(), reply, commands: all });
         notify();
+        if (added.length) { try { onAdded(tabId); } catch (err) { console.warn('[handoff-commands] onAdded failed:', err?.message || err); } }
         return;
       } catch (err) {
         console.warn('[handoff-commands] could not read the handed-back command:', err?.message || err);
@@ -266,7 +269,13 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
     return true;
   }
 
-  return { onHook, list, peek, take, startRun, running, finishRun };
+  /** Whether a command handed back in this tab is still waiting to be run (not run, dismissed or expired). */
+  function hasWaiting(tabId) {
+    if (prune()) notify();
+    return !!byTab.get(tabId)?.commands.some((c) => c.state === 'waiting');
+  }
+
+  return { onHook, list, peek, take, startRun, running, finishRun, hasWaiting };
 }
 
 /**

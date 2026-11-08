@@ -4,6 +4,7 @@ import LooseEnds from './LooseEnds';
 import { sortTermsByAttention, groupSummary, summaryLabel, isGroupCollapsed } from './board-order.js';
 import VoiceButton from './VoiceButton';
 import { pushSupported, pushActive, enablePush } from './push-client';
+import { isNativeApp, enableNativePush } from './native-push';
 import { timeAgo } from './format';
 import { pairingKey } from './pairings';
 
@@ -95,6 +96,15 @@ export default function Board({ connection, status, onOpen, onShowHistory, onSho
   // When one exists, re-register in the background so the server entry is bound
   // to the current device token (migrates any pre-token subscription so device
   // removal can revoke it). enablePush is idempotent and won't re-prompt.
+  // The App Store app: once notifications are allowed, give this Mac the device token again on every visit (never a
+  // prompt from here; Settings > Notifications asks), so a Mac that was re-paired or lost it still reaches this phone.
+  useEffect(() => {
+    if (!isNativeApp()) return undefined;
+    const send = () => { if (connection.status === 'authed') enableNativePush(connection, { prompt: false }).catch(() => { /* Settings shows why */ }); };
+    send();
+    return connection.onMessage((m) => { if (m.type === 'authed') send(); });
+  }, [connection]);
+
   useEffect(() => {
     let cancelled = false;
     pushActive(connection).then((active) => {

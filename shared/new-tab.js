@@ -26,6 +26,20 @@ export function newTabCommand(tool) {
   return null;
 }
 
+// The defaults a new tab's Claude starts with (Settings, also from the phone). '' means Claude's own default: no flag.
+// A fixed allowlist, checked again where the shell is spawned (loginShellSpawn): these are the only words that can ever
+// follow `claude` from here. bypassPermissions and dontAsk are deliberately not offered.
+export const NEW_TAB_MODELS = ['', 'opus', 'sonnet', 'fable', 'haiku'];
+export const NEW_TAB_PERMISSION_MODES = ['', 'acceptEdits', 'plan', 'auto'];
+export const normalizeNewTabModel = (v) => (NEW_TAB_MODELS.includes(v) ? v : '');
+export const normalizeNewTabPermissionMode = (v) => (NEW_TAB_PERMISSION_MODES.includes(v) ? v : '');
+// Settings to the options loginShellSpawn takes for a new tab running claude, or null when both are Claude's default.
+export function claudeLaunchOptions(settings) {
+  const model = normalizeNewTabModel(settings?.newTabModel);
+  const permissionMode = normalizeNewTabPermissionMode(settings?.newTabPermissionMode);
+  return model || permissionMode ? { model, permissionMode } : null;
+}
+
 // A renderer's launch request for a new terminal: 'default' (the Settings
 // choice, settingTool) or an explicit tool. Anything else starts nothing.
 export function launchCommandFor(request, settingTool) {
@@ -203,7 +217,7 @@ function utf16Base64(text) {
 // command line and never typed; the tab is a plain login shell afterwards. Only the shape below is accepted. Not on
 // PowerShell (Run is zsh and bash only).
 export const isRunScriptPath = (p) => typeof p === 'string' && /^\/[^\x00-\x1F\x7F]*\/dobius-run-[A-Za-z0-9_-]{16,}\.sh$/.test(p);
-export function loginShellSpawn(shell, startCommand, resume = null, runScript = null) {
+export function loginShellSpawn(shell, startCommand, resume = null, runScript = null, claudeOpts = null) {
   const powershell = isPowerShell(shell);
   const plain = { args: powershell ? ['-NoLogo', '-NoExit', '-EncodedCommand', utf16Base64(PS_GWS_FUNCTION)] : ['-l'], env: {} };
   const running = !powershell && isRunScriptPath(runScript);
@@ -216,6 +230,12 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
     return { args: powerShellSpawn(resuming), env };
   }
   const name = String(shell).split('/').pop();
+  // A new tab's Claude defaults (model, permission mode): only for a plain `claude` start and only allowlisted words.
+  // They travel in env like the tool name and are read into $2 and $3 with it, before any hook runs.
+  const plainClaude = startCommand === 'claude' && !running && !resuming;
+  const model = plainClaude ? normalizeNewTabModel(claudeOpts?.model) : '';
+  const perm = plainClaude ? normalizeNewTabPermissionMode(claudeOpts?.permissionMode) : '';
+  const withOpts = !!(model || perm);
   // The tool name is read before the hooks (a hook or a project .env could set
   // the variable) into the positional parameter $1, which no variable
   // assignment (direnv's dotenv included) can reach. Nothing is ever eval'd:
@@ -226,14 +246,18 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
     ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_SCRIPT"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_SCRIPT;`
     : resuming
       ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_ID" "$${START_TOOL_ENV}_CWD"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_ID ${START_TOOL_ENV}_CWD;`
-      : `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV};`;
+      : withOpts
+        ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_MODEL" "$${START_TOOL_ENV}_PERM"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_MODEL ${START_TOOL_ENV}_PERM;`
+        : `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV};`;
   // An and-list, not case/if: zsh forks a suspended compound command off as
   // its own job, so a Ctrl+Z inside one ended the whole wrapper (and the tab).
   // -p: bash imports no functions from the environment and reads no BASH_ENV/ENV, so a project .env (direnv) cannot
   // redefine `cd` or run a file before the script.
   const launch = running ? '[[ $1 == run ]] && /bin/bash -p -- "$2";'
-    : resuming ? '[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;' : NEW_TAB_TOOLS.filter((x) => newTabCommand(x))
-    .map((x) => `[[ $1 == ${x} ]] && ${newTabCommand(x)};`).join(' ');
+    : resuming ? '[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;'
+      // The flags are fixed words plus the allowlisted values in $2 and $3, built as an array, never eval'd.
+      : withOpts ? '__dobius_a=(); [[ -n $2 ]] && __dobius_a+=(--model "$2"); [[ -n $3 ]] && __dobius_a+=(--permission-mode "$3"); [[ $1 == claude ]] && claude "${__dobius_a[@]}";'
+        : NEW_TAB_TOOLS.filter((x) => newTabCommand(x)).map((x) => `[[ $1 == ${x} ]] && ${newTabCommand(x)};`).join(' ');
   let run;
   if (name === 'zsh') {
     run = `setopt no_nounset no_err_exit 2>/dev/null; ${take} (( $+functions[precmd] )) && precmd; for f in $precmd_functions; do "$f"; done; `
@@ -254,7 +278,9 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
     ? { [START_TOOL_ENV]: 'run', [`${START_TOOL_ENV}_SCRIPT`]: runScript }
     : resuming
       ? { [START_TOOL_ENV]: resume.sessionId === null ? 'fresh' : 'resume', [`${START_TOOL_ENV}_ID`]: resume.sessionId ?? '', [`${START_TOOL_ENV}_CWD`]: resume.cwd }
-      : { [START_TOOL_ENV]: startCommand };
+      : withOpts
+        ? { [START_TOOL_ENV]: startCommand, [`${START_TOOL_ENV}_MODEL`]: model, [`${START_TOOL_ENV}_PERM`]: perm }
+        : { [START_TOOL_ENV]: startCommand };
   return { args: ['-l', '-i', '-c', script], env };
 }
 
@@ -265,5 +291,5 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
 export function isNewTabWrapperCommand(line) {
   // Anchored on argv0 (after an optional pgrep pid), so the same text inside
   // some other program's arguments never matches.
-  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD"| "\$DOBIUS_NEW_TAB_TOOL_SCRIPT")?; /.test(String(line));
+  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD"| "\$DOBIUS_NEW_TAB_TOOL_SCRIPT"| "\$DOBIUS_NEW_TAB_TOOL_MODEL" "\$DOBIUS_NEW_TAB_TOOL_PERM")?; /.test(String(line));
 }

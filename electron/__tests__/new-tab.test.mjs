@@ -8,6 +8,7 @@ import {
   normalizeNewTabTool, newTabCommand, buildPickerProjects, countHiddenProjects,
   toggleHiddenProject, pickerShortcutIndex,
   launchCommandFor, loginShellSpawn, isNewTabWrapperCommand,
+  claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode, NEW_TAB_MODELS, NEW_TAB_PERMISSION_MODES,
 } from '../../shared/new-tab.js';
 import { setPendingLaunch, takePendingLaunch, clearPendingLaunches } from '../../src/lib/pending-launch.js';
 
@@ -161,6 +162,54 @@ test('a prompt hook rewriting the tool runs nothing but the allowlisted tool', (
       assert.doesNotMatch(r.stdout, /pwned/, `${shell} ran nothing a hook assigned`);
       assert.equal(fs.existsSync(path.join(dir, 'PWNED')), false, `${shell} ran nothing a hook assigned`);
     }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Chat defaults (Settings > New tab starts, also from the phone): the real shells start exactly
+// `claude --model X --permission-mode Y` from the allowlist, and a hook cannot change the words.
+test('new-tab Claude defaults: allowlisted flags only, as separate words, hooks cannot change them', () => {
+  assert.equal(claudeLaunchOptions({}), null);
+  assert.deepEqual(claudeLaunchOptions({ newTabModel: 'opus', newTabPermissionMode: 'nope' }), { model: 'opus', permissionMode: '' });
+  assert.equal(claudeLaunchOptions({ newTabModel: '--dangerously-skip-permissions', newTabPermissionMode: 'bypassPermissions' }), null);
+  assert.equal(normalizeNewTabModel('__proto__'), '');
+  assert.equal(normalizeNewTabPermissionMode('dontAsk'), '');
+  assert.ok(NEW_TAB_MODELS.includes('') && NEW_TAB_PERMISSION_MODES.includes(''));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-newtab-opts-'));
+  try {
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nprintf "ARGS:"; for a in "$@"; do printf "[%s]" "$a"; done; echo\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\necho CODEX-RAN "$@"\n', { mode: 0o755 });
+    const evil = `touch ${dir}/PWNED`;
+    const assigns = `DOBIUS_NEW_TAB_TOOL_MODEL='${evil}'; __dobius_a=('${evil}'); set -- claude '${evil}' '${evil}'`;
+    const base = { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, ZDOTDIR: dir, BASH_SILENCE_DEPRECATION_WARNING: '1' };
+    const cases = [
+      [{ model: 'opus', permissionMode: 'plan' }, 'claude', 'ARGS:[--model][opus][--permission-mode][plan]'],
+      [{ model: '', permissionMode: 'acceptEdits' }, 'claude', 'ARGS:[--permission-mode][acceptEdits]'],
+      [{ model: 'sonnet' }, 'claude', 'ARGS:[--model][sonnet]'],
+      [null, 'claude', 'ARGS:'],
+      [{ model: 'opus; touch x', permissionMode: 'bypassPermissions' }, 'claude', 'ARGS:'],
+      [{ model: 'opus' }, 'codex', 'CODEX-RAN'],
+    ];
+    for (const shell of ['/bin/zsh', '/bin/bash']) {
+      if (!fs.existsSync(shell)) continue;
+      const prelude = shell.endsWith('zsh') ? `_evil() { ${assigns}; }; precmd_functions=(_evil); ` : '';
+      const env = shell.endsWith('bash') ? { PROMPT_COMMAND: assigns } : {};
+      for (const [opts, tool, want] of cases) {
+        const spawn = loginShellSpawn(shell, tool, null, null, opts);
+        if (tool === 'codex') assert.equal(spawn.env.DOBIUS_NEW_TAB_TOOL_MODEL, undefined, 'codex never gets Claude flags');
+        assert.equal(isNewTabWrapperCommand(`${shell} ${spawn.args.join(' ')}`), true, `${shell} wrapper still recognised`);
+        const script = prelude + spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+        const r = spawnSync(shell, ['-c', script], { env: { ...base, ...env, ...spawn.env }, encoding: 'utf8', timeout: 10000, input: '' });
+        assert.equal(r.stdout.trim().split('\n').pop(), want, `${shell} ${JSON.stringify(opts)} ${r.stderr}`);
+      }
+      assert.equal(fs.existsSync(path.join(dir, 'PWNED')), false, `${shell} ran nothing a hook assigned`);
+    }
+    // A resume or a Run never takes the defaults.
+    const resume = loginShellSpawn('/bin/zsh', null, { sessionId: 'abc', cwd: dir }, null, { model: 'opus' });
+    assert.equal(resume.env.DOBIUS_NEW_TAB_TOOL_MODEL, undefined);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

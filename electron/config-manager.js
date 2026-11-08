@@ -1645,6 +1645,65 @@ export function removePushSubscriptionsByToken(token) {
   if (config.pushSubscriptions.length !== before) saveConfig(config);
 }
 
+// APNs device tokens of the App Store app (electron/apns.js), each bound to the pairing token of the phone that sent it,
+// so unpairing that phone removes it (removeApnsTokensByPairToken). env: 'auto' until Apple has taken one, then the host
+// that did ('production' or 'sandbox', a development build). pairingId is the phone's own id for this Mac, echoed in
+// payloads so a tap opens the right Mac.
+const APNS_TOKEN_RE = /^[0-9a-f]{64,200}$/;
+const APNS_ENVS = new Set(['auto', 'production', 'sandbox']);
+export function getApnsTokens() {
+  const list = loadConfig().apnsTokens;
+  return Array.isArray(list) ? list.filter((t) => t && APNS_TOKEN_RE.test(t.token) && typeof t.pairToken === 'string') : [];
+}
+
+export function addApnsToken({ token, pairToken, pairingId }) {
+  if (typeof token !== 'string' || !APNS_TOKEN_RE.test(token) || typeof pairToken !== 'string' || !pairToken) return null;
+  const config = loadConfig();
+  const list = Array.isArray(config.apnsTokens) ? config.apnsTokens : [];
+  const prior = list.find((t) => t?.token === token);
+  const entry = {
+    token,
+    pairToken,
+    pairingId: typeof pairingId === 'string' && /^[\w.:-]{1,64}$/.test(pairingId) ? pairingId : null,
+    // A token that moved to another pairing keeps the host Apple already took it on.
+    env: prior && APNS_ENVS.has(prior.env) ? prior.env : 'auto',
+    addedAt: Date.now(),
+  };
+  // One token per phone pairing: a phone that re-registers replaces its old token, never adds a second one.
+  config.apnsTokens = list.filter((t) => t?.token !== token && t?.pairToken !== pairToken);
+  config.apnsTokens.push(entry);
+  while (config.apnsTokens.length > 20) config.apnsTokens.shift(); // bound
+  saveConfig(config);
+  return entry;
+}
+
+// `addedAt` names the registration a send used: an answer that arrives after the phone registered again (the same token
+// moved to a new pairing, or re-sent) never removes or changes the newer entry (Codex design audit).
+export function removeApnsToken(token, addedAt) {
+  if (typeof token !== 'string') return;
+  const config = loadConfig();
+  const before = (config.apnsTokens || []).length;
+  config.apnsTokens = (config.apnsTokens || []).filter((t) => !(t?.token === token && (addedAt === undefined || t.addedAt === addedAt)));
+  if (config.apnsTokens.length !== before) saveConfig(config);
+}
+
+export function setApnsTokenEnv(token, env, addedAt) {
+  if (typeof token !== 'string' || !APNS_ENVS.has(env)) return;
+  const config = loadConfig();
+  const t = (config.apnsTokens || []).find((x) => x?.token === token && (addedAt === undefined || x.addedAt === addedAt));
+  if (!t || t.env === env) return;
+  t.env = env;
+  saveConfig(config);
+}
+
+export function removeApnsTokensByPairToken(pairToken) {
+  if (typeof pairToken !== 'string' || !pairToken) return;
+  const config = loadConfig();
+  const before = (config.apnsTokens || []).length;
+  config.apnsTokens = (config.apnsTokens || []).filter((t) => t?.pairToken !== pairToken);
+  if (config.apnsTokens.length !== before) saveConfig(config);
+}
+
 export function setProjectAccount(projectPath, accountId) {
   if (!projectPath || typeof projectPath !== 'string' || UNSAFE_KEYS.has(projectPath)) return;
   const config = loadConfig();

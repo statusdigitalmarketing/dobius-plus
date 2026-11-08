@@ -12,6 +12,7 @@ import { DemoConnection, isDemoPairing } from './demo';
 import * as storage from './storage';
 import { normaliseHost, mixedContent, reachabilityMessage } from './host';
 import { forgetPush } from './push-client';
+import { onNativeTap } from './native-push';
 import { PAIRINGS_KEY, activePairing, loadPairings, readPairings, savePairings, upsertPairing, switchPairing, renamePairing, removePairing } from './pairings';
 
 // A keyed tree owns all state for one connection lifetime, including terminal,
@@ -27,6 +28,9 @@ if (typeof navigator !== 'undefined') {
     if (tapHandler) tapHandler(e.data); else pendingTaps.push(e.data);
   });
 }
+// The App Store app's own notifications (APNs, native-push.js): same queue. They name the Mac and an opaque ref the
+// Mac turns into the tab once connected (notifyResolve), never the tab id.
+onNativeTap((tap) => { if (tapHandler) tapHandler(tap); else pendingTaps.push(tap); });
 
 function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, openRequest }) {
   const [connection, setConnection] = useState(null);
@@ -36,6 +40,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
   const [attempt, setAttempt] = useState(0);
   const [view, setView] = useState('board');
   const [openTabId, setOpenTabId] = useState(null);
+  const resolvedRefs = useRef(new WeakSet()); // notification taps already turned into a tab
   const { id, origin, token } = pairing;
 
   useEffect(() => {
@@ -91,6 +96,27 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     if (openRequest.view === 'tasks') setView('tasks');
     else if (openRequest.id) { setOpenTabId(openRequest.id); setView('terminal'); }
   }, [id, openRequest]);
+
+  // An App Store notification names its tab by an opaque ref: ask this Mac which tab it was, once connected. An
+  // unknown or expired ref just leaves the board showing.
+  useEffect(() => {
+    if (openRequest?.pairingId !== id || !openRequest.ref || openRequest.id || openRequest.view === 'tasks' || !connection) return undefined;
+    // Once per tap: a reconnect later (a new connection) must not jump back to that tab.
+    if (resolvedRefs.current.has(openRequest)) return undefined;
+    const reqId = `ref-${Date.now().toString(36)}`;
+    let asked = false;
+    const ask = () => { if (asked) return; asked = true; connection.send({ type: 'notifyResolve', ref: openRequest.ref, reqId }); };
+    const off = connection.onMessage((m) => {
+      if (m.type === 'authed') ask();
+      if (m.type === 'notifyTarget' && m.reqId === reqId) {
+        off();
+        resolvedRefs.current.add(openRequest);
+        if (typeof m.id === 'string' && m.id) { setOpenTabId(m.id); setView('terminal'); }
+      }
+    });
+    if (connection.status === 'authed') ask();
+    return off;
+  }, [id, openRequest, connection]);
 
   const openTab = useCallback((tabId) => { setOpenTabId(tabId); setView('terminal'); }, []);
 
@@ -368,7 +394,7 @@ export default function App() {
     // its turn, so it cannot switch Macs after a newer tap (Codex High).
     // While any tap is pending the screen is covered: nothing can be typed,
     // sent or confirmed into the Mac being left (Codex High and Medium).
-    const openSession = async ({ id, pairingId, view }) => {
+    const openSession = async ({ id, pairingId, view, ref }) => {
       const seq = ++tapSeqRef.current;
       const wanted = pairingId || 'legacy';
       const target = stateRef.current.pairings.find((p) => p.id === wanted);
@@ -403,7 +429,7 @@ export default function App() {
       // keeps the same key and would keep A's closed connection, Codex). A
       // bump batched with a key change mounts once.
       if (tapClosedRef.current) { tapClosedRef.current = false; setSessionEpoch((n) => n + 1); }
-      if (ok && (id || view === 'tasks')) setOpenRequest({ pairingId: wanted, id, view: view === 'tasks' ? 'tasks' : undefined });
+      if (ok && (id || ref || view === 'tasks')) setOpenRequest({ pairingId: wanted, id, ref: id ? undefined : ref, view: view === 'tasks' ? 'tasks' : undefined });
     };
     const params = new URLSearchParams(window.location.search);
     if (params.has('open') || params.has('mac') || params.get('view') === 'tasks') {

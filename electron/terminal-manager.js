@@ -193,8 +193,9 @@ export function trimToEscapeBoundary(buf, cap) {
 // launchCommandFor, never free text). The login shell runs it as its first
 // command, after the rc files, then becomes a normal login shell when it exits.
 // Nothing is typed into the terminal, so it can never land in a user's line,
-// a startup prompt or a moved tab.
-export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCommand = null, resume = null, runScript = null } = {}) {
+// a startup prompt or a moved tab. claudeOpts ({ model, permissionMode }, shared/new-tab.js claudeLaunchOptions):
+// the new tab's Claude defaults, allowlisted again inside loginShellSpawn.
+export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCommand = null, resume = null, runScript = null, claudeOpts = null } = {}) {
   // A respawn under an existing id (e.g. "Continue on switched account") must
   // NOT strand what was attached to the old PTY. Carry over the live subscriber
   // set so an attached phone keeps streaming (killing the old PTY would orphan
@@ -321,7 +322,7 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   };
   const spawnCols = (Number.isInteger(prevCols) && prevCols > 0) ? prevCols : 80;
   const spawnRows = (Number.isInteger(prevRows) && prevRows > 0) ? prevRows : 24;
-  const start = loginShellSpawn(shell, startCommand, resume, runScript);
+  const start = loginShellSpawn(shell, startCommand, resume, runScript, claudeOpts);
   const spawnedAt = Date.now();
   const term = pty.spawn(shell, start.args, {
     name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: { ...spawnEnv, ...start.env },

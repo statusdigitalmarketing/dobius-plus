@@ -1280,7 +1280,7 @@ a.today-title:active { opacity: 0.7; }
 .settings-head { margin: 18px 4px 6px; color: var(--dim); font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; }
 .settings-head:first-child { margin-top: 4px; }
 .settings-group { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
-.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 0 14px; font-size: 16px; color: var(--fg); }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 0 14px; font-size: 17px; color: var(--fg); }
 .settings-row + .settings-row { border-top: 1px solid var(--border); }
 .settings-row select, .settings-row input[type="time"] { min-height: 34px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--surface-2); color: var(--fg); font-size: 16px; }
@@ -1293,5 +1293,41 @@ a.today-title:active { opacity: 0.7; }
   box-shadow: 0 2px 4px rgba(0,0,0,0.3); transition: transform 0.2s; }
 .ios-switch.on .ios-switch-knob { transform: translateX(20px); }
 @media (prefers-reduced-motion: reduce) { .ios-switch, .ios-switch-knob { transition: none; } }
+.settings-group.spaced { margin-top: 10px; }
+/* What stops notifications reaching this phone, and the one thing to do about it. */
+.settings-warn { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; border-color: rgba(217, 96, 90, 0.45); }
+.settings-warn-text { margin: 0; font-size: 15px; line-height: 20px; color: var(--fg); }
+.settings-warn-text.dim { color: var(--dim); font-size: 13px; }
+.settings-action { align-self: stretch; min-height: 44px; border: 0; border-radius: 10px; background: var(--accent); color: var(--on-accent);
+  font-size: 17px; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.settings-action:active { opacity: 0.8; }
+.settings-action:disabled { opacity: 0.5; }
+/* iOS segmented control: one rounded track, the chosen item raised. */
+.seg-row { flex-wrap: wrap; padding-top: 6px; padding-bottom: 6px; }
+.seg { display: flex; flex: 1 1 200px; max-width: 280px; padding: 2px; border-radius: 9px; background: var(--surface-2); }
+.seg-item { flex: 1 1 0; min-height: 32px; border: 0; border-radius: 7px; background: none; color: var(--fg); font-size: 15px;
+  cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background 0.15s; }
+.seg-item.on { background: var(--surface); box-shadow: 0 1px 3px rgba(0,0,0,0.25); font-weight: 600; }
+.seg-item:disabled { opacity: 0.6; }
+@media (prefers-reduced-motion: reduce) { .seg-item { transition: none; } }
+/* Accounts: a tappable row per account, checkmark on the active one, usage under the name. */
+.acct-row { width: 100%; border: 0; background: none; text-align: left; font: inherit; padding-top: 10px; padding-bottom: 10px; cursor: pointer;
+  -webkit-tap-highlight-color: transparent; }
+.acct-row + .acct-row { border-top: 1px solid var(--border); }
+.acct-row:not(.static):active { background: var(--surface-2); }
+.acct-row:disabled { opacity: 0.6; }
+.acct-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1 1 auto; }
+.acct-name { font-size: 17px; color: var(--fg); display: flex; align-items: center; gap: 8px; }
+.acct-tag { font-size: 12px; color: var(--dim); border: 1px solid var(--border); border-radius: 6px; padding: 0 6px; }
+.acct-email { font-size: 13px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-check { flex: 0 0 auto; width: 22px; color: var(--accent); font-size: 19px; font-weight: 600; text-align: right; }
+.acct-usage { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; font-size: 13px; color: var(--dim); }
+.usage-line { display: flex; align-items: center; gap: 8px; }
+.usage-name { flex: 0 0 auto; min-width: 84px; }
+.usage-bar { flex: 1 1 auto; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.usage-fill { display: block; height: 100%; border-radius: 3px; background: var(--status-done); }
+.usage-fill.hot { background: var(--status-needs); }
+.usage-pct { flex: 0 0 auto; min-width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+.usage-stale { font-size: 12px; }
 .today-head { flex: 1 1 auto; min-width: 0; font-size: 17px; }
 .today-ask { align-self: center; color: var(--fg); font-size: 14px; }

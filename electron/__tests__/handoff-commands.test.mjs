@@ -48,12 +48,27 @@ function rig({ text = '! ./release.sh patch', at = null, session = { sessionId: 
     processCwd: async () => cwd,
     projectOf: (id) => (id.startsWith('term-/p-') ? '/p' : null),
     notify: () => { notes += 1; },
+    onAdded: (id) => { calls.added = [...(calls.added || []), id]; },
     now: () => clock,
     sleep: async (ms) => { clock += ms; },
     newId: () => `c${(n += 1)}`,
   });
   return { hc, calls, notes: () => notes };
 }
+
+test('phone notifier hook: onAdded gets the tab id once per new command batch, never the command; hasWaiting follows the list', async () => {
+  const { hc, calls } = rig();
+  turn(hc);
+  await tick();
+  assert.deepEqual(calls.added, ['term-/p-1']);
+  assert.equal(hc.hasWaiting('term-/p-1'), true);
+  turn(hc); // the same command handed back again: nothing new
+  await tick();
+  assert.deepEqual(calls.added, ['term-/p-1']);
+  const id = hc.list()[0].commands[0].id;
+  hc.take('term-/p-1', id);
+  assert.equal(hc.hasWaiting('term-/p-1'), false);
+});
 const tick = async (k = 40) => { for (let i = 0; i < k; i += 1) await new Promise((r) => setImmediate(r)); };
 const turn = (hc, tab = 'term-/p-1') => { hc.onHook(tab, 'working', null); clock += 1000; hc.onHook(tab, 'needs', 'handoff'); };
 
