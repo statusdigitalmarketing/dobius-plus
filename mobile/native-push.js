@@ -6,6 +6,7 @@
 // id itself, which names the project folder and would travel through Apple.
 
 import { PushNotifications } from '@capacitor/push-notifications';
+import * as storage from './storage';
 
 export const isNativeApp = () => {
   try { return typeof window !== 'undefined' && window.Capacitor?.isNativePlatform?.() === true; } catch { return false; }
@@ -29,7 +30,7 @@ function deviceToken() {
     const handles = [];
     const finish = (v) => { clearTimeout(timer); for (const h of handles) h.then((x) => x.remove()).catch(() => {}); resolve(v); };
     const timer = setTimeout(() => finish(null), 15000);
-    handles.push(PushNotifications.addListener('registration', (t) => { const v = typeof t?.value === 'string' ? t.value.toLowerCase() : null; if (v) { newestIosToken = v; seen(v); } finish(v); }));
+    handles.push(PushNotifications.addListener('registration', (t) => { const v = typeof t?.value === 'string' ? t.value.toLowerCase() : null; if (v) { newestIosToken = v; seen(v).catch(() => {}); } finish(v); }));
     handles.push(PushNotifications.addListener('registrationError', () => finish(null)));
     // Register only once both listeners are attached, so the answer cannot arrive before anyone hears it.
     Promise.all(handles).then(() => PushNotifications.register()).catch(() => finish(null));
@@ -45,22 +46,30 @@ const sentTokens = new WeakMap();
 let newestIosToken = null;
 // Each token iOS hands this app gets the next number of a counter kept on the phone, sent as seq so the Mac can refuse
 // an older registration arriving late. A counter, not the clock: a clock set back would make a newer token look older
-// (Codex round 18). Without storage the seq is left out and the Mac does not order (as before).
+// (Codex round 18). Kept in native Preferences (storage.js), which iOS does not evict the way it may clear the web
+// view's localStorage, where a reset counter would make the Mac refuse the current token (Codex round 19). Calls run
+// one at a time, so two registrations never take the same number. Unreadable storage: seq is left out and the Mac
+// does not order (as before).
 const SEQ_KEY = 'dobius.apnsTokenSeq';
+let seqChain = Promise.resolve();
 function seen(token) {
-  try {
-    let st;
-    try { st = JSON.parse(localStorage.getItem(SEQ_KEY) || 'null'); } catch { st = null; }
-    if (!st || typeof st.n !== 'number' || !Array.isArray(st.list)) st = { n: 0, list: [] };
-    let hit = st.list.find((x) => x && x.t === token);
-    if (!hit) {
-      st.n += 1;
-      hit = { t: token, s: st.n };
-      st.list = [...st.list, hit].slice(-8);
-      localStorage.setItem(SEQ_KEY, JSON.stringify(st));
-    }
-    return hit.s;
-  } catch { return undefined; }
+  const run = seqChain.then(async () => {
+    try {
+      let st;
+      try { st = JSON.parse((await storage.get(SEQ_KEY)) || 'null'); } catch { st = null; }
+      if (!st || typeof st.n !== 'number' || !Array.isArray(st.list)) st = { n: 0, list: [] };
+      let hit = st.list.find((x) => x && x.t === token);
+      if (!hit) {
+        st.n += 1;
+        hit = { t: token, s: st.n };
+        st.list = [...st.list, hit].slice(-8);
+        await storage.set(SEQ_KEY, JSON.stringify(st));
+      }
+      return hit.s;
+    } catch { return undefined; }
+  });
+  seqChain = run.then(() => {}, () => {});
+  return run;
 }
 
 /**
@@ -71,14 +80,15 @@ export function forwardTokenChanges(connection) {
   if (!isNativeApp()) return () => {};
   const h = PushNotifications.addListener('registration', (t) => {
     const token = typeof t?.value === 'string' ? t.value.toLowerCase() : null;
-    if (token) { newestIosToken = token; seen(token); }
+    if (token) { newestIosToken = token; seen(token).catch(() => {}); }
     if (!token || connection.closed || sentTokens.get(connection) === token || connection.status !== 'authed') return;
     sendRegister(connection, token).then((r) => { if (r.ok) sentTokens.set(connection, token); }).catch(() => {});
   });
   return () => { h.then((x) => x.remove()).catch(() => {}); };
 }
 
-function sendRegister(connection, token) {
+async function sendRegister(connection, token) {
+  const seq = await seen(token);
   if (connection.status !== 'authed') return Promise.resolve({ ok: false, error: 'Not connected to your Mac.' });
   // A Mac from before native push does not know the message: do not send it at all.
   if (!(Array.isArray(connection.features) && connection.features.includes('apns'))) return Promise.resolve({ ok: false, error: 'This Mac needs a newer Dobius+ for notifications in this app.' });
@@ -91,7 +101,7 @@ function sendRegister(connection, token) {
       off();
       resolve(m.ok ? { ok: true } : { ok: false, code: typeof m.error === 'string' ? m.error : 'failed', error: 'Your Mac would not take this phone for notifications.' });
     });
-    connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, ...(seen(token) !== undefined ? { seq: seen(token) } : {}), reqId });
+    connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, ...(seq !== undefined ? { seq } : {}), reqId });
   });
 }
 
