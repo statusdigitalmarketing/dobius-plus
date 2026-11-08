@@ -356,9 +356,38 @@ test('round 7: looking at the tab mid-send stops it; a handed-back red behind a 
   h.n.handoffAdded('b'); // held by the gap
   h.n.tabHook('b', 'working');
   h.n.tabHook('b', 'needs', 'handoff'); // another handed-back red behind it
+  h.n.handoffAdded('b'); // its own command is listed too
   waiting = false; // both commands dismissed
   h.advance(TAB_GAP_MS + 12000);
   assert.equal(h.sent.length, 1);
+});
+
+test('round 8: a handed-back red behind a handoff whose command was never captured falls back to "needs you"', () => {
+  let waiting = true;
+  const h = rig({ status: { b: 'needs' }, waiting: () => waiting });
+  h.n.tabHook('b', 'needs', null);
+  h.advance(2000); // needs sent
+  h.n.tabHook('b', 'working');
+  h.n.tabHook('b', 'needs', 'handoff');
+  h.n.handoffAdded('b'); // held by the gap
+  h.n.tabHook('b', 'working');
+  h.n.tabHook('b', 'needs', 'handoff'); // a new red; its command is never extracted
+  waiting = false; // the older command is dismissed
+  h.advance(TAB_GAP_MS + HANDOFF_WAIT_MS + 12000);
+  assert.equal(h.sent.length, 2, 'the still-red tab is not left silent');
+  assert.equal(h.sent[1].kind, 'needs');
+});
+
+test('round 8: a summary stops before the next phone once any of its tabs is being looked at', () => {
+  const watched = new Set();
+  const r = rig({ status: { a: 'needs', b: 'needs', c: 'needs' }, looking: (id) => watched.has(id) });
+  for (const id of ['a', 'b', 'c']) r.n.tabHook(id, 'needs', null);
+  r.advance(3000);
+  assert.equal(r.sent.length, 1);
+  assert.equal(r.sent[0].kind, 'summary');
+  assert.equal(r.sent[0].current(), true);
+  watched.add('b');
+  assert.equal(r.sent[0].current(), false);
 });
 
 test('switches: each event obeys its own; a handed-back command goes out as "needs you" with only that one on', () => {

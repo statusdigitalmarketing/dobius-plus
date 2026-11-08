@@ -187,7 +187,12 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
     if (!cached || t - cached.at > KEY_RECHECK_MS) {
       let result;
       try { result = dir ? readKey(dir) : { ok: false, reason: 'no-key' }; } catch { result = { ok: false, reason: 'unsafe-file' }; }
-      if (cached?.result?.stamp !== result.stamp) jwt = null; // a new key never signs with the old token
+      if (cached?.result?.stamp !== result.stamp) {
+        jwt = null; // a new key never signs with the old token
+        // Nor on the old connection: Apple refuses a different key (or key scope) on a connection a token already used,
+        // so every open session is retired and the next send opens a fresh one (Codex round 8).
+        if (cached) for (const [origin, s] of sessions) { clearTimeout(s.timer); sessions.delete(origin); retire(s.session); }
+      }
       cached = { at: t, result };
     }
     return cached.result;

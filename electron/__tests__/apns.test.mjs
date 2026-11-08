@@ -227,3 +227,22 @@ test('a stand-in that never answers times out as failed, keeping the device', as
     assert.equal(r.reason, 'timeout');
   } finally { sender.close(); await new Promise((r) => server.close(r)); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('round 8: a new key never reuses a connection the old one used', async () => {
+  const a = keyDir();
+  const b = keyDir();
+  const net = await standIns(() => ({ status: 200 }));
+  let connects = 0;
+  let t = 1_000_000;
+  let which = a.dir;
+  const sender = createApnsSender({ dir: a.dir, readKey: () => readApnsKey(which), connect: (o) => { connects += 1; return net.connect(o); }, now: () => t, idleMs: 60_000 });
+  try {
+    await sender.send([{ token: TOKEN, env: 'sandbox' }], { title: 'a', body: 'b' });
+    await sender.send([{ token: TOKEN, env: 'sandbox' }], { title: 'a', body: 'b' });
+    assert.equal(connects, 1, 'the same key reuses its connection');
+    which = b.dir; // the key file was replaced
+    t += 60 * 60 * 1000; // past the recheck
+    await sender.send([{ token: TOKEN, env: 'sandbox' }], { title: 'a', body: 'b' });
+    assert.equal(connects, 2, 'a fresh connection for the new key');
+  } finally { sender.close(); await net.close(); fs.rmSync(a.dir, { recursive: true, force: true }); fs.rmSync(b.dir, { recursive: true, force: true }); }
+});

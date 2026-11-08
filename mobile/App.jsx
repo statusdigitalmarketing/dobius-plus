@@ -103,6 +103,8 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     if (openRequest?.pairingId !== id || !openRequest.ref || openRequest.id || openRequest.view === 'tasks' || !connection) return undefined;
     // Once per tap: a reconnect later (a new connection) must not jump back to that tab.
     if (resolvedRefs.current.has(openRequest)) return undefined;
+    // Until the Mac names the tab, no other terminal stays in front taking input meant for the tapped one (Codex round 8).
+    setView('board');
     const reqId = `ref-${Date.now().toString(36)}`;
     // Asked again on every (re)authentication until the answer arrives: a socket dropped before the reply must not
     // lose the tap. A late duplicate reply is ignored (the listener is gone after the first).

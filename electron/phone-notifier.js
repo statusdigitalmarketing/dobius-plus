@@ -193,7 +193,9 @@ export function createPhoneNotifier(deps) {
     const p = pending.get(key);
     const t = d.now();
     if (p && (p.kind === 'needs' || p.kind === 'done')) { put({ ...p, kind: 'handoff', awaitHandoff: false, dueAt: Math.min(p.dueAt, t + 300) }); return; }
-    if (p) return; // a handoff already waiting
+    // A handoff already waiting. If a handed-back red waits behind it, that red's own command is now listed: remember it,
+    // so a later dismissal of both is silence, not a fallback "needs you" (Codex round 8).
+    if (p) { if (p.kind === 'handoff' && p.behind?.handoff && !p.behind.listed) pending.set(key, { ...p, behind: { ...p.behind, listed: true } }); return; }
     // The red already went out as "needs you" a moment ago: that buzz covered it.
     const last = lastSent.get(key);
     if (last && (last.kind === 'needs' || last.kind === 'handoff') && t - last.at < HANDOFF_WAIT_MS * 3) return;
@@ -312,9 +314,16 @@ export function createPhoneNotifier(deps) {
       // as that red, after its own debounce.
       // So does it when the handoff's own switch (and "needs you") is off: what waited behind it still counts (round 6).
       // A red that was itself a handed-back command is not news once no command waits (dismissed or run: round 7).
+      // A handed-back red waiting behind it whose own command is NOT listed yet goes back to waiting for that command
+      // (handoffAdded turns it into a handoff), and out as "needs you" when the wait ends without one: "not captured
+      // yet" is not "dismissed" (Codex round 8). One whose command was listed and is gone too stays silent (round 7).
       const behindStale = due0.behind?.handoff && !liveHandoff(due0);
-      if (due0.kind === 'handoff' && due0.behind && behindStale) continue;
-      if (due0.kind === 'handoff' && due0.behind && (!liveHandoff(due0) || !effectiveKind('handoff', alerts))) {
+      if (due0.kind === 'handoff' && due0.behind && behindStale) {
+        if (due0.behind.listed) continue;
+        const red = { key: due0.key, tabId: due0.tabId, kind: 'needs', gen: due0.behind.gen, awaitHandoff: true, dueAt: due0.behind.at };
+        if (red.dueAt > t) { pending.set(red.key, red); continue; }
+        p = red;
+      } else if (due0.kind === 'handoff' && due0.behind && (!liveHandoff(due0) || !effectiveKind('handoff', alerts))) {
         const red = { key: due0.key, tabId: due0.tabId, kind: due0.behind.kind, gen: due0.behind.gen, dueAt: due0.behind.at };
         if (red.dueAt > t) { pending.set(red.key, red); continue; }
         p = red;
@@ -346,7 +355,8 @@ export function createPhoneNotifier(deps) {
         sentTimes.push(t);
         for (const o of out) lastSent.set(gapKey(o.p), { at: t, kind: o.kind });
         // Its text is fixed, so it goes to the next phone only while ALL of what it sums up is still true (Codex round 4).
-        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o) => allowedNow(o.p.kind) && isCurrent(o.p));
+        // And nobody started looking at any of those tabs on the Mac meanwhile, as for a single notification (Codex round 8).
+        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o) => allowedNow(o.p.kind) && isCurrent(o.p) && !(o.p.tabId && d.isLooking(o.p.tabId)));
         Promise.resolve(d.send({ kind: 'summary', title: `${out.length} updates`, body, tag: 'summary', tabId: null, current })).catch(() => { /* the sender logs by code */ });
       } else {
         for (const { p, kind } of out) {
