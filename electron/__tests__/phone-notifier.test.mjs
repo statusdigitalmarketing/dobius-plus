@@ -551,3 +551,13 @@ test('round 11: a red waiting for its command, when the command is a repeat of o
   r.advance(HANDOFF_WAIT_MS + 20000);
   assert.equal(r.sent.length, 0);
 });
+
+test('round 12: a "needs you" already going out stops before the next phone once a repeat says the command was old news', () => {
+  const r = rig({ status: { a: 'needs' }, waiting: () => false });
+  r.n.tabHook('a', 'needs', 'handoff'); // waits for its command; capture is slow
+  r.advance(HANDOFF_WAIT_MS + 100); // the wait ends: out as "needs you"
+  assert.equal(r.sent.length, 1);
+  assert.equal(r.sent[0].current(), true);
+  r.n.handoffAdded('a', { repeat: true }); // capture finally reports: the command was one already announced
+  assert.equal(r.sent[0].current(), false);
+});

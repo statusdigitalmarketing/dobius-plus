@@ -37,3 +37,19 @@ test('registration: one token per pairing; another live pairing cannot take a to
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('round 12: a notification names a tab only by a name someone chose, never one copied from the terminal title', () => {
+  const cfg = cm.loadConfig();
+  cfg.projects = { '/p': { tabs: [
+    { id: 'term-/p-1', label: 'cat /Users/x/private.txt', labelSource: 'title' },
+    { id: 'term-/p-2', label: 'Fix login', labelSource: 'agent' },
+    { id: 'term-/p-3', label: 'Release', labelLockedByUser: true },
+  ] } };
+  cm.saveConfig(cfg);
+  const all = cm.getTabLabelsById();
+  assert.equal(all.get('term-/p-1'), 'cat /Users/x/private.txt', 'the screens still show it');
+  const spoken = cm.getTabLabelsById({ spokenOnly: true });
+  assert.equal(spoken.has('term-/p-1'), false);
+  assert.equal(spoken.get('term-/p-2'), 'Fix login');
+  assert.equal(spoken.get('term-/p-3'), 'Release');
+});

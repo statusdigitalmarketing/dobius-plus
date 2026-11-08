@@ -1174,24 +1174,28 @@ export function recordSessionTabNames(pairs, now = Date.now()) {
 // label from every window kind; callers fall back to their own default when
 // a tab has no (or a blank) label. Moved here from mobile-server.js so the
 // session-name capture in main reads the same labels the phone shows.
-export function getTabLabelsById() {
+// spokenOnly (phone notifications): only names a person or an agent chose, a rename (labelLockedByUser) or a
+// `dobius-tab` summary (labelSource 'agent'). A name taken from the terminal title can be a command or a path
+// (`cat /Users/x/private.txt`), and a notification travels through Apple (Codex round 12).
+export function getTabLabelsById({ spokenOnly = false } = {}) {
   const labelByTabId = new Map();
-  const take = (id, label) => {
+  const take = (id, label, tab) => {
+    if (spokenOnly && !(tab?.labelLockedByUser === true || tab?.labelSource === 'agent')) return;
     if (typeof id === 'string' && typeof label === 'string' && label.trim()) labelByTabId.set(id, label);
   };
   try {
     for (const proj of getAllProjectsWithTabs()) {
-      for (const tab of (Array.isArray(proj.tabs) ? proj.tabs : [])) take(tab?.id, tab?.label);
+      for (const tab of (Array.isArray(proj.tabs) ? proj.tabs : [])) take(tab?.id, tab?.label, tab);
     }
     // Tabs living in TEAR-OFF windows are absent from config.projects[*].tabs:
     // their labels come from the tear-off tab bucket (when present) and from
     // lastTearOffs (the torn tab's label survives there even without a bucket).
     const cfg = loadConfig();
     for (const st of Object.values(cfg?.tearOffWindows || {})) {
-      for (const tab of (Array.isArray(st?.tabs) ? st.tabs : [])) take(tab?.id, tab?.label);
+      for (const tab of (Array.isArray(st?.tabs) ? st.tabs : [])) take(tab?.id, tab?.label, tab);
     }
     for (const t of (Array.isArray(cfg?.lastTearOffs) ? cfg.lastTearOffs : [])) {
-      if (!labelByTabId.has(t?.tabId)) take(t?.tabId, t?.label);
+      if (!labelByTabId.has(t?.tabId)) take(t?.tabId, t?.label, t);
     }
   } catch { /* config unavailable; callers' default labels still work */ }
   return labelByTabId;

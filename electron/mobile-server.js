@@ -344,7 +344,8 @@ export function tabLabelForNotify(id, exitCwd) {
   const meta = parseTermLabel(id, t?.cwd || (typeof exitCwd === 'string' ? exitCwd : undefined));
   // The folder's own name by this platform's separators: on Windows a path split on `/` alone was the whole path
   // (Codex round 4), and a notification may name a folder, never where it lives.
-  return { label: configTabLabels().get(id) || meta.label, project: baseName(meta.projectPath) || meta.projectName };
+  // Only a chosen name (a rename or a dobius-tab summary), never one copied from the terminal title (Codex round 12).
+  return { label: getTabLabelsById({ spokenOnly: true }).get(id) || meta.label, project: baseName(meta.projectPath) || meta.projectName };
 }
 
 function parseTermLabel(id, cwd) {

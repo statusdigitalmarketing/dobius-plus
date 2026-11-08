@@ -92,6 +92,9 @@ export function createPhoneNotifier(deps) {
   const d = { quitting: () => false, isLooking: () => false, minuteOfDay: (t) => { const x = new Date(t); return x.getHours() * 60 + x.getMinutes(); }, ...deps };
   const pending = new Map(); // key -> { key, tabId, kind, dueAt, awaitHandoff, count, name }
   const lastSent = new Map(); // key -> { at, kind }
+  // Repeats per tab (a handback of commands already announced): a "needs you" already going out for a red that was
+  // waiting for its command stops before the next phone once a repeat says the command was old news (Codex round 12).
+  const repeats = new Map(); // tabId -> count
   const lastHook = new Map(); // tabId -> last hook state seen
   let sentTimes = [];
   let timer = null;
@@ -135,7 +138,7 @@ export function createPhoneNotifier(deps) {
     if (typeof tabId !== 'string' || !tabId) return;
     const prev = lastHook.get(tabId);
     // lastSent is kept: a failure buzz right after the exit still respects the tab's gap (pruned in flush).
-    if (state === 'exit') { lastHook.delete(tabId); bump(tabId); dropTab(tabId); return; }
+    if (state === 'exit') { lastHook.delete(tabId); repeats.delete(tabId); bump(tabId); dropTab(tabId); return; }
     if (state === 'done' && tag === 'idle') return; // Claude idle for a minute: never a "finished"
     // The same red told twice (PermissionRequest, then Claude's permission_prompt backstop seconds later) is one
     // prompt: it neither restarts the debounce nor queues a second buzz. An answer (tabInput) or a new hook state
@@ -194,6 +197,7 @@ export function createPhoneNotifier(deps) {
     const key = keyOf(tabId);
     const p = pending.get(key);
     if (repeat) {
+      repeats.set(tabId, (repeats.get(tabId) || 0) + 1);
       if (p?.kind === 'handoff' && p.behind?.handoff && !p.behind.listed) pending.set(key, { ...p, behind: { ...p.behind, listed: true } });
       // A red still waiting for its command, and the command is one already announced: nothing new to say, whether it
       // is later run, dismissed or left waiting (Codex round 11).
@@ -336,7 +340,12 @@ export function createPhoneNotifier(deps) {
         if (red.dueAt > t) { pending.set(red.key, red); continue; }
         p = red;
       } else if (due0.kind === 'handoff' && due0.behind && (!liveHandoff(due0) || !effectiveKind('handoff', alerts))) {
-        const red = { key: due0.key, tabId: due0.tabId, kind: due0.behind.kind, gen: due0.behind.gen, dueAt: due0.behind.at };
+        // A handed-back red keeps what it is: tied to its command when that was listed (judged by the command, so a
+        // dismissal is silence), still waiting for it when not (Codex round 12).
+        const b = due0.behind;
+        const red = b.handoff
+          ? (b.listed ? { key: due0.key, tabId: due0.tabId, kind: 'handoff', dueAt: b.at } : { key: due0.key, tabId: due0.tabId, kind: 'needs', gen: b.gen, awaitHandoff: true, dueAt: b.at })
+          : { key: due0.key, tabId: due0.tabId, kind: b.kind, gen: b.gen, dueAt: b.at };
         if (red.dueAt > t) { pending.set(red.key, red); continue; }
         p = red;
       }
@@ -379,7 +388,9 @@ export function createPhoneNotifier(deps) {
           // current(): asked by the sender before each phone, so news that stopped being true mid-send stops there. The
           // same test the flush used, on the entry as it was (a handoff sent as "needs you" is still judged by its command).
           // And nobody started looking at the tab on the Mac meanwhile (round 7).
-          const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind, kind) && isCurrent(p) && !(p.tabId && d.isLooking(p.tabId));
+          const rep = p.awaitHandoff && p.tabId ? (repeats.get(p.tabId) || 0) : null;
+          const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind, kind) && isCurrent(p) && !(p.tabId && d.isLooking(p.tabId))
+            && (rep === null || (repeats.get(p.tabId) || 0) === rep);
           Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId, current })).catch(() => { /* the sender logs by code */ });
         }
       }
