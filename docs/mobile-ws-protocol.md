@@ -240,3 +240,58 @@ on the Mac (focused window, that tab on screen, keyboard or mouse used in the la
 body built from a tab, project or teammate name and a fixed phrase, and a hashed tag; Web Push adds
 `url: ./?open=<tab id>` (end-to-end encrypted to the phone), APNs adds `mac` and an opaque `ref` instead
 (docs/native-push.md).
+
+## Commands, To-do and Asana (2.3)
+
+Advertised in `authed.features` as `commands` (the Commands view) and `projectTasks` (the To-do and Asana views). The
+phone's Tasks screen shows a view only when its flag is there (`mobile/tasks-views.js`); Today and Inbox need `today`.
+Code: `electron/mobile-tasks.js` (handler), `electron/command-run.js` (Run's checks and start, shared with the Mac's
+Tasks > Commands), wired in `electron/main.js` (`setTasksBridge`) with the same functions the Mac's Tasks dropdown
+uses. Same rules as above: string `reqId` (at most 64), fixed error codes, nothing queued across a reconnect. Every
+request first checks that the socket's pairing is still paired (a revoked phone is answered `unavailable` before
+anything runs), and every write checks again right before it changes anything.
+
+| Request | Fields | Reply |
+| --- | --- | --- |
+| `commandsList` | | `{type:'commands', ok, list:[{tabId, tabLabel, project, projectPath, cwd, at, commands:[{id, text, why, state, hole, cwd, reply, at, edited, exit, startedAt, endedAt, runTabId}]}]}`. `state` is `waiting`, `running`, `done`, `failed` or `closed`. `hole` is the Mac's placeholder check for a waiting command (null when none). Never sent: the text that actually ran (an edit may hold a key) or the exit file |
+| `commandsDismiss` | `tabId`, `id` | `{type:'commandResult', op:'dismiss', id, ok}` |
+| `commandsRun` | `tabId`, `id`, `edited` (optional string, at most 2000), `asIs` (optional, `true` = the flagged placeholder is real syntax) | `{type:'commandResult', op:'run', id, ok, termId, error}`. `termId` is a new phone terminal (`term-mobile-<n>`) this socket may attach to. `error`: `unavailable`, `bad-request`, `not-waiting`, `placeholder`, `bad-edit`, `bad-edit-syntax`, `syntax`, `shell`, `write-failed`, `spawn-failed`, `failed` |
+| `tasksProjects` | | `{type:'tasksProjects', ok, list:[{path, name, pending, asana}]}`: the Mac's known projects (the allowlist `createTerminal` uses), busiest first. `pending` counts open to-dos not from Asana, `asana` open Asana tasks |
+| `projectTasksRead` | `project` (a path from `tasksProjects`) | `{type:'projectTasks', ok, project, tasks:[{id, title, done, source, dueOn, lane, assignee, notes, url, stage, createdAt, print}]}`. `print` names the version shown. No event log, runs or session links. `unknown-project` for any other path |
+| `projectTaskAct` | `project`, `id`, `kind` (`complete`/`reopen`/`delete`), `print` (the task's, as shown) | `{type:'projectTaskResult', op, id, ok, error}`. `error`: `not-found` (the id must match exactly), `changed` (edited since the phone looked), `unavailable`, `unknown-project`, `bad-request`, `failed`. `complete` is LOCAL ONLY, as on the Mac: it never calls Asana |
+| `projectTaskAdd` | `project`, `title` (1 to 500 characters, no control characters) | `{type:'projectTaskResult', op:'add', ok, id, error}` |
+| `asanaSync` | `project` | `{type:'asanaSyncResult', ok, added, error}`: the Mac's "Sync from Asana" (reads Asana, updates this project's list). `error`: `no-key`, `unauthorized`, `unknown-project`, `unavailable`, `failed`, never Asana's own words |
+
+Pushed with no content: `{type:'commandsChanged'}` whenever a command is handed back, run, finished or dismissed, and
+`{type:'tasksChanged'}` whenever a project's list changes from the Mac or a phone. An open screen asks again.
+
+### Run from the phone
+
+The phone's Run goes through the same steps as the Mac's, in one synchronous call in main
+(`command-run.js phoneRun`): the pairing; the command must still be waiting (a second tap finds it running and is
+refused); `checkCommandRun` (an edit must parse as exactly one `! ` command line, an unfilled placeholder refuses
+unless `asIs`, `bash -n` must pass with no warnings, the login shell must be zsh or bash); the pairing again; then
+`writeRunScript` (a 0600 command file and wrapper in `<userData>/run`, both deleted as they start) and a new phone
+terminal that runs the wrapper as its startup program (`shared/new-tab.js loginShellSpawn`). Nothing is typed into a
+PTY and nothing is eval'd. The command is marked Running only once the terminal spawned; otherwise its files go and it
+stays waiting. The Mac's one-time token exists only because its decision and its spawn are two IPC calls from a window;
+here both happen in the same call. A phone Run terminal whose shell has not reached the script after two minutes (a
+login profile waiting for input) is closed, so the files never wait on disk with no window to close them.
+
+What the terminal prints as the command is the card's text, marked `(edited)` for an edit; the edited text itself is
+never shown, logged or listed.
+
+Command text, what Claude wrote around it and the full reply go only to the phone that asked, as the reply to its own
+`commandsList`. Notifications carry the tab id only (docs/native-push.md).
+
+### Accepted residuals
+
+- An Asana sync a phone started finishes even if that phone is unpaired while Asana answers. It is the same pull a
+  click on the Mac makes and writes only this Mac's task list; nothing goes to Asana.
+- Closing an Asana card from the Inbox board (`inboxAct complete`, the only Asana write on the phone) checks the card's
+  revision and print against a read made right before the board call, but the board's own endpoint does not compare
+  them atomically (noted in `electron/inbox-board.js`).
+- Any paired phone can attach to any listed terminal, a Run terminal included, as before: all of a Mac's paired phones
+  are its owner's. A Run terminal shows the command as handed back, which the session's own terminal already shows.
+- A task checked off from a terminal (`dobius-task-done`, the voice bridge) sends phones no event; an open To-do or
+  Asana screen reads again every minute and whenever it comes back into view.

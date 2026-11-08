@@ -103,18 +103,18 @@ import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCer
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
-  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones,
+  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones, tabLabelForNotify,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
 import { initTeam, stopTeam, handleTeamBridge, getTeamService } from './team-main.js';
 import { writeAgentContext } from './agent-context.js';
 import { visibleBuiltinAgents } from './visible-agents.js';
-import { createHandoffCommands, runScriptText, extractCommands } from './handoff-commands.js';
+import { createHandoffCommands, runScriptText } from './handoff-commands.js';
 import { shQuote } from '../shared/sh-quote.js';
 import { randomUUID } from 'node:crypto';
 import { createCodexStatusRouter, withCodexHooks, stripCodexHooks, hasCodexHooks } from './codex-status.js';
 import { answersPrompt, submitsInput } from '../shared/prompt-answer.js';
-import { stopHookCommand, commandPlaceholder } from '../shared/handoff.js';
+import { stopHookCommand } from '../shared/handoff.js';
 import { findCodexSessionForProcess, readRolloutMeta } from './codex-sessions.js';
 import { createOpenTabService } from './bridge-open-tab.js';
 import { createBridgeOpenDeps } from './bridge-open-main.js';
@@ -130,6 +130,8 @@ import { startAutoMode, stopAutoMode, getAutoMode, setAutoModeEnabled } from './
 import { installNavGuard, isAppUrl } from './nav-guard.js';
 import { readToday, readAllCards, cardSeen, openCardIds } from './today.js';
 import { setTodayBridge, nudgeSettings, checkSettingWrite } from './mobile-today.js';
+import { setTasksBridge, actOnProjectTask, addProjectTask, projectSummaries, commandsForPhone, syncErrorCode } from './mobile-tasks.js';
+import { checkCommandRun, afterRunSpawn, phoneRun, shownCommand } from './command-run.js';
 import { createNudger, NUDGE_PREFIX } from './today-nudge.js';
 import { hasPushSubscribers } from './push.js';
 import { initPhoneAlerts, phoneAlerts } from './phone-alerts-main.js';
@@ -155,6 +157,15 @@ import { isAbsPath, isInsidePath } from '../shared/platform.js';
 // still get status from terminal output.
 const IS_WIN = process.platform === 'win32';
 const WIN_UNSUPPORTED = { error: 'Not available on Windows yet.' };
+
+// A project's task list changed: every window's Tasks dropdown and every open phone To-do / Asana screen read again
+// (phones get only the event, never which project or what changed).
+function tasksChangedEverywhere(projectPath) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('tasks:updated', projectPath);
+  }
+  broadcastToPhones('tasksChanged');
+}
 
 // --- Today on the phone and Today nudges ---------------------------------
 // Something about Today changed (a snooze, a card marked done): open phone screens and desktop
@@ -455,6 +466,22 @@ function writeRunScript(text, cwd, shown = text) {
 // A Run tab's own files, by its tab id: removed when that tab goes, whether or not its wrapper ever started (a
 // profile that execs tmux never runs it, and the command file may hold a pasted key).
 const runFilesByTab = new Map();
+// The syntax first, without running it: a typo would make bash print the whole line (an edited one may hold a pasted
+// key) into the tab. bash -n only parses; nothing executes. A warning counts too (an unterminated heredoc is only a
+// warning to bash -n).
+function runSyntaxOk(text) {
+  const syn = spawnSync('/bin/bash', ['-n'], { input: text, timeout: 3000, encoding: 'utf8' });
+  return syn.status === 0 && !String(syn.stderr || '').trim();
+}
+// What happens once a Run terminal spawned (or did not), for the Mac's tab and the phone's terminal alike.
+const runStartDeps = {
+  startRun: (...a) => handoffCommands.startRun(...a),
+  track: (termId, files) => runFilesByTab.set(termId, files),
+  unlink: (f) => fs.unlinkSync(f),
+};
+// A phone's Run terminal whose shell has not reached the script after this long (a login profile waiting for input,
+// one that execs tmux) is closed, so its files (an edited key among them) never wait on disk with no one to close it.
+const PHONE_RUN_START_MS = 2 * 60 * 1000;
 function dropRunFiles(tabId) {
   const files = runFilesByTab.get(tabId);
   if (!files) return;
@@ -571,8 +598,7 @@ function setupTerminalHandlers() {
         const cmd = handoffCommands.peek(t.tabId, t.id);
         if (cmd) {
           // An edited command is shown in the tab as the card showed it, marked edited (it may hold a pasted key).
-          const shown = t.text === cmd.text ? cmd.text : `${cmd.text}   (edited)`;
-          try { runCmd = { ...t, ...writeRunScript(t.text, cmd.cwd, shown) }; runScript = runCmd.file; } catch (err) { console.error('[commands] could not write the run script:', err?.message || err); }
+          try { runCmd = { ...t, ...writeRunScript(t.text, cmd.cwd, shownCommand(cmd, t.text)) }; runScript = runCmd.file; } catch (err) { console.error('[commands] could not write the run script:', err?.message || err); }
         }
       }
     }
@@ -583,16 +609,8 @@ function setupTerminalHandlers() {
     try {
       created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand, runScript, claudeOpts });
     } finally {
-      if (runScript) {
-        // The card shows it running in this tab, then Done or Failed (pollRuns).
-        if (created && runCmd) {
-          handoffCommands.startRun(runCmd.tabId, runCmd.id, id, runCmd.text, runCmd.exitFile);
-          runFilesByTab.set(id, [runCmd.file, runCmd.cmdFile]);
-        }
-        else {
-          for (const f of [runScript, runCmd?.cmdFile]) { if (f) { try { fs.unlinkSync(f); } catch { /* cleared by pruneRunScripts */ } } }
-        }
-      }
+      // The card shows it running in this tab, then Done or Failed (pollRuns); a failed spawn removes its files.
+      if (runScript) afterRunSpawn(created, runCmd, id, runStartDeps);
     }
     // A tab restored with its saved scrollback in a window opened after
     // launch: resume the Claude session it ran at the last quit, under the
@@ -1684,11 +1702,7 @@ function setupOrchestrationHandlers() {
   // --- Project task to-do list ---
   // Broadcast tasks:updated to every window only on success, so all open boards
   // (Pipeline + the legacy Tasks panel) re-render live, matching handleTaskDone.
-  const broadcastTasksUpdated = (projectPath) => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.webContents.send('tasks:updated', projectPath);
-    }
-  };
+  const broadcastTasksUpdated = (projectPath) => tasksChangedEverywhere(projectPath);
   ipcMain.handle('tasks:list', (_event, projectPath) => listTasks(projectPath));
   ipcMain.handle('tasks:add', (_event, projectPath, taskData) => {
     const result = addTask(projectPath, taskData);
@@ -4335,7 +4349,8 @@ function setupWindowHandlers() {
     lastReply: getLastAssistantReply,
     processCwd: getProcessCwd,
     projectOf: (id) => { const p = projectPathFromTabId(id); return p && p !== 'mobile' ? p : null; },
-    notify: () => { for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('handoffCommands:changed'); },
+    // Only the event travels to phones, never a command: an open Commands screen asks again for its own copy.
+    notify: () => { for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('handoffCommands:changed'); broadcastToPhones('commandsChanged'); },
     onAdded: (id, o) => phoneAlerts.handoffAdded(id, o?.repeat === true ? { repeat: true } : undefined), // the tab id only, never the command
     newId: () => randomUUID(),
   });
@@ -4345,6 +4360,49 @@ function setupWindowHandlers() {
   const terminalGone = (id) => { dropRunFiles(id); handoffCommands.onHook(id, 'exit', null); };
   addTerminalObserver({ onExit: (id) => terminalGone(id), onKill: (id) => terminalGone(id) });
   ipcMain.handle('handoffCommands:list', () => handoffCommands.list());
+  // The phone's Commands, To-do and Asana (electron/mobile-tasks.js): the same collector, checks, Run start and task
+  // functions as the Mac's Tasks dropdown.
+  setTasksBridge({
+    listCommands: () => commandsForPhone(handoffCommands.list(), (id) => tabLabelForNotify(id)),
+    dismissCommand: (tabId, id) => !!handoffCommands.take(tabId, id),
+    // Windows tabs run PowerShell, which never starts a run script.
+    runCommand: (req, stillOk, ctx) => (IS_WIN ? { ok: false, error: 'shell' } : phoneRun(req, {
+      ...runStartDeps,
+      stillOk,
+      peek: (tabId, id) => handoffCommands.peek(tabId, id),
+      syntaxOk: runSyntaxOk,
+      shell: process.env.SHELL,
+      newTerminalId: ctx?.newTerminalId,
+      authorizeTab: ctx?.authorizeTab,
+      writeRunScript,
+      // A phone terminal: no window owns it. It starts in the project folder (the script then enters the card's folder
+      // or stops there), under the same accounts a phone terminal for that folder gets.
+      spawn: (termId, script, cmd) => {
+        const where = typeof cmd.projectPath === 'string' && isAbsPath(cmd.projectPath) ? cmd.projectPath : undefined;
+        return createTerminal(termId, where, null, resolveAccountEnvForCwd(where), { runScript: script });
+      },
+      watchStart: (termId, run) => {
+        setTimeout(() => {
+          // The wrapper deletes itself as its first step: still there means the shell never got to it.
+          if (!fs.existsSync(run.file) || !terminalInstance(termId)) return;
+          console.warn('[commands] a phone Run terminal never started its command; closing it');
+          killTerminal(termId);
+        }, PHONE_RUN_START_MS).unref?.();
+      },
+    })),
+    projectSummaries: (projects) => projectSummaries(projects, listTasks),
+    listTasks: (project) => listTasks(project),
+    actOnTask: (req, stillOk) => actOnProjectTask(req, stillOk, { listTasks, completeTaskByRef, reopenTask, updateTask, deleteTask, changed: tasksChangedEverywhere }),
+    addTask: (project, title, stillOk) => addProjectTask(project, title, stillOk, { addTask, changed: tasksChangedEverywhere }),
+    syncAsana: async (project, stillOk) => {
+      // Sync reads Asana and updates this Mac's list only. A phone unpaired while Asana answers still gets its pull
+      // finished (the same pull a Mac click makes; nothing goes to Asana): accepted, see docs/mobile-ws-protocol.md.
+      if (!stillOk()) return { ok: false, error: 'unavailable' };
+      const r = await syncAsanaTasks(project);
+      tasksChangedEverywhere(project);
+      return r?.ok ? { ok: true, added: Number.isInteger(r.added) ? r.added : 0 } : { ok: false, error: syncErrorCode(r) };
+    },
+  });
   ipcMain.handle('handoffCommands:dismiss', (_e, tabId, id) => (typeof tabId === 'string' && typeof id === 'string' ? !!handoffCommands.take(tabId, id) : false));
   // Run, step 1: a one-time token for this command (60 s, this window). The renderer opens a new tab whose
   // terminal:create carries it; there the command is taken off the list and started as the tab's own startup program
@@ -4355,24 +4413,11 @@ function setupWindowHandlers() {
   // `asIs`: the person said the flagged "placeholder" is real syntax (the card's "run as is"): only that check is skipped.
   ipcMain.handle('handoffCommands:prepare', (event, tabId, id, edited, asIs) => {
     if (typeof tabId !== 'string' || typeof id !== 'string') return { ok: false, error: 'bad request' };
-    const cmd = handoffCommands.peek(tabId, id);
-    if (!cmd) return { ok: false, error: 'That command is no longer waiting.' };
-    let text = cmd.text;
-    if (edited !== undefined && edited !== null) {
-      const e = typeof edited === 'string' ? edited.trim() : '';
-      const parsed = extractCommands(`! ${e}`);
-      if (!e || parsed.length !== 1 || parsed[0] !== e) return { ok: false, error: 'The edited command must be one line of plain text.' };
-      text = e;
-    }
-    const hole = commandPlaceholder(text);
-    if (hole && asIs !== true) return { ok: false, error: `Fill in ${hole} first (Edit).` };
-    // The syntax first, without running it: a typo would make bash print the whole line (an edited one may hold a
-    // pasted key) into the tab. bash -n only parses; nothing executes.
-    const syn = spawnSync('/bin/bash', ['-n'], { input: text, timeout: 3000, encoding: 'utf8' });
-    // A warning counts too (an unterminated heredoc is only a warning to bash -n).
-    if (syn.status !== 0 || String(syn.stderr || '').trim()) return { ok: false, error: edited != null ? 'That edit is not a complete shell command (check quotes and brackets).' : 'That command has a shell syntax error; Copy it and fix it, or ask the session again.' };
-    const sh = path.basename(process.env.SHELL || '/bin/zsh');
-    if (sh !== 'zsh' && sh !== 'bash') return { ok: false, error: `Run works with zsh and bash (your shell is ${sh}): use Copy.` };
+    // The same checks as the phone's Run (electron/command-run.js): still waiting, an edit is one plain command line,
+    // no unfilled placeholder unless "run as is", bash -n clean, zsh or bash.
+    const check = checkCommandRun({ cmd: handoffCommands.peek(tabId, id), edited, asIs, syntaxOk: runSyntaxOk, shell: process.env.SHELL });
+    if (!check.ok) return { ok: false, error: check.error };
+    const text = check.text;
     const now = Date.now();
     for (const [t, v] of runTokens) if (now - v.at > RUN_TOKEN_MS) runTokens.delete(t);
     const token = randomUUID();

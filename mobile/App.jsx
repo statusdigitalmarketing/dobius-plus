@@ -163,7 +163,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     </div>
   );
   if (view === 'history') return <History connection={connection} onBack={() => setView('board')} />;
-  if (view === 'tasks') return <Tasks connection={connection} onBack={() => setView('board')} />;
+  if (view === 'tasks') return <Tasks connection={connection} onBack={() => setView('board')} onOpenTab={openTab} />;
   if (view === 'settings') return <Settings connection={connection} macName={pairing.name} onBack={() => setView('board')} />;
   if (view === 'terminal') return <TerminalScreen connection={connection} status={status} initialId={openTabId} onBack={() => setView('board')} onShowHistory={() => setView('history')} />;
   const board = <Board connection={connection} status={status} macName={pairing.name} onMacs={onMacs}

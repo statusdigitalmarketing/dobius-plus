@@ -55,15 +55,6 @@ export function stopHookCommand(statusCmd) {
   return `if ${HANDOFF_SHELL}; then ${statusCmd('needs;handoff')}; elif ${BACKGROUND_SHELL}; then ${statusCmd('working;background')}; else ${statusCmd('done')}; fi`;
 }
 
-/**
- * The first placeholder in a handed-back command that has to be filled in before it can run (`<your-key>`,
- * YOUR_TOKEN, your-repo, xxx, ...), or null. Tasks > Commands keeps Run off until it is edited out.
- */
-// Each rule leaves real shell syntax alone: <name> but not a heredoc (<<EOF >file) or <(...); YOUR_/your- after a
-// prefix too (ghp_YOUR_TOKEN); x's on their own or 4+ in a value (sk_test_xxxx) but not mktemp's .XXXXXX; `...` only
-// as a token of its own, never git's main...HEAD. The card still offers "run as is" for anything it gets wrong.
-const PLACEHOLDER_RE = /(?<!<)<[A-Za-z][\w .:/-]{0,40}>|(?<![A-Za-z])YOUR[_-][A-Z0-9_-]+|(?<![A-Za-z])your[-_][a-z0-9_-]+|(?<![A-Za-z0-9.])[xX]{3}(?![A-Za-z0-9])|(?<![.xX])[xX]{4,}|(?<=^|[\s"'=])\.\.\.(?=[\s"']|$)/;
-export function commandPlaceholder(text) {
-  const m = PLACEHOLDER_RE.exec(String(text || ''));
-  return m ? m[0] : null;
-}
+// The placeholder rule lives in shared/placeholder.js, compiled at first use so an old iPhone can still load the
+// phone app (it cannot parse a lookbehind literal).
+export { commandPlaceholder } from './placeholder.js';

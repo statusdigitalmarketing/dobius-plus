@@ -37,6 +37,7 @@ import { stripAnsi, spinnerStatus } from './selector-parser.js';
 import { terminalTextTail, terminalScreenText, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
 import { TAB_OPS, ACK_FEATURES, handleTabOp } from './mobile-tab-ops.js';
 import { TODAY_FEATURES, handleTodayMessage } from './mobile-today.js';
+import { handleTasksMessage } from './mobile-tasks.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills, loadTranscriptImage } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
@@ -653,6 +654,13 @@ function handleTabWrite(socket, msg) {
 function handleAuthedMessage(socket, msg, subs) {
   if (TAB_OPS.has(msg.type)) { handleTabWrite(socket, msg); return; }
   if (handleTodayMessage(msg, (obj) => wsSend(socket, obj), () => knownToken(socket._authToken), { token: socket._authToken })) return;
+  // Commands, To-do and Asana (electron/mobile-tasks.js). Projects come from the same allowlist createTerminal uses; a
+  // Run's new terminal is authorized for THIS socket, as a phone-created terminal is.
+  if (handleTasksMessage(msg, (obj) => wsSend(socket, obj), () => knownToken(socket._authToken), {
+    knownProjects: knownProjectList,
+    newTerminalId: mobileTermId,
+    authorizeTab: (id) => socket._authedTabs.add(id),
+  })) return;
   switch (msg.type) {
     case 'ping':
       wsSend(socket, { type: 'pong' });
@@ -1031,7 +1039,7 @@ function handleAuthedMessage(socket, msg, subs) {
  * reads again. Carries no card content: the phone asks for what it wants to show.
  */
 export function broadcastToPhones(type) {
-  if (type !== 'todayChanged' && type !== 'settingsChanged') return;
+  if (!['todayChanged', 'settingsChanged', 'commandsChanged', 'tasksChanged'].includes(type)) return;
   for (const set of activeSocketsByToken.values()) {
     for (const socket of set) wsSend(socket, { type });
   }

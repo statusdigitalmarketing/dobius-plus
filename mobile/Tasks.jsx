@@ -1,9 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { commandPlaceholder } from '../shared/placeholder.js';
+import { dueLabel as dayLabel, localDay, sortOpenTasks } from '../shared/task-due.js';
+import { viewsFor, currentView } from './tasks-views.js';
 
 /**
- * Today on the phone: what Claude picked from the Inbox board, with a reason under each, and
- * Done / Snooze right there. "See all" shows every open card. Nothing here is saved on the
- * phone: every card comes from the Mac when the screen asks (electron/mobile-today.js).
+ * Tasks on the phone, the views of the Mac's Tasks dropdown: Today (what Claude picked from the Inbox board, Done and
+ * Snooze right there), Commands (what a session handed back for you to run), To-do and Asana (a project's task list,
+ * the same files the Mac's Project view reads) and Inbox (every open card on the board). Each view shows only when the
+ * Mac says it can do it (authed.features), so an older Mac never gets a message it does not know. Nothing here is saved
+ * on the phone except which view and project were open: every row comes from the Mac when the screen asks
+ * (electron/mobile-today.js, electron/mobile-tasks.js).
  */
 
 let reqSeq = 0;
@@ -37,11 +43,42 @@ function dueLabel(due, today) {
   return Number.isNaN(d.getTime()) ? '' : `Due ${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}`;
 }
 
-const SOURCE = { email: 'Email', asana: 'Asana', meeting: 'Meeting', text: 'Text', imessage: 'Text', slack: 'Slack' };
+const SOURCE = { email: 'Email', asana: 'Asana', meeting: 'Meeting', text: 'Text', imessage: 'Text', slack: 'Slack', whatsapp: 'WhatsApp' };
 
 function clock(iso) {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+const ago = (t) => {
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+};
+
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private window: not remembered */ } },
+};
+
+// Copy without the async clipboard API where the page is not a secure context (a plain-HTTP tailnet address).
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* fall through to the old way */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  ta.remove();
+  return ok;
 }
 
 function Card({ card, today, busy, onDone, onSnooze, showReason }) {
@@ -77,7 +114,7 @@ function Card({ card, today, busy, onDone, onSnooze, showReason }) {
           <button className="quiet" onClick={() => setSnoozing(false)}>Cancel</button>
         </> : <>
           {card.rev !== null && card.rev !== undefined && (
-            <button className="today-done" disabled={busy} onClick={() => (card.source === 'asana' ? setConfirmAsana(true) : onDone(card, 'done'))}>{busy ? '…' : 'Done'}</button>
+            <button className="today-done" disabled={busy} onClick={() => (card.source === 'asana' ? setConfirmAsana(true) : onDone(card, 'done'))}>{busy ? '…' : card.source === 'asana' ? 'Close in Asana' : 'Done'}</button>
           )}
           {card.print && <button disabled={busy} onClick={() => setSnoozing(true)}>Snooze</button>}
         </>}
@@ -99,29 +136,388 @@ export function useFeature(connection, name) {
   return has;
 }
 
-export default function Tasks({ connection, onBack }) {
-  const supported = useFeature(connection, 'today');
+
+function useFeatures(connection) {
+  const read = () => (Array.isArray(connection.features) ? connection.features : null);
+  const [features, setFeatures] = useState(read);
+  useEffect(() => {
+    setFeatures(read());
+    return connection.onMessage((m) => { if (m.type === 'authed') setFeatures(read()); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connection]);
+  return features;
+}
+
+// Run's answers that are codes, not sentences (the Mac's checks answer in full sentences).
+const RUN_CODES = {
+  unavailable: 'Your Mac did not take that. Try again.',
+  'bad-request': 'Your Mac did not take that. Try again.',
+  'not-waiting': 'That command is no longer waiting.',
+  placeholder: 'Fill in the placeholder first (Edit), or tap Run as is if it is not one.',
+  'bad-edit': 'The edited command must be one line of plain text.',
+  'bad-edit-syntax': 'That edit is not a complete shell command (check quotes and brackets).',
+  syntax: 'That command has a shell syntax error. Copy it and fix it, or ask the session again.',
+  shell: 'Run works with zsh and bash only. Use Copy and run it on the Mac.',
+  'write-failed': 'Your Mac could not write the command for its terminal.',
+  'spawn-failed': 'Your Mac could not start a terminal for it.',
+  failed: 'Your Mac could not run it.',
+};
+
+const RUN_STATUS = {
+  running: 'Running',
+  done: '✓ Done',
+  failed: 'Failed',
+  closed: 'Its terminal closed before it finished',
+};
+
+function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(c.text);
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+  // Run (on the Mac, this phone or another) or Dismiss changed it: a draft for the old state must not stay on screen.
+  useEffect(() => { if (c.state !== 'waiting') { setEditing(false); setDraft(c.text); } }, [c.state, c.text]);
+  // Opening Edit selects the placeholder, so pasting a key replaces exactly it.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!editing || !el) return;
+    el.focus();
+    const hole0 = commandPlaceholder(el.value);
+    const at = hole0 ? el.value.indexOf(hole0) : -1;
+    if (at >= 0) el.setSelectionRange(at, at + hole0.length);
+  }, [editing]);
+  const text = editing ? draft : c.text;
+  // undefined: this phone's browser cannot run the check (iOS before 16.4); the Mac's answer for the command as handed
+  // back is used, and an edit is checked by the Mac when Run is tapped.
+  const local = c.state === 'waiting' ? commandPlaceholder(text) : null;
+  const hole = local !== undefined ? local : (!editing && typeof c.hole === 'string' ? c.hole : null);
+  const changed = draft.trim() !== c.text;
+
+  const run = async (asIs = false) => {
+    if ((hole && !asIs) || busy) return;
+    setBusy(true);
+    const r = await ask(connection, { type: 'commandsRun', tabId: entry.tabId, id: c.id, edited: editing && changed ? draft.trim() : undefined, asIs }, 'commandResult', 30000);
+    setBusy(false);
+    if (r?.ok) {
+      setEditing(false);
+      say('Running in a new terminal on your Mac.', r.termId ? { label: 'Open', run: () => onOpenTab?.(r.termId) } : null);
+    } else if (!r) say(connection.status !== 'authed' ? 'Not connected to your Mac. Try again once it reconnects.' : 'No answer from your Mac. Look at the card again before running it.');
+    else say(RUN_CODES[r.error] || 'Your Mac could not run it.');
+    onChanged();
+  };
+  const dismiss = async () => {
+    const r = await ask(connection, { type: 'commandsDismiss', tabId: entry.tabId, id: c.id }, 'commandResult');
+    if (!r?.ok) say(r ? 'That one was already gone.' : 'No answer from your Mac.');
+    onChanged();
+  };
+  const copy = async () => { say((await copyText(text.trim())) ? 'Copied.' : 'Could not copy on this phone.'); };
+
+  return (
+    <div className="cmd-item">
+      {c.why && <div className={`cmd-why${c.state === 'waiting' ? '' : ' dim'}`}>{c.why}</div>}
+      {hole && (
+        <div className="cmd-hole">
+          <span>Fill in <code>{hole}</code> before running.</span>
+          <div className="cmd-hole-actions">
+            {!editing && <button className="cmd-link" onClick={() => setEditing(true)}>Fill it in</button>}
+            <button className="cmd-link dim" onClick={() => run(true)} disabled={busy}>Not a placeholder? Run as is</button>
+          </div>
+        </div>
+      )}
+      {editing && c.state === 'waiting'
+        ? <textarea ref={inputRef} className="cmd-edit" value={draft} rows={3} spellCheck={false} autoCapitalize="off" autoCorrect="off"
+          aria-label="Edit the command" onChange={(e) => setDraft(e.target.value.replace(/[\r\n]+/g, ' '))} />
+        : <div className="cmd-text">{c.text}</div>}
+      {c.edited && c.state !== 'waiting' && <div className="cmd-note">Ran with your edit. Dobius does not show or save it.</div>}
+      <div className="today-actions">
+        {c.state === 'waiting' ? <>
+          <button className="today-done" disabled={!!hole || busy} onClick={() => run()}>{busy ? 'Starting…' : 'Run'}</button>
+          {editing
+            ? <button onClick={() => { setEditing(false); setDraft(c.text); }}>Cancel</button>
+            : <button onClick={() => setEditing(true)}>Edit</button>}
+          <button onClick={copy}>Copy</button>
+          <button className="quiet" onClick={dismiss}>Dismiss</button>
+        </> : <>
+          <span className={`cmd-state ${c.state}`}>
+            {RUN_STATUS[c.state] || c.state}{c.state === 'failed' && Number.isInteger(c.exit) ? ` (exit ${c.exit})` : ''}
+            {c.endedAt && c.state !== 'running' ? <span className="cmd-ago"> · {ago(c.endedAt)}</span> : null}
+            {c.cwd && c.cwd !== entry.cwd ? <span className="cmd-ago"> · ran in {folderOf(c.cwd)}</span> : null}
+          </span>
+          {c.runTabId && c.state !== 'closed' && <button onClick={() => onOpenTab?.(c.runTabId)}>Open terminal</button>}
+          <button className="quiet" onClick={dismiss}>Dismiss</button>
+        </>}
+      </div>
+    </div>
+  );
+}
+
+function CommandsView({ connection, entries, reload, say, onOpenTab }) {
+  const [openReply, setOpenReply] = useState(null);
+  if (entries === null) return <p className="muted pad">Loading…</p>;
+  if (entries.error) return <p className="muted pad">Could not read the commands from your Mac. <button className="link-btn" onClick={reload}>Try again</button></p>;
+  const shown = entries.filter((e) => e.commands.length);
+  return <>
+    <p className="today-line">Commands your Claude sessions asked you to run. Run starts a new terminal on your Mac in the folder shown; the card then says whether it worked.</p>
+    {shown.length === 0 && <p className="muted pad">Nothing to run right now. When a session hands you a command, it shows up here.</p>}
+    {shown.map((e) => {
+      const folderOf = (cwd) => (!cwd || cwd === e.projectPath ? 'the project folder' : (e.projectPath && cwd.startsWith(`${e.projectPath}/`) ? cwd.slice(e.projectPath.length + 1) : cwd));
+      // One group per reply the commands came with, as on the Mac: each has its own folder, age and full reply.
+      const groups = [];
+      for (const c of e.commands) {
+        const key = `${c.at || ''}|${c.reply || ''}|${c.cwd || ''}`;
+        const last = groups[groups.length - 1];
+        if (last && last.key === key) last.commands.push(c); else groups.push({ key, id: c.id, reply: c.reply, cwd: c.cwd || e.cwd, at: c.at || e.at, commands: [c] });
+      }
+      return (
+        <section key={e.tabId} className="today-card cmd-card">
+          <div className="today-title">{e.tabLabel}{e.project ? <span className="cmd-proj"> · {e.project}</span> : null}</div>
+          {groups.map((g) => {
+            const gid = `${e.tabId}|${g.id}`;
+            return (
+              <div key={gid} className="cmd-group">
+                <div className="today-meta">Runs in {folderOf(g.cwd)}{g.at ? ` · handed back ${ago(g.at)}` : ''}</div>
+                {g.commands.map((c) => <CommandCard key={c.id} connection={connection} entry={e} c={c} folderOf={folderOf} say={say} onChanged={reload} onOpenTab={onOpenTab} />)}
+                {g.reply && <>
+                  <button className="cmd-link" onClick={() => setOpenReply(openReply === gid ? null : gid)}>{openReply === gid ? 'Hide Claude\'s reply' : 'Show Claude\'s full reply'}</button>
+                  {openReply === gid && <div className="cmd-reply">{g.reply}</div>}
+                </>}
+              </div>
+            );
+          })}
+        </section>
+      );
+    })}
+  </>;
+}
+
+const SYNC_PROBLEM = {
+  'no-key': 'No Asana key on this Mac yet. Add one in Settings > Integrations on the Mac.',
+  unauthorized: 'Asana turned down this Mac\'s key. Fix it from Tasks on the Mac, which can switch to a key that works.',
+  'unknown-project': 'That project is not on this Mac any more.',
+};
+
+const LANE = { build: 'Mine', review: 'Sam · review' };
+const STAGE = { approval: null, queued: 'Queued', running: 'Running', review: 'In review', blocked: 'Blocked' };
+
+function TaskRow({ task, today, busy, expanded, onExpand, onToggle, onDelete }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  useEffect(() => { if (!expanded) setConfirmDelete(false); }, [expanded]);
+  // A confirm belongs to the version it was asked on: a newer one (edited on the Mac) asks again.
+  useEffect(() => { setConfirmDelete(false); }, [task.print]);
+  const due = !task.done ? dayLabel(task.dueOn, today) : null;
+  const chips = [task.lane ? LANE[task.lane] : (task.source !== 'manual' && task.source !== 'asana' ? (task.source === 'inbox' ? 'From Inbox' : task.source) : null),
+    !task.done ? STAGE[task.stage] || null : null].filter(Boolean);
+  const hasDetail = !!(task.notes || task.url);
+  return (
+    <div className={`task-row${task.done ? ' done' : ''}`}>
+      <button className={`task-check${task.done ? ' on' : ''}`} disabled={busy} onClick={() => onToggle(task)}
+        role="checkbox" aria-checked={task.done} aria-label={task.done ? `Mark ${task.title} not done` : `Mark ${task.title} done`}>
+        <span className="task-circle" aria-hidden="true">{task.done ? '✓' : ''}</span>
+      </button>
+      <div className="task-main">
+        <button className="task-body" onClick={onExpand} aria-expanded={expanded}>
+          <span className="task-title">{task.title}</span>
+          {(chips.length > 0 || due || hasDetail) && (
+            <span className="task-meta">
+              {chips.map((c) => <span key={c} className="task-chip">{c}</span>)}
+              {due && <span className={`task-due ${due.tone}`}>{due.text}</span>}
+              {hasDetail && <span className="task-more">{expanded ? 'Less' : 'Details'}</span>}
+            </span>
+          )}
+        </button>
+        {expanded && (
+          <div className="task-detail">
+            {task.notes && <div className="task-notes">{task.notes}</div>}
+            <div className="today-actions">
+              {task.url && <a className="task-open" href={task.url} target="_blank" rel="noreferrer">{task.source === 'asana' ? 'Open in Asana' : 'Open original'}</a>}
+              {confirmDelete ? <>
+                <span className="today-ask">Delete it from this list?</span>
+                <button className="danger" disabled={busy} onClick={() => { setConfirmDelete(false); onDelete(task); }}>Delete</button>
+                <button className="quiet" onClick={() => setConfirmDelete(false)}>Cancel</button>
+              </> : <button className="quiet" onClick={() => setConfirmDelete(true)}>Delete</button>}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// To-do and Asana: one project's list from the Mac (tasks-service, as the Mac's Project view). To-do shows what is not
+// from Asana; Asana shows the synced Asana tasks, a Sync button, and the Inbox board's Asana cards (closing one of
+// those is the only thing here that changes Asana, and it asks first).
+function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
+  const key = `dobius-tasks-project:${connection.pairing?.id || connection.origin || ''}`;
+  const [projects, setProjects] = useState(null);
+  const [project, setProject] = useState(() => store.get(key));
+  const [list, setList] = useState(null); // { project, tasks } | { project, error }
+  const [busy, setBusy] = useState({});
+  const [expanded, setExpanded] = useState(null);
+  const [showDone, setShowDone] = useState(false);
+  const [title, setTitle] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncNote, setSyncNote] = useState(null);
+  const seq = useRef(0);
+  const projectRef = useRef(project);
+  projectRef.current = project;
+  const today = localDay();
+
+  const loadProjects = useCallback(async () => {
+    const r = await ask(connection, { type: 'tasksProjects' }, 'tasksProjects', 20000);
+    if (!r?.ok) { setProjects((p) => p || { error: true }); return; }
+    const all = Array.isArray(r.list) ? r.list : [];
+    setProjects(all);
+    // The one chosen before if this Mac still knows it, else the busiest.
+    setProject((cur) => (cur && all.some((p) => p.path === cur) ? cur : all[0]?.path || null));
+  }, [connection]);
+
+  const loadTasks = useCallback(async () => {
+    const p = projectRef.current;
+    if (!p) return;
+    const mine = ++seq.current;
+    const r = await ask(connection, { type: 'projectTasksRead', project: p }, 'projectTasks', 20000);
+    // Only the newest read, and only for the project still chosen.
+    if (mine !== seq.current || projectRef.current !== p) return;
+    setList((prev) => (r?.ok ? { project: p, tasks: r.tasks || [] } : prev?.project === p && prev.tasks ? prev : { project: p, error: r?.error || 'failed' }));
+  }, [connection]);
+
+  useEffect(() => {
+    loadProjects();
+    const off = connection.onMessage((m) => {
+      if (m.type === 'authed') { loadProjects(); loadTasks(); }
+      if (m.type === 'tasksChanged') loadTasks();
+    });
+    const onVisible = () => { if (document.visibilityState === 'visible') loadTasks(); };
+    document.addEventListener('visibilitychange', onVisible);
+    // A task checked off from a terminal (dobius-task-done) sends phones no event: look again every minute.
+    const t = setInterval(() => { if (document.visibilityState === 'visible') loadTasks(); }, 60000);
+    return () => { off(); clearInterval(t); document.removeEventListener('visibilitychange', onVisible); };
+  }, [connection, loadProjects, loadTasks]);
+
+  useEffect(() => {
+    if (!project) return;
+    store.set(key, project);
+    setExpanded(null);
+    loadTasks();
+  }, [project, key, loadTasks]);
+
+  const mark = (id, on) => setBusy((b) => { const n = { ...b }; if (on) n[id] = true; else delete n[id]; return n; });
+  const act = async (task, kind2) => {
+    const p = projectRef.current;
+    mark(task.id, true);
+    const r = await ask(connection, { type: 'projectTaskAct', project: p, id: task.id, kind: kind2, print: task.print }, 'projectTaskResult');
+    mark(task.id, false);
+    if (r?.ok) {
+      // Marking an Asana task done here is local, as on the Mac: Asana itself is never changed from this list.
+      if (kind2 === 'complete' && task.source === 'asana') say('Marked done on this list. Asana is not changed.');
+      else if (kind2 === 'delete') say('Deleted.');
+    } else say(!r ? 'No answer from your Mac. Try again in a moment.' : r.error === 'changed' ? 'That one changed since you looked. Have another look.' : 'Your Mac did not change that one. Have another look.');
+    loadTasks();
+  };
+  const add = async () => {
+    const t = title.trim();
+    if (!t || adding) return;
+    setAdding(true);
+    const r = await ask(connection, { type: 'projectTaskAdd', project: projectRef.current, title: t }, 'projectTaskResult');
+    setAdding(false);
+    if (r?.ok) setTitle('');
+    else say(r ? 'Could not add that.' : 'No answer from your Mac.');
+    loadTasks();
+  };
+  const sync = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncNote(null);
+    const r = await ask(connection, { type: 'asanaSync', project: projectRef.current }, 'asanaSyncResult', 120000);
+    setSyncing(false);
+    if (r?.ok) say(r.added ? `${r.added} new from Asana.` : 'Up to date with Asana.');
+    else setSyncNote(r ? SYNC_PROBLEM[r.error] || 'Asana sync failed. Try again in a moment.' : 'No answer from your Mac.');
+    loadTasks();
+  };
+
+  if (projects === null) return <p className="muted pad">Loading projects…</p>;
+  if (projects.error) return <p className="muted pad">Could not read the projects from your Mac. <button className="link-btn" onClick={loadProjects}>Try again</button></p>;
+  if (!projects.length) return <p className="muted pad">No projects on this Mac yet.</p>;
+
+  const current = list?.project === project ? list : null;
+  const tasks = (current?.tasks || []).filter((t) => (kind === 'asana' ? t.source === 'asana' : t.source !== 'asana'));
+  const pending = sortOpenTasks(tasks.filter((t) => !t.done));
+  const done = tasks.filter((t) => t.done);
+  const row = (t) => (
+    <TaskRow key={t.id} task={t} today={today} busy={!!busy[t.id]} expanded={expanded === t.id}
+      onExpand={() => setExpanded((v) => (v === t.id ? null : t.id))}
+      onToggle={(x) => act(x, x.done ? 'reopen' : 'complete')} onDelete={(x) => act(x, 'delete')} />
+  );
+  const name = (p) => `${p.name}${p.pending ? ` (${p.pending})` : ''}`;
+  return <>
+    <label className="tasks-project">
+      <span className="tasks-project-label">Project</span>
+      <select value={project || ''} onChange={(e) => setProject(e.target.value)} aria-label="Project">
+        {projects.map((p) => <option key={p.path} value={p.path}>{name(p)}</option>)}
+      </select>
+    </label>
+    {kind === 'todo' && (
+      <form className="task-add" onSubmit={(e) => { e.preventDefault(); add(); }}>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Add a task" maxLength={500} enterKeyHint="done" aria-label="Add a task" />
+        <button type="submit" disabled={!title.trim() || adding}>{adding ? '…' : 'Add'}</button>
+      </form>
+    )}
+    {kind === 'asana' && <>
+      <button className="settings-action tasks-sync" onClick={sync} disabled={syncing}>{syncing ? 'Syncing with Asana…' : 'Sync from Asana'}</button>
+      <p className="settings-foot">Pulls your Asana tasks and Sam's review lane into this project's list. Checking one off here marks it done on this list only.</p>
+      {syncNote && <p className="today-warn">{syncNote}</p>}
+    </>}
+    {!current && <p className="muted pad">Loading…</p>}
+    {current?.error && <p className="muted pad">{SYNC_PROBLEM[current.error] || 'Could not read this project\'s tasks.'} <button className="link-btn" onClick={loadTasks}>Try again</button></p>}
+    {current?.tasks && <>
+      {pending.length === 0 && <p className="muted pad">{tasks.length ? 'Everything here is done.' : kind === 'asana' ? 'No Asana tasks on this project\'s list. Sync to pull them in.' : 'No tasks yet. Add one above.'}</p>}
+      {pending.length > 0 && <div className="settings-group task-list">{pending.map(row)}</div>}
+      {done.length > 0 && <>
+        <button className="today-more" onClick={() => setShowDone((v) => !v)}>Done ({done.length}) {showDone ? '▾' : '▸'}</button>
+        {showDone && <div className="settings-group task-list">{done.map(row)}</div>}
+      </>}
+    </>}
+    {kind === 'asana' && asanaCards && asanaCards.length > 0 && <>
+      <p className="settings-head">On your Inbox board</p>
+      <p className="settings-foot tasks-foot-gap">Closing one of these closes the task in Asana itself, so it asks first.</p>
+      {asanaCards.map(cardFor)}
+    </>}
+  </>;
+}
+
+export default function Tasks({ connection, onBack, onOpenTab }) {
+  const features = useFeatures(connection);
+  const views = viewsFor(features);
+  const supported = !!features?.includes('today');
+  const hasCommands = !!features?.includes('commands');
+  const [view, setViewState] = useState(() => store.get('dobius-tasks-view') || 'today');
+  const current = currentView(views, view);
+  const setView = (v) => { setViewState(v); store.set('dobius-tasks-view', v); };
+  const needInbox = current === 'inbox' || current === 'asana';
   const [today, setToday] = useState(null);
-  const [all, setAll] = useState(false);
   const [inbox, setInbox] = useState(null);
   const [query, setQuery] = useState('');
+  const [source, setSource] = useState('all');
   const [busy, setBusy] = useState({});
-  const [note, setNote] = useState('');
+  const [note, setNote] = useState(null); // { text, action? }
   const [undo, setUndo] = useState(null);
   const [showSnoozed, setShowSnoozed] = useState(false);
+  const [commands, setCommands] = useState(null);
   const seq = useRef(0);
   const shown = useRef(0);
   const doneSeq = useRef(0);
   const inFlight = useRef(false);
-  const allRef = useRef(false);
-  allRef.current = all;
+  const inboxRef = useRef(false);
+  inboxRef.current = needInbox;
+  const cmdSeq = useRef(0);
 
   const load = useCallback(async () => {
     const mine = ++seq.current;
     inFlight.current = true;
     const [t, i] = await Promise.all([
       ask(connection, { type: 'todayRead' }, 'today', 90000),
-      allRef.current ? ask(connection, { type: 'inboxRead' }, 'inbox', 30000) : Promise.resolve(undefined),
+      inboxRef.current ? ask(connection, { type: 'inboxRead' }, 'inbox', 30000) : Promise.resolve(undefined),
     ]);
     if (mine === seq.current) inFlight.current = false;
     // The newest read to FINISH wins, so slow replies never starve the screen (Codex).
@@ -130,6 +526,13 @@ export default function Tasks({ connection, onBack }) {
     // A failed read keeps what is on screen; only a first read that fails shows the error.
     setToday((prev) => (t?.ok ? t.data : prev && !prev.error ? prev : { error: true }));
     if (i !== undefined) setInbox((prev) => (i?.ok ? i.data : prev || { ok: false }));
+  }, [connection]);
+
+  const loadCommands = useCallback(async () => {
+    const mine = ++cmdSeq.current;
+    const r = await ask(connection, { type: 'commandsList' }, 'commands', 15000);
+    if (mine !== cmdSeq.current) return;
+    setCommands((prev) => (r?.ok ? (Array.isArray(r.list) ? r.list : []) : prev && !prev.error ? prev : { error: true }));
   }, [connection]);
 
   useEffect(() => {
@@ -144,6 +547,17 @@ export default function Tasks({ connection, onBack }) {
     return () => { off(); document.removeEventListener('visibilitychange', onVisible); };
   }, [connection, load, supported]);
 
+  useEffect(() => {
+    if (!hasCommands) return undefined;
+    loadCommands();
+    const off = connection.onMessage((m) => { if (m.type === 'authed' || m.type === 'commandsChanged') loadCommands(); });
+    const onVisible = () => { if (document.visibilityState === 'visible') loadCommands(); };
+    document.addEventListener('visibilitychange', onVisible);
+    // "handed back 5m ago" and a running command's result stay current while the list is open.
+    const t = setInterval(() => { if (document.visibilityState === 'visible') loadCommands(); }, 60000);
+    return () => { off(); clearInterval(t); document.removeEventListener('visibilitychange', onVisible); };
+  }, [connection, loadCommands, hasCommands]);
+
   // While Claude is still picking, look again every 10 seconds.
   const picking = !!today?.board?.picking;
   useEffect(() => {
@@ -152,7 +566,7 @@ export default function Tasks({ connection, onBack }) {
     return () => clearInterval(t);
   }, [picking, load]);
 
-  useEffect(() => { if (all) load(); }, [all, load]);
+  useEffect(() => { if (needInbox && supported) load(); }, [needInbox, supported, load]);
 
   // New mail reaches the board on its own schedule and sends no event: look again every two
   // minutes while the screen is up (Codex).
@@ -169,7 +583,11 @@ export default function Tasks({ connection, onBack }) {
     return () => clearTimeout(t);
   }, [undo]);
 
-  const say = (text) => { setNote(text); setTimeout(() => setNote((n) => (n === text ? '' : n)), 5000); };
+  const say = useCallback((text, action = null) => {
+    const n = { text, action };
+    setNote(n);
+    setTimeout(() => setNote((cur) => (cur === n ? null : cur)), action ? 8000 : 5000);
+  }, []);
   const mark = (id, on) => setBusy((b) => { const n = { ...b }; if (on) n[id] = true; else delete n[id]; return n; });
 
   const done = async (card, kind) => {
@@ -194,7 +612,6 @@ export default function Tasks({ connection, onBack }) {
     if (!card || undo.pending) return;
     setUndo((cur) => (cur?.key === key ? { ...cur, pending: true } : cur));
     const r = await ask(connection, { type: 'inboxAct', kind: 'undo', id: card.id, rev: card.rev }, 'todayResult');
-    // Only if this card still owns the Undo bar: another card may have been marked done meanwhile.
     // Only the Undo bar this tap came from: a newer Done (even of the same card) has its own key.
     setUndo((cur) => (cur?.key !== key ? cur : r?.ok ? null : { card, key, problem: true }));
     load();
@@ -216,38 +633,71 @@ export default function Tasks({ connection, onBack }) {
     load();
   };
 
+  const waiting = Array.isArray(commands) ? commands.reduce((n, e) => n + e.commands.filter((c) => c.state === 'waiting').length, 0) : 0;
   const header = (
     <header className="top-bar">
       <button className="icon-btn" onClick={onBack} aria-label="Back">‹</button>
-      <span className="terminal-name today-head">{all ? 'All open' : 'Today'}</span>
-      <button className="resume-btn" onClick={() => { setAll((v) => !v); setQuery(''); }}>{all ? 'Today' : 'See all'}</button>
+      <span className="terminal-name today-head">Tasks</span>
     </header>
   );
+  const segments = views && views.length > 1 && (
+    <div className="tasks-seg-wrap">
+      <div className="seg tasks-seg" role="tablist" aria-label="Tasks views">
+        {views.map((v) => (
+          <button key={v.id} role="tab" aria-selected={current === v.id} className={`seg-item${current === v.id ? ' on' : ''}`}
+            onClick={() => { if (current !== v.id) { setView(v.id); setQuery(''); } }}
+            aria-label={v.id === 'commands' && waiting ? `Commands, ${waiting} waiting` : v.label}>
+            {v.label}{v.id === 'commands' && waiting > 0 && <span className="seg-badge" aria-hidden="true">{waiting}</span>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 
-  if (supported === null) return (
+  if (views === null) return (
     <div className="screen history">{header}<main className="today-body"><p className="muted pad">Connecting to your Mac…</p></main></div>
   );
-  if (!supported) return (
+  if (!views.length) return (
     <div className="screen history">{header}
-      <main className="today-body"><p className="muted pad">This Mac needs a newer Dobius+ to show Today here. Update Dobius+ on the Mac.</p></main>
+      <main className="today-body"><p className="muted pad">This Mac needs a newer Dobius+ to show Tasks here. Update Dobius+ on the Mac.</p></main>
     </div>
   );
 
   const board = today?.board;
   const day = board?.today || '';
+  const cardFor = (c, showReason = false) => <Card key={c.id} card={c} today={inbox?.today || day} busy={!!busy[c.id]} onDone={done} onSnooze={snooze} showReason={showReason} />;
   let body;
-  if (!today) body = <p className="muted pad">Loading…</p>;
+  if (current === 'commands') {
+    body = <CommandsView connection={connection} entries={commands} reload={loadCommands} say={say} onOpenTab={onOpenTab} />;
+  } else if (current === 'todo' || current === 'asana') {
+    const asanaCards = supported && board?.state === 'ok' ? (inbox?.cards || []).filter((c) => c.source === 'asana') : null;
+    body = <ProjectView connection={connection} kind={current} say={say} asanaCards={asanaCards} cardFor={(c) => cardFor(c)} />;
+  } else if (!today) body = <p className="muted pad">Loading…</p>;
   else if (today.error) body = <p className="muted pad">Could not read Today from your Mac. <button className="link-btn" onClick={load}>Try again</button></p>;
   else if (board?.state !== 'ok') body = <p className="muted pad">{BOARD_PROBLEM[board?.state] || 'Could not read the Inbox board on your Mac.'}</p>;
-  else if (all) {
+  else if (current === 'inbox') {
     const q = query.trim().toLowerCase();
-    const cards = (inbox?.cards || []).filter((c) => !q || [c.subject, c.summary, c.who].some((v) => (v || '').toLowerCase().includes(q)));
+    const all = inbox?.cards || [];
+    const counts = {};
+    for (const c of all) counts[c.source] = (counts[c.source] || 0) + 1;
+    // A filter whose cards were all closed falls back to All.
+    const src = source !== 'all' && counts[source] ? source : 'all';
+    const cards = all.filter((c) => (src === 'all' || c.source === src) && (!q || [c.subject, c.summary, c.who].some((v) => (v || '').toLowerCase().includes(q))));
     body = <>
       <input className="today-search" type="search" placeholder="Search every open card" value={query} onChange={(e) => setQuery(e.target.value)} />
+      {Object.keys(counts).length > 1 && (
+        <div className="source-chips" role="radiogroup" aria-label="Show cards from">
+          {['all', ...Object.keys(counts)].map((s) => (
+            <button key={s} role="radio" aria-checked={src === s} className={`source-chip${src === s ? ' on' : ''}`} onClick={() => setSource(s)}>
+              {s === 'all' ? `All ${all.length}` : `${SOURCE[s] || s} ${counts[s]}`}
+            </button>
+          ))}
+        </div>
+      )}
       {!inbox && <p className="muted pad">Loading every card…</p>}
-      {inbox && inbox.ok === false && <p className="muted pad">Could not read the Inbox board.</p>}
-      {inbox?.cards && <p className="today-line">{q ? `${cards.length} of ${inbox.cards.length}` : `${inbox.cards.length} open`}</p>}
-      {cards.map((c) => <Card key={c.id} card={c} today={inbox.today || day} busy={!!busy[c.id]} onDone={done} onSnooze={snooze} showReason={false} />)}
+      {inbox && inbox.ok === false && <p className="muted pad">{BOARD_PROBLEM[inbox.reason] || 'Could not read the Inbox board.'}</p>}
+      {inbox?.cards && <p className="today-line">{q || src !== 'all' ? `${cards.length} of ${all.length}` : `${all.length} open`}</p>}
+      {cards.map((c) => cardFor(c))}
     </>;
   } else {
     const line = board.picking && board.mode !== 'claude' ? 'Claude is picking your list…'
@@ -257,9 +707,9 @@ export default function Tasks({ connection, onBack }) {
     body = <>
       <p className="today-line">{line}</p>
       {board.failing?.length > 0 && <p className="today-warn">Can't read: {board.failing.join(', ')}. Cards from there may be missing.</p>}
-      {board.suggested.length === 0 && <p className="muted pad">Nothing picked right now. See all shows every open card.</p>}
-      {board.suggested.map((c) => <Card key={c.id} card={c} today={day} busy={!!busy[c.id]} onDone={done} onSnooze={snooze} showReason />)}
-      {board.otherCount > 0 && <button className="today-more" onClick={() => setAll(true)}>{board.otherCount} more open cards</button>}
+      {board.suggested.length === 0 && <p className="muted pad">Nothing picked right now. Inbox shows every open card.</p>}
+      {board.suggested.map((c) => cardFor(c, true))}
+      {board.otherCount > 0 && <button className="today-more" onClick={() => setView('inbox')}>{board.otherCount} more open cards</button>}
       {board.snoozed?.length > 0 && <>
         <button className="today-more" onClick={() => setShowSnoozed((v) => !v)}>{board.snoozed.length} snoozed {showSnoozed ? '▾' : '▸'}</button>
         {showSnoozed && board.snoozed.map((c) => (
@@ -285,13 +735,17 @@ export default function Tasks({ connection, onBack }) {
   return (
     <div className="screen history">
       {header}
+      {segments}
       <main className="today-body">{body}</main>
       {(undo || note) && (
         <div className="today-toast" role="status">
           {undo ? <>
             <span>{undo.problem ? 'Could not undo that.' : 'Marked done.'}</span>
             <button onClick={undoDone} disabled={!!undo.pending}>{undo.pending ? 'Undoing…' : undo.problem ? 'Try again' : 'Undo'}</button>
-          </> : <span>{note}</span>}
+          </> : <>
+            <span>{note.text}</span>
+            {note.action && <button onClick={() => { note.action.run(); setNote(null); }}>{note.action.label}</button>}
+          </>}
         </div>
       )}
     </div>
