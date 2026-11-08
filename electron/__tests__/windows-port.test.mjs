@@ -189,7 +189,8 @@ test('presence matches the record Claude 2.1.319 really writes on Windows (FILET
   // CIM reports the same start to the microsecond: 5 ticks (500ns) away.
   const hit = await presenceOf({ pid: 3568, startFt: '134385609760300750', startedAt: ftToMs('134385609760300750') }, null, read);
   assert.equal(hit?.sessionId, '92679e5c-9b91-48d5-82f3-ae0ad806e079');
-  assert.equal(hit?.cwd, 'C:\\Users\\u\\Projects\\Dobius+ Windows');
+  // path.isAbsolute reads a drive path as absolute only on Windows, where this record comes from.
+  assert.equal(hit?.cwd, process.platform === 'win32' ? 'C:\\Users\\u\\Projects\\Dobius+ Windows' : null);
   // A reused pid that started 2ms later is someone else.
   assert.equal(await presenceOf({ pid: 3568, startFt: '134385609760320755', startedAt: 1 }, null, read), null);
   // A Mac process never reads a FILETIME as `ps lstart` text.
@@ -234,3 +235,86 @@ test('cmdSafe refuses what cmd.exe would run', async () => {
   assert.equal(cmdSafe('C:\\%PATH%\\a'), false);
   assert.equal(cmdSafe('C:\\Program Files\\x\\a.txt'), true);
 });
+test('Overview lists Claude Code processes on Windows, never the Claude Desktop app', async () => {
+  const { claudeCodeProcessesFromWinRows } = await import('../data-service.js');
+  // Command lines as CIM reports them on a Windows 11 PC with Claude Desktop (MSIX) open.
+  const rows = [
+    { pid: 2600, command: '"C:\\Program Files\\WindowsApps\\Claude_4.23118.0.0_x64__pzs8sxrjxfjjc\\app\\Claude.exe"' },
+    { pid: 21748, command: '"C:\\Program Files\\WindowsApps\\Claude_4.23118.0.0_x64__pzs8sxrjxfjjc\\app\\Claude.exe" --type=renderer --lang=en-US' },
+    { pid: 13716, command: '"C:\\Users\\u\\.local\\bin\\claude.exe"' },
+    { pid: 10456, command: '"C:\\Users\\u\\.local\\bin\\claude.exe" --resume 317ac6ab-da03-4596-89a8-0e3eb494dd01' },
+    { pid: 900, command: 'powershell.exe -NoLogo' },
+  ];
+  assert.deepEqual(claudeCodeProcessesFromWinRows(rows), [
+    { pid: '13716', command: '"C:\\Users\\u\\.local\\bin\\claude.exe"' },
+    { pid: '10456', command: '"C:\\Users\\u\\.local\\bin\\claude.exe" --resume 317ac6ab-da03-4596-89a8-0e3eb494dd01' },
+  ]);
+  assert.deepEqual(claudeCodeProcessesFromWinRows(null), []);
+});
+
+test('Chrome profiles: Windows paths for Local State and chrome.exe, macOS unchanged', async () => {
+  const { chromeLocalStatePath, chromeBinaryCandidates } = await import('../chrome-profiles.js');
+  const env = { LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local', ProgramFiles: 'C:\\Program Files', 'ProgramFiles(x86)': 'C:\\Program Files (x86)' };
+  assert.equal(chromeLocalStatePath('win32', env, 'C:\\Users\\u'), 'C:\\Users\\u\\AppData\\Local\\Google\\Chrome\\User Data\\Local State');
+  assert.deepEqual(chromeBinaryCandidates('win32', env), [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Users\\u\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe',
+  ]);
+  assert.deepEqual(chromeBinaryCandidates('darwin', {}), ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']);
+});
+
+test('Tailscale CLI is looked for in Program Files on Windows', async () => {
+  const { tailscaleCandidates } = await import('../tailscale.js');
+  assert.deepEqual(tailscaleCandidates('win32', { ProgramFiles: 'C:\\Program Files', 'ProgramFiles(x86)': 'C:\\Program Files (x86)' }), [
+    'C:\\Program Files\\Tailscale\\tailscale.exe',
+    'C:\\Program Files (x86)\\Tailscale\\tailscale.exe',
+  ]);
+  assert.equal(tailscaleCandidates('darwin', {})[0], '/Applications/Tailscale.app/Contents/MacOS/Tailscale');
+});
+
+test('a missing JSONL file is quiet; an unreadable one still warns', async () => {
+  const { parseJsonl } = await import('../data-utils.js');
+  const fsm = await import('node:fs');
+  const os = await import('node:os');
+  const pathm = await import('node:path');
+  const warned = [];
+  const orig = console.warn;
+  console.warn = (...a) => warned.push(a.join(' '));
+  try {
+    const dir = fsm.mkdtempSync(pathm.join(os.tmpdir(), 'dobius-jsonl-'));
+    assert.deepEqual(await parseJsonl(pathm.join(dir, 'history.jsonl')), []);
+    assert.equal(warned.length, 0);
+    assert.deepEqual(await parseJsonl(dir), []); // a directory: EISDIR, a real failure
+    assert.equal(warned.length, 1);
+  } finally {
+    console.warn = orig;
+  }
+});
+
+test('a project folder Claude encoded lossily is found from the cwd its transcript records', async () => {
+  const { cwdFromTranscripts } = await import('../data-service.js');
+  const fsm = await import('node:fs');
+  const os = await import('node:os');
+  const pathm = await import('node:path');
+  const dir = fsm.mkdtempSync(pathm.join(os.tmpdir(), 'dobius-cwd-'));
+  const real = 'C:\\Users\\u\\Projects\\Dobius+ Windows';
+  const encoded = 'C--Users-u-Projects-Dobius--Windows';
+  fsm.writeFileSync(pathm.join(dir, 'a.jsonl'), `{"type":"summary"}\n{"type":"user","cwd":${JSON.stringify(real)},"sessionId":"x"}\n`);
+  const exists = async (p) => p === real;
+  assert.equal(await cwdFromTranscripts(dir, encoded, { exists }), real);
+  // A cwd that encodes to a different dir name is someone else's: refused.
+  assert.equal(await cwdFromTranscripts(dir, 'C--Users-u-Projects-Other', { exists }), null);
+  // Gone from disk: refused.
+  assert.equal(await cwdFromTranscripts(dir, encoded, { exists: async () => false }), null);
+  // No transcripts: null.
+  assert.equal(await cwdFromTranscripts(fsm.mkdtempSync(pathm.join(os.tmpdir(), 'dobius-cwd-')), encoded, { exists }), null);
+});
+
+test('History names a scheduled-task session instead of showing its XML wrapper', async () => {
+  const { sanitizePreviewText } = await import('../data-service.js');
+  const raw = '<scheduled-task name="review-bounce-texts-1106" file="C:\\Users\\u\\.claude\\scheduled-tasks\\review-bounce-texts-1106\\SKILL.md">\nReview the bounce texts and summarize.\n</scheduled-task>';
+  assert.equal(sanitizePreviewText(raw), 'Scheduled: review-bounce-texts-1106 · Review the bounce texts and summarize.');
+  assert.equal(sanitizePreviewText('Fix the <b>login</b> bug'), 'Fix the <b>login</b> bug');
+});
+
