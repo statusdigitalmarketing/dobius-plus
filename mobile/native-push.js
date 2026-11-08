@@ -6,7 +6,7 @@
 // id itself, which names the project folder and would travel through Apple.
 
 import { PushNotifications } from '@capacitor/push-notifications';
-import * as storage from './storage';
+import * as storage from './storage.js';
 
 export const isNativeApp = () => {
   try { return typeof window !== 'undefined' && window.Capacitor?.isNativePlatform?.() === true; } catch { return false; }
@@ -88,7 +88,7 @@ export function forwardTokenChanges(connection) {
 }
 
 async function sendRegister(connection, token) {
-  const seq = await seen(token);
+  const tokenSeq = await seen(token); // not `seq`: that name is the request counter above
   if (connection.status !== 'authed') return Promise.resolve({ ok: false, error: 'Not connected to your Mac.' });
   // A Mac from before native push does not know the message: do not send it at all.
   if (!(Array.isArray(connection.features) && connection.features.includes('apns'))) return Promise.resolve({ ok: false, error: 'This Mac needs a newer Dobius+ for notifications in this app.' });
@@ -101,7 +101,7 @@ async function sendRegister(connection, token) {
       off();
       resolve(m.ok ? { ok: true } : { ok: false, code: typeof m.error === 'string' ? m.error : 'failed', error: 'Your Mac would not take this phone for notifications.' });
     });
-    connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, ...(seq !== undefined ? { seq } : {}), reqId });
+    connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, ...(tokenSeq !== undefined ? { seq: tokenSeq } : {}), reqId });
   });
 }
 
@@ -172,3 +172,6 @@ export function onNativeTap(handler) {
   });
   return () => { h.then((x) => x.remove()).catch(() => {}); };
 }
+
+// Tests only: the registration message as the Mac receives it.
+export const _sendRegisterForTest = (connection, token) => sendRegister(connection, token);
