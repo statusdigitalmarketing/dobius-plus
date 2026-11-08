@@ -2528,6 +2528,44 @@ function tryReconstructPath(encodedName) {
  * Extract a readable display name from a Claude-encoded dir name.
  * Uses the last meaningful path segment rather than just the last dash-segment.
  */
+/**
+ * The real folder a ~/.claude/projects/<encoded> dir belongs to, read from the
+ * `cwd` its newest transcript records, or null. The encoding is lossy (every
+ * non-alphanumeric becomes '-'), so "Dobius+ Windows" cannot be rebuilt from
+ * "...-Dobius--Windows" by guessing; Claude's own record of where it ran can.
+ * Only accepted when it encodes back to the same dir name and still exists.
+ */
+export async function cwdFromTranscripts(projectDir, encodedName, { readHead = readFileHead, exists = pathExists } = {}) {
+  let files;
+  try {
+    const names = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
+    files = await Promise.all(names.map(async (f) => {
+      try { return { f, t: (await fs.stat(path.join(projectDir, f))).mtimeMs }; } catch { return null; }
+    }));
+  } catch { return null; }
+  for (const { f } of files.filter(Boolean).sort((a, b) => b.t - a.t).slice(0, 3)) {
+    const head = await readHead(path.join(projectDir, f), 256 * 1024);
+    const m = /"cwd"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(head || '');
+    if (!m) continue;
+    let cwd;
+    try { cwd = JSON.parse(m[1]); } catch { continue; }
+    if (typeof cwd !== 'string' || !cwd) continue;
+    if (encodePathLikeClaude(cwd) !== encodedName) continue;
+    if (await exists(cwd)) return cwd;
+  }
+  return null;
+}
+
+async function readFileHead(file, bytes) {
+  let fh;
+  try {
+    fh = await fs.open(file, 'r');
+    const buf = Buffer.alloc(bytes);
+    const { bytesRead } = await fh.read(buf, 0, bytes, 0);
+    return buf.subarray(0, bytesRead).toString('utf8');
+  } catch { return null; } finally { await fh?.close().catch(() => {}); }
+}
+
 function extractDisplayName(encodedName) {
   // Remove common prefixes to get the project-specific part
   const home = os.homedir();
@@ -2567,7 +2605,7 @@ export async function listProjects() {
       projectMap.set(manualPath, {
         encodedPath: null,
         decodedPath: manualPath,
-        displayName: manualPath.split('/').pop(),
+        displayName: path.basename(manualPath), // split('/') kept a whole Windows path
         sessionCount: 0,
         latestTimestamp,
         age: latestTimestamp ? timeAgo(latestTimestamp) : 'unknown',
@@ -2652,7 +2690,7 @@ export async function listProjects() {
           }
         } else {
           // Not in filesystem scan — try to reconstruct real path
-          const reconstructed = tryReconstructPath(d.name);
+          const reconstructed = tryReconstructPath(d.name) || await cwdFromTranscripts(projectDir, d.name);
 
           if (reconstructed && projectMap.has(reconstructed)) {
             // Exact match — merge sessions into existing entry
