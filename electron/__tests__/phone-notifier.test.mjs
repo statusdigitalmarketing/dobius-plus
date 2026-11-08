@@ -323,6 +323,22 @@ test('round 5: a finish behind a dismissed handoff still goes out; turning tab n
   assert.equal(n.sent[0].current(), false);
 });
 
+test('round 6: a switch turned off mid-send stops it; a finish behind a handoff whose switches are off still goes out', () => {
+  const r = rig({ status: { a: 'needs' } });
+  r.n.tabHook('a', 'needs', null);
+  r.advance(2000);
+  assert.equal(r.sent[0].current(), true);
+  r.cfg.alerts.needs = false;
+  assert.equal(r.sent[0].current(), false);
+  const h = rig({ alerts: { needs: false, handoff: false }, status: { b: 'done' } });
+  h.n.handoffAdded('b'); // due +300, its switches off
+  h.advance(100);
+  h.n.tabHook('b', 'working');
+  h.n.tabHook('b', 'done', null); // behind the handoff
+  h.advance(3000);
+  assert.deepEqual(h.sent.map((s) => s.kind), ['done']);
+});
+
 test('switches: each event obeys its own; a handed-back command goes out as "needs you" with only that one on', () => {
   const r = rig({ alerts: { done: false, team: false }, status: { a: 'done', b: 'needs' } });
   r.n.tabHook('a', 'done', null);

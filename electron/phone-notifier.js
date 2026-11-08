@@ -250,6 +250,16 @@ export function createPhoneNotifier(deps) {
     try { return alertSettings(d.settings()?.alerts).names; } catch { return false; }
   }
 
+  // Its switch still on and not quiet hours now: a switch turned off mid-send stops it before the next phone (round 6).
+  function allowedNow(kind) {
+    try {
+      const cfg = d.settings() || {};
+      const a = alertSettings(cfg.alerts);
+      if (a.quiet && inQuietHours(d.minuteOfDay(d.now()), cfg.morningAt, cfg.quietAfter)) return false;
+      return !!effectiveKind(kind, a);
+    } catch { return false; }
+  }
+
   // names off ("Tab names" switch): nothing but the app name and the event kind, for a lock screen others can see.
   function build(p, kind, names) {
     if (kind === 'team') {
@@ -300,7 +310,8 @@ export function createPhoneNotifier(deps) {
       let p = due0;
       // A handoff whose command was run or dismissed meanwhile, with a red that arrived behind it: the red goes out,
       // as that red, after its own debounce.
-      if (due0.kind === 'handoff' && due0.behind && !liveHandoff(due0)) {
+      // So does it when the handoff's own switch (and "needs you") is off: what waited behind it still counts (round 6).
+      if (due0.kind === 'handoff' && due0.behind && (!liveHandoff(due0) || !effectiveKind('handoff', alerts))) {
         const red = { key: due0.key, tabId: due0.tabId, kind: due0.behind.kind, gen: due0.behind.gen, dueAt: due0.behind.at };
         if (red.dueAt > t) { pending.set(red.key, red); continue; }
         p = red;
@@ -332,7 +343,7 @@ export function createPhoneNotifier(deps) {
         sentTimes.push(t);
         for (const o of out) lastSent.set(gapKey(o.p), { at: t, kind: o.kind });
         // Its text is fixed, so it goes to the next phone only while ALL of what it sums up is still true (Codex round 4).
-        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o) => isCurrent(o.p));
+        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o) => allowedNow(o.p.kind) && isCurrent(o.p));
         Promise.resolve(d.send({ kind: 'summary', title: `${out.length} updates`, body, tag: 'summary', tabId: null, current })).catch(() => { /* the sender logs by code */ });
       } else {
         for (const { p, kind } of out) {
@@ -342,7 +353,7 @@ export function createPhoneNotifier(deps) {
           const n = build(p, kind, alerts.names);
           // current(): asked by the sender before each phone, so news that stopped being true mid-send stops there. The
           // same test the flush used, on the entry as it was (a handoff sent as "needs you" is still judged by its command).
-          const current = () => !d.quitting() && namesStill(alerts.names) && isCurrent(p);
+          const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind) && isCurrent(p);
           Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId, current })).catch(() => { /* the sender logs by code */ });
         }
       }

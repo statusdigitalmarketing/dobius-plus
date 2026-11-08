@@ -1817,7 +1817,8 @@ function setupOrchestrationHandlers() {
       const r = activateClaudeAccount(id);
       if (r.ok) {
         broadcastToPhones('settingsChanged');
-        for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('accounts:changed');
+        // Desktop Settings (and its Accounts section) read again, so the Mac shows the switch the phone made.
+        for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('settings:changed');
       }
       return r;
     },

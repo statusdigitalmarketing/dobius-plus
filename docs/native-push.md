@@ -84,6 +84,15 @@ plus the phone's own id for that Mac so the tap opens the right one. The collaps
 - `ExpiredProviderToken` / `InvalidProviderToken`: a fresh JWT once, then the send fails and the token is kept.
 - JWTs are reused for 40 minutes (Apple allows up to 60 and asks for no more than one new one every 20).
 
+## Known limits (accepted)
+
+- A Mac removed in the app while it cannot be reached keeps the phone's token until the phone is unpaired on that Mac
+  (Settings, Mobile Access). Its notifications then still arrive; a tap says the Mac is no longer paired.
+- A cold-start tap (app not running) may open the last Mac's board rather than the notified tab: iOS hands that tap to
+  the scene, and whether Capacitor's plugin receives it there needs a device build to confirm. Check it on TestFlight.
+- A summary ("3 updates") whose text went stale while it was being sent to the first phone is not sent to the others.
+- Web Push sends to every subscription listed when the send starts (unchanged from before).
+
 ## Testing
 
 `npm run test:apns` runs the JWT, the request and every outcome against a local HTTP/2 stand-in. Nothing in the test

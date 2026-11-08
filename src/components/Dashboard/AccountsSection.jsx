@@ -249,10 +249,13 @@ export default function AccountsSection() {
     const refresh = () => { if (document.visibilityState === 'visible') reload(); };
     window.addEventListener('focus', refresh);
     document.addEventListener('visibilitychange', refresh);
+    // The phone can switch the account new tabs use: show it at once.
+    const offSettings = window.electronAPI?.onSettingsChanged?.(() => reload());
     return () => {
       mounted.current = false;
       window.removeEventListener('focus', refresh);
       document.removeEventListener('visibilitychange', refresh);
+      offSettings?.();
     };
   }, []);
 
