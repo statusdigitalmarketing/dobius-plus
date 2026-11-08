@@ -12,7 +12,7 @@ import { DemoConnection, isDemoPairing } from './demo';
 import * as storage from './storage';
 import { normaliseHost, mixedContent, reachabilityMessage } from './host';
 import { forgetPush } from './push-client';
-import { onNativeTap, unregisterNativePush } from './native-push';
+import { onNativeTap, unregisterNativePush, isNativeApp, enableNativePush, forwardTokenChanges } from './native-push';
 import { PAIRINGS_KEY, activePairing, loadPairings, readPairings, savePairings, upsertPairing, switchPairing, renamePairing, removePairing } from './pairings';
 
 // A keyed tree owns all state for one connection lifetime, including terminal,
@@ -122,6 +122,18 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     if (connection.status === 'authed') ask();
     return off;
   }, [id, openRequest, connection]);
+
+  // The App Store app: once notifications are allowed, give this Mac the device token on every (re)authentication and
+  // whenever iOS replaces it, for as long as this Mac's connection lives, whatever screen is open (never a prompt from
+  // here; Settings asks). On the Board before, so a token changed while a terminal was open was lost (Codex round 14).
+  useEffect(() => {
+    if (!isNativeApp() || !connection) return undefined;
+    const send = () => { if (connection.status === 'authed') enableNativePush(connection, { prompt: false }).catch(() => { /* Settings shows why */ }); };
+    send();
+    const offAuth = connection.onMessage((m) => { if (m.type === 'authed') send(); });
+    const offRotate = forwardTokenChanges(connection);
+    return () => { offAuth(); offRotate(); };
+  }, [connection]);
 
   const openTab = useCallback((tabId) => { setOpenTabId(tabId); setView('terminal'); }, []);
 

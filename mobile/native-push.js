@@ -93,7 +93,12 @@ export async function enableNativePush(connection, { prompt = true } = {}) {
   if (!r.ok && r.code === 'token-in-use') {
     await new Promise((res) => setTimeout(res, 8000));
     if (connection.closed) return r;
-    return sendRegister(connection, token);
+    // A newer token registered meanwhile (iOS rotated it): never put the old one back over it (Codex round 14).
+    const newer = sentTokens.get(connection);
+    if (newer && newer !== token) return { ok: true };
+    const again = await sendRegister(connection, token);
+    if (again.ok && !(sentTokens.get(connection) && sentTokens.get(connection) !== token)) sentTokens.set(connection, token);
+    return again;
   }
   return r;
 }

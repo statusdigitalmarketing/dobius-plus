@@ -137,4 +137,13 @@ assert.equal(parseLabelMeta(JSON.stringify({ claudeAccountPin: { id: 7 } })).cla
 assert.equal(labelMeta({ label: 'x' }).claudeAccountPin, undefined);
 ok('an account pin survives tear-off and dock, and only its clean shape');
 
+// 13. A Run tab ('Run: <command>') is not locked, so phone notifications never speak it, yet a terminal title does not
+// rename it (Codex round 14).
+{
+  const run = { id: 'x', label: 'Run: ./release.sh', labelSource: 'run' };
+  assert.equal(isLabelLocked(run), false);
+  assert.equal(applyAutoLabel(run, '✳ Something else', 'title'), run);
+  ok('a Run tab keeps its name against titles without counting as a rename');
+}
+
 console.log(`\n${pass} passed`);

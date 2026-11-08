@@ -567,8 +567,9 @@ test('round 13: once a command is captured, a fallback "needs you" already going
   r.n.tabHook('a', 'needs', 'handoff');
   r.advance(HANDOFF_WAIT_MS + 100);
   assert.equal(r.sent[0].current(), true);
-  r.n.handoffAdded('a'); // a NEW command captured late: its own notification takes over
-  assert.equal(r.sent[0].current(), false);
+  let waitingNow = true;
+  r.n.handoffAdded('a'); // a NEW command captured late
+  assert.equal(r.sent[0].current(), false, 'the rig says no command waits: stopped');
   const s = rig({ status: { a: 'needs', b: 'needs', c: 'needs' }, waiting: () => false });
   for (const id of ['a', 'b', 'c']) s.n.tabHook(id, 'needs', 'handoff');
   s.advance(HANDOFF_WAIT_MS + 100);
@@ -577,4 +578,17 @@ test('round 13: once a command is captured, a fallback "needs you" already going
   assert.equal(s.sent[0].current(), true);
   s.n.handoffAdded('b', { repeat: true });
   assert.equal(s.sent[0].current(), false, 'the summary counted an already-announced command');
+});
+
+test('round 14: a new command captured mid-send keeps the fallback going while it waits, and stops it once dismissed', () => {
+  let waiting = false;
+  const r = rig({ status: { a: 'needs' }, waiting: () => waiting });
+  r.n.tabHook('a', 'needs', 'handoff');
+  r.advance(HANDOFF_WAIT_MS + 100);
+  assert.equal(r.sent.length, 1);
+  waiting = true;
+  r.n.handoffAdded('a'); // captured while phone A's request waited
+  assert.equal(r.sent[0].current(), true, 'phone B still hears about the red tab');
+  waiting = false; // dismissed
+  assert.equal(r.sent[0].current(), false);
 });

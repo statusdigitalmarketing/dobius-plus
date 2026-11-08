@@ -124,7 +124,8 @@ export function applyAutoLabel(tab, rawLabel, source) {
     if (tab.autoLabel === label && tab.autoLabelSource === source) return tab;
     return { ...tab, autoLabel: label, autoLabelSource: source };
   }
-  if (source === 'title' && tab.labelSource === 'agent') return tab;
+  // A Run tab keeps its 'Run: <command>' name the way it did when it read as locked: only an agent summary replaces it.
+  if (source === 'title' && (tab.labelSource === 'agent' || tab.labelSource === 'run')) return tab;
   if (tab.label === label && tab.labelSource === source && tab.autoLabel === label) return tab;
   return { ...tab, label, labelSource: source, autoLabel: label, autoLabelSource: source };
 }

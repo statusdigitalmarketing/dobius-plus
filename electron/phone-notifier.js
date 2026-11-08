@@ -95,8 +95,17 @@ export function createPhoneNotifier(deps) {
   // Captures per tab (a handed-back command listed, new or a repeat): a fallback "needs you" already going out for a red
   // that was waiting for its command stops before the next phone once its command is captured, as the command's own
   // notification (or none, for a repeat) takes over. Rounds 12 and 13.
-  const captures = new Map(); // tabId -> count
-  const captured = (tabId) => captures.get(tabId) || 0;
+  // A repeat stops it outright (nothing new to say). A NEW command stops it only once that command stops waiting: the
+  // "needs you" already on its way is still true while the command waits, and the command's own notification is held
+  // back by the gap, so stopping it would leave the next phone with nothing (Codex round 14).
+  const captures = new Map(); // tabId -> { fresh, repeat }
+  const captured = (tabId) => captures.get(tabId) || { fresh: 0, repeat: 0 };
+  const stillOkAfterCaptures = (tabId, then) => {
+    const now = captured(tabId);
+    if (now.repeat !== then.repeat) return false;
+    if (now.fresh !== then.fresh) return typeof d.handoffWaiting === 'function' ? !!d.handoffWaiting(tabId) : true;
+    return true;
+  };
   const lastHook = new Map(); // tabId -> last hook state seen
   let sentTimes = [];
   let timer = null;
@@ -198,7 +207,7 @@ export function createPhoneNotifier(deps) {
     if (typeof tabId !== 'string' || !tabId) return;
     const key = keyOf(tabId);
     const p = pending.get(key);
-    captures.set(tabId, captured(tabId) + 1);
+    { const c = captured(tabId); captures.set(tabId, repeat ? { ...c, repeat: c.repeat + 1 } : { ...c, fresh: c.fresh + 1 }); }
     if (repeat) {
       if (p?.kind === 'handoff' && p.behind?.handoff && !p.behind.listed) pending.set(key, { ...p, behind: { ...p.behind, listed: true } });
       // A red still waiting for its command, and the command is one already announced: nothing new to say, whether it
@@ -381,7 +390,7 @@ export function createPhoneNotifier(deps) {
         // And nobody started looking at any of those tabs on the Mac meanwhile, as for a single notification (Codex round 8).
         const caps = out.map((o) => (o.p.awaitHandoff && o.p.tabId ? captured(o.p.tabId) : null));
         const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o, i) => allowedNow(o.p.kind, o.kind) && isCurrent(o.p)
-          && !(o.p.tabId && d.isLooking(o.p.tabId)) && (caps[i] === null || captured(o.p.tabId) === caps[i]));
+          && !(o.p.tabId && d.isLooking(o.p.tabId)) && (caps[i] === null || stillOkAfterCaptures(o.p.tabId, caps[i])));
         Promise.resolve(d.send({ kind: 'summary', title: `${out.length} updates`, body, tag: 'summary', tabId: null, current })).catch(() => { /* the sender logs by code */ });
       } else {
         for (const { p, kind } of out) {
@@ -394,7 +403,7 @@ export function createPhoneNotifier(deps) {
           // And nobody started looking at the tab on the Mac meanwhile (round 7).
           const cap = p.awaitHandoff && p.tabId ? captured(p.tabId) : null;
           const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind, kind) && isCurrent(p) && !(p.tabId && d.isLooking(p.tabId))
-            && (cap === null || captured(p.tabId) === cap);
+            && (cap === null || stillOkAfterCaptures(p.tabId, cap));
           Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId, current })).catch(() => { /* the sender logs by code */ });
         }
       }

@@ -270,7 +270,7 @@ export const useStore = create((set, get) => ({
     if (!get().tabsReady || typeof token !== 'string') return null;
     const tab = get().addTab(projectPath);
     setPendingLaunch(tab.id, { run: token });
-    set((s) => ({ terminalTabs: s.terminalTabs.map((t) => (t.id === tab.id ? { ...t, startsTool: true, label: String(label || t.label).slice(0, 40) } : t)) }));
+    set((s) => ({ terminalTabs: s.terminalTabs.map((t) => (t.id === tab.id ? { ...t, startsTool: true, label: String(label || t.label).slice(0, 40), labelSource: 'run' } : t)) }));
     return tab;
   },
 

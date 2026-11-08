@@ -53,3 +53,15 @@ test('round 12: a notification names a tab only by a name someone chose, never o
   assert.equal(spoken.get('term-/p-2'), 'Fix login');
   assert.equal(spoken.get('term-/p-3'), 'Release');
 });
+
+test('round 14: a Run tab (named from its command) is never spoken, even marked locked by a tear-off', () => {
+  const cfg = cm.loadConfig();
+  cfg.projects = { '/p': { tabs: [
+    { id: 'term-/p-7', label: 'Run: cat /tmp/private.txt', labelSource: 'run' },
+    { id: 'term-/p-8', label: 'Run: cat /tmp/private.txt', labelLockedByUser: true },
+  ] } };
+  cm.saveConfig(cfg);
+  const spoken = cm.getTabLabelsById({ spokenOnly: true });
+  assert.equal(spoken.has('term-/p-7'), false);
+  assert.equal(spoken.has('term-/p-8'), false);
+});

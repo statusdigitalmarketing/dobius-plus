@@ -1180,7 +1180,10 @@ export function recordSessionTabNames(pairs, now = Date.now()) {
 export function getTabLabelsById({ spokenOnly = false } = {}) {
   const labelByTabId = new Map();
   const take = (id, label, tab) => {
-    if (spokenOnly && !(tab?.labelLockedByUser === true || tab?.labelSource === 'agent')) return;
+    // A Run tab's name is made from its command text (labelSource 'run', and "Run: ..." for one saved before that):
+    // never spoken, even when a tear-off marked it locked (Codex round 14).
+    if (spokenOnly && (!(tab?.labelLockedByUser === true || tab?.labelSource === 'agent') || tab?.labelSource === 'run'
+      || (typeof label === 'string' && /^Run: /.test(label)))) return;
     if (typeof id === 'string' && typeof label === 'string' && label.trim()) labelByTabId.set(id, label);
   };
   try {
