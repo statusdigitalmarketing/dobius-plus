@@ -5251,7 +5251,7 @@ app.on('before-quit', (e) => {
     // this to only revive sessions that were ACTUALLY running at quit
     // (v1.0.35 stale-link fix).
     config.lastQuitAt = Date.now();
-    if (!quitReason) quitReason = 'quit (Cmd+Q twice)';
+    if (!quitReason) quitReason = IS_WIN ? 'quit (last window closed)' : 'quit (Cmd+Q twice)';
     config.lastQuitReason = quitReason;
     logLine('diag.quit', `${quitReason}: saved projects=${merged.lastOpenProjects.length} tearoffs=${merged.lastTearOffs.length} extras=${merged.lastPrimaryWindows.length}`);
     saveConfig(config);

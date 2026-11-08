@@ -443,6 +443,19 @@ export function focusPrimaryWindowForProject(projectPath) {
 }
 
 /**
+ * True when `win` is the only project window (primary, extra or tear-off) still
+ * open and not already closing. The Launcher is not a project window.
+ */
+export function isLastProjectWindow(win) {
+  for (const [, entry] of projectWindows) {
+    if (!entry?.win || entry.win === win || entry.closing) continue;
+    if (typeof entry.win.isDestroyed === 'function' && entry.win.isDestroyed()) continue;
+    return false;
+  }
+  return true;
+}
+
+/**
  * Set up common window event handlers (bounds saving, close cleanup, etc.)
  * @param {BrowserWindow} win
  * @param {string} projectPath
@@ -504,6 +517,19 @@ function setupWindowEvents(win, projectPath, { isTearOff = false, tearOffTabId =
     // before-quit handle PTY/server teardown. Without this bypass, the
     // graceful Ctrl+C+save dance can race the bundle replacement.
     if (getQuittingForUpdate && getQuittingForUpdate()) return;
+
+    // Windows: the X on the LAST Dobius+ window is how people quit (no app
+    // menu, no Cmd+Q). Closing it as a normal window first dropped it from the
+    // restore list, then window-all-closed quit with nothing saved, so nothing
+    // came back on relaunch and no session auto-resumed. Hand it to app.quit()
+    // instead: before-quit saves every open window and live session, then
+    // closes the windows itself (getQuitting() is set by then, so this branch
+    // does not run again).
+    if (process.platform === 'win32' && !getQuitting() && isLastProjectWindow(win)) {
+      e.preventDefault();
+      app.quit();
+      return;
+    }
 
     // Phase 1, intercept and do graceful shutdown
     e.preventDefault();
