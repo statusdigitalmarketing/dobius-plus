@@ -9,7 +9,7 @@ import { createPhoneNotifier } from './phone-notifier.js';
 import { createPhonePush } from './phone-push.js';
 import { createApnsSender } from './apns.js';
 import { sendPush, hasPushSubscribers } from './push.js';
-import { getSettings, getApnsTokens, addApnsToken, removeApnsToken, setApnsTokenEnv, removeApnsTokensByPairToken } from './config-manager.js';
+import { getSettings, getApnsTokens, addApnsToken, removeApnsToken, setApnsTokenEnv, removeApnsTokensByPairToken, optOutApnsPairing } from './config-manager.js';
 import { isPairedToken, tabLabelForNotify } from './mobile-server.js';
 import { statusFor } from './terminal-status.js';
 import { getTerminalWebContentsId, listTerminals } from './terminal-manager.js';
@@ -125,11 +125,12 @@ export const phoneAlerts = {
     const entry = addApnsToken({ token: deviceToken, pairToken, pairingId }, (prior) => !isPairedToken(prior.pairToken));
     if (!entry) return { ok: false, error: 'bad-request' };
     if (entry.taken) return { ok: false, error: 'token-in-use' };
+    if (entry.optedOut) return { ok: false, error: 'unavailable' }; // this pairing was dropped by the phone
     // Unpaired while it was being stored: take it out again (removeMobileDevice ran before the write landed).
     if (!stillOk() || !isPairedToken(pairToken)) { removeApnsTokensByPairToken(pairToken); return { ok: false, error: 'unavailable' }; }
     return { ok: true };
   },
-  unregisterApns(pairToken) { removeApnsTokensByPairToken(pairToken); },
+  unregisterApns(pairToken) { optOutApnsPairing(pairToken); },
   // Only a tab still open: a closed one must not be "opened" (the phone would fall onto another tab: Codex round 5).
   resolveRef: (ref) => {
     const id = push ? push.resolve(ref) : null;

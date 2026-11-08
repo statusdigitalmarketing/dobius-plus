@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
@@ -1669,6 +1670,7 @@ export function getApnsTokens() {
 export function addApnsToken({ token, pairToken, pairingId }, canTake = () => false) {
   if (typeof token !== 'string' || !APNS_TOKEN_RE.test(token) || typeof pairToken !== 'string' || !pairToken) return null;
   const config = loadConfig();
+  if (Array.isArray(config.apnsOptOuts) && config.apnsOptOuts.includes(optOutKey(pairToken))) return { optedOut: true };
   const list = Array.isArray(config.apnsTokens) ? config.apnsTokens : [];
   const prior = list.find((t) => t?.token === token);
   if (prior && prior.pairToken !== pairToken && !canTake(prior)) return { taken: true };
@@ -1704,6 +1706,22 @@ export function setApnsTokenEnv(token, env, addedAt) {
   const t = (config.apnsTokens || []).find((x) => x?.token === token && (addedAt === undefined || x.addedAt === addedAt));
   if (!t || t.env === env) return;
   t.env = env;
+  saveConfig(config);
+}
+
+// A phone unregisters a pairing only when it dropped or replaced it, so that pairing never registers again: a late
+// apnsRegister still in flight on its old connection must not bring the token back after the removal (Codex round 16).
+// Kept as a hash of the pairing token, never the token itself, and bounded.
+const optOutKey = (pairToken) => crypto.createHash('sha256').update(`apns-optout:${pairToken}`).digest('hex');
+export function optOutApnsPairing(pairToken) {
+  if (typeof pairToken !== 'string' || !pairToken) return;
+  const config = loadConfig();
+  const k = optOutKey(pairToken);
+  const list = Array.isArray(config.apnsOptOuts) ? config.apnsOptOuts.filter((x) => typeof x === 'string' && x !== k) : [];
+  list.push(k);
+  while (list.length > 50) list.shift();
+  config.apnsOptOuts = list;
+  config.apnsTokens = (config.apnsTokens || []).filter((t) => t?.pairToken !== pairToken);
   saveConfig(config);
 }
 

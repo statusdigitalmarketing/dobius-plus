@@ -65,3 +65,13 @@ test('round 14: a Run tab (named from its command) is never spoken, even marked 
   assert.equal(spoken.has('term-/p-7'), false);
   assert.equal(spoken.has('term-/p-8'), false);
 });
+
+test('round 16: a pairing the phone unregistered never registers again (a late frame cannot bring its token back)', () => {
+  cm.addApnsToken({ token: 'ef'.repeat(32), pairToken: 'Z', pairingId: 'pid-z' });
+  cm.optOutApnsPairing('Z');
+  assert.equal(cm.getApnsTokens().some((t) => t.pairToken === 'Z'), false);
+  assert.deepEqual(cm.addApnsToken({ token: 'ef'.repeat(32), pairToken: 'Z', pairingId: 'pid-z' }), { optedOut: true });
+  assert.ok(!JSON.stringify(cm.loadConfig().apnsOptOuts).includes('"Z"'), 'only a hash is kept');
+  const other = cm.addApnsToken({ token: 'ef'.repeat(32), pairToken: 'Y', pairingId: 'pid-y' }, () => true);
+  assert.equal(other.pairToken, 'Y', 'a new pairing of the same phone registers normally');
+});
