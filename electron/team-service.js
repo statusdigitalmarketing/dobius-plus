@@ -718,11 +718,13 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const byId = all.filter((p) => p.id === r || shortFp(p.id) === r);
     // A fingerprint-shaped reference only ever means a fingerprint (a reply to an unlinked Mac must not fall through
     // to a teammate whose name happens to read the same). Otherwise your name for them first, then what their Mac
-    // calls itself (a renamed teammate is still found by it).
+    // calls itself (a renamed teammate is still found by it); a name both ways is ambiguous.
     const fpShaped = looksLikeFingerprint(r);
     const same = (a) => typeof a === 'string' && a.normalize('NFKC').toLowerCase() === r.normalize('NFKC').toLowerCase();
-    const byName = byId.length || fpShaped ? [] : all.filter((p) => same(p.name));
-    const hits = byId.length ? byId : byName.length ? byName : fpShaped ? [] : all.filter((p) => same(p.selfName));
+    // A name that is one teammate's current name and ANOTHER's original name is ambiguous, not "the current one":
+    // the person may still know the other one by it.
+    const byNames = byId.length || fpShaped ? [] : all.filter((p) => same(p.name) || same(p.selfName));
+    const hits = byId.length ? byId : byNames;
     if (hits.length === 1) return { peer: hits[0] };
     return { error: hits.length ? `more than one teammate is called ${r}; use the name you gave them (Settings > Team) or their fingerprint` : `no linked teammate called ${r}` };
   }

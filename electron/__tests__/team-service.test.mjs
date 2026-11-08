@@ -1590,11 +1590,13 @@ test('rename a teammate: shown everywhere by the new name, still found by the ol
   // Found by the new name, and the old one now points at no one twice (both renamed): it is still ambiguous.
   assert.equal(a.svc.send('Brett', 'ping').ok, true);
   assert.match(a.svc.send('MacBook-Air', 'ping').error, /more than one teammate/);
-  // Empty restores what their Mac calls itself; then that name finds it (a name beats another's selfName).
+  // Empty restores what their Mac calls itself.
   a.store.updatePeer(max.id, { name: '' });
   assert.equal(a.store.peers()[max.id].name, 'MacBook-Air');
   assert.equal(Object.hasOwn(a.store.peers()[max.id], 'selfName'), false);
-  assert.equal(a.svc.send('MacBook-Air', 'ping').ok, true, 'by name wins over selfName');
+  // Max is called MacBook-Air again, and Brett's Mac also calls itself that: ambiguous, never a silent pick.
+  assert.match(a.svc.send('MacBook-Air', 'ping').error, /more than one teammate/);
+  assert.equal(a.svc.send('Brett', 'ping').ok, true);
   a.svc.stop(); b.svc.stop(); c.svc.stop();
 });
 
