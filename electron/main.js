@@ -1,4 +1,5 @@
 import './dev-userdata.js'; // MUST stay first: userData override before config-manager loads
+import './single-instance.js'; // MUST stay second: on Windows a second launch exits here, before anything else loads
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor, screen } from 'electron';
@@ -5169,6 +5170,21 @@ app.whenReady().then(() => {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+
+  // Windows: Dobius opened again while it runs (electron/single-instance.js). That copy has already exited; bring
+  // this one forward instead, as the Dock click does on the Mac: every minimized window comes back, and the one used
+  // last gets focus.
+  let lastFocusedWindow = null;
+  app.on('browser-window-focus', (_e, win) => { lastFocusedWindow = win; });
+  app.on('second-instance', () => {
+    if (getQuitting()) return;
+    const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed() && (w.isVisible() || w.isMinimized()));
+    if (!wins.length) { createWindow(); return; }
+    for (const w of wins) if (w.isMinimized()) w.restore();
+    const target = lastFocusedWindow && !lastFocusedWindow.isDestroyed() && wins.includes(lastFocusedWindow) ? lastFocusedWindow : wins[0];
+    target.show();
+    target.focus();
   });
 });
 

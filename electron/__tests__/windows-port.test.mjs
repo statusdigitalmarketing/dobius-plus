@@ -531,3 +531,15 @@ test('PowerShell gws function: arguments arrive intact, it waits, the exit code 
     if (other) fsm.rmSync(other, { recursive: true, force: true });
   }
 });
+
+test('Windows keeps one Dobius per userData; the lock module loads right after the userData override', async () => {
+  const { takesSingleInstanceLock } = await import('../single-instance.js');
+  assert.equal(takesSingleInstanceLock('win32'), true);
+  assert.equal(takesSingleInstanceLock('darwin'), false);
+  assert.equal(takesSingleInstanceLock('linux'), false);
+  const fsm = await import('node:fs');
+  const src = fsm.readFileSync(new URL('../main.js', import.meta.url), 'utf8');
+  const imports = src.split('\n').filter((l) => /^import /.test(l)).slice(0, 2);
+  assert.deepEqual(imports.map((l) => (l.match(/from '(.+?)'|import '(.+?)'/) || []).slice(1).find(Boolean)), ['./dev-userdata.js', './single-instance.js']);
+  assert.match(src, /app\.on\('second-instance', \(\) => \{/);
+});

@@ -10,6 +10,8 @@ const app = {
   setName: () => {},
   on: () => {},
   whenReady: () => Promise.resolve(),
+  // single-instance.js asks at load on Windows: under test this process is always the only one.
+  requestSingleInstanceLock: () => true,
 };
 export { app };
 export const ipcMain = { handle: () => {}, on: () => {}, removeHandler: () => {} };
