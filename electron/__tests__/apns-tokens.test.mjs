@@ -128,3 +128,13 @@ test('round 22: a drop judged before a re-registration of the same token does no
   cm.removeApnsToken(t, again.addedAt, again.regAt);
   assert.equal(cm.getApnsTokens().some((x) => x.token === t), false, 'a drop for the current one removes it');
 });
+
+test('round 23: an entry without regAt, re-registered mid-send, survives the late drop', () => {
+  const t = 'bc'.repeat(32);
+  const cfg = cm.loadConfig();
+  cfg.apnsTokens = [...(cfg.apnsTokens || []), { token: t, pairToken: 'V', env: 'auto', addedAt: 111 }];
+  cm.saveConfig(cfg);
+  cm.addApnsToken({ token: t, pairToken: 'V' }); // re-registered: gets a regAt
+  cm.removeApnsToken(t, 111, undefined); // the send had captured no regAt
+  assert.equal(cm.getApnsTokens().some((x) => x.token === t), true);
+});

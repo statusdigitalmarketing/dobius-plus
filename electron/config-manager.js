@@ -1713,13 +1713,14 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
 
 // `addedAt` names the registration a send used: an answer that arrives after the phone registered again (the same token
 // moved to a new pairing, or re-sent) never removes or changes the newer entry (Codex design audit).
-// regAt: the registration the send judged. A drop never removes a registration made after it (Codex round 22).
+// regAt: the registration the send judged. A drop never removes a registration made after it (Codex round 22); one
+// without regAt counts as 0 on both sides, so a re-registration (which sets it) is never removed by an older verdict.
 export function removeApnsToken(token, addedAt, regAt) {
   if (typeof token !== 'string') return;
   const config = loadConfig();
   const before = (config.apnsTokens || []).length;
   config.apnsTokens = (config.apnsTokens || []).filter((t) => !(t?.token === token && (addedAt === undefined || t.addedAt === addedAt)
-    && (regAt === undefined || t.regAt === undefined || t.regAt === regAt)));
+    && (t.regAt || 0) === (regAt || 0)));
   if (config.apnsTokens.length !== before) saveConfig(config);
 }
 
