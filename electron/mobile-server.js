@@ -47,7 +47,7 @@ import { estimateContextForTabId } from './tab-context.js';
 import { getMagicDNSName, certPathsFor, hasCertFor, getTailnetHosts } from './tailscale.js';
 import { transcribeAudio, transcribeAvailable } from './voice-transcribe.js';
 import { getVapidPublicKey, subscribePush } from './push.js';
-import { isAbsPath } from '../shared/platform.js';
+import { isAbsPath, baseName } from '../shared/platform.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -342,7 +342,9 @@ export function isPairedToken(token) { return knownToken(token); }
 export function tabLabelForNotify(id) {
   const t = listTerminals().find((x) => x.id === id);
   const meta = parseTermLabel(id, t?.cwd);
-  return { label: configTabLabels().get(id) || meta.label, project: meta.projectName };
+  // The folder's own name by this platform's separators: on Windows a path split on `/` alone was the whole path
+  // (Codex round 4), and a notification may name a folder, never where it lives.
+  return { label: configTabLabels().get(id) || meta.label, project: baseName(meta.projectPath) || meta.projectName };
 }
 
 function parseTermLabel(id, cwd) {

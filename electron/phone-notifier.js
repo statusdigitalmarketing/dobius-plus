@@ -141,6 +141,9 @@ export function createPhoneNotifier(deps) {
     // prompt: it neither restarts the debounce nor queues a second buzz. An answer (tabInput) or a new hook state
     // in between makes the next red a new one.
     if (state === 'needs' && prev === 'needs') return;
+    // The same finish told twice: before the generation moves, or the first one's notification would stop being
+    // current (Codex round 4).
+    if (state === 'done' && prev === 'done') return;
     lastHook.set(tabId, state);
     const g = bump(tabId);
     const t = d.now();
@@ -161,7 +164,6 @@ export function createPhoneNotifier(deps) {
       return;
     }
     if (state === 'done') {
-      if (prev === 'done') return; // the same finish told twice
       if (liveHandoff(pending.get(key))) return;
       put({ key, tabId, kind: 'done', gen: g, dueAt: t + DONE_DEBOUNCE_MS });
     }
@@ -284,6 +286,7 @@ export function createPhoneNotifier(deps) {
     const gapKey = (p) => (p.tabId ? keyOf(p.tabId) : p.key);
     for (const [k, v] of lastSent) if (t - v.at >= TAB_GAP_MS) lastSent.delete(k);
     const out = [];
+    const admitted = new Set(); // tabs given a buzz in this flush: a second one for the same tab waits its gap
     for (const due0 of due) {
       pending.delete(due0.key);
       let p = due0;
@@ -306,6 +309,8 @@ export function createPhoneNotifier(deps) {
         pending.set(p.key, { ...p, dueAt: last.at + TAB_GAP_MS });
         continue;
       }
+      if (admitted.has(gapKey(p))) { pending.set(p.key, { ...p, dueAt: t + TAB_GAP_MS }); continue; }
+      admitted.add(gapKey(p));
       out.push({ p, kind });
     }
     sentTimes = sentTimes.filter((x) => t - x < GLOBAL_WINDOW_MS);
@@ -318,8 +323,8 @@ export function createPhoneNotifier(deps) {
         const body = cleanLabel(`${reds ? `${reds} need you. ` : ''}${labels.join(', ')}`, 160) || 'Several tabs changed';
         sentTimes.push(t);
         for (const o of out) lastSent.set(gapKey(o.p), { at: t, kind: o.kind });
-        // Still worth sending to the next phone while any of what it sums up is still true.
-        const current = () => !d.quitting() && out.some((o) => isCurrent(o.p));
+        // Its text is fixed, so it goes to the next phone only while ALL of what it sums up is still true (Codex round 4).
+        const current = () => !d.quitting() && out.every((o) => isCurrent(o.p));
         Promise.resolve(d.send({ kind: 'summary', title: `${out.length} updates`, body, tag: 'summary', tabId: null, current })).catch(() => { /* the sender logs by code */ });
       } else {
         for (const { p, kind } of out) {

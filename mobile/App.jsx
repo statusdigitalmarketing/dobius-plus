@@ -113,6 +113,8 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
         off();
         resolvedRefs.current.add(openRequest);
         if (typeof m.id === 'string' && m.id) { setOpenTabId(m.id); setView('terminal'); }
+        // Unknown or expired: show the board, never leave another tab in front as if it were the one tapped.
+        else setView('board');
       }
     });
     if (connection.status === 'authed') ask();
@@ -467,10 +469,12 @@ export default function App() {
     // app also gives up the old pairing's APNs token there, so the new pairing
     // can register it (a token held by a live pairing is never moved).
     for (const gone of new Set([...replaceIds, atOrigin].filter(Boolean))) {
-      if (!stateRef.current.pairings.some((p) => p.id === gone)) {
-        forgetPush(gone).catch(() => { /* best effort: the Mac drops a dead endpoint */ });
-        if (before.get(gone)) unregisterNativePush(before.get(gone), Connection).catch(() => { /* best effort */ });
-      }
+      if (!stateRef.current.pairings.some((p) => p.id === gone)) forgetPush(gone).catch(() => { /* best effort: the Mac drops a dead endpoint */ });
+      // A replaced record may keep its id with a new token (upsertPairing keeps the proven one's id): judged by the
+      // token, so the old pairing's APNs registration is given up either way (Codex round 4).
+      const old = before.get(gone);
+      const nowRec = stateRef.current.pairings.find((p) => p.id === gone);
+      if (old && (!nowRec || nowRec.token !== old.token)) unregisterNativePush(old, Connection).catch(() => { /* best effort */ });
     }
     if (!ok) throw new Error('Could not save this pairing. Check device storage and get a new pairing code.');
     const current = pairingUIRef.current;

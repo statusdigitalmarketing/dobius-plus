@@ -282,6 +282,23 @@ test('round 3: a red behind a dismissed handoff keeps its own debounce; a failur
   assert.deepEqual(f.sent.map((s) => s.kind), ['needs', 'failed']);
 });
 
+test('round 4: a finish told twice still notifies once; one tab never gets two buzzes in one flush', () => {
+  const r = rig({ status: { a: 'done' } });
+  r.n.tabHook('a', 'working');
+  r.n.tabHook('a', 'done', null);
+  r.advance(100);
+  r.n.tabHook('a', 'done', null);
+  r.advance(3000);
+  assert.deepEqual(r.sent.map((s) => s.kind), ['done']);
+  const f = rig({ status: { b: 'needs' } });
+  f.n.tabFailed('b'); // due +500
+  f.n.tabHook('b', 'needs', null); // due +1500, flushed together with the failure (waits for it)
+  f.advance(2000);
+  assert.equal(f.sent.length, 1, 'the second waits its gap');
+  f.advance(TAB_GAP_MS + 1000);
+  assert.equal(f.sent.length, 2);
+});
+
 test('switches: each event obeys its own; a handed-back command goes out as "needs you" with only that one on', () => {
   const r = rig({ alerts: { done: false, team: false }, status: { a: 'done', b: 'needs' } });
   r.n.tabHook('a', 'done', null);

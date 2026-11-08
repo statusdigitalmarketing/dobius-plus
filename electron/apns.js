@@ -210,7 +210,8 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
       // Errors are swallowed to a reason code: an http2 error can name the host but never carries the key.
       session.on('error', forget);
       session.on('close', forget);
-      session.on('goaway', forget);
+      // GOAWAY: no new streams; retire it so a peer that never closes cannot keep the socket open (Codex round 4).
+      session.on('goaway', () => { forget(); retire(session); });
       sessions.set(origin, s);
     }
     s.timer = setTimeout(() => { if (sessions.get(origin) === s) sessions.delete(origin); retire(s.session); }, idleMs);
