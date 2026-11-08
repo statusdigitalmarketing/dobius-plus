@@ -34,3 +34,23 @@ test('a registration reaches the Mac with the token and its sequence number; a n
   await sendRegister(c, a);
   assert.equal(c.sent[2].seq, 1, 'the same token keeps its number');
 });
+
+test('a token the Mac calls stale while it is our newest is numbered past the Mac and sent once more', async () => {
+  const sent = [];
+  const listeners = new Set();
+  let first = true;
+  const c = {
+    status: 'authed', features: ['apns'], pairing: { id: 'pid-2' },
+    onMessage: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+    send: (m) => {
+      sent.push(m);
+      const reply = first ? { type: 'apnsResult', reqId: m.reqId, ok: false, error: 'stale', haveSeq: 40 } : { type: 'apnsResult', reqId: m.reqId, ok: true };
+      first = false;
+      queueMicrotask(() => { for (const fn of [...listeners]) fn(reply); });
+    },
+  };
+  const t = 'ef'.repeat(32);
+  assert.deepEqual(await sendRegister(c, t), { ok: true });
+  assert.equal(sent.length, 2);
+  assert.ok(sent[1].seq > 40, `numbered past the Mac's 40: ${sent[1].seq}`);
+});

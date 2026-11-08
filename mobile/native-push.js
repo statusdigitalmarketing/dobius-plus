@@ -72,6 +72,25 @@ function seen(token) {
   return run;
 }
 
+// The Mac holds a higher number for this phone than our counter (a backup restored the counter): number this token past
+// it, once, so the current token is not refused for good.
+function numberPast(token, haveSeq) {
+  const run = seqChain.then(async () => {
+    try {
+      let st;
+      try { st = JSON.parse((await storage.get(SEQ_KEY)) || 'null'); } catch { st = null; }
+      if (!st || typeof st.n !== 'number' || !Array.isArray(st.list)) st = { n: 0, list: [] };
+      const s = Math.max(st.n, haveSeq) + 1;
+      st.n = s;
+      st.list = [...st.list.filter((x) => x && x.t !== token), { t: token, s }].slice(-8);
+      await storage.set(SEQ_KEY, JSON.stringify(st));
+      return s;
+    } catch { return undefined; }
+  });
+  seqChain = run.then(() => {}, () => {});
+  return run;
+}
+
 /**
  * iOS may hand the app a new token while it stays open: pass it to this Mac. Only a token different from the one this
  * connection last sent goes out, so the registration answer to our own register() call never loops (Codex round 13).
@@ -87,7 +106,17 @@ export function forwardTokenChanges(connection) {
   return () => { h.then((x) => x.remove()).catch(() => {}); };
 }
 
+// One registration, and once more numbered past the Mac's when it calls this token stale while it is still the newest
+// token iOS gave this app (a restored backup set our counter back). Not the newest: it really is old, leave it.
 async function sendRegister(connection, token) {
+  const r = await sendRegisterOnce(connection, token);
+  if (!r.ok && r.code === 'stale' && typeof r.haveSeq === 'number' && (!newestIosToken || newestIosToken === token) && !connection.closed) {
+    if ((await numberPast(token, r.haveSeq)) !== undefined) return sendRegisterOnce(connection, token);
+  }
+  return r;
+}
+
+async function sendRegisterOnce(connection, token) {
   const tokenSeq = await seen(token); // not `seq`: that name is the request counter above
   if (connection.status !== 'authed') return Promise.resolve({ ok: false, error: 'Not connected to your Mac.' });
   // A Mac from before native push does not know the message: do not send it at all.
@@ -99,7 +128,7 @@ async function sendRegister(connection, token) {
       if (m.type !== 'apnsResult' || m.reqId !== reqId) return;
       clearTimeout(timer);
       off();
-      resolve(m.ok ? { ok: true } : { ok: false, code: typeof m.error === 'string' ? m.error : 'failed', error: 'Your Mac would not take this phone for notifications.' });
+      resolve(m.ok ? { ok: true } : { ok: false, code: typeof m.error === 'string' ? m.error : 'failed', haveSeq: typeof m.haveSeq === 'number' ? m.haveSeq : undefined, error: 'Your Mac would not take this phone for notifications.' });
     });
     connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, ...(tokenSeq !== undefined ? { seq: tokenSeq } : {}), reqId });
   });

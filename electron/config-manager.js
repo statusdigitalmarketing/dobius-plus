@@ -1678,7 +1678,14 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
   if (prior && prior.pairToken !== pairToken && !canTake(prior)) return { taken: true };
   const seqOk = typeof seq === 'number' && Number.isFinite(seq) && seq > 0 ? Math.round(seq) : null;
   const mine = list.find((t) => t?.pairToken === pairToken);
-  if (mine && mine.token !== token && seqOk !== null && typeof mine.seq === 'number' && seqOk < mine.seq) return { stale: true };
+  if (mine && mine.token !== token && seqOk !== null && typeof mine.seq === 'number' && seqOk < mine.seq) return { stale: true, haveSeq: mine.seq };
+  // The same token again from the same pairing (a reconnect): the entry stays as it is, so a send already going out,
+  // which names this registration by addedAt, still reaches it (Codex round 21).
+  if (mine && mine.token === token) {
+    const keepSeq = seqOk !== null && (typeof mine.seq !== 'number' || seqOk > mine.seq) ? seqOk : mine.seq;
+    if (keepSeq !== mine.seq) { mine.seq = keepSeq; saveConfig(config); }
+    return mine;
+  }
   const entry = {
     token,
     pairToken,

@@ -163,7 +163,8 @@ export function handleTodayMessage(msg, send, stillOk = () => true, ctx = {}) {
         const pairingId = typeof msg.pairingId === 'string' && PAIRING_ID_RE.test(msg.pairingId) ? msg.pairingId : null;
         const seq = typeof msg.seq === 'number' && Number.isFinite(msg.seq) && msg.seq > 0 ? msg.seq : undefined;
         const r = bridge.registerApns({ deviceToken: msg.token, pairToken: token, pairingId, ...(seq !== undefined ? { seq } : {}) }, stillOk);
-        return send({ type: 'apnsResult', reqId, ok: !!r?.ok, error: r?.ok ? undefined : (r?.error || 'failed') });
+        const haveSeq = typeof r?.haveSeq === 'number' && Number.isFinite(r.haveSeq) ? r.haveSeq : undefined;
+        return send({ type: 'apnsResult', reqId, ok: !!r?.ok, error: r?.ok ? undefined : (r?.error || 'failed'), ...(haveSeq !== undefined ? { haveSeq } : {}) });
       }
       case 'apnsUnregister': {
         if (!token) return fail({ error: 'bad-request' });

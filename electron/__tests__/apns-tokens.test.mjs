@@ -89,7 +89,7 @@ test('round 17: opt-outs lapse only when their pairing is gone; a late older tok
   assert.equal(cm.loadConfig().apnsOptOuts.length, 60);
   const t1 = '34'.repeat(32); const t2 = '56'.repeat(32);
   cm.addApnsToken({ token: t2, pairToken: 'R', seq: 2000 });
-  assert.deepEqual(cm.addApnsToken({ token: t1, pairToken: 'R', seq: 1000 }), { stale: true });
+  assert.deepEqual(cm.addApnsToken({ token: t1, pairToken: 'R', seq: 1000 }), { stale: true, haveSeq: 2000 });
   assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'R').token, t2);
   assert.equal(cm.addApnsToken({ token: t1, pairToken: 'R', seq: 3000 }).token, t1, 'a genuinely newer one replaces it');
 });
@@ -106,4 +106,12 @@ test("round 18: many paired phones never evict a live phone's token ownership; u
   const c2 = cm.loadConfig(); c2.mobileServer.devices = c2.mobileServer.devices.slice(10); cm.saveConfig(c2);
   cm.addApnsToken({ token: tok(99), pairToken: 'D15' });
   assert.equal(cm.getApnsTokens().length, 20, 'entries of unpaired phones are pruned');
+});
+
+test('round 21: the same token re-registered by the same pairing keeps its entry (a send in flight still reaches it)', () => {
+  const t = '78'.repeat(32);
+  const first = cm.addApnsToken({ token: t, pairToken: 'S', seq: 5 });
+  const again = cm.addApnsToken({ token: t, pairToken: 'S', seq: 5 });
+  assert.equal(again.addedAt, first.addedAt);
+  assert.equal(cm.getApnsTokens().filter((x) => x.pairToken === 'S').length, 1);
 });

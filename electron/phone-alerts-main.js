@@ -126,7 +126,9 @@ export const phoneAlerts = {
     if (!entry) return { ok: false, error: 'bad-request' };
     if (entry.taken) return { ok: false, error: 'token-in-use' };
     if (entry.optedOut) return { ok: false, error: 'unavailable' }; // this pairing was dropped by the phone
-    if (entry.stale) return { ok: true }; // an older token than the one held: the newer one stays
+    // An older token than the one held: refused, with the number held, so a phone whose counter went back (a restored
+    // backup) can number its current token past it; a late frame from an old connection never retries (Codex round 21).
+    if (entry.stale) return { ok: false, error: 'stale', haveSeq: entry.haveSeq };
     // Unpaired while it was being stored: take it out again (removeMobileDevice ran before the write landed).
     if (!stillOk() || !isPairedToken(pairToken)) { removeApnsTokensByPairToken(pairToken); return { ok: false, error: 'unavailable' }; }
     return { ok: true };
