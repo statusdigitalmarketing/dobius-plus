@@ -24,6 +24,7 @@ const NO_TURN_WINDOW_MS = 10 * 60 * 1000; // no turn start seen (the app started
 // The transcript's own order is the turn boundary (a prompt after a reply makes it an earlier turn's); time is only a
 // backstop, loose enough that hook markers processed late (a busy main thread) still find their turn's reply.
 const HOOK_LATENESS_MS = 30 * 1000;
+const MAX_WAITING = 12; // handed-back commands kept waiting per tab
 // What the card could hide or a shell could read differently from what is shown: control and format characters,
 // invisible (default-ignorable) ones, unassigned and private-use code points. Broken UTF-16 is refused separately.
 const HIDDEN_RE = /[\x00-\x1f\x7f-\x9f\u2028\u2029\p{Cf}\p{Default_Ignorable_Code_Point}\p{Cn}\p{Co}]/u;
@@ -129,18 +130,24 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
         const commands = extractCommandsWithContext(best.text);
         if (!commands.length) continue;
         const projectPath = tabProject || s.sessionProject || folder || best.project;
-        // Commands already run stay (their result is still worth seeing); waiting ones are replaced by this turn's.
-        const kept = (byTab.get(tabId)?.commands || []).filter((c) => c.state !== 'waiting');
+        // Everything handed back earlier stays until it is run, dismissed or the tab closes (Sam, 2026-11-07: a
+        // background agent's hand-back started a new turn and the command he still had to run vanished). This
+        // turn's commands are added; one already waiting with the same text keeps its place.
+        if (prune()) notify(); // an expired one must not hide the same command handed back again
+        const prior = byTab.get(tabId)?.commands || [];
+        const waitingTexts = new Set(prior.filter((c) => c.state === 'waiting').map((c) => c.text));
+        const added = commands.filter((c) => !waitingTexts.has(c.text));
         // Always an explicit folder: unknown Claude folder means the project folder, named, never "wherever a new
         // shell starts" (a login profile may cd).
         // Each command keeps the folder and reply it came with: one run earlier stays labelled as it ran, under a newer
         // turn's commands.
         const cwdNow = folder || projectPath;
         const reply = replyForDisplay(best.text);
-        byTab.set(tabId, {
-          tabId, projectPath, cwd: cwdNow, at: now(), reply,
-          commands: [...kept, ...commands.map((c) => ({ id: newId(), text: c.text, why: c.why, state: 'waiting', cwd: cwdNow, reply }))],
-        });
+        let all = [...prior, ...added.map((c) => ({ id: newId(), text: c.text, why: c.why, state: 'waiting', cwd: cwdNow, reply, at: now() }))];
+        // At most MAX_WAITING waiting per tab: the oldest waiting ones go first.
+        const waiting = all.filter((c) => c.state === 'waiting');
+        if (waiting.length > MAX_WAITING) { const drop = new Set(waiting.slice(0, waiting.length - MAX_WAITING)); all = all.filter((c) => !drop.has(c)); }
+        byTab.set(tabId, { tabId, projectPath, cwd: cwdNow, at: now(), reply, commands: all });
         notify();
         return;
       } catch (err) {
@@ -161,6 +168,7 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
     }
     if (state === 'exit') {
       turnStart.delete(tabId);
+      bump(tabId); // a read still in flight for this tab is dropped
       gen.delete(tabId);
       let changed = dropWaiting(tabId);
       // A Run tab closed before its command finished.
@@ -172,10 +180,11 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
       return;
     }
     if (state === 'working') {
-      // A new turn: what the tab handed back before is no longer what it is waiting on (commands already run stay).
+      // A new turn cancels a read of the last reply that has not settled yet (it could now see this turn's reply),
+      // but it does NOT clear what was already handed back: that may be a background agent reporting in, or the
+      // person talking about something else, while the command still waits to be run (Sam, 2026-11-07).
       if (!turnStart.has(tabId)) turnStart.set(tabId, now());
       bump(tabId);
-      if (dropWaiting(tabId)) notify();
       return;
     }
     if (state === 'done') turnStart.delete(tabId);
@@ -190,14 +199,23 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
     return e.commands.length !== before;
   }
 
-  // A finished one stays on its card for an hour, then goes.
+  // A finished one stays on its card for an hour; a waiting one for a day (then it is surely stale), then they go.
   const DONE_KEEP_MS = 60 * 60 * 1000;
+  const WAITING_KEEP_MS = 24 * 60 * 60 * 1000;
+  // Returns whether anything left, so a caller outside list() can tell the windows.
   function prune() {
+    let changed = false;
     for (const [tabId, e] of byTab) {
-      e.commands = e.commands.filter((c) => !c.endedAt || now() - c.endedAt < DONE_KEEP_MS);
+      const before = e.commands.length;
+      e.commands = e.commands.filter((c) => (c.endedAt ? now() - c.endedAt < DONE_KEEP_MS : c.state !== 'waiting' || !c.at || now() - c.at < WAITING_KEEP_MS));
+      if (e.commands.length !== before) changed = true;
       if (!e.commands.length) byTab.delete(tabId);
     }
+    return changed;
   }
+  // Expired cards leave open lists and the badge too, without waiting for some other change.
+  const expiry = setInterval(() => { if (prune()) notify(); }, 10 * 60 * 1000);
+  expiry.unref?.();
 
   /** Every tab's commands (waiting, running, finished), newest first; the renderer shows its own project's. */
   function list() {
@@ -209,6 +227,7 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
 
   /** One WAITING command and where it runs. */
   function peek(tabId, id) {
+    if (prune()) notify(); // an expired command is gone even if the list on screen was not refreshed
     const e = byTab.get(tabId);
     const c = e?.commands.find((x) => x.id === id && x.state === 'waiting');
     return c ? { tabId, projectPath: e.projectPath, cwd: c.cwd || e.cwd, text: c.text } : null;
@@ -225,6 +244,8 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
   }
 
   /** Run started in `runTabId` (text: what actually runs, edited or not). Only a waiting command. */
+  // No expiry check here: peek() checked it just before the run tab was started, and a command now running must
+  // keep its card (Running, then Done or Failed) even if it crossed the deadline meanwhile.
   function startRun(tabId, id, runTabId, text, exitFile) {
     const c = byTab.get(tabId)?.commands.find((x) => x.id === id && x.state === 'waiting');
     if (!c) return false;
