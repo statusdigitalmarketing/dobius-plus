@@ -98,6 +98,10 @@ export function createPhoneNotifier(deps) {
   let timerAt = Infinity;
 
   const keyOf = (tabId) => `tab:${tabId}`;
+  // Per tab, a number that moves on every new hook state and every input: a notification about a prompt or a finish
+  // is current only while it has not moved (a later prompt in the same tab is a different one: Codex round 3).
+  const gen = new Map();
+  const bump = (tabId) => { const g = (gen.get(tabId) || 0) + 1; gen.set(tabId, g); return g; };
 
   function schedule() {
     let next = Infinity;
@@ -130,13 +134,15 @@ export function createPhoneNotifier(deps) {
   function tabHook(tabId, state, tag) {
     if (typeof tabId !== 'string' || !tabId) return;
     const prev = lastHook.get(tabId);
-    if (state === 'exit') { lastHook.delete(tabId); lastSent.delete(keyOf(tabId)); dropTab(tabId); return; }
+    // lastSent is kept: a failure buzz right after the exit still respects the tab's gap (pruned in flush).
+    if (state === 'exit') { lastHook.delete(tabId); bump(tabId); dropTab(tabId); return; }
     if (state === 'done' && tag === 'idle') return; // Claude idle for a minute: never a "finished"
     // The same red told twice (PermissionRequest, then Claude's permission_prompt backstop seconds later) is one
     // prompt: it neither restarts the debounce nor queues a second buzz. An answer (tabInput) or a new hook state
     // in between makes the next red a new one.
     if (state === 'needs' && prev === 'needs') return;
     lastHook.set(tabId, state);
+    const g = bump(tabId);
     const t = d.now();
     const key = keyOf(tabId);
     if (state === 'working') {
@@ -149,14 +155,15 @@ export function createPhoneNotifier(deps) {
       const p = pending.get(key);
       // The commands are listed and still waiting: that is the better buzz. The red is remembered on it, so if the
       // command is run or dismissed before it goes out, the red still does (Codex round 2).
-      if (liveHandoff(p)) { pending.set(key, { ...p, alsoNeeds: true }); return; }
-      put({ key, tabId, kind: 'needs', awaitHandoff: handoff, dueAt: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) });
+      // It keeps its own debounce and its own generation (Codex round 3).
+      if (liveHandoff(p)) { pending.set(key, { ...p, alsoNeeds: { gen: g, at: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) } }); return; }
+      put({ key, tabId, kind: 'needs', gen: g, awaitHandoff: handoff, dueAt: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) });
       return;
     }
     if (state === 'done') {
       if (prev === 'done') return; // the same finish told twice
       if (liveHandoff(pending.get(key))) return;
-      put({ key, tabId, kind: 'done', dueAt: t + DONE_DEBOUNCE_MS });
+      put({ key, tabId, kind: 'done', gen: g, dueAt: t + DONE_DEBOUNCE_MS });
     }
   }
 
@@ -170,6 +177,7 @@ export function createPhoneNotifier(deps) {
     // Whatever the tab said last is over: the next red is a new prompt and the next green a new finish (Codex round 2:
     // a 'done' kept here swallowed the finish of work started by this very input).
     if (lastHook.has(tabId)) lastHook.set(tabId, 'working');
+    bump(tabId); // a notification already on its way about this tab stops before the next phone
     // Somebody is at the Mac answering this very tab: nothing pending for it is news to them.
     dropTab(tabId);
   }
@@ -224,6 +232,14 @@ export function createPhoneNotifier(deps) {
     return true;
   }
 
+  // Still true AND still the same event: a prompt or a finish is current only while its tab's generation has not moved
+  // (an answer, a new turn or a later prompt moves it). A handed-back command follows its command; failures and team
+  // messages stay true.
+  function isCurrent(p) {
+    if ((p.kind === 'needs' || p.kind === 'done') && p.tabId && p.gen !== undefined && gen.get(p.tabId) !== p.gen) return false;
+    return stillTrue(p);
+  }
+
   // names off ("Tab names" switch): nothing but the app name and the event kind, for a lock screen others can see.
   function build(p, kind, names) {
     if (kind === 'team') {
@@ -264,17 +280,26 @@ export function createPhoneNotifier(deps) {
     try { cfg = d.settings() || {}; } catch { cfg = {}; }
     const alerts = alertSettings(cfg.alerts);
     const quiet = alerts.quiet && inQuietHours(d.minuteOfDay(t), cfg.morningAt, cfg.quietAfter);
+    // A tab's gap is one gap whatever the event (a failure right after a red waits too); entries past it are forgotten.
+    const gapKey = (p) => (p.tabId ? keyOf(p.tabId) : p.key);
+    for (const [k, v] of lastSent) if (t - v.at >= TAB_GAP_MS) lastSent.delete(k);
     const out = [];
     for (const due0 of due) {
       pending.delete(due0.key);
-      // A handoff whose command was run or dismissed meanwhile, with a red that arrived behind it: the red goes out.
-      const p = due0.kind === 'handoff' && due0.alsoNeeds && !liveHandoff(due0) ? { ...due0, kind: 'needs' } : due0;
+      let p = due0;
+      // A handoff whose command was run or dismissed meanwhile, with a red that arrived behind it: the red goes out,
+      // as that red, after its own debounce.
+      if (due0.kind === 'handoff' && due0.alsoNeeds && !liveHandoff(due0)) {
+        const red = { key: due0.key, tabId: due0.tabId, kind: 'needs', gen: due0.alsoNeeds.gen, dueAt: due0.alsoNeeds.at };
+        if (red.dueAt > t) { pending.set(red.key, red); continue; }
+        p = red;
+      }
       // A handoff red still waiting for its command to be listed: out as "needs you" now (the wait is over).
       const kind = effectiveKind(p.kind, alerts);
       if (!kind || quiet || d.quitting()) continue;
-      if (!stillTrue(p)) continue;
+      if (!isCurrent(p)) continue;
       if (p.tabId && d.isLooking(p.tabId)) continue;
-      const last = lastSent.get(p.key);
+      const last = lastSent.get(gapKey(p));
       const redAfterGreen = (kind === 'needs' || kind === 'handoff') && last?.kind === 'done';
       if (last && t - last.at < TAB_GAP_MS && !redAfterGreen) {
         // Held, not dropped: the newest event for this key goes out when the gap ends, if it still holds then.
@@ -292,16 +317,19 @@ export function createPhoneNotifier(deps) {
         const reds = out.filter((o) => o.kind === 'needs' || o.kind === 'handoff' || o.kind === 'failed').length;
         const body = cleanLabel(`${reds ? `${reds} need you. ` : ''}${labels.join(', ')}`, 160) || 'Several tabs changed';
         sentTimes.push(t);
-        for (const o of out) lastSent.set(o.p.key, { at: t, kind: o.kind });
-        Promise.resolve(d.send({ kind: 'summary', title: `${out.length} updates`, body, tag: 'summary', tabId: null })).catch(() => { /* the sender logs by code */ });
+        for (const o of out) lastSent.set(gapKey(o.p), { at: t, kind: o.kind });
+        // Still worth sending to the next phone while any of what it sums up is still true.
+        const current = () => !d.quitting() && out.some((o) => isCurrent(o.p));
+        Promise.resolve(d.send({ kind: 'summary', title: `${out.length} updates`, body, tag: 'summary', tabId: null, current })).catch(() => { /* the sender logs by code */ });
       } else {
         for (const { p, kind } of out) {
           if (sentTimes.length >= GLOBAL_MAX) break;
           sentTimes.push(t);
-          lastSent.set(p.key, { at: t, kind });
+          lastSent.set(gapKey(p), { at: t, kind });
           const n = build(p, kind, alerts.names);
-          // current(): asked by the sender before each phone, so news that stopped being true mid-send stops there.
-          const current = () => !d.quitting() && stillTrue({ ...p, kind: p.kind === 'handoff' && kind === 'needs' ? 'needs' : p.kind });
+          // current(): asked by the sender before each phone, so news that stopped being true mid-send stops there. The
+          // same test the flush used, on the entry as it was (a handoff sent as "needs you" is still judged by its command).
+          const current = () => !d.quitting() && isCurrent(p);
           Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId, current })).catch(() => { /* the sender logs by code */ });
         }
       }

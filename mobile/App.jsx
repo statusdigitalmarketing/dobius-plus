@@ -460,11 +460,17 @@ export default function App() {
     // that address must hold its saved token AND have issued this new one.
     const replaceIds = await sameMacAs(stateRef.current, token);
     const atOrigin = stateRef.current.pairings.find((p) => p.origin === normaliseHost(host))?.id;
+    const before = new Map(stateRef.current.pairings.map((p) => [p.id, p]));
     const ok = await update((s) => upsertPairing(s, { origin: host, token, name }, { id: crypto.randomUUID?.() || `mac-${Date.now()}-${Math.random().toString(36).slice(2)}`, now: Date.now(), replaceIds, activate: seq === tapSeqRef.current }));
     // A record folded into this one must stop notifying, like a removed Mac
-    // (Codex P2). Decided by the saved list, as onRemove does.
+    // (Codex P2). Decided by the saved list, as onRemove does. The App Store
+    // app also gives up the old pairing's APNs token there, so the new pairing
+    // can register it (a token held by a live pairing is never moved).
     for (const gone of new Set([...replaceIds, atOrigin].filter(Boolean))) {
-      if (!stateRef.current.pairings.some((p) => p.id === gone)) forgetPush(gone).catch(() => { /* best effort: the Mac drops a dead endpoint */ });
+      if (!stateRef.current.pairings.some((p) => p.id === gone)) {
+        forgetPush(gone).catch(() => { /* best effort: the Mac drops a dead endpoint */ });
+        if (before.get(gone)) unregisterNativePush(before.get(gone), Connection).catch(() => { /* best effort */ });
+      }
     }
     if (!ok) throw new Error('Could not save this pairing. Check device storage and get a new pairing code.');
     const current = pairingUIRef.current;

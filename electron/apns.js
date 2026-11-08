@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import http2 from 'node:http2';
+import tls from 'node:tls';
 
 export const APNS_ORIGINS = Object.freeze({
   production: 'https://api.push.apple.com',
@@ -160,7 +161,21 @@ export function outcomeFor(status, reason, { envKnown }) {
  * deps: dir (the apns folder), connect(origin) -> ClientHttp2Session (tests point it at a stand-in), now() ms,
  * readKey (default readApnsKey), idleMs, timeoutMs.
  */
-export function createApnsSender({ dir, connect = (origin) => http2.connect(origin), now = () => Date.now(), readKey = readApnsKey, idleMs = 60_000, timeoutMs = 10_000 } = {}) {
+// The real connection, keeping hold of its own TLS socket: session.socket is a proxy that refuses destroy() and throws
+// once the session is torn down, so a stalled socket could never be closed through it (Codex round 3).
+function connectApple(origin) {
+  let raw = null;
+  const session = http2.connect(origin, {
+    createConnection: (url) => {
+      raw = tls.connect({ host: url.hostname, port: Number(url.port) || 443, servername: url.hostname, ALPNProtocols: ['h2'] });
+      return raw;
+    },
+  });
+  session.rawSocket = () => raw;
+  return session;
+}
+
+export function createApnsSender({ dir, connect = connectApple, now = () => Date.now(), readKey = readApnsKey, idleMs = 60_000, timeoutMs = 10_000 } = {}) {
   let cached = null; // { at, result }
   let jwt = null; // { value, iat, stamp }
   const sessions = new Map(); // origin -> { session, timer }
@@ -205,9 +220,11 @@ export function createApnsSender({ dir, connect = (origin) => http2.connect(orig
 
   // Close gracefully, and destroy if it is still open shortly after (a stream that never got its connection, a TLS
   // handshake that never finished, would otherwise hold the session forever).
-  // The socket is held separately: Node can mark a closing session destroyed while its socket is still open.
+  // The raw TLS socket (connectApple) is held separately: Node can mark a closing session destroyed while that socket
+  // is still open, and the session's own socket proxy cannot destroy it.
   function retire(session, graceMs = 5000) {
-    const socket = session.socket;
+    let socket = null;
+    try { socket = typeof session.rawSocket === 'function' ? session.rawSocket() : null; } catch { socket = null; }
     try { session.close(); } catch { /* closed */ }
     const t = setTimeout(() => {
       try { if (!session.destroyed) session.destroy(); } catch { /* gone */ }
@@ -289,7 +306,10 @@ export function createApnsSender({ dir, connect = (origin) => http2.connect(orig
       const list = (Array.isArray(devices) ? devices : []).filter((d) => d && isDeviceToken(d.token));
       const out = [];
       for (const d of list) {
-        try { out.push(await sendOne(k, d, notif, stillValid)); } catch { out.push({ token: d.token, outcome: 'failed', reason: 'error' }); }
+        // The key as it is now, for each device: one replaced while earlier requests waited signs the rest (Codex round 3).
+        const kNow = key();
+        if (!kNow.ok) { out.push({ token: d.token, outcome: 'failed', reason: kNow.reason }); continue; }
+        try { out.push(await sendOne(kNow, d, notif, stillValid)); } catch { out.push({ token: d.token, outcome: 'failed', reason: 'error' }); }
       }
       return out;
     },

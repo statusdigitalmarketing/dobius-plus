@@ -227,6 +227,61 @@ test('round 2: a red behind a live handoff still goes out if the command is dism
   assert.equal(g.sent.length, 2);
 });
 
+test('round 3: a sent prompt stops being current once answered, even if a later prompt makes the tab red again', () => {
+  const r = rig({ status: { a: 'needs' } });
+  r.n.tabHook('a', 'needs', null);
+  r.advance(2000);
+  const sentA = r.sent[0];
+  assert.equal(sentA.current(), true);
+  r.n.tabInput('a'); // answered while the send is in flight
+  r.n.tabHook('a', 'needs', null); // prompt B, red again
+  assert.equal(sentA.current(), false, 'prompt A is not prompt B');
+});
+
+test('round 3: a summary is current while any of it is; a handoff sent as "needs you" is judged by its command', () => {
+  const r = rig({ status: { a: 'needs', b: 'needs', c: 'needs' } });
+  for (const id of ['a', 'b', 'c']) r.n.tabHook(id, 'needs', null);
+  r.advance(2000);
+  assert.equal(r.sent[0].kind, 'summary');
+  assert.equal(r.sent[0].current(), true);
+  for (const id of ['a', 'b', 'c']) r.n.tabInput(id);
+  assert.equal(r.sent[0].current(), false);
+  let waiting = true;
+  const h = rig({ alerts: { handoff: false }, status: { x: 'working' }, waiting: () => waiting });
+  h.n.handoffAdded('x');
+  h.advance(1000);
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].kind, 'needs');
+  assert.equal(h.sent[0].current(), true, 'the command still waits, though the tab is working');
+  waiting = false;
+  assert.equal(h.sent[0].current(), false);
+});
+
+test('round 3: a red behind a dismissed handoff keeps its own debounce; a failure right after a red waits out the gap', () => {
+  let waiting = true;
+  const r = rig({ status: { a: 'needs' }, waiting: () => waiting });
+  r.n.handoffAdded('a'); // due at +300
+  r.advance(100);
+  r.n.tabHook('a', 'working');
+  r.n.tabHook('a', 'needs', null); // red at +100, its own debounce to +1600
+  waiting = false;
+  r.advance(400); // handoff due, dead: the red is not sent yet
+  assert.equal(r.sent.length, 0);
+  r.n.tabInput('a'); // answered inside its debounce
+  r.st.a = 'working';
+  r.advance(3000);
+  assert.equal(r.sent.length, 0);
+  const f = rig({ status: { b: 'needs' } });
+  f.n.tabHook('b', 'needs', null);
+  f.advance(2000);
+  f.n.tabFailed('b');
+  f.n.tabHook('b', 'exit');
+  f.advance(2000);
+  assert.equal(f.sent.length, 1, 'held by the tab gap');
+  f.advance(TAB_GAP_MS);
+  assert.deepEqual(f.sent.map((s) => s.kind), ['needs', 'failed']);
+});
+
 test('switches: each event obeys its own; a handed-back command goes out as "needs you" with only that one on', () => {
   const r = rig({ alerts: { done: false, team: false }, status: { a: 'done', b: 'needs' } });
   r.n.tabHook('a', 'done', null);

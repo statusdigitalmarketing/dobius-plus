@@ -72,7 +72,13 @@ plus the phone's own id for that Mac so the tap opens the right one. The collaps
 ## Token lifecycle
 
 - Stored in config as `apnsTokens` `{ token, pairToken, pairingId, env, addedAt }`, at most 20, one per pairing.
-- Sent only to tokens whose pairing is still paired.
+- A token already held by another pairing that is still paired is refused (`token-in-use`), never moved: a paired phone
+  cannot take over another phone's notifications. The app gives up a pairing's token itself when that Mac is removed
+  in the app or the pairing is replaced by a new address for the same Mac.
+- Sent only to tokens whose pairing is still paired, checked again before each request, and only while the news is
+  still true (a prompt answered while an earlier phone's request waited is not sent to the next one).
+- The collapse id is the notification's hashed tag plus the phone's id for this Mac, so two Macs never replace each
+  other's notifications on one phone.
 - Dropped on 410 / `Unregistered`, or `BadDeviceToken` from its known host (or from both hosts while unknown). A late
   answer for an older registration never removes a newer one (matched by `addedAt`).
 - `ExpiredProviderToken` / `InvalidProviderToken`: a fresh JWT once, then the send fails and the token is kept.

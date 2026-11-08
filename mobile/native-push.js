@@ -49,7 +49,7 @@ function sendRegister(connection, token) {
       if (m.type !== 'apnsResult' || m.reqId !== reqId) return;
       clearTimeout(timer);
       off();
-      resolve(m.ok ? { ok: true } : { ok: false, error: 'Your Mac would not take this phone for notifications.' });
+      resolve(m.ok ? { ok: true } : { ok: false, code: typeof m.error === 'string' ? m.error : 'failed', error: 'Your Mac would not take this phone for notifications.' });
     });
     connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, reqId });
   });
@@ -69,7 +69,15 @@ export async function enableNativePush(connection, { prompt = true } = {}) {
   const token = await deviceToken();
   if (!token) return { ok: false, error: 'iPhone did not give this app a notification token. Try again in a moment.' };
   if (connection.closed) return { ok: false, error: 'Mac switched' };
-  return sendRegister(connection, token);
+  const r = await sendRegister(connection, token);
+  // Still held by this phone's previous pairing with the same Mac (re-paired at a new address): that pairing is being
+  // unregistered as this runs, so ask once more shortly.
+  if (!r.ok && r.code === 'token-in-use') {
+    await new Promise((res) => setTimeout(res, 8000));
+    if (connection.closed) return r;
+    return sendRegister(connection, token);
+  }
+  return r;
 }
 
 /**

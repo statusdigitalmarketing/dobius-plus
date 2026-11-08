@@ -1657,7 +1657,7 @@ export function getApnsTokens() {
 }
 
 // canTake(prior): whether a token already registered under ANOTHER pairing may move to this one. The caller allows it
-// only when that pairing is gone or names the same phone-side id, so one paired phone cannot take over another's token
+// only when that pairing is gone, so one paired phone cannot take over another's token
 // (unpairing the owner would then leave it receiving through the taker: Codex round 2). Refused: returns { taken: true }.
 export function addApnsToken({ token, pairToken, pairingId }, canTake = () => false) {
   if (typeof token !== 'string' || !APNS_TOKEN_RE.test(token) || typeof pairToken !== 'string' || !pairToken) return null;
