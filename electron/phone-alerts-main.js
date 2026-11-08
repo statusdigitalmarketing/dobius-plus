@@ -118,8 +118,11 @@ export const phoneAlerts = {
 
   registerApns({ deviceToken, pairToken, pairingId }, stillOk = () => true) {
     if (!stillOk()) return { ok: false, error: 'unavailable' };
-    const entry = addApnsToken({ token: deviceToken, pairToken, pairingId });
+    // A token another live pairing holds moves here only when it is the same phone-side record (re-paired at the same
+    // address keeps its id); otherwise it is refused, never taken over.
+    const entry = addApnsToken({ token: deviceToken, pairToken, pairingId }, (prior) => !isPairedToken(prior.pairToken) || (!!prior.pairingId && prior.pairingId === pairingId));
     if (!entry) return { ok: false, error: 'bad-request' };
+    if (entry.taken) return { ok: false, error: 'token-in-use' };
     // Unpaired while it was being stored: take it out again (removeMobileDevice ran before the write landed).
     if (!stillOk() || !isPairedToken(pairToken)) { removeApnsTokensByPairToken(pairToken); return { ok: false, error: 'unavailable' }; }
     return { ok: true };

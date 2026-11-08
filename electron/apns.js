@@ -39,7 +39,8 @@ const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/=+$/, '').r
 function readOwnFile(file, maxBytes, uid) {
   let fd;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    // O_NONBLOCK: a FIFO named like a key must not hang the main process waiting for a writer (fstat refuses it next).
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0));
   } catch (err) {
     return { error: err?.code === 'ENOENT' ? 'missing' : 'unsafe-file' };
   }
@@ -204,9 +205,14 @@ export function createApnsSender({ dir, connect = (origin) => http2.connect(orig
 
   // Close gracefully, and destroy if it is still open shortly after (a stream that never got its connection, a TLS
   // handshake that never finished, would otherwise hold the session forever).
-  function retire(session) {
+  // The socket is held separately: Node can mark a closing session destroyed while its socket is still open.
+  function retire(session, graceMs = 5000) {
+    const socket = session.socket;
     try { session.close(); } catch { /* closed */ }
-    const t = setTimeout(() => { try { if (!session.destroyed) session.destroy(); } catch { /* gone */ } }, 5000);
+    const t = setTimeout(() => {
+      try { if (!session.destroyed) session.destroy(); } catch { /* gone */ }
+      try { if (socket && !socket.destroyed) socket.destroy(); } catch { /* gone */ }
+    }, graceMs);
     t.unref?.();
   }
 
@@ -224,10 +230,10 @@ export function createApnsSender({ dir, connect = (origin) => http2.connect(orig
       let text = '';
       req.setTimeout(timeoutMs, () => {
         try { req.close(http2.constants.NGHTTP2_CANCEL); } catch { /* closed */ }
-        // A request that timed out says the connection is not healthy: the next send starts a fresh one.
+        // A request that timed out says the connection is not healthy: the next send starts a fresh one. The old one is
+        // retired, not destroyed, so other requests already on it keep their own full timeout.
         const s = sessions.get(origin);
-        if (s?.session === session) { clearTimeout(s.timer); sessions.delete(origin); }
-        try { session.destroy(); } catch { /* gone */ }
+        if (s?.session === session) { clearTimeout(s.timer); sessions.delete(origin); retire(session, timeoutMs); }
         finish({ status: 0, reason: 'timeout' });
       });
       req.on('response', (h) => { status = Number(h[':status']) || 0; });

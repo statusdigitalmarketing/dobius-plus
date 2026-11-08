@@ -147,7 +147,9 @@ export function createPhoneNotifier(deps) {
     if (state === 'needs') {
       const handoff = tag === 'handoff';
       const p = pending.get(key);
-      if (liveHandoff(p)) return; // the commands are listed and still waiting: that is the better buzz
+      // The commands are listed and still waiting: that is the better buzz. The red is remembered on it, so if the
+      // command is run or dismissed before it goes out, the red still does (Codex round 2).
+      if (liveHandoff(p)) { pending.set(key, { ...p, alsoNeeds: true }); return; }
       put({ key, tabId, kind: 'needs', awaitHandoff: handoff, dueAt: t + (handoff ? HANDOFF_WAIT_MS : NEEDS_DEBOUNCE_MS) });
       return;
     }
@@ -165,7 +167,9 @@ export function createPhoneNotifier(deps) {
    */
   function tabInput(tabId) {
     if (typeof tabId !== 'string' || !tabId) return;
-    if (lastHook.get(tabId) === 'needs') lastHook.set(tabId, 'working');
+    // Whatever the tab said last is over: the next red is a new prompt and the next green a new finish (Codex round 2:
+    // a 'done' kept here swallowed the finish of work started by this very input).
+    if (lastHook.has(tabId)) lastHook.set(tabId, 'working');
     // Somebody is at the Mac answering this very tab: nothing pending for it is news to them.
     dropTab(tabId);
   }
@@ -261,8 +265,10 @@ export function createPhoneNotifier(deps) {
     const alerts = alertSettings(cfg.alerts);
     const quiet = alerts.quiet && inQuietHours(d.minuteOfDay(t), cfg.morningAt, cfg.quietAfter);
     const out = [];
-    for (const p of due) {
-      pending.delete(p.key);
+    for (const due0 of due) {
+      pending.delete(due0.key);
+      // A handoff whose command was run or dismissed meanwhile, with a red that arrived behind it: the red goes out.
+      const p = due0.kind === 'handoff' && due0.alsoNeeds && !liveHandoff(due0) ? { ...due0, kind: 'needs' } : due0;
       // A handoff red still waiting for its command to be listed: out as "needs you" now (the wait is over).
       const kind = effectiveKind(p.kind, alerts);
       if (!kind || quiet || d.quitting()) continue;
@@ -294,7 +300,9 @@ export function createPhoneNotifier(deps) {
           sentTimes.push(t);
           lastSent.set(p.key, { at: t, kind });
           const n = build(p, kind, alerts.names);
-          Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId })).catch(() => { /* the sender logs by code */ });
+          // current(): asked by the sender before each phone, so news that stopped being true mid-send stops there.
+          const current = () => !d.quitting() && stillTrue({ ...p, kind: p.kind === 'handoff' && kind === 'needs' ? 'needs' : p.kind });
+          Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId, current })).catch(() => { /* the sender logs by code */ });
         }
       }
     }

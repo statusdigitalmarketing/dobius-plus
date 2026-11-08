@@ -31,6 +31,8 @@ self.addEventListener('push', (e) => {
   e.waitUntil(self.registration.showNotification(title, {
     body: data.body || '',
     tag: data.tag ? `${PAIRING_ID}:${data.tag}` : undefined,
+    // A tab's notifications share a tag so the newest replaces the last; it must still buzz (a red after a green).
+    renotify: !!data.tag,
     data: { url: url.href, pairingId: PAIRING_ID, origin: APP_BASE.origin },
     icon: './icon.png',
     badge: './icon.png',

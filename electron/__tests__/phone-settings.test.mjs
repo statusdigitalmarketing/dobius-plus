@@ -141,6 +141,28 @@ test('fan-out: Web Push keeps its link; APNs gets an opaque ref, never the tab i
   assert.equal(r.p.resolve(n.ref), null);
 });
 
+test('round 2: the sender asks whether the news is still true and whether the device is still registered, per device', async () => {
+  let checks = [];
+  let current = true;
+  const p = createPhonePush({
+    webPush: () => Promise.resolve(),
+    hasWebPush: () => false,
+    apns: { status: () => ({ ready: true }), send: async (list, n, stillValid) => { for (const d of list) { checks.push(stillValid(d)); current = false; } return []; } },
+    tokens: { list: () => [{ token: TOKEN, addedAt: 1 }, { token: 'cd'.repeat(32), addedAt: 2 }], drop: () => {}, setEnv: () => {} },
+  });
+  await p.send({ kind: 'needs', title: 'a', body: 'b', tag: 't', tabId: 'x', current: () => current });
+  assert.deepEqual(checks, [true, false], 'answered after the first phone: the second is not sent');
+  checks = [];
+  current = true;
+  const gone = createPhonePush({
+    webPush: () => Promise.resolve(), hasWebPush: () => false,
+    apns: { status: () => ({ ready: true }), send: async (list, n, stillValid) => { checks = list.map((d) => stillValid(d)); return []; } },
+    tokens: { list: () => [], drop: () => {}, setEnv: () => {} },
+  });
+  await gone.send({ kind: 'done', title: 'a', body: 'b', tag: 't', tabId: null });
+  assert.deepEqual(checks, [], 'no devices, nothing asked');
+});
+
 test('fan-out: a dead APNs token is dropped for the registration that was used; nothing to send to sends nothing', async () => {
   const r = pushRig({ results: [{ token: TOKEN, outcome: 'drop', reason: 'Unregistered' }] });
   await r.p.send({ kind: 'done', title: 'a', body: 'b', tag: 't', tabId: null });

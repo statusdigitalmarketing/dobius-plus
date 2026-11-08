@@ -33,6 +33,8 @@ export const NEW_TAB_MODELS = ['', 'opus', 'sonnet', 'fable', 'haiku'];
 export const NEW_TAB_PERMISSION_MODES = ['', 'acceptEdits', 'plan', 'auto'];
 export const normalizeNewTabModel = (v) => (NEW_TAB_MODELS.includes(v) ? v : '');
 export const normalizeNewTabPermissionMode = (v) => (NEW_TAB_PERMISSION_MODES.includes(v) ? v : '');
+// `[[ $2 == opus || $2 == sonnet ... ]]` for the non-empty words of an allowlist (they are plain identifiers, so no quoting).
+const shellAllow = (v, list) => `[[ ${list.filter(Boolean).map((w) => `${v} == ${w}`).join(' || ')} ]]`;
 // Settings to the options loginShellSpawn takes for a new tab running claude, or null when both are Claude's default.
 export function claudeLaunchOptions(settings) {
   const model = normalizeNewTabModel(settings?.newTabModel);
@@ -256,7 +258,9 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
   const launch = running ? '[[ $1 == run ]] && /bin/bash -p -- "$2";'
     : resuming ? '[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;'
       // The flags are fixed words plus the allowlisted values in $2 and $3, built as an array, never eval'd.
-      : withOpts ? '__dobius_a=(); [[ -n $2 ]] && __dobius_a+=(--model "$2"); [[ -n $3 ]] && __dobius_a+=(--permission-mode "$3"); [[ $1 == claude ]] && claude "${__dobius_a[@]}";'
+      // Checked again in the shell against the same fixed words: a login rc file runs before this script and could
+      // have exported other values into the variables (Codex round 2).
+      : withOpts ? `__dobius_a=(); ${shellAllow('$2', NEW_TAB_MODELS)} && __dobius_a+=(--model "$2"); ${shellAllow('$3', NEW_TAB_PERMISSION_MODES)} && __dobius_a+=(--permission-mode "$3"); [[ $1 == claude ]] && claude "\${__dobius_a[@]}";`
         : NEW_TAB_TOOLS.filter((x) => newTabCommand(x)).map((x) => `[[ $1 == ${x} ]] && ${newTabCommand(x)};`).join(' ');
   let run;
   if (name === 'zsh') {

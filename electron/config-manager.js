@@ -1656,11 +1656,15 @@ export function getApnsTokens() {
   return Array.isArray(list) ? list.filter((t) => t && APNS_TOKEN_RE.test(t.token) && typeof t.pairToken === 'string') : [];
 }
 
-export function addApnsToken({ token, pairToken, pairingId }) {
+// canTake(prior): whether a token already registered under ANOTHER pairing may move to this one. The caller allows it
+// only when that pairing is gone or names the same phone-side id, so one paired phone cannot take over another's token
+// (unpairing the owner would then leave it receiving through the taker: Codex round 2). Refused: returns { taken: true }.
+export function addApnsToken({ token, pairToken, pairingId }, canTake = () => false) {
   if (typeof token !== 'string' || !APNS_TOKEN_RE.test(token) || typeof pairToken !== 'string' || !pairToken) return null;
   const config = loadConfig();
   const list = Array.isArray(config.apnsTokens) ? config.apnsTokens : [];
   const prior = list.find((t) => t?.token === token);
+  if (prior && prior.pairToken !== pairToken && !canTake(prior)) return { taken: true };
   const entry = {
     token,
     pairToken,

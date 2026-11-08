@@ -51,7 +51,10 @@ test('a permission prompt notifies once after the debounce, with a label and a f
   assert.equal(r.sent.length, 0, 'debounced');
   r.advance(1000);
   assert.equal(r.sent.length, 1);
-  assert.deepEqual(Object.keys(r.sent[0]).sort(), ['at', 'body', 'kind', 'tabId', 'tag', 'title']);
+  assert.deepEqual(Object.keys(r.sent[0]).sort(), ['at', 'body', 'current', 'kind', 'tabId', 'tag', 'title']);
+  assert.equal(r.sent[0].current(), true);
+  r.st.a = 'working';
+  assert.equal(r.sent[0].current(), false, 'answered: the sender stops before the next phone');
   assert.equal(r.sent[0].title, 'webapp');
   assert.equal(r.sent[0].body, 'Fix login needs you');
   assert.equal(r.sent[0].kind, 'needs');
@@ -201,6 +204,27 @@ test('round 1: a handoff whose command was dismissed does not swallow a new perm
   r.advance(TAB_GAP_MS + 5000);
   assert.equal(r.sent.length, 2);
   assert.equal(r.sent[1].kind, 'needs');
+});
+
+test('round 2: a red behind a live handoff still goes out if the command is dismissed first; input clears the last green', () => {
+  let waiting = true;
+  const r = rig({ status: { a: 'needs' }, waiting: () => waiting });
+  r.n.tabHook('a', 'needs', null);
+  r.advance(2000); // sent: needs
+  r.n.tabHook('a', 'working');
+  r.n.handoffAdded('a'); // held by the 30 s gap
+  r.n.tabHook('a', 'needs', null); // a real prompt behind the handoff
+  waiting = false; // the command dismissed before the held handoff fires
+  r.advance(TAB_GAP_MS + 1000);
+  assert.deepEqual(r.sent.map((s) => s.kind), ['needs', 'needs']);
+  // A finish, Enter in the tab, then another finish with no hook between: both are told.
+  const g = rig({ status: { b: 'done' } });
+  g.n.tabHook('b', 'done', null);
+  g.advance(3000);
+  g.n.tabInput('b');
+  g.n.tabHook('b', 'done', null);
+  g.advance(TAB_GAP_MS + 3000);
+  assert.equal(g.sent.length, 2);
 });
 
 test('switches: each event obeys its own; a handed-back command goes out as "needs you" with only that one on', () => {

@@ -59,7 +59,14 @@ export function createPhonePush({ webPush, hasWebPush, apns, tokens, now = () =>
         jobs.push((async () => {
           let results = [];
           // Each device is checked again right before its request: still listed (so still paired), same registration.
-          const stillValid = (dev) => { try { return tokens.list().some((x) => x.token === dev.token && x.addedAt === dev.addedAt); } catch { return false; } };
+          // And the news itself must still be true (n.current, from the notifier): a prompt answered while an earlier
+          // phone's request waited is not sent to the next phone.
+          const stillValid = (dev) => {
+            try {
+              if (typeof n.current === 'function' && !n.current()) return false;
+              return tokens.list().some((x) => x.token === dev.token && x.addedAt === dev.addedAt);
+            } catch { return false; }
+          };
           try { results = await apns.send(devices, { title: n.title, body: n.body, tag: n.tag, kind: n.kind, ref }, stillValid); } catch { log('apns-failed'); return; }
           for (const r of results) {
             // Only the registration this send used: the phone may have registered again while it was in flight.

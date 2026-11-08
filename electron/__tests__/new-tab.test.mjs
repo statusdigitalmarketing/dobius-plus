@@ -206,6 +206,11 @@ test('new-tab Claude defaults: allowlisted flags only, as separate words, hooks 
         assert.equal(r.stdout.trim().split('\n').pop(), want, `${shell} ${JSON.stringify(opts)} ${r.stderr}`);
       }
       assert.equal(fs.existsSync(path.join(dir, 'PWNED')), false, `${shell} ran nothing a hook assigned`);
+      // A login rc file runs before the script and could export other values: the shell checks the words again.
+      const spawn = loginShellSpawn(shell, 'claude', null, null, { model: 'opus', permissionMode: 'plan' });
+      const script = spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+      const r = spawnSync(shell, ['-c', script], { env: { ...base, ...spawn.env, DOBIUS_NEW_TAB_TOOL_PERM: 'bypassPermissions', DOBIUS_NEW_TAB_TOOL_MODEL: 'opus --dangerously-skip-permissions' }, encoding: 'utf8', timeout: 10000, input: '' });
+      assert.equal(r.stdout.trim().split('\n').pop(), 'ARGS:', `${shell} dropped words outside the allowlist`);
     }
     // A resume or a Run never takes the defaults.
     const resume = loginShellSpawn('/bin/zsh', null, { sessionId: 'abc', cwd: dir }, null, { model: 'opus' });

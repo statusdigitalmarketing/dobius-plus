@@ -67,6 +67,14 @@ test('the key folder: missing, two keys, a symlink, a bad key or bad ids are fix
   try { const k = readApnsKey(ok.dir); assert.equal(k.teamId, 'TEAM123456'); assert.equal(k.bundleId, 'com.example.app'); } finally { fs.rmSync(ok.dir, { recursive: true, force: true }); }
 });
 
+test('round 2: a FIFO named like the key is refused at once, never waited on', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-apns-'));
+  fs.chmodSync(dir, 0o700);
+  execFileSync('/usr/bin/mkfifo', [path.join(dir, 'AuthKey_ABCDE12345.p8')]);
+  try { assert.equal(readApnsKey(dir).reason, 'unsafe-file'); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('the provider token is ES256 with kid and iss/iat, and verifies with the public key', () => {
   const { dir, publicKey } = keyDir();
   try {

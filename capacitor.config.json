@@ -3,6 +3,7 @@
   "appId": "com.statusdigital.dobiusplus",
   "appName": "Dobius+",
   "webDir": "dist-mobile",
+  "loggingBehavior": "none",
   "server": {
     "cleartext": true,
     "errorPath": "error.html"
