@@ -32,6 +32,26 @@ jobs:
           node-version: 22
           cache: npm
 
+      # better-sqlite3's prebuilt binaries (Node's for npm ci, Electron's for the step below) through the GitHub API
+      # with this run's read-only token. prebuild-install's own anonymous download from github.com/.../releases/download
+      # failed for over an hour on 2026-11-08 (504s, then "No prebuilt binaries found" and a compile with no Visual
+      # Studio) while the API kept working. prebuild-install takes a file from npm_config_<pkg>_local_prebuilds before
+      # it downloads anything; if this step fails, the install falls back to downloading as before.
+      - name: Prebuilt better-sqlite3 through the API
+        shell: bash
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(node -p "require('./package-lock.json').packages['node_modules/better-sqlite3'].version")
+          ABI=$(node -p "process.versions.modules")
+          DIR="$RUNNER_TEMP/better-sqlite3-prebuilds"
+          mkdir -p "$DIR"
+          gh release download "v$V" -R WiseLibs/better-sqlite3 -D "$DIR" \
+            -p "better-sqlite3-v$V-node-v$ABI-win32-x64.tar.gz" -p "better-sqlite3-v$V-electron-v*-win32-x64.tar.gz"
+          ls "$DIR"
+          echo "npm_config_better_sqlite3_local_prebuilds=$DIR" >> "$GITHUB_ENV"
+
       - name: Install
         run: npm ci
 
