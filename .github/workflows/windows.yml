@@ -93,6 +93,11 @@ jobs:
     if: github.event_name == 'release'
     needs: build-and-smoke
     runs-on: ubuntu-latest
+    # One attach per release at a time (a release published, unpublished and published again starts two builds):
+    # the second waits and then finds the release complete.
+    concurrency:
+      group: windows-attach-${{ github.event.release.id }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
