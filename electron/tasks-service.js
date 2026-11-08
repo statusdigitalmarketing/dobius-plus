@@ -14,7 +14,8 @@ import os from 'os';
 import https from 'https';
 import crypto from 'crypto';
 import { getAsanaQueue } from './config-manager.js';
-import { asanaToken } from './claude-settings-env.js';
+import { spawn } from 'child_process';
+import { asanaTokenWithSource, claudeSettingsEnv } from './claude-settings-env.js';
 import * as pipeline from './task-pipeline.js';
 
 const TASKS_DIR = path.join(os.homedir(), '.claude', 'project-tasks');
@@ -367,30 +368,50 @@ function markTaskDone(projectPath, tasks, target) {
 
 // --- Asana sync -----------------------------------------------------------
 
-function asanaGet(urlPath, token) {
+// `deadlineMs`: a hard limit on the whole request (the socket timeout only measures silence, so a trickling answer
+// could otherwise hold a request open for minutes). The answer is capped at 8 MB.
+function asanaGet(urlPath, token, timeoutMs = ASANA_TIMEOUT_MS, deadlineMs = 60_000) {
   if (!token) return Promise.reject(new Error('Asana PAT not configured'));
   return new Promise((resolve, reject) => {
+    // Settles exactly once, whatever happens first: the answer, an error, a connection that closes mid-answer, or
+    // the deadline (which rejects itself rather than relying on destroy() to emit).
+    let deadline = null;
+    let settled = false;
+    const done = (fn) => (v) => { if (settled) return; settled = true; clearTimeout(deadline); fn(v); };
+    resolve = done(resolve);
+    reject = done(reject);
     const req = https.request({
       hostname: ASANA_BASE,
       path: urlPath,
       method: 'GET',
       headers: { Authorization: `Bearer ${token}` },
-      timeout: ASANA_TIMEOUT_MS,
+      timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+      let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > 8 * 1024 * 1024) { req.destroy(new Error('Asana answer too large')); return; }
+        chunks.push(c);
+      });
+      res.on('aborted', () => reject(new Error('Asana closed the connection')));
+      res.on('error', reject);
+      res.on('close', () => reject(new Error('Asana closed the connection'))); // after 'end' this is a no-op
       res.on('end', () => {
         const body = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode >= 200 && res.statusCode < 300) {
           try { resolve(JSON.parse(body)); }
           catch (e) { reject(new Error(`bad JSON: ${e.message}`)); }
         } else {
-          reject(new Error(`Asana ${res.statusCode}: ${body.slice(0, 200)}`));
+          const err = new Error(`Asana ${res.statusCode}: ${body.slice(0, 200)}`);
+          err.status = res.statusCode;
+          reject(err);
         }
       });
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(new Error('Asana timeout')); });
+    deadline = setTimeout(() => { reject(new Error('Asana timeout')); req.destroy(); }, deadlineMs);
     req.end();
   });
 }
@@ -403,20 +424,151 @@ function asanaGet(urlPath, token) {
 // One sync per project at a time: a second click joins the running one, so an
 // older Asana answer can never land after a newer one and revert it.
 const syncing = new Map();
+const answering = new Map(); // key -> the raw sync (main only: it can carry the refused key), for {fresh} to wait on
 
-export function syncAsanaTasks(projectPath) {
+export function syncAsanaTasks(projectPath, { fresh = false } = {}) {
   const key = projectPath ? tasksPath(projectPath) : '';
-  if (syncing.has(key)) return syncing.get(key);
-  const run = syncAsanaTasksOnce(projectPath).finally(() => syncing.delete(key));
+  if (syncing.has(key)) {
+    // Right after a key switch the running sync may still be using the old key: wait for ITS answer from Asana (not
+    // the diagnosis of it), then sync again.
+    if (fresh) return (answering.get(key) || syncing.get(key)).catch(() => {}).then(() => syncAsanaTasks(projectPath));
+    return syncing.get(key);
+  }
+  const once = syncAsanaTasksOnce(projectPath);
+  answering.set(key, once);
+  once.finally(() => { if (answering.get(key) === once) answering.delete(key); }).catch(() => {});
+  // Everyone who joins gets the DESCRIBED result: the internal one carries the refused key and never leaves here.
+  // The lock is released as soon as Asana has answered, before the refusal is looked into, so a sync asked for
+  // meanwhile (a key fixed elsewhere) runs with the new key instead of waiting on the diagnosis.
+  const run = once.then((r) => (r?.refusedKey ? describeRefusal(r.refusedKey) : r)).catch((err) => ({ ok: false, error: err?.message || 'Sync failed' }));
+  once.finally(() => { if (syncing.get(key) === run) syncing.delete(key); }).catch(() => {});
   syncing.set(key, run);
   return run;
+}
+
+// --- A refused Asana key (Brett, 2026-11-07, Dobius 2.2.7: "Asana 401 ... my key works outside Dobius") ---
+//
+// Dobius reads ONE key (asanaTokenWithSource): ~/.claude/settings.json's env first, else an older Dobius-only key,
+// else the environment Dobius started with. A key exported in the shell profile counts only in that last case, so a
+// stale key in either of the first two places wins over a working one in the shell. On a 401 the person is told
+// which key was refused and, when another key on this Mac works, whose account it is, with a one-click switch.
+// Keys never leave main: only where each lives, its last four characters and the account it opens.
+
+export const ASANA_KEY_PLACES = {
+  settings: 'Settings > Integrations',
+  dobius: 'an older Dobius-only setting',
+  env: 'the environment Dobius was started with',
+  shell: 'your shell profile (ASANA_PAT)',
+};
+const SHELL_MARK = '__DOBIUS_ASANA__';
+
+/** ASANA_PAT as the person's login shell sets it (not as Dobius inherited it), or null. Never logged. */
+function shellAsanaPat({ timeoutMs = 4000 } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(process.env.SHELL || '/bin/zsh', ['-ilc', `printf '${SHELL_MARK}%s${SHELL_MARK}' "$ASANA_PAT"`], {
+        detached: true, stdio: ['ignore', 'pipe', 'ignore'], cwd: os.homedir(),
+        env: { ...process.env, ASANA_PAT: '', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+      });
+    } catch { resolve(null); return; }
+    let out = '';
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      const m = out.match(new RegExp(`${SHELL_MARK}(.*?)${SHELL_MARK}`, 's'));
+      const v = m ? m[1].trim() : '';
+      resolve(v || null);
+    };
+    const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } finish(); }, timeoutMs);
+    // Once the value is in, the shell is done for us: end it (a slow logout script must not linger).
+    child.stdout.on('data', (c) => { out = (out + String(c)).slice(-65536); if (out.split(SHELL_MARK).length >= 3) { finish(); try { process.kill(-child.pid, 'SIGKILL'); } catch { /* gone */ } } });
+    child.on('error', finish);
+    child.on('exit', finish);
+  });
+}
+
+/** Every Asana key on this Mac, by place, without duplicates (first place wins). */
+async function asanaKeyCandidates({ dedupe = true } = {}) {
+  const legacy = typeof getAsanaQueue().pat === 'string' ? getAsanaQueue().pat.trim() : '';
+  const list = [
+    { source: 'settings', token: claudeSettingsEnv('ASANA_PAT') },
+    { source: 'dobius', token: legacy || null },
+    { source: 'env', token: (process.env.ASANA_PAT || '').trim() || null },
+    { source: 'shell', token: await shellAsanaPat() },
+  ];
+  if (!dedupe) return list.filter((c) => c.token);
+  const seen = new Set();
+  return list.filter((c) => c.token && !seen.has(c.token) && seen.add(c.token));
+}
+
+/** Whose key is this? { ok, email, name } when Asana accepts it, else { ok:false, refused } (refused: a 401). */
+async function asanaWhoIs(token) {
+  try {
+    // 6 seconds for the whole request, which is then aborted (not just stopped waiting for).
+    const me = await asanaGet('/api/1.0/users/me?opt_fields=email,name', token, 6000, 6000);
+    return { ok: true, email: me?.data?.email || null, name: me?.data?.name || null };
+  } catch (err) {
+    return { ok: false, refused: err?.status === 401 || err?.status === 403 };
+  }
+}
+
+/** After a 401: which key was refused, and the first other key here that works (with whose account it opens). */
+async function diagnoseRefusedKey(used) {
+  // All asked at once (each capped at 6s), the first place in order that works wins.
+  const others = (await asanaKeyCandidates()).filter((c) => c.token !== used.token);
+  const answers = await Promise.all(others.map((c) => asanaWhoIs(c.token)));
+  const i = answers.findIndex((a) => a.ok);
+  const c = others[i];
+  const alternative = i >= 0 ? { source: c.source, place: ASANA_KEY_PLACES[c.source], hint: c.token.slice(-4), email: answers[i].email, name: answers[i].name } : null;
+  return { refused: { source: used.source, place: ASANA_KEY_PLACES[used.source] || 'Dobius', hint: used.token.slice(-4) }, alternative };
+}
+
+/** The 401 result the popup shows: which key was refused and, when there is one, the key that works. */
+async function describeRefusal(used) {
+  const d = await diagnoseRefusedKey(used);
+  const alt = d.alternative ? ` The key in ${d.alternative.place} (ending ${d.alternative.hint}) works${d.alternative.email ? `, as ${d.alternative.email}` : ''}.` : '';
+  return {
+    ok: false,
+    unauthorized: true,
+    ...d,
+    error: `Asana turned down the key Dobius uses: the one in ${d.refused.place}, ending ${d.refused.hint} (expired, revoked or mistyped).${alt}`,
+  };
+}
+
+/**
+ * The working key from `source`, checked again right now, for Settings to save. Main calls this; the key itself
+ * never reaches the renderer. { ok, token, email } or { ok:false, error }.
+ */
+export async function workingAsanaKeyFrom(source, { expectHint, expectEmail } = {}) {
+  if (!Object.hasOwn(ASANA_KEY_PLACES, source)) return { ok: false, error: 'Unknown place.' };
+  const c = (await asanaKeyCandidates({ dedupe: false })).find((k) => k.source === source);
+  if (!c) return { ok: false, error: 'That key is no longer there. Press Asana to check again.', stale: true };
+  // The person agreed to THE key they were shown: same last four, same account. If either changed since (a profile
+  // edited, another person's key), nothing is saved.
+  if (!expectHint || c.token.slice(-4) !== expectHint) {
+    return { ok: false, error: 'That key changed since Dobius looked. Press Asana to check again.', stale: true };
+  }
+  const who = await asanaWhoIs(c.token);
+  if (!who.ok) {
+    return who.refused
+      ? { ok: false, error: 'Asana turned that key down too. Paste a new key in Settings.', stale: true }
+      : { ok: false, error: 'Asana did not answer (busy or offline). Try again in a moment.' };
+  }
+  if (typeof expectEmail === 'string' && expectEmail && String(who.email || '').toLowerCase() !== expectEmail.toLowerCase()) {
+    return { ok: false, error: `That key now opens ${who.email || 'a different account'}, not ${expectEmail}. Nothing was changed. Press Asana to check again.`, stale: true };
+  }
+  return { ok: true, token: c.token, email: who.email };
 }
 
 async function syncAsanaTasksOnce(projectPath) {
   if (!projectPath) return { ok: false, error: 'projectPath required' };
   const { pat } = getAsanaQueue();
-  const token = asanaToken(pat); // the shared spot decides (claude-settings-env.js)
-  if (!token) return { ok: false, error: 'No Asana PAT configured. Add it in Settings > Integrations.' };
+  const used = asanaTokenWithSource(pat); // the shared spot decides (claude-settings-env.js)
+  const token = used.token;
+  if (!token) return { ok: false, error: 'No Asana key yet. Add your Asana personal access token in Settings > Integrations.', noKey: true };
 
   try {
     const q = getAsanaQueue();
@@ -492,6 +644,8 @@ async function syncAsanaTasksOnce(projectPath) {
     if (changed) writeTasks(projectPath, tasks);
     return { ok: true, added, total: fetched.length };
   } catch (err) {
+    // Described by syncAsanaTasks once the lock is free; `refusedKey` never leaves main (describeRefusal replaces it).
+    if (err?.status === 401) return { ok: false, refusedKey: used };
     return { ok: false, error: err.message };
   }
 }

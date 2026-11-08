@@ -114,6 +114,10 @@ export default function DashboardView() {
   }, [dashboardTab, loading]); // loading: the nav is a skeleton until stats arrive
   useEffect(() => () => { jumpSeq.current++; }, []);
 
+  // Asked from elsewhere (the Tasks popup's "Paste a new key in Settings"): jump once the page shows.
+  const pendingSettingsSection = useStore((s) => s.pendingSettingsSection);
+  const clearPendingSettingsSection = useStore((s) => s.clearPendingSettingsSection);
+
   // Settings renders its sections only after its async settings load (and after
   // the page transition), so wait for the anchor instead of no-oping. Leaving
   // the page cancels the wait; the 30s cap only stops a page that never loads.
@@ -159,6 +163,12 @@ export default function DashboardView() {
     };
     attempt();
   };
+  useEffect(() => {
+    if (!pendingSettingsSection || dashboardTab !== 'settings' || loading) return;
+    clearPendingSettingsSection();
+    jumpToSettingsSection(pendingSettingsSection);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- jumpToSettingsSection is recreated each render
+  }, [pendingSettingsSection, dashboardTab, loading]);
 
   // Clear board notification badge when user switches to Board tab
   useEffect(() => {

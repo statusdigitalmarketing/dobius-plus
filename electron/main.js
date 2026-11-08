@@ -133,11 +133,11 @@ import { createPicker, runClaude } from './today-pick.js';
 import { createSnoozes, cardPrint } from './today-snooze.js';
 import { localDay } from '../shared/task-due.js';
 import { boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo, boardIsStandIn } from './inbox-board.js';
-import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
+import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, workingAsanaKeyFrom, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { readUpdateBackup } from './config-manager.js';
 import { recoverWindowLists } from './update-window-recovery.js';
-import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError } from './claude-settings-env.js';
+import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError, asanaToken } from './claude-settings-env.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages, getVisualProjectPath } from './visual-server.js';
 import { deployStatus, deployPreview, promote } from './deploy-service.js';
 
@@ -1672,8 +1672,8 @@ function setupOrchestrationHandlers() {
     if (result?.ok) broadcastTasksUpdated(projectPath);
     return result;
   });
-  ipcMain.handle('tasks:syncAsana', async (_event, projectPath) => {
-    const result = await syncAsanaTasks(projectPath);
+  ipcMain.handle('tasks:syncAsana', async (_event, projectPath, opts) => {
+    const result = await syncAsanaTasks(projectPath, { fresh: !!opts?.fresh });
     // Sync can mutate tasks without a direct write call, so always broadcast
     // (no result.ok check, service may not return that shape).
     broadcastTasksUpdated(projectPath);
@@ -2557,6 +2557,38 @@ function setupFileHandlers() {
     if (event.sender.getType?.() !== 'window' || !isAppUrl(event.senderFrame?.url || '', APP_PAGE)) {
       return { ok: false, error: 'Keys can only be changed from Dobius Settings.' };
     }
+    return saveSharedKey(name, value);
+  });
+  // Brett's 401 (2026-11-07): another key on this Mac works, and he pressed "Use it". Main looks the key up again by
+  // where it lives and checks it with Asana; the key itself never passes through the renderer.
+  ipcMain.handle('tasks:useAsanaKey', async (event, source, expect) => {
+    if (event.sender.getType?.() !== 'window' || !isAppUrl(event.senderFrame?.url || '', APP_PAGE)) {
+      return { ok: false, error: 'Keys can only be changed from Dobius.' };
+    }
+    // What Dobius uses now, before the (slow) check: if it changes meanwhile (a key saved or removed in Settings),
+    // that newer decision wins and nothing is written.
+    const before = asanaToken(getAsanaQueue().pat);
+    const found = await workingAsanaKeyFrom(source, {
+      expectHint: typeof expect?.hint === 'string' ? expect.hint : '',
+      expectEmail: typeof expect?.email === 'string' ? expect.email : '',
+    });
+    if (!found.ok) return found;
+    const refusal = { ok: false, error: 'The Asana key was changed in Settings meanwhile, so nothing was switched. Press Asana to check again.', stale: true };
+    if (asanaToken(getAsanaQueue().pat) !== before) return refusal;
+    // Checked against the very settings.json snapshot each write attempt is about to replace (the same rule as
+    // asanaToken: the shared key, else the older Dobius-only one), so no save in between can be overwritten.
+    const stillOk = (snapshot) => {
+      const shared = typeof snapshot?.env?.ASANA_PAT === 'string' ? snapshot.env.ASANA_PAT.trim() : '';
+      const legacy = typeof getAsanaQueue().pat === 'string' ? getAsanaQueue().pat.trim() : '';
+      return (shared || legacy || null) === before;
+    };
+    const saved = saveSharedKey('ASANA_PAT', found.token, { stillOk });
+    if (saved.refused) return refusal;
+    return saved.ok ? { ok: true, email: found.email, hint: saved.hint } : saved;
+  });
+  // `stillOk(snapshot)`: checked on each attempt against the settings snapshot that attempt writes over; false stops
+  // the save ({ ok:false, refused:true }).
+  function saveSharedKey(name, value, { stillOk } = {}) {
     const bad = sharedKeyError(name, value);
     if (bad) return { ok: false, error: bad };
     const v = value.trim();
@@ -2565,6 +2597,7 @@ function setupFileHandlers() {
     if (name === 'ASANA_PAT' && !v && getAsanaQueue().pat) updateAsanaQueue({ pat: '' });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const { settings, raw } = readClaudeSettings();
+      if (stillOk && settings !== null && !stillOk(settings)) return { ok: false, refused: true };
       if (settings === null) return { ok: false, error: '~/.claude/settings.json is not valid JSON, so it was left untouched.' };
       const env = { ...(settings.env && typeof settings.env === 'object' ? settings.env : {}) };
       if (v) env[name] = v; else delete env[name];
@@ -2582,7 +2615,7 @@ function setupFileHandlers() {
       }
     }
     return { ok: false, error: 'Not saved, try again.' };
-  });
+  }
 
   // Upgrade in place: a status block installed before the tab-label hint
   // existed gets the SessionStart hint on the next launch, without the user

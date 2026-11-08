@@ -45,9 +45,22 @@ export function sharedKeyEnv() {
 // is readable (an older Dobius-only PAT still counts until Settings saves or
 // removes one, which clears it); otherwise the old order.
 export function asanaToken(legacyPat) {
+  return asanaTokenWithSource(legacyPat).token;
+}
+
+// The same choice, plus where it came from, so a refused key can be named to the person:
+// 'settings' (~/.claude/settings.json, Settings > Integrations), 'dobius' (an older Dobius-only key) or 'env' (the
+// environment Dobius was started with).
+export function asanaTokenWithSource(legacyPat) {
   const env = sharedKeyEnv();
   const legacy = clean(legacyPat);
-  return env ? (env.ASANA_PAT || legacy || null) : (legacy || clean(process.env.ASANA_PAT) || null);
+  if (env) {
+    if (env.ASANA_PAT) return { token: env.ASANA_PAT, source: 'settings' };
+    return legacy ? { token: legacy, source: 'dobius' } : { token: null, source: null };
+  }
+  if (legacy) return { token: legacy, source: 'dobius' };
+  const fromEnv = clean(process.env.ASANA_PAT);
+  return fromEnv ? { token: fromEnv, source: 'env' } : { token: null, source: null };
 }
 
 // What Settings may show: set or not, and the last four characters.
