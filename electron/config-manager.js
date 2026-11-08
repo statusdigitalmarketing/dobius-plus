@@ -1691,7 +1691,10 @@ export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () 
   // One token per phone pairing: a phone that re-registers replaces its old token, never adds a second one.
   config.apnsTokens = list.filter((t) => t?.token !== token && t?.pairToken !== pairToken);
   config.apnsTokens.push(entry);
-  while (config.apnsTokens.length > 20) config.apnsTokens.shift(); // bound
+  // Bounded by the pairings themselves, never by count: evicting by count dropped a live phone's ownership record, so
+  // another paired phone could take its token (Codex round 18). One entry per pairing, and only pairings still paired.
+  const live = new Set((Array.isArray(config?.mobileServer?.devices) ? config.mobileServer.devices : []).map((d) => d?.token).filter(Boolean));
+  if (live.size) config.apnsTokens = config.apnsTokens.filter((t) => t.pairToken === pairToken || live.has(t.pairToken));
   saveConfig(config);
   return entry;
 }

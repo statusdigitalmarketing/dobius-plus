@@ -43,9 +43,25 @@ const sentTokens = new WeakMap();
 // The newest token iOS has handed this app, recorded the moment it arrives (before any Mac answers): an older one is
 // never sent after it (Codex round 15).
 let newestIosToken = null;
-// When this app first got each token from iOS: sent as seq so the Mac can refuse an older registration arriving late.
-const firstSeen = new Map();
-const seen = (token) => { if (!firstSeen.has(token)) firstSeen.set(token, Date.now()); if (firstSeen.size > 8) firstSeen.delete(firstSeen.keys().next().value); return firstSeen.get(token); };
+// Each token iOS hands this app gets the next number of a counter kept on the phone, sent as seq so the Mac can refuse
+// an older registration arriving late. A counter, not the clock: a clock set back would make a newer token look older
+// (Codex round 18). Without storage the seq is left out and the Mac does not order (as before).
+const SEQ_KEY = 'dobius.apnsTokenSeq';
+function seen(token) {
+  try {
+    let st;
+    try { st = JSON.parse(localStorage.getItem(SEQ_KEY) || 'null'); } catch { st = null; }
+    if (!st || typeof st.n !== 'number' || !Array.isArray(st.list)) st = { n: 0, list: [] };
+    let hit = st.list.find((x) => x && x.t === token);
+    if (!hit) {
+      st.n += 1;
+      hit = { t: token, s: st.n };
+      st.list = [...st.list, hit].slice(-8);
+      localStorage.setItem(SEQ_KEY, JSON.stringify(st));
+    }
+    return hit.s;
+  } catch { return undefined; }
+}
 
 /**
  * iOS may hand the app a new token while it stays open: pass it to this Mac. Only a token different from the one this
@@ -75,7 +91,7 @@ function sendRegister(connection, token) {
       off();
       resolve(m.ok ? { ok: true } : { ok: false, code: typeof m.error === 'string' ? m.error : 'failed', error: 'Your Mac would not take this phone for notifications.' });
     });
-    connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, seq: seen(token), reqId });
+    connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, ...(seen(token) !== undefined ? { seq: seen(token) } : {}), reqId });
   });
 }
 

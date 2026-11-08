@@ -93,3 +93,17 @@ test('round 17: opt-outs lapse only when their pairing is gone; a late older tok
   assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'R').token, t2);
   assert.equal(cm.addApnsToken({ token: t1, pairToken: 'R', seq: 3000 }).token, t1, 'a genuinely newer one replaces it');
 });
+
+test("round 18: many paired phones never evict a live phone's token ownership; unpaired pairings are pruned", () => {
+  const cfg = cm.loadConfig();
+  cfg.apnsTokens = [];
+  cfg.mobileServer = { ...(cfg.mobileServer || {}), devices: Array.from({ length: 30 }, (_, i) => ({ token: `D${i}`, name: 'd' })) };
+  cm.saveConfig(cfg);
+  const tok = (i) => i.toString(16).padStart(2, '0').repeat(32);
+  for (let i = 0; i < 30; i += 1) cm.addApnsToken({ token: tok(i + 1), pairToken: `D${i}` });
+  assert.equal(cm.getApnsTokens().length, 30, 'all 30 live phones keep their tokens');
+  assert.deepEqual(cm.addApnsToken({ token: tok(1), pairToken: 'D5' }, () => false), { taken: true }, "the first phone's token still has its owner");
+  const c2 = cm.loadConfig(); c2.mobileServer.devices = c2.mobileServer.devices.slice(10); cm.saveConfig(c2);
+  cm.addApnsToken({ token: tok(99), pairToken: 'D15' });
+  assert.equal(cm.getApnsTokens().length, 20, 'entries of unpaired phones are pruned');
+});
