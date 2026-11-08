@@ -181,6 +181,9 @@ function phoneSettings(ctx = {}) {
     autoMode: !!getAutoMode().enabled,
     info: {
       version: app.getVersion(),
+      // The phone hides what does nothing on this computer: new-tab model and permission flags reach Claude only from
+      // the zsh/bash launcher, not PowerShell (Max, 2026-11-08).
+      platform: process.platform === 'win32' ? 'windows' : 'mac',
       account: active?.name ? String(active.name).slice(0, 60) : 'Default',
       imessageReady: !!bridge.selfHandle,
       phonePush: hasPushSubscribers() || (channels.apnsReady && channels.thisPhoneApns),

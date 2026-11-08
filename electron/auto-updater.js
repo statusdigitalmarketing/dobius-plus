@@ -173,11 +173,20 @@ async function fetchLatestRelease({ force = false } = {}) {
   }
 }
 
+// checkForUpdates resolves before the download ends; the download runs on as result.downloadPromise. Its failure is
+// already reported through the 'error' event, and left unhandled it also landed in crash.log as an
+// unhandledRejection (Max, 2026-11-08). Returns the handled promise (tests).
+export function handleDownloadPromise(result, warn = console.warn) {
+  const p = result?.downloadPromise;
+  if (!p || typeof p.catch !== 'function') return null;
+  return p.catch((err) => warn('[updater] download failed:', err?.message || err));
+}
+
 async function safeCheck() {
   if (installing) return; // a new download would re-point Squirrel at a new proxy mid-install
   broadcast('updater:status', { state: 'checking' });
   try {
-    await autoUpdater.checkForUpdates();
+    handleDownloadPromise(await autoUpdater.checkForUpdates());
   } catch (err) {
     // A check already in flight when Restart was clicked. The install is still fine.
     if (installing) { console.warn('[updater] a check failed during the install:', err?.message || err); return; }

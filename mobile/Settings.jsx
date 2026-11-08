@@ -283,7 +283,7 @@ export default function Settings({ connection, onBack, macName }) {
             <Segmented label="New tab starts" value={tool} disabled={saving} onChange={(v) => write('newTabTool', v)}
               options={[['claude', 'Claude'], ['codex', 'Codex'], ['shell', 'Terminal']]} />
           </div>
-          {hasChatDefaults && tool === 'claude' && (
+          {hasChatDefaults && tool === 'claude' && data.info?.platform !== 'windows' && (
             <>
               <label className="settings-row"><span>Model</span>
                 <select value={data.newTabModel || ''} disabled={saving} onChange={(e) => write('newTabModel', e.target.value)}>

@@ -15,7 +15,7 @@ fs.mkdirSync(process.env.DOBIUS_TEST_USERDATA);
 const cache = path.join(home, 'Library', 'Caches', 'dobius-plus-updater');
 fs.mkdirSync(path.join(cache, 'pending'), { recursive: true });
 
-const { purgeUpdaterCache } = await import('../auto-updater.js');
+const { purgeUpdaterCache, handleDownloadPromise } = await import('../auto-updater.js');
 
 process.env.DOBIUS_USERDATA_DIR = path.join(home, 'ud');
 purgeUpdaterCache();
@@ -29,3 +29,20 @@ console.log('PASS  the real app still purges a wedged cache');
 
 fs.rmSync(home, { recursive: true, force: true });
 process.exit(0);
+
+// A failed background download is handled, never an unhandledRejection (Max, 2026-11-08).
+{
+  const seen = [];
+  const onUnhandled = (e) => seen.push(e);
+  process.on('unhandledRejection', onUnhandled);
+  const warned = [];
+  const handled = handleDownloadPromise({ downloadPromise: Promise.reject(new Error('net down')) }, (...a) => warned.push(a.join(' ')));
+  await handled;
+  await new Promise((r) => setTimeout(r, 20));
+  process.off('unhandledRejection', onUnhandled);
+  assert.equal(seen.length, 0, 'no unhandled rejection');
+  assert.match(warned[0], /download failed: net down/);
+  assert.equal(handleDownloadPromise(null), null);
+  assert.equal(handleDownloadPromise({}), null);
+  console.log('PASS  a failed update download is handled, not left unhandled');
+}

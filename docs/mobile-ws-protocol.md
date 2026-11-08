@@ -214,7 +214,7 @@ and the writes check it again right before they change anything.
 
 | Request | Fields | Reply |
 | --- | --- | --- |
-| `settingsRead` | | adds `newTabModel`, `newTabPermissionMode`, `phoneAlerts:{needs, done, handoff, team, quiet, names}` and `info.{webPush, apnsReady, apnsReason, thisPhoneApns}` (whether THIS phone, by its pairing, has an APNs token here) |
+| `settingsRead` | | adds `newTabModel`, `newTabPermissionMode`, `phoneAlerts:{needs, done, handoff, team, quiet, names}` and `info.{platform, webPush, apnsReady, apnsReason, thisPhoneApns}` (`platform`: `mac` or `windows`; the phone hides the new-tab model and permission rows for a Windows PC, where they do nothing) (whether THIS phone, by its pairing, has an APNs token here) |
 | `accountsRead` | | `{type:'accounts', ok, data:{claude:[{id, label, email, isDefault, login, active, usage:{known, headroom, limited, ageMs, windows:[{name, used, resetsAt, ageMs}]}, stale, sessionsRunning}], codex:[{id, label, isDefault, email, plan, login, active}], scanFailed}}`. Arrays only: account ids are user-influenced and never object keys. `data.unsupported` on Windows |
 | `accountActivate` | `id` (string, or `null` for the Mac's default login) | `{type:'accountResult', ok, error}`. The same function as the desktop's Accounts switch (`accounts:activateClaude`): NEW tabs use it, running tabs stay. Followed by `settingsChanged` |
 | `apnsRegister` | `token` (64 to 200 lowercase hex), `pairingId` (the phone's own id for this Mac, up to 64 of `[\w.:-]`) | `{type:'apnsResult', ok, error}`. Bound to the socket's pairing token, never to anything in the message; one token per pairing |
