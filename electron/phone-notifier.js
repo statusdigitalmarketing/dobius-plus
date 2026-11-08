@@ -193,7 +193,13 @@ export function createPhoneNotifier(deps) {
     if (typeof tabId !== 'string' || !tabId) return;
     const key = keyOf(tabId);
     const p = pending.get(key);
-    if (repeat) { if (p?.kind === 'handoff' && p.behind?.handoff && !p.behind.listed) pending.set(key, { ...p, behind: { ...p.behind, listed: true } }); return; }
+    if (repeat) {
+      if (p?.kind === 'handoff' && p.behind?.handoff && !p.behind.listed) pending.set(key, { ...p, behind: { ...p.behind, listed: true } });
+      // A red still waiting for its command, and the command is one already announced: nothing new to say, whether it
+      // is later run, dismissed or left waiting (Codex round 11).
+      else if (p?.kind === 'needs' && p.awaitHandoff) { pending.delete(key); schedule(); }
+      return;
+    }
     const t = d.now();
     if (p && (p.kind === 'needs' || p.kind === 'done')) { put({ ...p, kind: 'handoff', awaitHandoff: false, dueAt: Math.min(p.dueAt, t + 300) }); return; }
     // A handoff already waiting. If a handed-back red waits behind it, that red's own command is now listed: remember it,

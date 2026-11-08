@@ -291,3 +291,26 @@ test('round 10: a key for one environment never gets a valid token dropped; each
     assert.equal(r.outcome, 'drop', 'both hosts refused the token itself');
   } finally { s2.close(); await net2.close(); fs.rmSync(both.dir, { recursive: true, force: true }); }
 });
+
+test('round 11: two sends refused with the same expired token refresh it once, not twice', async () => {
+  const { dir } = keyDir();
+  const used = [];
+  let refusedOnce = new Set();
+  const net = await standIns((req) => {
+    const auth = req.headers.authorization;
+    used.push(auth);
+    if (used.length <= 2) { refusedOnce.add(auth); return { status: 403, reason: 'ExpiredProviderToken' }; } // both first tries
+    return { status: 200 };
+  });
+  const sender = createApnsSender({ dir, connect: net.connect, idleMs: 200 });
+  try {
+    const rs = await Promise.all([
+      sender.send([{ token: TOKEN, env: 'sandbox' }], { title: 'a', body: 'b' }),
+      sender.send([{ token: TOKEN2, env: 'sandbox' }], { title: 'a', body: 'b' }),
+    ]);
+    assert.deepEqual(rs.map((r) => r[0].outcome), ['sent', 'sent']);
+    const retries = used.slice(2);
+    assert.equal(new Set(retries).size, 1, 'both retries used the same fresh token');
+    assert.ok(!refusedOnce.has(retries[0]));
+  } finally { sender.close(); await net.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});

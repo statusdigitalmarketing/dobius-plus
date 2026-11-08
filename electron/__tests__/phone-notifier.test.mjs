@@ -543,3 +543,11 @@ test('round 10: a failed phone-opened tab is named by the folder its exit report
   assert.equal(sent.length, 1);
   assert.equal(sent[0].title, 'api');
 });
+
+test('round 11: a red waiting for its command, when the command is a repeat of one already announced, says nothing', () => {
+  const r = rig({ status: { a: 'needs' }, waiting: () => false });
+  r.n.tabHook('a', 'needs', 'handoff'); // waits for its command
+  r.n.handoffAdded('a', { repeat: true }); // the same command as before: already announced
+  r.advance(HANDOFF_WAIT_MS + 20000);
+  assert.equal(r.sent.length, 0);
+});

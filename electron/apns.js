@@ -202,10 +202,12 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
     return cached.result;
   }
 
-  function token(k, fresh = false) {
+  // refused: the token Apple just refused. A new one is made only if that is still the cached one: two sends refused
+  // together refresh once, not twice (TooManyProviderTokenUpdates, Codex round 11).
+  function token(k, refused = null) {
     const nowS = Math.floor(now() / 1000);
     let j = jwts.get(k.stamp);
-    if (fresh || !j || nowS - j.iat >= JWT_MAX_AGE_S) {
+    if ((refused && j?.value === refused) || !j || nowS - j.iat >= JWT_MAX_AGE_S) {
       j = { value: makeJwt(k, nowS), iat: nowS };
       jwts.set(k.stamp, j);
       if (jwts.size > 4) jwts.delete(jwts.keys().next().value); // only a key or two are ever live
@@ -298,13 +300,15 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
     let lastReason = '';
     for (const env of order) {
       let retried = false;
+      let refusedJwt = null;
       for (;;) {
         // Checked before every request: a phone unpaired while an earlier request waited gets nothing more.
         if (!stillValid(device)) return { token: device.token, outcome: 'skipped' };
-        const req = buildRequest({ token: device.token, bundleId: k.bundleId, jwt: token(k, retried), payload, tag, nowSeconds: Math.floor(now() / 1000) });
+        const jwtNow = token(k, refusedJwt);
+        const req = buildRequest({ token: device.token, bundleId: k.bundleId, jwt: jwtNow, payload, tag, nowSeconds: Math.floor(now() / 1000) });
         const r = await post(APNS_ORIGIN_FOR(env), req.headers, req.body, k.stamp);
         const outcome = outcomeFor(r.status, r.reason, { envKnown: device.env === env || (env === 'sandbox' && otherSaidBadDevice) });
-        if (outcome === 'retry-auth' && !retried) { retried = true; continue; }
+        if (outcome === 'retry-auth' && !retried) { retried = true; refusedJwt = jwtNow; continue; }
         if (outcome === 'other-host') { if (r.reason === 'BadDeviceToken') otherSaidBadDevice = true; lastReason = r.reason; break; } // try the next host
         if (outcome === 'retry-auth') return { token: device.token, outcome: 'failed', reason: r.reason };
         return { token: device.token, outcome, env, status: r.status, reason: r.reason };
