@@ -1,5 +1,4 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { isWindows } from '../../../shared/platform.js';
 
 export default function Updates() {
   const [currentVersion, setCurrentVersion] = useState('');
@@ -33,13 +32,9 @@ export default function Updates() {
     }
   }, []);
 
-  // Windows beta: releases are Mac-only, so there is nothing to check or offer here yet (Max, 2026-11-07).
-  const windowsBeta = isWindows();
-
   useEffect(() => {
     if (!window.electronAPI) return;
     window.electronAPI.updaterGetCurrentVersion?.().then(setCurrentVersion).catch(() => {});
-    if (windowsBeta) return undefined;
     window.electronAPI.updaterGetStatus?.().then((s) => s && setStatus(s)).catch(() => {});
     window.electronAPI.updaterGetPending?.().then(setPending).catch(() => {});
     const off = window.electronAPI.onUpdaterStatus?.((s) => {
@@ -50,7 +45,7 @@ export default function Updates() {
     });
     refreshRelease();
     return () => off?.();
-  }, [refreshRelease, windowsBeta]);
+  }, [refreshRelease]);
 
   const handleCheck = () => {
     setStatus({ state: 'checking' });
@@ -66,18 +61,6 @@ export default function Updates() {
     latestRelease.tag_name.replace(/^v/, '') === currentVersion;
 
   const ready = status.state === 'ready';
-
-  if (windowsBeta) {
-    return (
-      <div className="p-6 max-w-3xl">
-        <h2 className="text-lg font-medium" style={{ color: 'var(--fg)' }}>Updates</h2>
-        <p className="text-sm mt-3" style={{ color: 'var(--fg)' }}>You are on the Windows beta{currentVersion ? `, version ${currentVersion}` : ''}.</p>
-        <p className="text-xs mt-2" style={{ color: 'var(--dim)' }}>
-          Automatic updates are not set up for Windows yet: the releases on GitHub are Mac builds. New Windows builds are sent to you directly.
-        </p>
-      </div>
-    );
-  }
 
   return (
     <div className="p-6 max-w-3xl">

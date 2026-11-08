@@ -113,7 +113,9 @@ export default function GwsAccounts() {
     // classic leak warning (Codex P3). Guard here so no caller has to.
     if (!mountedRef.current) return;
     setFeedback({ msg, isError });
-    setTimeout(() => { if (mountedRef.current) setFeedback(''); }, 8000);
+    // An error stays until something replaces it; an info message clears after 8s, and only if it is still the
+    // one showing (Max, 2026-11-07: "Pick the Google account..." timed out and wiped the error that replaced it).
+    if (!isError) setTimeout(() => { if (mountedRef.current) setFeedback((f) => (f && f.msg === msg ? '' : f)); }, 8000);
   };
 
   // Add an account fully in-app (v1.0.64, Sam 8/18: no terminal login dance).

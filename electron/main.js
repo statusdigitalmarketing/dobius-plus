@@ -4778,7 +4778,7 @@ app.whenReady().then(() => {
   }
   // Self-heal an existing Claude Desktop MCP install: the wrapper must track
   // the CURRENT app binary across moves/updates (never creates an install).
-  if (!IS_WIN) healGwsMcpIfInstalled();
+  healGwsMcpIfInstalled();
   // Find gws (login-shell PATH, npm prefix, nvm...) in the background, so the first gws call and the shim's
   // gws-env.json have it. Never blocks startup.
   // The hint folder is set first, so the Claude Desktop server sees the result even before any terminal opens, and a

@@ -5,8 +5,16 @@ name: windows
 
 on:
   push:
-    branches: [feat/windows]
+    branches: [feat/windows, feat/windows-max]
+  # One release for both platforms (Sam, 2026-11-07): when release.sh publishes a release (Mac files), this builds
+  # the Windows installer from that tag and attaches it with latest.yml, which electron-updater on Windows reads (the
+  # Mac reads latest-mac.yml), so Windows updates itself like the Mac.
+  release:
+    types: [published]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-and-smoke:
@@ -65,6 +73,16 @@ jobs:
             dist-electron/latest.yml
             dist-electron/*.blockmap
           if-no-files-found: warn
+
+      # Only for a published release, and only after the smoke test passed: a build that does not start never
+      # reaches anyone's updater.
+      - name: Attach the installer to the release
+        if: github.event_name == 'release' && success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" dist-electron/*.exe dist-electron/*.exe.blockmap dist-electron/latest.yml --clobber
 
       - name: Upload smoke results
         if: always()

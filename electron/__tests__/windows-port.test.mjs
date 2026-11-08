@@ -318,3 +318,15 @@ test('History names a scheduled-task session instead of showing its XML wrapper'
   assert.equal(sanitizePreviewText('Fix the <b>login</b> bug'), 'Fix the <b>login</b> bug');
 });
 
+
+test('Add to Claude Desktop on Windows: the Store or AppData config, and an entry that runs Dobius+.exe itself', async () => {
+  const { claudeDesktopDirFor, mcpEntryFor } = await import('../gws-mcp-install.js');
+  const env = { APPDATA: 'C:\\Users\\u\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local' };
+  const pathm = await import('node:path');
+  const msix = pathm.join(env.LOCALAPPDATA, 'Packages', 'Claude_pzs8sxrjxfjjc', 'LocalCache', 'Roaming', 'Claude');
+  assert.equal(claudeDesktopDirFor('win32', env, 'C:\\Users\\u', (p) => p === pathm.join(env.LOCALAPPDATA, 'Packages', 'Claude_pzs8sxrjxfjjc')), msix);
+  assert.equal(claudeDesktopDirFor('win32', env, 'C:\\Users\\u', () => false), pathm.join(env.APPDATA, 'Claude'));
+  assert.deepEqual(mcpEntryFor('win32', 'C:\\D\\Dobius+.exe', 'C:\\ud\\gws-mcp\\gws-mcp.mjs', 'ignored'),
+    { command: 'C:\\D\\Dobius+.exe', args: ['C:\\ud\\gws-mcp\\gws-mcp.mjs'], env: { ELECTRON_RUN_AS_NODE: '1' } });
+  assert.deepEqual(mcpEntryFor('darwin', '/x', '/y', '/ud/gws-mcp/gws-mcp'), { command: '/ud/gws-mcp/gws-mcp' });
+});

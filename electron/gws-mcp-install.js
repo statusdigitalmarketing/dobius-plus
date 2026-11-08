@@ -29,21 +29,49 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const SERVER_NAME = 'gws';
 
-function claudeDesktopDir() {
+const WIN = process.platform === 'win32';
+// The Microsoft Store (MSIX) Claude keeps its config in its package's redirected AppData (Max, 2026-11-07).
+const msixClaudeDir = (env = process.env) => (env.LOCALAPPDATA
+  ? path.join(env.LOCALAPPDATA, 'Packages', 'Claude_pzs8sxrjxfjjc', 'LocalCache', 'Roaming', 'Claude') : null);
+
+/** Where Claude Desktop reads claude_desktop_config.json. Pure apart from one existence check; exported for tests. */
+export function claudeDesktopDirFor(platform = process.platform, env = process.env, home = os.homedir(), exists = fs.existsSync) {
   // Test/harness override so ship-tests never touch the real per-user config.
-  if (process.env.DOBIUS_CLAUDE_DESKTOP_DIR) return process.env.DOBIUS_CLAUDE_DESKTOP_DIR;
-  return path.join(os.homedir(), 'Library', 'Application Support', 'Claude');
+  if (env.DOBIUS_CLAUDE_DESKTOP_DIR) return env.DOBIUS_CLAUDE_DESKTOP_DIR;
+  if (platform === 'win32') {
+    const msix = msixClaudeDir(env);
+    if (msix && exists(path.dirname(path.dirname(path.dirname(msix))))) return msix; // the Store package is installed
+    return path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'Claude');
+  }
+  return path.join(home, 'Library', 'Application Support', 'Claude');
 }
+const claudeDesktopDir = () => claudeDesktopDirFor();
 
 function configPath() {
   return path.join(claudeDesktopDir(), 'claude_desktop_config.json');
 }
 
 function claudeDesktopAppPresent() {
-  for (const p of ['/Applications/Claude.app', path.join(os.homedir(), 'Applications', 'Claude.app')]) {
+  const env = process.env;
+  const places = WIN
+    ? [msixClaudeDir(env) && path.dirname(path.dirname(path.dirname(msixClaudeDir(env)))),
+      env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'AnthropicClaude'),
+      env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Programs', 'Claude')].filter(Boolean)
+    : ['/Applications/Claude.app', path.join(os.homedir(), 'Applications', 'Claude.app')];
+  for (const p of places) {
     try { fs.accessSync(p); return true; } catch { /* next */ }
   }
   return false;
+}
+
+/**
+ * The mcpServers entry. macOS: the wrapper script. Windows: Claude Desktop starts Dobius+.exe itself in node mode on
+ * the server file (a .sh wrapper cannot run there). Pure; exported for tests.
+ */
+export function mcpEntryFor(platform, execPath, destJs, wrapperPath) {
+  return platform === 'win32'
+    ? { command: execPath, args: [destJs], env: { ELECTRON_RUN_AS_NODE: '1' } }
+    : { command: wrapperPath };
 }
 
 function gwsCliPresent() {
@@ -77,11 +105,13 @@ export function ensureGwsMcpMaterialized() {
   const destJs = path.join(dir, 'gws-mcp.mjs');
   fs.copyFileSync(src, destJs);
   const wrapperPath = path.join(dir, 'gws-mcp');
-  fs.writeFileSync(wrapperPath, wrapperScript(process.execPath, destJs), { mode: 0o755 });
-  // writeFileSync's mode only applies on CREATE; an existing 0644 wrapper
-  // would stay non-executable and Claude Desktop would get EACCES (Codex).
-  fs.chmodSync(wrapperPath, 0o755);
-  return { wrapperPath };
+  if (!WIN) {
+    fs.writeFileSync(wrapperPath, wrapperScript(process.execPath, destJs), { mode: 0o755 });
+    // writeFileSync's mode only applies on CREATE; an existing 0644 wrapper
+    // would stay non-executable and Claude Desktop would get EACCES (Codex).
+    fs.chmodSync(wrapperPath, 0o755);
+  }
+  return { wrapperPath, destJs, entry: mcpEntryFor(process.platform, process.execPath, destJs, wrapperPath) };
 }
 
 /** Self-heal on launch: refresh an EXISTING install, never create one. */
@@ -100,7 +130,8 @@ export function healGwsMcpIfInstalled() {
  * A malformed existing file returns { error } rather than clobbering: the
  * user's hand-written config deserves a refusal, not silent replacement.
  */
-export function mergeClaudeDesktopConfig(existingText, wrapperPath) {
+export function mergeClaudeDesktopConfig(existingText, wrapperPathOrEntry) {
+  const entry = typeof wrapperPathOrEntry === 'string' ? { command: wrapperPathOrEntry } : wrapperPathOrEntry;
   let cfg = {};
   if (existingText !== null && existingText !== undefined && String(existingText).trim() !== '') {
     try {
@@ -118,7 +149,7 @@ export function mergeClaudeDesktopConfig(existingText, wrapperPath) {
   return {
     next: {
       ...cfg,
-      mcpServers: { ...servers, [SERVER_NAME]: { command: wrapperPath } },
+      mcpServers: { ...servers, [SERVER_NAME]: entry },
     },
   };
 }
@@ -133,7 +164,12 @@ export function gwsMcpStatus() {
     const cfg = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
     const entry = cfg?.mcpServers?.[SERVER_NAME];
     configured = !!entry;
-    if (entry?.command === wrapperPath) {
+    if (WIN) {
+      // Current when it starts THIS Dobius+.exe on the server file that is there.
+      const destJs = path.join(dir, 'gws-mcp.mjs');
+      entryCurrent = entry?.command === process.execPath && Array.isArray(entry?.args) && entry.args[0] === destJs
+        && entry?.env?.ELECTRON_RUN_AS_NODE === '1' && fs.existsSync(destJs);
+    } else if (entry?.command === wrapperPath) {
       // "Current" means it would actually LAUNCH: executable bit set, the
       // server file present, and the wrapper pointing at the binary we are
       // running from right now. existsSync alone said "Set up" for a dead
@@ -158,13 +194,13 @@ export function gwsMcpStatus() {
  */
 export function installGwsMcp() {
   try {
-    const { wrapperPath } = ensureGwsMcpMaterialized();
+    const { entry } = ensureGwsMcpMaterialized();
     const dir = claudeDesktopDir();
     fs.mkdirSync(dir, { recursive: true });
     const cfgPath = configPath();
     let existingText = null;
     try { existingText = fs.readFileSync(cfgPath, 'utf8'); } catch { /* first install */ }
-    const merged = mergeClaudeDesktopConfig(existingText, wrapperPath);
+    const merged = mergeClaudeDesktopConfig(existingText, entry);
     if (merged.error) return { ok: false, message: merged.error };
     if (existingText !== null) {
       // Keep the user's previous config recoverable; one backup per install.
@@ -176,7 +212,7 @@ export function installGwsMcp() {
     fs.renameSync(tmp, cfgPath);
     const st = gwsMcpStatus();
     let message = 'Added to Claude Desktop. Restart Claude Desktop to load it.';
-    if (!st.desktopAppPresent) message = 'Config written. Claude Desktop is not installed on this Mac yet; it will pick this up once installed.';
+    if (!st.desktopAppPresent) message = `Config written. Claude Desktop is not installed on this ${WIN ? 'PC' : 'Mac'} yet; it will pick this up once installed.`;
     if (!st.gwsCliPresent) message += ' Note: the gws CLI is missing (npm i -g @googleworkspace/cli), calls will fail until it is installed (Settings > Google Accounts > Setup).';
     return { ok: true, message };
   } catch (e) {
