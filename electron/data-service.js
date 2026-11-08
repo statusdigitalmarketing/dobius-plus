@@ -2530,10 +2530,6 @@ function tryReconstructPath(encodedName) {
 }
 
 /**
- * Extract a readable display name from a Claude-encoded dir name.
- * Uses the last meaningful path segment rather than just the last dash-segment.
- */
-/**
  * The real folder a ~/.claude/projects/<encoded> dir belongs to, read from the
  * `cwd` its newest transcript records, or null. The encoding is lossy (every
  * non-alphanumeric becomes '-'), so "Dobius+ Windows" cannot be rebuilt from
@@ -2571,6 +2567,10 @@ async function readFileHead(file, bytes) {
   } catch { return null; } finally { await fh?.close().catch(() => {}); }
 }
 
+/**
+ * Extract a readable display name from a Claude-encoded dir name.
+ * Uses the last meaningful path segment rather than just the last dash-segment.
+ */
 function extractDisplayName(encodedName) {
   // Remove common prefixes to get the project-specific part
   const home = os.homedir();
