@@ -37,7 +37,9 @@ jobs:
       # compile with no Visual Studio, and Electron's own install failing) while the API kept working. better-sqlite3's
       # prebuilds (Node's for npm ci, Electron's for the step below) go where prebuild-install looks before it downloads
       # (npm_config_<pkg>_local_prebuilds); Electron's zip, checked against its SHASUMS256.txt, goes to electron-builder as
-      # electronDist. If this step fails, everything falls back to downloading as before.
+      # electronDist; electron-builder's own tools (winCodeSign, NSIS) are served from 127.0.0.1 in the build step as its
+      # binaries mirror, and app-builder still checks each against its pinned sha512. If this step fails, everything
+      # falls back to downloading as before.
       - name: Prebuilt binaries through the API
         shell: bash
         continue-on-error: true
@@ -58,6 +60,12 @@ jobs:
           gh release download "v$EV" -R electron/electron -D "$EDIR" -p "electron-v$EV-win32-x64.zip" -p SHASUMS256.txt
           (cd "$EDIR" && grep " \*electron-v$EV-win32-x64.zip$" SHASUMS256.txt | sha256sum -c -)
           echo "ELECTRON_DIST=$EDIR" >> "$GITHUB_ENV"
+          BDIR="$RUNNER_TEMP/builder-binaries"
+          for T in winCodeSign-2.6.0 nsis-3.0.4.1 nsis-resources-3.4.1; do
+            mkdir -p "$BDIR/$T"
+            gh release download "$T" -R electron-userland/electron-builder-binaries -D "$BDIR/$T" -p "$T.7z"
+          done
+          echo "BUILDER_BINARIES=$BDIR" >> "$GITHUB_ENV"
 
       - name: Install
         run: npm ci
@@ -112,6 +120,13 @@ jobs:
           fi
           DIST=()
           if [ -n "$ELECTRON_DIST" ]; then DIST=("-c.electronDist=$ELECTRON_DIST"); fi
+          if [ -n "$BUILDER_BINARIES" ]; then
+            python -m http.server 8799 --bind 127.0.0.1 --directory "$BUILDER_BINARIES" > "$RUNNER_TEMP/mirror.log" 2>&1 &
+            MIRROR_PID=$!
+            trap 'kill $MIRROR_PID 2>/dev/null || true' EXIT
+            for i in $(seq 1 20); do curl -fsS -o /dev/null http://127.0.0.1:8799/ && break; sleep 0.5; done
+            export ELECTRON_BUILDER_BINARIES_MIRROR=http://127.0.0.1:8799/
+          fi
           npm run electron:build:win -- --publish never -c.npmRebuild=false "${DIST[@]}" "${SIGN[@]}"
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
