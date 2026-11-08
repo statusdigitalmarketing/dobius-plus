@@ -75,3 +75,21 @@ test('round 16: a pairing the phone unregistered never registers again (a late f
   const other = cm.addApnsToken({ token: 'ef'.repeat(32), pairToken: 'Y', pairingId: 'pid-y' }, () => true);
   assert.equal(other.pairToken, 'Y', 'a new pairing of the same phone registers normally');
 });
+
+test('round 17: opt-outs lapse only when their pairing is gone; a late older token never replaces a newer one', () => {
+  const cfg = cm.loadConfig();
+  cfg.mobileServer = { ...(cfg.mobileServer || {}), devices: [{ token: 'P1', name: 'a' }, ...Array.from({ length: 60 }, (_, i) => ({ token: `Q${i}`, name: 'q' }))] };
+  cm.saveConfig(cfg);
+  cm.optOutApnsPairing('P1');
+  for (let i = 0; i < 60; i += 1) cm.optOutApnsPairing(`Q${i}`);
+  assert.deepEqual(cm.addApnsToken({ token: '12'.repeat(32), pairToken: 'P1' }), { optedOut: true }, 'still opted out after 60 more');
+  // P1 unpaired on the Mac: its entry is pruned at the next opt-out.
+  const c2 = cm.loadConfig(); c2.mobileServer.devices = c2.mobileServer.devices.filter((d) => d.token !== 'P1'); cm.saveConfig(c2);
+  cm.optOutApnsPairing('Q0');
+  assert.equal(cm.loadConfig().apnsOptOuts.length, 60);
+  const t1 = '34'.repeat(32); const t2 = '56'.repeat(32);
+  cm.addApnsToken({ token: t2, pairToken: 'R', seq: 2000 });
+  assert.deepEqual(cm.addApnsToken({ token: t1, pairToken: 'R', seq: 1000 }), { stale: true });
+  assert.equal(cm.getApnsTokens().find((t) => t.pairToken === 'R').token, t2);
+  assert.equal(cm.addApnsToken({ token: t1, pairToken: 'R', seq: 3000 }).token, t1, 'a genuinely newer one replaces it');
+});

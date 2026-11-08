@@ -29,7 +29,7 @@ function deviceToken() {
     const handles = [];
     const finish = (v) => { clearTimeout(timer); for (const h of handles) h.then((x) => x.remove()).catch(() => {}); resolve(v); };
     const timer = setTimeout(() => finish(null), 15000);
-    handles.push(PushNotifications.addListener('registration', (t) => { const v = typeof t?.value === 'string' ? t.value.toLowerCase() : null; if (v) newestIosToken = v; finish(v); }));
+    handles.push(PushNotifications.addListener('registration', (t) => { const v = typeof t?.value === 'string' ? t.value.toLowerCase() : null; if (v) { newestIosToken = v; seen(v); } finish(v); }));
     handles.push(PushNotifications.addListener('registrationError', () => finish(null)));
     // Register only once both listeners are attached, so the answer cannot arrive before anyone hears it.
     Promise.all(handles).then(() => PushNotifications.register()).catch(() => finish(null));
@@ -43,6 +43,9 @@ const sentTokens = new WeakMap();
 // The newest token iOS has handed this app, recorded the moment it arrives (before any Mac answers): an older one is
 // never sent after it (Codex round 15).
 let newestIosToken = null;
+// When this app first got each token from iOS: sent as seq so the Mac can refuse an older registration arriving late.
+const firstSeen = new Map();
+const seen = (token) => { if (!firstSeen.has(token)) firstSeen.set(token, Date.now()); if (firstSeen.size > 8) firstSeen.delete(firstSeen.keys().next().value); return firstSeen.get(token); };
 
 /**
  * iOS may hand the app a new token while it stays open: pass it to this Mac. Only a token different from the one this
@@ -52,7 +55,7 @@ export function forwardTokenChanges(connection) {
   if (!isNativeApp()) return () => {};
   const h = PushNotifications.addListener('registration', (t) => {
     const token = typeof t?.value === 'string' ? t.value.toLowerCase() : null;
-    if (token) newestIosToken = token;
+    if (token) { newestIosToken = token; seen(token); }
     if (!token || connection.closed || sentTokens.get(connection) === token || connection.status !== 'authed') return;
     sendRegister(connection, token).then((r) => { if (r.ok) sentTokens.set(connection, token); }).catch(() => {});
   });
@@ -72,7 +75,7 @@ function sendRegister(connection, token) {
       off();
       resolve(m.ok ? { ok: true } : { ok: false, code: typeof m.error === 'string' ? m.error : 'failed', error: 'Your Mac would not take this phone for notifications.' });
     });
-    connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, reqId });
+    connection.send({ type: 'apnsRegister', token, pairingId: connection.pairing?.id || null, seq: seen(token), reqId });
   });
 }
 

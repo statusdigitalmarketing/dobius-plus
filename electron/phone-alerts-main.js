@@ -117,15 +117,16 @@ export const phoneAlerts = {
   /** One notification, for the Today nudge (its own rules live in today-nudge.js). */
   send: (n) => (push ? push.send(n) : Promise.resolve()),
 
-  registerApns({ deviceToken, pairToken, pairingId }, stillOk = () => true) {
+  registerApns({ deviceToken, pairToken, pairingId, seq }, stillOk = () => true) {
     if (!stillOk()) return { ok: false, error: 'unavailable' };
     // A token another pairing holds moves here only once that pairing is gone (unpaired on the Mac, or unregistered by
     // the phone when it dropped or replaced that record). Nothing the message says can move it (Codex round 3: a
     // pairingId is guessable, 'legacy' for one).
-    const entry = addApnsToken({ token: deviceToken, pairToken, pairingId }, (prior) => !isPairedToken(prior.pairToken));
+    const entry = addApnsToken({ token: deviceToken, pairToken, pairingId, seq }, (prior) => !isPairedToken(prior.pairToken));
     if (!entry) return { ok: false, error: 'bad-request' };
     if (entry.taken) return { ok: false, error: 'token-in-use' };
     if (entry.optedOut) return { ok: false, error: 'unavailable' }; // this pairing was dropped by the phone
+    if (entry.stale) return { ok: true }; // an older token than the one held: the newer one stays
     // Unpaired while it was being stored: take it out again (removeMobileDevice ran before the write landed).
     if (!stillOk() || !isPairedToken(pairToken)) { removeApnsTokensByPairToken(pairToken); return { ok: false, error: 'unavailable' }; }
     return { ok: true };

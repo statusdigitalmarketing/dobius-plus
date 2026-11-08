@@ -1667,13 +1667,18 @@ export function getApnsTokens() {
 // canTake(prior): whether a token already registered under ANOTHER pairing may move to this one. The caller allows it
 // only when that pairing is gone, so one paired phone cannot take over another's token
 // (unpairing the owner would then leave it receiving through the taker: Codex round 2). Refused: returns { taken: true }.
-export function addApnsToken({ token, pairToken, pairingId }, canTake = () => false) {
+// seq: when the phone first got this token from iOS (its own clock). A registration older than the one this pairing
+// already holds is a late frame from an old connection and is refused, never put back over a newer token (Codex round 17).
+export function addApnsToken({ token, pairToken, pairingId, seq }, canTake = () => false) {
   if (typeof token !== 'string' || !APNS_TOKEN_RE.test(token) || typeof pairToken !== 'string' || !pairToken) return null;
   const config = loadConfig();
   if (Array.isArray(config.apnsOptOuts) && config.apnsOptOuts.includes(optOutKey(pairToken))) return { optedOut: true };
   const list = Array.isArray(config.apnsTokens) ? config.apnsTokens : [];
   const prior = list.find((t) => t?.token === token);
   if (prior && prior.pairToken !== pairToken && !canTake(prior)) return { taken: true };
+  const seqOk = typeof seq === 'number' && Number.isFinite(seq) && seq > 0 ? Math.round(seq) : null;
+  const mine = list.find((t) => t?.pairToken === pairToken);
+  if (mine && mine.token !== token && seqOk !== null && typeof mine.seq === 'number' && seqOk < mine.seq) return { stale: true };
   const entry = {
     token,
     pairToken,
@@ -1681,6 +1686,7 @@ export function addApnsToken({ token, pairToken, pairingId }, canTake = () => fa
     // A token that moved to another pairing keeps the host Apple already took it on.
     env: prior && APNS_ENVS.has(prior.env) ? prior.env : 'auto',
     addedAt: Date.now(),
+    ...(seqOk !== null ? { seq: seqOk } : {}),
   };
   // One token per phone pairing: a phone that re-registers replaces its old token, never adds a second one.
   config.apnsTokens = list.filter((t) => t?.token !== token && t?.pairToken !== pairToken);
@@ -1711,15 +1717,21 @@ export function setApnsTokenEnv(token, env, addedAt) {
 
 // A phone unregisters a pairing only when it dropped or replaced it, so that pairing never registers again: a late
 // apnsRegister still in flight on its old connection must not bring the token back after the removal (Codex round 16).
-// Kept as a hash of the pairing token, never the token itself, and bounded.
+// Kept as a hash of the pairing token, never the token itself. Never evicted by count (that let an old opt-out lapse,
+// Codex round 17): only an entry whose pairing is no longer paired on this Mac is dropped, so the list is never longer
+// than the paired phones.
 const optOutKey = (pairToken) => crypto.createHash('sha256').update(`apns-optout:${pairToken}`).digest('hex');
+function livePairedKeys(config) {
+  const devices = Array.isArray(config?.mobileServer?.devices) ? config.mobileServer.devices : [];
+  return new Set(devices.filter((d) => typeof d?.token === 'string' && d.token).map((d) => optOutKey(d.token)));
+}
 export function optOutApnsPairing(pairToken) {
   if (typeof pairToken !== 'string' || !pairToken) return;
   const config = loadConfig();
   const k = optOutKey(pairToken);
-  const list = Array.isArray(config.apnsOptOuts) ? config.apnsOptOuts.filter((x) => typeof x === 'string' && x !== k) : [];
+  const live = livePairedKeys(config);
+  const list = (Array.isArray(config.apnsOptOuts) ? config.apnsOptOuts : []).filter((x) => typeof x === 'string' && x !== k && live.has(x));
   list.push(k);
-  while (list.length > 50) list.shift();
   config.apnsOptOuts = list;
   config.apnsTokens = (config.apnsTokens || []).filter((t) => t?.pairToken !== pairToken);
   saveConfig(config);
