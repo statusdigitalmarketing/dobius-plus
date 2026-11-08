@@ -543,3 +543,18 @@ test('Windows keeps one Dobius per userData; the lock module loads right after t
   assert.deepEqual(imports.map((l) => (l.match(/from '(.+?)'|import '(.+?)'/) || []).slice(1).find(Boolean)), ['./dev-userdata.js', './single-instance.js']);
   assert.match(src, /app\.on\('second-instance', \(\) => \{/);
 });
+
+test('the lock: a normal second launch hands over at once; a launch after an update waits for the old copy', async () => {
+  const { acquireLock } = await import('../single-instance.js');
+  const asks = (answers) => { let i = 0; const f = () => answers[Math.min(i++, answers.length - 1)]; f.count = () => i; return f; };
+  const held = asks([false]);
+  assert.equal(acquireLock(held), false);
+  assert.equal(held.count(), 1, 'no retry without --updated');
+  const freed = asks([false, false, false, true]);
+  let slept = 0;
+  assert.equal(acquireLock(freed, { updated: true, sleep: (ms) => { slept += ms; } }), true);
+  assert.equal(slept, 750);
+  const never = asks([false]);
+  assert.equal(acquireLock(never, { updated: true, sleep: () => {}, waitMs: 1000, stepMs: 250 }), false);
+  assert.equal(never.count(), 5, 'gives up after the wait');
+});

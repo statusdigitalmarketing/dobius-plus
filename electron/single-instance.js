@@ -15,7 +15,22 @@ export function takesSingleInstanceLock(platform = process.platform) {
   return platform === 'win32';
 }
 
-if (takesSingleInstanceLock() && !app.requestSingleInstanceLock()) {
+// The installer starts the new version with --updated after an update. It waits for the old copy to close first, but if
+// that copy is still letting go of the lock, giving up would leave no Dobius at all after an update (Sam's rule: an
+// update never loses windows). So an updated launch retries for up to 10 s; any other launch hands over at once.
+export function acquireLock(request, { updated = false, sleep = () => {}, waitMs = 10_000, stepMs = 250 } = {}) {
+  if (request()) return true;
+  for (let waited = 0; updated && waited < waitMs; waited += stepMs) {
+    sleep(stepMs);
+    if (request()) return true;
+  }
+  return false;
+}
+
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+if (takesSingleInstanceLock()
+  && !acquireLock(() => app.requestSingleInstanceLock(), { updated: process.argv.includes('--updated'), sleep: sleepSync })) {
   // process.exit, not app.quit: nothing after this import may run (no restore, no config write, no quit handlers).
   process.exit(0);
 }
