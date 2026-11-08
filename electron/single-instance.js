@@ -15,9 +15,12 @@ export function takesSingleInstanceLock(platform = process.platform) {
   return platform === 'win32';
 }
 
-// The installer starts the new version with --updated after an update. It waits for the old copy to close first, but if
-// that copy is still letting go of the lock, giving up would leave no Dobius at all after an update (Sam's rule: an
-// update never loses windows). So an updated launch retries for up to 10 s; any other launch hands over at once.
+// The installer starts the new version with --updated after an update, and a copy that was opened again while closing
+// relaunches itself with RELAUNCH_ARG (main.js second-instance). Both start while the old copy may still be letting go
+// of the lock, and giving up would leave no Dobius at all (Sam's rule: an update never loses windows). So those two
+// retry for up to 10 s; any other launch hands over at once.
+export const RELAUNCH_ARG = '--dobius-relaunch';
+
 export function acquireLock(request, { updated = false, sleep = () => {}, waitMs = 10_000, stepMs = 250 } = {}) {
   if (request()) return true;
   for (let waited = 0; updated && waited < waitMs; waited += stepMs) {
@@ -30,7 +33,7 @@ export function acquireLock(request, { updated = false, sleep = () => {}, waitMs
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 if (takesSingleInstanceLock()
-  && !acquireLock(() => app.requestSingleInstanceLock(), { updated: process.argv.includes('--updated'), sleep: sleepSync })) {
+  && !acquireLock(() => app.requestSingleInstanceLock(), { updated: process.argv.includes('--updated') || process.argv.includes(RELAUNCH_ARG), sleep: sleepSync })) {
   // process.exit, not app.quit: nothing after this import may run (no restore, no config write, no quit handlers).
   process.exit(0);
 }

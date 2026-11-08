@@ -541,6 +541,10 @@ test('Windows keeps one Dobius per userData; the lock module loads right after t
   const src = fsm.readFileSync(new URL('../main.js', import.meta.url), 'utf8');
   const imports = src.split('\n').filter((l) => /^import /.test(l)).slice(0, 2);
   assert.deepEqual(imports.map((l) => (l.match(/from '(.+?)'|import '(.+?)'/) || []).slice(1).find(Boolean)), ['./dev-userdata.js', './single-instance.js']);
+  // Opened again while closing: relaunch once this copy is gone, with the arg that makes the new copy wait for the lock.
+  const { RELAUNCH_ARG } = await import('../single-instance.js');
+  assert.equal(RELAUNCH_ARG, '--dobius-relaunch');
+  assert.match(src, /app\.relaunch\(\{ args: \[\.\.\.process\.argv\.slice\(1\)\.filter\(\(a\) => a !== RELAUNCH_ARG\), RELAUNCH_ARG\] \}\)/);
   assert.match(src, /app\.on\('second-instance', \(\) => \{/);
 });
 

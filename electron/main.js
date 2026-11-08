@@ -1,5 +1,5 @@
 import './dev-userdata.js'; // MUST stay first: userData override before config-manager loads
-import './single-instance.js'; // MUST stay second: on Windows a second launch exits here, before anything else loads
+import { RELAUNCH_ARG } from './single-instance.js'; // MUST stay second: on Windows a second launch exits here, before anything else loads
 import { createStallWatchdog } from './stall-watchdog.js';
 import { createOwnerCleanup } from './owner-cleanup.js';
 import { app, BrowserWindow, ipcMain, Menu, dialog, Notification, shell, webContents, powerMonitor, screen } from 'electron';
@@ -5177,12 +5177,19 @@ app.whenReady().then(() => {
   // last gets focus.
   let lastFocusedWindow = null;
   app.on('browser-window-focus', (_e, win) => { lastFocusedWindow = win; });
+  let relaunchAfterQuit = false;
   app.on('second-instance', () => {
-    if (getQuitting()) return;
+    // Opened again while this copy is closing: that launch has already exited, so start Dobius again once this one is
+    // gone, or nothing would be open (Codex). Not during an update: the installer starts the new version itself.
+    if (getQuitting()) {
+      if (!getQuittingForUpdate() && !relaunchAfterQuit) { relaunchAfterQuit = true; app.relaunch({ args: [...process.argv.slice(1).filter((a) => a !== RELAUNCH_ARG), RELAUNCH_ARG] }); }
+      return;
+    }
     const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed() && (w.isVisible() || w.isMinimized()));
     if (!wins.length) { createWindow(); return; }
-    for (const w of wins) if (w.isMinimized()) w.restore();
+    // Chosen before anything is restored: restoring a window focuses it and would move lastFocusedWindow (Codex).
     const target = lastFocusedWindow && !lastFocusedWindow.isDestroyed() && wins.includes(lastFocusedWindow) ? lastFocusedWindow : wins[0];
+    for (const w of wins) if (w.isMinimized()) w.restore();
     target.show();
     target.focus();
   });
