@@ -516,6 +516,7 @@ export default function TerminalPane({ id, cwd, theme, className = '', claimExis
         <span style={{ color: border, fontSize: 13, fontFamily: "'SF Mono', monospace", userSelect: 'none', paddingBottom: 2 }}>$</span>
         <textarea
           ref={inputRef}
+          data-command-bar=""
           value={input}
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}

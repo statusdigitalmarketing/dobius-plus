@@ -39,7 +39,7 @@ import {
 } from './claude-usage.js';
 import { speakLastResponse, stopVoicePlayback, isVoicePlaybackActive } from './voice-playback.js';
 import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
-import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser } from './gws-accounts.js';
+import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser, ensureShim } from './gws-accounts.js';
 import { gwsSetupStatus, installGws, useGwsAt, findClientFiles, useClientFile, refreshGwsEnv, setHintDir } from './gws-setup.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
 import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary } from './terminal-manager.js';
@@ -105,7 +105,9 @@ import {
   deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
-import { initTeam, stopTeam, handleTeamBridge } from './team-main.js';
+import { initTeam, stopTeam, handleTeamBridge, getTeamService } from './team-main.js';
+import { writeAgentContext } from './agent-context.js';
+import { visibleBuiltinAgents } from './visible-agents.js';
 import { createHandoffCommands, runScriptText, extractCommands } from './handoff-commands.js';
 import { shQuote } from '../shared/sh-quote.js';
 import { randomUUID } from 'node:crypto';
@@ -182,7 +184,10 @@ function writePhoneSetting(key, value) {
   const check = checkSettingWrite(key, value, st.todayNudges);
   if (!check.ok) return check;
   if (check.apply.settings) updateSettings(check.apply.settings);
-  if (typeof check.apply.autoMode === 'boolean') setAutoModeEnabled(check.apply.autoMode);
+  if (typeof check.apply.autoMode === 'boolean') {
+    const r = setAutoModeEnabled(check.apply.autoMode);
+    if (!r?.ok) return { ok: false, error: r?.error || 'Not changed.' }; // Windows: Auto Mode stays off (Codex round 5)
+  }
   broadcastToPhones('settingsChanged');
   for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('settings:changed');
   return { ok: true };
@@ -305,7 +310,8 @@ let mainWindow;
 function activeClaudeAccountEnv() {
   const config = loadConfig();
   const activeId = config.activeClaudeAccountId;
-  if (!activeId) return {};
+  // Windows applies no saved account (spawn-account-env.js): the same login as its terminals (Codex round 6).
+  if (!activeId || IS_WIN) return {};
   const account = (config.accounts || []).find((a) => a.id === activeId && a.type === 'claude');
   return claudeEnvForAccount(account || null);
 }
@@ -314,7 +320,8 @@ function resolveActiveCliPath() {
   const config = loadConfig();
   const activeId = config.activeClaudeAccountId;
   let raw = null;
-  if (activeId) {
+  // Windows applies no saved account (Accounts is not offered there), its CLI path included (Codex round 7).
+  if (activeId && !IS_WIN) {
     const account = (config.accounts || []).find((a) => a.id === activeId && a.type === 'claude');
     if (account?.cliPath) raw = account.cliPath;
   }
@@ -917,14 +924,14 @@ function setupDataHandlers() {
   // gws multi-account (v1.0.41): connect / list / remove. NO getToken handler
   // is exposed: access tokens never cross to the renderer (Codex plan #1).
   ipcMain.handle('gws:list', () => listGwsAccounts());
-  ipcMain.handle('gws:remove', (_event, id) => removeGwsAccount(id));
+  ipcMain.handle('gws:remove', async (_event, id) => { const r = await removeGwsAccount(id); refreshAgentContext(); return r; });
   // Health probe + one-button reconnect (v1.0.61): 4 of 5 grants were found
   // revoked with no UI surface saying so.
   ipcMain.handle('gws:verify', (_event, opts) => verifyGwsAccounts({ force: !!(opts && opts.force) }));
-  ipcMain.handle('gws:reconnect', (_event, id, opts) => reconnectGwsAccount(id, opts || {}));
+  ipcMain.handle('gws:reconnect', async (_event, id, opts) => { const r = await reconnectGwsAccount(id, opts || {}); refreshAgentContext(); return r; });
   // Add an account fully in-app (v1.0.64): browser approval + capture, no
   // terminal login dance.
-  ipcMain.handle('gws:addViaBrowser', (_event, opts) => addGwsAccountViaBrowser(opts || {}));
+  ipcMain.handle('gws:addViaBrowser', async (_event, opts) => { const r = await addGwsAccountViaBrowser(opts || {}); refreshAgentContext(); return r; });
   // Setup on a fresh Mac (Justin, 2026-11-07): find, install or locate gws, and put the OAuth client file in place.
   // Paths reach main only from a dialog main opened or from the list main found itself, never from the renderer.
   ipcMain.handle('gwsSetup:status', (_event, opts) => gwsSetupStatus({ force: !!(opts && opts.force) }));
@@ -959,7 +966,7 @@ function setupDataHandlers() {
     updateSettings({ voiceConductorEnabled: on });
     if (on) {
       const c = BUILTIN_AGENTS.find((a) => a.id === 'builtin-voice-conductor');
-      if (c) ensureVoiceConductor(c.systemPrompt);
+      if (c && !IS_WIN) ensureVoiceConductor(c.systemPrompt);
     } else {
       stopVoiceConductor();
     }
@@ -1496,12 +1503,12 @@ work-registry caps concurrent agents at 1 by default (strictly serial). If you t
 ];
 
 function setupAgentHandlers() {
-  ipcMain.handle('agents:getBuiltins', () => BUILTIN_AGENTS);
+  ipcMain.handle('agents:getBuiltins', () => visibleBuiltinAgents(BUILTIN_AGENTS));
 
   ipcMain.handle('agents:list', () => {
     const settings = getSettings();
     const custom = Array.isArray(settings.agents) ? settings.agents : [];
-    return [...BUILTIN_AGENTS, ...custom];
+    return [...visibleBuiltinAgents(BUILTIN_AGENTS), ...custom];
   });
 
   ipcMain.handle('agents:save', (_event, agent) => {
@@ -2220,19 +2227,21 @@ function setupFileHandlers() {
   // to it (the background-work guard, say) then reaches existing installs.
   const hasHandoffStop = (hooks) => Array.isArray(hooks?.Stop)
     && hooks.Stop.some((g) => g?.hooks?.some?.((h) => h?.command === stopEntry.command));
-  // SessionStart: tell Claude, only when it runs inside a Dobius tab, that it
-  // can label its tab. SessionStart stdout is added to the session's context.
+  // SessionStart: tell Claude, only when it runs inside a Dobius tab, what Dobius gives it (agent-context.js writes
+  // the text; every tab's DOBIUS_AGENT_CONTEXT names the file). SessionStart stdout is added to the session's context.
+  // Capped at 16KB; the one-line tab hint when the file is missing (an older Dobius started the tab).
   // The trailing comment is the marker that identifies this group as ours.
   const TAB_HINT_MARKER = 'dobius-tab-hint';
   const tabHintEntry = {
     type: 'command',
-    command: `[ -z "$DOBIUS_TAB_ID" ] || echo 'This session runs in a Dobius+ terminal tab. When you start a distinct task, run: dobius-tab "<3-6 word summary>" to label this tab.' # ${TAB_HINT_MARKER}`,
+    command: `[ -z "\${DOBIUS_TAB_ID:-}" ] || head -c 16384 "\${DOBIUS_AGENT_CONTEXT:-}" 2>/dev/null || echo 'This session runs in a Dobius+ terminal tab. When you start a distinct task, run: dobius-tab "<3-6 word summary>" to label this tab.' # ${TAB_HINT_MARKER}`,
   };
   const isDobiusCommand = (h) => typeof h?.command === 'string'
     && (h.command.includes(STATUS_MARKER) || h.command.includes(TAB_HINT_MARKER));
   const isStatusGroup = (group) => Array.isArray(group?.hooks) && group.hooks.some(isDobiusCommand);
+  // Exactly the current command, so a change to it reaches existing installs on the next launch.
   const hasTabHint = (hooks) => Array.isArray(hooks?.SessionStart)
-    && hooks.SessionStart.some((g) => g?.hooks?.some?.((h) => typeof h?.command === 'string' && h.command.includes(TAB_HINT_MARKER)));
+    && hooks.SessionStart.some((g) => g?.hooks?.some?.((h) => h?.command === tabHintEntry.command));
   const hasPermissionRequest = (hooks) => Array.isArray(hooks?.PermissionRequest)
     && hooks.PermissionRequest.some(isStatusGroup);
   // Append the whole Dobius block to an already-stripped hooks object.
@@ -2311,7 +2320,8 @@ function setupFileHandlers() {
       let current = null;
       try { current = fs.readFileSync(claudeSettingsPath, 'utf8'); }
       catch { current = null; }
-      if (expectedRaw === null) return current === null;
+      // Absent when read: a write that must not create the file is refused here too (the retry path, Codex round 2).
+      if (expectedRaw === null) return current === null && !mustExist;
       // Vanished: recreate rather than refuse, unless nobody asked for this
       // write (the launch install), which must never create the file.
       if (current === null) return !mustExist;
@@ -2408,7 +2418,9 @@ function setupFileHandlers() {
         // SECOND concurrent Claude rewrite (between the fresh read and the
         // retry write) get silently clobbered. If the retry ALSO conflicts,
         // surface the error rather than retry indefinitely.
-        writeClaudeSettings(toWrite, rawForWrite);
+        // A file that existed when read is never created again: deleted in between (by the person or another tool),
+        // it stays gone. Only an explicit "create it" may make one (Codex: the launch default-on could recreate it).
+        writeClaudeSettings(toWrite, rawForWrite, { mustExist: exists && !opts?.confirmCreate });
         return { ok: true, installed: true };
       } catch (err) {
         if (err.message.includes('changed under us') && attempt === 0) {
@@ -2539,6 +2551,7 @@ function setupFileHandlers() {
   ipcMain.handle('claudeHooks:enable', (_evt, opts) => {
     const r = enableClaudeHooks(opts);
     if (r?.ok) {
+      updateSettings({ statusDotsChoice: 'on' });
       const c = enableCodexHooks();
       if (c.error) console.warn(`[codexHooks] install skipped: ${c.error}`);
       return { ...r, codex: c.error ? { error: c.error } : { ok: true, absent: !!c.codexAbsent } };
@@ -2632,25 +2645,40 @@ function setupFileHandlers() {
   // having to toggle the Settings switch. Only an ALREADY-installed block is
   // touched (never a fresh opt-in), and the isolated ship-test instance never
   // writes the real ~/.claude/settings.json.
+  // A settings.json Claude accepts but our hook code cannot read (a hooks entry that is not a list) must never stop
+  // the launch before the first window opens (Codex round 5).
   if (!process.env.DOBIUS_USERDATA_DIR && !IS_WIN) {
-    const { settings, exists } = readClaudeSettings();
-    const hooks = settings?.hooks;
-    const installed = exists && settings && Object.values(hooks || {})
-      .some((groups) => Array.isArray(groups) && groups.some(isStatusGroup));
-    // Also blocks from before the instant red (PermissionRequest).
-    if (installed && (!hasTabHint(hooks) || !hasPermissionRequest(hooks) || !hasHandoffStop(hooks))) {
-      const r = enableClaudeHooks();
-      if (r?.error) console.warn(`[claudeHooks] status hook upgrade skipped: ${r.error}`);
-    }
-    // The Codex dots arrived after many people had the Claude ones on: give
-    // them the Codex block too (Codex asks once to trust it).
-    if (installed) {
-      const c = readCodexHooks();
-      if (!c.error && !c.absent && !codexHooksCurrent(c.doc)) {
-        const r = enableCodexHooks();
-        if (r?.error) console.warn(`[codexHooks] install skipped: ${r.error}`);
+    try {
+      const { settings, exists } = readClaudeSettings();
+      let hooks = settings?.hooks;
+      let installed = exists && settings && Object.values(hooks || {})
+        .some((groups) => Array.isArray(groups) && groups.some(isStatusGroup));
+      // On by default (Sam, 2026-11-07: "settings like tab status dots ... should automatically turn on"): once, on a
+      // Mac whose person has never chosen. Never creates settings.json, and a choice made in Settings sticks
+      // (statusDotsChoice 'on' / 'off', written by the switch).
+      if (getSettings().statusDotsChoice === undefined) {
+        if (!installed && exists && settings) {
+          const r = enableClaudeHooks();
+          if (r?.ok) { installed = true; hooks = readClaudeSettings().settings?.hooks; } else console.warn(`[claudeHooks] default-on skipped: ${r?.error || 'unknown'}`);
+        }
+        if (installed) updateSettings({ statusDotsChoice: 'on' });
       }
-    }
+      // Also blocks from before the instant red (PermissionRequest).
+      if (installed && (!hasTabHint(hooks) || !hasPermissionRequest(hooks) || !hasHandoffStop(hooks))) {
+        const r = enableClaudeHooks();
+        if (r?.error) console.warn(`[claudeHooks] status hook upgrade skipped: ${r.error}`);
+      }
+      // The Codex dots arrived after many people had the Claude ones on: give
+      // them the Codex block too (Codex asks once to trust it). Never after the person turned dots off: a Claude
+      // block whose removal failed must not bring the removed Codex one back (Codex round 6).
+      if (installed && getSettings().statusDotsChoice !== 'off') {
+        const c = readCodexHooks();
+        if (!c.error && !c.absent && !codexHooksCurrent(c.doc)) {
+          const r = enableCodexHooks();
+          if (r?.error) console.warn(`[codexHooks] install skipped: ${r.error}`);
+        }
+      }
+    } catch (err) { console.warn(`[claudeHooks] launch install skipped: ${err?.message || err}`); }
   }
 
   function disableClaudeHooks() {
@@ -2671,7 +2699,7 @@ function setupFileHandlers() {
       try {
         // Same as enable: always pass rawForWrite so a second concurrent
         // Claude rewrite can't slip through the retry.
-        writeClaudeSettings(toWrite, rawForWrite);
+        writeClaudeSettings(toWrite, rawForWrite, { mustExist: true }); // removing hooks never creates the file (Codex round 3)
         return { ok: true, installed: false };
       } catch (err) {
         if (err.message.includes('changed under us') && attempt === 0) {
@@ -2691,6 +2719,7 @@ function setupFileHandlers() {
     return { error: 'disable failed after retry' };
   }
   ipcMain.handle('claudeHooks:disable', () => {
+    updateSettings({ statusDotsChoice: 'off' }); // turned off on purpose: never turned back on by default
     const r = disableClaudeHooks();
     // The Codex block goes with it, whatever happened to the Claude one.
     const c = disableCodexHooks();
@@ -2973,11 +3002,11 @@ function setupFileHandlers() {
   if (!IS_WIN && !realClaudeHomeRefusal()) {
     const { settings, exists } = readClaudeSettings();
     if (settings && exists) {
+      // Existence re-checked too: a settings.json deleted since launch read
+      // would otherwise be recreated without anyone confirming it.
+      const eligible = (st) => fs.existsSync(claudeSettingsPath)
+        && (statusLineIsMine(st) || st.statusLine === undefined);
       if (getSettings().modelUnderPrompt === undefined) {
-        // Existence re-checked too: a settings.json deleted since launch read
-        // would otherwise be recreated without anyone confirming it.
-        const eligible = (st) => fs.existsSync(claudeSettingsPath)
-          && (statusLineIsMine(st) || st.statusLine === undefined);
         if (eligible(settings)) {
           const r = setStatusLinePart('modelUnderPrompt', true, undefined, eligible);
           if (r?.error) console.warn(`[statusLine] model line install skipped: ${r.error}`);
@@ -2986,6 +3015,18 @@ function setupFileHandlers() {
         // Refresh only: if the slot changed since this read, leave it alone.
         const r = syncStatusLine(undefined, (st) => fs.existsSync(claudeSettingsPath) && statusLineIsMine(st));
         if (r?.error) console.warn(`[statusLine] script refresh skipped: ${r.error}`);
+      }
+      // Account usage on by default too (Sam, 2026-11-08: "yes to account usage as well"): once, for a Mac whose
+      // person never chose, by the same rules as the model line (an empty slot or our own reporter, never a status
+      // line of theirs, never a new settings.json). The Settings switch records the choice (usageChoice) and it sticks.
+      if (getSettings().usageChoice === undefined) {
+        const now = readClaudeSettings().settings;
+        if (getSettings().usageReporting === true) updateSettings({ usageChoice: 'on' });
+        else if (now && eligible(now)) {
+          const r = setStatusLinePart('usageReporting', true, undefined, eligible);
+          if (r?.error) console.warn(`[statusLine] account usage default-on skipped: ${r.error}`);
+          else { updateSettings({ usageChoice: 'on' }); persistConfigNow(); }
+        }
       }
     }
   }
@@ -3002,11 +3043,13 @@ function setupFileHandlers() {
   ipcMain.handle('claudeUsage:enable', (_evt, opts) => {
     if (IS_WIN) return WIN_UNSUPPORTED;
     const r = setStatusLinePart('usageReporting', true, opts);
+    if (!r?.error) updateSettings({ usageChoice: 'on' });
     return r?.error ? r : { ok: true, installed: true };
   });
 
   ipcMain.handle('claudeUsage:disable', () => {
     const r = setStatusLinePart('usageReporting', false);
+    if (!r?.error) updateSettings({ usageChoice: 'off' });
     return r?.error ? r : { ...r, installed: false };
   });
 
@@ -4179,6 +4222,17 @@ function setupWindowHandlers() {
   // orchestrator tab reuses these same guards.
   initTeam({ bridgeOpenDeps, endpoint: getTeamEndpoint, endpointProblem: getTeamEndpointProblem });
   setTeamBridge(handleTeamBridge);
+  // What a Claude session in a Dobius tab is told it can do (electron/agent-context.js), kept current: at launch,
+  // after a Google account change, and every two minutes (written only when the text changed).
+  // Stage the gws shim first, so the first context names it even before any terminal opens (Codex round 2).
+  try { ensureShim(); } catch (err) { console.warn('[agent-context] gws shim:', err?.message || err); }
+  refreshAgentContext();
+  setInterval(refreshAgentContext, 2 * 60 * 1000).unref?.();
+  // Accounts connected before the quota-project check carry no mark, so every gws call through the shim is a 403
+  // until something checks them (Max, 2026-11-07). Check once, quietly, a little after launch. Not in a harness.
+  if (!process.env.DOBIUS_USERDATA_DIR) {
+    setTimeout(() => { verifyGwsAccounts().catch((err) => console.warn('[gws] launch check:', err?.message || err)); }, 30_000).unref?.();
+  }
   // Tasks > Commands (electron/handoff-commands.js): the `! ` commands a session handed back, per tab, read from its
   // last reply when its Stop hook marks the handback. Run: see handoffCommands:prepare and terminal:create.
   handoffCommands = createHandoffCommands({
@@ -4922,7 +4976,9 @@ app.whenReady().then(() => {
   // an OOM abort every ~2h and destabilized the whole Mac. When on it
   // self-recycles to stay under the cap.
   const conductor = BUILTIN_AGENTS.find((a) => a.id === 'builtin-voice-conductor');
-  if (conductor && getSettings().voiceConductorEnabled) ensureVoiceConductor(conductor.systemPrompt);
+  // Never on Windows (iPhone/Siri voice routing is macOS only and its switch is hidden there), even when an older
+  // version saved it as on (Codex).
+  if (!IS_WIN && conductor && getSettings().voiceConductorEnabled) ensureVoiceConductor(conductor.systemPrompt);
   // iMessage transport — drives Conductor via text-yourself commands.
   // No-op until the user enables it + sets selfHandle in Settings.
   startImessageBridge();
@@ -5508,3 +5564,26 @@ app.on('will-quit', (e) => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+
+// The text a Claude session in a Dobius tab gets at its start (SessionStart hook, DOBIUS_AGENT_CONTEXT), from what
+// this Dobius knows now: this machine's team name, connected Google accounts, linked teammates. Emails and names
+// only. Never throws.
+function refreshAgentContext() {
+  let machine = os.hostname().replace(/\.local$/i, '');
+  let teammates = [];
+  let orchestratorPinned = false;
+  try {
+    const st = getTeamService()?.status();
+    if (st?.ok) {
+      machine = st.settings?.name || machine;
+      teammates = (st.peers || []).filter((p) => p.enabled).map((p) => p.name);
+      orchestratorPinned = !!st.settings?.orchestratorTab;
+    }
+  } catch (err) { console.warn('[agent-context] team status:', err?.message || err); }
+  let gwsEmails = [];
+  try { gwsEmails = listGwsAccounts().map((a) => a.email); } catch (err) { console.warn('[agent-context] gws accounts:', err?.message || err); }
+  // Advertised only when it is really there (the Windows sh wrapper is skipped for an unusable install path).
+  const shimFile = path.join(app.getPath('userData'), 'gws-shim', 'gws');
+  const gwsShim = fs.existsSync(shimFile) ? shimFile : '';
+  writeAgentContext(path.join(app.getPath('userData'), 'agent-context.md'), { machine, platform: process.platform, gwsEmails, gwsShim, teammates, orchestratorPinned });
+}

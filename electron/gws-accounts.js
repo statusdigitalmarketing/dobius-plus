@@ -23,7 +23,7 @@ import fsSync, { constants as FS } from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFile, spawn } from 'child_process';
-import { gwsClientSecretPath, gwsCommand as gwsPath, windowsGwsEntry, gwsExecEnv, gwsState, findIn, isInside, setHintDir, gwsSetupStatus, effectiveQuotaProject } from './gws-setup.js';
+import { gwsClientSecretPath, gwsCommand as gwsPath, windowsGwsEntry, npmGwsEntry, gwsExecEnv, gwsState, findIn, isInside, setHintDir, gwsSetupStatus, effectiveQuotaProject } from './gws-setup.js';
 import { randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
 import { app, shell, BrowserWindow } from 'electron';
@@ -281,7 +281,7 @@ function clientProject() {
  * moment, so the profile is read again just before writing, and only rewritten when it is still there with the same
  * grant: a Remove or a Reconnect that landed meanwhile wins (Codex round 2, all four lenses).
  */
-async function syncQuotaMark(id, prof, accessToken) {
+async function syncQuotaMark(id, prof, accessToken, stillNewest = () => true) {
   const project = clientProject();
   const denied = await quotaProjectDenied(accessToken, project);
   // Decided under the lock from a fresh read, so no connect, reconnect, remove or other check for this account can
@@ -291,7 +291,8 @@ async function syncQuotaMark(id, prof, accessToken) {
     const now = await readProfile(id);
     if (!now) return false;
     const stored = !!now.noQuotaProject;
-    if (clientProject() !== project || now.refresh_token !== prof.refresh_token || !getGwsAccounts().some((a) => a.id === id)) return stored;
+    // A newer check started while Google answered this one: that one decides (Codex round 4).
+    if (!stillNewest() || clientProject() !== project || now.refresh_token !== prof.refresh_token || !getGwsAccounts().some((a) => a.id === id)) return stored;
     // The mark records the project it was decided for. Google not saying (null) keeps a mark only for that same
     // project; a mark made for another project no longer applies.
     const want = denied === null ? stored && now.noQuotaFor === project : denied;
@@ -409,7 +410,10 @@ export function listGwsAccounts() {
 // Verify results are cached briefly: Settings re-renders must not hammer
 // Google's token endpoint. A successful probe seeds the runtime token cache,
 // so verifying is never wasted work.
-const verifyCache = new Map(); // id -> { at, status, error }
+const verifyCache = new Map(); // id -> { at, seq, status, error }
+let verifySeq = 0;
+let verifyWrites = 0; // bumped on every verifyCache write: a result written after a check began is newer than its copy
+const latestVerify = new Map(); // id -> seq of the newest check that probes it
 const VERIFY_CACHE_MS = 5 * 60_000;
 
 /**
@@ -419,9 +423,18 @@ const VERIFY_CACHE_MS = 5 * 60_000;
  */
 export async function verifyGwsAccounts({ force = false } = {}) {
   const out = [];
-  for (const a of getGwsAccounts()) {
+  // Two checks can overlap (the launch check and Settings opening): the one that STARTED later wins the cache, so an
+  // older failure landing after a newer success never shows "check failed" for five minutes (Codex).
+  const startedAt = ++verifySeq;
+  const writesAtStart = verifyWrites;
+  const accounts = getGwsAccounts();
+  // Decided once: an answer that expires while earlier accounts are checked is still served, never probed unclaimed
+  // (an unclaimed probe skips the quota mark, Codex round 6).
+  const probe = new Set();
+  for (const a of accounts) if (force || !verifyCache.get(a.id) || Date.now() - verifyCache.get(a.id).at >= VERIFY_CACHE_MS) { probe.add(a.id); latestVerify.set(a.id, startedAt); }
+  for (const a of accounts) {
     const hit = verifyCache.get(a.id);
-    if (!force && hit && Date.now() - hit.at < VERIFY_CACHE_MS) {
+    if (!probe.has(a.id) && hit) {
       out.push({ id: a.id, email: a.email, status: hit.status, error: hit.error, quotaSkipped: !!hit.quotaSkipped });
       continue;
     }
@@ -451,7 +464,11 @@ export async function verifyGwsAccounts({ force = false } = {}) {
         if (profileAgrees && who && a.email && who.toLowerCase() === String(a.email).toLowerCase()) {
           status = 'ok';
           tokenCache.set(a.id, { token: res.access_token, expiresAt: Date.now() + (res.expires_in - 60) * 1000 });
-          quotaSkipped = await syncQuotaMark(a.id, prof, res.access_token);
+          // Only the newest check for this account may change its quota mark: an older probe landing late must not
+          // undo what a newer one decided (Codex round 3).
+          quotaSkipped = latestVerify.get(a.id) === startedAt
+            ? await syncQuotaMark(a.id, prof, res.access_token, () => latestVerify.get(a.id) === startedAt)
+            : !!prof.noQuotaProject;
         } else if (who) {
           error = 'email_mismatch'; // grant works but is not this account's
         } else {
@@ -463,10 +480,28 @@ export async function verifyGwsAccounts({ force = false } = {}) {
         error = res.error; // network_error, http_5xx, ...: not proof of death
       }
     }
-    verifyCache.set(a.id, { at: Date.now(), status, error, quotaSkipped });
+    const prev = verifyCache.get(a.id);
+    if (prev && prev.seq > startedAt) {
+      // A check that started later already answered: report that one, never this older result (Codex round 2).
+      out.push({ id: a.id, email: a.email, status: prev.status, error: prev.error, quotaSkipped: !!prev.quotaSkipped });
+      continue;
+    }
+    // A newer check has claimed this account but not answered yet: report this result, but leave the cache to the
+    // newer one, so it still probes the quota project instead of finding this answer and stopping (Codex round 4).
+    if (latestVerify.get(a.id) !== startedAt) {
+      out.push({ id: a.id, email: a.email, status, error, quotaSkipped });
+      continue;
+    }
+    verifyCache.set(a.id, { at: Date.now(), seq: startedAt, w: ++verifyWrites, status, error, quotaSkipped });
     out.push({ id: a.id, email: a.email, status, error, quotaSkipped });
   }
-  return out;
+  // Any answer written to the cache after this check began is newer than what this check holds: a later check that
+  // finished first, or an earlier forced one that finished while this one served that account from the old cache
+  // (Codex round 5). Only the newest check for an account writes it, so the cache is never older than our copy.
+  return out.map((r) => {
+    const c = verifyCache.get(r.id);
+    return c && c.w > writesAtStart ? { ...r, status: c.status, error: c.error, quotaSkipped: !!c.quotaSkipped } : r;
+  });
 }
 
 /** Whose access token is this? Email from Google userinfo, or null. */
@@ -832,7 +867,68 @@ export async function getAccessTokenForEmail(email) {
 
 /** Find the real gws binary (never the shim). Scans the standard dirs. */
 const isExecutable = (p) => { try { fsSync.accessSync(p, FS.X_OK); return fsSync.statSync(p).isFile(); } catch { return false; } };
+/**
+ * Windows: the real gws for the shim to run (Max, 2026-11-07, patch 0010). npm installs gws as a .cmd/.ps1 pair around
+ * a JS entry, which the shim runs under Dobius's own Electron in node mode (the same lookup as gwsCommand); a native
+ * gws.exe on Path also works. Never a file inside excludeDir (the shim's own folder).
+ */
+export function resolveRealGwsWindows(excludeDir = null, env = process.env) {
+  const entry = windowsGwsEntry(env);
+  if (entry && !isInside(entry, excludeDir)) return entry;
+  const skip = excludeDir ? path.win32.resolve(excludeDir).toLowerCase() : null;
+  for (const dir of String(env.Path || env.PATH || '').split(';')) {
+    if (!dir || !path.win32.isAbsolute(dir) || (skip && path.win32.resolve(dir).toLowerCase() === skip)) continue;
+    // npm with its own prefix (not %APPDATA%\npm): the JS entry beside that prefix's gws.cmd (Codex).
+    const npmEntry = npmGwsEntry(dir);
+    if (npmEntry && !isInside(npmEntry, excludeDir)) return npmEntry;
+    const cand = path.win32.join(dir, 'gws.exe');
+    try { if (fsSync.statSync(cand).isFile()) return cand; } catch { /* next */ }
+  }
+  return null;
+}
+
+/**
+ * Windows: the gws.cmd that runs the shim under Electron in node mode. %* hands the arguments through exactly as
+ * npm's own gws.cmd does (same quoting limits). Null when a path holds a character cmd would read as syntax (% expands,
+ * " ends the quote, a line break ends the command) or one outside ASCII: no wrapper beats a wrapper that runs
+ * something else, and without one the tab's plain gws still works.
+ */
+// gws.cmd for a Dobius folder cmd.exe cannot name: it refuses loudly instead of being left out, because without it
+// cmd.exe would find npm's gws.cmd next and run as the default Google account whatever DOBIUS_GWS_ACCOUNT says
+// (Codex round 7). No path inside, so nothing in it needs quoting.
+export const WINDOWS_REFUSING_CMD = '@echo off\r\n1>&2 echo gws: Dobius cannot run gws from cmd.exe here, its folder name has characters cmd.exe cannot carry. Use a PowerShell or Git Bash tab.\r\nexit /b 1\r\n';
+
+export function windowsShimWrapper(execPath, shimJs, selfPath) {
+  // Also nothing outside ASCII: cmd reads a .cmd file in the console's OEM codepage, so a C:\Users\José path written
+  // as UTF-8 would name a folder that does not exist, and this wrapper (first on Path) would break plain gws too.
+  // ! too: with delayed expansion on it expands, and DisableDelayedExpansion below turns it off for this file anyway.
+  if ([execPath, shimJs, selfPath].some((p) => typeof p !== 'string' || !p || /[%!"\r\n]|[^\x20-\x7e]/.test(p))) return null;
+  return [
+    '@echo off',
+    'setlocal DisableDelayedExpansion',
+    'set ELECTRON_RUN_AS_NODE=1',
+    `set "DOBIUS_GWS_SHIM_SELF=${selfPath}"`,
+    `"${execPath}" "${shimJs}" %*`,
+    '',
+  ].join('\r\n');
+}
+
+/**
+ * Windows: an extensionless `gws` sh script for Git Bash, which is also the shell Claude Code's Bash tool uses there.
+ * Bash never runs gws.cmd for `gws`, so without this it finds npm's own `gws` further down PATH and ignores
+ * DOBIUS_GWS_ACCOUNT (Codex). Forward slashes; null when a path holds a character sh would read inside "...".
+ */
+export function windowsShShimWrapper(execPath, shimJs, selfPath) {
+  // Single-quoted, so $ ` " and \ are all literal; a ' is closed, escaped and reopened. Only control characters (a
+  // line break would end the command) are refused (Codex round 2: a $ in the install path dropped this wrapper).
+  const ok = (p) => typeof p === 'string' && p && !/[\x00-\x1f\x7f]/.test(p);
+  if (![execPath, shimJs, selfPath].every(ok)) return null;
+  const q = (p) => `'${p.replace(/\\/g, '/').replace(/'/g, `'\\''`)}'`;
+  return `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexport DOBIUS_GWS_SHIM_SELF=${q(selfPath)}\nexec ${q(execPath)} ${q(shimJs)} "$@"\n`;
+}
+
 export function resolveRealGws(excludeDir = null) {
+  if (IS_WIN) return resolveRealGwsWindows(excludeDir);
   // Looked up again on every call (each terminal spawn), so a gws installed after launch is found without a restart.
   // The gws in use (a Locate pick may be run.js, which a search by name would miss), unless it is gone or the shim.
   const st = gwsState();
@@ -859,11 +955,26 @@ export function ensureShim() {
     const destJs = path.join(shimDir, 'gws-shim.mjs');
     // Copy the bundled shim source out of the asar so a plain node can run it.
     fsSync.copyFileSync(srcJs, destJs);
-    const wrapperPath = path.join(shimDir, 'gws');
-    // execPath is the Electron binary; ELECTRON_RUN_AS_NODE makes it a node.
-    const wrapper = `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexport DOBIUS_GWS_SHIM_SELF="${wrapperPath}"\nexec "${process.execPath}" "${destJs}" "$@"\n`;
-    fsSync.writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
-    fsSync.chmodSync(wrapperPath, 0o755);
+    if (IS_WIN) {
+      // Three ways in, all first on the tab's Path: gws.cmd for cmd.exe, an extensionless sh `gws` for Git Bash (and
+      // Claude's Bash tool), and in PowerShell a `gws` function the tab defines at start (shared/new-tab.js), which
+      // passes JSON quotes intact where PowerShell would mangle them on the way into a .cmd.
+      const cmdPath = path.join(shimDir, 'gws.cmd');
+      const shPath = path.join(shimDir, 'gws');
+      const cmd = windowsShimWrapper(process.execPath, destJs, cmdPath);
+      const sh = windowsShShimWrapper(process.execPath, destJs, shPath);
+      for (const [file, text] of [[cmdPath, cmd || WINDOWS_REFUSING_CMD], [shPath, sh]]) {
+        if (text) fsSync.writeFileSync(file, text);
+        else try { fsSync.unlinkSync(file); } catch { /* none */ } // never leave an older one pointing elsewhere
+      }
+      if (!cmd && !sh) throw Object.assign(new Error('unsafe path for the gws wrappers'), { code: 'EUNSAFEPATH' });
+    } else {
+      const wrapperPath = path.join(shimDir, 'gws');
+      // execPath is the Electron binary; ELECTRON_RUN_AS_NODE makes it a node.
+      const wrapper = `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexport DOBIUS_GWS_SHIM_SELF="${wrapperPath}"\nexec "${process.execPath}" "${destJs}" "$@"\n`;
+      fsSync.writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
+      fsSync.chmodSync(wrapperPath, 0o755);
+    }
   } catch (e) {
     console.warn('[gws-accounts] could not stage gws shim:', e?.code || e?.message || 'unknown');
     shimDir = null;

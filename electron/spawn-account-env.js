@@ -98,7 +98,9 @@ export function resolveAccountEnvForCwd(cwd, { claudeAccountPin } = {}) {
     try { shareCodexProfile(expandTilde(codexAccount.codexHome)); }
     catch (err) { console.warn('[codex-share] spawn-time link failed:', err?.message || err); }
   }
-  const accountEnv = { ...claudeEnvForAccount(account), ...codexEnvForAccount(codexAccount) };
+  // Windows has no Accounts section to change or clear a saved one (a config carried over from an earlier build),
+  // so none applies there: the terminal uses the default logins (Codex round 5).
+  const accountEnv = IS_WIN ? {} : { ...claudeEnvForAccount(account), ...codexEnvForAccount(codexAccount) };
   // Re-validate CODEX_HOME AT SPAWN. safeCodexHome checked containment at save,
   // but a symlink component of the stored home can be retargeted afterward to
   // escape ~/.codex-profiles (e.g. to ~/.codex), which would point the terminal
@@ -116,10 +118,9 @@ export function resolveAccountEnvForCwd(cwd, { claudeAccountPin } = {}) {
   // undefined is createTerminal's deletion signal.
   if (typeof accountEnv.CODEX_HOME !== 'string') accountEnv.CODEX_HOME = undefined;
 
-  // ponytail: the per-account `gws` shim is a sh wrapper, so Windows terminals
-  // run the user's own gws unchanged. Upgrade path: a gws.cmd wrapper plus a
-  // Windows-aware real-gws lookup in gws-shim.mjs.
-  const shim = IS_WIN ? { shimDir: null } : getGwsShim();
+  // The per-account `gws` shim: a sh wrapper on the Mac, gws.cmd on Windows (ensureShim), both running gws-shim.mjs
+  // under Dobius's own Electron.
+  const shim = getGwsShim();
   if (shim.shimDir) {
     accountEnv.DOBIUS_GWS_SHIM_DIR = shim.shimDir;
     // The shim folder is staged once; the real gws is looked up again for every terminal, so one installed after
@@ -127,6 +128,11 @@ export function resolveAccountEnvForCwd(cwd, { claudeAccountPin } = {}) {
     // None found: clear any DOBIUS_REAL_GWS Dobius itself inherited (launched from a Dobius terminal), so the shim falls
     // through to gws-env.json instead of a stale path. undefined is createTerminal's deletion signal.
     accountEnv.DOBIUS_REAL_GWS = resolveRealGws(shim.shimDir) || undefined;
+    // Windows PowerShell tabs define `gws` from these two (shared/new-tab.js powerShellSpawn).
+    if (IS_WIN) {
+      accountEnv.DOBIUS_GWS_SHIM_JS = path.join(shim.shimDir, 'gws-shim.mjs');
+      accountEnv.DOBIUS_ELECTRON_EXE = process.execPath;
+    }
   }
   return accountEnv;
 }

@@ -289,6 +289,8 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
     // Which tab this shell is, so `dobius-tab` (run by an agent's Bash tool,
     // whose output never reaches the tty) can rename its own tab.
     DOBIUS_TAB_ID: id,
+    // What Dobius gives an agent here (agent-context.js); the SessionStart hook prints it into Claude's context.
+    DOBIUS_AGENT_CONTEXT: path.join(app.getPath('userData'), 'agent-context.md'),
     ...extraEnv,
     ...termEnv,
   };

@@ -2,12 +2,17 @@ import { useRef, useState, useEffect, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { buildPairingDeepLink, buildPairingWebLink } from '../../../shared/pairing-link.js';
 import { useStore } from '../../store/store';
-import { CURATED_TERMINAL_FONTS, buildTerminalFontFamily } from '../../lib/terminal-font';
+import { curatedTerminalFontsFor, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
 import { normalizeNewTabTool } from '../../../shared/new-tab.js';
+import { isWindows, currentPlatform } from '../../../shared/platform.js';
+import { WINDOWS_SHORTCUT_ROWS } from '../../../shared/win-keys.js';
 import AccountsSection from './AccountsSection';
 import GwsAccounts from './GwsAccounts';
 import TeamSection from './TeamSection';
+
+// The terminal fonts offered here: the Mac faces, or the ones Windows ships.
+const CURATED_TERMINAL_FONTS = curatedTerminalFontsFor(currentPlatform());
 
 export default function Settings() {
   const themeIndex = useStore((s) => s.themeIndex);
@@ -318,8 +323,8 @@ export default function Settings() {
         )}
       </div>
 
-      {/* Accounts */}
-      <div data-settings-section="accounts"><AccountsSection /></div>
+      {/* Accounts (Claude login switching: Keychain + /bin/ps, macOS only) */}
+      {!isWindows() && <div data-settings-section="accounts"><AccountsSection /></div>}
       <div data-settings-section="gws"><GwsAccounts /></div>
 
       {/* Appearance */}
@@ -432,7 +437,9 @@ export default function Settings() {
       <Section id="terminal" title="Terminal">
         <SettingRow
           label="New Tab Starts"
-          description="What a new tab runs in its project folder (Cmd+T, or the + project picker), back to your shell when it exits. Needs zsh or bash. Restored tabs are left alone."
+          description={isWindows()
+            ? 'What a new tab runs in its project folder (Ctrl+Shift+T, or the + project picker), back to your shell when it exits. Restored tabs are left alone.'
+            : 'What a new tab runs in its project folder (Cmd+T, or the + project picker), back to your shell when it exits. Needs zsh or bash. Restored tabs are left alone.'}
         >
           <select
             value={normalizeNewTabTool(settings.newTabTool)}
@@ -525,6 +532,9 @@ export default function Settings() {
           />
         </SettingRow>
 
+        {/* The status hooks are printf commands that need bash: on a Windows PC
+            without Git Bash every Claude hook would fail, so not offered there. */}
+        {!isWindows() && (
         <SettingRow
           label="Tab status dots"
           description="Green = done, yellow = working, red = needs you, for Claude and Codex tabs. Adds hooks to ~/.claude/settings.json and ~/.codex/hooks.json (your own hooks are left alone). Codex asks you once to trust its hooks the next time it starts: choose Trust all."
@@ -540,6 +550,7 @@ export default function Settings() {
             />
           </div>
         </SettingRow>
+        )}
 
         <SettingRow
           label="Show model under the prompt"
@@ -618,22 +629,27 @@ export default function Settings() {
           placeholder="Paste your Fireflies key…"
         />
 
+        {/* Runs through the Voice Conductor, which is macOS only (Codex round 3). */}
+        {!isWindows() && (
         <SettingRow
           label="Auto Mode"
           description={`Poll Asana every ${autoMode.intervalMinutes || 10} min and auto-run new tasks (build mine + review Sam's). Stops only for your OK before posting to Asana or deploying.`}
         >
           <Toggle checked={!!autoMode.enabled} onChange={toggleAutoMode} />
         </SettingRow>
+        )}
       </Section>
 
       {/* Today alerts: counts only, never what a card says */}
       <Section id="today" title="Today Alerts">
-        <SettingRow label="Mac notification" description="A notification each morning with how many things are on Today, then again as you clear them. Click it to open Today.">
+        <SettingRow label={isWindows() ? 'Notification' : 'Mac notification'} description="A notification each morning with how many things are on Today, then again as you clear them. Click it to open Today.">
           <Toggle checked={!!nudges.mac} onChange={(v) => updateNudges({ mac: v })} />
         </SettingRow>
+        {!isWindows() && (
         <SettingRow label="Text to yourself" description="The same count as an iMessage to your own handle (set under iMessage Bridge). Says how many, never what they are.">
           <Toggle checked={!!nudges.imessage} onChange={(v) => updateNudges({ imessage: v })} />
         </SettingRow>
+        )}
         <SettingRow label="Phone notification" description="On a phone with Dobius notifications turned on (the web app added to the Home Screen).">
           <Toggle checked={!!nudges.push} onChange={(v) => updateNudges({ push: v })} />
         </SettingRow>
@@ -778,8 +794,8 @@ export default function Settings() {
                     ))}
                   </div>
                   {qrTarget === 'app'
-                    ? 'Opens the Dobius+ app with this Mac and code filled in, so you only confirm. Needs the app installed: without it the camera finds nothing to open.'
-                    : <>Opens Dobius+ in your browser with this Mac filled in{mobileStatus.url?.startsWith('https://')
+                    ? `Opens the Dobius+ app with this ${isWindows() ? 'PC' : 'Mac'} and code filled in, so you only confirm. Needs the app installed: without it the camera finds nothing to open.`
+                    : <>Opens Dobius+ in your browser with this {isWindows() ? 'PC' : 'Mac'} filled in{mobileStatus.url?.startsWith('https://')
                       ? ' and this code too, so you only tap “Pair this device.”'
                       : '; type this code there. With HTTPS on, the code is filled in too.'}</>}
                   {' '}Needs Tailscale on the phone. The code rotates on regenerate.
@@ -787,7 +803,7 @@ export default function Settings() {
               </div>
             )}
 
-            {mobileStatus.pairingCode && (mobileStatus.address || mobileStatus.url) && (
+            {!isWindows() && mobileStatus.pairingCode && (mobileStatus.address || mobileStatus.url) && (
               <SettingRow
                 label="Text it to yourself"
                 description={pairTextMsg || (imsgCfg?.selfHandle
@@ -845,7 +861,8 @@ export default function Settings() {
         <TeamSection Section={Section} SettingRow={SettingRow} Toggle={Toggle} />
       </div>
 
-      {/* iMessage Bridge — text yourself to drive Dobius */}
+      {/* iMessage Bridge: text yourself to drive Dobius (Messages.app: macOS only) */}
+      {!isWindows() && (
       <Section id="imessage" title="iMessage Bridge">
         <SettingRow
           label="Enable bridge"
@@ -940,9 +957,15 @@ export default function Settings() {
           </div>
         )}
       </Section>
+      )}
 
       {/* Keyboard Shortcuts */}
       <Section id="shortcuts" title="Keyboard Shortcuts">
+        {isWindows() ? (
+        <div className="space-y-1.5">
+          {WINDOWS_SHORTCUT_ROWS.map((r) => <ShortcutRow key={r.keys} keys={r.keys} action={r.action} />)}
+        </div>
+        ) : (
         <div className="space-y-1.5">
           <ShortcutRow keys="Cmd+T" action="New Tab" />
           <ShortcutRow keys="Cmd+W" action="Close Tab" />
@@ -959,15 +982,19 @@ export default function Settings() {
           <ShortcutRow keys="Esc" action="Focus Terminal (from input)" />
           <ShortcutRow keys="Enter" action="Send Command (from input)" />
         </div>
+        )}
       </Section>
 
       <Section id="diagnostics" title="Diagnostics">
+        {/* iPhone/Siri voice routing: macOS only */}
+        {!isWindows() && (
         <SettingRow
           label="Voice Conductor"
           description="A background Opus session for iPhone voice routing. Off by default: leave it off unless you use the voice Shortcut. When on it self-recycles so it never fills memory."
         >
           <Toggle checked={voiceConductor} onChange={toggleVoiceConductor} />
         </SettingRow>
+        )}
         <SettingRow
           label="Error log"
           description={errorLogPath

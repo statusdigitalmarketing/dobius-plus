@@ -3,6 +3,7 @@ import { useStore } from '../../store/store';
 import ThemePicker from './ThemePicker';
 import TasksDropdown from './TasksDropdown';
 import SpeakButton from './SpeakButton';
+import { isWindows } from '../../../shared/platform.js';
 
 export default function TopBar({ projectName }) {
   const activeView = useStore((s) => s.activeView);
@@ -55,7 +56,7 @@ export default function TopBar({ projectName }) {
           onClick={toggleSidebar}
           className="px-2 py-1 text-xs rounded transition-colors duration-150"
           style={{ color: 'var(--dim)' }}
-          title="Toggle Sidebar (Cmd+B)"
+          title={isWindows() ? 'Toggle Sidebar (Ctrl+Shift+B)' : 'Toggle Sidebar (Cmd+B)'}
           aria-label="Toggle sidebar"
           onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--fg)'; e.currentTarget.style.backgroundColor = 'var(--surface-hover)'; }}
           onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dim)'; e.currentTarget.style.backgroundColor = 'transparent'; }}

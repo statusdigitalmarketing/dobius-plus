@@ -18,6 +18,8 @@ export function normalizeNewTabTool(value) {
 // What to type into a new tab's shell, or null for a plain shell. The tab's
 // PTY already starts in the project directory with the active Claude and
 // Codex account env (terminal:create), so the bare command is enough.
+export { PS_GWS_FUNCTION };
+
 export function newTabCommand(tool) {
   if (tool === 'claude') return 'claude';
   if (tool === 'codex') return 'codex';
@@ -151,12 +153,33 @@ export function isPowerShell(shell) {
 // Application (claude.exe, or npm's claude.cmd) so the default execution
 // policy, which blocks npm's .ps1 shims, never stops it. Passed encoded, so no
 // quoting survives into the command line to be misread.
+// `gws` in a PowerShell tab is Dobius's per-account shim run under Dobius's Electron, defined in EVERY PowerShell tab
+// (plain ones too). A function, so no .ps1 meets the execution policy. It builds the command line itself (the C runtime
+// rules: quotes as \", backslashes doubled before a quote) and starts the process through .NET (Codex rounds 1 and 2):
+// PowerShell's own passing strips the quotes inside --params '{"userId":"me"}' through a .cmd and in 5.1 everywhere,
+// and it would not wait for Electron (a GUI program) or report its exit code. It runs in the tab's CURRENT folder
+// (PowerShell's cd does not move the process). stdout comes back down the pipeline, so `gws ... | ConvertFrom-Json`
+// works, and piped input (`'text' | gws ...`) is handed to gws on stdin as UTF-8 with no byte order mark (5.1 takes
+// the pipe's encoding from the console, so the console's input encoding is switched for the moment of the start). ELECTRON_RUN_AS_NODE is set for
+// the child only, never the session, and a gws left running when the pipeline stops early (Select-Object -First 1)
+// is ended with everything it started (taskkill /T: the shim runs the real gws as its own child, Codex round 5).
+// A profile alias named gws is removed (aliases win over functions, so it would run gws as the default account), and
+// an array argument passes its elements as separate arguments, as PowerShell does for a native command (Codex round 6).
+// `gws auth login` and `gws auth setup` draw on the console themselves (the scope picker is cursor frames, not lines),
+// so their output is not captured (every other command is, auth export and auth status included, Codex round 8); a Constant alias cannot be removed, so the tab says so at start instead of running as the default account
+// unnoticed (Codex round 7). Output is read and the exit awaited in 200 ms waits, never one blocking call, so Ctrl+C
+// stops the function and finally ends the gws tree (a blocked ReadLine cannot be interrupted, Codex round 9). Accepted: stderr goes to the console, not the
+// error stream (2> cannot catch it), $? stays true on failure (check $LASTEXITCODE), and a huge piped input is written
+// before any output is read.
+const PS_GWS_FUNCTION = String.raw`if ($env:DOBIUS_GWS_SHIM_JS -and $env:DOBIUS_ELECTRON_EXE) { Remove-Item Alias:gws -Force -ErrorAction SilentlyContinue; if (Test-Path Alias:gws) { Write-Warning 'gws is a constant alias in your PowerShell profile, so it runs as your default Google account, not the one Dobius picks. Remove it from the profile to use Dobius accounts here.' }; function global:gws { $q = { param($s) if ($s -eq '') { return '""' }; if ($s -notmatch '[\s"]') { return $s }; $r = '"'; $n = 0; foreach ($c in $s.ToCharArray()) { if ($c -eq [char]92) { $n++ } elseif ($c -eq [char]34) { $r += ('\' * (2 * $n + 1)) + '"'; $n = 0 } else { $r += ('\' * $n) + $c; $n = 0 } }; return $r + ('\' * (2 * $n)) + '"' }; $fa = @($args | ForEach-Object { $_ }); $line = (@($env:DOBIUS_GWS_SHIM_JS) + $fa | ForEach-Object { & $q ([string]$_) }) -join ' '; $pipe = $MyInvocation.ExpectingInput; $cap = -not ($fa.Count -gt 1 -and [string]$fa[0] -eq 'auth' -and @('login', 'setup') -contains [string]$fa[1]); $p = $null; try { $i = New-Object System.Diagnostics.ProcessStartInfo; $i.FileName = $env:DOBIUS_ELECTRON_EXE; $i.Arguments = $line; $i.WorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath; $i.UseShellExecute = $false; $i.EnvironmentVariables['ELECTRON_RUN_AS_NODE'] = '1'; $i.EnvironmentVariables['DOBIUS_GWS_SHIM_SELF'] = $env:DOBIUS_GWS_SHIM_JS; $i.RedirectStandardOutput = $cap; $i.RedirectStandardInput = $pipe; if ($cap) { $i.StandardOutputEncoding = [System.Text.Encoding]::UTF8 }; $u = New-Object System.Text.UTF8Encoding $false; $ie = $null; if ($pipe) { if ($i.PSObject.Properties['StandardInputEncoding']) { $i.StandardInputEncoding = $u } else { try { $ie = [Console]::InputEncoding; [Console]::InputEncoding = $u } catch { $ie = $null } } }; try { $p = [System.Diagnostics.Process]::Start($i) } finally { if ($ie) { try { [Console]::InputEncoding = $ie } catch { } } }; if ($pipe) { foreach ($x in $input) { $b = $u.GetBytes(([string]$x) + [char]10); $p.StandardInput.BaseStream.Write($b, 0, $b.Length) }; $p.StandardInput.BaseStream.Flush(); $p.StandardInput.Close() }; if ($cap) { while ($true) { $t = $p.StandardOutput.ReadLineAsync(); while (-not $t.Wait(200)) { }; if ($null -eq $t.Result) { break }; $t.Result } }; while (-not $p.WaitForExit(200)) { }; $p.WaitForExit(); $global:LASTEXITCODE = $p.ExitCode } finally { if ($p -and -not $p.HasExited) { try { & "$env:SystemRoot\System32\taskkill.exe" /PID $p.Id /T /F 2>$null | Out-Null } catch { }; try { $p.Kill() } catch { } } } } }`;
+
 function powerShellSpawn(resuming) {
   const v = START_TOOL_ENV;
   const script = [
     `$__dt = $env:${v}; $__di = $env:${v}_ID; $__dc = $env:${v}_CWD`,
     `Remove-Item Env:${v}, Env:${v}_ID, Env:${v}_CWD -ErrorAction SilentlyContinue`,
     'function __dobius_run($n) { $a = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($a) { & $a.Source @args } else { & $n @args } }',
+    PS_GWS_FUNCTION,
     resuming
       ? "if ($__dt -eq 'resume') { Set-Location -LiteralPath $__dc; __dobius_run claude --resume $__di } elseif ($__dt -eq 'fresh') { Set-Location -LiteralPath $__dc; __dobius_run claude }"
       : "if ($__dt -eq 'claude') { __dobius_run claude } elseif ($__dt -eq 'codex') { __dobius_run codex }",
@@ -182,7 +205,7 @@ function utf16Base64(text) {
 export const isRunScriptPath = (p) => typeof p === 'string' && /^\/[^\x00-\x1F\x7F]*\/dobius-run-[A-Za-z0-9_-]{16,}\.sh$/.test(p);
 export function loginShellSpawn(shell, startCommand, resume = null, runScript = null) {
   const powershell = isPowerShell(shell);
-  const plain = { args: powershell ? ['-NoLogo'] : ['-l'], env: {} };
+  const plain = { args: powershell ? ['-NoLogo', '-NoExit', '-EncodedCommand', utf16Base64(PS_GWS_FUNCTION)] : ['-l'], env: {} };
   const running = !powershell && isRunScriptPath(runScript);
   const resuming = !running && !!resume && (resume.sessionId === null || /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(resume.sessionId))) && isAbsPath(String(resume.cwd)) && !/[\x00-\x1F\x7F]/.test(resume.cwd);
   if (!running && !resuming && !NEW_TAB_TOOLS.some((x) => newTabCommand(x) && newTabCommand(x) === startCommand)) return plain;

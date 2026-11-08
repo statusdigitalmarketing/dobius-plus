@@ -24,6 +24,7 @@ import os from 'os';
 import { spawnSync } from 'child_process';
 
 const PROFILES_DIR = path.join(os.homedir(), '.gws-profiles');
+const IS_WIN = process.platform === 'win32';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 
 function fail(msg, code = 1) {
@@ -61,18 +62,50 @@ function isDobiusShim(p) {
 function findRealGws(selfDir, hint) {
   const realSelf = selfDir ? real(selfDir) : null;
   const notSelf = (p) => {
-    if (typeof p !== 'string' || !p.startsWith('/') || !isExec(p)) return false;
+    if (typeof p !== 'string' || !path.isAbsolute(p) || !isExec(p)) return false;
     const rp = real(p);
-    return !!rp && !(realSelf && (rp === realSelf || rp.startsWith(realSelf + path.sep))) && !isDobiusShim(rp);
+    if (!rp) return false; // vanished, or a parent folder cannot be read: not a gws we can vouch for
+    const same = (a, b) => (IS_WIN ? a.toLowerCase() === b.toLowerCase() : a === b);
+    const inSelf = realSelf && (same(rp, realSelf) || same(rp.slice(0, realSelf.length + 1), realSelf + path.sep));
+    return !inSelf && !isDobiusShim(rp);
   };
   // What Dobius found most recently beats what it found when this terminal opened: a Locate or an install since then
   // must reach open tabs too (Codex round 2).
   if (notSelf(hint?.gws)) return hint.gws;
   if (notSelf(process.env.DOBIUS_REAL_GWS)) return process.env.DOBIUS_REAL_GWS;
-  for (const dir of (process.env.PATH || '').split(':')) {
+  // Windows: a ';' Path, and only a native gws.exe starts without a shell (npm's gws.cmd needs one; Dobius passes the
+  // JS entry as DOBIUS_REAL_GWS instead).
+  const pathVar = IS_WIN ? (process.env.Path || process.env.PATH || '') : (process.env.PATH || '');
+  const dirs = pathVar.split(path.delimiter);
+  // Windows: npm's own folder too (a gws installed after this tab opened), and npm's layout in any Path folder, whose
+  // JS entry runs under this Electron (realGwsSpawn). Dobius writes no gws-env.json hint there (Codex).
+  if (IS_WIN && process.env.APPDATA) dirs.unshift(path.join(process.env.APPDATA, 'npm'));
+  for (const dir of dirs) {
     if (!dir || dir === selfDir) continue;
-    const cand = path.join(dir, 'gws');
+    if (IS_WIN) {
+      const entry = npmEntryIn(dir);
+      if (entry && notSelf(entry)) return entry;
+    }
+    const cand = path.join(dir, IS_WIN ? 'gws.exe' : 'gws');
     if (notSelf(cand)) return cand;
+  }
+  return null;
+}
+
+// Windows: the gws JS entry under an npm prefix folder (the package's own bin map, then the known names), or null.
+// Mirrors gws-setup.js npmGwsEntry; this file runs alone, outside the app, so it cannot import it.
+function npmEntryIn(prefix) {
+  const pkg = path.join(prefix, 'node_modules', '@googleworkspace', 'cli');
+  const names = [];
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(pkg, 'package.json'), 'utf8'));
+    const bin = typeof j.bin === 'string' ? j.bin : j.bin?.gws;
+    if (typeof bin === 'string' && bin) names.push(bin);
+  } catch { /* no package here */ }
+  names.push('run.js', path.join('bin', 'gws'));
+  for (const n of names) {
+    const c = path.join(pkg, n);
+    try { if (fs.statSync(c).isFile()) return c; } catch { /* next */ }
   }
   return null;
 }
@@ -81,7 +114,7 @@ function findRealGws(selfDir, hint) {
 // checked: the gws there runs with the node there) go FIRST; an older node earlier on the tab's PATH could not run it.
 // Only absolute entries: an empty one would mean the current folder, so a project's own `node` would run.
 function withHintPath(env, hint) {
-  if (typeof hint?.path !== 'string' || !hint.path) return env;
+  if (IS_WIN || typeof hint?.path !== 'string' || !hint.path) return env; // Dobius writes no hint on Windows
   const parts = `${hint.path}:${env.PATH || ''}`.split(':').filter((d) => d.startsWith('/'));
   return { ...env, PATH: [...new Set(parts)].join(':') };
 }
@@ -107,8 +140,17 @@ function noQuotaEnv(env) {
   return { ...env, GOOGLE_WORKSPACE_CLI_CONFIG_DIR: dir, GOOGLE_APPLICATION_CREDENTIALS: adc, GOOGLE_WORKSPACE_PROJECT_ID: '' };
 }
 
+// How to start the real gws. On Windows anything but a native gws.exe is npm's JS entry (run.js, or bin/gws with no
+// extension) and runs under this same Electron binary in node mode (Max, patch 0010); on the Mac everything runs
+// directly as before.
+function realGwsSpawn(realGws, args, env, { win = IS_WIN, execPath = process.execPath } = {}) {
+  if (win && !/\.exe$/i.test(realGws)) return { file: execPath, args: [realGws, ...args], env: { ...env, ELECTRON_RUN_AS_NODE: '1' } };
+  return { file: realGws, args, env };
+}
+
 function runReal(realGws, env) {
-  const r = spawnSync(realGws, process.argv.slice(2), { stdio: 'inherit', env: withHintPath(env, HINT) });
+  const s = realGwsSpawn(realGws, process.argv.slice(2), withHintPath(env, HINT));
+  const r = spawnSync(s.file, s.args, { stdio: 'inherit', env: s.env });
   if (r.error) fail(`could not run gws (${r.error.code || 'unknown'})`, 127);
   process.exit(typeof r.status === 'number' ? r.status : 1);
 }

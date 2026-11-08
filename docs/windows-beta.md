@@ -41,9 +41,37 @@ Accepted for Dobius debugging only. Sam's Mac public key sent.
 ## From Sam on Max's PC (2026-11-07)
 | Report | State |
 |---|---|
-| Tab names show raw paths and do not clean up; paths not recognized | Open (shared/tab-label.js only knows POSIX paths and shells) |
+| Tab names show raw paths and do not clean up; paths not recognized | Done (f1cf428): program paths never become tab names; tabs find claude, npm tools, Node, Git, Tailscale |
 | Tab status dots do not work ("does not recognize a window") | Open (the hooks are POSIX shell; Windows needs its own) |
 | "Add to Claude Desktop" said "not installed on this Mac" | Done: works on Windows (Store or %APPDATA% config, runs Dobius+.exe) |
 | Auto-update needs Windows releases | Done (see email 1 #2) |
 | Tailscale cross-Dobius communication with Max's PC | Open: link the two Dobius copies (Settings > Team) once his build has the Tailscale fix |
-| Agents in Dobius tabs should know Dobius's commands; core settings on by default | Open |
+| Agents in Dobius tabs should know Dobius's commands; core settings on by default | Built, waiting on Codex review: agent-context.md via the SessionStart hook; status dots on once by default on the Mac (a choice to turn them off sticks) |
+
+## From Max, email 5 (from mr.max.ii.llc@gmail.com, 2026-11-07 ~22:10 ET): patches 0009, 0010
+Max now writes from mr.max.ii.llc@gmail.com (mschwarz@ is for insurance only).
+| Fix | State |
+|---|---|
+| 0009 Voice Conductor hidden on Windows (`visibleBuiltinAgents`) | Applied as is |
+| 0010 per-account gws shim on Windows (gws.cmd wrapper, Windows real-gws lookup, run.js under Electron) | Applied, adapted: a path with `%`, `"` or a line break gets no wrapper; the Mac path is unchanged |
+| 0010 empty gws config dir for every token call on Windows (quota project) | Not taken: the existing per-account probe marks any account Google refuses the client's Cloud project for and runs it with no quota project, on both platforms (opening Settings > Google Accounts runs the probe) |
+
+## From Max, status email (2026-11-07 22:25 ET): "waiting on Sam"
+| Item | Answer |
+|---|---|
+| Windows port source + build config | Branch `feat/windows-max` on github.com/statusdigitalmarketing/dobius-plus (public); electron-builder.yml has the win/nsis config, .github/workflows/windows.yml builds it |
+| Quota project on gmail-oauth-486517 (testers lack serviceusage.services.use) | Fixed in code (probe and mark, above). The alternative is granting testers Service Usage Consumer on that project, which needs Sam |
+| Updater 404 (no latest.yml on v2.2.7) | Fixed from the next release on: CI attaches the Windows installer and latest.yml to every published release. Needs Sam's release word |
+
+Note (2026-11-07, Mac): in a Dobius tab the login shell puts /opt/homebrew/bin ahead of the gws shim folder, so a bare
+`gws` there is Homebrew's and ignores DOBIUS_GWS_ACCOUNT. The agent context names the shim by full path; the PATH order
+itself is still open.
+
+## From Max, email 6 (2026-11-07 23:11 ET): 3 patches on top of f1cf428 (not pushed)
+| Patch | State |
+|---|---|
+| 0001 Windows UI: shortcuts work while the command bar has focus; Accounts, iMessage, Text to yourself, status dots and the Voice Conductor toggle hidden on Windows; Windows fonts; Ctrl+Shift / This PC wording | Applied as is (closes UI 1 and UI 3 from email 2). Accepted: on Windows the translated chords also fire inside a rename or text field; none of them can be typed text |
+| 0002 gws shim on Windows | Not taken: same as the adapted 0010 already applied, which also refuses unsafe paths and keeps the Mac running a JS gws directly |
+| 0003 Voice Conductor off the Windows agent lists (electron/visible-agents.js + tests) | Applied in place of 0009 (same behavior, testable module) |
+| Accounts connected before the quota check fail until checked | Done: Dobius checks every account once, 30 s after launch |
+| Local installer build fails without admin (winCodeSign 7z holds macOS symlinks) | CI is unaffected; documented for local builds: pre-extract winCodeSign-2.6.0 into the electron-builder cache |

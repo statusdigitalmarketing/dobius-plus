@@ -37,7 +37,7 @@ export function getAutoMode() {
   const q = getAsanaQueue();
   const a = q.autoMode || {};
   return {
-    enabled: !!a.enabled,
+    enabled: !!a.enabled && process.platform !== 'win32',
     intervalMinutes: a.intervalMinutes || DEFAULT_INTERVAL_MIN,
     lanes: Array.isArray(a.lanes) && a.lanes.length ? a.lanes : ['build', 'review'],
     seen: Array.isArray(a.seen) ? a.seen : [],
@@ -45,6 +45,9 @@ export function getAutoMode() {
 }
 
 export function setAutoModeEnabled(enabled) {
+  // It works through the Voice Conductor, which is macOS only: on Windows it stays off whoever asks (the desktop
+  // switch is hidden there, and the phone's setting lands here too, Codex round 4).
+  if (process.platform === 'win32' && enabled) return { ok: false, enabled: false, error: 'Auto Mode needs the Voice Conductor, which runs on macOS only.' };
   mutateAutoMode((a) => { a.enabled = !!enabled; });
   restart();
   return { ok: true, enabled: !!enabled };

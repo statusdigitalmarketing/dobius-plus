@@ -17,6 +17,18 @@ export const SETTINGS_SECTIONS = [
   { id: 'diagnostics', label: 'Diagnostics' },
 ];
 
+// Sections that only work on macOS, hidden on Windows: iMessage Bridge reads
+// Messages.app's chat.db, and Accounts switches Claude logins through the
+// Keychain and finds running sessions with /bin/ps.
+export const MAC_ONLY_SETTINGS_SECTIONS = new Set(['accounts', 'imessage']);
+
+// The sections to show on this platform, in page order.
+export function settingsSectionsFor(platform) {
+  return platform === 'win32'
+    ? SETTINGS_SECTIONS.filter((s) => !MAC_ONLY_SETTINGS_SECTIONS.has(s.id))
+    : SETTINGS_SECTIONS;
+}
+
 export const settingsSectionSelector = (id) => `[data-settings-section="${id}"]`;
 
 // The scrollTop that puts `elTop` (a viewport y, from getBoundingClientRect)

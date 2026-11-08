@@ -118,7 +118,10 @@ test('PowerShell new tabs: allowlisted tool from env, nothing interpolated', () 
   assert.equal(isPowerShell(ps), true);
   assert.equal(isPowerShell('C:\\Program Files\\PowerShell\\7\\pwsh.exe'), true);
   assert.equal(isPowerShell('/bin/zsh'), false);
-  assert.deepEqual(loginShellSpawn(ps, null), { args: ['-NoLogo'], env: {} });
+  // A plain tab runs only the gws function definition (no tool starts).
+  const plain = loginShellSpawn(ps, null);
+  assert.deepEqual(plain.args.slice(0, 3), ['-NoLogo', '-NoExit', '-EncodedCommand']);
+  assert.doesNotMatch(Buffer.from(plain.args[3], 'base64').toString('utf16le'), /__dobius_run|claude|codex/);
   const r = loginShellSpawn(ps, 'claude');
   assert.deepEqual(r.args.slice(0, 3), ['-NoLogo', '-NoExit', '-EncodedCommand']);
   assert.deepEqual(r.env, { DOBIUS_NEW_TAB_TOOL: 'claude' });
@@ -126,7 +129,7 @@ test('PowerShell new tabs: allowlisted tool from env, nothing interpolated', () 
   assert.match(script, /if \(\$__dt -eq 'claude'\) \{ __dobius_run claude \}/);
   assert.doesNotMatch(script, /Invoke-Expression|iex /);
   // A tool name outside the allowlist starts a plain shell.
-  assert.deepEqual(loginShellSpawn(ps, 'calc'), { args: ['-NoLogo'], env: {} });
+  assert.deepEqual(loginShellSpawn(ps, 'calc'), plain);
   // The Mac path is unchanged.
   assert.deepEqual(loginShellSpawn('/bin/zsh', null), { args: ['-l'], env: {} });
 });
@@ -353,4 +356,178 @@ test('Windows tab PATH: the usual tool folders that exist and are missing are ap
   assert.deepEqual(windowsToolDirs('C:\\Windows\\system32;C:\\Users\\u\\AppData\\Roaming\\npm\\', env, exists),
     ['C:\\Users\\u\\.local\\bin', 'C:\\Program Files\\Tailscale'], 'npm already there (trailing slash, any case); nodejs and Git absent');
   assert.deepEqual(windowsToolDirs('c:\\users\\u\\.local\\bin;c:\\program files\\tailscale;C:\\Users\\u\\AppData\\Roaming\\npm', env, exists), []);
+});
+
+test('gws shim on Windows: gws.cmd runs the shim under Electron; real gws is npm run.js, never the shim folder', async () => {
+  const { windowsShimWrapper, resolveRealGwsWindows } = await import('../gws-accounts.js');
+  assert.equal(
+    windowsShimWrapper('C:\\Apps\\Dobius+.exe', 'C:\\U\\gws-shim\\gws-shim.mjs', 'C:\\U\\gws-shim\\gws.cmd'),
+    '@echo off\r\nsetlocal DisableDelayedExpansion\r\nset ELECTRON_RUN_AS_NODE=1\r\nset "DOBIUS_GWS_SHIM_SELF=C:\\U\\gws-shim\\gws.cmd"\r\n"C:\\Apps\\Dobius+.exe" "C:\\U\\gws-shim\\gws-shim.mjs" %*\r\n',
+  );
+  // A path cmd would read as syntax gets no wrapper at all.
+  assert.equal(windowsShimWrapper('C:\\100%\\Dobius+.exe', 'C:\\U\\s.mjs', 'C:\\U\\gws.cmd'), null);
+  assert.equal(windowsShimWrapper('C:\\Apps\\Dobius+.exe', 'C:\\U\\a"b.mjs', 'C:\\U\\gws.cmd'), null);
+  assert.equal(windowsShimWrapper('C:\\Apps\\Dobius+.exe', 'C:\\U\\s.mjs', 'C:\\U\\x\r\ncalc'), null);
+  assert.equal(windowsShimWrapper('C:\\Apps\\Dobius+.exe', 'C:\\Users\\José\\gws-shim.mjs', 'C:\\U\\gws.cmd'), null);
+  // Such a folder still gets a gws.cmd: one that refuses, so cmd.exe never falls through to npm's gws as the default account.
+  const { WINDOWS_REFUSING_CMD } = await import('../gws-accounts.js');
+  assert.match(WINDOWS_REFUSING_CMD, /^@echo off\r\n1>&2 echo gws: .*\r\nexit \/b 1\r\n$/);
+  assert.ok(!/[%!"()^&|<>]/.test(WINDOWS_REFUSING_CMD.split('echo gws:')[1].split('\r\n')[0]), 'nothing cmd.exe would interpret');
+  const fsm = await import('node:fs');
+  const os = await import('node:os');
+  const pathm = await import('node:path');
+  const appdata = fsm.mkdtempSync(pathm.join(os.tmpdir(), 'dobius-gwsnpm-'));
+  try {
+    const pkg = pathm.join(appdata, 'npm', 'node_modules', '@googleworkspace', 'cli');
+    fsm.mkdirSync(pkg, { recursive: true });
+    fsm.writeFileSync(pathm.join(pkg, 'package.json'), JSON.stringify({ bin: { gws: 'run.js' } }));
+    fsm.writeFileSync(pathm.join(pkg, 'run.js'), '');
+    assert.equal(resolveRealGwsWindows(null, { APPDATA: appdata, Path: '' }), pathm.join(pkg, 'run.js'));
+    // The shim folder itself is never the real gws.
+    assert.equal(resolveRealGwsWindows(pkg, { APPDATA: appdata, Path: '' }), null);
+    assert.equal(resolveRealGwsWindows(null, { APPDATA: pathm.join(appdata, 'none'), Path: '' }), null);
+  } finally {
+    fsm.rmSync(appdata, { recursive: true, force: true });
+  }
+});
+
+test('Settings on Windows: no macOS-only sections; the menu and the page agree', async () => {
+  const { SETTINGS_SECTIONS, settingsSectionsFor } = await import('../../src/lib/settings-sections.js');
+  assert.deepEqual(settingsSectionsFor('darwin'), SETTINGS_SECTIONS);
+  assert.deepEqual(settingsSectionsFor('win32').map((s) => s.id),
+    ['gws', 'appearance', 'terminal', 'projects', 'integrations', 'today', 'mobile', 'team', 'shortcuts', 'diagnostics']);
+});
+
+test('Settings > Keyboard Shortcuts on Windows lists only keys that do something', async () => {
+  const { WINDOWS_SHORTCUT_ROWS } = await import('../../shared/win-keys.js');
+  const press = (combo) => {
+    const parts = combo.split('+');
+    const key = parts.pop();
+    return { type: 'keydown', key: key === 'Tab' ? 'Tab' : key.toLowerCase(), ctrlKey: parts.includes('Ctrl'), shiftKey: parts.includes('Shift'), altKey: false, metaKey: false };
+  };
+  const chords = WINDOWS_SHORTCUT_ROWS.map((r) => r.keys).filter((k) => k.startsWith('Ctrl+'));
+  assert.ok(chords.length >= 15, 'the Ctrl chords are listed');
+  for (const k of chords) {
+    const combo = k === 'Ctrl+1-9' ? 'Ctrl+5' : k;
+    const e = press(combo);
+    const app = winToMacShortcut(e) || winTerminalKey(e, true);
+    assert.ok(app, `${k} does nothing on Windows`);
+  }
+  assert.equal(WINDOWS_SHORTCUT_ROWS.some((r) => /Cmd/.test(r.keys)), false);
+});
+
+test('Terminal fonts offered on Windows are Windows fonts, Mac list unchanged', async () => {
+  const { curatedTerminalFontsFor, CURATED_TERMINAL_FONTS } = await import('../../src/lib/terminal-font.js');
+  assert.equal(curatedTerminalFontsFor('darwin'), CURATED_TERMINAL_FONTS);
+  const win = curatedTerminalFontsFor('win32');
+  assert.deepEqual(win.map((f) => f.id), ['', 'Cascadia Mono', 'Consolas', 'Lucida Console', 'Courier New']);
+  assert.equal(win[0].label, 'Default (Cascadia Code)');
+});
+
+test('the Voice Conductor (macOS voice) is not listed on Windows', async () => {
+  const { visibleBuiltinAgents } = await import('../visible-agents.js');
+  const agents = [{ id: 'builtin-code-reviewer' }, { id: 'builtin-voice-conductor' }, { id: 'builtin-test-writer' }];
+  assert.deepEqual(visibleBuiltinAgents(agents, 'win32').map((a) => a.id), ['builtin-code-reviewer', 'builtin-test-writer']);
+  assert.equal(visibleBuiltinAgents(agents, 'darwin'), agents);
+  assert.deepEqual(visibleBuiltinAgents(null, 'win32'), []);
+});
+
+test('gws shim on Windows: ! is refused in gws.cmd; Git Bash gets an sh wrapper; npm with its own prefix is found', async () => {
+  const { windowsShimWrapper, windowsShShimWrapper, resolveRealGwsWindows } = await import('../gws-accounts.js');
+  assert.equal(windowsShimWrapper('C:\\Apps\\!CHANNEL!\\Dobius+.exe', 'C:\\U\\s.mjs', 'C:\\U\\gws.cmd'), null);
+  assert.equal(
+    windowsShShimWrapper('C:\\Users\\José\\Dobius+.exe', 'C:\\U\\gws-shim\\gws-shim.mjs', 'C:\\U\\gws-shim\\gws'),
+    "#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexport DOBIUS_GWS_SHIM_SELF='C:/U/gws-shim/gws'\nexec 'C:/Users/José/Dobius+.exe' 'C:/U/gws-shim/gws-shim.mjs' \"$@\"\n",
+  );
+  // $ " ` and ' stay literal (single quotes; a ' is closed, escaped, reopened); only a control character is refused.
+  assert.match(windowsShShimWrapper('C:\\a$b`c"d\\Dobius+.exe', 'C:\\U\\s.mjs', 'C:\\U\\gws'), /exec 'C:\/a\$b`c"d\/Dobius\+\.exe'/);
+  assert.match(windowsShShimWrapper("C:\\O'Neil\\Dobius+.exe", 'C:\\U\\s.mjs', 'C:\\U\\gws'), /exec 'C:\/O'\\''Neil\/Dobius\+\.exe'/);
+  assert.equal(windowsShShimWrapper('C:\\a\nb\\Dobius+.exe', 'C:\\U\\s.mjs', 'C:\\U\\gws'), null);
+  const fsm = await import('node:fs');
+  const os = await import('node:os');
+  const pathm = await import('node:path');
+  const prefix = fsm.mkdtempSync(pathm.join(os.tmpdir(), 'dobius-npmprefix-'));
+  try {
+    const pkg = pathm.join(prefix, 'node_modules', '@googleworkspace', 'cli');
+    fsm.mkdirSync(pkg, { recursive: true });
+    fsm.writeFileSync(pathm.join(pkg, 'package.json'), JSON.stringify({ bin: { gws: 'run.js' } }));
+    fsm.writeFileSync(pathm.join(pkg, 'run.js'), '');
+    if (process.platform === 'win32') {
+      assert.equal(resolveRealGwsWindows(null, { APPDATA: pathm.join(prefix, 'none'), Path: prefix }), pathm.join(pkg, 'run.js'));
+    }
+    const { npmGwsEntry } = await import('../gws-setup.js');
+    assert.equal(npmGwsEntry(prefix), pathm.join(pkg, 'run.js'));
+    assert.equal(npmGwsEntry(pathm.join(prefix, 'nothing')), null);
+  } finally {
+    fsm.rmSync(prefix, { recursive: true, force: true });
+  }
+});
+
+test('PowerShell tabs define gws as the shim run straight under Electron (JSON quotes survive)', async () => {
+  const { loginShellSpawn, newTabCommand } = await import('../../shared/new-tab.js');
+  const pwsh = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
+  // A plain tab and one that starts Claude both get it.
+  for (const spawn of [loginShellSpawn(pwsh, null), loginShellSpawn(pwsh, newTabCommand('claude'))]) {
+    const enc = spawn.args[spawn.args.indexOf('-EncodedCommand') + 1];
+    assert.ok(spawn.args.includes('-NoExit'));
+    const script = Buffer.from(enc, 'base64').toString('utf16le');
+    assert.match(script, /function global:gws \{/);
+    assert.match(script, /\[System\.Diagnostics\.Process\]::Start\(\$i\)/);
+    assert.match(script, /\$global:LASTEXITCODE = \$p\.ExitCode/);
+    assert.match(script, /\$i\.EnvironmentVariables\['ELECTRON_RUN_AS_NODE'\] = '1'/);
+    assert.doesNotMatch(script, /\$env:ELECTRON_RUN_AS_NODE =/); // never set for the whole session
+    // The whole tree ends (the shim's real gws is its child), then the shim itself as a fallback.
+  assert.match(script, /finally \{ if \(\$p -and -not \$p\.HasExited\) \{ try \{ & "\$env:SystemRoot\\System32\\taskkill\.exe" \/PID \$p\.Id \/T \/F 2>\$null \| Out-Null \} catch \{ \}; try \{ \$p\.Kill\(\) \}/);
+  }
+  // zsh/bash tabs are untouched.
+  assert.deepEqual(loginShellSpawn('/bin/zsh', null).args, ['-l']);
+});
+
+// Runs only on Windows (CI): the real PowerShell, 5.1 and 7 when present, calling the gws function with a stand-in
+// "shim" (a node script that prints its arguments and exits 3) in place of Dobius's Electron.
+test('PowerShell gws function: arguments arrive intact, it waits, the exit code and output come back', { skip: process.platform !== 'win32' }, async () => {
+  const { PS_GWS_FUNCTION } = await import('../../shared/new-tab.js');
+  const fsm = await import('node:fs');
+  const os = await import('node:os');
+  const pathm = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const dir = fsm.mkdtempSync(pathm.join(os.tmpdir(), 'dobius-psgws-'));
+  let other = null;
+  try {
+    const stand = pathm.join(dir, 'shim.js');
+    fsm.writeFileSync(stand, "let inp = ''; process.stdin.on('data', (d) => { inp += d; }); process.stdin.on('end', () => setTimeout(() => { process.stdout.write(JSON.stringify({ args: process.argv.slice(2), run: process.env.ELECTRON_RUN_AS_NODE, cwd: process.cwd(), inp }) + '\\n'); process.exit(3); }, 300));");
+    other = fsm.mkdtempSync(pathm.join(os.tmpdir(), 'dobius-pscwd-'));
+    const tricky = ['gmail', 'users', 'getProfile', '--params', '{"userId":"me"}', 'two words', 'C:\\end\\', '', 'a"b c'];
+    const lit = (a) => `'${a.replace(/'/g, "''")}'`;
+    // A profile alias named gws must not shadow the function; an array argument passes its elements separately.
+    const body = `Set-Alias -Name gws -Value whoami.exe -Scope Global; ${PS_GWS_FUNCTION}; Set-Location -LiteralPath ${lit(other)}; $r = gws ${tricky.map(lit).join(' ')}; "EXIT=$LASTEXITCODE"; "OUT=$r"; "AFTER=$env:ELECTRON_RUN_AS_NODE"; $piped = 'hello', 'café' | gws x; "PIPED=$piped"; $arr = 'drive', 'files list'; $ar = gws $arr 'z'; "ARR=$ar"; $au = gws auth login; "AUTHCAP=[$au]"; $al = 'auth', 'setup'; $as = gws $al; "SETUPCAP=[$as]"; $st = gws auth status; "STATUS=$st"`;
+    const env = { ...process.env, DOBIUS_GWS_SHIM_JS: stand, DOBIUS_ELECTRON_EXE: process.execPath };
+    delete env.ELECTRON_RUN_AS_NODE;
+    const shells = ['powershell.exe', 'pwsh.exe'].filter((sh) => spawnSync(sh, ['-NoProfile', '-Command', 'exit 0']).status === 0);
+    assert.ok(shells.length > 0);
+    for (const sh of shells) {
+      const r = spawnSync(sh, ['-NoProfile', '-NonInteractive', '-Command', body], { env, encoding: 'utf8' });
+      const out = r.stdout.replace(/\r/g, '');
+      assert.match(out, /EXIT=3/, `${sh}: ${out} ${r.stderr}`);
+      const json = JSON.parse(out.split('\n').find((l) => l.startsWith('OUT=')).slice(4));
+      assert.deepEqual(json.args, tricky, sh);
+      assert.equal(json.run, '1', sh);
+      assert.equal(fsm.realpathSync.native(json.cwd).toLowerCase(), fsm.realpathSync.native(other).toLowerCase(), `${sh}: runs in the tab's current folder`);
+      const piped = JSON.parse(out.split('\n').find((l) => l.startsWith('PIPED=')).slice(6));
+      assert.deepEqual(piped.inp.replace(/\r/g, '').split('\n').filter(Boolean), ['hello', 'café'], `${sh}: piped input reaches gws as UTF-8`);
+      const arr = JSON.parse(out.split('\n').find((l) => l.startsWith('ARR=')).slice(4));
+      assert.deepEqual(arr.args, ['drive', 'files list', 'z'], `${sh}: array elements are separate arguments`);
+      // gws auth login / setup draw on the console: nothing captured, the output went straight to the screen (here,
+      // stdout), the array form included. Every other auth command is captured like any command.
+      assert.match(out, /^AUTHCAP=\[\]$/m, `${sh}: auth login output is not captured`);
+      assert.match(out, /^SETUPCAP=\[\]$/m, `${sh}: auth setup (array form) output is not captured`);
+      const direct = out.split('\n').filter((l) => l.startsWith('{')).map((l) => JSON.parse(l).args);
+      assert.deepEqual(direct, [['auth', 'login'], ['auth', 'setup']], `${sh}: only login and setup reach the console directly`);
+      assert.deepEqual(JSON.parse(out.split('\n').find((l) => l.startsWith('STATUS=')).slice(7)).args, ['auth', 'status'], `${sh}: auth status is captured`);
+      assert.match(out, /AFTER=\n|AFTER=$/m, `${sh}: ELECTRON_RUN_AS_NODE must not stay set`);
+    }
+  } finally {
+    fsm.rmSync(dir, { recursive: true, force: true });
+    if (other) fsm.rmSync(other, { recursive: true, force: true });
+  }
 });

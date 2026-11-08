@@ -29,7 +29,8 @@ import Costs from './Costs';
 import ChangeFeed from './ChangeFeed';
 import Search from './Search';
 import BrowserProfiles from './BrowserProfiles';
-import { SETTINGS_SECTIONS, settingsSectionSelector, sectionScrollTop } from '../../lib/settings-sections';
+import { settingsSectionsFor, settingsSectionSelector, sectionScrollTop } from '../../lib/settings-sections';
+import { currentPlatform } from '../../../shared/platform.js';
 
 // Wide enough for the longest label plus a count ("Sessions (1234)"), narrow
 // enough to leave a 900px window most of its width for the page itself.
@@ -310,7 +311,7 @@ export default function DashboardView() {
                   works at any window width. */}
               {tab.id === 'settings' && active && (
                 <div className="py-0.5" aria-label="Settings sections" role="group">
-                  {SETTINGS_SECTIONS.map((sec) => (
+                  {settingsSectionsFor(currentPlatform()).map((sec) => (
                     <button
                       key={sec.id}
                       onClick={() => jumpToSettingsSection(sec.id)}

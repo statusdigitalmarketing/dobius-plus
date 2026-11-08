@@ -23,6 +23,22 @@ export const CURATED_TERMINAL_FONTS = [
   { id: 'Courier New', label: 'Courier New', hint: 'Typewriter nostalgia' },
 ];
 
+// Windows ships none of the Mac faces above except Courier New. Every entry
+// here ships with Windows 11 (Cascadia with Windows Terminal); the default
+// stack already falls through to Cascadia Code there.
+export const WINDOWS_TERMINAL_FONTS = [
+  { id: '', label: 'Default (Cascadia Code)', hint: 'The modern Windows Terminal mono' },
+  { id: 'Cascadia Mono', label: 'Cascadia Mono', hint: 'Cascadia without ligatures' },
+  { id: 'Consolas', label: 'Consolas', hint: 'The classic Windows coding mono' },
+  { id: 'Lucida Console', label: 'Lucida Console', hint: 'Wide and very legible' },
+  { id: 'Courier New', label: 'Courier New', hint: 'Typewriter nostalgia' },
+];
+
+/** The font list Settings offers on this platform. */
+export function curatedTerminalFontsFor(platform) {
+  return platform === 'win32' ? WINDOWS_TERMINAL_FONTS : CURATED_TERMINAL_FONTS;
+}
+
 /**
  * Keep only characters that can appear in a legitimate font family name.
  * The value lands in canvas ctx.font / CSS font-family, so quotes, braces,

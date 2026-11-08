@@ -755,3 +755,9 @@
 - **FIX**: When replacing an inherited PATH with a curated one, always append the system folders `/usr/bin:/bin:/usr/sbin:/sbin` explicitly.
 - **CONTEXT**: Codex round 8 asked for npm to never run with an untrusted inherited `node`.
 - **DETECTION**: `grep -n "PATH: joinPath(" electron/*.js` and check each ends with the system folders.
+
+### Git: 2026-11-08
+- **MISTAKE**: Ran `git stash -q && eslint ...; git stash pop -q` to lint the base. With intent-to-add files (`git add -N`, shown as ` A`) in the tree, `git stash` failed, the `&&` skipped the lint, and the unconditional `git stash pop` then popped an OLDER unrelated stash (`pre-release-untracked-ios` from feat/voice-stt-server). It aborted only because its untracked files already existed.
+- **FIX**: Never pair a conditional stash with an unconditional pop. Compare against the base with a worktree (`git worktree add /tmp/x HEAD`) or `git show HEAD:<file> | npx eslint --stdin --stdin-filename <file>`. If a stash is unavoidable: `git stash push -m tag && { ...; git stash pop; }`.
+- **CONTEXT**: This repo keeps two old stashes; a stray pop can drop iOS build files or old work into the tree.
+- **DETECTION**: `git stash list` before and after any stash; grep shell history for `stash -q &&`.

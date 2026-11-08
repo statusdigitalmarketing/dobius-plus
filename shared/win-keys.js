@@ -63,3 +63,32 @@ export function winTerminalKey(e, hasSelection) {
 export function shortcutLabel(mac, win, platform) {
   return platform === 'win32' ? win : mac;
 }
+
+/**
+ * Settings > Keyboard Shortcuts on Windows: every app shortcut above, in the
+ * order people reach for them. windows-port.test.mjs checks each Ctrl chord here
+ * really is one winToMacShortcut / winTerminalKey answers, so the page cannot
+ * list a key that does nothing.
+ */
+export const WINDOWS_SHORTCUT_ROWS = [
+  { keys: 'Ctrl+Shift+T', action: 'New Tab' },
+  { keys: 'Ctrl+Shift+W', action: 'Close Tab' },
+  { keys: 'Ctrl+1-9', action: 'Switch to Tab N' },
+  { keys: 'Ctrl+Tab', action: 'Next Tab' },
+  { keys: 'Ctrl+Shift+Tab', action: 'Previous Tab' },
+  { keys: 'Ctrl+Shift+Z', action: 'Reopen Closed Tab' },
+  { keys: 'Ctrl+Shift+N', action: 'New Window' },
+  { keys: 'Ctrl+Shift+M', action: 'Terminal / Chat View' },
+  { keys: 'Ctrl+Shift+D', action: 'Toggle Terminal / Dashboard' },
+  { keys: 'Ctrl+Shift+B', action: 'Toggle Sidebar' },
+  { keys: 'Ctrl+Shift+G', action: 'Toggle Git Panel' },
+  { keys: 'Ctrl+Shift+P', action: 'Command Palette' },
+  { keys: 'Ctrl+Shift+K', action: 'Clear Terminal' },
+  { keys: 'Ctrl+Shift+F', action: 'Search Terminal' },
+  { keys: 'Ctrl+Shift+R', action: 'Resume Latest Session' },
+  { keys: 'Ctrl+C', action: 'Copy selection (stops the command when nothing is selected)' },
+  { keys: 'Ctrl+V', action: 'Paste' },
+  { keys: 'Close the last window', action: 'Quit (windows and sessions come back next time)' },
+  { keys: 'Esc', action: 'Focus Terminal (from input)' },
+  { keys: 'Enter', action: 'Send Command (from input)' },
+];

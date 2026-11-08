@@ -560,7 +560,13 @@ function gwsReportsClient() {
  */
 export function windowsGwsEntry(env = process.env) {
   if (!env.APPDATA) return null;
-  const pkgDir = path.join(env.APPDATA, 'npm', 'node_modules', '@googleworkspace', 'cli');
+  return npmGwsEntry(path.join(env.APPDATA, 'npm'));
+}
+
+/** The gws JS entry under one npm prefix folder (Windows layout: <prefix>\node_modules\...), or null. */
+export function npmGwsEntry(prefixDir) {
+  if (typeof prefixDir !== 'string' || !prefixDir) return null;
+  const pkgDir = path.join(prefixDir, 'node_modules', '@googleworkspace', 'cli');
   const candidates = [];
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));

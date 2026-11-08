@@ -4,6 +4,7 @@ import { useStore } from '../../store/store';
 import { markDoNotKill, unmarkDoNotKill } from '../../hooks/useTerminal';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 import MoveAccountDialog from './MoveAccountDialog';
+import { isWindows } from '../../../shared/platform.js';
 
 // Tab ids with a tear-off gesture already in flight. A tab stays in this window's
 // tab bar until its tear-off confirms (H5), so a rapid SECOND drag of the same
@@ -673,7 +674,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
       <button
         onClick={() => setNewTabPickerOpen(true)}
         onContextMenu={(e) => { e.preventDefault(); addBrowserTab(currentProjectPath); }}
-        title="New Tab: pick a project (Cmd+T opens one here). Right-click for a Browser tab"
+        title={`New Tab: pick a project (${isWindows() ? 'Ctrl+Shift+T' : 'Cmd+T'} opens one here). Right-click for a Browser tab`}
         style={{
           width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center',
           marginLeft: 2, borderRadius: 4, fontSize: 16, lineHeight: 1,

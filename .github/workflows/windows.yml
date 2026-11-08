@@ -50,11 +50,47 @@ jobs:
           Pop-Location
 
       # bash: PowerShell splits -c.npmRebuild=false into two arguments.
+      # Signed with Azure Trusted Signing once its secrets and variables exist (docs/windows-signing.md). Until then the
+      # installer is built unsigned, as before: electron-builder fails a build that has signing settings but no
+      # credentials, so the settings are only passed when everything is there. No pull_request trigger runs this
+      # workflow, so the secrets never reach a fork's code.
       - name: Build installer
         shell: bash
-        run: npm run electron:build:win -- --publish never -c.npmRebuild=false
+        run: |
+          SIGN=()
+          if [ -n "$AZURE_TENANT_ID" ] && [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ] \
+             && [ -n "$AZURE_TS_ENDPOINT" ] && [ -n "$AZURE_TS_ACCOUNT" ] && [ -n "$AZURE_TS_PROFILE" ] && [ -n "$AZURE_TS_PUBLISHER" ]; then
+            SIGN=(
+              "-c.win.azureSignOptions.endpoint=$AZURE_TS_ENDPOINT"
+              "-c.win.azureSignOptions.codeSigningAccountName=$AZURE_TS_ACCOUNT"
+              "-c.win.azureSignOptions.certificateProfileName=$AZURE_TS_PROFILE"
+              "-c.win.azureSignOptions.publisherName=$AZURE_TS_PUBLISHER"
+            )
+            echo "SIGNED=true" >> "$GITHUB_ENV"
+            echo "Signing with Azure Trusted Signing"
+          else
+            echo "No Azure Trusted Signing settings: building unsigned"
+          fi
+          npm run electron:build:win -- --publish never -c.npmRebuild=false "${SIGN[@]}"
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TS_ENDPOINT: ${{ vars.AZURE_TS_ENDPOINT }}
+          AZURE_TS_ACCOUNT: ${{ vars.AZURE_TS_ACCOUNT }}
+          AZURE_TS_PROFILE: ${{ vars.AZURE_TS_PROFILE }}
+          AZURE_TS_PUBLISHER: ${{ vars.AZURE_TS_PUBLISHER }}
+
+      # A signed build must really be signed (and timestamped): never ship one that only looks configured.
+      - name: Check the installer signature
+        if: ${{ env.SIGNED == 'true' }}
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist-electron -Filter 'Dobius-Plus-Setup-*.exe' | Select-Object -First 1
+          $sig = Get-AuthenticodeSignature $exe.FullName
+          "$($exe.Name): $($sig.Status) by $($sig.SignerCertificate.Subject), timestamped by $($sig.TimeStamperCertificate.Subject)"
+          if ($sig.Status -ne 'Valid' -or -not $sig.TimeStamperCertificate) { exit 1 }
 
       - name: Smoke test the packaged app
         run: node scripts/windows-smoke.mjs

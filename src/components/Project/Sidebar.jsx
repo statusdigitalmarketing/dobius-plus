@@ -7,6 +7,7 @@ import { bucketSessions, EARLIER_PAGE } from '../../lib/session-shelves';
 import ConversationCard from './ConversationCard';
 import ProjectTabsView from './ProjectTabsView';
 import Preview from './Preview';
+import { isWindows } from '../../../shared/platform.js';
 
 const SHELF_DEFAULTS = { working: false, earlier: true };
 
@@ -363,7 +364,7 @@ export default function Sidebar({ pinnedIds = [], onTogglePin, onResumeSession }
               className="text-xs italic"
               style={{ color: 'var(--dim)', fontSize: '10px' }}
             >
-              tap to open
+              {isWindows() ? 'click to open' : 'tap to open'}
             </span>
           )}
         </div>

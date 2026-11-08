@@ -1090,9 +1090,17 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       // tab-rename input) — but NOT the xterm terminal, which uses a hidden
       // textarea — don't let disruptive shortcuts hijack the keystroke (e.g.
       // Cmd+K wiping the terminal mid-compose, Cmd+W closing during a rename).
+      // Windows: the terminal's own command bar is exempt. It holds focus by
+      // default there and again after every tab switch, and the chords that
+      // reach this handler (Ctrl+digit, Ctrl+Tab, Ctrl+Shift+letter) cannot be
+      // typed text, so with the guard Ctrl+Tab, Ctrl+1..9 and Ctrl+Shift+W/B/G/K
+      // did nothing until Esc (Windows beta, Max 2026-11-07). Every other field
+      // stays guarded: Ctrl+Shift+K from the CLAUDE.md editor would otherwise
+      // clear a terminal holding an unsent prompt (Codex).
       const ae = document.activeElement;
       const inXterm = ae?.classList?.contains?.('xterm-helper-textarea');
-      const inAppField = !inXterm && !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
+      const inCommandBar = isWindows() && !!ae?.closest?.('[data-command-bar]');
+      const inAppField = !inXterm && !inCommandBar && !!ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
 
       if (e.key === 't' && !e.shiftKey) {
         // Cmd+T = new tab here with the default tool, instantly (the + button

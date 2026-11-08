@@ -1,6 +1,7 @@
 // Settings > Team: this Mac's identity, invites and joining, linked teammates, the pinned orchestrator tab.
 // docs/team-communicator.md. Section, SettingRow and Toggle come from Settings.jsx so the page stays one style.
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { isWindows } from '../../../shared/platform.js';
 
 const api = window.electronAPI;
 const box = { backgroundColor: 'var(--surface)', border: '1px solid var(--border)' };
@@ -74,7 +75,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
         Message teammates&apos; Dobius orchestrators over Tailscale. Every message is signed and encrypted end to end; only linked teammates can send.
       </div>
 
-      <SettingRow label="This Mac" description={st.endpoint ? `Reachable at ${st.endpoint.host}:${st.endpoint.port}` : `Not reachable yet. ${st.notReachable}`}>
+      <SettingRow label={isWindows() ? 'This PC' : 'This Mac'} description={st.endpoint ? `Reachable at ${st.endpoint.host}:${st.endpoint.port}` : `Not reachable yet. ${st.notReachable}`}>
         <div className="flex items-center gap-2">
           <input
             value={name}
