@@ -75,3 +75,12 @@ itself is still open.
 | 0003 Voice Conductor off the Windows agent lists (electron/visible-agents.js + tests) | Applied in place of 0009 (same behavior, testable module) |
 | Accounts connected before the quota check fail until checked | Done: Dobius checks every account once, 30 s after launch |
 | Local installer build fails without admin (winCodeSign 7z holds macOS symlinks) | CI is unaffected; documented for local builds: pre-extract winCodeSign-2.6.0 into the electron-builder cache |
+
+## From Max, email 7 (2026-11-08 01:16 ET): ran ci snapshot 8c9771a on his PC
+Tests 49/49 (windows-port, osc-only) and agent-context 8/8 pass on Windows 11; installer build stopped there for low
+memory (smoke and a live PowerShell gws check pending on the release build). Shipped in v2.2.8 (2026-11-08).
+| Item | State |
+|---|---|
+| Windows sessions get no agent context (SessionStart hook is sh and hooks are Mac only) | Open, next build |
+| Claude's own PowerShell tool starts a new powershell without the gws function, so gws.cmd loses JSON quotes there | Open, next build (the tab and Claude's Bash tool are fine) |
+| History double-click also renaming (email 5) | Closed: not a bug, double-click only resumes |
