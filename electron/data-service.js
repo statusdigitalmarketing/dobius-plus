@@ -1157,7 +1157,12 @@ export function sanitizePreviewText(text) {
   if (!text) return text;
   // Collapse whitespace BEFORE the cap (linear, unlike CLIPBOARD_IMG_RE), or
   // text behind a long run of spaces would be cut away.
-  return text.replace(/\s+/g, ' ').trim().slice(0, PREVIEW_INPUT_MAX).replace(CLIPBOARD_IMG_RE, '[image]').trim();
+  return text.replace(/\s+/g, ' ').trim().slice(0, PREVIEW_INPUT_MAX).replace(CLIPBOARD_IMG_RE, '[image]')
+    // A session a scheduled task started opens with its XML wrapper, which
+    // History showed raw ('<scheduled-task name="review-...'). Name the task.
+    .replace(/^<scheduled-task\b[^>]*?\bname="([^"]{1,120})"[^>]*>\s*/i, 'Scheduled: $1 · ')
+    .replace(/<\/scheduled-task>\s*$/i, '')
+    .trim();
 }
 
 function tsToEpochMs(v) {
