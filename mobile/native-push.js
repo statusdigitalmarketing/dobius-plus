@@ -29,7 +29,7 @@ function deviceToken() {
     const handles = [];
     const finish = (v) => { clearTimeout(timer); for (const h of handles) h.then((x) => x.remove()).catch(() => {}); resolve(v); };
     const timer = setTimeout(() => finish(null), 15000);
-    handles.push(PushNotifications.addListener('registration', (t) => finish(typeof t?.value === 'string' ? t.value.toLowerCase() : null)));
+    handles.push(PushNotifications.addListener('registration', (t) => { const v = typeof t?.value === 'string' ? t.value.toLowerCase() : null; if (v) newestIosToken = v; finish(v); }));
     handles.push(PushNotifications.addListener('registrationError', () => finish(null)));
     // Register only once both listeners are attached, so the answer cannot arrive before anyone hears it.
     Promise.all(handles).then(() => PushNotifications.register()).catch(() => finish(null));
@@ -40,6 +40,9 @@ function deviceToken() {
 let seq = 0;
 // The token each connection last gave its Mac.
 const sentTokens = new WeakMap();
+// The newest token iOS has handed this app, recorded the moment it arrives (before any Mac answers): an older one is
+// never sent after it (Codex round 15).
+let newestIosToken = null;
 
 /**
  * iOS may hand the app a new token while it stays open: pass it to this Mac. Only a token different from the one this
@@ -49,6 +52,7 @@ export function forwardTokenChanges(connection) {
   if (!isNativeApp()) return () => {};
   const h = PushNotifications.addListener('registration', (t) => {
     const token = typeof t?.value === 'string' ? t.value.toLowerCase() : null;
+    if (token) newestIosToken = token;
     if (!token || connection.closed || sentTokens.get(connection) === token || connection.status !== 'authed') return;
     sendRegister(connection, token).then((r) => { if (r.ok) sentTokens.set(connection, token); }).catch(() => {});
   });
@@ -95,7 +99,7 @@ export async function enableNativePush(connection, { prompt = true } = {}) {
     if (connection.closed) return r;
     // A newer token registered meanwhile (iOS rotated it): never put the old one back over it (Codex round 14).
     const newer = sentTokens.get(connection);
-    if (newer && newer !== token) return { ok: true };
+    if ((newer && newer !== token) || (newestIosToken && newestIosToken !== token)) return { ok: true };
     const again = await sendRegister(connection, token);
     if (again.ok && !(sentTokens.get(connection) && sentTokens.get(connection) !== token)) sentTokens.set(connection, token);
     return again;

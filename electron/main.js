@@ -4131,6 +4131,7 @@ function setupWindowHandlers() {
       for (const k of ['labelSource', 'autoLabelSource']) {
         if (labelMeta[k] === 'title' || labelMeta[k] === 'agent') meta[k] = labelMeta[k];
       }
+      if (labelMeta.labelSource === 'run') meta.labelSource = 'run'; // a Run tab stays one (Codex round 15)
       if (typeof labelMeta.autoLabel === 'string') meta.autoLabel = labelMeta.autoLabel.slice(0, 100);
       if (labelMeta.viewMode === 'chat') meta.viewMode = 'chat';
       const pin = sanitizeAccountPin(labelMeta.claudeAccountPin);
@@ -4486,6 +4487,7 @@ function setupWindowHandlers() {
       for (const k of ['labelSource', 'autoLabelSource']) {
         if (labelMeta[k] === 'title' || labelMeta[k] === 'agent') meta[k] = labelMeta[k];
       }
+      if (labelMeta.labelSource === 'run') meta.labelSource = 'run'; // a Run tab stays one (Codex round 15)
       if (typeof labelMeta.autoLabel === 'string') meta.autoLabel = labelMeta.autoLabel.slice(0, 100);
       if (labelMeta.viewMode === 'chat') meta.viewMode = 'chat';
       const pin = sanitizeAccountPin(labelMeta.claudeAccountPin);

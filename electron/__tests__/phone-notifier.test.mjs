@@ -592,3 +592,13 @@ test('round 14: a new command captured mid-send keeps the fallback going while i
   waiting = false; // dismissed
   assert.equal(r.sent[0].current(), false);
 });
+
+test('round 15: after its command is captured, a background turn does not stop the fallback while the command waits', () => {
+  const r = rig({ status: { a: 'needs' }, waiting: () => true });
+  r.n.tabHook('a', 'needs', 'handoff');
+  r.advance(HANDOFF_WAIT_MS + 100);
+  r.n.handoffAdded('a');
+  r.n.tabHook('a', 'working'); // a background turn moves the generation
+  r.st.a = 'needs';
+  assert.equal(r.sent[0].current(), true, 'the command still waits: phone B still hears');
+});

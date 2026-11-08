@@ -100,11 +100,14 @@ export function createPhoneNotifier(deps) {
   // back by the gap, so stopping it would leave the next phone with nothing (Codex round 14).
   const captures = new Map(); // tabId -> { fresh, repeat }
   const captured = (tabId) => captures.get(tabId) || { fresh: 0, repeat: 0 };
-  const stillOkAfterCaptures = (tabId, then) => {
-    const now = captured(tabId);
+  // Is a fallback "needs you" (a red that waited for its command) still worth sending to the next phone? Before any
+  // capture: the usual test (isCurrent). After a fresh capture: its command decides, not the tab's generation, which a
+  // background turn moves while the command still waits (Codex round 15). After a repeat: no.
+  const fallbackStill = (p, then) => {
+    const now = captured(p.tabId);
     if (now.repeat !== then.repeat) return false;
-    if (now.fresh !== then.fresh) return typeof d.handoffWaiting === 'function' ? !!d.handoffWaiting(tabId) : true;
-    return true;
+    if (now.fresh !== then.fresh) return typeof d.handoffWaiting === 'function' ? !!d.handoffWaiting(p.tabId) : true;
+    return isCurrent(p);
   };
   const lastHook = new Map(); // tabId -> last hook state seen
   let sentTimes = [];
@@ -389,8 +392,8 @@ export function createPhoneNotifier(deps) {
         // Its text is fixed, so it goes to the next phone only while ALL of what it sums up is still true (Codex round 4).
         // And nobody started looking at any of those tabs on the Mac meanwhile, as for a single notification (Codex round 8).
         const caps = out.map((o) => (o.p.awaitHandoff && o.p.tabId ? captured(o.p.tabId) : null));
-        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o, i) => allowedNow(o.p.kind, o.kind) && isCurrent(o.p)
-          && !(o.p.tabId && d.isLooking(o.p.tabId)) && (caps[i] === null || stillOkAfterCaptures(o.p.tabId, caps[i])));
+        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o, i) => allowedNow(o.p.kind, o.kind)
+          && !(o.p.tabId && d.isLooking(o.p.tabId)) && (caps[i] === null ? isCurrent(o.p) : fallbackStill(o.p, caps[i])));
         Promise.resolve(d.send({ kind: 'summary', title: `${out.length} updates`, body, tag: 'summary', tabId: null, current })).catch(() => { /* the sender logs by code */ });
       } else {
         for (const { p, kind } of out) {
@@ -402,8 +405,8 @@ export function createPhoneNotifier(deps) {
           // same test the flush used, on the entry as it was (a handoff sent as "needs you" is still judged by its command).
           // And nobody started looking at the tab on the Mac meanwhile (round 7).
           const cap = p.awaitHandoff && p.tabId ? captured(p.tabId) : null;
-          const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind, kind) && isCurrent(p) && !(p.tabId && d.isLooking(p.tabId))
-            && (cap === null || stillOkAfterCaptures(p.tabId, cap));
+          const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind, kind) && !(p.tabId && d.isLooking(p.tabId))
+            && (cap === null ? isCurrent(p) : fallbackStill(p, cap));
           Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId, current })).catch(() => { /* the sender logs by code */ });
         }
       }

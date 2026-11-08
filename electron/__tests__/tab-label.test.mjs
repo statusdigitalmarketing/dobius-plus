@@ -143,6 +143,7 @@ ok('an account pin survives tear-off and dock, and only its clean shape');
   const run = { id: 'x', label: 'Run: ./release.sh', labelSource: 'run' };
   assert.equal(isLabelLocked(run), false);
   assert.equal(applyAutoLabel(run, '✳ Something else', 'title'), run);
+  assert.equal(parseLabelMeta(JSON.stringify(labelMeta(run))).labelSource, 'run', 'and stays a Run tab through a tear-off');
   ok('a Run tab keeps its name against titles without counting as a rename');
 }
 

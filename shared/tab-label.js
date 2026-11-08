@@ -186,6 +186,8 @@ export function parseLabelMeta(json) {
   for (const k of ['labelSource', 'autoLabelSource']) {
     if (raw[k] === 'title' || raw[k] === 'agent') out[k] = raw[k];
   }
+  // A Run tab stays one through a tear-off (its name is its command: titles keep off it, Codex round 15).
+  if (raw.labelSource === 'run') out.labelSource = 'run';
   if (typeof raw.autoLabel === 'string') out.autoLabel = cleanLabel(raw.autoLabel);
   if (raw.viewMode === 'chat') out.viewMode = 'chat';
   const pin = sanitizeAccountPin(raw.claudeAccountPin);
