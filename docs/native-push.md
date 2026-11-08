@@ -93,6 +93,8 @@ plus the phone's own id for that Mac so the tap opens the right one. The collaps
 - A summary ("3 updates") whose text went stale while it was being sent to the first phone is not sent to the others.
 - Web Push sends to every subscription listed when the send starts (unchanged from before).
 
+- A tab with an announced command still waiting that hands back a second command, dismissed before its held notification goes out, can still get a "handed back" notification: a notification follows whether the tab has a command waiting, not which one (Codex round 13).
+
 ## Testing
 
 `npm run test:apns` runs the JWT, the request and every outcome against a local HTTP/2 stand-in. Nothing in the test

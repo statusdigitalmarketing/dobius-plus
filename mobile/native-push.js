@@ -38,6 +38,23 @@ function deviceToken() {
 }
 
 let seq = 0;
+// The token each connection last gave its Mac.
+const sentTokens = new WeakMap();
+
+/**
+ * iOS may hand the app a new token while it stays open: pass it to this Mac. Only a token different from the one this
+ * connection last sent goes out, so the registration answer to our own register() call never loops (Codex round 13).
+ */
+export function forwardTokenChanges(connection) {
+  if (!isNativeApp()) return () => {};
+  const h = PushNotifications.addListener('registration', (t) => {
+    const token = typeof t?.value === 'string' ? t.value.toLowerCase() : null;
+    if (!token || connection.closed || sentTokens.get(connection) === token || connection.status !== 'authed') return;
+    sendRegister(connection, token).then((r) => { if (r.ok) sentTokens.set(connection, token); }).catch(() => {});
+  });
+  return () => { h.then((x) => x.remove()).catch(() => {}); };
+}
+
 function sendRegister(connection, token) {
   if (connection.status !== 'authed') return Promise.resolve({ ok: false, error: 'Not connected to your Mac.' });
   // A Mac from before native push does not know the message: do not send it at all.
@@ -70,6 +87,7 @@ export async function enableNativePush(connection, { prompt = true } = {}) {
   if (!token) return { ok: false, error: 'iPhone did not give this app a notification token. Try again in a moment.' };
   if (connection.closed) return { ok: false, error: 'Mac switched' };
   const r = await sendRegister(connection, token);
+  if (r.ok) sentTokens.set(connection, token);
   // Still held by this phone's previous pairing with the same Mac (re-paired at a new address): that pairing is being
   // unregistered as this runs, so ask once more shortly.
   if (!r.ok && r.code === 'token-in-use') {

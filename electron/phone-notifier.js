@@ -92,9 +92,11 @@ export function createPhoneNotifier(deps) {
   const d = { quitting: () => false, isLooking: () => false, minuteOfDay: (t) => { const x = new Date(t); return x.getHours() * 60 + x.getMinutes(); }, ...deps };
   const pending = new Map(); // key -> { key, tabId, kind, dueAt, awaitHandoff, count, name }
   const lastSent = new Map(); // key -> { at, kind }
-  // Repeats per tab (a handback of commands already announced): a "needs you" already going out for a red that was
-  // waiting for its command stops before the next phone once a repeat says the command was old news (Codex round 12).
-  const repeats = new Map(); // tabId -> count
+  // Captures per tab (a handed-back command listed, new or a repeat): a fallback "needs you" already going out for a red
+  // that was waiting for its command stops before the next phone once its command is captured, as the command's own
+  // notification (or none, for a repeat) takes over. Rounds 12 and 13.
+  const captures = new Map(); // tabId -> count
+  const captured = (tabId) => captures.get(tabId) || 0;
   const lastHook = new Map(); // tabId -> last hook state seen
   let sentTimes = [];
   let timer = null;
@@ -138,7 +140,7 @@ export function createPhoneNotifier(deps) {
     if (typeof tabId !== 'string' || !tabId) return;
     const prev = lastHook.get(tabId);
     // lastSent is kept: a failure buzz right after the exit still respects the tab's gap (pruned in flush).
-    if (state === 'exit') { lastHook.delete(tabId); repeats.delete(tabId); bump(tabId); dropTab(tabId); return; }
+    if (state === 'exit') { lastHook.delete(tabId); captures.delete(tabId); bump(tabId); dropTab(tabId); return; }
     if (state === 'done' && tag === 'idle') return; // Claude idle for a minute: never a "finished"
     // The same red told twice (PermissionRequest, then Claude's permission_prompt backstop seconds later) is one
     // prompt: it neither restarts the debounce nor queues a second buzz. An answer (tabInput) or a new hook state
@@ -196,8 +198,8 @@ export function createPhoneNotifier(deps) {
     if (typeof tabId !== 'string' || !tabId) return;
     const key = keyOf(tabId);
     const p = pending.get(key);
+    captures.set(tabId, captured(tabId) + 1);
     if (repeat) {
-      repeats.set(tabId, (repeats.get(tabId) || 0) + 1);
       if (p?.kind === 'handoff' && p.behind?.handoff && !p.behind.listed) pending.set(key, { ...p, behind: { ...p.behind, listed: true } });
       // A red still waiting for its command, and the command is one already announced: nothing new to say, whether it
       // is later run, dismissed or left waiting (Codex round 11).
@@ -377,7 +379,9 @@ export function createPhoneNotifier(deps) {
         for (const o of out) lastSent.set(gapKey(o.p), { at: t, kind: o.kind });
         // Its text is fixed, so it goes to the next phone only while ALL of what it sums up is still true (Codex round 4).
         // And nobody started looking at any of those tabs on the Mac meanwhile, as for a single notification (Codex round 8).
-        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o) => allowedNow(o.p.kind, o.kind) && isCurrent(o.p) && !(o.p.tabId && d.isLooking(o.p.tabId)));
+        const caps = out.map((o) => (o.p.awaitHandoff && o.p.tabId ? captured(o.p.tabId) : null));
+        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o, i) => allowedNow(o.p.kind, o.kind) && isCurrent(o.p)
+          && !(o.p.tabId && d.isLooking(o.p.tabId)) && (caps[i] === null || captured(o.p.tabId) === caps[i]));
         Promise.resolve(d.send({ kind: 'summary', title: `${out.length} updates`, body, tag: 'summary', tabId: null, current })).catch(() => { /* the sender logs by code */ });
       } else {
         for (const { p, kind } of out) {
@@ -388,9 +392,9 @@ export function createPhoneNotifier(deps) {
           // current(): asked by the sender before each phone, so news that stopped being true mid-send stops there. The
           // same test the flush used, on the entry as it was (a handoff sent as "needs you" is still judged by its command).
           // And nobody started looking at the tab on the Mac meanwhile (round 7).
-          const rep = p.awaitHandoff && p.tabId ? (repeats.get(p.tabId) || 0) : null;
+          const cap = p.awaitHandoff && p.tabId ? captured(p.tabId) : null;
           const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind, kind) && isCurrent(p) && !(p.tabId && d.isLooking(p.tabId))
-            && (rep === null || (repeats.get(p.tabId) || 0) === rep);
+            && (cap === null || captured(p.tabId) === cap);
           Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId, current })).catch(() => { /* the sender logs by code */ });
         }
       }

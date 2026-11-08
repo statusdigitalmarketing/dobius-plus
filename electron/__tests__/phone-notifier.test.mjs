@@ -561,3 +561,20 @@ test('round 12: a "needs you" already going out stops before the next phone once
   r.n.handoffAdded('a', { repeat: true }); // capture finally reports: the command was one already announced
   assert.equal(r.sent[0].current(), false);
 });
+
+test('round 13: once a command is captured, a fallback "needs you" already going out stops, alone or in a summary', () => {
+  const r = rig({ status: { a: 'needs' }, waiting: () => false });
+  r.n.tabHook('a', 'needs', 'handoff');
+  r.advance(HANDOFF_WAIT_MS + 100);
+  assert.equal(r.sent[0].current(), true);
+  r.n.handoffAdded('a'); // a NEW command captured late: its own notification takes over
+  assert.equal(r.sent[0].current(), false);
+  const s = rig({ status: { a: 'needs', b: 'needs', c: 'needs' }, waiting: () => false });
+  for (const id of ['a', 'b', 'c']) s.n.tabHook(id, 'needs', 'handoff');
+  s.advance(HANDOFF_WAIT_MS + 100);
+  assert.equal(s.sent.length, 1);
+  assert.equal(s.sent[0].kind, 'summary');
+  assert.equal(s.sent[0].current(), true);
+  s.n.handoffAdded('b', { repeat: true });
+  assert.equal(s.sent[0].current(), false, 'the summary counted an already-announced command');
+});

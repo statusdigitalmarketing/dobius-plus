@@ -4,7 +4,7 @@ import LooseEnds from './LooseEnds';
 import { sortTermsByAttention, groupSummary, summaryLabel, isGroupCollapsed } from './board-order.js';
 import VoiceButton from './VoiceButton';
 import { pushSupported, pushActive, enablePush } from './push-client';
-import { isNativeApp, enableNativePush } from './native-push';
+import { isNativeApp, enableNativePush, forwardTokenChanges } from './native-push';
 import { timeAgo } from './format';
 import { pairingKey } from './pairings';
 
@@ -102,7 +102,9 @@ export default function Board({ connection, status, onOpen, onShowHistory, onSho
     if (!isNativeApp()) return undefined;
     const send = () => { if (connection.status === 'authed') enableNativePush(connection, { prompt: false }).catch(() => { /* Settings shows why */ }); };
     send();
-    return connection.onMessage((m) => { if (m.type === 'authed') send(); });
+    const offAuth = connection.onMessage((m) => { if (m.type === 'authed') send(); });
+    const offRotate = forwardTokenChanges(connection); // a token iOS replaces while the app stays open
+    return () => { offAuth(); offRotate(); };
   }, [connection]);
 
   useEffect(() => {
