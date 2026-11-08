@@ -179,6 +179,32 @@ test('presence matches a Windows record by FILETIME, never by a reused pid', asy
   assert.equal(await presenceOf({ pid: 42, startedAt: ftToMs(ft) }, '/cfg', read), null);
 });
 
+test('presence matches the record Claude 2.1.319 really writes on Windows (FILETIME under procStart)', async () => {
+  // Shape copied from a live C:\Users\<u>\.claude\sessions\<pid>.json on Windows 11, 2026-11-07.
+  const rec = {
+    pid: 3568, sessionId: '92679e5c-9b91-48d5-82f3-ae0ad806e079', cwd: 'C:\\Users\\u\\Projects\\Dobius+ Windows',
+    startedAt: 1794087540530, procStart: '134385609760300755', kind: 'interactive', status: 'busy',
+  };
+  const read = async () => JSON.stringify(rec);
+  // CIM reports the same start to the microsecond: 5 ticks (500ns) away.
+  const hit = await presenceOf({ pid: 3568, startFt: '134385609760300750', startedAt: ftToMs('134385609760300750') }, null, read);
+  assert.equal(hit?.sessionId, '92679e5c-9b91-48d5-82f3-ae0ad806e079');
+  assert.equal(hit?.cwd, 'C:\\Users\\u\\Projects\\Dobius+ Windows');
+  // A reused pid that started 2ms later is someone else.
+  assert.equal(await presenceOf({ pid: 3568, startFt: '134385609760320755', startedAt: 1 }, null, read), null);
+  // A Mac process never reads a FILETIME as `ps lstart` text.
+  assert.equal(await presenceOf({ pid: 3568, startedAt: ftToMs('134385609760300755') }, null, read), null);
+});
+
+test('recordStartFiletime: procStartFt first, digit-only procStart next, lstart text never', async () => {
+  const { recordStartFiletime } = await import('../win-proc.js');
+  assert.equal(recordStartFiletime({ procStartFt: '133123456789012345', procStart: '999' }), '133123456789012345');
+  assert.equal(recordStartFiletime({ procStart: '134385609760300755' }), '134385609760300755');
+  assert.equal(recordStartFiletime({ procStart: 'Tue Oct 27 12:49:51 2026' }), null);
+  assert.equal(recordStartFiletime({}), null);
+  assert.equal(recordStartFiletime(null), null);
+});
+
 test('typed cd: Mac text unchanged, PowerShell quoting holds', async () => {
   const { cdThen, psQuote } = await import('../../shared/sh-quote.js');
   assert.equal(cdThen("/Users/x/Jacob's app", 'claude --resume abc', 'darwin'), "cd '/Users/x/Jacob'\\''s app' && claude --resume abc");

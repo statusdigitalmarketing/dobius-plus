@@ -73,6 +73,22 @@ export function sameFiletime(a, b) {
   return (d < 0n ? -d : d) <= 10000n;
 }
 
+/**
+ * The FILETIME start a Claude session record gives for its own process, as a
+ * digit string, or null. Claude Code on Windows (seen on 2.1.319) writes it as
+ * `procStart` (a FILETIME digit string), not `procStartFt`, so reading only
+ * `procStartFt` never matched and no tab ever linked to its session. A
+ * `procStart` that is not all digits is the macOS `ps lstart` text, never a
+ * FILETIME.
+ */
+export function recordStartFiletime(rec) {
+  if (!rec || typeof rec !== 'object') return null;
+  for (const v of [rec.procStartFt, rec.procStart]) {
+    if (v != null && /^\d{1,20}$/.test(String(v))) return String(v);
+  }
+  return null;
+}
+
 export function ftToMs(ft) {
   try {
     const n = typeof ft === 'bigint' ? ft : BigInt(String(ft));

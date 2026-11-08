@@ -30,7 +30,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { sameFiletime } from './win-proc.js';
+import { sameFiletime, recordStartFiletime } from './win-proc.js';
 
 export const GRACE_MS = 3000;
 const CACHE_MS = 4000; // several windows poll the same tabs
@@ -41,11 +41,13 @@ const MAX_FILE_BYTES = 64 * 1024;
 function recordIsProcess(rec, proc) {
   if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return false;
   if (!proc || !Number.isInteger(proc.pid) || rec.pid !== proc.pid) return false;
-  // Windows: Claude records its creation time as a FILETIME (procStartFt), which
-  // win-proc.js reads for the tab's claude too. Compared as digit strings: the
-  // value is past 2^53, so a Number would round it.
-  if (rec.procStartFt != null || proc.startFt != null) {
-    return proc.startFt != null && sameFiletime(rec.procStartFt, proc.startFt);
+  // Windows: Claude records its creation time as a FILETIME digit string
+  // (`procStart` on 2.1.319, `procStartFt` in older notes), which win-proc.js
+  // reads for the tab's claude too. Compared as digit strings: the value is
+  // past 2^53, so a Number would round it.
+  const recFt = recordStartFiletime(rec);
+  if (proc.startFt != null || rec.procStartFt != null) {
+    return proc.startFt != null && sameFiletime(recFt, proc.startFt);
   }
   if (typeof rec.procStart !== 'string' || !Number.isFinite(proc.startedAt)) return false;
   // `ps lstart` text ("Tue Oct 27 13:39:54 2026") with no zone: Claude takes it

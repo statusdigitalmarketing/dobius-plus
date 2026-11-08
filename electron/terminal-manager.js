@@ -20,7 +20,7 @@ import { getSessionTabMap } from './config-manager.js';
 import { loginShellSpawn, ptyProgramName } from '../shared/new-tab.js';
 import { parseCodexCommand } from './codex-sessions.js';
 import { sharedKeyEnv, SHARED_KEYS } from './claude-settings-env.js';
-import { sameFiletime, winProcessTable, shellPrograms, descendants, winClaudeCommand, winCodexCommand, winExeBase } from './win-proc.js';
+import { sameFiletime, recordStartFiletime, winProcessTable, shellPrograms, descendants, winClaudeCommand, winCodexCommand, winExeBase } from './win-proc.js';
 import { readPresenceRecordAt } from './claude-presence.js';
 
 const IS_WIN = process.platform === 'win32';
@@ -1388,7 +1388,7 @@ async function winProcessCwd(pid, startFt) {
   for (const entry of terminals.values()) if (entry.accountBinding?.claudeConfigDir) dirs.add(entry.accountBinding.claudeConfigDir);
   for (const dir of dirs) {
     const rec = await readPresenceRecordAt(pid, dir);
-    if (rec && rec.pid === pid && sameFiletime(rec.procStartFt, startFt) && typeof rec.cwd === 'string' && path.isAbsolute(rec.cwd)) return rec.cwd;
+    if (rec && rec.pid === pid && sameFiletime(recordStartFiletime(rec), startFt) && typeof rec.cwd === 'string' && path.isAbsolute(rec.cwd)) return rec.cwd;
   }
   return null;
 }
