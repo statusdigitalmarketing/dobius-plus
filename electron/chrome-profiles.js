@@ -15,10 +15,32 @@ import path from 'path';
 import os from 'os';
 import { spawn } from 'child_process';
 
-const LOCAL_STATE = path.join(
-  os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome', 'Local State',
-);
-const CHROME_BIN = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+import fsSync from 'fs';
+
+// Where Chrome keeps its profile registry, per platform. Windows: per-user
+// %LOCALAPPDATA%\Google\Chrome\User Data\Local State.
+export function chromeLocalStatePath(platform = process.platform, env = process.env, home = os.homedir()) {
+  if (platform === 'win32') {
+    const local = env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local');
+    return path.win32.join(local, 'Google', 'Chrome', 'User Data', 'Local State');
+  }
+  return path.join(home, 'Library', 'Application Support', 'Google', 'Chrome', 'Local State');
+}
+
+// Chrome's binary. Windows installs per machine (Program Files, either
+// bitness) or per user (%LOCALAPPDATA%); the first that exists wins.
+export function chromeBinaryCandidates(platform = process.platform, env = process.env) {
+  if (platform !== 'win32') return ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'];
+  const rel = ['Google', 'Chrome', 'Application', 'chrome.exe'];
+  return [env.ProgramFiles, env['ProgramFiles(x86)'], env.LOCALAPPDATA]
+    .filter(Boolean).map((root) => path.win32.join(root, ...rel));
+}
+
+const LOCAL_STATE = chromeLocalStatePath();
+function chromeBin() {
+  const cands = chromeBinaryCandidates();
+  return cands.find((p) => { try { fsSync.accessSync(p); return true; } catch { return false; } }) || cands[0];
+}
 
 // A Chrome profile directory name is "Default" or "Profile <n>". Anything else
 // is rejected before it can reach --profile-directory, so a crafted value can
@@ -105,9 +127,10 @@ export async function openUrlInProfile(profileDir, url) {
     const done = (v) => { if (!settled) { settled = true; resolve(v); } };
     let child;
     try {
-      child = spawn(CHROME_BIN, [`--profile-directory=${profileDir}`, parsed.href], {
+      child = spawn(chromeBin(), [`--profile-directory=${profileDir}`, parsed.href], {
         detached: true,
         stdio: 'ignore',
+        windowsHide: false,
       });
     } catch (err) {
       console.warn('[chrome-profiles] spawn threw:', err?.code || 'unknown');

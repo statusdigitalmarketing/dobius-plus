@@ -4,6 +4,7 @@ import { isNewTabWrapperCommand } from '../shared/new-tab.js';
 import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
+import { winProcessTable, winClaudeCommand } from './win-proc.js';
 import {
   HISTORY_PATH, STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PLUGINS_DIR, PROJECTS_DIR,
   parseJsonl, streamJsonl, timeAgo, pathExists, mapLimit,
@@ -2378,9 +2379,28 @@ export async function parseTranscriptTail(filePath, messageLimit, blocks = false
 }
 
 /**
+ * Pure (Windows): Claude Code processes from win-proc rows. pgrep does not
+ * exist on Windows, so the Overview always said "No active Claude processes".
+ * The Claude Desktop app (the MSIX package under \WindowsApps\, and any
+ * Chromium helper with --type=) is also claude.exe and is not Claude Code.
+ */
+export function claudeCodeProcessesFromWinRows(rows, isClaude = winClaudeCommand) {
+  return (rows || [])
+    .filter((r) => r && r.command && isClaude(r.command))
+    .filter((r) => !/\\WindowsApps\\/i.test(r.command) && !/\s--type=/.test(r.command))
+    .map((r) => ({ pid: String(r.pid), command: r.command }));
+}
+
+async function winActiveClaudeProcesses() {
+  const rows = await winProcessTable();
+  return rows ? claudeCodeProcessesFromWinRows(rows) : [];
+}
+
+/**
  * Get active Claude processes using execFile (safe — no shell injection).
  */
-export function getActiveProcesses() {
+export async function getActiveProcesses() {
+  if (process.platform === 'win32') return winActiveClaudeProcesses();
   return new Promise((resolve) => {
     execFile('pgrep', ['-lf', 'claude'], { timeout: 5000 }, (err, stdout) => {
       if (err || !stdout) {
