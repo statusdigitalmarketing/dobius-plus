@@ -218,7 +218,7 @@ export function handleTeamBridge(body) {
     const t = Date.now();
     const lines = store.messages().slice(-20).map((m) => {
       // Printed into a terminal: teammate-supplied text never carries an escape or control character.
-      const who = oneLine(m.peerName, 80) || shortFp(m.peer);
+      const who = oneLine(store.nameFor(m), 80) || shortFp(m.peer);
       const head = m.dir === 'in' ? `<- ${who}` : `-> ${who}`;
       const { stage, since, note } = stageOf(m);
       const why = note ? ` (${oneLine(note, 120)})` : '';
@@ -232,7 +232,7 @@ export function handleTeamBridge(body) {
     const t = Date.now();
     const when = (x) => `${new Date(x).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')} (${ago(t - x)} ago)`;
     const lines = [
-      `${m.dir === 'in' ? 'from' : 'to'} ${oneLine(m.peerName, 80) || shortFp(m.peer)}  ${m.kind}${m.replyTo ? ` to ${m.replyTo.slice(0, 8)}` : ''}  id ${m.id}`,
+      `${m.dir === 'in' ? 'from' : 'to'} ${oneLine(store.nameFor(m), 80) || shortFp(m.peer)}  ${m.kind}${m.replyTo ? ` to ${m.replyTo.slice(0, 8)}` : ''}  id ${m.id}`,
       `  ${m.dir === 'in' ? 'received' : 'queued'}  ${when(m.firstSentAt && m.dir === 'out' ? m.firstSentAt : m.at)}`,
     ];
     if (m.dir === 'out') {

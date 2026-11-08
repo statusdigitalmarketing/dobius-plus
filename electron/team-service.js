@@ -15,6 +15,7 @@
 import crypto from 'node:crypto';
 import * as P from './team-protocol.js';
 import { shortFp, fingerprint } from './team-crypto.js';
+import { looksLikeFingerprint } from './team-store.js';
 import { deliver, deliveryCard, handoffCard } from './team-deliver.js';
 
 export const SEND_DEADLINE_MS = 24 * 3600 * 1000;
@@ -331,7 +332,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     if (why) { holdIn(peer, id, why); return; }
     const deps = deliverDeps(tabId, authorized);
     if (!deps) { holdIn(peer, id, 'delivery is not available'); return; }
-    const card = deliveryCard({ fromName: msg.peerName, fromFp: peer, at: msg.at, id, text: msg.text });
+    const card = deliveryCard({ fromName: store.nameFor(msg), fromFp: peer, at: msg.at, id, text: msg.text });
     if (card.error) { holdIn(peer, id, card.error); return; }
     store.patchMessage('in', peer, id, { state: 'routing', note: null });
     changed();
@@ -497,7 +498,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     if (!msg) return { ok: false, error: 'no single received message has that id@fingerprint' };
     if (tracked && tracked.peer === msg.peer && tracked.id === msg.id) tracked = null;
     report(msg.peer, msg.id, state, note || null);
-    return { ok: true, short: msg.id.slice(0, 8), to: msg.peerName };
+    return { ok: true, short: msg.id.slice(0, 8), to: store.nameFor(msg) };
   }
 
   async function attemptReport(snap) {
@@ -715,9 +716,15 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const r = String(ref || '').trim();
     if (!r) return { error: 'name a teammate' };
     const byId = all.filter((p) => p.id === r || shortFp(p.id) === r);
-    const hits = byId.length ? byId : all.filter((p) => p.name.toLowerCase() === r.toLowerCase());
+    // A fingerprint-shaped reference only ever means a fingerprint (a reply to an unlinked Mac must not fall through
+    // to a teammate whose name happens to read the same). Otherwise your name for them first, then what their Mac
+    // calls itself (a renamed teammate is still found by it).
+    const fpShaped = looksLikeFingerprint(r);
+    const same = (a) => typeof a === 'string' && a.normalize('NFKC').toLowerCase() === r.normalize('NFKC').toLowerCase();
+    const byName = byId.length || fpShaped ? [] : all.filter((p) => same(p.name));
+    const hits = byId.length ? byId : byName.length ? byName : fpShaped ? [] : all.filter((p) => same(p.selfName));
     if (hits.length === 1) return { peer: hits[0] };
-    return { error: hits.length ? `more than one teammate is called ${r}; use their fingerprint` : `no linked teammate called ${r}` };
+    return { error: hits.length ? `more than one teammate is called ${r}; use the name you gave them (Settings > Team) or their fingerprint` : `no linked teammate called ${r}` };
   }
 
   function send(ref, text, { kind = 'ask', replyTo = null, id = null } = {}) {
@@ -961,7 +968,10 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const all = store.messages();
     const act = new Set(['held', 'needs attention', 'unconfirmed', 'not delivered', 'waiting', 'routing', 'queued', 'sending']);
     const recent = new Set(all.slice(-200));
-    return all.filter((m) => recent.has(m) || act.has(m.state));
+    // Rows show the teammate's CURRENT name (a rename after the row was written must not leave a stale label).
+    const current = store.peers(); // read once for the whole list
+    return all.filter((m) => recent.has(m) || act.has(m.state))
+      .map((m) => { const n = m.peer && Object.hasOwn(current, m.peer) ? current[m.peer].name : m.peerName; return n !== m.peerName ? { ...m, peerName: n } : m; });
   }
 
   return {
