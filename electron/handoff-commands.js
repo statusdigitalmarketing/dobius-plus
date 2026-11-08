@@ -151,7 +151,8 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
         if (waiting.length > MAX_WAITING) { const drop = new Set(waiting.slice(0, waiting.length - MAX_WAITING)); all = all.filter((c) => !drop.has(c)); }
         byTab.set(tabId, { tabId, projectPath, cwd: cwdNow, at: now(), reply, commands: all });
         notify();
-        if (added.length) { try { onAdded(tabId); } catch (err) { console.warn('[handoff-commands] onAdded failed:', err?.message || err); } }
+        // A turn that handed back only commands already waiting reports that too, as a repeat (not news for a phone).
+        if (added.length || commands.length) { try { onAdded(tabId, added.length ? undefined : { repeat: true }); } catch (err) { console.warn('[handoff-commands] onAdded failed:', err?.message || err); } }
         return;
       } catch (err) {
         console.warn('[handoff-commands] could not read the handed-back command:', err?.message || err);

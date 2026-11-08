@@ -246,3 +246,31 @@ test('round 8: a new key never reuses a connection the old one used', async () =
     assert.equal(connects, 2, 'a fresh connection for the new key');
   } finally { sender.close(); await net.close(); fs.rmSync(a.dir, { recursive: true, force: true }); fs.rmSync(b.dir, { recursive: true, force: true }); }
 });
+
+test('round 9: a key valid on one environment tries the other host while unknown; an old-key send never shares the new key\'s connection', async () => {
+  assert.equal(outcomeFor(403, 'BadEnvironmentKeyIdInToken', { envKnown: false }), 'other-host');
+  assert.equal(outcomeFor(403, 'BadEnvironmentKeyIdInToken', { envKnown: true }), 'failed');
+  const a = keyDir();
+  const b = keyDir();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let first = true;
+  const net = await standIns(async (req) => {
+    if (first && req.env === 'production') { first = false; await gate; return { status: 400, reason: 'BadDeviceToken' }; }
+    return { status: 200 };
+  });
+  const opened = [];
+  let t = 1_000_000;
+  let which = a.dir;
+  const sender = createApnsSender({ dir: a.dir, readKey: () => readApnsKey(which), connect: (o) => { opened.push(which); return net.connect(o); }, now: () => t, idleMs: 60_000 });
+  try {
+    const pending = sender.send([{ token: TOKEN, env: 'auto' }], { title: 'a', body: 'b' }); // waits on production with key A
+    await new Promise((r) => setTimeout(r, 50));
+    which = b.dir; t += 60 * 60 * 1000; sender.status(); // key B noticed: sessions retired
+    release();
+    await pending; // its sandbox retry still signs with A, on a connection of its own
+    const before = opened.length;
+    await sender.send([{ token: TOKEN2, env: 'sandbox' }], { title: 'a', body: 'b' }); // key B
+    assert.equal(opened.length, before + 1, 'key B opened its own connection instead of reusing the A one');
+  } finally { sender.close(); await net.close(); fs.rmSync(a.dir, { recursive: true, force: true }); fs.rmSync(b.dir, { recursive: true, force: true }); }
+});

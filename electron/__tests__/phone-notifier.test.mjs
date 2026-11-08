@@ -492,3 +492,28 @@ test('settings helpers: defaults, quiet window across midnight, label cleaning',
   assert.equal([...cleanLabel('x'.repeat(200))].length, 60);
   assert.doesNotMatch(tabTag('term-/Users/sam/Projects/secret-1'), /Users|secret/);
 });
+
+test('round 9: a repeated handback marks the red behind as listed (dismissing it is silence); a switch changed mid-send stops a kind no longer allowed', () => {
+  let waiting = true;
+  const h = rig({ status: { b: 'needs' }, waiting: () => waiting });
+  h.n.tabHook('b', 'needs', null);
+  h.advance(2000);
+  h.n.tabHook('b', 'working');
+  h.n.tabHook('b', 'needs', 'handoff');
+  h.n.handoffAdded('b');
+  h.n.tabHook('b', 'working');
+  h.n.tabHook('b', 'needs', 'handoff');
+  h.n.handoffAdded('b', { repeat: true }); // the same command again: captured, deduplicated
+  waiting = false;
+  h.advance(TAB_GAP_MS + HANDOFF_WAIT_MS + 12000);
+  assert.equal(h.sent.length, 1, 'no false "needs you" for a command that was listed and dismissed');
+  const r = rig({ status: { c: 'needs' } });
+  r.n.tabHook('c', 'needs', 'handoff');
+  r.n.handoffAdded('c');
+  r.advance(1000);
+  assert.equal(r.sent.length, 1);
+  assert.equal(r.sent[0].kind, 'handoff');
+  assert.equal(r.sent[0].current(), true);
+  r.cfg.alerts.handoff = false; // only "needs you" left
+  assert.equal(r.sent[0].current(), false, 'the next phone does not get a "handed back" its switch now refuses');
+});

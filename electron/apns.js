@@ -154,6 +154,8 @@ export function outcomeFor(status, reason, { envKnown }) {
   if (status === 410 || reason === 'Unregistered') return 'drop';
   if (status === 403 && (reason === 'ExpiredProviderToken' || reason === 'InvalidProviderToken')) return 'retry-auth';
   if (status === 400 && reason === 'BadDeviceToken') return envKnown ? 'drop' : 'other-host';
+  // A key valid on only one environment: try the other host while this device's is unknown, never drop (Codex round 9).
+  if (status === 403 && reason === 'BadEnvironmentKeyIdInToken') return envKnown ? 'failed' : 'other-host';
   return 'failed';
 }
 
@@ -204,22 +206,25 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
     return jwt.value;
   }
 
-  function sessionFor(origin) {
-    let s = sessions.get(origin);
+  // One connection per host AND key: a send still going on the old key after a swap opens its own, never one the new
+  // key will use (Apple refuses a second key on a connection, Codex round 9).
+  function sessionFor(origin, stamp) {
+    const id = `${origin}|${stamp ?? ''}`;
+    let s = sessions.get(id);
     if (s && !s.session.closed && !s.session.destroyed) {
       clearTimeout(s.timer);
     } else {
       const session = connect(origin);
       s = { session, timer: null };
-      const forget = () => { if (sessions.get(origin) === s) { clearTimeout(s.timer); sessions.delete(origin); } };
+      const forget = () => { if (sessions.get(id) === s) { clearTimeout(s.timer); sessions.delete(id); } };
       // Errors are swallowed to a reason code: an http2 error can name the host but never carries the key.
       session.on('error', forget);
       session.on('close', forget);
       // GOAWAY: no new streams; retire it so a peer that never closes cannot keep the socket open (Codex round 4).
       session.on('goaway', () => { forget(); retire(session); });
-      sessions.set(origin, s);
+      sessions.set(id, s);
     }
-    s.timer = setTimeout(() => { if (sessions.get(origin) === s) sessions.delete(origin); retire(s.session); }, idleMs);
+    s.timer = setTimeout(() => { if (sessions.get(id) === s) sessions.delete(id); retire(s.session); }, idleMs);
     s.timer.unref?.();
     return s.session;
   }
@@ -239,14 +244,14 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
     t.unref?.();
   }
 
-  function post(origin, headers, body) {
+  function post(origin, headers, body, stamp) {
     return new Promise((resolve) => {
       let done = false;
       const finish = (r) => { if (!done) { done = true; resolve(r); } };
       let req;
       let session;
       try {
-        session = sessionFor(origin);
+        session = sessionFor(origin, stamp);
         req = session.request(headers);
       } catch { finish({ status: 0, reason: 'connect' }); return; }
       let status = 0;
@@ -255,8 +260,9 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
         try { req.close(http2.constants.NGHTTP2_CANCEL); } catch { /* closed */ }
         // A request that timed out says the connection is not healthy: the next send starts a fresh one. The old one is
         // retired, not destroyed, so other requests already on it keep their own full timeout.
-        const s = sessions.get(origin);
-        if (s?.session === session) { clearTimeout(s.timer); sessions.delete(origin); retire(session, timeoutMs); }
+        const sid = `${origin}|${stamp ?? ''}`;
+        const s = sessions.get(sid);
+        if (s?.session === session) { clearTimeout(s.timer); sessions.delete(sid); retire(session, timeoutMs); }
         finish({ status: 0, reason: 'timeout' });
       });
       req.on('response', (h) => { status = Number(h[':status']) || 0; });
@@ -284,7 +290,7 @@ export function createApnsSender({ dir, connect = connectApple, now = () => Date
         // Checked before every request: a phone unpaired while an earlier request waited gets nothing more.
         if (!stillValid(device)) return { token: device.token, outcome: 'skipped' };
         const req = buildRequest({ token: device.token, bundleId: k.bundleId, jwt: token(k, retried), payload, tag, nowSeconds: Math.floor(now() / 1000) });
-        const r = await post(APNS_ORIGIN_FOR(env), req.headers, req.body);
+        const r = await post(APNS_ORIGIN_FOR(env), req.headers, req.body, k.stamp);
         const outcome = outcomeFor(r.status, r.reason, { envKnown: device.env === env || env === 'sandbox' });
         if (outcome === 'retry-auth' && !retried) { retried = true; continue; }
         if (outcome === 'other-host') break; // try the next host

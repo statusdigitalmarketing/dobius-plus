@@ -187,10 +187,13 @@ export function createPhoneNotifier(deps) {
   }
 
   /** Tasks > Commands listed at least one new handed-back command for this tab. */
-  function handoffAdded(tabId) {
+  // repeat: the turn handed back only commands already waiting (deduplicated by capture). Not news, but it does mean
+  // the red behind a waiting handoff has its command listed (Codex round 9).
+  function handoffAdded(tabId, { repeat = false } = {}) {
     if (typeof tabId !== 'string' || !tabId) return;
     const key = keyOf(tabId);
     const p = pending.get(key);
+    if (repeat) { if (p?.kind === 'handoff' && p.behind?.handoff && !p.behind.listed) pending.set(key, { ...p, behind: { ...p.behind, listed: true } }); return; }
     const t = d.now();
     if (p && (p.kind === 'needs' || p.kind === 'done')) { put({ ...p, kind: 'handoff', awaitHandoff: false, dueAt: Math.min(p.dueAt, t + 300) }); return; }
     // A handoff already waiting. If a handed-back red waits behind it, that red's own command is now listed: remember it,
@@ -253,12 +256,15 @@ export function createPhoneNotifier(deps) {
   }
 
   // Its switch still on and not quiet hours now: a switch turned off mid-send stops it before the next phone (round 6).
-  function allowedNow(kind) {
+  // sentAs: the kind the notification already went out as. A switch changed mid-send stops it unless the same kind is
+  // still allowed (a handoff sent as "handed back" does not continue once only "needs you" is on, Codex round 9).
+  function allowedNow(kind, sentAs) {
     try {
       const cfg = d.settings() || {};
       const a = alertSettings(cfg.alerts);
       if (a.quiet && inQuietHours(d.minuteOfDay(d.now()), cfg.morningAt, cfg.quietAfter)) return false;
-      return !!effectiveKind(kind, a);
+      const k = effectiveKind(kind, a);
+      return sentAs ? k === sentAs : !!k;
     } catch { return false; }
   }
 
@@ -356,7 +362,7 @@ export function createPhoneNotifier(deps) {
         for (const o of out) lastSent.set(gapKey(o.p), { at: t, kind: o.kind });
         // Its text is fixed, so it goes to the next phone only while ALL of what it sums up is still true (Codex round 4).
         // And nobody started looking at any of those tabs on the Mac meanwhile, as for a single notification (Codex round 8).
-        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o) => allowedNow(o.p.kind) && isCurrent(o.p) && !(o.p.tabId && d.isLooking(o.p.tabId)));
+        const current = () => !d.quitting() && namesStill(alerts.names) && out.every((o) => allowedNow(o.p.kind, o.kind) && isCurrent(o.p) && !(o.p.tabId && d.isLooking(o.p.tabId)));
         Promise.resolve(d.send({ kind: 'summary', title: `${out.length} updates`, body, tag: 'summary', tabId: null, current })).catch(() => { /* the sender logs by code */ });
       } else {
         for (const { p, kind } of out) {
@@ -367,7 +373,7 @@ export function createPhoneNotifier(deps) {
           // current(): asked by the sender before each phone, so news that stopped being true mid-send stops there. The
           // same test the flush used, on the entry as it was (a handoff sent as "needs you" is still judged by its command).
           // And nobody started looking at the tab on the Mac meanwhile (round 7).
-          const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind) && isCurrent(p) && !(p.tabId && d.isLooking(p.tabId));
+          const current = () => !d.quitting() && namesStill(alerts.names) && allowedNow(p.kind, kind) && isCurrent(p) && !(p.tabId && d.isLooking(p.tabId));
           Promise.resolve(d.send({ kind: n.kind, title: n.title, body: n.body, tag: n.tag, tabId: n.tabId, current })).catch(() => { /* the sender logs by code */ });
         }
       }

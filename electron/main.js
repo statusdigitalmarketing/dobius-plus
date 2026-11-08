@@ -4335,7 +4335,7 @@ function setupWindowHandlers() {
     processCwd: getProcessCwd,
     projectOf: (id) => { const p = projectPathFromTabId(id); return p && p !== 'mobile' ? p : null; },
     notify: () => { for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('handoffCommands:changed'); },
-    onAdded: (id) => phoneAlerts.handoffAdded(id), // the tab id only, never the command
+    onAdded: (id, o) => phoneAlerts.handoffAdded(id, o?.repeat === true ? { repeat: true } : undefined), // the tab id only, never the command
     newId: () => randomUUID(),
   });
   terminalStatus.onHookState((id, state, tag) => handoffCommands.onHook(id, state, tag));

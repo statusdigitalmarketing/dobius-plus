@@ -48,7 +48,7 @@ function rig({ text = '! ./release.sh patch', at = null, session = { sessionId: 
     processCwd: async () => cwd,
     projectOf: (id) => (id.startsWith('term-/p-') ? '/p' : null),
     notify: () => { notes += 1; },
-    onAdded: (id) => { calls.added = [...(calls.added || []), id]; },
+    onAdded: (id, o) => { if (o?.repeat) calls.repeats = [...(calls.repeats || []), id]; else calls.added = [...(calls.added || []), id]; },
     now: () => clock,
     sleep: async (ms) => { clock += ms; },
     newId: () => `c${(n += 1)}`,
@@ -62,9 +62,10 @@ test('phone notifier hook: onAdded gets the tab id once per new command batch, n
   await tick();
   assert.deepEqual(calls.added, ['term-/p-1']);
   assert.equal(hc.hasWaiting('term-/p-1'), true);
-  turn(hc); // the same command handed back again: nothing new
+  turn(hc); // the same command handed back again: nothing new, reported as a repeat (it is listed for that red)
   await tick();
   assert.deepEqual(calls.added, ['term-/p-1']);
+  assert.deepEqual(calls.repeats, ['term-/p-1']);
   const id = hc.list()[0].commands[0].id;
   hc.take('term-/p-1', id);
   assert.equal(hc.hasWaiting('term-/p-1'), false);
