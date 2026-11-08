@@ -5178,7 +5178,10 @@ app.whenReady().then(() => {
   let lastFocusedWindow = null;
   app.on('browser-window-focus', (_e, win) => { lastFocusedWindow = win; });
   let relaunchAfterQuit = false;
-  app.on('second-instance', () => {
+  app.on('second-instance', (_e, argv) => {
+    // A copy only waiting for this one's lock (a relaunch or an update start, electron/single-instance.js) asks again
+    // every 250 ms: those are not someone opening Dobius, and answering them would chain relaunches (Codex).
+    if (Array.isArray(argv) && (argv.includes(RELAUNCH_ARG) || argv.includes('--updated'))) return;
     // Opened again while this copy is closing: that launch has already exited, so start Dobius again once this one is
     // gone, or nothing would be open (Codex). Not during an update: the installer starts the new version itself.
     if (getQuitting()) {
