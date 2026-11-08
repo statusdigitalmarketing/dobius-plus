@@ -253,10 +253,10 @@ anything runs), and every write checks again right before it changes anything.
 
 | Request | Fields | Reply |
 | --- | --- | --- |
-| `commandsList` | | `{type:'commands', ok, list:[{tabId, tabLabel, project, projectPath, cwd, at, commands:[{id, text, why, state, hole, cwd, reply, at, edited, exit, startedAt, endedAt, runTabId}]}]}`. `state` is `waiting`, `running`, `done`, `failed` or `closed`. `hole` is the Mac's placeholder check for a waiting command (null when none). Never sent: the text that actually ran (an edit may hold a key) or the exit file |
+| `commandsList` | | `{type:'commands', ok, list:[{tabId, tabLabel, project, projectPath, cwd, at, commands:[{id, text, why, state, hole, cwd, reply, at, edited, exit, startedAt, endedAt, runTabId, runLive}]}]}`. `runLive`: the run's terminal is still there (the phone offers Open terminal only then). `state` is `waiting`, `running`, `done`, `failed` or `closed`. `hole` is the Mac's placeholder check for a waiting command (null when none). Never sent: the text that actually ran (an edit may hold a key) or the exit file |
 | `commandsDismiss` | `tabId`, `id` | `{type:'commandResult', op:'dismiss', id, ok}` |
 | `commandsRun` | `tabId`, `id`, `edited` (optional string, at most 2000), `asIs` (optional, `true` = the flagged placeholder is real syntax) | `{type:'commandResult', op:'run', id, ok, termId, error}`. `termId` is a new phone terminal (`term-mobile-<n>`) this socket may attach to. `error`: `unavailable`, `bad-request`, `not-waiting`, `placeholder`, `bad-edit`, `bad-edit-syntax`, `syntax`, `shell`, `write-failed`, `spawn-failed`, `failed` |
-| `tasksProjects` | | `{type:'tasksProjects', ok, list:[{path, name, pending, asana}]}`: the Mac's known projects (the allowlist `createTerminal` uses), busiest first. `pending` counts open to-dos not from Asana, `asana` open Asana tasks |
+| `tasksProjects` | | `{type:'tasksProjects', ok, list:[{path, name, pending, asana}]}`: the Mac's known projects (the allowlist `createTerminal` uses), busiest first. `pending` counts open to-dos not from Asana, `asana` open Asana tasks. Counted read only (`peekTasks`): no legacy-name move or corrupt-file move for projects nobody opened |
 | `projectTasksRead` | `project` (a path from `tasksProjects`) | `{type:'projectTasks', ok, project, tasks:[{id, title, done, source, dueOn, lane, assignee, notes, url, stage, createdAt, print}]}`. `print` names the version shown. No event log, runs or session links. `unknown-project` for any other path |
 | `projectTaskAct` | `project`, `id`, `kind` (`complete`/`reopen`/`delete`), `print` (the task's, as shown) | `{type:'projectTaskResult', op, id, ok, error}`. `error`: `not-found` (the id must match exactly), `changed` (edited since the phone looked), `unavailable`, `unknown-project`, `bad-request`, `failed`. `complete` is LOCAL ONLY, as on the Mac: it never calls Asana |
 | `projectTaskAdd` | `project`, `title` (1 to 500 characters, no control characters) | `{type:'projectTaskResult', op:'add', ok, id, error}` |
@@ -276,7 +276,8 @@ terminal that runs the wrapper as its startup program (`shared/new-tab.js loginS
 PTY and nothing is eval'd. The command is marked Running only once the terminal spawned; otherwise its files go and it
 stays waiting. The Mac's one-time token exists only because its decision and its spawn are two IPC calls from a window;
 here both happen in the same call. A phone Run terminal whose shell has not reached the script after two minutes (a
-login profile waiting for input) is closed, so the files never wait on disk with no window to close them.
+login profile waiting for input) is closed, so the files never wait on disk with no window to close them. No window may
+create a terminal over a `term-mobile-` id (`terminal:create` refuses it), and a phone's `kill` checks the pairing too.
 
 What the terminal prints as the command is the card's text, marked `(edited)` for an edit; the edited text itself is
 never shown, logged or listed.

@@ -136,6 +136,20 @@ test('a task write needs the exact task and the version the phone showed, and th
   assert.equal(adds.length, 0);
 });
 
+test('a phone unpaired while its project was looked up reads nothing (reading can move a list file aside)', async () => {
+  const calls = rig();
+  const out = [];
+  let paired = true;
+  const slowCtx = { ...ctx, knownProjects: async () => { paired = false; return [{ path: '/p/one', name: 'one' }]; } };
+  handleTasksMessage({ type: 'projectTasksRead', reqId: 'a', project: '/p/one' }, (m) => out.push(m), () => paired, slowCtx);
+  await flush();
+  paired = true;
+  handleTasksMessage({ type: 'tasksProjects', reqId: 'b' }, (m) => out.push(m), () => paired, slowCtx);
+  await flush();
+  assert.equal(calls.length, 0);
+  assert.ok(out.every((m) => m.ok === false && m.error === 'unavailable'));
+});
+
 test('a task write request without the print it was shown is refused', async () => {
   const calls = rig();
   const out = [];
@@ -173,6 +187,22 @@ test('the command list for the phone: the Mac\'s placeholder check comes with it
   assert.equal(list[0].commands[1].hole, null);
   const json = JSON.stringify(list);
   assert.ok(!json.includes('--secret') && !json.includes('/tmp/x'), 'the text that ran and the exit file never go');
+});
+
+test('Open terminal only for a run terminal that is still there; a long project path still runs', async () => {
+  const entries = [{ tabId: 'term-/p-1', commands: [{ id: 'a', text: 'ls', state: 'done', runTabId: 'term-mobile-1' }, { id: 'b', text: 'pwd', state: 'done', runTabId: 'term-mobile-2' }] }];
+  const list = commandsForPhone(entries, () => null, (id) => id === 'term-mobile-1');
+  assert.deepEqual(list[0].commands.map((c) => c.runLive), [true, false]);
+  // A desktop tab id holds the project's whole path: one past 200 characters is still a tab Run must reach.
+  const longTab = `term-/${'d'.repeat(240)}-1`;
+  const calls = rig();
+  const out = [];
+  handleTasksMessage({ type: 'commandsRun', reqId: 'l', tabId: longTab, id: 'c1' }, (m) => out.push(m), () => true, ctx);
+  handleTasksMessage({ type: 'commandsDismiss', reqId: 'm', tabId: longTab, id: 'c1' }, (m) => out.push(m), () => true, ctx);
+  handleTasksMessage({ type: 'commandsRun', reqId: 'n', tabId: 'not-a-tab', id: 'c1' }, (m) => out.push(m), () => true, ctx);
+  await flush();
+  assert.deepEqual(calls.map((c) => c[0]), ['run', 'dismiss']);
+  assert.deepEqual(out.map((m) => m.ok), [true, true, false]);
 });
 
 // ---- Run from the phone ----
@@ -276,15 +306,15 @@ test('Run from the phone over the socket: a second tap finds it already running;
     }),
   });
   const out = [];
-  handleTasksMessage({ type: 'commandsRun', reqId: '1', tabId: 't', id: 'c1' }, (m) => out.push(m), () => true, ctx);
-  handleTasksMessage({ type: 'commandsRun', reqId: '2', tabId: 't', id: 'c1' }, (m) => out.push(m), () => true, ctx);
+  handleTasksMessage({ type: 'commandsRun', reqId: '1', tabId: 'term-/p-1', id: 'c1' }, (m) => out.push(m), () => true, ctx);
+  handleTasksMessage({ type: 'commandsRun', reqId: '2', tabId: 'term-/p-1', id: 'c1' }, (m) => out.push(m), () => true, ctx);
   await flush();
   assert.equal(spawned.length, 1);
   assert.deepEqual(out.map((m) => [m.reqId, m.ok, m.error]), [['1', true, undefined], ['2', false, 'not-waiting']]);
   // Oversized or non-string edits never reach the Mac's checks.
   const calls = rig();
-  handleTasksMessage({ type: 'commandsRun', reqId: '3', tabId: 't', id: 'c1', edited: 'x'.repeat(5000) }, (m) => out.push(m), () => true, ctx);
-  handleTasksMessage({ type: 'commandsRun', reqId: '4', tabId: 't', id: 'c1', edited: { toString: 1 } }, (m) => out.push(m), () => true, ctx);
+  handleTasksMessage({ type: 'commandsRun', reqId: '3', tabId: 'term-/p-1', id: 'c1', edited: 'x'.repeat(5000) }, (m) => out.push(m), () => true, ctx);
+  handleTasksMessage({ type: 'commandsRun', reqId: '4', tabId: 'term-/p-1', id: 'c1', edited: { toString: 1 } }, (m) => out.push(m), () => true, ctx);
   await flush();
   assert.equal(calls.length, 0);
 });

@@ -40,6 +40,10 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
   const [attempt, setAttempt] = useState(0);
   const [view, setView] = useState('board');
   const [openTabId, setOpenTabId] = useState(null);
+  // Where a terminal's Back goes (Tasks when it was opened from a command card), and the view Tasks opens on (Today
+  // for a Today notification).
+  const [terminalBack, setTerminalBack] = useState('board');
+  const [tasksStart, setTasksStart] = useState(null);
   const resolvedRefs = useRef(new WeakSet()); // notification taps already turned into a tab
   const { id, origin, token } = pairing;
 
@@ -93,7 +97,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
   useEffect(() => {
     if (openRequest?.pairingId !== id) return;
     // A Today notification opens Today; a session notification opens its session.
-    if (openRequest.view === 'tasks') setView('tasks');
+    if (openRequest.view === 'tasks') { setTasksStart('today'); setView('tasks'); }
     else if (openRequest.id) { setOpenTabId(openRequest.id); setView('terminal'); }
   }, [id, openRequest]);
 
@@ -135,7 +139,8 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     return () => { offAuth(); offRotate(); };
   }, [connection]);
 
-  const openTab = useCallback((tabId) => { setOpenTabId(tabId); setView('terminal'); }, []);
+  const openTab = useCallback((tabId) => { setOpenTabId(tabId); setTerminalBack('board'); setView('terminal'); }, []);
+  const openTabFromTasks = useCallback((tabId) => { setOpenTabId(tabId); setTerminalBack('tasks'); setTasksStart(null); setView('terminal'); }, []);
 
   if (problem || !connection) return (
     <div className="screen board-screen">
@@ -163,12 +168,12 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     </div>
   );
   if (view === 'history') return <History connection={connection} onBack={() => setView('board')} />;
-  if (view === 'tasks') return <Tasks connection={connection} onBack={() => setView('board')} onOpenTab={openTab} />;
+  if (view === 'tasks') return <Tasks connection={connection} onBack={() => { setTasksStart(null); setView('board'); }} onOpenTab={openTabFromTasks} startView={tasksStart} />;
   if (view === 'settings') return <Settings connection={connection} macName={pairing.name} onBack={() => setView('board')} />;
-  if (view === 'terminal') return <TerminalScreen connection={connection} status={status} initialId={openTabId} onBack={() => setView('board')} onShowHistory={() => setView('history')} />;
+  if (view === 'terminal') return <TerminalScreen connection={connection} status={status} initialId={openTabId} onBack={() => { setView(terminalBack); setTerminalBack('board'); }} onShowHistory={() => setView('history')} />;
   const board = <Board connection={connection} status={status} macName={pairing.name} onMacs={onMacs}
     onOpen={openTab} onShowHistory={() => setView('history')}
-    onShowTasks={() => setView('tasks')} onShowSettings={() => setView('settings')} />;
+    onShowTasks={() => { setTasksStart(null); setView('tasks'); }} onShowSettings={() => setView('settings')} />;
   if (!isDemoPairing(origin, token)) return board;
   // A pill over the board's last rows, so demo-board lets them scroll clear of it.
   return <>

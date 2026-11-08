@@ -26,6 +26,8 @@ export function setTasksBridge(b) { bridge = b || null; }
 
 const reqIdOf = (msg) => (typeof msg.reqId === 'string' && msg.reqId.length <= MAX_REQ_ID ? msg.reqId : null);
 const idOk = (id) => typeof id === 'string' && id.length > 0 && id.length <= MAX_ID;
+// A desktop tab id carries its project's whole path (term-<path>-<n>), so it is as long as a path can be.
+const tabIdOk = (id) => typeof id === 'string' && id.startsWith('term-') && id.length <= MAX_PATH + 64 && !/[\x00-\x1f\x7f]/.test(id);
 const pathOk = (p) => typeof p === 'string' && p.startsWith('/') && p.length <= MAX_PATH && !/[\x00-\x1f\x7f]/.test(p);
 const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : null);
 
@@ -54,7 +56,8 @@ export function taskForPhone(t) {
 }
 
 /** A handed-back command list entry as the phone shows it (handoffCommands.list() already dropped what must not go). */
-export function commandsForPhone(entries, labelOf = () => null) {
+// isLive(termId): whether that terminal is still there, so the phone offers "Open terminal" only for one it can open.
+export function commandsForPhone(entries, labelOf = () => null, isLive = () => false) {
   return (Array.isArray(entries) ? entries : []).map((e) => {
     const label = labelOf(e.tabId) || {};
     return {
@@ -78,7 +81,8 @@ export function commandsForPhone(entries, labelOf = () => null) {
         exit: Number.isInteger(c.exit) ? c.exit : null,
         startedAt: Number.isFinite(c.startedAt) ? c.startedAt : null,
         endedAt: Number.isFinite(c.endedAt) ? c.endedAt : null,
-        runTabId: str(c.runTabId, 300),
+        runTabId: str(c.runTabId, MAX_PATH + 64),
+        runLive: typeof c.runTabId === 'string' && !!isLive(c.runTabId),
       })),
     };
   });
@@ -107,12 +111,12 @@ export function handleTasksMessage(msg, send, stillOk = () => true, ctx = {}) {
       case 'commandsList':
         return send({ type: 'commands', reqId, ok: true, list: bridge.listCommands() });
       case 'commandsDismiss': {
-        if (!idOk(msg.tabId) || !idOk(msg.id)) return fail({ op: 'dismiss', error: 'bad-request' });
+        if (!tabIdOk(msg.tabId) || !idOk(msg.id)) return fail({ op: 'dismiss', error: 'bad-request' });
         if (!stillOk()) return fail({ op: 'dismiss', error: 'unavailable' });
         return send({ type: 'commandResult', reqId, op: 'dismiss', id: msg.id, ok: !!bridge.dismissCommand(msg.tabId, msg.id) });
       }
       case 'commandsRun': {
-        if (!idOk(msg.tabId) || !idOk(msg.id)) return fail({ op: 'run', error: 'bad-request' });
+        if (!tabIdOk(msg.tabId) || !idOk(msg.id)) return fail({ op: 'run', error: 'bad-request' });
         let edited;
         if (msg.edited !== undefined && msg.edited !== null) {
           if (typeof msg.edited !== 'string' || msg.edited.length > MAX_EDITED) return fail({ op: 'run', id: msg.id, error: 'bad-request' });
@@ -128,10 +132,13 @@ export function handleTasksMessage(msg, send, stillOk = () => true, ctx = {}) {
       }
       case 'tasksProjects': {
         const list = typeof ctx.knownProjects === 'function' ? await ctx.knownProjects() : [];
+        if (!stillOk()) return fail({ error: 'unavailable' });
         return send({ type: 'tasksProjects', reqId, ok: true, list: bridge.projectSummaries(Array.isArray(list) ? list : []) });
       }
       case 'projectTasksRead': {
         if (!(await knownProject(msg.project))) return fail({ project: str(msg.project, MAX_PATH), error: 'unknown-project' });
+        // Reading can move a legacy or corrupt list file aside: not for a phone unpaired while the project was looked up.
+        if (!stillOk()) return fail({ error: 'unavailable' });
         const tasks = bridge.listTasks(msg.project);
         return send({ type: 'projectTasks', reqId, ok: true, project: msg.project, tasks: (Array.isArray(tasks) ? tasks : []).map(taskForPhone) });
       }
@@ -177,6 +184,8 @@ export function syncErrorCode(r) {
  * deleteTask, changed(project) }.
  */
 export function actOnProjectTask({ project, id, kind, print }, stillOk, svc) {
+  // Before the read too: reading can move a legacy or corrupt list file aside. Nothing below awaits.
+  if (!stillOk()) return { ok: false, error: 'unavailable' };
   const tasks = svc.listTasks(project);
   const t = Array.isArray(tasks) ? tasks.find((x) => x?.id === id) : null;
   if (!t) return { ok: false, error: 'not-found' };

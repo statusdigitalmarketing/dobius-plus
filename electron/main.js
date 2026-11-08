@@ -141,7 +141,7 @@ import { createPicker, runClaude } from './today-pick.js';
 import { createSnoozes, cardPrint } from './today-snooze.js';
 import { localDay } from '../shared/task-due.js';
 import { boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo, boardIsStandIn } from './inbox-board.js';
-import { listTasks, addTask, updateTask, deleteTask, syncAsanaTasks, workingAsanaKeyFrom, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
+import { listTasks, peekTasks, addTask, updateTask, deleteTask, syncAsanaTasks, workingAsanaKeyFrom, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { readUpdateBackup } from './config-manager.js';
 import { recoverWindowLists } from './update-window-recovery.js';
@@ -558,6 +558,9 @@ function ownsTerminal(senderId, id) {
 function setupTerminalHandlers() {
   ipcMain.handle('terminal:create', (event, id, cwd, opts) => {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
+    // Phone terminals (a phone's own, a phone Run) have no owning window: no window may create over one of them and so
+    // take it over. No window ever makes a term-mobile id (its project path would be the bare word "mobile").
+    if (id.startsWith('term-mobile-')) return null;
     if (cwd !== undefined && cwd !== null && typeof cwd !== 'string') return null;
     // Reject hijack attempts: if this id is already owned by a DIFFERENT
     // webContents, don't let the caller's createTerminal kill+replace the
@@ -4363,7 +4366,10 @@ function setupWindowHandlers() {
   // The phone's Commands, To-do and Asana (electron/mobile-tasks.js): the same collector, checks, Run start and task
   // functions as the Mac's Tasks dropdown.
   setTasksBridge({
-    listCommands: () => commandsForPhone(handoffCommands.list(), (id) => tabLabelForNotify(id)),
+    listCommands: () => {
+      const live = new Set(listTerminals().map((t) => t.id));
+      return commandsForPhone(handoffCommands.list(), (id) => tabLabelForNotify(id), (id) => live.has(id));
+    },
     dismissCommand: (tabId, id) => !!handoffCommands.take(tabId, id),
     // Windows tabs run PowerShell, which never starts a run script.
     runCommand: (req, stillOk, ctx) => (IS_WIN ? { ok: false, error: 'shell' } : phoneRun(req, {
@@ -4390,7 +4396,8 @@ function setupWindowHandlers() {
         }, PHONE_RUN_START_MS).unref?.();
       },
     })),
-    projectSummaries: (projects) => projectSummaries(projects, listTasks),
+    // Read only: counting every known project must not run listTasks' legacy-name move for projects nobody opened.
+    projectSummaries: (projects) => projectSummaries(projects, peekTasks),
     listTasks: (project) => listTasks(project),
     actOnTask: (req, stillOk) => actOnProjectTask(req, stillOk, { listTasks, completeTaskByRef, reopenTask, updateTask, deleteTask, changed: tasksChangedEverywhere }),
     addTask: (project, title, stillOk) => addProjectTask(project, title, stillOk, { addTask, changed: tasksChangedEverywhere }),

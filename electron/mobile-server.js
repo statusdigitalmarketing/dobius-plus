@@ -542,6 +542,16 @@ async function knownProjectList() {
     return [];
   }
 }
+// The phone's To-do and Asana screens ask for it on every read and write; listProjects stats every transcript, so
+// one answer serves the requests of the next 15 seconds (a project added meanwhile shows up after that).
+let knownProjectsCache = null; // { at, promise }
+function knownProjectListCached() {
+  if (!knownProjectsCache || Date.now() - knownProjectsCache.at > 15_000) {
+    const promise = knownProjectList();
+    knownProjectsCache = { at: Date.now(), promise };
+  }
+  return knownProjectsCache.promise;
+}
 async function isKnownProjectPath(pth) {
   if (typeof pth !== 'string' || !pth) return false;
   return (await knownProjectList()).some((p) => p.path === pth);
@@ -657,7 +667,7 @@ function handleAuthedMessage(socket, msg, subs) {
   // Commands, To-do and Asana (electron/mobile-tasks.js). Projects come from the same allowlist createTerminal uses; a
   // Run's new terminal is authorized for THIS socket, as a phone-created terminal is.
   if (handleTasksMessage(msg, (obj) => wsSend(socket, obj), () => knownToken(socket._authToken), {
-    knownProjects: knownProjectList,
+    knownProjects: knownProjectListCached,
     newTerminalId: mobileTermId,
     authorizeTab: (id) => socket._authedTabs.add(id),
   })) return;
@@ -778,7 +788,8 @@ function handleAuthedMessage(socket, msg, subs) {
       break;
 
     case 'kill':
-      if (typeof msg.id === 'string' && socket._authedTabs.has(msg.id)) killTerminal(msg.id);
+      // A revoked phone's queued kill must not stop anything (the socket is closing, its frames may still be read).
+      if (typeof msg.id === 'string' && socket._authedTabs.has(msg.id) && knownToken(socket._authToken)) killTerminal(msg.id);
       break;
 
     case 'listProjects':

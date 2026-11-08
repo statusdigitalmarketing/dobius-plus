@@ -174,6 +174,8 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(c.text);
   const [busy, setBusy] = useState(false);
+  // The draft the Mac answered 'placeholder' for, on a phone that cannot check it itself.
+  const [macHoleFor, setMacHoleFor] = useState(null);
   const inputRef = useRef(null);
   // Run (on the Mac, this phone or another) or Dismiss changed it: a draft for the old state must not stay on screen.
   useEffect(() => { if (c.state !== 'waiting') { setEditing(false); setDraft(c.text); } }, [c.state, c.text]);
@@ -190,7 +192,9 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
   // undefined: this phone's browser cannot run the check (iOS before 16.4); the Mac's answer for the command as handed
   // back is used, and an edit is checked by the Mac when Run is tapped.
   const local = c.state === 'waiting' ? commandPlaceholder(text) : null;
-  const hole = local !== undefined ? local : (!editing && typeof c.hole === 'string' ? c.hole : null);
+  const hole = local !== undefined ? local
+    : !editing ? (typeof c.hole === 'string' ? c.hole : null)
+      : (macHoleFor !== null && macHoleFor === draft.trim() ? 'a placeholder' : null);
   const changed = draft.trim() !== c.text;
 
   const run = async (asIs = false) => {
@@ -202,7 +206,10 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
       setEditing(false);
       say('Running in a new terminal on your Mac.', r.termId ? { label: 'Open', run: () => onOpenTab?.(r.termId) } : null);
     } else if (!r) say(connection.status !== 'authed' ? 'Not connected to your Mac. Try again once it reconnects.' : 'No answer from your Mac. Look at the card again before running it.');
-    else say(RUN_CODES[r.error] || 'Your Mac could not run it.');
+    else {
+      if (r.error === 'placeholder' && editing && local === undefined) setMacHoleFor(draft.trim());
+      say(RUN_CODES[r.error] || 'Your Mac could not run it.');
+    }
     onChanged();
   };
   const dismiss = async () => {
@@ -217,7 +224,7 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
       {c.why && <div className={`cmd-why${c.state === 'waiting' ? '' : ' dim'}`}>{c.why}</div>}
       {hole && (
         <div className="cmd-hole">
-          <span>Fill in <code>{hole}</code> before running.</span>
+          <span>Fill in {hole === 'a placeholder' ? hole : <code>{hole}</code>} before running.</span>
           <div className="cmd-hole-actions">
             {!editing && <button className="cmd-link" onClick={() => setEditing(true)}>Fill it in</button>}
             <button className="cmd-link dim" onClick={() => run(true)} disabled={busy}>Not a placeholder? Run as is</button>
@@ -243,7 +250,7 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
             {c.endedAt && c.state !== 'running' ? <span className="cmd-ago"> · {ago(c.endedAt)}</span> : null}
             {c.cwd && c.cwd !== entry.cwd ? <span className="cmd-ago"> · ran in {folderOf(c.cwd)}</span> : null}
           </span>
-          {c.runTabId && c.state !== 'closed' && <button onClick={() => onOpenTab?.(c.runTabId)}>Open terminal</button>}
+          {c.runTabId && c.runLive && c.state !== 'closed' && <button onClick={() => onOpenTab?.(c.runTabId)}>Open terminal</button>}
           <button className="quiet" onClick={dismiss}>Dismiss</button>
         </>}
       </div>
@@ -300,10 +307,11 @@ const LANE = { build: 'Mine', review: 'Sam · review' };
 const STAGE = { approval: null, queued: 'Queued', running: 'Running', review: 'In review', blocked: 'Blocked' };
 
 function TaskRow({ task, today, busy, expanded, onExpand, onToggle, onDelete }) {
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  useEffect(() => { if (!expanded) setConfirmDelete(false); }, [expanded]);
-  // A confirm belongs to the version it was asked on: a newer one (edited on the Mac) asks again.
-  useEffect(() => { setConfirmDelete(false); }, [task.print]);
+  // A confirm belongs to the version it was asked on: a newer one (edited on the Mac) asks again. Decided while
+  // rendering, so the Delete button for an older version is never on screen with the newer task behind it.
+  const [confirmFor, setConfirmFor] = useState(null);
+  const confirmDelete = expanded && confirmFor === task.print;
+  const setConfirmDelete = (on) => setConfirmFor(on ? task.print : null);
   const due = !task.done ? dayLabel(task.dueOn, today) : null;
   const chips = [task.lane ? LANE[task.lane] : (task.source !== 'manual' && task.source !== 'asana' ? (task.source === 'inbox' ? 'From Inbox' : task.source) : null),
     !task.done ? STAGE[task.stage] || null : null].filter(Boolean);
@@ -421,7 +429,7 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     setAdding(true);
     const r = await ask(connection, { type: 'projectTaskAdd', project: projectRef.current, title: t }, 'projectTaskResult');
     setAdding(false);
-    if (r?.ok) setTitle('');
+    if (r?.ok) setTitle((cur) => (cur.trim() === t ? '' : cur));
     else say(r ? 'Could not add that.' : 'No answer from your Mac.');
     loadTasks();
   };
@@ -449,7 +457,8 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
       onExpand={() => setExpanded((v) => (v === t.id ? null : t.id))}
       onToggle={(x) => act(x, x.done ? 'reopen' : 'complete')} onDelete={(x) => act(x, 'delete')} />
   );
-  const name = (p) => `${p.name}${p.pending ? ` (${p.pending})` : ''}`;
+  // The count for this view: open to-dos, or open Asana tasks.
+  const name = (p) => { const n = kind === 'asana' ? p.asana : p.pending; return `${p.name}${n ? ` (${n})` : ''}`; };
   return <>
     <label className="tasks-project">
       <span className="tasks-project-label">Project</span>
@@ -486,12 +495,13 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
   </>;
 }
 
-export default function Tasks({ connection, onBack, onOpenTab }) {
+export default function Tasks({ connection, onBack, onOpenTab, startView = null }) {
   const features = useFeatures(connection);
   const views = viewsFor(features);
   const supported = !!features?.includes('today');
   const hasCommands = !!features?.includes('commands');
-  const [view, setViewState] = useState(() => store.get('dobius-tasks-view') || 'today');
+  // A Today notification opens Today; otherwise the view picked last time.
+  const [view, setViewState] = useState(() => startView || store.get('dobius-tasks-view') || 'today');
   const current = currentView(views, view);
   const setView = (v) => { setViewState(v); store.set('dobius-tasks-view', v); };
   const needInbox = current === 'inbox' || current === 'asana';
@@ -665,7 +675,8 @@ export default function Tasks({ connection, onBack, onOpenTab }) {
 
   const board = today?.board;
   const day = board?.today || '';
-  const cardFor = (c, showReason = false) => <Card key={c.id} card={c} today={inbox?.today || day} busy={!!busy[c.id]} onDone={done} onSnooze={snooze} showReason={showReason} />;
+  // Today's cards by Today's date, board cards by the date of the read they came with.
+  const cardFor = (c, showReason = false) => <Card key={c.id} card={c} today={showReason ? day : inbox?.today || day} busy={!!busy[c.id]} onDone={done} onSnooze={snooze} showReason={showReason} />;
   let body;
   if (current === 'commands') {
     body = <CommandsView connection={connection} entries={commands} reload={loadCommands} say={say} onOpenTab={onOpenTab} />;

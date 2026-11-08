@@ -23,6 +23,30 @@ const ASANA_BASE = 'app.asana.com';
 const ASANA_TIMEOUT_MS = 15_000;
 const MAX_TITLE = 500;
 
+// The list file's name for a project, with no side effects (see tasksPath for the legacy move).
+function hashedTasksPath(projectPath) {
+  const norm = path.resolve(String(projectPath).replace(/^~(?=$|\/)/, os.homedir()));
+  const slug = norm.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 100);
+  const hash = crypto.createHash('sha1').update(norm).digest('hex').slice(0, 8);
+  return path.join(TASKS_DIR, `${slug}.${hash}.json`);
+}
+
+/**
+ * A project's tasks for a count, READ ONLY: never the legacy-name move, the corrupt-file move or a mkdir that
+ * listTasks may do. The phone's project picker counts every known project this way, including ones nobody opened, so
+ * it must not move a legacy file (two paths can share a legacy name) or touch anything else. [] when there is no file
+ * or it cannot be read.
+ */
+export function peekTasks(projectPath) {
+  if (!projectPath) return [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(hashedTasksPath(projectPath), 'utf8'));
+    return Array.isArray(parsed) ? parsed.map((t) => pipeline.migrate(t)) : [];
+  } catch {
+    return []; // no file yet, or unreadable: listTasks handles that when the project is opened
+  }
+}
+
 function tasksPath(projectPath) {
   // Normalize so the renderer (store currentProjectPath) and the CLI (which may
   // pass ~, a trailing slash, or a relative cwd) encode to the SAME filename.
