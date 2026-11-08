@@ -22,8 +22,9 @@ const UPDATER_CACHE_DIR = path.join(os.homedir(), 'Library', 'Caches', 'dobius-p
 // the Windows installer and latest.yml from the Windows CI job a few minutes after they publish; until then a new
 // release has no latest.yml, which is "nothing for Windows yet", not an error (WINDOWS_NOT_YET below).
 const WINDOWS = process.platform === 'win32';
-const WINDOWS_NOT_YET = /latest\.yml/i;
-const windowsNotYet = (err) => WINDOWS && WINDOWS_NOT_YET.test(String(err?.message || err)) && /404|Cannot find/i.test(String(err?.message || err));
+// electron-updater's own code for "the release has no latest.yml" (GitHubProvider), never a text match: a malformed
+// manifest is a different error (ERR_UPDATER_INVALID_UPDATE_INFO) and must still show.
+const windowsNotYet = (err) => WINDOWS && err?.code === 'ERR_UPDATER_CHANNEL_FILE_NOT_FOUND';
 const updatesEnabled = () => app.isPackaged && !process.env.DOBIUS_USERDATA_DIR;
 
 // Purge the updater cache after a download error so the NEXT periodic check

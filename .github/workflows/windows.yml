@@ -117,8 +117,13 @@ jobs:
           [ -f "$EXE" ] && [ -f "$EXE.blockmap" ] && [ -f latest.yml ] || { echo "missing build files" >&2; exit 1; }
           grep -q "^version: $V$" latest.yml || { echo "latest.yml is not for $V" >&2; exit 1; }
           have="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')"
-          # Installer and blockmap first, the manifest last, one at a time. A file already on the release is never
-          # replaced: a re-run must not delete a working installer that the manifest points at.
-          for f in "$EXE" "$EXE.blockmap" latest.yml; do
-            if grep -qxF "$f" <<<"$have"; then echo "already attached: $f"; else gh release upload "$TAG" "$f" --repo "$REPO"; fi
+          # Once latest.yml is on the release the Windows files are complete: nothing is ever touched again (a re-run
+          # cannot replace an installer the manifest points at). Without it, nobody's updater uses the release yet, so
+          # an installer left by an earlier half-finished attempt (another build, another hash) is replaced by this
+          # build's, and the manifest goes up last.
+          if grep -qxF latest.yml <<<"$have"; then echo "already complete"; exit 0; fi
+          for f in "$EXE" "$EXE.blockmap"; do
+            if grep -qxF "$f" <<<"$have"; then gh release delete-asset "$TAG" "$f" --repo "$REPO" --yes; fi
+            gh release upload "$TAG" "$f" --repo "$REPO"
           done
+          gh release upload "$TAG" latest.yml --repo "$REPO"
