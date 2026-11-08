@@ -13,8 +13,10 @@ on:
     types: [published]
   workflow_dispatch:
 
+# Read-only by default: the build, the smoke test and the diagnostic probe never hold a token that can write
+# releases. Only the small `attach` job below can.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-and-smoke:
@@ -22,6 +24,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -64,6 +68,7 @@ jobs:
           node scripts/windows-claude-probe.mjs
 
       - name: Upload installer
+        id: installer
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -74,16 +79,6 @@ jobs:
             dist-electron/*.blockmap
           if-no-files-found: warn
 
-      # Only for a published release, and only after the smoke test passed: a build that does not start never
-      # reaches anyone's updater.
-      - name: Attach the installer to the release
-        if: github.event_name == 'release' && success()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ github.event.release.tag_name }}" dist-electron/*.exe dist-electron/*.exe.blockmap dist-electron/latest.yml --clobber
-
       - name: Upload smoke results
         if: always()
         uses: actions/upload-artifact@v4
@@ -91,3 +86,39 @@ jobs:
           name: smoke-out
           path: smoke-out/
           if-no-files-found: warn
+
+  # Attach the smoke-tested installer to the published release. The only job that can write releases: it runs no
+  # project code and installs nothing, it takes the built files from the job above.
+  attach:
+    if: github.event_name == 'release'
+    needs: build-and-smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: win
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The tag comes in through the environment, never pasted into this script.
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "unexpected tag: $TAG" >&2; exit 1; }
+          cd win
+          ls -la
+          V="${TAG#v}"
+          EXE="Dobius-Plus-Setup-$V.exe"
+          [ -f "$EXE" ] && [ -f "$EXE.blockmap" ] && [ -f latest.yml ] || { echo "missing build files" >&2; exit 1; }
+          grep -q "^version: $V$" latest.yml || { echo "latest.yml is not for $V" >&2; exit 1; }
+          have="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')"
+          # Installer and blockmap first, the manifest last, one at a time. A file already on the release is never
+          # replaced: a re-run must not delete a working installer that the manifest points at.
+          for f in "$EXE" "$EXE.blockmap" latest.yml; do
+            if grep -qxF "$f" <<<"$have"; then echo "already attached: $f"; else gh release upload "$TAG" "$f" --repo "$REPO"; fi
+          done

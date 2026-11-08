@@ -99,9 +99,10 @@ gh release edit "v$V" --draft=false
 step "Verify release"
 STATUS="$(gh release view "v$V" --json isDraft,isPrerelease,assets --jq '"draft=\(.isDraft) prerelease=\(.isPrerelease) assets=\(.assets|length)"')"
 echo "$STATUS"
-# 6 Mac assets; the Windows CI job (release: published) adds its installer, blockmap and latest.yml a few minutes
-# later, so a quick one may already be there.
-echo "$STATUS" | grep -qE "draft=false prerelease=false assets=(6|7|8|9)$" || { echo "ERROR: release not fully published with its 6 Mac assets" >&2; exit 1; }
+# The 6 Mac assets, counted apart from the Windows ones the CI job (release: published) attaches a few minutes later
+# (Setup .exe, its blockmap, latest.yml), so a quick Windows build can never stand in for a missing Mac file.
+MAC_ASSETS="$(gh release view "v$V" --json assets --jq '[.assets[].name | select(test("\\.exe(\\.blockmap)?$|^latest\\.yml$") | not)] | length')"
+echo "$STATUS" | grep -qE "draft=false prerelease=false" && [ "$MAC_ASSETS" = "6" ] || { echo "ERROR: release not fully published with its 6 Mac assets ($MAC_ASSETS)" >&2; exit 1; }
 SERVED="$(curl -sL "https://github.com/${REPO}/releases/latest/download/latest-mac.yml" | head -1)"
 echo "served manifest: $SERVED"
 [ "$SERVED" = "version: $V" ] || { echo "ERROR: served manifest is not $V (CDN lag? re-check in 1 min)" >&2; exit 1; }

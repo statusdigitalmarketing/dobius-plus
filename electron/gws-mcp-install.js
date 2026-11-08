@@ -24,6 +24,7 @@ import os from 'os';
 import { app } from 'electron';
 import { fileURLToPath } from 'url';
 import { resolveRealGws } from './gws-accounts.js';
+import { windowsGwsEntry } from './gws-setup.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -75,7 +76,9 @@ export function mcpEntryFor(platform, execPath, destJs, wrapperPath) {
 }
 
 function gwsCliPresent() {
-  // The same lookup every other gws caller uses (login-shell PATH, npm's prefix, nvm, volta...), not two fixed folders.
+  // The same lookup every other gws caller uses (login-shell PATH, npm's prefix, nvm, volta...; on Windows npm's
+  // run.js under %APPDATA%\npm, which is what the server runs), not two fixed folders.
+  if (WIN) return !!windowsGwsEntry();
   return !!resolveRealGws(path.join(app.getPath('userData'), 'gws-shim'));
 }
 
@@ -118,7 +121,25 @@ export function ensureGwsMcpMaterialized() {
 export function healGwsMcpIfInstalled() {
   try {
     const dir = path.join(app.getPath('userData'), 'gws-mcp');
-    if (fs.existsSync(dir)) ensureGwsMcpMaterialized();
+    if (!fs.existsSync(dir)) return;
+    const { entry } = ensureGwsMcpMaterialized();
+    // Windows: the entry itself names Dobius+.exe (there is no wrapper to rewrite), so a moved app means the config
+    // entry is rewritten too, only when one of ours is there and points elsewhere.
+    if (WIN) {
+      const cfgPath = configPath();
+      let text;
+      try { text = fs.readFileSync(cfgPath, 'utf8'); } catch { return; }
+      const cfg = JSON.parse(text);
+      const cur = cfg?.mcpServers?.[SERVER_NAME];
+      if (!cur || JSON.stringify(cur) === JSON.stringify(entry)) return;
+      const ours = cur?.env?.ELECTRON_RUN_AS_NODE === '1' && Array.isArray(cur?.args) && /gws-mcp\.mjs$/.test(String(cur.args[0] || ''));
+      if (!ours) return; // someone else's gws server: leave it
+      const merged = mergeClaudeDesktopConfig(text, entry);
+      if (merged.error) return;
+      const tmp = `${cfgPath}.tmp-${process.pid}`;
+      fs.writeFileSync(tmp, `${JSON.stringify(merged.next, null, 2)}\n`);
+      fs.renameSync(tmp, cfgPath);
+    }
   } catch (e) {
     console.warn('[gws-mcp] self-heal failed:', e?.message || e);
   }

@@ -2392,7 +2392,9 @@ export async function parseTranscriptTail(filePath, messageLimit, blocks = false
 export function claudeCodeProcessesFromWinRows(rows, isClaude = winClaudeCommand) {
   return (rows || [])
     .filter((r) => r && r.command && isClaude(r.command))
-    .filter((r) => !/\\WindowsApps\\/i.test(r.command) && !/\s--type=/.test(r.command))
+    // Claude Desktop in any install (Store package, its own installer, a per-user Programs folder) is not Claude
+    // Code, and Overview's kill button must never reach it.
+    .filter((r) => !/\\(WindowsApps|AnthropicClaude|Programs\\Claude)\\/i.test(r.command) && !/\s--type=/.test(r.command))
     .map((r) => ({ pid: String(r.pid), command: r.command }));
 }
 
@@ -2551,7 +2553,8 @@ export async function cwdFromTranscripts(projectDir, encodedName, { readHead = r
     let cwd;
     try { cwd = JSON.parse(m[1]); } catch { continue; }
     if (typeof cwd !== 'string' || !cwd) continue;
-    if (encodePathLikeClaude(cwd) !== encodedName) continue;
+    // Any of the names Claude has used for that folder (current Claude turns dots into '-' too).
+    if (!claudeDirNames(cwd).includes(encodedName)) continue;
     if (await exists(cwd)) return cwd;
   }
   return null;

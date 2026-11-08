@@ -23,6 +23,7 @@ const UPDATER_CACHE_DIR = path.join(os.homedir(), 'Library', 'Caches', 'dobius-p
 // release has no latest.yml, which is "nothing for Windows yet", not an error (WINDOWS_NOT_YET below).
 const WINDOWS = process.platform === 'win32';
 const WINDOWS_NOT_YET = /latest\.yml/i;
+const windowsNotYet = (err) => WINDOWS && WINDOWS_NOT_YET.test(String(err?.message || err)) && /404|Cannot find/i.test(String(err?.message || err));
 const updatesEnabled = () => app.isPackaged && !process.env.DOBIUS_USERDATA_DIR;
 
 // Purge the updater cache after a download error so the NEXT periodic check
@@ -179,6 +180,8 @@ async function safeCheck() {
   } catch (err) {
     // A check already in flight when Restart was clicked. The install is still fine.
     if (installing) { console.warn('[updater] a check failed during the install:', err?.message || err); return; }
+    // The same "no Windows build yet" the error event reports as idle: the rejection must not overwrite it.
+    if (windowsNotYet(err)) { broadcast('updater:status', { state: 'idle' }); return; }
     broadcast('updater:status', { state: 'error', message: String(err?.message || err) });
   }
 }
@@ -408,7 +411,7 @@ export function initAutoUpdater() {
 
   autoUpdater.on('error', (err) => {
     // Windows: the newest release's Windows build is still being made (or that release has none): up to date.
-    if (WINDOWS && WINDOWS_NOT_YET.test(String(err?.message || err)) && /404|Cannot find/i.test(String(err?.message || err))) {
+    if (windowsNotYet(err)) {
       console.warn('[updater] the newest release has no Windows build yet');
       broadcast('updater:status', { state: 'idle' });
       return;
