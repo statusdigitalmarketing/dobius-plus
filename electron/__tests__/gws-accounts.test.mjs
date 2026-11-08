@@ -84,6 +84,19 @@ check('registry empty after remove', gws.listGwsAccounts(), []);
   check('the symlink target is left untouched (no token written to it)', victimContent, 'DO NOT OVERWRITE');
 }
 
+// --- mustExist (Codex round 2): a quota-mark update must never recreate a profile that was removed meanwhile. ---
+{
+  const goneId = 'gws-removedmeanwhile01';
+  let err = null;
+  try { await gws.writeProfile(goneId, { email: 'x@y.com', refresh_token: 'r', noQuotaProject: true }, { mustExist: true }); } catch (e) { err = e.message; }
+  check('mustExist write to a removed profile fails', err, 'profile_gone');
+  check('and does not recreate it', await fs.access(gws.profilePathFor(goneId)).then(() => true, () => false), false);
+  await gws.writeProfile(goneId, { email: 'x@y.com', refresh_token: 'r' });
+  await gws.writeProfile(goneId, { email: 'x@y.com', refresh_token: 'r', noQuotaProject: true }, { mustExist: true });
+  check('mustExist updates one that is there', JSON.parse(await fs.readFile(gws.profilePathFor(goneId), 'utf8')).noQuotaProject, true);
+  await fs.rm(gws.profilePathFor(goneId), { force: true });
+}
+
 // --- no-follow DIRECTORY (Codex r3 P2): if ~/.gws-profiles is itself a
 // symlink, writing a token must refuse rather than land it in the target. ---
 {
@@ -185,6 +198,23 @@ check('registry empty after remove', gws.listGwsAccounts(), []);
   check('full is gws --full', gws.loginArgsFor('full'), ['auth', 'login', '--full']);
   check('unknown mode falls back to standard (never silently full)',
     gws.loginArgsFor('bogus')[2], '--scopes');
+}
+
+// quotaProjectDenied (Justin, 2026-11-07): Google's refusal to let an account use the client's Cloud project.
+{
+  const resp = (status, body) => ({ ok: status < 300, status, text: async () => body });
+  const seen = [];
+  const fake = (answers) => async (url, init) => { seen.push({ url, project: init.headers['x-goog-user-project'] }); return answers.shift(); };
+  const denied = 'Caller does not have required permission to use project gmail-oauth-1. Grant the caller the roles/serviceusage.serviceUsageConsumer role';
+  check('no project: nothing to refuse, no request', await gws.quotaProjectDenied('t', null, fake([])), false);
+  check('Drive 200 with the project: allowed', await gws.quotaProjectDenied('t', 'p1', fake([resp(200, '{}')])), false);
+  seen.length = 0;
+  check('Drive 403 serviceusage: refused', await gws.quotaProjectDenied('t', 'p1', fake([resp(403, denied)])), true);
+  check('the probe sends the project as x-goog-user-project', seen[0]?.project, 'p1');
+  check('Drive not granted, Gmail refuses: refused', await gws.quotaProjectDenied('t', 'p1', fake([resp(403, 'Request had insufficient authentication scopes'), resp(403, denied)])), true);
+  check('Drive 503 then Gmail OK: unknown, a Gmail OK alone clears nothing', await gws.quotaProjectDenied('t', 'p1', fake([resp(503, 'unavailable'), resp(200, '{}')])), null);
+  check('neither API can tell: unknown (null), never a guess', await gws.quotaProjectDenied('t', 'p1', fake([resp(403, 'insufficient scopes'), resp(500, 'oops')])), null);
+  check('network failure: unknown', await gws.quotaProjectDenied('t', 'p1', async () => { throw new Error('offline'); }), null);
 }
 
 await fs.rm(TMP_HOME, { recursive: true, force: true });

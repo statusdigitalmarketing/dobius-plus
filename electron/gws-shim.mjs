@@ -31,26 +31,84 @@ function fail(msg, code = 1) {
   process.exit(code);
 }
 
-// Locate the real gws, never this shim. Prefer DOBIUS_REAL_GWS (set by Dobius),
-// else scan PATH skipping the shim's own dir.
-function findRealGws() {
-  const explicit = process.env.DOBIUS_REAL_GWS;
-  if (explicit) {
-    try { fs.accessSync(explicit, fs.constants.X_OK); return explicit; } catch { /* fall through */ }
+// What Dobius found when it looked for gws (gws-setup.js writes gws-env.json beside this shim): { gws, path }. Lets a
+// gws installed after this terminal opened, or one only the login shell knows about, work here. Null when absent.
+function readHint(selfDir) {
+  if (!selfDir) return null;
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(selfDir, 'gws-env.json'), 'utf8'));
+    return j && typeof j === 'object' ? j : null;
+  } catch {
+    return null;
   }
-  const selfDir = process.env.DOBIUS_GWS_SHIM_SELF
-    ? path.dirname(process.env.DOBIUS_GWS_SHIM_SELF)
-    : null;
+}
+
+const isExec = (p) => { try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch { return false; } };
+const real = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+// Any Dobius shim (another Dobius copy's too) names DOBIUS_GWS_SHIM_SELF in its wrapper; running one as "gws" loops.
+function isDobiusShim(p) {
+  try {
+    const fd = fs.openSync(p, 'r');
+    try {
+      const buf = Buffer.alloc(512);
+      return buf.subarray(0, fs.readSync(fd, buf, 0, 512, 0)).toString('latin1').includes('DOBIUS_GWS_SHIM_SELF');
+    } finally { fs.closeSync(fd); }
+  } catch { return false; }
+}
+
+// Locate the real gws, never this shim, not even through a link to it (that would run the shim again, forever):
+// what Dobius found most recently (gws-env.json), then DOBIUS_REAL_GWS (set at spawn), then PATH.
+function findRealGws(selfDir, hint) {
+  const realSelf = selfDir ? real(selfDir) : null;
+  const notSelf = (p) => {
+    if (typeof p !== 'string' || !p.startsWith('/') || !isExec(p)) return false;
+    const rp = real(p);
+    return !!rp && !(realSelf && (rp === realSelf || rp.startsWith(realSelf + path.sep))) && !isDobiusShim(rp);
+  };
+  // What Dobius found most recently beats what it found when this terminal opened: a Locate or an install since then
+  // must reach open tabs too (Codex round 2).
+  if (notSelf(hint?.gws)) return hint.gws;
+  if (notSelf(process.env.DOBIUS_REAL_GWS)) return process.env.DOBIUS_REAL_GWS;
   for (const dir of (process.env.PATH || '').split(':')) {
     if (!dir || dir === selfDir) continue;
     const cand = path.join(dir, 'gws');
-    try { fs.accessSync(cand, fs.constants.X_OK); return cand; } catch { /* next */ }
+    if (notSelf(cand)) return cand;
   }
   return null;
 }
 
+// gws from npm is a node script (#!/usr/bin/env node), so for the gws process only, the folders Dobius found (and
+// checked: the gws there runs with the node there) go FIRST; an older node earlier on the tab's PATH could not run it.
+// Only absolute entries: an empty one would mean the current folder, so a project's own `node` would run.
+function withHintPath(env, hint) {
+  if (typeof hint?.path !== 'string' || !hint.path) return env;
+  const parts = `${hint.path}:${env.PATH || ''}`.split(':').filter((d) => d.startsWith('/'));
+  return { ...env, PATH: [...new Set(parts)].join(':') };
+}
+
+// The env that makes gws send NO quota project (Justin, 2026-11-07). gws 0.22.5 picks it from a non-empty
+// GOOGLE_WORKSPACE_PROJECT_ID, then the client file's project_id, then gcloud's default credentials; each is cleared:
+// the variable set empty, a config folder with no client file (~/.gws-profiles/.noquota), and a credentials path with
+// nothing at it. Verified against live gws. Null when .noquota is not a plain folder (fail rather than send it).
+function noQuotaEnv(env) {
+  const dir = path.join(PROFILES_DIR, '.noquota');
+  const adc = path.join(dir, 'no-adc.json');
+  // Nothing is written: gws treats a credentials path that does not exist as "no project", and creates the config
+  // folder itself for its cache (both verified live). Anything at those two names is removed (unlinking never follows a
+  // link), so neither can ever carry a project.
+  // Only inside a plain folder that is really ours: through a link, the cleanup would delete the real client file.
+  let st = null;
+  try { st = fs.lstatSync(dir); } catch { /* gws creates it */ }
+  if (st && (st.isSymbolicLink() || !st.isDirectory())) return null;
+  for (const f of [path.join(dir, 'client_secret.json'), adc]) {
+    // Gone is the goal; anything that stays (locked, no permission) could carry a project, so refuse.
+    try { fs.unlinkSync(f); } catch (e) { if (e?.code !== 'ENOENT') return null; }
+  }
+  return { ...env, GOOGLE_WORKSPACE_CLI_CONFIG_DIR: dir, GOOGLE_APPLICATION_CREDENTIALS: adc, GOOGLE_WORKSPACE_PROJECT_ID: '' };
+}
+
 function runReal(realGws, env) {
-  const r = spawnSync(realGws, process.argv.slice(2), { stdio: 'inherit', env });
+  const r = spawnSync(realGws, process.argv.slice(2), { stdio: 'inherit', env: withHintPath(env, HINT) });
   if (r.error) fail(`could not run gws (${r.error.code || 'unknown'})`, 127);
   process.exit(typeof r.status === 'number' ? r.status : 1);
 }
@@ -132,17 +190,19 @@ async function mint(creds) {
   }
 }
 
-const realGws = findRealGws();
+const SELF_DIR = process.env.DOBIUS_GWS_SHIM_SELF ? path.dirname(process.env.DOBIUS_GWS_SHIM_SELF) : null;
+const HINT = readHint(SELF_DIR);
+const realGws = findRealGws(SELF_DIR, HINT);
 const target = resolveProfile();
 
 if (!target) {
   // No account requested: transparent passthrough.
-  if (!realGws) fail('real gws not found on PATH', 127);
+  if (!realGws) fail('gws is not installed (or Dobius cannot find it). Open Dobius Settings > Google Accounts > Setup to install or locate it.', 127);
   runReal(realGws, process.env);
 } else if (target.error) {
   fail(target.error);
 } else if (!realGws) {
-  fail('real gws not found on PATH', 127);
+  fail('gws is not installed (or Dobius cannot find it). Open Dobius Settings > Google Accounts > Setup to install or locate it.', 127);
 } else if (!target.creds || typeof target.creds.refresh_token !== 'string') {
   fail(`stored credentials for that account are unreadable`);
 } else {
@@ -163,5 +223,13 @@ if (!target) {
     token = m.token;
     writeCachedToken(target.id, m.token, m.expiresIn);
   }
-  runReal(realGws, { ...process.env, GOOGLE_WORKSPACE_CLI_TOKEN: token });
+  const env = { ...process.env, GOOGLE_WORKSPACE_CLI_TOKEN: token };
+  // An account Google refuses the OAuth client's Cloud project (a personal Gmail next to Workspace accounts) runs
+  // without one, or every call is a 403 (Justin, 2026-11-07).
+  if (target.creds.noQuotaProject === true) {
+    const nq = noQuotaEnv(env);
+    if (!nq) fail(`${path.join(PROFILES_DIR, '.noquota')} could not be cleared (not a plain folder, or a file in it cannot be removed), so gws cannot run without the Cloud project for this account. Remove that folder and try again.`);
+    runReal(realGws, nq);
+  }
+  runReal(realGws, env);
 }

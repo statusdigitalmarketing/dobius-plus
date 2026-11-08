@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { buildArgv, findGws, gwsInvocation, claudeDesktopDirFor, mergeClaudeConfig } from '../gws-mcp.mjs';
+import { buildArgv, findGws, gwsInvocation, claudeDesktopDirFor, mergeClaudeConfig, quotaHint, noQuotaEnv } from '../gws-mcp.mjs';
 
 let pass = 0, fail = 0;
 const check = (label, got, want) => {
@@ -98,6 +98,48 @@ check('findGws avoids Dobius shim dirs', gwsPath.includes('dobius') || gwsPath.i
     { command: '/x' });
   check('config merge refuses malformed', typeof mergeClaudeConfig('{oops', {}).error, 'string');
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// The gws hint file (Justin, 2026-11-07): an npm gws Dobius found is used; the shim itself never is.
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gws-mcp-hint-'));
+  const real = path.join(tmp, 'npm-global', 'bin', 'gws');
+  fs.mkdirSync(path.dirname(real), { recursive: true });
+  fs.writeFileSync(real, '#!/bin/sh\n', { mode: 0o755 });
+  check('findGws uses the hinted gws', findGws({ gws: real }), real);
+  const shim = path.join(tmp, 'gws-shim', 'gws');
+  fs.mkdirSync(path.dirname(shim), { recursive: true });
+  fs.writeFileSync(shim, '#!/bin/sh\n', { mode: 0o755 });
+  check('findGws never picks the Dobius shim', findGws({ gws: shim }) === shim, false);
+  fs.rmSync(tmp, { recursive: true, force: true });
+  const nq = fs.mkdtempSync(path.join(os.tmpdir(), 'gws-mcp-nq-'));
+  const e = noQuotaEnv({ GOOGLE_WORKSPACE_PROJECT_ID: 'forbidden', KEEP: '1' }, path.join(nq, '.noquota'));
+  check('no-quota env clears all three project sources', [e.GOOGLE_WORKSPACE_PROJECT_ID, e.GOOGLE_WORKSPACE_CLI_CONFIG_DIR, fs.existsSync(e.GOOGLE_APPLICATION_CREDENTIALS), e.KEEP], ['', path.join(nq, '.noquota'), false, '1']);
+  // A link planted at the credentials name is removed, never written through (Codex round 5).
+  fs.mkdirSync(path.join(nq, '.noquota'), { recursive: true });
+  fs.writeFileSync(path.join(nq, 'victim.json'), 'KEEP');
+  fs.symlinkSync(path.join(nq, 'victim.json'), path.join(nq, '.noquota', 'no-adc.json'));
+  noQuotaEnv({}, path.join(nq, '.noquota'));
+  // .noquota itself a link (to the real gws config, say): nothing inside is deleted, the call refuses (round 6).
+  const realCfg = path.join(nq, 'real-cfg');
+  fs.mkdirSync(realCfg);
+  fs.writeFileSync(path.join(realCfg, 'client_secret.json'), 'REAL CLIENT');
+  fs.symlinkSync(realCfg, path.join(nq, 'linked-noquota'));
+  check('a linked .noquota is refused', noQuotaEnv({}, path.join(nq, 'linked-noquota')), null);
+  check('and the real client file survives', fs.readFileSync(path.join(realCfg, 'client_secret.json'), 'utf8'), 'REAL CLIENT');
+  // A file in .noquota that cannot be removed: refuse rather than let it carry a project (round 7).
+  const locked = path.join(nq, 'locked-noquota');
+  fs.mkdirSync(locked);
+  fs.writeFileSync(path.join(locked, 'client_secret.json'), '{"installed":{"project_id":"x"}}');
+  fs.chmodSync(locked, 0o555);
+  check('an undeletable client file in .noquota is refused', noQuotaEnv({}, locked), null);
+  fs.chmodSync(locked, 0o755);
+  check('a planted link is removed and its target untouched', [fs.existsSync(path.join(nq, '.noquota', 'no-adc.json')), fs.readFileSync(path.join(nq, 'victim.json'), 'utf8')], [false, 'KEEP']);
+  fs.rmSync(nq, { recursive: true, force: true });
+  const denied = '{"error":{"code":403,"message":"Grant the caller the roles/serviceusage.serviceUsageConsumer role"}}';
+  check('a quota refusal gets the plain explanation', /Its sign-in is fine/.test(quotaHint(denied)), true);
+  check('a call that named no account is told to name one', /named no account/.test(quotaHint(denied, { named: false })), true);
+  check('other output is left alone', quotaHint('{"ok":1}'), '{"ok":1}');
 }
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : fail + ' FAILED'}  (${pass} passed)`);

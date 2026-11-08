@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import GwsSetup from './GwsSetup.jsx';
 
 // Google Workspace (gws) accounts (v1.0.41; health + reconnect v1.0.61).
 // Connect multiple Google accounts so the gws CLI (and in-app flows) can act
@@ -19,6 +20,9 @@ export default function GwsAccounts() {
   const [accounts, setAccounts] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [health, setHealth] = useState({});      // id -> 'ok' | 'revoked' | 'error'
+  // id -> true when Google refuses this account the OAuth client's Cloud project for quota (a personal Gmail next to
+  // Workspace accounts), so Dobius runs gws for it without one (Justin, 2026-11-07).
+  const [quotaSkipped, setQuotaSkipped] = useState({});
   const [reconnecting, setReconnecting] = useState(''); // account id mid-flow
   const [feedback, setFeedback] = useState('');
   // Fallback consent link, shown a few seconds AFTER the browser opens: the
@@ -55,8 +59,10 @@ export default function GwsAccounts() {
       const res = await window.electronAPI?.gwsVerify?.({ force });
       if (!mountedRef.current || !Array.isArray(res)) return;
       const next = {};
-      for (const r of res) next[r.id] = r.status;
+      const skip = {};
+      for (const r of res) { next[r.id] = r.status; skip[r.id] = !!r.quotaSkipped; }
       setHealth(next);
+      setQuotaSkipped(skip);
     } catch { /* probe is best-effort; rows fall back to 'checking' */ }
   };
 
@@ -71,6 +77,35 @@ export default function GwsAccounts() {
     }
   };
   useEffect(() => { reload().then(() => verify(false)); }, []);
+
+  // What this Mac still needs (gws, Node.js, the OAuth client file). Add stays off until it is all there.
+  const [setup, setSetup] = useState(null);
+  const [mcpStatus, setMcpStatus] = useState(null);
+  // Only the newest answer is shown: a slow poll that started before an action must not overwrite its result.
+  // An answer is shown unless a NEWER request's answer already was (so a slow one never undoes a fresh one, and a
+  // stream of slow polls still lands each answer).
+  const setupSeq = useRef(0);
+  const setupShown = useRef(0);
+  const refreshSetup = async (opts) => {
+    const seq = ++setupSeq.current;
+    const show = (st) => {
+      if (!mountedRef.current || seq < setupShown.current) return;
+      setupShown.current = seq;
+      setSetup(st);
+    };
+    try {
+      show((await window.electronAPI?.gwsSetupStatus?.(opts)) || { ready: false });
+    } catch {
+      show({ ready: false });
+    }
+    try {
+      const s = await window.electronAPI?.gwsMcpStatus?.();
+      if (mountedRef.current) setMcpStatus(s || {});
+    } catch {
+      if (mountedRef.current) setMcpStatus((m) => m || {});
+    }
+  };
+  useEffect(() => { refreshSetup(); }, []);
 
   const flash = (msg, isError = false) => {
     // Reconnect can resolve minutes later (browser approval); by then this
@@ -104,6 +139,7 @@ export default function GwsAccounts() {
         await verify(true);
       } else {
         flash(res?.error || 'Could not add the account.', true);
+        if (res?.setup) refreshSetup();
       }
     } catch {
       flash('Could not add the account.', true);
@@ -114,14 +150,8 @@ export default function GwsAccounts() {
     }
   };
 
-  // Claude Desktop MCP setup row (v1.0.63): status on mount, one-click install.
-  const [mcpStatus, setMcpStatus] = useState(null);
+  // Claude Desktop MCP setup row (v1.0.63): one-click install. Its status loads with Setup (refreshSetup).
   const [mcpBusy, setMcpBusy] = useState(false);
-  useEffect(() => {
-    window.electronAPI?.gwsMcpStatus?.()
-      .then((s) => { if (mountedRef.current) setMcpStatus(s || {}); })
-      .catch(() => { if (mountedRef.current) setMcpStatus({}); });
-  }, []);
   const handleMcpInstall = async () => {
     setMcpBusy(true);
     try {
@@ -172,6 +202,7 @@ export default function GwsAccounts() {
         await verify(true);
       } else {
         flash(res?.error || 'Reconnect failed.', true);
+        if (res?.setup) refreshSetup();
       }
     } catch {
       flash('Reconnect failed.', true);
@@ -227,9 +258,11 @@ export default function GwsAccounts() {
         </button>
       </div>
 
+      <GwsSetup status={setup} onRefresh={refreshSetup} onClientChanged={() => verify(true)} btn={btn} />
+
       {loaded && accounts.length === 0 && (
         <p className="text-xs mb-3" style={{ color: 'var(--dim)' }}>
-          No Google accounts connected. Click Add Google Account: a Google approval opens in your browser, you pick the account, and it lands here. Repeat for as many accounts as you want.
+          No Google accounts connected yet. Press Add Google Account: Google's sign-in opens in your browser, you pick the account, and it shows up here. Repeat for each account.
         </p>
       )}
 
@@ -253,6 +286,11 @@ export default function GwsAccounts() {
                   <div className="text-sm font-medium truncate" style={{ color: 'var(--fg)' }}>{a.email}</div>
                   <div className="text-xs mt-0.5" style={{ color: health[a.id] === 'revoked' ? '#f87171' : 'var(--dim)' }}>
                     {st.label} · {(a.scopes?.length || 0)} scope{(a.scopes?.length || 0) === 1 ? '' : 's'}
+                    {quotaSkipped[a.id] && (
+                      <span title="Google does not let this account use your OAuth client's Cloud project for quota, which is normal for a personal Gmail. Dobius leaves the project out for this account so its calls work.">
+                        {' '}· runs without the Cloud project (personal account)
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -287,12 +325,16 @@ export default function GwsAccounts() {
       </label>
 
       <button
-        style={btn('primary', { opacity: reconnecting === '__add__' ? 0.7 : 1 })}
-        disabled={!!reconnecting}
+        style={btn('primary', { opacity: reconnecting === '__add__' ? 0.7 : (setup?.ready ? 1 : 0.45), cursor: setup?.ready ? (reconnecting ? 'wait' : 'pointer') : 'not-allowed' })}
+        disabled={!!reconnecting || !setup?.ready}
+        title={setup?.ready ? undefined : 'Finish Setup above first'}
         onClick={handleAdd}
       >
         {reconnecting === '__add__' ? 'Waiting for browser…' : '+ Add Google Account'}
       </button>
+      {setup && !setup.ready && (
+        <span className="text-xs ml-2" style={{ color: 'var(--dim)' }}>Finish Setup above first.</span>
+      )}
 
       {feedback && (
         <p className="text-xs mt-2" style={{ color: feedback.isError ? '#f87171' : 'var(--dim)' }}>
@@ -324,7 +366,7 @@ export default function GwsAccounts() {
             {mcpStatus === null && 'Checking…'}
             {mcpStatus && mcpStatus.entryCurrent && 'Set up: Claude Desktop can use these accounts (all Workspace APIs, any account by email).'}
             {mcpStatus && !mcpStatus.entryCurrent && 'One click gives Claude Desktop all of these Google accounts (every Workspace API, any account by email).'}
-            {mcpStatus && !mcpStatus.gwsCliPresent && ' gws CLI missing: npm i -g @googleworkspace/cli'}
+            {mcpStatus && !mcpStatus.gwsCliPresent && ' gws is not installed yet: see Setup above.'}
           </div>
         </div>
         <button
