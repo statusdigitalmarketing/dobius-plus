@@ -921,13 +921,23 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
     // Focus stays in the menu while it is open: something moving it later (a prompt refocusing itself after a tab
     // closes, Improve finishing) is undone at once, and native editing commands (Cut, Delete, Undo from the Edit menu)
     // are held as they reach any field (Codex sidebar round 4).
-    const keepFocus = (e) => { if (!menuRef.current?.contains(e.target)) menuRef.current?.focus({ preventScroll: true }); };
-    const holdEdit = (e) => { if (!menuRef.current?.contains(e.target)) hold(e); };
+    // A press outside the menu is the person choosing where to go next: the menu closes there and then, before the
+    // press moves the focus, and lets that focus stand (clicking Search with the menu open types into Search, Codex
+    // sidebar round 5).
+    let released = false;
+    const keepFocus = (e) => { if (!released && !menuRef.current?.contains(e.target)) menuRef.current?.focus({ preventScroll: true }); };
+    const holdEdit = (e) => { if (!released && !menuRef.current?.contains(e.target)) hold(e); };
+    const onPress = (e) => {
+      if (released || menuRef.current?.contains(e.target)) return;
+      released = true;
+      dismissRef.current();
+    };
     window.addEventListener('keydown', onKey, true);
     window.addEventListener('paste', hold, true);
     window.addEventListener('cut', hold, true);
     window.addEventListener('beforeinput', holdEdit, true);
     document.addEventListener('focusin', keepFocus, true);
+    window.addEventListener('pointerdown', onPress, true);
     // A browser tab's page (<webview>) keeps its clicks to itself: while the menu is open those views stop taking the
     // mouse, so a click over one lands in this window and closes the menu like any outside click.
     document.body.classList.add('tab-menu-open');
@@ -937,10 +947,11 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
       window.removeEventListener('cut', hold, true);
       window.removeEventListener('beforeinput', holdEdit, true);
       document.removeEventListener('focusin', keepFocus, true);
+      window.removeEventListener('pointerdown', onPress, true);
       document.body.classList.remove('tab-menu-open');
       // Only when the focus fell to the page with the menu: an item that moved it on purpose (Rename's box) keeps it.
       const now = document.activeElement;
-      if (prev && prev !== document.body && prev.isConnected && (!now || now === document.body)) prev.focus?.({ preventScroll: true });
+      if (!released && prev && prev !== document.body && prev.isConnected && (!now || now === document.body)) prev.focus?.({ preventScroll: true });
     };
   }, []);
 
