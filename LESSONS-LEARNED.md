@@ -896,3 +896,10 @@
 - **FIX**: Persist anything that backs a "never twice" or "never into X" promise (`<userData>/auto-move.json`, loaded on the first tick, saved after a tick that changed it, every loaded value validated and bounded). Ship-tested by a real relaunch of the packaged build.
 - **CONTEXT**: Applies to any rate limit, cooldown or hold keyed by an id that outlives the process (tab ids, project paths, logins).
 - **DETECTION**: `grep -n "new Map()" electron/*-service.js` and ask, for each, whether a relaunch resetting it breaks a promise the UI makes.
+
+### Process - 2026-11-09
+- **MISTAKE**: Posted the "shipped in 2.2.16" comment on Brett's Asana card 1220332151377656 with `mcp__claude_ai_Asana__add_comment`. The claude.ai Asana connector in this profile is signed in as **Bryan**, so the comment (story 1220368609105715) went out under Bryan's name, while the screenshots (attached with `~/.claude/scripts/asana-attach.sh`, which uses `$ASANA_PAT`) went out as Sam.
+- **FIX**: Write to Asana only through `$ASANA_PAT` (Sam): `asana-attach.sh`, `asana-comment.sh`, or a urllib POST to `/tasks/<gid>/stories`. Read with anything, write as Sam. Before any connector write, check `get_me` names Sam.
+- **CONTEXT**: Every outbound Asana comment is in Sam's name and voice. A comment under Bryan's name tells a stakeholder that Bryan did the work.
+- **DETECTION**: `python3 -c "import urllib.request,json,os;r=urllib.request.Request('https://app.asana.com/api/1.0/users/me',headers={'Authorization':'Bearer '+os.environ['ASANA_PAT']});print(json.load(urllib.request.urlopen(r))['data']['name'])"` must print Sam Nihalani; the claude.ai connector's get_me does not.
+
