@@ -54,7 +54,15 @@ const killGroup = (child) => {
   if (!child?.pid) return;
   try { process.kill(-child.pid, 'SIGKILL'); } catch (err) { if (err.code !== 'ESRCH') console.error(`[ios-release] could not stop step ${child.pid}: ${err.message}`); }
 };
-process.on('exit', () => killGroup(current));
+// The build's own checkout and folder, removed however the run ends: a run stopped by a lost lock or a cancel exits
+// without reaching its finally, and left the checkout registered with git.
+let cleanupOnExit = null;
+process.on('exit', () => {
+  killGroup(current);
+  const c = cleanupOnExit;
+  cleanupOnExit = null;
+  c?.();
+});
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { killGroup(current); process.exit(130); });
 // The build steps get only these from the environment: anything else could change the app without changing the commit
 // (XCODE_XCCONFIG_FILE swaps in another Info.plist, npm_config_* another registry; Codex).
@@ -448,6 +456,18 @@ async function appStoreSigning(asc, { create }) {
  */
 async function buildAndUpload(cfg, signing, marketing, buildNo) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), `dobius-ios-${buildNo}-`));
+  // Cleanup never decides the outcome: a leftover folder must not turn an accepted upload into a failure (and so an
+  // untagged build).
+  const cleanup = () => {
+    for (const step of [
+      () => spawnSync('git', ['worktree', 'remove', '--force', path.join(work, 'src')], GIT_OPTS),
+      () => fs.rmSync(work, { recursive: true, force: true }),
+      () => spawnSync('git', ['worktree', 'prune'], GIT_OPTS),
+    ]) {
+      try { step(); } catch (err) { say(`cleanup: ${err.message} (left ${work})`); }
+    }
+  };
+  cleanupOnExit = cleanup;
   try {
     const src = await cleanSource(cfg.sha, work);
     const archive = path.join(work, 'Dobius.xcarchive');
@@ -493,15 +513,8 @@ async function buildAndUpload(cfg, signing, marketing, buildNo) {
     const delivery = /Delivery (?:UUID|ID):?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(sent);
     return { after, before: Date.now(), deliveryId: delivery ? delivery[1].toLowerCase() : null };
   } finally {
-    // Cleanup never decides the outcome: a leftover folder must not turn an accepted upload into a failure (and so an
-    // untagged build).
-    for (const step of [
-      () => spawnSync('git', ['worktree', 'remove', '--force', path.join(work, 'src')], GIT_OPTS),
-      () => fs.rmSync(work, { recursive: true, force: true }),
-      () => spawnSync('git', ['worktree', 'prune'], GIT_OPTS),
-    ]) {
-      try { step(); } catch (err) { say(`cleanup: ${err.message} (left ${work})`); }
-    }
+    cleanupOnExit = null;
+    cleanup();
   }
 }
 
