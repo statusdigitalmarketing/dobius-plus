@@ -827,3 +827,15 @@
 - **FIX**: Import the URL the page actually loaded: `performance.getEntriesByType('resource').map(e => e.name).filter(n => /\/src\/store\/store\.js/.test(n)).pop()`.
 - **CONTEXT**: Any harness that reads app state by importing a module in a Vite dev page.
 - **DETECTION**: `grep -rn "import('/src/" <probe scripts>`
+
+### Process - 2026-11-09
+- **MISTAKE**: Switched the main checkout from feat/ios-release to main (to merge and release) while three Codex lenses were still reviewing the iOS branch FROM that checkout. They ran `nl scripts/ios-release.mjs` after the switch, got "No such file or directory", and their round 8 verdicts were worthless; the round had to be re-run.
+- **FIX**: Run every Codex review from a dedicated worktree of the branch under review (`git worktree add .claude/worktrees/<name> <branch>`, symlink node_modules), never from the main checkout, and never change the branch of a checkout a review or ship-test is using.
+- **CONTEXT**: Reviews take 5 to 15 minutes; merges and releases happen in the main checkout in the meantime.
+- **DETECTION**: `grep -l "No such file or directory" <scratchpad>/*/r*/[abc].out` after a round; any hit on a reviewed file means re-run it.
+
+### Build - 2026-11-09
+- **MISTAKE**: Pointed both `npm_config_userconfig` and `npm_config_globalconfig` at one empty file to stop `~/.npmrc` reaching the iOS build; npm aborted with `double-loading config ... as "global", previously loaded as "user"`.
+- **FIX**: Two separate empty files (scripts/ios-release.mjs `noNpmrc()`). Proven with `env -i PATH HOME npm_config_userconfig=<a> npm_config_globalconfig=<b> npm config get node-options` printing `null` while a node-options line sat in the user file.
+- **CONTEXT**: Any build step that must ignore the user's npm config.
+- **DETECTION**: `grep -n "npm_config_userconfig" scripts/*.mjs`

@@ -20,8 +20,12 @@ node scripts/ios-release.mjs submit                 # no build: submit the newes
 Flags `release.sh` uses: `--expect-sha <sha>` (stop unless HEAD is that commit) and `--skip-tests` (the tests already
 ran on that commit). `--allow-branch` builds from a branch other than main; such a build is never submitted, because
 only builds tagged on a commit of `origin/main` are. A second run while one is going stops at once (a kernel file lock
-through `/usr/bin/lockf`, released however the first one ends; if the lockf process itself is killed, the run stops
-at its next step or write instead of carrying on unlocked). Git calls have a deadline and never prompt for a password.
+through `/usr/bin/lockf` on `/tmp/dobius-ios-release.lock`, the same path whatever TMPDIR says, released however the
+first one ends; if the lockf process itself is killed, the run stops at its next step or write instead of carrying on
+unlocked). Cancelling the command that was started (Ctrl+C, a kill, release.sh stopped) stops the run within seconds:
+it ends lockf, and the run also watches the process that started it. Git calls have a deadline, never prompt for a
+password, ignore replace refs, and fetch every branch by an explicit refspec (the configured one may leave
+`origin/main` stale).
 Each step runs in its own process group: a timeout, a lost lock or an interrupt stops the step and everything it
 started, and a step is over when its own process exits (a helper left holding the output open is stopped, not waited
 for). The validate and upload output is kept in a file in the temp folder (one short line names it), never written to the
@@ -128,9 +132,15 @@ Mac)
 - A build number is never reused. A build is tagged once Apple has the upload; one Apple refuses stops counting.
 - The .p8 key and the JWT are never printed. Requests go only to `api.appstoreconnect.apple.com`, with redirects
   refused, a 60-second timeout, and an answer that is not JSON, has no data, or is a list cut short treated as an error.
-- `--dry-run` makes no build, no tags, no uploads, no App Store Connect changes and installs no profile (it does fetch
-  from origin).
-- One run at a time (a lock file in the temp folder).
+- `--dry-run` makes no build, no tags, no uploads, no App Store Connect changes and installs no profile (it fetches
+  origin's branches, never its tags: it holds no lock, so it reads the tags it already has).
+- One run at a time (`/tmp/dobius-ios-release.lock`).
+- A version left in a draft submission by a run that stopped is taken out of the draft before its build changes (Apple
+  keeps a draft's build fixed), then added back. The submit is tried up to 6 times, 10 seconds apart, while Apple
+  answers 409 (it moves a version into its ready state on its own time), with the build and item checks before each.
+- Accepted, not handled: git checkout filters (smudge/clean) configured on this Mac apply to the clean checkout the
+  build uses. Setting one up takes write access to this user's git config, which can already change the build in
+  many other ways.
 - App Review needs the demo answered for every screen it shows: a new phone message type a screen depends on must be
   answered in `mobile/demo.js` too (RELEASING-IOS.md).
 

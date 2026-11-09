@@ -133,7 +133,7 @@ if [ "${DOBIUS_SKIP_IOS:-}" != "1" ]; then
     node -e '
       const { execFileSync } = require("child_process");
       const [a, b] = process.argv.slice(1);
-      const read = (sha, f) => { try { return JSON.parse(execFileSync("git", ["show", `${sha}:${f}`], { encoding: "utf8", maxBuffer: 1 << 28 })); } catch { return null; } };
+      const read = (sha, f) => { try { return JSON.parse(execFileSync("git", ["show", `${sha}:${f}`], { encoding: "utf8", maxBuffer: 1 << 28, timeout: 60000, killSignal: "SIGKILL" })); } catch { return null; } };
       const bare = (f, j) => { if (!j) return String(j); delete j.version; if (f === "package-lock.json" && j.packages && j.packages[""]) delete j.packages[""].version; return JSON.stringify(j); };
       for (const f of ["package.json", "package-lock.json"]) if (bare(f, read(a, f)) !== bare(f, read(b, f))) process.exit(1);
     ' "$TESTED_SHA" "$HEAD_SHA"

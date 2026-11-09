@@ -39,7 +39,8 @@ const say = (...a) => console.log('[ios-release]', ...a);
 const die = (msg, code = 1) => { console.error(`[ios-release] ${msg}`); process.exit(code); };
 
 // Git gets a deadline too, and never asks for a password: a stalled fetch or push must not hold the lock forever.
-const GIT_OPTS = { cwd: ROOT, timeout: 5 * MIN, killSignal: 'SIGKILL', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } };
+// GIT_NO_REPLACE_OBJECTS: a replace ref must not make the pinned commit build another tree (Codex round 8).
+const GIT_OPTS = { cwd: ROOT, timeout: 5 * MIN, killSignal: 'SIGKILL', env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' } };
 const git = (...args) => execFileSync('git', args, { ...GIT_OPTS, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
 const gitOk = (...args) => spawnSync('git', args, GIT_OPTS).status === 0;
 const gitIn = (cwd, ...args) => execFileSync('git', args, { ...GIT_OPTS, cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
@@ -116,24 +117,44 @@ const plistJson = (file) => JSON.parse(read('plutil', ['-convert', 'json', '-o',
 // Branches, plus only this script's own tags: the release tags here can differ from origin's (electron-builder makes
 // them), and a plain --tags fetch refuses to clobber them and fails the whole fetch.
 // --prune drops a local ios-* tag origin does not have: a binding whose push failed must not count on a later run.
-const fetchOrigin = () => gitOk('fetch', '-q', 'origin') && gitOk('fetch', '-q', '--prune', 'origin', '+refs/tags/ios-*:refs/tags/ios-*');
+// Branches by an explicit refspec: the configured one may not fetch main at all, and a stale origin/main would pass the
+// ancestry checks (Codex round 8). A dry run reads the tags it has and never rewrites them: it holds no lock, and a
+// forced tag fetch could undo a live run's binding between its local write and its push (Codex round 8).
+const fetchOrigin = () => gitOk('fetch', '-q', 'origin', '+refs/heads/*:refs/remotes/origin/*')
+  && (DRY || gitOk('fetch', '-q', '--prune', 'origin', '+refs/tags/ios-*:refs/tags/ios-*'));
 
 // ---- one run at a time: the kernel's lock on a file, released when the process ends however it ends ----
-const LOCK = path.join(os.tmpdir(), 'dobius-ios-release.lock');
+// A fixed path, not os.tmpdir(): TMPDIR differs between shells, and two runs must find the same lock (Codex round 8).
+const LOCK = '/tmp/dobius-ios-release.lock';
 if (cmd !== 'status' && !DRY && process.env.DOBIUS_IOS_RELEASE_LOCKED !== '1') {
-  const r = spawnSync('/usr/bin/lockf', ['-s', '-t', '0', LOCK, process.execPath, SELF, ...argv], {
-    stdio: 'inherit', env: { ...process.env, DOBIUS_IOS_RELEASE_LOCKED: '1' },
+  // Not spawnSync: a process blocked in it never runs its signal handlers, so cancelling it left the run going (Codex
+  // round 8). A signal here ends lockf, and the run, which watches lockf (stillLocked), stops within seconds.
+  const child = spawn('/usr/bin/lockf', ['-s', '-t', '0', LOCK, process.execPath, SELF, ...argv], {
+    stdio: 'inherit', env: { ...process.env, DOBIUS_IOS_RELEASE_LOCKED: '1', DOBIUS_IOS_RELEASE_STARTER: String(process.pid) },
   });
-  if (r.status === 75) die('another iOS release is running');
-  process.exit(r.status ?? 1);
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.removeAllListeners(sig);
+    process.on(sig, () => { try { child.kill('SIGTERM'); } catch { /* already gone */ } });
+  }
+  const code = await new Promise((resolve) => {
+    child.on('error', (err) => { console.error(`[ios-release] could not start lockf: ${err.message}`); resolve(1); });
+    child.on('exit', (c) => resolve(c ?? 1));
+  });
+  if (code === 75) die('another iOS release is running');
+  process.exit(code);
 }
 // lockf holds the lock, not this process: if lockf is killed the lock is gone and another run may start, so this one
 // stops too. Checked before every step and every App Store Connect write, and every few seconds while it waits.
 const LOCK_HOLDER = process.env.DOBIUS_IOS_RELEASE_LOCKED === '1' ? process.ppid : null;
+// The process that was started (release.sh's node, or a person's): killed outright, it can forward nothing, so the run
+// watches it too and stops once it is gone (Codex round 8).
+const STARTER = Number(process.env.DOBIUS_IOS_RELEASE_STARTER) || null;
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (err) { return err.code !== 'ESRCH'; } };
 function stillLocked() {
-  if (LOCK_HOLDER === null || process.ppid === LOCK_HOLDER) return;
+  if (LOCK_HOLDER === null) return;
+  if (process.ppid === LOCK_HOLDER && (STARTER === null || alive(STARTER))) return;
   killGroup(current);
-  die('the release lock was released (its lockf process ended); stopping');
+  die(process.ppid !== LOCK_HOLDER ? 'the release lock was released (its lockf process ended); stopping' : 'the release was cancelled (the process that started it ended); stopping');
 }
 if (LOCK_HOLDER !== null) setInterval(stillLocked, 5000).unref();
 
@@ -543,6 +564,8 @@ async function itemsOf(asc, subId) {
   return asc.all(`/v1/reviewSubmissions/${subId}/items?fields[reviewSubmissionItems]=state,appStoreVersion&limit=50`);
 }
 /** The version's item in a submission (a removed one does not count: it cannot come back). */
+const SUBMIT_TRIES = 6;
+const SUBMIT_RETRY_MS = 10_000;
 const itemFor = (items, versionId) => items.find((i) => i.relationships?.appStoreVersion?.data?.id === versionId && i.attributes?.state !== 'REMOVED');
 
 async function submit(asc, notes, justUploaded) {
@@ -593,8 +616,20 @@ async function submit(asc, notes, justUploaded) {
     await asc.patch(`/v1/appStoreVersions/${version.id}`, { data: { type: 'appStoreVersions', id: version.id, attributes: { versionString: candidate.marketing, releaseType: 'AFTER_APPROVAL' } } });
     say(`set ${candidate.marketing} on the existing version, released automatically on approval`);
   }
-  await asc.patch(`/v1/appStoreVersions/${version.id}/relationships/build`, { data: { type: 'builds', id: candidate.id } });
-  say(`attached build ${candidate.raw}`);
+  // A version sitting in a draft submission (a run that stopped before submitting) keeps its build frozen: it comes out
+  // of the draft first and goes back in below. Only a draft; a rejected submission takes a new build as it is. Only when
+  // the build really changes (Codex round 8).
+  const onVersion = await buildOfVersion(asc, version.id);
+  if (onVersion?.id !== candidate.id) {
+    for (const s of open.filter((x) => x.attributes?.state === 'READY_FOR_REVIEW')) {
+      const item = itemFor(openItems.get(s.id), version.id);
+      if (!item) continue;
+      await asc.del(`/v1/reviewSubmissionItems/${item.id}`);
+      say(`took version ${candidate.marketing} out of draft submission ${s.id} to change its build`);
+    }
+    await asc.patch(`/v1/appStoreVersions/${version.id}/relationships/build`, { data: { type: 'builds', id: candidate.id } });
+    say(`attached build ${candidate.raw}`);
+  } else say(`build ${candidate.raw} is already on the version`);
   const text = whatsNewText(notes);
   const locs = await asc.all(`/v1/appStoreVersions/${version.id}/appStoreVersionLocalizations?fields[appStoreVersionLocalizations]=locale,whatsNew`);
   if (!locs.length) throw new Error('the version has no localizations to put What\'s New on');
@@ -660,12 +695,23 @@ async function submit(asc, notes, justUploaded) {
   // ours (another App Store Connect user could have picked a different one), and the submission must hold this version
   // and nothing else. What is left is the time between the items read and the submit (one request): Apple offers no
   // conditional submit, so an item added in that instant would go with it.
-  const finalBuild = await buildOfVersion(asc, version.id);
-  if (finalBuild?.id !== candidate.id) throw new Error(`the version's build changed to ${finalBuild?.raw ?? 'none'} before submitting; not submitted`);
-  const finalItems = await itemsOf(asc, sub.id);
-  if (!itemFor(finalItems, version.id)) throw new Error(`version ${candidate.marketing} is not in review submission ${sub.id}`);
-  if (othersIn(finalItems, version.id).length) throw new Error(`review submission ${sub.id} gained other items before submitting; not submitted`);
-  await asc.patch(`/v1/reviewSubmissions/${sub.id}`, { data: { type: 'reviewSubmissions', id: sub.id, attributes: { submitted: true } } });
+  // Apple moves a version into its ready state on its own time after the item is added, and answers 409 until then; the
+  // submit is tried again a few times, each after the same last looks (Codex round 8, as fastlane waits for it).
+  for (let attempt = 1; ; attempt += 1) {
+    const finalBuild = await buildOfVersion(asc, version.id);
+    if (finalBuild?.id !== candidate.id) throw new Error(`the version's build changed to ${finalBuild?.raw ?? 'none'} before submitting; not submitted`);
+    const finalItems = await itemsOf(asc, sub.id);
+    if (!itemFor(finalItems, version.id)) throw new Error(`version ${candidate.marketing} is not in review submission ${sub.id}`);
+    if (othersIn(finalItems, version.id).length) throw new Error(`review submission ${sub.id} gained other items before submitting; not submitted`);
+    try {
+      await asc.patch(`/v1/reviewSubmissions/${sub.id}`, { data: { type: 'reviewSubmissions', id: sub.id, attributes: { submitted: true } } });
+      break;
+    } catch (err) {
+      if (err?.status !== 409 || attempt >= SUBMIT_TRIES) throw err;
+      say(`Apple did not take the submission yet (${err.message}); trying again in ${SUBMIT_RETRY_MS / 1000} seconds`);
+      await new Promise((r) => setTimeout(r, SUBMIT_RETRY_MS));
+    }
+  }
   say(`submitted ${candidate.marketing} (${candidate.raw}) for review; Apple releases it when it is approved`);
 }
 
