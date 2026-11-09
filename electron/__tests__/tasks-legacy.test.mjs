@@ -78,3 +78,35 @@ test('the phone\'s Done closes only the task with exactly that id (Codex round 6
   assert.equal(completeTaskById(proj, b.task.id).ok, true);
   assert.deepEqual(listTasks(proj).filter((t) => t.done).map((t) => t.id), [b.task.id]);
 });
+
+test('a damaged entry in the list does not stop an Asana sync (Codex phone tasks round 10)', async () => {
+  const dir = path.join(home, '.claude', 'project-tasks');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({ env: { ASANA_PAT: 'test-not-a-key' } }));
+  const own = path.join(dir, `_work_damaged.${crypto.createHash('sha1').update('/work/damaged').digest('hex').slice(0, 8)}.json`);
+  fs.writeFileSync(own, JSON.stringify([null, { id: 'k', title: 'Kept', done: false, source: 'manual' }]));
+  const realRequest = https.request;
+  let calls = 0;
+  https.request = (opts, onRes) => {
+    const req = new EventEmitter();
+    req.end = () => setImmediate(() => {
+      calls++;
+      const body = calls === 1 ? { data: { gid: '1', workspaces: [{ gid: 'w' }] } } : { data: [{ gid: '9', name: 'From Asana', completed: false }] };
+      const res = new EventEmitter();
+      res.statusCode = 200;
+      onRes(res);
+      res.emit('data', Buffer.from(JSON.stringify(body)));
+      res.emit('end');
+    });
+    req.destroy = () => {};
+    return req;
+  };
+  try {
+    const r = await syncAsanaTasks('/work/damaged');
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const titles = JSON.parse(fs.readFileSync(own, 'utf8')).filter((t) => t && typeof t === 'object').map((t) => t.title);
+    assert.deepEqual(titles.sort(), ['From Asana', 'Kept']);
+  } finally {
+    https.request = realRequest;
+  }
+});

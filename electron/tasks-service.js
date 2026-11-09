@@ -189,12 +189,12 @@ export function addTask(projectPath, { title, source = 'manual', dueOn = null, a
   if (!clean) return { ok: false, error: 'title empty' };
   const tasks = readTasks(projectPath);
   // Dedupe by asanaGid, and by Inbox card
-  if (asanaGid && tasks.some((t) => t.asanaGid === asanaGid)) {
+  if (asanaGid && tasks.some((t) => t?.asanaGid === asanaGid)) {
     return { ok: false, error: 'duplicate asanaGid' };
   }
   // Any task, done or not: reopening the old one is the way back, and two
   // tasks for one card would make completeTaskByRef ambiguous.
-  if (inboxId && tasks.some((t) => t.inboxId === inboxId)) {
+  if (inboxId && tasks.some((t) => t?.inboxId === inboxId)) {
     return { ok: false, error: 'already on this list' };
   }
   const task = newTask(clean, { source, dueOn, asanaGid, inboxId, lane, assignee, notes, url });
@@ -359,7 +359,7 @@ export function resolveTaskRef(projectPath, ref) {
   if (exact) return { ok: true, task: exact };
 
   // 2. Fuzzy title match, restricted to PENDING tasks only.
-  const pending = tasks.filter((t) => !t.done);
+  const pending = tasks.filter((t) => t && typeof t === 'object' && !t.done);
   const low = needle.toLowerCase();
   let matches = pending.filter((t) => (t.title || '').toLowerCase().includes(low));
 
@@ -680,7 +680,8 @@ async function syncAsanaTasksOnce(projectPath) {
     // already here gets its due date, notes and link refreshed; its title,
     // stage and done state stay as they are.
     const tasks = readTasks(projectPath, { strict: true, legacyMove });
-    const byGid = new Map(tasks.filter((x) => x.asanaGid).map((x) => [x.asanaGid, x]));
+    // A damaged entry (null, a number) in the file is left as it is, never read as a task (Codex phone tasks round 10).
+    const byGid = new Map(tasks.filter((x) => x && typeof x === 'object' && x.asanaGid).map((x) => [x.asanaGid, x]));
     let added = 0;
     let changed = false;
     for (const { t, lane, assignee } of fetched) {

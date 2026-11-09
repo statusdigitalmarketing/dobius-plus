@@ -159,8 +159,13 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         // tap. Drop off it and refresh so we don't show a live-looking blank
         // that swallows keystrokes. Audit MED-9.
         refreshList();
-        if (exactIdRef.current && msg.id === exactIdRef.current) setTimeout(() => exactMissingRef.current?.(), 0);
-        setActiveId((cur) => (cur === msg.id ? null : cur));
+        // Back to Tasks only while that run terminal is still the one on screen: a late answer for it must not take the
+        // person away from another terminal they have opened since (Codex phone tasks round 10).
+        setActiveId((cur) => {
+          if (cur !== msg.id) return cur;
+          if (exactIdRef.current && msg.id === exactIdRef.current) setTimeout(() => exactMissingRef.current?.(), 0);
+          return null;
+        });
       } else if (msg.type === 'exit') {
         refreshList();
       } else if (msg.type === 'opError' && msg.code === 'unknown_tab') {

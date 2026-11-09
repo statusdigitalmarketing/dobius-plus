@@ -1257,7 +1257,7 @@ button.secondary:disabled { opacity: 0.4; }
 .today-card.snoozed, .today-card.noticed { opacity: 0.85; }
 .today-title { display: block; color: var(--fg); font-size: 16px; font-weight: 600; line-height: 21px; text-decoration: none; overflow-wrap: anywhere; }
 a.today-title:active { opacity: 0.7; }
-.today-meta { margin-top: 3px; color: var(--dim); font-size: 13px; }
+.today-meta { margin-top: 3px; color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
 .today-meta.overdue { color: var(--status-needs); }
 .today-reason { margin-top: 6px; color: var(--fg); opacity: 0.85; font-size: 14px; line-height: 19px; }
 .today-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
