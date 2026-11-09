@@ -1336,15 +1336,14 @@ async function knownProjectSet() {
 // and never gets a finished list from before it. ponytail: sharing is only as
 // wide as a scan is long, which is exactly when a duplicate would cost most;
 // a warm scan that ends before the next window asks is cheap to repeat.
-// Bounded: at most SESSIONS_SHARE_MAX distinct asks in flight.
-const SESSIONS_SHARE_MAX = 64;
+// Bounded by construction: an entry lives only while its scan runs, so the map
+// holds at most one per distinct ask running at that moment.
 const sharedSessionLoads = new Map(); // key -> promise of the running scan
 function loadAllSessionsShared(projectFilter, opts) {
   let key;
   try { key = JSON.stringify([projectFilter ?? null, opts]); } catch { return loadAllSessions(projectFilter, opts); }
   const running = sharedSessionLoads.get(key);
   if (running) return running;
-  if (sharedSessionLoads.size >= SESSIONS_SHARE_MAX) return loadAllSessions(projectFilter, opts);
   const promise = loadAllSessions(projectFilter, opts).finally(() => {
     if (sharedSessionLoads.get(key) === promise) sharedSessionLoads.delete(key);
   });
