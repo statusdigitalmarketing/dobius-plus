@@ -25,16 +25,17 @@ To open a NEW tab and send it a message, use `/openTab` (`docs/bridge-open-tab.m
 
 | The tab holds | What is done | Reply |
 |---|---|---|
-| Claude at an empty prompt, idle or working | One bracketed paste, then Enter as its own write, on a screen read while nothing new arrived and nobody used the tab, with the box holding the message, Claude still in front (no command of its reading the terminal) and no permission prompt open. Then the box must empty. While Claude works it queues the message for after the turn, and `note` says so. | `{ ok: true, sent, submitted: true, confirmed: true }` |
+| Claude at an empty prompt, idle or working | One bracketed paste, then Enter as its own write, on a screen read while nothing new arrived and nobody used the tab, with the box holding the message, Claude still in front (no command of its reading the terminal) and no permission prompt open. Then the box must be empty on a still screen. While Claude works it queues the message for after the turn, and `note` says so. | `{ ok: true, sent, submitted: true, confirmed: true }` |
 | Claude, but the Enter only added a line, could not be pressed, or the tab closed before the box emptied | Nothing more is pressed. | `{ ok: false, sent, typed: true, submitted: false, note }` (200) |
 | Claude with a draft in its box | Nothing typed. | 409 `{ ok: false, error }` |
 | Claude with a question or dialog open | Nothing typed (an Enter would answer it). | 409 |
 | Claude running a command that holds the terminal readable | Nothing typed (keys could reach that command). | 409 |
 | The process checks failed (a ps or pgrep timeout) | Nothing typed: a failed check is never read as "not Claude". | 409 |
-| The process checks say "not Claude" but the screen shows Claude's prompt | Nothing typed (a check can time out into "no"). | 409 |
+| The process checks say "not Claude" but a claude process is in the tab, the screen shows Claude's prompt, or a permission prompt is open | Nothing typed (a check can time out into "no"). | 409 |
 | Claude, with a screen that never held still for 3 s | Nothing typed. | 409 |
 | A message to Claude ending in a backslash | Nothing typed (Claude reads backslash + Enter as a new line). | 409 |
-| Another send to the same tab still running, or dobius-open still delivering its message there | Nothing typed. | 409 |
+| Another send to the same tab still running, dobius-open still delivering its message there, or any dobius-open still creating its tab | Nothing typed. | 409 |
+| Someone used the tab (a key, the mouse wheel) since the send began | Nothing typed. | 409 |
 | Someone typing into the tab right now | Nothing typed. | 409 |
 | Not Claude (a shell, Codex, another program) | Typed in chunks of 256 characters, then Enter as a separate write after a pause; nothing goes out when someone typed during the checks, and no Enter when someone typed during the pause. | `{ ok: true, sent, submitted: true, confirmed: false, note }`; 409 with `typed: true` when Enter was held back |
 | No such tab | Nothing. | 404 |
@@ -48,6 +49,15 @@ says whether it was seen (false only for a tab that is not running Claude).
 Why it changed (2026-11-09, a bug report from another Mac): the old route wrote the message in raw chunks with `\r`
 straight behind them. Claude read the burst as a paste, so the Enter landed inside it as a new line; a long or
 multi-line message then sat unsent while the reply said ok.
+
+## Accepted limits
+
+- Claude's process tree is checked before each Enter attempt and the screen right after; a command Claude starts that
+  opens the terminal for reading in the moment between that check and the Enter (one screen render) can take the Enter.
+  No order of checks closes it: a process check is a snapshot.
+- A team message being followed, an unrelated dobius-send queued behind it, and the team message's turn then ending on
+  a handed-back `! command`: the queued message's turn can be reported to the teammate as theirs being done. Nothing is
+  typed anywhere it should not be; only that status is wrong.
 
 ## Response examples
 

@@ -270,6 +270,9 @@ export const boxStillHasMessage = boxIsMessage;
 // doubt leaves the message typed and unsent: { ok, submitted: false }.
 /** Tabs /openTab is delivering a message into right now (dobius-send refuses them meanwhile). */
 export const openTabBusy = new Set();
+let starting = 0;
+/** How many /openTab calls are creating their tab right now (its id is not known until it exists). */
+export const openTabsStarting = () => starting;
 
 export async function submitAfterPaste(deps, tabId, pty, watch, seqAtPaste, message, projectPath, opts = {}) {
   const { anyPaste = false, beforeEnter = null } = opts;
@@ -399,12 +402,18 @@ export function createOpenTabService(deps, opts = {}) {
   async function run(projectPath, message) {
     const resolved = await deps.resolveProject(projectPath);
     if (resolved.error) return { ok: false, status: resolved.status || 400, error: resolved.error };
-    const opened = await deps.openTab(resolved.path);
+    starting += 1;
+    let opened;
+    try {
+      opened = await deps.openTab(resolved.path);
+      if (opened?.tabId) openTabBusy.add(opened.tabId);
+    } finally {
+      starting -= 1;
+    }
     // A tab that was added but whose shell never started is still named, so
     // the board can tell the person which tab to close.
-    if (opened.error) return { ok: false, status: 500, error: opened.error, ...(opened.tabId ? { tabId: opened.tabId } : {}) };
+    if (opened.error) { if (opened.tabId) openTabBusy.delete(opened.tabId); return { ok: false, status: 500, error: opened.error, ...(opened.tabId ? { tabId: opened.tabId } : {}) }; }
     const { tabId } = opened;
-    openTabBusy.add(tabId);
     try {
       return await deliver(tabId, opened, resolved, message);
     } finally {

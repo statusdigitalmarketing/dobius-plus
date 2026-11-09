@@ -17,13 +17,13 @@
 // One send per tab at a time, and none into a tab /openTab is still delivering to: two pastes would land in one box.
 // ok is true only when Enter was pressed on the message and, where it can be seen (Claude), it was seen taken;
 // confirmed says whether it was seen.
-import { promptBoxText, boxHoldsMessage, TRAILING_BACKSLASH_RE, openTabBusy } from './bridge-open-tab.js';
+import { promptBoxText, boxHoldsMessage, TRAILING_BACKSLASH_RE, openTabBusy, openTabsStarting } from './bridge-open-tab.js';
 import { boxIsEmpty } from './team-deliver.js';
 
 const CHUNK = 256;
 const STILL_MS = 3000;
 const SUBMIT_WAIT_MS = 6000;
-const CONFIRM_MS = 3000;
+const CONFIRM_MS = 5000;
 const POLL_MS = 150;
 
 const fail = (status, error, extra = {}) => ({ status, body: { ok: false, ...extra, error } });
@@ -33,12 +33,14 @@ const sending = new Set();
  * deps: tabAlive, ptyOf, claudeRunning(tabId, null), claudeLeads(tabId) (the same without the reader check; throws when
  *       the process checks fail), working(tabId), needs(tabId) (a permission prompt is open), watch(tabId) -> { seq,
  *       keys, input, screen, stop }, paste(tabId, text), submit(tabId), write(tabId, data) (counted as Dobius's own, not
- *       a person's), inputBusy(tabId), onSubmit(tabId) (Enter was pressed on a message), sleep(ms), now()
+ *       a person's), inputBusy(tabId), claudeInTab(tabId) (a claude process anywhere in the tab; true when unsure),
+ *       onSubmit(tabId) (Enter was pressed on a message), sleep(ms), now()
  * Resolves { status, body } for the HTTP reply.
  */
 export async function sendToTab(deps, tabId, message) {
   if (!deps.tabAlive(tabId) || !deps.ptyOf(tabId)) return fail(404, 'no such tab (see dobius-tabs)');
-  if (sending.has(tabId) || openTabBusy.has(tabId)) return fail(409, 'another message is being sent to that tab right now; nothing was typed, try again');
+  // openTabsStarting: a tab /openTab is creating can already be listed before it is marked as its own.
+  if (sending.has(tabId) || openTabBusy.has(tabId) || openTabsStarting() > 0) return fail(409, 'another message is being sent to that tab right now; nothing was typed, try again');
   sending.add(tabId);
   try {
     return await send(deps, tabId, message);
@@ -73,9 +75,14 @@ async function send(deps, tabId, message) {
       // Claude leads the terminal but a command it started holds it readable (a tool running): keys could reach that
       // command, so nothing is typed. Only a tab Claude is not leading at all is typed into raw.
       if (leads) return fail(409, 'Claude in that tab is running a command that holds the terminal; nothing was typed, try again when it finishes');
+      // A check that timed out says "not Claude" too: a claude process anywhere in the tab, its prompt on screen or a
+      // permission prompt open means it is Claude's after all, and raw text plus Enter could answer its dialog.
+      if (await deps.claudeInTab(tabId)) return fail(409, 'Claude is running in that tab but could not be confirmed at its prompt; nothing was typed, try again');
       const s = await stillScreen(deps, watch, deps.now() + STILL_MS);
-      if (s && promptBoxText(s.lines, s.modes) !== null) return fail(409, 'that tab shows Claude\'s prompt, but Claude could not be confirmed running there; nothing was typed, try again');
-      return typeRaw(deps, tabId, pty, watch, message);
+      if ((s && promptBoxText(s.lines, s.modes) !== null) || deps.needs(tabId)) return fail(409, 'that tab shows Claude\'s prompt or a question, but Claude could not be confirmed running there; nothing was typed, try again');
+      // Awaited here, never returned bare: the finally below would stop the watch before typeRaw's pause, and keys typed
+      // during it would go unseen (Codex round 3).
+      return await typeRaw(deps, tabId, pty, watch, message);
     }
     if (TRAILING_BACKSLASH_RE.test(message)) return fail(409, 'the message ends with a backslash, which Claude reads as a line continuation; nothing was typed');
     const screen = await stillScreen(deps, watch, deps.now() + STILL_MS);
@@ -87,7 +94,8 @@ async function send(deps, tabId, message) {
         : fail(409, 'Claude\'s prompt in that tab already holds typed text; nothing was typed');
     }
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return fail(409, 'the tab closed or its shell changed; nothing was typed');
-    if (watch.keys() !== 0 || deps.inputBusy(tabId) || deps.needs(tabId)) return fail(409, 'someone typed into the tab, or Claude is asking something; nothing was typed');
+    // Any input of a person's since the send began (a wheel turn can recall an old prompt whose redraw is still to come).
+    if (watch.keys() !== 0 || watch.input() !== 0 || deps.inputBusy(tabId) || deps.needs(tabId)) return fail(409, 'someone used the tab, or Claude is asking something; nothing was typed, try again');
     deps.paste(tabId, message);
     return await submitPasted(deps, tabId, pty, watch, message, watch.input());
   } finally {
@@ -121,12 +129,10 @@ async function submitPasted(deps, tabId, pty, watch, message, inputAtPaste) {
     // A window closing sends Ctrl+C straight to the PTY, which empties the box without the message being sent.
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return unconfirmed('the tab closed before Claude was seen taking the message');
     if (watch.keys() !== 0 || watch.input() !== inputAtPaste) return unconfirmed('someone used the tab before Claude was seen taking the message');
-    let after;
-    try { after = await watch.screen(); } catch { after = null; }
-    if (!after) continue;
-    const box = promptBoxText(after.lines, after.modes);
-    // Taken: the box no longer holds it (while Claude works, it shows it above the box until the turn ends).
-    if (box !== null && !boxHoldsMessage(box, message, true)) {
+    const after = await stillScreen(deps, watch, 0);
+    // Taken: the box is empty on a still read (while Claude works, it shows the message above the box until the turn
+    // ends). Not merely "no longer the message": a repaint caught halfway can show part of it.
+    if (after && boxIsEmpty(after)) {
       return { status: 200, body: { ok: true, sent: message.length, submitted: true, confirmed: true, ...(queued ? { note: 'Claude was working, so the message is queued for after its turn' } : {}) } };
     }
   }

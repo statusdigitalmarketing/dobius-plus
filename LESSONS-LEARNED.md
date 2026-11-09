@@ -821,3 +821,20 @@
 - **FIX**: Import the URL the page actually loaded: `performance.getEntriesByType('resource').map(e => e.name).filter(n => /\/src\/store\/store\.js/.test(n)).pop()`.
 - **CONTEXT**: Any harness that reads app state by importing a module in a Vite dev page.
 - **DETECTION**: `grep -rn "import('/src/" <probe scripts>`
+
+### API: 2026-11-09 (dobius-send typed but never submitted)
+- **MISTAKE**: `/tabSend` wrote a message in raw 256-char chunks with `\r` straight behind them and answered `ok:true`. Claude Code read the burst as one paste, so the `\r` landed inside it as a newline: a 2.5k multi-line brief sat unsent in the box while the caller was told it went.
+- **FIX**: `electron/tab-send.js`: a bracketed paste, then Enter as its own write on a screen read with no output and no person input during the render, then confirm the box emptied. One path for idle and working Claude (a turn can start right after the paste). `ok` means confirmed taken.
+- **CONTEXT**: Any code that types into a Claude Code TUI. Never put the Enter in the same write as the text, and never report success from "bytes written".
+- **DETECTION**: `grep -rn "writeTerminal([^)]*'\\\\r')\|+ '\\\\r'" electron/`
+
+### API: 2026-11-09 (lsof exit 1 is not "unknown")
+- **MISTAKE**: `ttyReaderUnder` treated any lsof non-zero exit as doubt. lsof exits 1 when a listed process exits mid-scan (a Claude tool's shell finishing), so a working Claude read as "not at its prompt" and dobius-send took the raw path.
+- **FIX**: On exit 1, use the partial output when every pid missing from it is really gone (kill 0 says ESRCH); an `ferr` / `nFD info error` line on any exit is doubt.
+- **CONTEXT**: Any process-tree check run against a busy Claude session.
+- **DETECTION**: `grep -n "lsof" electron/bridge-open-main.js`
+
+### Testing: 2026-11-09 (hidden tab text in a harness)
+- **MISTAKE**: Reading `.xterm-rows` innerText of a HIDDEN tab gave a garbled, 80-column frame mixing two renders, which looked like a send that never got answered.
+- **FIX**: Make the tab visible first (click its `button[draggable="true"]`), then read or screenshot.
+- **DETECTION**: a probe that reads `.xterm-rows` without first showing the tab.
