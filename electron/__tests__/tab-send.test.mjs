@@ -320,17 +320,22 @@ test('Codex leading the terminal is typed into raw', async () => {
 });
 
 test('what leads the terminal: only the tab\'s own shell or Codex counts', () => {
-  const rows = (...r) => r.map(([pgid, comm]) => ({ pgid, comm }));
-  assert.equal(classifyFront({ shellPid: 10, shellComm: '-zsh', tpgid: '10', rows: rows(['10', '-zsh']) }), 'shell');
-  assert.equal(classifyFront({ shellPid: 10, shellComm: '/bin/bash', tpgid: '10', rows: [] }), 'shell');
+  const rows = (...r) => r.map(([pid, pgid, comm]) => ({ pid, pgid, comm }));
+  assert.equal(classifyFront({ shellPid: 10, shellComm: '-zsh', tpgid: '10', rows: rows(['10', '10', '-zsh']) }), 'shell');
+  assert.equal(classifyFront({ shellPid: 10, shellComm: '/bin/bash', tpgid: '10', rows: rows(['10', '10', '/bin/bash'], ['11', '30', 'sleep']) }), 'shell');
   // A login profile that exec'd tmux: the PTY's own process leads, but it is not a shell.
-  assert.equal(classifyFront({ shellPid: 10, shellComm: 'tmux', tpgid: '10', rows: [] }), 'other');
-  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: rows(['10', 'zsh'], ['20', 'node'], ['20', '/opt/homebrew/lib/node_modules/@openai/codex/bin/codex']) }), 'codex');
-  for (const comm of ['docker', 'tmux', '/usr/bin/ssh', 'vim', 'python3', 'kubectl', 'limactl']) {
-    assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: rows(['10', 'zsh'], ['20', comm]) }), 'other', comm);
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'tmux', tpgid: '10', rows: rows(['10', '10', 'tmux']) }), 'other');
+  // pwsh has no job control: ssh it runs stays in the shell's own group (Codex round 8).
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'pwsh', tpgid: '10', rows: rows(['10', '10', 'pwsh'], ['12', '10', '/usr/bin/ssh']) }), 'other');
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: rows(['10', '10', 'zsh'], ['20', '20', 'node'], ['21', '20', '/opt/homebrew/lib/node_modules/@openai/codex/vendor/bin/codex']) }), 'codex');
+  // `exec codex`: the PTY's own process is Codex (Codex round 8).
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'codex', tpgid: '10', rows: rows(['10', '10', 'codex'], ['11', '10', 'codex-code-mode-host']) }), 'codex');
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: rows(['20', '20', 'codex'], ['22', '20', 'docker']) }), 'other');
+  for (const comm of ['docker', 'tmux', '/usr/bin/ssh', 'vim', 'python3', 'kubectl', 'limactl', 'node']) {
+    assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: rows(['10', '10', 'zsh'], ['20', '20', comm]) }), 'other', comm);
   }
   // codex in a background group does not make the foreground program Codex.
-  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: rows(['30', 'codex'], ['20', 'docker']) }), 'other');
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: rows(['30', '30', 'codex'], ['20', '20', 'docker']) }), 'other');
   assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '', rows: [] }), 'other');
-  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: [] }), 'other');
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '10', rows: [] }), 'other');
 });
