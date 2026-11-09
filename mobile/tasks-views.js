@@ -21,4 +21,4 @@ export const pcOf = (connection) => (connection?.platform === 'windows' ? 'PC' :
 // A sentence written for a Mac, said for the computer this phone is paired with. Only the word on its own: not inside a
 // code ('open-on-Mac') or a longer word ('Macé', 'MacBook'). No lookbehind: iOS before 16.4 cannot parse one.
 export const forPc = (text, pc) => (pc === 'Mac' || typeof text !== 'string' ? text
-  : text.replace(/(^|[^\p{L}\p{N}_-])Mac(?=$|[^\p{L}\p{N}_-])/gu, (_m, pre) => `${pre}${pc}`));
+  : text.replace(/(^|[^\p{L}\p{M}\p{N}_-])Mac(?=$|[^\p{L}\p{M}\p{N}_-])/gu, (_m, pre) => `${pre}${pc}`));
