@@ -318,9 +318,11 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                         beforeClick.current = null;
                         // Back to where this double-click started, before the close (closing the tab on screen would
                         // pick its neighbour). The row's own tab, or one already gone: nothing to go back to.
-                        if (b && b.row === t.id && b.tabId && b.tabId !== t.id && useStore.getState().terminalTabs.some((x) => x.id === b.tabId)) {
-                          showTab(b.tabId);
-                          setActiveView(b.view);
+                        if (b && b.row === t.id) {
+                          if (b.tabId && b.tabId !== t.id && useStore.getState().terminalTabs.some((x) => x.id === b.tabId)) showTab(b.tabId);
+                          // The view too, even when the row was the tab already shown (a pinned tab's cancelled close
+                          // must not leave the Dashboard switched to the terminal).
+                          if (b.view) setActiveView(b.view);
                         }
                         requestTabBar({ kind: 'close', tabId: t.id });
                       } : undefined}

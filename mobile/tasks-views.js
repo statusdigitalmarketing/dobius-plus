@@ -18,6 +18,7 @@ export const currentView = (views, wanted) => (views?.some((v) => v.id === wante
 // The paired computer's own word: its authed message says when it is a Windows PC; anything else (an older Mac or PC
 // that does not say) reads as Mac, as before (Max, 2026-11-09).
 export const pcOf = (connection) => (connection?.platform === 'windows' ? 'PC' : 'Mac');
-// A sentence written for a Mac, said for the computer this phone is paired with. Only the capitalised word, so codes
-// such as 'open-on-mac' never change.
-export const forPc = (text, pc) => (pc === 'Mac' || typeof text !== 'string' ? text : text.replace(/\bMac\b/g, pc));
+// A sentence written for a Mac, said for the computer this phone is paired with. Only the word on its own: not inside a
+// code ('open-on-Mac') or a longer word ('Macé', 'MacBook'). No lookbehind: iOS before 16.4 cannot parse one.
+export const forPc = (text, pc) => (pc === 'Mac' || typeof text !== 'string' ? text
+  : text.replace(/(^|[^\p{L}\p{N}_-])Mac(?=$|[^\p{L}\p{N}_-])/gu, (_m, pre) => `${pre}${pc}`));

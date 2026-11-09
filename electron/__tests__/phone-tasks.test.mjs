@@ -451,6 +451,9 @@ test('the phone words its messages for the computer it is paired with (Max, 2026
   assert.equal(forPc('No Asana key on this Mac yet. Add one in Settings > Integrations on the Mac.', 'PC'), 'No Asana key on this PC yet. Add one in Settings > Integrations on the PC.');
   assert.equal(forPc('Asana turned down this Mac\'s key.', 'PC'), 'Asana turned down this PC\'s key.');
   assert.equal(forPc('open-on-mac', 'PC'), 'open-on-mac', 'codes are not words');
+  assert.equal(forPc('open-on-Mac', 'PC'), 'open-on-Mac', 'not inside a code either');
+  assert.equal(forPc(`Mac${String.fromCodePoint(0xe9)} MacBook Mac`, 'PC'), `Mac${String.fromCodePoint(0xe9)} MacBook PC`, 'only the word on its own');
+  assert.equal(forPc('Mac Mac.', 'PC'), 'PC PC.');
   assert.equal(forPc('Your Mac did not take that.', 'Mac'), 'Your Mac did not take that.');
   assert.equal(forPc(undefined, 'PC'), undefined);
 });

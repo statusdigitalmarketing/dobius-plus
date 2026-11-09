@@ -6,6 +6,8 @@ import VoiceButton from './VoiceButton';
 import { pushSupported, pushActive, enablePush } from './push-client';
 
 import { timeAgo } from './format';
+import { visiblePath } from '../shared/short-path.js';
+import { pcOf } from './tasks-views.js';
 import { pairingKey } from './pairings';
 
 // Group terminals by project PATH, preserving first-seen order. Keyed on path,
@@ -351,7 +353,8 @@ export default function Board({ connection, status, onOpen, onShowHistory, onSho
                   }}
                 >
                   <span className="card-title">{p.name}</span>
-                  <span className="card-sub">{p.path}</span>
+                  {/* The same exact label Tasks gives a folder, so a folder read there is the one picked here. */}
+                  <span className="card-sub path-text">{visiblePath(p.path, { windows: pcOf(connection) === 'PC' })}</span>
                 </button>
               ))}
             </div>
