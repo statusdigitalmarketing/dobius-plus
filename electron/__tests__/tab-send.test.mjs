@@ -16,7 +16,7 @@ function screenWith(boxText, { dialog = false } = {}) {
 
 const SHELL = (() => { const lines = ['user@Mac project % ']; lines.dimFrom = [-1]; return { lines, modes: { bracketedPaste: true, cursor: { x: 19, y: 0 } } }; })();
 
-function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false } = {}) {
+function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false, needsAfterPaste = false, spinAfterSubmit = false } = {}) {
   let clock = 0;
   const t = { box, seq: 0, keys: 0, input: 0, pasted: null, written: [], submitted: 0, pty: {}, alive: true, reads: 0, stopped: false, probes: 0 };
   const deps = {
@@ -25,12 +25,13 @@ function fakeTab({ leads, claude = true, working = false, needs = false, box = '
     claudeRunning: async () => { if (wheelBeforeRead && (t.probes += 1) === 1) t.input += 1; return claude && !(readerAfterPaste && t.pasted !== null); },
     claudeInTab: async () => inTab,
     claudeLeads: async () => { if (keysDuringProbe) t.keys += 1; if (probeFails) throw new Error('pgrep timed out'); return leads ?? claude; },
-    needs: () => needs,
+    needs: () => needs || (needsAfterPaste && t.pasted !== null),
     working: () => working,
     inputBusy: () => false,
     watch: () => ({
       seq: () => t.seq, keys: () => t.keys, input: () => t.keys + t.input, stop: () => { t.stopped = true; },
       screen: async () => {
+        if (spinAfterSubmit && t.submitted) t.seq += 1; // a frame arrives during every read
         const shown = boxOnScreen ? screenWith(t.box, { dialog }) : SHELL;
         // A wheel turn recalls an earlier prompt while this read renders the screen as it was.
         if (wheelDuringRead && (t.reads += 1) === 1) { t.input += 1; t.seq += 1; t.box = 'an earlier prompt'; }
@@ -91,15 +92,26 @@ test('Claude working and Enter only adds a line: reported not sent', async () =>
   assert.equal(t.submitted, 1);
 });
 
-test('Claude working with a permission prompt open: no Enter', async () => {
-  const { t, deps } = fakeTab({ working: true });
-  const r0 = await sendToTab(deps, 'tab', 'x');
-  assert.equal(r0.body.ok, true);
-  const n = fakeTab({ working: true, needs: true });
-  const r = await sendToTab(n.deps, 'tab', 'x');
-  assert.equal(r.status, 409);
-  assert.equal(n.t.pasted, null);
-  assert.equal(n.t.submitted, 0);
+test('a permission prompt that opens after the paste: no Enter', async () => {
+  const { t, deps } = fakeTab({ working: true, needsAfterPaste: true });
+  const r = await sendToTab(deps, 'tab', 'x');
+  assert.equal(r.body.ok, false);
+  assert.equal(r.body.typed, true);
+  assert.equal(t.submitted, 0);
+});
+
+test('a red left over from a prompt already answered, with an empty prompt on screen: sent', async () => {
+  const { t, deps } = fakeTab({ needs: true });
+  const r = await sendToTab(deps, 'tab', 'x');
+  assert.equal(r.body.ok, true);
+  assert.equal(t.submitted, 1);
+});
+
+test('a spinner that never lets the screen hold still after the Enter: two empty reads in a row confirm it', async () => {
+  const { t, deps } = fakeTab({ spinAfterSubmit: true });
+  const r = await sendToTab(deps, 'tab', 'hello');
+  assert.equal(r.body.ok, true);
+  assert.equal(r.body.confirmed, true);
   assert.equal(t.submitted, 1);
 });
 

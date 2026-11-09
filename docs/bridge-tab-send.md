@@ -31,7 +31,7 @@ To open a NEW tab and send it a message, use `/openTab` (`docs/bridge-open-tab.m
 | Claude with a question or dialog open | Nothing typed (an Enter would answer it). | 409 |
 | Claude running a command that holds the terminal readable | Nothing typed (keys could reach that command). | 409 |
 | The process checks failed (a ps or pgrep timeout) | Nothing typed: a failed check is never read as "not Claude". | 409 |
-| The process checks say "not Claude" but a claude process is in the tab, the screen shows Claude's prompt, or a permission prompt is open | Nothing typed (a check can time out into "no"). | 409 |
+| The process checks say "not Claude" but a running (not suspended) claude process is in the tab, or the screen shows Claude's prompt or a dialog, or a permission prompt is open | Nothing typed (a check can time out into "no"). | 409 |
 | Claude, with a screen that never held still for 3 s | Nothing typed. | 409 |
 | A message to Claude ending in a backslash | Nothing typed (Claude reads backslash + Enter as a new line). | 409 |
 | Another send to the same tab still running, dobius-open still delivering its message there, or any dobius-open still creating its tab | Nothing typed. | 409 |
@@ -40,8 +40,10 @@ To open a NEW tab and send it a message, use `/openTab` (`docs/bridge-open-tab.m
 | Not Claude (a shell, Codex, another program) | Typed in chunks of 256 characters, then Enter as a separate write after a pause; nothing goes out when someone typed during the checks, and no Enter when someone typed during the pause. | `{ ok: true, sent, submitted: true, confirmed: false, note }`; 409 with `typed: true` when Enter was held back |
 | No such tab | Nothing. | 404 |
 
-A tab opened from the phone counts like any other. A tab whose dot is red only because Claude handed back a `! command`
-is at an ordinary prompt and is sent to; a real permission prompt is not.
+A tab opened from the phone counts like any other. A red dot alone does not block a send to a Claude tab (a handed-back
+`! command`, or a prompt already answered, leaves one over an ordinary prompt): the screen decides whether a dialog is
+open. A permission prompt that appears while the send is under way stops it before the Enter. While Claude's spinner
+keeps the screen moving, two empty-box reads in a row confirm the send.
 
 `ok` is true only when Enter was pressed on the message and, in a Claude tab, Claude was seen taking it. `confirmed`
 says whether it was seen (false only for a tab that is not running Claude).
@@ -58,6 +60,10 @@ multi-line message then sat unsent while the reply said ok.
 - A team message being followed, an unrelated dobius-send queued behind it, and the team message's turn then ending on
   a handed-back `! command`: the queued message's turn can be reported to the teammate as theirs being done. Nothing is
   typed anywhere it should not be; only that status is wrong.
+
+- A team message delivered into the pinned tab at the same moment as a dobius-send: both can paste into one box. Neither
+  presses Enter on the mix (each checks the box holds exactly its own message), both report not sent, and the person
+  clears the draft.
 
 ## Response examples
 

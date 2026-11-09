@@ -17,7 +17,7 @@
 // One send per tab at a time, and none into a tab /openTab is still delivering to: two pastes would land in one box.
 // ok is true only when Enter was pressed on the message and, where it can be seen (Claude), it was seen taken;
 // confirmed says whether it was seen.
-import { promptBoxText, boxHoldsMessage, TRAILING_BACKSLASH_RE, openTabBusy, openTabsStarting } from './bridge-open-tab.js';
+import { promptBoxText, boxHoldsMessage, dialogOnScreen, TRAILING_BACKSLASH_RE, openTabBusy, openTabsStarting } from './bridge-open-tab.js';
 import { boxIsEmpty } from './team-deliver.js';
 
 const CHUNK = 256;
@@ -67,6 +67,9 @@ async function send(deps, tabId, message) {
   if (deps.inputBusy(tabId)) return fail(409, 'something else is typing into the tab right now; nothing was typed, try again');
   const pty = deps.ptyOf(tabId);
   const watch = deps.watch(tabId);
+  // A red left over from a prompt already answered must not block every send: the screen is what says a dialog is open.
+  // Only a permission prompt that appears during the send stops it.
+  const needsAtStart = deps.needs(tabId);
   try {
     const claude = await deps.claudeRunning(tabId, null);
     if (!claude) {
@@ -79,7 +82,7 @@ async function send(deps, tabId, message) {
       // permission prompt open means it is Claude's after all, and raw text plus Enter could answer its dialog.
       if (await deps.claudeInTab(tabId)) return fail(409, 'Claude is running in that tab but could not be confirmed at its prompt; nothing was typed, try again');
       const s = await stillScreen(deps, watch, deps.now() + STILL_MS);
-      if ((s && promptBoxText(s.lines, s.modes) !== null) || deps.needs(tabId)) return fail(409, 'that tab shows Claude\'s prompt or a question, but Claude could not be confirmed running there; nothing was typed, try again');
+      if ((s && (promptBoxText(s.lines, s.modes) !== null || dialogOnScreen(s.lines, []))) || deps.needs(tabId)) return fail(409, 'that tab shows Claude\'s prompt or a question, but Claude could not be confirmed running there; nothing was typed, try again');
       // Awaited here, never returned bare: the finally below would stop the watch before typeRaw's pause, and keys typed
       // during it would go unseen (Codex round 3).
       return await typeRaw(deps, tabId, pty, watch, message);
@@ -95,15 +98,15 @@ async function send(deps, tabId, message) {
     }
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return fail(409, 'the tab closed or its shell changed; nothing was typed');
     // Any input of a person's since the send began (a wheel turn can recall an old prompt whose redraw is still to come).
-    if (watch.keys() !== 0 || watch.input() !== 0 || deps.inputBusy(tabId) || deps.needs(tabId)) return fail(409, 'someone used the tab, or Claude is asking something; nothing was typed, try again');
+    if (watch.keys() !== 0 || watch.input() !== 0 || deps.inputBusy(tabId) || (deps.needs(tabId) && !needsAtStart)) return fail(409, 'someone used the tab, or Claude is asking something; nothing was typed, try again');
     deps.paste(tabId, message);
-    return await submitPasted(deps, tabId, pty, watch, message, watch.input());
+    return await submitPasted(deps, tabId, pty, watch, message, watch.input(), needsAtStart);
   } finally {
     watch.stop();
   }
 }
 
-async function submitPasted(deps, tabId, pty, watch, message, inputAtPaste) {
+async function submitPasted(deps, tabId, pty, watch, message, inputAtPaste, needsAtStart) {
   const typedOnly = (why) => ({ status: 200, body: { ok: false, sent: message.length, typed: true, submitted: false, note: `the message is typed into Claude's prompt but was not sent: ${why}; press Enter in the tab to send it` } });
   const end = deps.now() + SUBMIT_WAIT_MS;
   let ready = false;
@@ -117,26 +120,34 @@ async function submitPasted(deps, tabId, pty, watch, message, inputAtPaste) {
     // Same tick from the checks below to the Enter.
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return typedOnly('the tab closed or its shell changed');
     if (watch.keys() !== 0 || deps.inputBusy(tabId) || watch.input() !== inputAtPaste) return typedOnly('someone used the tab');
-    if (deps.needs(tabId)) return typedOnly('Claude is asking something');
+    if (deps.needs(tabId) && !needsAtStart) return typedOnly('Claude is asking something');
   }
   const queued = deps.working(tabId);
   deps.submit(tabId);
   deps.onSubmit?.(tabId);
   const unconfirmed = (why) => ({ status: 200, body: { ok: false, sent: message.length, typed: true, submitted: false, note: `Enter was pressed, but ${why}; check the tab` } });
   const confirmEnd = deps.now() + CONFIRM_MS;
+  let emptyBefore = false;
   while (deps.now() < confirmEnd) {
     await deps.sleep(POLL_MS);
     // A window closing sends Ctrl+C straight to the PTY, which empties the box without the message being sent.
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return unconfirmed('the tab closed before Claude was seen taking the message');
     if (watch.keys() !== 0 || watch.input() !== inputAtPaste) return unconfirmed('someone used the tab before Claude was seen taking the message');
-    const after = await stillScreen(deps, watch, 0);
-    // Taken: the box is empty on a still read (while Claude works, it shows the message above the box until the turn
-    // ends). Not merely "no longer the message": a repaint caught halfway can show part of it.
-    if (after && boxIsEmpty(after)) {
+    // Taken: the box is empty on a still read, or on two reads in a row while a spinner keeps the screen moving (while
+    // Claude works it shows the message above the box until the turn ends). Not merely "no longer the message": a
+    // repaint caught halfway can show part of it.
+    let after;
+    const seqBefore = watch.seq();
+    try { after = await watch.screen(); } catch { after = null; }
+    const empty = !!after && boxIsEmpty(after);
+    const still = watch.seq() === seqBefore;
+    const taken = empty && (still || emptyBefore);
+    emptyBefore = empty;
+    if (taken) {
       return { status: 200, body: { ok: true, sent: message.length, submitted: true, confirmed: true, ...(queued ? { note: 'Claude was working, so the message is queued for after its turn' } : {}) } };
     }
   }
-  return unconfirmed('the message is still in Claude\'s prompt (is Enter set to insert a new line?)');
+  return unconfirmed(emptyBefore ? 'Claude\'s screen never held still long enough to confirm it was taken; look before sending it again' : 'the message is still in Claude\'s prompt (is Enter set to insert a new line?)');
 }
 
 async function typeRaw(deps, tabId, pty, watch, message) {
