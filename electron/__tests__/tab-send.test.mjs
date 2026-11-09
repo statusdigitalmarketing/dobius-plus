@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { sendToTab } from '../tab-send.js';
 import { stripTerminalReplies, isTerminalReply } from '../terminal-reply.js';
 import { isKeyboardInput } from '../bridge-open-tab.js';
-import { isRelayCommand } from '../bridge-open-main.js';
+import { classifyFront } from '../bridge-open-main.js';
 
 const RULE = '─'.repeat(40);
 function screenWith(boxText, { dialog = false } = {}) {
@@ -17,7 +17,7 @@ function screenWith(boxText, { dialog = false } = {}) {
 
 const SHELL = (() => { const lines = ['user@Mac project % ']; lines.dimFrom = [-1]; return { lines, modes: { bracketedPaste: true, cursor: { x: 19, y: 0 } } }; })();
 
-function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false, needsAfterPaste = false, spinAfterSubmit = false, shell = SHELL, relay = false, busyScreen = false } = {}) {
+function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false, needsAfterPaste = false, spinAfterSubmit = false, shell = SHELL, front = 'shell', busyScreen = false } = {}) {
   let clock = 0;
   const t = { box, seq: 0, keys: 0, input: 0, pasted: null, written: [], submitted: 0, pty: {}, alive: true, reads: 0, stopped: false, probes: 0 };
   const deps = {
@@ -25,7 +25,7 @@ function fakeTab({ leads, claude = true, working = false, needs = false, box = '
     ptyOf: () => (t.alive ? t.pty : null),
     claudeRunning: async () => { if (wheelBeforeRead && (t.probes += 1) === 1) t.input += 1; return claude && !(readerAfterPaste && t.pasted !== null); },
     claudeInTab: async () => inTab,
-    relayInFront: async () => relay,
+    frontKind: async () => front,
     claudeLeads: async () => { if (keysDuringProbe) t.keys += 1; if (probeFails) throw new Error('pgrep timed out'); return leads ?? claude; },
     needs: () => needs || (needsAfterPaste && t.pasted !== null),
     working: () => working,
@@ -297,8 +297,8 @@ test('dialog-like words in old output above a shell prompt do not block a raw se
   assert.equal(t.submitted, 1);
 });
 
-test('tmux or ssh leading the terminal: refused, nothing typed (Claude may be behind it, Codex round 6)', async () => {
-  const { t, deps } = fakeTab({ claude: false, leads: false, relay: true });
+test('tmux, ssh or docker exec leading the terminal: refused, nothing typed (Claude may be behind it, Codex rounds 6 and 7)', async () => {
+  const { t, deps } = fakeTab({ claude: false, leads: false, front: 'other' });
   const r = await sendToTab(deps, 'tab', '1');
   assert.equal(r.status, 409);
   assert.deepEqual(t.written, []);
@@ -312,7 +312,25 @@ test('not Claude, but the screen never holds still: refused, nothing typed', asy
   assert.deepEqual(t.written, []);
 });
 
-test('relay commands are told apart from ordinary programs', () => {
-  for (const c of ['tmux', '/opt/homebrew/bin/tmux', 'ssh', '/usr/bin/ssh', 'mosh-client', 'screen', '-zellij']) assert.equal(isRelayCommand(c), true, c);
-  for (const c of ['zsh', '-zsh', '/bin/bash', 'node', 'claude', '2.1.270', 'sshd-helper', 'vim', '']) assert.equal(isRelayCommand(c), false, c);
+test('Codex leading the terminal is typed into raw', async () => {
+  const { t, deps } = fakeTab({ claude: false, leads: false, front: 'codex' });
+  const r = await sendToTab(deps, 'tab', 'hello');
+  assert.equal(r.body.ok, true);
+  assert.equal(t.written.join(''), 'hello');
+});
+
+test('what leads the terminal: only the tab\'s own shell or Codex counts', () => {
+  const rows = (...r) => r.map(([pgid, comm]) => ({ pgid, comm }));
+  assert.equal(classifyFront({ shellPid: 10, shellComm: '-zsh', tpgid: '10', rows: rows(['10', '-zsh']) }), 'shell');
+  assert.equal(classifyFront({ shellPid: 10, shellComm: '/bin/bash', tpgid: '10', rows: [] }), 'shell');
+  // A login profile that exec'd tmux: the PTY's own process leads, but it is not a shell.
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'tmux', tpgid: '10', rows: [] }), 'other');
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: rows(['10', 'zsh'], ['20', 'node'], ['20', '/opt/homebrew/lib/node_modules/@openai/codex/bin/codex']) }), 'codex');
+  for (const comm of ['docker', 'tmux', '/usr/bin/ssh', 'vim', 'python3', 'kubectl', 'limactl']) {
+    assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: rows(['10', 'zsh'], ['20', comm]) }), 'other', comm);
+  }
+  // codex in a background group does not make the foreground program Codex.
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: rows(['30', 'codex'], ['20', 'docker']) }), 'other');
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '', rows: [] }), 'other');
+  assert.equal(classifyFront({ shellPid: 10, shellComm: 'zsh', tpgid: '20', rows: [] }), 'other');
 });
