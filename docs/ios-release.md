@@ -56,12 +56,14 @@ A failure there never fails the desktop release: it prints what to run by hand. 
    signature check, and its entitlements (`aps-environment` production, no `get-task-allow`, this team and app id). Then
    `altool --validate-app` and `altool --upload-package` with the API key (found by file name through
    `API_PRIVATE_KEYS_DIR`, never on a command line).
-5. **Tags and waits.** Once the upload succeeds the commit is tagged `ios-<version>-<N>` (both numbers: Apple lets a
-   build number repeat under another version) and the tag pushed. Then it waits for processing (up to 45 minutes,
+5. **Tags and waits.** altool must print `UPLOAD SUCCEEDED` (it can exit 0 on a refused upload). Then the commit is
+   tagged `ios-<version>-<N>` (both numbers: Apple lets a build number repeat under another version), the tag's message
+   recording when the upload began, and the tag pushed. A tag vouches only for the FIRST build Apple lists under its
+   pair uploaded since then: one reusing the numbers later, or uploaded before, is never treated as ours. Then it waits for processing (up to 45 minutes,
    polled every 30 seconds). Refused (`INVALID`, `FAILED`): it stops, and that tag no longer counts as the last build.
    Still processing after 45 minutes: it stops there, and a later `submit` (or the next release) submits it.
 6. **Submits.** Only a processed build of ours: its version and build string match an `ios-<version>-<N>` tag on a
-   commit of `origin/main` exactly, it has not expired, and it is above the live build in Apple's order (a live `100.1`
+   commit of `origin/main` exactly and is the build that tag vouches for, it has not expired, and it is above the live build in Apple's order (a live `100.1`
    keeps out a 7; a live build string that cannot be read keeps out everything). Builds uploaded by hand, from a branch,
    or under a reused number are never picked. If origin cannot be fetched it does not submit. The version it goes on:
    - a version Apple is already handling (waiting for review, in review, accepted, pending Apple's release, processing,
@@ -76,15 +78,16 @@ A failure there never fails the desktop release: it prints what to run by hand. 
    - otherwise a new version, `releaseType: AFTER_APPROVAL`.
 
    Then it attaches the build, sets "What's New" on every localization, and checks the review details field by field:
-   a contact (first and last name, phone, email), notes that mention the demo Mac `demo.dobius` and code `123456`, and a
+   a contact (first and last name, phone, email), notes that mention the demo Mac `demo.dobius` (never as `https://`, which the demo does
+   not answer) and code `123456`, and a
    demo sign-in when the details say one is required.
    Anything missing is repaired from the live version's details, or it stops if those are incomplete too. Everything is
    read back (version string, release type, What's New, review details) and any difference stops it before review.
    The review submission: one left open by a rejection that holds this version (its rejected item is marked
-   resolved), else an open one ready for review, else a new one. A submission that also holds anything else (an In-App Event,
-   another version) stops the run: submitting sends every item, and those are not this script's to send.
-   It confirms the version's item is there (a removed one does not count), reads the version's build once more, and
-   submits.
+   resolved), else a draft holding only this version, else an empty draft, else a new one. Drafts holding anything else
+   (an In-App Event, another version) are left alone; an unresolved submission holding other items stops the run.
+   Right before submitting it reads the items again (this version there, a removed one not counting, nothing else added
+   since) and the version's build once more, then submits: submitting sends every item.
 7. **Apple releases it** on approval (`AFTER_APPROVAL`). Nothing else has to run.
 
 ## Rules it keeps
@@ -93,7 +96,8 @@ A failure there never fails the desktop release: it prints what to run by hand. 
 - A build number is never reused. A build is tagged once Apple has the upload; one Apple refuses stops counting.
 - The .p8 key and the JWT are never printed. Requests go only to `api.appstoreconnect.apple.com`, with redirects
   refused, a 60-second timeout, and an answer that is not JSON, has no data, or is a list cut short treated as an error.
-- `--dry-run` makes no build, no tags, no uploads and no App Store Connect changes (it does fetch from origin).
+- `--dry-run` makes no build, no tags, no uploads, no App Store Connect changes and installs no profile (it does fetch
+  from origin).
 - One run at a time (a lock file in the temp folder).
 - App Review needs the demo answered for every screen it shows: a new phone message type a screen depends on must be
   answered in `mobile/demo.js` too (RELEASING-IOS.md).
