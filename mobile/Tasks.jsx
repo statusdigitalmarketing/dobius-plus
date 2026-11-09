@@ -316,7 +316,9 @@ const SYNC_PROBLEM = {
 const OPEN_ON_MAC = SYNC_PROBLEM['open-on-mac'];
 
 const LANE = { build: 'Mine', review: 'Sam · review' };
-const STAGE = { approval: null, queued: 'Queued', running: 'Running', review: 'In review', blocked: 'Blocked' };
+// The pipeline's own stages (electron/task-pipeline.js STAGES), worded as the desktop Tasks list words them. Intake,
+// approval and done show no chip (Codex phone tasks round 11: building and ship-test had none).
+const STAGE = { queued: 'Queued', building: 'Building', review: 'In review', shiptest: 'Ship-test', blocked: 'Blocked' };
 
 function TaskRow({ task, today, busy, expanded, onExpand, onToggle, onDelete }) {
   // A confirm belongs to the version it was asked on: a newer one (edited on the Mac) asks again. Decided while

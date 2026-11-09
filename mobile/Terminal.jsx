@@ -74,6 +74,24 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
   const exactMissingRef = useRef(onExactMissing);
   exactMissingRef.current = onExactMissing;
   const exactIdRef = useRef(onExactMissing ? initialId : null);
+  // The queued leave once that terminal is gone. Opening or picking another terminal on this screen cancels it and ends
+  // the exact mode, so a late answer about the run terminal never takes the person off the one they chose (Codex
+  // phone tasks round 11).
+  const leaveTimerRef = useRef(null);
+  const leaveSoon = useCallback(() => {
+    const exact = exactIdRef.current;
+    clearTimeout(leaveTimerRef.current);
+    leaveTimerRef.current = setTimeout(() => {
+      leaveTimerRef.current = null;
+      if (exact && exactIdRef.current === exact) exactMissingRef.current?.();
+    }, 0);
+  }, []);
+  const endExact = useCallback(() => {
+    clearTimeout(leaveTimerRef.current);
+    leaveTimerRef.current = null;
+    exactIdRef.current = null;
+  }, []);
+  useEffect(() => () => clearTimeout(leaveTimerRef.current), []);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // The specific session being confirmed for stop, captured at tap time, so a
   // later activeId change (exit / reordered payload) can't make Stop kill the
@@ -137,7 +155,7 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         setActiveId((cur) => {
           if (cur && (msg.list || []).some((t) => t.id === cur)) return cur;
           if (exactIdRef.current && cur === exactIdRef.current) {
-            setTimeout(() => exactMissingRef.current?.(), 0);
+            leaveSoon();
             return null;
           }
           return (msg.list || [])[0]?.id || null;
@@ -151,6 +169,7 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         if (!mine) { refreshList(); return; } // someone else's create (the Board's): leave this screen's state alone
         creatingRef.current = false;
         createNonceRef.current = null;
+        endExact();
         refreshList();
         setActiveId(msg.id);
         setSwitcherOpen(false);
@@ -163,7 +182,7 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         // person away from another terminal they have opened since (Codex phone tasks round 10).
         setActiveId((cur) => {
           if (cur !== msg.id) return cur;
-          if (exactIdRef.current && msg.id === exactIdRef.current) setTimeout(() => exactMissingRef.current?.(), 0);
+          if (exactIdRef.current && msg.id === exactIdRef.current) leaveSoon();
           return null;
         });
       } else if (msg.type === 'exit') {
@@ -181,7 +200,7 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
     });
     if (connection.status === 'authed') refreshList();
     return off;
-  }, [connection, refreshList]);
+  }, [connection, refreshList, leaveSoon, endExact]);
 
   // Switch to a deep-linked session even when already mounted on the terminal
   // screen: a push tapped while here updates initialId (the openTabId prop) but
@@ -308,7 +327,7 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
                 <button
                   key={t.id}
                   className={`switcher-item ${t.id === activeId ? 'active' : ''}`}
-                  onClick={() => { setActiveId(t.id); setSwitcherOpen(false); }}
+                  onClick={() => { if (t.id !== exactIdRef.current) endExact(); setActiveId(t.id); setSwitcherOpen(false); }}
                 >
                   <span className="terminal-name">{t.tabLabel}</span>
                 </button>
