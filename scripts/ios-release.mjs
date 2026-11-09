@@ -9,6 +9,7 @@
 //   node scripts/ios-release.mjs submit [--dry-run] [--notes "..."]
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -206,8 +207,123 @@ function verifyIpa(ipa, marketing, buildNo, work) {
   say(`checked: ${BUNDLE_ID} ${marketing} (${buildNo}), team ${TEAM_ID}, push production, distribution signed`);
 }
 
+// ---- App Store signing: this Mac's Apple Distribution identity and a profile made for it through the API ----
+// Signing is manual. The API key cannot use Apple's cloud signing ("Cloud signing permission error"), and Xcode's
+// automatic export then falls back to a cached profile it cannot repair: one made before push was added to the App ID
+// has no aps-environment, so the export fails (or, worse, would ship an app whose pushes never arrive).
+const PROFILE_DIR = path.join(os.homedir(), 'Library', 'Developer', 'Xcode', 'UserData', 'Provisioning Profiles');
+const PROFILE_MIN_DAYS = 14; // a profile expiring sooner is replaced, so a run never signs with one about to lapse
+
+/** SHA-1s of the valid Apple Distribution identities for this team that have their private key on this Mac. */
+function localDistributionShas() {
+  const out = read('security', ['find-identity', '-v', '-p', 'codesigning']);
+  const re = new RegExp(`\\b([0-9A-F]{40}) "Apple Distribution: [^"]*\\(${TEAM_ID}\\)"`, 'g');
+  return new Set([...out.matchAll(re)].map((m) => m[1]));
+}
+
+// One value from a plist by key path, as text (a date in ISO 8601, data in base64, an array as its length); null when
+// the key is not there. A profile holds dates and data, which plutil cannot turn into JSON, so it is read key by key.
+function plistValue(file, keyPath) {
+  const r = spawnSync('plutil', ['-extract', keyPath, 'raw', '-o', '-', file], { encoding: 'utf8', timeout: MIN });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+/** The parts of a profile the export depends on, or null when it cannot be read. */
+function decodeProfile(contentB64, work) {
+  if (typeof contentB64 !== 'string' || !contentB64) return null;
+  const file = path.join(work, `profile-${crypto.randomUUID()}.mobileprovision`);
+  fs.writeFileSync(file, Buffer.from(contentB64, 'base64'));
+  const xml = path.join(work, `profile-${crypto.randomUUID()}.plist`);
+  try {
+    fs.writeFileSync(xml, read('security', ['cms', '-D', '-i', file]));
+  } catch (err) {
+    say(`could not read a profile: ${err.message}`);
+    return null;
+  }
+  const v = (k) => plistValue(xml, k);
+  const certCount = Number(v('DeveloperCertificates')) || 0;
+  const certs = [];
+  for (let i = 0; i < certCount && i < 50; i += 1) certs.push(v(`DeveloperCertificates.${i}`));
+  return {
+    file,
+    plist: {
+      UUID: v('UUID'), ExpirationDate: v('ExpirationDate'), ProvisionedDevices: v('ProvisionedDevices'),
+      DeveloperCertificates: certs,
+      Entitlements: {
+        'application-identifier': v('Entitlements.application-identifier'),
+        'aps-environment': v('Entitlements.aps-environment'),
+        'get-task-allow': v('Entitlements.get-task-allow') === 'true',
+      },
+    },
+  };
+}
+
+/** Why this profile cannot sign the App Store build (empty when it can). */
+function profileProblems(plist, certDerB64) {
+  const out = [];
+  const ent = plist?.Entitlements || {};
+  if (ent['application-identifier'] !== `${TEAM_ID}.${BUNDLE_ID}`) out.push(`it is for ${ent['application-identifier']}`);
+  if (ent['aps-environment'] !== 'production') out.push(`its push entitlement is ${ent['aps-environment'] ?? 'missing'}`);
+  if (ent['get-task-allow'] === true || plist?.ProvisionedDevices !== null) out.push('it is not an App Store profile');
+  const exp = Date.parse(plist?.ExpirationDate);
+  if (!(exp > Date.now() + PROFILE_MIN_DAYS * 24 * 60 * MIN)) out.push(`it expires ${plist?.ExpirationDate}`);
+  // plutil gives each certificate as base64 DER, the same form App Store Connect uses: the identity must be one.
+  if (!(plist?.DeveloperCertificates || []).includes(certDerB64)) out.push('it does not hold this Mac\'s distribution certificate');
+  if (typeof plist?.UUID !== 'string' || !/^[0-9A-Fa-f-]{36}$/.test(plist.UUID)) out.push('it has no UUID');
+  return out;
+}
+
+/**
+ * The certificate and profile the export signs with: an active App Store profile for this app that holds this Mac's
+ * distribution certificate and the push entitlement, else a new one made through the API (never in a dry run).
+ * Installed where Xcode looks for profiles. Returns { sha1, uuid, name } or null in a dry run with nothing usable.
+ */
+async function appStoreSigning(asc, { create }) {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-ios-sign-'));
+  try {
+    const local = localDistributionShas();
+    const certs = await asc.all('/v1/certificates?filter[certificateType]=DISTRIBUTION,IOS_DISTRIBUTION&limit=200');
+    const cert = certs.find((c) => {
+      const der = c.attributes?.certificateContent;
+      return der && local.has(crypto.createHash('sha1').update(Buffer.from(der, 'base64')).digest('hex').toUpperCase());
+    });
+    if (!cert) throw new Error(`no Apple Distribution certificate of team ${TEAM_ID} has its private key on this Mac`);
+    const der = cert.attributes.certificateContent;
+    const sha1 = crypto.createHash('sha1').update(Buffer.from(der, 'base64')).digest('hex').toUpperCase();
+    const bundles = (await asc.all(`/v1/bundleIds?filter[identifier]=${BUNDLE_ID}&limit=50`)).filter((b) => b.attributes?.identifier === BUNDLE_ID);
+    if (bundles.length !== 1) throw new Error(`App Store Connect lists ${bundles.length} bundle ids named ${BUNDLE_ID}`);
+    const profiles = await asc.all(`/v1/bundleIds/${bundles[0].id}/profiles?limit=200`);
+    let chosen = null;
+    for (const p of profiles) {
+      if (p.attributes?.profileType !== 'IOS_APP_STORE' || p.attributes?.profileState !== 'ACTIVE') continue;
+      const d = decodeProfile(p.attributes.profileContent, work);
+      if (d && !profileProblems(d.plist, der).length) { chosen = { ...d, name: p.attributes.name }; break; }
+    }
+    if (!chosen) {
+      if (!create) { say('[dry run] would make an App Store profile for this Mac\'s distribution certificate'); return null; }
+      const name = `Dobius App Store ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
+      say(`making App Store profile "${name}" (no active one holds this Mac's certificate and push)`);
+      const made = await asc.post('/v1/profiles', { data: {
+        type: 'profiles',
+        attributes: { name, profileType: 'IOS_APP_STORE' },
+        relationships: { bundleId: { data: { type: 'bundleIds', id: bundles[0].id } }, certificates: { data: [{ type: 'certificates', id: cert.id }] } },
+      } });
+      const d = decodeProfile(made?.data?.attributes?.profileContent, work);
+      const problems = d ? profileProblems(d.plist, der) : ['Apple sent no profile back'];
+      if (problems.length) throw new Error(`the new profile cannot sign the app: ${problems.join('; ')} (is Push Notifications on for the App ID?)`);
+      chosen = { ...d, name };
+    }
+    fs.mkdirSync(PROFILE_DIR, { recursive: true });
+    fs.copyFileSync(chosen.file, path.join(PROFILE_DIR, `${chosen.plist.UUID}.mobileprovision`));
+    say(`signing with "${chosen.name}" (${chosen.plist.UUID}), expires ${chosen.plist.ExpirationDate}`);
+    return { sha1, uuid: chosen.plist.UUID, name: chosen.name };
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
+
 /** Builds, checks and (unless --no-upload) uploads. Returns true once Apple has the upload. */
-function buildAndUpload(cfg, marketing, buildNo) {
+function buildAndUpload(cfg, signing, marketing, buildNo) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), `dobius-ios-${buildNo}-`));
   try {
     const src = cleanSource(cfg.sha, work);
@@ -218,9 +334,7 @@ function buildAndUpload(cfg, marketing, buildNo) {
       '-archivePath', archive, 'archive', `MARKETING_VERSION=${marketing}`, `CURRENT_PROJECT_VERSION=${buildNo}`,
       `DEVELOPMENT_TEAM=${TEAM_ID}`, 'CODE_SIGN_STYLE=Automatic', '-quiet', ...auth,
     ], `Archiving ${marketing} (${buildNo})`, { cwd: src, minutes: 40 });
-    // Signed with this Mac's own Apple Distribution identity: the API key cannot use Apple's cloud signing ("Cloud
-    // signing permission error"), and with it Xcode repairs a stale App Store profile (one made before a capability such
-    // as push was added) through -allowProvisioningUpdates.
+    // Signed by hand with the identity and profile appStoreSigning() chose (see there for why not automatic).
     const opts = path.join(work, 'ExportOptions.plist');
     fs.writeFileSync(opts, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -228,14 +342,15 @@ function buildAndUpload(cfg, marketing, buildNo) {
   <key>method</key><string>app-store-connect</string>
   <key>destination</key><string>export</string>
   <key>teamID</key><string>${TEAM_ID}</string>
-  <key>signingStyle</key><string>automatic</string>
-  <key>signingCertificate</key><string>Apple Distribution</string>
+  <key>signingStyle</key><string>manual</string>
+  <key>signingCertificate</key><string>${signing.sha1}</string>
+  <key>provisioningProfiles</key><dict><key>${BUNDLE_ID}</key><string>${signing.uuid}</string></dict>
   <key>uploadSymbols</key><true/>
   <key>manageAppVersionAndBuildNumber</key><false/>
 </dict></plist>
 `);
     const exportDir = path.join(work, 'export');
-    run('xcodebuild', ['-exportArchive', '-archivePath', archive, '-exportOptionsPlist', opts, '-exportPath', exportDir, '-quiet', ...auth],
+    run('xcodebuild', ['-exportArchive', '-archivePath', archive, '-exportOptionsPlist', opts, '-exportPath', exportDir, '-quiet'],
       `Signing ${marketing} (${buildNo}) for the App Store`, { cwd: src, minutes: 20 });
     const ipas = fs.readdirSync(exportDir).filter((n) => n.endsWith('.ipa'));
     if (ipas.length !== 1) throw new Error(`the export made ${ipas.length} IPAs`);
@@ -402,10 +517,12 @@ async function release(asc) {
     const buildNo = nextBuildNumber(builds.map((b) => b.number), projectBuildNumber(), buildTagNumbers(allTags));
     say(`building ${marketing} (${buildNo}) from ${cfg.sha.slice(0, 8)}: ${change.why}`);
     if (DRY) {
+      await appStoreSigning(asc, { create: false });
       say(`[dry run] would test, build from a clean checkout, check, validate and upload ${marketing} (${buildNo}), then tag ${buildTagName(marketing, buildNo)}`);
     } else {
       if (!flag('--skip-tests')) run('npm', ['test'], 'Running the tests', { minutes: 30 });
-      if (!buildAndUpload(cfg, marketing, buildNo)) return; // --no-upload
+      const signing = await appStoreSigning(asc, { create: true });
+      if (!buildAndUpload(cfg, signing, marketing, buildNo)) return; // --no-upload
       tagBuild(marketing, buildNo, cfg.sha);
       const state = await waitForBuild(asc, app.id, marketing, buildNo);
       if (state === 'timeout') {
