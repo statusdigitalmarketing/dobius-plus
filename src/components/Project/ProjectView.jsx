@@ -1223,12 +1223,14 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [projectPath, openNewTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab, doResumeLatest, reopenLastClosedTab, clearActiveTerminal]);
 
-  // Menu bar events
+  // Menu bar events. Accelerators skip the DOM, so they hold off themselves while the New Tab picker or a tab's
+  // right-click menu owns the keyboard.
   useEffect(() => {
     if (!window.electronAPI) return;
+    const keysHeld = () => { const st = useStore.getState(); return st.newTabPickerOpen || st.tabMenuOpen; };
     const cleanups = [
       window.electronAPI.onMenuToggleView?.(() => {
-        if (useStore.getState().newTabPickerOpen) return;
+        if (keysHeld()) return;
         const current = useStore.getState().activeView;
         setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
       }),
@@ -1237,16 +1239,17 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         useStore.getState().setDashboardTab('settings');
         setActiveView('dashboard');
       }),
-      window.electronAPI.onMenuToggleSidebar?.(() => { if (!useStore.getState().newTabPickerOpen) toggleSidebar(); }),
-      window.electronAPI.onMenuToggleGitPanel?.(() => { if (!useStore.getState().newTabPickerOpen) toggleGitPanel(); }),
+      window.electronAPI.onMenuToggleSidebar?.(() => { if (!keysHeld()) toggleSidebar(); }),
+      window.electronAPI.onMenuToggleGitPanel?.(() => { if (!keysHeld()) toggleGitPanel(); }),
       window.electronAPI.onMenuNewTab?.(() => {
+        if (useStore.getState().tabMenuOpen) return; // the open tab menu holds the keys (Escape first)
         useStore.getState().setNewTabPickerOpen(false);
         openNewTab(projectPath);
         setActiveView('terminal');
       }),
       // While the New Tab picker owns the keyboard, menu accelerators (which
       // skip its DOM key handler) must not close or type into the tab behind it.
-      window.electronAPI.onMenuCloseTab?.(() => { if (!useStore.getState().newTabPickerOpen) closeActiveTab(); }),
+      window.electronAPI.onMenuCloseTab?.(() => { if (!keysHeld()) closeActiveTab(); }),
       // /openTab repeat: bring the tab that request already opened forward.
       window.electronAPI.onBridgeFocusTab?.((tabId) => {
         if (!useStore.getState().terminalTabs.some((t) => t.id === tabId)) return;
@@ -1254,7 +1257,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         setActiveView('terminal');
       }),
       window.electronAPI.onMenuResumeSession?.(() => {
-        if (useStore.getState().newTabPickerOpen) return;
+        if (keysHeld()) return;
         // Menu "Resume Last Session" — shares the keydown's guarded path.
         doResumeLatest();
       }),
