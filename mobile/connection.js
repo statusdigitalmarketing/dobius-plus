@@ -137,6 +137,8 @@ export class Connection {
       if (msg.type === 'authed') {
         // What this Mac's server can do: an older Mac has no Today or Settings.
         this.features = Array.isArray(msg.features) ? msg.features.filter((f) => typeof f === 'string') : [];
+        // 'windows' or 'mac' (an older computer does not say: Mac, as before).
+        this.platform = msg.platform === 'windows' ? 'windows' : 'mac';
         this.reconnectDelay = 1000;
         this._setStatus('authed');
         this._startPing();

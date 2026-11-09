@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { handleTasksMessage, setTasksBridge, taskForPhone, taskPrint, commandsForPhone, actOnProjectTask, addProjectTask, projectSummaries, syncErrorCode } from '../mobile-tasks.js';
 import { checkCommandRun, phoneRun, afterRunSpawn } from '../command-run.js';
 import { TODAY_FEATURES } from '../mobile-today.js';
-import { viewsFor, currentView } from '../../mobile/tasks-views.js';
+import { viewsFor, currentView, pcOf, forPc } from '../../mobile/tasks-views.js';
 import { commandPlaceholder } from '../../shared/placeholder.js';
 import { commandPlaceholder as fromHandoff } from '../../shared/handoff.js';
 
@@ -416,6 +416,47 @@ test('a folder shows exactly: only printable ASCII as is, everything else as a c
   // No two folders read the same: the marks themselves are escaped.
   const names = ['/w/a  b', `/w/a${box}${box}b`, `/w/a${cp(9)}b`, `/w/a${BS}tb`, '/w/ab', `/w/a${cp(0x34f)}b`, `/w/a${BS}u{34f}b`];
   assert.equal(new Set(names.map(visiblePath)).size, names.length);
+});
+
+test('a Windows PC\'s folder keeps its single backslashes, and still no two folders read the same (Max, 2026-11-09)', async () => {
+  const { visiblePath, shortPath } = await import('../../shared/short-path.js');
+  const cp = (...n) => String.fromCodePoint(...n);
+  const BS = cp(92);
+  const W = { windows: true };
+  const p = ['C:', 'Users', 'max', 'Projects', 'x'].join(BS);
+  assert.equal(visiblePath(p, W), p, 'shown as Windows writes it');
+  assert.equal(visiblePath(shortPath(p, ['C:', 'Users', 'max'].join(BS)), W), ['~', 'Projects', 'x'].join(BS));
+  assert.equal(visiblePath(p), p.split(BS).join(BS + BS), 'a Mac folder (or no flag) is unchanged: doubled');
+  assert.equal(visiblePath(`C:${BS}a${cp(0xe9)}`, W), `C:${BS}a${cp(0x27e8)}u+e9${cp(0x27e9)}`);
+  // A folder literally named u{e9} or u+e9 next to an accented letter, a tab, and the marks themselves.
+  const names = [`C:${BS}${cp(0xe9)}`, `C:${BS}u{e9}`, `C:${BS}u+e9`, `C:${BS}${cp(0x27e8)}u+e9${cp(0x27e9)}`, `C:${BS}a${cp(9)}b`, `C:${BS}a${BS}tb`, `C:${BS}a  b`, `C:${BS}a b`];
+  assert.equal(new Set(names.map((n) => visiblePath(n, W))).size, names.length);
+});
+
+test('Run on a Windows PC: refused before the syntax check, which would find no /bin/bash (Max, 2026-11-09)', () => {
+  let checked = 0;
+  const r = checkCommandRun({ cmd: { text: 'npm test' }, syntaxOk: () => { checked += 1; return false; }, shell: undefined, windows: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'shell');
+  assert.match(r.error, /not on Windows yet: use Copy/);
+  assert.equal(checked, 0, 'never reports a syntax error');
+  assert.equal(checkCommandRun({ cmd: null, syntaxOk: () => true, windows: true }).code, 'not-waiting');
+  assert.equal(checkCommandRun({ cmd: { text: 'npm test' }, syntaxOk: () => true, shell: '/bin/zsh' }).ok, true, 'a Mac is unchanged');
+});
+
+test('the phone words its messages for the computer it is paired with (Max, 2026-11-09)', () => {
+  assert.equal(pcOf({ platform: 'windows' }), 'PC');
+  assert.equal(pcOf({ platform: 'mac' }), 'Mac');
+  assert.equal(pcOf({}), 'Mac', 'an older computer that does not say');
+  assert.equal(forPc('No Asana key on this Mac yet. Add one in Settings > Integrations on the Mac.', 'PC'), 'No Asana key on this PC yet. Add one in Settings > Integrations on the PC.');
+  assert.equal(forPc('Asana turned down this Mac\'s key.', 'PC'), 'Asana turned down this PC\'s key.');
+  assert.equal(forPc('open-on-mac', 'PC'), 'open-on-mac', 'codes are not words');
+  assert.equal(forPc('open-on-Mac', 'PC'), 'open-on-Mac', 'not inside a code either');
+  assert.equal(forPc(`Mac${String.fromCodePoint(0xe9)} MacBook Mac`, 'PC'), `Mac${String.fromCodePoint(0xe9)} MacBook PC`, 'only the word on its own');
+  assert.equal(forPc(`Mac${String.fromCodePoint(0x301)} on the Mac`, 'PC'), `Mac${String.fromCodePoint(0x301)} on the PC`, 'a combining mark makes it another word');
+  assert.equal(forPc('Mac Mac.', 'PC'), 'PC PC.');
+  assert.equal(forPc('Your Mac did not take that.', 'Mac'), 'Your Mac did not take that.');
+  assert.equal(forPc(undefined, 'PC'), undefined);
 });
 
 test('a long task id is never cut short into another task\'s id (Codex round 7)', () => {

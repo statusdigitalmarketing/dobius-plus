@@ -593,6 +593,8 @@ button.secondary:disabled { opacity: 0.4; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-family: 'SF Mono', Menlo, monospace; font-size: 11px;
 }
+/* A folder path must show whole: on Windows two folders can differ only past the point an ellipsis would cut. */
+.sheet-item .card-sub.path-text { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
 .sheet-empty { padding: 20px; text-align: center; color: var(--dim); font-size: 13px; }
 
 /* Stop control + confirm bar (terminal). */

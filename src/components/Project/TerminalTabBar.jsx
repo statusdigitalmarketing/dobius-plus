@@ -797,7 +797,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
             toggleMonitor(contextMenu.tabId);
             setContextMenu(null);
           }}
-          onContinueAccount={() => {
+          onContinueAccount={isWindows() ? undefined : () => {
             const targetTabId = contextMenu.tabId;
             setContextMenu(null);
             // Pick one of your Claude logins for this tab (or the whole
@@ -967,7 +967,8 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
     { type: 'divider' },
     { label: 'Copy Last Claude Response', onClick: onCopyLastResponse },
     ...(onTeamOrchestrator ? [{ label: isTeamOrchestrator ? 'Stop being team orchestrator' : 'Use as team orchestrator', onClick: onTeamOrchestrator }] : []),
-    { label: 'Move to account…', onClick: onContinueAccount },
+    // Windows applies no saved account to a terminal, so moving would do nothing there (Max, 2026-11-09).
+    ...(onContinueAccount ? [{ label: 'Move to account…', onClick: onContinueAccount }] : []),
     { type: 'divider' },
     { label: 'Close', onClick: onClose, disabled: tabCount <= 1 },
     { label: 'Close Others', onClick: onCloseOthers, disabled: tabCount <= 1 },

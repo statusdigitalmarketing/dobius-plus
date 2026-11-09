@@ -160,6 +160,16 @@ try {
   step('Ctrl+Shift+T opens a second tab', !!tabs);
   await page.screenshot({ path: path.join(out, '5-two-tabs.png') });
 
+  // The tab menu on Windows: no Move to account (Windows applies no saved account, Max 2026-11-09).
+  await page.locator('button[draggable="true"]').first().click({ button: 'right' });
+  const menu = await waitFor(async () => {
+    const t = await page.evaluate(() => document.body.innerText);
+    return t.includes('Close Others') ? t : null;
+  }, 10000, 500);
+  step('tab menu opens without Move to account', !!menu && !menu.includes('Move to account'), menu ? '' : 'menu did not open');
+  await page.screenshot({ path: path.join(out, '6-tab-menu.png') });
+  await page.keyboard.press('Escape');
+
   // Close every window: the app must quit by itself on Windows.
   for (const ctx of browser.contexts()) for (const p of ctx.pages()) await p.evaluate(() => window.close()).catch(() => {});
   const quit = await waitFor(async () => exited, 30000, 500);

@@ -22,7 +22,13 @@ const OPEN_BOX = String.fromCodePoint(0x2423);
 // folder name is not printable ASCII, so it is written as a code and never reads the same.
 const NBSP = String.fromCharCode(160);
 const NAMED = new Map([[9, 't'], [10, 'n'], [13, 'r']]);
-export function visiblePath(p) {
+// A Windows computer's folders (`windows`): the backslash is the separator there, so it is shown as it is, and every
+// code is written between two marks outside ASCII instead (the marks themselves are never shown as they are), so
+// `C:\x` and a folder named `u{e9}` still never read the same as a code (Max, 2026-11-09: a Windows folder showed
+// every backslash doubled).
+const WIN_OPEN = String.fromCodePoint(0x27e8);
+const WIN_CLOSE = String.fromCodePoint(0x27e9);
+export function visiblePath(p, { windows = false } = {}) {
   const s = Array.from(String(p || ''));
   let out = '';
   for (let i = 0; i < s.length; i += 1) {
@@ -30,9 +36,10 @@ export function visiblePath(p) {
     if (cp === 32) {
       const lone = i > 0 && i < s.length - 1 && s[i - 1] !== ' ' && s[i + 1] !== ' ';
       out += lone ? NBSP : OPEN_BOX;
-    } else if (cp === 92) out += BS + BS;
-    else if (NAMED.has(cp)) out += BS + NAMED.get(cp);
+    } else if (cp === 92) out += windows ? BS : BS + BS;
     else if (cp > 32 && cp < 127) out += s[i];
+    else if (windows) out += `${WIN_OPEN}u+${cp.toString(16)}${WIN_CLOSE}`;
+    else if (NAMED.has(cp)) out += BS + NAMED.get(cp);
     else out += `${BS}u{${cp.toString(16)}}`;
   }
   return out;

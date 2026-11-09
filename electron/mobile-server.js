@@ -1583,7 +1583,8 @@ async function doStartMobileServer(stillCurrent) {
           let set = activeSocketsByToken.get(authedToken);
           if (!set) { set = new Set(); activeSocketsByToken.set(authedToken, set); }
           set.add(socket);
-          wsSend(socket, { type: 'authed', version: app.getVersion(), features: [...ACK_FEATURES, ...TODAY_FEATURES] });
+          // platform: the phone words its messages for a PC and shows Windows folders as Windows writes them (Max, 2026-11-09).
+          wsSend(socket, { type: 'authed', version: app.getVersion(), platform: process.platform === 'win32' ? 'windows' : 'mac', features: [...ACK_FEATURES, ...TODAY_FEATURES] });
         } else {
           socket.close(4003, 'unauthorized');
         }
