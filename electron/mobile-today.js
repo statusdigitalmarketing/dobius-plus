@@ -11,7 +11,8 @@ import { isDeviceToken } from './apns.js';
 
 // alerts: Notifications by event (phoneAlerts). accounts: accountsRead / accountActivate. chatDefaults: the newTabModel
 // and newTabPermissionMode keys. apns: apnsRegister / apnsUnregister / notifyResolve (the App Store app's push).
-export const TODAY_FEATURES = Object.freeze(['today', 'settings', 'alerts', 'accounts', 'chatDefaults', 'apns']);
+// commands / projectTasks: the phone's Commands, To-do and Asana views (electron/mobile-tasks.js).
+export const TODAY_FEATURES = Object.freeze(['today', 'settings', 'alerts', 'accounts', 'chatDefaults', 'apns', 'commands', 'projectTasks']);
 
 const MAX_REQ_ID = 64;
 const MAX_ID = 200;

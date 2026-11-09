@@ -23,6 +23,32 @@ const ASANA_BASE = 'app.asana.com';
 const ASANA_TIMEOUT_MS = 15_000;
 const MAX_TITLE = 500;
 
+// The list file's name for a project, with no side effects (see tasksPath for the legacy move).
+function hashedTasksPath(projectPath) {
+  const norm = path.resolve(String(projectPath).replace(/^~(?=$|\/)/, os.homedir()));
+  const slug = norm.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 100);
+  const hash = crypto.createHash('sha1').update(norm).digest('hex').slice(0, 8);
+  return path.join(TASKS_DIR, `${slug}.${hash}.json`);
+}
+
+/**
+ * A project's tasks for a count, READ ONLY: never the legacy-name move, the corrupt-file move or a mkdir that
+ * listTasks may do. The phone's project picker counts every known project this way, including ones nobody opened, so
+ * it must not move a legacy file (two paths can share a legacy name) or touch anything else. null when the project has
+ * no list file under its own name, [] when it has one that cannot be read.
+ */
+export function peekTasks(projectPath) {
+  if (!projectPath) return null;
+  let raw;
+  try { raw = fs.readFileSync(hashedTasksPath(projectPath), 'utf8'); } catch { return null; } // no list of its own yet
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((t) => pipeline.migrate(t)) : [];
+  } catch {
+    return []; // unreadable: listTasks moves it aside when the project is opened
+  }
+}
+
 function tasksPath(projectPath) {
   // Normalize so the renderer (store currentProjectPath) and the CLI (which may
   // pass ~, a trailing slash, or a relative cwd) encode to the SAME filename.
@@ -55,8 +81,24 @@ function tasksPath(projectPath) {
   return newPath;
 }
 
-function readTasks(projectPath, { strict = false } = {}) {
-  const p = tasksPath(projectPath);
+/**
+ * True when the project has no list file of its own yet but an old-style (legacy-named) one is waiting: the first read
+ * would move that file to this project. Two folders can share a legacy name, so the phone never triggers that move
+ * (Codex, phone tasks round 3); opening the project on the Mac does, as before. No side effects.
+ */
+export function legacyListWaiting(projectPath) {
+  if (!projectPath) return false;
+  try {
+    if (fs.existsSync(hashedTasksPath(projectPath))) return false;
+    const norm = path.resolve(String(projectPath).replace(/^~(?=$|\/)/, os.homedir()));
+    const legacySafe = norm.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 120);
+    return fs.existsSync(path.join(TASKS_DIR, `${legacySafe}.json`));
+  } catch { return true; } // cannot tell: treat as waiting, never move
+}
+
+// legacyMove false: read the project's own file only, never the legacy move (see syncAsanaTasksOnce).
+function readTasks(projectPath, { strict = false, legacyMove = true } = {}) {
+  const p = legacyMove ? tasksPath(projectPath) : hashedTasksPath(projectPath);
   try {
     fs.mkdirSync(TASKS_DIR, { recursive: true });
     if (!fs.existsSync(p)) return [];
@@ -93,7 +135,10 @@ function readTasks(projectPath, { strict = false } = {}) {
 // translate the throw into { ok:false } so the IPC contract never rejects).
 function writeTasks(projectPath, tasks) {
   fs.mkdirSync(TASKS_DIR, { recursive: true });
-  const filePath = tasksPath(projectPath);
+  // The project's own file, never the legacy move: a write is not the first touch (a read came first and did any move
+  // there), and moving another folder's old list here on a write is how a corrupt-file recovery overwrote it (Codex,
+  // phone tasks round 4).
+  const filePath = hashedTasksPath(projectPath);
   const tmp = `${filePath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
   try {
     fs.writeFileSync(tmp, JSON.stringify(tasks, null, 2), 'utf8');
@@ -144,12 +189,12 @@ export function addTask(projectPath, { title, source = 'manual', dueOn = null, a
   if (!clean) return { ok: false, error: 'title empty' };
   const tasks = readTasks(projectPath);
   // Dedupe by asanaGid, and by Inbox card
-  if (asanaGid && tasks.some((t) => t.asanaGid === asanaGid)) {
+  if (asanaGid && tasks.some((t) => t?.asanaGid === asanaGid)) {
     return { ok: false, error: 'duplicate asanaGid' };
   }
   // Any task, done or not: reopening the old one is the way back, and two
   // tasks for one card would make completeTaskByRef ambiguous.
-  if (inboxId && tasks.some((t) => t.inboxId === inboxId)) {
+  if (inboxId && tasks.some((t) => t?.inboxId === inboxId)) {
     return { ok: false, error: 'already on this list' };
   }
   const task = newTask(clean, { source, dueOn, asanaGid, inboxId, lane, assignee, notes, url });
@@ -165,7 +210,7 @@ export function addTask(projectPath, { title, source = 'manual', dueOn = null, a
 export function updateTask(projectPath, taskId, patch) {
   if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
   const tasks = readTasks(projectPath);
-  const idx = tasks.findIndex((t) => t.id === taskId);
+  const idx = tasks.findIndex((t) => t?.id === taskId);
   if (idx === -1) return { ok: false, error: 'task not found' };
   // Benign metadata only. `stage`/`events`/`runs`/`stagedAt` are intentionally
   // NOT patchable here — stage changes must go through advanceTask/blockTask so
@@ -196,7 +241,7 @@ export function updateTask(projectPath, taskId, patch) {
 export function reopenTask(projectPath, taskId, { actor = 'human', note = null } = {}) {
   if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
   const tasks = readTasks(projectPath);
-  const idx = tasks.findIndex((t) => t.id === taskId);
+  const idx = tasks.findIndex((t) => t?.id === taskId);
   if (idx === -1) return { ok: false, error: 'task not found' };
   const t = tasks[idx];
   if (!t.done && t.stage !== 'done') {
@@ -231,7 +276,7 @@ export function reopenTask(projectPath, taskId, { actor = 'human', note = null }
 function mutateTask(projectPath, taskId, fn) {
   if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
   const tasks = readTasks(projectPath);
-  const idx = tasks.findIndex((t) => t.id === taskId);
+  const idx = tasks.findIndex((t) => t?.id === taskId);
   if (idx === -1) return { ok: false, error: 'task not found' };
   try {
     tasks[idx] = fn(tasks[idx]);
@@ -264,7 +309,7 @@ export function unblockTask(projectPath, taskId, { toStage = null, note = null, 
 export function deleteTask(projectPath, taskId) {
   if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
   const tasks = readTasks(projectPath);
-  const next = tasks.filter((t) => t.id !== taskId);
+  const next = tasks.filter((t) => t?.id !== taskId);
   try {
     writeTasks(projectPath, next);
   } catch (err) {
@@ -310,11 +355,11 @@ export function resolveTaskRef(projectPath, ref) {
   if (!tasks.length) return { ok: false, error: 'no tasks for this project' };
 
   // 1. Exact id or asanaGid match (may be already done — that's fine, idempotent).
-  const exact = tasks.find((t) => t.id === needle || t.asanaGid === needle);
+  const exact = tasks.find((t) => t?.id === needle || t?.asanaGid === needle);
   if (exact) return { ok: true, task: exact };
 
   // 2. Fuzzy title match, restricted to PENDING tasks only.
-  const pending = tasks.filter((t) => !t.done);
+  const pending = tasks.filter((t) => t && typeof t === 'object' && !t.done);
   const low = needle.toLowerCase();
   let matches = pending.filter((t) => (t.title || '').toLowerCase().includes(low));
 
@@ -355,8 +400,18 @@ export function completeTaskByRef(projectPath, ref) {
   return markTaskDone(projectPath, tasks, resolved.task);
 }
 
+// The phone's Done: only the task with exactly this id. completeTaskByRef trims the reference and also matches an
+// asanaGid or a title, so `" a "` there could close task `a` (Codex phone tasks round 6).
+export function completeTaskById(projectPath, taskId) {
+  if (!projectPath || typeof taskId !== 'string' || !taskId) return { ok: false, error: 'task id required' };
+  const tasks = readTasks(projectPath);
+  const target = tasks.find((t) => t?.id === taskId);
+  if (!target) return { ok: false, error: 'task not found' };
+  return markTaskDone(projectPath, tasks, target);
+}
+
 function markTaskDone(projectPath, tasks, target) {
-  const idx = tasks.findIndex((t) => t.id === target.id);
+  const idx = tasks.findIndex((t) => t?.id === target.id);
   if (idx === -1) return { ok: false, error: 'task not found' };
   const already = tasks[idx].done === true;
   // complete() is the explicit human force-done path (works from any stage) and
@@ -565,6 +620,10 @@ export async function workingAsanaKeyFrom(source, { expectHint, expectEmail } = 
 
 async function syncAsanaTasksOnce(projectPath) {
   if (!projectPath) return { ok: false, error: 'projectPath required' };
+  // Decided before Asana is asked: the legacy move may happen only as this project's first touch. If the project
+  // already had its own list here, a read after the await must not move another folder's old list in, even when its
+  // own file was moved aside as corrupt meanwhile (Codex phone tasks round 5).
+  const legacyMove = legacyListWaiting(projectPath);
   const { pat } = getAsanaQueue();
   const used = asanaTokenWithSource(pat); // the shared spot decides (claude-settings-env.js)
   const token = used.token;
@@ -620,8 +679,9 @@ async function syncAsanaTasksOnce(projectPath) {
     // from a terminal while Asana was answering is not overwritten. A task
     // already here gets its due date, notes and link refreshed; its title,
     // stage and done state stay as they are.
-    const tasks = readTasks(projectPath, { strict: true });
-    const byGid = new Map(tasks.filter((x) => x.asanaGid).map((x) => [x.asanaGid, x]));
+    const tasks = readTasks(projectPath, { strict: true, legacyMove });
+    // A damaged entry (null, a number) in the file is left as it is, never read as a task (Codex phone tasks round 10).
+    const byGid = new Map(tasks.filter((x) => x && typeof x === 'object' && x.asanaGid).map((x) => [x.asanaGid, x]));
     let added = 0;
     let changed = false;
     for (const { t, lane, assignee } of fetched) {

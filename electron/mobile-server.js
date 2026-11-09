@@ -37,6 +37,7 @@ import { stripAnsi, spinnerStatus } from './selector-parser.js';
 import { terminalTextTail, terminalScreenText, submitPromptDetailed, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab } from './chat-service.js';
 import { TAB_OPS, ACK_FEATURES, handleTabOp } from './mobile-tab-ops.js';
 import { TODAY_FEATURES, handleTodayMessage } from './mobile-today.js';
+import { handleTasksMessage } from './mobile-tasks.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills, loadTranscriptImage } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
@@ -246,6 +247,9 @@ function wsSend(socket, obj) {
     try { socket.terminate(); } catch { /* noop */ }
     return;
   }
+  // A create reply and an error always carry a nonce key (null when no create asked for it), so a phone can tell this
+  // Mac echoes nonces and never takes a resume's reply, or an unrelated error, for its own create (Codex phone tasks round 5).
+  if ((obj?.type === 'terminalCreated' || obj?.type === 'error') && typeof obj.nonce !== 'string') obj = { ...obj, nonce: null };
   try { socket.send(JSON.stringify(obj)); } catch { /* noop */ }
 }
 
@@ -541,6 +545,16 @@ async function knownProjectList() {
     return [];
   }
 }
+// The phone's To-do and Asana screens ask for it on every read and write; listProjects stats every transcript, so
+// one answer serves the requests of the next 15 seconds (a project added meanwhile shows up after that).
+let knownProjectsCache = null; // { at, promise }
+function knownProjectListCached() {
+  if (!knownProjectsCache || Date.now() - knownProjectsCache.at > 15_000) {
+    const promise = knownProjectList();
+    knownProjectsCache = { at: Date.now(), promise };
+  }
+  return knownProjectsCache.promise;
+}
 async function isKnownProjectPath(pth) {
   if (typeof pth !== 'string' || !pth) return false;
   return (await knownProjectList()).some((p) => p.path === pth);
@@ -601,7 +615,9 @@ function routeToConductor(transcript) {
 // within a session (PTYs never survive a restart) and never reuses an id, which
 // fixes the `Date.now()` collision that let two same-millisecond spawns kill
 // each other's PTY. Audit MED-10 + Codex.
-let mobileTermCounter = 0;
+// Starts at a random point each launch: a terminal id is never reused across a restart, so a phone that still holds an
+// old id can never be attached to a different terminal that took the same number (Codex, phone tasks round 4).
+let mobileTermCounter = 1000 * (1 + crypto.randomInt(900000));
 function mobileTermId() {
   mobileTermCounter += 1;
   return `term-mobile-${mobileTermCounter}`;
@@ -653,6 +669,13 @@ function handleTabWrite(socket, msg) {
 function handleAuthedMessage(socket, msg, subs) {
   if (TAB_OPS.has(msg.type)) { handleTabWrite(socket, msg); return; }
   if (handleTodayMessage(msg, (obj) => wsSend(socket, obj), () => knownToken(socket._authToken), { token: socket._authToken })) return;
+  // Commands, To-do and Asana (electron/mobile-tasks.js). Projects come from the same allowlist createTerminal uses; a
+  // Run's new terminal is authorized for THIS socket, as a phone-created terminal is.
+  if (handleTasksMessage(msg, (obj) => wsSend(socket, obj), () => knownToken(socket._authToken), {
+    knownProjects: knownProjectListCached,
+    newTerminalId: mobileTermId,
+    authorizeTab: (id) => socket._authedTabs.add(id),
+  })) return;
   switch (msg.type) {
     case 'ping':
       wsSend(socket, { type: 'pong' });
@@ -763,14 +786,15 @@ function handleAuthedMessage(socket, msg, subs) {
         // smaller geometry, which mangles the desktop xterm. Phone-only PTYs
         // (e.g. ones created via `createTerminal` from mobile) still get
         // resized normally.
-        if (socket._authedTabs.has(msg.id) && !terminalHasDesktopAttached(msg.id)) {
+        if (socket._authedTabs.has(msg.id) && !terminalHasDesktopAttached(msg.id) && knownToken(socket._authToken)) {
           resizeTerminal(msg.id, msg.cols, msg.rows);
         }
       }
       break;
 
     case 'kill':
-      if (typeof msg.id === 'string' && socket._authedTabs.has(msg.id)) killTerminal(msg.id);
+      // A revoked phone's queued kill must not stop anything (the socket is closing, its frames may still be read).
+      if (typeof msg.id === 'string' && socket._authedTabs.has(msg.id) && knownToken(socket._authToken)) killTerminal(msg.id);
       break;
 
     case 'listProjects':
@@ -793,6 +817,8 @@ function handleAuthedMessage(socket, msg, subs) {
           wsSend(socket, { type: 'error', message: 'Unknown project', nonce: crNonce });
           return;
         }
+        // Unpaired while the project was looked up: start nothing.
+        if (!knownToken(socket._authToken)) return;
         const id = mobileTermId();
         try {
           createTerminal(id, resolved, null, resolveAccountEnvForCwd(resolved));
@@ -844,11 +870,13 @@ function handleAuthedMessage(socket, msg, subs) {
       if (typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) break;
       resolveCreateCwdCodex(projectPath).then((cwd) => {
         if (cwd === null) { wsSend(socket, { type: 'error', message: 'Unknown project' }); return; }
+        if (!knownToken(socket._authToken)) return; // unpaired while the project was looked up
         const id = mobileTermId();
         try {
           createTerminal(id, cwd, null, resolveAccountEnvForCwd(cwd));
           wsSend(socket, { type: 'terminalCreated', id });
-          setTimeout(() => writeTerminal(id, `codex resume ${sessionId}\r`), 700);
+          // Unpaired during the beat before the command: start nothing, close the shell it opened (Codex round 3).
+          setTimeout(() => { if (knownToken(socket._authToken)) writeTerminal(id, `codex resume ${sessionId}\r`); else killTerminal(id); }, 700);
         } catch (err) {
           wsSend(socket, { type: 'error', message: String(err?.message || err) });
         }
@@ -993,6 +1021,8 @@ function handleAuthedMessage(socket, msg, subs) {
           wsSend(socket, { type: 'error', message: 'That session is already running on your Mac' });
           return;
         }
+        // Unpaired while the project was looked up or the claim was taken: hand the claim back, start nothing.
+        if (!knownToken(socket._authToken)) { releaseSessionResume(sessionId); return; }
         const id = mobileTermId();
         try {
           createTerminal(id, cwd, null, resolveAccountEnvForCwd(cwd));
@@ -1005,7 +1035,8 @@ function handleAuthedMessage(socket, msg, subs) {
           // Link the session to this tab so the sidebar shows where it resumed.
           setSessionTabLink(sessionId, id, cwd);
           // Give the shell a beat to print its prompt before sending the command.
-          setTimeout(() => writeTerminal(id, `claude --resume ${sessionId}\r`), 700);
+          // Unpaired during the beat before the command: start nothing; closing the tab frees the session's claim.
+          setTimeout(() => { if (knownToken(socket._authToken)) writeTerminal(id, `claude --resume ${sessionId}\r`); else killTerminal(id); }, 700);
         } catch (err) {
           // The claim was taken before the terminal existed, so a failed spawn
           // has to hand it back. Otherwise a resume that never happened leaves
@@ -1031,7 +1062,7 @@ function handleAuthedMessage(socket, msg, subs) {
  * reads again. Carries no card content: the phone asks for what it wants to show.
  */
 export function broadcastToPhones(type) {
-  if (type !== 'todayChanged' && type !== 'settingsChanged') return;
+  if (!['todayChanged', 'settingsChanged', 'commandsChanged', 'tasksChanged'].includes(type)) return;
   for (const set of activeSocketsByToken.values()) {
     for (const socket of set) wsSend(socket, { type });
   }

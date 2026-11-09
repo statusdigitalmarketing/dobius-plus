@@ -40,6 +40,14 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
   const [attempt, setAttempt] = useState(0);
   const [view, setView] = useState('board');
   const [openTabId, setOpenTabId] = useState(null);
+  // Bumped on every request to open a terminal, so asking again for the one already named still moves the screen to
+  // it after the person switched away (Codex phone tasks round 13).
+  const [openNonce, setOpenNonce] = useState(0);
+  // Where a terminal's Back goes (Tasks when it was opened from a command card), and the view Tasks opens on (Today
+  // for a Today notification).
+  const [terminalBack, setTerminalBack] = useState('board');
+  const [tasksStart, setTasksStart] = useState(null); // { view }: a new object per request
+  const [tasksNotice, setTasksNotice] = useState(null);
   const resolvedRefs = useRef(new WeakSet()); // notification taps already turned into a tab
   const { id, origin, token } = pairing;
 
@@ -93,8 +101,8 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
   useEffect(() => {
     if (openRequest?.pairingId !== id) return;
     // A Today notification opens Today; a session notification opens its session.
-    if (openRequest.view === 'tasks') setView('tasks');
-    else if (openRequest.id) { setOpenTabId(openRequest.id); setView('terminal'); }
+    if (openRequest.view === 'tasks') { setTasksStart({ view: 'today' }); setView('tasks'); }
+    else if (openRequest.id) { setOpenTabId(openRequest.id); setOpenNonce((x) => x + 1); setTerminalBack('board'); setView('terminal'); }
   }, [id, openRequest]);
 
   // An App Store notification names its tab by an opaque ref: ask this Mac which tab it was, once connected. An
@@ -114,7 +122,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
       if (m.type === 'notifyTarget' && m.reqId === reqId) {
         off();
         resolvedRefs.current.add(openRequest);
-        if (typeof m.id === 'string' && m.id) { setOpenTabId(m.id); setView('terminal'); }
+        if (typeof m.id === 'string' && m.id) { setOpenTabId(m.id); setOpenNonce((x) => x + 1); setTerminalBack('board'); setView('terminal'); }
         // Unknown or expired: show the board, never leave another tab in front as if it were the one tapped.
         else setView('board');
       }
@@ -135,7 +143,11 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     return () => { offAuth(); offRotate(); };
   }, [connection]);
 
-  const openTab = useCallback((tabId) => { setOpenTabId(tabId); setView('terminal'); }, []);
+  const openTab = useCallback((tabId) => { setOpenTabId(tabId); setOpenNonce((x) => x + 1); setTerminalBack('board'); setView('terminal'); }, []);
+  // From a command card: that exact terminal or none. If it has closed, back to Tasks saying so, never the first
+  // terminal in the list (whatever is typed next would go to some other tab).
+  const openTabFromTasks = useCallback((tabId) => { setOpenTabId(tabId); setOpenNonce((x) => x + 1); setTerminalBack('tasks'); setTasksStart(null); setTasksNotice(null); setView('terminal'); }, []);
+  const runTerminalGone = useCallback(() => { setTasksNotice({ text: 'That terminal has closed.' }); setTerminalBack('board'); setView('tasks'); }, []);
 
   if (problem || !connection) return (
     <div className="screen board-screen">
@@ -163,12 +175,12 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     </div>
   );
   if (view === 'history') return <History connection={connection} onBack={() => setView('board')} />;
-  if (view === 'tasks') return <Tasks connection={connection} onBack={() => setView('board')} />;
+  if (view === 'tasks') return <Tasks connection={connection} onBack={() => { setTasksStart(null); setTasksNotice(null); setView('board'); }} onOpenTab={openTabFromTasks} startView={tasksStart} notice={tasksNotice} />;
   if (view === 'settings') return <Settings connection={connection} macName={pairing.name} onBack={() => setView('board')} />;
-  if (view === 'terminal') return <TerminalScreen connection={connection} status={status} initialId={openTabId} onBack={() => setView('board')} onShowHistory={() => setView('history')} />;
+  if (view === 'terminal') return <TerminalScreen connection={connection} status={status} initialId={openTabId} openNonce={openNonce} onBack={() => { setView(terminalBack); setTerminalBack('board'); }} onShowHistory={() => setView('history')} onExactMissing={terminalBack === 'tasks' ? runTerminalGone : undefined} />;
   const board = <Board connection={connection} status={status} macName={pairing.name} onMacs={onMacs}
     onOpen={openTab} onShowHistory={() => setView('history')}
-    onShowTasks={() => setView('tasks')} onShowSettings={() => setView('settings')} />;
+    onShowTasks={() => { setTasksStart(null); setView('tasks'); }} onShowSettings={() => setView('settings')} />;
   if (!isDemoPairing(origin, token)) return board;
   // A pill over the board's last rows, so demo-board lets them scroll clear of it.
   return <>

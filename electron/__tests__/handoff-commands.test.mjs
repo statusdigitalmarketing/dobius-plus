@@ -335,6 +335,26 @@ async function runForReal(cmd, { cwd = null, shown = cmd, mkdir = true } = {}) {
   return out;
 }
 
+test('script: a wrapper whose file was already taken (the phone watchdog) runs nothing (Codex phone tasks round 8)', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const { shQuote } = await import('../../shared/sh-quote.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-run-t-'));
+  try {
+    const base = path.join(dir, 'dobius-run-abcdefabcdefabcdef');
+    fs.writeFileSync(`${base}.cmd`, 'touch RAN\n');
+    const text = runScriptText(`${base}.cmd`, dir, shQuote, `${base}.exit`, 'touch RAN');
+    // bash already has the script; its own path is gone (renamed away): $0 names a file that is not there.
+    const r = spawnSync('/bin/bash', ['-p', '-c', text, `${base}.sh`], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(r.status, 0);
+    assert.equal(fs.existsSync(path.join(dir, 'RAN')), false, 'the command never ran');
+    assert.equal(fs.existsSync(`${base}.cmd`), false, 'its command file is removed');
+    assert.equal(fs.existsSync(`${base}.exit`), false, 'no status: the card is not told it ran');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('script: the real exit status whatever the command does; files cleaned up; the folder or nothing', async () => {
   for (const [cmd, want] of [["trap 'exit 7' EXIT; true", '7'], ['exec /usr/bin/false', '1'], ['set -e; false; echo no', '1'], ['exit 3', '3'], ['true', '0'], ['echo "A $(pwd -P)" & wait', '0']]) {
     const r = await runForReal(cmd);

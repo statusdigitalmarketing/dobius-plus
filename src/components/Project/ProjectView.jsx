@@ -1020,11 +1020,6 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       saved = await window.electronAPI.terminalLoadState(tabId);
       scrollback = saved?.scrollback || null;
     }
-    if (tab) {
-      // Preserve kind/url so a closed browser tab can be resurrected via
-      // Cmd+Shift+T as a browser (not a blank terminal). Carson self-flag #4.
-      state.pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode, claudeAccountPin: tab.claudeAccountPin });
-    }
     // Auto-checkpoint on close, matching the tab-bar X / middle-click / context-menu
     // paths (Cmd+W previously skipped this, so the same close produced no checkpoint).
     // Reuse the scrollback already loaded above — no second save round-trip.
@@ -1040,6 +1035,16 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       } catch (err) {
         console.error('[ProjectView] auto-checkpoint on close failed:', err);
       }
+    }
+    // Decided on the tabs as they are NOW: a sidebar or tab-bar close may have finished during the awaits above. A tab
+    // already gone is left alone, and the last tab is never killed (removeTab keeps it, so killing it would leave a dead
+    // terminal on screen; Codex sidebar round 3).
+    const live = useStore.getState().terminalTabs;
+    if (!live.some((t) => t.id === tabId) || live.length <= 1) return;
+    if (tab) {
+      // Preserve kind/url so a closed browser tab can be resurrected via
+      // Cmd+Shift+T as a browser (not a blank terminal). Carson self-flag #4.
+      state.pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode, claudeAccountPin: tab.claudeAccountPin });
     }
     if (window.electronAPI) {
       window.electronAPI.terminalKill(tabId);
@@ -1223,12 +1228,14 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [projectPath, openNewTab, removeTab, setActiveTab, setActiveView, toggleSidebar, toggleGitPanel, closeActiveTab, doResumeLatest, reopenLastClosedTab, clearActiveTerminal]);
 
-  // Menu bar events
+  // Menu bar events. Accelerators skip the DOM, so they hold off themselves while the New Tab picker or a tab's
+  // right-click menu owns the keyboard.
   useEffect(() => {
     if (!window.electronAPI) return;
+    const keysHeld = () => { const st = useStore.getState(); return st.newTabPickerOpen || st.tabMenuOpen; };
     const cleanups = [
       window.electronAPI.onMenuToggleView?.(() => {
-        if (useStore.getState().newTabPickerOpen) return;
+        if (keysHeld()) return;
         const current = useStore.getState().activeView;
         setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
       }),
@@ -1237,16 +1244,17 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         useStore.getState().setDashboardTab('settings');
         setActiveView('dashboard');
       }),
-      window.electronAPI.onMenuToggleSidebar?.(() => { if (!useStore.getState().newTabPickerOpen) toggleSidebar(); }),
-      window.electronAPI.onMenuToggleGitPanel?.(() => { if (!useStore.getState().newTabPickerOpen) toggleGitPanel(); }),
+      window.electronAPI.onMenuToggleSidebar?.(() => { if (!keysHeld()) toggleSidebar(); }),
+      window.electronAPI.onMenuToggleGitPanel?.(() => { if (!keysHeld()) toggleGitPanel(); }),
       window.electronAPI.onMenuNewTab?.(() => {
+        if (useStore.getState().tabMenuOpen) return; // the open tab menu holds the keys (Escape first)
         useStore.getState().setNewTabPickerOpen(false);
         openNewTab(projectPath);
         setActiveView('terminal');
       }),
       // While the New Tab picker owns the keyboard, menu accelerators (which
       // skip its DOM key handler) must not close or type into the tab behind it.
-      window.electronAPI.onMenuCloseTab?.(() => { if (!useStore.getState().newTabPickerOpen) closeActiveTab(); }),
+      window.electronAPI.onMenuCloseTab?.(() => { if (!keysHeld()) closeActiveTab(); }),
       // /openTab repeat: bring the tab that request already opened forward.
       window.electronAPI.onBridgeFocusTab?.((tabId) => {
         if (!useStore.getState().terminalTabs.some((t) => t.id === tabId)) return;
@@ -1254,7 +1262,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
         setActiveView('terminal');
       }),
       window.electronAPI.onMenuResumeSession?.(() => {
-        if (useStore.getState().newTabPickerOpen) return;
+        if (keysHeld()) return;
         // Menu "Resume Last Session" — shares the keydown's guarded path.
         doResumeLatest();
       }),

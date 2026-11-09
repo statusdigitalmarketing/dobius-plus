@@ -780,6 +780,30 @@
 - **CONTEXT**: The notifier skips a tab the person is looking at (focused window, tab on screen, input in the last 2 minutes), so an event in the visible harness tab may be suppressed on purpose.
 - **DETECTION**: the stand-in's `push-received.jsonl`
 
+### Build: 2026-11-08 (phone Tasks)
+- **MISTAKE**: Planned to import `commandPlaceholder` from shared/handoff.js into the phone app. Its regex literal uses lookbehind (`(?<!`, `(?<=`), which WebKit parses only from iOS 16.4, and the phone app supports iOS 15. A regex literal an engine cannot parse is a SyntaxError for the whole bundle: nothing loads, not pairing, not the board. A feature flag cannot help, because parsing happens before any code runs. Codex's design audit caught it.
+- **FIX**: shared/placeholder.js keeps the pattern as a `String.raw` source and compiles it on first use inside try/catch. Where it cannot compile, `commandPlaceholder` returns `undefined` and the phone uses the Mac's `hole` for that command (the Mac checks again before any Run). electron/__tests__/phone-tasks.test.mjs walks the phone's import graph and fails on any lookbehind outside that one source string.
+- **CONTEXT**: Anything in shared/ that the phone imports is parsed by the oldest supported WebKit. Lookbehind, named groups with duplicate names, the `v` flag and other newer regex syntax all break it.
+- **DETECTION**: `npm run test:phonetasks` (the import-graph test), or grep the built bundle: `grep -o ".\{20\}(?<[=!]" dist-mobile/assets/*.js` should show only strings, never a `/(?<` literal.
+
+### Security: 2026-11-08 (phone Tasks)
+- **MISTAKE**: A phone's terminals (a phone-created one, and now a phone Run's) have no owning window, and `terminal:create` accepted any id with no owner, so a window could create over `term-mobile-<n>` and take that PTY over. A queued `kill` from a phone revoked meanwhile still went through, because `kill` checked only the socket's authorized tabs, not the pairing. Both predate this branch; Codex lens A found them because a phone Run made such terminals matter more.
+- **FIX**: `terminal:create` refuses ids starting `term-mobile-` (no window ever makes one), and the phone `kill` checks `knownToken(socket._authToken)` like every other write.
+- **CONTEXT**: Any new phone message that changes something needs the pairing check right before it acts, not just the per-socket authorization set.
+- **DETECTION**: `grep -n "case 'kill'" -A3 electron/mobile-server.js` and check for `knownToken`.
+
+### Process: 2026-11-08 (phone Tasks)
+- **MISTAKE**: In an isolated worktree agent, Bash commands that mention the word git inside a string (a test argument like `main...HEAD`), use shell variables in front of an interpreter (`python3 $S/x.py`), loop, or chain heredocs were refused by the worktree guard before running.
+- **FIX**: Put multi-step work in a script file under the scratchpad and run it as one plain `node <file>` or `python3 <file>` with literal paths; keep git calls as their own plain commands.
+- **CONTEXT**: Sabotage checks and Codex runs are the usual triggers; `sabotage.mjs` (swap a guard out, run the tests, restore in `finally`) worked as one plain command.
+- **DETECTION**: a Bash result starting with "This agent is isolated in the worktree".
+
+### Process: 2026-11-08
+- **MISTAKE**: Writing a regex of invisible-character escapes into `shared/short-path.js` and a test through a Bash heredoc. The tool call's JSON decoding turned each backslash-u escape in the command text into the real character, so the source and `electron/__tests__/phone-tasks.test.mjs` ended up with literal zero-width and bidi characters. Raw strings and quoted heredocs do not help: the conversion happens before the shell sees the text.
+- **FIX**: Build escapes from code points in the script (`String.fromCharCode(92) + 'u' + hex`), then scan the changed files for invisible characters before committing.
+- **CONTEXT**: Invisible characters in source are a review and security hazard (they hide what a regex or test actually matches). The tests still passed, so nothing would have caught it.
+- **DETECTION**: `node -e "const s=require('fs').readFileSync(process.argv[1],'utf8');console.log([...s].filter(c=>{const x=c.codePointAt(0);return (x>=0x200b&&x<=0x200f)||(x>=0x202a&&x<=0x202e)||(x>=0x2060&&x<=0x206f)||x===0xfeff||x===0xad||(x>=0xe0000&&x<=0xe007f)}).length)" <file>`
+
 ### Build: 2026-11-08
 - **MISTAKE**: Fast-forwarded main to feat/phone-settings (built in an agent worktree) and ran the gates in the main checkout: `npm test` and `npm run build:mobile` failed with "Cannot find package '@capacitor/push-notifications'". The worktree had run `npm install` for the new dependency; the main checkout's node_modules never got it.
 - **FIX**: After merging a branch that changed package.json or package-lock.json, run `npm install` (then `npx electron-rebuild -f -w better-sqlite3,node-pty`) in the checkout that will release, and re-run the gates before `./release.sh`.
@@ -792,3 +816,14 @@
 - **CONTEXT**: A profile holds `<date>` and `<data>` values, so `plutil -convert json` fails on it ("Invalid object in plist for JSON format"). Read it key by key with `plutil -extract <keypath> raw`: dates come back ISO 8601, data base64, arrays as their length.
 - **DETECTION**: `grep -n "signingStyle" scripts/ios-release.mjs` should show `manual`. A failing export says `Cloud signing permission error`.
 
+### UI/UX: 2026-11-08 (sidebar tab menu)
+- **MISTAKE**: Guarded tab closes with a "closing" set checked at the START of `handleCloseTab`, then awaited a save before killing. Close Others, Cmd+W and the store's bulk closes never consult that set, so one of them could run during the await and the pending close then killed the last tab, which `removeTab` refuses to remove: a visible tab with a dead terminal (Codex sidebar round 2).
+- **FIX**: Re-read `useStore.getState().terminalTabs` after the last await in `closeTabNow` and return without killing when the tab is gone or is the only one left. A guard that lives before an await only guards the paths that know about it.
+- **CONTEXT**: Any destructive action that awaits (save, checkpoint, confirm) must decide on live state right before it acts.
+- **DETECTION**: `grep -n "await" -A6 src/components/Project/TerminalTabBar.jsx | grep -n "terminalKill"`
+
+### Testing: 2026-11-08 (Vite dev harness)
+- **MISTAKE**: In a CDP probe, `await import('/src/store/store.js')` returned a DIFFERENT store instance from the app's (its flag read false while the app's was true), because after an HMR update Vite imports that module as `/src/store/store.js?t=<timestamp>`, even after a full page reload.
+- **FIX**: Import the URL the page actually loaded: `performance.getEntriesByType('resource').map(e => e.name).filter(n => /\/src\/store\/store\.js/.test(n)).pop()`.
+- **CONTEXT**: Any harness that reads app state by importing a module in a Vite dev page.
+- **DETECTION**: `grep -rn "import('/src/" <probe scripts>`

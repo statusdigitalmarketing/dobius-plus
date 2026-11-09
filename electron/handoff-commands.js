@@ -179,6 +179,9 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
       // A Run tab closed: 'closed' until its exit file says otherwise (it may have finished just before).
       for (const e of byTab.values()) for (const c of e.commands) {
         if (c.state === 'running' && c.runTabId === tabId) { c.state = 'closed'; c.endedAt = now(); changed = true; }
+        // A finished command's terminal going away changes nothing on its card, but a phone offers "Open terminal"
+        // only while that terminal is there: tell the lists to look again.
+        else if (c.runTabId === tabId) changed = true;
       }
       if (changed) notify();
       return;
@@ -295,7 +298,10 @@ export function runScriptText(cmdFile, cwd, quote, exitFile = null, shown = '') 
   const report = (code) => (exitFile ? `printf '%s' ${code} > ${quote(`${exitFile}.tmp`)} && /bin/mv -f -- ${quote(`${exitFile}.tmp`)} ${quote(exitFile)}` : ':');
   const dropCmd = `/bin/rm -f -- ${quote(cmdFile)}`;
   return [
-    '/bin/rm -f -- "$0"', // a full path: a project .env may put its own `rm` first on PATH
+    // A full path: a project .env may put its own `rm` first on PATH. Without -f, as a claim: if the file is already
+    // gone, the Mac gave up on this run (a phone Run whose profile never finished takes it first, by rename), and
+    // nothing runs. One rename and one unlink of the same file, so exactly one side wins (Codex phone tasks round 8).
+    `/bin/rm -- "$0" 2>/dev/null || { ${dropCmd}; exit 0; }`,
     "trap ':' INT TERM HUP",
     `builtin cd -- ${quote(cwd)} || { printf 'Dobius: could not open %s, nothing was run.\\n' ${quote(cwd)}; ${dropCmd}; ${report(127)}; exit 1; }`,
     `printf '\\033[2m$ %s\\033[0m\\n' ${quote(shown)}`,

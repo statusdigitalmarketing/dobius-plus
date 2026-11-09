@@ -3,6 +3,9 @@ import XtermView from './XtermView';
 import ChatView from './ChatView';
 import SpecialKeys from './SpecialKeys';
 
+// How long a new tab asked for from this screen is waited for before the screen stops expecting its reply.
+const CREATE_WAIT_MS = 60_000;
+
 /** Last path segment, for a short folder label. */
 function lastSeg(p) {
   if (!p) return '';
@@ -66,9 +69,32 @@ function groupTerminals(terminals) {
   return groups;
 }
 
-export default function TerminalScreen({ connection, status, initialId, onBack, onShowHistory }) {
+export default function TerminalScreen({ connection, status, initialId, openNonce, onBack, onShowHistory, onExactMissing }) {
   const [terminals, setTerminals] = useState([]);
   const [activeId, setActiveId] = useState(initialId || null);
+  // Opened for one exact terminal (a command's run, from Tasks): when it is not there, leave instead of falling back to
+  // another terminal, where whatever is typed next would land.
+  const exactMissingRef = useRef(onExactMissing);
+  exactMissingRef.current = onExactMissing;
+  const exactIdRef = useRef(onExactMissing ? initialId : null);
+  // The queued leave once that terminal is gone. Opening or picking another terminal on this screen cancels it and ends
+  // the exact mode, so a late answer about the run terminal never takes the person off the one they chose (Codex
+  // phone tasks round 11).
+  const leaveTimerRef = useRef(null);
+  const leaveSoon = useCallback(() => {
+    const exact = exactIdRef.current;
+    clearTimeout(leaveTimerRef.current);
+    leaveTimerRef.current = setTimeout(() => {
+      leaveTimerRef.current = null;
+      if (exact && exactIdRef.current === exact) exactMissingRef.current?.();
+    }, 0);
+  }, []);
+  const endExact = useCallback(() => {
+    clearTimeout(leaveTimerRef.current);
+    leaveTimerRef.current = null;
+    exactIdRef.current = null;
+  }, []);
+  useEffect(() => () => clearTimeout(leaveTimerRef.current), []);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // The specific session being confirmed for stop, captured at tap time, so a
   // later activeId change (exit / reordered payload) can't make Stop kill the
@@ -79,6 +105,16 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
   // Guards a createTerminal round-trip so a double-tap over Tailscale latency
   // can't spawn two orphan PTYs. Reset on the reply. Audit MED-10.
   const creatingRef = useRef(false);
+  // The nonce of this screen's own pending create: only the reply carrying it moves the screen (Codex round 4).
+  const createNonceRef = useRef(null);
+  const createTimerRef = useRef(null);
+  const stopCreating = useCallback(() => {
+    clearTimeout(createTimerRef.current);
+    createTimerRef.current = null;
+    creatingRef.current = false;
+    createNonceRef.current = null;
+  }, []);
+  useEffect(() => () => clearTimeout(createTimerRef.current), []);
   // tab id -> { sig, at }: when each tab's current spinner reading first arrived.
   const activityRxRef = useRef(new Map());
   // 'chat' (responsive transcript, default) vs 'terminal' (raw PTY mirror). The
@@ -129,10 +165,27 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         activityRxRef.current = nextRx;
         setActiveId((cur) => {
           if (cur && (msg.list || []).some((t) => t.id === cur)) return cur;
+          // Opened for one exact terminal: never fall back to another one, not even on a second list that arrives while
+          // the leave is still queued (cur already null then; Codex phone tasks round 13).
+          if (exactIdRef.current && (cur === exactIdRef.current || cur === null)) {
+            // A new tab asked for from this screen is on its way: wait for its reply, which opens it (leaving now would
+            // unmount the only handler for it; Codex phone tasks round 15). A failed create refreshes the list, and
+            // that list leaves.
+            if (creatingRef.current) return null;
+            leaveSoon();
+            return null;
+          }
           return (msg.list || [])[0]?.id || null;
         });
       } else if (msg.type === 'terminalCreated') {
-        creatingRef.current = false;
+        // Only a creation this screen asked for moves it: a late reply to one started elsewhere (the Board) must not
+        // take the place of the exact terminal opened from a command card (Codex, phone tasks round 3).
+        // Ours only when it echoes the nonce this screen sent; a Mac too old to echo one falls back to the pending flag.
+        // A Mac that echoes nonces always sends the key (null on a resume's reply, Codex round 5); only an older Mac omits it.
+        const mine = 'nonce' in msg ? (createNonceRef.current !== null && msg.nonce === createNonceRef.current) : creatingRef.current;
+        if (!mine) { refreshList(); return; } // someone else's create (the Board's): leave this screen's state alone
+        stopCreating();
+        endExact();
         refreshList();
         setActiveId(msg.id);
         setSwitcherOpen(false);
@@ -141,7 +194,13 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         // tap. Drop off it and refresh so we don't show a live-looking blank
         // that swallows keystrokes. Audit MED-9.
         refreshList();
-        setActiveId((cur) => (cur === msg.id ? null : cur));
+        // Back to Tasks only while that run terminal is still the one on screen: a late answer for it must not take the
+        // person away from another terminal they have opened since (Codex phone tasks round 10).
+        setActiveId((cur) => {
+          if (cur !== msg.id) return cur;
+          if (exactIdRef.current && msg.id === exactIdRef.current && !creatingRef.current) leaveSoon();
+          return null;
+        });
       } else if (msg.type === 'exit') {
         refreshList();
       } else if (msg.type === 'opError' && msg.code === 'unknown_tab') {
@@ -149,20 +208,30 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         // answers instead of dropping it): refresh so the list stops offering it.
         refreshList();
       } else if (msg.type === 'error') {
-        creatingRef.current = false; // let the user retry a failed create
+        // Not this screen's create: another screen's, or an unrelated error (a newer Mac sends nonce null on those). A
+        // Mac that answers creates at all echoes the nonce on every reply to one sent with it, so an error with no nonce
+        // (a resume's, from the released Mac) is never this create's: the create keeps waiting, and only on a Mac too old
+        // to echo does a real failure wait out CREATE_WAIT_MS (Codex phone tasks round 17).
+        if ('nonce' in msg ? (createNonceRef.current === null || msg.nonce !== createNonceRef.current) : createNonceRef.current !== null) { refreshList(); return; }
+        stopCreating(); // let the user retry a failed create
+        refreshList(); // a run terminal that went while this was pending is left now (see the terminals case)
       }
     });
     if (connection.status === 'authed') refreshList();
     return off;
-  }, [connection, refreshList]);
+  }, [connection, refreshList, leaveSoon, endExact, stopCreating]);
 
   // Switch to a deep-linked session even when already mounted on the terminal
   // screen: a push tapped while here updates initialId (the openTabId prop) but
   // the useState initializer above only read it once, so without this the screen
   // stayed on the old terminal. Audit MED-12 (Codex follow-up).
+  // A different terminal arriving this way (a notification) is the person's choice too: it ends the exact mode and
+  // cancels a queued leave for the run terminal (Codex phone tasks round 12).
   useEffect(() => {
-    if (initialId) setActiveId(initialId);
-  }, [initialId]);
+    if (!initialId) return;
+    if (initialId !== exactIdRef.current) endExact();
+    setActiveId(initialId);
+  }, [initialId, openNonce, endExact]); // the nonce: a second tap naming the same terminal still brings it back
 
   // Close the stop-confirm if the session it named has since exited/vanished.
   useEffect(() => {
@@ -194,9 +263,21 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
   const newTerminalIn = useCallback((projectPath) => {
     if (creatingRef.current) return; // guard double-tap over latency (MED-10)
     creatingRef.current = true;
+    // A leave already queued for a gone run terminal would unmount this screen, and with it the only handler for this
+    // create's reply (Codex phone tasks round 16): cancelled; the reply, or the failure's list, decides instead.
+    clearTimeout(leaveTimerRef.current);
+    leaveTimerRef.current = null;
+    const nonce = `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    createNonceRef.current = nonce;
+    // A reply can be lost (the socket dropped after the create went out). Past the deadline it stops waiting and
+    // re-reads the list, which leaves for Tasks if the run terminal is gone. A create queued while offline goes out once
+    // the connection is back and is still answered within the minute after a short drop; accepted: after a longer one
+    // the new tab is made on the Mac but this screen no longer opens it (it shows in the switcher).
+    clearTimeout(createTimerRef.current);
+    createTimerRef.current = setTimeout(() => { if (createNonceRef.current === nonce) { stopCreating(); refreshList(); } }, CREATE_WAIT_MS);
     setSwitcherOpen(false);
-    connection.send({ type: 'createTerminal', cwd: projectPath });
-  }, [connection]);
+    connection.send({ type: 'createTerminal', cwd: projectPath, nonce });
+  }, [connection, refreshList, stopCreating]);
 
   // Top-bar "+": add a tab in the active terminal's project.
   const newTerminalHere = useCallback(() => {
@@ -279,7 +360,7 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
                 <button
                   key={t.id}
                   className={`switcher-item ${t.id === activeId ? 'active' : ''}`}
-                  onClick={() => { setActiveId(t.id); setSwitcherOpen(false); }}
+                  onClick={() => { if (t.id !== exactIdRef.current) endExact(); setActiveId(t.id); setSwitcherOpen(false); }}
                 >
                   <span className="terminal-name">{t.tabLabel}</span>
                 </button>

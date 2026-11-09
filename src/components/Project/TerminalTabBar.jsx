@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { isLabelLocked, labelMeta } from '../../../shared/tab-label.js';
 import { useStore } from '../../store/store';
 import { markDoNotKill, unmarkDoNotKill } from '../../hooks/useTerminal';
@@ -99,13 +100,40 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
     };
   }, [checkOverflow, tabs.length]);
 
-  // Close context menu on click anywhere
+  // The sidebar Tabs list asks for this bar's own menu (right-click) or close (double-click) on one of its tabs
+  // (Brett, task 1220331878170954). Only tabs this window holds; anything else is ignored.
+  const tabBarRequest = useStore((s) => s.tabBarRequest);
+  const clearTabBarRequest = useStore((s) => s.clearTabBarRequest);
+  useEffect(() => {
+    if (!tabBarRequest) return;
+    const req = tabBarRequest;
+    clearTabBarRequest();
+    if (!tabs.some((t) => t.id === req.tabId)) return;
+    if (req.kind === 'menu') setContextMenu({ x: req.x, y: req.y, tabId: req.tabId });
+    else if (req.kind === 'close' && tabs.length > 1) handleCloseTab({ stopPropagation: () => {} }, req.tabId);
+  }, [tabBarRequest]); // eslint-disable-line react-hooks/exhaustive-deps -- acts once per request, on the tabs as they are now
+
+  // The menu lives on body now, so it closes itself when the terminal view goes away (the Dashboard) or its tab does.
+  const activeView = useStore((s) => s.activeView);
+  useEffect(() => {
+    if (contextMenu && (activeView !== 'terminal' || !tabs.some((t) => t.id === contextMenu.tabId))) setContextMenu(null);
+  }, [activeView, tabs, contextMenu]);
+
+  // Close context menu on a click anywhere, and on a right-click outside it: a right-click on a row that opens no menu
+  // of its own (another window's tab) must not leave this tab's Close one click away (Codex sidebar round 2). The
+  // right-click one listens in the capture phase, so a right-click that opens another menu closes this one first and
+  // the new one wins.
   useEffect(() => {
     if (!contextMenu) return;
     const handler = () => setContextMenu(null);
+    const onRight = (e) => { if (!e.target?.closest?.('[data-tab-menu]')) setContextMenu(null); };
     window.addEventListener('click', handler);
-    return () => window.removeEventListener('click', handler);
+    window.addEventListener('contextmenu', onRight, true);
+    return () => { window.removeEventListener('click', handler); window.removeEventListener('contextmenu', onRight, true); };
   }, [contextMenu]);
+  const setTabMenuOpen = useStore((s) => s.setTabMenuOpen);
+  useEffect(() => { setTabMenuOpen(!!contextMenu); }, [contextMenu, setTabMenuOpen]);
+  useEffect(() => () => setTabMenuOpen(false), [setTabMenuOpen]);
 
   const handleDoubleClick = useCallback((tab) => {
     setEditingId(tab.id);
@@ -156,8 +184,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
     }
   }, [currentProjectPath, tabs]);
 
-  const handleCloseTab = useCallback(async (e, tabId) => {
-    e.stopPropagation();
+  const closeTabNow = useCallback(async (tabId) => {
     const tab = tabs.find((t) => t.id === tabId);
     // Pinned tabs require confirmation
     if (tab?.pinned) {
@@ -172,36 +199,38 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
       const state = await window.electronAPI.terminalLoadState(tabId);
       scrollback = state?.scrollback || null;
     }
+    await autoCheckpoint(tabId);
+    // Decided on the tabs as they are NOW, after the awaits: another close (Close Others, Cmd+W, a second sidebar
+    // close) may have run meanwhile. A tab already gone is left alone, and the last tab is never killed: removeTab
+    // keeps the last tab, so killing it would leave a tab with a dead terminal (Codex sidebar round 2).
+    const live = useStore.getState().terminalTabs;
+    if (!live.some((t) => t.id === tabId) || live.length <= 1) return;
     if (tab) {
       // Carry kind/url so browser tabs reopen as browsers, not blank terminals.
       pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode, claudeAccountPin: tab.claudeAccountPin });
     }
-    await autoCheckpoint(tabId);
     if (window.electronAPI) window.electronAPI.terminalKill(tabId);
     removeTab(tabId);
   }, [removeTab, autoCheckpoint, tabs, pushClosedTab]);
 
-  // Middle-click to close (#24)
-  const handleMouseDown = useCallback(async (e, tabId) => {
-    if (e.button === 1 && tabs.length > 1) {
-      e.preventDefault();
-      const tab = tabs.find((t) => t.id === tabId);
-      let scrollback = null;
-      if (window.electronAPI?.terminalLoadState) {
-        await window.electronAPI.terminalRequestSaveNow?.();
-        await new Promise((r) => setTimeout(r, 200));
-        const state = await window.electronAPI.terminalLoadState(tabId);
-        scrollback = state?.scrollback || null;
-      }
-      if (tab) {
-        // Carry kind/url so browser tabs reopen as browsers, not blank terminals.
-      pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode, claudeAccountPin: tab.claudeAccountPin });
-      }
-      await autoCheckpoint(tabId);
-      if (window.electronAPI) window.electronAPI.terminalKill(tabId);
-      removeTab(tabId);
-    }
-  }, [removeTab, tabs, autoCheckpoint, pushClosedTab]);
+  // Tabs whose close is under way (the save before it takes a moment): a second close started meanwhile counts them as
+  // gone, so two quick closes can never take the last tab, or kill its terminal and then keep it (Codex).
+  const closingRef = useRef(new Set());
+  const handleCloseTab = useCallback(async (e, tabId) => {
+    e.stopPropagation();
+    if (closingRef.current.has(tabId)) return;
+    if (useStore.getState().terminalTabs.filter((t) => !closingRef.current.has(t.id)).length <= 1) return;
+    closingRef.current.add(tabId);
+    try { await closeTabNow(tabId); } finally { closingRef.current.delete(tabId); }
+  }, [closeTabNow]);
+
+  // Middle-click to close (#24). Through the same guarded close as every other path (pinned confirm, never the last
+  // tab, never two closes racing).
+  const handleMouseDown = useCallback((e, tabId) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    handleCloseTab(e, tabId);
+  }, [handleCloseTab]);
 
   // Right-click context menu (#25)
   const handleContextMenu = useCallback((e, tabId) => {
@@ -701,7 +730,8 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
 
       {/* Context menu (#25) */}
       {moveAccountTabId && <MoveAccountDialog tabId={moveAccountTabId} onClose={closeMoveAccount} />}
-      {contextMenu && (
+      {/* On body: the sidebar opens this menu too, and this bar is hidden while the Dashboard shows. */}
+      {contextMenu && createPortal(
         <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
@@ -829,7 +859,8 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
             }
           }}
           onDismiss={() => setContextMenu(null)}
-        />
+        />,
+        document.body,
       )}
     </div>
   );
@@ -847,6 +878,85 @@ function timeAgo(ts) {
 function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, onTeamOrchestrator, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
+  // Kept inside the window: opened low in the sidebar it would otherwise run off the bottom, out of reach (Codex).
+  const menuRef = useRef(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  // Placed again whenever the menu or the window changes size: an entry appearing while it is open (Reopen Closed Tab,
+  // after a close finishes) or a smaller window would otherwise push it out of reach (Codex sidebar round 2).
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el) return undefined;
+    const place = () => {
+      const r = el.getBoundingClientRect();
+      const pad = 8;
+      const next = {
+        left: Math.max(pad, Math.min(x, window.innerWidth - r.width - pad)),
+        top: Math.max(pad, Math.min(y, window.innerHeight - r.height - pad)),
+      };
+      setPos((p) => (p.left === next.left && p.top === next.top ? p : next));
+    };
+    place();
+    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(place) : null;
+    ro?.observe(el);
+    window.addEventListener('resize', place);
+    return () => { ro?.disconnect(); window.removeEventListener('resize', place); };
+  }, [x, y]);
+  // While it is open, keys belong to the menu, never to a terminal or prompt behind it (opening it from the sidebar can
+  // focus one): Escape closes it, every other key is held (Codex).
+  const dismissRef = useRef(onDismiss);
+  dismissRef.current = onDismiss;
+  // The menu also takes the focus while open, so the native Edit menu (Paste comes from Electron's own accelerator and
+  // never fires a keydown) has nothing to type into, and a browser tab's page loses the focus that kept Escape from
+  // reaching this window. Paste events are held too, and focus goes back where it was when the menu closes (Codex
+  // sidebar round 3).
+  useEffect(() => {
+    const prev = document.activeElement;
+    // Focus goes back where it was only when the menu is dismissed with Escape. After an item (Move to account, Close)
+    // nothing behind a dialog gets it back, so Enter cannot send a prompt's draft from under one (Codex sidebar round 6).
+    let backOnClose = false;
+    menuRef.current?.focus({ preventScroll: true });
+    const onKey = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') { backOnClose = true; dismissRef.current(); }
+    };
+    const hold = (e) => { e.preventDefault(); e.stopPropagation(); };
+    // Focus stays in the menu while it is open: something moving it later (a prompt refocusing itself after a tab
+    // closes, Improve finishing) is undone at once, and native editing commands (Cut, Delete, Undo from the Edit menu)
+    // are held as they reach any field (Codex sidebar round 4).
+    // A press outside the menu is the person choosing where to go next: the menu closes there and then, before the
+    // press moves the focus, and lets that focus stand (clicking Search with the menu open types into Search, Codex
+    // sidebar round 5).
+    let released = false;
+    const keepFocus = (e) => { if (!released && !menuRef.current?.contains(e.target)) menuRef.current?.focus({ preventScroll: true }); };
+    const holdEdit = (e) => { if (!released && !menuRef.current?.contains(e.target)) hold(e); };
+    const onPress = (e) => {
+      if (released || menuRef.current?.contains(e.target)) return;
+      released = true;
+      dismissRef.current();
+    };
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('paste', hold, true);
+    window.addEventListener('cut', hold, true);
+    window.addEventListener('beforeinput', holdEdit, true);
+    document.addEventListener('focusin', keepFocus, true);
+    window.addEventListener('pointerdown', onPress, true);
+    // A browser tab's page (<webview>) keeps its clicks to itself: while the menu is open those views stop taking the
+    // mouse, so a click over one lands in this window and closes the menu like any outside click.
+    document.body.classList.add('tab-menu-open');
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('paste', hold, true);
+      window.removeEventListener('cut', hold, true);
+      window.removeEventListener('beforeinput', holdEdit, true);
+      document.removeEventListener('focusin', keepFocus, true);
+      window.removeEventListener('pointerdown', onPress, true);
+      document.body.classList.remove('tab-menu-open');
+      // Only when the focus fell to the page with the menu: an item that moved it on purpose (Rename's box) keeps it.
+      const now = document.activeElement;
+      if (backOnClose && !released && prev && prev !== document.body && prev.isConnected && (!now || now === document.body)) prev.focus?.({ preventScroll: true });
+    };
+  }, []);
 
   const items = [
     ...(onDock ? [{ label: 'Move back to main window', onClick: onDock }, { type: 'divider' }] : []),
@@ -879,10 +989,18 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
 
   return (
     <div
+      ref={menuRef}
+      data-tab-menu=""
+      tabIndex={-1}
       style={{
+        outline: 'none',
+        // Clamped to the top it can sit over the title bar's drag area, which would swallow its clicks.
+        WebkitAppRegion: 'no-drag',
         position: 'fixed',
-        left: x,
-        top: y,
+        left: pos.left,
+        top: pos.top,
+        maxHeight: 'calc(100vh - 16px)',
+        overflowY: 'auto',
         zIndex: 200,
         backgroundColor: 'var(--surface)',
         border: '1px solid var(--border)',
