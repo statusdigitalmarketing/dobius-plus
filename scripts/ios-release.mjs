@@ -581,8 +581,10 @@ async function waitForBuild(asc, appId, marketing, buildNo, up, onSeen) {
 }
 
 // ---- submit ----
+// include=appStoreVersion: without it Apple leaves the relationship out entirely, so no item could ever be matched to a
+// version (2.2.14's first run stopped at "is not in review submission" for exactly that).
 async function itemsOf(asc, subId) {
-  return asc.all(`/v1/reviewSubmissions/${subId}/items?fields[reviewSubmissionItems]=state,appStoreVersion&limit=50`);
+  return asc.all(`/v1/reviewSubmissions/${subId}/items?fields[reviewSubmissionItems]=state,appStoreVersion&include=appStoreVersion&limit=50`);
 }
 /** The version's item in a submission (a removed one does not count: it cannot come back). */
 const SUBMIT_TRIES = 6;
