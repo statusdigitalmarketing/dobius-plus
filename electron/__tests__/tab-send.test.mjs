@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { sendToTab } from '../tab-send.js';
 import { stripTerminalReplies, isTerminalReply } from '../terminal-reply.js';
 import { isKeyboardInput } from '../bridge-open-tab.js';
+import { isRelayCommand } from '../bridge-open-main.js';
 
 const RULE = '─'.repeat(40);
 function screenWith(boxText, { dialog = false } = {}) {
@@ -16,7 +17,7 @@ function screenWith(boxText, { dialog = false } = {}) {
 
 const SHELL = (() => { const lines = ['user@Mac project % ']; lines.dimFrom = [-1]; return { lines, modes: { bracketedPaste: true, cursor: { x: 19, y: 0 } } }; })();
 
-function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false, needsAfterPaste = false, spinAfterSubmit = false, shell = SHELL } = {}) {
+function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false, needsAfterPaste = false, spinAfterSubmit = false, shell = SHELL, relay = false, busyScreen = false } = {}) {
   let clock = 0;
   const t = { box, seq: 0, keys: 0, input: 0, pasted: null, written: [], submitted: 0, pty: {}, alive: true, reads: 0, stopped: false, probes: 0 };
   const deps = {
@@ -24,6 +25,7 @@ function fakeTab({ leads, claude = true, working = false, needs = false, box = '
     ptyOf: () => (t.alive ? t.pty : null),
     claudeRunning: async () => { if (wheelBeforeRead && (t.probes += 1) === 1) t.input += 1; return claude && !(readerAfterPaste && t.pasted !== null); },
     claudeInTab: async () => inTab,
+    relayInFront: async () => relay,
     claudeLeads: async () => { if (keysDuringProbe) t.keys += 1; if (probeFails) throw new Error('pgrep timed out'); return leads ?? claude; },
     needs: () => needs || (needsAfterPaste && t.pasted !== null),
     working: () => working,
@@ -31,7 +33,7 @@ function fakeTab({ leads, claude = true, working = false, needs = false, box = '
     watch: () => ({
       seq: () => t.seq, keys: () => t.keys, input: () => t.keys + t.input, stop: () => { t.stopped = true; },
       screen: async () => {
-        if (spinAfterSubmit && t.submitted) t.seq += 1; // a frame arrives during every read
+        if ((spinAfterSubmit && t.submitted) || busyScreen) t.seq += 1; // a frame arrives during every read
         const shown = boxOnScreen ? screenWith(t.box, { dialog }) : shell;
         // A wheel turn recalls an earlier prompt while this read renders the screen as it was.
         if (wheelDuringRead && (t.reads += 1) === 1) { t.input += 1; t.seq += 1; t.box = 'an earlier prompt'; }
@@ -293,4 +295,24 @@ test('dialog-like words in old output above a shell prompt do not block a raw se
   assert.equal(r.body.ok, true);
   assert.equal(t.written.join(''), 'pwd');
   assert.equal(t.submitted, 1);
+});
+
+test('tmux or ssh leading the terminal: refused, nothing typed (Claude may be behind it, Codex round 6)', async () => {
+  const { t, deps } = fakeTab({ claude: false, leads: false, relay: true });
+  const r = await sendToTab(deps, 'tab', '1');
+  assert.equal(r.status, 409);
+  assert.deepEqual(t.written, []);
+  assert.equal(t.submitted, 0);
+});
+
+test('not Claude, but the screen never holds still: refused, nothing typed', async () => {
+  const { t, deps } = fakeTab({ claude: false, leads: false, busyScreen: true });
+  const r = await sendToTab(deps, 'tab', 'pwd');
+  assert.equal(r.status, 409);
+  assert.deepEqual(t.written, []);
+});
+
+test('relay commands are told apart from ordinary programs', () => {
+  for (const c of ['tmux', '/opt/homebrew/bin/tmux', 'ssh', '/usr/bin/ssh', 'mosh-client', 'screen', '-zellij']) assert.equal(isRelayCommand(c), true, c);
+  for (const c of ['zsh', '-zsh', '/bin/bash', 'node', 'claude', '2.1.270', 'sshd-helper', 'vim', '']) assert.equal(isRelayCommand(c), false, c);
 });

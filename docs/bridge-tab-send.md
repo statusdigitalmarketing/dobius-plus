@@ -37,6 +37,8 @@ To open a NEW tab and send it a message, use `/openTab` (`docs/bridge-open-tab.m
 | Another send to the same tab still running, dobius-open still delivering its message there, or any dobius-open still creating its tab | Nothing typed. | 409 |
 | Someone used the tab (a key, the mouse wheel) since the send began | Nothing typed. | 409 |
 | Someone typing into the tab right now | Nothing typed. | 409 |
+| tmux, screen, zellij, ssh or mosh leads the terminal | Nothing typed: Claude could be behind it, where no process check can see it. | 409 |
+| Not Claude, with a screen that never held still for 3 s (a busy program, a spinner) | Nothing typed. | 409 |
 | Not Claude (a shell, Codex, another program) | Typed in chunks of 256 characters, then Enter as a separate write after a pause; nothing goes out when someone typed during the checks, and no Enter when someone typed during the pause. | `{ ok: true, sent, submitted: true, confirmed: false, note }`; 409 with `typed: true` when Enter was held back |
 | No such tab | Nothing. | 404 |
 

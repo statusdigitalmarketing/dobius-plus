@@ -4307,6 +4307,7 @@ function setupWindowHandlers() {
     claudeRunning: bridgeOpenDeps.claudeRunning,
     claudeLeads: (id) => bridgeOpenDeps.claudeRunning(id, null, { anyReader: true }),
     claudeInTab: (id) => terminalRunsClaude(id, { skipStopped: true }),
+    relayInFront: bridgeOpenDeps.relayInFront,
     inputBusy: bridgeOpenDeps.inputBusy,
     paste: bridgeOpenDeps.paste,
     submit: bridgeOpenDeps.submit,

@@ -13,7 +13,8 @@
 //     the process checks fail, or when the process checks say no but the screen shows Claude's prompt (a check can
 //     time out into "no").
 //   - Anything else (a shell, Codex, a program): typed as before, with the Enter written on its own once the text has
-//     gone out, and only when nobody typed meanwhile.
+//     gone out, and only when nobody typed meanwhile. Not when tmux, screen or ssh leads the terminal (Claude could be
+//     behind it unseen), nor when the screen never holds still for 3 s.
 // One send per tab at a time, and none into a tab /openTab is still delivering to: two pastes would land in one box.
 // ok is true only when Enter was pressed on the message and, where it can be seen (Claude), it was seen taken;
 // confirmed says whether it was seen.
@@ -34,7 +35,8 @@ const sending = new Set();
  *       the process checks fail), working(tabId), needs(tabId) (a permission prompt is open), watch(tabId) -> { seq,
  *       keys, input, screen, stop }, paste(tabId, text), submit(tabId), write(tabId, data) (counted as Dobius's own, not
  *       a person's), inputBusy(tabId), claudeInTab(tabId) (a claude process anywhere in the tab; true when unsure),
- *       onSubmit(tabId) (Enter was pressed on a message), sleep(ms), now()
+ *       relayInFront(tabId) (tmux, screen or ssh leads the terminal; true when unsure), onSubmit(tabId) (Enter was
+ *       pressed on a message), sleep(ms), now()
  * Resolves { status, body } for the HTTP reply.
  */
 export async function sendToTab(deps, tabId, message) {
@@ -83,8 +85,12 @@ async function send(deps, tabId, message) {
       // text plus Enter could answer its dialog. Not the red dot or dialog-like words on screen: a suspended Claude
       // leaves both behind over a working shell (Codex round 5).
       if (await deps.claudeInTab(tabId)) return fail(409, 'Claude is running in that tab but could not be confirmed at its prompt; nothing was typed, try again');
+      // tmux, screen or ssh in front: the keys go to a program none of these checks can see, Claude included.
+      if (await deps.relayInFront(tabId)) return fail(409, 'that tab is attached to tmux, screen or a remote login, where Dobius cannot see which program gets the keys; nothing was typed');
       const s = await stillScreen(deps, watch, deps.now() + STILL_MS);
-      if (s && promptBoxText(s.lines, s.modes) !== null) return fail(409, 'that tab shows Claude\'s prompt, but Claude could not be confirmed running there; nothing was typed, try again');
+      // A screen that never held still (a busy program, or a spinner) is not typed into blind.
+      if (!s) return fail(409, 'the screen in that tab kept changing, so what is running there could not be checked; nothing was typed, try again when it settles');
+      if (promptBoxText(s.lines, s.modes) !== null) return fail(409, 'that tab shows Claude\'s prompt, but Claude could not be confirmed running there; nothing was typed, try again');
       // Awaited here, never returned bare: the finally below would stop the watch before typeRaw's pause, and keys typed
       // during it would go unseen (Codex round 3).
       return await typeRaw(deps, tabId, pty, watch, message);

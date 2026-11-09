@@ -45,6 +45,15 @@ function writeOwn(tabId, data) {
 }
 
 // -ww: never truncate a command line.
+// Programs that pass the keyboard on to something Dobius cannot see: a multiplexer client or a remote login. Claude
+// running behind one is invisible to every process check here (a tmux server is not in the tab's tree, a remote
+// machine has no tree at all), so dobius-send never types raw into a tab where one leads the terminal (Codex round 6).
+const RELAY_RE = /^(?:tmux|screen|zellij|byobu|abduco|dtach|ssh|mosh|mosh-client|et|autossh|telnet)$/i;
+export function isRelayCommand(comm) {
+  const name = String(comm || '').trim().split('/').pop().replace(/^-/, '');
+  return RELAY_RE.test(name);
+}
+
 const psField = async (pid, field) => (await execFileP('/bin/ps', ['-ww', '-o', `${field}=`, '-p', String(pid)], { timeout: 1000, encoding: 'utf8' })).stdout.trim();
 
 function isExecutableFile(f) {
@@ -582,12 +591,31 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     return false;
   }
 
+  // A relay (tmux, ssh, ...) in the tab's foreground process group. True when it cannot tell.
+  async function relayInFront(tabId) {
+    const shellPid = terminalInstance(tabId)?.pid;
+    if (!Number.isInteger(shellPid) || shellPid <= 0) return true;
+    try {
+      const tty = await psField(shellPid, 'tty');
+      const tpgid = await psField(shellPid, 'tpgid');
+      if (!tty || tty === '??' || !/^\d+$/.test(tpgid)) return true;
+      const { stdout } = await execFileP('/bin/ps', ['-ww', '-o', 'pgid=,comm=', '-t', tty], { timeout: 1000, encoding: 'utf8' });
+      return stdout.split('\n').some((line) => {
+        const m = line.trim().match(/^(\d+)\s+(.+)$/);
+        return !!m && m[1] === tpgid && isRelayCommand(m[2]);
+      });
+    } catch {
+      return true;
+    }
+  }
+
   return {
     resolveProject,
     openTab,
     focusTab,
     watchOutput,
     claudeRunning,
+    relayInFront,
     // A tab being closed (its window shutting down sends Ctrl+C straight to
     // the PTY) is not alive: nothing more is typed into it.
     // Nor is a tab whose window is closing (its shutdown snapshot can miss a
