@@ -911,11 +911,14 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
   // sidebar round 3).
   useEffect(() => {
     const prev = document.activeElement;
+    // Focus goes back where it was only when the menu is dismissed with Escape. After an item (Move to account, Close)
+    // nothing behind a dialog gets it back, so Enter cannot send a prompt's draft from under one (Codex sidebar round 6).
+    let backOnClose = false;
     menuRef.current?.focus({ preventScroll: true });
     const onKey = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      if (e.key === 'Escape') dismissRef.current();
+      if (e.key === 'Escape') { backOnClose = true; dismissRef.current(); }
     };
     const hold = (e) => { e.preventDefault(); e.stopPropagation(); };
     // Focus stays in the menu while it is open: something moving it later (a prompt refocusing itself after a tab
@@ -951,7 +954,7 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
       document.body.classList.remove('tab-menu-open');
       // Only when the focus fell to the page with the menu: an item that moved it on purpose (Rename's box) keeps it.
       const now = document.activeElement;
-      if (!released && prev && prev !== document.body && prev.isConnected && (!now || now === document.body)) prev.focus?.({ preventScroll: true });
+      if (backOnClose && !released && prev && prev !== document.body && prev.isConnected && (!now || now === document.body)) prev.focus?.({ preventScroll: true });
     };
   }, []);
 
