@@ -594,7 +594,10 @@ export async function getAllProjectTabs({ liveTabIds = null, tearOffTabs = [], o
       // entries, and dropping them rendered a browser tab in a tear-off as a
       // dateless terminal row (Codex integration round, Medium).
       .map((to) => toRow({ id: to.tabId, label: to.label || 'Tab', kind: to.kind || 'terminal', url: to.url, createdAt: to.createdAt }, true));
-    return [...persisted, ...torn].filter((t) => t.id).sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+    // savedIndex: the row's place in the project's saved tab order (tear-offs after), kept through the recency sort
+    // so the sidebar's "Same as the tab bar" order can restore it for tabs outside the asking window's bar.
+    return [...persisted, ...torn].filter((t) => t.id).map((t, i) => ({ ...t, savedIndex: i }))
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
   };
 
   const result = projects.map(({ path, tabs }) => {

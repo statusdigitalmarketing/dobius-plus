@@ -30,6 +30,21 @@ test('tab bar order follows a reordered bar in this window, then the rest in sav
   assert.equal(ids(orderSidebarTabs(TABS, 'tabs', { ...opts, barIndex: (t) => bar[t.id] ?? -1 })), 'o,w,h,c');
 });
 
+test('tab bar order for another window: main hands rows over by recency, savedIndex restores the bar (Codex P2)', () => {
+  // Another window's bar is [A, B]; main sorted its rows by lastActiveAt, so B arrives first.
+  const fromMain = [
+    { id: 'B', savedIndex: 1, lastActiveAt: 200 },
+    { id: 'A', savedIndex: 0, lastActiveAt: 100 },
+  ];
+  const none = { barIndex: () => -1, kind: () => null };
+  assert.equal(ids(orderSidebarTabs(fromMain, 'tabs', none)), 'A,B');
+  // A becomes the most recent: main now sends it first, and the sidebar must not move.
+  const later = [{ ...fromMain[1], lastActiveAt: 300 }, fromMain[0]];
+  assert.equal(ids(orderSidebarTabs(later, 'tabs', none)), 'A,B');
+  // Status order breaks ties by the bar too.
+  assert.equal(ids(orderSidebarTabs(fromMain, 'status', none)), 'A,B');
+});
+
 test('by status: working, input, waiting, done, then the rest, tab bar order within each', () => {
   assert.equal(ids(orderSidebarTabs(TABS, 'status', opts)), 'h,o,w,c');
   const kinds = { w: 'working', h: 'input', o: 'working', c: 'done' };

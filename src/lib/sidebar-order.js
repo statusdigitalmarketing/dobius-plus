@@ -12,13 +12,14 @@ const STATUS_RANK = { working: 0, input: 1, waiting: 2, done: 3 };
 export const statusRank = (kind) => STATUS_RANK[kind] ?? 4;
 
 /**
- * tabs: one project's rows in their saved order (that project's tab bar order).
+ * tabs: one project's rows; each row's savedIndex (from main) is its place in the project's saved tab bar order.
  * barIndex(tab): the tab's place in THIS window's tab bar, or -1 when it is not in it (another window's, or closed).
  * kind(tab): its activity kind ('working' | 'input' | 'waiting' | 'done' | null).
  * Returns a new array; never mutates.
  */
 export function orderSidebarTabs(tabs, mode, { barIndex = () => -1, kind = () => null } = {}) {
-  const rows = (tabs || []).map((t, i) => ({ t, i, bar: barIndex(t) }));
+  // i: the saved tab order (main's savedIndex; main hands the rows over sorted by recency), else the array position.
+  const rows = (tabs || []).map((t, i) => ({ t, i: Number.isFinite(t?.savedIndex) ? t.savedIndex : i, bar: barIndex(t) }));
   // Tab bar order: this window's bar first, in its order, then the rest in their saved order.
   const byBar = (a, b) => {
     const ab = a.bar >= 0 ? a.bar : Infinity;
