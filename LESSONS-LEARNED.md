@@ -867,3 +867,10 @@
 - **FIX**: electron/history-index.js reads history.jsonl in 1MB chunks once, then only appended bytes, shared by every caller (`singleFlight`). The known-project set is cached 30s with a generation counter. Measured: 1058MB to 2MB peak heap for 14 concurrent loads on the real file, identical output.
 - **CONTEXT**: Any main-process read that a broadcast event (watcher, data:updated) fans out to every window multiplies by the window count. The stall watchdog's `in flight at recovery` counts and its heap numbers in error.log are what pointed here; read them first after any crash or "laggy" report.
 - **DETECTION**: `grep -nE "parseJsonl\((HISTORY_PATH|[a-zA-Z]+)\)$|readFile\([^)]*'utf-?8'\)" electron/*.js` for whole-file reads, and `grep -n "main.stall" "$HOME/Library/Application Support/dobius-plus/logs/error.log" | tail` for what was in flight.
+
+### Performance - 2026-11-09
+- **MISTAKE**: To stop 14 windows each rescanning sessions on every history event, `loadAllSessionsShared` in `electron/main.js` kept a FINISHED scan for 2s and served it to identical asks. Codex then found one stale-answer path per round: Hide in Sessions within 2s, account activation importing transcripts, trashing a transcript in the Files panel. Each fix was another `forgetSharedSessionLoads()` call at one more mutator, and there was always another mutator.
+- **FIX**: Share only a scan that is still RUNNING and delete the entry when it settles (`.finally` with an identity check). Duplicate asks during an expensive scan share it, which is when sharing matters; an ask made after any user action starts its own scan. No size cap: entries remove themselves, and a cap that falls back to unshared scans undoes the fan-out under load (Codex round 4). Measured in the harness: six concurrent loads 300ms, one alone 250-600ms.
+- **CONTEXT**: Any cross-window cache of a derived answer. A time-to-live cache needs every writer to invalidate it; an in-flight share needs none.
+- **DETECTION**: `grep -n "SHARE_MS\|_TTL_MS\|Date.now() - .*\.at <" electron/*.js` and ask, for each hit, which user actions change its inputs.
+
