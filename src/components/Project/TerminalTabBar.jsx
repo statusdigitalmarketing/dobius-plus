@@ -1,5 +1,5 @@
 import { createPortal } from 'react-dom';
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { isLabelLocked, labelMeta } from '../../../shared/tab-label.js';
 import { useStore } from '../../store/store';
 import { markDoNotKill, unmarkDoNotKill } from '../../hooks/useTerminal';
@@ -113,6 +113,12 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
     else if (req.kind === 'close' && tabs.length > 1) handleCloseTab({ stopPropagation: () => {} }, req.tabId);
   }, [tabBarRequest]); // eslint-disable-line react-hooks/exhaustive-deps -- acts once per request, on the tabs as they are now
 
+  // The menu lives on body now, so it closes itself when the terminal view goes away (the Dashboard) or its tab does.
+  const activeView = useStore((s) => s.activeView);
+  useEffect(() => {
+    if (contextMenu && (activeView !== 'terminal' || !tabs.some((t) => t.id === contextMenu.tabId))) setContextMenu(null);
+  }, [activeView, tabs, contextMenu]);
+
   // Close context menu on click anywhere
   useEffect(() => {
     if (!contextMenu) return;
@@ -170,8 +176,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
     }
   }, [currentProjectPath, tabs]);
 
-  const handleCloseTab = useCallback(async (e, tabId) => {
-    e.stopPropagation();
+  const closeTabNow = useCallback(async (tabId) => {
     const tab = tabs.find((t) => t.id === tabId);
     // Pinned tabs require confirmation
     if (tab?.pinned) {
@@ -195,27 +200,24 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
     removeTab(tabId);
   }, [removeTab, autoCheckpoint, tabs, pushClosedTab]);
 
-  // Middle-click to close (#24)
-  const handleMouseDown = useCallback(async (e, tabId) => {
-    if (e.button === 1 && tabs.length > 1) {
-      e.preventDefault();
-      const tab = tabs.find((t) => t.id === tabId);
-      let scrollback = null;
-      if (window.electronAPI?.terminalLoadState) {
-        await window.electronAPI.terminalRequestSaveNow?.();
-        await new Promise((r) => setTimeout(r, 200));
-        const state = await window.electronAPI.terminalLoadState(tabId);
-        scrollback = state?.scrollback || null;
-      }
-      if (tab) {
-        // Carry kind/url so browser tabs reopen as browsers, not blank terminals.
-      pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode, claudeAccountPin: tab.claudeAccountPin });
-      }
-      await autoCheckpoint(tabId);
-      if (window.electronAPI) window.electronAPI.terminalKill(tabId);
-      removeTab(tabId);
-    }
-  }, [removeTab, tabs, autoCheckpoint, pushClosedTab]);
+  // Tabs whose close is under way (the save before it takes a moment): a second close started meanwhile counts them as
+  // gone, so two quick closes can never take the last tab, or kill its terminal and then keep it (Codex).
+  const closingRef = useRef(new Set());
+  const handleCloseTab = useCallback(async (e, tabId) => {
+    e.stopPropagation();
+    if (closingRef.current.has(tabId)) return;
+    if (useStore.getState().terminalTabs.filter((t) => !closingRef.current.has(t.id)).length <= 1) return;
+    closingRef.current.add(tabId);
+    try { await closeTabNow(tabId); } finally { closingRef.current.delete(tabId); }
+  }, [closeTabNow]);
+
+  // Middle-click to close (#24). Through the same guarded close as every other path (pinned confirm, never the last
+  // tab, never two closes racing).
+  const handleMouseDown = useCallback((e, tabId) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    handleCloseTab(e, tabId);
+  }, [handleCloseTab]);
 
   // Right-click context menu (#25)
   const handleContextMenu = useCallback((e, tabId) => {
@@ -863,6 +865,31 @@ function timeAgo(ts) {
 function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, onTeamOrchestrator, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
+  // Kept inside the window: opened low in the sidebar it would otherwise run off the bottom, out of reach (Codex).
+  const menuRef = useRef(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+  useLayoutEffect(() => {
+    const r = menuRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const pad = 8;
+    setPos({
+      left: Math.max(pad, Math.min(x, window.innerWidth - r.width - pad)),
+      top: Math.max(pad, Math.min(y, window.innerHeight - r.height - pad)),
+    });
+  }, [x, y]);
+  // While it is open, keys belong to the menu, never to a terminal or prompt behind it (opening it from the sidebar can
+  // focus one): Escape closes it, every other key is held (Codex).
+  const dismissRef = useRef(onDismiss);
+  dismissRef.current = onDismiss;
+  useEffect(() => {
+    const onKey = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') dismissRef.current();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
 
   const items = [
     ...(onDock ? [{ label: 'Move back to main window', onClick: onDock }, { type: 'divider' }] : []),
@@ -895,10 +922,13 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
 
   return (
     <div
+      ref={menuRef}
       style={{
         position: 'fixed',
-        left: x,
-        top: y,
+        left: pos.left,
+        top: pos.top,
+        maxHeight: 'calc(100vh - 16px)',
+        overflowY: 'auto',
         zIndex: 200,
         backgroundColor: 'var(--surface)',
         border: '1px solid var(--border)',
