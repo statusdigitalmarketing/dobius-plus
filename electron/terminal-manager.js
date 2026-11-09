@@ -195,7 +195,7 @@ export function trimToEscapeBoundary(buf, cap) {
 // Nothing is typed into the terminal, so it can never land in a user's line,
 // a startup prompt or a moved tab. claudeOpts ({ model, permissionMode }, shared/new-tab.js claudeLaunchOptions):
 // the new tab's Claude defaults, allowlisted again inside loginShellSpawn.
-export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCommand = null, resume = null, runScript = null, claudeOpts = null } = {}) {
+export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCommand = null, resume = null, runScript = null, claudeOpts = null, requireCwd = false } = {}) {
   // A respawn under an existing id (e.g. "Continue on switched account") must
   // NOT strand what was attached to the old PTY. Carry over the live subscriber
   // set so an attached phone keeps streaming (killing the old PTY would orphan
@@ -233,6 +233,10 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
 
   // A New Tab's tool belongs to its project: never start it in the fallback.
   if (safeCwd !== cwd) { startCommand = null; resume = null; }
+  // A phone Run terminal must start in the card's folder or not at all: home's login profile would set up the command's
+  // environment (Codex phone tasks round 9). Checked here, at the last moment (a phone Run id is always new, so no
+  // earlier PTY was killed above); node-pty itself fails the spawn if the folder goes in the instant after.
+  if (requireCwd && safeCwd !== cwd) return null;
 
   // Per-project shell history file
   const extraEnv = {};

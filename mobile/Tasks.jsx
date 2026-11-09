@@ -498,14 +498,18 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
       onExpand={() => setExpanded((v) => (v === k ? null : k))}
       onToggle={(x) => act(x, x.done ? 'reopen' : 'complete')} onDelete={(x) => act(x, 'delete')} />;
   };
-  // The count for this view: open to-dos, or open Asana tasks.
-  // Two projects with the same name (two `api` folders) show their folder too: Add, Done and Delete go to the one picked
-  // (Codex round 8).
-  const shared = new Set(projects.map((p) => p.name).filter((n, i, all) => all.indexOf(n) !== i));
-  const name = (p) => {
+  // The count for this view: open to-dos, or open Asana tasks. Names are shown printable (visiblePath), and two entries
+  // that would READ the same (two `api` folders, or `api` with one task next to a folder named `api (1)`) show their
+  // folder too (Codex rounds 8 and 9). The picked project's folder is always shown under the picker, so where Add, Done
+  // and Delete go is on screen whatever the labels say.
+  const base = (p) => {
     const n = kind === 'asana' ? p.asana : p.pending;
-    return `${p.name}${n ? ` (${n})` : ''}${shared.has(p.name) ? ` · ${visiblePath(p.path)}` : ''}`;
+    return `${visiblePath(p.name)}${n ? ` (${n})` : ''}`;
   };
+  const seen = new Map();
+  for (const p of projects) seen.set(base(p), (seen.get(base(p)) || 0) + 1);
+  const name = (p) => (seen.get(base(p)) > 1 ? `${base(p)} · ${visiblePath(p.path)}` : base(p));
+  const picked = projects.find((p) => p.path === project);
   return <>
     <label className="tasks-project">
       <span className="tasks-project-label">Project</span>
@@ -514,6 +518,7 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
         {projects.map((p) => <option key={p.path} value={p.path}>{name(p)}</option>)}
       </select>
     </label>
+    {picked && <p className="settings-foot tasks-folder">In {visiblePath(picked.path)}</p>}
     {kind === 'todo' && (
       <form className="task-add" onSubmit={(e) => { e.preventDefault(); add(); }}>
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Add a task" maxLength={500} enterKeyHint="done" aria-label="Add a task" />

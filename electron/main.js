@@ -4389,7 +4389,7 @@ function setupWindowHandlers() {
       folderOk: runFolderOk,
       spawn: (termId, script, cmd) => {
         if (!runFolderOk(cmd.cwd)) return null;
-        return createTerminal(termId, cmd.cwd, null, resolveAccountEnvForCwd(cmd.cwd), { runScript: script });
+        return createTerminal(termId, cmd.cwd, null, resolveAccountEnvForCwd(cmd.cwd), { runScript: script, requireCwd: true });
       },
       watchStart: (termId, run) => {
         setTimeout(() => {
