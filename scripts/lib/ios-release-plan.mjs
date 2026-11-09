@@ -108,7 +108,7 @@ export function planVersion(versions, marketingVersion) {
 
 // The paths whose changes reach the app binary. mobile/ imports from shared/ only (checked by the tests). The
 // dependency files count separately (depsChanged): every release bumps their version line, which changes nothing.
-export const APP_PATHS = ['mobile', 'shared', 'ios', 'capacitor.config.json', 'vite.mobile.config.js'];
+export const APP_PATHS = ['mobile', 'shared', 'ios', 'capacitor.config.json', 'vite.mobile.config.js', 'npm-shrinkwrap.json'];
 
 /** True when the installed dependency set differs between two package-lock.json texts, ignoring the app's own version. */
 export function depsChanged(oldLock, newLock) {
@@ -160,19 +160,35 @@ export const buildTagName = (marketing, n) => `ios-${marketing}-${n}`;
 /** The key that names one uploaded binary: its marketing version and its build string, exactly. */
 export const buildKey = (marketing, build) => `${marketing}|${build}`;
 
-// A tag also records when its upload started; Apple's clock may run a little behind this Mac's.
+// A tag records when its upload began and ended; Apple's clock may run a little behind this Mac's, and Apple may date a
+// build a little after the transfer ends.
 export const UPLOAD_SLACK_MS = 2 * 60_000;
+export const UPLOAD_LATE_MS = 10 * 60_000;
+
+/** Parses a tag message: { after, before } (ms, NaN when missing) and buildId (null when not bound yet). */
+export function parseTagMessage(subject) {
+  const time = (k) => { const m = new RegExp(`${k} (\\S+)`).exec(subject || ''); return m ? Date.parse(m[1]) : Number.NaN; };
+  const id = /asc-build ([A-Za-z0-9-]+)/.exec(subject || '');
+  return { after: time('uploaded-after'), before: time('uploaded-before'), buildId: id ? id[1] : null };
+}
+
+export const tagMessage = (marketing, n, after, before, buildId) =>
+  `iOS ${marketing} (${n}) uploaded-after ${new Date(after).toISOString()} uploaded-before ${new Date(before).toISOString()}${buildId ? ` asc-build ${buildId}` : ''}`;
 
 /**
- * The build a tag ({ marketing, n, after }) vouches for: the FIRST build Apple lists under that pair uploaded since the
- * upload began. One reusing the numbers later, or uploaded before ours, is never it; a tag without a time vouches for
- * nothing. `builds` are { marketing, raw, uploaded }.
+ * The build a tag ({ marketing, n, after, before, buildId }) vouches for. Once bound (the id App Store Connect gave the
+ * build, recorded the first time the run saw it) only that build. Before that, the first build under the pair that
+ * Apple dates inside the upload's own window: one uploaded earlier, or a later upload reusing the numbers after ours
+ * failed, is never it. A tag without both times vouches for nothing. `builds` are { id, marketing, raw, uploaded }.
  */
 export function buildOfTag(t, builds) {
-  if (!t || !Number.isFinite(t.after)) return null;
-  return (builds || [])
-    .filter((b) => b.marketing === t.marketing && b.raw === String(t.n) && Date.parse(b.uploaded) >= t.after - UPLOAD_SLACK_MS)
-    .sort((x, y) => Date.parse(x.uploaded) - Date.parse(y.uploaded))[0] || null;
+  if (!t || !Number.isFinite(t.after) || !Number.isFinite(t.before)) return null;
+  const inWindow = (builds || []).filter((b) => {
+    const at = Date.parse(b.uploaded);
+    return b.marketing === t.marketing && b.raw === String(t.n) && at >= t.after - UPLOAD_SLACK_MS && at <= t.before + UPLOAD_LATE_MS;
+  });
+  if (t.buildId) return inWindow.find((b) => b.id === t.buildId) || null;
+  return inWindow.sort((x, y) => Date.parse(x.uploaded) - Date.parse(y.uploaded))[0] || null;
 }
 
 /** The last uploaded build's tag among `tags`: the highest build number. */
@@ -210,7 +226,9 @@ export function reviewDetailProblems(attrs) {
   for (const m of REVIEW_NOTE_MARKERS) if (!notes.includes(m)) out.push(`the notes do not mention ${m}`);
   // The built-in demo answers only at http://demo.dobius:8420 (mobile/host.js DEMO_ORIGIN): an https address typed from
   // the notes keeps https and reaches no Mac at all.
-  if (/https:\/\/demo\.dobius/i.test(notes)) out.push('the notes give the demo address with https, which the demo does not answer');
+  // Bare `demo.dobius` normalises to it; any address with a scheme must be exactly that one (https, or http without the
+  // port, reaches no Mac at all).
+  if (/[a-z][a-z0-9+.-]*:\/\/demo\.dobius(?!:8420(?![0-9]))/i.test(notes)) out.push('the notes give the demo address in a form the demo does not answer (use demo.dobius or http://demo.dobius:8420)');
   // A version that says reviewers need a sign-in must carry one, or Apple refuses the submission.
   if (attrs.demoAccountRequired === true) {
     for (const k of ['demoAccountName', 'demoAccountPassword']) if (typeof attrs[k] !== 'string' || !attrs[k].trim()) out.push(`no ${k}`);

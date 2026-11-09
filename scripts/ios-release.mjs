@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ascConfig, createAscClient } from './lib/asc-client.mjs';
 import {
-  planVersion, liveVersion, nextBuildNumber, compareBuildStrings, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildOfTag, UPLOAD_SLACK_MS,
+  planVersion, liveVersion, nextBuildNumber, compareBuildStrings, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildOfTag, parseTagMessage, tagMessage, UPLOAD_SLACK_MS, UPLOAD_LATE_MS,
   whatsNewText, reviewDetailCopy, reviewDetailProblems, depsChanged, manifestChanged, APP_PATHS,
 } from './lib/ios-release-plan.mjs';
 
@@ -46,29 +46,41 @@ const gitIn = (cwd, ...args) => execFileSync('git', args, { ...GIT_OPTS, cwd, en
 // Every step has a deadline: a signing prompt nobody answers must not hold the lock (and release.sh) forever. Steps run
 // without blocking, so the lock watch below keeps running and stops a step whose lock is gone. `capture` also returns
 // the output (still shown as it comes) for the steps whose exit status alone does not prove success.
+// Each step runs in its own process group, so a timeout or a lost lock stops the step AND everything it started (a
+// helper holding the output open would otherwise keep the step, and so the lock, alive past its deadline).
 let current = null;
+const killGroup = (child) => {
+  if (!child?.pid) return;
+  try { process.kill(-child.pid, 'SIGKILL'); } catch (err) { if (err.code !== 'ESRCH') console.error(`[ios-release] could not stop step ${child.pid}: ${err.message}`); }
+};
+process.on('exit', () => killGroup(current));
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { killGroup(current); process.exit(130); });
 function run(file, args, label, { cwd = ROOT, env, minutes = 20, capture = false } = {}) {
   stillLocked();
   say(`${label}...`);
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { cwd, env: env ? { ...process.env, ...env } : process.env, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit' });
+    const child = spawn(file, args, {
+      cwd, env: env ? { ...process.env, ...env } : process.env, detached: true,
+      stdio: ['ignore', capture ? 'pipe' : 'inherit', capture ? 'pipe' : 'inherit'],
+    });
     current = child;
     let out = '';
-    let timedOut = false;
+    let settled = false;
+    const settle = (fn) => { if (settled) return; settled = true; clearTimeout(timer); if (current === child) current = null; fn(); };
     if (capture) {
       for (const stream of [child.stdout, child.stderr]) {
         stream.on('data', (d) => { process.stdout.write(d); if (out.length < 8 * 1024 * 1024) out += d; });
       }
     }
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, minutes * MIN);
-    child.on('error', (err) => { clearTimeout(timer); current = null; reject(new Error(`${label} could not start: ${err.message}`)); });
-    child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      current = null;
-      if (timedOut) reject(new Error(`${label} took over ${minutes} minutes and was stopped`));
-      else if (code !== 0) reject(new Error(`${label} failed (exit ${code ?? signal})`));
+    // Settled here, not on 'close': a descendant still holding the output open would delay 'close' forever.
+    const timer = setTimeout(() => { killGroup(child); settle(() => reject(new Error(`${label} took over ${minutes} minutes and was stopped`))); }, minutes * MIN);
+    child.on('error', (err) => settle(() => reject(new Error(`${label} could not start: ${err.message}`))));
+    child.on('close', (code, signal) => settle(() => {
+      if (code !== 0) reject(new Error(`${label} failed (exit ${code ?? signal})`));
       else { stillLocked(); resolve(out); }
-    });
+    }));
+    // The step is done once its own process exits; a descendant it left behind is stopped, not waited for.
+    child.on('exit', () => setTimeout(() => killGroup(child), 2000).unref());
   });
 }
 const read = (file, args) => execFileSync(file, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 2 * MIN });
@@ -91,7 +103,7 @@ if (cmd !== 'status' && !DRY && process.env.DOBIUS_IOS_RELEASE_LOCKED !== '1') {
 const LOCK_HOLDER = process.env.DOBIUS_IOS_RELEASE_LOCKED === '1' ? process.ppid : null;
 function stillLocked() {
   if (LOCK_HOLDER === null || process.ppid === LOCK_HOLDER) return;
-  current?.kill('SIGKILL');
+  killGroup(current);
   die('the release lock was released (its lockf process ended); stopping');
 }
 if (LOCK_HOLDER !== null) setInterval(stillLocked, 5000).unref();
@@ -121,18 +133,17 @@ function assertAt(sha) {
 }
 
 // ---- git tags: which commit each upload was ----
-// Each upload's tag also records when the upload started ("uploaded-after <ISO time>"). The build a tag vouches for is
-// the FIRST one Apple lists under that pair uploaded since then, so a build reusing the numbers later (after Apple
-// refused ours, say) or one uploaded before ours was never vouched for. A tag without the time vouches for nothing.
+// Each upload's tag records when the upload began and ended, and, once the run sees Apple list the build, that build's
+// App Store Connect id. See buildOfTag: a bound tag vouches for that build only; an unbound one for the first build of
+// its pair Apple dates inside the window; a tag without both times for nothing.
 
-/** This script's tags whose commit is an ancestor of `ref`, parsed, with `after` (ms) from the tag's message. */
+/** This script's tags whose commit is an ancestor of `ref`, parsed, with the upload window and build id. */
 function buildTagsOn(ref) {
   const out = git('for-each-ref', '--format=%(refname:short)%09%(contents:subject)', 'refs/tags/ios-*');
   return out.split('\n').filter(Boolean).map((line) => {
     const [name, subject = ''] = line.split('\t');
     const t = parseBuildTag(name);
-    const m = /uploaded-after (\S+)/.exec(subject);
-    return t && { ...t, after: m ? Date.parse(m[1]) : Number.NaN };
+    return t && { ...t, ...parseTagMessage(subject) };
   }).filter(Boolean).filter((t) => gitOk('merge-base', '--is-ancestor', `${t.tag}^{commit}`, ref));
 }
 
@@ -215,7 +226,8 @@ async function cleanSource(sha, work) {
   const src = path.join(work, 'src');
   await run('git', ['worktree', 'add', '--detach', src, sha], `Checking out ${sha.slice(0, 8)} on its own`, { minutes: 5 });
   // Only what the phone build needs: no install scripts (Electron's download, native rebuilds).
-  await run('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], 'Installing the locked dependencies', { cwd: src, minutes: 20 });
+  // Dev dependencies too (Vite builds the phone bundle), whatever NODE_ENV says (Codex).
+  await run('npm', ['ci', '--include=dev', '--ignore-scripts', '--no-audit', '--no-fund'], 'Installing the locked dependencies', { cwd: src, minutes: 20 });
   await run('npm', ['run', 'build:mobile'], 'Building the phone bundle', { cwd: src, minutes: 10 });
   await run('npx', ['cap', 'sync', 'ios'], 'Copying it into the iOS app (cap sync)', { cwd: src, minutes: 10 });
   // cap sync must not change tracked files: if it did, the build would not be exactly that commit.
@@ -330,13 +342,15 @@ async function appStoreSigning(asc, { create }) {
   try {
     const local = localDistributionShas();
     const certs = await asc.all('/v1/certificates?filter[certificateType]=DISTRIBUTION,IOS_DISTRIBUTION&limit=200');
-    const cert = certs.find((c) => {
+    // Every distribution certificate with its private key here and at least PROFILE_MIN_DAYS left, longest-lived first:
+    // during a certificate rotation the old one must not win just because Apple lists it first (Codex).
+    const soon = Date.now() + PROFILE_MIN_DAYS * 24 * 60 * MIN;
+    const candidates = certs.map((c) => {
       const der = c.attributes?.certificateContent;
-      return der && local.has(crypto.createHash('sha1').update(Buffer.from(der, 'base64')).digest('hex').toUpperCase());
-    });
-    if (!cert) throw new Error(`no Apple Distribution certificate of team ${TEAM_ID} has its private key on this Mac`);
-    const der = cert.attributes.certificateContent;
-    const sha1 = crypto.createHash('sha1').update(Buffer.from(der, 'base64')).digest('hex').toUpperCase();
+      const sha1 = der ? crypto.createHash('sha1').update(Buffer.from(der, 'base64')).digest('hex').toUpperCase() : null;
+      return { id: c.id, der, sha1, expires: Date.parse(c.attributes?.expirationDate) };
+    }).filter((c) => c.sha1 && local.has(c.sha1) && c.expires > soon).sort((a, b) => b.expires - a.expires);
+    if (!candidates.length) throw new Error(`no Apple Distribution certificate of team ${TEAM_ID} with ${PROFILE_MIN_DAYS}+ days left has its private key on this Mac`);
     const bundles = (await asc.all(`/v1/bundleIds?filter[identifier]=${BUNDLE_ID}&limit=50`)).filter((b) => b.attributes?.identifier === BUNDLE_ID);
     if (bundles.length !== 1) throw new Error(`App Store Connect lists ${bundles.length} bundle ids named ${BUNDLE_ID}`);
     const profiles = await asc.all(`/v1/bundleIds/${bundles[0].id}/profiles?limit=200`);
@@ -344,9 +358,11 @@ async function appStoreSigning(asc, { create }) {
     for (const p of profiles) {
       if (p.attributes?.profileType !== 'IOS_APP_STORE' || p.attributes?.profileState !== 'ACTIVE') continue;
       const d = decodeProfile(p.attributes.profileContent, work);
-      if (d && !profileProblems(d.plist, der).length) { chosen = { ...d, name: p.attributes.name }; break; }
+      const cert = d && candidates.find((c) => !profileProblems(d.plist, c.der).length);
+      if (cert) { chosen = { ...d, name: p.attributes.name, cert }; break; }
     }
     if (!chosen) {
+      const cert = candidates[0];
       if (!create) { say('[dry run] would make an App Store profile for this Mac\'s distribution certificate'); return null; }
       const name = `Dobius App Store ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
       say(`making App Store profile "${name}" (no active one holds this Mac's certificate and push)`);
@@ -356,22 +372,22 @@ async function appStoreSigning(asc, { create }) {
         relationships: { bundleId: { data: { type: 'bundleIds', id: bundles[0].id } }, certificates: { data: [{ type: 'certificates', id: cert.id }] } },
       } });
       const d = decodeProfile(made?.data?.attributes?.profileContent, work);
-      const problems = d ? profileProblems(d.plist, der) : ['Apple sent no profile back'];
+      const problems = d ? profileProblems(d.plist, cert.der) : ['Apple sent no profile back'];
       if (problems.length) throw new Error(`the new profile cannot sign the app: ${problems.join('; ')} (is Push Notifications on for the App ID?)`);
-      chosen = { ...d, name };
+      chosen = { ...d, name, cert };
     }
     if (!create) { say(`[dry run] would sign with "${chosen.name}" (${chosen.plist.UUID})`); return null; }
     fs.mkdirSync(PROFILE_DIR, { recursive: true });
     fs.copyFileSync(chosen.file, path.join(PROFILE_DIR, `${chosen.plist.UUID}.mobileprovision`));
     say(`signing with "${chosen.name}" (${chosen.plist.UUID}), expires ${chosen.plist.ExpirationDate}`);
-    return { sha1, uuid: chosen.plist.UUID, name: chosen.name };
+    return { sha1: chosen.cert.sha1, uuid: chosen.plist.UUID, name: chosen.name };
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }
 }
 
 /**
- * Builds, checks and (unless --no-upload) uploads. Returns { after } (ms, just before the upload began) once Apple has
+ * Builds, checks and (unless --no-upload) uploads. Returns { after, before } (ms, when the upload began and ended) once Apple has
  * the upload, false with --no-upload.
  */
 async function buildAndUpload(cfg, signing, marketing, buildNo) {
@@ -417,7 +433,7 @@ async function buildAndUpload(cfg, signing, marketing, buildNo) {
     const after = Date.now();
     const sent = await run('xcrun', ['altool', '--upload-package', ipa, ...key], `Uploading ${marketing} (${buildNo})`, { env, minutes: 40, capture: true });
     if (!/UPLOAD SUCCEEDED/.test(sent) || /UPLOAD FAILED/.test(sent)) throw new Error('altool did not report UPLOAD SUCCEEDED');
-    return { after };
+    return { after, before: Date.now() };
   } finally {
     // Cleanup never decides the outcome: a leftover folder must not turn an accepted upload into a failure (and so an
     // untagged build).
@@ -432,24 +448,33 @@ async function buildAndUpload(cfg, signing, marketing, buildNo) {
 }
 
 // The commit this binary is, tagged as soon as Apple has it: what --if-changed compares against next time, and what
-// marks the build as ours to submit. A build Apple later refuses stops counting (see release()).
-function tagBuild(marketing, buildNo, sha, after) {
+// marks the build as ours to submit. Tagged again (same commit) with the build's id once Apple lists it. A build Apple
+// later refuses stops counting (see release()).
+function tagBuild(marketing, buildNo, sha, up, buildId = null) {
   stillLocked();
   const tag = buildTagName(marketing, buildNo);
-  git('tag', '-a', tag, '-m', `iOS ${marketing} (${buildNo}) uploaded-after ${new Date(after).toISOString()}`, sha);
-  if (!gitOk('push', '-q', 'origin', tag)) say(`could not push tag ${tag}; push it by hand: git push origin ${tag}`);
+  git('tag', '-f', '-a', tag, '-m', tagMessage(marketing, buildNo, up.after, up.before, buildId), sha);
+  if (!gitOk('push', '-q', '-f', 'origin', `refs/tags/${tag}`)) say(`could not push tag ${tag}; push it by hand: git push -f origin ${tag}`);
 }
 
-/** 'valid' once Apple has processed it, 'timeout' if it is still processing; throws when Apple refused it. */
-async function waitForBuild(asc, appId, marketing, buildNo, after) {
+/**
+ * 'valid' once Apple has processed it, 'timeout' if it is still processing; throws when Apple refused it. The first
+ * time Apple lists the build it is bound to the tag by id (onSeen), so nothing uploaded later can take its place.
+ */
+async function waitForBuild(asc, appId, marketing, buildNo, up, onSeen) {
   const until = Date.now() + PROCESSING_TIMEOUT_MS;
+  let seen = null;
   say(`Waiting for Apple to process build ${buildNo}...`);
   while (Date.now() < until) {
     const r = await asc.get(`/v1/builds?filter[app]=${appId}&filter[version]=${buildNo}&filter[preReleaseVersion.version]=${marketing}&fields[builds]=version,processingState,uploadedDate&limit=50`);
-    // The same build the tag vouches for (buildOfTag): the first one uploaded since this upload began.
-    const b = r.data
-      .filter((x) => String(x.attributes.version) === String(buildNo) && Date.parse(x.attributes.uploadedDate) >= after - UPLOAD_SLACK_MS)
+    // The same build the tag vouches for (buildOfTag): once seen, by id; before that, the first one inside the window.
+    const b = seen ? r.data.find((x) => x.id === seen) : r.data
+      .filter((x) => {
+        const at = Date.parse(x.attributes.uploadedDate);
+        return String(x.attributes.version) === String(buildNo) && at >= up.after - UPLOAD_SLACK_MS && at <= up.before + UPLOAD_LATE_MS;
+      })
       .sort((x, y) => Date.parse(x.attributes.uploadedDate) - Date.parse(y.attributes.uploadedDate))[0];
+    if (b && !seen) { seen = b.id; onSeen(b.id); }
     if (b?.attributes.processingState === 'VALID') { say(`build ${buildNo} processed`); return 'valid'; }
     if (b && REFUSED.has(b.attributes.processingState)) throw new Error(`Apple marked build ${buildNo} ${b.attributes.processingState}`);
     await new Promise((res) => setTimeout(res, POLL_MS));
@@ -487,6 +512,21 @@ async function submit(asc, notes, justUploaded) {
   if (plan.action === 'stop') throw new Error(plan.reason);
   if (plan.action === 'wait') { say('it will be submitted on a later run'); return; }
   if (DRY) return say(`[dry run] would ${plan.action} version ${candidate.marketing}, attach build ${candidate.raw}, set What's New, check the review details, and submit for review`);
+
+  // Submitting sends every item in a submission, so one holding this version plus anything else (an In-App Event,
+  // another version) is someone else's to send. Checked BEFORE any write, so such a version is never edited here.
+  const othersIn = (items, versionId) => items.filter((i) => i.attributes?.state !== 'REMOVED' && i.relationships?.appStoreVersion?.data?.id !== versionId);
+  const open = await asc.all(`/v1/reviewSubmissions?filter[app]=${app.id}&filter[platform]=IOS&filter[state]=READY_FOR_REVIEW,UNRESOLVED_ISSUES&limit=50`);
+  const openItems = new Map();
+  for (const s of open) openItems.set(s.id, await itemsOf(asc, s.id));
+  if (plan.version) {
+    for (const s of open) {
+      const items = openItems.get(s.id);
+      if (itemFor(items, plan.version.id) && othersIn(items, plan.version.id).length) {
+        throw new Error(`version ${plan.version.attributes?.versionString ?? plan.version.id} sits in review submission ${s.id} with other items; resolve or remove them in App Store Connect first (nothing was changed)`);
+      }
+    }
+  }
 
   let version = plan.version;
   if (plan.action === 'create') {
@@ -529,13 +569,16 @@ async function submit(asc, notes, justUploaded) {
   wrong.push(...reviewDetailProblems(backDetail?.attributes));
   if (wrong.length) throw new Error(`version ${candidate.marketing} did not read back as written: ${wrong.join('; ')}`);
 
-  // The review submission: one left open by a rejection that holds this version (its item is marked resolved), else an
-  // open one ready for review, else a new one. A submission holding only other items (an In-App Event) is left alone.
-  const open = await asc.all(`/v1/reviewSubmissions?filter[app]=${app.id}&filter[platform]=IOS&filter[state]=READY_FOR_REVIEW,UNRESOLVED_ISSUES&limit=50`);
+  // The review submission: one left open by a rejection that holds this version (its item is marked resolved), else a
+  // draft holding only this version (a run that stopped before submitting), else an empty draft, else a new one. Apple
+  // allows several drafts; one holding anything else is left alone (and one holding this version too stopped the run
+  // above, before any write).
   let sub = null;
   for (const s of open.filter((x) => x.attributes?.state === 'UNRESOLVED_ISSUES')) {
-    const item = itemFor(await itemsOf(asc, s.id), version.id);
+    const items = await itemsOf(asc, s.id);
+    const item = itemFor(items, version.id);
     if (!item) continue;
+    if (othersIn(items, version.id).length) throw new Error(`review submission ${s.id} (unresolved issues) also holds other items; resolve or remove them in App Store Connect first`);
     if (item.attributes?.state === 'REJECTED') {
       await asc.patch(`/v1/reviewSubmissionItems/${item.id}`, { data: { type: 'reviewSubmissionItems', id: item.id, attributes: { resolved: true } } });
       say('marked the rejected item resolved');
@@ -543,17 +586,11 @@ async function submit(asc, notes, justUploaded) {
     sub = s;
     break;
   }
-  // Submitting sends every item in the submission, so the one used must hold nothing but this version: an In-App
-  // Event or another version in it is someone else's to send, and one rejection would hold this release too. Apple
-  // allows several drafts: a draft holding only this version (a run that stopped before submitting) is used, else an
-  // empty one, else a new one. A draft holding other things is left alone.
-  const othersIn = (items) => items.filter((i) => i.attributes?.state !== 'REMOVED' && i.relationships?.appStoreVersion?.data?.id !== version.id);
-  if (sub && othersIn(await itemsOf(asc, sub.id)).length) throw new Error(`review submission ${sub.id} (unresolved issues) also holds other items; resolve or remove them in App Store Connect first`);
   if (!sub) {
     let empty = null;
     for (const s of open.filter((x) => x.attributes?.state === 'READY_FOR_REVIEW')) {
-      const items = await itemsOf(asc, s.id);
-      if (othersIn(items).length) continue;
+      const items = openItems.get(s.id);
+      if (othersIn(items, version.id).length) continue;
       if (itemFor(items, version.id)) { sub = s; break; }
       if (!empty) empty = s;
     }
@@ -563,14 +600,15 @@ async function submit(asc, notes, justUploaded) {
   if (!itemFor(await itemsOf(asc, sub.id), version.id)) {
     await asc.post('/v1/reviewSubmissionItems', { data: { type: 'reviewSubmissionItems', relationships: { reviewSubmission: { data: { type: 'reviewSubmissions', id: sub.id } }, appStoreVersion: { data: { type: 'appStoreVersions', id: version.id } } } } });
   }
-  // Read once more right before submitting: this version is in it, and nothing else has been added since.
-  const finalItems = await itemsOf(asc, sub.id);
-  if (!itemFor(finalItems, version.id)) throw new Error(`version ${candidate.marketing} is not in review submission ${sub.id}`);
-  if (othersIn(finalItems).length) throw new Error(`review submission ${sub.id} gained other items before submitting; not submitted`);
-  // Last look right before submitting: the build on the version must still be ours (another App Store Connect user
-  // could have picked a different one since it was attached).
+  // Last looks, the build first and the items LAST, then the submit at once: the build on the version must still be
+  // ours (another App Store Connect user could have picked a different one), and the submission must hold this version
+  // and nothing else. What is left is the time between the items read and the submit (one request): Apple offers no
+  // conditional submit, so an item added in that instant would go with it.
   const finalBuild = await buildOfVersion(asc, version.id);
   if (finalBuild?.id !== candidate.id) throw new Error(`the version's build changed to ${finalBuild?.raw ?? 'none'} before submitting; not submitted`);
+  const finalItems = await itemsOf(asc, sub.id);
+  if (!itemFor(finalItems, version.id)) throw new Error(`version ${candidate.marketing} is not in review submission ${sub.id}`);
+  if (othersIn(finalItems, version.id).length) throw new Error(`review submission ${sub.id} gained other items before submitting; not submitted`);
   await asc.patch(`/v1/reviewSubmissions/${sub.id}`, { data: { type: 'reviewSubmissions', id: sub.id, attributes: { submitted: true } } });
   say(`submitted ${candidate.marketing} (${candidate.raw}) for review; Apple releases it when it is approved`);
 }
@@ -612,8 +650,8 @@ async function release(asc) {
       const signing = await appStoreSigning(asc, { create: true });
       const up = await buildAndUpload(cfg, signing, marketing, buildNo);
       if (!up) return; // --no-upload
-      tagBuild(marketing, buildNo, cfg.sha, up.after);
-      const state = await waitForBuild(asc, app.id, marketing, buildNo, up.after);
+      tagBuild(marketing, buildNo, cfg.sha, up);
+      const state = await waitForBuild(asc, app.id, marketing, buildNo, up, (id) => tagBuild(marketing, buildNo, cfg.sha, up, id));
       if (state === 'timeout') {
         say(`build ${buildNo} is still processing after ${PROCESSING_TIMEOUT_MS / MIN} minutes; run "node scripts/ios-release.mjs submit" later`);
         return;
