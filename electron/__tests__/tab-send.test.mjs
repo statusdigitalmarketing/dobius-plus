@@ -14,25 +14,35 @@ function screenWith(boxText, { dialog = false } = {}) {
   return { lines, modes: { bracketedPaste: true, cursor: { x: 2 + boxText.length, y: 2 } } };
 }
 
-function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false } = {}) {
+const SHELL = (() => { const lines = ['user@Mac project % ']; lines.dimFrom = [-1]; return { lines, modes: { bracketedPaste: true, cursor: { x: 19, y: 0 } } }; })();
+
+function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false } = {}) {
   let clock = 0;
-  const t = { box, seq: 0, keys: 0, pasted: null, written: [], submitted: 0, pty: {}, alive: true };
+  const t = { box, seq: 0, keys: 0, input: 0, pasted: null, written: [], submitted: 0, pty: {}, alive: true, reads: 0 };
   const deps = {
     tabAlive: () => t.alive,
     ptyOf: () => (t.alive ? t.pty : null),
-    claudeRunning: async () => claude,
-    claudeLeads: async () => { if (probeFails) throw new Error('pgrep timed out'); return leads ?? claude; },
+    claudeRunning: async () => claude && !(readerAfterPaste && t.pasted !== null),
+    claudeLeads: async () => { if (keysDuringProbe) t.keys += 1; if (probeFails) throw new Error('pgrep timed out'); return leads ?? claude; },
     needs: () => needs,
     working: () => working,
     inputBusy: () => false,
-    watch: () => ({ seq: () => t.seq, keys: () => t.keys, input: () => t.keys, screen: async () => screenWith(t.box, { dialog }), stop: () => {} }),
+    watch: () => ({
+      seq: () => t.seq, keys: () => t.keys, input: () => t.keys + t.input, stop: () => {},
+      screen: async () => {
+        const shown = boxOnScreen ? screenWith(t.box, { dialog }) : SHELL;
+        // A wheel turn recalls an earlier prompt while this read renders the screen as it was.
+        if (wheelDuringRead && (t.reads += 1) === 1) { t.input += 1; t.seq += 1; t.box = 'an earlier prompt'; }
+        return shown;
+      },
+    }),
     paste: (_id, text) => {
       t.pasted = text;
       t.box = `[Pasted text #1 +${text.split('\n').length - 1} lines]`;
       t.seq += 1;
       if (keysAfterPaste) t.keys += 1;
     },
-    submit: () => { t.submitted += 1; t.seq += 1; if (!enterInsertsNewline) t.box = ''; },
+    submit: () => { t.submitted += 1; t.seq += 1; if (!enterInsertsNewline) t.box = ''; if (closeOnSubmit) { t.alive = false; t.box = ''; } },
     write: (_id, data) => { t.written.push(data); if (keysWhileTyping) t.keys += 1; },
     sleep: async (ms) => { clock += ms; },
     now: () => clock,
@@ -61,11 +71,12 @@ test('an Enter that only adds a line is reported as not sent, never ok', async (
   assert.equal(t.submitted, 1);
 });
 
-test('Claude working: pasted, then Enter once the box shows it, reported unconfirmed', async () => {
+test('Claude working: pasted, then Enter once the box shows it, confirmed queued', async () => {
   const { t, deps } = fakeTab({ working: true });
   const r = await sendToTab(deps, 'tab', BRIEF);
   assert.equal(r.body.ok, true);
   assert.equal(r.body.confirmed, true, 'the box emptied: queued');
+  assert.match(r.body.note, /queued/);
   assert.equal(t.pasted, BRIEF);
   assert.equal(t.submitted, 1);
 });
@@ -177,8 +188,46 @@ test('terminal string replies (DECRQSS, XTVERSION, kitty graphics) and kitty/DSR
 });
 
 test('keys still count as typing', () => {
-  for (const k of ['a', '\r', '\x03', '\x1b[A', '\x1b[2~', '\x1b[13;2u', '\x1bP', '\x1b[200~hi\x1b[201~', '\x1bPhello\r\x1b\\', '\x1bPhello\x1b\\', '\x1b_hi\x1b\\']) {
+  for (const k of ['a', '\r', '\x03', '\x1b[A', '\x1b[2~', '\x1b[13;2u', '\x1bP', '\x1b[200~hi\x1b[201~', '\x1bPhello\r\x1b\\', '\x1bPhello\x1b\\', '\x1b_hi\x1b\\', '\x1bP1$r\x03\x1b\\', '\x1b_G\x15\x1b\\']) {
     assert.equal(isKeyboardInput(k), true, JSON.stringify(k));
     assert.equal(isTerminalReply(k), false, JSON.stringify(k));
   }
+});
+
+test('the process checks say not Claude but the screen shows Claude\'s prompt: refused, nothing typed raw', async () => {
+  const { t, deps } = fakeTab({ claude: false, leads: false, boxOnScreen: true });
+  const r = await sendToTab(deps, 'tab', 'hello');
+  assert.equal(r.status, 409);
+  assert.deepEqual(t.written, []);
+  assert.equal(t.submitted, 0);
+});
+
+test('a command Claude starts that reads the terminal after the paste: no Enter', async () => {
+  const { t, deps } = fakeTab({ readerAfterPaste: true });
+  const r = await sendToTab(deps, 'tab', 'hello');
+  assert.equal(r.body.ok, false);
+  assert.equal(r.body.typed, true);
+  assert.equal(t.submitted, 0);
+});
+
+test('the tab closes right after the Enter (its Ctrl+C empties the box): not reported sent', async () => {
+  const { t, deps } = fakeTab({ closeOnSubmit: true, enterInsertsNewline: true });
+  const r = await sendToTab(deps, 'tab', 'hello');
+  assert.equal(r.body.ok, false);
+  assert.equal(r.body.submitted, false);
+  assert.equal(t.submitted, 1);
+});
+
+test('a wheel turn recalls a prompt while the screen is read: the old read does not count, nothing pasted', async () => {
+  const { t, deps } = fakeTab({ wheelDuringRead: true });
+  const r = await sendToTab(deps, 'tab', 'hello');
+  assert.equal(r.status, 409);
+  assert.equal(t.pasted, null);
+});
+
+test('a shell tab: keys typed during the process checks stop the text before any of it goes out', async () => {
+  const { t, deps } = fakeTab({ claude: false, keysDuringProbe: true });
+  const r = await sendToTab(deps, 'tab', 'hello');
+  assert.equal(r.status, 409);
+  assert.deepEqual(t.written, []);
 });

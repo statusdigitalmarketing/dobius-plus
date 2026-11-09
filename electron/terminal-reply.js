@@ -12,7 +12,7 @@
 // reports (`ESC[?997;1n`) and window reports (`ESC[8;24;80t`). No key produces any of those. Missing the string
 // replies made a Claude that asks DECRQSS at startup read as someone typing, so dobius-open gave up on a fresh tab
 // (bug report from another Mac, 2026-11-09).
-const REPLY_PARTS = String.raw`\x1b\[[IO]|\x1b\[[?>=][\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[01]\$r[^\x1b\r\n]*\x1b\\|\x1bP>\|[^\x1b\r\n]*\x1b\\|\x1b_G[^\x1b\r\n]*\x1b\\|\x1b\[\?\d*u|\x1b\[\?[\d;]*n|\x1b\[\d+(?:;\d+)*t`;
+const REPLY_PARTS = String.raw`\x1b\[[IO]|\x1b\[[?>=][\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[01]\$r[\x20-\x7e]*\x1b\\|\x1bP>\|[\x20-\x7e]*\x1b\\|\x1b_G[\x20-\x7e]*\x1b\\|\x1b\[\?\d*u|\x1b\[\?[\d;]*n|\x1b\[\d+(?:;\d+)*t`;
 const TERMINAL_REPLY_RE = new RegExp(String.raw`^(?:${REPLY_PARTS}|\x1b\[\?\d+;\d+R|\x1b\[(?!1;(?:[2-9]|1[0-6])R)\d+;\d+R)+$`);
 
 export function isTerminalReply(data) {

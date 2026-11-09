@@ -43,7 +43,7 @@ import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser, ensureShim } from './gws-accounts.js';
 import { gwsSetupStatus, installGws, useGwsAt, findClientFiles, useClientFile, refreshGwsEnv, setHintDir } from './gws-setup.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary, terminalBracketedPaste } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, terminalClosing, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary, terminalBracketedPaste } from './terminal-manager.js';
 import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
@@ -4301,7 +4301,8 @@ function setupWindowHandlers() {
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
   // dobius-send into an existing tab (electron/tab-send.js): the same paste and confirmed Enter for Claude.
   setTabSendService((tabId, message) => sendToTab({
-    tabAlive: bridgeOpenDeps.tabAlive,
+    // A phone-opened terminal has no window; it is alive while its PTY is and is not being closed.
+    tabAlive: (id) => (getTerminalWebContentsId(id) === null ? !!terminalInstance(id) && !terminalClosing(id) : bridgeOpenDeps.tabAlive(id)),
     ptyOf: bridgeOpenDeps.ptyOf,
     claudeRunning: bridgeOpenDeps.claudeRunning,
     claudeLeads: (id) => bridgeOpenDeps.claudeRunning(id, null, { anyReader: true }),
@@ -4309,7 +4310,10 @@ function setupWindowHandlers() {
     paste: bridgeOpenDeps.paste,
     submit: bridgeOpenDeps.submit,
     write: bridgeOpenDeps.write,
-    needs: (id) => terminalStatus.statusFor(id)?.status === 'needs',
+    // A permission prompt, not a handed-back `! command` (that red sits over an ordinary empty prompt).
+    needs: (id) => { const st = terminalStatus.statusFor(id); return st?.status === 'needs' && st.needsKind !== 'handoff'; },
+    // Enter on a message that is not a team message's: ends following one whose turn is over, as a person's Enter does.
+    onSubmit: (id) => getTeamService()?.tabEvent(id, 'person-submit', null),
     sleep: bridgeOpenDeps.sleep,
     now: bridgeOpenDeps.now,
     working: (id) => terminalStatus.statusFor(id)?.status === 'working',

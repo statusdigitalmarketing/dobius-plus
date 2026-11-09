@@ -184,12 +184,13 @@ export async function ttyReaderUnder(pid, tty, { exec = execFileP, alive = pidAl
     const r = await exec('/usr/sbin/lsof', ['-n', '-P', '-a', '-p', desc.join(','), '-Fan'], { timeout: 3000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
       .catch((err) => {
         if (err?.code !== 1) return Promise.reject(err);
-        // A descriptor lsof could not read (an `ferr` entry) is doubt too: that process's list is not complete.
-        if (/^ferr$/m.test(err.stdout || '')) return Promise.reject(new Error('lsof could not read every descriptor'));
         const seen = new Set((err.stdout || '').split('\n').filter((l) => l.startsWith('p')).map((l) => l.slice(1)));
         const left = desc.filter((d) => !seen.has(d) && alive(Number(d)));
         return left.length ? Promise.reject(new Error(`lsof could not read running process ${left.join(',')}`)) : { stdout: err.stdout || '' };
       });
+    // A descriptor lsof could not read (an `ferr` entry, on a clean exit too) is doubt: that process's list is not
+    // complete. None showed up across 62 live Claude processes and their children (2026-11-09).
+    if (/^(?:ferr|nFD info error)/m.test(r.stdout)) return true;
     const names = new Set([`/dev/${tty}`, '/dev/tty']);
     let mode = '';
     for (const l of r.stdout.split('\n')) {

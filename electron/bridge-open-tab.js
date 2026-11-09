@@ -268,6 +268,9 @@ export const boxStillHasMessage = boxIsMessage;
 // output since that was read, and nothing else typed into the tab since the
 // paste (a person's keys, or their mouse over a fullscreen Claude). Any
 // doubt leaves the message typed and unsent: { ok, submitted: false }.
+/** Tabs /openTab is delivering a message into right now (dobius-send refuses them meanwhile). */
+export const openTabBusy = new Set();
+
 export async function submitAfterPaste(deps, tabId, pty, watch, seqAtPaste, message, projectPath, opts = {}) {
   const { anyPaste = false, beforeEnter = null } = opts;
   // Any person's input from here on (a wheel turn included) can change what
@@ -401,6 +404,15 @@ export function createOpenTabService(deps, opts = {}) {
     // the board can tell the person which tab to close.
     if (opened.error) return { ok: false, status: 500, error: opened.error, ...(opened.tabId ? { tabId: opened.tabId } : {}) };
     const { tabId } = opened;
+    openTabBusy.add(tabId);
+    try {
+      return await deliver(tabId, opened, resolved, message);
+    } finally {
+      openTabBusy.delete(tabId);
+    }
+  }
+
+  async function deliver(tabId, opened, resolved, message) {
     const pty = deps.ptyOf(tabId);
     // The tab was asked for with tool 'claude' (store.openNewTab): its login
     // shell starts Claude itself as its first command (shared/new-tab.js),
