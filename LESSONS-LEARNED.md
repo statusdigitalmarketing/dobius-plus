@@ -785,3 +785,15 @@
 - **FIX**: After merging a branch that changed package.json or package-lock.json, run `npm install` (then `npx electron-rebuild -f -w better-sqlite3,node-pty`) in the checkout that will release, and re-run the gates before `./release.sh`.
 - **CONTEXT**: Agent worktrees have their own node_modules. A release from the main checkout builds with whatever is installed there.
 - **DETECTION**: `git diff --name-only HEAD@{1} HEAD -- package.json package-lock.json` after a merge; non-empty means install first.
+
+### UI/UX: 2026-11-08 (sidebar tab menu)
+- **MISTAKE**: Guarded tab closes with a "closing" set checked at the START of `handleCloseTab`, then awaited a save before killing. Close Others, Cmd+W and the store's bulk closes never consult that set, so one of them could run during the await and the pending close then killed the last tab, which `removeTab` refuses to remove: a visible tab with a dead terminal (Codex sidebar round 2).
+- **FIX**: Re-read `useStore.getState().terminalTabs` after the last await in `closeTabNow` and return without killing when the tab is gone or is the only one left. A guard that lives before an await only guards the paths that know about it.
+- **CONTEXT**: Any destructive action that awaits (save, checkpoint, confirm) must decide on live state right before it acts.
+- **DETECTION**: `grep -n "await" -A6 src/components/Project/TerminalTabBar.jsx | grep -n "terminalKill"`
+
+### Testing: 2026-11-08 (Vite dev harness)
+- **MISTAKE**: In a CDP probe, `await import('/src/store/store.js')` returned a DIFFERENT store instance from the app's (its flag read false while the app's was true), because after an HMR update Vite imports that module as `/src/store/store.js?t=<timestamp>`, even after a full page reload.
+- **FIX**: Import the URL the page actually loaded: `performance.getEntriesByType('resource').map(e => e.name).filter(n => /\/src\/store\/store\.js/.test(n)).pop()`.
+- **CONTEXT**: Any harness that reads app state by importing a module in a Vite dev page.
+- **DETECTION**: `grep -rn "import('/src/" <probe scripts>`
