@@ -17,7 +17,8 @@ const REQUEST_TIMEOUT_MS = 60_000;
 export function ascConfig(env = process.env) {
   const keyId = env.ASC_KEY_ID || 'RVU59FRA7H';
   const issuerId = env.ASC_ISSUER_ID || 'c7167f5f-1a8d-4d63-8af9-1f032a24e66c';
-  const keyPath = env.ASC_KEY_PATH || path.join(os.homedir(), '.appstoreconnect', 'private_keys', `AuthKey_${keyId}.p8`);
+  // Absolute, so it still names the same file from the build's own checkout (Xcode runs there).
+  const keyPath = path.resolve(env.ASC_KEY_PATH || path.join(os.homedir(), '.appstoreconnect', 'private_keys', `AuthKey_${keyId}.p8`));
   return { keyId, issuerId, keyPath };
 }
 

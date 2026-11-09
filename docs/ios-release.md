@@ -12,7 +12,7 @@ node scripts/ios-release.mjs release                # test, build, check, upload
 node scripts/ios-release.mjs release --if-changed   # same, but only build when the phone code changed since the last iOS build
 node scripts/ios-release.mjs release --dry-run      # print the plan, change nothing (no build, no upload, no ASC writes)
 node scripts/ios-release.mjs release --no-submit    # build and upload only
-node scripts/ios-release.mjs release --no-upload    # build, sign, check and validate with Apple, upload nothing (a ship-test)
+node scripts/ios-release.mjs release --no-upload    # build, sign, check and validate with Apple; uploads and submits nothing (a ship-test)
 node scripts/ios-release.mjs release --notes "..."  # the "What's New" text (default: a plain sentence)
 node scripts/ios-release.mjs submit                 # no build: submit the newest processed build of ours not live yet
 ```
@@ -20,7 +20,8 @@ node scripts/ios-release.mjs submit                 # no build: submit the newes
 Flags `release.sh` uses: `--expect-sha <sha>` (stop unless HEAD is that commit) and `--skip-tests` (the tests already
 ran on that commit). `--allow-branch` builds from a branch other than main; such a build is never submitted, because
 only builds tagged on a commit of `origin/main` are. A second run while one is going stops at once (a kernel file lock
-through `/usr/bin/lockf`, released however the first one ends).
+through `/usr/bin/lockf`, released however the first one ends; if the lockf process itself is killed, the run stops
+at its next step or write instead of carrying on unlocked). Git calls have a deadline and never prompt for a password.
 
 `release.sh` runs `release --if-changed --expect-sha <HEAD> --skip-tests` after a desktop release is published.
 A failure there never fails the desktop release: it prints what to run by hand. `DOBIUS_SKIP_IOS=1` skips it.
@@ -32,7 +33,7 @@ A failure there never fails the desktop release: it prints what to run by hand. 
 2. **Reads App Store Connect.** The app (bundle id `com.statusdigital.dobiusplus`), its iOS versions and newest builds,
    and decides the version (below). A version that cannot ship stops it before anything is built.
 3. **Decides whether to build.** `--if-changed` compares HEAD with the commit of the last uploaded build (the highest
-   `ios-<version>-<N>` tag that is an ancestor of HEAD and whose build Apple lists and did not refuse) over the paths that end up in the app: `mobile/`, `shared/` (the
+   `ios-<version>-<N>` tag that is an ancestor of HEAD and whose build Apple lists, did not refuse, and has not expired) over the paths that end up in the app: `mobile/`, `shared/` (the
    only outside folder phone screens import, checked by a test), `ios/`, `capacitor.config.json`,
    `vite.mobile.config.js`, the installed dependency set in `package-lock.json`, and `package.json` (the version line,
    bumped by every release, does not count in either). It also skips the build when this version already has a build
@@ -41,11 +42,16 @@ A failure there never fails the desktop release: it prints what to run by hand. 
    checkout of exactly that commit (`git worktree add --detach`) with the dependencies the lockfile names
    (`npm ci --ignore-scripts`), so nothing edited in the main checkout or left over in its `node_modules` reaches the
    app: `npm run build:mobile`, `npx cap sync ios` (which must leave tracked files unchanged), `xcodebuild archive`,
-   then `xcodebuild -exportArchive` to a local IPA with automatic signing and the API key for provisioning. Every step
+   then `xcodebuild -exportArchive` to a local IPA, signed by hand: this Mac's Apple Distribution identity (matched to
+   App Store Connect's certificate by its SHA-1) and an active App Store profile for the app that holds that
+   certificate, the push entitlement and at least 14 days of life. When there is none the script makes one through the
+   API (`Dobius App Store <date>`) and installs it where Xcode looks. Automatic export cannot work here: the API key
+   cannot use Apple's cloud signing, and Xcode then falls back to a cached profile made before push was added. Every step
    has a deadline (a signing prompt nobody answers cannot hold the run forever). Version numbers are build settings,
    never written into the project: `MARKETING_VERSION` is the commit's `package.json` version,
-   `CURRENT_PROJECT_VERSION` is one more than every build number App Store Connect lists (all pages), the project's
-   own, and every `ios-<version>-<N>` tag.
+   `CURRENT_PROJECT_VERSION` is one more than every build number App Store Connect lists (all pages; a dotted one
+   such as `100.1` by its first part), the project's own, and every `ios-<version>-<N>` tag. The tests run in the main
+   checkout, which must still be exactly that commit before and after them.
    The IPA is unpacked and checked before upload: bundle id, version and build number in its Info.plist, a strict
    signature check, and its entitlements (`aps-environment` production, no `get-task-allow`, this team and app id). Then
    `altool --validate-app` and `altool --upload-package` with the API key (found by file name through
@@ -55,7 +61,8 @@ A failure there never fails the desktop release: it prints what to run by hand. 
    polled every 30 seconds). Refused (`INVALID`, `FAILED`): it stops, and that tag no longer counts as the last build.
    Still processing after 45 minutes: it stops there, and a later `submit` (or the next release) submits it.
 6. **Submits.** Only a processed build of ours: its version and build string match an `ios-<version>-<N>` tag on a
-   commit of `origin/main` exactly, and its number is above the live build's. Builds uploaded by hand, from a branch,
+   commit of `origin/main` exactly, it has not expired, and it is above the live build in Apple's order (a live `100.1`
+   keeps out a 7; a live build string that cannot be read keeps out everything). Builds uploaded by hand, from a branch,
    or under a reused number are never picked. If origin cannot be fetched it does not submit. The version it goes on:
    - a version Apple is already handling (waiting for review, in review, accepted, pending Apple's release, processing,
      waiting for export compliance): nothing is touched; the build waits and a later run submits it.
@@ -74,7 +81,8 @@ A failure there never fails the desktop release: it prints what to run by hand. 
    Anything missing is repaired from the live version's details, or it stops if those are incomplete too. Everything is
    read back (version string, release type, What's New, review details) and any difference stops it before review.
    The review submission: one left open by a rejection that holds this version (its rejected item is marked
-   resolved), else an open one ready for review, else a new one; a submission holding only other items is left alone.
+   resolved), else an open one ready for review, else a new one. A submission that also holds anything else (an In-App Event,
+   another version) stops the run: submitting sends every item, and those are not this script's to send.
    It confirms the version's item is there (a removed one does not count), reads the version's build once more, and
    submits.
 7. **Apple releases it** on approval (`AFTER_APPROVAL`). Nothing else has to run.

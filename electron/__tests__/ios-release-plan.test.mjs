@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  compareVersions, nextBuildNumber, planVersion, liveVersion, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildKey,
+  compareVersions, compareBuildStrings, nextBuildNumber, planVersion, liveVersion, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildKey,
   whatsNewText, reviewDetailCopy, reviewDetailProblems, depsChanged, manifestChanged, APP_PATHS,
 } from '../../scripts/lib/ios-release-plan.mjs';
 import { ascJwt, createAscClient } from '../../scripts/lib/asc-client.mjs';
@@ -215,4 +215,17 @@ test('the client refuses redirects, a non-JSON success, and a list cut short', a
   );
   const pg = await c.pages('/v1/builds');
   assert.deepEqual([pg.data.map((x) => x.id), pg.included.map((x) => x.id)], [['1', '2'], ['p1', 'p2']]);
+});
+
+test('build strings compare the way Apple orders them, and a dotted build still gets a higher next number', () => {
+  assert.equal(compareBuildStrings('7', '6'), 1);
+  assert.equal(compareBuildStrings('7', '100.1'), -1, 'a live dotted hotfix keeps an older whole number out');
+  assert.equal(compareBuildStrings('101', '100.1'), 1);
+  assert.equal(compareBuildStrings('7', '7.0'), 0);
+  assert.equal(compareBuildStrings('7.0.1', '7'), 1);
+  assert.equal(compareBuildStrings('10', '9'), 1, 'numeric, not text');
+  assert.equal(compareBuildStrings('7', 'abc'), null);
+  assert.equal(compareBuildStrings('7', '1.2.3.4'), null, 'Apple allows three parts at most');
+  assert.equal(compareBuildStrings(null, '7'), null);
+  assert.equal(nextBuildNumber(['100.1', '6'], 6), 101, 'counted by its first part');
 });

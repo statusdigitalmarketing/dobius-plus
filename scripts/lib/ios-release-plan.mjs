@@ -16,6 +16,26 @@ export function compareVersions(a, b) {
  * One more than every build number App Store Connect has, the project's own, and every `ios-<version>-<N>` tag (an upload
  * Apple has not listed yet still used its number). Never reused.
  */
+/**
+ * Compares two build strings the way Apple orders them: up to three dot-separated whole numbers, a missing part read as
+ * 0 ("7" equals "7.0", "100.1" is above "7"). Returns -1, 0 or 1, or null when either is not a build string.
+ */
+export function compareBuildStrings(a, b) {
+  const parse = (v) => (/^\d+(?:\.\d+){0,2}$/.test(String(v ?? '')) ? String(v).split('.').map(Number) : null);
+  const x = parse(a);
+  const y = parse(b);
+  if (!x || !y) return null;
+  for (let i = 0; i < 3; i += 1) {
+    const d = (x[i] || 0) - (y[i] || 0);
+    if (d) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+/**
+ * One above every build number in use. A dotted build ("100.1") counts by its first part, so the next whole number
+ * (101) still sorts above it.
+ */
 export function nextBuildNumber(ascBuildVersions, projectBuild, tagNumbers = []) {
   const nums = [...(ascBuildVersions || []), projectBuild, ...(tagNumbers || [])]
     .map((v) => Number.parseInt(String(v ?? ''), 10))

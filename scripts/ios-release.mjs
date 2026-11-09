@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ascConfig, createAscClient } from './lib/asc-client.mjs';
 import {
-  planVersion, liveVersion, nextBuildNumber, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildKey,
+  planVersion, liveVersion, nextBuildNumber, compareBuildStrings, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildKey,
   whatsNewText, reviewDetailCopy, reviewDetailProblems, depsChanged, manifestChanged, APP_PATHS,
 } from './lib/ios-release-plan.mjs';
 
@@ -38,10 +38,13 @@ const NO_UPLOAD = flag('--no-upload');
 const say = (...a) => console.log('[ios-release]', ...a);
 const die = (msg, code = 1) => { console.error(`[ios-release] ${msg}`); process.exit(code); };
 
-const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).trim();
-const gitOk = (...args) => spawnSync('git', args, { cwd: ROOT }).status === 0;
+// Git gets a deadline too, and never asks for a password: a stalled fetch or push must not hold the lock forever.
+const GIT_OPTS = { cwd: ROOT, timeout: 5 * MIN, killSignal: 'SIGKILL', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } };
+const git = (...args) => execFileSync('git', args, { ...GIT_OPTS, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
+const gitOk = (...args) => spawnSync('git', args, GIT_OPTS).status === 0;
 // Every step has a deadline: a signing prompt nobody answers must not hold the lock (and release.sh) forever.
 function run(file, args, label, { cwd = ROOT, env, minutes = 20 } = {}) {
+  stillLocked();
   say(`${label}...`);
   const r = spawnSync(file, args, { cwd, stdio: 'inherit', env: env ? { ...process.env, ...env } : process.env, timeout: minutes * MIN, killSignal: 'SIGKILL' });
   if (r.error?.code === 'ETIMEDOUT') throw new Error(`${label} took over ${minutes} minutes and was stopped`);
@@ -62,6 +65,13 @@ if (cmd !== 'status' && !DRY && process.env.DOBIUS_IOS_RELEASE_LOCKED !== '1') {
   if (r.status === 75) die('another iOS release is running');
   process.exit(r.status ?? 1);
 }
+// lockf holds the lock, not this process: if lockf is killed the lock is gone and another run may start, so this one
+// stops too. Checked before every step and every App Store Connect write, and every few seconds while it waits.
+const LOCK_HOLDER = process.env.DOBIUS_IOS_RELEASE_LOCKED === '1' ? process.ppid : null;
+function stillLocked() {
+  if (LOCK_HOLDER !== null && process.ppid !== LOCK_HOLDER) die('the release lock was released (its lockf process ended); stopping');
+}
+if (LOCK_HOLDER !== null) setInterval(stillLocked, 5000).unref();
 
 // ---- checks before building ----
 function preflight() {
@@ -78,6 +88,13 @@ function preflight() {
   if (!fetchOrigin()) die('could not fetch origin');
   if (!gitOk('merge-base', '--is-ancestor', 'HEAD', `origin/${branch}`)) die(`HEAD is not on origin/${branch}: push it first`);
   return { ...cfg, sha };
+}
+
+/** The checkout is still exactly the commit preflight pinned: the tests run here, and must be of the commit built. */
+function assertAt(sha) {
+  const head = git('rev-parse', 'HEAD');
+  if (head !== sha) throw new Error(`the checkout moved from ${sha.slice(0, 8)} to ${head.slice(0, 8)} during the run`);
+  if (git('status', '--porcelain')) throw new Error('the working tree changed during the run');
 }
 
 // ---- git tags: which commit each upload was ----
@@ -142,20 +159,20 @@ async function status(asc) {
 }
 
 // ---- did anything in the app change since the last upload Apple did not refuse? ----
-function appChangedSince(tag) {
+function appChangedSince(tag, sha) {
   if (!tag) return { changed: true, why: 'no earlier iOS build of this branch that Apple accepted' };
-  const files = git('diff', '--name-only', tag, 'HEAD', '--', ...APP_PATHS).split('\n').filter(Boolean);
+  const files = git('diff', '--name-only', tag, sha, '--', ...APP_PATHS).split('\n').filter(Boolean);
   if (files.length) return { changed: true, why: `${files.length} app file(s) changed since ${tag}` };
   const at = (file) => { try { return git('show', `${tag}:${file}`); } catch { return ''; } };
-  const now = (file) => git('show', `HEAD:${file}`);
+  const now = (file) => git('show', `${sha}:${file}`);
   if (depsChanged(at('package-lock.json'), now('package-lock.json'))) return { changed: true, why: `dependencies changed since ${tag}` };
   if (manifestChanged(at('package.json'), now('package.json'))) return { changed: true, why: `package.json changed since ${tag}` };
   return { changed: false, why: `nothing in the app changed since ${tag}` };
 }
 
 // ---- build, check, upload ----
-function projectBuildNumber() {
-  const pbx = git('show', 'HEAD:ios/App/App.xcodeproj/project.pbxproj');
+function projectBuildNumber(sha) {
+  const pbx = git('show', `${sha}:ios/App/App.xcodeproj/project.pbxproj`);
   const nums = [...pbx.matchAll(/CURRENT_PROJECT_VERSION = (\d+);/g)].map((m) => Number(m[1]));
   return nums.length ? Math.max(...nums) : 0;
 }
@@ -408,10 +425,11 @@ async function submit(asc, notes, justUploaded) {
   const ours = tagKeys(buildTagsOn('origin/main'));
   const live = liveVersion(versions);
   const liveBuild = live ? await buildOfVersion(asc, live.id) : null;
-  const liveNo = liveBuild && /^\d+$/.test(liveBuild.raw) ? Number(liveBuild.raw) : null;
   // Newer than the live build, whichever path picked it: a hotfix shipped from elsewhere is never replaced by older code.
+  // Compared as Apple orders build strings, so a live "100.1" keeps out a 7; a live build string that cannot be read
+  // keeps out everything.
   const eligible = builds.filter((b) => b.state === 'VALID' && !b.expired && b.marketing && Number.isInteger(b.number)
-    && ours.has(keyOf(b)) && (liveNo === null || b.number > liveNo));
+    && ours.has(keyOf(b)) && (!liveBuild || compareBuildStrings(b.raw, liveBuild.raw) === 1));
   const candidate = justUploaded
     ? eligible.find((b) => b.marketing === justUploaded.marketing && b.number === justUploaded.number)
     : eligible.sort((a, b) => b.number - a.number)[0];
@@ -478,6 +496,12 @@ async function submit(asc, notes, justUploaded) {
     break;
   }
   if (!sub) sub = open.find((x) => x.attributes?.state === 'READY_FOR_REVIEW') || null;
+  // Submitting sends every item in the submission. Anything else in it (an In-App Event, another version) is someone
+  // else's to send, and one rejection would hold this release too: stop rather than submit it.
+  if (sub) {
+    const others = (await itemsOf(asc, sub.id)).filter((i) => i.attributes?.state !== 'REMOVED' && i.relationships?.appStoreVersion?.data?.id !== version.id);
+    if (others.length) throw new Error(`open review submission ${sub.id} also holds ${others.length} other item(s); submit or remove them in App Store Connect first`);
+  }
   if (!sub) sub = (await asc.post('/v1/reviewSubmissions', { data: { type: 'reviewSubmissions', attributes: { platform: 'IOS' }, relationships: { app: { data: { type: 'apps', id: app.id } } } } })).data;
   if (!itemFor(await itemsOf(asc, sub.id), version.id)) {
     await asc.post('/v1/reviewSubmissionItems', { data: { type: 'reviewSubmissionItems', relationships: { reviewSubmission: { data: { type: 'reviewSubmissions', id: sub.id } }, appStoreVersion: { data: { type: 'appStoreVersions', id: version.id } } } } });
@@ -503,9 +527,10 @@ async function release(asc) {
   const byKey = new Map(builds.map((b) => [keyOf(b), b]));
   const good = buildTagsOn(cfg.sha).filter((t) => {
     const b = byKey.get(buildKey(t.marketing, String(t.n)));
-    return b && !REFUSED.has(b.state);
+    // An expired build can no longer be submitted, so it does not count as shipped either: its changes build again.
+    return b && !REFUSED.has(b.state) && !b.expired;
   });
-  const change = appChangedSince(lastBuildTag(good.map((t) => t.tag)));
+  const change = appChangedSince(lastBuildTag(good.map((t) => t.tag)), cfg.sha);
   const existing = good.find((t) => t.marketing === marketing);
   let uploaded = null;
   if (flag('--if-changed') && !change.changed) {
@@ -514,13 +539,17 @@ async function release(asc) {
     say(`no new build: ${marketing} already has build ${existing.n}`);
   } else {
     const allTags = git('tag', '--list', 'ios-*').split('\n');
-    const buildNo = nextBuildNumber(builds.map((b) => b.number), projectBuildNumber(), buildTagNumbers(allTags));
+    const buildNo = nextBuildNumber(builds.map((b) => b.raw), projectBuildNumber(cfg.sha), buildTagNumbers(allTags));
     say(`building ${marketing} (${buildNo}) from ${cfg.sha.slice(0, 8)}: ${change.why}`);
     if (DRY) {
       await appStoreSigning(asc, { create: false });
       say(`[dry run] would test, build from a clean checkout, check, validate and upload ${marketing} (${buildNo}), then tag ${buildTagName(marketing, buildNo)}`);
     } else {
-      if (!flag('--skip-tests')) run('npm', ['test'], 'Running the tests', { minutes: 30 });
+      if (!flag('--skip-tests')) {
+        assertAt(cfg.sha);
+        run('npm', ['test'], 'Running the tests', { minutes: 30 });
+        assertAt(cfg.sha);
+      }
       const signing = await appStoreSigning(asc, { create: true });
       if (!buildAndUpload(cfg, signing, marketing, buildNo)) return; // --no-upload
       tagBuild(marketing, buildNo, cfg.sha);
@@ -532,14 +561,18 @@ async function release(asc) {
       uploaded = { marketing, number: buildNo };
     }
   }
-  if (flag('--no-submit')) return;
+  // --no-upload is a ship-test: it never submits, not even a build that was already there.
+  if (flag('--no-submit') || NO_UPLOAD) return;
   await submit(asc, opt('--notes'), uploaded);
 }
 
 const COMMANDS = { status, release, submit: (asc) => submit(asc, opt('--notes'), null) };
 if (!COMMANDS[cmd]) die(`unknown command ${cmd} (status, release, submit)`);
 try {
-  await COMMANDS[cmd](createAscClient());
+  // Every App Store Connect write checks the lock first (see stillLocked).
+  const asc = createAscClient();
+  const guard = (fn) => (...a) => { stillLocked(); return fn(...a); };
+  await COMMANDS[cmd]({ ...asc, post: guard(asc.post), patch: guard(asc.patch), del: guard(asc.del) });
 } catch (err) {
   die(err?.message || String(err));
 }
