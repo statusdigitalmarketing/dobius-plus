@@ -31,7 +31,7 @@ To open a NEW tab and send it a message, use `/openTab` (`docs/bridge-open-tab.m
 | Claude with a question or dialog open | Nothing typed (an Enter would answer it). | 409 |
 | Claude running a command that holds the terminal readable | Nothing typed (keys could reach that command). | 409 |
 | The process checks failed (a ps or pgrep timeout) | Nothing typed: a failed check is never read as "not Claude". | 409 |
-| The process checks say "not Claude" but a running (not suspended) claude process is in the tab, or the screen shows Claude's prompt or a dialog, or a permission prompt is open | Nothing typed (a check can time out into "no"). | 409 |
+| The process checks say "not Claude" but a running (not suspended) claude process is in the tab, or the screen shows Claude's prompt box | Nothing typed (a check can time out into "no"; the tab check answers yes when it cannot tell). | 409 |
 | Claude, with a screen that never held still for 3 s | Nothing typed. | 409 |
 | A message to Claude ending in a backslash | Nothing typed (Claude reads backslash + Enter as a new line). | 409 |
 | Another send to the same tab still running, dobius-open still delivering its message there, or any dobius-open still creating its tab | Nothing typed. | 409 |

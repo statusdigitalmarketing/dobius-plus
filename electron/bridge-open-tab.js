@@ -160,7 +160,7 @@ export function isClaudePromptReady(lines, modes) {
 // one; `above` is checked only when the caret's place is unknown.
 const DIALOG_FOOTER_RE = /Esc to cancel|Enter to (?:confirm|select)/i;
 const DIALOG_RE = /Do you want to |Would you like to /i;
-export function dialogOnScreen(above, below) {
+function dialogOnScreen(above, below) {
   if (above.some((l) => DIALOG_RE.test(String(l || '')))) return true;
   if ([...above, ...below].some((l) => DIALOG_FOOTER_RE.test(String(l || '')))) return true;
   try { return !!parseSelectorFromScreen([...above, ...below]); } catch { return true; }

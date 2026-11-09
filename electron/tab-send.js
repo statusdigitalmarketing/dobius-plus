@@ -17,7 +17,7 @@
 // One send per tab at a time, and none into a tab /openTab is still delivering to: two pastes would land in one box.
 // ok is true only when Enter was pressed on the message and, where it can be seen (Claude), it was seen taken;
 // confirmed says whether it was seen.
-import { promptBoxText, boxHoldsMessage, dialogOnScreen, TRAILING_BACKSLASH_RE, openTabBusy, openTabsStarting } from './bridge-open-tab.js';
+import { promptBoxText, boxHoldsMessage, TRAILING_BACKSLASH_RE, openTabBusy, openTabsStarting } from './bridge-open-tab.js';
 import { boxIsEmpty } from './team-deliver.js';
 
 const CHUNK = 256;
@@ -78,11 +78,13 @@ async function send(deps, tabId, message) {
       // Claude leads the terminal but a command it started holds it readable (a tool running): keys could reach that
       // command, so nothing is typed. Only a tab Claude is not leading at all is typed into raw.
       if (leads) return fail(409, 'Claude in that tab is running a command that holds the terminal; nothing was typed, try again when it finishes');
-      // A check that timed out says "not Claude" too: a claude process anywhere in the tab, its prompt on screen or a
-      // permission prompt open means it is Claude's after all, and raw text plus Enter could answer its dialog.
+      // A check that timed out says "not Claude" too: a running claude process anywhere in the tab (that check answers
+      // yes when it cannot tell), or its prompt box at the bottom of the screen, means it is Claude's after all, and raw
+      // text plus Enter could answer its dialog. Not the red dot or dialog-like words on screen: a suspended Claude
+      // leaves both behind over a working shell (Codex round 5).
       if (await deps.claudeInTab(tabId)) return fail(409, 'Claude is running in that tab but could not be confirmed at its prompt; nothing was typed, try again');
       const s = await stillScreen(deps, watch, deps.now() + STILL_MS);
-      if ((s && (promptBoxText(s.lines, s.modes) !== null || dialogOnScreen(s.lines, []))) || deps.needs(tabId)) return fail(409, 'that tab shows Claude\'s prompt or a question, but Claude could not be confirmed running there; nothing was typed, try again');
+      if (s && promptBoxText(s.lines, s.modes) !== null) return fail(409, 'that tab shows Claude\'s prompt, but Claude could not be confirmed running there; nothing was typed, try again');
       // Awaited here, never returned bare: the finally below would stop the watch before typeRaw's pause, and keys typed
       // during it would go unseen (Codex round 3).
       return await typeRaw(deps, tabId, pty, watch, message);

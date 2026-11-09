@@ -16,7 +16,7 @@ function screenWith(boxText, { dialog = false } = {}) {
 
 const SHELL = (() => { const lines = ['user@Mac project % ']; lines.dimFrom = [-1]; return { lines, modes: { bracketedPaste: true, cursor: { x: 19, y: 0 } } }; })();
 
-function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false, needsAfterPaste = false, spinAfterSubmit = false } = {}) {
+function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false, needsAfterPaste = false, spinAfterSubmit = false, shell = SHELL } = {}) {
   let clock = 0;
   const t = { box, seq: 0, keys: 0, input: 0, pasted: null, written: [], submitted: 0, pty: {}, alive: true, reads: 0, stopped: false, probes: 0 };
   const deps = {
@@ -32,7 +32,7 @@ function fakeTab({ leads, claude = true, working = false, needs = false, box = '
       seq: () => t.seq, keys: () => t.keys, input: () => t.keys + t.input, stop: () => { t.stopped = true; },
       screen: async () => {
         if (spinAfterSubmit && t.submitted) t.seq += 1; // a frame arrives during every read
-        const shown = boxOnScreen ? screenWith(t.box, { dialog }) : SHELL;
+        const shown = boxOnScreen ? screenWith(t.box, { dialog }) : shell;
         // A wheel turn recalls an earlier prompt while this read renders the screen as it was.
         if (wheelDuringRead && (t.reads += 1) === 1) { t.input += 1; t.seq += 1; t.box = 'an earlier prompt'; }
         return shown;
@@ -273,5 +273,24 @@ test('a box caught halfway through a repaint after the Enter is not a confirmed 
   const { t, deps } = fakeTab({ partialAfterSubmit: true });
   const r = await sendToTab(deps, 'tab', 'hello');
   assert.equal(r.body.ok, false);
+  assert.equal(t.submitted, 1);
+});
+
+test('Claude suspended with a red dot left over: the shell underneath is typed into (Codex round 5)', async () => {
+  const { t, deps } = fakeTab({ claude: false, leads: false, needs: true });
+  const r = await sendToTab(deps, 'tab', 'pwd');
+  assert.equal(r.body.ok, true);
+  assert.equal(t.written.join(''), 'pwd');
+  assert.equal(t.submitted, 1);
+});
+
+test('dialog-like words in old output above a shell prompt do not block a raw send (Codex round 5)', async () => {
+  const lines = ['Would you like to see the diff?', 'Do you want to proceed?', '[1]  + suspended  claude', 'user@Mac project % '];
+  lines.dimFrom = lines.map(() => -1);
+  const shell = { lines, modes: { bracketedPaste: true, cursor: { x: 19, y: 3 } } };
+  const { t, deps } = fakeTab({ claude: false, leads: false, shell });
+  const r = await sendToTab(deps, 'tab', 'pwd');
+  assert.equal(r.body.ok, true);
+  assert.equal(t.written.join(''), 'pwd');
   assert.equal(t.submitted, 1);
 });
