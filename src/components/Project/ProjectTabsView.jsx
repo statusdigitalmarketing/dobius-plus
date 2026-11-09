@@ -85,6 +85,9 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
   // The aggregate reads session history and can be slow on a big history, so
   // a tick is skipped while one is still out (overlapping asks piled up).
   const groupsInFlight = useRef(false);
+  // The tab and view before a double-click's first click switched to the row: closing the row puts you back there, not
+  // on its neighbour (Max, 2026-11-09).
+  const beforeClick = useRef(null);
   const refresh = useCallback(() => {
     if (!window.electronAPI?.dataGetAllProjectTabs) { setGroups([]); return; }
     if (groupsInFlight.current) return;
@@ -304,7 +307,23 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                         setActiveView('terminal');
                         requestTabBar({ kind: 'menu', tabId: t.id, x: e.clientX, y: e.clientY });
                       } : undefined}
-                      onDoubleClick={live ? () => requestTabBar({ kind: 'close', tabId: t.id }) : undefined}
+                      onMouseDown={live ? (e) => {
+                        if (e.button === 0 && e.detail === 1) {
+                          const s = useStore.getState();
+                          beforeClick.current = { row: t.id, tabId: s.activeTabId, view: s.activeView };
+                        }
+                      } : undefined}
+                      onDoubleClick={live ? () => {
+                        const b = beforeClick.current;
+                        beforeClick.current = null;
+                        // Back to where this double-click started, before the close (closing the tab on screen would
+                        // pick its neighbour). The row's own tab, or one already gone: nothing to go back to.
+                        if (b && b.row === t.id && b.tabId && b.tabId !== t.id && useStore.getState().terminalTabs.some((x) => x.id === b.tabId)) {
+                          showTab(b.tabId);
+                          setActiveView(b.view);
+                        }
+                        requestTabBar({ kind: 'close', tabId: t.id });
+                      } : undefined}
                       className="w-full flex items-start gap-2 px-3 py-1.5 rounded"
                       data-testid="sidebar-tab-row"
                       aria-current={selected ? 'true' : undefined}

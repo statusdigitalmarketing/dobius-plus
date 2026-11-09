@@ -14,3 +14,10 @@ export const viewsFor = (features) => (Array.isArray(features) ? VIEWS.filter((v
 
 /** The view to show: the one picked before if this Mac has it, else the first it has (null: none, or not known yet). */
 export const currentView = (views, wanted) => (views?.some((v) => v.id === wanted) ? wanted : views?.[0]?.id || null);
+
+// The paired computer's own word: its authed message says when it is a Windows PC; anything else (an older Mac or PC
+// that does not say) reads as Mac, as before (Max, 2026-11-09).
+export const pcOf = (connection) => (connection?.platform === 'windows' ? 'PC' : 'Mac');
+// A sentence written for a Mac, said for the computer this phone is paired with. Only the capitalised word, so codes
+// such as 'open-on-mac' never change.
+export const forPc = (text, pc) => (pc === 'Mac' || typeof text !== 'string' ? text : text.replace(/\bMac\b/g, pc));

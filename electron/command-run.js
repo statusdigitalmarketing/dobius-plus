@@ -10,12 +10,15 @@ import { commandPlaceholder } from '../shared/handoff.js';
 /**
  * Whether a WAITING command (handoffCommands.peek) may run, and the text that runs. `edited`: the person changed it on
  * the card first (it must still be exactly one plain `! ` command line). `asIs`: the person said the flagged
- * placeholder is real syntax. `syntaxOk(text)`: bash -n, warnings included. `shell`: $SHELL.
+ * placeholder is real syntax. `syntaxOk(text)`: bash -n, warnings included. `shell`: $SHELL. `windows`: this is a Windows
+ * PC, whose tabs are PowerShell and which has no /bin/bash to check with: never runs (Max, 2026-11-09: every command
+ * read as a syntax error there).
  * Returns { ok:true, text } or { ok:false, code, error }: `code` is fixed (what the phone gets), `error` is the Mac's
  * sentence (the placeholder one names the placeholder, so it only goes to the Mac's own window).
  */
-export function checkCommandRun({ cmd, edited, asIs = false, syntaxOk, shell }) {
+export function checkCommandRun({ cmd, edited, asIs = false, syntaxOk, shell, windows = false }) {
   if (!cmd) return { ok: false, code: 'not-waiting', error: 'That command is no longer waiting.' };
+  if (windows) return { ok: false, code: 'shell', error: 'Run is not on Windows yet: use Copy and paste it into a terminal tab.' };
   let text = cmd.text;
   if (edited !== undefined && edited !== null) {
     const e = typeof edited === 'string' ? edited.trim() : '';

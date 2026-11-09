@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { shortPath, visiblePath } from '../shared/short-path.js';
 import { commandPlaceholder } from '../shared/placeholder.js';
 import { dueLabel as dayLabel, localDay, sortOpenTasks } from '../shared/task-due.js';
-import { viewsFor, currentView } from './tasks-views.js';
+import { viewsFor, currentView, pcOf, forPc } from './tasks-views.js';
 
 /**
  * Tasks on the phone, the views of the Mac's Tasks dropdown: Today (what Claude picked from the Inbox board, Done and
@@ -162,6 +162,7 @@ const RUN_CODES = {
   'bad-edit': 'The edited command must be one line of plain text.',
   'bad-edit-syntax': 'That edit is not a complete shell command (check quotes and brackets).',
   syntax: 'That command has a shell syntax error. Copy it and fix it, or ask the session again.',
+  // A Windows PC answers 'shell' too (its tabs are PowerShell); forPc makes it "on the PC".
   shell: 'Run works with zsh and bash only. Use Copy and run it on the Mac.',
   'write-failed': 'Your Mac could not write the command for its terminal.',
   'spawn-failed': 'Your Mac could not start a terminal for it.',
@@ -202,6 +203,8 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
     : !editing ? (typeof c.hole === 'string' ? c.hole : null)
       : (macHoleFor !== null && macHoleFor === draft.trim() ? 'a placeholder' : null);
   const changed = draft.trim() !== c.text;
+  // A Windows PC never runs one (its tabs are PowerShell): Copy only, as on the PC itself.
+  const canRun = pcOf(connection) !== 'PC';
 
   const run = async (asIs = false) => {
     if ((hole && !asIs) || busy) return;
@@ -230,10 +233,10 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
       {c.why && <div className={`cmd-why${c.state === 'waiting' ? '' : ' dim'}`}>{c.why}</div>}
       {hole && (
         <div className="cmd-hole">
-          <span>Fill in {hole === 'a placeholder' ? hole : <code>{hole}</code>} before running.</span>
+          <span>Fill in {hole === 'a placeholder' ? hole : <code>{hole}</code>} {canRun ? 'before running' : 'before copying'}.</span>
           <div className="cmd-hole-actions">
             {!editing && <button className="cmd-link" onClick={() => setEditing(true)}>Fill it in</button>}
-            <button className="cmd-link dim" onClick={() => run(true)} disabled={busy}>Not a placeholder? Run as is</button>
+            {canRun && <button className="cmd-link dim" onClick={() => run(true)} disabled={busy}>Not a placeholder? Run as is</button>}
           </div>
         </div>
       )}
@@ -244,7 +247,7 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
       {c.edited && c.state !== 'waiting' && <div className="cmd-note">Ran with your edit. Dobius does not show or save it.</div>}
       <div className="today-actions">
         {c.state === 'waiting' ? <>
-          <button className="today-done" disabled={!!hole || busy} onClick={() => run()}>{busy ? 'Starting…' : 'Run'}</button>
+          {canRun && <button className="today-done" disabled={!!hole || busy} onClick={() => run()}>{busy ? 'Starting…' : 'Run'}</button>}
           {editing
             ? <button onClick={() => { setEditing(false); setDraft(c.text); }}>Cancel</button>
             : <button onClick={() => setEditing(true)}>Edit</button>}
@@ -267,15 +270,18 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
 function CommandsView({ connection, entries, reload, say, onOpenTab }) {
   const [openReply, setOpenReply] = useState(null);
   if (entries === null) return <p className="muted pad">Loading…</p>;
-  if (entries.error) return <p className="muted pad">Could not read the commands from your Mac. <button className="link-btn" onClick={reload}>Try again</button></p>;
+  const pc = pcOf(connection);
+  if (entries.error) return <p className="muted pad">Could not read the commands from your {pc}. <button className="link-btn" onClick={reload}>Try again</button></p>;
   const shown = entries.filter((e) => e.commands.length);
   return <>
-    <p className="today-line">Commands your Claude sessions asked you to run. Run starts a new terminal on your Mac in the folder shown; the card then says whether it worked.</p>
+    <p className="today-line">{pc === 'PC'
+      ? 'Commands your Claude sessions asked you to run. Copy one and paste it into a terminal on your PC in the folder shown (Run is not on Windows yet).'
+      : 'Commands your Claude sessions asked you to run. Run starts a new terminal on your Mac in the folder shown; the card then says whether it worked.'}</p>
     {shown.length === 0 && <p className="muted pad">Nothing to run right now. When a session hands you a command, it shows up here.</p>}
     {shown.map((e) => {
       // Always the path itself: two projects can share a name and a tab label, and Run acts on exactly this folder (Codex
       // round 4). Home is shortened to ~.
-      const folderOf = (cwd) => visiblePath(shortPath(cwd || e.projectPath || '', e.home)) || 'the project folder';
+      const folderOf = (cwd) => visiblePath(shortPath(cwd || e.projectPath || '', e.home), { windows: pc === 'PC' }) || 'the project folder';
       // One group per reply the commands came with, as on the Mac: each has its own folder, age and full reply.
       const groups = [];
       for (const c of e.commands) {
@@ -502,15 +508,16 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
   // that would READ the same (two `api` folders, or `api` with one task next to a folder named `api (1)`) show their
   // folder too (Codex rounds 8 and 9). The picked project's folder is always shown under the picker, so where Add, Done
   // and Delete go is on screen whatever the labels say.
+  const win = { windows: pcOf(connection) === 'PC' };
   const base = (p) => {
     const n = kind === 'asana' ? p.asana : p.pending;
     // The whole label goes through visiblePath, count included, so the two compare exactly as they read (Codex round 14:
     // a name's space and the count's space were written differently and two equal-looking labels did not match).
-    return visiblePath(`${p.name}${n ? ` (${n})` : ''}`);
+    return visiblePath(`${p.name}${n ? ` (${n})` : ''}`, win);
   };
   const seen = new Map();
   for (const p of projects) seen.set(base(p), (seen.get(base(p)) || 0) + 1);
-  const name = (p) => (seen.get(base(p)) > 1 ? `${base(p)} · ${visiblePath(p.path)}` : base(p));
+  const name = (p) => (seen.get(base(p)) > 1 ? `${base(p)} · ${visiblePath(p.path, win)}` : base(p));
   const picked = projects.find((p) => p.path === project);
   return <>
     <label className="tasks-project">
@@ -520,7 +527,7 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
         {projects.map((p) => <option key={p.path} value={p.path}>{name(p)}</option>)}
       </select>
     </label>
-    {picked && <p className="settings-foot tasks-folder">In <span className="path-text">{visiblePath(picked.path)}</span></p>}
+    {picked && <p className="settings-foot tasks-folder">In <span className="path-text">{visiblePath(picked.path, win)}</span></p>}
     {kind === 'todo' && (
       <form className="task-add" onSubmit={(e) => { e.preventDefault(); add(); }}>
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Add a task" maxLength={500} enterKeyHint="done" aria-label="Add a task" />
@@ -530,11 +537,11 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     {kind === 'asana' && <>
       <button className="settings-action tasks-sync" onClick={sync} disabled={syncing}>{syncing ? 'Syncing with Asana…' : 'Sync from Asana'}</button>
       <p className="settings-foot">Pulls your Asana tasks and Sam's review lane into this project's list. Checking one off here marks it done on this list only.</p>
-      {syncNote && <p className={syncNote.ok ? 'today-meta today-synced' : 'today-warn'}>{syncNote.ok || syncNote}</p>}
+      {syncNote && <p className={syncNote.ok ? 'today-meta today-synced' : 'today-warn'}>{syncNote.ok || forPc(syncNote, pcOf(connection))}</p>}
     </>}
     {!project && <p className="muted pad">Choose a project to see its list.</p>}
     {project && !current && <p className="muted pad">Loading…</p>}
-    {current?.error && <p className="muted pad">{SYNC_PROBLEM[current.error] || 'Could not read this project\'s tasks.'} <button className="link-btn" onClick={loadTasks}>Try again</button></p>}
+    {current?.error && <p className="muted pad">{forPc(SYNC_PROBLEM[current.error], pcOf(connection)) || 'Could not read this project\'s tasks.'} <button className="link-btn" onClick={loadTasks}>Try again</button></p>}
     {current?.tasks && <>
       {pending.length === 0 && <p className="muted pad">{tasks.length ? 'Everything here is done.' : kind === 'asana' ? 'No Asana tasks on this project\'s list. Sync to pull them in.' : 'No tasks yet. Add one above.'}</p>}
       {pending.length > 0 && <div className="settings-group task-list">{pending.map(row)}</div>}
@@ -651,11 +658,12 @@ export default function Tasks({ connection, onBack, onOpenTab, startView = null,
     return () => clearTimeout(t);
   }, [undo]);
 
+  const pc = pcOf(connection);
   const say = useCallback((text, action = null) => {
-    const n = { text, action };
+    const n = { text: forPc(text, pc), action };
     setNote(n);
     setTimeout(() => setNote((cur) => (cur === n ? null : cur)), action ? 8000 : 5000);
-  }, []);
+  }, [pc]);
   const mark = (id, on) => setBusy((b) => { const n = { ...b }; if (on) n[id] = true; else delete n[id]; return n; });
   useEffect(() => { if (notice?.text) say(notice.text); }, [notice, say]);
 
@@ -744,7 +752,7 @@ export default function Tasks({ connection, onBack, onOpenTab, startView = null,
     body = <ProjectView connection={connection} kind={current} say={say} asanaCards={asanaCards} cardFor={(c) => cardFor(c)} />;
   } else if (!today) body = <p className="muted pad">Loading…</p>;
   else if (today.error) body = <p className="muted pad">Could not read Today from your Mac. <button className="link-btn" onClick={load}>Try again</button></p>;
-  else if (board?.state !== 'ok') body = <p className="muted pad">{BOARD_PROBLEM[board?.state] || 'Could not read the Inbox board on your Mac.'}</p>;
+  else if (board?.state !== 'ok') body = <p className="muted pad">{forPc(BOARD_PROBLEM[board?.state] || 'Could not read the Inbox board on your Mac.', pc)}</p>;
   else if (current === 'inbox') {
     const q = query.trim().toLowerCase();
     const all = inbox?.cards || [];
@@ -765,7 +773,7 @@ export default function Tasks({ connection, onBack, onOpenTab, startView = null,
         </div>
       )}
       {!inbox && <p className="muted pad">Loading every card…</p>}
-      {inbox && inbox.ok === false && <p className="muted pad">{BOARD_PROBLEM[inbox.reason] || 'Could not read the Inbox board.'}</p>}
+      {inbox && inbox.ok === false && <p className="muted pad">{forPc(BOARD_PROBLEM[inbox.reason], pc) || 'Could not read the Inbox board.'}</p>}
       {inbox?.cards && <p className="today-line">{q || src !== 'all' ? `${cards.length} of ${all.length}` : `${all.length} open`}</p>}
       {cards.map((c) => cardFor(c))}
     </>;

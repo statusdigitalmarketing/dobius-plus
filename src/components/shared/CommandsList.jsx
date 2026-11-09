@@ -6,6 +6,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useStore } from '../../store/store';
 import { commandPlaceholder } from '../../../shared/handoff.js';
+import { isWindows } from '../../../shared/platform.js';
+
+// Windows tabs run PowerShell, which cannot start a run script: Copy only (Max, 2026-11-09).
+const CAN_RUN = !isWindows();
 
 const MONO = "'SF Mono', Menlo, monospace";
 const api = window.electronAPI;
@@ -118,17 +122,19 @@ function CommandCard({ entry, c, projectPath, tabName, hasTab, folderOf, onError
       )}
       {hole && (
         <div style={{ fontSize: 11, color: '#F87300', background: 'rgba(248,115,0,0.08)', border: '1px solid rgba(248,115,0,0.35)', borderRadius: 4, padding: '4px 8px', marginBottom: 6 }}>
-          Fill in <span style={{ fontFamily: MONO }}>{hole}</span> before running.
+          Fill in <span style={{ fontFamily: MONO }}>{hole}</span> {CAN_RUN ? 'before running' : 'before copying'}.
           {!editing && (
             <button style={{ ...btn(), marginLeft: 8, color: '#F87300', borderColor: 'rgba(248,115,0,0.5)' }} onClick={() => setEditing(true)}>Fill it in</button>
           )}
-          <button
-            style={{ ...btn(), border: 'none', padding: '0 0 0 8px', textDecoration: 'underline', color: 'var(--dim)' }}
-            title={`Run it exactly as shown: ${hole} is part of the command, not something to replace`}
-            onClick={() => run(true)}
-          >
-            Not a placeholder? Run as is
-          </button>
+          {CAN_RUN && (
+            <button
+              style={{ ...btn(), border: 'none', padding: '0 0 0 8px', textDecoration: 'underline', color: 'var(--dim)' }}
+              title={`Run it exactly as shown: ${hole} is part of the command, not something to replace`}
+              onClick={() => run(true)}
+            >
+              Not a placeholder? Run as is
+            </button>
+          )}
         </div>
       )}
       {editing && c.state === 'waiting' ? (
@@ -141,7 +147,7 @@ function CommandCard({ entry, c, projectPath, tabName, hasTab, folderOf, onError
           onKeyDown={(e) => {
             // Enter while an input method is composing (Japanese, Chinese) accepts the candidate; it never runs.
             if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-            if (e.key === 'Enter') { e.preventDefault(); run(); }
+            if (e.key === 'Enter') { e.preventDefault(); if (CAN_RUN) run(); }
             if (e.key === 'Escape') { setEditing(false); setDraft(c.text); }
           }}
           aria-label="Edit the command"
@@ -161,18 +167,20 @@ function CommandCard({ entry, c, projectPath, tabName, hasTab, folderOf, onError
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
         {c.state === 'waiting' ? (
           <>
-            <button
-              style={btn('primary', !!hole || busy)}
-              disabled={!!hole || busy}
-              title={hole ? `Fill in ${hole} first` : 'Opens a new terminal tab in the folder shown and runs it there'}
-              onClick={() => run()}
-            >
-              {busy ? 'Starting…' : '▶ Run'}
-            </button>
+            {CAN_RUN && (
+              <button
+                style={btn('primary', !!hole || busy)}
+                disabled={!!hole || busy}
+                title={hole ? `Fill in ${hole} first` : 'Opens a new terminal tab in the folder shown and runs it there'}
+                onClick={() => run()}
+              >
+                {busy ? 'Starting…' : '▶ Run'}
+              </button>
+            )}
             {editing ? (
               <button style={btn()} onClick={() => { setEditing(false); setDraft(c.text); }}>Cancel</button>
             ) : (
-              <button style={btn()} title="Change it before running (fill in a key, a path)" onClick={() => setEditing(true)}>Edit</button>
+              <button style={btn()} title={CAN_RUN ? 'Change it before running (fill in a key, a path)' : 'Change it before copying (fill in a key, a path)'} onClick={() => setEditing(true)}>Edit</button>
             )}
             <button style={btn()} onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
             <button style={btn()} title="Not running it: remove it from the list" onClick={() => api.handoffCommandsDismiss(entry.tabId, c.id)}>Dismiss</button>
@@ -217,7 +225,9 @@ export default function CommandsList({ query }) {
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '2px 0 6px' }}>
       <div style={{ padding: '6px 12px 8px', borderBottom: '1px solid var(--border)', fontSize: 11, lineHeight: 1.45, color: 'var(--dim)' }}>
-        Commands your Claude sessions asked you to run. <span style={{ color: 'var(--fg)' }}>Run</span> opens a new terminal tab in the folder shown and runs it there; the card then says whether it worked.
+        {CAN_RUN
+          ? <>Commands your Claude sessions asked you to run. <span style={{ color: 'var(--fg)' }}>Run</span> opens a new terminal tab in the folder shown and runs it there; the card then says whether it worked.</>
+          : <>Commands your Claude sessions asked you to run. <span style={{ color: 'var(--fg)' }}>Copy</span> one and paste it into a terminal tab in the folder shown (Run is not on Windows yet).</>}
       </div>
       {shown.length === 0 && (
         <div style={{ padding: '20px 14px', textAlign: 'center', color: 'var(--dim)', fontSize: 11, lineHeight: 1.5 }}>

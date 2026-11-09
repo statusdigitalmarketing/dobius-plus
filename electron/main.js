@@ -4435,7 +4435,7 @@ function setupWindowHandlers() {
     if (typeof tabId !== 'string' || typeof id !== 'string') return { ok: false, error: 'bad request' };
     // The same checks as the phone's Run (electron/command-run.js): still waiting, an edit is one plain command line,
     // no unfilled placeholder unless "run as is", bash -n clean, zsh or bash.
-    const check = checkCommandRun({ cmd: handoffCommands.peek(tabId, id), edited, asIs, syntaxOk: runSyntaxOk, shell: process.env.SHELL });
+    const check = checkCommandRun({ cmd: handoffCommands.peek(tabId, id), edited, asIs, syntaxOk: runSyntaxOk, shell: process.env.SHELL, windows: IS_WIN });
     if (!check.ok) return { ok: false, error: check.error };
     const text = check.text;
     const now = Date.now();
