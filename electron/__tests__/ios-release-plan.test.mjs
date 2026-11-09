@@ -152,7 +152,8 @@ test('review details are checked field by field and copied only from a complete 
   const c = reviewDetailCopy(full);
   assert.deepEqual(Object.keys(c).sort(), ['contactEmail', 'contactFirstName', 'contactLastName', 'contactPhone', 'demoAccountRequired', 'notes']);
   assert.deepEqual(reviewDetailProblems({ ...full, contactPhone: '  ' }), ['no contactPhone']);
-  assert.deepEqual(reviewDetailProblems({ ...full, notes: 'Pair with demo.dobius' }), ['the notes do not mention 123456']);
+  assert.deepEqual(reviewDetailProblems({ ...full, notes: 'Pair with demo.dobius' }), ['the notes do not give the pairing code 123456 on its own']);
+  assert.deepEqual(reviewDetailProblems({ ...full, notes: 'Pair with demo.dobius, code 0123456' }), ['the notes do not give the pairing code 123456 on its own'], 'a longer number is not the code');
   assert.deepEqual(reviewDetailProblems(null), ['no review details']);
   assert.equal(reviewDetailCopy({ ...full, contactEmail: '' }), null);
   // Reviewers told a sign-in is needed must get one.

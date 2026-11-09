@@ -63,7 +63,8 @@ process.on('exit', () => {
   cleanupOnExit = null;
   c?.();
 });
-for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { killGroup(current); process.exit(130); });
+// SIGQUIT too (Ctrl+\): its default ends the run without the exit handlers, leaving the build running (Codex round 10).
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) process.on(sig, () => { killGroup(current); process.exit(130); });
 // The build steps get only these from the environment: anything else could change the app without changing the commit
 // (XCODE_XCCONFIG_FILE swaps in another Info.plist, npm_config_* another registry; Codex).
 const BUILD_ENV_KEYS = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'DEVELOPER_DIR'];
@@ -141,7 +142,7 @@ if (cmd !== 'status' && !DRY && process.env.DOBIUS_IOS_RELEASE_LOCKED !== '1') {
   const child = spawn('/usr/bin/lockf', ['-s', '-t', '0', LOCK, process.execPath, SELF, ...argv], {
     stdio: 'inherit', env: { ...process.env, DOBIUS_IOS_RELEASE_LOCKED: '1', DOBIUS_IOS_RELEASE_STARTER: [process.env.DOBIUS_IOS_RELEASE_STARTER, process.pid].filter(Boolean).join(',') },
   });
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) {
     process.removeAllListeners(sig);
     process.on(sig, () => { try { child.kill('SIGTERM'); } catch { /* already gone */ } });
   }
@@ -170,6 +171,8 @@ if (LOCK_HOLDER !== null) setInterval(stillLocked, 5000).unref();
 // ---- checks before building ----
 function preflight() {
   const cfg = ascConfig();
+  // Checked before it is printed anywhere: a key's contents in ASC_KEY_ID by mistake would land in the log (Codex round 10).
+  if (!/^[A-Z0-9]{8,12}$/.test(String(cfg.keyId || ''))) die('ASC_KEY_ID is not an App Store Connect key id (8 to 12 capital letters and digits)');
   // The path is never printed: a key's contents put in ASC_KEY_PATH by mistake would land in the log (Codex round 9).
   if (!fs.existsSync(cfg.keyPath)) die('the App Store Connect key file named by ASC_KEY_PATH does not exist');
   // altool finds the key by its file name in a folder, so the file must carry Apple's name.
@@ -573,7 +576,7 @@ async function waitForBuild(asc, appId, marketing, buildNo, up, onSeen) {
     }
     await new Promise((res) => setTimeout(res, POLL_MS));
   }
-  if (!buildId) say(`never found this run's own upload (${why}); the tag stays unbound and vouches for nothing`);
+  if (!buildId) { say(`never found this run's own upload (${why}); the tag stays unbound and vouches for nothing`); return 'timeout-unbound'; }
   return 'timeout';
 }
 
@@ -721,6 +724,13 @@ async function submit(asc, notes, justUploaded) {
     const finalItems = await itemsOf(asc, sub.id);
     if (!itemFor(finalItems, version.id)) throw new Error(`version ${candidate.marketing} is not in review submission ${sub.id}`);
     if (othersIn(finalItems, version.id).length) throw new Error(`review submission ${sub.id} gained other items before submitting; not submitted`);
+    // The review details and the review type again before each try: they can be edited in App Store Connect meanwhile,
+    // and a Notarization version would never reach the App Store (Codex round 10).
+    const lastDetail = await reviewDetailOf(asc, version.id);
+    const lastProblems = reviewDetailProblems(lastDetail?.attributes);
+    if (lastProblems.length) throw new Error(`the review details changed before submitting (${lastProblems.join(', ')}); not submitted`);
+    const reviewType = (await asc.get(`/v1/appStoreVersions/${version.id}`)).data?.attributes?.reviewType;
+    if (reviewType && reviewType !== 'APP_STORE') throw new Error(`version ${candidate.marketing} is set for ${reviewType} review, not the App Store; change it in App Store Connect; not submitted`);
     try {
       await asc.patch(`/v1/reviewSubmissions/${sub.id}`, { data: { type: 'reviewSubmissions', id: sub.id, attributes: { submitted: true } } });
       break;
@@ -785,6 +795,8 @@ async function release(asc) {
       });
       // Unbound: it can never be submitted from here, so the run fails and release.sh says so.
       if (state === 'unbound') throw new Error(`build ${buildNo} was uploaded but could not be bound to this run (no delivery id)`);
+      // Never bound: a later submit cannot use it either, so this fails loudly instead of pointing at submit (Codex round 10).
+      if (state === 'timeout-unbound') throw new Error(`build ${buildNo} was still processing after ${PROCESSING_TIMEOUT_MS / MIN} minutes and was never bound to this run; the next release builds a new number`);
       if (state === 'timeout') {
         say(`build ${buildNo} is still processing after ${PROCESSING_TIMEOUT_MS / MIN} minutes; run "node scripts/ios-release.mjs submit" later`);
         return;
