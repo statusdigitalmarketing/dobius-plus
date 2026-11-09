@@ -134,7 +134,10 @@ function readTasks(projectPath, { strict = false } = {}) {
 // translate the throw into { ok:false } so the IPC contract never rejects).
 function writeTasks(projectPath, tasks) {
   fs.mkdirSync(TASKS_DIR, { recursive: true });
-  const filePath = tasksPath(projectPath);
+  // The project's own file, never the legacy move: a write is not the first touch (a read came first and did any move
+  // there), and moving another folder's old list here on a write is how a corrupt-file recovery overwrote it (Codex,
+  // phone tasks round 4).
+  const filePath = hashedTasksPath(projectPath);
   const tmp = `${filePath}.${Date.now()}-${Math.floor(Math.random() * 1e6)}.tmp`;
   try {
     fs.writeFileSync(tmp, JSON.stringify(tasks, null, 2), 'utf8');

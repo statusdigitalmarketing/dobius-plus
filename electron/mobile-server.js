@@ -612,7 +612,9 @@ function routeToConductor(transcript) {
 // within a session (PTYs never survive a restart) and never reuses an id, which
 // fixes the `Date.now()` collision that let two same-millisecond spawns kill
 // each other's PTY. Audit MED-10 + Codex.
-let mobileTermCounter = 0;
+// Starts at a random point each launch: a terminal id is never reused across a restart, so a phone that still holds an
+// old id can never be attached to a different terminal that took the same number (Codex, phone tasks round 4).
+let mobileTermCounter = 1000 * (1 + crypto.randomInt(900000));
 function mobileTermId() {
   mobileTermCounter += 1;
   return `term-mobile-${mobileTermCounter}`;

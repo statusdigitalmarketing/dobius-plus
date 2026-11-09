@@ -296,3 +296,5 @@ Command text, what Claude wrote around it and the full reply go only to the phon
   are its owner's. A Run terminal shows the command as handed back, which the session's own terminal already shows.
 - A task checked off from a terminal (`dobius-task-done`, the voice bridge) sends phones no event; an open To-do or
   Asana screen reads again every minute and whenever it comes back into view.
+
+**Phone Tasks: accepted residuals (Codex review, 2026-11-08).** (1) A command edited before Run is shown as the original plus "(edited)", but if the edited text makes bash fail at run time (a bad substitution), bash's own error message can echo part of it into that terminal: the same residual the desktop already accepts (CLAUDE.md, Tasks > Commands). (2) Two Dobius instances on one Mac share `~/.claude/project-tasks`: a phone delete can remove a task the other instance renamed in the same instant, after the phone's print check. Not reachable with one instance.

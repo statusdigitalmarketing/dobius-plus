@@ -84,6 +84,8 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
   // Guards a createTerminal round-trip so a double-tap over Tailscale latency
   // can't spawn two orphan PTYs. Reset on the reply. Audit MED-10.
   const creatingRef = useRef(false);
+  // The nonce of this screen's own pending create: only the reply carrying it moves the screen (Codex round 4).
+  const createNonceRef = useRef(null);
   // tab id -> { sig, at }: when each tab's current spinner reading first arrived.
   const activityRxRef = useRef(new Map());
   // 'chat' (responsive transcript, default) vs 'terminal' (raw PTY mirror). The
@@ -143,10 +145,12 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
       } else if (msg.type === 'terminalCreated') {
         // Only a creation this screen asked for moves it: a late reply to one started elsewhere (the Board) must not
         // take the place of the exact terminal opened from a command card (Codex, phone tasks round 3).
-        const mine = creatingRef.current;
+        // Ours only when it echoes the nonce this screen sent; a Mac too old to echo one falls back to the pending flag.
+        const mine = typeof msg.nonce === 'string' ? (createNonceRef.current !== null && msg.nonce === createNonceRef.current) : creatingRef.current;
+        if (!mine) { refreshList(); return; } // someone else's create (the Board's): leave this screen's state alone
         creatingRef.current = false;
+        createNonceRef.current = null;
         refreshList();
-        if (!mine) return;
         setActiveId(msg.id);
         setSwitcherOpen(false);
       } else if (msg.type === 'terminalMissing') {
@@ -163,7 +167,9 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         // answers instead of dropping it): refresh so the list stops offering it.
         refreshList();
       } else if (msg.type === 'error') {
+        if (typeof msg.nonce === 'string' && msg.nonce !== createNonceRef.current) return; // another screen's create failed
         creatingRef.current = false; // let the user retry a failed create
+        createNonceRef.current = null;
       }
     });
     if (connection.status === 'authed') refreshList();
@@ -208,8 +214,10 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
   const newTerminalIn = useCallback((projectPath) => {
     if (creatingRef.current) return; // guard double-tap over latency (MED-10)
     creatingRef.current = true;
+    const nonce = `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    createNonceRef.current = nonce;
     setSwitcherOpen(false);
-    connection.send({ type: 'createTerminal', cwd: projectPath });
+    connection.send({ type: 'createTerminal', cwd: projectPath, nonce });
   }, [connection]);
 
   // Top-bar "+": add a tab in the active terminal's project.

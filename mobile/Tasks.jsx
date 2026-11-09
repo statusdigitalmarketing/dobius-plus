@@ -267,7 +267,9 @@ function CommandsView({ connection, entries, reload, say, onOpenTab }) {
     <p className="today-line">Commands your Claude sessions asked you to run. Run starts a new terminal on your Mac in the folder shown; the card then says whether it worked.</p>
     {shown.length === 0 && <p className="muted pad">Nothing to run right now. When a session hands you a command, it shows up here.</p>}
     {shown.map((e) => {
-      const folderOf = (cwd) => (!cwd || cwd === e.projectPath ? 'the project folder' : (e.projectPath && cwd.startsWith(`${e.projectPath}/`) ? cwd.slice(e.projectPath.length + 1) : cwd));
+      // Always the path itself: two projects can share a name and a tab label, and Run acts on exactly this folder (Codex
+      // round 4). Home is shortened to ~.
+      const folderOf = (cwd) => shortPath(cwd || e.projectPath || '') || 'the project folder';
       // One group per reply the commands came with, as on the Mac: each has its own folder, age and full reply.
       const groups = [];
       for (const c of e.commands) {
@@ -298,6 +300,8 @@ function CommandsView({ connection, entries, reload, say, onOpenTab }) {
     })}
   </>;
 }
+
+const shortPath = (p) => String(p || '').replace(/^\/Users\/[^/]+(?=\/|$)/, '~');
 
 const SYNC_PROBLEM = {
   'no-key': 'No Asana key on this Mac yet. Add one in Settings > Integrations on the Mac.',
@@ -409,6 +413,7 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
   }, [connection, loadProjects, loadTasks]);
 
   useEffect(() => {
+    setSyncNote(null); // a note was about the project before
     if (!project) return;
     store.set(key, project);
     setExpanded(null);
@@ -449,10 +454,12 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     if (syncing) return;
     setSyncing(true);
     setSyncNote(null);
-    const r = await ask(connection, { type: 'asanaSync', project: projectRef.current }, 'asanaSyncResult', 120000);
+    const p = projectRef.current;
+    const r = await ask(connection, { type: 'asanaSync', project: p }, 'asanaSyncResult', 120000);
     setSyncing(false);
     if (r?.ok) say(r.added ? `${r.added} new from Asana.` : 'Up to date with Asana.');
-    else setSyncNote(r ? SYNC_PROBLEM[r.error] || 'Asana sync failed. Try again in a moment.' : 'No answer from your Mac.');
+    // A note is about the project it was for: shown only while that project is still the one on screen (Codex round 4).
+    else if (projectRef.current === p) setSyncNote(r ? SYNC_PROBLEM[r.error] || 'Asana sync failed. Try again in a moment.' : 'No answer from your Mac.');
     loadTasks();
     loadProjects();
   };
