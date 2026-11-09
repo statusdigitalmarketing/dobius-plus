@@ -41,15 +41,21 @@ function useMonitors() {
   useEffect(() => {
     if (!window.electronAPI?.terminalGetProcess || live.length === 0) { setActiveCount(0); return; }
     let cancelled = false;
+    let running = false;
     const poll = async () => {
-      let active = 0;
-      for (const id of live) {
-        try {
-          const proc = await window.electronAPI.terminalGetProcess(id);
-          if (proc && !SHELLS.includes(String(proc).trim())) active += 1;
-        } catch { /* ignore */ }
-      }
-      if (!cancelled) setActiveCount(active);
+      // A round that outlives the interval (a busy main process) is not stacked on.
+      if (running) return;
+      running = true;
+      try {
+        let active = 0;
+        for (const id of live) {
+          try {
+            const proc = await window.electronAPI.terminalGetProcess(id);
+            if (proc && !SHELLS.includes(String(proc).trim())) active += 1;
+          } catch { /* ignore */ }
+        }
+        if (!cancelled) setActiveCount(active);
+      } finally { running = false; }
     };
     poll();
     const i = setInterval(poll, 5000);

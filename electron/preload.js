@@ -184,7 +184,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dataLastAssistantMessage: (sessionId, projectPath) => ipcRenderer.invoke('data:lastAssistantMessage', sessionId, projectPath),
   dataSessionHoverInfo: (sessionId, projectPath) => ipcRenderer.invoke('data:sessionHoverInfo', sessionId, projectPath),
   onDataUpdated: (callback) => {
-    const handler = (_event, changedPath) => callback(changedPath);
+    // info: { projects: string[] | null } from the history watcher (which
+    // projects had a prompt; null = unknown), absent from other senders.
+    const handler = (_event, changedPath, info) => callback(changedPath, info);
     ipcRenderer.on('data:updated', handler);
     return () => ipcRenderer.removeListener('data:updated', handler);
   },

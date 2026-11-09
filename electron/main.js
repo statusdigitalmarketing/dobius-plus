@@ -43,7 +43,7 @@ import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser, ensureShim } from './gws-accounts.js';
 import { gwsSetupStatus, installGws, useGwsAt, findClientFiles, useClientFile, refreshGwsEnv, setHintDir } from './gws-setup.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, terminalClosing, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary, terminalBracketedPaste } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalProcessShared, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, terminalClosing, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary, terminalBracketedPaste } from './terminal-manager.js';
 import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
@@ -663,7 +663,7 @@ function setupTerminalHandlers() {
   ipcMain.handle('terminal:getProcess', (event, id) => {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
     if (!ownsTerminal(event.sender.id, id)) return null;
-    return getTerminalProcess(id);
+    return getTerminalProcessShared(id);
   });
 
   ipcMain.handle('terminal:getCwd', (event, id) => {

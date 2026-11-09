@@ -94,7 +94,11 @@ export function useSessions({ projectFilter = null, excludeAutomated = false } =
   useEffect(() => {
     loadSessions();
     if (!window.electronAPI) return;
-    const remove = window.electronAPI.onDataUpdated(() => {
+    const remove = window.electronAPI.onDataUpdated((_changed, info) => {
+      // A history event names the projects that had a prompt. A window scoped
+      // to another project has nothing new to show: skip the rescan (14 windows
+      // rescanning on every prompt was ~3.7s of main CPU each time).
+      if (projectFilter && Array.isArray(info?.projects) && !info.projects.includes(projectFilter)) return;
       loadSessions();
     });
     // Main renamed a running session after its tab: no transcript write
@@ -102,7 +106,13 @@ export function useSessions({ projectFilter = null, excludeAutomated = false } =
     const removeNames = window.electronAPI.onSessionNamesChanged?.(() => {
       loadSessions();
     });
-    return () => { remove(); removeNames?.(); };
+    // Statuses (working / done) age with the clock and with replies, which
+    // write no history line. Other projects' prompts used to refresh them as a
+    // side effect; now a slow tick and window focus do, and only while visible.
+    const tick = setInterval(() => { if (!document.hidden) loadSessions(); }, 60_000);
+    const onFocus = () => loadSessions();
+    window.addEventListener('focus', onFocus);
+    return () => { remove(); removeNames?.(); clearInterval(tick); window.removeEventListener('focus', onFocus); };
   }, [loadSessions]);
 
   // Apply tags + project filter without re-fetching. displayName is what the

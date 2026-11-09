@@ -622,6 +622,34 @@ export async function getTerminalProcess(id) {
   }
 }
 
+// For the status pollers (terminal:getProcess): every window polls every tab
+// it shows (StatusBar every 5s, the tab bar every 10s), and each answer is a
+// pgrep plus a ps. With ~45 tabs those piled up behind a busy main thread
+// (2026-11-09 stall log: ~15 in flight at once). One answer per tab is shared
+// for PROCESS_TTL_MS and concurrent asks share one lookup. Anything about to
+// type into a tab must call getTerminalProcess itself, never this.
+const PROCESS_TTL_MS = 1500;
+const processAnswers = new Map(); // id -> { at, value } | { pending }
+export function getTerminalProcessShared(id) {
+  const hit = processAnswers.get(id);
+  if (hit?.pending) return hit.pending;
+  if (hit && Date.now() - hit.at < PROCESS_TTL_MS && terminals.has(id)) return Promise.resolve(hit.value);
+  const pending = getTerminalProcess(id).then(
+    (value) => {
+      if (terminals.has(id)) processAnswers.set(id, { at: Date.now(), value });
+      else processAnswers.delete(id);
+      return value;
+    },
+    (err) => { processAnswers.delete(id); throw err; },
+  );
+  processAnswers.set(id, { pending });
+  // Bounded by the live tabs: answers for closed tabs go on the next sweep.
+  if (processAnswers.size > terminals.size + 64) {
+    for (const key of processAnswers.keys()) if (!terminals.has(key) && !processAnswers.get(key)?.pending) processAnswers.delete(key);
+  }
+  return pending;
+}
+
 // Programs that run under an IDLE interactive shell: the shells themselves
 // and Powerlevel10k's prompt helper, which lives under every p10k zsh.
 const IDLE_SHELL_PROCS = /^-?(zsh|bash|sh|fish|dash|ksh|tcsh)$|^gitstatusd/;

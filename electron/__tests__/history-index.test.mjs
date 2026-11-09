@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHistoryIndex, singleFlight } from '../history-index.js';
+import { createHistoryIndex, singleFlight, projectsSince } from '../history-index.js';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-history-index-'));
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -261,4 +261,24 @@ test('a read that fails part way is thrown away, so the retry starts from the be
   fs.writeFileSync(f, txt);
   const idx = await h.read();
   assert.equal(idx.bySession.get('a1').display, `Q a1 ${T0}`);
+});
+
+test('projectsSince names the projects that had a prompt after an earlier reading', async () => {
+  const f = tmpFile();
+  fs.writeFileSync(f, line('a1', T0) + line('b1', T0 + 1)); // projects /p/a, /p/b
+  const h = createHistoryIndex(f);
+  const first = await h.read();
+  const seq = first.seq;
+  assert.equal(seq, 2);
+  assert.equal(projectsSince(first, null, NaN), null, 'no earlier reading: unknown');
+  fs.appendFileSync(f, line('c1', T0 + 2) + line('a2', T0 + 3) + line('c2', T0 + 4));
+  const idx = await h.read();
+  assert.equal(idx, first, 'same index object after an append');
+  assert.deepEqual(projectsSince(idx, first, seq).sort(), ['/p/a', '/p/c']);
+  assert.deepEqual(projectsSince(idx, idx, idx.seq), [], 'nothing new');
+  // A rewrite builds a new index: which projects changed cannot be told.
+  fs.writeFileSync(f, line('z1', T0));
+  const fresh = await h.read();
+  assert.notEqual(fresh, first);
+  assert.equal(projectsSince(fresh, first, seq), null);
 });

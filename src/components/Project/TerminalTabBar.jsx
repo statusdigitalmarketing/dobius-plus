@@ -458,21 +458,28 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
   const [tabProcesses, setTabProcesses] = useState({});
   useEffect(() => {
     if (!window.electronAPI?.terminalGetProcess || tabs.length === 0) return;
+    let running = false;
+    let cancelled = false;
     const poll = async () => {
-      const result = {};
-      for (const tab of tabs) {
-        try {
-          const proc = await window.electronAPI.terminalGetProcess(tab.id);
-          if (proc) result[tab.id] = proc;
-        } catch { /* ignore */ }
-      }
-      setTabProcesses(result);
+      // Never stack a round on one still waiting for a busy main process.
+      if (running) return;
+      running = true;
+      try {
+        const result = {};
+        for (const tab of tabs) {
+          try {
+            const proc = await window.electronAPI.terminalGetProcess(tab.id);
+            if (proc) result[tab.id] = proc;
+          } catch { /* ignore */ }
+        }
+        if (!cancelled) setTabProcesses(result);
+      } finally { running = false; }
     };
     poll();
     // 10s, not 3s: under many tabs/windows the per-tab IPC + main-process
     // pgrep added measurable load. Status badges aren't time-critical.
     const interval = setInterval(poll, 10000);
-    return () => clearInterval(interval);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [tabs]);
 
   // Scroll arrows (#27)

@@ -107,11 +107,21 @@ export default function ProjectList() {
         .then((s) => setScanDir(s?.projectScanDir || ''))
         .catch((err) => console.warn('[launcher] settings refresh failed:', err?.message));
     };
-    const removeWatcher = window.electronAPI.onDataUpdated(refresh);
+    // History changes on every prompt in any session; the project list is a
+    // full scan of ~/.claude/projects, so it follows them at most every 10s.
+    let lastAt = 0;
+    let pending = null;
+    const onData = () => {
+      const wait = 10_000 - (Date.now() - lastAt);
+      if (wait <= 0) { lastAt = Date.now(); refresh(); return; }
+      if (!pending) pending = setTimeout(() => { pending = null; lastAt = Date.now(); refresh(); }, wait);
+    };
+    const removeWatcher = window.electronAPI.onDataUpdated(onData);
     window.addEventListener('focus', refresh);
 
     return () => {
       clearInterval(interval);
+      clearTimeout(pending);
       removeWatcher();
       window.removeEventListener('focus', refresh);
     };

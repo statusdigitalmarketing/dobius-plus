@@ -46,6 +46,11 @@ function freshIndex(ino) {
     byDay: new Map(), // 'YYYY-MM-DD' -> { messageCount, sessions: Set }
     hourCounts: {},
     projects: new Set(),
+    // Lines ingested so far, and the line number at which each project last
+    // had a prompt: lets a reader holding an earlier `seq` ask which projects
+    // changed since (projectsSince). Bounded by the number of projects.
+    seq: 0,
+    projectSeq: new Map(),
   };
 }
 
@@ -53,6 +58,8 @@ function ingest(idx, text) {
   let e;
   try { e = JSON.parse(text); } catch { return; }
   if (!e || typeof e !== 'object' || e.type === REQUEST_BLOB_TYPE) return;
+  idx.seq += 1;
+  if (typeof e.project === 'string' && e.project) idx.projectSeq.set(e.project, idx.seq);
   const ts = typeof e.timestamp === 'number' && Number.isFinite(e.timestamp) ? e.timestamp : 0;
   if (typeof e.sessionId === 'string' && e.sessionId) {
     const existing = idx.bySession.get(e.sessionId);
@@ -203,6 +210,18 @@ export function singleFlight(fn) {
     }
     return queued;
   };
+}
+
+/**
+ * The projects that had a prompt in `idx` after line `seq` (an earlier
+ * reading's idx.seq). `null` when that cannot be told: a different index
+ * object (the file was rewritten and re-read) or no earlier reading.
+ */
+export function projectsSince(idx, prevIdx, prevSeq) {
+  if (!idx || !prevIdx || idx !== prevIdx || !Number.isFinite(prevSeq)) return null;
+  const out = [];
+  for (const [project, at] of idx.projectSeq) if (at > prevSeq) out.push(project);
+  return out;
 }
 
 export const historyIndex = createHistoryIndex();
