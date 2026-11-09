@@ -176,19 +176,21 @@ export const tagMessage = (marketing, n, after, before, buildId) =>
   `iOS ${marketing} (${n}) uploaded-after ${new Date(after).toISOString()} uploaded-before ${new Date(before).toISOString()}${buildId ? ` asc-build ${buildId}` : ''}`;
 
 /**
- * The build a tag ({ marketing, n, after, before, buildId }) vouches for. Once bound (the id App Store Connect gave the
- * build, recorded the first time the run saw it) only that build. Before that, the first build under the pair that
- * Apple dates inside the upload's own window: one uploaded earlier, or a later upload reusing the numbers after ours
- * failed, is never it. A tag without both times vouches for nothing. `builds` are { id, marketing, raw, uploaded }.
+ * The build a tag ({ marketing, n, after, before, buildId }) vouches for: only the build whose App Store Connect id the
+ * run recorded on it (bound the first time it saw Apple list the build, inside the upload's own window), and only while
+ * that build still carries the tag's numbers and falls in the window. A tag never bound (the run died, Apple never
+ * listed the build, the binding push failed) vouches for nothing: Apple lets a failed upload's numbers be reused, so
+ * any later match could be someone else's binary. `builds` are { id, marketing, raw, uploaded }.
  */
 export function buildOfTag(t, builds) {
-  if (!t || !Number.isFinite(t.after) || !Number.isFinite(t.before)) return null;
-  const inWindow = (builds || []).filter((b) => {
-    const at = Date.parse(b.uploaded);
-    return b.marketing === t.marketing && b.raw === String(t.n) && at >= t.after - UPLOAD_SLACK_MS && at <= t.before + UPLOAD_LATE_MS;
-  });
-  if (t.buildId) return inWindow.find((b) => b.id === t.buildId) || null;
-  return inWindow.sort((x, y) => Date.parse(x.uploaded) - Date.parse(y.uploaded))[0] || null;
+  if (!t || !t.buildId || !Number.isFinite(t.after) || !Number.isFinite(t.before)) return null;
+  return (builds || []).find((b) => b.id === t.buildId && inUploadWindow(t, b.marketing, b.raw, b.uploaded)) || null;
+}
+
+/** Whether a build ({marketing, raw, uploaded}) has a tag's numbers and Apple dates it inside the tag's upload window. */
+export function inUploadWindow(t, marketing, raw, uploaded) {
+  const at = Date.parse(uploaded);
+  return marketing === t.marketing && String(raw) === String(t.n) && at >= t.after - UPLOAD_SLACK_MS && at <= t.before + UPLOAD_LATE_MS;
 }
 
 /** The last uploaded build's tag among `tags`: the highest build number. */
@@ -228,7 +230,8 @@ export function reviewDetailProblems(attrs) {
   // the notes keeps https and reaches no Mac at all.
   // Bare `demo.dobius` normalises to it; any address with a scheme must be exactly that one (https, or http without the
   // port, reaches no Mac at all).
-  if (/[a-z][a-z0-9+.-]*:\/\/demo\.dobius(?!:8420(?![0-9]))/i.test(notes)) out.push('the notes give the demo address in a form the demo does not answer (use demo.dobius or http://demo.dobius:8420)');
+  if ([...notes.matchAll(/([a-z][a-z0-9+.-]*):\/\/demo\.dobius(:[0-9]+)?(?![0-9a-z-])/gi)].some((m) => m[1].toLowerCase() !== 'http' || m[2] !== ':8420')
+    || /[a-z][a-z0-9+.-]*:\/\/demo\.dobius[0-9a-z.-]/i.test(notes)) out.push('the notes give the demo address in a form the demo does not answer (use demo.dobius or http://demo.dobius:8420)');
   // A version that says reviewers need a sign-in must carry one, or Apple refuses the submission.
   if (attrs.demoAccountRequired === true) {
     for (const k of ['demoAccountName', 'demoAccountPassword']) if (typeof attrs[k] !== 'string' || !attrs[k].trim()) out.push(`no ${k}`);

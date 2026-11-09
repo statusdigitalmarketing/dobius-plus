@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ascConfig, createAscClient } from './lib/asc-client.mjs';
 import {
-  planVersion, liveVersion, nextBuildNumber, compareBuildStrings, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildOfTag, parseTagMessage, tagMessage, UPLOAD_SLACK_MS, UPLOAD_LATE_MS,
+  planVersion, liveVersion, nextBuildNumber, compareBuildStrings, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildOfTag, inUploadWindow, parseTagMessage, tagMessage,
   whatsNewText, reviewDetailCopy, reviewDetailProblems, depsChanged, manifestChanged, APP_PATHS,
 } from './lib/ios-release-plan.mjs';
 
@@ -67,15 +67,18 @@ function run(file, args, label, { cwd = ROOT, env, minutes = 20, capture = false
     let out = '';
     let settled = false;
     const settle = (fn) => { if (settled) return; settled = true; clearTimeout(timer); if (current === child) current = null; fn(); };
+    // Captured output is kept, not echoed as it comes: a write to a stalled terminal blocks this process, and with it
+    // every deadline and the lock watch (Codex). Its tail is printed once the step ends.
     if (capture) {
       for (const stream of [child.stdout, child.stderr]) {
-        stream.on('data', (d) => { process.stdout.write(d); if (out.length < 8 * 1024 * 1024) out += d; });
+        stream.on('data', (d) => { if (out.length < 8 * 1024 * 1024) out += d; });
       }
     }
     // Settled here, not on 'close': a descendant still holding the output open would delay 'close' forever.
     const timer = setTimeout(() => { killGroup(child); settle(() => reject(new Error(`${label} took over ${minutes} minutes and was stopped`))); }, minutes * MIN);
     child.on('error', (err) => settle(() => reject(new Error(`${label} could not start: ${err.message}`))));
     child.on('close', (code, signal) => settle(() => {
+      if (capture && out) console.log(out.length > 8000 ? `...${out.slice(-8000)}` : out);
       if (code !== 0) reject(new Error(`${label} failed (exit ${code ?? signal})`));
       else { stillLocked(); resolve(out); }
     }));
@@ -454,7 +457,9 @@ function tagBuild(marketing, buildNo, sha, up, buildId = null) {
   stillLocked();
   const tag = buildTagName(marketing, buildNo);
   git('tag', '-f', '-a', tag, '-m', tagMessage(marketing, buildNo, up.after, up.before, buildId), sha);
-  if (!gitOk('push', '-q', '-f', 'origin', `refs/tags/${tag}`)) say(`could not push tag ${tag}; push it by hand: git push -f origin ${tag}`);
+  if (gitOk('push', '-q', '-f', 'origin', `refs/tags/${tag}`)) return true;
+  say(`could not push tag ${tag}; push it by hand: git push -f origin ${tag}`);
+  return false;
 }
 
 /**
@@ -469,10 +474,7 @@ async function waitForBuild(asc, appId, marketing, buildNo, up, onSeen) {
     const r = await asc.get(`/v1/builds?filter[app]=${appId}&filter[version]=${buildNo}&filter[preReleaseVersion.version]=${marketing}&fields[builds]=version,processingState,uploadedDate&limit=50`);
     // The same build the tag vouches for (buildOfTag): once seen, by id; before that, the first one inside the window.
     const b = seen ? r.data.find((x) => x.id === seen) : r.data
-      .filter((x) => {
-        const at = Date.parse(x.attributes.uploadedDate);
-        return String(x.attributes.version) === String(buildNo) && at >= up.after - UPLOAD_SLACK_MS && at <= up.before + UPLOAD_LATE_MS;
-      })
+      .filter((x) => inUploadWindow({ marketing, n: buildNo, ...up }, marketing, x.attributes.version, x.attributes.uploadedDate))
       .sort((x, y) => Date.parse(x.attributes.uploadedDate) - Date.parse(y.attributes.uploadedDate))[0];
     if (b && !seen) { seen = b.id; onSeen(b.id); }
     if (b?.attributes.processingState === 'VALID') { say(`build ${buildNo} processed`); return 'valid'; }
@@ -622,18 +624,22 @@ async function release(asc) {
   if (plan.action === 'stop') die(plan.reason);
   // Our earlier uploads on this branch that Apple has and did not refuse. One still processing counts; one Apple
   // refused, or never lists, does not, so its changes are built again.
+  // A build the live one has overtaken (shipped by hand from elsewhere) can never be submitted either, so it does not
+  // count unless it IS the live build: otherwise its changes would never ship (Codex).
+  const live = liveVersion(versions);
+  const liveBuild = live ? await buildOfVersion(asc, live.id) : null;
   const good = buildTagsOn(cfg.sha).filter((t) => {
     const b = buildOfTag(t, builds);
     // An expired build can no longer be submitted, so it does not count as shipped either: its changes build again.
-    return b && !REFUSED.has(b.state) && !b.expired;
+    if (!b || REFUSED.has(b.state) || b.expired) return false;
+    return !liveBuild || b.id === liveBuild.id || compareBuildStrings(b.raw, liveBuild.raw) === 1;
   });
   const change = appChangedSince(lastBuildTag(good.map((t) => t.tag)), cfg.sha);
-  const existing = good.find((t) => t.marketing === marketing);
+  // A change since the last good build always builds, even under the same version: an earlier build of it may be the
+  // one App Review rejected, and the fix must not be skipped for it (Codex).
   let uploaded = null;
   if (flag('--if-changed') && !change.changed) {
     say(`no new build: ${change.why}`);
-  } else if (flag('--if-changed') && existing) {
-    say(`no new build: ${marketing} already has build ${existing.n}`);
   } else {
     const allTags = git('tag', '--list', 'ios-*').split('\n');
     const buildNo = nextBuildNumber(builds.map((b) => b.raw), 0, [...projectBuildNumber(cfg.sha), ...buildTagNumbers(allTags)]);
@@ -651,7 +657,11 @@ async function release(asc) {
       const up = await buildAndUpload(cfg, signing, marketing, buildNo);
       if (!up) return; // --no-upload
       tagBuild(marketing, buildNo, cfg.sha, up);
-      const state = await waitForBuild(asc, app.id, marketing, buildNo, up, (id) => tagBuild(marketing, buildNo, cfg.sha, up, id));
+      // Only a bound tag vouches for a build (buildOfTag), and origin's copy is what later runs read: if the binding
+      // cannot be pushed, the build is not submitted (a later run builds again).
+      const state = await waitForBuild(asc, app.id, marketing, buildNo, up, (id) => {
+        if (!tagBuild(marketing, buildNo, cfg.sha, up, id)) throw new Error(`could not push the binding of ${buildTagName(marketing, buildNo)} to build ${id}; not submitting it`);
+      });
       if (state === 'timeout') {
         say(`build ${buildNo} is still processing after ${PROCESSING_TIMEOUT_MS / MIN} minutes; run "node scripts/ios-release.mjs submit" later`);
         return;

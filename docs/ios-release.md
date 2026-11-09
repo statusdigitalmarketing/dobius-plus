@@ -24,7 +24,9 @@ through `/usr/bin/lockf`, released however the first one ends; if the lockf proc
 at its next step or write instead of carrying on unlocked). Git calls have a deadline and never prompt for a password.
 Each step runs in its own process group: a timeout, a lost lock or an interrupt stops the step and everything it
 started, and a step is over when its own process exits (a helper left holding the output open is stopped, not waited
-for).
+for). The validate and upload output is collected and printed when the step ends, not echoed as it comes, so a stalled
+terminal cannot block the deadlines. Accepted: the script's own short status lines are still written as they happen,
+so a terminal stalled for good still holds the run.
 
 `release.sh` runs `release --if-changed --expect-sha <HEAD> --skip-tests` after a desktop release is published.
 A failure there never fails the desktop release: it prints what to run by hand. `DOBIUS_SKIP_IOS=1` skips it.
@@ -36,11 +38,12 @@ A failure there never fails the desktop release: it prints what to run by hand. 
 2. **Reads App Store Connect.** The app (bundle id `com.statusdigital.dobiusplus`), its iOS versions and newest builds,
    and decides the version (below). A version that cannot ship stops it before anything is built.
 3. **Decides whether to build.** `--if-changed` compares HEAD with the commit of the last uploaded build (the highest
-   `ios-<version>-<N>` tag that is an ancestor of HEAD and whose build Apple lists, did not refuse, and has not expired) over the paths that end up in the app: `mobile/`, `shared/` (the
+   `ios-<version>-<N>` tag that is an ancestor of HEAD and whose bound build Apple lists, did not refuse, has not expired, and is the live build or above it:
+a build the live one overtook can never ship, so its changes build again) over the paths that end up in the app: `mobile/`, `shared/` (the
    only outside folder phone screens import, checked by a test), `ios/`, `capacitor.config.json`,
    `vite.mobile.config.js`, `npm-shrinkwrap.json` (npm prefers it to the lockfile), the installed dependency set in `package-lock.json`, and `package.json` (the version line,
-   bumped by every release, does not count in either). It also skips the build when this version already has a build
-   of ours that Apple did not refuse. With no build, the submit step below still runs.
+   bumped by every release, does not count in either). A change always builds, even under a version that already has
+   a build (that build may be the one App Review rejected). With no build, the submit step below still runs.
 4. **Tests, builds, checks the signed app, uploads.** `npm test` in the checkout, then everything else in a fresh
    checkout of exactly that commit (`git worktree add --detach`) with the dependencies the lockfile names
    (`npm ci --include=dev --ignore-scripts`, dev dependencies whatever `NODE_ENV` says: Vite builds the phone bundle), so nothing edited in the main checkout or left over in its `node_modules` reaches the
@@ -49,7 +52,9 @@ A failure there never fails the desktop release: it prints what to run by hand. 
    App Store Connect's certificate by its SHA-1, with 14+ days left; an existing profile for any of them is used first,
    else the longest-lived one gets a new profile) and an active App Store profile for the app that holds that
    certificate, the push entitlement and at least 14 days of life. When there is none the script makes one through the
-   API (`Dobius App Store <date>`) and installs it where Xcode looks. Automatic export cannot work here: the API key
+   API (`Dobius App Store <date>`) and installs it where Xcode looks. The ARCHIVE still signs automatically (as it does
+   on this Mac today): a release Mac where Xcode cannot sign automatically fails at the archive, before anything is
+   uploaded. Accepted, since moving the archive to manual signing would need its own ship-test. Automatic export cannot work here: the API key
    cannot use Apple's cloud signing, and Xcode then falls back to a cached profile made before push was added. Every step
    has a deadline (a signing prompt nobody answers cannot hold the run forever). Version numbers are build settings,
    never written into the project: `MARKETING_VERSION` is the commit's `package.json` version,
@@ -63,12 +68,14 @@ A failure there never fails the desktop release: it prints what to run by hand. 
 5. **Tags and waits.** altool must print `UPLOAD SUCCEEDED` (it can exit 0 on a refused upload). Then the commit is
    tagged `ios-<version>-<N>` (both numbers: Apple lets a build number repeat under another version), the tag's message
    recording when the upload began and ended, and the tag pushed. The first time Apple lists the build, the tag is
-   rewritten (same commit, force-pushed) with that build's App Store Connect id (`asc-build <id>`), and from then on it
-   vouches for that build only. Before that it vouches for the first build of its pair that Apple dates inside the
-   upload's window (two minutes early, ten late): one uploaded before, or a later upload reusing the numbers after ours
-   failed before Apple listed it, is never treated as ours. A tag without both times vouches for nothing. Then it waits for processing (up to 45 minutes,
+   rewritten (same commit, force-pushed) with that build's App Store Connect id (`asc-build <id>`): the first build of
+   its pair Apple dates inside the upload's window (two minutes early, ten late). Only a bound tag vouches for a build,
+   and only for that id. A tag never bound (the run died first, Apple never listed the build, or the binding push
+   failed, which stops the run) vouches for nothing: Apple lets a failed upload's numbers be reused, so a later match
+   could be someone else's binary. Its commit simply builds again next time. Then it waits for processing (up to 45 minutes,
    polled every 30 seconds). Refused (`INVALID`, `FAILED`): it stops, and that tag no longer counts as the last build.
-   Still processing after 45 minutes: it stops there, and a later `submit` (or the next release) submits it.
+   Still processing after 45 minutes: it stops there, and a later `submit` (or the next release) submits it, provided
+   the tag was bound (Apple lists a build within minutes of the upload, processing or not).
 6. **Submits.** Only a processed build of ours: its version and build string match an `ios-<version>-<N>` tag on a
    commit of `origin/main` exactly and is the build that tag vouches for, it has not expired, and it is above the live build in Apple's order (a live `100.1`
    keeps out a 7; a live build string that cannot be read keeps out everything). Builds uploaded by hand, from a branch,
@@ -86,7 +93,8 @@ A failure there never fails the desktop release: it prints what to run by hand. 
 
    Then it attaches the build, sets "What's New" on every localization, and checks the review details field by field:
    a contact (first and last name, phone, email), notes that mention the demo Mac `demo.dobius` (bare, or exactly
-   `http://demo.dobius:8420`: any other address with a scheme, `https://` or `http://` without the port, reaches no Mac)
+   `http://demo.dobius:8420`: every address with a scheme must be exactly that; `https://` with or without the port,
+   or `http://` without it, reaches no Mac)
    and code `123456`, and a
    demo sign-in when the details say one is required.
    Anything missing is repaired from the live version's details, or it stops if those are incomplete too. Everything is

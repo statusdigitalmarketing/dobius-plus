@@ -230,23 +230,20 @@ test('build strings compare the way Apple orders them, and a dotted build still 
   assert.equal(nextBuildNumber(['100.1', '6'], 6), 101, 'counted by its first part');
 });
 
-test('a tag vouches only for the build Apple dates inside its own upload window', () => {
-  const t = { marketing: '2.2.12', n: 7, after: Date.parse('2026-11-09T03:00:00Z'), before: Date.parse('2026-11-09T03:02:00Z'), buildId: null };
+test('a tag vouches only for the build it was bound to, inside its own upload window', () => {
+  const t = { marketing: '2.2.12', n: 7, after: Date.parse('2026-11-09T03:00:00Z'), before: Date.parse('2026-11-09T03:02:00Z'), buildId: 'ours' };
   const b = (id, raw, marketing, uploaded) => ({ id, raw, marketing, uploaded });
-  const before = b('old', '7', '2.2.12', '2026-11-09T02:00:00Z');
   const ours = b('ours', '7', '2.2.12', '2026-11-09T03:05:00Z');
-  const later = b('later', '7', '2.2.12', '2026-11-09T05:00:00Z');
-  assert.equal(buildOfTag(t, [later, before, ours])?.id, 'ours', 'not the one before, not a later reuse');
-  assert.equal(buildOfTag(t, [before]), null, 'a build uploaded before ours is never vouched for');
-  assert.equal(buildOfTag(t, [later]), null, 'a later upload reusing the pair (ours failed before Apple listed it) is never vouched for');
-  assert.equal(buildOfTag(t, [b('x', '7', '2.2.13', '2026-11-09T03:05:00Z')]), null, 'the marketing version must match');
-  assert.equal(buildOfTag(t, [b('x', '7.0', '2.2.12', '2026-11-09T03:05:00Z')]), null, 'the build string must match exactly');
+  const other = b('other', '7', '2.2.12', '2026-11-09T03:01:00Z');
+  assert.equal(buildOfTag(t, [other, ours])?.id, 'ours', 'the bound build');
+  assert.equal(buildOfTag(t, [other]), null, 'nothing else, even in the window');
+  assert.equal(buildOfTag({ ...t, buildId: null }, [ours]), null, 'an unbound tag vouches for nothing (a failed upload frees its numbers)');
+  assert.equal(buildOfTag(t, [b('ours', '7', '2.2.13', '2026-11-09T03:05:00Z')]), null, 'the marketing version must match');
+  assert.equal(buildOfTag(t, [b('ours', '7.0', '2.2.12', '2026-11-09T03:05:00Z')]), null, 'the build string must match exactly');
+  assert.equal(buildOfTag(t, [b('ours', '7', '2.2.12', '2026-11-09T05:00:00Z')]), null, 'outside the window');
   assert.equal(buildOfTag({ ...t, after: Number.NaN }, [ours]), null, 'a tag without its start vouches for nothing');
   assert.equal(buildOfTag({ ...t, before: Number.NaN }, [ours]), null, 'a tag without its end vouches for nothing');
-  assert.equal(buildOfTag(t, [b('skew', '7', '2.2.12', '2026-11-09T02:59:00Z')])?.id, 'skew', 'a minute of clock skew is allowed');
-  const bound = { ...t, buildId: 'ours' };
-  assert.equal(buildOfTag(bound, [b('other', '7', '2.2.12', '2026-11-09T03:01:00Z'), ours])?.id, 'ours', 'a bound tag names its build');
-  assert.equal(buildOfTag(bound, [b('other', '7', '2.2.12', '2026-11-09T03:01:00Z')]), null, 'and nothing else, even in the window');
+  assert.equal(buildOfTag(t, [b('ours', '7', '2.2.12', '2026-11-09T02:59:00Z')])?.id, 'ours', 'a minute of clock skew is allowed');
 });
 
 test('tag messages round-trip', () => {
@@ -265,4 +262,8 @@ test('review notes that give the demo with https are refused', () => {
   assert.equal(reviewDetailProblems({ ...ok, notes: 'Mac address http://demo.dobius, code 123456' }).length, 1, 'http without the port');
   assert.equal(reviewDetailProblems({ ...ok, notes: 'Mac address http://demo.dobius:84201, code 123456' }).length, 1, 'a longer port');
   assert.deepEqual(reviewDetailProblems({ ...ok, notes: 'Mac address http://demo.dobius:8420, code 123456' }), [], 'the exact address');
+  assert.deepEqual(reviewDetailProblems({ ...ok, notes: 'Mac address HTTP://demo.dobius:8420. Code 123456' }), [], 'any case, then punctuation');
+  assert.equal(reviewDetailProblems({ ...ok, notes: 'Mac address https://demo.dobius:8420, code 123456' }).length, 1, 'https with the right port');
+  assert.equal(reviewDetailProblems({ ...ok, notes: 'Use demo.dobius or https://demo.dobius:8420, code 123456' }).length, 1, 'one wrong address among right ones');
+  assert.equal(reviewDetailProblems({ ...ok, notes: 'Mac address http://demo.dobiusx:8420, code 123456' }).length, 1, 'a longer host');
 });
