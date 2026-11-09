@@ -218,6 +218,9 @@ function buildAndUpload(cfg, marketing, buildNo) {
       '-archivePath', archive, 'archive', `MARKETING_VERSION=${marketing}`, `CURRENT_PROJECT_VERSION=${buildNo}`,
       `DEVELOPMENT_TEAM=${TEAM_ID}`, 'CODE_SIGN_STYLE=Automatic', '-quiet', ...auth,
     ], `Archiving ${marketing} (${buildNo})`, { cwd: src, minutes: 40 });
+    // Signed with this Mac's own Apple Distribution identity: the API key cannot use Apple's cloud signing ("Cloud
+    // signing permission error"), and with it Xcode repairs a stale App Store profile (one made before a capability such
+    // as push was added) through -allowProvisioningUpdates.
     const opts = path.join(work, 'ExportOptions.plist');
     fs.writeFileSync(opts, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -226,6 +229,7 @@ function buildAndUpload(cfg, marketing, buildNo) {
   <key>destination</key><string>export</string>
   <key>teamID</key><string>${TEAM_ID}</string>
   <key>signingStyle</key><string>automatic</string>
+  <key>signingCertificate</key><string>Apple Distribution</string>
   <key>uploadSymbols</key><true/>
   <key>manageAppVersionAndBuildNumber</key><false/>
 </dict></plist>
