@@ -803,3 +803,9 @@
 - **FIX**: Build escapes from code points in the script (`String.fromCharCode(92) + 'u' + hex`), then scan the changed files for invisible characters before committing.
 - **CONTEXT**: Invisible characters in source are a review and security hazard (they hide what a regex or test actually matches). The tests still passed, so nothing would have caught it.
 - **DETECTION**: `node -e "const s=require('fs').readFileSync(process.argv[1],'utf8');console.log([...s].filter(c=>{const x=c.codePointAt(0);return (x>=0x200b&&x<=0x200f)||(x>=0x202a&&x<=0x202e)||(x>=0x2060&&x<=0x206f)||x===0xfeff||x===0xad||(x>=0xe0000&&x<=0xe007f)}).length)" <file>`
+
+### Build: 2026-11-08
+- **MISTAKE**: Fast-forwarded main to feat/phone-settings (built in an agent worktree) and ran the gates in the main checkout: `npm test` and `npm run build:mobile` failed with "Cannot find package '@capacitor/push-notifications'". The worktree had run `npm install` for the new dependency; the main checkout's node_modules never got it.
+- **FIX**: After merging a branch that changed package.json or package-lock.json, run `npm install` (then `npx electron-rebuild -f -w better-sqlite3,node-pty`) in the checkout that will release, and re-run the gates before `./release.sh`.
+- **CONTEXT**: Agent worktrees have their own node_modules. A release from the main checkout builds with whatever is installed there.
+- **DETECTION**: `git diff --name-only HEAD@{1} HEAD -- package.json package-lock.json` after a merge; non-empty means install first.

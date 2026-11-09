@@ -73,7 +73,11 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
   const terminalTabs = useStore((s) => s.terminalTabs);
   const tabStatus = useStore((s) => s.tabStatus);
   const unreadTabs = useStore((s) => s.unreadTabs);
-  const setActiveTab = useStore((s) => s.setActiveTab);
+  const activeTabId = useStore((s) => s.activeTabId);
+  const activeView = useStore((s) => s.activeView);
+  // showTab, not setActiveTab: it leaves split or grid when needed, otherwise the
+  // click is reverted or lands on a hidden tab (NOTES 2026-10-19).
+  const showTab = useStore((s) => s.showTab);
   const setActiveView = useStore((s) => s.setActiveView);
   const [collapsed, setCollapsed] = useState({}); // path -> true when collapsed
 
@@ -149,7 +153,7 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
 
   const handleClick = useCallback((projectPath, tab) => {
     if (liveHere(projectPath, tab.id)) {
-      setActiveTab(tab.id);
+      showTab(tab.id);
       setActiveView('terminal');
       return;
     }
@@ -166,7 +170,7 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
     }
     // This project, tab not live anywhere: resume its linked session here.
     if (tab.sessionId) onResumeSession?.({ sessionId: tab.sessionId, project: projectPath });
-  }, [liveHere, currentProjectPath, setActiveTab, setActiveView, onResumeSession]);
+  }, [liveHere, currentProjectPath, showTab, setActiveView, onResumeSession]);
 
   // Filter by search across tab label + preview + project name. Keep a project
   // only if it still has matching tabs.
@@ -282,17 +286,25 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                     unread: live ? !!unreadTabs[t.id] : !!row?.unread,
                     now,
                   });
+                  // The tab this window is showing (Brett: "so I know which tab I'm actually on").
+                  // A tinted fill plus an accent bar, so it reads in light and dark themes alike.
+                  // Only while the terminal view shows it: on the Dashboard no tab is on screen (Codex).
+                  const selected = live && t.id === activeTabId && activeView === 'terminal';
+                  const restBg = selected ? 'var(--accent-muted)' : 'transparent';
                   return (
                     <button
                       key={t.id}
                       onClick={() => handleClick(g.path, t)}
                       className="w-full flex items-start gap-2 px-3 py-1.5 rounded"
+                      data-testid="sidebar-tab-row"
+                      aria-current={selected ? 'true' : undefined}
                       style={{
-                        background: 'transparent', border: 'none', cursor: 'pointer',
+                        backgroundColor: restBg, border: 'none', cursor: 'pointer',
                         textAlign: 'left', color: 'var(--fg)',
+                        boxShadow: selected ? 'inset 3px 0 0 var(--accent)' : 'none',
                       }}
-                      onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--surface-hover, var(--border))'; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                      onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = selected ? 'var(--accent-muted)' : 'var(--surface-hover, var(--border))'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = restBg; }}
                       title={live
                         ? 'Switch to this tab'
                         : t.live

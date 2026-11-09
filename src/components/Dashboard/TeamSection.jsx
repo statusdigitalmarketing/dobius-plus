@@ -89,7 +89,7 @@ export default function TeamSection({ Section, SettingRow, Toggle }) {
         </div>
       </SettingRow>
 
-      <SettingRow label="Accept team messages" description="Off: teammates' messages are refused and their Macs keep retrying for a day">
+      <SettingRow label="Accept team messages" description="Off: teammates' messages are refused and their Dobius keeps retrying for a day">
         <Toggle checked={!!st.settings.accept} onChange={(v) => saveSettings({ accept: v })} />
       </SettingRow>
 
