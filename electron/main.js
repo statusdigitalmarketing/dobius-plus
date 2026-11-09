@@ -4381,10 +4381,12 @@ function setupWindowHandlers() {
       newTerminalId: ctx?.newTerminalId,
       authorizeTab: ctx?.authorizeTab,
       writeRunScript,
-      // A phone terminal: no window owns it. It starts in the project folder (the script then enters the card's folder
-      // or stops there), under the same accounts a phone terminal for that folder gets.
+      // A phone terminal: no window owns it. It starts in the card's own folder when that folder is there, so the login
+      // profile and anything keyed on the folder (direnv, account overrides) see the folder the card names, not the
+      // project the tab opened in (Codex phone tasks round 5). The script still enters that folder or stops.
       spawn: (termId, script, cmd) => {
-        const where = typeof cmd.projectPath === 'string' && isAbsPath(cmd.projectPath) ? cmd.projectPath : undefined;
+        const dirOk = (p) => typeof p === 'string' && isAbsPath(p) && (() => { try { return fs.statSync(p).isDirectory(); } catch { return false; } })();
+        const where = dirOk(cmd.cwd) ? cmd.cwd : (typeof cmd.projectPath === 'string' && isAbsPath(cmd.projectPath) ? cmd.projectPath : undefined);
         return createTerminal(termId, where, null, resolveAccountEnvForCwd(where), { runScript: script });
       },
       watchStart: (termId, run) => {

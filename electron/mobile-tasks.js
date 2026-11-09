@@ -6,6 +6,7 @@
 // Nothing here logs a message body or an error message: a failure answers a fixed code.
 
 import crypto from 'crypto';
+import os from 'os';
 import { commandPlaceholder } from '../shared/handoff.js';
 import { baseName } from '../shared/platform.js';
 
@@ -60,11 +61,13 @@ export function taskForPhone(t) {
 
 /** A handed-back command list entry as the phone shows it (handoffCommands.list() already dropped what must not go). */
 // isLive(termId): whether that terminal is still there, so the phone offers "Open terminal" only for one it can open.
-export function commandsForPhone(entries, labelOf = () => null, isLive = () => false) {
+// home: this Mac's home folder, so the phone shortens only that one to ~ (never /Users/Shared or another person's home).
+export function commandsForPhone(entries, labelOf = () => null, isLive = () => false, home = os.homedir()) {
   return (Array.isArray(entries) ? entries : []).map((e) => {
     const label = labelOf(e.tabId) || {};
     return {
       tabId: e.tabId,
+      home: str(home, MAX_PATH),
       tabLabel: str(label.label, 80) || 'A tab',
       // The folder the commands were captured in (Claude's own, which may differ from where the tab started), never the
       // tab's starting folder: the card must name where Run will act (Codex, phone tasks round 3).

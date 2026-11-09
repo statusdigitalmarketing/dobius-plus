@@ -247,6 +247,9 @@ function wsSend(socket, obj) {
     try { socket.terminate(); } catch { /* noop */ }
     return;
   }
+  // A create reply and an error always carry a nonce key (null when no create asked for it), so a phone can tell this
+  // Mac echoes nonces and never takes a resume's reply, or an unrelated error, for its own create (Codex phone tasks round 5).
+  if ((obj?.type === 'terminalCreated' || obj?.type === 'error') && typeof obj.nonce !== 'string') obj = { ...obj, nonce: null };
   try { socket.send(JSON.stringify(obj)); } catch { /* noop */ }
 }
 

@@ -253,7 +253,7 @@ anything runs), and every write checks again right before it changes anything.
 
 | Request | Fields | Reply |
 | --- | --- | --- |
-| `commandsList` | | `{type:'commands', ok, list:[{tabId, tabLabel, project, projectPath, cwd, at, commands:[{id, text, why, state, hole, cwd, reply, at, edited, exit, startedAt, endedAt, runTabId, runLive}]}]}`. `runLive`: the run's terminal is still there (the phone offers Open terminal only then). `state` is `waiting`, `running`, `done`, `failed` or `closed`. `hole` is the Mac's placeholder check for a waiting command (null when none). Never sent: the text that actually ran (an edit may hold a key) or the exit file |
+| `commandsList` | | `{type:'commands', ok, list:[{tabId, home, tabLabel, project, projectPath, cwd, at, commands:[{id, text, why, state, hole, cwd, reply, at, edited, exit, startedAt, endedAt, runTabId, runLive}]}]}`. `home`: this Mac's home folder, the only one the phone shortens to `~`. `runLive`: the run's terminal is still there (the phone offers Open terminal only then). `state` is `waiting`, `running`, `done`, `failed` or `closed`. `hole` is the Mac's placeholder check for a waiting command (null when none). Never sent: the text that actually ran (an edit may hold a key) or the exit file |
 | `commandsDismiss` | `tabId`, `id` | `{type:'commandResult', op:'dismiss', id, ok}` |
 | `commandsRun` | `tabId`, `id`, `edited` (optional string, at most 2000), `asIs` (optional, `true` = the flagged placeholder is real syntax) | `{type:'commandResult', op:'run', id, ok, termId, error}`. `termId` is a new phone terminal (`term-mobile-<n>`) this socket may attach to. `error`: `unavailable`, `bad-request`, `not-waiting`, `placeholder`, `bad-edit`, `bad-edit-syntax`, `syntax`, `shell`, `write-failed`, `spawn-failed`, `failed` |
 | `tasksProjects` | | `{type:'tasksProjects', ok, list:[{path, name, pending, asana}]}`: the Mac's known projects (the allowlist `createTerminal` uses), busiest first. `pending` counts open to-dos not from Asana, `asana` open Asana tasks. Counted read only (`peekTasks`): no legacy-name move or corrupt-file move for projects nobody opened |
@@ -298,3 +298,11 @@ Command text, what Claude wrote around it and the full reply go only to the phon
   Asana screen reads again every minute and whenever it comes back into view.
 
 **Phone Tasks: accepted residuals (Codex review, 2026-11-08).** (1) A command edited before Run is shown as the original plus "(edited)", but if the edited text makes bash fail at run time (a bad substitution), bash's own error message can echo part of it into that terminal: the same residual the desktop already accepts (CLAUDE.md, Tasks > Commands). (2) Two Dobius instances on one Mac share `~/.claude/project-tasks`: a phone delete can remove a task the other instance renamed in the same instant, after the phone's print check. Not reachable with one instance.
+
+### Create replies carry a nonce key (2.2.12)
+
+Every `terminalCreated` and every `error` from a Mac on 2.2.12 or later has a `nonce` key: the string the phone's
+`createTerminal` sent, or `null` (a resume's terminal, an error no create asked for). A phone treats a reply as its own
+create only when that key matches; a reply WITHOUT the key comes from an older Mac and falls back to the pending flag.
+A phone Run terminal starts in the command's own folder when it exists (else the project folder).
+

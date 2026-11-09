@@ -96,8 +96,9 @@ export function legacyListWaiting(projectPath) {
   } catch { return true; } // cannot tell: treat as waiting, never move
 }
 
-function readTasks(projectPath, { strict = false } = {}) {
-  const p = tasksPath(projectPath);
+// legacyMove false: read the project's own file only, never the legacy move (see syncAsanaTasksOnce).
+function readTasks(projectPath, { strict = false, legacyMove = true } = {}) {
+  const p = legacyMove ? tasksPath(projectPath) : hashedTasksPath(projectPath);
   try {
     fs.mkdirSync(TASKS_DIR, { recursive: true });
     if (!fs.existsSync(p)) return [];
@@ -609,6 +610,10 @@ export async function workingAsanaKeyFrom(source, { expectHint, expectEmail } = 
 
 async function syncAsanaTasksOnce(projectPath) {
   if (!projectPath) return { ok: false, error: 'projectPath required' };
+  // Decided before Asana is asked: the legacy move may happen only as this project's first touch. If the project
+  // already had its own list here, a read after the await must not move another folder's old list in, even when its
+  // own file was moved aside as corrupt meanwhile (Codex phone tasks round 5).
+  const legacyMove = legacyListWaiting(projectPath);
   const { pat } = getAsanaQueue();
   const used = asanaTokenWithSource(pat); // the shared spot decides (claude-settings-env.js)
   const token = used.token;
@@ -664,7 +669,7 @@ async function syncAsanaTasksOnce(projectPath) {
     // from a terminal while Asana was answering is not overwritten. A task
     // already here gets its due date, notes and link refreshed; its title,
     // stage and done state stay as they are.
-    const tasks = readTasks(projectPath, { strict: true });
+    const tasks = readTasks(projectPath, { strict: true, legacyMove });
     const byGid = new Map(tasks.filter((x) => x.asanaGid).map((x) => [x.asanaGid, x]));
     let added = 0;
     let changed = false;

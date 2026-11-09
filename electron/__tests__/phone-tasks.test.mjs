@@ -186,8 +186,9 @@ test('the command list for the phone: the Mac\'s placeholder check comes with it
   const list = commandsForPhone([{ tabId: 'term-/p-1', projectPath: '/p', cwd: '/p', at: 1, commands: [
     { id: 'c1', text: 'echo <your-key>', why: 'set it', state: 'waiting', cwd: '/p', reply: 'r', at: 1 },
     { id: 'c2', text: 'ls', state: 'done', exit: 0, edited: true, runTabId: 'term-mobile-1', exitFile: '/tmp/x', ran: 'ls --secret' },
-  ] }], () => ({ label: 'Tab 1', project: 'p' }));
+  ] }], () => ({ label: 'Tab 1', project: 'p' }), () => false, '/Users/sam');
   assert.equal(list[0].tabLabel, 'Tab 1');
+  assert.equal(list[0].home, '/Users/sam', 'the Mac names its own home so the phone shortens only that');
   assert.equal(list[0].commands[0].hole, '<your-key>');
   assert.equal(list[0].commands[1].hole, null);
   const json = JSON.stringify(list);
@@ -386,4 +387,14 @@ test('round 3: a command card names the folder its commands were captured in, no
   assert.equal(card.project, 'production');
   const [fallback] = commandsForPhone([{ tabId: 't', commands: [] }], () => ({ label: 'Tab 1', project: 'proj' }));
   assert.equal(fallback.project, 'proj');
+});
+
+test('a folder is shortened to ~ only under the Mac\'s own home', async () => {
+  const { shortPath } = await import('../../shared/short-path.js');
+  assert.equal(shortPath('/Users/sam/release', '/Users/sam'), '~/release');
+  assert.equal(shortPath('/Users/sam', '/Users/sam/'), '~');
+  assert.equal(shortPath('/Users/Shared/release', '/Users/sam'), '/Users/Shared/release');
+  assert.equal(shortPath('/Users/samuel/x', '/Users/sam'), '/Users/samuel/x');
+  assert.equal(shortPath('/Users/alice/x', undefined), '/Users/alice/x', 'an older Mac sends no home: full path');
+  assert.equal(shortPath('C:\\Users\\max\\proj', 'C:\\Users\\max'), '~\\proj');
 });

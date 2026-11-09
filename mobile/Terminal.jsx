@@ -146,7 +146,8 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         // Only a creation this screen asked for moves it: a late reply to one started elsewhere (the Board) must not
         // take the place of the exact terminal opened from a command card (Codex, phone tasks round 3).
         // Ours only when it echoes the nonce this screen sent; a Mac too old to echo one falls back to the pending flag.
-        const mine = typeof msg.nonce === 'string' ? (createNonceRef.current !== null && msg.nonce === createNonceRef.current) : creatingRef.current;
+        // A Mac that echoes nonces always sends the key (null on a resume's reply, Codex round 5); only an older Mac omits it.
+        const mine = 'nonce' in msg ? (createNonceRef.current !== null && msg.nonce === createNonceRef.current) : creatingRef.current;
         if (!mine) { refreshList(); return; } // someone else's create (the Board's): leave this screen's state alone
         creatingRef.current = false;
         createNonceRef.current = null;
@@ -167,7 +168,8 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         // answers instead of dropping it): refresh so the list stops offering it.
         refreshList();
       } else if (msg.type === 'error') {
-        if (typeof msg.nonce === 'string' && msg.nonce !== createNonceRef.current) return; // another screen's create failed
+        // Not this screen's create: another screen's, or an unrelated error (a newer Mac sends nonce null on those).
+        if ('nonce' in msg && (createNonceRef.current === null || msg.nonce !== createNonceRef.current)) return;
         creatingRef.current = false; // let the user retry a failed create
         createNonceRef.current = null;
       }
