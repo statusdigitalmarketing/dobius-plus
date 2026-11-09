@@ -206,9 +206,13 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
   // screen: a push tapped while here updates initialId (the openTabId prop) but
   // the useState initializer above only read it once, so without this the screen
   // stayed on the old terminal. Audit MED-12 (Codex follow-up).
+  // A different terminal arriving this way (a notification) is the person's choice too: it ends the exact mode and
+  // cancels a queued leave for the run terminal (Codex phone tasks round 12).
   useEffect(() => {
-    if (initialId) setActiveId(initialId);
-  }, [initialId]);
+    if (!initialId) return;
+    if (initialId !== exactIdRef.current) endExact();
+    setActiveId(initialId);
+  }, [initialId, endExact]);
 
   // Close the stop-confirm if the session it named has since exited/vanished.
   useEffect(() => {

@@ -99,7 +99,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
     if (openRequest?.pairingId !== id) return;
     // A Today notification opens Today; a session notification opens its session.
     if (openRequest.view === 'tasks') { setTasksStart({ view: 'today' }); setView('tasks'); }
-    else if (openRequest.id) { setOpenTabId(openRequest.id); setView('terminal'); }
+    else if (openRequest.id) { setOpenTabId(openRequest.id); setTerminalBack('board'); setView('terminal'); }
   }, [id, openRequest]);
 
   // An App Store notification names its tab by an opaque ref: ask this Mac which tab it was, once connected. An
@@ -119,7 +119,7 @@ function MacSession({ pairing, connectionRef, onMacs, onRepair, onLeaveDemo, ope
       if (m.type === 'notifyTarget' && m.reqId === reqId) {
         off();
         resolvedRefs.current.add(openRequest);
-        if (typeof m.id === 'string' && m.id) { setOpenTabId(m.id); setView('terminal'); }
+        if (typeof m.id === 'string' && m.id) { setOpenTabId(m.id); setTerminalBack('board'); setView('terminal'); }
         // Unknown or expired: show the board, never leave another tab in front as if it were the one tapped.
         else setView('board');
       }
