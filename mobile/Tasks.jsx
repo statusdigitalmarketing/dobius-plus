@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { shortPath } from '../shared/short-path.js';
+import { shortPath, visiblePath } from '../shared/short-path.js';
 import { commandPlaceholder } from '../shared/placeholder.js';
 import { dueLabel as dayLabel, localDay, sortOpenTasks } from '../shared/task-due.js';
 import { viewsFor, currentView } from './tasks-views.js';
@@ -270,7 +270,7 @@ function CommandsView({ connection, entries, reload, say, onOpenTab }) {
     {shown.map((e) => {
       // Always the path itself: two projects can share a name and a tab label, and Run acts on exactly this folder (Codex
       // round 4). Home is shortened to ~.
-      const folderOf = (cwd) => shortPath(cwd || e.projectPath || '', e.home) || 'the project folder';
+      const folderOf = (cwd) => visiblePath(shortPath(cwd || e.projectPath || '', e.home)) || 'the project folder';
       // One group per reply the commands came with, as on the Mac: each has its own folder, age and full reply.
       const groups = [];
       for (const c of e.commands) {
@@ -376,6 +376,10 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
   const seq = useRef(0);
   const projectRef = useRef(project);
   projectRef.current = project;
+  // A sync started here can answer after this view is gone (another view, then back to a different project): its
+  // result is shown only while this same view is still up (Codex phone tasks round 6).
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const today = localDay();
 
   const loadProjects = useCallback(async () => {
@@ -458,7 +462,7 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     setSyncing(false);
     // Every result is about the project it was for: shown only while that project is still the one on screen (Codex
     // rounds 4 and 5). A later look at that project shows the synced list itself.
-    if (projectRef.current !== p) { /* another project is open now */ }
+    if (!alive.current || projectRef.current !== p) { /* another view or project is open now */ }
     else if (r?.ok) say(r.added ? `${r.added} new from Asana.` : 'Up to date with Asana.');
     else setSyncNote(r ? SYNC_PROBLEM[r.error] || 'Asana sync failed. Try again in a moment.' : 'No answer from your Mac.');
     loadTasks();

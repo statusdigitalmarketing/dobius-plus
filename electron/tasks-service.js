@@ -400,6 +400,16 @@ export function completeTaskByRef(projectPath, ref) {
   return markTaskDone(projectPath, tasks, resolved.task);
 }
 
+// The phone's Done: only the task with exactly this id. completeTaskByRef trims the reference and also matches an
+// asanaGid or a title, so `" a "` there could close task `a` (Codex phone tasks round 6).
+export function completeTaskById(projectPath, taskId) {
+  if (!projectPath || typeof taskId !== 'string' || !taskId) return { ok: false, error: 'task id required' };
+  const tasks = readTasks(projectPath);
+  const target = tasks.find((t) => t?.id === taskId);
+  if (!target) return { ok: false, error: 'task not found' };
+  return markTaskDone(projectPath, tasks, target);
+}
+
 function markTaskDone(projectPath, tasks, target) {
   const idx = tasks.findIndex((t) => t.id === target.id);
   if (idx === -1) return { ok: false, error: 'task not found' };

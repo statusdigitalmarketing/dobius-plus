@@ -190,9 +190,9 @@ export function syncErrorCode(r) {
 
 /**
  * One change the phone asked for on a project's list, through the same tasks-service functions the Mac's Tasks dropdown
- * uses. Only a task with exactly this id (completeTaskByRef would otherwise fall back to a title match), only the version
+ * uses. Only a task with exactly this id (completeTaskById, never completeTaskByRef, which trims and falls back to a title match), only the version
  * the phone showed (`print`), and only while the phone is still paired, checked right before the write. Marking done is
- * LOCAL ONLY, as on the Mac: nothing here calls Asana. svc: { listTasks, completeTaskByRef, reopenTask, updateTask,
+ * LOCAL ONLY, as on the Mac: nothing here calls Asana. svc: { listTasks, completeTaskById, reopenTask, updateTask,
  * deleteTask, changed(project) }.
  */
 export function actOnProjectTask({ project, id, kind, print }, stillOk, svc) {
@@ -204,7 +204,7 @@ export function actOnProjectTask({ project, id, kind, print }, stillOk, svc) {
   if (taskPrint(t) !== print) return { ok: false, error: 'changed' };
   if (!stillOk()) return { ok: false, error: 'unavailable' };
   let r;
-  if (kind === 'complete') r = t.done ? { ok: true } : svc.completeTaskByRef(project, t.id);
+  if (kind === 'complete') r = t.done ? { ok: true } : svc.completeTaskById(project, t.id);
   else if (kind === 'reopen') {
     // The Mac's checkbox: a task the pipeline marked done reopens through reopenTask (stage and done together).
     if (!t.done && t.stage !== 'done') r = { ok: true };
@@ -234,7 +234,8 @@ export function projectSummaries(projects, peek) {
   const rows = projects.filter((p) => pathOk(p?.path)).map((p, i) => {
     let tasks;
     try { tasks = peek(p.path); } catch { tasks = null; }
-    const open = (Array.isArray(tasks) ? tasks : []).filter((t) => !t?.done);
+    // Only real task objects: one bad entry (`null`, a number) must not fail the whole picker (Codex round 6).
+    const open = (Array.isArray(tasks) ? tasks : []).filter((t) => t && typeof t === 'object' && !t.done);
     return { path: p.path, name: str(p.name, 120) || p.path, pending: open.filter((t) => t.source !== 'asana').length, asana: open.filter((t) => t.source === 'asana').length, hasList: Array.isArray(tasks), i };
   });
   rows.sort((a, b) => (b.pending + b.asana) - (a.pending + a.asana) || a.i - b.i);

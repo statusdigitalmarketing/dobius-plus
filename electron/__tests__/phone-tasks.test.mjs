@@ -105,7 +105,7 @@ test('a task write needs the exact task and the version the phone showed, and th
   const calls = [];
   const svc = {
     listTasks: () => tasks,
-    completeTaskByRef: (...a) => { calls.push(['complete', ...a]); return { ok: true }; },
+    completeTaskById: (...a) => { calls.push(['complete', ...a]); return { ok: true }; },
     reopenTask: (...a) => { calls.push(['reopen', ...a]); return { ok: true }; },
     updateTask: (...a) => { calls.push(['update', ...a]); return { ok: true }; },
     deleteTask: (...a) => { calls.push(['delete', ...a]); return { ok: true }; },
@@ -387,6 +387,22 @@ test('round 3: a command card names the folder its commands were captured in, no
   assert.equal(card.project, 'production');
   const [fallback] = commandsForPhone([{ tabId: 't', commands: [] }], () => ({ label: 'Tab 1', project: 'proj' }));
   assert.equal(fallback.project, 'proj');
+});
+
+test('a folder shows exactly: double spaces, tabs and invisible marks are made visible (Codex round 6)', async () => {
+  const { visiblePath } = await import('../../shared/short-path.js');
+  assert.equal(visiblePath('/work/a b'), '/work/a b', 'a lone space between words stays');
+  assert.notEqual(visiblePath('/work/a  b'), visiblePath('/work/a b'));
+  assert.equal(visiblePath('/work/a  b'), '/work/a␣␣b');
+  assert.equal(visiblePath('/work/a\tb'), '/work/a\\tb');
+  assert.equal(visiblePath('/work/a​b'), '/work/a\\u{200b}b');
+  assert.equal(visiblePath('/work/x '), '/work/x␣', 'a trailing space is shown');
+  assert.equal(visiblePath('~/café'), '~/café', 'ordinary letters stay as they are');
+});
+
+test('one bad entry in a list does not fail the project picker (Codex round 6)', () => {
+  const r = projectSummaries([{ path: '/a', name: 'a' }, { path: '/b', name: 'b' }], (p) => (p === '/a' ? [null, 3, { title: 'x', source: 'asana' }] : [{ title: 'y' }]));
+  assert.deepEqual(r.map((x) => [x.path, x.pending, x.asana]), [['/a', 0, 1], ['/b', 1, 0]]);
 });
 
 test('a folder is shortened to ~ only under the Mac\'s own home', async () => {

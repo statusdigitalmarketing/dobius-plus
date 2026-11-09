@@ -141,7 +141,7 @@ import { createPicker, runClaude } from './today-pick.js';
 import { createSnoozes, cardPrint } from './today-snooze.js';
 import { localDay } from '../shared/task-due.js';
 import { boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo, boardIsStandIn } from './inbox-board.js';
-import { listTasks, peekTasks, legacyListWaiting, addTask, updateTask, deleteTask, syncAsanaTasks, workingAsanaKeyFrom, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
+import { listTasks, peekTasks, legacyListWaiting, addTask, updateTask, deleteTask, syncAsanaTasks, workingAsanaKeyFrom, advanceTask, blockTask, unblockTask, completeTaskByRef, completeTaskById, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { readUpdateBackup } from './config-manager.js';
 import { recoverWindowLists } from './update-window-recovery.js';
@@ -4402,7 +4402,7 @@ function setupWindowHandlers() {
     projectSummaries: (projects) => projectSummaries(projects, peekTasks),
     listTasks: (project) => listTasks(project),
     legacyListWaiting: (project) => legacyListWaiting(project),
-    actOnTask: (req, stillOk) => actOnProjectTask(req, stillOk, { listTasks, completeTaskByRef, reopenTask, updateTask, deleteTask, changed: tasksChangedEverywhere }),
+    actOnTask: (req, stillOk) => actOnProjectTask(req, stillOk, { listTasks, completeTaskById, reopenTask, updateTask, deleteTask, changed: tasksChangedEverywhere }),
     addTask: (project, title, stillOk) => addProjectTask(project, title, stillOk, { addTask, changed: tasksChangedEverywhere }),
     syncAsana: async (project, stillOk) => {
       // Sync reads Asana and updates this Mac's list only. A phone unpaired while Asana answers still gets its pull
@@ -5655,9 +5655,11 @@ app.on('before-quit', (e) => {
 // auto-mode and the watchers leak on a force quit. Idempotent via didTeardown
 // (forward-declared above so the updater-bypass branch can share it).
 // Run files still held (a Run tab whose wrapper had not started, or whose command is running): on every way out,
-// since a quit can kill all terminals without telling their observers.
+// since a quit can kill all terminals without telling their observers. Only once the quit is really going ahead
+// (will-quit): before-quit also fires on the first press of the two-press Cmd+Q, which can still be cancelled, and
+// dropping the files then left a Run whose profile was still loading with no script, stuck at Running (Codex phone
+// tasks round 6).
 const dropAllRunFiles = () => { for (const id of [...runFilesByTab.keys()]) dropRunFiles(id); };
-app.on('before-quit', dropAllRunFiles);
 app.on('will-quit', (e) => {
   dropAllRunFiles();
   if (didTeardown) return;

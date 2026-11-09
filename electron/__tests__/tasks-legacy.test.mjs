@@ -11,7 +11,7 @@ import path from 'node:path';
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-legacy-'));
 process.env.HOME = home;
-const { legacyListWaiting, syncAsanaTasks } = await import('../tasks-service.js');
+const { legacyListWaiting, syncAsanaTasks, completeTaskById, addTask, listTasks } = await import('../tasks-service.js');
 after(() => fs.rmSync(home, { recursive: true, force: true }));
 
 test('an old-style list two folders can share is reported waiting, and the check moves nothing', () => {
@@ -65,4 +65,16 @@ test('a sync never moves another folder\'s old list in after its own file went a
   } finally {
     https.request = realRequest;
   }
+});
+
+test('the phone\'s Done closes only the task with exactly that id (Codex round 6)', () => {
+  const proj = path.join(home, 'exact-id-proj');
+  const a = addTask(proj, { title: 'first' });
+  const b = addTask(proj, { title: 'second' });
+  assert.equal(a.ok && b.ok, true);
+  assert.equal(completeTaskById(proj, ` ${a.task.id} `).ok, false, 'a padded id is not that task');
+  assert.equal(completeTaskById(proj, 'second').ok, false, 'a title is not an id');
+  assert.equal(listTasks(proj).filter((t) => t.done).length, 0, 'nothing was closed');
+  assert.equal(completeTaskById(proj, b.task.id).ok, true);
+  assert.deepEqual(listTasks(proj).filter((t) => t.done).map((t) => t.id), [b.task.id]);
 });
