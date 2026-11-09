@@ -114,3 +114,16 @@ echo "tag v$V on $TAG_SHA == main HEAD"
 step "Done"
 echo "v$V is live: https://github.com/${REPO}/releases/tag/v$V"
 echo "Users auto-update within 30s of next launch (or 4h if running)."
+
+# The phone app: a new App Store build when the phone code changed since the last one, submitted for review and
+# released by Apple on approval (docs/ios-release.md). The desktop release above is already live, so this never fails
+# it: a problem is printed with the command to finish by hand. The tests already ran in preflight on this commit.
+# DOBIUS_SKIP_IOS=1 skips it. The notary password and GitHub token are not passed down.
+if [ "${DOBIUS_SKIP_IOS:-}" != "1" ]; then
+  step "iOS (App Store)"
+  if env -u GH_TOKEN -u APPLE_APP_SPECIFIC_PASSWORD node scripts/ios-release.mjs release --if-changed --expect-sha "$HEAD_SHA" --skip-tests; then
+    echo "iOS step finished"
+  else
+    echo "WARNING: the iOS step did not finish (desktop v$V is live regardless). Finish it with: node scripts/ios-release.mjs release --if-changed" >&2
+  fi
+fi
