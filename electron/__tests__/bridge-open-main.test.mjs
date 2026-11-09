@@ -265,5 +265,6 @@ test('ttyReaderUnder: an editor or shell command under claude reading the termin
   assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: partial(rest), alive: () => true }), true, 'one still running that lsof could not read is');
   assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: partial(rest + 'p300\nf0\nau\nn/dev/ttys004\n'), alive: () => false }), true, 'partial output that shows a reader still blocks');
   assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: partial(''), alive: () => false }), false, 'every one of them gone');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: partial(rest + 'p300\nferr\nnFD info error: Permission denied\n'), alive: (p) => p === 300 }), true, 'a process whose descriptors lsof could not read is doubt');
   assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: async (bin) => { if (bin === '/bin/ps') return { stdout: ps }; throw Object.assign(new Error('x'), { code: 2, stdout: rest }); }, alive: () => false }), true, 'any other failure is doubt');
 });

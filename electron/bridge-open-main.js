@@ -184,6 +184,8 @@ export async function ttyReaderUnder(pid, tty, { exec = execFileP, alive = pidAl
     const r = await exec('/usr/sbin/lsof', ['-n', '-P', '-a', '-p', desc.join(','), '-Fan'], { timeout: 3000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
       .catch((err) => {
         if (err?.code !== 1) return Promise.reject(err);
+        // A descriptor lsof could not read (an `ferr` entry) is doubt too: that process's list is not complete.
+        if (/^ferr$/m.test(err.stdout || '')) return Promise.reject(new Error('lsof could not read every descriptor'));
         const seen = new Set((err.stdout || '').split('\n').filter((l) => l.startsWith('p')).map((l) => l.slice(1)));
         const left = desc.filter((d) => !seen.has(d) && alive(Number(d)));
         return left.length ? Promise.reject(new Error(`lsof could not read running process ${left.join(',')}`)) : { stdout: err.stdout || '' };
@@ -534,7 +536,8 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // terminal's foreground process group (a background claude in the shell's
   // own group, job control off, does not), and work in the project (a login
   // script's `cd /q; claude` does not).
-  // opts.anyReader: skip the reader check below (dobius-send asks it apart, to refuse rather than type raw).
+  // opts.anyReader: skip the reader check below (dobius-send asks it apart, to refuse rather than type raw), and throw
+  // when a process check fails instead of answering false: dobius-send must not read a failed check as "not claude".
   async function claudeRunning(tabId, projectPath, opts = {}) {
     const shellPid = terminalInstance(tabId)?.pid;
     if (!Number.isInteger(shellPid) || shellPid <= 0) return false;
@@ -545,7 +548,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     try {
       pids = [...(await childPids(shellPid)), shellPid];
       tty = await psField(shellPid, 'tty');
-    } catch { return false; }
+    } catch (err) { if (opts.anyReader) throw err; return false; }
     // It must be on THIS tab's terminal (a child can hold another pty).
     if (!tty || tty === '??') return false;
     for (const pid of pids) {
@@ -570,7 +573,10 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
         // terminal, e.g. `zsh -lc`, must not stop Brett's board sending).
         if (projectPath === null && !opts.anyReader && (await ttyReaderUnder(pid, tty))) continue;
         return true;
-      } catch { /* this candidate is unreadable: not claude */ }
+      } catch (err) {
+        // This candidate is unreadable: not claude (dobius-send: a failed check, so it refuses).
+        if (opts.anyReader) throw err;
+      }
     }
     return false;
   }
@@ -598,6 +604,8 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     paste: (tabId, text) => writeOwn(tabId, `\x1b[200~${text}\x1b[201~`),
     // The single Enter, written on its own once the paste has settled.
     submit: (tabId) => writeOwn(tabId, '\r'),
+    // Any text, written as Dobius's own (dobius-send's raw typing), so a person typing meanwhile is still noticed.
+    write: (tabId, data) => writeOwn(tabId, data),
     // Someone is sending a Chat message into the tab right now, or prompt
     // editing holds their input: their Enter may still be to come, so the
     // prompt is not ours to type into.

@@ -63,7 +63,7 @@ const SUBMIT_SETTLE_MAX_MS = 5000;
 const MODE_LEAD_RE = /^\s*[!/#&]/;
 // A message ending in a backslash: Claude reads backslash + Enter as "new
 // line", so the Enter would not send it. Typed, never sent automatically.
-const TRAILING_BACKSLASH_RE = /\\\s*$/;
+export const TRAILING_BACKSLASH_RE = /\\\s*$/;
 const READY_POLL_MS = 250;
 // After the Enter: Claude empties its input box when it takes a message.
 const SUBMIT_CONFIRM_MS = 3000;

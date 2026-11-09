@@ -27,15 +27,19 @@ To open a NEW tab and send it a message, use `/openTab` (`docs/bridge-open-tab.m
 |---|---|---|
 | Claude, idle at an empty prompt | One bracketed paste, then Enter as its own write, and the Enter is confirmed taken (the box empties). | `{ ok: true, sent, submitted: true, confirmed: true }` |
 | Claude, idle, but the Enter only added a line | Nothing more is pressed. | `{ ok: false, sent, typed: true, submitted: false, note }` (200) |
-| Claude, working | The paste, then Enter once the box shows it (Claude queues it for after the turn). Not confirmable. | `{ ok: true, sent, submitted: true, confirmed: false, note }` |
+| Claude, working | The paste, then Enter on a screen read while nothing new arrived, with the box holding the message and no permission prompt open; then the box must empty (Claude queues it for after the turn). | `{ ok: true, sent, submitted: true, confirmed: true, note }`, or `ok: false` with `typed: true` when it could not be pressed or did not take |
 | Claude with a draft in its box | Nothing typed. | 409 `{ ok: false, error }` |
 | Claude with a question or dialog open | Nothing typed (an Enter would answer it). | 409 |
 | Claude running a command that holds the terminal readable | Nothing typed (keys could reach that command). | 409 |
+| The process checks failed (a ps or pgrep timeout) | Nothing typed: a failed check is never read as "not Claude". | 409 |
+| A message to Claude ending in a backslash | Nothing typed (Claude reads backslash + Enter as a new line). | 409 |
+| Another send to the same tab still running | Nothing typed. | 409 |
 | Someone typing into the tab right now | Nothing typed. | 409 |
-| Not Claude (a shell, Codex, another program) | Typed in 256-byte chunks, then Enter as a separate write after a pause. | `{ ok: true, sent, submitted: true, confirmed: false, note }` |
+| Not Claude (a shell, Codex, another program) | Typed in chunks of 256 characters, then Enter as a separate write after a pause, only if nobody typed meanwhile. | `{ ok: true, sent, submitted: true, confirmed: false, note }`; 409 with `typed: true` when Enter was held back |
 | No such tab | Nothing. | 404 |
 
-`ok` is true only when Enter was pressed on the message. `confirmed` says whether Claude was seen taking it.
+`ok` is true only when Enter was pressed on the message and, in a Claude tab, Claude was seen taking it. `confirmed`
+says whether it was seen (false only for a tab that is not running Claude).
 
 Why it changed (2026-11-09, a bug report from another Mac): the old route wrote the message in raw chunks with `\r`
 straight behind them. Claude read the burst as a paste, so the Enter landed inside it as a new line; a long or
@@ -60,8 +64,9 @@ curl -sS --noproxy '*' -X POST http://127.0.0.1:8421/tabSend -H "Host: 127.0.0.1
   -H 'Content-Type: application/json' -d '{"tabId":"term-/path/to/project-2","message":"hello"}'
 ```
 
-Or `dobius-send <tabId> "<message>"`: it prints the reply and exits 0 only when `ok` is true (1 otherwise, 2 when the
-bridge did not answer).
+Or `dobius-send <tabId> "<message>"`: it prints the reply and exits 0 only when `ok` is true, 1 when the reply says (or the arguments are missing)
+otherwise, 2 when the bridge did not answer or its token could not be read, 3 when python3, curl or a temp file is
+missing.
 
 ## Side effects
 

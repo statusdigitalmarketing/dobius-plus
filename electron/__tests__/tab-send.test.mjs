@@ -14,14 +14,15 @@ function screenWith(boxText, { dialog = false } = {}) {
   return { lines, modes: { bracketedPaste: true, cursor: { x: 2 + boxText.length, y: 2 } } };
 }
 
-function fakeTab({ leads, claude = true, working = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false } = {}) {
+function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false } = {}) {
   let clock = 0;
   const t = { box, seq: 0, keys: 0, pasted: null, written: [], submitted: 0, pty: {}, alive: true };
   const deps = {
     tabAlive: () => t.alive,
     ptyOf: () => (t.alive ? t.pty : null),
     claudeRunning: async () => claude,
-    claudeLeads: async () => (leads ?? claude),
+    claudeLeads: async () => { if (probeFails) throw new Error('pgrep timed out'); return leads ?? claude; },
+    needs: () => needs,
     working: () => working,
     inputBusy: () => false,
     watch: () => ({ seq: () => t.seq, keys: () => t.keys, input: () => t.keys, screen: async () => screenWith(t.box, { dialog }), stop: () => {} }),
@@ -32,7 +33,7 @@ function fakeTab({ leads, claude = true, working = false, box = '', dialog = fal
       if (keysAfterPaste) t.keys += 1;
     },
     submit: () => { t.submitted += 1; t.seq += 1; if (!enterInsertsNewline) t.box = ''; },
-    write: (_id, data) => { t.written.push(data); },
+    write: (_id, data) => { t.written.push(data); if (keysWhileTyping) t.keys += 1; },
     sleep: async (ms) => { clock += ms; },
     now: () => clock,
   };
@@ -64,9 +65,59 @@ test('Claude working: pasted, then Enter once the box shows it, reported unconfi
   const { t, deps } = fakeTab({ working: true });
   const r = await sendToTab(deps, 'tab', BRIEF);
   assert.equal(r.body.ok, true);
-  assert.equal(r.body.confirmed, false);
+  assert.equal(r.body.confirmed, true, 'the box emptied: queued');
   assert.equal(t.pasted, BRIEF);
   assert.equal(t.submitted, 1);
+});
+
+test('Claude working and Enter only adds a line: reported not sent', async () => {
+  const { t, deps } = fakeTab({ working: true, enterInsertsNewline: true });
+  const r = await sendToTab(deps, 'tab', 'hello');
+  assert.equal(r.body.ok, false);
+  assert.equal(r.body.submitted, false);
+  assert.equal(t.submitted, 1);
+});
+
+test('Claude working with a permission prompt open: no Enter', async () => {
+  const { t, deps } = fakeTab({ working: true });
+  const r0 = await sendToTab(deps, 'tab', 'x');
+  assert.equal(r0.body.ok, true);
+  const n = fakeTab({ working: true, needs: true });
+  const r = await sendToTab(n.deps, 'tab', 'x');
+  assert.equal(r.status, 409);
+  assert.equal(n.t.pasted, null);
+  assert.equal(n.t.submitted, 0);
+  assert.equal(t.submitted, 1);
+});
+
+test('a message ending in a backslash is refused for Claude (line continuation)', async () => {
+  const { t, deps } = fakeTab();
+  const r = await sendToTab(deps, 'tab', 'run this \\');
+  assert.equal(r.status, 409);
+  assert.equal(t.pasted, null);
+});
+
+test('process checks that fail: refused, never typed raw', async () => {
+  const { t, deps } = fakeTab({ claude: false, probeFails: true });
+  const r = await sendToTab(deps, 'tab', 'x');
+  assert.equal(r.status, 409);
+  assert.deepEqual(t.written, []);
+});
+
+test('two sends to one tab at once: the second is refused', async () => {
+  const { t, deps } = fakeTab();
+  const [a, b] = await Promise.all([sendToTab(deps, 'tab', 'first'), sendToTab(deps, 'tab', 'second')]);
+  assert.equal(a.body.ok, true);
+  assert.equal(b.status, 409);
+  assert.equal(t.pasted, 'first');
+});
+
+test('a shell tab: someone typing during the pause stops the Enter', async () => {
+  const { t, deps } = fakeTab({ claude: false, keysWhileTyping: true });
+  const r = await sendToTab(deps, 'tab', 'echo hi');
+  assert.equal(r.body.ok, false);
+  assert.equal(r.body.submitted, false);
+  assert.equal(t.submitted, 0);
 });
 
 test('Claude working and someone types after the paste: no Enter', async () => {
@@ -126,7 +177,7 @@ test('terminal string replies (DECRQSS, XTVERSION, kitty graphics) and kitty/DSR
 });
 
 test('keys still count as typing', () => {
-  for (const k of ['a', '\r', '\x03', '\x1b[A', '\x1b[2~', '\x1b[13;2u', '\x1bP', '\x1b[200~hi\x1b[201~']) {
+  for (const k of ['a', '\r', '\x03', '\x1b[A', '\x1b[2~', '\x1b[13;2u', '\x1bP', '\x1b[200~hi\x1b[201~', '\x1bPhello\r\x1b\\', '\x1bPhello\x1b\\', '\x1b_hi\x1b\\']) {
     assert.equal(isKeyboardInput(k), true, JSON.stringify(k));
     assert.equal(isTerminalReply(k), false, JSON.stringify(k));
   }
