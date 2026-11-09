@@ -24,8 +24,11 @@ through `/usr/bin/lockf`, released however the first one ends; if the lockf proc
 at its next step or write instead of carrying on unlocked). Git calls have a deadline and never prompt for a password.
 Each step runs in its own process group: a timeout, a lost lock or an interrupt stops the step and everything it
 started, and a step is over when its own process exits (a helper left holding the output open is stopped, not waited
-for). The validate and upload output is collected and printed when the step ends, not echoed as it comes, so a stalled
-terminal cannot block the deadlines. Accepted: the script's own short status lines are still written as they happen,
+for). The validate and upload output is kept in a file in the temp folder (one short line names it), never written to the
+terminal, so a stalled terminal cannot block the deadlines. The build steps (npm ci, the phone bundle, cap sync,
+archive, export, altool) run with only PATH, HOME, USER, LOGNAME, SHELL, TMPDIR, LANG, LC_ALL, TERM and DEVELOPER_DIR from
+the environment: a variable such as XCODE_XCCONFIG_FILE or npm_config_registry could otherwise change the app without
+changing the commit. Accepted: the script's own short status lines are still written as they happen,
 so a terminal stalled for good still holds the run.
 
 `release.sh` runs `release --if-changed --expect-sha <HEAD> --skip-tests` after a desktop release is published.
@@ -38,8 +41,9 @@ A failure there never fails the desktop release: it prints what to run by hand. 
 2. **Reads App Store Connect.** The app (bundle id `com.statusdigital.dobiusplus`), its iOS versions and newest builds,
    and decides the version (below). A version that cannot ship stops it before anything is built.
 3. **Decides whether to build.** `--if-changed` compares HEAD with the commit of the last uploaded build (the highest
-   `ios-<version>-<N>` tag that is an ancestor of HEAD and whose bound build Apple lists, did not refuse, has not expired, and is the live build or above it:
-a build the live one overtook can never ship, so its changes build again) over the paths that end up in the app: `mobile/`, `shared/` (the
+   `ios-<version>-<N>` tag that is an ancestor of HEAD and whose bound build Apple lists, did not refuse, has not expired, and is the live build or both
+   under a version above every shipped one and above the live build: a build that can never ship does not count, so its
+   changes build again) over the paths that end up in the app: `mobile/`, `shared/` (the
    only outside folder phone screens import, checked by a test), `ios/`, `capacitor.config.json`,
    `vite.mobile.config.js`, `npm-shrinkwrap.json` (npm prefers it to the lockfile), the installed dependency set in `package-lock.json`, and `package.json` (the version line,
    bumped by every release, does not count in either). A change always builds, even under a version that already has
@@ -68,10 +72,14 @@ a build the live one overtook can never ship, so its changes build again) over t
 5. **Tags and waits.** altool must print `UPLOAD SUCCEEDED` (it can exit 0 on a refused upload). Then the commit is
    tagged `ios-<version>-<N>` (both numbers: Apple lets a build number repeat under another version), the tag's message
    recording when the upload began and ended, and the tag pushed. The first time Apple lists the build, the tag is
-   rewritten (same commit, force-pushed) with that build's App Store Connect id (`asc-build <id>`): the first build of
-   its pair Apple dates inside the upload's window (two minutes early, ten late). Only a bound tag vouches for a build,
+   rewritten (same commit, force-pushed) with that build's App Store Connect id (`asc-build <id>`). The build is found
+   through this run's OWN upload record in App Store Connect (`/v1/apps/{id}/buildUploads`): the delivery id altool
+   printed, else the one record of these numbers Apple created during the upload and that got past AWAITING_UPLOAD (a
+   validate leaves one there). When that record is COMPLETE it names its build. A later upload reusing the numbers has a
+   record of its own, so it can never be bound; a FAILED record stops the run. Only a bound tag vouches for a build,
    and only for that id. A tag never bound (the run died first, Apple never listed the build, or the binding push
-   failed, which stops the run) vouches for nothing: Apple lets a failed upload's numbers be reused, so a later match
+   failed, which stops the run; fetching origin prunes local ios-* tags origin does not have, so a binding that never
+   reached origin does not count) vouches for nothing: Apple lets a failed upload's numbers be reused, so a later match
    could be someone else's binary. Its commit simply builds again next time. Then it waits for processing (up to 45 minutes,
    polled every 30 seconds). Refused (`INVALID`, `FAILED`): it stops, and that tag no longer counts as the last build.
    Still processing after 45 minutes: it stops there, and a later `submit` (or the next release) submits it, provided
@@ -93,8 +101,8 @@ a build the live one overtook can never ship, so its changes build again) over t
 
    Then it attaches the build, sets "What's New" on every localization, and checks the review details field by field:
    a contact (first and last name, phone, email), notes that mention the demo Mac `demo.dobius` (bare, or exactly
-   `http://demo.dobius:8420`: every address with a scheme must be exactly that; `https://` with or without the port,
-   or `http://` without it, reaches no Mac)
+   `demo.dobius:8420` or `http://demo.dobius:8420`, every mention: `https://`, `http://` without the port, another
+   port or a longer host reaches no Mac)
    and code `123456`, and a
    demo sign-in when the details say one is required.
    Anything missing is repaired from the live version's details, or it stops if those are incomplete too. Everything is
