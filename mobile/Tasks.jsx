@@ -150,6 +150,10 @@ function useFeatures(connection) {
 }
 
 // Run's answers that are codes, not sentences (the Mac's checks answer in full sentences).
+// Whether an id has a request out. Own keys only: an id such as `constructor` or `toString` must not read a function off
+// Object.prototype and look busy forever (Codex round 8). hasOwnProperty, not Object.hasOwn: iOS 15.0 to 15.3 lack it.
+const isBusy = (map, id) => Object.prototype.hasOwnProperty.call(map, id) && !!map[id];
+
 const RUN_CODES = {
   unavailable: 'Your Mac did not take that. Try again.',
   'bad-request': 'Your Mac did not take that. Try again.',
@@ -383,8 +387,12 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const today = localDay();
 
+  const projSeq = useRef(0);
   const loadProjects = useCallback(async () => {
+    // Only the newest answer: an older, slower one must not bring back an old list and move the selection (Codex round 8).
+    const mine = ++projSeq.current;
     const r = await ask(connection, { type: 'tasksProjects' }, 'tasksProjects', 20000);
+    if (mine !== projSeq.current) return;
     if (!r?.ok) { setProjects((p) => p || { error: true }); return; }
     const all = Array.isArray(r.list) ? r.list : [];
     setProjects(all);
@@ -483,13 +491,21 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
   const pending = sortOpenTasks(tasks.filter((t) => !t.done));
   const done = tasks.filter((t) => t.done);
   // A task the Mac sent without an id (its id was too long to send whole) can be read but not changed from here.
-  const row = (t, i) => (
-    <TaskRow key={t.id || `no-id-${i}`} task={t} today={today} busy={!t.id || !!busy[t.id]} expanded={!!t.id && expanded === t.id}
-      onExpand={() => { if (t.id) setExpanded((v) => (v === t.id ? null : t.id)); }}
-      onToggle={(x) => act(x, x.done ? 'reopen' : 'complete')} onDelete={(x) => act(x, 'delete')} />
-  );
+  // It still opens, to read its notes and link (Codex round 8).
+  const row = (t, i) => {
+    const k = t.id || `no-id-${i}`;
+    return <TaskRow key={k} task={t} today={today} busy={!t.id || isBusy(busy, t.id)} expanded={expanded === k}
+      onExpand={() => setExpanded((v) => (v === k ? null : k))}
+      onToggle={(x) => act(x, x.done ? 'reopen' : 'complete')} onDelete={(x) => act(x, 'delete')} />;
+  };
   // The count for this view: open to-dos, or open Asana tasks.
-  const name = (p) => { const n = kind === 'asana' ? p.asana : p.pending; return `${p.name}${n ? ` (${n})` : ''}`; };
+  // Two projects with the same name (two `api` folders) show their folder too: Add, Done and Delete go to the one picked
+  // (Codex round 8).
+  const shared = new Set(projects.map((p) => p.name).filter((n, i, all) => all.indexOf(n) !== i));
+  const name = (p) => {
+    const n = kind === 'asana' ? p.asana : p.pending;
+    return `${p.name}${n ? ` (${n})` : ''}${shared.has(p.name) ? ` · ${visiblePath(p.path)}` : ''}`;
+  };
   return <>
     <label className="tasks-project">
       <span className="tasks-project-label">Project</span>
@@ -712,7 +728,7 @@ export default function Tasks({ connection, onBack, onOpenTab, startView = null,
   const board = today?.board;
   const day = board?.today || '';
   // Today's cards by Today's date, board cards by the date of the read they came with.
-  const cardFor = (c, showReason = false) => <Card key={c.id} card={c} today={showReason ? day : inbox?.today || day} busy={!!busy[c.id]} onDone={done} onSnooze={snooze} showReason={showReason} />;
+  const cardFor = (c, showReason = false) => <Card key={c.id} card={c} today={showReason ? day : inbox?.today || day} busy={isBusy(busy, c.id)} onDone={done} onSnooze={snooze} showReason={showReason} />;
   let body;
   if (current === 'commands') {
     body = <CommandsView connection={connection} entries={commands} reload={loadCommands} say={say} onOpenTab={onOpenTab} />;
@@ -763,7 +779,7 @@ export default function Tasks({ connection, onBack, onOpenTab, startView = null,
           <div key={c.id} className="today-card snoozed">
             <span className="today-title">{c.subject || c.summary || '(no subject)'}</span>
             <div className="today-meta">{[c.who, c.until ? `back ${new Date(c.until).toLocaleDateString([], { weekday: 'short' })}` : null].filter(Boolean).join(' · ')}</div>
-            <div className="today-actions"><button disabled={!!busy[c.id]} onClick={() => bringBack(c.id, c.sid)}>Bring back</button></div>
+            <div className="today-actions"><button disabled={isBusy(busy, c.id)} onClick={() => bringBack(c.id, c.sid)}>Bring back</button></div>
           </div>
         ))}
       </>}

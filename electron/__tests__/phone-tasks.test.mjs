@@ -397,26 +397,39 @@ test('round 3: a command card names the folder its commands were captured in, no
   assert.equal(fallback.project, 'proj');
 });
 
-test('a folder shows exactly: double spaces, tabs and invisible marks are made visible (Codex round 6)', async () => {
+test('a folder shows exactly: only printable ASCII as is, everything else as a code (Codex rounds 6 to 8)', async () => {
   const { visiblePath } = await import('../../shared/short-path.js');
+  const cp = (...n) => String.fromCodePoint(...n);
+  const BS = cp(92);
+  const box = cp(0x2423);
   assert.equal(visiblePath('/work/a b'), '/work/a b', 'a lone space between words stays');
-  assert.notEqual(visiblePath('/work/a  b'), visiblePath('/work/a b'));
-  assert.equal(visiblePath('/work/a  b'), '/work/a␣␣b');
-  assert.equal(visiblePath('/work/a\tb'), '/work/a\\tb');
-  assert.equal(visiblePath('/work/a\u200bb'), '/work/a\\u{200b}b');
-  assert.equal(visiblePath('/work/x '), '/work/x␣', 'a trailing space is shown');
-  assert.equal(visiblePath('~/café'), '~/café', 'ordinary letters stay as they are');
-  // Round 7: the marks themselves are escaped, so no folder name spells another's label.
-  assert.notEqual(visiblePath('/work/a  b'), visiblePath('/work/a␣␣b'));
-  assert.notEqual(visiblePath('/work/a\tb'), visiblePath('/work/a\\tb'));
-  assert.equal(visiblePath('/work/a\\tb'), '/work/a\\\\tb');
-  assert.equal(visiblePath('/x\u{e0041}'), '/x\\u{e0041}', 'a tag character is shown as one mark');
+  assert.equal(visiblePath('/work/a  b'), `/work/a${box}${box}b`, 'a run of spaces is marked');
+  assert.equal(visiblePath('/work/x '), `/work/x${box}`, 'a trailing space is marked');
+  assert.equal(visiblePath(`/work/a${cp(9)}b`), `/work/a${BS}tb`);
+  assert.equal(visiblePath(`/work/a${BS}tb`), `/work/a${BS}${BS}tb`, 'a literal backslash is doubled');
+  // Each of these looked like a plain folder name before: zero-width space, combining grapheme joiner, a tag
+  // character, a right-to-left mark, an accented letter, a Cyrillic look-alike.
+  for (const n of [0x200b, 0x34f, 0xe0041, 0x200f, 0xe9, 0x430]) {
+    assert.equal(visiblePath(`/w/a${cp(n)}b`), `/w/a${BS}u{${n.toString(16)}}b`, n.toString(16));
+  }
+  // No two folders read the same: the marks themselves are escaped.
+  const names = ['/w/a  b', `/w/a${box}${box}b`, `/w/a${cp(9)}b`, `/w/a${BS}tb`, '/w/ab', `/w/a${cp(0x34f)}b`, `/w/a${BS}u{34f}b`];
+  assert.equal(new Set(names.map(visiblePath)).size, names.length);
 });
 
 test('a long task id is never cut short into another task\'s id (Codex round 7)', () => {
   const S = 'a'.repeat(200);
   assert.equal(taskForPhone({ id: S, title: 't' }).id, S);
   assert.equal(taskForPhone({ id: S + 'x', title: 't' }).id, null, 'too long to send whole: not actionable');
+});
+
+test('two tasks sharing an id are never changed from the phone (Codex round 8)', () => {
+  const calls = [];
+  const tasks = [{ id: 'dup', title: 'Discard', source: 'manual' }, { id: 'dup', title: 'Keep', source: 'asana' }];
+  const svc = { listTasks: () => tasks, deleteTask: (...a) => { calls.push(a); return { ok: true }; }, changed: () => {} };
+  const r = actOnProjectTask({ project: '/p', id: 'dup', kind: 'delete', print: taskPrint(tasks[0]) }, () => true, svc);
+  assert.deepEqual(r, { ok: false, error: 'open-on-mac' });
+  assert.deepEqual(calls, []);
 });
 
 test('one bad entry in a list does not fail the project picker (Codex round 6)', () => {

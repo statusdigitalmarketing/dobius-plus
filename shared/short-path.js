@@ -9,28 +9,27 @@ export function shortPath(p, home) {
   return s.startsWith(h) && (s[h.length] === '/' || s[h.length] === '\\') ? `~${s.slice(h.length)}` : s;
 }
 
-// What the phone shows for a folder must name exactly one folder: HTML collapses a double space and hides tabs,
-// newlines and zero-width or direction marks, so `/work/a  b` read as `/work/a b` (Codex phone tasks round 6). A
-// single space between words stays; every other space in a run, and every invisible character, is shown as a mark.
-// The marks themselves (a backslash, a literal ␣) are escaped too, so no folder name can spell another's label
-// (Codex phone tasks round 7).
-const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b-\u200f\u202a-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb\u{e0000}-\u{e007f}]/u;
+// What the phone shows for a folder must name exactly one folder, since Run acts on the folder the card names. HTML
+// collapses a double space, and Unicode has more invisible and look-alike characters than any list can hold (Codex
+// found a new one each round: zero-width, bidi, tag, combining grapheme joiner). So the label keeps printable ASCII
+// as it is, a single space between words as a space, and writes everything else as a code: a run of spaces as
+// open-box marks, a backslash doubled, a tab as \t, any other character as \u{hex}. A folder with accented or
+// non-Latin letters reads as codes, and no two folders can ever read the same (Codex phone tasks rounds 6 to 8).
+const BS = String.fromCharCode(92);
+const OPEN_BOX = String.fromCodePoint(0x2423);
+const NAMED = new Map([[9, 't'], [10, 'n'], [13, 'r']]);
 export function visiblePath(p) {
-  // By code point, so an invisible character outside the BMP (a tag character) is one mark, not two halves.
   const s = Array.from(String(p || ''));
   let out = '';
   for (let i = 0; i < s.length; i += 1) {
-    const ch = s[i];
-    if (ch === ' ') {
+    const cp = s[i].codePointAt(0);
+    if (cp === 32) {
       const lone = i > 0 && i < s.length - 1 && s[i - 1] !== ' ' && s[i + 1] !== ' ';
-      out += lone ? ' ' : '\u2423';
-    } else if (ch === '\\') out += '\\\\';
-    else if (ch === '\u2423') out += '\\u{2423}';
-    else if (ch === '\t') out += '\\t';
-    else if (ch === '\n') out += '\\n';
-    else if (ch === '\r') out += '\\r';
-    else if (INVISIBLE.test(ch) || /\s/u.test(ch)) out += `\\u{${ch.codePointAt(0).toString(16)}}`;
-    else out += ch;
+      out += lone ? ' ' : OPEN_BOX;
+    } else if (cp === 92) out += BS + BS;
+    else if (NAMED.has(cp)) out += BS + NAMED.get(cp);
+    else if (cp > 32 && cp < 127) out += s[i];
+    else out += `${BS}u{${cp.toString(16)}}`;
   }
   return out;
 }

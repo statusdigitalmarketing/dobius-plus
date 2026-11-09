@@ -201,7 +201,11 @@ export function actOnProjectTask({ project, id, kind, print }, stillOk, svc) {
   // Before the read too: reading can move a legacy or corrupt list file aside. Nothing below awaits.
   if (!stillOk()) return { ok: false, error: 'unavailable' };
   const tasks = svc.listTasks(project);
-  const t = Array.isArray(tasks) ? tasks.find((x) => x?.id === id) : null;
+  const same = Array.isArray(tasks) ? tasks.filter((x) => x?.id === id) : [];
+  // Exactly one: deleteTask and the other writers act on every task with that id, and the phone saw and checked only
+  // one of them (Codex phone tasks round 8). Two tasks sharing an id are left for the Mac.
+  if (same.length > 1) return { ok: false, error: 'open-on-mac' };
+  const t = same[0];
   if (!t) return { ok: false, error: 'not-found' };
   if (taskPrint(t) !== print) return { ok: false, error: 'changed' };
   if (!stillOk()) return { ok: false, error: 'unavailable' };

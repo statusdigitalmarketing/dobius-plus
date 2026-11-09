@@ -511,7 +511,7 @@ function pruneRunScripts() {
   try { names = fs.readdirSync(runScriptDir()); } catch { return; }
   const mine = new Set([...runFilesByTab.values()].flat());
   for (const n of names) {
-    if (!/^dobius-run-[A-Za-z0-9_-]+\.(sh|exit|cmd|exit\.tmp)$/.test(n)) continue;
+    if (!/^dobius-run-[A-Za-z0-9_-]+\.(sh|exit|cmd|exit\.tmp|sh\.abandoned)$/.test(n)) continue;
     const f = path.join(runScriptDir(), n);
     if (mine.has(f)) continue;
     try { if (Date.now() - fs.statSync(f).mtimeMs > RUN_FILE_STALE_MS) fs.unlinkSync(f); } catch (err) { console.warn('[commands] could not clear an old run file:', err?.message || err); }
@@ -4393,8 +4393,13 @@ function setupWindowHandlers() {
       },
       watchStart: (termId, run) => {
         setTimeout(() => {
-          // The wrapper deletes itself as its first step: still there means the shell never got to it.
-          if (!fs.existsSync(run.file) || !terminalInstance(termId)) return;
+          // The wrapper deletes itself as its first step: still there means the shell never got to it. Taken by rename,
+          // not just looked at: the wrapper's own delete then fails and it stops, so a shell that reaches it a moment
+          // later never runs a command this is about to close (Codex phone tasks round 8).
+          if (!terminalInstance(termId)) return;
+          const taken = `${run.file}.abandoned`;
+          try { fs.renameSync(run.file, taken); } catch { return; } // already gone: the command started
+          try { fs.unlinkSync(taken); } catch { /* the sweep removes it */ }
           console.warn('[commands] a phone Run terminal never started its command; closing it');
           killTerminal(termId);
         }, PHONE_RUN_START_MS).unref?.();
