@@ -128,7 +128,8 @@ const plistJson = (file) => JSON.parse(read('plutil', ['-convert', 'json', '-o',
 // Branches by an explicit refspec: the configured one may not fetch main at all, and a stale origin/main would pass the
 // ancestry checks (Codex round 8). A dry run reads the tags it has and never rewrites them: it holds no lock, and a
 // forced tag fetch could undo a live run's binding between its local write and its push (Codex round 8).
-const fetchOrigin = () => gitOk('fetch', '-q', 'origin', '+refs/heads/*:refs/remotes/origin/*')
+// --no-tags on the branch fetch: tag following would add origin's ios-* tags on a dry run too (Codex round 9).
+const fetchOrigin = () => gitOk('fetch', '-q', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*')
   && (DRY || gitOk('fetch', '-q', '--prune', 'origin', '+refs/tags/ios-*:refs/tags/ios-*'));
 
 // ---- one run at a time: the kernel's lock on a file, released when the process ends however it ends ----
@@ -138,7 +139,7 @@ if (cmd !== 'status' && !DRY && process.env.DOBIUS_IOS_RELEASE_LOCKED !== '1') {
   // Not spawnSync: a process blocked in it never runs its signal handlers, so cancelling it left the run going (Codex
   // round 8). A signal here ends lockf, and the run, which watches lockf (stillLocked), stops within seconds.
   const child = spawn('/usr/bin/lockf', ['-s', '-t', '0', LOCK, process.execPath, SELF, ...argv], {
-    stdio: 'inherit', env: { ...process.env, DOBIUS_IOS_RELEASE_LOCKED: '1', DOBIUS_IOS_RELEASE_STARTER: String(process.pid) },
+    stdio: 'inherit', env: { ...process.env, DOBIUS_IOS_RELEASE_LOCKED: '1', DOBIUS_IOS_RELEASE_STARTER: [process.env.DOBIUS_IOS_RELEASE_STARTER, process.pid].filter(Boolean).join(',') },
   });
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.removeAllListeners(sig);
@@ -154,13 +155,13 @@ if (cmd !== 'status' && !DRY && process.env.DOBIUS_IOS_RELEASE_LOCKED !== '1') {
 // lockf holds the lock, not this process: if lockf is killed the lock is gone and another run may start, so this one
 // stops too. Checked before every step and every App Store Connect write, and every few seconds while it waits.
 const LOCK_HOLDER = process.env.DOBIUS_IOS_RELEASE_LOCKED === '1' ? process.ppid : null;
-// The process that was started (release.sh's node, or a person's): killed outright, it can forward nothing, so the run
-// watches it too and stops once it is gone (Codex round 8).
-const STARTER = Number(process.env.DOBIUS_IOS_RELEASE_STARTER) || null;
+// The processes that started it (this script's own first process, and release.sh when it ran it): killed outright,
+// they can forward nothing, so the run watches them too and stops once any is gone (Codex rounds 8 and 9).
+const STARTERS = String(process.env.DOBIUS_IOS_RELEASE_STARTER || '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 1);
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (err) { return err.code !== 'ESRCH'; } };
 function stillLocked() {
   if (LOCK_HOLDER === null) return;
-  if (process.ppid === LOCK_HOLDER && (STARTER === null || alive(STARTER))) return;
+  if (process.ppid === LOCK_HOLDER && STARTERS.every(alive)) return;
   killGroup(current);
   die(process.ppid !== LOCK_HOLDER ? 'the release lock was released (its lockf process ended); stopping' : 'the release was cancelled (the process that started it ended); stopping');
 }
@@ -169,7 +170,8 @@ if (LOCK_HOLDER !== null) setInterval(stillLocked, 5000).unref();
 // ---- checks before building ----
 function preflight() {
   const cfg = ascConfig();
-  if (!fs.existsSync(cfg.keyPath)) die(`App Store Connect key not found at ${cfg.keyPath}`);
+  // The path is never printed: a key's contents put in ASC_KEY_PATH by mistake would land in the log (Codex round 9).
+  if (!fs.existsSync(cfg.keyPath)) die('the App Store Connect key file named by ASC_KEY_PATH does not exist');
   // altool finds the key by its file name in a folder, so the file must carry Apple's name.
   if (path.basename(cfg.keyPath) !== `AuthKey_${cfg.keyId}.p8`) die(`the key file must be named AuthKey_${cfg.keyId}.p8`);
   if (git('status', '--porcelain')) die('the working tree has changes: commit or drop them first');
@@ -476,6 +478,9 @@ async function buildAndUpload(cfg, signing, marketing, buildNo) {
       '-project', path.join(src, 'ios/App/App.xcodeproj'), '-scheme', 'App', '-configuration', 'Release', '-destination', 'generic/platform=iOS',
       '-archivePath', archive, 'archive', `MARKETING_VERSION=${marketing}`, `CURRENT_PROJECT_VERSION=${buildNo}`,
       `DEVELOPMENT_TEAM=${TEAM_ID}`, 'CODE_SIGN_STYLE=Automatic', '-quiet', ...auth,
+      // The committed Package.resolved, never one Xcode works out on its own: the binary must be the checked tree's
+      // (Codex round 9; Apple's guidance for CI builds).
+      '-disableAutomaticPackageResolution',
     ], `Archiving ${marketing} (${buildNo})`, { cwd: src, clean: true, minutes: 40 });
     // Signed by hand with the identity and profile appStoreSigning() chose (see there for why not automatic).
     const opts = path.join(work, 'ExportOptions.plist');

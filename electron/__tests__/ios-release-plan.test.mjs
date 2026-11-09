@@ -297,6 +297,7 @@ test('review notes that give the demo with https are refused', () => {
   assert.equal(demoAddressesOk('Mac address demo.dobius:8421, code 123456'), false, 'a bare address with another port');
   assert.equal(demoAddressesOk('Mac address demo.dobius:8420, code 123456'), true, 'a bare address with the right port');
   assert.equal(demoAddressesOk('Mac address: demo.dobius. Code 123456'), true, 'bare, then a full stop');
+  assert.equal(demoAddressesOk('Mac address: https:demo.dobius:8420; code 123456'), false, 'a scheme with no slashes is not an address the phone takes');
   assert.equal(demoAddressesOk('Open http://demo.dobius:8420/ and pair'), true, 'a trailing slash');
   assert.equal(demoAddressesOk('Open (http://demo.dobius) and pair'), false, 'http without the port, in brackets');
   assert.equal(demoAddressesOk('Use https://notdemo.dobius:8420, code 123456'), false, 'a longer host before the name');
@@ -305,4 +306,14 @@ test('review notes that give the demo with https are refused', () => {
   assert.equal(demoAddressesOk('See example.com/demo.dobius, code 123456'), false, 'the name inside another address');
   assert.equal(demoAddressesOk('Mac address (demo.dobius:8420) or http://demo.dobius:8420'), true, 'two right mentions');
   assert.equal(reviewDetailProblems({ ...ok, notes: 'Use https://notdemo.dobius:8420, code 123456' }).length, 1, 'refused at the review details too');
+});
+
+test('a key put in ASC_KEY_PATH by mistake is never echoed in the error', () => {
+  const pem = '-----BEGIN PRIVATE KEY-----\nMIGTAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBHkwdwIBAQQgsecretsecret\n-----END PRIVATE KEY-----';
+  assert.throws(() => createAscClient({ keyId: 'K', issuerId: 'I', keyPath: pem }), (err) => {
+    assert.equal(err.message.includes('secret'), false);
+    assert.equal(err.message.includes('BEGIN'), false);
+    assert.match(err.message, /ASC_KEY_PATH/);
+    return true;
+  });
 });

@@ -240,7 +240,7 @@ export const REVIEW_NOTE_MARKERS = ['demo.dobius', '123456'];
 export function demoAddressesOk(notes) {
   const s = String(notes || '');
   let valid = 0;
-  for (const m of s.matchAll(/(?<![a-z0-9+._@/-])(?:([a-z][a-z0-9+.-]*):\/\/)?demo\.dobius([^\s,;)\]'"<>]*)/gi)) {
+  for (const m of s.matchAll(/(?<![a-z0-9+._@/:-])(?:([a-z][a-z0-9+.-]*):\/\/)?demo\.dobius([^\s,;)\]'"<>]*)/gi)) {
     const scheme = m[1] ? m[1].toLowerCase() : null;
     const rest = m[2].replace(/[.!?:/]+$/, ''); // sentence punctuation, a trailing slash
     if (scheme ? !(scheme === 'http' && rest === ':8420') : !(rest === '' || rest === ':8420')) return false;

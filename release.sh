@@ -141,7 +141,8 @@ if [ "${DOBIUS_SKIP_IOS:-}" != "1" ]; then
   if [ "$(git rev-parse "$HEAD_SHA^")" = "$TESTED_SHA" ] && [ -z "$(git diff --name-only "$TESTED_SHA" "$HEAD_SHA" -- . ':!package.json' ':!package-lock.json')" ] && version_only; then
     IOS_ARGS+=(--skip-tests)
   fi
-  if env -u GH_TOKEN -u APPLE_APP_SPECIFIC_PASSWORD node scripts/ios-release.mjs "${IOS_ARGS[@]}"; then
+  # The run watches this shell too: cancelling release.sh stops the iOS release (Codex round 9).
+  if env -u GH_TOKEN -u APPLE_APP_SPECIFIC_PASSWORD DOBIUS_IOS_RELEASE_STARTER=$$ node scripts/ios-release.mjs "${IOS_ARGS[@]}"; then
     echo "iOS step finished"
   else
     echo "WARNING: the iOS step did not finish (desktop v$V is live regardless). Finish it with: node scripts/ios-release.mjs release --if-changed" >&2

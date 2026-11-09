@@ -45,7 +45,12 @@ export class AscError extends Error {
  * Each call mints a fresh token when the cached one is over 10 minutes old. `fetchImpl` is injectable for tests.
  */
 export function createAscClient({ keyId, issuerId, keyPath, key: keyIn, fetchImpl = fetch, now = () => Date.now() } = ascConfig()) {
-  const key = keyIn || crypto.createPrivateKey(fs.readFileSync(keyPath, 'utf8'));
+  let key = keyIn;
+  if (!key) {
+    // Neither the path nor the reader's message is passed on: a key's contents put in ASC_KEY_PATH by mistake would be
+    // in both (Codex round 9).
+    try { key = crypto.createPrivateKey(fs.readFileSync(keyPath, 'utf8')); } catch (err) { throw new Error(`could not read the App Store Connect key named by ASC_KEY_PATH (${err?.code || 'not a valid key'})`); }
+  }
   let token = null;
   let madeAt = 0;
   const auth = () => {

@@ -141,6 +141,13 @@ Mac)
 - Accepted, not handled: git checkout filters (smudge/clean) configured on this Mac apply to the clean checkout the
   build uses. Setting one up takes write access to this user's git config, which can already change the build in
   many other ways.
+- Accepted, not handled: after App Review rejects a version, a run that marked the rejection resolved and then
+  stopped before submitting leaves the version's build fixed inside the rejected submission. The next run's build
+  change is refused by Apple (409) and the run fails loudly; nothing is shipped. A rejection needs a person in App
+  Store Connect anyway, and they finish it there.
+- Cancelling release.sh, the started command or its lockf stops the run within seconds: the run watches all three.
+- The archive uses the committed `Package.resolved` (`-disableAutomaticPackageResolution`); a pin out of step with
+  `Package.swift` fails the build instead of Xcode choosing other package versions.
 - App Review needs the demo answered for every screen it shows: a new phone message type a screen depends on must be
   answered in `mobile/demo.js` too (RELEASING-IOS.md).
 
