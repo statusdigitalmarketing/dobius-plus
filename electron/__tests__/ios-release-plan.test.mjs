@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  compareVersions, compareBuildStrings, nextBuildNumber, planVersion, liveVersion, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildKey,
+  compareVersions, compareBuildStrings, buildOfTag, nextBuildNumber, planVersion, liveVersion, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildKey,
   whatsNewText, reviewDetailCopy, reviewDetailProblems, depsChanged, manifestChanged, APP_PATHS,
 } from '../../scripts/lib/ios-release-plan.mjs';
 import { ascJwt, createAscClient } from '../../scripts/lib/asc-client.mjs';
@@ -228,4 +228,24 @@ test('build strings compare the way Apple orders them, and a dotted build still 
   assert.equal(compareBuildStrings('7', '1.2.3.4'), null, 'Apple allows three parts at most');
   assert.equal(compareBuildStrings(null, '7'), null);
   assert.equal(nextBuildNumber(['100.1', '6'], 6), 101, 'counted by its first part');
+});
+
+test('a tag vouches only for the first build of its pair uploaded since its upload began', () => {
+  const t = { marketing: '2.2.12', n: 7, after: Date.parse('2026-11-09T03:00:00Z') };
+  const b = (id, raw, marketing, uploaded) => ({ id, raw, marketing, uploaded });
+  const before = b('old', '7', '2.2.12', '2026-11-09T02:00:00Z');
+  const ours = b('ours', '7', '2.2.12', '2026-11-09T03:05:00Z');
+  const later = b('later', '7', '2.2.12', '2026-11-09T05:00:00Z');
+  assert.equal(buildOfTag(t, [later, before, ours])?.id, 'ours', 'not the one before, not a later reuse');
+  assert.equal(buildOfTag(t, [before]), null, 'a build uploaded before ours is never vouched for');
+  assert.equal(buildOfTag(t, [b('x', '7', '2.2.13', '2026-11-09T03:05:00Z')]), null, 'the marketing version must match');
+  assert.equal(buildOfTag(t, [b('x', '7.0', '2.2.12', '2026-11-09T03:05:00Z')]), null, 'the build string must match exactly');
+  assert.equal(buildOfTag({ ...t, after: Number.NaN }, [ours]), null, 'a tag without its time vouches for nothing');
+  assert.equal(buildOfTag(t, [b('skew', '7', '2.2.12', '2026-11-09T02:59:00Z')])?.id, 'skew', 'a minute of clock skew is allowed');
+});
+
+test('review notes that give the demo with https are refused', () => {
+  const ok = { contactFirstName: 'A', contactLastName: 'B', contactPhone: '1', contactEmail: 'a@b.c', notes: 'Mac address demo.dobius, code 123456' };
+  assert.deepEqual(reviewDetailProblems(ok), []);
+  assert.equal(reviewDetailProblems({ ...ok, notes: 'Mac address https://demo.dobius, code 123456' }).length, 1);
 });

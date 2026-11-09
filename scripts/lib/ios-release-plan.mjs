@@ -160,6 +160,21 @@ export const buildTagName = (marketing, n) => `ios-${marketing}-${n}`;
 /** The key that names one uploaded binary: its marketing version and its build string, exactly. */
 export const buildKey = (marketing, build) => `${marketing}|${build}`;
 
+// A tag also records when its upload started; Apple's clock may run a little behind this Mac's.
+export const UPLOAD_SLACK_MS = 2 * 60_000;
+
+/**
+ * The build a tag ({ marketing, n, after }) vouches for: the FIRST build Apple lists under that pair uploaded since the
+ * upload began. One reusing the numbers later, or uploaded before ours, is never it; a tag without a time vouches for
+ * nothing. `builds` are { marketing, raw, uploaded }.
+ */
+export function buildOfTag(t, builds) {
+  if (!t || !Number.isFinite(t.after)) return null;
+  return (builds || [])
+    .filter((b) => b.marketing === t.marketing && b.raw === String(t.n) && Date.parse(b.uploaded) >= t.after - UPLOAD_SLACK_MS)
+    .sort((x, y) => Date.parse(x.uploaded) - Date.parse(y.uploaded))[0] || null;
+}
+
 /** The last uploaded build's tag among `tags`: the highest build number. */
 export function lastBuildTag(tags) {
   let best = null;
@@ -193,6 +208,9 @@ export function reviewDetailProblems(attrs) {
   for (const k of CONTACT_FIELDS) if (typeof attrs[k] !== 'string' || !attrs[k].trim()) out.push(`no ${k}`);
   const notes = typeof attrs.notes === 'string' ? attrs.notes : '';
   for (const m of REVIEW_NOTE_MARKERS) if (!notes.includes(m)) out.push(`the notes do not mention ${m}`);
+  // The built-in demo answers only at http://demo.dobius:8420 (mobile/host.js DEMO_ORIGIN): an https address typed from
+  // the notes keeps https and reaches no Mac at all.
+  if (/https:\/\/demo\.dobius/i.test(notes)) out.push('the notes give the demo address with https, which the demo does not answer');
   // A version that says reviewers need a sign-in must carry one, or Apple refuses the submission.
   if (attrs.demoAccountRequired === true) {
     for (const k of ['demoAccountName', 'demoAccountPassword']) if (typeof attrs[k] !== 'string' || !attrs[k].trim()) out.push(`no ${k}`);

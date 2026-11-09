@@ -42,6 +42,7 @@ export APPLE_APP_SPECIFIC_PASSWORD
 GH_TOKEN="$(gh auth token)"
 export GH_TOKEN
 npm test >/dev/null 2>&1 || { echo "ERROR: npm test failed; not releasing a red build" >&2; exit 1; }
+TESTED_SHA="$(git rev-parse HEAD)"
 echo "preflight OK (tests green)"
 
 step "Version bump ($BUMP)"
@@ -117,11 +118,17 @@ echo "Users auto-update within 30s of next launch (or 4h if running)."
 
 # The phone app: a new App Store build when the phone code changed since the last one, submitted for review and
 # released by Apple on approval (docs/ios-release.md). The desktop release above is already live, so this never fails
-# it: a problem is printed with the command to finish by hand. The tests already ran in preflight on this commit.
+# it: a problem is printed with the command to finish by hand.
 # DOBIUS_SKIP_IOS=1 skips it. The notary password and GitHub token are not passed down.
 if [ "${DOBIUS_SKIP_IOS:-}" != "1" ]; then
   step "iOS (App Store)"
-  if env -u GH_TOKEN -u APPLE_APP_SPECIFIC_PASSWORD node scripts/ios-release.mjs release --if-changed --expect-sha "$HEAD_SHA" --skip-tests; then
+  # The tests ran on TESTED_SHA; the release commit is that plus the version bump only. Anything else landing in
+  # between means the iOS step runs the tests itself.
+  IOS_ARGS=(release --if-changed --expect-sha "$HEAD_SHA")
+  if [ "$(git rev-parse "$HEAD_SHA^")" = "$TESTED_SHA" ] && [ -z "$(git diff --name-only "$TESTED_SHA" "$HEAD_SHA" -- . ':!package.json' ':!package-lock.json')" ]; then
+    IOS_ARGS+=(--skip-tests)
+  fi
+  if env -u GH_TOKEN -u APPLE_APP_SPECIFIC_PASSWORD node scripts/ios-release.mjs "${IOS_ARGS[@]}"; then
     echo "iOS step finished"
   else
     echo "WARNING: the iOS step did not finish (desktop v$V is live regardless). Finish it with: node scripts/ios-release.mjs release --if-changed" >&2
