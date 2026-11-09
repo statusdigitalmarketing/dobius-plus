@@ -27,9 +27,6 @@ purgeUpdaterCache();
 assert.equal(fs.existsSync(cache), false, 'the real app still self-heals');
 console.log('PASS  the real app still purges a wedged cache');
 
-fs.rmSync(home, { recursive: true, force: true });
-process.exit(0);
-
 // A failed background download is handled, never an unhandledRejection (Max, 2026-11-08).
 {
   const seen = [];
@@ -46,3 +43,6 @@ process.exit(0);
   assert.equal(handleDownloadPromise({}), null);
   console.log('PASS  a failed update download is handled, not left unhandled');
 }
+
+fs.rmSync(home, { recursive: true, force: true });
+process.exit(0);

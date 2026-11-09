@@ -126,7 +126,7 @@ function Notifications({ data, connection, write, saving, onChanged }) {
       </div>
       <p className="settings-foot">
         {a.names ? 'A notification names the tab and what happened, never what is in it.' : 'Notifications say only what happened, not which tab.'}
-        {' '}Quiet at night holds them from {data.todayNudges.quietAfter} to {data.todayNudges.morningAt} (the Today times below). Nothing comes for the tab you are looking at on the Mac.
+        {' '}Quiet at night holds them from {data.todayNudges.quietAfter} to {data.todayNudges.morningAt} (the Today times below). Nothing comes for the tab you are looking at on the {data.info?.platform === 'windows' ? 'PC' : 'Mac'}.
       </p>
     </>
   );
@@ -267,6 +267,8 @@ export default function Settings({ connection, onBack, macName }) {
 
   const n = data.todayNudges;
   const tool = data.newTabTool;
+  // A Windows PC: Auto Mode, iMessage and the new-tab model and permission flags do nothing there (Max, 2026-11-08).
+  const onWindows = data.info?.platform === 'windows';
   return (
     <div className="screen history">
       {header}
@@ -283,7 +285,7 @@ export default function Settings({ connection, onBack, macName }) {
             <Segmented label="New tab starts" value={tool} disabled={saving} onChange={(v) => write('newTabTool', v)}
               options={[['claude', 'Claude'], ['codex', 'Codex'], ['shell', 'Terminal']]} />
           </div>
-          {hasChatDefaults && tool === 'claude' && data.info?.platform !== 'windows' && (
+          {hasChatDefaults && tool === 'claude' && !onWindows && (
             <>
               <label className="settings-row"><span>Model</span>
                 <select value={data.newTabModel || ''} disabled={saving} onChange={(e) => write('newTabModel', e.target.value)}>
@@ -297,17 +299,17 @@ export default function Settings({ connection, onBack, macName }) {
               </label>
             </>
           )}
-          <div className="settings-row"><span>Auto Mode</span><Switch label="Auto Mode" on={data.autoMode} disabled={saving} onChange={(v) => write('autoMode', v)} /></div>
+          {!onWindows && <div className="settings-row"><span>Auto Mode</span><Switch label="Auto Mode" on={data.autoMode} disabled={saving} onChange={(v) => write('autoMode', v)} /></div>}
         </div>
         <p className="settings-foot">
-          {hasChatDefaults && tool === 'claude' ? 'Default leaves the choice to Claude. Resumed and restored tabs keep what they had. ' : ''}
-          Auto Mode checks Asana and starts new tasks on its own, and still asks before posting to Asana or deploying.
+          {hasChatDefaults && tool === 'claude' && !onWindows ? 'Default leaves the choice to Claude. Resumed and restored tabs keep what they had. ' : ''}
+          {onWindows ? 'What a new tab on this PC starts with.' : 'Auto Mode checks Asana and starts new tasks on its own, and still asks before posting to Asana or deploying.'}
         </p>
 
         <p className="settings-head">Today alerts</p>
         <div className="settings-group">
-          <div className="settings-row"><span>Mac notification</span><Switch label="Mac notification" on={n.mac} disabled={saving} onChange={(v) => write('todayNudges', { mac: v })} /></div>
-          <div className="settings-row"><span>Text to yourself</span><Switch label="Text to yourself" on={n.imessage} disabled={saving} onChange={(v) => write('todayNudges', { imessage: v })} /></div>
+          <div className="settings-row"><span>{onWindows ? 'PC notification' : 'Mac notification'}</span><Switch label={onWindows ? 'PC notification' : 'Mac notification'} on={n.mac} disabled={saving} onChange={(v) => write('todayNudges', { mac: v })} /></div>
+          {!onWindows && <div className="settings-row"><span>Text to yourself</span><Switch label="Text to yourself" on={n.imessage} disabled={saving} onChange={(v) => write('todayNudges', { imessage: v })} /></div>}
           <div className="settings-row"><span>Phone notification</span><Switch label="Phone notification" on={n.push} disabled={saving} onChange={(v) => write('todayNudges', { push: v })} /></div>
           <label className="settings-row"><span>Morning</span>
             <input type="time" value={n.morningAt} disabled={saving} onChange={(e) => e.target.value && write('todayNudges', { morningAt: e.target.value })} />
@@ -318,7 +320,7 @@ export default function Settings({ connection, onBack, macName }) {
         </div>
         <p className="settings-foot">
           Alerts say how many things are on Today, never what they are. The first five go out in the morning, the next five once those are done or snoozed.
-          {n.imessage && !data.info.imessageReady && ' Texts need your iMessage handle set on the Mac (Settings, iMessage Bridge).'}
+          {n.imessage && !onWindows && !data.info.imessageReady && ' Texts need your iMessage handle set on the Mac (Settings, iMessage Bridge).'}
           {n.push && !data.info.phonePush && (hasAlerts
             ? ' No phone can get notifications from this Mac yet: turn them on under Notifications above.'
             : ' No phone has notifications on for this Mac yet: tap the bell on the home screen of the web app.')}
