@@ -1261,6 +1261,7 @@ function setupDataHandlers() {
     // or Sessions dashboard that was open in another window, and offering
     // to resume it. Codex PR#3 r16 P2.
     if (result?.ok !== false) {
+      forgetKnownProjects(); // a project known only through this transcript is gone
       for (const win of BrowserWindow.getAllWindows()) {
         if (!win.isDestroyed()) win.webContents.send('data:updated', projectPath);
       }
@@ -1290,15 +1291,45 @@ function setupDataHandlers() {
  * etc.) so a renderer bug / compromised page cannot point them at arbitrary
  * local directories. Codex PR#3 r14+r15 P1/P2.
  */
+// listProjects() reads every folder under ~/.claude/projects and stats every
+// transcript in them (1,063 folders, 10,000+ files on Sam's Mac). This guard
+// runs on every git:* call, and each window polls git:status every 20s with the
+// active tab's cwd, which is often not a project (a worktree, a subfolder). On
+// 2026-11-09 that queued ~230 git:status calls about six minutes deep. The
+// known set changes rarely, so it is reused for KNOWN_PROJECTS_TTL_MS and every
+// caller shares one scan.
+const KNOWN_PROJECTS_TTL_MS = 30_000;
+let knownProjects = { at: 0, set: null };
+let knownProjectsScan = null;
+let knownProjectsGen = 0;
+async function knownProjectSet() {
+  if (knownProjects.set && Date.now() - knownProjects.at < KNOWN_PROJECTS_TTL_MS) return knownProjects.set;
+  if (!knownProjectsScan) {
+    const gen = knownProjectsGen;
+    const scan = listProjects()
+      .then((list) => {
+        const set = new Set((list || []).map((p) => p.decodedPath).filter(Boolean));
+        // A scan that started before forgetKnownProjects() answers its own
+        // callers but is not kept.
+        if (gen === knownProjectsGen) knownProjects = { at: Date.now(), set };
+        return set;
+      })
+      .finally(() => { if (knownProjectsScan === scan) knownProjectsScan = null; });
+    knownProjectsScan = scan;
+  }
+  return knownProjectsScan;
+}
+
+// A project added from the folder picker, or a new projects folder, is known at once.
+const forgetKnownProjects = () => { knownProjectsGen++; knownProjects = { at: 0, set: null }; knownProjectsScan = null; };
+
 async function isKnownProject(projectPath) {
   if (!projectPath || typeof projectPath !== 'string') return false;
   try {
-    const known = new Set([
-      ...(getOpenProjects() || []),
-      ...((await listProjects()) || []).map((p) => p.decodedPath).filter(Boolean),
-    ]);
-    return known.has(projectPath);
-  } catch {
+    if ((getOpenProjects() || []).includes(projectPath)) return true;
+    return (await knownProjectSet()).has(projectPath);
+  } catch (err) {
+    console.warn('[main] project list for the known-project check failed:', err?.message);
     return false;
   }
 }
@@ -3340,7 +3371,13 @@ function setupConfigHandlers() {
   ipcMain.handle('config:getPinnedProjects', () => getPinnedProjects());
   ipcMain.handle('config:setPinnedProjects', (_event, paths) => setPinnedProjects(paths));
   ipcMain.handle('config:getSettings', () => getSettings());
-  ipcMain.handle('config:updateSettings', (_event, updates) => { const r = updateSettings(updates); broadcastToPhones('settingsChanged'); return r; });
+  ipcMain.handle('config:updateSettings', (_event, updates) => {
+    const r = updateSettings(updates);
+    // A new projects folder changes which projects the git and file handlers accept.
+    if (updates && typeof updates === 'object' && Object.prototype.hasOwnProperty.call(updates, 'projectScanDir')) forgetKnownProjects();
+    broadcastToPhones('settingsChanged');
+    return r;
+  });
   ipcMain.handle('settings:writeChecked', (_event, key, value) => writePhoneSetting(key, value));
   ipcMain.handle('config:getSessionTags', () => getSessionTags());
   ipcMain.handle('config:setSessionTag', (_event, sessionId, label, color) => setSessionTag(sessionId, label, color));
@@ -3824,6 +3861,7 @@ function setupShellHandlers() {
   ipcMain.handle('project:removeFromList', (_event, projectPath) => {
     if (typeof projectPath !== 'string') return;
     addHiddenProject(projectPath);
+    forgetKnownProjects();
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('data:updated', projectPath);
     }
@@ -4037,6 +4075,7 @@ function setupWindowHandlers() {
     if (result.canceled || result.filePaths.length === 0) return { ok: false };
     const projectPath = result.filePaths[0];
     addManualProject(projectPath);
+    forgetKnownProjects();
     openProjectWindow(projectPath);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('data:updated', projectPath);
@@ -4056,6 +4095,7 @@ function setupWindowHandlers() {
     if (result.canceled || result.filePaths.length === 0) return { ok: false };
     const dir = result.filePaths[0];
     updateSettings({ projectScanDir: dir });
+    forgetKnownProjects();
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('data:updated', dir);
     }

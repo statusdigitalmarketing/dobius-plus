@@ -6,11 +6,12 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { winProcessTable, winClaudeCommand } from './win-proc.js';
 import {
-  HISTORY_PATH, STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PLUGINS_DIR, PROJECTS_DIR,
+  STATS_PATH, SETTINGS_PATH, CLAUDE_JSON_PATH, MCP_BRIDGE_CONFIG, PLANS_DIR, SKILLS_DIR, PLUGINS_DIR, PROJECTS_DIR,
   parseJsonl, streamJsonl, timeAgo, pathExists, mapLimit,
 } from './data-utils.js';
 import { listCodexSessions, codexTranscript } from './codex-sessions.js';
 import { presenceOf } from './claude-presence.js';
+import { historyIndex, singleFlight } from './history-index.js';
 import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects, getAllProjectsWithTabs, getSessionTabMap, getSessionTabNames } from './config-manager.js';
 import { isAbsPath, isInsidePath } from '../shared/platform.js';
 
@@ -18,16 +19,17 @@ import { isAbsPath, isInsidePath } from '../shared/platform.js';
  * Load session history from ~/.claude/history.jsonl
  * Returns array of sessions, deduped by sessionId, sorted by timestamp desc, limited to 100.
  */
-export async function loadHistory() {
-  const entries = await parseJsonl(HISTORY_PATH);
-  const bySession = new Map();
-  for (const entry of entries) {
-    if (entry.sessionId) {
-      const existing = bySession.get(entry.sessionId);
-      if (!existing || (entry.timestamp && entry.timestamp >= existing.timestamp)) {
-        bySession.set(entry.sessionId, entry);
-      }
-    }
+// Every window asks at once (the history watcher tells them all), so they
+// share one run: see electron/history-index.js for the crash this prevents.
+export const loadHistory = singleFlight(loadHistoryOnce);
+
+async function loadHistoryOnce() {
+  let bySession;
+  try {
+    ({ bySession } = await historyIndex.read());
+  } catch (err) {
+    console.warn('[data-service] history read failed:', err?.message);
+    return [];
   }
   // v1.0.28: enrich each session with transcriptExists + sizeMB. Filter
   // ghosts BEFORE the 100-session cap so the sidebar never empties out when
@@ -1302,24 +1304,11 @@ export async function loadStats() {
  */
 async function computeStatsFromHistory() {
   const empty = { version: 2, dailyActivity: [], modelUsage: {}, hourCounts: {}, derived: true };
-  let entries;
-  try { entries = await parseJsonl(HISTORY_PATH); } catch { return empty; }
-  if (!Array.isArray(entries) || entries.length === 0) return empty;
-  const byDay = new Map(); // 'YYYY-MM-DD' -> { messageCount, sessions:Set }
-  const hourCounts = {};
-  const projects = new Set();
-  for (const e of entries) {
-    const ts = typeof e?.timestamp === 'number' ? e.timestamp : 0;
-    if (!ts) continue;
-    const d = new Date(ts);
-    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    let day = byDay.get(date);
-    if (!day) { day = { messageCount: 0, sessions: new Set() }; byDay.set(date, day); }
-    day.messageCount += 1;
-    if (e.sessionId) day.sessions.add(e.sessionId);
-    if (e.project) projects.add(e.project);
-    hourCounts[d.getHours()] = (hourCounts[d.getHours()] || 0) + 1;
-  }
+  let idx;
+  try { idx = await historyIndex.read(); } catch { return empty; }
+  const { byDay, projects } = idx;
+  if (byDay.size === 0) return empty;
+  const hourCounts = { ...idx.hourCounts };
   const dailyActivity = Array.from(byDay.entries())
     .sort((a, b) => a[0].localeCompare(b[0])) // chronological; chart slices last 14
     .map(([date, v]) => ({ date, messageCount: v.messageCount, sessionCount: v.sessions.size, toolCallCount: 0 }));
