@@ -506,7 +506,9 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
   // and Delete go is on screen whatever the labels say.
   const base = (p) => {
     const n = kind === 'asana' ? p.asana : p.pending;
-    return `${visiblePath(p.name)}${n ? ` (${n})` : ''}`;
+    // The whole label goes through visiblePath, count included, so the two compare exactly as they read (Codex round 14:
+    // a name's space and the count's space were written differently and two equal-looking labels did not match).
+    return visiblePath(`${p.name}${n ? ` (${n})` : ''}`);
   };
   const seen = new Map();
   for (const p of projects) seen.set(base(p), (seen.get(base(p)) || 0) + 1);
