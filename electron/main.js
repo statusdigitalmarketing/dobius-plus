@@ -73,7 +73,7 @@ import {
   renameEntry as fmRenameEntry, trashEntry as fmTrashEntry, revealEntry as fmRevealEntry,
   openEntry as fmOpenEntry,
 } from './file-manager-service.js';
-import { watchFiles, stopWatching } from './watcher-service.js';
+import { watchFiles, stopWatching, setBeforeNotify } from './watcher-service.js';
 import { watchProjectDir, unwatchProjectDir, getProjectEvents, stopAllFileWatchers } from './file-change-service.js';
 import { watchBuildDir, unwatchBuildDir, stopAllBuildWatchers } from './build-monitor-watcher.js';
 import {
@@ -663,6 +663,14 @@ function setupTerminalHandlers() {
   ipcMain.handle('terminal:getProcess', (event, id) => {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
     if (!ownsTerminal(event.sender.id, id)) return null;
+    return getTerminalProcess(id);
+  });
+
+  // Display only (status bar count, tab badges): may be up to 1.5s old. Resume,
+  // close-confirm and anything else that acts on the answer use the fresh one.
+  ipcMain.handle('terminal:getProcessForStatus', (event, id) => {
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
+    if (!ownsTerminal(event.sender.id, id)) return null;
     return getTerminalProcessShared(id);
   });
 
@@ -841,7 +849,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:loadTranscript', (_event, sessionId, projectPath) => loadTranscript(sessionId, projectPath));
   ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
   ipcMain.handle('data:listProjects', () => listProjects());
-  ipcMain.handle('data:loadAllSessions', (_event, projectFilter, opts) => loadAllSessions(typeof projectFilter === 'string' ? projectFilter : undefined, (opts && typeof opts === 'object') ? opts : {}));
+  ipcMain.handle('data:loadAllSessions', (_event, projectFilter, opts) => loadAllSessionsShared(typeof projectFilter === 'string' ? projectFilter : undefined, (opts && typeof opts === 'object') ? opts : {}));
   ipcMain.handle('data:getAllProjectTabs', () => {
     // Feed live-PTY ids (so the sidebar can tell a still-running cross-window tab
     // from a resumable one, H3) and open tear-off windows (so their torn tab,
@@ -1262,6 +1270,7 @@ function setupDataHandlers() {
     // to resume it. Codex PR#3 r16 P2.
     if (result?.ok !== false) {
       forgetKnownProjects(); // a project known only through this transcript is gone
+      forgetSharedSessionLoads();
       for (const win of BrowserWindow.getAllWindows()) {
         if (!win.isDestroyed()) win.webContents.send('data:updated', projectPath);
       }
@@ -1319,6 +1328,32 @@ async function knownProjectSet() {
   }
   return knownProjectsScan;
 }
+
+// Windows ask for the same session list together (every sidebar on focus and
+// on a history event): identical asks share one scan, and its answer for
+// SESSIONS_SHARE_MS. Bounded: at most SESSIONS_SHARE_MAX distinct asks kept.
+const SESSIONS_SHARE_MS = 2000;
+const SESSIONS_SHARE_MAX = 64;
+const sharedSessionLoads = new Map(); // key -> { at, promise }
+function loadAllSessionsShared(projectFilter, opts) {
+  let key;
+  try { key = JSON.stringify([projectFilter ?? null, opts]); } catch { return loadAllSessions(projectFilter, opts); }
+  const hit = sharedSessionLoads.get(key);
+  if (hit && (hit.at === 0 || Date.now() - hit.at < SESSIONS_SHARE_MS)) return hit.promise;
+  const entry = { at: 0, promise: null };
+  entry.promise = loadAllSessions(projectFilter, opts).finally(() => {
+    if (sharedSessionLoads.get(key) === entry) entry.at = Date.now();
+  });
+  sharedSessionLoads.delete(key);
+  sharedSessionLoads.set(key, entry);
+  while (sharedSessionLoads.size > SESSIONS_SHARE_MAX) sharedSessionLoads.delete(sharedSessionLoads.keys().next().value);
+  return entry.promise;
+}
+
+// A history event, a deleted session or a renamed one makes every shared
+// answer stale: a scan that was running when the change landed may miss it.
+const forgetSharedSessionLoads = () => sharedSessionLoads.clear();
+setBeforeNotify(forgetSharedSessionLoads);
 
 // A project added from the folder picker, or a new projects folder, is known at once.
 const forgetKnownProjects = () => { knownProjectsGen++; knownProjects = { at: 0, set: null }; knownProjectsScan = null; };
@@ -3767,6 +3802,7 @@ function setupSessionTabCapture() {
       // rather than on the next transcript write, which an idle chat never
       // makes. Its own event: data:updated also reloads projects and stats.
       if (recordSessionTabNames(namePairs)) {
+        forgetSharedSessionLoads();
         for (const win of BrowserWindow.getAllWindows()) {
           if (!win.isDestroyed()) win.webContents.send('sessions:namesChanged');
         }

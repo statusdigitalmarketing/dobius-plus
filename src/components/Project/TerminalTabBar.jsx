@@ -457,7 +457,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
   // Poll active process for each tab (for status badges)
   const [tabProcesses, setTabProcesses] = useState({});
   useEffect(() => {
-    if (!window.electronAPI?.terminalGetProcess || tabs.length === 0) return;
+    if (!window.electronAPI?.terminalGetProcessForStatus || tabs.length === 0) return;
     let running = false;
     let cancelled = false;
     const poll = async () => {
@@ -468,7 +468,7 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
         const result = {};
         for (const tab of tabs) {
           try {
-            const proc = await window.electronAPI.terminalGetProcess(tab.id);
+            const proc = await window.electronAPI.terminalGetProcessForStatus(tab.id);
             if (proc) result[tab.id] = proc;
           } catch { /* ignore */ }
         }

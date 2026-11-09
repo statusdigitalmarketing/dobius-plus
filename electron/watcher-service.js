@@ -1,6 +1,6 @@
 import path from 'path';
 import { watch } from 'chokidar';
-import { HISTORY_PATH, STATS_PATH, pathExists } from './data-utils.js';
+import { HISTORY_PATH, STATS_PATH } from './data-utils.js';
 import { historyIndex, projectsSince } from './history-index.js';
 
 /**
@@ -21,21 +21,19 @@ const HISTORY = path.resolve(HISTORY_PATH);
 
 const subscribers = new Set(); // webContents
 let watcher = null;
-let starting = null;
 let timer = null;
 const pendingPaths = new Set();
-let lastIdx = null; // the history index as of the last event, and its line count
+// The history index as of the last event, and its line count. Null until the
+// first event, which therefore names no projects (every window reloads once):
+// a baseline taken at start could count a prompt that lands between the
+// watcher attaching and the baseline read as already delivered.
+let lastIdx = null;
 let lastSeq = NaN;
 
-async function baseline() {
-  try {
-    const idx = await historyIndex.read();
-    lastIdx = idx;
-    lastSeq = idx.seq;
-  } catch (err) {
-    console.warn('[watcher] history baseline failed:', err?.message);
-  }
-}
+// Called just before windows are told (main drops its shared session scans,
+// which may predate the change).
+let beforeNotify = () => {};
+export function setBeforeNotify(fn) { beforeNotify = typeof fn === 'function' ? fn : () => {}; }
 
 async function flush() {
   timer = null;
@@ -53,6 +51,7 @@ async function flush() {
       console.warn('[watcher] history read failed:', err?.message);
     }
   }
+  try { beforeNotify(); } catch (err) { console.warn('[watcher] beforeNotify failed:', err?.message); }
   for (const wc of subscribers) {
     if (!wc.isDestroyed()) wc.send('data:updated', paths[0], { projects });
   }
@@ -68,35 +67,34 @@ function closeWatcher() {
   pendingPaths.clear();
   const w = watcher;
   watcher = null;
+  lastIdx = null;
+  lastSeq = NaN;
   w?.close().catch(() => {});
 }
 
-async function ensureWatcher() {
-  if (watcher || starting) return starting;
-  starting = (async () => {
-    const watchPaths = [];
-    if (await pathExists(HISTORY_PATH)) watchPaths.push(HISTORY_PATH);
-    if (await pathExists(STATS_PATH)) watchPaths.push(STATS_PATH);
-    if (watchPaths.length === 0 || subscribers.size === 0) return;
-    watcher = watch(watchPaths, {
-      persistent: true,
-      ignoreInitial: true,
-      awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
-    });
-    watcher.on('change', onChange);
-    await baseline();
-  })().finally(() => { starting = null; });
-  return starting;
+// Synchronous, so there is no window in which a watcher is half started. Both
+// files are watched whether or not they exist yet: chokidar reports one that
+// appears later as 'add' (a fresh install has no history.jsonl).
+function ensureWatcher() {
+  if (watcher || subscribers.size === 0) return;
+  watcher = watch([HISTORY_PATH, STATS_PATH], {
+    persistent: true,
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
+  });
+  watcher.on('change', onChange);
+  watcher.on('add', onChange);
+  watcher.on('error', (err) => console.warn('[watcher] error:', err?.message));
 }
 
-export async function watchFiles(webContents) {
+export function watchFiles(webContents) {
   if (subscribers.has(webContents)) return;
   subscribers.add(webContents);
   webContents.once('destroyed', () => {
     subscribers.delete(webContents);
     if (subscribers.size === 0) closeWatcher();
   });
-  await ensureWatcher();
+  ensureWatcher();
 }
 
 export function stopWatching() {

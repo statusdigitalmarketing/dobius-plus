@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   terminalResize: (id, cols, rows) => ipcRenderer.send('terminal:resize', id, cols, rows),
   terminalKill: (id) => ipcRenderer.send('terminal:kill', id),
   terminalGetProcess: (id) => ipcRenderer.invoke('terminal:getProcess', id),
+  // For display pollers only; may be up to 1.5s old (see main.js).
+  terminalGetProcessForStatus: (id) => ipcRenderer.invoke('terminal:getProcessForStatus', id),
   terminalGetCwd: (id) => ipcRenderer.invoke('terminal:getCwd', id),
   onTerminalData: (callback) => {
     const handler = (_event, id, data) => callback(id, data);

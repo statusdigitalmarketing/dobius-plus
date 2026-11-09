@@ -108,8 +108,9 @@ export function useSessions({ projectFilter = null, excludeAutomated = false } =
     });
     // Statuses (working / done) age with the clock and with replies, which
     // write no history line. Other projects' prompts used to refresh them as a
-    // side effect; now a slow tick and window focus do, and only while visible.
-    const tick = setInterval(() => { if (!document.hidden) loadSessions(); }, 60_000);
+    // side effect; now focusing the window does, plus a slow tick in the ONE
+    // window that has focus (every window ticking was 14 full scans a minute).
+    const tick = setInterval(() => { if (document.hasFocus()) loadSessions(); }, 60_000);
     const onFocus = () => loadSessions();
     window.addEventListener('focus', onFocus);
     return () => { remove(); removeNames?.(); clearInterval(tick); window.removeEventListener('focus', onFocus); };

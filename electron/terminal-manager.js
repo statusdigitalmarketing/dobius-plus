@@ -631,18 +631,24 @@ export async function getTerminalProcess(id) {
 const PROCESS_TTL_MS = 1500;
 const processAnswers = new Map(); // id -> { at, value } | { pending }
 export function getTerminalProcessShared(id) {
+  // Keyed to the PTY too: a tab id reused for a new shell never gets the old one's answer.
+  const ptyPid = terminals.get(id)?.pty?.pid;
   const hit = processAnswers.get(id);
-  if (hit?.pending) return hit.pending;
-  if (hit && Date.now() - hit.at < PROCESS_TTL_MS && terminals.has(id)) return Promise.resolve(hit.value);
+  if (hit && hit.ptyPid === ptyPid) {
+    if (hit.pending) return hit.pending;
+    if (Date.now() - hit.at < PROCESS_TTL_MS) return Promise.resolve(hit.value);
+  }
   const pending = getTerminalProcess(id).then(
     (value) => {
-      if (terminals.has(id)) processAnswers.set(id, { at: Date.now(), value });
-      else processAnswers.delete(id);
+      if (processAnswers.get(id)?.pending === pending) {
+        if (terminals.get(id)?.pty?.pid === ptyPid) processAnswers.set(id, { ptyPid, at: Date.now(), value });
+        else processAnswers.delete(id);
+      }
       return value;
     },
-    (err) => { processAnswers.delete(id); throw err; },
+    (err) => { if (processAnswers.get(id)?.pending === pending) processAnswers.delete(id); throw err; },
   );
-  processAnswers.set(id, { pending });
+  processAnswers.set(id, { ptyPid, pending });
   // Bounded by the live tabs: answers for closed tabs go on the next sweep.
   if (processAnswers.size > terminals.size + 64) {
     for (const key of processAnswers.keys()) if (!terminals.has(key) && !processAnswers.get(key)?.pending) processAnswers.delete(key);

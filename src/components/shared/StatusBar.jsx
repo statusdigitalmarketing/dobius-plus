@@ -39,7 +39,7 @@ function useMonitors() {
   const [activeCount, setActiveCount] = useState(0);
 
   useEffect(() => {
-    if (!window.electronAPI?.terminalGetProcess || live.length === 0) { setActiveCount(0); return; }
+    if (!window.electronAPI?.terminalGetProcessForStatus || live.length === 0) { setActiveCount(0); return; }
     let cancelled = false;
     let running = false;
     const poll = async () => {
@@ -50,7 +50,7 @@ function useMonitors() {
         let active = 0;
         for (const id of live) {
           try {
-            const proc = await window.electronAPI.terminalGetProcess(id);
+            const proc = await window.electronAPI.terminalGetProcessForStatus(id);
             if (proc && !SHELLS.includes(String(proc).trim())) active += 1;
           } catch { /* ignore */ }
         }
