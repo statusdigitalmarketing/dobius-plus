@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useStore } from '../../store/store';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 import { tabActivityLabel } from '../../lib/tab-activity';
+import { orderSidebarTabs, normalizeSidebarOrder } from '../../lib/sidebar-order';
 
 function timeAgo(ts) {
   if (!ts) return '';
@@ -81,6 +82,19 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
   const setActiveView = useStore((s) => s.setActiveView);
   const requestTabBar = useStore((s) => s.requestTabBar);
   const [collapsed, setCollapsed] = useState({}); // path -> true when collapsed
+  // settings.sidebarTabOrder (src/lib/sidebar-order.js). Read on open and with every list refresh, so a change made in
+  // another window arrives within the poll; Settings in this window announces its own change at once.
+  const [order, setOrder] = useState('activity');
+  const readOrder = useCallback(() => {
+    window.electronAPI?.configGetSettings?.()
+      .then((s) => setOrder(normalizeSidebarOrder(s?.sidebarTabOrder)))
+      .catch((err) => console.warn('[ProjectTabsView] settings read failed:', err?.message));
+  }, []);
+  useEffect(() => {
+    const onChange = (e) => setOrder(normalizeSidebarOrder(e.detail));
+    window.addEventListener('dobius:sidebarTabOrder', onChange);
+    return () => window.removeEventListener('dobius:sidebarTabOrder', onChange);
+  }, []);
 
   // The aggregate reads session history and can be slow on a big history, so
   // a tick is skipped while one is still out (overlapping asks piled up).
@@ -102,9 +116,10 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
   // in-window event for their changes.
   useEffect(() => {
     refresh();
-    const i = setInterval(refresh, 5000);
+    readOrder();
+    const i = setInterval(() => { refresh(); readOrder(); }, 5000);
     return () => clearInterval(i);
-  }, [refresh]);
+  }, [refresh, readOrder]);
 
   // Live row status (Working / Input / Waiting / Done) comes from main's cheap
   // tabs:activity, keyed by tab id. One ask at a time; an ask requested while
@@ -176,26 +191,39 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
     if (tab.sessionId) onResumeSession?.({ sessionId: tab.sessionId, project: projectPath });
   }, [liveHere, currentProjectPath, showTab, setActiveView, onResumeSession]);
 
-  // Filter by search across tab label + preview + project name. Keep a project
-  // only if it still has matching tabs.
-  // Attention-first WITHIN each project, matching the mobile board: a live
-  // tab, then the most recently active, then the rest. The aggregate can run
-  // to dozens of rows (39 tabs on this account, only 10 with Claude running),
-  // and project order alone buries the ones that matter.
+  // A row's activity (Working / Input / Waiting / Done): what it shows, and what the status order sorts by.
+  const labelFor = useCallback((projectPath, t, now) => {
+    const live = liveHere(projectPath, t.id);
+    const row = activity.get(t.id);
+    const a = row?.activity;
+    return tabActivityLabel({
+      live: !!a,
+      status: a?.status,
+      hookOwned: !!a?.hookOwned,
+      since: a?.since,
+      lastWorkMs: a?.lastWorkMs,
+      background: a?.background,
+      waiting: a?.waiting,
+      unread: live ? !!unreadTabs[t.id] : !!row?.unread,
+      now,
+    });
+  }, [liveHere, activity, unreadTabs]);
+
+  // Within each project, by settings.sidebarTabOrder: most recently active first (the default, attention-first like
+  // the mobile board), the tab bar's order, or by status. Filtered by search across tab label + preview + project
+  // name below, keeping a project only if it still has matching tabs.
   const ordered = useMemo(() => {
     if (!groups) return null;
+    const now = Date.now();
+    const bar = new Map(terminalTabs.map((t, i) => [t.id, i]));
     return groups.map((g) => ({
       ...g,
-      tabs: [...(g.tabs || [])]
-        .map((t, i) => ({ t, i }))
-        .sort((a, b) => (
-          (b.t.live ? 1 : 0) - (a.t.live ? 1 : 0)
-          || (b.t.lastActiveAt || 0) - (a.t.lastActiveAt || 0)
-          || a.i - b.i
-        ))
-        .map((x) => x.t),
+      tabs: orderSidebarTabs(g.tabs, order, {
+        barIndex: (t) => (g.path === currentProjectPath && bar.has(t.id) ? bar.get(t.id) : -1),
+        kind: (t) => labelFor(g.path, t, now)?.kind || null,
+      }),
     }));
-  }, [groups]);
+  }, [groups, order, terminalTabs, currentProjectPath, labelFor]);
 
   const filtered = useMemo(() => {
     if (!ordered) return null;
@@ -272,24 +300,13 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                   // every window (a tear-off, a respawn and auto-resume's
                   // status broadcasts all leave the store behind). Unread is
                   // this window's own for its tabs, main's mirror for others.
-                  const row = activity.get(t.id);
-                  const a = row?.activity;
+                  const a = activity.get(t.id)?.activity;
                   // Dot: this window's tabs keep the store (it also carries
                   // auto-resume's queued state); another window's live tab
                   // uses main's hook status rather than a transcript guess.
                   const status = (live ? tabStatus[t.id] : (a?.status || t.status)) || 'idle';
                   const dot = STATUS_COLORS[status] || 'var(--dim)';
-                  const label = tabActivityLabel({
-                    live: !!a,
-                    status: a?.status,
-                    hookOwned: !!a?.hookOwned,
-                    since: a?.since,
-                    lastWorkMs: a?.lastWorkMs,
-                    background: a?.background,
-                    waiting: a?.waiting,
-                    unread: live ? !!unreadTabs[t.id] : !!row?.unread,
-                    now,
-                  });
+                  const label = labelFor(g.path, t, now);
                   // The tab this window is showing (Brett: "so I know which tab I'm actually on").
                   // A tinted fill plus an accent bar, so it reads in light and dark themes alike.
                   // Only while the terminal view shows it: on the Dashboard no tab is on screen (Codex).

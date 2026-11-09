@@ -4,6 +4,7 @@ import { buildPairingDeepLink, buildPairingWebLink } from '../../../shared/pairi
 import { useStore } from '../../store/store';
 import { curatedTerminalFontsFor, buildTerminalFontFamily } from '../../lib/terminal-font';
 import { THEMES } from '../../lib/themes';
+import { normalizeSidebarOrder } from '../../lib/sidebar-order';
 import {
   normalizeNewTabTool, normalizeNewTabModel, normalizeNewTabPermissionMode, NEW_TAB_MODELS, NEW_TAB_PERMISSION_MODES,
 } from '../../../shared/new-tab.js';
@@ -572,6 +573,26 @@ export default function Settings() {
             checked={settings.sidebarDefaultOpen}
             onChange={(v) => updateSetting('sidebarDefaultOpen', v)}
           />
+        </SettingRow>
+
+        <SettingRow
+          label="Sidebar Tab Order"
+          description="How the sidebar's Tabs list orders each project's tabs. Same as the tab bar keeps them where you put them; by status puts working tabs first, then ones that need you, waiting, and done."
+        >
+          <select
+            value={normalizeSidebarOrder(settings.sidebarTabOrder)}
+            onChange={(e) => {
+              updateSetting('sidebarTabOrder', e.target.value);
+              window.dispatchEvent(new CustomEvent('dobius:sidebarTabOrder', { detail: e.target.value }));
+            }}
+            data-testid="sidebar-tab-order"
+            aria-label="Sidebar tab order"
+            style={SELECT_STYLE}
+          >
+            <option value="activity">Most recent first</option>
+            <option value="tabs">Same as the tab bar</option>
+            <option value="status">By status</option>
+          </select>
         </SettingRow>
 
         {/* The status hooks are printf commands that need bash: on a Windows PC
