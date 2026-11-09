@@ -3,6 +3,9 @@ import XtermView from './XtermView';
 import ChatView from './ChatView';
 import SpecialKeys from './SpecialKeys';
 
+// How long a new tab asked for from this screen is waited for before the screen stops expecting its reply.
+const CREATE_WAIT_MS = 60_000;
+
 /** Last path segment, for a short folder label. */
 function lastSeg(p) {
   if (!p) return '';
@@ -104,6 +107,14 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
   const creatingRef = useRef(false);
   // The nonce of this screen's own pending create: only the reply carrying it moves the screen (Codex round 4).
   const createNonceRef = useRef(null);
+  const createTimerRef = useRef(null);
+  const stopCreating = useCallback(() => {
+    clearTimeout(createTimerRef.current);
+    createTimerRef.current = null;
+    creatingRef.current = false;
+    createNonceRef.current = null;
+  }, []);
+  useEffect(() => () => clearTimeout(createTimerRef.current), []);
   // tab id -> { sig, at }: when each tab's current spinner reading first arrived.
   const activityRxRef = useRef(new Map());
   // 'chat' (responsive transcript, default) vs 'terminal' (raw PTY mirror). The
@@ -133,10 +144,6 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
   useEffect(() => {
     const off = connection.onMessage((msg) => {
       if (msg.type === 'authed') {
-        // A create sent on the old socket answers on that socket, never this one: stop waiting for it (the list below
-        // then decides, and leaves for Tasks if the run terminal is gone).
-        creatingRef.current = false;
-        createNonceRef.current = null;
         refreshList();
       } else if (msg.type === 'terminals') {
         // Stamp when each spinner reading arrived: the Chat view's clock
@@ -177,8 +184,7 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
         // A Mac that echoes nonces always sends the key (null on a resume's reply, Codex round 5); only an older Mac omits it.
         const mine = 'nonce' in msg ? (createNonceRef.current !== null && msg.nonce === createNonceRef.current) : creatingRef.current;
         if (!mine) { refreshList(); return; } // someone else's create (the Board's): leave this screen's state alone
-        creatingRef.current = false;
-        createNonceRef.current = null;
+        stopCreating();
         endExact();
         refreshList();
         setActiveId(msg.id);
@@ -204,14 +210,13 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
       } else if (msg.type === 'error') {
         // Not this screen's create: another screen's, or an unrelated error (a newer Mac sends nonce null on those).
         if ('nonce' in msg && (createNonceRef.current === null || msg.nonce !== createNonceRef.current)) return;
-        creatingRef.current = false; // let the user retry a failed create
-        createNonceRef.current = null;
+        stopCreating(); // let the user retry a failed create
         refreshList(); // a run terminal that went while this was pending is left now (see the terminals case)
       }
     });
     if (connection.status === 'authed') refreshList();
     return off;
-  }, [connection, refreshList, leaveSoon, endExact]);
+  }, [connection, refreshList, leaveSoon, endExact, stopCreating]);
 
   // Switch to a deep-linked session even when already mounted on the terminal
   // screen: a push tapped while here updates initialId (the openTabId prop) but
@@ -255,11 +260,21 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
   const newTerminalIn = useCallback((projectPath) => {
     if (creatingRef.current) return; // guard double-tap over latency (MED-10)
     creatingRef.current = true;
+    // A leave already queued for a gone run terminal would unmount this screen, and with it the only handler for this
+    // create's reply (Codex phone tasks round 16): cancelled; the reply, or the failure's list, decides instead.
+    clearTimeout(leaveTimerRef.current);
+    leaveTimerRef.current = null;
     const nonce = `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     createNonceRef.current = nonce;
+    // A reply can be lost (the socket dropped after the create went out). Past the deadline it stops waiting and
+    // re-reads the list, which leaves for Tasks if the run terminal is gone. A create queued while offline goes out once
+    // the connection is back and is still answered within the minute after a short drop; accepted: after a longer one
+    // the new tab is made on the Mac but this screen no longer opens it (it shows in the switcher).
+    clearTimeout(createTimerRef.current);
+    createTimerRef.current = setTimeout(() => { if (createNonceRef.current === nonce) { stopCreating(); refreshList(); } }, CREATE_WAIT_MS);
     setSwitcherOpen(false);
     connection.send({ type: 'createTerminal', cwd: projectPath, nonce });
-  }, [connection]);
+  }, [connection, refreshList, stopCreating]);
 
   // Top-bar "+": add a tab in the active terminal's project.
   const newTerminalHere = useCallback(() => {
