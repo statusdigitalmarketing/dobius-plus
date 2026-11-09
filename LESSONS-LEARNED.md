@@ -855,3 +855,9 @@
 - **FIX**: Two separate empty files (scripts/ios-release.mjs `noNpmrc()`). Proven with `env -i PATH HOME npm_config_userconfig=<a> npm_config_globalconfig=<b> npm config get node-options` printing `null` while a node-options line sat in the user file.
 - **CONTEXT**: Any build step that must ignore the user's npm config.
 - **DETECTION**: `grep -n "npm_config_userconfig" scripts/*.mjs`
+
+### API - 2026-11-09
+- **MISTAKE**: `scripts/ios-release.mjs` `itemsOf` read `/v1/reviewSubmissions/{id}/items?fields[reviewSubmissionItems]=state,appStoreVersion` and matched items by `relationships.appStoreVersion.data.id`. App Store Connect leaves the `relationships` object out entirely unless the request also has `include=appStoreVersion`, so the 2.2.14 release could never see its own item and stopped with "version 2.2.14 is not in review submission".
+- **FIX**: add `include=<relationship>` to any App Store Connect read whose code looks at `relationships.<x>.data`. Proven live with a read-only GET before and after.
+- **CONTEXT**: fake-client tests cannot catch this; only a live read can. The builds query already had `include=preReleaseVersion`, which is why that part worked.
+- **DETECTION**: `grep -n "relationships?\.\w*?\.data" scripts/ios-release.mjs` and check that each matching request URL has `include=`
