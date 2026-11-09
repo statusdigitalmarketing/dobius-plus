@@ -402,7 +402,8 @@ test('a folder shows exactly: only printable ASCII as is, everything else as a c
   const cp = (...n) => String.fromCodePoint(...n);
   const BS = cp(92);
   const box = cp(0x2423);
-  assert.equal(visiblePath('/work/a b'), '/work/a b', 'a lone space between words stays');
+  assert.equal(visiblePath('/work/a b'), `/work/a${cp(160)}b`, 'a lone space stays a gap, one a line cannot wrap at');
+  assert.equal(visiblePath(`/work/a${cp(160)}b`), `/work/a${BS}u{a0}b`, 'a real no-break space is a code, so it never reads as a space');
   assert.equal(visiblePath('/work/a  b'), `/work/a${box}${box}b`, 'a run of spaces is marked');
   assert.equal(visiblePath('/work/x '), `/work/x${box}`, 'a trailing space is marked');
   assert.equal(visiblePath(`/work/a${cp(9)}b`), `/work/a${BS}tb`);

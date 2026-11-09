@@ -66,7 +66,7 @@ function groupTerminals(terminals) {
   return groups;
 }
 
-export default function TerminalScreen({ connection, status, initialId, onBack, onShowHistory, onExactMissing }) {
+export default function TerminalScreen({ connection, status, initialId, openNonce, onBack, onShowHistory, onExactMissing }) {
   const [terminals, setTerminals] = useState([]);
   const [activeId, setActiveId] = useState(initialId || null);
   // Opened for one exact terminal (a command's run, from Tasks): when it is not there, leave instead of falling back to
@@ -154,7 +154,9 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         activityRxRef.current = nextRx;
         setActiveId((cur) => {
           if (cur && (msg.list || []).some((t) => t.id === cur)) return cur;
-          if (exactIdRef.current && cur === exactIdRef.current) {
+          // Opened for one exact terminal: never fall back to another one, not even on a second list that arrives while
+          // the leave is still queued (cur already null then; Codex phone tasks round 13).
+          if (exactIdRef.current && (cur === exactIdRef.current || cur === null)) {
             leaveSoon();
             return null;
           }
@@ -212,7 +214,7 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
     if (!initialId) return;
     if (initialId !== exactIdRef.current) endExact();
     setActiveId(initialId);
-  }, [initialId, endExact]);
+  }, [initialId, openNonce, endExact]); // the nonce: a second tap naming the same terminal still brings it back
 
   // Close the stop-confirm if the session it named has since exited/vanished.
   useEffect(() => {

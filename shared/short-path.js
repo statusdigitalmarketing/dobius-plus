@@ -17,6 +17,10 @@ export function shortPath(p, home) {
 // non-Latin letters reads as codes, and no two folders can ever read the same (Codex phone tasks rounds 6 to 8).
 const BS = String.fromCharCode(92);
 const OPEN_BOX = String.fromCodePoint(0x2423);
+// A lone space is written as a no-break space: a line never wraps at it, so it always shows as a gap between two
+// characters on one line and cannot vanish at a line end (Codex phone tasks round 13). A real no-break space in a
+// folder name is not printable ASCII, so it is written as a code and never reads the same.
+const NBSP = String.fromCharCode(160);
 const NAMED = new Map([[9, 't'], [10, 'n'], [13, 'r']]);
 export function visiblePath(p) {
   const s = Array.from(String(p || ''));
@@ -25,7 +29,7 @@ export function visiblePath(p) {
     const cp = s[i].codePointAt(0);
     if (cp === 32) {
       const lone = i > 0 && i < s.length - 1 && s[i - 1] !== ' ' && s[i + 1] !== ' ';
-      out += lone ? ' ' : OPEN_BOX;
+      out += lone ? NBSP : OPEN_BOX;
     } else if (cp === 92) out += BS + BS;
     else if (NAMED.has(cp)) out += BS + NAMED.get(cp);
     else if (cp > 32 && cp < 127) out += s[i];

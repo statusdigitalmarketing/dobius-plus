@@ -254,7 +254,7 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
           <span className={`cmd-state ${c.state}`}>
             {RUN_STATUS[c.state] || c.state}{c.state === 'failed' && Number.isInteger(c.exit) ? ` (exit ${c.exit})` : ''}
             {c.endedAt && c.state !== 'running' ? <span className="cmd-ago"> · {ago(c.endedAt)}</span> : null}
-            {c.cwd && c.cwd !== entry.cwd ? <span className="cmd-ago"> · ran in {folderOf(c.cwd)}</span> : null}
+            {c.cwd && c.cwd !== entry.cwd ? <span className="cmd-ago"> · ran in <span className="path-text">{folderOf(c.cwd)}</span></span> : null}
           </span>
           {c.runTabId && c.runLive && c.state !== 'closed' && <button onClick={() => onOpenTab?.(c.runTabId)}>Open terminal</button>}
           <button className="quiet" onClick={dismiss}>Dismiss</button>
@@ -292,7 +292,7 @@ function CommandsView({ connection, entries, reload, say, onOpenTab }) {
             const gid = `${e.tabId}|${g.at}|${g.cwd}`;
             return (
               <div key={gid} className="cmd-group">
-                <div className="today-meta">Runs in {folderOf(g.cwd)}{g.at ? ` · handed back ${ago(g.at)}` : ''}</div>
+                <div className="today-meta">Runs in <span className="path-text">{folderOf(g.cwd)}</span>{g.at ? ` · handed back ${ago(g.at)}` : ''}</div>
                 {g.commands.map((c) => <CommandCard key={c.id} connection={connection} entry={e} c={c} folderOf={folderOf} say={say} onChanged={reload} onOpenTab={onOpenTab} />)}
                 {g.reply && <>
                   <button className="cmd-link" onClick={() => setOpenReply(openReply === gid ? null : gid)}>{openReply === gid ? 'Hide Claude\'s reply' : 'Show Claude\'s full reply'}</button>
@@ -520,7 +520,7 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
         {projects.map((p) => <option key={p.path} value={p.path}>{name(p)}</option>)}
       </select>
     </label>
-    {picked && <p className="settings-foot tasks-folder">In {visiblePath(picked.path)}</p>}
+    {picked && <p className="settings-foot tasks-folder">In <span className="path-text">{visiblePath(picked.path)}</span></p>}
     {kind === 'todo' && (
       <form className="task-add" onSubmit={(e) => { e.preventDefault(); add(); }}>
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Add a task" maxLength={500} enterKeyHint="done" aria-label="Add a task" />

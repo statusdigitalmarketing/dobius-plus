@@ -1379,6 +1379,9 @@ a.today-title:active { opacity: 0.7; }
 .tasks-project select { flex: 1 1 auto; min-width: 0; min-height: 34px; padding: 0 8px; border: 0; background: none; color: var(--accent);
   font-size: 17px; text-align: right; text-align-last: right; -webkit-appearance: none; appearance: none; }
 .tasks-folder { margin: -4px 4px 10px; overflow-wrap: anywhere; }
+/* A folder breaks between any two characters, never at a space (written as a no-break space, shared/short-path.js), so
+   every space in it shows between two characters on one line. */
+.path-text { word-break: break-all; }
 .task-add { display: flex; gap: 8px; margin-bottom: 12px; }
 .task-add input { flex: 1 1 auto; min-width: 0; min-height: 44px; padding: 0 12px; border: 1px solid var(--border); border-radius: 10px;
   background: var(--surface); color: var(--fg); font-size: 17px; }
