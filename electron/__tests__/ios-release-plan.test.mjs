@@ -254,13 +254,15 @@ test('the run binds only its own upload record', () => {
   const validate = u('val', '2.2.12', '7', '2026-11-09T02:59:00Z', 'AWAITING_UPLOAD');
   const later = u('later', '2.2.12', '7', '2026-11-09T03:20:00Z', 'COMPLETE');
   const t = { marketing: '2.2.12', n: 7, after, before };
-  assert.equal(ownUpload([later, validate, ours], t).upload?.id, 'ours', 'not a validate record, not a later reuse');
-  assert.equal(ownUpload([later, validate], t).upload, undefined, 'a later upload reusing the numbers is never ours');
-  assert.equal(ownUpload([ours, u('twin', '2.2.12', '7', '2026-11-09T03:01:00Z', 'PROCESSING')], t).upload, undefined, 'two in the window name none');
-  assert.equal(ownUpload([u('x', '2.2.13', '7', '2026-11-09T03:00:30Z', 'COMPLETE')], t).upload, undefined, 'the numbers must match');
+  // Without the delivery id altool printed, nothing is bound: numbers and dates cannot tell ours from a hand upload of
+  // the same numbers made alongside it (Codex iOS round 7).
+  assert.equal(ownUpload([later, validate, ours], t).upload, undefined, 'no delivery id, no binding');
+  assert.match(ownUpload([ours], t).reason, /no delivery id/);
   assert.equal(ownUpload([later, ours], { ...t, deliveryId: 'later' }).upload?.id, 'later', 'the delivery id altool printed decides');
+  assert.equal(ownUpload([ours], { ...t, deliveryId: 'OURS' }).upload?.id, 'ours', 'in any case');
   assert.equal(ownUpload([ours], { ...t, deliveryId: 'missing' }).upload, undefined, 'a delivery Apple does not list yet names none');
   assert.equal(ownUpload([u('d', '2.2.13', '7', '2026-11-09T03:00:30Z', 'COMPLETE')], { ...t, deliveryId: 'd' }).upload, undefined, 'a delivery of other numbers names none');
+  void validate;
 });
 
 test('a version at or below the shipped floor cannot ship', () => {
@@ -297,4 +299,10 @@ test('review notes that give the demo with https are refused', () => {
   assert.equal(demoAddressesOk('Mac address: demo.dobius. Code 123456'), true, 'bare, then a full stop');
   assert.equal(demoAddressesOk('Open http://demo.dobius:8420/ and pair'), true, 'a trailing slash');
   assert.equal(demoAddressesOk('Open (http://demo.dobius) and pair'), false, 'http without the port, in brackets');
+  assert.equal(demoAddressesOk('Use https://notdemo.dobius:8420, code 123456'), false, 'a longer host before the name');
+  assert.equal(demoAddressesOk('Mac address https://staging.demo.dobius:8420, code 123456'), false, 'a subdomain with https');
+  assert.equal(demoAddressesOk('Mac address staging.demo.dobius, code 123456'), false, 'a bare subdomain');
+  assert.equal(demoAddressesOk('See example.com/demo.dobius, code 123456'), false, 'the name inside another address');
+  assert.equal(demoAddressesOk('Mac address (demo.dobius:8420) or http://demo.dobius:8420'), true, 'two right mentions');
+  assert.equal(reviewDetailProblems({ ...ok, notes: 'Use https://notdemo.dobius:8420, code 123456' }).length, 1, 'refused at the review details too');
 });

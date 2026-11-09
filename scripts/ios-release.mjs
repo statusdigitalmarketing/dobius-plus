@@ -58,7 +58,23 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { killG
 // The build steps get only these from the environment: anything else could change the app without changing the commit
 // (XCODE_XCCONFIG_FILE swaps in another Info.plist, npm_config_* another registry; Codex).
 const BUILD_ENV_KEYS = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'DEVELOPER_DIR'];
-const buildEnv = (extra = {}) => ({ ...Object.fromEntries(BUILD_ENV_KEYS.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]])), ...extra });
+// npm also reads ~/.npmrc and its global npmrc, where a node-options line would load code into Vite without touching
+// the environment: build steps get an empty file for both (Codex iOS round 7).
+let emptyNpmrc = null; // npm refuses one file as both, so two
+const noNpmrc = () => {
+  if (!emptyNpmrc) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-ios-npmrc-'));
+    emptyNpmrc = { user: path.join(dir, 'user'), global: path.join(dir, 'global') };
+    fs.writeFileSync(emptyNpmrc.user, '');
+    fs.writeFileSync(emptyNpmrc.global, '');
+    process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+  }
+  return emptyNpmrc;
+};
+const buildEnv = (extra = {}) => ({
+  ...Object.fromEntries(BUILD_ENV_KEYS.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]])),
+  npm_config_userconfig: noNpmrc().user, npm_config_globalconfig: noNpmrc().global, ...extra,
+});
 function run(file, args, label, { cwd = ROOT, env, clean = false, minutes = 20, capture = false } = {}) {
   stillLocked();
   say(`${label}...`);
@@ -94,7 +110,8 @@ function run(file, args, label, { cwd = ROOT, env, clean = false, minutes = 20, 
     child.on('exit', () => setTimeout(() => killGroup(child), 2000).unref());
   });
 }
-const read = (file, args) => execFileSync(file, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 2 * MIN });
+// SIGKILL on timeout: the default SIGTERM stays pending on a stopped process and execFileSync would wait forever.
+const read = (file, args) => execFileSync(file, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 2 * MIN, killSignal: 'SIGKILL' });
 const plistJson = (file) => JSON.parse(read('plutil', ['-convert', 'json', '-o', '-', file]));
 // Branches, plus only this script's own tags: the release tags here can differ from origin's (electron-builder makes
 // them), and a plain --tags fetch refuses to clobber them and fails the whole fetch.
@@ -236,7 +253,12 @@ function projectBuildNumber(sha) {
  */
 async function cleanSource(sha, work) {
   const src = path.join(work, 'src');
-  await run('git', ['worktree', 'add', '--detach', src, sha], `Checking out ${sha.slice(0, 8)} on its own`, { minutes: 5 });
+  // No hooks: a post-checkout hook could move the new checkout to another commit. And the checkout must then be exactly
+  // that commit, clean, before anything is built from it (Codex iOS round 7).
+  await run('git', ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--detach', src, sha], `Checking out ${sha.slice(0, 8)} on its own`, { minutes: 5 });
+  const at = () => gitIn(src, 'rev-parse', 'HEAD');
+  if (at() !== sha) throw new Error(`the checkout is at ${at()}, not ${sha}`);
+  if (gitIn(src, 'status', '--porcelain')) throw new Error('the fresh checkout is not clean');
   // Only what the phone build needs: no install scripts (Electron's download, native rebuilds).
   // Dev dependencies too (Vite builds the phone bundle), whatever NODE_ENV says (Codex).
   await run('npm', ['ci', '--include=dev', '--ignore-scripts', '--no-audit', '--no-fund'], 'Installing the locked dependencies', { cwd: src, clean: true, minutes: 20 });
@@ -245,6 +267,7 @@ async function cleanSource(sha, work) {
   // cap sync must not change tracked files: if it did, the build would not be exactly that commit.
   const dirty = gitIn(src, 'status', '--porcelain');
   if (dirty) throw new Error(`cap sync changed tracked files:\n${dirty}`);
+  if (at() !== sha) throw new Error(`the checkout moved to ${at()} during the build`);
   return src;
 }
 
@@ -295,7 +318,7 @@ function localDistributionShas() {
 // One value from a plist by key path, as text (a date in ISO 8601, data in base64, an array as its length); null when
 // the key is not there. A profile holds dates and data, which plutil cannot turn into JSON, so it is read key by key.
 function plistValue(file, keyPath) {
-  const r = spawnSync('plutil', ['-extract', keyPath, 'raw', '-o', '-', file], { encoding: 'utf8', timeout: MIN });
+  const r = spawnSync('plutil', ['-extract', keyPath, 'raw', '-o', '-', file], { encoding: 'utf8', timeout: MIN, killSignal: 'SIGKILL' });
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
@@ -446,7 +469,7 @@ async function buildAndUpload(cfg, signing, marketing, buildNo) {
     const sent = await run('xcrun', ['altool', '--upload-package', ipa, ...key], `Uploading ${marketing} (${buildNo})`, { env, clean: true, minutes: 40, capture: true });
     if (!/UPLOAD SUCCEEDED/.test(sent) || /UPLOAD FAILED/.test(sent)) throw new Error('altool did not report UPLOAD SUCCEEDED');
     // The delivery id names this upload's own record (and so its build) in App Store Connect; see ownUpload.
-    const delivery = /Delivery UUID:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(sent);
+    const delivery = /Delivery (?:UUID|ID):?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(sent);
     return { after, before: Date.now(), deliveryId: delivery ? delivery[1].toLowerCase() : null };
   } finally {
     // Cleanup never decides the outcome: a leftover folder must not turn an accepted upload into a failure (and so an
@@ -484,6 +507,10 @@ async function waitForBuild(asc, appId, marketing, buildNo, up, onSeen) {
   const until = Date.now() + PROCESSING_TIMEOUT_MS;
   let buildId = null;
   let why = '';
+  if (!up.deliveryId) {
+    say(`altool printed no delivery id for ${marketing} (${buildNo}), so this upload cannot be told apart from another of the same numbers: the tag stays unbound and vouches for nothing. Check the upload output, then upload again or submit by hand.`);
+    return 'unbound';
+  }
   say(`Waiting for Apple to process build ${buildNo}...`);
   while (Date.now() < until) {
     if (!buildId) {
@@ -531,7 +558,7 @@ async function submit(asc, notes, justUploaded) {
   // Compared as Apple orders build strings, so a live "100.1" keeps out a 7; a live build string that cannot be read
   // keeps out everything.
   const eligible = builds.filter((b) => b.state === 'VALID' && !b.expired && b.marketing && Number.isInteger(b.number)
-    && ours.has(b.id) && (!liveBuild || compareBuildStrings(b.raw, liveBuild.raw) === 1));
+    && ours.has(b.id) && aboveShipped(versions, b.marketing) && (!liveBuild || compareBuildStrings(b.raw, liveBuild.raw) === 1));
   const candidate = justUploaded
     ? eligible.find((b) => b.marketing === justUploaded.marketing && b.number === justUploaded.number)
     : eligible.sort((a, b) => b.number - a.number)[0];
@@ -692,6 +719,8 @@ async function release(asc) {
       const state = await waitForBuild(asc, app.id, marketing, buildNo, up, (id) => {
         if (!tagBuild(marketing, buildNo, cfg.sha, up, id)) throw new Error(`could not push the binding of ${buildTagName(marketing, buildNo)} to build ${id}; not submitting it`);
       });
+      // Unbound: it can never be submitted from here, so the run fails and release.sh says so.
+      if (state === 'unbound') throw new Error(`build ${buildNo} was uploaded but could not be bound to this run (no delivery id)`);
       if (state === 'timeout') {
         say(`build ${buildNo} is still processing after ${PROCESSING_TIMEOUT_MS / MIN} minutes; run "node scripts/ios-release.mjs submit" later`);
         return;

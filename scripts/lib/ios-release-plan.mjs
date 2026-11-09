@@ -232,38 +232,37 @@ const CONTACT_FIELDS = ['contactFirstName', 'contactLastName', 'contactPhone', '
 export const REVIEW_NOTE_MARKERS = ['demo.dobius', '123456'];
 
 /** Every reason these review details would leave App Review stuck; an empty list means they are complete. */
-/** Every demo.dobius mention in review notes is one the demo answers (see reviewDetailProblems). */
+/**
+ * Every demo.dobius mention in review notes is one the demo answers (see reviewDetailProblems). A mention is only read
+ * from the start of its host: `notdemo.dobius`, `staging.demo.dobius` or `example.com/demo.dobius` are other addresses,
+ * so every occurrence of the name has to be a whole, valid address of its own (Codex iOS round 7).
+ */
 export function demoAddressesOk(notes) {
-  for (const m of String(notes || '').matchAll(/(?:([a-z][a-z0-9+.-]*):\/\/)?demo\.dobius([^\s,;)\]'"<>]*)/gi)) {
+  const s = String(notes || '');
+  let valid = 0;
+  for (const m of s.matchAll(/(?<![a-z0-9+._@/-])(?:([a-z][a-z0-9+.-]*):\/\/)?demo\.dobius([^\s,;)\]'"<>]*)/gi)) {
     const scheme = m[1] ? m[1].toLowerCase() : null;
     const rest = m[2].replace(/[.!?:/]+$/, ''); // sentence punctuation, a trailing slash
     if (scheme ? !(scheme === 'http' && rest === ':8420') : !(rest === '' || rest === ':8420')) return false;
+    valid += 1;
   }
-  return true;
+  return valid === (s.match(/demo\.dobius/gi) || []).length;
 }
 
 /**
- * Which of App Store Connect's upload records (`/v1/apps/{id}/buildUploads`) is this run's own upload. With the
- * delivery id altool printed, that record and nothing else. Without one, the record of these numbers that Apple
- * created during the upload (createdDate inside [after - slack, before + slack]) and that got past AWAITING_UPLOAD (a
- * validate leaves one there): exactly one, or none is named. Someone uploading the same numbers later gets a record of
- * its own, created after ours, so it is never this one.
+ * Which of App Store Connect's upload records (`/v1/apps/{id}/buildUploads`) is this run's own upload: the one whose id
+ * is the delivery id altool printed for it, and nothing else. Without that id no record is named: numbers and dates
+ * cannot tell this upload from someone else's of the same numbers made around the same time (Codex iOS round 7), so
+ * the tag stays unbound and vouches for nothing.
  * Returns { upload } or { reason }.
  */
-export function ownUpload(uploads, { marketing, n, after, before, deliveryId }) {
-  const nums = (u) => u?.attributes?.cfBundleShortVersionString === marketing && String(u?.attributes?.cfBundleVersion) === String(n);
-  if (deliveryId) {
-    const u = (uploads || []).find((x) => x.id === deliveryId);
-    if (!u) return { reason: `Apple does not list delivery ${deliveryId} yet` };
-    if (!nums(u)) return { reason: `delivery ${deliveryId} is not ${marketing} (${n})` };
-    return { upload: u };
-  }
-  const found = (uploads || []).filter((u) => {
-    const at = Date.parse(u?.attributes?.createdDate);
-    return nums(u) && at >= after - UPLOAD_SLACK_MS && at <= before + UPLOAD_SLACK_MS && u.attributes?.state?.state !== 'AWAITING_UPLOAD';
-  });
-  if (found.length === 1) return { upload: found[0] };
-  return { reason: found.length ? `${found.length} uploads of ${marketing} (${n}) were made during this one` : `Apple does not list this upload of ${marketing} (${n}) yet` };
+export function ownUpload(uploads, { marketing, n, deliveryId }) {
+  if (!deliveryId) return { reason: 'altool printed no delivery id for this upload, so it cannot be told apart from another upload of the same numbers' };
+  const id = String(deliveryId).toLowerCase();
+  const u = (uploads || []).find((x) => String(x?.id).toLowerCase() === id);
+  if (!u) return { reason: `Apple does not list delivery ${deliveryId} yet` };
+  if (u.attributes?.cfBundleShortVersionString !== marketing || String(u.attributes?.cfBundleVersion) !== String(n)) return { reason: `delivery ${deliveryId} is not ${marketing} (${n})` };
+  return { upload: u };
 }
 
 export function reviewDetailProblems(attrs) {

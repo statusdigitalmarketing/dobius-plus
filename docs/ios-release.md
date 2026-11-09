@@ -27,11 +27,14 @@ started, and a step is over when its own process exits (a helper left holding th
 for). The validate and upload output is kept in a file in the temp folder (one short line names it), never written to the
 terminal, so a stalled terminal cannot block the deadlines. The build steps (npm ci, the phone bundle, cap sync,
 archive, export, altool) run with only PATH, HOME, USER, LOGNAME, SHELL, TMPDIR, LANG, LC_ALL, TERM and DEVELOPER_DIR from
-the environment: a variable such as XCODE_XCCONFIG_FILE or npm_config_registry could otherwise change the app without
-changing the commit. Accepted: the script's own short status lines are still written as they happen,
+the environment, and npm is pointed at empty user and global config files: a variable such as XCODE_XCCONFIG_FILE or
+npm_config_registry, or a `node-options` line in `~/.npmrc`, could otherwise change the app without changing the commit.
+Synchronous helpers (`security`, `plutil`) are killed with SIGKILL on their deadline, which also ends a stopped one. Accepted: the script's own short status lines are still written as they happen,
 so a terminal stalled for good still holds the run.
 
-`release.sh` runs `release --if-changed --expect-sha <HEAD> --skip-tests` after a desktop release is published.
+`release.sh` runs `release --if-changed --expect-sha <HEAD>` after a desktop release is published, with `--skip-tests`
+only when the release commit is the tested commit plus a change to the version fields of `package.json` and
+`package-lock.json` and nothing else.
 A failure there never fails the desktop release: it prints what to run by hand. `DOBIUS_SKIP_IOS=1` skips it.
 
 ## What `release` does
@@ -49,7 +52,8 @@ A failure there never fails the desktop release: it prints what to run by hand. 
    bumped by every release, does not count in either). A change always builds, even under a version that already has
    a build (that build may be the one App Review rejected). With no build, the submit step below still runs.
 4. **Tests, builds, checks the signed app, uploads.** `npm test` in the checkout, then everything else in a fresh
-   checkout of exactly that commit (`git worktree add --detach`) with the dependencies the lockfile names
+   checkout of exactly that commit (`git worktree add --detach`, with git hooks off, then checked to be at that commit and
+clean, and checked again after `cap sync`) with the dependencies the lockfile names
    (`npm ci --include=dev --ignore-scripts`, dev dependencies whatever `NODE_ENV` says: Vite builds the phone bundle), so nothing edited in the main checkout or left over in its `node_modules` reaches the
    app: `npm run build:mobile`, `npx cap sync ios` (which must leave tracked files unchanged), `xcodebuild archive`,
    then `xcodebuild -exportArchive` to a local IPA, signed by hand: an Apple Distribution identity on this Mac (matched to
@@ -73,10 +77,10 @@ A failure there never fails the desktop release: it prints what to run by hand. 
    tagged `ios-<version>-<N>` (both numbers: Apple lets a build number repeat under another version), the tag's message
    recording when the upload began and ended, and the tag pushed. The first time Apple lists the build, the tag is
    rewritten (same commit, force-pushed) with that build's App Store Connect id (`asc-build <id>`). The build is found
-   through this run's OWN upload record in App Store Connect (`/v1/apps/{id}/buildUploads`): the delivery id altool
-   printed, else the one record of these numbers Apple created during the upload and that got past AWAITING_UPLOAD (a
-   validate leaves one there). When that record is COMPLETE it names its build. A later upload reusing the numbers has a
-   record of its own, so it can never be bound; a FAILED record stops the run. Only a bound tag vouches for a build,
+   through this run's OWN upload record in App Store Connect (`/v1/apps/{id}/buildUploads`): the record whose id is the
+   delivery id altool printed for this upload, nothing else. When that record is COMPLETE it names its build; a FAILED
+   record stops the run. Without a delivery id nothing is bound and the run fails at once: numbers and dates cannot tell
+   this upload from someone else's of the same numbers made alongside it. Only a bound tag vouches for a build,
    and only for that id. A tag never bound (the run died first, Apple never listed the build, or the binding push
    failed, which stops the run; fetching origin prunes local ios-* tags origin does not have, so a binding that never
    reached origin does not count) vouches for nothing: Apple lets a failed upload's numbers be reused, so a later match
@@ -85,7 +89,8 @@ A failure there never fails the desktop release: it prints what to run by hand. 
    Still processing after 45 minutes: it stops there, and a later `submit` (or the next release) submits it, provided
    the tag was bound (Apple lists a build within minutes of the upload, processing or not).
 6. **Submits.** Only a processed build of ours: its version and build string match an `ios-<version>-<N>` tag on a
-   commit of `origin/main` exactly and is the build that tag vouches for, it has not expired, and it is above the live build in Apple's order (a live `100.1`
+   commit of `origin/main` exactly and is the build that tag vouches for, it has not expired, its version is above every shipped one (so a build that can never ship does not hide one that
+can), and it is above the live build in Apple's order (a live `100.1`
    keeps out a 7; a live build string that cannot be read keeps out everything). Builds uploaded by hand, from a branch,
    or under a reused number are never picked. If origin cannot be fetched it does not submit. The version it goes on:
    - a version Apple is already handling (waiting for review, in review, accepted, pending Apple's release, processing,
@@ -102,7 +107,8 @@ A failure there never fails the desktop release: it prints what to run by hand. 
    Then it attaches the build, sets "What's New" on every localization, and checks the review details field by field:
    a contact (first and last name, phone, email), notes that mention the demo Mac `demo.dobius` (bare, or exactly
    `demo.dobius:8420` or `http://demo.dobius:8420`, every mention: `https://`, `http://` without the port, another
-   port or a longer host reaches no Mac)
+   port, a longer host such as `staging.demo.dobius` or `notdemo.dobius`, or the name inside another address reaches no
+Mac)
    and code `123456`, and a
    demo sign-in when the details say one is required.
    Anything missing is repaired from the live version's details, or it stops if those are incomplete too. Everything is

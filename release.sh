@@ -128,7 +128,17 @@ if [ "${DOBIUS_SKIP_IOS:-}" != "1" ]; then
   # The tests ran on TESTED_SHA; the release commit is that plus the version bump only. Anything else landing in
   # between means the iOS step runs the tests itself.
   IOS_ARGS=(release --if-changed --expect-sha "$HEAD_SHA")
-  if [ "$(git rev-parse "$HEAD_SHA^")" = "$TESTED_SHA" ] && [ -z "$(git diff --name-only "$TESTED_SHA" "$HEAD_SHA" -- . ':!package.json' ':!package-lock.json')" ]; then
+  # And in those two files only the version fields: a lifecycle hook that also moved a dependency gets tested (Codex).
+  version_only() {
+    node -e '
+      const { execFileSync } = require("child_process");
+      const [a, b] = process.argv.slice(1);
+      const read = (sha, f) => { try { return JSON.parse(execFileSync("git", ["show", `${sha}:${f}`], { encoding: "utf8", maxBuffer: 1 << 28 })); } catch { return null; } };
+      const bare = (f, j) => { if (!j) return String(j); delete j.version; if (f === "package-lock.json" && j.packages && j.packages[""]) delete j.packages[""].version; return JSON.stringify(j); };
+      for (const f of ["package.json", "package-lock.json"]) if (bare(f, read(a, f)) !== bare(f, read(b, f))) process.exit(1);
+    ' "$TESTED_SHA" "$HEAD_SHA"
+  }
+  if [ "$(git rev-parse "$HEAD_SHA^")" = "$TESTED_SHA" ] && [ -z "$(git diff --name-only "$TESTED_SHA" "$HEAD_SHA" -- . ':!package.json' ':!package-lock.json')" ] && version_only; then
     IOS_ARGS+=(--skip-tests)
   fi
   if env -u GH_TOKEN -u APPLE_APP_SPECIFIC_PASSWORD node scripts/ios-release.mjs "${IOS_ARGS[@]}"; then
