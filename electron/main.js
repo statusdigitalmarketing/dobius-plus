@@ -3398,7 +3398,7 @@ function activateClaudeAccount(accountId) {
 
 function setupConfigHandlers() {
   ipcMain.handle('config:load', () => loadConfig());
-  ipcMain.handle('config:save', (_event, config) => saveConfig(config));
+  ipcMain.handle('config:save', (_event, config) => { forgetSharedSessionLoads(); return saveConfig(config); });
   ipcMain.handle('config:getProject', (_event, projectPath) => getProjectConfig(projectPath));
   ipcMain.handle('config:setProject', (_event, projectPath, settings) => setProjectConfig(projectPath, settings));
   ipcMain.handle('config:getPinned', () => getPinnedSessions());
@@ -3408,6 +3408,9 @@ function setupConfigHandlers() {
   ipcMain.handle('config:getSettings', () => getSettings());
   ipcMain.handle('config:updateSettings', (_event, updates) => {
     const r = updateSettings(updates);
+    // Session lists read settings (hidden sources, the projects folder): a
+    // shared answer from before this change is stale.
+    forgetSharedSessionLoads();
     // A new projects folder changes which projects the git and file handlers accept.
     if (updates && typeof updates === 'object' && Object.prototype.hasOwnProperty.call(updates, 'projectScanDir')) forgetKnownProjects();
     broadcastToPhones('settingsChanged');
@@ -3898,6 +3901,7 @@ function setupShellHandlers() {
     if (typeof projectPath !== 'string') return;
     addHiddenProject(projectPath);
     forgetKnownProjects();
+    forgetSharedSessionLoads();
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('data:updated', projectPath);
     }
@@ -4112,6 +4116,7 @@ function setupWindowHandlers() {
     const projectPath = result.filePaths[0];
     addManualProject(projectPath);
     forgetKnownProjects();
+    forgetSharedSessionLoads();
     openProjectWindow(projectPath);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('data:updated', projectPath);
@@ -4132,6 +4137,7 @@ function setupWindowHandlers() {
     const dir = result.filePaths[0];
     updateSettings({ projectScanDir: dir });
     forgetKnownProjects();
+    forgetSharedSessionLoads();
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('data:updated', dir);
     }
