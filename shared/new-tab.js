@@ -153,8 +153,23 @@ export function ptyProgramName(comm, shellPath = '') {
 // resume ({ sessionId, cwd }, an account move): the same wrapper runs
 // `cd <cwd> && claude --resume <id>`, or plain `claude` with sessionId null,
 // nothing typed. Both values travel in env and reach the fixed command as $2 and
-// $3, never eval'd.
+// $3, never eval'd. carryOn (an automatic move after a usage limit) adds the
+// fixed CARRY_ON_PROMPT as Claude's first prompt, on its command line.
 export const START_TOOL_ENV = 'DOBIUS_NEW_TAB_TOOL';
+// Several words, so a future `claude` subcommand can never take it for its name.
+// No quote characters: it sits inside single quotes in the shell script.
+export const CARRY_ON_PROMPT = 'Your previous Claude account hit its usage limit, so Dobius moved this conversation to another account. Continue where you left off.';
+// Any of these in the new shell decides Claude's login instead of its folder
+// (main.js AUTH_OVERRIDE_NAMES reads the same list), so the carry-on waits.
+export const CLAUDE_AUTH_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BASE_URL'];
+// Read from the exported environment, so only what Claude would inherit
+// counts (`export -n` keeps a shell value that never reaches it). The token
+// test is an exit status, never an expanded value, so `set -x` in a startup
+// file cannot print a key into the tab. grep without -q reads all of env's
+// output, so pipefail cannot see a SIGPIPE as "no token".
+const CARRY_ON_TOKEN = `/usr/bin/env | /usr/bin/grep -E '^(${CLAUDE_AUTH_ENV.join('|')})=.' >/dev/null`;
+const CARRY_ON_DIR = '$(/usr/bin/printenv CLAUDE_CONFIG_DIR)';
+const resumeTool = (resume) => (resume.sessionId === null ? 'fresh' : resume.carryOn === true ? 'resume-on' : 'resume');
 
 // Windows PowerShell (powershell.exe) or PowerShell 7 (pwsh.exe).
 export function isPowerShell(shell) {
@@ -247,7 +262,7 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
   const take = running
     ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_SCRIPT"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_SCRIPT;`
     : resuming
-      ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_ID" "$${START_TOOL_ENV}_CWD"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_ID ${START_TOOL_ENV}_CWD;`
+      ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_ID" "$${START_TOOL_ENV}_CWD" "$${START_TOOL_ENV}_CFG"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_ID ${START_TOOL_ENV}_CWD ${START_TOOL_ENV}_CFG;`
       : withOpts
         ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_MODEL" "$${START_TOOL_ENV}_PERM"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_MODEL ${START_TOOL_ENV}_PERM;`
         : `set -- "$${START_TOOL_ENV}"; unset ${START_TOOL_ENV};`;
@@ -256,7 +271,7 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
   // -p: bash imports no functions from the environment and reads no BASH_ENV/ENV, so a project .env (direnv) cannot
   // redefine `cd` or run a file before the script.
   const launch = running ? '[[ $1 == run ]] && /bin/bash -p -- "$2";'
-    : resuming ? '[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;'
+    : resuming ? `[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; __dobius_on=; [[ $1 == resume-on ]] && cd -- "$3" && __dobius_on=1; [[ $__dobius_on == 1 && "${CARRY_ON_DIR}" != "$4" ]] && __dobius_on=0; [[ $__dobius_on == 1 ]] && ${CARRY_ON_TOKEN} && __dobius_on=0; [[ $__dobius_on == 1 ]] && claude --resume "$2" '${CARRY_ON_PROMPT}'; [[ $__dobius_on == 0 ]] && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;`
       // The flags are fixed words plus the allowlisted values in $2 and $3, built as an array, never eval'd.
       // Checked again in the shell against the same fixed words: a login rc file runs before this script and could
       // have exported other values into the variables (Codex round 2).
@@ -281,7 +296,7 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
   const env = running
     ? { [START_TOOL_ENV]: 'run', [`${START_TOOL_ENV}_SCRIPT`]: runScript }
     : resuming
-      ? { [START_TOOL_ENV]: resume.sessionId === null ? 'fresh' : 'resume', [`${START_TOOL_ENV}_ID`]: resume.sessionId ?? '', [`${START_TOOL_ENV}_CWD`]: resume.cwd }
+      ? { [START_TOOL_ENV]: resumeTool(resume), [`${START_TOOL_ENV}_ID`]: resume.sessionId ?? '', [`${START_TOOL_ENV}_CWD`]: resume.cwd, [`${START_TOOL_ENV}_CFG`]: typeof resume.configDir === 'string' ? resume.configDir : '' }
       : withOpts
         ? { [START_TOOL_ENV]: startCommand, [`${START_TOOL_ENV}_MODEL`]: model, [`${START_TOOL_ENV}_PERM`]: perm }
         : { [START_TOOL_ENV]: startCommand };
@@ -295,5 +310,5 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
 export function isNewTabWrapperCommand(line) {
   // Anchored on argv0 (after an optional pgrep pid), so the same text inside
   // some other program's arguments never matches.
-  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD"| "\$DOBIUS_NEW_TAB_TOOL_SCRIPT"| "\$DOBIUS_NEW_TAB_TOOL_MODEL" "\$DOBIUS_NEW_TAB_TOOL_PERM")?; /.test(String(line));
+  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD"(?: "\$DOBIUS_NEW_TAB_TOOL_CFG")?| "\$DOBIUS_NEW_TAB_TOOL_SCRIPT"| "\$DOBIUS_NEW_TAB_TOOL_MODEL" "\$DOBIUS_NEW_TAB_TOOL_PERM")?; /.test(String(line));
 }

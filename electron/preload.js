@@ -232,6 +232,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   accountsMoveTargets: (tabId) => ipcRenderer.invoke('accounts:moveTargets', tabId),
   accountsMoveCandidates: (tabIds, targetId) => ipcRenderer.invoke('accounts:moveCandidates', tabIds, targetId),
   accountsMove: (tabId, targetId, opts) => ipcRenderer.invoke('accounts:move', tabId, targetId, opts),
+  // main: an automatic move on a usage limit happened (or could not) in one of this window's tabs.
+  onAccountsAutoMove: (callback) => {
+    const handler = (_event, tabId, payload) => callback(tabId, payload);
+    ipcRenderer.on('accounts:autoMove', handler);
+    return () => ipcRenderer.removeListener('accounts:autoMove', handler);
+  },
   accountsSave: (account) => ipcRenderer.invoke('accounts:save', account),
   accountsDelete: (accountId) => ipcRenderer.invoke('accounts:delete', accountId),
   claudeUsageGetStatus: () => ipcRenderer.invoke('claudeUsage:getStatus'),

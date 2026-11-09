@@ -812,6 +812,21 @@ export const useStore = create((set, get) => ({
   // cancelled }, each entry { label, reason }.
   // single: the one tab the person picked, who is told about a turn or unsent
   // text and may go ahead. Move all skips and names those tabs, never interrupts.
+  // The account a tab's Claude starts on after a relaunch, tear-off or reopen:
+  // what main found running after a move (the dialog's or an automatic one).
+  // null = Default (no pin).
+  applyAccountPin: (tabId, pin) => {
+    if (pin !== null && (typeof pin !== 'object' || (pin.id !== null && typeof pin.id !== 'string'))) return;
+    set((s) => ({
+      terminalTabs: s.terminalTabs.map((t) => {
+        if (t.id !== tabId) return t;
+        if (pin) return { ...t, claudeAccountPin: pin };
+        const { claudeAccountPin: _drop, ...rest } = t;
+        return rest;
+      }),
+    }));
+  },
+
   moveTabsToAccount: async (tabIds, accountId, label = 'the chosen account', { single = false } = {}) => {
     const api = window.electronAPI;
     const name = (id) => (get().terminalTabs.find((t) => t.id === id)?.label) || id;
@@ -833,16 +848,7 @@ export const useStore = create((set, get) => ({
       const r = await api.accountsMove(tabId, accountId, { allowBusy: single && c.busy, allowDraft: single && c.draft }).catch((err) => ({ ok: false, error: err?.message || String(err) }));
       // The pin says what main found running, not what was asked for. Set at
       // once: a later tab's wait must not leave this one's saved account stale.
-      if (r.pin !== undefined) {
-        set((s) => ({
-          terminalTabs: s.terminalTabs.map((t) => {
-            if (t.id !== tabId) return t;
-            if (r.pin) return { ...t, claudeAccountPin: r.pin };
-            const { claudeAccountPin: _drop, ...rest } = t;
-            return rest;
-          }),
-        }));
-      }
+      if (r.pin !== undefined) get().applyAccountPin(tabId, r.pin);
       if (r.ok) moved += 1; else failed.push({ label: name(tabId), reason: r.error || 'something went wrong' });
     }
     return { moved, skipped, failed };

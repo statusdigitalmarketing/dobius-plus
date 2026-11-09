@@ -47,6 +47,9 @@ const DEFAULT_CONFIG = {
     newTabTool: 'claude',
     // Projects left out of the New Tab picker (real paths).
     newTabHiddenProjects: [],
+    // Move a tab that hits its usage limit to another logged-in account with
+    // room (account-headroom-service.js autoTick). Opt-in.
+    autoMoveOnLimit: false,
     // NOT declared here on purpose: usageReporting and modelUnderPrompt (the
     // two switches of the shared statusLine, main.js). Their launch logic
     // reads UNDEFINED as "never decided": usageReporting is then settled once

@@ -19,24 +19,35 @@ import { orderedWindows, windowLabel, ago, untilText, paceText, forecastText, ba
  * Shown per ACCOUNT (name and login), each report attributed by the Keychain
  * service its session ran under, with pace (percent per hour) and when the
  * window runs out at that pace (electron/account-headroom.js).
+ *
+ * The opt-in auto-move switch lives here too: a tab that hits its limit moves to
+ * the logged-in account with the most known room (account-headroom-service.js
+ * autoTick), never through a browser sign-in.
  */
 const AMBER = '#fbbf24';
 const RED = '#f87171';
 export default function AccountUsage() {
   const [rows, setRows] = useState(null);
   const [scanFailed, setScanFailed] = useState(false);
+  const [autoMove, setAutoMove] = useState(false);
   const [installed, setInstalled] = useState(null);
   const [elsewhere, setElsewhere] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const mounted = useRef(true);
+  // Only the newest read shows: an older one still waiting on the usage read
+  // must not put back the switch as it was before a click.
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
-    const [st, usage] = await Promise.all([
+    const seq = (loadSeq.current += 1);
+    const [st, usage, settings] = await Promise.all([
       window.electronAPI?.claudeUsageGetStatus?.(),
       window.electronAPI?.accountsUsage?.(),
+      window.electronAPI?.configGetSettings?.(),
     ]);
-    if (!mounted.current) return;
+    if (!mounted.current || seq !== loadSeq.current) return;
+    if (settings) setAutoMove(settings.autoMoveOnLimit === true);
     if (st) { setInstalled(!!st.installed); setElsewhere(!!st.installedElsewhere); }
     if (usage?.ok) { setRows(usage.accounts); setScanFailed(!!usage.scanFailed); }
   }, []);
@@ -78,6 +89,19 @@ export default function AccountUsage() {
     if (!mounted.current) return;
     setBusy(false);
     if (res?.error) setError(res.error); else load();
+  };
+
+  const toggleAutoMove = async () => {
+    const next = !autoMove;
+    loadSeq.current += 1;
+    setBusy(true);
+    await window.electronAPI?.configUpdateSettings?.({ autoMoveOnLimit: next });
+    if (!mounted.current) return;
+    // Shown at once: load() also waits on the usage read, which takes seconds
+    // with many sessions running.
+    setAutoMove(next);
+    setBusy(false);
+    load();
   };
 
   const box = {
@@ -165,6 +189,21 @@ export default function AccountUsage() {
           </div>
         );
       })}
+
+      {installed && (
+        <div data-auto-move-setting className="flex items-start justify-between gap-3 text-xs mt-2 mb-2" style={{ color: 'var(--fg)', borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+          <div>
+            Move a tab to another account when it hits its limit
+            <div style={{ color: 'var(--dim)' }}>
+              Restarts the tab on the logged-in account with the most room and asks it to continue. Never to an account
+              whose usage is unknown or that has under 20% left, never the same tab twice within 15 minutes, and it never
+              opens a browser sign-in. Claude in Chrome follows the one account its extension is signed in to, so browser
+              tools in a moved tab work only if that is the account it moved to.
+            </div>
+          </div>
+          <button data-auto-move-toggle style={btn} disabled={busy} onClick={toggleAutoMove}>{autoMove ? 'On' : 'Off'}</button>
+        </div>
+      )}
 
       {installed && (rows || []).length > 0 && (
         <div className="text-xs" style={{ color: 'var(--dim)' }}>

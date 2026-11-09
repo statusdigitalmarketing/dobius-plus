@@ -16,6 +16,7 @@ import crypto from 'node:crypto';
 import {
   emptyHistory, sanitizeHistory, updateHistory, usageForKeys, accountKeyRows, moveRefusal,
   rankTargets, tabBusy, noteLogin, moveBlock, limitMenuOn, trustPromptOn, UNKNOWN_LOGIN, STALE_MS,
+  AUTO, autoTargetRefusal, pickAutoTarget, autoCoolingDown, autoHoldUntil,
 } from './account-headroom.js';
 
 const SAVE_EVERY_MS = 30_000;
@@ -24,6 +25,9 @@ const DEFAULT_SERVICE = 'Claude Code-credentials';
 const STOP_MS = 8000;
 const VERIFY_MS = 45_000;
 const POLL_MS = 1000;
+// As long as the conversation stays claimed for a tab (terminal-manager
+// TAB_RESERVATION_MS).
+const SETTLE_MS = 600_000;
 // Older than the longest window a usage record says nothing.
 const RECORD_MAX_AGE_MS = 8 * 24 * 3600_000;
 const PRUNE_EVERY_MS = 3600_000;
@@ -78,6 +82,21 @@ export function createHeadroomService(d) {
   // One move at a time, across every window.
   let moving = false;
   let lastPrune = 0;
+  // Auto-move memory: per tab its last automatic move and the notices already
+  // shown for the limit it is on now; per login (lowercased address) when it
+  // was last seen on its limit menu, and recent moves into it. Cooldowns, holds
+  // and reservations are kept on disk too, so a relaunch does not forget them
+  // (restored tabs keep their ids).
+  const autoTabs = new Map();
+  const holds = new Map();
+  let placements = [];
+  let autoRunning = false;
+  const unknownSeen = new Set();
+  const autoPath = path.join(d.userDataDir, 'auto-move.json');
+  let autoLoaded = false;
+  // A move whose new Claude had not started when verification gave up: its
+  // shell may still start it, on whatever login the folder has by then.
+  let settlingUntil = 0;
 
   async function history() {
     if (hist) return hist;
@@ -236,6 +255,11 @@ export function createHeadroomService(d) {
     catch (err) { console.warn('[headroom] process scan failed:', err?.message || err); return null; }
   }
   const groupOf = (scan, pid) => (scan?.groups || []).find((g) => g.pids.includes(pid)) || null;
+  // Claude's own record of the process: read from the folder it really runs in.
+  const presenceFor = (tab, info, scan) => {
+    const g = groupOf(scan, info.pid);
+    return d.presence(info, g ? (g.envUnset ? null : g.configDir) : tab.claudeConfigDir).catch(() => null);
+  };
 
   // The account a tab is really on: the running Claude's own folder (a shell
   // can point it elsewhere), else the folder the tab's shell was spawned with
@@ -309,10 +333,9 @@ export function createHeadroomService(d) {
     let presence = null;
     let override = null;
     if (info) {
-      const g = groupOf(scan, info.pid);
       // Claude's own record names the conversation it is on now (argv keeps
       // naming the old one after /clear).
-      presence = await d.presence(info, g ? (g.envUnset ? null : g.configDir) : tab.claudeConfigDir).catch(() => null);
+      presence = await presenceFor(tab, info, scan);
       if (presence?.sessionId) {
         // Resumed where it runs (a worktree, a subfolder), not at the project root.
         const cwd = await d.processCwd(info.pid).catch(() => null);
@@ -337,7 +360,9 @@ export function createHeadroomService(d) {
     // permission prompt is never read through as a limit.
     const limited = !!sc && presence?.status === 'waiting' && act?.status !== 'needs' && limitMenuOn(sc.lines);
     return {
-      tabId, running, session, override,
+      tabId, running, session, override, limited,
+      // Screen and record both read: a "not limited" that is an answer.
+      readable: !!sc && !!presence,
       busy: !limited && tabBusy(act, d.now(), presence?.status),
       status: act?.status || null,
       // Unsent text in Claude's box, or input the window still holds (an image
@@ -387,7 +412,9 @@ export function createHeadroomService(d) {
   const pinOf = (r) => ({ id: r.isDefault ? null : r.id });
   const named = (r) => (r.email ? `${r.label} (${r.email})` : r.label);
 
-  async function moveOne(tabId, targetId, { allowBusy, allowDraft, cannotRestart, restart }) {
+  // auto: the automatic path's own last check (never reachable over IPC), run
+  // on the same fresh reads as everything else, before anything is stopped.
+  async function moveOne(tabId, targetId, { allowBusy, allowDraft, cannotRestart, restart }, auto = null) {
     const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
     const tab = d.tabs().find((t) => t.id === tabId);
     if (!tab) return fail('the tab has no terminal running');
@@ -400,6 +427,9 @@ export function createHeadroomService(d) {
     const rows = await accountRows();
     const target = targetRow(rows, targetId);
     if (!target) return fail('that account no longer exists');
+    // The automatic check first: it records the target as this read found it.
+    const autoWhy = auto ? auto({ info, target, rows, tab, scan }) : null;
+    if (autoWhy) return fail(autoWhy);
     const refusal = rowRefusal(sourceOf(tab, rows, info.pid, scan), target);
     if (refusal) return fail(refusal);
     // No await from here to the signal.
@@ -425,7 +455,11 @@ export function createHeadroomService(d) {
     // The shell's folder may have been deleted since it started.
     const cwd = d.isDir(tab.cwd) ? tab.cwd : project;
     try {
-      if (!restart(tabId, cwd, pin, { sessionId, cwd: project })) return abort(`Claude stopped, but the tab could not restart on ${target.label}. ${manual}`);
+      // The automatic move asks the resumed Claude to carry on, on its command
+      // line: nothing is ever typed into the tab.
+      // configDir: the folder that passed the checks, which the new shell
+      // must still be on when it starts Claude (terminal-manager, new-tab).
+      if (!restart(tabId, cwd, pin, { sessionId, cwd: project, ...(auto && sessionId ? { carryOn: true, configDir: target.envUnset ? '' : target.dir } : {}) })) return abort(`Claude stopped, but the tab could not restart on ${target.label}. ${manual}`);
     } catch (err) { return abort(`Claude stopped, but the tab could not restart on ${target.label}: ${err.message}. ${manual}`); }
     return verifyMove(tabId, sessionId, target, rows, pin, manual);
   }
@@ -437,10 +471,18 @@ export function createHeadroomService(d) {
   // announces a process starting, and a slow shell rc only uses up the bound.
   async function verifyMove(tabId, sessionId, target, rows, pin, manual) {
     const end = d.now() + VERIFY_MS;
+    // Until the conversation is confirmed running, a queued resume may still be
+    // waiting in the shell (a startup file can run some other claude first):
+    // only a confirmed one ends that.
+    const settleWas = settlingUntil;
+    settlingUntil = Math.max(settlingUntil, d.now() + SETTLE_MS);
     let started = false;
     while (d.now() < end) {
       const info = await d.claudeInfo(tabId).catch(() => null);
-      if (started && !info) { if (sessionId) d.release(sessionId, tabId); return { ok: false, pin, error: `Claude started on ${target.label} and exited. The tab is a shell there. ${manual}` }; }
+      // Not released: what came and went may have been some other claude a
+      // startup file ran (`claude --version`), with the resume still queued.
+      // The claim stays this tab's, so resuming here by hand still works.
+      if (started && !info) return { ok: false, pin, error: `Claude started on ${target.label} and exited. The tab is a shell there. ${manual}` };
       if (info) {
         started = true;
         const g = groupOf(await readScan(), info.pid);
@@ -474,6 +516,7 @@ export function createHeadroomService(d) {
           // The process appearing is what ends a hold (terminal-manager): from
           // here the running Claude itself is what stops a second resume.
           if (sessionId) d.release(sessionId, tabId);
+          settlingUntil = settleWas;
           return { ok: true, pin };
         }
       }
@@ -486,15 +529,252 @@ export function createHeadroomService(d) {
       : `Claude has not started after ${VERIFY_MS / 1000} seconds. The tab's shell on ${target.label} may still start it, so give it a moment before doing anything there.` };
   }
 
-  async function move(tabId, targetId, opts) {
+  // False when the memory exists but cannot be read: no move until it can,
+  // or a relaunch would forget a cooldown or hold.
+  async function loadAuto() {
+    if (autoLoaded) return true;
+    let j;
+    try { j = JSON.parse(await readPrivateFile(autoPath)); }
+    catch (err) {
+      if (err?.code !== 'ENOENT') { console.warn('[headroom] auto-move memory unreadable, no automatic move until it is:', err?.message || err); return false; }
+      autoLoaded = true;
+      return true;
+    }
+    autoLoaded = true;
+    const now = d.now();
+    const list = (k) => (Array.isArray(j?.[k]) ? j[k] : []);
+    for (const x of list('tabs')) if (typeof x?.id === 'string' && x.movedAt <= now && autoCoolingDown(x, now) && !autoTabs.has(x.id)) autoTabs.set(x.id, { movedAt: x.movedAt });
+    for (const x of list('holds')) if (typeof x?.login === 'string' && Number.isFinite(x.until) && x.until > now && x.until <= now + 2 * AUTO.HOLD_MS) holds.set(x.login, Math.max(holds.get(x.login) ?? 0, x.until));
+    for (const x of list('placements')) if (typeof x?.login === 'string' && Number.isFinite(x.at) && x.at <= now && now - x.at < AUTO.RESERVE_MS) placements.push({ login: x.login, at: x.at });
+    return true;
+  }
+  function saveAuto() {
+    const now = d.now();
+    const tabs = [...autoTabs].filter(([, st]) => autoCoolingDown(st, now)).map(([id, st]) => ({ id, movedAt: st.movedAt }));
+    const held = [...holds].filter(([, until]) => until > now).map(([login, until]) => ({ login, until }));
+    try { writePrivateFileSync(autoPath, JSON.stringify({ tabs, holds: held, placements: placements.filter((p) => now - p.at < AUTO.RESERVE_MS) })); return true; }
+    catch (err) { console.warn('[headroom] could not save auto-move memory:', err?.message || err); return false; }
+  }
+
+  async function locked(fn) {
     if (moving) return { ok: false, error: 'another account move is still running; try again when it finishes' };
     moving = true;
-    try { return await moveOne(tabId, targetId, opts); }
+    try { return await fn(); }
     finally { moving = false; }
   }
+  const move = (tabId, targetId, opts) => locked(() => moveOne(tabId, targetId, opts));
+
+  // ---- auto-move on limit ----
+
+  const loginOf = (x) => (typeof x?.email === 'string' && x.email.trim() ? x.email.trim().toLowerCase() : null);
+  const heldFor = (c, now) => (holds.get(loginOf(c)) ?? 0) > now;
+  // `except`: the attempt's own reservation, which its own check must not count.
+  const reservedFor = (c, now, except = null) => {
+    const e = loginOf(c);
+    return e ? placements.filter((p) => p !== except && p.login === e && now - p.at < AUTO.RESERVE_MS).length * AUTO.RESERVE_PER_MOVE : 0;
+  };
+  const who = (r) => ({ label: r.label, email: r.email || null });
+
+  // Tell the tab's window once per limit: the same notice is not repeated while
+  // the tab stays on that limit menu.
+  function noticeOnce(tabId, st, payload) {
+    const key = `${payload.kind}|${payload.error || ''}`;
+    if (st.shown?.has(key)) return;
+    (st.shown ??= new Set()).add(key);
+    d.notify(tabId, payload);
+  }
+
+  /**
+   * Every tab showing Claude's own limit menu moves to the logged-in account
+   * with the most known room, by the dialog's move, and resumes with a carry-on
+   * prompt. Never opens a browser: only an account already logged in can be a
+   * target (moveRefusal). Runs on a timer while the setting is on.
+   */
+  async function autoTick() {
+    if (!d.autoMoveOn() || moving || autoRunning) return;
+    autoRunning = true;
+    let changed = false;
+    try {
+      if (!(await loadAuto())) return;
+      const tabs = d.tabs();
+      // A tab gone with its window keeps its cooldown: reopening the project
+      // restores the same tab id.
+      for (const [id, st] of autoTabs) if (!tabs.some((t) => t.id === id) && !autoCoolingDown(st, d.now())) autoTabs.delete(id);
+      let scan;
+      let sampled = false;
+      let rows = null;
+      // First every tab's state, holding every login seen on its limit, so the
+      // order tabs are looked at never sends one into a login another tab
+      // shows is out.
+      const limited = [];
+      for (const tab of tabs) {
+        const mover = d.restarterFor(tab.id);
+        if (!mover) continue; // no window owns it (a phone terminal)
+        const st = autoTabs.get(tab.id) || {};
+        autoTabs.set(tab.id, st);
+        // Cheap first: only a Claude whose own record says it waits on a dialog
+        // gets the full look.
+        const info = await d.claudeInfo(tab.id).catch(() => null);
+        if (scan === undefined) scan = await readScan();
+        // A scan that could not list every Claude cannot rule out one on its
+        // limit (an `exec claude` tab is only seen through it).
+        if (!scan || scan.discoveryFailed) return;
+        // `exec claude`: the shell became Claude, which the child lookup does
+        // not see. Whether it waits on its limit cannot be judged here. A pid
+        // the scan could not resolve counts the same, never as no Claude.
+        const unresolved = (pid) => (scan?.unresolved || []).some((u) => u?.pid === pid);
+        if (!info && tab.pid != null && (groupOf(scan, tab.pid) || unresolved(tab.pid))) { unknownTab(tab.id, tab.pid); return; }
+        // A Claude started after the scan was read is not in it: read it again,
+        // before its record is looked for (the folder it runs in names it).
+        if (info && !groupOf(scan, info.pid)) {
+          scan = await readScan();
+          if (!scan || scan.discoveryFailed) return;
+          // Still not there: whether it waits on its limit, and on which login,
+          // cannot be known, and any move this tick could go straight into it.
+          if (!groupOf(scan, info.pid)) { unknownTab(tab.id, info.pid); return; }
+        }
+        const rec = info ? await presenceFor(tab, info, scan) : null;
+        // A Claude whose own record cannot be read may be on its limit, on the
+        // very login a move would go to: no move this tick. So may a second
+        // Claude sharing the tab's shell (the lookup names only one of them).
+        if (info && (!rec || info.soleChild === false)) { unknownTab(tab.id, info.pid); return; }
+        // Off its limit only on a reading that says so: a failed read keeps what
+        // was already said, or the same notice would come back. (A new Claude
+        // in the tab starts afresh below, by its pid.)
+        if (rec?.status !== 'waiting') { if (rec) st.shown = null; continue; }
+        if (!sampled) { await sample(); sampled = true; }
+        const full = await tabInfo(tab, scan);
+        // Its Claude was replaced meanwhile: the new one is in no scan read here.
+        // Or another program joined it in the shell (the second look says so).
+        if (full.pid !== info.pid || full.running !== 'claude') { unknownTab(tab.id, full.pid); return; }
+        // A clear reading of something else (another dialog) ends that limit's
+        // notices; a failed read keeps them.
+        // A failed read keeps them, and stops every move this tick: that tab may
+        // be on its limit, on the very login a move would go to.
+        if (!full.limited) {
+          if (full.readable) { st.shown = null; continue; }
+          unknownTab(tab.id, full.pid);
+          return;
+        }
+        if (st.pid !== full.pid) { st.pid = full.pid; st.shown = null; }
+        rows ??= await accountRows();
+        const now = d.now();
+        const source = sourceOf(tab, rows, full.pid, scan);
+        // A limit whose login cannot be named (no address, or a token in its
+        // environment deciding it) cannot be held, and any move this tick could
+        // go straight into it: none this time.
+        if (!loginOf(source) || full.override) { unknownTab(tab.id, full.pid); return; }
+        // Its own report (100%) keeps it out once it arrives; the hold covers the
+        // time before, and a limit the figures never show: until its five-hour
+        // window resets when that is known, else for a whole five-hour window.
+        const was = holds.get(loginOf(source)) ?? 0;
+        const until = Math.max(was, autoHoldUntil(usageForRow(rows.find((r) => r.key === source.key) || {}, rows, now), now));
+        if (until !== was) { holds.set(loginOf(source), until); changed = true; }
+        limited.push({ tab, st, mover, full, source });
+      }
+      // At most one attempt a tick. A target can hit its own limit as the moved
+      // tab resumes, and only the next tick sees that (and holds it); a second
+      // move in the same tick would follow the first into it.
+      for (const { tab, st, mover, full, source } of limited) {
+        if (!d.autoMoveOn()) return;
+        // Taken by a manual move meanwhile: looked at again next time, with no
+        // cooldown, since nothing was tried. Nothing awaits between this check
+        // and locked(), so the lock is ours.
+        if (moving) return;
+        const now = d.now();
+        const from = { label: source.label, email: source.email || null };
+        if (autoCoolingDown(st, now)) {
+          noticeOnce(tab.id, st, { kind: 'cooldown', from, at: now, movedAt: st.movedAt });
+          continue;
+        }
+        // Keys pressed just before the tick looked (Esc and a prompt) may not
+        // have reached Claude yet: tried next time, with no cooldown.
+        if (d.inputAgeMs(tab.id) < AUTO.QUIET_MS) continue;
+        const cands = candidatesFor(source, rows, now);
+        const pick = pickAutoTarget(cands, { now, heldFor: (c) => heldFor(c, now), reservedFor: (c) => reservedFor(c, now) });
+        if (!pick) {
+          // Looked at again next time: an account may reset or log in meanwhile.
+          noticeOnce(tab.id, st, { kind: 'stuck', from, at: now });
+          continue;
+        }
+        // Any attempt starts the cooldown, so a move that went wrong is never
+        // retried into a loop.
+        st.movedAt = now;
+        st.shown = null;
+        // Saved before the move: a quit while it verifies keeps the cooldown,
+        // the holds and this reservation.
+        // Not saved, not tried: a relaunch would forget the cooldown.
+        const mine = loginOf(pick) ? { login: loginOf(pick), at: now } : null;
+        placements = [...placements.filter((p) => now - p.at < AUTO.RESERVE_MS), ...(mine ? [mine] : [])];
+        changed = true;
+        if (!saveAuto()) {
+          noticeOnce(tab.id, st, { kind: 'failed', from, to: who(pick), error: 'its auto-move memory could not be saved, so it was not moved', at: now });
+          return;
+        }
+        let checked = null;
+        const r = await locked(() => moveOne(tab.id, pick.isDefault ? null : pick.id, { allowBusy: false, allowDraft: false, ...mover }, (x) => {
+          checked = x.target;
+          const why = autoMoveCheck(x, full, mine);
+          // The folder now names another login: reserve that one too, saved
+          // before Claude is stopped.
+          if (!why && loginOf(checked) && loginOf(checked) !== loginOf(pick)) {
+            placements.push({ login: loginOf(checked), at: now });
+            if (!saveAuto()) return 'its auto-move memory could not be saved, so it was not moved';
+          }
+          return why;
+        }));
+        // Named by what the move itself read: the folder may have been logged
+        // into another address since the pick.
+        noticeOnce(tab.id, st, { kind: r.ok ? 'moved' : 'failed', from, to: who(checked || pick), error: r.ok ? null : (r.error || 'the move failed'), ...(r.pin !== undefined ? { pin: r.pin } : {}), at: now });
+        return;
+      }
+    } finally {
+      if (changed) saveAuto();
+      autoRunning = false;
+    }
+  }
+
+  // Said once per Claude process, not every 30 seconds.
+  function unknownTab(tabId, pid) {
+    const k = `${tabId}|${pid}`;
+    if (unknownSeen.has(k)) return;
+    if (unknownSeen.size > 500) unknownSeen.clear(); // ponytail: bounded by forgetting, a warning may repeat after
+    unknownSeen.add(k);
+    console.warn(`[headroom] auto-move: the Claude in ${tabId} could not be matched to a login; no tab moves while that lasts`);
+  }
+
+  // The automatic move's last word, on the move's own fresh reads, before
+  // anything is stopped. `seen` is the tick's look at the tab.
+  function autoMoveCheck({ info, target, rows, tab, scan }, seen, mine) {
+    if (!info.limited) return 'it is no longer on its limit menu';
+    // Another Claude in the tab (a manual move meanwhile) is not the one judged.
+    if (info.pid !== seen.pid) return 'its Claude was restarted since it was looked at';
+    if (!scan || scan.discoveryFailed) return 'the process list could not be read in full';
+    // A key pressed since the tick looked (Esc on the menu) is the person's.
+    if (info.inputSeq !== seen.inputSeq) return 'something was typed in the tab, so it was left alone';
+    // The carry-on prompt goes out with the start, before anything can confirm
+    // the account. A Claude not on the folder its tab was started with means a
+    // shell setting picks the folder, and would pick it for the restart too.
+    const g = groupOf(scan, info.pid);
+    const spawnKey = d.keyFor(tab.claudeConfigDir === null ? d.cliDefaultDir() : tab.claudeConfigDir);
+    if (!g || g.key !== spawnKey) return 'its Claude does not run on the account its tab was started with (a shell setting may choose it), so a restart could land on the wrong account';
+    const now = d.now();
+    const c = { usage: usageForRow(target, rows, now), email: target.email };
+    const why = autoTargetRefusal(c, { now, held: heldFor(c, now), reserved: reservedFor(c, now, mine) });
+    return why ? `${target.label} no longer qualifies: ${why}` : null;
+  }
+
 
   return {
     move,
+    // The Switch job re-logs folders: it must not start while a move is between
+    // its checks and the new Claude (main.js accounts:switchRun).
+    // A resume still waiting on a slow shell counts until its claim would end.
+    isMoving: () => moving || d.now() < settlingUntil,
+    autoTick: async () => {
+      try { await autoTick(); }
+      catch (err) { console.warn('[headroom] auto-move check failed:', err?.message || err); }
+    },
     tick: async () => {
       if (ticking) return;
       ticking = true;
