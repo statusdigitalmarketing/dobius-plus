@@ -7,8 +7,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  compareVersions, nextBuildNumber, planVersion, liveVersion, lastBuildTag, buildTagNumbers, whatsNewText, reviewDetailCopy,
-  reviewDetailProblems, depsChanged, manifestChanged, APP_PATHS,
+  compareVersions, nextBuildNumber, planVersion, liveVersion, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildKey,
+  whatsNewText, reviewDetailCopy, reviewDetailProblems, depsChanged, manifestChanged, APP_PATHS,
 } from '../../scripts/lib/ios-release-plan.mjs';
 import { ascJwt, createAscClient } from '../../scripts/lib/asc-client.mjs';
 
@@ -92,10 +92,20 @@ test('replaced and removed versions do not block', () => {
   assert.equal(p.action, 'create');
 });
 
-test('the last build tag is the highest number, not the last listed', () => {
-  assert.equal(lastBuildTag(['ios-build-7', 'ios-build-12', 'ios-build-9', 'v2.2.12']), 'ios-build-12');
+test('a build tag names the marketing version and the build, and the last one is the highest build', () => {
+  assert.equal(buildTagName('2.2.12', 7), 'ios-2.2.12-7');
+  assert.deepEqual(parseBuildTag('ios-2.2.12-7'), { tag: 'ios-2.2.12-7', marketing: '2.2.12', n: 7 });
+  for (const bad of ['ios-build-7', 'v2.2.12', 'ios-2.2.12-7.1', 'ios-2.2.12-', 'ios--7', '']) assert.equal(parseBuildTag(bad), null, bad);
+  assert.equal(lastBuildTag(['ios-2.2.10-7', 'ios-2.2.12-12', 'ios-2.2.11-9', 'v2.2.12']), 'ios-2.2.12-12');
   assert.equal(lastBuildTag(['v1', 'ios-build-x']), null);
-  assert.deepEqual(buildTagNumbers(['ios-build-7', 'v2.2.12', 'ios-build-12', 'ios-build-1a', '']), [7, 12]);
+  assert.deepEqual(buildTagNumbers(['ios-2.2.12-7', 'v2.2.12', 'ios-2.2.13-12', 'ios-2.2.13-1a', '']), [7, 12]);
+});
+
+test('a build is ours only when both numbers match exactly', () => {
+  // Apple lets build 7 repeat under another marketing version, and allows "7.1": neither is the tagged binary.
+  assert.notEqual(buildKey('2.2.13', '7'), buildKey('2.2.12', '7'));
+  assert.notEqual(buildKey('2.2.12', '7.1'), buildKey('2.2.12', '7'));
+  assert.equal(buildKey('2.2.12', '7'), buildKey('2.2.12', String(parseBuildTag('ios-2.2.12-7').n)));
 });
 
 test('dependency changes count, the release version bump does not', () => {
@@ -145,6 +155,9 @@ test('review details are checked field by field and copied only from a complete 
   assert.deepEqual(reviewDetailProblems({ ...full, notes: 'Pair with demo.dobius' }), ['the notes do not mention 123456']);
   assert.deepEqual(reviewDetailProblems(null), ['no review details']);
   assert.equal(reviewDetailCopy({ ...full, contactEmail: '' }), null);
+  // Reviewers told a sign-in is needed must get one.
+  assert.deepEqual(reviewDetailProblems({ ...full, demoAccountRequired: true, demoAccountName: 'r', demoAccountPassword: '' }), ['no demoAccountPassword']);
+  assert.deepEqual(reviewDetailProblems({ ...full, demoAccountRequired: true, demoAccountName: 'r', demoAccountPassword: 'p' }), []);
   assert.equal(reviewDetailCopy(null), null);
 });
 
@@ -195,4 +208,11 @@ test('the client refuses redirects, a non-JSON success, and a list cut short', a
   await assert.rejects(c.all('/v1/apps'), /outside App Store Connect/);
   answers.push({ ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'a' }, { id: 'b' }] }) });
   assert.deepEqual((await c.all('/v1/apps')).map((x) => x.id), ['a', 'b']);
+  // Every page's included objects come back with the list (a build's marketing version lives there).
+  answers.push(
+    { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: '1' }], included: [{ id: 'p1' }], links: { next: 'https://api.appstoreconnect.apple.com/v1/builds?cursor=2' } }) },
+    { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: '2' }], included: [{ id: 'p2' }] }) },
+  );
+  const pg = await c.pages('/v1/builds');
+  assert.deepEqual([pg.data.map((x) => x.id), pg.included.map((x) => x.id)], [['1', '2'], ['p1', 'p2']]);
 });

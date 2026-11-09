@@ -85,18 +85,24 @@ export function createAscClient({ keyId, issuerId, keyPath, key: keyIn, fetchImp
     post: (route, body) => call('POST', route, body),
     patch: (route, body) => call('PATCH', route, body),
     del: (route, body) => call('DELETE', route, body),
-    /** Every item across pages (Apple's links.next). A list longer than maxPages throws: a partial list is not "all". */
-    async all(route, maxPages = 20) {
-      const out = [];
+    /**
+     * Every item across pages (Apple's links.next), with every page's `included` objects. A list longer than maxPages
+     * throws: a partial list is not "all".
+     */
+    async pages(route, maxPages = 20) {
+      const data = [];
+      const included = [];
       let next = route;
       for (let i = 0; next; i += 1) {
         if (i >= maxPages) throw new AscError(200, 'GET', url(route).pathname, `more than ${maxPages} pages`);
         const page = await call('GET', next);
         if (!Array.isArray(page.data)) throw new AscError(200, 'GET', url(next).pathname, 'the answer was not a list');
-        out.push(...page.data);
+        data.push(...page.data);
+        if (Array.isArray(page.included)) included.push(...page.included);
         next = page.links?.next || null;
       }
-      return out;
+      return { data, included };
     },
+    async all(route, maxPages = 20) { return (await this.pages(route, maxPages)).data; },
   };
 }

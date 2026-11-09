@@ -13,7 +13,7 @@ export function compareVersions(a, b) {
 }
 
 /**
- * One more than every build number App Store Connect has, the project's own, and every `ios-build-<N>` tag (an upload
+ * One more than every build number App Store Connect has, the project's own, and every `ios-<version>-<N>` tag (an upload
  * Apple has not listed yet still used its number). Never reused.
  */
 export function nextBuildNumber(ascBuildVersions, projectBuild, tagNumbers = []) {
@@ -125,24 +125,34 @@ function stableJson(x) {
   return JSON.stringify(x);
 }
 
-/** The last uploaded build's tag: the highest `ios-build-<N>`. */
+// Each upload's commit is tagged `ios-<marketing>-<build>` (ios-2.2.12-7): both numbers, because Apple lets a build
+// number repeat across marketing versions, so the pair is what names one binary.
+const TAG_RE = /^ios-(\d+(?:\.\d+){0,3})-(\d+)$/;
+
+/** { tag, marketing, n } for one of this script's tags, else null. */
+export function parseBuildTag(tag) {
+  const m = TAG_RE.exec(String(tag ?? '').trim());
+  return m ? { tag: m[0], marketing: m[1], n: Number(m[2]) } : null;
+}
+
+export const buildTagName = (marketing, n) => `ios-${marketing}-${n}`;
+
+/** The key that names one uploaded binary: its marketing version and its build string, exactly. */
+export const buildKey = (marketing, build) => `${marketing}|${build}`;
+
+/** The last uploaded build's tag among `tags`: the highest build number. */
 export function lastBuildTag(tags) {
   let best = null;
   for (const t of tags || []) {
-    const m = /^ios-build-(\d+)$/.exec(String(t).trim());
-    if (m && (!best || Number(m[1]) > best.n)) best = { tag: m[0], n: Number(m[1]) };
+    const b = parseBuildTag(t);
+    if (b && (!best || b.n > best.n)) best = b;
   }
   return best?.tag || null;
 }
 
-/** The build numbers of `ios-build-<N>` tags. */
+/** The build numbers of this script's tags. */
 export function buildTagNumbers(tags) {
-  const out = [];
-  for (const t of tags || []) {
-    const m = /^ios-build-(\d+)$/.exec(String(t).trim());
-    if (m) out.push(Number(m[1]));
-  }
-  return out;
+  return (tags || []).map(parseBuildTag).filter(Boolean).map((b) => b.n);
 }
 
 /** "What's New" text: the person's own, else a plain line. Apple caps it at 4000 characters. */
@@ -163,6 +173,10 @@ export function reviewDetailProblems(attrs) {
   for (const k of CONTACT_FIELDS) if (typeof attrs[k] !== 'string' || !attrs[k].trim()) out.push(`no ${k}`);
   const notes = typeof attrs.notes === 'string' ? attrs.notes : '';
   for (const m of REVIEW_NOTE_MARKERS) if (!notes.includes(m)) out.push(`the notes do not mention ${m}`);
+  // A version that says reviewers need a sign-in must carry one, or Apple refuses the submission.
+  if (attrs.demoAccountRequired === true) {
+    for (const k of ['demoAccountName', 'demoAccountPassword']) if (typeof attrs[k] !== 'string' || !attrs[k].trim()) out.push(`no ${k}`);
+  }
   return out;
 }
 
