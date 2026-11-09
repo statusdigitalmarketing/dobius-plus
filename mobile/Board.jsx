@@ -218,7 +218,7 @@ export default function Board({ connection, status, onOpen, onShowHistory, onSho
               ><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z" /><path d="M10 20.5a2 2 0 0 0 4 0" /></svg></button>
             )}
             {onShowTasks && (
-              <button onClick={onShowTasks} aria-label="Today">
+              <button onClick={onShowTasks} aria-label="Tasks">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="4.5" width="15" height="15" rx="3" /><path d="M8.5 12.2l2.4 2.4 4.8-5" /></svg>
               </button>
             )}
