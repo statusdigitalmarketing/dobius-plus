@@ -208,8 +208,11 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
         // answers instead of dropping it): refresh so the list stops offering it.
         refreshList();
       } else if (msg.type === 'error') {
-        // Not this screen's create: another screen's, or an unrelated error (a newer Mac sends nonce null on those).
-        if ('nonce' in msg && (createNonceRef.current === null || msg.nonce !== createNonceRef.current)) return;
+        // Not this screen's create: another screen's, or an unrelated error (a newer Mac sends nonce null on those). A
+        // Mac that answers creates at all echoes the nonce on every reply to one sent with it, so an error with no nonce
+        // (a resume's, from the released Mac) is never this create's: the create keeps waiting, and only on a Mac too old
+        // to echo does a real failure wait out CREATE_WAIT_MS (Codex phone tasks round 17).
+        if ('nonce' in msg ? (createNonceRef.current === null || msg.nonce !== createNonceRef.current) : createNonceRef.current !== null) { refreshList(); return; }
         stopCreating(); // let the user retry a failed create
         refreshList(); // a run terminal that went while this was pending is left now (see the terminals case)
       }

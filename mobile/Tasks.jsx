@@ -474,11 +474,9 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     // Every result is about the project it was for: shown only while that project is still the one on screen (Codex
     // rounds 4 and 5). A later look at that project shows the synced list itself.
     if (!alive.current || projectRef.current !== p) { /* another view or project is open now */ }
-    // Named, since the note can stay up for a moment after another project is picked (Codex round 7).
-    else if (r?.ok) {
-      const pname = (Array.isArray(projects) ? projects.find((x) => x.path === p)?.name : null) || 'This project';
-      say(r.added ? `${pname}: ${r.added} new from Asana.` : `${pname}: up to date with Asana.`);
-    }
+    // Shown in this project's own view, not as a toast: picking another project clears it, so it can never read as being
+    // about a different folder with the same name (Codex rounds 7 and 17).
+    else if (r?.ok) setSyncNote({ ok: r.added ? `${r.added} new from Asana.` : 'Up to date with Asana.' });
     else setSyncNote(r ? SYNC_PROBLEM[r.error] || 'Asana sync failed. Try again in a moment.' : 'No answer from your Mac.');
     loadTasks();
     loadProjects();
@@ -532,7 +530,7 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     {kind === 'asana' && <>
       <button className="settings-action tasks-sync" onClick={sync} disabled={syncing}>{syncing ? 'Syncing with Asana…' : 'Sync from Asana'}</button>
       <p className="settings-foot">Pulls your Asana tasks and Sam's review lane into this project's list. Checking one off here marks it done on this list only.</p>
-      {syncNote && <p className="today-warn">{syncNote}</p>}
+      {syncNote && <p className={syncNote.ok ? 'today-meta today-synced' : 'today-warn'}>{syncNote.ok || syncNote}</p>}
     </>}
     {!project && <p className="muted pad">Choose a project to see its list.</p>}
     {project && !current && <p className="muted pad">Loading…</p>}
