@@ -13,7 +13,8 @@
 //     the process checks fail, or when the process checks say no but the screen shows Claude's prompt (a check can
 //     time out into "no").
 //   - Anything else (a shell, Codex, a program): typed as before, with the Enter written on its own once the text has
-//     gone out, and only when nobody typed meanwhile.
+//     gone out, and only when nobody typed meanwhile. Not when tmux, screen or ssh leads the terminal (Claude could be
+//     behind it unseen), nor when the screen never holds still for 3 s.
 // One send per tab at a time, and none into a tab /openTab is still delivering to: two pastes would land in one box.
 // ok is true only when Enter was pressed on the message and, where it can be seen (Claude), it was seen taken;
 // confirmed says whether it was seen.
@@ -34,7 +35,8 @@ const sending = new Set();
  *       the process checks fail), working(tabId), needs(tabId) (a permission prompt is open), watch(tabId) -> { seq,
  *       keys, input, screen, stop }, paste(tabId, text), submit(tabId), write(tabId, data) (counted as Dobius's own, not
  *       a person's), inputBusy(tabId), claudeInTab(tabId) (a claude process anywhere in the tab; true when unsure),
- *       onSubmit(tabId) (Enter was pressed on a message), sleep(ms), now()
+ *       relayInFront(tabId) (tmux, screen or ssh leads the terminal; true when unsure), onSubmit(tabId) (Enter was
+ *       pressed on a message), sleep(ms), now()
  * Resolves { status, body } for the HTTP reply.
  */
 export async function sendToTab(deps, tabId, message) {
@@ -67,6 +69,9 @@ async function send(deps, tabId, message) {
   if (deps.inputBusy(tabId)) return fail(409, 'something else is typing into the tab right now; nothing was typed, try again');
   const pty = deps.ptyOf(tabId);
   const watch = deps.watch(tabId);
+  // A red left over from a prompt already answered must not block every send: the screen is what says a dialog is open.
+  // Only a permission prompt that appears during the send stops it.
+  const needsAtStart = deps.needs(tabId);
   try {
     const claude = await deps.claudeRunning(tabId, null);
     if (!claude) {
@@ -75,11 +80,17 @@ async function send(deps, tabId, message) {
       // Claude leads the terminal but a command it started holds it readable (a tool running): keys could reach that
       // command, so nothing is typed. Only a tab Claude is not leading at all is typed into raw.
       if (leads) return fail(409, 'Claude in that tab is running a command that holds the terminal; nothing was typed, try again when it finishes');
-      // A check that timed out says "not Claude" too: a claude process anywhere in the tab, its prompt on screen or a
-      // permission prompt open means it is Claude's after all, and raw text plus Enter could answer its dialog.
+      // A check that timed out says "not Claude" too: a running claude process anywhere in the tab (that check answers
+      // yes when it cannot tell), or its prompt box at the bottom of the screen, means it is Claude's after all, and raw
+      // text plus Enter could answer its dialog. Not the red dot or dialog-like words on screen: a suspended Claude
+      // leaves both behind over a working shell (Codex round 5).
       if (await deps.claudeInTab(tabId)) return fail(409, 'Claude is running in that tab but could not be confirmed at its prompt; nothing was typed, try again');
+      // tmux, screen or ssh in front: the keys go to a program none of these checks can see, Claude included.
+      if (await deps.relayInFront(tabId)) return fail(409, 'that tab is attached to tmux, screen or a remote login, where Dobius cannot see which program gets the keys; nothing was typed');
       const s = await stillScreen(deps, watch, deps.now() + STILL_MS);
-      if ((s && promptBoxText(s.lines, s.modes) !== null) || deps.needs(tabId)) return fail(409, 'that tab shows Claude\'s prompt or a question, but Claude could not be confirmed running there; nothing was typed, try again');
+      // A screen that never held still (a busy program, or a spinner) is not typed into blind.
+      if (!s) return fail(409, 'the screen in that tab kept changing, so what is running there could not be checked; nothing was typed, try again when it settles');
+      if (promptBoxText(s.lines, s.modes) !== null) return fail(409, 'that tab shows Claude\'s prompt, but Claude could not be confirmed running there; nothing was typed, try again');
       // Awaited here, never returned bare: the finally below would stop the watch before typeRaw's pause, and keys typed
       // during it would go unseen (Codex round 3).
       return await typeRaw(deps, tabId, pty, watch, message);
@@ -95,15 +106,15 @@ async function send(deps, tabId, message) {
     }
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return fail(409, 'the tab closed or its shell changed; nothing was typed');
     // Any input of a person's since the send began (a wheel turn can recall an old prompt whose redraw is still to come).
-    if (watch.keys() !== 0 || watch.input() !== 0 || deps.inputBusy(tabId) || deps.needs(tabId)) return fail(409, 'someone used the tab, or Claude is asking something; nothing was typed, try again');
+    if (watch.keys() !== 0 || watch.input() !== 0 || deps.inputBusy(tabId) || (deps.needs(tabId) && !needsAtStart)) return fail(409, 'someone used the tab, or Claude is asking something; nothing was typed, try again');
     deps.paste(tabId, message);
-    return await submitPasted(deps, tabId, pty, watch, message, watch.input());
+    return await submitPasted(deps, tabId, pty, watch, message, watch.input(), needsAtStart);
   } finally {
     watch.stop();
   }
 }
 
-async function submitPasted(deps, tabId, pty, watch, message, inputAtPaste) {
+async function submitPasted(deps, tabId, pty, watch, message, inputAtPaste, needsAtStart) {
   const typedOnly = (why) => ({ status: 200, body: { ok: false, sent: message.length, typed: true, submitted: false, note: `the message is typed into Claude's prompt but was not sent: ${why}; press Enter in the tab to send it` } });
   const end = deps.now() + SUBMIT_WAIT_MS;
   let ready = false;
@@ -117,26 +128,34 @@ async function submitPasted(deps, tabId, pty, watch, message, inputAtPaste) {
     // Same tick from the checks below to the Enter.
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return typedOnly('the tab closed or its shell changed');
     if (watch.keys() !== 0 || deps.inputBusy(tabId) || watch.input() !== inputAtPaste) return typedOnly('someone used the tab');
-    if (deps.needs(tabId)) return typedOnly('Claude is asking something');
+    if (deps.needs(tabId) && !needsAtStart) return typedOnly('Claude is asking something');
   }
   const queued = deps.working(tabId);
   deps.submit(tabId);
   deps.onSubmit?.(tabId);
   const unconfirmed = (why) => ({ status: 200, body: { ok: false, sent: message.length, typed: true, submitted: false, note: `Enter was pressed, but ${why}; check the tab` } });
   const confirmEnd = deps.now() + CONFIRM_MS;
+  let emptyBefore = false;
   while (deps.now() < confirmEnd) {
     await deps.sleep(POLL_MS);
     // A window closing sends Ctrl+C straight to the PTY, which empties the box without the message being sent.
     if (!deps.tabAlive(tabId) || deps.ptyOf(tabId) !== pty) return unconfirmed('the tab closed before Claude was seen taking the message');
     if (watch.keys() !== 0 || watch.input() !== inputAtPaste) return unconfirmed('someone used the tab before Claude was seen taking the message');
-    const after = await stillScreen(deps, watch, 0);
-    // Taken: the box is empty on a still read (while Claude works, it shows the message above the box until the turn
-    // ends). Not merely "no longer the message": a repaint caught halfway can show part of it.
-    if (after && boxIsEmpty(after)) {
+    // Taken: the box is empty on a still read, or on two reads in a row while a spinner keeps the screen moving (while
+    // Claude works it shows the message above the box until the turn ends). Not merely "no longer the message": a
+    // repaint caught halfway can show part of it.
+    let after;
+    const seqBefore = watch.seq();
+    try { after = await watch.screen(); } catch { after = null; }
+    const empty = !!after && boxIsEmpty(after);
+    const still = watch.seq() === seqBefore;
+    const taken = empty && (still || emptyBefore);
+    emptyBefore = empty;
+    if (taken) {
       return { status: 200, body: { ok: true, sent: message.length, submitted: true, confirmed: true, ...(queued ? { note: 'Claude was working, so the message is queued for after its turn' } : {}) } };
     }
   }
-  return unconfirmed('the message is still in Claude\'s prompt (is Enter set to insert a new line?)');
+  return unconfirmed(emptyBefore ? 'Claude\'s screen never held still long enough to confirm it was taken; look before sending it again' : 'the message is still in Claude\'s prompt (is Enter set to insert a new line?)');
 }
 
 async function typeRaw(deps, tabId, pty, watch, message) {

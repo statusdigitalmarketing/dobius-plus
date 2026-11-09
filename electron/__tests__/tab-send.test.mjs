@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { sendToTab } from '../tab-send.js';
 import { stripTerminalReplies, isTerminalReply } from '../terminal-reply.js';
 import { isKeyboardInput } from '../bridge-open-tab.js';
+import { isRelayCommand } from '../bridge-open-main.js';
 
 const RULE = '─'.repeat(40);
 function screenWith(boxText, { dialog = false } = {}) {
@@ -16,7 +17,7 @@ function screenWith(boxText, { dialog = false } = {}) {
 
 const SHELL = (() => { const lines = ['user@Mac project % ']; lines.dimFrom = [-1]; return { lines, modes: { bracketedPaste: true, cursor: { x: 19, y: 0 } } }; })();
 
-function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false } = {}) {
+function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false, needsAfterPaste = false, spinAfterSubmit = false, shell = SHELL, relay = false, busyScreen = false } = {}) {
   let clock = 0;
   const t = { box, seq: 0, keys: 0, input: 0, pasted: null, written: [], submitted: 0, pty: {}, alive: true, reads: 0, stopped: false, probes: 0 };
   const deps = {
@@ -24,14 +25,16 @@ function fakeTab({ leads, claude = true, working = false, needs = false, box = '
     ptyOf: () => (t.alive ? t.pty : null),
     claudeRunning: async () => { if (wheelBeforeRead && (t.probes += 1) === 1) t.input += 1; return claude && !(readerAfterPaste && t.pasted !== null); },
     claudeInTab: async () => inTab,
+    relayInFront: async () => relay,
     claudeLeads: async () => { if (keysDuringProbe) t.keys += 1; if (probeFails) throw new Error('pgrep timed out'); return leads ?? claude; },
-    needs: () => needs,
+    needs: () => needs || (needsAfterPaste && t.pasted !== null),
     working: () => working,
     inputBusy: () => false,
     watch: () => ({
       seq: () => t.seq, keys: () => t.keys, input: () => t.keys + t.input, stop: () => { t.stopped = true; },
       screen: async () => {
-        const shown = boxOnScreen ? screenWith(t.box, { dialog }) : SHELL;
+        if ((spinAfterSubmit && t.submitted) || busyScreen) t.seq += 1; // a frame arrives during every read
+        const shown = boxOnScreen ? screenWith(t.box, { dialog }) : shell;
         // A wheel turn recalls an earlier prompt while this read renders the screen as it was.
         if (wheelDuringRead && (t.reads += 1) === 1) { t.input += 1; t.seq += 1; t.box = 'an earlier prompt'; }
         return shown;
@@ -91,15 +94,26 @@ test('Claude working and Enter only adds a line: reported not sent', async () =>
   assert.equal(t.submitted, 1);
 });
 
-test('Claude working with a permission prompt open: no Enter', async () => {
-  const { t, deps } = fakeTab({ working: true });
-  const r0 = await sendToTab(deps, 'tab', 'x');
-  assert.equal(r0.body.ok, true);
-  const n = fakeTab({ working: true, needs: true });
-  const r = await sendToTab(n.deps, 'tab', 'x');
-  assert.equal(r.status, 409);
-  assert.equal(n.t.pasted, null);
-  assert.equal(n.t.submitted, 0);
+test('a permission prompt that opens after the paste: no Enter', async () => {
+  const { t, deps } = fakeTab({ working: true, needsAfterPaste: true });
+  const r = await sendToTab(deps, 'tab', 'x');
+  assert.equal(r.body.ok, false);
+  assert.equal(r.body.typed, true);
+  assert.equal(t.submitted, 0);
+});
+
+test('a red left over from a prompt already answered, with an empty prompt on screen: sent', async () => {
+  const { t, deps } = fakeTab({ needs: true });
+  const r = await sendToTab(deps, 'tab', 'x');
+  assert.equal(r.body.ok, true);
+  assert.equal(t.submitted, 1);
+});
+
+test('a spinner that never lets the screen hold still after the Enter: two empty reads in a row confirm it', async () => {
+  const { t, deps } = fakeTab({ spinAfterSubmit: true });
+  const r = await sendToTab(deps, 'tab', 'hello');
+  assert.equal(r.body.ok, true);
+  assert.equal(r.body.confirmed, true);
   assert.equal(t.submitted, 1);
 });
 
@@ -262,4 +276,43 @@ test('a box caught halfway through a repaint after the Enter is not a confirmed 
   const r = await sendToTab(deps, 'tab', 'hello');
   assert.equal(r.body.ok, false);
   assert.equal(t.submitted, 1);
+});
+
+test('Claude suspended with a red dot left over: the shell underneath is typed into (Codex round 5)', async () => {
+  const { t, deps } = fakeTab({ claude: false, leads: false, needs: true });
+  const r = await sendToTab(deps, 'tab', 'pwd');
+  assert.equal(r.body.ok, true);
+  assert.equal(t.written.join(''), 'pwd');
+  assert.equal(t.submitted, 1);
+});
+
+test('dialog-like words in old output above a shell prompt do not block a raw send (Codex round 5)', async () => {
+  const lines = ['Would you like to see the diff?', 'Do you want to proceed?', '[1]  + suspended  claude', 'user@Mac project % '];
+  lines.dimFrom = lines.map(() => -1);
+  const shell = { lines, modes: { bracketedPaste: true, cursor: { x: 19, y: 3 } } };
+  const { t, deps } = fakeTab({ claude: false, leads: false, shell });
+  const r = await sendToTab(deps, 'tab', 'pwd');
+  assert.equal(r.body.ok, true);
+  assert.equal(t.written.join(''), 'pwd');
+  assert.equal(t.submitted, 1);
+});
+
+test('tmux or ssh leading the terminal: refused, nothing typed (Claude may be behind it, Codex round 6)', async () => {
+  const { t, deps } = fakeTab({ claude: false, leads: false, relay: true });
+  const r = await sendToTab(deps, 'tab', '1');
+  assert.equal(r.status, 409);
+  assert.deepEqual(t.written, []);
+  assert.equal(t.submitted, 0);
+});
+
+test('not Claude, but the screen never holds still: refused, nothing typed', async () => {
+  const { t, deps } = fakeTab({ claude: false, leads: false, busyScreen: true });
+  const r = await sendToTab(deps, 'tab', 'pwd');
+  assert.equal(r.status, 409);
+  assert.deepEqual(t.written, []);
+});
+
+test('relay commands are told apart from ordinary programs', () => {
+  for (const c of ['tmux', '/opt/homebrew/bin/tmux', 'ssh', '/usr/bin/ssh', 'mosh-client', 'screen', '-zellij']) assert.equal(isRelayCommand(c), true, c);
+  for (const c of ['zsh', '-zsh', '/bin/bash', 'node', 'claude', '2.1.270', 'sshd-helper', 'vim', '']) assert.equal(isRelayCommand(c), false, c);
 });

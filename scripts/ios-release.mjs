@@ -719,18 +719,21 @@ async function submit(asc, notes, justUploaded) {
   // Apple moves a version into its ready state on its own time after the item is added, and answers 409 until then; the
   // submit is tried again a few times, each after the same last looks (Codex round 8, as fastlane waits for it).
   for (let attempt = 1; ; attempt += 1) {
+    // The review details, review type and release type again before each try, and BEFORE the build and items looks:
+    // a read after the items look would widen the moment in which another item can join the submission (Codex round
+    // 11). They can be edited in App Store Connect meanwhile; a Notarization version never reaches the App Store, and a
+    // manual release would wait forever for a person (Codex rounds 10 and 11).
+    const lastDetail = await reviewDetailOf(asc, version.id);
+    const lastProblems = reviewDetailProblems(lastDetail?.attributes);
+    if (lastProblems.length) throw new Error(`the review details changed before submitting (${lastProblems.join(', ')}); not submitted`);
+    const lastAttrs = (await asc.get(`/v1/appStoreVersions/${version.id}`)).data?.attributes || {};
+    if (lastAttrs.reviewType && lastAttrs.reviewType !== 'APP_STORE') throw new Error(`version ${candidate.marketing} is set for ${lastAttrs.reviewType} review, not the App Store; change it in App Store Connect; not submitted`);
+    if (lastAttrs.releaseType !== 'AFTER_APPROVAL') throw new Error(`version ${candidate.marketing} is no longer released automatically on approval (${lastAttrs.releaseType ?? 'unknown'}); not submitted`);
     const finalBuild = await buildOfVersion(asc, version.id);
     if (finalBuild?.id !== candidate.id) throw new Error(`the version's build changed to ${finalBuild?.raw ?? 'none'} before submitting; not submitted`);
     const finalItems = await itemsOf(asc, sub.id);
     if (!itemFor(finalItems, version.id)) throw new Error(`version ${candidate.marketing} is not in review submission ${sub.id}`);
     if (othersIn(finalItems, version.id).length) throw new Error(`review submission ${sub.id} gained other items before submitting; not submitted`);
-    // The review details and the review type again before each try: they can be edited in App Store Connect meanwhile,
-    // and a Notarization version would never reach the App Store (Codex round 10).
-    const lastDetail = await reviewDetailOf(asc, version.id);
-    const lastProblems = reviewDetailProblems(lastDetail?.attributes);
-    if (lastProblems.length) throw new Error(`the review details changed before submitting (${lastProblems.join(', ')}); not submitted`);
-    const reviewType = (await asc.get(`/v1/appStoreVersions/${version.id}`)).data?.attributes?.reviewType;
-    if (reviewType && reviewType !== 'APP_STORE') throw new Error(`version ${candidate.marketing} is set for ${reviewType} review, not the App Store; change it in App Store Connect; not submitted`);
     try {
       await asc.patch(`/v1/reviewSubmissions/${sub.id}`, { data: { type: 'reviewSubmissions', id: sub.id, attributes: { submitted: true } } });
       break;

@@ -706,7 +706,7 @@ export async function getTerminalProcessArgv(id) {
  * `exec claude`) or any process under it (a child of the shell, or deeper,
  * from a nested `bash`: Codex, rounds 11 and 12). One ps of the whole table.
  */
-export async function terminalRunsClaude(id) {
+export async function terminalRunsClaude(id, { skipStopped = false } = {}) {
   const root = terminals.get(id)?.pty?.pid;
   if (typeof root !== 'number' || root <= 0) return false;
   if (IS_WIN) {
@@ -716,11 +716,13 @@ export async function terminalRunsClaude(id) {
   }
   let stdout;
   try {
-    ({ stdout } = await execFileP('/bin/ps', ['-axo', 'pid=,ppid=,command='], { timeout: 2000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
+    ({ stdout } = await execFileP('/bin/ps', ['-axo', skipStopped ? 'pid=,ppid=,stat=,command=' : 'pid=,ppid=,command='], { timeout: 2000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
   } catch (err) {
     console.warn('[terminal] claude check failed:', err?.message || err);
     return true; // unknown: keep the wait rather than end it on a guess
   }
+  // skipStopped: a suspended claude (Ctrl+Z) is not the program on screen (dobius-send into that shell, Codex round 4).
+  if (skipStopped) stdout = stdout.split('\n').filter((l) => !/^\s*\d+\s+\d+\s+T/.test(l)).map((l) => l.replace(/^(\s*\d+\s+\d+\s+)\S+\s+/, '$1')).join('\n');
   return claudeInTree(stdout, root);
 }
 

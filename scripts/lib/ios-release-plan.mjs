@@ -121,7 +121,7 @@ export function planVersion(versions, marketingVersion) {
 // The paths whose changes reach the app binary. mobile/ imports from shared/ only (checked by the tests). The
 // dependency files count separately (depsChanged): every release bumps their version line, which changes nothing.
 // Root build configs Vite would pick up for the phone build count too, even before they exist (Codex round 10).
-export const APP_PATHS = ['mobile', 'shared', 'ios', 'capacitor.config.json', 'vite.mobile.config.js', 'npm-shrinkwrap.json', 'postcss.config.js', 'postcss.config.cjs', 'postcss.config.mjs', 'postcss.config.ts', 'tailwind.config.js', 'tailwind.config.cjs', 'tailwind.config.mjs', 'tailwind.config.ts', '.browserslistrc', '.postcssrc', '.postcssrc.json'];
+export const APP_PATHS = ['mobile', 'shared', 'ios', 'capacitor.config.json', 'vite.mobile.config.js', 'npm-shrinkwrap.json', 'postcss.config.js', 'postcss.config.cjs', 'postcss.config.mjs', 'postcss.config.ts', 'tailwind.config.js', 'tailwind.config.cjs', 'tailwind.config.mjs', 'tailwind.config.ts', 'postcss.config.cts', 'postcss.config.mts', '.postcssrc', '.postcssrc.json', '.postcssrc.yaml', '.postcssrc.yml', '.postcssrc.js', '.postcssrc.cjs', '.postcssrc.mjs', '.postcssrc.ts', '.postcssrc.cts', '.postcssrc.mts', '.browserslistrc', 'browserslist'];
 
 /** True when the installed dependency set differs between two package-lock.json texts, ignoring the app's own version. */
 export function depsChanged(oldLock, newLock) {
