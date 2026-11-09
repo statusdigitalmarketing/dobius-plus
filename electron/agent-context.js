@@ -43,7 +43,7 @@ export function buildAgentContext({ machine = '', platform = process.platform, g
   const lines = [
     `This session runs in a Dobius+ terminal tab${name ? ` on ${where} "${name}"` : ''}. Dobius+ gives you these, use them when they help:`,
     '- Name this tab: when you start a distinct task, run `dobius-tab "<3-6 word summary>"`.',
-    '- Other tabs on this ' + where + ': `dobius-tabs` lists them; `dobius-send <tabId> "<message>"` types a message into one; `dobius-open <project folder> <any request id> - < message.txt` opens a new tab there, starts Claude and sends it the message.',
+    '- Other tabs on this ' + where + ': `dobius-tabs` lists them; `dobius-send <tabId> "<message>"` sends a message into one and submits it (it refuses, saying why, when Claude there has a draft or a question open); `dobius-open <project folder> <any request id> - < message.txt` opens a new tab there, starts Claude and sends it the message.',
     '- Hand the person a command to run (when an action is blocked for you): put it on its own line starting with `! `. Dobius lists it in Tasks > Commands with a Run button.',
     '- Tasks panel: when you finish a task listed there, run `dobius-task-done "<task title, Asana gid or task id>"` (it acts on the project this tab opened in).',
   ];

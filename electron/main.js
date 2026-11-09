@@ -43,7 +43,7 @@ import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser, ensureShim } from './gws-accounts.js';
 import { gwsSetupStatus, installGws, useGwsAt, findClientFiles, useClientFile, refreshGwsEnv, setHintDir } from './gws-setup.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary, writeTerminal, terminalBracketedPaste } from './terminal-manager.js';
 import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
@@ -105,7 +105,8 @@ import {
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
   deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones, tabLabelForNotify,
 } from './mobile-server.js';
-import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
+import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setTabSendService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
+import { sendToTab } from './tab-send.js';
 import { initTeam, stopTeam, handleTeamBridge, getTeamService } from './team-main.js';
 import { writeAgentContext } from './agent-context.js';
 import { visibleBuiltinAgents } from './visible-agents.js';
@@ -4298,6 +4299,30 @@ function setupWindowHandlers() {
     ownerOf: (tabId) => terminalOwners.get(tabId),
   });
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
+  // dobius-send into an existing tab (electron/tab-send.js): the same paste and confirmed Enter for Claude.
+  setTabSendService((tabId, message) => sendToTab({
+    tabAlive: bridgeOpenDeps.tabAlive,
+    ptyOf: bridgeOpenDeps.ptyOf,
+    claudeRunning: bridgeOpenDeps.claudeRunning,
+    claudeLeads: (id) => bridgeOpenDeps.claudeRunning(id, null, { anyReader: true }),
+    inputBusy: bridgeOpenDeps.inputBusy,
+    paste: bridgeOpenDeps.paste,
+    submit: bridgeOpenDeps.submit,
+    write: (id, data) => writeTerminal(id, data),
+    sleep: bridgeOpenDeps.sleep,
+    now: bridgeOpenDeps.now,
+    working: (id) => terminalStatus.statusFor(id)?.status === 'working',
+    watch: (id) => {
+      const x = bridgeOpenDeps.watchOutput(id);
+      return {
+        seq: x.seq, keys: x.keys, input: x.input, stop: x.stop,
+        screen: async () => {
+          const sc = await x.screen();
+          return sc ? { lines: sc.lines, modes: { ...sc.modes, bracketedPaste: terminalBracketedPaste(id) } } : null;
+        },
+      };
+    },
+  }, tabId, message));
   // Team communicator (docs/team-communicator.md): delivery into the pinned
   // orchestrator tab reuses these same guards.
   // Phone notifications by event (electron/phone-alerts-main.js): first, so every source below can feed it.

@@ -7,8 +7,12 @@
 // ponytail: the cost is that a real cursor report on row 1 counts as input,
 // which only makes the selector card re-read once. Tracking outstanding DSR
 // queries would remove it.
-// The replies both tests below share: focus, device attributes, DECRQM, OSC.
-const REPLY_PARTS = String.raw`\x1b\[[IO]|\x1b\[[?>=][\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`;
+// The replies both tests below share: focus, device attributes, DECRQM, OSC, and the string replies (DCS: DECRQSS
+// `ESC P 1$r ... ESC \`, XTVERSION; APC: kitty graphics), the kitty keyboard flags (`ESC[?<n>u`), private status
+// reports (`ESC[?997;1n`) and window reports (`ESC[8;24;80t`). No key produces any of those. Missing the string
+// replies made a Claude that asks DECRQSS at startup read as someone typing, so dobius-open gave up on a fresh tab
+// (bug report from another Mac, 2026-11-09).
+const REPLY_PARTS = String.raw`\x1b\[[IO]|\x1b\[[?>=][\d;]*c|\x1b\[\??[\d;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[P_][^\x1b]*\x1b\\|\x1b\[\?\d*u|\x1b\[\?[\d;]*n|\x1b\[\d+(?:;\d+)*t`;
 const TERMINAL_REPLY_RE = new RegExp(String.raw`^(?:${REPLY_PARTS}|\x1b\[\?\d+;\d+R|\x1b\[(?!1;(?:[2-9]|1[0-6])R)\d+;\d+R)+$`);
 
 export function isTerminalReply(data) {

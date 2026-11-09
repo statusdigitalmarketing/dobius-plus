@@ -255,4 +255,15 @@ test('ttyReaderUnder: an editor or shell command under claude reading the termin
   assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: async () => { throw new Error('ps failed'); } }), true, 'doubt blocks');
   assert.equal(await ttyReaderUnder(999, 'ttys004', { exec: async (bin) => ({ stdout: bin === '/bin/ps' ? ps : '' }) }), true, 'claude gone from the process table');
   assert.equal(await ttyReaderUnder(500, 'ttys004', { exec: async (bin) => ({ stdout: bin === '/bin/ps' ? ps : '' }) }), false, 'no children');
+  // lsof exit 1: some listed process was not read.
+  const partial = (stdout) => async (bin) => {
+    if (bin === '/bin/ps') return { stdout: ps };
+    throw Object.assign(new Error('lsof exit 1'), { code: 1, stdout });
+  };
+  const rest = 'p200\nf0\nn->0x1\np400\nf0\nn/dev/null\np500\nf0\nn/dev/null\n';
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: partial(rest), alive: (p) => p !== 300 }), false, 'a tool shell that exited mid-scan is not doubt');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: partial(rest), alive: () => true }), true, 'one still running that lsof could not read is');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: partial(rest + 'p300\nf0\nau\nn/dev/ttys004\n'), alive: () => false }), true, 'partial output that shows a reader still blocks');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: partial(''), alive: () => false }), false, 'every one of them gone');
+  assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: async (bin) => { if (bin === '/bin/ps') return { stdout: ps }; throw Object.assign(new Error('x'), { code: 2, stdout: rest }); }, alive: () => false }), true, 'any other failure is doubt');
 });

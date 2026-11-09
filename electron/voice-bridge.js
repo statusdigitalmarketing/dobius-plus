@@ -8,7 +8,8 @@
  * session running inside Dobius+ can call it.
  *
  * Endpoints (all POST, body is JSON):
- *   /tabSend   { tabId: string, message: string }  -> writeTerminal(tabId, message + '\r')
+ *   /tabSend   { tabId: string, message: string }  -> the message into that tab and submitted (electron/tab-send.js,
+ *              docs/bridge-tab-send.md)
  *   /tabList   {}                                  -> { tabs: listTerminals() }
  *   /tabRename { tabId: string, label: string }    -> label that tab (dobius-tab)
  *   /codexStatus <a Codex hook's stdin head>        -> that session's tab status dot (dobius-codex-status)
@@ -36,6 +37,7 @@ import { buildOpenCliScript } from './bridge-open-tab.js';
 import { buildTeamCliScript } from './team-cli.js';
 import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
 import { STAGES } from './task-pipeline.js';
+import { statusFor } from './terminal-status.js';
 
 // DOBIUS_BRIDGE_PORT exists for the isolated ship-test harness (8421 belongs
 // to the live app); a packaged launch never sets it.
@@ -96,6 +98,9 @@ function sendJson(res, status, body) {
 
 const TAB_ID_RE = /^term-.+-\d+$/;
 
+let tabSendService = null;
+export function setTabSendService(fn) { tabSendService = fn; }
+
 async function handleTabSend(req, res) {
   let body;
   try {
@@ -110,9 +115,12 @@ async function handleTabSend(req, res) {
   if (typeof message !== 'string') {
     return sendJson(res, 400, { ok: false, error: 'message must be a string' });
   }
-  // Trailing \r so the target shell/TUI submits the line. Long messages get
-  // chunked into 256-byte writes so the PTY's input buffer isn't slammed in a
-  // single write (matches the desktop sendCommand pattern in TerminalPane).
+  // main installs the real path (electron/tab-send.js: Claude gets a paste and a confirmed Enter). This raw fallback
+  // only answers while Dobius+ is still starting.
+  if (tabSendService) {
+    const { status, body: reply } = await tabSendService(tabId, message);
+    return sendJson(res, status, reply);
+  }
   const CHUNK = 256;
   let i = 0;
   while (i < message.length) {
@@ -200,8 +208,10 @@ async function handleTeam(req, res) {
   }
 }
 
+// Each tab with its state (working, done, needs, idle; null when no hook reports it), so a sender can see a message
+// it sent start a turn.
 function handleTabList(_req, res) {
-  return sendJson(res, 200, { ok: true, tabs: listTerminals() });
+  return sendJson(res, 200, { ok: true, tabs: listTerminals().map((t) => ({ ...t, status: statusFor(t.id)?.status || null })) });
 }
 
 // --- Phase 2: work registry endpoints ----------------------------------
@@ -769,12 +779,16 @@ chmod 600 "$DOBIUS_AUTH_HDR"
 printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 TAB_ID="$1"; shift
 MESSAGE="$*"
-RESPONSE=$(curl -fsS -X POST "http://127.0.0.1:${PORT}/tabSend" \\
+# No -f: a refusal (409, 404) carries its reason in the body, and that is what the caller needs to read.
+# --noproxy: an http_proxy in the environment must never see the token.
+RESPONSE=$(curl -sS --noproxy '*' -X POST "http://127.0.0.1:${PORT}/tabSend" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"tabId": sys.argv[1], "message": sys.argv[2]}))' "$TAB_ID" "$MESSAGE")")
+  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"tabId": sys.argv[1], "message": sys.argv[2]}))' "$TAB_ID" "$MESSAGE")") || exit 2
 echo "$RESPONSE"
+# ok:true only when Enter was pressed on the message (docs/bridge-tab-send.md); anything else exits 1.
+case "$RESPONSE" in *'"ok":true'*) exit 0 ;; *) exit 1 ;; esac
 `;
 
 const CLI_TABS_SCRIPT = `#!/bin/bash
@@ -796,7 +810,7 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/tabList" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   -d "{}" \\
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(t["id"], "-", t["cwd"]) for t in d.get("tabs", [])]'
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(t["id"], "-", t["cwd"], "-", t.get("status") or "unknown") for t in d.get("tabs", [])]'
 `;
 
 const CLI_REPLY_SCRIPT = `#!/bin/bash

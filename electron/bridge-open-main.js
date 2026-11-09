@@ -148,7 +148,7 @@ export async function isClaudeProcess(pid, { ps = psField, exe = executablePath,
 // Residual: a LOCAL process built to race this check (forking a reader between
 // the process snapshot and the paste) is outside the threat model, which is a
 // remote teammate's text.
-export async function ttyReaderUnder(pid, tty, { exec = execFileP } = {}) {
+export async function ttyReaderUnder(pid, tty, { exec = execFileP, alive = pidAlive } = {}) {
   try {
     const { stdout } = await exec('/bin/ps', ['-A', '-o', 'pid=,ppid=,uid=,tty='], { timeout: 1500, encoding: 'utf8' });
     const kids = new Map();
@@ -177,8 +177,17 @@ export async function ttyReaderUnder(pid, tty, { exec = execFileP } = {}) {
     // its controlling tty can still have opened it.
     // -n -P: no host or port name lookups (a slow resolver must not time this
     // out on an MCP server's socket). -Fan: access mode, then name, per fd.
+    // lsof exits 1 when a listed process could not be read, which is mostly one that exited during the scan (a Claude
+    // tool's shell finishing). Failing closed on that made a working Claude read as "not at its prompt" (2026-11-09).
+    // Its output for the rest still counts, provided every process it left out is really gone; one still running that
+    // lsof could not read is doubt.
     const r = await exec('/usr/sbin/lsof', ['-n', '-P', '-a', '-p', desc.join(','), '-Fan'], { timeout: 3000, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
-      .catch((err) => (err?.code === 1 && !err.stdout ? { stdout: '' } : Promise.reject(err)));
+      .catch((err) => {
+        if (err?.code !== 1) return Promise.reject(err);
+        const seen = new Set((err.stdout || '').split('\n').filter((l) => l.startsWith('p')).map((l) => l.slice(1)));
+        const left = desc.filter((d) => !seen.has(d) && alive(Number(d)));
+        return left.length ? Promise.reject(new Error(`lsof could not read running process ${left.join(',')}`)) : { stdout: err.stdout || '' };
+      });
     const names = new Set([`/dev/${tty}`, '/dev/tty']);
     let mode = '';
     for (const l of r.stdout.split('\n')) {
@@ -191,6 +200,10 @@ export async function ttyReaderUnder(pid, tty, { exec = execFileP } = {}) {
     console.warn('[bridge-open] could not check what reads the terminal:', err?.message || err);
     return true;
   }
+}
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (err) { return err?.code !== 'ESRCH'; }
 }
 
 async function childPids(pid) {
@@ -298,6 +311,11 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       if (senderId !== null && c.wcId !== senderId) continue;
       c.any += 1;
       if (key) c.n += 1;
+      // An escape sequence counted as typing is most likely a terminal reply this Mac's setup sends that we do not
+      // know yet: its shape (never its text) goes to the log so the next report names it.
+      if (key && c.n === 1 && data.charCodeAt(0) === 0x1b) {
+        console.warn(`[bridge-open] input counted as typing in a tab being opened: an escape sequence starting ESC ${JSON.stringify(data[1] || '')}, ${data.length} bytes`);
+      }
     }
   };
   addInputObserver((id, data) => { if (!ownWrite) bump(id, data); });
@@ -516,7 +534,8 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
   // terminal's foreground process group (a background claude in the shell's
   // own group, job control off, does not), and work in the project (a login
   // script's `cd /q; claude` does not).
-  async function claudeRunning(tabId, projectPath) {
+  // opts.anyReader: skip the reader check below (dobius-send asks it apart, to refuse rather than type raw).
+  async function claudeRunning(tabId, projectPath, opts = {}) {
     const shellPid = terminalInstance(tabId)?.pid;
     if (!Number.isInteger(shellPid) || shellPid <= 0) return false;
     // EVERY child, not the first claude one: a background `claude -p` listed
@@ -549,7 +568,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
         // keyboard. /openTab types into a tab it just opened, where nothing can
         // be open yet, and keeps main's behaviour (an MCP wrapper holding the
         // terminal, e.g. `zsh -lc`, must not stop Brett's board sending).
-        if (projectPath === null && (await ttyReaderUnder(pid, tty))) continue;
+        if (projectPath === null && !opts.anyReader && (await ttyReaderUnder(pid, tty))) continue;
         return true;
       } catch { /* this candidate is unreadable: not claude */ }
     }

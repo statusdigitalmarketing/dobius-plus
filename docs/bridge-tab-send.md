@@ -1,0 +1,73 @@
+# Bridge `POST /tabSend` (dobius-send)
+
+Sends a message into an EXISTING tab on this Mac and submits it. Code: `electron/tab-send.js` (decisions),
+`electron/voice-bridge.js` (route and the `dobius-send` script), wiring in `electron/main.js` (`setTabSendService`).
+To open a NEW tab and send it a message, use `/openTab` (`docs/bridge-open-tab.md`).
+
+## Endpoint
+
+`POST http://127.0.0.1:8421/tabSend` (the bridge port; `DOBIUS_BRIDGE_PORT` moves it for an isolated instance)
+
+## Authentication
+
+- `Authorization: Bearer <token>`, the bridge token in `<userData>/voice-bridge-token` (0600).
+- `Host: 127.0.0.1:<port>` exactly (DNS rebinding guard).
+- The scripts put the token in a private header file, never on a command line.
+
+## Request
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `tabId` | string | yes | The full tab id from `dobius-tabs` (`term-/path/to/project-N`). |
+| `message` | string | yes | The text. Any length the bridge accepts, line breaks included. |
+
+## What happens, by what is in the tab
+
+| The tab holds | What is done | Reply |
+|---|---|---|
+| Claude, idle at an empty prompt | One bracketed paste, then Enter as its own write, and the Enter is confirmed taken (the box empties). | `{ ok: true, sent, submitted: true, confirmed: true }` |
+| Claude, idle, but the Enter only added a line | Nothing more is pressed. | `{ ok: false, sent, typed: true, submitted: false, note }` (200) |
+| Claude, working | The paste, then Enter once the box shows it (Claude queues it for after the turn). Not confirmable. | `{ ok: true, sent, submitted: true, confirmed: false, note }` |
+| Claude with a draft in its box | Nothing typed. | 409 `{ ok: false, error }` |
+| Claude with a question or dialog open | Nothing typed (an Enter would answer it). | 409 |
+| Claude running a command that holds the terminal readable | Nothing typed (keys could reach that command). | 409 |
+| Someone typing into the tab right now | Nothing typed. | 409 |
+| Not Claude (a shell, Codex, another program) | Typed in 256-byte chunks, then Enter as a separate write after a pause. | `{ ok: true, sent, submitted: true, confirmed: false, note }` |
+| No such tab | Nothing. | 404 |
+
+`ok` is true only when Enter was pressed on the message. `confirmed` says whether Claude was seen taking it.
+
+Why it changed (2026-11-09, a bug report from another Mac): the old route wrote the message in raw chunks with `\r`
+straight behind them. Claude read the burst as a paste, so the Enter landed inside it as a new line; a long or
+multi-line message then sat unsent while the reply said ok.
+
+## Response examples
+
+```json
+{ "ok": true, "sent": 2726, "submitted": true, "confirmed": true }
+```
+
+```json
+{ "ok": false, "error": "Claude's prompt in that tab already holds typed text; nothing was typed" }
+```
+
+## curl
+
+```bash
+HDR=$(mktemp); chmod 600 "$HDR"; trap 'rm -f "$HDR"' EXIT
+printf 'Authorization: Bearer %s\n' "$(cat "$HOME/Library/Application Support/dobius-plus/voice-bridge-token")" > "$HDR"
+curl -sS --noproxy '*' -X POST http://127.0.0.1:8421/tabSend -H "Host: 127.0.0.1:8421" -H @"$HDR" \
+  -H 'Content-Type: application/json' -d '{"tabId":"term-/path/to/project-2","message":"hello"}'
+```
+
+Or `dobius-send <tabId> "<message>"`: it prints the reply and exits 0 only when `ok` is true (1 otherwise, 2 when the
+bridge did not answer).
+
+## Side effects
+
+Writes to the tab's terminal only. Nothing is logged with the message text.
+
+## `dobius-tabs` status
+
+`/tabList` now returns each tab's `status` (`working`, `done`, `needs`, `idle`, or null when unknown, from the tab
+status dots), and `dobius-tabs` prints it as the last column.
