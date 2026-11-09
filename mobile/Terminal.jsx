@@ -133,6 +133,10 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
   useEffect(() => {
     const off = connection.onMessage((msg) => {
       if (msg.type === 'authed') {
+        // A create sent on the old socket answers on that socket, never this one: stop waiting for it (the list below
+        // then decides, and leaves for Tasks if the run terminal is gone).
+        creatingRef.current = false;
+        createNonceRef.current = null;
         refreshList();
       } else if (msg.type === 'terminals') {
         // Stamp when each spinner reading arrived: the Chat view's clock
@@ -157,6 +161,10 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
           // Opened for one exact terminal: never fall back to another one, not even on a second list that arrives while
           // the leave is still queued (cur already null then; Codex phone tasks round 13).
           if (exactIdRef.current && (cur === exactIdRef.current || cur === null)) {
+            // A new tab asked for from this screen is on its way: wait for its reply, which opens it (leaving now would
+            // unmount the only handler for it; Codex phone tasks round 15). A failed create refreshes the list, and
+            // that list leaves.
+            if (creatingRef.current) return null;
             leaveSoon();
             return null;
           }
@@ -184,7 +192,7 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
         // person away from another terminal they have opened since (Codex phone tasks round 10).
         setActiveId((cur) => {
           if (cur !== msg.id) return cur;
-          if (exactIdRef.current && msg.id === exactIdRef.current) leaveSoon();
+          if (exactIdRef.current && msg.id === exactIdRef.current && !creatingRef.current) leaveSoon();
           return null;
         });
       } else if (msg.type === 'exit') {
@@ -198,6 +206,7 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
         if ('nonce' in msg && (createNonceRef.current === null || msg.nonce !== createNonceRef.current)) return;
         creatingRef.current = false; // let the user retry a failed create
         createNonceRef.current = null;
+        refreshList(); // a run terminal that went while this was pending is left now (see the terminals case)
       }
     });
     if (connection.status === 'authed') refreshList();
