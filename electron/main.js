@@ -1329,29 +1329,31 @@ async function knownProjectSet() {
   return knownProjectsScan;
 }
 
-// Windows ask for the same session list together (every sidebar on focus and
-// on a history event): identical asks share one scan, and its answer for
-// SESSIONS_SHARE_MS. Bounded: at most SESSIONS_SHARE_MAX distinct asks kept.
-const SESSIONS_SHARE_MS = 2000;
+// Windows ask for the same session list together (every sidebar on a history
+// event that names no project): identical asks made while a scan is RUNNING
+// share it. Nothing is kept once it finishes, so an ask made after any change
+// the user made (hide, delete, tag, an imported profile) starts a fresh scan
+// and never gets a finished list from before it. ponytail: sharing is only as
+// wide as a scan is long, which is exactly when a duplicate would cost most;
+// a warm scan that ends before the next window asks is cheap to repeat.
+// Bounded: at most SESSIONS_SHARE_MAX distinct asks in flight.
 const SESSIONS_SHARE_MAX = 64;
-const sharedSessionLoads = new Map(); // key -> { at, promise }
+const sharedSessionLoads = new Map(); // key -> promise of the running scan
 function loadAllSessionsShared(projectFilter, opts) {
   let key;
   try { key = JSON.stringify([projectFilter ?? null, opts]); } catch { return loadAllSessions(projectFilter, opts); }
-  const hit = sharedSessionLoads.get(key);
-  if (hit && (hit.at === 0 || Date.now() - hit.at < SESSIONS_SHARE_MS)) return hit.promise;
-  const entry = { at: 0, promise: null };
-  entry.promise = loadAllSessions(projectFilter, opts).finally(() => {
-    if (sharedSessionLoads.get(key) === entry) entry.at = Date.now();
+  const running = sharedSessionLoads.get(key);
+  if (running) return running;
+  if (sharedSessionLoads.size >= SESSIONS_SHARE_MAX) return loadAllSessions(projectFilter, opts);
+  const promise = loadAllSessions(projectFilter, opts).finally(() => {
+    if (sharedSessionLoads.get(key) === promise) sharedSessionLoads.delete(key);
   });
-  sharedSessionLoads.delete(key);
-  sharedSessionLoads.set(key, entry);
-  while (sharedSessionLoads.size > SESSIONS_SHARE_MAX) sharedSessionLoads.delete(sharedSessionLoads.keys().next().value);
-  return entry.promise;
+  sharedSessionLoads.set(key, promise);
+  return promise;
 }
 
-// A history event, a deleted session or a renamed one makes every shared
-// answer stale: a scan that was running when the change landed may miss it.
+// A history event, a deleted session or a renamed one: a scan already running
+// may predate it, so later asks start their own.
 const forgetSharedSessionLoads = () => sharedSessionLoads.clear();
 setBeforeNotify(forgetSharedSessionLoads);
 
