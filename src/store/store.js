@@ -105,6 +105,11 @@ export const useStore = create((set, get) => ({
   // tabId currently being dragged from the tab bar (drives grid drop zones).
   draggingTabId: null,
   setDraggingTabId: (id) => set({ draggingTabId: id }),
+  // Asks this window's tab bar to act on one of its tabs from elsewhere (the sidebar Tabs list), so the menu and the
+  // close are the tab bar's own: { kind: 'menu', tabId, x, y } or { kind: 'close', tabId }. `n` makes a repeat new.
+  tabBarRequest: null,
+  requestTabBar: (req) => set({ tabBarRequest: { ...req, n: Date.now() + Math.random() } }),
+  clearTabBarRequest: () => set({ tabBarRequest: null }),
 
   // Running agents: Map<agentId, tabId>
   runningAgents: {},

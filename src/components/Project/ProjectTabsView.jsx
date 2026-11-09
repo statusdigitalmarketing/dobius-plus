@@ -79,6 +79,7 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
   // click is reverted or lands on a hidden tab (NOTES 2026-10-19).
   const showTab = useStore((s) => s.showTab);
   const setActiveView = useStore((s) => s.setActiveView);
+  const requestTabBar = useStore((s) => s.requestTabBar);
   const [collapsed, setCollapsed] = useState({}); // path -> true when collapsed
 
   // The aggregate reads session history and can be slow on a big history, so
@@ -295,6 +296,15 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                     <button
                       key={t.id}
                       onClick={() => handleClick(g.path, t)}
+                      // A tab open in this window: right-click gives the tab bar's own menu, double-click closes it
+                      // (Brett, task 1220331878170954; Cmd+Shift+T brings a closed tab back). The terminal view comes
+                      // forward first so Rename and Split have somewhere to show.
+                      onContextMenu={live ? (e) => {
+                        e.preventDefault();
+                        setActiveView('terminal');
+                        requestTabBar({ kind: 'menu', tabId: t.id, x: e.clientX, y: e.clientY });
+                      } : undefined}
+                      onDoubleClick={live ? () => requestTabBar({ kind: 'close', tabId: t.id }) : undefined}
                       className="w-full flex items-start gap-2 px-3 py-1.5 rounded"
                       data-testid="sidebar-tab-row"
                       aria-current={selected ? 'true' : undefined}
@@ -306,7 +316,7 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
                       onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = selected ? 'var(--accent-muted)' : 'var(--surface-hover, var(--border))'; }}
                       onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = restBg; }}
                       title={live
-                        ? 'Switch to this tab'
+                        ? 'Switch to this tab. Right-click for options, double-click to close.'
                         : t.live
                           ? 'Focus the window running this tab'
                           : (g.path === currentProjectPath ? 'Resume this session' : 'Open this project window')}

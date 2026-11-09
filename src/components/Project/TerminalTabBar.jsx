@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { isLabelLocked, labelMeta } from '../../../shared/tab-label.js';
 import { useStore } from '../../store/store';
@@ -98,6 +99,19 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
       observer.disconnect();
     };
   }, [checkOverflow, tabs.length]);
+
+  // The sidebar Tabs list asks for this bar's own menu (right-click) or close (double-click) on one of its tabs
+  // (Brett, task 1220331878170954). Only tabs this window holds; anything else is ignored.
+  const tabBarRequest = useStore((s) => s.tabBarRequest);
+  const clearTabBarRequest = useStore((s) => s.clearTabBarRequest);
+  useEffect(() => {
+    if (!tabBarRequest) return;
+    const req = tabBarRequest;
+    clearTabBarRequest();
+    if (!tabs.some((t) => t.id === req.tabId)) return;
+    if (req.kind === 'menu') setContextMenu({ x: req.x, y: req.y, tabId: req.tabId });
+    else if (req.kind === 'close' && tabs.length > 1) handleCloseTab({ stopPropagation: () => {} }, req.tabId);
+  }, [tabBarRequest]); // eslint-disable-line react-hooks/exhaustive-deps -- acts once per request, on the tabs as they are now
 
   // Close context menu on click anywhere
   useEffect(() => {
@@ -701,7 +715,8 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
 
       {/* Context menu (#25) */}
       {moveAccountTabId && <MoveAccountDialog tabId={moveAccountTabId} onClose={closeMoveAccount} />}
-      {contextMenu && (
+      {/* On body: the sidebar opens this menu too, and this bar is hidden while the Dashboard shows. */}
+      {contextMenu && createPortal(
         <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
@@ -829,7 +844,8 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
             }
           }}
           onDismiss={() => setContextMenu(null)}
-        />
+        />,
+        document.body,
       )}
     </div>
   );
