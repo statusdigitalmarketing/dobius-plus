@@ -810,6 +810,12 @@
 - **CONTEXT**: Agent worktrees have their own node_modules. A release from the main checkout builds with whatever is installed there.
 - **DETECTION**: `git diff --name-only HEAD@{1} HEAD -- package.json package-lock.json` after a merge; non-empty means install first.
 
+### Deployment: 2026-11-08 (iOS release script)
+- **MISTAKE**: The unattended App Store export used automatic signing with the App Manager API key (`-allowProvisioningUpdates -authenticationKeyPath ...`). It failed with "Cloud signing permission error" plus "Provisioning profile iOS Team Store Provisioning Profile ... doesn't include the Push Notifications capability". Adding `signingCertificate Apple Distribution` to the export options did not change it. The API key cannot use Apple's cloud-managed certificates, so Xcode fell back to its cached Team Store profile, made before push was added to the App ID (App Store Connect lists that profile INVALID).
+- **FIX**: Sign the export by hand. `appStoreSigning()` in scripts/ios-release.mjs matches the local Apple Distribution identity to App Store Connect's certificate by SHA-1, picks an ACTIVE IOS_APP_STORE profile that holds it with `aps-environment production`, or POSTs `/v1/profiles` to make one, installs it as `<UUID>.mobileprovision` under `~/Library/Developer/Xcode/UserData/Provisioning Profiles`, and exports with `signingStyle manual`, `signingCertificate <sha1>`, `provisioningProfiles {bundle: uuid}`. A `--no-upload` run then passed `altool --validate-app`.
+- **CONTEXT**: A profile holds `<date>` and `<data>` values, so `plutil -convert json` fails on it ("Invalid object in plist for JSON format"). Read it key by key with `plutil -extract <keypath> raw`: dates come back ISO 8601, data base64, arrays as their length.
+- **DETECTION**: `grep -n "signingStyle" scripts/ios-release.mjs` should show `manual`. A failing export says `Cloud signing permission error`.
+
 ### UI/UX: 2026-11-08 (sidebar tab menu)
 - **MISTAKE**: Guarded tab closes with a "closing" set checked at the START of `handleCloseTab`, then awaited a save before killing. Close Others, Cmd+W and the store's bulk closes never consult that set, so one of them could run during the await and the pending close then killed the last tab, which `removeTab` refuses to remove: a visible tab with a dead terminal (Codex sidebar round 2).
 - **FIX**: Re-read `useStore.getState().terminalTabs` after the last await in `closeTabNow` and return without killing when the tab is gone or is the only one left. A guard that lives before an await only guards the paths that know about it.
@@ -838,3 +844,14 @@
 - **MISTAKE**: Reading `.xterm-rows` innerText of a HIDDEN tab gave a garbled, 80-column frame mixing two renders, which looked like a send that never got answered.
 - **FIX**: Make the tab visible first (click its `button[draggable="true"]`), then read or screenshot.
 - **DETECTION**: a probe that reads `.xterm-rows` without first showing the tab.
+### Process - 2026-11-09
+- **MISTAKE**: Switched the main checkout from feat/ios-release to main (to merge and release) while three Codex lenses were still reviewing the iOS branch FROM that checkout. They ran `nl scripts/ios-release.mjs` after the switch, got "No such file or directory", and their round 8 verdicts were worthless; the round had to be re-run.
+- **FIX**: Run every Codex review from a dedicated worktree of the branch under review (`git worktree add .claude/worktrees/<name> <branch>`, symlink node_modules), never from the main checkout, and never change the branch of a checkout a review or ship-test is using.
+- **CONTEXT**: Reviews take 5 to 15 minutes; merges and releases happen in the main checkout in the meantime.
+- **DETECTION**: `grep -l "No such file or directory" <scratchpad>/*/r*/[abc].out` after a round; any hit on a reviewed file means re-run it.
+
+### Build - 2026-11-09
+- **MISTAKE**: Pointed both `npm_config_userconfig` and `npm_config_globalconfig` at one empty file to stop `~/.npmrc` reaching the iOS build; npm aborted with `double-loading config ... as "global", previously loaded as "user"`.
+- **FIX**: Two separate empty files (scripts/ios-release.mjs `noNpmrc()`). Proven with `env -i PATH HOME npm_config_userconfig=<a> npm_config_globalconfig=<b> npm config get node-options` printing `null` while a node-options line sat in the user file.
+- **CONTEXT**: Any build step that must ignore the user's npm config.
+- **DETECTION**: `grep -n "npm_config_userconfig" scripts/*.mjs`

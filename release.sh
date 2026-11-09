@@ -41,7 +41,11 @@ APPLE_APP_SPECIFIC_PASSWORD="$(security find-generic-password -s dobius-notary-p
 export APPLE_APP_SPECIFIC_PASSWORD
 GH_TOKEN="$(gh auth token)"
 export GH_TOKEN
+# The commit is pinned BEFORE the tests and checked after: a commit landing while they run was never tested.
+TESTED_SHA="$(git rev-parse HEAD)"
 npm test >/dev/null 2>&1 || { echo "ERROR: npm test failed; not releasing a red build" >&2; exit 1; }
+[ "$(git rev-parse HEAD)" = "$TESTED_SHA" ] || { echo "ERROR: HEAD moved while the tests ran; run the release again" >&2; exit 1; }
+[ -z "$(git status --porcelain)" ] || { echo "ERROR: the tree changed while the tests ran; run the release again" >&2; exit 1; }
 echo "preflight OK (tests green)"
 
 step "Version bump ($BUMP)"
@@ -114,3 +118,33 @@ echo "tag v$V on $TAG_SHA == main HEAD"
 step "Done"
 echo "v$V is live: https://github.com/${REPO}/releases/tag/v$V"
 echo "Users auto-update within 30s of next launch (or 4h if running)."
+
+# The phone app: a new App Store build when the phone code changed since the last one, submitted for review and
+# released by Apple on approval (docs/ios-release.md). The desktop release above is already live, so this never fails
+# it: a problem is printed with the command to finish by hand.
+# DOBIUS_SKIP_IOS=1 skips it. The notary password and GitHub token are not passed down.
+if [ "${DOBIUS_SKIP_IOS:-}" != "1" ]; then
+  step "iOS (App Store)"
+  # The tests ran on TESTED_SHA; the release commit is that plus the version bump only. Anything else landing in
+  # between means the iOS step runs the tests itself.
+  IOS_ARGS=(release --if-changed --expect-sha "$HEAD_SHA")
+  # And in those two files only the version fields: a lifecycle hook that also moved a dependency gets tested (Codex).
+  version_only() {
+    node -e '
+      const { execFileSync } = require("child_process");
+      const [a, b] = process.argv.slice(1);
+      const read = (sha, f) => { try { return JSON.parse(execFileSync("git", ["show", `${sha}:${f}`], { encoding: "utf8", maxBuffer: 1 << 28, timeout: 60000, killSignal: "SIGKILL" })); } catch { return null; } };
+      const bare = (f, j) => { if (!j) return String(j); delete j.version; if (f === "package-lock.json" && j.packages && j.packages[""]) delete j.packages[""].version; return JSON.stringify(j); };
+      for (const f of ["package.json", "package-lock.json"]) if (bare(f, read(a, f)) !== bare(f, read(b, f))) process.exit(1);
+    ' "$TESTED_SHA" "$HEAD_SHA"
+  }
+  if [ "$(git rev-parse "$HEAD_SHA^")" = "$TESTED_SHA" ] && [ -z "$(git diff --name-only "$TESTED_SHA" "$HEAD_SHA" -- . ':!package.json' ':!package-lock.json')" ] && version_only; then
+    IOS_ARGS+=(--skip-tests)
+  fi
+  # The run watches this shell too: cancelling release.sh stops the iOS release (Codex round 9).
+  if env -u GH_TOKEN -u APPLE_APP_SPECIFIC_PASSWORD DOBIUS_IOS_RELEASE_STARTER=$$ node scripts/ios-release.mjs "${IOS_ARGS[@]}"; then
+    echo "iOS step finished"
+  else
+    echo "WARNING: the iOS step did not finish (desktop v$V is live regardless). Finish it with: node scripts/ios-release.mjs release --if-changed" >&2
+  fi
+fi
