@@ -82,6 +82,19 @@ export function liveVersion(versions) {
  *   'stop'     the build cannot ship (its version is not above every shipped one, a person must act, or a state this
  *              script does not know)
  */
+/** The floor: the highest version string that ever shipped (live, replaced, pulled), or null. */
+export function shippedFloor(versions) {
+  const list = iosVersions(versions);
+  const top = highest(list.filter((v) => LIVE_STATES.has(stateOf(v)) || PAST_STATES.has(stateOf(v))));
+  return top ? vs(top) : null;
+}
+
+/** Whether a version string can still ship: Apple refuses one at or below the shipped floor. */
+export function aboveShipped(versions, marketingVersion) {
+  const floor = shippedFloor(versions);
+  return !floor || compareVersions(marketingVersion, floor) > 0;
+}
+
 export function planVersion(versions, marketingVersion) {
   const list = iosVersions(versions);
   const live = liveVersion(list);
@@ -95,10 +108,9 @@ export function planVersion(versions, marketingVersion) {
   if (busy) return { action: 'wait', live, version: busy, reason: `Apple is handling ${vs(busy)} (${stateOf(busy)})` };
   const pending = others.find((v) => PENDING_RELEASE_STATES.has(stateOf(v)));
   if (pending) return { action: 'wait', live, version: pending, reason: `${vs(pending)} is approved and waits for a manual release in App Store Connect` };
-  // The floor: every version that ever shipped (live, replaced, pulled). Apple refuses a version string at or below it.
-  const shipped = highest(list.filter((v) => LIVE_STATES.has(stateOf(v)) || PAST_STATES.has(stateOf(v))));
-  if (shipped && compareVersions(marketingVersion, vs(shipped)) <= 0) {
-    return { action: 'stop', live, reason: `version ${marketingVersion} is not higher than ${vs(shipped)}, which already shipped` };
+  const shipped = shippedFloor(list);
+  if (!aboveShipped(list, marketingVersion)) {
+    return { action: 'stop', live, reason: `version ${marketingVersion} is not higher than ${shipped}, which already shipped` };
   }
   const editable = others.filter((v) => EDITABLE_STATES.has(stateOf(v)));
   if (editable.length > 1) return { action: 'stop', live, reason: `more than one editable version (${editable.map(vs).join(', ')})` };
@@ -220,18 +232,50 @@ const CONTACT_FIELDS = ['contactFirstName', 'contactLastName', 'contactPhone', '
 export const REVIEW_NOTE_MARKERS = ['demo.dobius', '123456'];
 
 /** Every reason these review details would leave App Review stuck; an empty list means they are complete. */
+/** Every demo.dobius mention in review notes is one the demo answers (see reviewDetailProblems). */
+export function demoAddressesOk(notes) {
+  for (const m of String(notes || '').matchAll(/(?:([a-z][a-z0-9+.-]*):\/\/)?demo\.dobius([^\s,;)\]'"<>]*)/gi)) {
+    const scheme = m[1] ? m[1].toLowerCase() : null;
+    const rest = m[2].replace(/[.!?:/]+$/, ''); // sentence punctuation, a trailing slash
+    if (scheme ? !(scheme === 'http' && rest === ':8420') : !(rest === '' || rest === ':8420')) return false;
+  }
+  return true;
+}
+
+/**
+ * Which of App Store Connect's upload records (`/v1/apps/{id}/buildUploads`) is this run's own upload. With the
+ * delivery id altool printed, that record and nothing else. Without one, the record of these numbers that Apple
+ * created during the upload (createdDate inside [after - slack, before + slack]) and that got past AWAITING_UPLOAD (a
+ * validate leaves one there): exactly one, or none is named. Someone uploading the same numbers later gets a record of
+ * its own, created after ours, so it is never this one.
+ * Returns { upload } or { reason }.
+ */
+export function ownUpload(uploads, { marketing, n, after, before, deliveryId }) {
+  const nums = (u) => u?.attributes?.cfBundleShortVersionString === marketing && String(u?.attributes?.cfBundleVersion) === String(n);
+  if (deliveryId) {
+    const u = (uploads || []).find((x) => x.id === deliveryId);
+    if (!u) return { reason: `Apple does not list delivery ${deliveryId} yet` };
+    if (!nums(u)) return { reason: `delivery ${deliveryId} is not ${marketing} (${n})` };
+    return { upload: u };
+  }
+  const found = (uploads || []).filter((u) => {
+    const at = Date.parse(u?.attributes?.createdDate);
+    return nums(u) && at >= after - UPLOAD_SLACK_MS && at <= before + UPLOAD_SLACK_MS && u.attributes?.state?.state !== 'AWAITING_UPLOAD';
+  });
+  if (found.length === 1) return { upload: found[0] };
+  return { reason: found.length ? `${found.length} uploads of ${marketing} (${n}) were made during this one` : `Apple does not list this upload of ${marketing} (${n}) yet` };
+}
+
 export function reviewDetailProblems(attrs) {
   if (!attrs || typeof attrs !== 'object') return ['no review details'];
   const out = [];
   for (const k of CONTACT_FIELDS) if (typeof attrs[k] !== 'string' || !attrs[k].trim()) out.push(`no ${k}`);
   const notes = typeof attrs.notes === 'string' ? attrs.notes : '';
   for (const m of REVIEW_NOTE_MARKERS) if (!notes.includes(m)) out.push(`the notes do not mention ${m}`);
-  // The built-in demo answers only at http://demo.dobius:8420 (mobile/host.js DEMO_ORIGIN): an https address typed from
-  // the notes keeps https and reaches no Mac at all.
-  // Bare `demo.dobius` normalises to it; any address with a scheme must be exactly that one (https, or http without the
-  // port, reaches no Mac at all).
-  if ([...notes.matchAll(/([a-z][a-z0-9+.-]*):\/\/demo\.dobius(:[0-9]+)?(?![0-9a-z-])/gi)].some((m) => m[1].toLowerCase() !== 'http' || m[2] !== ':8420')
-    || /[a-z][a-z0-9+.-]*:\/\/demo\.dobius[0-9a-z.-]/i.test(notes)) out.push('the notes give the demo address in a form the demo does not answer (use demo.dobius or http://demo.dobius:8420)');
+  // The built-in demo answers only at http://demo.dobius:8420 (mobile/host.js DEMO_ORIGIN), and the phone keeps any
+  // scheme or port it is given. So every mention must be bare `demo.dobius`, `demo.dobius:8420`, or exactly
+  // `http://demo.dobius:8420`: https, http without the port, another port or a longer host reaches no Mac.
+  if (!demoAddressesOk(notes)) out.push('the notes give the demo address in a form the demo does not answer (use demo.dobius or http://demo.dobius:8420)');
   // A version that says reviewers need a sign-in must carry one, or Apple refuses the submission.
   if (attrs.demoAccountRequired === true) {
     for (const k of ['demoAccountName', 'demoAccountPassword']) if (typeof attrs[k] !== 'string' || !attrs[k].trim()) out.push(`no ${k}`);

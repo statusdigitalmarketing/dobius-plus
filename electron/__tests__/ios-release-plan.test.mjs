@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  compareVersions, compareBuildStrings, buildOfTag, parseTagMessage, tagMessage, nextBuildNumber, planVersion, liveVersion, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildKey,
+  compareVersions, compareBuildStrings, buildOfTag, parseTagMessage, tagMessage, ownUpload, aboveShipped, shippedFloor, demoAddressesOk, nextBuildNumber, planVersion, liveVersion, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildKey,
   whatsNewText, reviewDetailCopy, reviewDetailProblems, depsChanged, manifestChanged, APP_PATHS,
 } from '../../scripts/lib/ios-release-plan.mjs';
 import { ascJwt, createAscClient } from '../../scripts/lib/asc-client.mjs';
@@ -246,6 +246,32 @@ test('a tag vouches only for the build it was bound to, inside its own upload wi
   assert.equal(buildOfTag(t, [b('ours', '7', '2.2.12', '2026-11-09T02:59:00Z')])?.id, 'ours', 'a minute of clock skew is allowed');
 });
 
+test('the run binds only its own upload record', () => {
+  const after = Date.parse('2026-11-09T03:00:00Z');
+  const before = Date.parse('2026-11-09T03:02:00Z');
+  const u = (id, v, n, created, state) => ({ id, attributes: { cfBundleShortVersionString: v, cfBundleVersion: n, createdDate: created, state: { state } } });
+  const ours = u('ours', '2.2.12', '7', '2026-11-09T03:00:30Z', 'COMPLETE');
+  const validate = u('val', '2.2.12', '7', '2026-11-09T02:59:00Z', 'AWAITING_UPLOAD');
+  const later = u('later', '2.2.12', '7', '2026-11-09T03:20:00Z', 'COMPLETE');
+  const t = { marketing: '2.2.12', n: 7, after, before };
+  assert.equal(ownUpload([later, validate, ours], t).upload?.id, 'ours', 'not a validate record, not a later reuse');
+  assert.equal(ownUpload([later, validate], t).upload, undefined, 'a later upload reusing the numbers is never ours');
+  assert.equal(ownUpload([ours, u('twin', '2.2.12', '7', '2026-11-09T03:01:00Z', 'PROCESSING')], t).upload, undefined, 'two in the window name none');
+  assert.equal(ownUpload([u('x', '2.2.13', '7', '2026-11-09T03:00:30Z', 'COMPLETE')], t).upload, undefined, 'the numbers must match');
+  assert.equal(ownUpload([later, ours], { ...t, deliveryId: 'later' }).upload?.id, 'later', 'the delivery id altool printed decides');
+  assert.equal(ownUpload([ours], { ...t, deliveryId: 'missing' }).upload, undefined, 'a delivery Apple does not list yet names none');
+  assert.equal(ownUpload([u('d', '2.2.13', '7', '2026-11-09T03:00:30Z', 'COMPLETE')], { ...t, deliveryId: 'd' }).upload, undefined, 'a delivery of other numbers names none');
+});
+
+test('a version at or below the shipped floor cannot ship', () => {
+  const versions = [ver('2.2.13', 'READY_FOR_DISTRIBUTION'), ver('2.2.11', 'REPLACED_WITH_NEW_VERSION')];
+  assert.equal(shippedFloor(versions), '2.2.13');
+  assert.equal(aboveShipped(versions, '2.2.12'), false);
+  assert.equal(aboveShipped(versions, '2.2.13'), false);
+  assert.equal(aboveShipped(versions, '2.2.14'), true);
+  assert.equal(aboveShipped([], '1.0.0'), true);
+});
+
 test('tag messages round-trip', () => {
   const after = Date.parse('2026-11-09T03:00:00Z');
   const before = Date.parse('2026-11-09T03:02:00Z');
@@ -266,4 +292,9 @@ test('review notes that give the demo with https are refused', () => {
   assert.equal(reviewDetailProblems({ ...ok, notes: 'Mac address https://demo.dobius:8420, code 123456' }).length, 1, 'https with the right port');
   assert.equal(reviewDetailProblems({ ...ok, notes: 'Use demo.dobius or https://demo.dobius:8420, code 123456' }).length, 1, 'one wrong address among right ones');
   assert.equal(reviewDetailProblems({ ...ok, notes: 'Mac address http://demo.dobiusx:8420, code 123456' }).length, 1, 'a longer host');
+  assert.equal(demoAddressesOk('Mac address demo.dobius:8421, code 123456'), false, 'a bare address with another port');
+  assert.equal(demoAddressesOk('Mac address demo.dobius:8420, code 123456'), true, 'a bare address with the right port');
+  assert.equal(demoAddressesOk('Mac address: demo.dobius. Code 123456'), true, 'bare, then a full stop');
+  assert.equal(demoAddressesOk('Open http://demo.dobius:8420/ and pair'), true, 'a trailing slash');
+  assert.equal(demoAddressesOk('Open (http://demo.dobius) and pair'), false, 'http without the port, in brackets');
 });

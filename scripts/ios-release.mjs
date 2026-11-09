@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ascConfig, createAscClient } from './lib/asc-client.mjs';
 import {
-  planVersion, liveVersion, nextBuildNumber, compareBuildStrings, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildOfTag, inUploadWindow, parseTagMessage, tagMessage,
+  planVersion, liveVersion, nextBuildNumber, compareBuildStrings, lastBuildTag, buildTagNumbers, parseBuildTag, buildTagName, buildOfTag, parseTagMessage, tagMessage, ownUpload, aboveShipped,
   whatsNewText, reviewDetailCopy, reviewDetailProblems, depsChanged, manifestChanged, APP_PATHS,
 } from './lib/ios-release-plan.mjs';
 
@@ -55,12 +55,16 @@ const killGroup = (child) => {
 };
 process.on('exit', () => killGroup(current));
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { killGroup(current); process.exit(130); });
-function run(file, args, label, { cwd = ROOT, env, minutes = 20, capture = false } = {}) {
+// The build steps get only these from the environment: anything else could change the app without changing the commit
+// (XCODE_XCCONFIG_FILE swaps in another Info.plist, npm_config_* another registry; Codex).
+const BUILD_ENV_KEYS = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'DEVELOPER_DIR'];
+const buildEnv = (extra = {}) => ({ ...Object.fromEntries(BUILD_ENV_KEYS.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]])), ...extra });
+function run(file, args, label, { cwd = ROOT, env, clean = false, minutes = 20, capture = false } = {}) {
   stillLocked();
   say(`${label}...`);
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, {
-      cwd, env: env ? { ...process.env, ...env } : process.env, detached: true,
+      cwd, env: clean ? buildEnv(env) : (env ? { ...process.env, ...env } : process.env), detached: true,
       stdio: ['ignore', capture ? 'pipe' : 'inherit', capture ? 'pipe' : 'inherit'],
     });
     current = child;
@@ -78,7 +82,11 @@ function run(file, args, label, { cwd = ROOT, env, minutes = 20, capture = false
     const timer = setTimeout(() => { killGroup(child); settle(() => reject(new Error(`${label} took over ${minutes} minutes and was stopped`))); }, minutes * MIN);
     child.on('error', (err) => settle(() => reject(new Error(`${label} could not start: ${err.message}`))));
     child.on('close', (code, signal) => settle(() => {
-      if (capture && out) console.log(out.length > 8000 ? `...${out.slice(-8000)}` : out);
+      // Kept in a file, with one short line here: a long write to a stalled terminal would block this process (Codex).
+      if (capture && out) {
+        const log = path.join(os.tmpdir(), `dobius-ios-release-${label.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.log`);
+        try { fs.writeFileSync(log, out); say(`${label}: output in ${log}`); } catch (err) { say(`${label}: could not keep its output (${err.message})`); }
+      }
       if (code !== 0) reject(new Error(`${label} failed (exit ${code ?? signal})`));
       else { stillLocked(); resolve(out); }
     }));
@@ -90,7 +98,8 @@ const read = (file, args) => execFileSync(file, args, { encoding: 'utf8', maxBuf
 const plistJson = (file) => JSON.parse(read('plutil', ['-convert', 'json', '-o', '-', file]));
 // Branches, plus only this script's own tags: the release tags here can differ from origin's (electron-builder makes
 // them), and a plain --tags fetch refuses to clobber them and fails the whole fetch.
-const fetchOrigin = () => gitOk('fetch', '-q', 'origin') && gitOk('fetch', '-q', 'origin', '+refs/tags/ios-*:refs/tags/ios-*');
+// --prune drops a local ios-* tag origin does not have: a binding whose push failed must not count on a later run.
+const fetchOrigin = () => gitOk('fetch', '-q', 'origin') && gitOk('fetch', '-q', '--prune', 'origin', '+refs/tags/ios-*:refs/tags/ios-*');
 
 // ---- one run at a time: the kernel's lock on a file, released when the process ends however it ends ----
 const LOCK = path.join(os.tmpdir(), 'dobius-ios-release.lock');
@@ -230,9 +239,9 @@ async function cleanSource(sha, work) {
   await run('git', ['worktree', 'add', '--detach', src, sha], `Checking out ${sha.slice(0, 8)} on its own`, { minutes: 5 });
   // Only what the phone build needs: no install scripts (Electron's download, native rebuilds).
   // Dev dependencies too (Vite builds the phone bundle), whatever NODE_ENV says (Codex).
-  await run('npm', ['ci', '--include=dev', '--ignore-scripts', '--no-audit', '--no-fund'], 'Installing the locked dependencies', { cwd: src, minutes: 20 });
-  await run('npm', ['run', 'build:mobile'], 'Building the phone bundle', { cwd: src, minutes: 10 });
-  await run('npx', ['cap', 'sync', 'ios'], 'Copying it into the iOS app (cap sync)', { cwd: src, minutes: 10 });
+  await run('npm', ['ci', '--include=dev', '--ignore-scripts', '--no-audit', '--no-fund'], 'Installing the locked dependencies', { cwd: src, clean: true, minutes: 20 });
+  await run('npm', ['run', 'build:mobile'], 'Building the phone bundle', { cwd: src, clean: true, minutes: 10 });
+  await run('npx', ['cap', 'sync', 'ios'], 'Copying it into the iOS app (cap sync)', { cwd: src, clean: true, minutes: 10 });
   // cap sync must not change tracked files: if it did, the build would not be exactly that commit.
   const dirty = gitIn(src, 'status', '--porcelain');
   if (dirty) throw new Error(`cap sync changed tracked files:\n${dirty}`);
@@ -403,7 +412,7 @@ async function buildAndUpload(cfg, signing, marketing, buildNo) {
       '-project', path.join(src, 'ios/App/App.xcodeproj'), '-scheme', 'App', '-configuration', 'Release', '-destination', 'generic/platform=iOS',
       '-archivePath', archive, 'archive', `MARKETING_VERSION=${marketing}`, `CURRENT_PROJECT_VERSION=${buildNo}`,
       `DEVELOPMENT_TEAM=${TEAM_ID}`, 'CODE_SIGN_STYLE=Automatic', '-quiet', ...auth,
-    ], `Archiving ${marketing} (${buildNo})`, { cwd: src, minutes: 40 });
+    ], `Archiving ${marketing} (${buildNo})`, { cwd: src, clean: true, minutes: 40 });
     // Signed by hand with the identity and profile appStoreSigning() chose (see there for why not automatic).
     const opts = path.join(work, 'ExportOptions.plist');
     fs.writeFileSync(opts, `<?xml version="1.0" encoding="UTF-8"?>
@@ -421,7 +430,7 @@ async function buildAndUpload(cfg, signing, marketing, buildNo) {
 `);
     const exportDir = path.join(work, 'export');
     await run('xcodebuild', ['-exportArchive', '-archivePath', archive, '-exportOptionsPlist', opts, '-exportPath', exportDir, '-quiet'],
-      `Signing ${marketing} (${buildNo}) for the App Store`, { cwd: src, minutes: 20 });
+      `Signing ${marketing} (${buildNo}) for the App Store`, { cwd: src, clean: true, minutes: 20 });
     const ipas = fs.readdirSync(exportDir).filter((n) => n.endsWith('.ipa'));
     if (ipas.length !== 1) throw new Error(`the export made ${ipas.length} IPAs`);
     const ipa = path.join(exportDir, ipas[0]);
@@ -430,13 +439,15 @@ async function buildAndUpload(cfg, signing, marketing, buildNo) {
     const key = ['-t', 'ios', '--api-key', cfg.keyId, '--api-issuer', cfg.issuerId];
     const env = { API_PRIVATE_KEYS_DIR: path.dirname(cfg.keyPath) };
     // altool can exit 0 on a refused upload (a duplicate build, for one), so its own success line is required too.
-    const checked = await run('xcrun', ['altool', '--validate-app', ipa, ...key], 'Validating with App Store Connect', { env, minutes: 20, capture: true });
+    const checked = await run('xcrun', ['altool', '--validate-app', ipa, ...key], 'Validating with App Store Connect', { env, clean: true, minutes: 20, capture: true });
     if (!/VERIFY SUCCEEDED/.test(checked) || /VERIFY FAILED/.test(checked)) throw new Error('altool did not report VERIFY SUCCEEDED');
     if (NO_UPLOAD) { say('--no-upload: stopping before the upload'); return false; }
     const after = Date.now();
-    const sent = await run('xcrun', ['altool', '--upload-package', ipa, ...key], `Uploading ${marketing} (${buildNo})`, { env, minutes: 40, capture: true });
+    const sent = await run('xcrun', ['altool', '--upload-package', ipa, ...key], `Uploading ${marketing} (${buildNo})`, { env, clean: true, minutes: 40, capture: true });
     if (!/UPLOAD SUCCEEDED/.test(sent) || /UPLOAD FAILED/.test(sent)) throw new Error('altool did not report UPLOAD SUCCEEDED');
-    return { after, before: Date.now() };
+    // The delivery id names this upload's own record (and so its build) in App Store Connect; see ownUpload.
+    const delivery = /Delivery UUID:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(sent);
+    return { after, before: Date.now(), deliveryId: delivery ? delivery[1].toLowerCase() : null };
   } finally {
     // Cleanup never decides the outcome: a leftover folder must not turn an accepted upload into a failure (and so an
     // untagged build).
@@ -463,24 +474,40 @@ function tagBuild(marketing, buildNo, sha, up, buildId = null) {
 }
 
 /**
- * 'valid' once Apple has processed it, 'timeout' if it is still processing; throws when Apple refused it. The first
- * time Apple lists the build it is bound to the tag by id (onSeen), so nothing uploaded later can take its place.
+ * 'valid' once Apple has processed it, 'timeout' if it is still processing; throws when Apple refused it. The build is
+ * found through this run's OWN upload record (ownUpload: the delivery id altool printed, else the one record of these
+ * numbers Apple created during the upload), never by numbers and dates in the builds list: Apple lets a failed
+ * upload's numbers be reused, and a later upload of them is someone else's binary. Once that record leads to its build,
+ * the build is bound to the tag by id (onSeen).
  */
 async function waitForBuild(asc, appId, marketing, buildNo, up, onSeen) {
   const until = Date.now() + PROCESSING_TIMEOUT_MS;
-  let seen = null;
+  let buildId = null;
+  let why = '';
   say(`Waiting for Apple to process build ${buildNo}...`);
   while (Date.now() < until) {
-    const r = await asc.get(`/v1/builds?filter[app]=${appId}&filter[version]=${buildNo}&filter[preReleaseVersion.version]=${marketing}&fields[builds]=version,processingState,uploadedDate&limit=50`);
-    // The same build the tag vouches for (buildOfTag): once seen, by id; before that, the first one inside the window.
-    const b = seen ? r.data.find((x) => x.id === seen) : r.data
-      .filter((x) => inUploadWindow({ marketing, n: buildNo, ...up }, marketing, x.attributes.version, x.attributes.uploadedDate))
-      .sort((x, y) => Date.parse(x.attributes.uploadedDate) - Date.parse(y.attributes.uploadedDate))[0];
-    if (b && !seen) { seen = b.id; onSeen(b.id); }
-    if (b?.attributes.processingState === 'VALID') { say(`build ${buildNo} processed`); return 'valid'; }
-    if (b && REFUSED.has(b.attributes.processingState)) throw new Error(`Apple marked build ${buildNo} ${b.attributes.processingState}`);
+    if (!buildId) {
+      const uploads = await asc.all(`/v1/apps/${appId}/buildUploads?limit=200`);
+      const found = ownUpload(uploads, { marketing, n: buildNo, ...up });
+      why = found.reason || '';
+      const state = found.upload?.attributes?.state?.state;
+      if (state === 'FAILED') throw new Error(`Apple refused the upload of ${marketing} (${buildNo}): ${JSON.stringify(found.upload.attributes.state.errors || []).slice(0, 400)}`);
+      if (found.upload && state === 'COMPLETE') {
+        const r = await asc.get(`/v1/buildUploads/${found.upload.id}?include=build`);
+        const id = r.data?.relationships?.build?.data?.id;
+        if (id) { buildId = id; onSeen(id); }
+        else why = `the upload of ${marketing} (${buildNo}) lists no build yet`;
+      }
+    }
+    if (buildId) {
+      const b = (await asc.get(`/v1/builds/${buildId}?fields[builds]=version,processingState`)).data;
+      if (String(b?.attributes?.version) !== String(buildNo)) throw new Error(`build ${buildId} is not number ${buildNo}`);
+      if (b.attributes.processingState === 'VALID') { say(`build ${buildNo} processed`); return 'valid'; }
+      if (REFUSED.has(b.attributes.processingState)) throw new Error(`Apple marked build ${buildNo} ${b.attributes.processingState}`);
+    }
     await new Promise((res) => setTimeout(res, POLL_MS));
   }
+  if (!buildId) say(`never found this run's own upload (${why}); the tag stays unbound and vouches for nothing`);
   return 'timeout';
 }
 
@@ -632,7 +659,10 @@ async function release(asc) {
     const b = buildOfTag(t, builds);
     // An expired build can no longer be submitted, so it does not count as shipped either: its changes build again.
     if (!b || REFUSED.has(b.state) || b.expired) return false;
-    return !liveBuild || b.id === liveBuild.id || compareBuildStrings(b.raw, liveBuild.raw) === 1;
+    if (liveBuild && b.id === liveBuild.id) return true;
+    // A version Apple will no longer take (at or below one that shipped) can never ship either (Codex).
+    if (!aboveShipped(versions, b.marketing)) return false;
+    return !liveBuild || compareBuildStrings(b.raw, liveBuild.raw) === 1;
   });
   const change = appChangedSince(lastBuildTag(good.map((t) => t.tag)), cfg.sha);
   // A change since the last good build always builds, even under the same version: an earlier build of it may be the
