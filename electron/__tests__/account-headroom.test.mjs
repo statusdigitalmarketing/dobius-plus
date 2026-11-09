@@ -7,7 +7,9 @@ import path from 'node:path';
 import {
   emptyHistory, sanitizeHistory, updateHistory, noteLogin, pruneHistory, UNKNOWN_LOGIN, paceFor, forecastFor, usageForKeys,
   accountKeyRows, moveRefusal, moveBlock, rankTargets, tabBusy, authOverrideIn, limitMenuOn, trustPromptOn,
+  AUTO, autoTargetRefusal, pickAutoTarget, autoCoolingDown, autoHoldUntil,
 } from '../account-headroom.js';
+import { autoMoveText } from '../../src/lib/auto-move-text.js';
 import { keychainServiceFor } from '../account-identity.js';
 
 let pass = 0;
@@ -336,6 +338,84 @@ check('busy means a permission prompt, or a working tab still drawing; a stale w
   assert.equal(tabBusy({ status: 'done', lastActivityAt: now - 60_000 }, now, 'busy'), true);
   assert.equal(tabBusy(null, now, 'shell'), true);
   assert.equal(tabBusy({ status: 'working', lastActivityAt: now - 60_000 }, now, 'idle'), false);
+});
+
+// ---- auto-move on limit ----
+
+const autoCand = (label, headroom, over = {}) => ({
+  label, email: `${label}@x.com`, refusal: null,
+  usage: { known: true, limited: headroom <= 0, headroom, windows: { five_hour: { used: 100 - headroom, forecast: { steady: true } } } },
+  ...over,
+});
+
+check('an automatic target needs a known figure with room, not held, not about to run out, and no dialog refusal', () => {
+  const now = T0;
+  assert.equal(autoTargetRefusal(autoCand('b', 80), { now }), null);
+  assert.equal(autoTargetRefusal(autoCand('b', AUTO.MIN_HEADROOM), { now }), null, 'exactly the floor is enough');
+  assert.match(autoTargetRefusal(autoCand('b', AUTO.MIN_HEADROOM - 1), { now }), /less than 20%/);
+  assert.match(autoTargetRefusal(autoCand('b', 30), { now, reserved: 15 }), /less than 20%/, 'recent moves into it count');
+  assert.match(autoTargetRefusal(autoCand('b', 0), { now }), /at its limit/);
+  assert.match(autoTargetRefusal(autoCand('b', 80, { usage: { known: false, headroom: null, windows: {} } }), { now }), /unknown/);
+  assert.match(autoTargetRefusal(autoCand('b', 80), { now, held: true }), /has not reset since/);
+  // A weekly-only figure is known for the panel, but says nothing about the
+  // five-hour limit a carry-on runs into first.
+  assert.match(autoTargetRefusal(autoCand('b', 80, { usage: { known: true, limited: false, headroom: 80, windows: { seven_day: { used: 20 } } } }), { now }), /five-hour use is unknown/);
+  assert.match(autoTargetRefusal(autoCand('b', 80, { refusal: 'that account is not logged in' }), { now }), /not logged in/);
+  const soon = autoCand('b', 60);
+  soon.usage.windows.five_hour.forecast = { at: now + AUTO.NEAR_MS - 1 };
+  assert.match(autoTargetRefusal(soon, { now }), /forecast/);
+  soon.usage.windows.five_hour.forecast = { at: now + AUTO.NEAR_MS };
+  assert.equal(autoTargetRefusal(soon, { now }), null);
+  assert.match(autoTargetRefusal(null, { now }), /unknown/);
+});
+
+check('the automatic pick is the most room after recent moves into it, skipping held and refused accounts', () => {
+  const now = T0;
+  const list = [autoCand('b', 70), autoCand('c', 60), autoCand('d', 95, { refusal: 'the tab is already on that account' }), autoCand('e', 90)];
+  assert.equal(pickAutoTarget(list, { now }).label, 'e');
+  assert.equal(pickAutoTarget(list, { now, heldFor: (c) => c.label === 'e' }).label, 'b');
+  // Two moves into e already: 90 - 30 = 60 left to count, below b's 70.
+  assert.equal(pickAutoTarget(list, { now, reservedFor: (c) => (c.label === 'e' ? 2 * AUTO.RESERVE_PER_MOVE : 0) }).label, 'b');
+  assert.equal(pickAutoTarget([autoCand('b', 10), autoCand('c', 0)], { now }), null);
+  assert.equal(pickAutoTarget([], { now }), null);
+  assert.equal(pickAutoTarget(undefined, { now }), null);
+});
+
+check('a login on its limit is held until its five-hour window resets, else for a whole five-hour window', () => {
+  const now = T0;
+  assert.equal(autoHoldUntil({ known: true, windows: { five_hour: { used: 40, resetsAt: R5 } } }, now), R5 * 1000);
+  // Weekly-only figures say nothing about when a five-hour limit lifts.
+  assert.equal(autoHoldUntil({ known: true, windows: { seven_day: { used: 20, resetsAt: R5 + 86400 } } }, now), now + AUTO.HOLD_MS);
+  assert.equal(AUTO.HOLD_MS, 5 * 3600_000);
+  assert.equal(autoHoldUntil({ known: true, windows: { five_hour: { used: 40, resetsAt: now / 1000 } } }, now), now + AUTO.HOLD_MS, 'a reset already past');
+  assert.equal(autoHoldUntil(null, now), now + AUTO.HOLD_MS);
+  assert.equal(autoHoldUntil({ known: false, windows: {} }, now), now + AUTO.HOLD_MS);
+});
+
+check('a tab is left alone for the cooldown after an automatic move, and only then', () => {
+  assert.equal(autoCoolingDown({ movedAt: T0 }, T0 + AUTO.COOLDOWN_MS - 1), true);
+  assert.equal(autoCoolingDown({ movedAt: T0 }, T0 + AUTO.COOLDOWN_MS), false);
+  assert.equal(autoCoolingDown({}, T0), false);
+  assert.equal(autoCoolingDown(undefined, T0), false);
+});
+
+check('the window is told which account a tab left, where it went and why, with the Chrome note on a move', () => {
+  const from = { label: 'Work', email: 'w@x.com' };
+  const to = { label: 'Spare', email: 's@x.com' };
+  const moved = autoMoveText('Fix login', { kind: 'moved', from, to });
+  assert.match(moved.text, /^Fix login hit its usage limit on Work \(w@x\.com\)\. Moved to Spare \(s@x\.com\)/);
+  assert.match(moved.note, /Claude in Chrome/);
+  assert.match(moved.note, /s@x\.com/);
+  assert.match(moved.note, /no browser sign-in/);
+  assert.match(autoMoveText('T', { kind: 'failed', from, to, error: 'Claude did not stop' }).text, /did not work: Claude did not stop/);
+  assert.match(autoMoveText('T', { kind: 'failed', from, to, error: 'so this tab stays there.' }).text, /stays there\. It is not/, 'one full stop, not two');
+  assert.match(autoMoveText('T', { kind: 'stuck', from }).text, /No other account has room/);
+  assert.match(autoMoveText('T', { kind: 'cooldown', from }).text, /again on Work/);
+  assert.equal(autoMoveText('T', { kind: 'other', from }), null);
+  for (const k of ['moved', 'failed', 'stuck', 'cooldown']) {
+    const m = autoMoveText('T', { kind: k, from, to, error: 'x' });
+    assert.equal(/\u2014/.test(m.text + (m.note || '')), false, 'no em dashes in UI copy');
+  }
 });
 
 console.log(`\n${pass} passed`);

@@ -48,7 +48,7 @@ import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
 import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending } from './chat-service.js';
-import { launchCommandFor, claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode } from '../shared/new-tab.js';
+import { launchCommandFor, claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode, CLAUDE_AUTH_ENV } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
 import { renderScreenLines } from './screen-render.js';
 import { promptBoxText } from './bridge-open-tab.js';
@@ -3212,10 +3212,7 @@ let headroom = null;
 let heldInputFor = () => false;
 // Any of these in Dobius's own environment signs in every Claude it starts the
 // same way, whatever CLAUDE_CONFIG_DIR says. By name only: no value is kept.
-const AUTH_OVERRIDE_NAMES = [
-  'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
-  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'ANTHROPIC_BASE_URL',
-];
+const AUTH_OVERRIDE_NAMES = CLAUDE_AUTH_ENV;
 // A token set inside Claude's own settings files never shows here
 // (docs/account-usage-and-move.md).
 const processAuthOverride = async (pid) => authOverrideIn(await processEnvironment(pid), AUTH_OVERRIDE_NAMES, { HOME: os.homedir(), USER: process.env.USER || os.userInfo().username });
@@ -3274,6 +3271,7 @@ function setupHeadroomHandlers() {
     process: (id) => getTerminalProcess(id),
     processCwd: (pid) => getProcessCwd(pid),
     inputSeq: (id) => terminalInputSeq(id),
+    inputAgeMs: (id) => terminalInputAgeMs(id),
     inputHeld: (id) => heldInputFor(id),
     screen: async (id) => {
       // A long-running Claude turned bracketed paste on long before this tail
@@ -3286,6 +3284,17 @@ function setupHeadroomHandlers() {
       return lines ? { lines: lines.map((l, i) => (lines.dimFrom[i] >= 0 ? l.slice(0, lines.dimFrom[i]) : l)), modes: lines.modes } : null;
     },
     promptBox: (lines, modes) => promptBoxText(lines, modes),
+    // Off with the usage reporter off: old reports would stand in for figures
+    // nobody refreshes, and the panel's switch is hidden then too.
+    // Never while the Switch job re-logs folders: a target could change login
+    // between the move's checks and its start.
+    autoMoveOn: () => { const st = getSettings(); return st.autoMoveOnLimit === true && st.usageReporting === true && !isSwitchRunning(); },
+    restarterFor: (tabId) => {
+      const wc = TERMINAL_ID_RE.test(tabId) && !tabId.startsWith('term-mobile-') ? ownerWindowOf(tabId) : null;
+      return wc ? restarterFor(wc) : null;
+    },
+    // What an automatic move did, to the window that owns the tab (its pin, and the notice).
+    notify: (tabId, payload) => { ownerWindowOf(tabId)?.send('accounts:autoMove', tabId, payload); },
   });
   ipcMain.handle('accounts:usage', async () => {
     try { return await headroom.usage(); } catch (err) { return { ok: false, error: err.message }; }
@@ -3304,26 +3313,40 @@ function setupHeadroomHandlers() {
   ipcMain.handle('accounts:move', async (event, tabId, targetId, opts) => {
     if (!ownsTab(event, tabId)) return { ok: false, error: 'not your tab' };
     if (targetId !== null && typeof targetId !== 'string') return { ok: false, error: 'no account' };
-    const sender = event.sender;
-    const cannotRestart = (id, pin) => {
-      if (!/\/(zsh|bash)$/.test(process.env.SHELL || '/bin/zsh')) return 'a conversation can only be resumed through zsh or bash';
-      if (sender.isDestroyed() || terminalOwners.get(id) !== sender.id || tearOffGrants.has(id) || dockingTabs.has(id)) return 'the tab is moving to another window';
-      return resolveClaudeAccountPin(pin, loadConfig().accounts) === undefined ? 'that account is gone, or two accounts share its id' : null;
-    };
-    const restart = (id, cwd, pin, resume) => {
-      if (cannotRestart(id, pin)) return false;
-      // Keep the project the link already names: a conversation resumed from a
-      // subfolder has its transcript under where it began, and auto-resume looks there.
-      if (resume.sessionId) setSessionTabLink(resume.sessionId, id, getSessionTabMap()?.[resume.sessionId]?.projectPath || resume.cwd);
-      createTerminal(id, cwd, sender, resolveAccountEnvForCwd(cwd, { claudeAccountPin: pin }), { resume });
-      return true;
-    };
-    try { return await headroom.move(tabId, targetId, { allowBusy: opts?.allowBusy === true, allowDraft: opts?.allowDraft === true, cannotRestart, restart }); }
+    try { return await headroom.move(tabId, targetId, { allowBusy: opts?.allowBusy === true, allowDraft: opts?.allowDraft === true, ...restarterFor(event.sender) }); }
     catch (err) { return { ok: false, error: err.message }; }
   });
   // Sampling keeps pace honest while no panel is open. unref'd: never keeps the
   // app alive.
   setInterval(() => { headroom.tick(); }, 60_000).unref();
+  // Auto-move on limit: a no-op unless settings.autoMoveOnLimit is on.
+  setInterval(() => { headroom.autoTick(); }, 30_000).unref();
+}
+
+// How a move restarts a tab: a new PTY owned by `sender`, the window that owns
+// the tab (the dialog's window, or for an automatic move the tab's owner).
+function restarterFor(sender) {
+  const cannotRestart = (id, pin) => {
+    if (!/\/(zsh|bash)$/.test(process.env.SHELL || '/bin/zsh')) return 'a conversation can only be resumed through zsh or bash';
+    if (sender.isDestroyed() || terminalOwners.get(id) !== sender.id || tearOffGrants.has(id) || dockingTabs.has(id)) return 'the tab is moving to another window';
+    return resolveClaudeAccountPin(pin, loadConfig().accounts) === undefined ? 'that account is gone, or two accounts share its id' : null;
+  };
+  const restart = (id, cwd, pin, resume) => {
+    if (cannotRestart(id, pin)) return false;
+    // Keep the project the link already names: a conversation resumed from a
+    // subfolder has its transcript under where it began, and auto-resume looks there.
+    if (resume.sessionId) setSessionTabLink(resume.sessionId, id, getSessionTabMap()?.[resume.sessionId]?.projectPath || resume.cwd);
+    createTerminal(id, cwd, sender, resolveAccountEnvForCwd(cwd, { claudeAccountPin: pin }), { resume });
+    return true;
+  };
+  return { cannotRestart, restart };
+}
+
+// The window that owns a desktop tab, or null (a phone terminal, a window gone).
+function ownerWindowOf(tabId) {
+  const id = terminalOwners.get(tabId);
+  const wc = id != null ? webContents.fromId(id) : null;
+  return wc && !wc.isDestroyed() ? wc : null;
 }
 
 // Codex account identities (email/plan/login) for the Accounts panel and the phone.
@@ -3503,6 +3526,9 @@ function setupConfigHandlers() {
       // "Switching..." with a dead Cancel and no result (reviewer HIGH).
       // Every window hears the progress, and the terminal 'finished' event
       // carries the result itself.
+      // A move between its checks and its new Claude would start that Claude
+      // on whatever login the switch leaves its target folder in.
+      if (headroom?.isMoving()) return { ok: false, error: 'An account move is still running, or its tab has not started Claude yet. Try again in a few minutes.' };
       return await runAccountSwitch({
         targetEmail,
         cliPath: cliPath || null,

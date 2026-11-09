@@ -326,7 +326,12 @@ export function createTerminal(id, cwd, webContents, accountEnv = {}, { startCom
   };
   const spawnCols = (Number.isInteger(prevCols) && prevCols > 0) ? prevCols : 80;
   const spawnRows = (Number.isInteger(prevRows) && prevRows > 0) ? prevRows : 24;
-  const start = loginShellSpawn(shell, startCommand, resume, runScript, claudeOpts);
+  // A carry-on goes out only on the folder this spawn sets: the shell checks it
+  // after its startup files ran, since one of them may export another.
+  // The folder that passed the move's checks must be the one this spawn set
+  // (an account id remapped meanwhile is not).
+  const carryOn = resume?.carryOn === true && typeof resume.configDir === 'string' && resume.configDir === (accountBinding.claudeConfigDir ?? '');
+  const start = loginShellSpawn(shell, startCommand, resume?.carryOn === true ? { ...resume, carryOn } : resume, runScript, claudeOpts);
   const spawnedAt = Date.now();
   const term = pty.spawn(shell, start.args, {
     name: 'xterm-256color', cols: spawnCols, rows: spawnRows, cwd: safeCwd, env: { ...spawnEnv, ...start.env },

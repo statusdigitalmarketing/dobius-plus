@@ -58,7 +58,7 @@ function world(over = {}) {
     ...over,
   };
   w.svc = createHeadroomService({
-    userDataDir: ud,
+    userDataDir: w.ud,
     now: () => w.now,
     getAccounts: () => w.accounts,
     defaultDir: () => w.defaultDir || HOMEC,
@@ -80,12 +80,12 @@ function world(over = {}) {
     },
     sharesHistory: async (dir) => !w.unshared.has(dir),
     authOverride: () => w.authOverride || null,
-    readRecords: async () => w.records,
-    scan: async () => { if (w.scanThrows) throw new Error('scan'); return { groups: w.groups, unresolved: w.unresolved || [] }; },
+    readRecords: async () => { if (w.readGate) await w.readGate; return w.records; },
+    scan: async () => { w.onScan?.(); if (w.scanThrows) throw new Error('scan'); return { groups: w.groups, unresolved: w.unresolved || [], ...(w.discoveryFailed ? { discoveryFailed: true } : {}) }; },
     tabs: () => w.tabs,
     activity: () => w.activity,
-    claudeInfo: async () => w.claude,
-    presence: async () => w.presence,
+    claudeInfo: async (id) => (w.infoCalls = (w.infoCalls || 0) + 1, w.claudeByTab ? w.claudeByTab[id] ?? null : w.claude),
+    presence: async (info) => (w.presenceByPid ? w.presenceByPid[info.pid] ?? null : w.presence),
     stop: (pid) => { w.events.push(`stop ${pid}`); w.onStop?.(); if (w.stopThrows) throw w.stopThrows; },
     alive: () => w.stillAlive === true,
     claim: async (sid) => { w.events.push(`claim ${sid}`); return w.claimOk !== false; },
@@ -94,15 +94,20 @@ function world(over = {}) {
     nlink: async (p) => w.nlinks?.[p] ?? 1,
     pruneRecords: async (age) => { w.pruned = (w.pruned || 0) + 1; w.prunedAge = age; return 0; },
     sleep: async (ms) => { w.now += ms; w.onSleep?.(); },
-    processAuthOverride: async () => w.override || null,
+    processAuthOverride: async (pid) => w.overrideFor?.[pid] || w.override || null,
     isDir: (p) => p !== w.goneDir,
     process: async () => w.proc || null,
     processCwd: async () => w.cwd === undefined ? '/proj/worktree' : w.cwd,
     inputSeq: () => w.inputSeq,
+    inputAgeMs: () => w.inputAge ?? Infinity,
     inputHeld: () => w.held,
-    screen: async () => { w.onScreen?.(); return w.noScreen ? null : { lines: w.lines || [], modes: {} }; },
+    screen: async (id) => { w.onScreen?.(id); return w.noScreen || (w.noScreenFor && w.noScreenFor === id) ? null : { lines: w.lines || [], modes: {} }; },
     promptBox: () => w.box,
+    autoMoveOn: () => w.autoOn === true,
+    restarterFor: (id) => (w.noWindow ? null : (w.restarter ? w.restarter(id) : moveOpts(w))),
+    notify: (id, p) => { w.notices.push({ id, ...p }); },
   });
+  w.notices = [];
   return w;
 }
 const target = (r, label) => r.targets.find((t) => t.label === label);
@@ -371,6 +376,7 @@ const moveOpts = (w, { allowBusy = false, group = (t) => t } = {}) => ({
   cannotRestart: () => w.cannotRestart || null,
   restart: (id, cwd, pin, resume) => {
     w.events.push(`restart ${id} ${cwd} ${JSON.stringify(pin)} ${resume.sessionId} ${resume.cwd}`);
+    w.lastResume = resume;
     if (w.restartThrows) throw new Error('no ptys');
     if (w.restartOk === false) return false;
     if (w.neverStarts) w.claude = null;
@@ -578,7 +584,9 @@ await check('after the restart: a wrong account outranks a trust prompt, an exit
   const r2 = o.restart;
   o.restart = (...a) => { const ok = r2(...a); w.presence = null; w.onSleep = () => { w.claude = null; }; return ok; };
   await w.svc.move(TAB, 'b', o);
-  assert.equal(w.events.at(-1), 'release sess-now');
+  // Kept: what came and went may have been another claude a startup file ran,
+  // with the resume still queued (the claim is this tab's, so a retry here works).
+  assert.equal(w.events.includes('release sess-now'), false);
   // No transcript: nothing was at risk, so never a resume command with no id.
   w = world({ transcript: false });
   o = moveOpts(w);
@@ -895,6 +903,685 @@ await check('records older than the longest window are not read', async () => {
   fs.utimesSync(path.join(dir, 'old.json'), old, old);
   assert.deepEqual((await readUsageRecords(ud, 8 * 86400_000)).map((r) => r.sessionId), ['fresh']);
   assert.equal((await readUsageRecords(ud)).length, 2);
+});
+
+// ---- auto-move on limit ----
+
+const LIMIT_LINES = await renderScreenLines(new Uint8Array(fs.readFileSync(new URL('./fixtures/limit-menu-2.1.316-raw.bin', import.meta.url))), { cols: 120 });
+const limitedWorld = (over = {}) => world({ lines: LIMIT_LINES, presence: { sessionId: 'sess-now', status: 'waiting' }, box: null, activity: { status: 'working', lastActivityAt: T0 }, autoOn: true, ...over });
+const kinds = (w) => w.notices.map((n) => n.kind);
+
+await check('auto-move: off does nothing; on, a tab on its limit menu moves to the account with room, resumes with a carry-on, and its window gets the pin', async () => {
+  const w = limitedWorld({ autoOn: false });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.equal(w.infoCalls ?? 0, 0, 'off, no tab is even looked at');
+  assert.deepEqual(w.notices, []);
+  w.autoOn = true;
+  await w.svc.autoTick();
+  assert.deepEqual(w.events, ['stop 100', 'claim sess-now', `restart ${TAB} /proj {"id":"b"} sess-now /proj/worktree`, 'release sess-now']);
+  assert.equal(w.lastResume.carryOn, true);
+  assert.equal(w.notices.length, 1);
+  const n = w.notices[0];
+  assert.equal(n.id, TAB);
+  assert.equal(n.kind, 'moved');
+  assert.deepEqual(n.from, { label: 'A', email: 'a@x.com' });
+  assert.deepEqual(n.to, { label: 'B', email: 'b@x.com' });
+  assert.deepEqual(n.pin, { id: 'b' });
+});
+
+await check('auto-move: never the same tab twice within the cooldown, said once, and the account it left is held', async () => {
+  const w = limitedWorld();
+  await settled(w);
+  await w.svc.autoTick();
+  assert.equal(w.events.filter((e) => e.startsWith('stop')).length, 1);
+  // Now on B, and B's limit menu is up too.
+  w.now += 60_000;
+  await w.svc.autoTick();
+  await w.svc.autoTick();
+  assert.equal(w.events.filter((e) => e.startsWith('stop')).length, 1, 'not moved again');
+  assert.deepEqual(kinds(w), ['moved', 'cooldown'], 'the cooldown is said once');
+  assert.deepEqual(w.notices[1].from, { label: 'B', email: 'b@x.com' });
+  // Past the cooldown: A has 10% left and was seen on its limit, so nowhere qualifies.
+  w.now += 15 * 60_000;
+  await w.svc.autoTick();
+  assert.equal(w.events.filter((e) => e.startsWith('stop')).length, 1);
+  assert.deepEqual(kinds(w), ['moved', 'cooldown', 'stuck']);
+});
+
+await check('a manual move never carries the auto-move prompt', async () => {
+  const w = world();
+  assert.equal((await moveB(w)).ok, true);
+  assert.equal(w.lastResume.carryOn, undefined);
+});
+
+await check('auto-move leaves alone a tab that is not on its limit menu by every test', async () => {
+  for (const over of [
+    { presence: { sessionId: 'sess-now', status: 'idle' } },
+    { presence: { sessionId: 'sess-now', status: 'busy' } },
+    { lines: [] },
+    { activity: { status: 'needs', lastActivityAt: T0 } },
+    { claude: null },
+    { noWindow: true },
+  ]) {
+    const w = limitedWorld(over);
+    await settled(w);
+    let judged = false;
+    w.onLogin = () => { judged = true; };
+    await w.svc.autoTick();
+    untouched(w);
+    assert.deepEqual(w.notices, [], JSON.stringify(over));
+    assert.equal(judged, false, `not even judged: ${JSON.stringify(over)}`);
+  }
+});
+
+await check('auto-move with nowhere to go: under 20% left, or usage unknown, stays put and says so once', async () => {
+  for (const records of [
+    [{ key: KEY_A, sessionId: 's-a', receivedAt: T0 - 30_000, windows: five(100) }, { key: KEY_B, sessionId: 's-b', receivedAt: T0 - 60_000, windows: five(85) }],
+    [{ key: KEY_A, sessionId: 's-a', receivedAt: T0 - 30_000, windows: five(100) }],
+  ]) {
+    const w = limitedWorld({ records });
+    await settled(w);
+    await w.svc.autoTick();
+    await w.svc.autoTick();
+    untouched(w);
+    assert.deepEqual(kinds(w), ['stuck']);
+    assert.deepEqual(w.notices[0].from, { label: 'A', email: 'a@x.com' });
+  }
+});
+
+await check('auto-move checks again right before stopping Claude: off its limit menu, or a target that filled up, is not moved', async () => {
+  // The menu is gone by the move's own look (the person picked an option).
+  let w = limitedWorld();
+  await settled(w);
+  let looks = 0;
+  // The first look (the tick's) reads the record before the screen, so this lands on the move's own look.
+  // Idle with an empty box: nothing else would stop a manual move now, only the automatic check.
+  w.onScreen = () => { looks += 1; if (looks === 1) { w.presence = { sessionId: 'sess-now', status: 'idle' }; w.activity = null; w.box = ''; } };
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(kinds(w), ['failed']);
+  assert.match(w.notices[0].error, /no longer on its limit menu/);
+  // A failed attempt still starts the cooldown: back on the menu, it is not retried.
+  w.presence = { sessionId: 'sess-now', status: 'waiting' };
+  w.box = null;
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(kinds(w), ['failed', 'cooldown']);
+  // B fills up between the pick and the move.
+  w = limitedWorld();
+  await settled(w);
+  // Login checks run after the tick has ranked the targets and before the move
+  // samples again, so the move's own reading is the first to see B at 95%.
+  const base = w.records;
+  w.onLogin = () => { w.records = [...base.filter((r) => r.key !== KEY_B), { key: KEY_B, sessionId: 's-b', receivedAt: w.now, windows: five(95) }]; };
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(kinds(w), ['failed']);
+  assert.match(w.notices[0].error, /B no longer qualifies/);
+});
+
+for (const order of ['Y first', 'X first']) await check(`auto-move: a login seen on its limit is no target for another tab, whichever is looked at first (${order})`, async () => {
+  const DIR_C = '/profiles/c';
+  const KEY_C = keychainServiceFor(DIR_C);
+  const X = 'term-/proj-2';
+  const Y = 'term-/proj-3';
+  const dirOf = { b: DIR_B, c: DIR_C };
+  const keyOf = { [DIR_A]: KEY_A, [DIR_B]: KEY_B, [DIR_C]: KEY_C };
+  const w = limitedWorld({
+    accounts: [acct('a', DIR_A), acct('b', DIR_B), acct('c', DIR_C)],
+    emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', [DIR_C]: 'c@x.com', [HOMEC]: 'd@x.com' },
+    records: [
+      { key: KEY_A, sessionId: 's-a', receivedAt: T0 - 30_000, windows: five(90) },
+      { key: KEY_B, sessionId: 's-b', receivedAt: T0 - 30_000, windows: five(20) },
+      { key: KEY_C, sessionId: 's-c', receivedAt: T0 - 30_000, windows: five(10) },
+    ],
+    // Y runs on B and is first; X runs on A.
+    tabs: order === 'Y first'
+      ? [{ id: Y, cwd: '/proj', claudeConfigDir: DIR_B }, { id: X, cwd: '/proj', claudeConfigDir: DIR_A }]
+      : [{ id: X, cwd: '/proj', claudeConfigDir: DIR_A }, { id: Y, cwd: '/proj', claudeConfigDir: DIR_B }],
+    claudeByTab: { [X]: { pid: 100, soleChild: true }, [Y]: { pid: 101, soleChild: true } },
+    groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }, { key: KEY_B, configDir: DIR_B, envUnset: false, pids: [101] }],
+    presenceByPid: { 100: { sessionId: 'sess-now', status: 'waiting' }, 101: { sessionId: 'sess-now', status: 'waiting' } },
+  });
+  let next = 300;
+  w.restarter = () => ({
+    cannotRestart: () => null,
+    restart: (id, cwd, pin) => {
+      w.events.push(`restart ${id} ${pin.id}`);
+      const pid = (next += 1);
+      w.claudeByTab[id] = { pid, soleChild: true };
+      w.presenceByPid[pid] = { sessionId: 'sess-now', status: 'idle' };
+      w.groups = [...w.groups.filter((g) => !g.pids.includes(id === X ? 100 : 101)), { key: keyOf[dirOf[pin.id]], configDir: dirOf[pin.id], envUnset: false, pids: [pid] }];
+      return true;
+    },
+  });
+  await settled(w);
+  await w.svc.autoTick();
+  // One attempt a tick: a target can hit its own limit as the moved tab
+  // resumes, and only the next look sees that.
+  assert.equal(w.events.filter((e) => e.startsWith('restart')).length, 1);
+  await w.svc.autoTick();
+  // Y (on B) goes to C (A has 10% left). X (on A) would pick B (80% left, more
+  // than C's 90% less 15 reserved for the other move), but B is on its limit
+  // menu in Y, so X goes to C as well, even when X is looked at first.
+  assert.deepEqual(w.events.filter((e) => e.startsWith('restart')).sort(), [`restart ${X} c`, `restart ${Y} c`]);
+  assert.deepEqual(kinds(w), ['moved', 'moved']);
+});
+
+await check('auto-move refuses a tab whose Claude is not on the folder its tab was started with, or typed into since the tick looked', async () => {
+  // A shell setting points Claude at B although the tab was started on A: the
+  // carry-on would go out on whatever that setting picks after the restart.
+  let w = limitedWorld({ groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }], tabs: [{ id: TAB, cwd: '/proj', claudeConfigDir: '/profiles/other' }] });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(kinds(w), ['failed']);
+  assert.match(w.notices[0].error, /started with/);
+  // Esc on the menu right after the tick looked.
+  w = limitedWorld();
+  await settled(w);
+  let looks = 0;
+  w.onScreen = () => { looks += 1; if (looks === 1) w.inputSeq += 1; };
+  await w.svc.autoTick();
+  untouched(w);
+  assert.match(w.notices[0].error, /typed/);
+});
+
+await check('auto-move that finds a manual move holding the lock tries again next time, with no cooldown', async () => {
+  const w = limitedWorld();
+  await settled(w);
+  // A manual move starts while the tick is looking at the tab, and holds the
+  // lock until its own read of the records is let through.
+  let manual = null;
+  w.onLogin = () => {
+    if (manual) return;
+    let open;
+    w.readGate = new Promise((r) => { open = r; });
+    manual = w.svc.move(TAB, 'nope', moveOpts(w));
+    setTimeout(() => { w.readGate = null; open(); }, 0);
+  };
+  await w.svc.autoTick();
+  assert.deepEqual(w.notices, [], 'nothing tried, nothing said');
+  untouched(w);
+  assert.match((await manual).error, /no longer exists/);
+  w.onLogin = null;
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['moved'], 'no cooldown was started by the tick that stood aside');
+});
+
+await check('auto-move: a failed attempt still counts against its target, since its resume may yet start there', async () => {
+  const DIR_C = '/profiles/c';
+  const X = 'term-/proj-2';
+  const Y = 'term-/proj-3';
+  const w = limitedWorld({
+    accounts: [acct('a', DIR_A), acct('b', DIR_B), acct('c', DIR_C)],
+    emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', [DIR_C]: 'c@x.com', [HOMEC]: 'd@x.com' },
+    records: [
+      { key: KEY_A, sessionId: 's-a', receivedAt: T0 - 30_000, windows: five(90) },
+      { key: KEY_B, sessionId: 's-b', receivedAt: T0 - 30_000, windows: five(70) },
+      { key: keychainServiceFor(DIR_C), sessionId: 's-c', receivedAt: T0 - 30_000, windows: five(75) },
+    ],
+    tabs: [{ id: X, cwd: '/proj', claudeConfigDir: DIR_A }, { id: Y, cwd: '/proj', claudeConfigDir: DIR_A }],
+    claudeByTab: { [X]: { pid: 100, soleChild: true }, [Y]: { pid: 101, soleChild: true } },
+    groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100, 101] }],
+  });
+  // X's restart is refused after every check (as when the resume is left
+  // waiting on a slow shell): nothing verified, but B may still get it.
+  w.restarter = (id) => ({ ...moveOpts(w), cannotRestart: () => (id === X ? 'the tab is moving to another window' : null) });
+  await settled(w);
+  await w.svc.autoTick();
+  assert.equal(w.notices[0].id, X);
+  assert.equal(w.notices[0].kind, 'failed');
+  assert.deepEqual(w.notices[0].to, { label: 'B', email: 'b@x.com' });
+  await w.svc.autoTick();
+  // B had 30% left, 15 of it now reserved: under 20%. C, with 25%, is the one.
+  const second = w.notices.find((n) => n.id === Y);
+  assert.deepEqual(second.to, { label: 'C', email: 'c@x.com' });
+});
+
+await check('auto-move reads the processes again for a Claude started after the tick looked, and moves nothing when its login still cannot be named', async () => {
+  // Not in the first read; there in the next one.
+  let w = limitedWorld({ groups: [] });
+  await settled(w);
+  let reads = 0;
+  w.onScan = () => { reads += 1; if (reads === 2) w.groups = [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }]; };
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['moved']);
+  // There, on a folder no account lists: its login cannot be named either.
+  w = limitedWorld({ groups: [{ key: keychainServiceFor('/profiles/z'), configDir: '/profiles/z', envUnset: false, pids: [100] }], tabs: [{ id: TAB, cwd: '/proj', claudeConfigDir: '/profiles/z' }] });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+  // Never there: its limit cannot be held, so no tab moves this time.
+  w = limitedWorld({ groups: [] });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+});
+
+await check('auto-move: a tab on its limit menu whose login a token decides stops every move that tick', async () => {
+  const X = 'term-/proj-2';
+  const Y = 'term-/proj-3';
+  const w = limitedWorld({
+    tabs: [{ id: X, cwd: '/proj', claudeConfigDir: DIR_A }, { id: Y, cwd: '/proj', claudeConfigDir: DIR_A }],
+    claudeByTab: { [X]: { pid: 100, soleChild: true }, [Y]: { pid: 101, soleChild: true } },
+    groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100, 101] }],
+  });
+  await settled(w);
+  // Y's Claude signs in with a token: its limit is some other login's, maybe B's.
+  w.overrideFor = { 101: 'CLAUDE_CODE_OAUTH_TOKEN' };
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+});
+
+await check('auto-move charges the login its own read found, not only the one it picked', async () => {
+  const DIR_C = '/profiles/c';
+  const KEY_C = keychainServiceFor(DIR_C);
+  const X = 'term-/proj-2';
+  const Y = 'term-/proj-3';
+  const w = limitedWorld({
+    accounts: [acct('a', DIR_A), acct('b', DIR_B), acct('c', DIR_C)],
+    emails: { [DIR_A]: 'a@x.com', [DIR_B]: 'b@x.com', [DIR_C]: 'c@x.com', [HOMEC]: 'd@x.com' },
+    records: [
+      { key: KEY_A, sessionId: 's-a', receivedAt: T0 - 30_000, windows: five(90) },
+      { key: KEY_B, sessionId: 's-b', receivedAt: T0 - 30_000, windows: five(20) },
+      { key: KEY_C, sessionId: 's-c', receivedAt: T0 - 30_000, windows: five(70) },
+    ],
+    tabs: [{ id: X, cwd: '/proj', claudeConfigDir: DIR_A }, { id: Y, cwd: '/proj', claudeConfigDir: DIR_A }],
+    claudeByTab: { [X]: { pid: 100, soleChild: true }, [Y]: { pid: 101, soleChild: true } },
+    groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100, 101] }],
+  });
+  await settled(w);
+  // B's folder is logged in to C's login between the pick and the move's read.
+  // The tick looks at X and Y; the third look is the move's own.
+  let looks = 0;
+  w.onScreen = () => { looks += 1; if (looks === 3) w.emails[DIR_B] = 'c@x.com'; };
+  w.restarter = (id) => ({ ...moveOpts(w), cannotRestart: () => (id === X ? 'the tab is moving to another window' : null) });
+  await w.svc.autoTick();
+  assert.equal(w.notices[0].kind, 'failed');
+  // Named by what the move read, not by the pick.
+  assert.deepEqual(w.notices[0].to, { label: 'B', email: 'c@x.com' });
+  w.onScreen = null;
+  await w.svc.autoTick();
+  // C's login has 30% left, 15 of it charged by X's attempt: under 20%.
+  const second = w.notices.find((n) => n.id === Y);
+  assert.equal(second.kind, 'stuck', JSON.stringify(w.notices));
+});
+
+await check('auto-move: another tab whose Claude the process list cannot find stops every move, even with no record where its tab started', async () => {
+  // Y's Claude runs on some other folder (a shell setting) the scan cannot
+  // resolve; its record is not in the folder its tab was started with. It may
+  // be on its limit, on the very login X would move to.
+  const X = 'term-/proj-2';
+  const Y = 'term-/proj-3';
+  const w = limitedWorld({
+    tabs: [{ id: X, cwd: '/proj', claudeConfigDir: DIR_A }, { id: Y, cwd: '/proj', claudeConfigDir: '/profiles/d' }],
+    claudeByTab: { [X]: { pid: 100, soleChild: true }, [Y]: { pid: 101, soleChild: true } },
+    groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }],
+    presenceByPid: { 100: { sessionId: 'sess-now', status: 'waiting' } },
+  });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+});
+
+await check('auto-move: a tab whose shell became Claude (exec claude), or whose Claude was replaced while it was looked at, stops every move that tick', async () => {
+  const X = 'term-/proj-2';
+  const Y = 'term-/proj-3';
+  // Y: no child Claude, but its shell's own pid is a Claude in the scan.
+  let w = limitedWorld({
+    tabs: [{ id: X, cwd: '/proj', claudeConfigDir: DIR_A }, { id: Y, cwd: '/proj', claudeConfigDir: DIR_A, pid: 555 }],
+    claudeByTab: { [X]: { pid: 100, soleChild: true } },
+    groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }, { key: KEY_B, configDir: DIR_B, envUnset: false, pids: [555] }],
+  });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+  // The same Y as a plain shell (its pid no Claude): X is restarted on B.
+  w.groups = [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }];
+  await w.svc.autoTick();
+  assert.equal(w.events.some((e) => e.startsWith(`restart ${X} /proj {"id":"b"}`)), true, w.events.join(' | '));
+  // Y's shell is a Claude the scan could not resolve: the same.
+  w = limitedWorld({
+    tabs: [{ id: X, cwd: '/proj', claudeConfigDir: DIR_A }, { id: Y, cwd: '/proj', claudeConfigDir: DIR_A, pid: 555 }],
+    claudeByTab: { [X]: { pid: 100, soleChild: true } },
+    unresolved: [{ pid: 555, reason: 'binding unreadable' }],
+  });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+  // Replaced between the first look and the full one.
+  w = limitedWorld();
+  await settled(w);
+  let calls = 0;
+  const first = w.claude;
+  w.claudeByTab = new Proxy({}, { get: () => { calls += 1; return calls === 1 ? first : { ...first, pid: 777 }; } });
+  w.groups = [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100, 777] }];
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+});
+
+await check('auto-move: a tab closed with its window keeps its cooldown when the project reopens it', async () => {
+  const w = limitedWorld();
+  await settled(w);
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['moved']);
+  const tabs = w.tabs;
+  w.tabs = [];
+  await w.svc.autoTick();
+  w.now += 60_000;
+  // Reopened under the same id, on its limit menu again.
+  w.tabs = tabs;
+  w.events = [];
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(kinds(w), ['moved', 'cooldown']);
+});
+
+await check('auto-move: a record that could not be read does not bring back a notice already shown', async () => {
+  const w = limitedWorld({ autoOn: true, records: [{ key: KEY_A, sessionId: 's-a', receivedAt: T0 - 30_000, windows: five(90) }, { key: KEY_B, sessionId: 's-b', receivedAt: T0 - 30_000, windows: five(95) }] });
+  await settled(w);
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['stuck']);
+  const rec = w.presence;
+  w.presence = null; // the read failed
+  await w.svc.autoTick();
+  w.presence = rec;
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['stuck'], 'said once');
+  // A Claude lookup that failed for a tick says nothing either.
+  const claude = w.claude;
+  w.claude = null;
+  await w.svc.autoTick();
+  w.claude = claude;
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['stuck'], 'still once');
+  // A new Claude in the tab on its own limit: said for it.
+  w.claude = { ...claude, pid: 101 };
+  w.groups = [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [101] }];
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['stuck', 'stuck']);
+  w.claude = claude;
+  w.groups = [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }];
+  await w.svc.autoTick();
+  w.notices = [w.notices[0]];
+  // A real reading off the menu, then back on it: said again.
+  w.presence = { sessionId: 'sess-now', status: 'idle' };
+  await w.svc.autoTick();
+  w.presence = rec;
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['stuck', 'stuck']);
+});
+
+await check('a move says it is running from its first check to its end, so the Switch job can wait for it', async () => {
+  const w = limitedWorld();
+  await settled(w);
+  const seen = [];
+  w.onScreen = () => { seen.push(w.svc.isMoving()); };
+  assert.equal(w.svc.isMoving(), false);
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['moved']);
+  // The tick's own look is outside the move; the move's looks (its checks and
+  // its verification) are inside it.
+  assert.equal(seen[0], false);
+  assert.equal(seen.length > 1 && seen.slice(1).every(Boolean), true, JSON.stringify(seen));
+  assert.equal(w.svc.isMoving(), false);
+});
+
+await check('auto-move: a process list that could not list every Claude moves nothing', async () => {
+  const w = limitedWorld({ discoveryFailed: true });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+  w.discoveryFailed = false;
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['moved']);
+});
+
+await check('auto-move: a relaunch keeps the cooldown and the hold on the account left', async () => {
+  const w = limitedWorld();
+  await settled(w);
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['moved']);
+  // Relaunched a minute later; the restored tab is on B and B is on its limit.
+  // A's figure now shows room, but A was seen on its limit and has not reset.
+  const records = [
+    { key: KEY_A, sessionId: 's-a', receivedAt: w.now, windows: five(50) },
+    { key: KEY_B, sessionId: 's-b', receivedAt: w.now, windows: five(100) },
+  ];
+  const w2 = limitedWorld({ ud: w.ud, now: w.now + 60_000, records, tabs: [{ id: TAB, cwd: '/proj', claudeConfigDir: DIR_B }], groups: [{ key: KEY_B, configDir: DIR_B, envUnset: false, pids: [100] }] });
+  await settled(w2);
+  await w2.svc.autoTick();
+  untouched(w2);
+  assert.deepEqual(kinds(w2), ['cooldown']);
+  w2.now += 15 * 60_000;
+  w2.records = w2.records.map((r) => ({ ...r, receivedAt: w2.now }));
+  await w2.svc.autoTick();
+  untouched(w2);
+  assert.deepEqual(kinds(w2), ['cooldown', 'stuck']);
+  // A fresh userData remembers nothing: the same tab moves back to A.
+  const w3 = limitedWorld({ now: w2.now, records: w2.records, tabs: w2.tabs, groups: w2.groups, groupsAfter: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [200] }] });
+  await settled(w3);
+  await w3.svc.autoTick();
+  assert.deepEqual(kinds(w3), ['moved']);
+  assert.deepEqual(w3.notices[0].to, { label: 'A', email: 'a@x.com' });
+});
+
+await check('auto-move: a clear reading of another dialog ends the notices for that limit', async () => {
+  const w = limitedWorld({ records: [{ key: KEY_A, sessionId: 's-a', receivedAt: T0 - 30_000, windows: five(90) }, { key: KEY_B, sessionId: 's-b', receivedAt: T0 - 30_000, windows: five(95) }] });
+  await settled(w);
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['stuck']);
+  // A permission prompt: still waiting, but read clearly and not the limit.
+  w.activity = { status: 'needs', lastActivityAt: w.now };
+  await w.svc.autoTick();
+  w.activity = { status: 'working', lastActivityAt: w.now };
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['stuck', 'stuck']);
+  // A screen that could not be read says nothing new.
+  w.noScreen = true;
+  await w.svc.autoTick();
+  w.noScreen = false;
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['stuck', 'stuck']);
+});
+
+await check('a move whose Claude never started keeps the Switch job waiting while the resume is still claimed', async () => {
+  const w = world({ neverStarts: true });
+  const r = await moveB(w);
+  assert.match(r.error, /has not started/);
+  assert.equal(w.svc.isMoving(), true);
+  w.now += 9 * 60_000;
+  assert.equal(w.svc.isMoving(), true);
+  w.now += 2 * 60_000;
+  assert.equal(w.svc.isMoving(), false);
+  // One that started and was confirmed leaves nothing behind.
+  const w2 = world();
+  assert.equal((await moveB(w2)).ok, true);
+  assert.equal(w2.svc.isMoving(), false);
+});
+
+await check('auto-move: the attempt is saved before the move, so a quit while it verifies keeps the cooldown, holds and reservation', async () => {
+  const w = limitedWorld();
+  await settled(w);
+  let saved = null;
+  w.restarter = () => {
+    const o = moveOpts(w);
+    const restart = o.restart;
+    return { ...o, restart: (...a) => { saved = JSON.parse(fs.readFileSync(path.join(w.ud, 'auto-move.json'), 'utf8')); return restart(...a); } };
+  };
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['moved']);
+  assert.deepEqual(saved.tabs.map((t) => t.id), [TAB]);
+  assert.deepEqual(saved.holds.map((h) => h.login), ['a@x.com']);
+  assert.deepEqual(saved.placements.map((x) => x.login), ['b@x.com']);
+});
+
+await check('auto-move: the move refuses a different Claude than the one the tick judged, and a process list that failed on its own read', async () => {
+  let w = limitedWorld();
+  await settled(w);
+  // A manual move (or a restart) put another Claude in the tab after the tick looked.
+  let looks = 0;
+  w.onScreen = () => { looks += 1; if (looks === 1) { w.claude = { ...w.claude, pid: 300 }; w.groups = [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [300] }]; } };
+  await w.svc.autoTick();
+  untouched(w);
+  assert.equal(kinds(w)[0], 'failed');
+  assert.match(w.notices[0].error, /restarted since/);
+  // The move's own process read could not list every Claude.
+  w = limitedWorld();
+  await settled(w);
+  let scans = 0;
+  w.onScan = () => { scans += 1; if (scans === 2) w.discoveryFailed = true; };
+  await w.svc.autoTick();
+  untouched(w);
+  assert.match(w.notices[0].error, /process list/);
+});
+
+await check('auto-move: a refusal names the target as the move read it, even one the dialog would refuse too', async () => {
+  const w = limitedWorld();
+  await settled(w);
+  // B's folder now names the source's own login: changed after the tick read
+  // the accounts, during the move's own look.
+  let looks = 0;
+  w.onScreen = () => { looks += 1; if (looks === 2) w.emails[DIR_B] = 'a@x.com'; };
+  await w.svc.autoTick();
+  untouched(w);
+  assert.equal(kinds(w)[0], 'failed');
+  assert.deepEqual(w.notices[0].to, { label: 'B', email: 'a@x.com' });
+});
+
+await check('a resume not confirmed keeps the Switch job waiting even when some other Claude started and exited', async () => {
+  const w = world();
+  const o = moveOpts(w);
+  const restart = o.restart;
+  o.restart = (...a) => { const ok = restart(...a); w.presence = null; w.onSleep = () => { w.claude = null; }; return ok; };
+  const r = await w.svc.move(TAB, 'b', o);
+  assert.match(r.error, /exited/);
+  assert.equal(w.svc.isMoving(), true);
+  w.now += 11 * 60_000;
+  assert.equal(w.svc.isMoving(), false);
+});
+
+await check('auto-move: a tab waiting on a dialog whose screen cannot be read stops every move that tick', async () => {
+  const X = 'term-/proj-2';
+  const Y = 'term-/proj-3';
+  const w = limitedWorld({
+    tabs: [{ id: X, cwd: '/proj', claudeConfigDir: DIR_A }, { id: Y, cwd: '/proj', claudeConfigDir: DIR_B }],
+    claudeByTab: { [X]: { pid: 100, soleChild: true }, [Y]: { pid: 101, soleChild: true } },
+    groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }, { key: KEY_B, configDir: DIR_B, envUnset: false, pids: [101] }],
+    noScreenFor: Y,
+  });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+  // Read: Y is on B's limit, so B is held and X does not go there.
+  w.noScreenFor = null;
+  await w.svc.autoTick();
+  assert.equal(w.events.some((e) => e.includes('{"id":"b"}')), false, JSON.stringify(w.events));
+});
+
+await check('auto-move: the attempt\'s own reservation never refuses its own target', async () => {
+  // B has 30% left: enough, and only this attempt is reserved on it.
+  const w = limitedWorld({ records: [{ key: KEY_A, sessionId: 's-a', receivedAt: T0 - 30_000, windows: five(90) }, { key: KEY_B, sessionId: 's-b', receivedAt: T0 - 30_000, windows: five(70) }] });
+  await settled(w);
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['moved'], JSON.stringify(w.notices));
+});
+
+await check('auto-move: another Claude whose own record cannot be read stops every move that tick', async () => {
+  const X = 'term-/proj-2';
+  const Y = 'term-/proj-3';
+  const w = limitedWorld({
+    tabs: [{ id: X, cwd: '/proj', claudeConfigDir: DIR_A }, { id: Y, cwd: '/proj', claudeConfigDir: DIR_B }],
+    claudeByTab: { [X]: { pid: 100, soleChild: true }, [Y]: { pid: 101, soleChild: true } },
+    groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100] }, { key: KEY_B, configDir: DIR_B, envUnset: false, pids: [101] }],
+    presenceByPid: { 100: { sessionId: 'sess-now', status: 'waiting' } },
+  });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+  w.presenceByPid[101] = { sessionId: 'sess-y', status: 'idle' };
+  w.presenceByPid[200] = { sessionId: 'sess-now', status: 'idle' }; // the resumed one
+  w.restarter = () => { const o = moveOpts(w); return { ...o, restart: (...a) => { const ok = o.restart(...a); w.claudeByTab[X] = w.claude; w.groups = [...w.groups, { key: KEY_B, configDir: DIR_B, envUnset: false, pids: [101, 200] }].slice(-1); return ok; } }; };
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['moved'], JSON.stringify(w.notices));
+});
+
+await check('auto-move: keys pressed in the last 30 seconds wait a tick, with no cooldown', async () => {
+  const w = limitedWorld({ inputAge: 5000 });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+  w.inputAge = 31_000;
+  await w.svc.autoTick();
+  assert.deepEqual(kinds(w), ['moved']);
+});
+
+await check('auto-move: an attempt whose memory cannot be saved is not tried', async () => {
+  const w = limitedWorld();
+  await settled(w);
+  fs.chmodSync(w.ud, 0o500);
+  try { await w.svc.autoTick(); }
+  finally { fs.chmodSync(w.ud, 0o700); }
+  untouched(w);
+  assert.equal(kinds(w)[0], 'failed');
+  assert.match(w.notices[0].error, /could not be saved/);
+});
+
+await check('auto-move: a tab whose shell runs Claude next to another program stops every move that tick', async () => {
+  const X = 'term-/proj-2';
+  const Y = 'term-/proj-3';
+  const w = limitedWorld({
+    tabs: [{ id: X, cwd: '/proj', claudeConfigDir: DIR_A }, { id: Y, cwd: '/proj', claudeConfigDir: DIR_A }],
+    claudeByTab: { [X]: { pid: 100, soleChild: true }, [Y]: { pid: 101, soleChild: false } },
+    groups: [{ key: KEY_A, configDir: DIR_A, envUnset: false, pids: [100, 101] }],
+    presenceByPid: { 100: { sessionId: 'sess-now', status: 'waiting' }, 101: { sessionId: 'sess-y', status: 'idle' } },
+  });
+  await settled(w);
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+});
+
+await check('auto-move: memory on disk that cannot be read means no move until it can', async () => {
+  const w = limitedWorld();
+  await settled(w);
+  const f = path.join(w.ud, 'auto-move.json');
+  // It holds a cooldown for this very tab, from a minute ago.
+  fs.writeFileSync(f, JSON.stringify({ tabs: [{ id: TAB, movedAt: w.now - 60_000 }] }), { mode: 0o600 });
+  fs.chmodSync(f, 0o000);
+  try { await w.svc.autoTick(); }
+  finally { fs.chmodSync(f, 0o600); }
+  untouched(w);
+  assert.deepEqual(w.notices, []);
+  // Readable again: read now, so the cooldown it holds counts.
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(kinds(w), ['cooldown']);
+});
+
+await check('auto-move: a second Claude joining the tab between the two looks stops every move that tick', async () => {
+  const w = limitedWorld();
+  await settled(w);
+  let calls = 0;
+  const first = w.claude;
+  w.claudeByTab = new Proxy({}, { get: () => { calls += 1; return calls === 1 ? first : { ...first, soleChild: false }; } });
+  await w.svc.autoTick();
+  untouched(w);
+  assert.deepEqual(w.notices, []);
 });
 
 console.log(`\n${pass} passed`);

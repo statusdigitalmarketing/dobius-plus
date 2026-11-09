@@ -874,3 +874,25 @@
 - **CONTEXT**: Any cross-window cache of a derived answer. A time-to-live cache needs every writer to invalidate it; an in-flight share needs none.
 - **DETECTION**: `grep -n "SHARE_MS\|_TTL_MS\|Date.now() - .*\.at <" electron/*.js` and ask, for each hit, which user actions change its inputs.
 
+### Testing - 2026-11-09 (auto-move: which read sees a flipped fake)
+- **MISTAKE**: A service test flipped Claude's presence record to idle on the SECOND screen read to simulate "the limit menu went away right before the move", but `tabInfo` reads presence BEFORE the screen, so the move's own check still saw `waiting` and the test failed for the wrong reason. Flipping on the first read then let `moveBlock` (busy/draft) refuse first and hide the auto check.
+- **FIX**: Flip at the read the check under test actually consumes (looks===1), and make the other inputs (activity null, box '') neutral so only the check under test can refuse. Sabotage the check to prove the test sees it.
+- **CONTEXT**: electron/__tests__/account-headroom-service.test.mjs; any test that changes a fake mid-call.
+- **DETECTION**: `grep -n "looks += 1" electron/__tests__/account-headroom-service.test.mjs`
+
+### Architecture - 2026-11-09 (a guard that never changes an outcome)
+- **MISTAKE**: Added an auto-move hold keyed on "the fullest window is at 80%+"; it never changed a decision, because 80% used already fails the 20%-left rule. Dead logic that read as safety.
+- **FIX**: Removed it. The hold that matters is "seen on its limit menu", held until the five-hour reset (else 5h), when the figures may still read low.
+- **CONTEXT**: electron/account-headroom.js AUTO / autoHoldUntil. Before adding a guard, find an input where it flips the result; if none exists, it is not a guard.
+- **DETECTION**: sabotage the guard; if no test fails and no input can be built that fails, delete it.
+
+### Testing - 2026-11-09 (throwaway HOME hang, again)
+- **MISTAKE**: Launched the packaged harness with a throwaway HOME although NOTES (2026-10-31) says safeStorage then has no keychain. team-main.js initTeam encrypts at boot, the main thread sat in SecItemAdd's keychain-create UI, CDP accepted connections but never answered, and a SecurityAgent dialog appeared on Sam's screen.
+- **FIX**: Real HOME plus `DOBIUS_CLAUDE_HOME=1`, `ZDOTDIR=<harness>`, harness profiles and a stand-in that refuses config dirs outside them. If it happens: kill the app by its CDP listener pid and the SecurityAgent started at the same second.
+- **CONTEXT**: Any packaged or dev isolated instance since team-main (2.2.0) touches safeStorage on every launch.
+- **DETECTION**: `sample <main pid> 1 | grep makeLoginAuthUI`
+### Architecture - 2026-11-09 (auto-move: a promise that must survive a relaunch)
+- **MISTAKE**: Auto-move kept its cooldowns and holds in memory only (`autoTabs`, `holds` in `electron/account-headroom-service.js`). Restored tabs keep their ids and pins, so quitting and relaunching within 15 minutes let the same tab move again, back into the account it had just left on its limit (Codex round 5).
+- **FIX**: Persist anything that backs a "never twice" or "never into X" promise (`<userData>/auto-move.json`, loaded on the first tick, saved after a tick that changed it, every loaded value validated and bounded). Ship-tested by a real relaunch of the packaged build.
+- **CONTEXT**: Applies to any rate limit, cooldown or hold keyed by an id that outlives the process (tab ids, project paths, logins).
+- **DETECTION**: `grep -n "new Map()" electron/*-service.js` and ask, for each, whether a relaunch resetting it breaks a promise the UI makes.

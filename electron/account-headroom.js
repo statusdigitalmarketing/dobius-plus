@@ -324,6 +324,79 @@ export function rankTargets(candidates) {
   });
 }
 
+// Auto-move on limit (opt-in, Settings > Accounts > Account usage). The move is
+// the dialog's (moveOne); these are only the extra rules for doing it unasked.
+export const AUTO = {
+  // A tab moved automatically is left alone this long, whatever happens next.
+  COOLDOWN_MS: 15 * 60_000,
+  // Never into an account with less than this left: a resume re-sends the whole
+  // conversation with a cold cache on the new account.
+  MIN_HEADROOM: 20,
+  // A login just seen on its limit menu is not a target until its five-hour
+  // window resets, or for a whole five-hour window when that is not known,
+  // even if its last report (which predates the hit) says otherwise.
+  HOLD_MS: 5 * 3600_000,
+  // No automatic move while the tab had input this recently.
+  QUIET_MS: 30_000,
+  // Until a moved tab reports, assume it takes this much from its target, so
+  // tabs that hit a limit together do not all pile onto one account.
+  RESERVE_PER_MOVE: 15,
+  RESERVE_MS: 10 * 60_000,
+  // A window forecast to run out sooner than this counts as near its limit.
+  NEAR_MS: 30 * 60_000,
+};
+
+/**
+ * Why the automatic move will not use candidate `c` (candidatesFor's shape), or
+ * null. On top of the dialog's refusal: a known five-hour figure, room in
+ * every window, not held, and not forecast to run out soon. Unknown is never a target:
+ * it is not 0%.
+ */
+export function autoTargetRefusal(c, { now, held = false, reserved = 0 } = {}) {
+  if (c?.refusal) return c.refusal;
+  const u = c?.usage;
+  if (!u?.known) return 'its usage is unknown';
+  // Weekly-only figures (real records often carry nothing else) say nothing
+  // about the five-hour limit, which is the one a carry-on runs into first.
+  if (!Number.isFinite(u.windows?.five_hour?.used)) return 'its five-hour use is unknown';
+  if (u.limited) return 'it is at its limit';
+  if (held) return 'it hit its limit and has not reset since';
+  if (u.headroom - reserved < AUTO.MIN_HEADROOM) return `it has less than ${AUTO.MIN_HEADROOM}% left`;
+  const soon = Object.values(u.windows || {}).some((w) => Number.isFinite(w?.forecast?.at) && w.forecast.at - now < AUTO.NEAR_MS);
+  return soon ? 'it is forecast to reach its limit within half an hour' : null;
+}
+
+/**
+ * The account to move a limited tab to, or null: the candidate with the most
+ * room once recent automatic moves into it are counted. `heldFor(c)` and
+ * `reservedFor(c)` come from the service's memory.
+ */
+export function pickAutoTarget(candidates, { now, heldFor = () => false, reservedFor = () => 0 } = {}) {
+  let best = null;
+  for (const c of Array.isArray(candidates) ? candidates : []) {
+    const reserved = reservedFor(c);
+    if (autoTargetRefusal(c, { now, held: heldFor(c), reserved })) continue;
+    const room = c.usage.headroom - reserved;
+    if (!best || room > best.room) best = { c, room };
+  }
+  return best ? best.c : null;
+}
+
+/**
+ * Until when a login seen on its limit menu is no target: its five-hour
+ * window's reset when a live figure names one, else a whole five-hour window.
+ * A weekly-only report says nothing about when a five-hour limit lifts, and a
+ * hold that lapsed early sent tabs back and forth between two logins that were
+ * both out.
+ */
+export function autoHoldUntil(usage, now) {
+  const r = usage?.known ? usage.windows?.five_hour?.resetsAt : null;
+  return Number.isFinite(r) && r * 1000 > now ? r * 1000 : now + AUTO.HOLD_MS;
+}
+
+/** Is this tab still inside the cooldown after its last automatic move? */
+export const autoCoolingDown = (state, now) => Number.isFinite(state?.movedAt) && now - state.movedAt < AUTO.COOLDOWN_MS;
+
 /**
  * Is a tab mid-turn? Claude's own record of the process says so when it says
  * anything but idle (a background agent or shell, a dialog: a restart stops

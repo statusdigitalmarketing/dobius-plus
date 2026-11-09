@@ -262,6 +262,73 @@ test('a resume runs exactly claude --resume <id> in that folder, nothing typed o
   }
 });
 
+// An automatic move after a usage limit: the same resume, with the fixed
+// carry-on prompt as ONE argument on Claude's command line, nothing typed.
+test('a carry-on resume passes exactly the fixed prompt as one argument, and only with a conversation', async () => {
+  const { CARRY_ON_PROMPT, CLAUDE_AUTH_ENV } = await import('../../shared/new-tab.js');
+  assert.equal(/['"\\$`\u2014]/.test(CARRY_ON_PROMPT), false, 'nothing that could break out of the single quotes');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-carryon-'));
+  try {
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nprintf "[%s]" "$@"\n', { mode: 0o755 });
+    const base = { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, ZDOTDIR: dir, BASH_SILENCE_DEPRECATION_WARNING: '1' };
+    for (const shell of ['/bin/zsh', '/bin/bash']) {
+      if (!fs.existsSync(shell)) continue;
+      const spawn = loginShellSpawn(shell, null, { sessionId: 'abc-123', cwd: dir, carryOn: true });
+      assert.equal(spawn.env.DOBIUS_NEW_TAB_TOOL, 'resume-on');
+      assert.equal(isNewTabWrapperCommand([shell, ...spawn.args].join(' ')), true, 'argv scans still skip it');
+      const script = spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+      const r = spawnSync(shell, ['-c', script], { cwd: dir, env: { ...base, ...spawn.env }, encoding: 'utf8', timeout: 10000, input: '' });
+      assert.equal(r.stdout.trim(), `[--resume][abc-123][${CARRY_ON_PROMPT}]`, shell);
+      // Without carryOn the same resume has no prompt.
+      const plain = loginShellSpawn(shell, null, { sessionId: 'abc-123', cwd: dir });
+      const r2 = spawnSync(shell, ['-c', plain.args[3].replace(/exec '[^']*' -l$/, 'exit 0')], { cwd: dir, env: { ...base, ...plain.env }, encoding: 'utf8', timeout: 10000, input: '' });
+      assert.equal(r2.stdout.trim(), '[--resume][abc-123]', shell);
+    }
+    // The prompt goes only on the folder the spawn set. A startup file or a
+    // precmd hook that exports another one (the shell checks after both ran)
+    // gets the plain resume, once.
+    const target = "/p/it's b $(touch PWNED)";
+    for (const shell of ['/bin/zsh', '/bin/bash']) {
+      if (!fs.existsSync(shell)) continue;
+      const spawn = loginShellSpawn(shell, null, { sessionId: 'abc-123', cwd: dir, carryOn: true, configDir: target });
+      const script = spawn.args[3].replace(/exec '[^']*' -l$/, 'exit 0');
+      const run = (env, prelude = '') => spawnSync(shell, ['-c', prelude + script], { cwd: dir, env: { ...base, ...env, ...spawn.env }, encoding: 'utf8', timeout: 10000, input: '' }).stdout.trim();
+      assert.equal(run({ CLAUDE_CONFIG_DIR: target }), `[--resume][abc-123][${CARRY_ON_PROMPT}]`, `${shell}: on the target`);
+      assert.equal(run({ CLAUDE_CONFIG_DIR: '/p/a' }), '[--resume][abc-123]', `${shell}: a startup file chose another folder`);
+      assert.equal(run({}), '[--resume][abc-123]', `${shell}: a startup file unset it`);
+      if (shell === '/bin/zsh') assert.equal(run({ CLAUDE_CONFIG_DIR: target }, '_h() { export CLAUDE_CONFIG_DIR=/p/a; }; precmd_functions=(_h); '), '[--resume][abc-123]', 'a precmd hook chose another folder');
+      // The cd into the conversation's folder runs a directory hook too.
+      if (shell === '/bin/zsh') assert.equal(run({ CLAUDE_CONFIG_DIR: target }, '_d() { export CLAUDE_CONFIG_DIR=/p/a; }; chpwd_functions=(_d); '), '[--resume][abc-123]', 'a chpwd hook chose another folder');
+      // A value the shell keeps but no longer exports never reaches Claude.
+      const unexport = shell === '/bin/zsh' ? 'typeset +x CLAUDE_CONFIG_DIR; ' : 'export -n CLAUDE_CONFIG_DIR; ';
+      assert.equal(run({ CLAUDE_CONFIG_DIR: target }, unexport), '[--resume][abc-123]', `${shell}: unexported`);
+      // A token decides the login instead of the folder.
+      for (const name of CLAUDE_AUTH_ENV) assert.equal(run({ CLAUDE_CONFIG_DIR: target, [name]: 'x' }), '[--resume][abc-123]', `${shell}: ${name}`);
+      // Set but empty decides nothing; a token only in the shell (not exported) neither.
+      assert.equal(run({ CLAUDE_CONFIG_DIR: target, ANTHROPIC_API_KEY: '' }), `[--resume][abc-123][${CARRY_ON_PROMPT}]`, `${shell}: empty token`);
+      assert.equal(run({ CLAUDE_CONFIG_DIR: target }, 'ANTHROPIC_API_KEY=sk-shellonly; '), `[--resume][abc-123][${CARRY_ON_PROMPT}]`, `${shell}: unexported token`);
+      // Tracing on in a startup file never prints a key, and pipefail changes nothing.
+      const traced = spawnSync(shell, ['-c', 'set -x; set -o pipefail; ' + script], { cwd: dir, env: { ...base, CLAUDE_CONFIG_DIR: target, ANTHROPIC_API_KEY: 'sk-SECRET-123', ...spawn.env }, encoding: 'utf8', timeout: 10000, input: '' });
+      assert.equal(traced.stdout.trim(), '[--resume][abc-123]', `${shell}: traced`);
+      assert.doesNotMatch(traced.stderr + traced.stdout, /sk-SECRET-123/, `${shell}: the key never printed`);
+      assert.equal(spawnSync(shell, ['-c', 'set -o pipefail; ' + script], { cwd: dir, env: { ...base, CLAUDE_CONFIG_DIR: target, ...spawn.env }, encoding: 'utf8', timeout: 10000, input: '' }).stdout.trim(), `[--resume][abc-123][${CARRY_ON_PROMPT}]`, `${shell}: pipefail, no token`);
+      // An rc cannot pre-set the internal flag for a plain resume.
+      const plain = loginShellSpawn(shell, null, { sessionId: 'abc-123', cwd: dir });
+      const r3 = spawnSync(shell, ['-c', `__dobius_on=1; ${plain.args[3].replace(/exec '[^']*' -l$/, 'exit 0')}`], { cwd: dir, env: { ...base, CLAUDE_CONFIG_DIR: '', ...plain.env }, encoding: 'utf8', timeout: 10000, input: '' });
+      assert.equal(r3.stdout.trim(), '[--resume][abc-123]', `${shell}: once`);
+      assert.equal(fs.existsSync(path.join(dir, 'PWNED')), false);
+    }
+    // No conversation: a plain claude, never a prompt sent to a new one.
+    assert.equal(loginShellSpawn('/bin/zsh', null, { sessionId: null, cwd: dir, carryOn: true }).env.DOBIUS_NEW_TAB_TOOL, 'fresh');
+    // Only a real true asks for it.
+    assert.equal(loginShellSpawn('/bin/zsh', null, { sessionId: 'abc', cwd: dir, carryOn: 'yes' }).env.DOBIUS_NEW_TAB_TOOL, 'resume');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('one shell quoting for every generated command survives /bin/sh, quotes included', async () => {
   const { shQuote } = await import('../../shared/sh-quote.js');
   for (const s of ["plain", "with space", "it's", "'", "''x''", "$HOME `id` $(id) \\ \"q\"", "Library/Application Support/dobius-plus", '']) {
