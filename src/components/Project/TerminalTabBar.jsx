@@ -918,14 +918,25 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
       if (e.key === 'Escape') dismissRef.current();
     };
     const hold = (e) => { e.preventDefault(); e.stopPropagation(); };
+    // Focus stays in the menu while it is open: something moving it later (a prompt refocusing itself after a tab
+    // closes, Improve finishing) is undone at once, and native editing commands (Cut, Delete, Undo from the Edit menu)
+    // are held as they reach any field (Codex sidebar round 4).
+    const keepFocus = (e) => { if (!menuRef.current?.contains(e.target)) menuRef.current?.focus({ preventScroll: true }); };
+    const holdEdit = (e) => { if (!menuRef.current?.contains(e.target)) hold(e); };
     window.addEventListener('keydown', onKey, true);
     window.addEventListener('paste', hold, true);
+    window.addEventListener('cut', hold, true);
+    window.addEventListener('beforeinput', holdEdit, true);
+    document.addEventListener('focusin', keepFocus, true);
     // A browser tab's page (<webview>) keeps its clicks to itself: while the menu is open those views stop taking the
     // mouse, so a click over one lands in this window and closes the menu like any outside click.
     document.body.classList.add('tab-menu-open');
     return () => {
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('paste', hold, true);
+      window.removeEventListener('cut', hold, true);
+      window.removeEventListener('beforeinput', holdEdit, true);
+      document.removeEventListener('focusin', keepFocus, true);
       document.body.classList.remove('tab-menu-open');
       // Only when the focus fell to the page with the menu: an item that moved it on purpose (Rename's box) keeps it.
       const now = document.activeElement;
@@ -969,6 +980,8 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
       tabIndex={-1}
       style={{
         outline: 'none',
+        // Clamped to the top it can sit over the title bar's drag area, which would swallow its clicks.
+        WebkitAppRegion: 'no-drag',
         position: 'fixed',
         left: pos.left,
         top: pos.top,
