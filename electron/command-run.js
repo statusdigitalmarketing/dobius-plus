@@ -65,6 +65,9 @@ export function phoneRun({ tabId, id, edited, asIs }, deps) {
   // The syntax check ran bash: look at the pairing again right before anything is written or started.
   if (!deps.stillOk()) return { ok: false, error: 'unavailable' };
   if (typeof deps.newTerminalId !== 'function') return { ok: false, error: 'unavailable' };
+  // The card's own folder must be there: starting anywhere else would run the login profile and folder hooks of a
+  // folder the card does not name (Codex phone tasks round 7).
+  if (typeof deps.folderOk === 'function' && !deps.folderOk(cmd.cwd)) return { ok: false, error: 'no-folder' };
   const termId = deps.newTerminalId();
   let run;
   try {

@@ -210,7 +210,7 @@ export function addTask(projectPath, { title, source = 'manual', dueOn = null, a
 export function updateTask(projectPath, taskId, patch) {
   if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
   const tasks = readTasks(projectPath);
-  const idx = tasks.findIndex((t) => t.id === taskId);
+  const idx = tasks.findIndex((t) => t?.id === taskId);
   if (idx === -1) return { ok: false, error: 'task not found' };
   // Benign metadata only. `stage`/`events`/`runs`/`stagedAt` are intentionally
   // NOT patchable here — stage changes must go through advanceTask/blockTask so
@@ -241,7 +241,7 @@ export function updateTask(projectPath, taskId, patch) {
 export function reopenTask(projectPath, taskId, { actor = 'human', note = null } = {}) {
   if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
   const tasks = readTasks(projectPath);
-  const idx = tasks.findIndex((t) => t.id === taskId);
+  const idx = tasks.findIndex((t) => t?.id === taskId);
   if (idx === -1) return { ok: false, error: 'task not found' };
   const t = tasks[idx];
   if (!t.done && t.stage !== 'done') {
@@ -276,7 +276,7 @@ export function reopenTask(projectPath, taskId, { actor = 'human', note = null }
 function mutateTask(projectPath, taskId, fn) {
   if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
   const tasks = readTasks(projectPath);
-  const idx = tasks.findIndex((t) => t.id === taskId);
+  const idx = tasks.findIndex((t) => t?.id === taskId);
   if (idx === -1) return { ok: false, error: 'task not found' };
   try {
     tasks[idx] = fn(tasks[idx]);
@@ -309,7 +309,7 @@ export function unblockTask(projectPath, taskId, { toStage = null, note = null, 
 export function deleteTask(projectPath, taskId) {
   if (!projectPath || !taskId) return { ok: false, error: 'projectPath and taskId required' };
   const tasks = readTasks(projectPath);
-  const next = tasks.filter((t) => t.id !== taskId);
+  const next = tasks.filter((t) => t?.id !== taskId);
   try {
     writeTasks(projectPath, next);
   } catch (err) {
@@ -355,7 +355,7 @@ export function resolveTaskRef(projectPath, ref) {
   if (!tasks.length) return { ok: false, error: 'no tasks for this project' };
 
   // 1. Exact id or asanaGid match (may be already done — that's fine, idempotent).
-  const exact = tasks.find((t) => t.id === needle || t.asanaGid === needle);
+  const exact = tasks.find((t) => t?.id === needle || t?.asanaGid === needle);
   if (exact) return { ok: true, task: exact };
 
   // 2. Fuzzy title match, restricted to PENDING tasks only.
@@ -411,7 +411,7 @@ export function completeTaskById(projectPath, taskId) {
 }
 
 function markTaskDone(projectPath, tasks, target) {
-  const idx = tasks.findIndex((t) => t.id === target.id);
+  const idx = tasks.findIndex((t) => t?.id === target.id);
   if (idx === -1) return { ok: false, error: 'task not found' };
   const already = tasks[idx].done === true;
   // complete() is the explicit human force-done path (works from any stage) and

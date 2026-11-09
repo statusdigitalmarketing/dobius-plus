@@ -161,6 +161,7 @@ const RUN_CODES = {
   shell: 'Run works with zsh and bash only. Use Copy and run it on the Mac.',
   'write-failed': 'Your Mac could not write the command for its terminal.',
   'spawn-failed': 'Your Mac could not start a terminal for it.',
+  'no-folder': 'The folder this command runs in is not on your Mac right now, so it was not run.',
   failed: 'Your Mac could not run it.',
 };
 
@@ -463,7 +464,11 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     // Every result is about the project it was for: shown only while that project is still the one on screen (Codex
     // rounds 4 and 5). A later look at that project shows the synced list itself.
     if (!alive.current || projectRef.current !== p) { /* another view or project is open now */ }
-    else if (r?.ok) say(r.added ? `${r.added} new from Asana.` : 'Up to date with Asana.');
+    // Named, since the note can stay up for a moment after another project is picked (Codex round 7).
+    else if (r?.ok) {
+      const pname = (Array.isArray(projects) ? projects.find((x) => x.path === p)?.name : null) || 'This project';
+      say(r.added ? `${pname}: ${r.added} new from Asana.` : `${pname}: up to date with Asana.`);
+    }
     else setSyncNote(r ? SYNC_PROBLEM[r.error] || 'Asana sync failed. Try again in a moment.' : 'No answer from your Mac.');
     loadTasks();
     loadProjects();
@@ -477,9 +482,10 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
   const tasks = (current?.tasks || []).filter((t) => (kind === 'asana' ? t.source === 'asana' : t.source !== 'asana'));
   const pending = sortOpenTasks(tasks.filter((t) => !t.done));
   const done = tasks.filter((t) => t.done);
-  const row = (t) => (
-    <TaskRow key={t.id} task={t} today={today} busy={!!busy[t.id]} expanded={expanded === t.id}
-      onExpand={() => setExpanded((v) => (v === t.id ? null : t.id))}
+  // A task the Mac sent without an id (its id was too long to send whole) can be read but not changed from here.
+  const row = (t, i) => (
+    <TaskRow key={t.id || `no-id-${i}`} task={t} today={today} busy={!t.id || !!busy[t.id]} expanded={!!t.id && expanded === t.id}
+      onExpand={() => { if (t.id) setExpanded((v) => (v === t.id ? null : t.id)); }}
       onToggle={(x) => act(x, x.done ? 'reopen' : 'complete')} onDelete={(x) => act(x, 'delete')} />
   );
   // The count for this view: open to-dos, or open Asana tasks.

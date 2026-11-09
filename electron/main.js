@@ -466,6 +466,8 @@ function writeRunScript(text, cwd, shown = text) {
 // A Run tab's own files, by its tab id: removed when that tab goes, whether or not its wrapper ever started (a
 // profile that execs tmux never runs it, and the command file may hold a pasted key).
 const runFilesByTab = new Map();
+// A phone Run's folder: absolute and a directory right now.
+const runFolderOk = (p) => typeof p === 'string' && isAbsPath(p) && (() => { try { return fs.statSync(p).isDirectory(); } catch { return false; } })();
 // The syntax first, without running it: a typo would make bash print the whole line (an edited one may hold a pasted
 // key) into the tab. bash -n only parses; nothing executes. A warning counts too (an unterminated heredoc is only a
 // warning to bash -n).
@@ -4381,13 +4383,13 @@ function setupWindowHandlers() {
       newTerminalId: ctx?.newTerminalId,
       authorizeTab: ctx?.authorizeTab,
       writeRunScript,
-      // A phone terminal: no window owns it. It starts in the card's own folder when that folder is there, so the login
-      // profile and anything keyed on the folder (direnv, account overrides) see the folder the card names, not the
-      // project the tab opened in (Codex phone tasks round 5). The script still enters that folder or stops.
+      // A phone terminal: no window owns it. It starts in the card's own folder and nowhere else, so the login profile
+      // and anything keyed on the folder (direnv, account overrides) see the folder the card names, never the project
+      // the tab opened in (Codex phone tasks rounds 5 and 7). No folder: no terminal (the phone says so).
+      folderOk: runFolderOk,
       spawn: (termId, script, cmd) => {
-        const dirOk = (p) => typeof p === 'string' && isAbsPath(p) && (() => { try { return fs.statSync(p).isDirectory(); } catch { return false; } })();
-        const where = dirOk(cmd.cwd) ? cmd.cwd : (typeof cmd.projectPath === 'string' && isAbsPath(cmd.projectPath) ? cmd.projectPath : undefined);
-        return createTerminal(termId, where, null, resolveAccountEnvForCwd(where), { runScript: script });
+        if (!runFolderOk(cmd.cwd)) return null;
+        return createTerminal(termId, cmd.cwd, null, resolveAccountEnvForCwd(cmd.cwd), { runScript: script });
       },
       watchStart: (termId, run) => {
         setTimeout(() => {

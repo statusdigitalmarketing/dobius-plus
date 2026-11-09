@@ -44,7 +44,9 @@ export function taskPrint(t) {
 /** One task as the phone shows it: no event log, runs or session links. */
 export function taskForPhone(t) {
   return {
-    id: str(t?.id, MAX_ID),
+    // Never cut short: two long ids that share their first MAX_ID characters would become one, and Done on one would
+    // close the other (Codex round 7). A longer id is shown but cannot be acted on from the phone.
+    id: typeof t?.id === 'string' && t.id.length <= MAX_ID ? t.id : null,
     title: str(t?.title, MAX_TITLE) || '',
     done: t?.done === true,
     source: str(t?.source, 20) || 'manual',

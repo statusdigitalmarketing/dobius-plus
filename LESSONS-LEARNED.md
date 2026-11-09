@@ -797,3 +797,9 @@
 - **FIX**: Put multi-step work in a script file under the scratchpad and run it as one plain `node <file>` or `python3 <file>` with literal paths; keep git calls as their own plain commands.
 - **CONTEXT**: Sabotage checks and Codex runs are the usual triggers; `sabotage.mjs` (swap a guard out, run the tests, restore in `finally`) worked as one plain command.
 - **DETECTION**: a Bash result starting with "This agent is isolated in the worktree".
+
+### Process: 2026-11-08
+- **MISTAKE**: Writing a regex of invisible-character escapes into `shared/short-path.js` and a test through a Bash heredoc. The tool call's JSON decoding turned each backslash-u escape in the command text into the real character, so the source and `electron/__tests__/phone-tasks.test.mjs` ended up with literal zero-width and bidi characters. Raw strings and quoted heredocs do not help: the conversion happens before the shell sees the text.
+- **FIX**: Build escapes from code points in the script (`String.fromCharCode(92) + 'u' + hex`), then scan the changed files for invisible characters before committing.
+- **CONTEXT**: Invisible characters in source are a review and security hazard (they hide what a regex or test actually matches). The tests still passed, so nothing would have caught it.
+- **DETECTION**: `node -e "const s=require('fs').readFileSync(process.argv[1],'utf8');console.log([...s].filter(c=>{const x=c.codePointAt(0);return (x>=0x200b&&x<=0x200f)||(x>=0x202a&&x<=0x202e)||(x>=0x2060&&x<=0x206f)||x===0xfeff||x===0xad||(x>=0xe0000&&x<=0xe007f)}).length)" <file>`

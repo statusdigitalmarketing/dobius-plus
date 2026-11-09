@@ -235,6 +235,14 @@ function runDeps(over = {}) {
 }
 const req = { tabId: 'term-/p-1', id: 'c1' };
 
+test('Run from the phone: a missing card folder runs nothing anywhere else (Codex round 7)', () => {
+  const asked = [];
+  const { deps, calls } = runDeps({ folderOk: (p) => { asked.push(p); return false; } });
+  assert.deepEqual(phoneRun(req, deps), { ok: false, error: 'no-folder' });
+  assert.deepEqual(asked, ['/p/sub'], 'the command folder is what is checked, never the project');
+  assert.deepEqual(calls, [], 'nothing written, nothing started');
+});
+
 test('Run from the phone: the pairing is checked before anything, and again right before anything is written', () => {
   let { deps, calls } = runDeps({ stillOk: () => false });
   assert.deepEqual(phoneRun(req, deps), { ok: false, error: 'unavailable' });
@@ -395,9 +403,20 @@ test('a folder shows exactly: double spaces, tabs and invisible marks are made v
   assert.notEqual(visiblePath('/work/a  b'), visiblePath('/work/a b'));
   assert.equal(visiblePath('/work/a  b'), '/work/a␣␣b');
   assert.equal(visiblePath('/work/a\tb'), '/work/a\\tb');
-  assert.equal(visiblePath('/work/a​b'), '/work/a\\u{200b}b');
+  assert.equal(visiblePath('/work/a\u200bb'), '/work/a\\u{200b}b');
   assert.equal(visiblePath('/work/x '), '/work/x␣', 'a trailing space is shown');
   assert.equal(visiblePath('~/café'), '~/café', 'ordinary letters stay as they are');
+  // Round 7: the marks themselves are escaped, so no folder name spells another's label.
+  assert.notEqual(visiblePath('/work/a  b'), visiblePath('/work/a␣␣b'));
+  assert.notEqual(visiblePath('/work/a\tb'), visiblePath('/work/a\\tb'));
+  assert.equal(visiblePath('/work/a\\tb'), '/work/a\\\\tb');
+  assert.equal(visiblePath('/x\u{e0041}'), '/x\\u{e0041}', 'a tag character is shown as one mark');
+});
+
+test('a long task id is never cut short into another task\'s id (Codex round 7)', () => {
+  const S = 'a'.repeat(200);
+  assert.equal(taskForPhone({ id: S, title: 't' }).id, S);
+  assert.equal(taskForPhone({ id: S + 'x', title: 't' }).id, null, 'too long to send whole: not actionable');
 });
 
 test('one bad entry in a list does not fail the project picker (Codex round 6)', () => {
