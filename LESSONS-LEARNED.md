@@ -785,3 +785,10 @@
 - **FIX**: After merging a branch that changed package.json or package-lock.json, run `npm install` (then `npx electron-rebuild -f -w better-sqlite3,node-pty`) in the checkout that will release, and re-run the gates before `./release.sh`.
 - **CONTEXT**: Agent worktrees have their own node_modules. A release from the main checkout builds with whatever is installed there.
 - **DETECTION**: `git diff --name-only HEAD@{1} HEAD -- package.json package-lock.json` after a merge; non-empty means install first.
+
+### Deployment: 2026-11-08 (iOS release script)
+- **MISTAKE**: The unattended App Store export used automatic signing with the App Manager API key (`-allowProvisioningUpdates -authenticationKeyPath ...`). It failed with "Cloud signing permission error" plus "Provisioning profile iOS Team Store Provisioning Profile ... doesn't include the Push Notifications capability". Adding `signingCertificate Apple Distribution` to the export options did not change it. The API key cannot use Apple's cloud-managed certificates, so Xcode fell back to its cached Team Store profile, made before push was added to the App ID (App Store Connect lists that profile INVALID).
+- **FIX**: Sign the export by hand. `appStoreSigning()` in scripts/ios-release.mjs matches the local Apple Distribution identity to App Store Connect's certificate by SHA-1, picks an ACTIVE IOS_APP_STORE profile that holds it with `aps-environment production`, or POSTs `/v1/profiles` to make one, installs it as `<UUID>.mobileprovision` under `~/Library/Developer/Xcode/UserData/Provisioning Profiles`, and exports with `signingStyle manual`, `signingCertificate <sha1>`, `provisioningProfiles {bundle: uuid}`. A `--no-upload` run then passed `altool --validate-app`.
+- **CONTEXT**: A profile holds `<date>` and `<data>` values, so `plutil -convert json` fails on it ("Invalid object in plist for JSON format"). Read it key by key with `plutil -extract <keypath> raw`: dates come back ISO 8601, data base64, arrays as their length.
+- **DETECTION**: `grep -n "signingStyle" scripts/ios-release.mjs` should show `manual`. A failing export says `Cloud signing permission error`.
+
