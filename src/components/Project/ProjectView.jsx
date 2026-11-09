@@ -1020,11 +1020,6 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       saved = await window.electronAPI.terminalLoadState(tabId);
       scrollback = saved?.scrollback || null;
     }
-    if (tab) {
-      // Preserve kind/url so a closed browser tab can be resurrected via
-      // Cmd+Shift+T as a browser (not a blank terminal). Carson self-flag #4.
-      state.pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode, claudeAccountPin: tab.claudeAccountPin });
-    }
     // Auto-checkpoint on close, matching the tab-bar X / middle-click / context-menu
     // paths (Cmd+W previously skipped this, so the same close produced no checkpoint).
     // Reuse the scrollback already loaded above — no second save round-trip.
@@ -1040,6 +1035,16 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       } catch (err) {
         console.error('[ProjectView] auto-checkpoint on close failed:', err);
       }
+    }
+    // Decided on the tabs as they are NOW: a sidebar or tab-bar close may have finished during the awaits above. A tab
+    // already gone is left alone, and the last tab is never killed (removeTab keeps it, so killing it would leave a dead
+    // terminal on screen; Codex sidebar round 3).
+    const live = useStore.getState().terminalTabs;
+    if (!live.some((t) => t.id === tabId) || live.length <= 1) return;
+    if (tab) {
+      // Preserve kind/url so a closed browser tab can be resurrected via
+      // Cmd+Shift+T as a browser (not a blank terminal). Carson self-flag #4.
+      state.pushClosedTab({ label: tab.label, labelLocked: isLabelLocked(tab), projectPath: tab.projectPath, scrollback, kind: tab.kind, url: tab.url, viewMode: tab.viewMode, claudeAccountPin: tab.claudeAccountPin });
     }
     if (window.electronAPI) {
       window.electronAPI.terminalKill(tabId);

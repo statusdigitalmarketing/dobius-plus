@@ -905,14 +905,32 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
   // focus one): Escape closes it, every other key is held (Codex).
   const dismissRef = useRef(onDismiss);
   dismissRef.current = onDismiss;
+  // The menu also takes the focus while open, so the native Edit menu (Paste comes from Electron's own accelerator and
+  // never fires a keydown) has nothing to type into, and a browser tab's page loses the focus that kept Escape from
+  // reaching this window. Paste events are held too, and focus goes back where it was when the menu closes (Codex
+  // sidebar round 3).
   useEffect(() => {
+    const prev = document.activeElement;
+    menuRef.current?.focus({ preventScroll: true });
     const onKey = (e) => {
       e.preventDefault();
       e.stopPropagation();
       if (e.key === 'Escape') dismissRef.current();
     };
+    const hold = (e) => { e.preventDefault(); e.stopPropagation(); };
     window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
+    window.addEventListener('paste', hold, true);
+    // A browser tab's page (<webview>) keeps its clicks to itself: while the menu is open those views stop taking the
+    // mouse, so a click over one lands in this window and closes the menu like any outside click.
+    document.body.classList.add('tab-menu-open');
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('paste', hold, true);
+      document.body.classList.remove('tab-menu-open');
+      // Only when the focus fell to the page with the menu: an item that moved it on purpose (Rename's box) keeps it.
+      const now = document.activeElement;
+      if (prev && prev !== document.body && prev.isConnected && (!now || now === document.body)) prev.focus?.({ preventScroll: true });
+    };
   }, []);
 
   const items = [
@@ -948,7 +966,9 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
     <div
       ref={menuRef}
       data-tab-menu=""
+      tabIndex={-1}
       style={{
+        outline: 'none',
         position: 'fixed',
         left: pos.left,
         top: pos.top,
