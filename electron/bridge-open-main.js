@@ -45,13 +45,24 @@ function writeOwn(tabId, data) {
 }
 
 // -ww: never truncate a command line.
-// Programs that pass the keyboard on to something Dobius cannot see: a multiplexer client or a remote login. Claude
-// running behind one is invisible to every process check here (a tmux server is not in the tab's tree, a remote
-// machine has no tree at all), so dobius-send never types raw into a tab where one leads the terminal (Codex round 6).
-const RELAY_RE = /^(?:tmux|screen|zellij|byobu|abduco|dtach|ssh|mosh|mosh-client|et|autossh|telnet)$/i;
-export function isRelayCommand(comm) {
-  const name = String(comm || '').trim().split('/').pop().replace(/^-/, '');
-  return RELAY_RE.test(name);
+// What leads a tab's terminal, for dobius-send's raw typing: 'shell' (the tab's own shell at its prompt), 'codex', or
+// 'other'. Raw text goes only to the first two. An allowlist on purpose: Claude can sit unseen behind tmux, ssh,
+// docker exec, a VM console and more, and every list of those missed one (Codex rounds 6 and 7).
+const SHELL_RE = /^(?:zsh|bash|sh|dash|ksh|fish|tcsh|csh|pwsh)$/;
+const baseCommand = (comm) => String(comm || '').trim().split('/').pop().replace(/^-/, '');
+// rows: { pid, pgid, comm } for every process on the tab's terminal.
+// 'shell' needs the shell ALONE in the foreground group: a shell without job control (pwsh) leaves the program it runs
+// in its own group. 'codex' needs a group of nothing but Codex's processes (its npm launcher is node), so `exec codex`
+// counts and Codex running next to anything else does not (Codex round 8).
+const CODEX_GROUP_RE = /^(?:codex|codex-[a-z-]+|node)$/;
+export function classifyFront({ shellPid, shellComm, tpgid, rows }) {
+  if (!/^\d+$/.test(String(tpgid))) return 'other';
+  const group = (rows || []).filter((r) => String(r.pgid) === String(tpgid));
+  if (!group.length) return 'other';
+  const names = group.map((r) => baseCommand(r.comm));
+  if (names.includes('codex') && names.every((n) => CODEX_GROUP_RE.test(n))) return 'codex';
+  if (String(tpgid) === String(shellPid) && SHELL_RE.test(baseCommand(shellComm)) && group.every((r) => String(r.pid) === String(shellPid))) return 'shell';
+  return 'other';
 }
 
 const psField = async (pid, field) => (await execFileP('/bin/ps', ['-ww', '-o', `${field}=`, '-p', String(pid)], { timeout: 1000, encoding: 'utf8' })).stdout.trim();
@@ -591,21 +602,20 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     return false;
   }
 
-  // A relay (tmux, ssh, ...) in the tab's foreground process group. True when it cannot tell.
-  async function relayInFront(tabId) {
+  // classifyFront for a live tab; 'other' when anything cannot be read.
+  async function frontKind(tabId) {
     const shellPid = terminalInstance(tabId)?.pid;
-    if (!Number.isInteger(shellPid) || shellPid <= 0) return true;
+    if (!Number.isInteger(shellPid) || shellPid <= 0) return 'other';
     try {
       const tty = await psField(shellPid, 'tty');
       const tpgid = await psField(shellPid, 'tpgid');
-      if (!tty || tty === '??' || !/^\d+$/.test(tpgid)) return true;
-      const { stdout } = await execFileP('/bin/ps', ['-ww', '-o', 'pgid=,comm=', '-t', tty], { timeout: 1000, encoding: 'utf8' });
-      return stdout.split('\n').some((line) => {
-        const m = line.trim().match(/^(\d+)\s+(.+)$/);
-        return !!m && m[1] === tpgid && isRelayCommand(m[2]);
-      });
+      const shellComm = await psField(shellPid, 'comm');
+      if (!tty || tty === '??') return 'other';
+      const { stdout } = await execFileP('/bin/ps', ['-ww', '-o', 'pid=,pgid=,comm=', '-t', tty], { timeout: 1000, encoding: 'utf8' });
+      const rows = stdout.split('\n').map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)).filter(Boolean).map((m) => ({ pid: m[1], pgid: m[2], comm: m[3] }));
+      return classifyFront({ shellPid, shellComm, tpgid, rows });
     } catch {
-      return true;
+      return 'other';
     }
   }
 
@@ -615,7 +625,7 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
     focusTab,
     watchOutput,
     claudeRunning,
-    relayInFront,
+    frontKind,
     // A tab being closed (its window shutting down sends Ctrl+C straight to
     // the PTY) is not alive: nothing more is typed into it.
     // Nor is a tab whose window is closing (its shutdown snapshot can miss a
