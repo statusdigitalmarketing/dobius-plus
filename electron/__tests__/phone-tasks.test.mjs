@@ -364,3 +364,26 @@ test('a task as the phone sees it', () => {
   assert.equal(t.lane, null);
   assert.equal(t.createdAt, 5);
 });
+
+test('round 3: a project whose old-style list is waiting is never read or written from the phone', async () => {
+  const calls = rig({ legacyListWaiting: () => true });
+  const out = [];
+  const msgs = [
+    { type: 'projectTasksRead', project: '/p/one' },
+    { type: 'projectTaskAct', project: '/p/one', id: 'task-1', kind: 'complete', print: 'x' },
+    { type: 'projectTaskAdd', project: '/p/one', title: 'x' },
+    { type: 'asanaSync', project: '/p/one' },
+  ];
+  for (const m of msgs) handleTasksMessage({ ...m, reqId: 'r' }, (x) => out.push(x), () => true, ctx);
+  await flush();
+  assert.equal(calls.filter((c) => ['listTasks', 'act', 'add', 'sync'].includes(c[0])).length, 0, 'nothing could move the old list');
+  assert.equal(out.length, 4);
+  assert.ok(out.every((m) => m.ok === false && m.error === 'open-on-mac'));
+});
+
+test('round 3: a command card names the folder its commands were captured in, not where the tab started', () => {
+  const [card] = commandsForPhone([{ tabId: 'term-mobile-1', projectPath: '/work/production', cwd: '/work/production', commands: [] }], () => ({ label: 'new', project: 'sandbox' }));
+  assert.equal(card.project, 'production');
+  const [fallback] = commandsForPhone([{ tabId: 't', commands: [] }], () => ({ label: 'Tab 1', project: 'proj' }));
+  assert.equal(fallback.project, 'proj');
+});

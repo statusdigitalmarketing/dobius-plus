@@ -141,7 +141,7 @@ import { createPicker, runClaude } from './today-pick.js';
 import { createSnoozes, cardPrint } from './today-snooze.js';
 import { localDay } from '../shared/task-due.js';
 import { boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo, boardIsStandIn } from './inbox-board.js';
-import { listTasks, peekTasks, addTask, updateTask, deleteTask, syncAsanaTasks, workingAsanaKeyFrom, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
+import { listTasks, peekTasks, legacyListWaiting, addTask, updateTask, deleteTask, syncAsanaTasks, workingAsanaKeyFrom, advanceTask, blockTask, unblockTask, completeTaskByRef, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
 import { readUpdateBackup } from './config-manager.js';
 import { recoverWindowLists } from './update-window-recovery.js';
@@ -4399,6 +4399,7 @@ function setupWindowHandlers() {
     // Read only: counting every known project must not run listTasks' legacy-name move for projects nobody opened.
     projectSummaries: (projects) => projectSummaries(projects, peekTasks),
     listTasks: (project) => listTasks(project),
+    legacyListWaiting: (project) => legacyListWaiting(project),
     actOnTask: (req, stillOk) => actOnProjectTask(req, stillOk, { listTasks, completeTaskByRef, reopenTask, updateTask, deleteTask, changed: tasksChangedEverywhere }),
     addTask: (project, title, stillOk) => addProjectTask(project, title, stillOk, { addTask, changed: tasksChangedEverywhere }),
     syncAsana: async (project, stillOk) => {

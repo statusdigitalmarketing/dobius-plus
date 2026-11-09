@@ -141,8 +141,12 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
           return (msg.list || [])[0]?.id || null;
         });
       } else if (msg.type === 'terminalCreated') {
+        // Only a creation this screen asked for moves it: a late reply to one started elsewhere (the Board) must not
+        // take the place of the exact terminal opened from a command card (Codex, phone tasks round 3).
+        const mine = creatingRef.current;
         creatingRef.current = false;
         refreshList();
+        if (!mine) return;
         setActiveId(msg.id);
         setSwitcherOpen(false);
       } else if (msg.type === 'terminalMissing') {

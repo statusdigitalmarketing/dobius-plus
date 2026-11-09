@@ -870,7 +870,8 @@ function handleAuthedMessage(socket, msg, subs) {
         try {
           createTerminal(id, cwd, null, resolveAccountEnvForCwd(cwd));
           wsSend(socket, { type: 'terminalCreated', id });
-          setTimeout(() => writeTerminal(id, `codex resume ${sessionId}\r`), 700);
+          // Unpaired during the beat before the command: start nothing, close the shell it opened (Codex round 3).
+          setTimeout(() => { if (knownToken(socket._authToken)) writeTerminal(id, `codex resume ${sessionId}\r`); else killTerminal(id); }, 700);
         } catch (err) {
           wsSend(socket, { type: 'error', message: String(err?.message || err) });
         }
@@ -1029,7 +1030,8 @@ function handleAuthedMessage(socket, msg, subs) {
           // Link the session to this tab so the sidebar shows where it resumed.
           setSessionTabLink(sessionId, id, cwd);
           // Give the shell a beat to print its prompt before sending the command.
-          setTimeout(() => writeTerminal(id, `claude --resume ${sessionId}\r`), 700);
+          // Unpaired during the beat before the command: start nothing; closing the tab frees the session's claim.
+          setTimeout(() => { if (knownToken(socket._authToken)) writeTerminal(id, `claude --resume ${sessionId}\r`); else killTerminal(id); }, 700);
         } catch (err) {
           // The claim was taken before the terminal existed, so a failed spawn
           // has to hand it back. Otherwise a resume that never happened leaves

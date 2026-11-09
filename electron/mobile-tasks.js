@@ -7,6 +7,9 @@
 
 import crypto from 'crypto';
 import { commandPlaceholder } from '../shared/handoff.js';
+import { baseName } from '../shared/platform.js';
+
+const baseNameOf = (p) => (typeof p === 'string' && p ? str(baseName(p), 120) || null : null);
 
 const MAX_REQ_ID = 64;
 const MAX_ID = 200;
@@ -63,7 +66,9 @@ export function commandsForPhone(entries, labelOf = () => null, isLive = () => f
     return {
       tabId: e.tabId,
       tabLabel: str(label.label, 80) || 'A tab',
-      project: str(label.project, 120) || null,
+      // The folder the commands were captured in (Claude's own, which may differ from where the tab started), never the
+      // tab's starting folder: the card must name where Run will act (Codex, phone tasks round 3).
+      project: baseNameOf(e.projectPath) || str(label.project, 120) || null,
       projectPath: str(e.projectPath, MAX_PATH),
       cwd: str(e.cwd, MAX_PATH),
       at: Number.isFinite(e.at) ? e.at : null,
@@ -137,6 +142,7 @@ export function handleTasksMessage(msg, send, stillOk = () => true, ctx = {}) {
       }
       case 'projectTasksRead': {
         if (!(await knownProject(msg.project))) return fail({ project: str(msg.project, MAX_PATH), error: 'unknown-project' });
+        if (bridge.legacyListWaiting?.(msg.project)) return fail({ project: str(msg.project, MAX_PATH), error: 'open-on-mac' });
         // Reading can move a legacy or corrupt list file aside: not for a phone unpaired while the project was looked up.
         if (!stillOk()) return fail({ error: 'unavailable' });
         const tasks = bridge.listTasks(msg.project);
@@ -145,6 +151,7 @@ export function handleTasksMessage(msg, send, stillOk = () => true, ctx = {}) {
       case 'projectTaskAct': {
         if (!['complete', 'reopen', 'delete'].includes(msg.kind) || !idOk(msg.id) || typeof msg.print !== 'string' || msg.print.length > 64) return fail({ op: msg.kind, error: 'bad-request' });
         if (!(await knownProject(msg.project))) return fail({ op: msg.kind, id: msg.id, error: 'unknown-project' });
+        if (bridge.legacyListWaiting?.(msg.project)) return fail({ op: msg.kind, id: msg.id, error: 'open-on-mac' });
         const r = bridge.actOnTask({ project: msg.project, id: msg.id, kind: msg.kind, print: msg.print }, stillOk);
         return send({ type: 'projectTaskResult', reqId, op: msg.kind, id: msg.id, ok: !!r?.ok, error: r?.ok ? undefined : (r?.error || 'failed') });
       }
@@ -152,11 +159,13 @@ export function handleTasksMessage(msg, send, stillOk = () => true, ctx = {}) {
         const title = typeof msg.title === 'string' ? msg.title.trim() : '';
         if (!title || title.length > MAX_TITLE || /[\x00-\x08\x0b-\x1f\x7f]/.test(title)) return fail({ op: 'add', error: 'bad-request' });
         if (!(await knownProject(msg.project))) return fail({ op: 'add', error: 'unknown-project' });
+        if (bridge.legacyListWaiting?.(msg.project)) return fail({ op: 'add', error: 'open-on-mac' });
         const r = bridge.addTask(msg.project, title, stillOk);
         return send({ type: 'projectTaskResult', reqId, op: 'add', ok: !!r?.ok, id: r?.ok ? r.id : undefined, error: r?.ok ? undefined : (r?.error || 'failed') });
       }
       case 'asanaSync': {
         if (!(await knownProject(msg.project))) return fail({ error: 'unknown-project' });
+        if (bridge.legacyListWaiting?.(msg.project)) return fail({ error: 'open-on-mac' });
         const r = await bridge.syncAsana(msg.project, stillOk);
         return send({ type: 'asanaSyncResult', reqId, ok: !!r?.ok, added: r?.ok && Number.isInteger(r.added) ? r.added : undefined, error: r?.ok ? undefined : (r?.error || 'failed') });
       }

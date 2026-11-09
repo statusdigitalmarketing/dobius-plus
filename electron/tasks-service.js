@@ -81,6 +81,21 @@ function tasksPath(projectPath) {
   return newPath;
 }
 
+/**
+ * True when the project has no list file of its own yet but an old-style (legacy-named) one is waiting: the first read
+ * would move that file to this project. Two folders can share a legacy name, so the phone never triggers that move
+ * (Codex, phone tasks round 3); opening the project on the Mac does, as before. No side effects.
+ */
+export function legacyListWaiting(projectPath) {
+  if (!projectPath) return false;
+  try {
+    if (fs.existsSync(hashedTasksPath(projectPath))) return false;
+    const norm = path.resolve(String(projectPath).replace(/^~(?=$|\/)/, os.homedir()));
+    const legacySafe = norm.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 120);
+    return fs.existsSync(path.join(TASKS_DIR, `${legacySafe}.json`));
+  } catch { return true; } // cannot tell: treat as waiting, never move
+}
+
 function readTasks(projectPath, { strict = false } = {}) {
   const p = tasksPath(projectPath);
   try {

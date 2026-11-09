@@ -303,7 +303,9 @@ const SYNC_PROBLEM = {
   'no-key': 'No Asana key on this Mac yet. Add one in Settings > Integrations on the Mac.',
   unauthorized: 'Asana turned down this Mac\'s key. Fix it from Tasks on the Mac, which can switch to a key that works.',
   'unknown-project': 'That project is not on this Mac any more.',
+  'open-on-mac': 'This project has an older list on your Mac. Open the project there once to bring it over, then it shows here.',
 };
+const OPEN_ON_MAC = SYNC_PROBLEM['open-on-mac'];
 
 const LANE = { build: 'Mine', review: 'Sam · review' };
 const STAGE = { approval: null, queued: 'Queued', running: 'Running', review: 'In review', blocked: 'Blocked' };
@@ -397,7 +399,7 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     loadProjects();
     const off = connection.onMessage((m) => {
       if (m.type === 'authed') { loadProjects(); loadTasks(); }
-      if (m.type === 'tasksChanged') loadTasks();
+      if (m.type === 'tasksChanged') { loadTasks(); loadProjects(); } // the rows and the picker's counts
     });
     const onVisible = () => { if (document.visibilityState === 'visible') loadTasks(); };
     document.addEventListener('visibilitychange', onVisible);
@@ -423,7 +425,7 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
       // Marking an Asana task done here is local, as on the Mac: Asana itself is never changed from this list.
       if (kind2 === 'complete' && task.source === 'asana') say('Marked done on this list. Asana is not changed.');
       else if (kind2 === 'delete') say('Deleted.');
-    } else say(!r ? 'No answer from your Mac. Try again in a moment.' : r.error === 'changed' ? 'That one changed since you looked. Have another look.' : 'Your Mac did not change that one. Have another look.');
+    } else say(!r ? 'No answer from your Mac. Try again in a moment.' : r.error === 'changed' ? 'That one changed since you looked. Have another look.' : r.error === 'open-on-mac' ? OPEN_ON_MAC : 'Your Mac did not change that one. Have another look.');
     loadTasks();
     loadProjects(); // the picker's counts
   };
@@ -435,8 +437,11 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     const r = await ask(connection, { type: 'projectTaskAdd', project: p, title: t }, 'projectTaskResult');
     setAdding(false);
     // Only the draft that was sent: not a newer one, and not one typed for another project meanwhile.
-    if (r?.ok && projectRef.current === p) setTitle((cur) => (cur.trim() === t ? '' : cur));
-    else say(r ? 'Could not add that.' : 'No answer from your Mac.');
+    if (r?.ok) {
+      // Saved. The draft is cleared only if it is still that project's (another project's draft is left alone).
+      if (projectRef.current === p) setTitle((cur) => (cur.trim() === t ? '' : cur));
+      else say('Added.');
+    } else say(!r ? 'No answer from your Mac.' : r.error === 'open-on-mac' ? OPEN_ON_MAC : 'Could not add that.');
     loadTasks();
     loadProjects();
   };
