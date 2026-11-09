@@ -66,9 +66,14 @@ function groupTerminals(terminals) {
   return groups;
 }
 
-export default function TerminalScreen({ connection, status, initialId, onBack, onShowHistory }) {
+export default function TerminalScreen({ connection, status, initialId, onBack, onShowHistory, onExactMissing }) {
   const [terminals, setTerminals] = useState([]);
   const [activeId, setActiveId] = useState(initialId || null);
+  // Opened for one exact terminal (a command's run, from Tasks): when it is not there, leave instead of falling back to
+  // another terminal, where whatever is typed next would land.
+  const exactMissingRef = useRef(onExactMissing);
+  exactMissingRef.current = onExactMissing;
+  const exactIdRef = useRef(onExactMissing ? initialId : null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // The specific session being confirmed for stop, captured at tap time, so a
   // later activeId change (exit / reordered payload) can't make Stop kill the
@@ -129,6 +134,10 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         activityRxRef.current = nextRx;
         setActiveId((cur) => {
           if (cur && (msg.list || []).some((t) => t.id === cur)) return cur;
+          if (exactIdRef.current && cur === exactIdRef.current) {
+            setTimeout(() => exactMissingRef.current?.(), 0);
+            return null;
+          }
           return (msg.list || [])[0]?.id || null;
         });
       } else if (msg.type === 'terminalCreated') {
@@ -141,6 +150,7 @@ export default function TerminalScreen({ connection, status, initialId, onBack, 
         // tap. Drop off it and refresh so we don't show a live-looking blank
         // that swallows keystrokes. Audit MED-9.
         refreshList();
+        if (exactIdRef.current && msg.id === exactIdRef.current) setTimeout(() => exactMissingRef.current?.(), 0);
         setActiveId((cur) => (cur === msg.id ? null : cur));
       } else if (msg.type === 'exit') {
         refreshList();

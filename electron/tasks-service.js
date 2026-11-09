@@ -34,16 +34,18 @@ function hashedTasksPath(projectPath) {
 /**
  * A project's tasks for a count, READ ONLY: never the legacy-name move, the corrupt-file move or a mkdir that
  * listTasks may do. The phone's project picker counts every known project this way, including ones nobody opened, so
- * it must not move a legacy file (two paths can share a legacy name) or touch anything else. [] when there is no file
- * or it cannot be read.
+ * it must not move a legacy file (two paths can share a legacy name) or touch anything else. null when the project has
+ * no list file under its own name, [] when it has one that cannot be read.
  */
 export function peekTasks(projectPath) {
-  if (!projectPath) return [];
+  if (!projectPath) return null;
+  let raw;
+  try { raw = fs.readFileSync(hashedTasksPath(projectPath), 'utf8'); } catch { return null; } // no list of its own yet
   try {
-    const parsed = JSON.parse(fs.readFileSync(hashedTasksPath(projectPath), 'utf8'));
+    const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.map((t) => pipeline.migrate(t)) : [];
   } catch {
-    return []; // no file yet, or unreadable: listTasks handles that when the project is opened
+    return []; // unreadable: listTasks moves it aside when the project is opened
   }
 }
 

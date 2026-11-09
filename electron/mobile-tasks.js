@@ -212,13 +212,18 @@ export function addProjectTask(project, title, stillOk, svc) {
   return { ok: true, id: r.task?.id };
 }
 
-/** Each known project with its open counts, busiest first; projects with no tasks keep their order at the end. */
-export function projectSummaries(projects, listTasks) {
+/**
+ * Each known project with its open counts, busiest first; projects with no tasks keep their order at the end.
+ * `hasList`: the project has a list file of its own. The phone opens one of those by itself, never a project without
+ * one: reading that one would run tasks-service's legacy-name move, which two folders can share (the person can still
+ * pick it, as opening it on the Mac does).
+ */
+export function projectSummaries(projects, peek) {
   const rows = projects.filter((p) => pathOk(p?.path)).map((p, i) => {
     let tasks;
-    try { tasks = listTasks(p.path) || []; } catch { tasks = []; }
-    const open = tasks.filter((t) => !t?.done);
-    return { path: p.path, name: str(p.name, 120) || p.path, pending: open.filter((t) => t.source !== 'asana').length, asana: open.filter((t) => t.source === 'asana').length, i };
+    try { tasks = peek(p.path); } catch { tasks = null; }
+    const open = (Array.isArray(tasks) ? tasks : []).filter((t) => !t?.done);
+    return { path: p.path, name: str(p.name, 120) || p.path, pending: open.filter((t) => t.source !== 'asana').length, asana: open.filter((t) => t.source === 'asana').length, hasList: Array.isArray(tasks), i };
   });
   rows.sort((a, b) => (b.pending + b.asana) - (a.pending + a.asana) || a.i - b.i);
   return rows.map(({ i: _i, ...r }) => r);

@@ -279,7 +279,9 @@ function CommandsView({ connection, entries, reload, say, onOpenTab }) {
         <section key={e.tabId} className="today-card cmd-card">
           <div className="today-title">{e.tabLabel}{e.project ? <span className="cmd-proj"> · {e.project}</span> : null}</div>
           {groups.map((g) => {
-            const gid = `${e.tabId}|${g.id}`;
+            // By the capture (when and where), never by its first command: dismissing that one must not remount the
+            // others and drop an edit in progress.
+            const gid = `${e.tabId}|${g.at}|${g.cwd}`;
             return (
               <div key={gid} className="cmd-group">
                 <div className="today-meta">Runs in {folderOf(g.cwd)}{g.at ? ` · handed back ${ago(g.at)}` : ''}</div>
@@ -376,8 +378,9 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     if (!r?.ok) { setProjects((p) => p || { error: true }); return; }
     const all = Array.isArray(r.list) ? r.list : [];
     setProjects(all);
-    // The one chosen before if this Mac still knows it, else the busiest.
-    setProject((cur) => (cur && all.some((p) => p.path === cur) ? cur : all[0]?.path || null));
+    // The one chosen before if this Mac still knows it, else the busiest that has a list (never one without: reading it
+    // could take over another folder's old list file on the Mac). None: the person picks.
+    setProject((cur) => (cur && all.some((p) => p.path === cur) ? cur : all.find((p) => p.hasList)?.path || null));
   }, [connection]);
 
   const loadTasks = useCallback(async () => {
@@ -422,16 +425,20 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
       else if (kind2 === 'delete') say('Deleted.');
     } else say(!r ? 'No answer from your Mac. Try again in a moment.' : r.error === 'changed' ? 'That one changed since you looked. Have another look.' : 'Your Mac did not change that one. Have another look.');
     loadTasks();
+    loadProjects(); // the picker's counts
   };
   const add = async () => {
     const t = title.trim();
+    const p = projectRef.current;
     if (!t || adding) return;
     setAdding(true);
-    const r = await ask(connection, { type: 'projectTaskAdd', project: projectRef.current, title: t }, 'projectTaskResult');
+    const r = await ask(connection, { type: 'projectTaskAdd', project: p, title: t }, 'projectTaskResult');
     setAdding(false);
-    if (r?.ok) setTitle((cur) => (cur.trim() === t ? '' : cur));
+    // Only the draft that was sent: not a newer one, and not one typed for another project meanwhile.
+    if (r?.ok && projectRef.current === p) setTitle((cur) => (cur.trim() === t ? '' : cur));
     else say(r ? 'Could not add that.' : 'No answer from your Mac.');
     loadTasks();
+    loadProjects();
   };
   const sync = async () => {
     if (syncing) return;
@@ -442,6 +449,7 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
     if (r?.ok) say(r.added ? `${r.added} new from Asana.` : 'Up to date with Asana.');
     else setSyncNote(r ? SYNC_PROBLEM[r.error] || 'Asana sync failed. Try again in a moment.' : 'No answer from your Mac.');
     loadTasks();
+    loadProjects();
   };
 
   if (projects === null) return <p className="muted pad">Loading projects…</p>;
@@ -462,7 +470,8 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
   return <>
     <label className="tasks-project">
       <span className="tasks-project-label">Project</span>
-      <select value={project || ''} onChange={(e) => setProject(e.target.value)} aria-label="Project">
+      <select value={project || ''} onChange={(e) => setProject(e.target.value || null)} aria-label="Project">
+        {!project && <option value="">Choose…</option>}
         {projects.map((p) => <option key={p.path} value={p.path}>{name(p)}</option>)}
       </select>
     </label>
@@ -477,7 +486,8 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
       <p className="settings-foot">Pulls your Asana tasks and Sam's review lane into this project's list. Checking one off here marks it done on this list only.</p>
       {syncNote && <p className="today-warn">{syncNote}</p>}
     </>}
-    {!current && <p className="muted pad">Loading…</p>}
+    {!project && <p className="muted pad">Choose a project to see its list.</p>}
+    {project && !current && <p className="muted pad">Loading…</p>}
     {current?.error && <p className="muted pad">{SYNC_PROBLEM[current.error] || 'Could not read this project\'s tasks.'} <button className="link-btn" onClick={loadTasks}>Try again</button></p>}
     {current?.tasks && <>
       {pending.length === 0 && <p className="muted pad">{tasks.length ? 'Everything here is done.' : kind === 'asana' ? 'No Asana tasks on this project\'s list. Sync to pull them in.' : 'No tasks yet. Add one above.'}</p>}
@@ -495,13 +505,15 @@ function ProjectView({ connection, kind, say, asanaCards, cardFor }) {
   </>;
 }
 
-export default function Tasks({ connection, onBack, onOpenTab, startView = null }) {
+export default function Tasks({ connection, onBack, onOpenTab, startView = null, notice = null }) {
   const features = useFeatures(connection);
   const views = viewsFor(features);
   const supported = !!features?.includes('today');
   const hasCommands = !!features?.includes('commands');
   // A Today notification opens Today; otherwise the view picked last time.
-  const [view, setViewState] = useState(() => startView || store.get('dobius-tasks-view') || 'today');
+  const [view, setViewState] = useState(() => startView?.view || store.get('dobius-tasks-view') || 'today');
+  // A notification while Tasks is already open (each request is a new object, so a second one switches again).
+  useEffect(() => { if (startView?.view) setViewState(startView.view); }, [startView]);
   const current = currentView(views, view);
   const setView = (v) => { setViewState(v); store.set('dobius-tasks-view', v); };
   const needInbox = current === 'inbox' || current === 'asana';
@@ -599,6 +611,7 @@ export default function Tasks({ connection, onBack, onOpenTab, startView = null 
     setTimeout(() => setNote((cur) => (cur === n ? null : cur)), action ? 8000 : 5000);
   }, []);
   const mark = (id, on) => setBusy((b) => { const n = { ...b }; if (on) n[id] = true; else delete n[id]; return n; });
+  useEffect(() => { if (notice?.text) say(notice.text); }, [notice, say]);
 
   const done = async (card, kind) => {
     const mine = ++doneSeq.current;

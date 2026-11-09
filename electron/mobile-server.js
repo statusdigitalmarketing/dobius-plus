@@ -781,7 +781,7 @@ function handleAuthedMessage(socket, msg, subs) {
         // smaller geometry, which mangles the desktop xterm. Phone-only PTYs
         // (e.g. ones created via `createTerminal` from mobile) still get
         // resized normally.
-        if (socket._authedTabs.has(msg.id) && !terminalHasDesktopAttached(msg.id)) {
+        if (socket._authedTabs.has(msg.id) && !terminalHasDesktopAttached(msg.id) && knownToken(socket._authToken)) {
           resizeTerminal(msg.id, msg.cols, msg.rows);
         }
       }
@@ -812,6 +812,8 @@ function handleAuthedMessage(socket, msg, subs) {
           wsSend(socket, { type: 'error', message: 'Unknown project', nonce: crNonce });
           return;
         }
+        // Unpaired while the project was looked up: start nothing.
+        if (!knownToken(socket._authToken)) return;
         const id = mobileTermId();
         try {
           createTerminal(id, resolved, null, resolveAccountEnvForCwd(resolved));
@@ -863,6 +865,7 @@ function handleAuthedMessage(socket, msg, subs) {
       if (typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) break;
       resolveCreateCwdCodex(projectPath).then((cwd) => {
         if (cwd === null) { wsSend(socket, { type: 'error', message: 'Unknown project' }); return; }
+        if (!knownToken(socket._authToken)) return; // unpaired while the project was looked up
         const id = mobileTermId();
         try {
           createTerminal(id, cwd, null, resolveAccountEnvForCwd(cwd));
@@ -1012,6 +1015,8 @@ function handleAuthedMessage(socket, msg, subs) {
           wsSend(socket, { type: 'error', message: 'That session is already running on your Mac' });
           return;
         }
+        // Unpaired while the project was looked up or the claim was taken: hand the claim back, start nothing.
+        if (!knownToken(socket._authToken)) { releaseSessionResume(sessionId); return; }
         const id = mobileTermId();
         try {
           createTerminal(id, cwd, null, resolveAccountEnvForCwd(cwd));

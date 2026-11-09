@@ -172,9 +172,14 @@ test('Asana sync: the phone gets a fixed code, never Asana\'s words or the key\'
 });
 
 test('project list: busiest first, counts split into to-do and Asana, a non-path dropped', () => {
-  const lists = { '/a': [], '/b': [{ source: 'manual' }, { source: 'asana' }, { source: 'manual', done: true }], '/c': [{ source: 'asana' }] };
-  const r = projectSummaries([{ path: '/a', name: 'a' }, { path: '/b', name: 'b' }, { path: 'main', name: 'x' }, { path: '/c', name: 'c' }], (p) => lists[p]);
-  assert.deepEqual(r, [{ path: '/b', name: 'b', pending: 1, asana: 1 }, { path: '/c', name: 'c', pending: 0, asana: 1 }, { path: '/a', name: 'a', pending: 0, asana: 0 }]);
+  const lists = { '/a': [], '/b': [{ source: 'manual' }, { source: 'asana' }, { source: 'manual', done: true }], '/c': [{ source: 'asana' }], '/d': null };
+  const r = projectSummaries([{ path: '/a', name: 'a' }, { path: '/b', name: 'b' }, { path: 'main', name: 'x' }, { path: '/d', name: 'd' }, { path: '/c', name: 'c' }], (p) => lists[p]);
+  assert.deepEqual(r, [
+    { path: '/b', name: 'b', pending: 1, asana: 1, hasList: true },
+    { path: '/c', name: 'c', pending: 0, asana: 1, hasList: true },
+    { path: '/a', name: 'a', pending: 0, asana: 0, hasList: true },
+    { path: '/d', name: 'd', pending: 0, asana: 0, hasList: false },
+  ]);
 });
 
 test('the command list for the phone: the Mac\'s placeholder check comes with it, nothing the Mac keeps to itself', () => {
