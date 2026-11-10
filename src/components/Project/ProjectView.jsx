@@ -61,7 +61,6 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
   const toggleGitPanel = useStore((s) => s.toggleGitPanel);
   const setCurrentProjectPath = useStore((s) => s.setCurrentProjectPath);
   const theme = THEMES[themeIndex];
-  const setSessions = useStore((s) => s.setSessions);
   const setActiveProcesses = useStore((s) => s.setActiveProcesses);
 
   // Tab state
@@ -860,11 +859,9 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
   useEffect(() => {
     if (!window.electronAPI) return;
 
-    window.electronAPI.dataLoadHistory().then(setSessions);
     window.electronAPI.dataGetActiveProcesses().then(setActiveProcesses);
 
     const removeWatcher = window.electronAPI.onDataUpdated(() => {
-      window.electronAPI.dataLoadHistory().then(setSessions);
       window.electronAPI.dataGetActiveProcesses().then(setActiveProcesses);
     });
 
@@ -876,7 +873,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       removeWatcher();
       clearInterval(interval);
     };
-  }, [setSessions, setActiveProcesses]);
+  }, [setActiveProcesses]);
 
   // Auto-resume status listener (v1.0.30). Main process pushes
   // { tabId, status } on the 'tab:status' channel as the queue progresses;
