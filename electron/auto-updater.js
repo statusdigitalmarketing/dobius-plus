@@ -3,7 +3,7 @@ import { app, autoUpdater as nativeUpdater, BrowserWindow, Notification, ipcMain
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { setQuittingForUpdate, markInstallAttempted } from './quit-state.js';
+import { setQuittingForUpdate, markInstallAttempted, getQuitting } from './quit-state.js';
 import { drainConfigWrites, backupConfigForUpdate } from './config-manager.js';
 import { saveLiveRestoreListsForUpdate } from './window-manager.js';
 import { mapRelease } from './release-info.js';
@@ -292,6 +292,10 @@ async function performInstall() {
 
 // Every Restart goes through here. A click while one is running joins it.
 function installOnce() {
+  // A quit already under way (Restart without updating, Cmd+Q twice) owns the shutdown: an install started now would
+  // save the window lists while that quit closes the windows and relaunch beside its own relaunch, two copies on one
+  // config auto-resuming the same sessions. The update installs on the next Restart click.
+  if (!installing && getQuitting()) return Promise.resolve(false);
   if (installing) {
     broadcast('updater:status', lastStatus); // a window opened mid-install still shows Restart
     return installing;
@@ -301,6 +305,10 @@ function installOnce() {
   run.then((ok) => { if (!ok && installing === run) installing = null; }, () => { if (installing === run) installing = null; });
   return run;
 }
+
+// An install is running (or waiting on Squirrel) or was attempted and may still be staged. Restart without updating
+// refuses then, since Squirrel's own relaunch would run beside it.
+export function installInFlight() { return !!installing || lastStatus?.state === 'installing'; }
 
 export function initAutoUpdater() {
   ipcMain.handle('updater:check', () => {
