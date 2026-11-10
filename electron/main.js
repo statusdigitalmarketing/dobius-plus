@@ -60,7 +60,7 @@ import {
   loadTranscript, readPlanFile, getActiveProcesses, listProjects,
   loadAllSessions, getLatestSession, getSessionSize, resolveFreshSessionsForTabs, provenanceChanged, sessionMovedPast, findLooseEnds, getTranscriptSig,
   loadProjectTokens, searchTranscripts, deleteSession,
-  getLastAssistantMessage, getLastAssistantReply, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
+  getLastAssistantMessage, getLastAssistantReply, readTranscriptAppended, getAllProjectTabs, getSessionHoverInfo, loadTranscriptImage } from './data-service.js';
 import {
   loadBuildProgress, loadSupervisorLog, loadHandoff, detectActiveBuilds,
 } from './build-monitor-service.js';
@@ -4573,6 +4573,7 @@ function setupWindowHandlers() {
       return { ...r, recordCwd: rec?.cwd || null };
     },
     lastReply: getLastAssistantReply,
+    readAppended: readTranscriptAppended,
     processCwd: getProcessCwd,
     projectOf: (id) => { const p = projectPathFromTabId(id); return p && p !== 'mobile' ? p : null; },
     // Only the event travels to phones, never a command: an open Commands screen asks again for its own copy.

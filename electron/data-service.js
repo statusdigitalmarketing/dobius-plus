@@ -1663,6 +1663,58 @@ export async function getLastAssistantReply(sessionId, projectPath) {
   return null;
 }
 
+// Tasks > Commands' "did it run some other way" reader (handoff-commands.js commandRunsFrom). Bounded by construction:
+// each call reads only what was appended since `offset`, at most APPEND_MAX_BYTES (a burst bigger than that keeps only
+// its newest part), and a session read for the first time looks back APPEND_LOOKBACK_BYTES. Lines over BIG_LINE_BYTES
+// (huge tool outputs) are skipped, never parsed.
+const APPEND_MAX_BYTES = 2 * 1024 * 1024;
+const APPEND_LOOKBACK_BYTES = 256 * 1024;
+const BIG_LINE_BYTES = 512 * 1024;
+/** { records, next, gap } with the records appended after `offset` (null: first read), or null when there is no transcript. */
+export async function readTranscriptAppended(sessionId, projectPath, offset) {
+  if (!sessionId || typeof sessionId !== 'string' || !/^[\w-]+$/.test(sessionId)) return null;
+  if (typeof projectPath !== 'string' || !projectPath) return null;
+  let transcriptPath = null;
+  for (const enc of claudeDirNames(projectPath)) {
+    const p = path.join(PROJECTS_DIR, enc, `${sessionId}.jsonl`);
+    if (await pathExists(p)) { transcriptPath = p; break; }
+  }
+  if (!transcriptPath) return null;
+  const fh = await fs.open(transcriptPath, 'r');
+  try {
+    const { size } = await fh.stat();
+    const resume = Number.isInteger(offset) && offset >= 0 && offset <= size; // a shrunk file starts over
+    let from = resume ? offset : Math.max(0, size - APPEND_LOOKBACK_BYTES);
+    let partial = !resume && from > 0;
+    if (size - from > APPEND_MAX_BYTES) { from = size - APPEND_MAX_BYTES; partial = true; }
+    const len = size - from;
+    // gap: bytes after `offset` were stepped over, so a caller's state carried across reads no longer joins up.
+    // A shrunk file (offset past its end) counts too: what was read before no longer joins up with it.
+    const gap = resume ? from > offset : Number.isInteger(offset);
+    if (len <= 0) return { records: [], next: size };
+    const buf = Buffer.alloc(len);
+    await fh.read(buf, 0, len, from);
+    const lastNl = buf.lastIndexOf(10);
+    // No complete line yet: wait for it, unless it alone fills a whole read (a giant line): then step over it.
+    if (lastNl < 0) return len >= APPEND_MAX_BYTES ? { records: [], next: size, gap: true } : { records: [], next: from, gap };
+    let i = partial ? buf.indexOf(10) + 1 : 0;
+    const records = [];
+    while (i <= lastNl) {
+      const j = buf.indexOf(10, i);
+      if (j - i > 1 && j - i <= BIG_LINE_BYTES && buf[i] === 0x7b) {
+        try {
+          const rec = JSON.parse(buf.toString('utf8', i, j));
+          if (rec && typeof rec === 'object' && rec.type !== 'api-request-blob') records.push(rec);
+        } catch { /* a line still being written or not JSON: skipped */ }
+      }
+      i = j + 1;
+    }
+    return { records, next: from + lastNl + 1, gap };
+  } finally {
+    await fh.close().catch(() => {});
+  }
+}
+
 /** A transcript record that is a prompt a person (or the harness) submitted: not a tool result, not meta. */
 function isPromptEntry(e) {
   if (!e || e.type !== 'user' || e.isMeta) return false;

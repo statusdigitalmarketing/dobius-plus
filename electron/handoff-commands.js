@@ -97,7 +97,10 @@ export const replyForDisplay = (text) => String(text || '').replace(/\r\n?/g, '\
 
 // onAdded(tabId): at least one NEW waiting command was listed for that tab (the phone notifier's "handed back" event;
 // it gets the tab id only, never the command).
-export function createHandoffCommands({ resolve, lastReply, processCwd, projectOf, notify = () => {}, onAdded = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), newId }) {
+// readAppended(sessionId, project, offset) -> { records, next } | null (data-service readTranscriptAppended): a command
+// handed back and then run some other way (typed as `! cmd` into Claude, or Claude running it itself after a yes)
+// leaves the list as run, told apart from Run here by `ranBy`. Optional: without it nothing is marked.
+export function createHandoffCommands({ resolve, lastReply, processCwd, projectOf, readAppended = null, notify = () => {}, onAdded = () => {}, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), newId }) {
   const byTab = new Map(); // tabId -> { tabId, projectPath, cwd, at, commands: [{ id, text }] }
   const gen = new Map(); // tabId -> generation, so a slow read cannot land after the tab moved on
   const turnStart = new Map(); // tabId -> when its current turn's first hook came
@@ -145,7 +148,8 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
         // turn's commands.
         const cwdNow = folder || projectPath;
         const reply = replyForDisplay(best.text);
-        let all = [...prior, ...added.map((c) => ({ id: newId(), text: c.text, why: c.why, state: 'waiting', cwd: cwdNow, reply, at: now() }))];
+        // sid / tproject / replyAt: where to look for it having run since (markRanElsewhere).
+        let all = [...prior, ...added.map((c) => ({ id: newId(), text: c.text, why: c.why, state: 'waiting', cwd: cwdNow, reply, at: now(), sid: s.sessionId, tproject: best.project, replyAt: best.at }))];
         // At most MAX_WAITING waiting per tab: the oldest waiting ones go first.
         const waiting = all.filter((c) => c.state === 'waiting');
         if (waiting.length > MAX_WAITING) { const drop = new Set(waiting.slice(0, waiting.length - MAX_WAITING)); all = all.filter((c) => !drop.has(c)); }
@@ -161,8 +165,84 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
     }
   }
 
+  // ---- Run some other way: the session's own transcript says so. Only the EXACT command, in the folder the card
+  // names, after the reply that handed it back, counts: `a && cmd` may never have reached cmd, and a match inside
+  // quotes, a heredoc or a longer command is not a run (bugbot rounds 1 and 2). A wrong "ran" is the failure that
+  // matters (the person then never runs a release or a login), so anything less certain stays waiting.
+  // Bounded: each session is read incrementally (only appended bytes, at most 2MB a read), at most every
+  // MIN_READ_MS, at most READS_PER_PASS sessions a pass (the longest unread first), and its state goes as soon as
+  // nothing of it waits.
+  const MIN_READ_MS = 5000;
+  const READS_PER_PASS = 4;
+  const norm = (t) => String(t || '').trim().replace(/\s+/g, ' ');
+  const dirOf = (d) => (typeof d === 'string' && d.length > 1 ? d.replace(/\/+$/, '') : d);
+  const sessions = new Map(); // `${sid}|${project}` -> { offset, pending: Map, runs: [], readAt }
+  let checking = null;
+  let again = false;
+  async function markRanElsewhere() {
+    if (!readAppended) return;
+    if (checking) { again = true; return checking; }
+    checking = (async () => {
+      do {
+        again = false;
+        const groups = new Map();
+        for (const e of byTab.values()) for (const c of e.commands) {
+          if (c.state !== 'waiting' || !c.sid || !c.tproject || !Number.isFinite(c.replyAt) || !c.cwd) continue;
+          const k = `${c.sid}|${c.tproject}`;
+          if (!groups.has(k)) groups.set(k, { sid: c.sid, project: c.tproject, cmds: [] });
+          groups.get(k).cmds.push(c);
+        }
+        for (const k of [...sessions.keys()]) if (!groups.has(k)) sessions.delete(k);
+        const due = [...groups].map(([k, g]) => [k, g, sessions.get(k)])
+          .filter(([, , st]) => !st || now() - st.readAt >= MIN_READ_MS)
+          .sort((x, y) => (x[2]?.readAt || 0) - (y[2]?.readAt || 0))
+          .slice(0, READS_PER_PASS);
+        let changed = false;
+        for (const [k, g, st0] of due) {
+          try {
+            const st = st0 || { offset: null, pending: new Map(), runs: [], readAt: 0 };
+            // Spaced like a good read even when it fails, or a failing transcript takes every slot every pass.
+            st.readAt = now();
+            sessions.set(k, st);
+            const got = await readAppended(g.sid, g.project, st.offset);
+            if (!got) continue;
+            if (got.gap) st.pending.clear(); // a call and its result may sit on either side of the skipped bytes
+            st.offset = got.next;
+            st.runs.push(...commandRunsFrom(got.records, st.pending));
+            if (st.runs.length > 200) st.runs.splice(0, st.runs.length - 200);
+            sessions.set(k, st);
+            // Oldest command first: each run accounts for one command, never two.
+            for (const c of [...g.cmds].sort((x, y) => x.replyAt - y.replyAt)) {
+              if (c.state !== 'waiting') continue; // Run or Dismiss while this read was out
+              const r = st.runs.find((x) => !x.used && x.at >= c.replyAt && dirOf(x.cwd) === dirOf(c.cwd) && norm(x.text) === norm(c.text));
+              if (!r) continue;
+              r.used = true;
+              Object.assign(c, { state: r.exit === null ? 'ran' : r.exit === 0 ? 'done' : 'failed', exit: r.exit, ranBy: r.by, ranErr: r.err || null, startedAt: r.at, endedAt: now() });
+              changed = true;
+            }
+          } catch (err) {
+            console.warn('[handoff-commands] could not check whether a command ran:', err?.message || err);
+          }
+        }
+        if (changed) notify();
+      } while (again);
+    })().finally(() => { checking = null; });
+    return checking;
+  }
+  let checkTimer = null;
+  const soon = (ms = 1500) => {
+    if (!readAppended || checkTimer) return;
+    checkTimer = setTimeout(() => { checkTimer = null; void markRanElsewhere(); }, ms);
+    checkTimer.unref?.();
+  };
+  // A `! cmd` typed into Claude fires no hook, so look now and then too, only while something is waiting.
+  const poll = setInterval(() => { if ([...byTab.values()].some((e) => e.commands.some((c) => c.state === 'waiting' && c.sid))) soon(0); }, 20 * 1000);
+  poll.unref?.();
+
   /** A hook state from a terminal (terminal-status onHookState). */
   function onHook(tabId, state, tag) {
+    // A turn ending is when a run it made is on disk; tool-level hooks would only re-arm the check.
+    if ((state === 'done' || state === 'needs') && byTab.get(tabId)?.commands.some((c) => c.state === 'waiting')) soon();
     if (state === 'needs' && tag === 'handoff') {
       // When this turn began (its first hook), as a loose backstop; the transcript order decides (promptAfter).
       const since = turnStart.get(tabId) ?? now() - NO_TURN_WINDOW_MS;
@@ -227,9 +307,10 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
   /** Every tab's commands (waiting, running, finished), newest first; the renderer shows its own project's. */
   function list() {
     prune();
+    soon(300); // an open list catches up with a command run meanwhile
     // Never sent to a window: the script's exit file, and the text that actually ran (an edited one may hold a key).
     return [...byTab.values()].sort((a, b) => b.at - a.at)
-      .map((e) => ({ ...e, commands: e.commands.map(({ exitFile: _exitFile, ran: _ran, ...c }) => ({ ...c })) }));
+      .map((e) => ({ ...e, commands: e.commands.map(({ exitFile: _exitFile, ran: _ran, sid: _sid, tproject: _tp, replyAt: _ra, ...c }) => ({ ...c })) }));
   }
 
   /** One WAITING command and where it runs. */
@@ -279,7 +360,82 @@ export function createHandoffCommands({ resolve, lastReply, processCwd, projectO
     return !!byTab.get(tabId)?.commands.some((c) => c.state === 'waiting');
   }
 
-  return { onHook, list, peek, take, startRun, running, finishRun, hasWaiting };
+  return { onHook, list, peek, take, startRun, running, finishRun, hasWaiting, markRanElsewhere };
+}
+
+/**
+ * Commands that RAN, from transcript records in file order. `pending` (Map, kept by the caller across reads) holds
+ * Claude's Bash calls whose result has not been seen yet. A run is:
+ * - a `! cmd` the person typed into Claude (bash mode, a user record `<bash-input>cmd</bash-input>`), counted once its
+ *   output record (`<bash-stdout>` / `<bash-stderr>`) is there, so one still running is not a run yet, nor one moved to
+ *   the background (past 120s, or Ctrl+B). Its exit is not recorded (exit null: the card says "Ran", never a success);
+ *   stderr's first line comes back as `err`, for display only. Any other record in between ends the wait (Esc);
+ * - a Bash call of Claude's whose result came back fine (exit 0) or as "Exit code N" (exit null when Claude read a
+ *   non-zero exit as no error, `returnCodeInterpretation`, e.g. grep's 1 for no match). A refused, blocked or
+ *   interrupted call, a background one (run_in_background, or moved there: toolUseResult.backgroundTaskId) and one
+ *   with no result yet did not run (or has not finished).
+ * Each run carries where Claude's shell was: the folder of the call AND of its result must agree (a `cd` run beside it
+ * in the same turn moves the shell between them), else cwd is null and it matches no card.
+ */
+// Only a command as short as a handed-back one can match, so longer ones are never kept; a kept one is a detached copy
+// (a slice of the record's string would retain the whole record, NOTES 2026-09-15).
+const BASH_MODE = '\0bash-mode'; // the `pending` key of a `! cmd` typed into Claude whose output is not in yet
+const keepText = (t) => (typeof t === 'string' && t.length <= MAX_COMMAND_LEN * 2 ? Buffer.from(t, 'utf16le').toString('utf16le') : null);
+export function commandRunsFrom(records, pending) {
+  const runs = [];
+  for (const e of Array.isArray(records) ? records : []) {
+    if (!e || typeof e !== 'object') continue;
+    const at = Date.parse(e.timestamp);
+    const cwd = typeof e.cwd === 'string' ? e.cwd : null;
+    const c = e.message?.content;
+    if (e.type === 'user') {
+      if (Array.isArray(c)) {
+        for (const b of c) {
+          if (b?.type !== 'tool_result' || !pending.has(b.tool_use_id)) continue;
+          const u = pending.get(b.tool_use_id);
+          pending.delete(b.tool_use_id);
+          const tur = e.toolUseResult;
+          if (tur && typeof tur === 'object' && (tur.backgroundTaskId || tur.interrupted === true)) continue;
+          const t = typeof b.content === 'string' ? b.content : Array.isArray(b.content) ? b.content.map((x) => (typeof x?.text === 'string' ? x.text : '')).join('') : '';
+          const code = b.is_error === true ? t.slice(0, 64).match(/^\s*Exit code (\d+)/) : null;
+          if (b.is_error === true && !code) continue;
+          const unsure = !code && tur && typeof tur === 'object' && typeof tur.returnCodeInterpretation === 'string' && tur.returnCodeInterpretation;
+          runs.push({ text: u.text, at: u.at, cwd: u.cwd && u.cwd === cwd ? u.cwd : null, by: 'claude', exit: code ? Number(code[1]) : unsure ? null : 0 });
+        }
+      }
+      if (!e.isMeta) {
+        const t = typeof c === 'string' ? c : '';
+        const u = pending.get(BASH_MODE);
+        pending.delete(BASH_MODE); // whatever this record is, it ends the wait for an earlier `! cmd`'s output
+        const m = t.match(/^\s*<bash-input>([\s\S]*?)<\/bash-input>\s*$/);
+        if (m) {
+          const text = Number.isFinite(at) ? keepText(m[1]) : null;
+          if (text !== null) pending.set(BASH_MODE, { text, at, cwd: keepText(cwd) });
+          continue;
+        }
+        // Its output: the bash-mode command finished (in the folder it started in, the same rule as a Bash call).
+        if (u && /^\s*<bash-(stdout|stderr)>/.test(t) && !/moved to the background \(ID:/.test(t)) {
+          // The record's own trailing stderr block, never one quoted inside the output.
+          const tail = t.trimEnd();
+          const so = tail.endsWith('</bash-stderr>') ? tail.lastIndexOf('<bash-stderr>') : -1;
+          const se = so >= 0 ? [null, tail.slice(so + 13, -14)] : null;
+          const errLine = se ? se[1].replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trim().split('\n')[0].slice(0, 200) : '';
+          runs.push({ text: u.text, at: u.at, cwd: u.cwd && u.cwd === cwd ? u.cwd : null, by: 'you', exit: null, err: errLine ? keepText(errLine) : null });
+        }
+      }
+      continue;
+    }
+    if (e.type !== 'assistant' || !Array.isArray(c) || !Number.isFinite(at)) continue;
+    for (const b of c) {
+      if (b?.type !== 'tool_use' || b.name !== 'Bash' || typeof b.id !== 'string' || typeof b.input?.command !== 'string') continue;
+      if (b.input.run_in_background === true) continue;
+      const text = keepText(b.input.command);
+      if (text === null) continue;
+      pending.set(keepText(b.id), { text, at, cwd: keepText(cwd) });
+      if (pending.size > 500) pending.delete(pending.keys().next().value);
+    }
+  }
+  return runs;
 }
 
 /**

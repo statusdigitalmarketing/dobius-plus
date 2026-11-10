@@ -52,6 +52,7 @@ export const waitingCount = (entries) => entries.reduce((n, e) => n + e.commands
 const STATUS = {
   running: { label: 'Running', color: 'var(--accent)' },
   done: { label: '✓ Done', color: '#3FB950' },
+  ran: { label: 'Ran, exit not known', color: '#58A6FF' }, // never shown as a success: check its output
   failed: { label: 'Failed', color: 'var(--danger)' },
   closed: { label: 'Tab closed before it finished', color: '#F87300' },
 };
@@ -191,9 +192,11 @@ function CommandCard({ entry, c, projectPath, tabName, hasTab, folderOf, onError
               {st?.label || c.state}{c.state === 'failed' && Number.isInteger(c.exit) && c.exit >= 0 ? ` (exit ${c.exit})` : ''}
             </span>
             <span style={{ fontSize: 10, color: 'var(--dim)' }}>
+              {c.ranBy ? `${c.ranBy === 'you' ? 'you ran it in Claude' : 'Claude ran it'} · ` : ''}
               {c.state === 'running' ? `in ${tabName(c.runTabId)}` : c.endedAt ? ago(c.endedAt) : ''}
-              {c.cwd && c.cwd !== entry.cwd ? ` · ran in ${folderOf(c.cwd)}` : ''}
+              {c.cwd && c.cwd !== entry.cwd && !c.ranBy ? ` · ran in ${folderOf(c.cwd)}` : ''}
             </span>
+            {c.state === 'ran' && c.ranErr && <span title="What it printed on stderr. Its exit was not recorded." style={{ fontSize: 10, color: 'var(--dim)', fontFamily: "'SF Mono', monospace", wordBreak: 'break-word' }}>{c.ranErr}</span>}
             {c.runTabId && hasTab(c.runTabId) && <button style={btn()} onClick={() => openTab(c.runTabId)}>Open tab</button>}
             <button style={btn()} title={c.state === 'running' ? 'Remove the card (the command keeps running in its tab)' : 'Remove the card'} onClick={() => api.handoffCommandsDismiss(entry.tabId, c.id)}>Dismiss</button>
           </>

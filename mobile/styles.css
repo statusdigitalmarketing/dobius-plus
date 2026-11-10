@@ -1370,6 +1370,7 @@ a.today-title:active { opacity: 0.7; }
 .cmd-state { align-self: center; font-size: 14px; font-weight: 600; color: var(--dim); }
 .cmd-state.running { color: var(--accent); }
 .cmd-state.done { color: var(--status-done); }
+.cmd-state.ran { color: var(--dim); }
 .cmd-state.failed { color: var(--status-needs); }
 .cmd-state.closed { color: #F87300; }
 .cmd-ago { font-weight: 400; color: var(--dim); }
