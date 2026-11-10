@@ -88,6 +88,9 @@ export function commandsForPhone(entries, labelOf = () => null, isLive = () => f
         reply: str(c.reply, 6000) || '',
         at: Number.isFinite(c.at) ? c.at : null,
         edited: c.edited === true,
+        // Run some other way (typed into Claude, or Claude ran it), seen in the session's transcript.
+        ranBy: c.ranBy === 'you' || c.ranBy === 'claude' ? c.ranBy : null,
+        ranErr: str(c.ranErr, 200) || null,
         exit: Number.isInteger(c.exit) ? c.exit : null,
         startedAt: Number.isFinite(c.startedAt) ? c.startedAt : null,
         endedAt: Number.isFinite(c.endedAt) ? c.endedAt : null,

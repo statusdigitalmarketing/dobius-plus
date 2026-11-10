@@ -173,6 +173,7 @@ const RUN_CODES = {
 const RUN_STATUS = {
   running: 'Running',
   done: '✓ Done',
+  ran: 'Ran, exit not known',
   failed: 'Failed',
   closed: 'Its terminal closed before it finished',
 };
@@ -256,8 +257,10 @@ function CommandCard({ connection, entry, c, folderOf, say, onChanged, onOpenTab
         </> : <>
           <span className={`cmd-state ${c.state}`}>
             {RUN_STATUS[c.state] || c.state}{c.state === 'failed' && Number.isInteger(c.exit) ? ` (exit ${c.exit})` : ''}
+            {c.state === 'ran' && c.ranErr ? <span className="cmd-ago"> · {c.ranErr}</span> : null}
+            {c.ranBy ? <span className="cmd-ago"> · {c.ranBy === 'you' ? 'you ran it in Claude' : 'Claude ran it'}</span> : null}
             {c.endedAt && c.state !== 'running' ? <span className="cmd-ago"> · {ago(c.endedAt)}</span> : null}
-            {c.cwd && c.cwd !== entry.cwd ? <span className="cmd-ago"> · ran in <span className="path-text">{folderOf(c.cwd)}</span></span> : null}
+            {c.cwd && c.cwd !== entry.cwd && !c.ranBy ? <span className="cmd-ago"> · ran in <span className="path-text">{folderOf(c.cwd)}</span></span> : null}
           </span>
           {c.runTabId && c.runLive && c.state !== 'closed' && <button onClick={() => onOpenTab?.(c.runTabId)}>Open terminal</button>}
           <button className="quiet" onClick={dismiss}>Dismiss</button>
