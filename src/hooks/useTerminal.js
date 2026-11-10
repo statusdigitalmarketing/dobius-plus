@@ -218,7 +218,13 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
           // empty). Scroll them all into scrollback first: the new prompt starts on a clean screen with the old
           // output one scroll up. Swallowing ConPTY's clear instead would not work: it draws by absolute position
           // and would paint over them. A moved tab keeps its live PTY and is left alone.
-          if (!claimExisting && isWindows()) termRef.current.write('\r\n'.repeat(termRef.current.rows));
+          // Fit first so the padding is the pane's real height: padding the default 24 rows and growing afterwards
+          // makes xterm pull the restored lines back down onto the screen ConPTY then clears (review, 2.2.20). A
+          // hidden pane cannot be measured and keeps 24; its ConPTY clear runs at that size, so nothing comes back.
+          if (!claimExisting && isWindows()) {
+            fit();
+            termRef.current.write('\r\n'.repeat(termRef.current.rows));
+          }
           if (!forked && !claimExisting) restoredFromDisk = true;
         }
       }).catch(() => {});

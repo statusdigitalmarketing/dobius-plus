@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useStore } from '../../store/store';
+import { baseName } from '../../../shared/platform.js';
 
 // Notes live in <project>/.dobius/NOTES.md so the terminal agent shares them. Each
 // note is a `## <title>` section with an optional `_<stamp>_` meta line; this parses
@@ -79,7 +80,7 @@ export default function Notes() {
   const [error, setError] = useState('');
 
   const projectName = currentProjectPath
-    ? currentProjectPath.replace(/\/+$/, '').split('/').pop()
+    ? baseName(currentProjectPath)
     : '';
 
   const load = useCallback(async () => {
