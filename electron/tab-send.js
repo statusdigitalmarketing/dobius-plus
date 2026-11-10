@@ -39,13 +39,13 @@ const sending = new Set();
  *       on a message), sleep(ms), now()
  * Resolves { status, body } for the HTTP reply.
  */
-export async function sendToTab(deps, tabId, message) {
+export async function sendToTab(deps, tabId, message, { claudeOnly = false } = {}) {
   if (!deps.tabAlive(tabId) || !deps.ptyOf(tabId)) return fail(404, 'no such tab (see dobius-tabs)');
   // openTabsStarting: a tab /openTab is creating can already be listed before it is marked as its own.
   if (sending.has(tabId) || openTabBusy.has(tabId) || openTabsStarting() > 0) return fail(409, 'another message is being sent to that tab right now; nothing was typed, try again');
   sending.add(tabId);
   try {
-    return await send(deps, tabId, message);
+    return await send(deps, tabId, message, claudeOnly);
   } finally {
     sending.delete(tabId);
   }
@@ -65,7 +65,9 @@ async function stillScreen(deps, watch, until) {
   }
 }
 
-async function send(deps, tabId, message) {
+// claudeOnly (dobius-project tell): only ever a paste into Claude's prompt. A tab whose Claude has exited is back at a
+// shell, and typing the message there would run it as a command.
+async function send(deps, tabId, message, claudeOnly = false) {
   if (deps.inputBusy(tabId)) return fail(409, 'something else is typing into the tab right now; nothing was typed, try again');
   const pty = deps.ptyOf(tabId);
   const watch = deps.watch(tabId);
@@ -75,6 +77,7 @@ async function send(deps, tabId, message) {
   try {
     const claude = await deps.claudeRunning(tabId, null);
     if (!claude) {
+      if (claudeOnly) return fail(409, 'Claude is not at its prompt in that tab (it may have exited or be busy with a command); nothing was typed');
       let leads;
       try { leads = await deps.claudeLeads(tabId); } catch { return fail(409, 'could not check what is running in that tab; nothing was typed, try again'); }
       // Claude leads the terminal but a command it started holds it readable (a tool running): keys could reach that

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { THEMES, applyTheme } from '../lib/themes';
 import { groupByStage } from '../lib/stages';
 import { makeTabId } from '../lib/tab-id';
-import { onScreenTabIds, becomesUnread, clearSeen } from '../lib/tab-unread';
+import { onScreenTabIds, becomesUnread, clearSeen, splitPrimaryOf } from '../lib/tab-unread';
 import { windowFocused } from '../lib/window-focus';
 import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.js';
 import { NEW_TAB_TOOLS, resumeNeedsNewTab } from '../../shared/new-tab.js';
@@ -109,6 +109,8 @@ export const useStore = create((set, get) => ({
   tabIdSpace: null,
   setTabIdSpace: (key) => set({ tabIdSpace: key || null }),
   splitTabId: null,
+  // Split's left pane while the right one is the active (focused) tab: tab-unread.js splitPrimaryOf.
+  splitPrimaryTabId: null,
   splitRatio: 0.5,
 
   // Terminal grid — null when off; otherwise a dense, ordered list of 1–6 tabIds.
@@ -370,8 +372,10 @@ export const useStore = create((set, get) => ({
     const state = get();
     const tabs = state.terminalTabs.filter((t) => t.id !== tabId);
     if (tabs.length === 0) return; // don't remove last tab
+    // Closing the focused right pane of a split leaves the left pane's tab on screen, not a list neighbour.
+    const splitLeft = state.splitTabId === tabId ? splitPrimaryOf({ ...state, terminalTabs: tabs }) : null;
     const newActive = state.activeTabId === tabId
-      ? tabs[Math.max(0, state.terminalTabs.findIndex((t) => t.id === tabId) - 1)]?.id || tabs[0]?.id
+      ? splitLeft || tabs[Math.max(0, state.terminalTabs.findIndex((t) => t.id === tabId) - 1)]?.id || tabs[0]?.id
       : state.activeTabId;
     // Clean up any running agents associated with this tab — prune BOTH
     // runningAgents and agentActivity (otherwise stale activity entries leak
@@ -416,7 +420,11 @@ export const useStore = create((set, get) => ({
     });
   },
 
-  setSplitTab: (tabId) => set({ splitTabId: tabId, gridSlots: null }),
+  setSplitTab: (tabId) => set((s) => ({
+    splitTabId: tabId, gridSlots: null,
+    splitPrimaryTabId: s.activeTabId && s.activeTabId !== tabId ? s.activeTabId : s.splitPrimaryTabId,
+  })),
+  setSplitPrimary: (tabId) => set({ splitPrimaryTabId: tabId }),
   clearSplitTab: () => set({ splitTabId: null }),
   setSplitRatio: (ratio) => set({ splitRatio: Math.min(0.8, Math.max(0.2, Number(ratio) || 0.5)) }),
   setGridColumnRatio: (ratio) => set({ gridColumnRatio: Math.min(0.8, Math.max(0.2, Number(ratio) || 0.5)) }),
@@ -475,12 +483,13 @@ export const useStore = create((set, get) => ({
     if (tabId === null || tabId === undefined) return { activeTabId: null };
     if (typeof tabId !== 'string') return {};
     if (!s.terminalTabs.some((t) => t.id === tabId)) return {};
-    return { activeTabId: tabId };
+    // In a split, any tab but the right pane becomes the left one.
+    return s.splitTabId && tabId !== s.splitTabId ? { activeTabId: tabId, splitPrimaryTabId: tabId } : { activeTabId: tabId };
   }),
 
-  // "I want to see this tab": leave split if it is the split's right pane and
-  // leave grid if it is not a grid cell, otherwise the split guard reverts the
-  // selection or the tab activates while display:none.
+  // "I want to see this tab" (tab bar, palette): leave split if it is the
+  // split's right pane, so it shows full width, and leave grid if it is not a
+  // grid cell, otherwise the tab activates while display:none.
   showTab: (tabId) => {
     const s = get();
     if (tabId === s.splitTabId) s.clearSplitTab();
@@ -640,7 +649,10 @@ export const useStore = create((set, get) => ({
     const hot = { ...state.hookOwnedTabs };
     for (const id of removedIds) delete hot[id];
     const allKept = [...kept, ...pinnedRight];
-    const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : tabId;
+    // A focused split right pane closed: the split's left tab stays on screen, as in removeTab.
+    const splitLeft = state.activeTabId === state.splitTabId && state.splitPrimaryTabId !== state.splitTabId
+      && allKept.some((t) => t.id === state.splitPrimaryTabId) ? state.splitPrimaryTabId : null;
+    const newActive = allKept.find((t) => t.id === state.activeTabId) ? state.activeTabId : (splitLeft || tabId);
     // Same split-cleanup as closeOtherTabs — kill the split pointer if the
     // tab it referenced just got removed.
     const splitTabId = removedIds.has(state.splitTabId) ? null : state.splitTabId;

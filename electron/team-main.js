@@ -20,6 +20,11 @@ let service = null;
 let store = null;
 
 /** The service for the phone server's /team routes, or null while this Mac has no usable identity. */
+/** The tab pinned as team orchestrator, or null (no pin, or team storage unavailable). */
+export function teamOrchestratorTab() {
+  try { const t = store?.settings()?.orchestratorTab; return typeof t === 'string' && t ? t : null; } catch { return null; }
+}
+
 export function getTeamService() {
   if (!service) return null;
   try { store.loadIdentity(); } catch { return null; } // no secure storage: the routes answer 404

@@ -933,3 +933,27 @@
 - **FIX**: Find the harness PIDs (`pgrep -f` candidates), keep only those whose env names the harness userData (`ps -E -p $p -o command= | grep -q <harness>/ud`), and kill those by PID.
 - **CONTEXT**: Same reason as "never pkill -f vite" in NOTES: patterns match more than the harness.
 - **DETECTION**: never `pkill -f` in a harness teardown; `grep -n "pkill -f" scratchpad scripts` should find none.
+
+### Build: 2026-11-10
+- **MISTAKE**: `electron/project-board.js` `oneLine` had raw U+2028/U+2029 inside a regex character class. They are JS line terminators, so the module failed to parse ("Invalid regular expression: missing /"). `node --check` was run on main.js but not on the new file, and nothing imported it until its test.
+- **FIX**: Write the two separators as escapes inside regexes; `node --check` every new file before wiring it in.
+- **CONTEXT**: Any sanitizer that strips line/paragraph separators is at risk when pasted from a tool that renders the characters.
+- **DETECTION**: `grep -rnP '\x{2028}|\x{2029}' electron shared src`
+
+### Performance: 2026-11-10
+- **MISTAKE**: The first `dobius-project brief` read the hook's stdin with `head -c 65536`, which blocks until EOF. A hook (or a manual run) with an open stdin would hold every prompt until the 5 s hook timeout.
+- **FIX**: Read line by line with `read -r -t 1` and stop at the first timeout or EOF.
+- **CONTEXT**: Anything in UserPromptSubmit runs on every prompt in every session; its worst case is the prompt latency.
+- **DETECTION**: `grep -n "head -c" electron/*cli*.js electron/voice-bridge.js`
+
+### UI/UX: 2026-11-10
+- **MISTAKE**: Split view's right pane never took typing (Sam: "split view doesnt allow me to inout into the window on the right hand side but grid view does"). A "defensive guard" effect in `ProjectView.jsx` moved `activeTabId` off `splitTabId` whenever they matched, so a click on the right pane (TerminalPane `activatePane` on mousedown) was undone a frame later and the left pane's auto-focus took the keyboard back. Grid has no such guard, which is why it worked.
+- **FIX**: The right pane may be the active tab. The left pane is `splitPrimaryOf()` in `src/lib/tab-unread.js` (active tab, else `splitPrimaryTabId`, else the first other tab), kept by `setActiveTab` / `setSplitTab` and the sync effect. Proven in the harness by typing `echo $DOBIUS_TAB_ID | tee <file>` with the real keyboard after a click on each half, and by running the same probe against the old file (input went to the left tab).
+- **CONTEXT**: A guard that "fixes" a layout collision by changing focus state fights every click on the thing it guards. Fix the layout (remember the other pane), not the user's selection.
+- **DETECTION**: `grep -n "setActiveTab" src/components/Project/ProjectView.jsx` (no effect there should move the active tab off a pane the user can click)
+
+### Architecture: 2026-11-10
+- **MISTAKE**: The project board's orphan clock was first a `goneAt` field saved on each item. A stamp left from an earlier absence skipped the day of grace, setting it counted as a board change (every session got the brief again), and it only advanced on board changes, so a quiet project kept orphans for weeks.
+- **FIX**: Keep "first seen gone" in memory (`goneSince` in `electron/project-board.js`), update it on every command including the per-prompt brief (`sweep`), drop on the first command after the day. A relaunch restarts every clock, which is the safe direction.
+- **CONTEXT**: Bookkeeping nobody reads must not live in the persisted, change-detected state, or it causes saves, version bumps and broadcasts.
+- **DETECTION**: `grep -n "goneAt" electron/project-board.js` (only the load-time strip should remain)

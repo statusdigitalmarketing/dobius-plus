@@ -3,12 +3,26 @@
 // Pure so it is tested under plain node (electron/__tests__/tab-unread.test.mjs).
 
 /**
+ * The LEFT pane of a split. The active tab when that is not the split (right)
+ * pane; when the right pane is the active one (clicked or focused, so typing
+ * goes there), the tab last on the left, else the first other tab.
+ */
+export function splitPrimaryOf({ activeTabId, splitTabId, splitPrimaryTabId, terminalTabs }) {
+  if (!splitTabId) return activeTabId || null;
+  if (activeTabId && activeTabId !== splitTabId) return activeTabId;
+  const tabs = terminalTabs || [];
+  if (splitPrimaryTabId && splitPrimaryTabId !== splitTabId && tabs.some((t) => t.id === splitPrimaryTabId)) return splitPrimaryTabId;
+  return tabs.find((t) => t.id !== splitTabId)?.id || null;
+}
+
+/**
  * Tab ids currently visible in the terminal area. Mirrors ProjectView's
  * paneStyleFor: grid shows its cells; split shows the split pane plus the
- * primary pane (the active tab, or the first other tab when the active tab IS
- * the split pane); otherwise only the active tab. Nothing in the Dashboard.
+ * primary pane (splitPrimaryOf); otherwise only the active tab. Nothing in the
+ * Dashboard.
  */
-export function onScreenTabIds({ activeView, activeTabId, splitTabId, gridSlots, terminalTabs }) {
+export function onScreenTabIds(s) {
+  const { activeView, activeTabId, splitTabId, gridSlots } = s;
   const ids = new Set();
   if (activeView !== 'terminal') return ids;
   if (Array.isArray(gridSlots) && gridSlots.length) {
@@ -17,9 +31,7 @@ export function onScreenTabIds({ activeView, activeTabId, splitTabId, gridSlots,
   }
   if (splitTabId) {
     ids.add(splitTabId);
-    const primary = activeTabId === splitTabId
-      ? (terminalTabs || []).find((t) => t.id !== splitTabId)?.id
-      : activeTabId;
+    const primary = splitPrimaryOf(s);
     if (primary) ids.add(primary);
     return ids;
   }

@@ -722,11 +722,11 @@ export default function ChatPane({ tabId, visible }) {
 
   // Clicking, focusing or dragging over this pane makes its tab the active
   // one, so window-level drops and shortcuts target what the user is using.
-  // Not for split's right pane: the split guard would hand activity (and
-  // focus) straight back to the left tab.
+  // Split's right pane too: it can be the active tab (splitPrimaryOf keeps the
+  // left pane in place).
   const activate = () => {
     const st = useStore.getState();
-    if (st.activeTabId !== tabId && st.splitTabId !== tabId) st.setActiveTab(tabId);
+    if (st.activeTabId !== tabId) st.setActiveTab(tabId);
   };
 
   useEffect(() => {

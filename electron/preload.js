@@ -559,6 +559,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('team:changed', handler);
     return () => ipcRenderer.removeListener('team:changed', handler);
   },
+  // Project orchestrator (docs/project-orchestrator.md): the pinned tab of a project folder.
+  projectOrchGet: (projectPath) => ipcRenderer.invoke('projectOrch:get', projectPath),
+  projectOrchSet: (tabId, on) => ipcRenderer.invoke('projectOrch:set', tabId, on === true),
+  onProjectOrchChanged: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('projectOrch:changed', handler);
+    return () => ipcRenderer.removeListener('projectOrch:changed', handler);
+  },
   // Tasks > Commands: `! ` commands sessions handed back (electron/handoff-commands.js).
   handoffCommandsList: () => ipcRenderer.invoke('handoffCommands:list'),
   handoffCommandsDismiss: (tabId, id) => ipcRenderer.invoke('handoffCommands:dismiss', tabId, id),

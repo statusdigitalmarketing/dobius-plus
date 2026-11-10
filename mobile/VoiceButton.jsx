@@ -105,7 +105,7 @@ export default function VoiceButton({ connection }) {
       if (!aliveRef.current || connection.closed) return;
       if (!j.ok) { setState('error'); setLine(j.error || 'Transcription failed'); resetSoon(5000); return; }
       if (j.requestId) { setLine(`“${j.transcript}”`); setState('working'); pollReply(j.requestId); }
-      else { setState('done'); setLine(`“${j.transcript}”\n(Conductor offline, not sent)`); resetSoon(8000); }
+      else { setState('done'); setLine(`“${j.transcript}”\n(${j.note || 'Conductor offline'}, not sent)`); resetSoon(8000); }
     } catch {
       if (!aliveRef.current || connection.closed) return;
       setState('error'); setLine('Upload failed'); resetSoon(4000);

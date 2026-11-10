@@ -26,6 +26,7 @@ import { createTerminal, writeTerminal, listTerminals } from './terminal-manager
 import { askSam } from './conversation-router.js';
 import { getProjectConfig, setProjectConfig } from './config-manager.js';
 import { baseName } from '../shared/platform.js';
+import { projectPathFromTabId } from './tab-id-util.js';
 
 const SPAWN_DEBOUNCE_MS = 5000;
 let lastSpawnTs = 0;
@@ -163,12 +164,21 @@ export async function spawnAgent({ projectPath, agentId, initialPrompt, builtinA
  * Set the lead tab for a project. Once set, Conductor routes new work there
  * instead of asking to spawn. Pass `null` to clear.
  */
+// The project orchestrator (docs/project-orchestrator.md) is this same slot: the tab menu and the Voice Conductor's
+// dobius-lead-tab both come through here, so a tab can only lead its OWN project, only while it is open, and every
+// window hears about the change.
+const leadListeners = new Set();
+export function onLeadTabChanged(fn) { leadListeners.add(fn); return () => leadListeners.delete(fn); }
+
 export function setLeadTab(projectPath, tabId) {
-  if (!projectPath) return { ok: false, error: 'projectPath required' };
+  if (!projectPath || typeof projectPath !== 'string') return { ok: false, error: 'projectPath required' };
   if (tabId !== null && (typeof tabId !== 'string' || !/^term-.+-\d+$/.test(tabId))) {
     return { ok: false, error: 'tabId malformed' };
   }
+  if (tabId !== null && projectPathFromTabId(tabId) !== projectPath) return { ok: false, error: 'that tab belongs to another project' };
+  if (tabId !== null && !listTerminals().some((t) => t.id === tabId)) return { ok: false, error: 'that tab is not open' };
   setProjectConfig(projectPath, { leadTabId: tabId });
+  for (const fn of leadListeners) { try { fn(projectPath, tabId); } catch (err) { console.warn('[agent-spawner] lead listener:', err?.message || err); } }
   return { ok: true, projectPath, leadTabId: tabId };
 }
 

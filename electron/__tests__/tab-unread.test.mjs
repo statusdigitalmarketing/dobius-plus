@@ -22,6 +22,10 @@ test('grid: exactly the cells, active or not', () => {
 test('split: split pane plus primary; primary falls back when active IS the split pane', () => {
   assert.deepEqual(ids(onScreenTabIds({ ...base, activeTabId: 'b', splitTabId: 'd' })), ['b', 'd']);
   assert.deepEqual(ids(onScreenTabIds({ ...base, activeTabId: 'd', splitTabId: 'd' })), ['a', 'd']);
+  // The right pane focused: the left keeps the tab that was there.
+  assert.deepEqual(ids(onScreenTabIds({ ...base, activeTabId: 'd', splitTabId: 'd', splitPrimaryTabId: 'c' })), ['c', 'd']);
+  // A left tab that has since closed falls back to the first other tab.
+  assert.deepEqual(ids(onScreenTabIds({ ...base, activeTabId: 'd', splitTabId: 'd', splitPrimaryTabId: 'gone' })), ['a', 'd']);
 });
 
 test('grid wins over a stale split pointer, as in paneStyleFor', () => {

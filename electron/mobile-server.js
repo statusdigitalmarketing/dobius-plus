@@ -41,7 +41,7 @@ import { handleTasksMessage } from './mobile-tasks.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills, loadTranscriptImage } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
-import { peekReply } from './voice-bridge.js';
+import { peekReply, recordReply } from './voice-bridge.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
 import { snapshot as terminalStatusSnapshot } from './terminal-status.js';
 import { estimateContextForTabId } from './tab-context.js';
@@ -604,6 +604,38 @@ function routeToConductor(transcript) {
   for (let i = 0; i < tagged.length; i += CHUNK) writeTerminal(conductorId, tagged.slice(i, i + CHUNK));
   writeTerminal(conductorId, '\r');
   return requestId;
+}
+
+// Brett (Asana 1220329713038498): "Could we just put the messages from the Voice Conductor directly into the Team
+// Global Orchestrator?" When a tab is pinned as team orchestrator, a phone voice command goes into that tab (main sets
+// the route: dobius-send's paste with every guard, Claude only). The answer comes back through the same requestId and
+// /voice/reply a Conductor reply uses (that reply is Dobius's own note, the orchestrator does not answer through it),
+// so phone builds that only know the Conductor show it too. With a live orchestrator pinned a refusal (a draft open, a
+// question showing, a send already in flight) is reported, never handed to the Conductor as well: one agent per
+// command. No pin, or the pinned tab gone: the Conductor as before.
+let voiceOrchestratorRoute = null;
+export function setVoiceOrchestratorRoute(fn) { voiceOrchestratorRoute = typeof fn === 'function' ? fn : null; }
+
+async function routeVoice(transcript) {
+  if (voiceOrchestratorRoute) {
+    try {
+      const r = await voiceOrchestratorRoute(transcript.slice(0, 4000).replace(/[\r\n]+/g, ' '));
+      if (r?.sent) {
+        const requestId = `req-${crypto.randomBytes(6).toString('hex')}`;
+        recordReply(requestId, r.unconfirmed
+          ? `Typed into your orchestrator tab "${r.label}", not confirmed: ${r.note || 'check that tab'}.`
+          : `Sent to your orchestrator tab "${r.label}".`);
+        return { requestId, mode: 'orchestrator' };
+      }
+      if (r) return { requestId: null, mode: null, error: `Your orchestrator tab did not take it: ${r.error || 'not delivered'}` };
+    } catch (err) {
+      console.warn('[mobile] voice to orchestrator failed:', err?.message || err);
+      return { requestId: null, mode: null, error: 'Your orchestrator tab did not take it' };
+    }
+  }
+  const requestId = routeToConductor(transcript);
+  if (requestId) return { requestId, mode: 'conductor' };
+  return { requestId: null, mode: null, error: null };
 }
 
 // Monotonic per-session counter for phone-spawned terminal ids. Must stay the
@@ -1332,7 +1364,7 @@ async function doStartMobileServer(stillCurrent) {
   //      is typed straight into that tab, no Conductor involved, no req-id
   //      tagging, no reply expected. Fast and dumb. Useful when you already
   //      know exactly which tab you want to talk to.
-  expApp.post('/voice/intent', (req, res) => {
+  expApp.post('/voice/intent', async (req, res) => {
     if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
     const transcript = req.body?.transcript;
     const directTabId = req.body?.tabId;
@@ -1356,9 +1388,9 @@ async function doStartMobileServer(stillCurrent) {
     }
     // Conductor mode (default): route via the shared helper, tagged with a
     // per-request id so /voice/reply can match the reply. 503 if offline.
-    const requestId = routeToConductor(transcript);
-    if (!requestId) return res.status(503).json({ ok: false, error: 'conductor offline' });
-    res.json({ ok: true, mode: 'conductor', requestId });
+    const routed = await routeVoice(transcript);
+    if (!routed.requestId) return res.status(503).json({ ok: false, error: routed.error || 'conductor offline' });
+    res.json({ ok: true, mode: routed.mode, requestId: routed.requestId });
   });
 
   // POST /voice/audio  (raw recorded audio body; Bearer auth)
@@ -1391,11 +1423,12 @@ async function doStartMobileServer(stillCurrent) {
       const result = await transcribeAudio(audio, req.headers['content-type'], ac.signal);
       if (ac.signal.aborted) return; // client already gone; nothing to send
       if (result.error) return res.status(422).json({ ok: false, error: result.error });
-      const requestId = routeToConductor(result.text); // null if Conductor offline
+      const routed = await routeVoice(result.text); // requestId null when nothing took it
+      if (ac.signal.aborted) return;
       // Transcription succeeded either way, but be honest about whether the
       // command was actually routed, so the phone doesn't imply it was handled
       // when the Conductor is down. Codex Phase 5a P2.
-      res.json({ ok: true, transcript: result.text, requestId, routed: !!requestId });
+      res.json({ ok: true, transcript: result.text, requestId: routed.requestId, routed: !!routed.requestId, mode: routed.mode, ...(routed.error ? { note: routed.error } : {}) });
     } finally {
       voiceInFlight -= 1;
       res.off('close', onClose);
