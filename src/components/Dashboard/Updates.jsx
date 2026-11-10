@@ -101,6 +101,8 @@ export default function Updates() {
       {/* Status banner */}
       <StatusBanner status={status} ready={ready} pending={pending} onInstall={handleInstall} isUpToDate={isUpToDate} />
 
+      <RestartCard updateReady={ready && !!pending} installing={status.state === 'installing'} />
+
       {/* Release notes */}
       {latestRelease && (
         <div
@@ -136,6 +138,100 @@ export default function Updates() {
         <p className="text-xs mt-4" style={{ color: 'var(--danger)' }}>
           Couldn't reach GitHub: {releaseError}
         </p>
+      )}
+    </div>
+  );
+}
+
+// Restart without updating: each Claude tab gets a fresh `claude` (Claude in Chrome reconnects, new hooks and MCP
+// servers load) and auto-resume picks the conversation back up. Asks once inline, since it ends every running turn.
+// The confirm is armed after ARM_MS and Cancel takes the spot under the cursor, so a double-click or a held Enter on
+// the first button cannot skip it.
+const ARM_MS = 400;
+const STALL_MS = 20000;
+function RestartCard({ updateReady, installing }) {
+  const [confirming, setConfirming] = useState(false);
+  const [armed, setArmed] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [error, setError] = useState('');
+  const [autoResume, setAutoResume] = useState(true);
+  useEffect(() => {
+    window.electronAPI?.appRestartInfo?.().then((r) => { if (r) setAutoResume(r.autoResume !== false); }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!confirming) { setArmed(false); return undefined; }
+    const t = setTimeout(() => setArmed(true), ARM_MS);
+    return () => clearTimeout(t);
+  }, [confirming]);
+  // ok only means the quit started. If this window is still here well after, say so instead of spinning forever.
+  useEffect(() => {
+    if (!restarting) return undefined;
+    const t = setTimeout(() => setError('Dobius+ is still closing. If it does not reopen, quit it and open it again.'), STALL_MS);
+    return () => clearTimeout(t);
+  }, [restarting]);
+  const restart = async () => {
+    if (!armed || restarting || installing) return;
+    setRestarting(true);
+    setError('');
+    try {
+      const res = await window.electronAPI?.appRestart?.();
+      if (!res?.ok) throw new Error(res?.reason || 'restart is not available');
+    } catch (err) {
+      setRestarting(false);
+      setConfirming(false);
+      setError(`Couldn't restart: ${String(err?.message || err)}`);
+    }
+  };
+  const label = updateReady ? 'Restart without updating' : 'Restart Dobius+';
+  const help = autoResume
+    ? 'Quits and reopens on this version. Windows and tabs come back, and Claude conversations that were running resume in a fresh claude --resume, which loads your current hooks, MCP servers and Claude in Chrome (when Chrome is on by default in /chrome). Flags a tab was started with are not kept, and Codex and plain terminal tabs come back as a new shell.'
+    : 'Quits and reopens on this version. Windows and tabs come back. Auto-resume is turned off on this Mac, so Claude conversations do not restart by themselves.';
+  return (
+    <div
+      className="mt-4 p-4 rounded-md flex items-center justify-between gap-4"
+      style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
+    >
+      <div className="min-w-0">
+        <div className="text-sm font-medium" style={{ color: 'var(--fg)' }}>
+          {restarting ? 'Restarting…' : confirming ? 'Restart now? Running Claude turns stop.' : label}
+        </div>
+        <div className="text-xs mt-0.5" style={{ color: error ? 'var(--danger)' : 'var(--dim)' }}>
+          {error || help}
+        </div>
+      </div>
+      {confirming && !restarting ? (
+        <div className="flex gap-2 shrink-0">
+          <button
+            onClick={restart}
+            disabled={!armed || installing}
+            className="px-3 py-2 text-sm rounded-md font-medium"
+            style={{ backgroundColor: 'var(--accent)', color: 'white', opacity: armed && !installing ? 1 : 0.5 }}
+          >
+            Restart
+          </button>
+          <button
+            onClick={() => setConfirming(false)}
+            autoFocus
+            className="px-3 py-2 text-sm rounded-md"
+            style={{ color: 'var(--fg)', border: '1px solid var(--border)' }}
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={() => { setError(''); setConfirming(true); }}
+          disabled={restarting || installing}
+          className="px-4 py-2 text-sm rounded-md font-medium shrink-0"
+          style={{
+            color: 'var(--fg)',
+            border: '1px solid var(--border)',
+            opacity: restarting || installing ? 0.5 : 1,
+            cursor: restarting ? 'wait' : installing ? 'not-allowed' : 'pointer',
+          }}
+        >
+          {restarting ? 'Restarting…' : 'Restart'}
+        </button>
       )}
     </div>
   );

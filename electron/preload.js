@@ -344,6 +344,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Auto-updater
   updaterCheck: () => ipcRenderer.invoke('updater:check'),
   updaterInstall: () => ipcRenderer.invoke('updater:install'),
+  appRestart: () => ipcRenderer.invoke('app:restart'),
+  appRestartInfo: () => ipcRenderer.invoke('app:restartInfo'),
   updaterGetPending: () => ipcRenderer.invoke('updater:getPending'),
   updaterGetStatus: () => ipcRenderer.invoke('updater:getStatus'),
   updaterGetLatestRelease: (force) => ipcRenderer.invoke('updater:getLatestRelease', force === true),

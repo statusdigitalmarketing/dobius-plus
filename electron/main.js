@@ -99,7 +99,7 @@ import {
   getWindowEntryByWcId, primaryDockTarget, dockingTabs, markTearOffIdentityDocked, tearOffKeyInUse, reserveTearOffKey,
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
-import { initAutoUpdater } from './auto-updater.js';
+import { initAutoUpdater, installInFlight } from './auto-updater.js';
 import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCert } from './tailscale.js';
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
@@ -145,7 +145,7 @@ import { localDay } from '../shared/task-due.js';
 import { boardStatus as inboxBoardStatus, startBoard as startInboxBoard, actOnCard as actOnInboxCard, fleetInfo, boardIsStandIn } from './inbox-board.js';
 import { listTasks, peekTasks, legacyListWaiting, addTask, updateTask, deleteTask, syncAsanaTasks, workingAsanaKeyFrom, advanceTask, blockTask, unblockTask, completeTaskByRef, completeTaskById, reopenTask } from './tasks-service.js';
 import { getImessageBridge, updateImessageBridge, getAsanaQueue, updateAsanaQueue } from './config-manager.js';
-import { readUpdateBackup } from './config-manager.js';
+import { readUpdateBackup, getAutoResume } from './config-manager.js';
 import { recoverWindowLists } from './update-window-recovery.js';
 import { SHARED_KEYS, setClaudeSettingsReader, sharedKeyStatus, sharedKeyError, asanaToken } from './claude-settings-env.js';
 import { startVisualServer, stopVisualServer, getVisualPort, listVisualPages, getVisualProjectPath } from './visual-server.js';
@@ -5594,6 +5594,34 @@ app.whenReady().then(() => {
 let quitTimer = null;
 let savedBeforeQuit = false;
 
+// Restart without updating (Updates tab). Runs the confirmed two-press quit exactly as Cmd+Q twice does: Claude
+// sessions are ended resumably, the window lists and running stamps saved, so auto-resume brings the sessions back in
+// the new process. For when every session needs a fresh `claude` (Claude in Chrome reconnecting, a changed hook or MCP
+// config) without anyone retyping resumes. The new copy is registered in will-quit, at the very end, so a macOS
+// shutdown that arrives mid-quit, or an update quit that took over, starts nothing (app.relaunch cannot be undone).
+// RELAUNCH_ARG makes a Windows copy wait for the single-instance lock instead of handing over.
+// No update is installed: autoInstallOnAppQuit is off, and an install in flight or attempted refuses this.
+let restartRequested = false;
+ipcMain.handle('app:restartInfo', () => {
+  let autoResume = true;
+  try { autoResume = getAutoResume().enabled !== false; } catch (err) { console.warn('[restart] could not read auto-resume:', err?.message || err); }
+  return { autoResume };
+});
+ipcMain.handle('app:restart', () => {
+  if (restartRequested || getQuitting() || getQuittingForUpdate() || (quitConfirmed && savedBeforeQuit)) return { ok: false, reason: 'Dobius+ is already quitting' };
+  if (installInFlight()) return { ok: false, reason: 'an update is installing' };
+  // Squirrel may still hold an update staged from an earlier attempt and install it on this quit, relaunching beside us.
+  if (getInstallAttempted()) return { ok: false, reason: 'an update install was started earlier, so quit and reopen Dobius+ to finish it' };
+  restartRequested = true;
+  quitReason = 'restart (Restart button, no update)';
+  logLine('diag.quit', 'restart requested: quitting gracefully, then starting again');
+  clearTimeout(quitTimer);
+  quitTimer = null;
+  quitConfirmed = true;
+  app.quit();
+  return { ok: true };
+});
+
 // Updater quit bypass. When the user clicks the Restart button on the auto-
 // update toast, autoUpdater.quitAndInstall() internally calls app.quit()
 // which fires before-quit. Without a bypass the two-press Cmd+Q overlay
@@ -5943,6 +5971,11 @@ app.on('will-quit', (e) => {
     flushConfigAsync(),
     new Promise((resolve) => setTimeout(resolve, 1500)),
   ]).finally(() => {
+    // Restart without updating: start the new copy now, unless macOS is shutting down (a copy started into a logout
+    // misses the shutdown notice and blocks it at the two-press prompt). An update quit never gets here (didTeardown).
+    if (restartRequested && !quitForShutdown && !getQuittingForUpdate()) {
+      try { app.relaunch({ args: [...process.argv.slice(1).filter((a) => a !== RELAUNCH_ARG), RELAUNCH_ARG] }); } catch (err) { console.warn('[restart] relaunch failed:', err?.message || err); }
+    }
     app.exit(0); // hard exit, the work above already tore everything down
   });
 });
