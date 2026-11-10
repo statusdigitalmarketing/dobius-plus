@@ -847,7 +847,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:readPlanFile', (_event, planName) => readPlanFile(planName));
   ipcMain.handle('data:loadSkills', () => loadSkills());
   ipcMain.handle('data:loadTranscript', (_event, sessionId, projectPath) => loadTranscript(sessionId, projectPath));
-  ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses());
+  ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses({ ptyPids: listTerminals().map((t) => t.pid) }));
   ipcMain.handle('data:listProjects', () => listProjects());
   ipcMain.handle('data:loadAllSessions', (_event, projectFilter, opts) => loadAllSessionsShared(typeof projectFilter === 'string' ? projectFilter : undefined, (opts && typeof opts === 'object') ? opts : {}));
   ipcMain.handle('data:getAllProjectTabs', () => {
@@ -954,15 +954,16 @@ function setupDataHandlers() {
   ipcMain.handle('data:killProcess', async (_event, pid) => {
     const n = parseInt(pid, 10);
     if (!Number.isFinite(n) || n <= 1) throw new Error('Invalid PID');
-    // SECURITY: only kill PIDs that getActiveProcesses() reports. Without
+    // SECURITY: only kill a Claude process running inside a Dobius tab, read fresh. Without
     // this gate, a renderer bug or compromised page could SIGTERM ANY
-    // user-owned process (Chrome, Slack, etc). Codex flagged HIGH on PR #3.
+    // user-owned process (Chrome, Slack, etc). Codex flagged HIGH on PR #3. Claude processes
+    // Dobius did not start (the Claude Desktop app's own one) are listed but never killable.
     try {
-      const active = await getActiveProcesses();
+      const active = await getActiveProcesses({ ptyPids: listTerminals().map((t) => t.pid), fresh: true });
       const allowed = new Set((Array.isArray(active) ? active : [])
-        .map((p) => Number(p.pid)).filter(Number.isFinite));
+        .filter((p) => p.owned).map((p) => Number(p.pid)).filter(Number.isFinite));
       if (!allowed.has(n)) {
-        throw new Error('PID is not in the active-processes list, refusing to kill');
+        throw new Error('PID is not a Claude process in a Dobius tab, refusing to kill');
       }
       process.kill(n, 'SIGTERM');
       return true;

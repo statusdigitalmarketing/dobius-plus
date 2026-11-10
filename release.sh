@@ -98,6 +98,9 @@ cp "$DMG" dist-electron/Dobius-Plus.dmg
 gh release upload "v$V" dist-electron/Dobius-Plus.dmg --clobber
 
 step "Publish the draft (atomic go-live with all 6 assets)"
+# Notes first: the Updates panel shows the body, and every release from 2.1.8 to 2.2.17 went out without one.
+# A failure here only costs the notes, never the release.
+{ node scripts/release-notes.mjs "v$V" > dist-electron/release-notes.md && gh release edit "v$V" --notes-file dist-electron/release-notes.md; } || echo "WARN: release notes not set; add them with: gh release edit v$V --notes-file <file>" >&2
 gh release edit "v$V" --draft=false
 
 step "Verify release"

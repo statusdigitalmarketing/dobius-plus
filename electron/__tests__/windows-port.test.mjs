@@ -255,6 +255,27 @@ test('Overview lists Claude Code processes on Windows, never the Claude Desktop 
   assert.deepEqual(claudeCodeProcessesFromWinRows(null), []);
 });
 
+test('Overview kill: only a Claude running under a Dobius tab is owned, never Claude Desktop\'s own', async () => {
+  const { pidsUnder, claudeProcessesFromMacRows } = await import('../data-service.js');
+  const rows = [
+    { pid: 1, ppid: 0, command: '/sbin/launchd' },
+    { pid: 500, ppid: 1, command: '/Applications/Dobius+.app/Contents/MacOS/Dobius+' },
+    { pid: 600, ppid: 500, command: '/bin/zsh -l' }, // a tab's PTY
+    { pid: 610, ppid: 600, command: '/Users/u/.local/bin/claude --resume abc' },
+    { pid: 611, ppid: 610, command: 'node /Users/u/.claude/skills/x/mcp.js' },
+    { pid: 700, ppid: 1, command: '/Applications/Claude.app/Contents/MacOS/Claude' },
+    { pid: 710, ppid: 700, command: '/Users/u/Library/Application Support/Claude/claude-code/2.1.300/claude' },
+    { pid: 800, ppid: 800, command: 'cycle' }, // a reused pid that is its own parent ends the walk
+  ];
+  const under = pidsUnder(rows, [600, 'junk', -1]);
+  assert.deepEqual([...under].sort((a, b) => a - b), [600, 610, 611]);
+  assert.deepEqual(claudeProcessesFromMacRows(rows).map((p) => [p.pid, under.has(Number(p.pid))]), [
+    ['610', true], ['611', true], ['710', false], // Claude.app itself has no lowercase claude, as with pgrep
+  ]);
+  assert.deepEqual([...pidsUnder(rows, [])], []);
+  assert.deepEqual([...pidsUnder(null, [600])], [600]);
+});
+
 test('Chrome profiles: Windows paths for Local State and chrome.exe, macOS unchanged', async () => {
   const { chromeLocalStatePath, chromeBinaryCandidates } = await import('../chrome-profiles.js');
   const env = { LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local', ProgramFiles: 'C:\\Program Files', 'ProgramFiles(x86)': 'C:\\Program Files (x86)' };

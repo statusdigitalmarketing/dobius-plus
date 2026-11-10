@@ -100,7 +100,7 @@ export default function DashboardView() {
   const boardNotification = useStore((s) => s.boardNotification);
   const clearBoardNotification = useStore((s) => s.clearBoardNotification);
   const { stats, settings, bridgeServers, plans, skills, loading } = useStats();
-  const [sessionCount, setSessionCount] = useState(0);
+  const [sessionCount, setSessionCount] = useState(null); // null until counted
   const runningCount = Object.keys(runningAgents).length;
 
   // Keep the selected page visible when the window is too short for the whole
@@ -345,7 +345,7 @@ export default function DashboardView() {
             transition={{ duration: 0.15 }}
             className="h-full"
           >
-            {renderTab && renderTab({ stats, settings, bridgeServers, plans, skills })}
+            {renderTab && renderTab({ stats, settings, bridgeServers, plans, skills, sessionCount })}
           </motion.div>
         </AnimatePresence>
       </div>

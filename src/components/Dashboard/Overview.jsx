@@ -1,21 +1,25 @@
 import { useMemo, useState } from 'react';
 import { useStore } from '../../store/store';
 
-export default function Overview({ stats, settings }) {
-  const sessions = useStore((s) => s.sessions);
+export default function Overview({ stats, settings, sessionCount }) {
   const activeProcesses = useStore((s) => s.activeProcesses);
   const setActiveProcesses = useStore((s) => s.setActiveProcesses);
 
   const dailyActivity = stats?.dailyActivity;
-  const { totalMessages, totalSessions, totalTools } = useMemo(() => {
-    if (!dailyActivity) return { totalMessages: 0, totalSessions: 0, totalTools: 0 };
-    let msgs = 0, sess = 0, tools = 0;
+  // Sessions is the Sessions page's own count (sessionCount, from DashboardView), so the card and the "Sessions (N)"
+  // nav label always agree. Summing dailyActivity's per-day counts gave a third number that counted a session once
+  // for every day it ran in (Max, Windows 2.2.17 pass: 12 here, 26 in the nav, 7 in the status bar).
+  const { totalMessages, totalTools, todaySessions } = useMemo(() => {
+    if (!dailyActivity) return { totalMessages: 0, totalTools: 0, todaySessions: 0 };
+    let msgs = 0, tools = 0;
     for (const d of dailyActivity) {
       msgs += d.messageCount || 0;
-      sess += d.sessionCount || 0;
       tools += d.toolCallCount || 0;
     }
-    return { totalMessages: msgs, totalSessions: sess, totalTools: tools };
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const t = dailyActivity.find((d) => d.date === today);
+    return { totalMessages: msgs, totalTools: tools, todaySessions: t?.sessionCount || 0 };
   }, [dailyActivity]);
 
   return (
@@ -24,14 +28,14 @@ export default function Overview({ stats, settings }) {
           current Claude Code no longer writes; when stats are history-derived we
           show a real Projects count instead of a misleading 0. */}
       <div className="grid grid-cols-4 gap-3">
-        <StatCard label="Sessions" value={totalSessions.toLocaleString()} />
+        <StatCard label="Sessions" value={sessionCount == null ? '...' : sessionCount.toLocaleString()} />
         <StatCard label="Messages" value={totalMessages.toLocaleString()} />
         {stats?.derived ? (
           <StatCard label="Projects" value={(stats?.projectCount || 0).toLocaleString()} />
         ) : (
           <StatCard label="Tool Calls" value={totalTools.toLocaleString()} />
         )}
-        <StatCard label="Recent" value={sessions.length} />
+        <StatCard label="Sessions today" value={todaySessions.toLocaleString()} />
       </div>
 
       {/* Active processes */}
@@ -122,6 +126,13 @@ function ProcessRow({ process: p, onKilled }) {
         {p.command}
       </td>
       <td className="px-3 py-1.5 text-right">
+        {/* Only a Claude running in a Dobius tab can be killed here. Others (the Claude desktop app's own, a session
+            in another terminal) belong to something else, and main refuses them anyway. */}
+        {!p.owned ? (
+          <span title="Not started by Dobius+, so it can't be stopped from here" style={{ fontSize: 9, color: 'var(--dim)', whiteSpace: 'nowrap' }}>
+            outside
+          </span>
+        ) : (
         <button
           onClick={handleKill}
           title={confirm ? 'Click again to send SIGTERM' : 'Kill process'}
@@ -142,6 +153,7 @@ function ProcessRow({ process: p, onKilled }) {
         >
           {confirm ? 'kill?' : '× kill'}
         </button>
+        )}
       </td>
     </tr>
   );

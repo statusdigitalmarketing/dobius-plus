@@ -124,7 +124,6 @@ function useContextSize(tabId) {
 }
 
 export default function StatusBar() {
-  const sessions = useStore((s) => s.sessions);
   const activeProcesses = useStore((s) => s.activeProcesses);
   const tabs = useStore((s) => s.terminalTabs);
   const activeTabId = useStore((s) => s.activeTabId);
@@ -201,7 +200,6 @@ export default function StatusBar() {
             )}
           </span>
         )}
-        <span>{sessions.length} sessions</span>
         <span className="flex items-center gap-1.5">
           <span
             className="w-1.5 h-1.5 rounded-full inline-block"

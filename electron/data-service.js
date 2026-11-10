@@ -2390,35 +2390,79 @@ export function claudeCodeProcessesFromWinRows(rows, isClaude = winClaudeCommand
     .map((r) => ({ pid: String(r.pid), command: r.command }));
 }
 
-async function winActiveClaudeProcesses() {
-  const rows = await winProcessTable();
-  return rows ? claudeCodeProcessesFromWinRows(rows) : [];
+/**
+ * Pure: every pid at or under one of `roots` in a {pid, ppid} process table. The roots are the Dobius tabs' PTY
+ * pids, so the result is everything running inside a Dobius tab. The visited set bounds the walk by the table size,
+ * whatever cycles a reused pid makes.
+ */
+export function pidsUnder(rows, roots) {
+  const kids = new Map();
+  for (const r of rows || []) {
+    const parent = Number(r.ppid);
+    if (!kids.has(parent)) kids.set(parent, []);
+    kids.get(parent).push(Number(r.pid));
+  }
+  const under = new Set();
+  const queue = [...(roots || [])].map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  while (queue.length) {
+    const pid = queue.pop();
+    if (under.has(pid)) continue;
+    under.add(pid);
+    for (const k of kids.get(pid) || []) queue.push(k);
+  }
+  return under;
+}
+
+// One `ps` read shared by every window's 10s Overview poll (each project window polls on its own), kept 2s.
+// The kill gate always reads fresh.
+const PS_TABLE_MS = 2000;
+let psTableCache = null;
+
+function macProcessTable({ fresh = false } = {}) {
+  const now = Date.now();
+  if (!fresh && psTableCache && now - psTableCache.at < PS_TABLE_MS) return psTableCache.pending;
+  const pending = new Promise((resolve) => {
+    execFile('ps', ['-axo', 'pid=,ppid=,command='], { timeout: 5000, maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
+      if (err) {
+        console.warn('[data-service] ps read failed:', err.code || err.message);
+        resolve(null);
+        return;
+      }
+      const rows = [];
+      for (const line of String(stdout).split('\n')) {
+        const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+        if (m) rows.push({ pid: Number(m[1]), ppid: Number(m[2]), command: m[3] });
+      }
+      resolve(rows);
+    });
+  });
+  const entry = { at: now, pending };
+  if (!fresh) psTableCache = entry;
+  pending.then((rows) => { if (!rows && psTableCache === entry) psTableCache = null; });
+  return pending;
+}
+
+/** Pure (macOS): the rows `pgrep -lf claude` used to report, less a New Tab's wrapper shell, which names the tools
+ * in its own argv and is the tab's shell, not a Claude process (shared/new-tab.js loginShellSpawn). */
+export function claudeProcessesFromMacRows(rows) {
+  return (rows || [])
+    .filter((r) => r && typeof r.command === 'string' && r.command.includes('claude') && !isNewTabWrapperCommand(r.command))
+    .map((r) => ({ pid: String(r.pid), command: r.command }));
 }
 
 /**
- * Get active Claude processes using execFile (safe — no shell injection).
+ * Active Claude processes, each marked `owned` when it runs inside one of `ptyPids` (a Dobius tab). Only owned ones
+ * may be killed from the Overview: the list also shows Claude processes Dobius did not start (the Claude Desktop
+ * app's own Claude Code, a Terminal.app session), and a kill button there ended someone else's work (Max, Windows
+ * 2.2.17 pass).
  */
-export async function getActiveProcesses() {
-  if (process.platform === 'win32') return winActiveClaudeProcesses();
-  return new Promise((resolve) => {
-    execFile('pgrep', ['-lf', 'claude'], { timeout: 5000 }, (err, stdout) => {
-      if (err || !stdout) {
-        resolve([]);
-        return;
-      }
-      // A New Tab's wrapper shell names the tools in its own argv; it is the
-      // tab's shell, not a Claude process (shared/new-tab.js loginShellSpawn).
-      const lines = stdout.trim().split('\n').filter((l) => l && !isNewTabWrapperCommand(l));
-      resolve(lines.map((line) => {
-        const spaceIdx = line.indexOf(' ');
-        if (spaceIdx === -1) return null;
-        return {
-          pid: line.slice(0, spaceIdx),
-          command: line.slice(spaceIdx + 1),
-        };
-      }).filter(Boolean));
-    });
-  });
+export async function getActiveProcesses({ ptyPids = [], fresh = false } = {}) {
+  const win = process.platform === 'win32';
+  const rows = win ? await winProcessTable({ fresh }) : await macProcessTable({ fresh });
+  if (!rows) return [];
+  const claude = win ? claudeCodeProcessesFromWinRows(rows) : claudeProcessesFromMacRows(rows);
+  const under = pidsUnder(rows, ptyPids);
+  return claude.map((p) => ({ ...p, owned: under.has(Number(p.pid)) }));
 }
 
 /**

@@ -65,7 +65,6 @@ export const useStore = create((set, get) => ({
 
   // Data
   currentProjectPath: null,
-  sessions: [],
   activeProcesses: [],
   buildComplete: false,
 
@@ -661,7 +660,6 @@ export const useStore = create((set, get) => ({
   currentIsFork: false,
   setCurrentIsFork: (v) => set({ currentIsFork: !!v }),
 
-  setSessions: (sessions) => set({ sessions }),
   setActiveProcesses: (procs) => set({ activeProcesses: procs }),
   setBuildComplete: (val) => set({ buildComplete: val }),
 
