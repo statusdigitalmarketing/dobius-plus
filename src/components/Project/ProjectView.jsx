@@ -28,7 +28,7 @@ import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
 import { useSnoozeReturn } from '../../hooks/useSnoozeReturn';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
-import { onScreenTabIds } from '../../lib/tab-unread';
+import { onScreenTabIds, splitPrimaryOf } from '../../lib/tab-unread';
 import { windowFocused, onWindowFocus } from '../../lib/window-focus';
 import { markAdopting, takeAdopting, markDoNotKill } from '../../hooks/useTerminal';
 
@@ -80,6 +80,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
   const isExtraWindow = !tearOffTabId && !!windowKey && windowKey !== 'main';
   // Split view + terminal grid state and actions
   const splitTabId = useStore((s) => s.splitTabId);
+  const splitPrimaryTabId = useStore((s) => s.splitPrimaryTabId);
   const clearSplitTab = useStore((s) => s.clearSplitTab);
   const splitRatio = useStore((s) => s.splitRatio);
   const setSplitRatio = useStore((s) => s.setSplitRatio);
@@ -650,19 +651,21 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
     window.electronAPI?.tabsReportUnread?.(Object.keys(unreadTabs));
   }, [unreadTabs]);
 
-  // Defensive guard: paneStyleFor renders splitTabId on the right and
-  // activeTabId on the left. If those collide (Cmd+number activated the
-  // split tab, programmatic activeTab change, etc.), the left half goes
-  // blank. The menu handler already routes around this, but any other path
-  // that sets activeTabId can hit it — auto-pick a different tab as the
-  // left pane when the collision is detected.
+  // Split: the right pane (splitTabId) may BE the active tab, which is what
+  // lets it take focus and typing (clicking it activates it, like a grid
+  // cell). The left pane is then the tab last shown there (splitPrimaryOf).
+  // This keeps that record true for paths that set activeTabId directly, and
+  // ends a split that has no other tab to show on the left.
+  // (Until 2.2.23 this effect moved the active tab off the right pane, which
+  // pulled focus back to the left one on every click: Sam, 2026-11-10.)
   useEffect(() => {
-    if (!splitTabId || splitTabId !== activeTabId) return;
-    const tabs = useStore.getState().terminalTabs;
-    const idx = tabs.findIndex((t) => t.id === splitTabId);
-    const other = tabs[idx + 1] || tabs[idx - 1];
-    if (other) useStore.getState().setActiveTab(other.id);
-    else useStore.getState().clearSplitTab(); // only one tab — split is meaningless
+    if (!splitTabId) return;
+    const s = useStore.getState();
+    if (activeTabId && activeTabId !== splitTabId) {
+      if (s.splitPrimaryTabId !== activeTabId) s.setSplitPrimary(activeTabId);
+      return;
+    }
+    if (!s.terminalTabs.some((t) => t.id !== splitTabId)) s.clearSplitTab();
   }, [activeTabId, splitTabId]);
 
   // Same class of defense for grid mode: paneStyleFor hides any tab not in
@@ -1335,9 +1338,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
               const rowTotal = rowRatios.reduce((sum, r) => sum + r, 0) || 1;
               const normalizedRows = rowRatios.map((r) => r / rowTotal);
               const rowTemplate = normalizedRows.map((r) => `${Math.max(0.12, r)}fr`).join(' ');
-              const primarySplitTabId = splitTabId && activeTabId === splitTabId
-                ? tabs.find((t) => t.id !== splitTabId)?.id
-                : activeTabId;
+              const primarySplitTabId = splitPrimaryOf({ activeTabId, splitTabId, splitPrimaryTabId, terminalTabs: tabs });
 
               // CSS placement for the i-th terminal. An odd final terminal spans
               // the full row so the grid stays gap-free.

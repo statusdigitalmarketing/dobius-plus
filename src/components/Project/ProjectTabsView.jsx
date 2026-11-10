@@ -128,6 +128,9 @@ const GONE_SETTLE_MS = 1500;
  *   - a tab in ANOTHER project (not live)          -> open/focus that project's window
  *   - a tab in THIS project, not live anywhere     -> resume its session here (if linked)
  */
+// Per window (each window is its own renderer): project path -> true when opened, false when folded.
+const windowFold = Object.create(null);
+
 export default function ProjectTabsView({ search = '', onResumeSession }) {
   const [groups, setGroups] = useState(null); // null = loading
   const currentProjectPath = useStore((s) => s.currentProjectPath);
@@ -141,7 +144,14 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
   const showTab = useStore((s) => s.showTab);
   const setActiveView = useStore((s) => s.setActiveView);
   const requestTabBar = useStore((s) => s.requestTabBar);
-  const [collapsed, setCollapsed] = useState({}); // path -> true when collapsed
+  // Only the project this window is on starts open; every other project is folded until you open it (Brett, Asana
+  // 1220329713038492: "only the project that's open to be open and the other projects will be collapsed by default").
+  // A choice lasts for this window (kept across the sidebar closing and opening), never shared with other windows.
+  const [fold, setFold] = useState(() => ({ ...windowFold }));
+  const toggleProject = useCallback((projectPath, isOpen) => {
+    windowFold[projectPath] = !isOpen;
+    setFold({ ...windowFold });
+  }, []);
   // Snoozed shelves start folded and stay open once you open one (Brett: "auto-collapsed unless we uncollapse it"),
   // remembered per project in settings.sidebarSnoozeOpen (a list of project paths, at most 50).
   const [snoozeOpen, setSnoozeOpen] = useState(() => new Set());
@@ -409,11 +419,14 @@ export default function ProjectTabsView({ search = '', onResumeSession }) {
     <div className="flex-1 overflow-y-auto">
       {filtered.map((g) => {
         const isCurrent = g.path === currentProjectPath;
-        const isCollapsed = collapsed[g.path];
+        // A search shows every match, folded or not.
+        const isOpen = search.trim() ? true : (typeof fold[g.path] === 'boolean' ? fold[g.path] : isCurrent);
+        const isCollapsed = !isOpen;
         return (
           <div key={g.path} style={{ borderBottom: '1px solid var(--border)' }}>
             <button
-              onClick={() => setCollapsed((c) => ({ ...c, [g.path]: !c[g.path] }))}
+              onClick={() => { if (!search.trim()) toggleProject(g.path, isOpen); }}
+              aria-expanded={isOpen}
               className="w-full flex items-center justify-between px-3 py-1.5"
               style={{
                 background: 'transparent', border: 'none', cursor: 'pointer',

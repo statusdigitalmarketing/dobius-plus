@@ -104,11 +104,13 @@ import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCer
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
-  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones, tabLabelForNotify,
+  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones, tabLabelForNotify, setVoiceOrchestratorRoute,
 } from './mobile-server.js';
-import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setTabSendService, setCodexStatusHandler, setTeamBridge } from './voice-bridge.js';
+import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setTabSendService, setCodexStatusHandler, setTeamBridge, setProjectBridge } from './voice-bridge.js';
 import { sendToTab } from './tab-send.js';
-import { initTeam, stopTeam, handleTeamBridge, getTeamService } from './team-main.js';
+import { createProjectBoard } from './project-board.js';
+import { getLeadTab, setLeadTab, onLeadTabChanged } from './agent-spawner.js';
+import { initTeam, stopTeam, handleTeamBridge, getTeamService, teamOrchestratorTab } from './team-main.js';
 import { writeAgentContext } from './agent-context.js';
 import { visibleBuiltinAgents } from './visible-agents.js';
 import { createHandoffCommands, runScriptText } from './handoff-commands.js';
@@ -451,6 +453,14 @@ const RUN_TOKEN_MS = 60_000;
 const runScriptDir = () => path.join(app.getPath('userData'), 'run');
 // Snoozed tabs: one list and one timer for every window. A change is announced to all of them; each project window
 // takes back its own ready entries.
+// Tabs being snoozed right now: their kill is not a close for the project board (the session comes back in a new tab
+// and can still finish its claimed work). At most a minute old, pruned on every add.
+const snoozingTabs = new Map();
+function markSnoozing(tabId) {
+  const t = Date.now();
+  for (const [k, at] of snoozingTabs) if (t - at > 60_000) snoozingTabs.delete(k);
+  snoozingTabs.set(tabId, t);
+}
 const snoozeStore = createSnoozeStore({
   load: () => loadConfig(),
   save: (c) => saveConfig(c),
@@ -873,11 +883,13 @@ function setupTerminalHandlers() {
     if (session) {
       try { preview = await getLastAssistantMessage(session.sessionId, session.cwd); } catch (err) { console.warn('[snooze] preview failed:', err?.message || err); }
     }
-    return snoozeStore.add({
+    const added = snoozeStore.add({
       projectPath: meta.projectPath, label: meta.label, labelLocked: meta.labelLocked, kind: meta.kind, url: meta.url,
       viewMode: meta.viewMode, claudeAccountPin: meta.claudeAccountPin, pinned: meta.pinned === true, until,
       ...(session || {}), ...(typeof preview === 'string' ? { preview: preview.replace(/\s+/g, ' ') } : {}),
     }, Array.isArray(scrollback) ? scrollback : null);
+    if (added && typeof tabId === 'string' && meta.kind !== 'browser') markSnoozing(tabId);
+    return added;
   });
   ipcMain.handle('snooze:list', () => snoozeStore.list());
   ipcMain.handle('snooze:take', (_event, id, opts) => (typeof id === 'string'
@@ -1573,7 +1585,7 @@ Every voice transcript arrives with a request id prefix like \`[req-abc123] tell
 
 For each "do X" request:
 1. Identify the target project (from Sam's words or by fuzzy-matching dobius-tabs cwd paths)
-2. Check lead tab: \`dobius-lead-tab get <projectPath>\` — if set + alive, that's your target. Go to step 4.
+2. Check lead tab: \`dobius-lead-tab get <projectPath>\` — if set + alive, that's your target. Go to step 4. The lead tab is that project's orchestrator (pinned from its tab menu): it decides which of its project's tabs does the work and records it with dobius-project, so after dispatching to it do nothing else for that request.
 3. No lead tab → check dobius-tabs for an existing tab in that project. If one obvious match, use it. If multiple or none, call \`dobius-spawn\` (which asks Sam to confirm).
 4. dobius-send to the target tab + dobius-track to register the work + dobius-reply with a short ack.
 
@@ -2436,18 +2448,30 @@ function setupFileHandlers() {
     type: 'command',
     command: `[ -z "\${DOBIUS_TAB_ID:-}" ] || head -c 16384 "\${DOBIUS_AGENT_CONTEXT:-}" 2>/dev/null || echo 'This session runs in a Dobius+ terminal tab. When you start a distinct task, run: dobius-tab "<3-6 word summary>" to label this tab.' # ${TAB_HINT_MARKER}`,
   };
+  // The project orchestrator's board (electron/project-board.js): printed into context at a session's start and at a
+  // prompt only when the project has an orchestrator and the board changed. The CLI caps itself at 1s and exits 0.
+  const PROJECT_BRIEF_MARKER = 'dobius-project-brief';
+  const briefEntry = (arg) => ({
+    type: 'command',
+    timeout: 5,
+    command: `[ -z "\${DOBIUS_TAB_ID:-}" ] || { command -v dobius-project >/dev/null 2>&1 && dobius-project brief${arg} 2>/dev/null; }; true # ${PROJECT_BRIEF_MARKER}`,
+  });
+  const briefStart = briefEntry(' start');
+  const briefPrompt = briefEntry('');
   const isDobiusCommand = (h) => typeof h?.command === 'string'
-    && (h.command.includes(STATUS_MARKER) || h.command.includes(TAB_HINT_MARKER));
+    && (h.command.includes(STATUS_MARKER) || h.command.includes(TAB_HINT_MARKER) || h.command.includes(PROJECT_BRIEF_MARKER));
   const isStatusGroup = (group) => Array.isArray(group?.hooks) && group.hooks.some(isDobiusCommand);
   // Exactly the current command, so a change to it reaches existing installs on the next launch.
   const hasTabHint = (hooks) => Array.isArray(hooks?.SessionStart)
     && hooks.SessionStart.some((g) => g?.hooks?.some?.((h) => h?.command === tabHintEntry.command));
+  const hasProjectBrief = (hooks) => [['SessionStart', briefStart], ['UserPromptSubmit', briefPrompt]].every(([ev, e]) => Array.isArray(hooks?.[ev])
+    && hooks[ev].some((g) => g?.hooks?.some?.((h) => h?.command === e.command)));
   const hasPermissionRequest = (hooks) => Array.isArray(hooks?.PermissionRequest)
     && hooks.PermissionRequest.some(isStatusGroup);
   // Append the whole Dobius block to an already-stripped hooks object.
   const addDobiusHooks = (hooks) => {
     const add = (event, group) => { hooks[event] = [...(hooks[event] || []), group]; };
-    add('UserPromptSubmit', { hooks: [cmdEntry('working')] });
+    add('UserPromptSubmit', { hooks: [cmdEntry('working'), briefPrompt] });
     add('PreToolUse', { hooks: [cmdEntry('working')] }); // no matcher = all tools
     // PermissionRequest runs the instant a permission dialog opens (main
     // session and subagents alike); Claude's permission_prompt Notification
@@ -2461,7 +2485,7 @@ function setupFileHandlers() {
     // back command or an open prompt is still waiting on the person.
     add('Notification', { matcher: 'idle_prompt', hooks: [cmdEntry('done;idle')] });
     add('Stop', { hooks: [stopEntry] });
-    add('SessionStart', { hooks: [tabHintEntry] });
+    add('SessionStart', { hooks: [tabHintEntry, briefStart] });
     return hooks;
   };
 
@@ -2864,7 +2888,7 @@ function setupFileHandlers() {
         if (installed) updateSettings({ statusDotsChoice: 'on' });
       }
       // Also blocks from before the instant red (PermissionRequest).
-      if (installed && (!hasTabHint(hooks) || !hasPermissionRequest(hooks) || !hasHandoffStop(hooks))) {
+      if (installed && (!hasTabHint(hooks) || !hasProjectBrief(hooks) || !hasPermissionRequest(hooks) || !hasHandoffStop(hooks))) {
         const r = enableClaudeHooks();
         if (r?.error) console.warn(`[claudeHooks] status hook upgrade skipped: ${r.error}`);
       }
@@ -4486,7 +4510,7 @@ function setupWindowHandlers() {
   });
   setOpenTabService(createOpenTabService(bridgeOpenDeps));
   // dobius-send into an existing tab (electron/tab-send.js): the same paste and confirmed Enter for Claude.
-  setTabSendService((tabId, message) => sendToTab({
+  const tabSendDeps = {
     // A phone-opened terminal has no window; it is alive while its PTY is and is not being closed.
     tabAlive: (id) => (getTerminalWebContentsId(id) === null ? !!terminalInstance(id) && !terminalClosing(id) : bridgeOpenDeps.tabAlive(id)),
     ptyOf: bridgeOpenDeps.ptyOf,
@@ -4515,7 +4539,22 @@ function setupWindowHandlers() {
         },
       };
     },
-  }, tabId, message));
+  };
+  setTabSendService((tabId, message) => sendToTab(tabSendDeps, tabId, message));
+  // Project orchestrator and work board (electron/project-board.js, docs/project-orchestrator.md).
+  initProjectBoard(tabSendDeps);
+  // Phone voice goes into the tab pinned as team orchestrator when there is one (Brett, Asana 1220329713038498),
+  // pasted into Claude with every dobius-send guard; mobile-server falls back to the Voice Conductor otherwise.
+  setVoiceOrchestratorRoute(async (text) => {
+    const tab = teamOrchestratorTab();
+    if (!tab || !tabSendDeps.tabAlive(tab)) return null;
+    const r = await sendToTab(tabSendDeps, tab, `[voice from the phone] ${text}`, { claudeOnly: true });
+    const label = getTabLabelsById().get(tab) || `Tab ${tab.match(/-(\d+)$/)?.[1] || '?'}`;
+    if (r?.body?.ok) return { sent: true, label };
+    // Typed but Enter not seen taken (or left in the box): it is in that tab, so it must never ALSO go to the Conductor.
+    if (r?.body?.typed) return { sent: true, label, unconfirmed: true, note: r.body.note || r.body.error || '' };
+    return { sent: false, error: r?.body?.error || r?.body?.note || 'not delivered' };
+  });
   // Team communicator (docs/team-communicator.md): delivery into the pinned
   // orchestrator tab reuses these same guards.
   // Phone notifications by event (electron/phone-alerts-main.js): first, so every source below can feed it.
@@ -5984,6 +6023,97 @@ app.on('will-quit', (e) => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+
+// Project orchestrator (docs/project-orchestrator.md): one pinned tab per project folder (config.projects[path].leadTabId,
+// the slot the Voice Conductor routes to) and a shared work board every tab of that project reads before it starts.
+function initProjectBoard(tabSendDeps) {
+  const projectOf = (id) => { const p = projectPathFromTabId(id); return p && isAbsPath(p) ? p : null; };
+  // $PWD is the logical path: a project opened through a symlink still counts. realpath runs on libuv's threadpool (4
+  // threads), and on a dead network mount it never returns: so one lookup a path at a time, answers cached for a minute
+  // (at most 200), and no new lookup while two are still out, which leaves the pool to the rest of the app.
+  const realCache = new Map(); // path -> { real, at }
+  const realPending = new Map(); // path -> promise
+  const realOf = (p) => {
+    const hit = realCache.get(p);
+    if (hit && Date.now() - hit.at < 60_000) return Promise.resolve(hit.real);
+    if (realPending.has(p)) return realPending.get(p);
+    if (realPending.size >= 2) return Promise.resolve(null);
+    const run = fs.promises.realpath(p).then((real) => real, () => null).then((real) => {
+      realPending.delete(p);
+      realCache.delete(p);
+      realCache.set(p, { real, at: Date.now() });
+      while (realCache.size > 200) realCache.delete(realCache.keys().next().value);
+      return real;
+    });
+    realPending.set(p, run);
+    return run;
+  };
+  const inside = async (child, parent) => {
+    if (isInsidePath(child, parent)) return true;
+    let timer;
+    const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(null), 1000); });
+    try {
+      const both = await Promise.race([Promise.all([realOf(child), realOf(parent)]), deadline]);
+      return !!both?.[0] && !!both[1] && isInsidePath(both[0], both[1]);
+    } finally { clearTimeout(timer); }
+  };
+  // One label map a second at most: a render names up to OPEN_MAX + 10 tabs.
+  let labels = null;
+  let labelsAt = 0;
+  const labelOf = (id) => {
+    if (!labels || Date.now() - labelsAt > 1000) { labels = getTabLabelsById(); labelsAt = Date.now(); }
+    return labels.get(id) || `Tab ${String(id).match(/-(\d+)$/)?.[1] || '?'}`;
+  };
+  const changed = (projectPath) => {
+    for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('projectOrch:changed', { projectPath });
+  };
+  const board = createProjectBoard({
+    dir: path.join(app.getPath('userData'), 'project-board'),
+    now: () => Date.now(),
+    tabAlive: (id) => tabSendDeps.tabAlive(id),
+    projectOf,
+    inside,
+    labelOf,
+    leadOf: (projectPath) => getLeadTab(projectPath),
+    sessionOf: async (id) => { try { return (await resolveSessionForTab(id))?.sessionId || null; } catch { return null; } },
+    // Only ever a paste into Claude's prompt, with every dobius-send guard (a draft, a question, a person typing).
+    sendToOrchestrator: (id, text) => sendToTab(tabSendDeps, id, text, { claudeOnly: true }),
+    onChange: changed,
+  });
+  setProjectBridge((body) => board.handle(body));
+  onLeadTabChanged((projectPath) => { board.touch(projectPath); changed(projectPath); });
+  // The person closed a tab (main's own terminal:kill listener runs first): its open work is dropped, and a pin on it
+  // is cleared so a later tab can never inherit it.
+  ipcMain.on('terminal:kill', (_e, id) => {
+    // Only a kill main actually carried out (it refuses a window that does not own the tab), as team-main does.
+    if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id) || terminalInstance(id)) return;
+    // A snoozed tab's open work stays open (anyone may close it, as for any closed tab's work).
+    // The kill is sent twice for a snoozed tab (snooze, then the pane unmounting): the mark is not consumed, it ages out.
+    const snoozedAt = snoozingTabs.get(id);
+    if (!(snoozedAt && Date.now() - snoozedAt < 60_000)) board.tabClosed(id);
+    const projectPath = projectOf(id);
+    if (projectPath && getProjectConfig(projectPath)?.leadTabId === id) {
+      setProjectConfig(projectPath, { leadTabId: null });
+      board.touch(projectPath);
+      changed(projectPath);
+    }
+  });
+  ipcMain.handle('projectOrch:get', (_e, projectPath) => {
+    if (typeof projectPath !== 'string' || !isAbsPath(projectPath)) return { ok: false, error: 'projectPath required' };
+    // The configured pin, not only a live one: at launch the badge loads before the restored tab's terminal exists.
+    const id = getProjectConfig(projectPath)?.leadTabId;
+    return { ok: true, leadTabId: typeof id === 'string' ? id : null };
+  });
+  // Pin or unpin a tab of the calling window; the project is the tab's own, never the caller's say.
+  ipcMain.handle('projectOrch:set', (event, tabId, on) => {
+    if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId) || !ownsTerminal(event.sender.id, tabId)) return { ok: false, error: 'not a tab of this window' };
+    const projectPath = projectOf(tabId);
+    if (!projectPath) return { ok: false, error: 'that tab does not belong to a project folder' };
+    if (on === true) return setLeadTab(projectPath, tabId);
+    // Unpin only what is pinned: a stale menu must not clear a pin another tab took since.
+    return getProjectConfig(projectPath)?.leadTabId === tabId ? setLeadTab(projectPath, null) : { ok: true, projectPath, leadTabId: getLeadTab(projectPath) };
+  });
+}
 
 // The text a Claude session in a Dobius tab gets at its start (SessionStart hook, DOBIUS_AGENT_CONTEXT), from what
 // this Dobius knows now: this machine's team name, connected Google accounts, linked teammates. Emails and names

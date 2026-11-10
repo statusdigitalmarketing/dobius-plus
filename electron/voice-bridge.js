@@ -35,6 +35,7 @@ import { validateTabRename, buildTabCliScript } from './tab-rename.js';
 import { buildCodexStatusScript, HOOK_HEAD_BYTES } from './codex-status.js';
 import { buildOpenCliScript } from './bridge-open-tab.js';
 import { buildTeamCliScript } from './team-cli.js';
+import { buildProjectCliScript } from './project-cli.js';
 import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
 import { STAGES } from './task-pipeline.js';
 import { statusFor } from './terminal-status.js';
@@ -181,6 +182,22 @@ export function setOpenTabService(svc) { openTabService = svc; }
 // POST /team (dobius-team): team-main.js handleTeamBridge, handed in by main.
 let teamBridge = null;
 export function setTeamBridge(fn) { teamBridge = fn; }
+// POST /project (dobius-project): project-board.js handle, handed in by main.
+let projectBridge = null;
+export function setProjectBridge(fn) { projectBridge = fn; }
+
+async function handleProject(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  if (!projectBridge) return sendJson(res, 503, { ok: false, error: 'Dobius+ is still starting; try again' });
+  try {
+    const { status, json } = await projectBridge(body);
+    return sendJson(res, status, json);
+  } catch (err) {
+    return sendJson(res, 500, { ok: false, error: `project command failed: ${err.message}` });
+  }
+}
 
 async function handleOpenTab(req, res) {
   let body;
@@ -544,8 +561,14 @@ async function handleSetReply(req, res) {
   if (typeof msg !== 'string') {
     return sendJson(res, 400, { ok: false, error: 'message must be a string' });
   }
+  recordReply(requestId, msg);
+  return sendJson(res, 200, { ok: true });
+}
+
+/** Store the reply to a voice request (the Conductor's dobius-reply, or Dobius itself when it routed the request). */
+export function recordReply(requestId, msg) {
   pruneOldReplies();
-  const entry = { message: msg.slice(0, 4000), ts: Date.now() };
+  const entry = { message: String(msg).slice(0, 4000), ts: Date.now() };
   replies.set(requestId, entry);
   // Notify any in-process subscriber waiting on this requestId (iMessage bridge).
   const sub = replyCallbacks.get(requestId);
@@ -554,7 +577,6 @@ async function handleSetReply(req, res) {
     clearTimeout(sub.timer);
     try { sub.resolve(entry); } catch (err) { console.warn(`[voice-bridge] subscribeReply resolve threw: ${err.message}`); }
   }
-  return sendJson(res, 200, { ok: true });
 }
 
 async function handleGetReply(req, res) {
@@ -623,6 +645,7 @@ function handleRequest(req, res) {
   if (req.url === '/codexStatus') return handleCodexStatus(req, res);
   if (req.url === '/openTab') return handleOpenTab(req, res);
   if (req.url === '/team') return handleTeam(req, res);
+  if (req.url === '/project') return handleProject(req, res);
   if (req.url === '/setReply') return handleSetReply(req, res);
   if (req.url === '/getReply') return handleGetReply(req, res);
   if (req.url === '/trackWork') return handleTrackWork(req, res);
@@ -711,6 +734,7 @@ function installTabCli() {
     writeIfChanged(path.join(tabBinDir(), 'dobius-open'), buildOpenCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
     writeIfChanged(path.join(tabBinDir(), 'dobius-codex-status'), buildCodexStatusScript({ port: PORT, tokenFile: TOKEN_FILE }));
     writeIfChanged(path.join(tabBinDir(), 'dobius-team'), buildTeamCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
+    writeIfChanged(path.join(tabBinDir(), 'dobius-project'), buildProjectCliScript({ port: PORT, tokenFile: TOKEN_FILE }));
   } catch (err) {
     console.warn(`[voice-bridge] dobius-tab install failed: ${err.message}`);
   }

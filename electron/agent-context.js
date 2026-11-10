@@ -43,6 +43,7 @@ export function buildAgentContext({ machine = '', platform = process.platform, g
   const lines = [
     `This session runs in a Dobius+ terminal tab${name ? ` on ${where} "${name}"` : ''}. Dobius+ gives you these, use them when they help:`,
     '- Name this tab: when you start a distinct task, run `dobius-tab "<3-6 word summary>"`.',
+    '- Same project, several tabs: `dobius-project` shows the project orchestrator tab (when one is pinned), what each tab has claimed and what finished in the last day. When this project has an orchestrator, `dobius-project claim "<task>"` before a distinct task, `dobius-project done <id> "<result>"` after, and `dobius-project tell "<message>"` for questions about scope. It is printed into context automatically when it changes.',
     '- Other tabs on this ' + where + ': `dobius-tabs` lists them; `dobius-send <tabId> "<message>"` sends a message into one and submits it (it refuses, saying why, when Claude there has a draft or a question open); `dobius-open <project folder> <any request id> - < message.txt` opens a new tab there, starts Claude and sends it the message.',
     '- Hand the person a command to run (when an action is blocked for you): put it on its own line starting with `! `. Dobius lists it in Tasks > Commands with a Run button.',
     '- Tasks panel: when you finish a task listed there, run `dobius-task-done "<task title, Asana gid or task id>"` (it acts on the project this tab opened in).',

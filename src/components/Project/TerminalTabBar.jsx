@@ -59,6 +59,19 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
     load();
     return api.onTeamChanged?.(load);
   }, []);
+  // The project orchestrator (docs/project-orchestrator.md): one tab per project folder, badge LEAD.
+  const [leadTab, setLeadTab] = useState(null);
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.projectOrchGet || !currentProjectPath) return undefined;
+    let live = true;
+    const load = () => api.projectOrchGet(currentProjectPath)
+      .then((r) => { if (live) setLeadTab(r?.ok ? r.leadTabId : null); })
+      .catch(() => { if (live) setLeadTab(null); });
+    load();
+    const off = api.onProjectOrchChanged?.((p) => { if (!p?.projectPath || p.projectPath === currentProjectPath) load(); });
+    return () => { live = false; off?.(); };
+  }, [currentProjectPath]);
   const [moveAccountTabId, setMoveAccountTabId] = useState(null);
   const closeMoveAccount = useCallback(() => setMoveAccountTabId(null), []);
   const [dragTabId, setDragTabId] = useState(null);
@@ -641,6 +654,13 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
                 </span>
               )}
 
+              {/* Project orchestrator: the other tabs of this project coordinate through it (dobius-project) */}
+              {leadTab === tab.id && (
+                <span style={{ fontSize: 9, color: 'var(--accent)', flexShrink: 0, lineHeight: 1 }} title="Project orchestrator: this project's tabs claim work and send questions here; also receives Voice Conductor work">
+                  {'LEAD'}
+                </span>
+              )}
+
               {/* Pin indicator */}
               {tab.pinned && (
                 <span style={{ fontSize: 9, color: 'var(--dim)', flexShrink: 0, lineHeight: 1 }} title="Pinned">
@@ -795,6 +815,14 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
             setContextMenu(null);
             window.electronAPI.teamSettings({ orchestratorTab: teamTab === target ? null : target });
           } : null}
+          isProjectOrchestrator={leadTab === contextMenu.tabId}
+          onProjectOrchestrator={window.electronAPI?.projectOrchSet && tabs.find((t) => t.id === contextMenu.tabId)?.kind !== 'browser' ? () => {
+            const target = contextMenu.tabId;
+            setContextMenu(null);
+            window.electronAPI.projectOrchSet(target, leadTab !== target)
+              .then((r) => { if (r && !r.ok) console.warn('[TerminalTabBar] project orchestrator:', r.error); })
+              .catch((err) => console.warn('[TerminalTabBar] project orchestrator:', err?.message));
+          } : null}
           onRename={() => {
             const tab = tabs.find((t) => t.id === contextMenu.tabId);
             if (tab) handleDoubleClick(tab);
@@ -931,7 +959,7 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, canSnooze, onSnooze, isPinned, isTeamOrchestrator, onTeamOrchestrator, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
+function ContextMenu({ x, y, tabCount, tabIndex, canSnooze, onSnooze, isPinned, isTeamOrchestrator, onTeamOrchestrator, isProjectOrchestrator, onProjectOrchestrator, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
   // Kept inside the window: opened low in the sidebar it would otherwise run off the bottom, out of reach (Codex).
@@ -1023,6 +1051,7 @@ function ContextMenu({ x, y, tabCount, tabIndex, canSnooze, onSnooze, isPinned, 
     { type: 'divider' },
     ...(onSnooze ? [{ label: 'Snooze', submenu: 'snooze', disabled: !canSnooze }, { type: 'divider' }] : []),
     { label: 'Copy Last Claude Response', onClick: onCopyLastResponse },
+    ...(onProjectOrchestrator ? [{ label: isProjectOrchestrator ? 'Stop being project orchestrator' : 'Use as project orchestrator', onClick: onProjectOrchestrator, title: "This project's other tabs claim their work and send questions to this tab (dobius-project). It also receives Voice Conductor work for this project." }] : []),
     ...(onTeamOrchestrator ? [{ label: isTeamOrchestrator ? 'Stop being team orchestrator' : 'Use as team orchestrator', onClick: onTeamOrchestrator }] : []),
     // Windows applies no saved account to a terminal, so moving would do nothing there (Max, 2026-11-09).
     ...(onContinueAccount ? [{ label: 'Move to account…', onClick: onContinueAccount }] : []),
@@ -1105,6 +1134,7 @@ function ContextMenu({ x, y, tabCount, tabIndex, canSnooze, onSnooze, isPinned, 
           <button
             key={item.label}
             onClick={item.disabled ? undefined : item.onClick}
+            title={item.title}
             style={{
               display: 'block',
               width: '100%',
