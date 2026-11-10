@@ -47,6 +47,7 @@ import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll
 import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
+import { createSnoozeStore } from './tab-snooze.js';
 import { terminalTextTail, terminalScreenText, submitPromptToTab, writeRawInput, readSelectorForAnswer, answerSelector, activityForTab, submitPending } from './chat-service.js';
 import { launchCommandFor, claudeLaunchOptions, normalizeNewTabModel, normalizeNewTabPermissionMode, CLAUDE_AUTH_ENV } from '../shared/new-tab.js';
 import { sanitizeAccountPin } from '../shared/tab-label.js';
@@ -448,6 +449,18 @@ let handoffCommands = null;
 const runTokens = new Map(); // token -> { sender, tabId, id, at }
 const RUN_TOKEN_MS = 60_000;
 const runScriptDir = () => path.join(app.getPath('userData'), 'run');
+// Snoozed tabs: one list and one timer for every window. A change is announced to all of them; each project window
+// takes back its own ready entries.
+const snoozeStore = createSnoozeStore({
+  load: () => loadConfig(),
+  save: (c) => saveConfig(c),
+  dir: path.join(app.getPath('userData'), 'snoozed'),
+  onChange: () => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send('snooze:changed');
+    }
+  },
+});
 // The script a Run tab starts with: it deletes itself, enters the folder (or stops), shows the command, runs it, and
 // writes its exit status next to itself for the card (Done / Failed).
 function writeRunScript(text, cwd, shown = text) {
@@ -562,7 +575,7 @@ function ownsTerminal(senderId, id) {
 }
 
 function setupTerminalHandlers() {
-  ipcMain.handle('terminal:create', (event, id, cwd, opts) => {
+  ipcMain.handle('terminal:create', async (event, id, cwd, opts) => {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return null;
     // Phone terminals (a phone's own, a phone Run) have no owning window: no window may create over one of them and so
     // take it over. No window ever makes a term-mobile id (its project path would be the bare word "mobile").
@@ -612,12 +625,35 @@ function setupTerminalHandlers() {
       }
     }
     const startCommand = launch === undefined || typeof launch === 'object' ? null : launchCommandFor(launch, getSettings().newTabTool);
+    // A snoozed tab coming back (snooze:take, then the window's new tab): its Claude session resumes as the shell's
+    // first command, nothing typed. loginShellSpawn validates the id and the folder again; a renderer could type the
+    // same command into its own terminal, so this grants nothing new.
+    let resume = launch && typeof launch === 'object' && launch.resume && typeof launch.resume === 'object'
+      && typeof launch.resume.sessionId === 'string' && typeof launch.resume.cwd === 'string'
+      ? { sessionId: launch.resume.sessionId, cwd: launch.resume.cwd }
+      : null;
+    // Through the same gate as every other resume (History, auto-resume, the phone): while the tab was snoozed its
+    // session may have been resumed somewhere else, and two `claude --resume` on one session corrupt its transcript.
+    // Refused: the tab comes back as a plain shell in its folder, with its scrollback.
+    if (resume) {
+      let claimed = false;
+      try { claimed = await claimSessionResume(resume.sessionId, id); } catch (err) { console.warn('[snooze] claim failed:', err?.message || err); }
+      if (!claimed) {
+        console.warn(`[snooze] ${resume.sessionId} is already running or claimed: tab ${id} opens without resuming it`);
+        resume = null;
+      }
+      if (event.sender.isDestroyed()) {
+        if (resume) releaseSessionResume(resume.sessionId, id);
+        return null;
+      }
+    }
     // The new tab's Claude defaults (model, permission mode), from the same fixed allowlist the phone writes through.
     const claudeOpts = startCommand === 'claude' ? claudeLaunchOptions(getSettings()) : null;
     let created = null;
     try {
-      created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand, runScript, claudeOpts });
+      created = createTerminal(id, cwd, event.sender, accountEnv, { startCommand, runScript, claudeOpts, resume });
     } finally {
+      if (resume && !created) releaseSessionResume(resume.sessionId, id);
       // The card shows it running in this tab, then Done or Failed (pollRuns); a failed spawn removes its files.
       if (runScript) afterRunSpawn(created, runCmd, id, runStartDeps);
     }
@@ -818,6 +854,37 @@ function setupTerminalHandlers() {
     return config?.closedTabs || [];
   });
 
+  // Snoozed tabs (electron/tab-snooze.js). Every window hears snooze:changed and the project's own window takes back
+  // what is ready; take() hands an entry out once.
+  ipcMain.handle('snooze:add', async (event, tabId, until, meta, scrollback) => {
+    if (!meta || typeof meta !== 'object' || typeof meta.projectPath !== 'string') return null;
+    let session = null;
+    if (meta.kind !== 'browser') {
+      if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId) || !ownsTerminal(event.sender.id, tabId)) return null;
+      // Read before the window kills the PTY: which Claude conversation it is on and where it lives.
+      try {
+        const r = await resolveSessionForTab(tabId);
+        if (r?.sessionId) session = { sessionId: r.sessionId, cwd: r.sessionProject || (await getTerminalCwd(tabId)) || meta.projectPath };
+      } catch (err) {
+        console.warn('[snooze] session lookup failed:', err?.message || err);
+      }
+    }
+    let preview = null;
+    if (session) {
+      try { preview = await getLastAssistantMessage(session.sessionId, session.cwd); } catch (err) { console.warn('[snooze] preview failed:', err?.message || err); }
+    }
+    return snoozeStore.add({
+      projectPath: meta.projectPath, label: meta.label, labelLocked: meta.labelLocked, kind: meta.kind, url: meta.url,
+      viewMode: meta.viewMode, claudeAccountPin: meta.claudeAccountPin, pinned: meta.pinned === true, until,
+      ...(session || {}), ...(typeof preview === 'string' ? { preview: preview.replace(/\s+/g, ' ') } : {}),
+    }, Array.isArray(scrollback) ? scrollback : null);
+  });
+  ipcMain.handle('snooze:list', () => snoozeStore.list());
+  ipcMain.handle('snooze:take', (_event, id, opts) => (typeof id === 'string'
+    ? snoozeStore.take(id, { onlyReady: !!(opts && typeof opts === 'object' && opts.onlyReady === true) }) : null));
+  ipcMain.handle('snooze:setTime', (_event, id, until) => (typeof id === 'string' ? snoozeStore.setTime(id, until) : false));
+  ipcMain.handle('snooze:discard', (_event, id) => (typeof id === 'string' ? snoozeStore.discard(id) : false));
+
   // Request all terminals to save their scrollback NOW (used by checkpoint save)
   ipcMain.handle('terminal:requestSaveNow', (event) => {
     event.sender.send('terminal:requestSave');
@@ -850,7 +917,7 @@ function setupDataHandlers() {
   ipcMain.handle('data:getActiveProcesses', () => getActiveProcesses({ ptyPids: listTerminals().map((t) => t.pid) }));
   ipcMain.handle('data:listProjects', () => listProjects());
   ipcMain.handle('data:loadAllSessions', (_event, projectFilter, opts) => loadAllSessionsShared(typeof projectFilter === 'string' ? projectFilter : undefined, (opts && typeof opts === 'object') ? opts : {}));
-  ipcMain.handle('data:getAllProjectTabs', () => {
+  ipcMain.handle('data:getAllProjectTabs', async () => {
     // Feed live-PTY ids (so the sidebar can tell a still-running cross-window tab
     // from a resumable one, H3) and open tear-off windows (so their torn tab,
     // which is stripped from the primary's persisted tabs, still appears, M4).
@@ -877,7 +944,16 @@ function setupDataHandlers() {
       mainPaths: new Set(getOpenProjectsForRestore()),
       windowKeys: new Set(getOpenPrimaryWindowsForRestore().map((w) => w.windowKey)),
     };
-    return getAllProjectTabs({ liveTabIds, tearOffTabs, openWindows });
+    const groups = await getAllProjectTabs({ liveTabIds, tearOffTabs, openWindows });
+    const snoozed = snoozeStore.list();
+    if (snoozed.length === 0) return groups;
+    const out = Array.isArray(groups) ? groups.map((g) => ({ ...g, snoozed: [] })) : [];
+    for (const e of snoozed) {
+      let g = out.find((x) => x.path === e.projectPath);
+      if (!g) { g = { path: e.projectPath, name: path.basename(e.projectPath), tabs: [], snoozed: [] }; out.push(g); }
+      g.snoozed.push(e);
+    }
+    return out;
   });
   // Live row status for the Tabs sidebar, apart from the aggregate above
   // (which reads session history and is slow): main's hook status and the
@@ -5090,6 +5166,10 @@ app.whenReady().then(() => {
   // and agents included. See claude-account-env.js.
   console.log(`[plugins] root pinned for all spawns: ${pinPluginRoot()}`);
   stallWatchdog.start({ powerMonitor });
+  snoozeStore.sweepOrphans();
+  snoozeStore.checkDue(); // anything that came due while the app was not running is ready now, then the timer is armed
+  // A Mac asleep through a wake time: the timer may fire late or not at all, so look again on resume.
+  powerMonitor.on('resume', () => snoozeStore.checkDue());
   setupCrashLogging();
   // Make sure node-pty can actually launch shells before any tab is created.
   ensureSpawnHelperExecutable();

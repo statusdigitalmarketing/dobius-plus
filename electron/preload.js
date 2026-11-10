@@ -41,6 +41,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   tearOffSaveTabs: (tearOffTabId, tabs, counter, activeTabId) => ipcRenderer.invoke('tearoff:saveTabs', tearOffTabId, tabs, counter, activeTabId),
   tearOffLoadTabs: (tearOffTabId) => ipcRenderer.invoke('tearoff:loadTabs', tearOffTabId),
   terminalSaveClosedTabs: (projectPath, closedTabs, windowKey) => ipcRenderer.invoke('terminal:saveClosedTabs', projectPath, closedTabs, windowKey),
+  // Snoozed tabs (electron/tab-snooze.js)
+  snoozeAdd: (tabId, until, meta, scrollback) => ipcRenderer.invoke('snooze:add', tabId, until, meta, scrollback),
+  snoozeList: () => ipcRenderer.invoke('snooze:list'),
+  snoozeTake: (id, opts) => ipcRenderer.invoke('snooze:take', id, opts),
+  snoozeSetTime: (id, until) => ipcRenderer.invoke('snooze:setTime', id, until),
+  snoozeDiscard: (id) => ipcRenderer.invoke('snooze:discard', id),
+  onSnoozeChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('snooze:changed', handler);
+    return () => ipcRenderer.removeListener('snooze:changed', handler);
+  },
   terminalLoadClosedTabs: (projectPath, windowKey) => ipcRenderer.invoke('terminal:loadClosedTabs', projectPath, windowKey),
   terminalRequestSaveNow: () => ipcRenderer.invoke('terminal:requestSaveNow'),
   onTerminalRequestSave: (callback) => {

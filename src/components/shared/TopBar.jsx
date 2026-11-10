@@ -168,13 +168,14 @@ export default function TopBar({ projectName }) {
 }
 
 /**
- * Terminal / Chat switch for the active tab (Cmd+Shift+C). Chat reads the
- * running Claude session as messages over the same PTY; the choice is per tab.
+ * Terminal / Chat switch for the whole window (Cmd+Shift+C). Chat reads each
+ * tab's running Claude session as messages over the same PTY; the switch moves
+ * every terminal tab in the window at once.
  */
 function ViewModeToggle() {
   const activeView = useStore((s) => s.activeView);
   const tab = useStore((s) => s.terminalTabs.find((t) => t.id === s.activeTabId));
-  const setTabViewMode = useStore((s) => s.setTabViewMode);
+  const setWindowViewMode = useStore((s) => s.setWindowViewMode);
   if (activeView !== 'terminal' || !tab || tab.kind === 'browser') return null;
   const mode = tab.viewMode === 'chat' ? 'chat' : 'terminal';
   const seg = (value, label) => {
@@ -182,9 +183,9 @@ function ViewModeToggle() {
     return (
       <button
         key={value}
-        onClick={() => setTabViewMode(tab.id, value)}
+        onClick={() => setWindowViewMode(value)}
         aria-pressed={on}
-        title={`${label} view for this tab (Cmd+Shift+C)`}
+        title={`${label} view for every tab in this window (Cmd+Shift+C)`}
         style={{
           padding: '2px 9px',
           fontSize: 11,
