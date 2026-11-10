@@ -114,6 +114,13 @@ goes back to `selfName`. Nothing is sent to the teammate.
 - The owner **pins one tab** as the orchestrator (tab menu: "Use as team orchestrator"; stored by tab id, shown with
   a badge). No label or recency guessing and no fallback to another session (audit #5). If the pinned tab is gone or
   closed, messages wait in the Team inbox with a notification.
+- **A busy pinned tab is never silent (2026-11-09, Muzikmaker report: four messages held 3 to 17 hours unseen).** After
+  5 minutes of waiting a toast says a message is waiting for the orchestrator tab; at the 30 minute give-up the
+  message AND every teammate message queued behind it are held together with one toast (they used to wait 30 minutes
+  each, in turn). A message a person sent with "Send to orchestrator" is never batch-held, and a re-pin during the
+  wait gives the rest a fresh try. Anything waiting for a person shows a red `@N` badge on the Tasks button itself.
+  `dobius-team show` prints the whole text. Not done, on purpose: routing to another idle tab (the pin is the one
+  place teammates' requests may be typed).
 - A new delivery routine (not Chat's submit and not `/openTab`, which assume other things; audit #6, #9):
   0. **Still authorised and still the target (r3 #2, r4 #2):** the sender is still linked and enabled, Auto-route is
      still on for it, "Accept team messages" is still on, AND the tab is still the pinned orchestrator. Checked again

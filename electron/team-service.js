@@ -9,14 +9,14 @@
  *   request(opts)         team-net.js teamRequest (tests pass an in-memory router)
  *   endpoint() -> { host, port } | null   this install's MagicDNS name and phone-server port (null: not reachable)
  *   deliverDeps(tabId, authorized) -> deps for team-deliver.js, or null when the app cannot deliver
- *   notify(event, payload)                 UI: 'changed' | 'link-request' | 'message'
+ *   notify(event, payload)                 UI: 'changed' | 'link-request' | 'message' | 'held' | 'waiting-long'
  *   now(), sleep(ms)
  */
 import crypto from 'node:crypto';
 import * as P from './team-protocol.js';
 import { shortFp, fingerprint } from './team-crypto.js';
 import { looksLikeFingerprint } from './team-store.js';
-import { deliver, deliveryCard, handoffCard } from './team-deliver.js';
+import { deliver, deliveryCard, handoffCard, GAVE_UP_NOTE } from './team-deliver.js';
 
 export const SEND_DEADLINE_MS = 24 * 3600 * 1000;
 export const HANDOFF_TTL_MS = 24 * 3600 * 1000;
@@ -240,7 +240,10 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   // ---------- delivery queue (one at a time) ----------
 
   function enqueueDelivery(peer, id, manual = false) {
-    if (!deliveryQueue.some((q) => q.peer === peer && q.id === id)) {
+    const queued = deliveryQueue.find((q) => q.peer === peer && q.id === id);
+    // A person's Send to orchestrator on a message already queued keeps that intent (a batch hold skips manual jobs).
+    if (queued && manual) queued.manual = true;
+    if (!queued) {
       // A teammate's message goes ahead of local handoff requests, so a tab's requests can never hold one up.
       const firstLocal = deliveryQueue.findIndex((q) => q.local);
       deliveryQueue.splice(firstLocal < 0 ? deliveryQueue.length : firstLocal, 0, { peer, id, manual });
@@ -369,7 +372,9 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
       tracker.reliable = !deps.background?.(t) && !bgOpenTabs.has(t);
       return deps.paste(t, text);
     } };
-    try { result = await deliver(followed, tabId, card.text); } catch (err) { result = { state: 'needs attention', note: `delivery failed: ${err.message}` }; } finally { current = null; }
+    // A person hears it is waiting after SLOW_NOTICE_MS, not only at the give-up (or never, before 2.2.17).
+    const onSlow = () => notify('waiting-long', { name: store.nameFor(msg), queued: deliveryQueue.filter((q) => !q.local).length });
+    try { result = await deliver(followed, tabId, card.text, { onSlow }); } catch (err) { result = { state: 'needs attention', note: `delivery failed: ${err.message}` }; } finally { current = null; }
     saveResult(peer, id, { state: result.state, note: result.note || null, routedAt: result.state === 'routed' ? now() : undefined });
     const t = tracked === tracker ? tracker : null;
     if (result.state === 'routed') {
@@ -384,6 +389,12 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
       if (t) tracked = null;
       report(peer, id, result.state === 'needs attention' ? 'needs attention' : 'held',
         result.state === 'needs attention' ? `${result.note || 'typed in, not confirmed sent'}; someone has to check their orchestrator tab` : result.note);
+      const names = [store.nameFor(msg)];
+      // The tab stayed busy for the whole wait: the messages queued behind this one would each wait their own 30
+      // minutes in turn (four of them, two hours) before anyone heard. They are held now, with this one, in one notice.
+      // Only while the same tab is still the authorised target: a re-pin during the last wait gives the rest a fresh try.
+      if (result.state === 'held' && result.note === GAVE_UP_NOTE && !stopped && !authorized()) names.push(...holdQueuedBehind(GAVE_UP_NOTE));
+      notifyInHeld(names, result.note, result.state);
     }
   }
 
@@ -391,6 +402,33 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     store.patchMessage('in', peer, id, { state: 'held', note });
     changed();
     report(peer, id, 'held', note);
+    const msg = store.messages().find((x) => x.dir === 'in' && x.peer === peer && x.id === id);
+    notifyInHeld([msg ? store.nameFor(msg) : shortFp(peer)], note, 'held');
+  }
+
+  /** Every teammate message still waiting in the queue (not a local request, not one a person routed by hand) is held. */
+  function holdQueuedBehind(note) {
+    const names = [];
+    for (let i = deliveryQueue.length - 1; i >= 0; i -= 1) {
+      const q = deliveryQueue[i];
+      if (q.local || q.manual) continue;
+      const m = store.messages().find((x) => x.dir === 'in' && x.peer === q.peer && x.id === q.id);
+      if (!m || m.state !== 'waiting') continue;
+      // Saved first, dequeued after: a failed write (disk full) leaves it queued, so it is still tried, never stranded.
+      try { store.patchMessage('in', q.peer, q.id, { state: 'held', note }); } catch (err) {
+        console.error('[team] could not hold a queued message, leaving it queued:', err.message);
+        continue;
+      }
+      deliveryQueue.splice(i, 1);
+      report(q.peer, q.id, 'held', note);
+      names.push(store.nameFor(m));
+    }
+    if (names.length) changed();
+    return names;
+  }
+
+  function notifyInHeld(names, note, state) {
+    try { notify('held', { names, note: note || null, state }); } catch (err) { console.error('[team] held notification failed:', err.message); }
   }
 
   // ---------- lifecycle reports (receiver side) ----------
@@ -561,7 +599,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
   function routeNow(peer, id) {
     const msg = store.messages().find((x) => x.dir === 'in' && x.peer === peer && x.id === id);
     if (!msg || (msg.state !== 'held' && msg.state !== 'waiting')) return { ok: false, error: 'that message is not waiting for you' };
-    if (msg.state === 'waiting') { enqueueDelivery(peer, id); return { ok: true }; }
+    if (msg.state === 'waiting') { enqueueDelivery(peer, id, true); return { ok: true }; } // a person asked: never batch-held
     enqueueDelivery(peer, id, true);
     return { ok: true };
   }
