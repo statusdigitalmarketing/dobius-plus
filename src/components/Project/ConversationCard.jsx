@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { timeAgo } from '../../lib/time-ago';
 import { projectMonogram } from '../../lib/project-color';
 import SessionHoverCard from './SessionHoverCard';
+import { baseName } from '../../../shared/platform.js';
 
 // Long enough that sweeping the pointer down the list does not flash a card
 // per row, short enough to feel like a tooltip.
@@ -32,7 +33,7 @@ export default function ConversationCard({
   onClearRename,
   hasCustomLabel,
 }) {
-  const projectName = session.project?.split('/').filter(Boolean).pop() || 'Unknown';
+  const projectName = baseName(session.project) || 'Unknown';
   const monogram = useMemo(() => projectMonogram(session.project), [session.project]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.displayName || '');

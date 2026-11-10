@@ -24,6 +24,7 @@ import fs from 'node:fs/promises';
 import { createReadStream, constants as fsConstants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { baseName } from '../shared/platform.js';
 
 export const CODEX_HOME = () => path.join(os.homedir(), '.codex');
 export const CODEX_SESSIONS_DIR = () => path.join(CODEX_HOME(), 'sessions');
@@ -355,7 +356,7 @@ export async function listCodexSessions({ limit = 50, includeExec = false, proje
     return {
       sessionId: parsed.sessionId,
       projectPath,
-      projectName: projectPath ? projectPath.split('/').filter(Boolean).pop() : 'codex',
+      projectName: projectPath ? baseName(projectPath) : 'codex',
       preview: parsed.preview || 'Codex session',
       timestamp: parsed.timestamp || 0,
       age: (timeAgo && parsed.timestamp) ? timeAgo(parsed.timestamp) : 'unknown',

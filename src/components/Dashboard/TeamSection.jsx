@@ -1,7 +1,7 @@
 // Settings > Team: this Mac's identity, invites and joining, linked teammates, the pinned orchestrator tab.
 // docs/team-communicator.md. Section, SettingRow and Toggle come from Settings.jsx so the page stays one style.
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { isWindows } from '../../../shared/platform.js';
+import { isWindows, baseName } from '../../../shared/platform.js';
 
 const api = window.electronAPI;
 const box = { backgroundColor: 'var(--surface)', border: '1px solid var(--border)' };
@@ -15,7 +15,7 @@ const btn = (primary, busy, off) => ({
 export function tabName(tabId) {
   const m = /^term-(.*)-([^-]+)$/.exec(String(tabId || ''));
   if (!m) return String(tabId || '');
-  return `${m[1].split('/').filter(Boolean).pop() || m[1]} tab ${m[2]}`;
+  return `${baseName(m[1]) || m[1]} tab ${m[2]}`;
 }
 
 export default function TeamSection({ Section, SettingRow, Toggle }) {

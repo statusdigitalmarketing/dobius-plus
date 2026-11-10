@@ -2,6 +2,7 @@ import { useStore } from '../../store/store';
 import { useState, useEffect } from 'react';
 import { modelLabel } from '../../lib/model-label';
 import { compactTokens } from '../../lib/compact-tokens';
+import { baseName } from '../../../shared/platform.js';
 
 function ctxColor(pct) {
   if (pct >= 95) return '#f85149';
@@ -150,7 +151,7 @@ export default function StatusBar() {
 
   const hasActive = activeProcesses.length > 0;
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  const projectName = currentProjectPath ? currentProjectPath.split('/').filter(Boolean).pop() : '';
+  const projectName = currentProjectPath ? baseName(currentProjectPath) : '';
   const gitKind = currentDetached ? null : (currentIsFork ? 'fork' : (currentIsWorktree ? 'worktree' : null));
 
   return (

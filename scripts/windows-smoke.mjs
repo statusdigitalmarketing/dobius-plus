@@ -8,7 +8,8 @@
 //    claude-code/cli.js path) that writes Claude's own session record and a
 //    transcript, then checks the Chat view finds it and shows the reply.
 // 4. Checks the session is listed in History.
-// 5. Closes the window and checks the app quits on its own.
+// 5. Snoozes a tab and brings it back with its output; the sidebar names the project by folder.
+// 6. Closes the window and checks the app quits on its own.
 // Screenshots of each step land in smoke-out/.
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -169,6 +170,34 @@ try {
   step('tab menu opens without Move to account', !!menu && !menu.includes('Move to account'), menu ? '' : 'menu did not open');
   await page.screenshot({ path: path.join(out, '6-tab-menu.png') });
   await page.keyboard.press('Escape');
+
+  // The sidebar names projects by their folder, not the whole Windows path (Max, 2.2.19).
+  const tabsButton = page.getByRole('button', { name: 'Tabs', exact: true });
+  if (await tabsButton.isVisible().catch(() => false)) await tabsButton.click();
+  const named = await waitFor(async () => page.evaluate(() => [...document.querySelectorAll('span.truncate')].some((e) => /^demo-app • here/.test(e.textContent || ''))), 30000, 1000);
+  step('sidebar shows the project as demo-app', !!named);
+
+  // Snooze a tab and bring it back: its output comes back with it (scrolled up: ConPTY clears the screen it starts on).
+  const lastTab = page.locator('button[draggable="true"]').last();
+  await lastTab.click();
+  await page.locator('.xterm-screen').filter({ visible: true }).first().click();
+  await page.keyboard.type('Write-Output ("snz-" + (5*5))');
+  await page.keyboard.press('Enter');
+  const marked = await waitFor(async () => /snz-25/.test(await terminalText(page)), 15000);
+  await sleep(1500); // the tab's scrollback save
+  await lastTab.click({ button: 'right' });
+  await page.locator('button[aria-haspopup="menu"]', { hasText: 'Snooze' }).hover({ timeout: 10000 });
+  await page.locator('[data-testid="snooze-picks"] button').filter({ hasText: 'Until I bring it back' }).click({ timeout: 10000 });
+  const shelf = page.locator('[data-testid="snoozed-shelf"] [aria-expanded]').first();
+  await shelf.waitFor({ timeout: 20000 });
+  if ((await shelf.getAttribute('aria-expanded')) !== 'true') await shelf.click();
+  await page.locator('[data-testid="snoozed-row"]').first().click({ timeout: 10000 });
+  await sleep(6000); // the new PowerShell starts
+  await page.locator('.xterm-screen').filter({ visible: true }).first().hover();
+  for (let i = 0; i < 10; i++) { await page.mouse.wheel(0, -600); await sleep(100); }
+  const back = await waitFor(async () => /snz-25/.test(await terminalText(page)), 8000);
+  step('a snoozed tab comes back with its output', !!marked && !!back, marked ? '' : 'marker never printed');
+  await page.screenshot({ path: path.join(out, '7-snooze-back.png') });
 
   // Close every window: the app must quit by itself on Windows.
   for (const ctx of browser.contexts()) for (const p of ctx.pages()) await p.evaluate(() => window.close()).catch(() => {});

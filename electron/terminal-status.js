@@ -1,5 +1,6 @@
 import { parseTabId } from './tab-id-util.js';
 import { answersPrompt, submitsInput } from '../shared/prompt-answer.js';
+import { baseName } from '../shared/platform.js';
 // Main-process terminal STATUS authority (v1.0.43, remote-control Phase 1).
 //
 // Today the tab status (working / done / needs-input) is derived in the
@@ -64,10 +65,10 @@ function projectFromId(id, cwd) {
   const parsed = parseTabId(id);
   if (parsed && parsed.projectPath !== 'mobile') {
     const p = parsed.projectPath;
-    return { projectPath: p, projectName: p.split('/').filter(Boolean).pop() || p };
+    return { projectPath: p, projectName: baseName(p) || p };
   }
   const p = cwd || 'mobile';
-  return { projectPath: p, projectName: p.split('/').filter(Boolean).pop() || 'mobile' };
+  return { projectPath: p, projectName: baseName(p) || 'mobile' };
 }
 
 /** Feed a raw PTY data chunk for a terminal. Returns the tab's current status. */

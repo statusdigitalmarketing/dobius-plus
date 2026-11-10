@@ -8,6 +8,7 @@ import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, 
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../../../shared/chat-activity.js';
 import ModelMenu from './ModelMenu';
 import './ChatPane.css';
+import { isWindows } from '../../../shared/platform.js';
 
 const POLL_MS = 1500;
 // Unsent drafts outlive the pane: switching a tab to Terminal unmounts it.
@@ -1134,7 +1135,7 @@ export default function ChatPane({ tabId, visible }) {
           {claudeLive || sessionId ? (STATUS_TEXT[status] || 'Ready') : 'Terminal'}
         </span>
         <span className="chatp-spacer" />
-        <button type="button" className="chatp-link" onClick={() => setWindowViewMode('terminal')} title="Back to the terminal (Cmd+Shift+C)">
+        <button type="button" className="chatp-link" onClick={() => setWindowViewMode('terminal')} title={`Back to the terminal for every tab (${isWindows() ? 'Ctrl+Shift+M' : 'Cmd+Shift+C'})`}>
           Show terminal
         </button>
       </div>

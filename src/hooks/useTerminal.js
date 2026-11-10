@@ -8,6 +8,7 @@ import { useStore } from '../store/store';
 import { takePendingScrollback, drawableLine } from '../lib/pending-scrollback';
 import { attachPromptEditing } from '../lib/prompt-edit-term';
 import { takePendingLaunch } from '../lib/pending-launch';
+import { isWindows } from '../../shared/platform.js';
 
 // States carried by the Dobius status marker (OSC 777;dobius;<state>), emitted by
 // the managed Claude Notification/Stop hook. Anything else is ignored.
@@ -212,6 +213,12 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
           }
           // A moved tab (tear-off or dock) keeps its live session: no divider.
           if (!claimExisting) termRef.current.write('\x1b[2m\x1b[38;5;240m── previous session ──\x1b[0m\r\n\r\n');
+          // Windows: ConPTY clears the screen (ED2) as the new shell starts, and xterm's ED2 erases the viewport
+          // without keeping it, so restored lines still on screen were wiped (Max, 2.2.19: a snoozed tab came back
+          // empty). Scroll them all into scrollback first: the new prompt starts on a clean screen with the old
+          // output one scroll up. Swallowing ConPTY's clear instead would not work: it draws by absolute position
+          // and would paint over them. A moved tab keeps its live PTY and is left alone.
+          if (!claimExisting && isWindows()) termRef.current.write('\r\n'.repeat(termRef.current.rows));
           if (!forked && !claimExisting) restoredFromDisk = true;
         }
       }).catch(() => {});

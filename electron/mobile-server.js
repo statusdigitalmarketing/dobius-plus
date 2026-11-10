@@ -365,10 +365,10 @@ function parseTermLabel(id, cwd) {
     const windowTag = extra ? extra[2].slice(2) : '';
     const num = extra ? extra[3] : m[2];
     const label = windowTag ? `Tab ${num} (win ${windowTag.slice(0, 4)})` : `Tab ${num}`;
-    return { projectPath, projectName: projectPath.split('/').filter(Boolean).pop() || projectPath, label };
+    return { projectPath, projectName: baseName(projectPath) || projectPath, label };
   }
   const projectPath = cwd || 'mobile';
-  return { projectPath, projectName: projectPath.split('/').filter(Boolean).pop() || 'mobile', label: 'new' };
+  return { projectPath, projectName: baseName(projectPath) || 'mobile', label: 'new' };
 }
 
 // Per-tab context (model + ctx%) cache, refreshed on a slow debounce because it
@@ -540,7 +540,7 @@ async function knownProjectList() {
     return (projs || [])
       .map((p) => p.decodedPath)
       .filter((pth) => typeof pth === 'string' && pth)
-      .map((pth) => ({ path: pth, name: pth.split('/').filter(Boolean).pop() || pth }));
+      .map((pth) => ({ path: pth, name: baseName(pth) || pth }));
   } catch {
     return [];
   }

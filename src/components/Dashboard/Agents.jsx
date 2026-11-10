@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../store/store';
 import { motion, AnimatePresence } from 'framer-motion';
 import { modelLabel } from '../../lib/model-label';
-import { isAbsPath, isWindows } from '../../../shared/platform.js';
+import { isAbsPath, isWindows, baseName } from '../../../shared/platform.js';
 import { shellArg, toolCommand, cmdSafe } from '../../../shared/sh-quote.js';
 
 const ALLOWED_MODELS = ['claude-opus-4-6', 'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'];
@@ -107,7 +107,7 @@ export default function Agents() {
           const status = entry.exitCode === 0 ? 'success' : entry.exitCode != null ? `exit ${entry.exitCode}` : 'unknown';
           memorySection += `- ${date} | ${dur} | ${status}`;
           if (entry.projectPath) {
-            const projName = entry.projectPath.split('/').filter(Boolean).pop();
+            const projName = baseName(entry.projectPath);
             memorySection += ` | ${projName}`;
           }
           if (entry.summary) memorySection += ` — ${entry.summary}`;
