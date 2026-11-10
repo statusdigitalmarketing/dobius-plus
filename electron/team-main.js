@@ -94,6 +94,16 @@ export function initTeam({ bridgeOpenDeps: w, endpoint, endpointProblem, onMessa
         toast(`Team message from ${p.name}`, p.text);
         try { onMessage(p.name); } catch (err) { console.warn('[team] phone notify failed:', err?.message || err); }
       }
+      if (event === 'held') {
+        const names = [...new Set((p.names || []).map((n) => oneLine(n, 80)).filter(Boolean))];
+        const n = (p.names || []).length || 1;
+        const from = names.length ? `From ${names.join(', ')}. ` : '';
+        if (p.state === 'needs attention') toast('Team message needs a look', `${from}${p.note || 'typed in, not confirmed sent'}. Check your orchestrator tab.`);
+        else toast(n > 1 ? `${n} team messages waiting for you` : 'Team message waiting for you', `${from}Not typed into your orchestrator tab: ${p.note || 'unknown reason'}. Read ${n > 1 ? 'them' : 'it'} in Tasks > Team.`);
+      }
+      if (event === 'waiting-long') {
+        toast('Team message waiting for your orchestrator tab', `From ${oneLine(p.name, 80)}: the pinned tab has been busy for 5 minutes, so it is not typed in yet${p.queued ? ` (${p.queued} more behind it)` : ''}. Free that tab, or read it in Tasks > Team.`);
+      }
       if (event === 'handoff-held') toast('Team request not handed over', `A message for ${p.to} could not be typed into the orchestrator tab: ${p.note || 'unknown reason'}. Nothing was sent.`);
       if (event === 'inbox-full') toast('Team inbox full', `A message from ${p.name} was refused: act on the waiting ones in Tasks > Team.`);
       broadcast('team:changed', { event });
@@ -250,7 +260,10 @@ export function handleTeamBridge(body) {
       const owed = Array.isArray(m.reports) ? m.reports.length : 0;
       if (owed) lines.push(`  ${owed} status report(s) not yet confirmed by the sender`);
     }
-    lines.push(`  text: ${oneLine(m.text, 400).replace(/\s+/g, ' ').slice(0, 200)}`);
+    // The whole message, line by line (it used to stop at 200 characters, with no way to read the rest). Each line is
+    // made safe for a terminal; the text is at most MAX_TEXT (8000) characters, so this stays bounded.
+    lines.push('  text:');
+    for (const l of String(m.text || '').split(/\r\n?|[\n\x0b\x0c\x85\u2028\u2029]/)) lines.push(`  | ${l.toWellFormed().replace(/[\x00-\x1f\x7f\u0080-\u009f]/g, ' ')}`); // indentation kept, controls never printed, a lone surrogate (which breaks the CLI's UTF-8 print) becomes U+FFFD
     return { status: 200, json: { ok: true, lines } };
   }
   if (!['send', 'reply', 'approve', 'release', 'done', 'failed'].includes(cmd)) return { status: 400, json: { ok: false, error: 'unknown command' } };

@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createTeamStore } from '../team-store.js';
 import { createTeamService } from '../team-service.js';
-import { deliver, deliveryCard, handoffCard, boxIsEmpty } from '../team-deliver.js';
+import { deliver, deliveryCard, handoffCard, boxIsEmpty, GAVE_UP_NOTE } from '../team-deliver.js';
 import { createAdmission, PER_IP_IN_FLIGHT } from '../team-routes.js';
 import { trackPasteMode } from '../paste-mode.js';
 
@@ -351,6 +351,139 @@ test('delivery through the service: pinned tab, routed, and a revoked peer holds
   const second = a.store.messages().filter((m) => m.dir === 'in').find((m) => m.text === 'second');
   assert.equal(second.state, 'held');
   assert.match(second.note, /Auto-route is off/);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('delivery: a tab that never frees tells a person once after the notice time, then gives up', async () => {
+  const card = deliveryCard({ fromName: 'Bryan', fromFp: 'A'.repeat(43), at: 0, id: '0123abcd-0000-4000-8000-000000000000', text: 'x' }).text;
+  const { t, deps } = fakeTab();
+  deps.idle = () => false; // a foreground build that never ends
+  let slow = 0;
+  const start = now();
+  const r = await deliver(deps, 'tab', card, { giveUpMs: 60_000, retryMs: 1000, slowMs: 10_000, onSlow: () => { slow += 1; assert.ok(now() - start >= 10_000); } });
+  assert.deepEqual(r, { state: 'held', note: GAVE_UP_NOTE });
+  assert.equal(slow, 1, 'one notice, not one per retry');
+  assert.equal(t.pasted, null);
+});
+
+test('busy orchestrator tab: people hear early, and the queue is held together instead of 30 minutes each', async () => {
+  const tn = net();
+  const a = install('Sam', tn, { deliverDeps: (tabId, authorized) => { const f = fakeTab(); return { ...f.deps, idle: () => false, authorized }; } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.store.setSettings({ orchestratorTab: 'term-/x-1' });
+  for (const text of ['one', 'two', 'three']) b.svc.send('Sam', text);
+  await b.svc.pump();
+  const ins = () => a.store.messages().filter((m) => m.dir === 'in');
+  for (let i = 0; i < 2000 && !(ins().length === 3 && ins().every((m) => m.state === 'held')); i += 1) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(ins().map((m) => m.state), ['held', 'held', 'held']);
+  for (const m of ins()) assert.equal(m.note, GAVE_UP_NOTE);
+  const slow = a.events.filter(([e]) => e === 'waiting-long');
+  assert.equal(slow.length, 1, 'one early notice for the message being tried');
+  assert.equal(slow[0][1].name, 'Bryan');
+  const held = a.events.filter(([e]) => e === 'held');
+  assert.equal(held.length, 1, 'one notice for the whole queue');
+  assert.deepEqual(held[0][1].names, ['Bryan', 'Bryan', 'Bryan']);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('busy tab review: a re-pin during the last wait does not hold the rest of the queue', async () => {
+  const tn = net();
+  const start = now();
+  let a;
+  a = install('Sam', tn, { deliverDeps: (tabId, authorized) => {
+    const f = fakeTab();
+    const sleep = f.deps.sleep;
+    return { ...f.deps, idle: () => false, authorized, sleep: async (ms) => {
+      await sleep(ms);
+      // Pinned elsewhere during the first message's final sleep, after its last authorisation check.
+      if (now() - start >= 30 * 60 * 1000 && a.store.settings().orchestratorTab === 'term-/x-1') a.store.setSettings({ orchestratorTab: 'term-/x-2' });
+    } };
+  } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.store.setSettings({ orchestratorTab: 'term-/x-1' });
+  for (const text of ['one', 'two']) b.svc.send('Sam', text);
+  await b.svc.pump();
+  const held = () => a.events.filter(([e]) => e === 'held');
+  for (let i = 0; i < 4000 && held().length < 2; i += 1) await new Promise((r) => setImmediate(r));
+  // Not one batch notice for both: the second got its own try on the new pin (and, that tab busy too, its own wait).
+  assert.deepEqual(held().map(([, p]) => p.names), [['Bryan'], ['Bryan']]);
+  a.svc.stop(); b.svc.stop();
+});
+
+test('busy tab review: a failed write while holding the queue leaves that message queued, not stranded', async () => {
+  const tn = net();
+  const a = install('Sam', tn, { deliverDeps: (tabId, authorized) => { const f = fakeTab(); return { ...f.deps, idle: () => false, authorized }; } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.store.setSettings({ orchestratorTab: 'term-/x-1' });
+  for (const text of ['one', 'two', 'three']) b.svc.send('Sam', text);
+  await b.svc.pump();
+  const patch = a.store.patchMessage;
+  let failOnce = true;
+  a.store.patchMessage = (dir, peer, id, p) => {
+    const m = a.store.messages().find((x) => x.id === id);
+    if (failOnce && p.state === 'held' && m?.text === 'two') { failOnce = false; throw new Error('ENOSPC'); }
+    return patch(dir, peer, id, p);
+  };
+  const ins = () => a.store.messages().filter((m) => m.dir === 'in');
+  for (let i = 0; i < 4000 && !(ins().length === 3 && ins().every((m) => m.state === 'held')); i += 1) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(ins().map((m) => m.state), ['held', 'held', 'held'], 'the one whose hold failed was still tried and held later');
+  const held = a.events.filter(([e]) => e === 'held');
+  assert.deepEqual(held[0][1].names, ['Bryan', 'Bryan'], 'the batch held the two it could save');
+  assert.equal(held.length, 2, 'then its own notice when it gave up');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('busy tab review: a waiting message a person sent to the orchestrator is not batch-held', async () => {
+  const tn = net();
+  const a = install('Sam', tn, { deliverDeps: (tabId, authorized) => { const f = fakeTab(); return { ...f.deps, idle: () => false, authorized }; } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.store.setSettings({ orchestratorTab: 'term-/x-1' });
+  for (const text of ['one', 'two']) b.svc.send('Sam', text);
+  await b.svc.pump();
+  const two = () => a.store.messages().find((m) => m.dir === 'in' && m.text === 'two');
+  for (let i = 0; i < 50 && two()?.state !== 'waiting'; i += 1) await new Promise((r) => setImmediate(r));
+  assert.equal(a.svc.routeNow(two().peer, two().id).ok, true);
+  const held = () => a.events.filter(([e]) => e === 'held');
+  for (let i = 0; i < 4000 && held().length < 2; i += 1) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(held().map(([, p]) => p.names), [['Bryan'], ['Bryan']], 'tried on its own, not held with the first');
+  a.svc.stop(); b.svc.stop();
+});
+
+test('busy tab review: no batch hold once the service has stopped', async () => {
+  const tn = net();
+  const start = now();
+  let a;
+  a = install('Sam', tn, { deliverDeps: (tabId, authorized) => {
+    const f = fakeTab();
+    const sleep = f.deps.sleep;
+    return { ...f.deps, idle: () => false, authorized, sleep: async (ms) => { await sleep(ms); if (now() - start >= 30 * 60 * 1000) a.svc.stop(); } };
+  } });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.store.setSettings({ orchestratorTab: 'term-/x-1' });
+  for (const text of ['one', 'two']) b.svc.send('Sam', text);
+  await b.svc.pump();
+  for (let i = 0; i < 4000 && !a.events.some(([e]) => e === 'held'); i += 1) await new Promise((r) => setImmediate(r));
+  assert.equal(a.store.messages().find((m) => m.dir === 'in' && m.text === 'two').state, 'waiting', 'left to resume on the next launch');
+  b.svc.stop();
+});
+
+test('a message held for any reason raises a held notice', async () => {
+  const tn = net();
+  const a = install('Sam', tn, { deliverDeps: () => null });
+  const b = install('Bryan', tn);
+  assert.equal((await linkPair(a, b)).ok, true);
+  a.store.setSettings({ orchestratorTab: 'term-/x-1' });
+  b.svc.send('Sam', 'hello');
+  await b.svc.pump();
+  for (let i = 0; i < 50 && !a.events.some(([e]) => e === 'held'); i += 1) await new Promise((r) => setImmediate(r));
+  const held = a.events.find(([e]) => e === 'held');
+  assert.equal(held[1].note, 'delivery is not available');
+  assert.deepEqual(held[1].names, ['Bryan']);
   a.svc.stop(); b.svc.stop();
 });
 

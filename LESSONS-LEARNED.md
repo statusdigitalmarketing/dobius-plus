@@ -903,3 +903,9 @@
 - **CONTEXT**: Every outbound Asana comment is in Sam's name and voice. A comment under Bryan's name tells a stakeholder that Bryan did the work.
 - **DETECTION**: `python3 -c "import urllib.request,json,os;r=urllib.request.Request('https://app.asana.com/api/1.0/users/me',headers={'Authorization':'Bearer '+os.environ['ASANA_PAT']});print(json.load(urllib.request.urlopen(r))['data']['name'])"` must print Sam Nihalani; the claude.ai connector's get_me does not.
 
+
+### Architecture - 2026-11-09 (a second function with the same name silently wins)
+- **MISTAKE**: Added `function notifyHeld(names, note, state)` inside `createTeamService` (electron/team-service.js) while a handoff `function notifyHeld(to, note)` already existed further down the same closure. Function declarations hoist and the LAST one wins, so every new call went to the handoff notifier and raised a "Team request not handed over" toast instead. `node --check` passed; only the new service test (events showed `handoff-held`) caught it.
+- **FIX**: Renamed the new one `notifyInHeld`. Before adding a function to a large closure, grep the file for the name.
+- **CONTEXT**: team-service.js is ~1000 lines in one closure; any long factory function has the same trap. No linter here flags duplicate declarations.
+- **DETECTION**: `grep -oE "^  function [A-Za-z0-9_]+" electron/team-service.js | sort | uniq -d` (prints any duplicate, should print nothing).

@@ -26,6 +26,10 @@ import { shortFp } from './team-crypto.js';
 
 export const QUIET_MS = 3000;            // no person's input for this long before a paste
 export const GIVE_UP_MS = 30 * 60 * 1000; // then the message waits in the Team inbox
+// A person is told the message is waiting long before it gives up: a busy pinned tab (a foreground build that never
+// ends) held four messages for 3 to 17 hours with nothing on screen (Muzikmaker report, 2026-11-09).
+export const SLOW_NOTICE_MS = 5 * 60 * 1000;
+export const GAVE_UP_NOTE = 'the orchestrator tab was not free for 30 minutes';
 export const RETRY_MS = 10_000;
 const READY_POLL_MS = 250;
 const READY_POLLS = 2;
@@ -99,10 +103,14 @@ export function boxIsEmpty(screen) {
  *   { state: 'needs attention', note }                   pasted but not confirmed sent: never retried (the prompt now
  *                                                         holds unknown mixed input)
  *   { state: 'held', note }                              nothing typed: stopped (authorisation) or gave up (30 min)
+ * opts.onSlow(): called once when the tab has not been free for opts.slowMs (SLOW_NOTICE_MS), so a person hears about
+ * it then rather than at the give-up.
  */
 export async function deliver(deps, tabId, card, opts = {}) {
   const giveUpAt = deps.now() + (opts.giveUpMs ?? GIVE_UP_MS);
   const retryMs = opts.retryMs ?? RETRY_MS;
+  const slowAt = deps.now() + (opts.slowMs ?? SLOW_NOTICE_MS);
+  let warned = false;
   while (deps.now() < giveUpAt) {
     const why = deps.authorized();
     if (why) return { state: 'held', note: why };
@@ -111,9 +119,13 @@ export async function deliver(deps, tabId, card, opts = {}) {
       const r = await attempt(deps, tabId, card);
       if (r) return r;
     }
+    if (!warned && opts.onSlow && deps.now() >= slowAt) {
+      warned = true;
+      try { opts.onSlow(); } catch (err) { console.warn('[team] slow-delivery notice failed:', err?.message || err); }
+    }
     await deps.sleep(retryMs);
   }
-  return { state: 'held', note: 'the orchestrator tab was not free for 30 minutes' };
+  return { state: 'held', note: GAVE_UP_NOTE };
 }
 
 // One try. null: not ready, nothing typed (retry later). Otherwise a final result.

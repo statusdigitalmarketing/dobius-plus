@@ -537,8 +537,8 @@ export default function TasksDropdown() {
     <div ref={dropdownRef} style={{ position: 'relative' }}>
       <button
         onClick={() => setOpen((v) => !v)}
-        title={`Tasks: this project's to-do list and the Inbox board${pendingCount > 0 ? ` (${pendingCount} open)` : ''}${commandCount > 0 ? `. ${commandCount} command${commandCount === 1 ? '' : 's'} waiting for you to run` : ''}`}
-        aria-label={`Tasks${pendingCount > 0 ? `, ${pendingCount} open` : ''}${commandCount > 0 ? `, ${commandCount} commands to run` : ''}`}
+        title={`Tasks: this project's to-do list and the Inbox board${pendingCount > 0 ? ` (${pendingCount} open)` : ''}${commandCount > 0 ? `. ${commandCount} command${commandCount === 1 ? '' : 's'} waiting for you to run` : ''}${team.attention > 0 ? `. ${team.attention} team message${team.attention === 1 ? '' : 's'} waiting for you` : ''}`}
+        aria-label={`Tasks${pendingCount > 0 ? `, ${pendingCount} open` : ''}${commandCount > 0 ? `, ${commandCount} commands to run` : ''}${team.attention > 0 ? `, ${team.attention} team messages waiting` : ''}`}
         aria-expanded={open}
         className="no-drag"
         style={{
@@ -571,6 +571,17 @@ export default function TasksDropdown() {
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1,
           }}>
             {'$'}{commandCount}
+          </span>
+        )}
+        {team.attention > 0 && (
+          // A teammate's message is waiting for a person (held, or typed in and not confirmed): visible without opening
+          // the panel, which is where it used to be the only sign (Muzikmaker report, 2026-11-09).
+          <span title="Team messages waiting for you (Tasks > Team)" style={{
+            minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8, backgroundColor: 'var(--danger)',
+            color: 'var(--bg)', fontSize: 9, fontWeight: 700,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1,
+          }}>
+            {'@'}{team.attention}
           </span>
         )}
       </button>
