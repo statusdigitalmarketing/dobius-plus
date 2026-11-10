@@ -469,7 +469,7 @@ const SELECTOR_KEYS = [
  * visible.
  */
 export default function ChatPane({ tabId, visible }) {
-  const setTabViewMode = useStore((s) => s.setTabViewMode);
+  const setWindowViewMode = useStore((s) => s.setWindowViewMode);
   const isActive = useStore((s) => s.activeTabId === tabId);
   const [messages, setMessages] = useState(null); // null = not loaded yet
   const [sessionId, setSessionId] = useState(undefined); // undefined = first poll pending
@@ -1134,7 +1134,7 @@ export default function ChatPane({ tabId, visible }) {
           {claudeLive || sessionId ? (STATUS_TEXT[status] || 'Ready') : 'Terminal'}
         </span>
         <span className="chatp-spacer" />
-        <button type="button" className="chatp-link" onClick={() => setTabViewMode(tabId, 'terminal')} title="Back to the terminal (Cmd+Shift+C)">
+        <button type="button" className="chatp-link" onClick={() => setWindowViewMode('terminal')} title="Back to the terminal (Cmd+Shift+C)">
           Show terminal
         </button>
       </div>

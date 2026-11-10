@@ -7,6 +7,7 @@ import { windowFocused } from '../lib/window-focus';
 import { applyAutoLabel, lockLabel, unlockLabel } from '../../shared/tab-label.js';
 import { NEW_TAB_TOOLS, resumeNeedsNewTab } from '../../shared/new-tab.js';
 import { setPendingLaunch, clearPendingLaunches } from '../lib/pending-launch';
+import { setPendingScrollback } from '../lib/pending-scrollback';
 import { isAbsPath, isWindows } from '../../shared/platform.js';
 import { cdThen, toolCommand } from '../../shared/sh-quote.js';
 
@@ -48,6 +49,22 @@ function resolveActiveTerminalTabId(state) {
   if (active && (active.kind || 'terminal') === 'terminal') return active.id;
   const terms = tabs.filter((t) => (t.kind || 'terminal') === 'terminal');
   return terms.length ? terms[terms.length - 1].id : null;
+}
+
+// A tab with the given Terminal/Chat mode ('chat' is stored, terminal is the absence of the field).
+function withViewMode(t, mode) {
+  if (mode === 'chat') return t.viewMode === 'chat' ? t : { ...t, viewMode: 'chat' };
+  if (t.viewMode === undefined) return t;
+  const { viewMode: _drop, ...rest } = t;
+  return rest;
+}
+
+// The window's Terminal/Chat mode: the active tab's, else any terminal tab's. A tab that joins the window (new,
+// reopened, back from snooze) takes it, so the window stays one mode.
+function windowViewMode(state) {
+  const active = state.terminalTabs.find((t) => t.id === state.activeTabId && t.kind !== 'browser');
+  const t = active || state.terminalTabs.find((x) => x.kind !== 'browser');
+  return t?.viewMode === 'chat' ? 'chat' : 'terminal';
 }
 
 export const useStore = create((set, get) => ({
@@ -260,7 +277,9 @@ export const useStore = create((set, get) => ({
   // it returns null in that case.
   openNewTab: (projectPath, tool) => {
     if (!get().tabsReady) { queuedNewTabs.push([projectPath, tool]); return null; }
+    const chat = windowViewMode(get()) === 'chat';
     const tab = get().addTab(projectPath);
+    if (chat) set((s) => ({ terminalTabs: s.terminalTabs.map((t) => (t.id === tab.id ? withViewMode(t, 'chat') : t)) }));
     // main reads the setting at spawn ('default'); an unknown tool starts nothing.
     const launch = tool === undefined ? 'default' : (NEW_TAB_TOOLS.includes(tool) ? tool : 'shell');
     setPendingLaunch(tab.id, launch);
@@ -331,8 +350,12 @@ export const useStore = create((set, get) => ({
     if (!tab?.id || state.terminalTabs.some((t) => t.id === tab.id)) return false;
     // Its id is in this window's id space only if it was born here (so below
     // the counter), else in a tear-off's own space: never handed out here.
+    // It joins this window's Terminal/Chat mode, so the window stays one mode (a window with no terminal tab yet
+    // has no mode of its own and takes the docked tab's).
+    const adopted = tab.kind === 'browser' || !state.terminalTabs.some((t) => t.kind !== 'browser')
+      ? tab : withViewMode(tab, windowViewMode(state));
     set({
-      terminalTabs: [...state.terminalTabs, tab],
+      terminalTabs: [...state.terminalTabs, adopted],
       tabStatus: status ? { ...state.tabStatus, [tab.id]: status } : state.tabStatus,
       hookOwnedTabs: hookOwned ? { ...state.hookOwnedTabs, [tab.id]: true } : state.hookOwnedTabs,
       // A turn's background work still running travels with the tab, or the
@@ -471,15 +494,12 @@ export const useStore = create((set, get) => ({
     terminalTabs: s.terminalTabs.map((t) => t.id === tabId ? lockLabel(t, label) : t),
   })),
 
-  // Terminal or Chat (the readable transcript view over the same PTY). Stored
-  // on the tab so it survives a restart, tear-off, dock and reopen.
-  setTabViewMode: (tabId, mode) => set((s) => ({
-    terminalTabs: s.terminalTabs.map((t) => {
-      if (t.id !== tabId) return t;
-      if (mode === 'chat') return { ...t, viewMode: 'chat' };
-      const { viewMode: _drop, ...rest } = t;
-      return rest;
-    }),
+  // Terminal or Chat (the readable transcript view over the same PTY), for the WHOLE window (Brett, Asana
+  // 1220362099009581: switching one tab at a time was the complaint). Still stored on each tab so it survives a
+  // restart, tear-off, dock and reopen; every terminal tab in this window gets the same value. Browser tabs have no
+  // chat view and are left alone.
+  setWindowViewMode: (mode) => set((s) => ({
+    terminalTabs: s.terminalTabs.map((t) => (t.kind === 'browser' ? t : withViewMode(t, mode))),
   })),
 
   // The user cleared the name: hand the label back to the automatic sources.
@@ -773,7 +793,7 @@ export const useStore = create((set, get) => ({
       kind: closed.kind || 'terminal',
       ...(closed.claudeAccountPin ? { claudeAccountPin: closed.claudeAccountPin } : {}),
       ...(closed.url ? { url: closed.url } : {}),
-      ...(closed.viewMode === 'chat' ? { viewMode: 'chat' } : {}),
+      ...((closed.kind || 'terminal') !== 'browser' && windowViewMode(state) === 'chat' ? { viewMode: 'chat' } : {}),
       createdAt: Date.now(),
     };
     set({
@@ -789,6 +809,39 @@ export const useStore = create((set, get) => ({
     }
     // Return the new tab + saved scrollback so the caller can restore it
     return { tab, scrollback: closed.scrollback };
+  },
+
+  // A snoozed tab coming back (main's snooze:take handed it to this window): a new tab with its label and scrollback,
+  // whose shell resumes the Claude conversation it was on (main runs `claude --resume` as the first command, nothing is
+  // typed). A timed return does not take the screen from what you are doing: it arrives unread. Null before the
+  // window's tabs are restored (the caller tries again when they are).
+  restoreSnoozedTab: ({ entry, scrollback } = {}, { activate = false } = {}) => {
+    const state = get();
+    if (!state.tabsReady || !entry?.projectPath) return null;
+    const counter = nextFreeCounter(state, entry.projectPath);
+    const id = makeTabId(entry.projectPath, counter, idSpace(state));
+    const resumes = entry.kind !== 'browser' && entry.sessionId && entry.cwd;
+    const tab = {
+      id,
+      label: entry.label || 'Tab',
+      ...(typeof entry.labelLocked === 'boolean' ? { labelLockedByUser: entry.labelLocked } : {}),
+      projectPath: entry.projectPath,
+      kind: entry.kind === 'browser' ? 'browser' : 'terminal',
+      ...(entry.claudeAccountPin ? { claudeAccountPin: entry.claudeAccountPin } : {}),
+      ...(entry.pinned === true ? { pinned: true } : {}),
+      ...(entry.kind === 'browser' && entry.url ? { url: entry.url } : {}),
+      ...(entry.kind !== 'browser' && windowViewMode(state) === 'chat' ? { viewMode: 'chat' } : {}),
+      ...(resumes ? { startsTool: true } : {}),
+      createdAt: Date.now(),
+    };
+    if (resumes) setPendingLaunch(id, { resume: { sessionId: entry.sessionId, cwd: entry.cwd } });
+    if (Array.isArray(scrollback) && scrollback.length > 0) setPendingScrollback(id, { scrollback });
+    set((s) => ({
+      terminalTabs: [...s.terminalTabs, tab],
+      tabCounter: counter,
+      ...(activate ? { activeTabId: id, activeView: 'terminal' } : { unreadTabs: { ...s.unreadTabs, [id]: true } }),
+    }));
+    return tab;
   },
 
   // Resume a Claude session by sending the resume command to the active terminal

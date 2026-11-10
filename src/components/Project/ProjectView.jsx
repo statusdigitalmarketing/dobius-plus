@@ -26,6 +26,7 @@ import ResumeBanner from './ResumeBanner';
 import AutoMoveNotices from './AutoMoveNotices';
 import { useAgentActivity } from '../../hooks/useAgentActivity';
 import { useTabActivity } from '../../hooks/useTabActivity';
+import { useSnoozeReturn } from '../../hooks/useSnoozeReturn';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 import { onScreenTabIds } from '../../lib/tab-unread';
 import { windowFocused, onWindowFocus } from '../../lib/window-focus';
@@ -107,6 +108,8 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
   useAgentActivity();
   // Per-tab status dots (working/done inferred from output flow; red is hook-driven)
   useTabActivity();
+  // Snoozed tabs whose time has come open here again (Brett, Asana 1220362133877230).
+  useSnoozeReturn(projectPath, !!tearOffTabId);
 
   // Extract project name from path
   const projectName = projectPath
@@ -1153,13 +1156,13 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
           setActiveView(current === 'terminal' ? 'dashboard' : 'terminal');
         }
       } else if ((e.key === 'c' || e.key === 'C') && e.shiftKey && !e.altKey) {
-        // Cmd+Shift+C = flip the active tab between Terminal and Chat.
+        // Cmd+Shift+C = flip the window (every terminal tab) between Terminal and Chat.
         const state = useStore.getState();
         if (state.activeView !== 'terminal') return;
         const tab = state.terminalTabs.find((t) => t.id === state.activeTabId);
         if (!tab || tab.kind === 'browser') return;
         e.preventDefault();
-        state.setTabViewMode(tab.id, tab.viewMode === 'chat' ? 'terminal' : 'chat');
+        state.setWindowViewMode(tab.viewMode === 'chat' ? 'terminal' : 'chat');
       } else if (e.key === 'w' && !e.shiftKey) {
         // Cmd+W = close tab (with process confirmation)
         if (inAppField) return;

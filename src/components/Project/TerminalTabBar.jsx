@@ -1,11 +1,12 @@
 import { createPortal } from 'react-dom';
-import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { isLabelLocked, labelMeta } from '../../../shared/tab-label.js';
 import { useStore } from '../../store/store';
 import { markDoNotKill, unmarkDoNotKill } from '../../hooks/useTerminal';
 import { STATUS_COLORS, STATUS_LABELS } from '../../lib/status-colors';
 import MoveAccountDialog from './MoveAccountDialog';
 import { isWindows } from '../../../shared/platform.js';
+import { snoozePicks, snoozeTimeLabel } from '../../../shared/snooze-times.js';
 
 // Tab ids with a tear-off gesture already in flight. A tab stays in this window's
 // tab bar until its tear-off confirms (H5), so a rapid SECOND drag of the same
@@ -223,6 +224,48 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
     closingRef.current.add(tabId);
     try { await closeTabNow(tabId); } finally { closingRef.current.delete(tabId); }
   }, [closeTabNow]);
+
+  // Snooze (Brett, Asana 1220362133877230): the tab closes, main keeps what brings it back (electron/tab-snooze.js),
+  // and it reopens on its own time in this project's window. Same guards as a close: never the last tab, never twice
+  // at once, a pinned tab asks; and a tab Claude is still working in asks first, since its terminal stops.
+  const snoozeTabNow = useCallback(async (tabId, until) => {
+    if (closingRef.current.has(tabId)) return;
+    if (useStore.getState().terminalTabs.filter((t) => !closingRef.current.has(t.id)).length <= 1) return;
+    const tab = useStore.getState().terminalTabs.find((t) => t.id === tabId);
+    if (!tab || !window.electronAPI?.snoozeAdd) return;
+    if (tab.pinned && !window.confirm(`"${tab.label}" is pinned. Snooze it anyway?`)) return;
+    if (useStore.getState().tabStatus[tabId] === 'working'
+      && !window.confirm(`Claude is still working in "${tab.label}". Snooze it anyway?\n\nIts terminal stops now, so this turn ends. A Claude conversation picks up where it left off when the tab comes back; anything else comes back as a fresh terminal.`)) return;
+    closingRef.current.add(tabId);
+    try {
+      let scrollback = null;
+      if (tab.kind !== 'browser' && window.electronAPI.terminalLoadState) {
+        await window.electronAPI.terminalRequestSaveNow?.();
+        await new Promise((r) => setTimeout(r, 200));
+        scrollback = (await window.electronAPI.terminalLoadState(tabId))?.scrollback || null;
+      }
+      const id = await window.electronAPI.snoozeAdd(tabId, until, {
+        projectPath: tab.projectPath, label: tab.label, labelLocked: isLabelLocked(tab), kind: tab.kind || 'terminal',
+        url: tab.url, viewMode: tab.viewMode, claudeAccountPin: tab.claudeAccountPin, pinned: tab.pinned === true,
+      }, scrollback);
+      if (!id) {
+        window.alert(`Couldn't snooze "${tab.label}". It stays open.`);
+        return;
+      }
+      // As with a close: decided on the tabs as they are now. If it left this window meanwhile (torn off: its session
+      // runs on there) or became the last tab, it is not snoozed, and the entry is dropped so it never comes back
+      // later as a second copy of a live session.
+      const live = useStore.getState().terminalTabs;
+      if (!live.some((t) => t.id === tabId) || live.length <= 1) { await window.electronAPI.snoozeDiscard(id); return; }
+      if (tab.kind !== 'browser') window.electronAPI.terminalKill(tabId);
+      removeTab(tabId);
+    } catch (err) {
+      console.warn('[snooze] failed:', err?.message || err);
+      window.alert(`Couldn't snooze "${tab.label}": ${err?.message || err}`);
+    } finally {
+      closingRef.current.delete(tabId);
+    }
+  }, [removeTab]);
 
   // Middle-click to close (#24). Through the same guarded close as every other path (pinned confirm, never the last
   // tab, never two closes racing).
@@ -763,6 +806,12 @@ export default function TerminalTabBar({ tearOffTabId = null }) {
             }
             setContextMenu(null);
           }}
+          canSnooze={tabs.length > 1 && !!window.electronAPI?.snoozeAdd}
+          onSnooze={(until) => {
+            const target = contextMenu.tabId;
+            setContextMenu(null);
+            snoozeTabNow(target, until);
+          }}
           onCloseOthers={() => {
             closeOtherTabs(contextMenu.tabId);
             setContextMenu(null);
@@ -882,7 +931,7 @@ function timeAgo(ts) {
   return `${Math.floor(diff / 86400000)}d ago`;
 }
 
-function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, onTeamOrchestrator, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
+function ContextMenu({ x, y, tabCount, tabIndex, canSnooze, onSnooze, isPinned, isTeamOrchestrator, onTeamOrchestrator, isSplit, isMonitored, onMonitor, onRename, onClose, onCloseOthers, onCloseToRight, onPin, onSplit, onCopyLastResponse, onContinueAccount, onDock, onDismiss }) {
   const recentlyClosedTabs = useStore((s) => s.recentlyClosedTabs);
   const reopenClosedTab = useStore((s) => s.reopenClosedTab);
   // Kept inside the window: opened low in the sidebar it would otherwise run off the bottom, out of reach (Codex).
@@ -972,6 +1021,7 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
     { label: 'Rename', onClick: onRename },
     { label: isSplit ? 'Unsplit' : 'Split View', onClick: onSplit, disabled: tabCount <= 1 },
     { type: 'divider' },
+    ...(onSnooze ? [{ label: 'Snooze', submenu: 'snooze', disabled: !canSnooze }, { type: 'divider' }] : []),
     { label: 'Copy Last Claude Response', onClick: onCopyLastResponse },
     ...(onTeamOrchestrator ? [{ label: isTeamOrchestrator ? 'Stop being team orchestrator' : 'Use as team orchestrator', onClick: onTeamOrchestrator }] : []),
     // Windows applies no saved account to a terminal, so moving would do nothing there (Max, 2026-11-09).
@@ -981,6 +1031,16 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
     { label: 'Close Others', onClick: onCloseOthers, disabled: tabCount <= 1 },
     { label: 'Close to Right', onClick: onCloseToRight, disabled: tabIndex >= tabCount - 1 },
   ];
+
+  // Snooze picks, beside the menu. Rendered inside the menu's own element so its clicks and focus count as the menu's.
+  const [flyout, setFlyout] = useState(null); // { left, top } | null
+  const openFlyout = (el) => {
+    const r = el.getBoundingClientRect();
+    const w = 260;
+    const left = r.right + 2 + w <= window.innerWidth - 8 ? r.right + 2 : Math.max(8, r.left - w - 2);
+    setFlyout({ left, top: Math.max(8, Math.min(r.top - 4, window.innerHeight - 230)) });
+  };
+  const picks = flyout ? snoozePicks() : [];
 
   const handleReopen = (idx) => {
     const result = reopenClosedTab(idx);
@@ -1022,6 +1082,25 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
       {items.map((item, i) =>
         item.type === 'divider' ? (
           <div key={`div-${i}`} style={{ height: 1, backgroundColor: 'var(--border)', margin: '4px 0' }} />
+        ) : item.submenu ? (
+          <button
+            key={item.label}
+            onClick={item.disabled ? undefined : (e) => openFlyout(e.currentTarget)}
+            onMouseEnter={(e) => { if (!item.disabled) { e.currentTarget.style.backgroundColor = 'var(--border)'; openFlyout(e.currentTarget); } }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = flyout ? 'var(--border)' : 'transparent'; }}
+            aria-haspopup="menu"
+            aria-expanded={!!flyout}
+            title={item.disabled ? 'The last tab in a window stays open' : undefined}
+            style={{
+              display: 'flex', justifyContent: 'space-between', width: '100%', textAlign: 'left',
+              padding: '5px 14px', fontSize: 11, fontFamily: "'SF Mono', monospace",
+              color: item.disabled ? 'var(--border)' : 'var(--fg)',
+              backgroundColor: flyout ? 'var(--border)' : 'transparent', border: 'none',
+              cursor: item.disabled ? 'default' : 'pointer',
+            }}
+          >
+            <span>{item.label}</span><span style={{ color: 'var(--dim)', fontSize: 9 }}>▸</span>
+          </button>
         ) : (
           <button
             key={item.label}
@@ -1038,12 +1117,45 @@ function ContextMenu({ x, y, tabCount, tabIndex, isPinned, isTeamOrchestrator, o
               border: 'none',
               cursor: item.disabled ? 'default' : 'pointer',
             }}
-            onMouseEnter={(e) => { if (!item.disabled) e.currentTarget.style.backgroundColor = 'var(--border)'; }}
+            onMouseEnter={(e) => { setFlyout(null); if (!item.disabled) e.currentTarget.style.backgroundColor = 'var(--border)'; }}
             onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
             {item.label}
           </button>
         )
+      )}
+
+      {flyout && onSnooze && (
+        <div
+          role="menu"
+          aria-label="Snooze until"
+          data-testid="snooze-picks"
+          style={{
+            position: 'fixed', left: flyout.left, top: flyout.top, width: 260, zIndex: 201,
+            backgroundColor: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6,
+            padding: '4px 0', boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+          }}
+        >
+          {picks.map((p) => (
+            <Fragment key={p.id}>
+              {p.at === null && <div style={{ height: 1, backgroundColor: 'var(--border)', margin: '4px 0' }} />}
+              <button
+                role="menuitem"
+                onClick={() => onSnooze(p.at)}
+                style={{
+                  display: 'flex', justifyContent: 'space-between', gap: 12, width: '100%', textAlign: 'left',
+                  padding: '5px 14px', fontSize: 11, fontFamily: "'SF Mono', monospace", color: 'var(--fg)',
+                  backgroundColor: 'transparent', border: 'none', cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'var(--border)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+              >
+                <span>{p.label}</span>
+                {p.at !== null && <span style={{ color: 'var(--dim)' }}>{snoozeTimeLabel(p.at)}</span>}
+              </button>
+            </Fragment>
+          ))}
+        </div>
       )}
 
       {/* Reopen closed tabs section */}
