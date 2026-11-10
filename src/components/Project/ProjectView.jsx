@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { isLabelLocked, parseLabelMeta } from '../../../shared/tab-label.js';
 import { winToMacShortcut } from '../../../shared/win-keys.js';
-import { isWindows } from '../../../shared/platform.js';
+import { isWindows, baseName } from '../../../shared/platform.js';
 import { useStore } from '../../store/store';
 import { THEMES, applyTheme } from '../../lib/themes';
 import TopBar from '../shared/TopBar';
@@ -113,7 +113,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
 
   // Extract project name from path
   const projectName = projectPath
-    ? projectPath.split('/').filter(Boolean).pop()
+    ? baseName(projectPath)
     : 'Dobius+';
 
   // Store current project path for other components (e.g. GitView)

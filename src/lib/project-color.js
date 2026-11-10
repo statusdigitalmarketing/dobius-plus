@@ -2,6 +2,7 @@
 // scanned by project without reading the grey project name. Same path, same
 // color, in every window and after every restart (no stored state).
 // Pure: tested in electron/__tests__/sidebar-polish.test.mjs.
+import { baseName } from '../../shared/platform.js';
 
 // FNV-1a over UTF-16 code units: tiny, deterministic, well spread for paths
 // that differ only in their last segment.
@@ -22,7 +23,7 @@ function hash(str) {
  */
 export function projectMonogram(projectPath) {
   const p = typeof projectPath === 'string' ? projectPath : '';
-  const name = p.split('/').filter(Boolean).pop() || '';
+  const name = baseName(p) || '';
   const letter = (name.match(/[a-z0-9]/i)?.[0] || '?').toUpperCase();
   const hue = hash(p) % 360;
   return { letter, hue, background: `hsl(${hue} 45% 42%)` };

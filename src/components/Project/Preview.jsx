@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { timeAgo } from '../../lib/time-ago';
+import { baseName } from '../../../shared/platform.js';
 
 export default function Preview({ session, onClose, onResume }) {
   const [messages, setMessages] = useState([]);
@@ -18,7 +19,7 @@ export default function Preview({ session, onClose, onResume }) {
 
   if (!session) return null;
 
-  const projectName = session.project?.split('/').filter(Boolean).pop() || 'Unknown';
+  const projectName = baseName(session.project) || 'Unknown';
 
   return (
     <div className="h-full flex flex-col" style={{ backgroundColor: 'var(--bg)' }}>

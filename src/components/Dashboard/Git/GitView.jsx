@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../../../store/store';
 import { useGit } from '../../../hooks/useGit';
+import { baseName } from '../../../../shared/platform.js';
 import GitStatusBar from './GitStatusBar';
 import CommitLog from './CommitLog';
 import BranchList from './BranchList';
@@ -136,7 +137,7 @@ export default function GitView() {
             className="text-xs truncate max-w-[200px]"
             style={{ color: 'var(--dim)', fontFamily: "'SF Mono', monospace" }}
           >
-            {projectDir.split('/').pop()}
+            {baseName(projectDir)}
           </span>
           <button
             onClick={handlePickDirectory}

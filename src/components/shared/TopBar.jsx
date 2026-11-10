@@ -185,7 +185,7 @@ function ViewModeToggle() {
         key={value}
         onClick={() => setWindowViewMode(value)}
         aria-pressed={on}
-        title={`${label} view for every tab in this window (Cmd+Shift+C)`}
+        title={`${label} view for every tab in this window (${isWindows() ? 'Ctrl+Shift+M' : 'Cmd+Shift+C'})`}
         style={{
           padding: '2px 9px',
           fontSize: 11,

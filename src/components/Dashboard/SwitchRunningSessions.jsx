@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { baseName } from '../../../shared/platform.js';
 
 /**
  * Move every RUNNING Claude session to another account.
@@ -19,7 +20,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
  */
 const AMBER = '#fbbf24';
 const RED = '#f87171';
-const shortName = (p) => String(p).split('/').filter(Boolean).pop() || String(p);
+const shortName = (p) => baseName(String(p)) || String(p);
 
 export default function SwitchRunningSessions({ accounts, identities }) {
   const [plan, setPlan] = useState(null);

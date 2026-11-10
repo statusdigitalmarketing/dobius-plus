@@ -13,7 +13,7 @@ import { listCodexSessions, codexTranscript } from './codex-sessions.js';
 import { presenceOf } from './claude-presence.js';
 import { historyIndex, singleFlight } from './history-index.js';
 import { getSettings, getManualProjects, getProjectDisplayNames, getHiddenProjects, getAllProjectsWithTabs, getSessionTabMap, getSessionTabNames } from './config-manager.js';
-import { isAbsPath, isInsidePath } from '../shared/platform.js';
+import { isAbsPath, isInsidePath, baseName } from '../shared/platform.js';
 
 /**
  * Load session history from ~/.claude/history.jsonl
@@ -361,7 +361,7 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         continue;
       }
       const projectName = realPath
-        ? realPath.split('/').filter(Boolean).pop()
+        ? baseName(realPath)
         : dir.name.split('-').filter(Boolean).pop() || dir.name;
       let files = [];
       try {
@@ -431,7 +431,7 @@ export async function loadAllSessions(projectFilter, opts = {}) {
         sessions.push({
           sessionId,
           projectPath: sessionPath,
-          projectName: sessionPath === projectPath ? projectName : (sessionPath.split('/').filter(Boolean).pop() || projectName),
+          projectName: sessionPath === projectPath ? projectName : (baseName(sessionPath) || projectName),
           preview: preview || 'No preview available',
           title,
           timestamp,
@@ -601,7 +601,7 @@ export async function getAllProjectTabs({ liveTabIds = null, tearOffTabs = [], o
   };
 
   const result = projects.map(({ path, tabs }) => {
-    const name = displayNames[path] || path.split('/').filter(Boolean).pop() || path;
+    const name = displayNames[path] || baseName(path) || path;
     const outTabs = rowsFor(path, tabs);
     const projLastActive = outTabs.length ? outTabs[0].lastActiveAt : 0;
     return { path, name, lastActiveAt: projLastActive, tabs: outTabs };
@@ -611,7 +611,7 @@ export async function getAllProjectTabs({ liveTabIds = null, tearOffTabs = [], o
   // would otherwise vanish from the aggregate; surface it as its own group. M4.
   for (const [path] of tearsByProject) {
     if (knownPaths.has(path)) continue;
-    const name = displayNames[path] || path.split('/').filter(Boolean).pop() || path;
+    const name = displayNames[path] || baseName(path) || path;
     const outTabs = rowsFor(path, []);
     if (outTabs.length === 0) continue;
     result.push({ path, name, lastActiveAt: outTabs[0].lastActiveAt, tabs: outTabs });
@@ -2976,7 +2976,7 @@ export async function searchTranscripts(query) {
       const realPath = encodedToReal.get(dir.name) || tryReconstructPath(dir.name);
       const projectPath = realPath || ('/' + dir.name.replace(/-/g, '/'));
       const projectName = realPath
-        ? realPath.split('/').filter(Boolean).pop()
+        ? baseName(realPath)
         : (dir.name.split('-').filter(Boolean).pop() || dir.name);
       try {
         const files = (await fs.readdir(projectDir)).filter((f) => f.endsWith('.jsonl'));
@@ -3051,7 +3051,7 @@ export async function searchTranscripts(query) {
         if (matches.length >= 200) break;
         matches.push({
           sessionId: m.sessionId,
-          projectName: sessionCwd ? (sessionCwd.split('/').filter(Boolean).pop() || m.projectName) : m.projectName,
+          projectName: sessionCwd ? (baseName(sessionCwd) || m.projectName) : m.projectName,
           projectPath: sessionCwd || m.projectPath,
           role: m.role,
           excerpt: m.excerpt,
@@ -3516,7 +3516,7 @@ export async function findLooseEnds({
     out.push({
       sessionId: c.sessionId,
       projectPath: c.projectPath,
-      projectName: c.projectPath.split('/').filter(Boolean).pop() || c.projectPath,
+      projectName: baseName(c.projectPath) || c.projectPath,
       ending,
       lastActivityAt: c.mtimeMs,
       ageHours: Math.round((now - c.mtimeMs) / 3600_000),

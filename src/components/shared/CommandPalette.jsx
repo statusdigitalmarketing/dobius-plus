@@ -6,7 +6,7 @@ import {
   filterGroups, flattenItems, reduceSearchState, initialSearchState, isLightColor,
 } from '../../lib/command-palette';
 import Kbd from './Kbd';
-import { isWindows } from '../../../shared/platform.js';
+import { isWindows, baseName } from '../../../shared/platform.js';
 
 const RECENT_SESSION_LIMIT = 5;
 const SEARCH_SESSION_LIMIT = 60;
@@ -106,7 +106,7 @@ export default function CommandPalette({ open, onClose, projectPath, commands })
       id: 'projects', title: 'Open project', placeholder: 'Search projects...',
       groups: [{ id: 'projects', label: 'Projects', items: projects.map((p) => ({
         id: `project:${p.decodedPath}`,
-        title: p.displayName || p.decodedPath.split('/').filter(Boolean).pop(),
+        title: p.displayName || baseName(p.decodedPath),
         subtitle: p.decodedPath.replace(/^\/Users\/[^/]+/, '~'),
         trailing: p.decodedPath === projectPath ? 'This window' : null,
         searchTerms: [p.displayName || '', p.decodedPath],

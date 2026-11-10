@@ -25,6 +25,7 @@ import { app } from 'electron';
 import { createTerminal, writeTerminal, listTerminals } from './terminal-manager.js';
 import { askSam } from './conversation-router.js';
 import { getProjectConfig, setProjectConfig } from './config-manager.js';
+import { baseName } from '../shared/platform.js';
 
 const SPAWN_DEBOUNCE_MS = 5000;
 let lastSpawnTs = 0;
@@ -92,7 +93,7 @@ export async function spawnAgent({ projectPath, agentId, initialPrompt, builtinA
   const agent = findAgent(agentId, builtinAgents);
   if (!agent) throw new Error(`agent not found: ${agentId}`);
 
-  const projectName = projectPath.split('/').filter(Boolean).pop() || projectPath;
+  const projectName = baseName(projectPath) || projectPath;
 
   // Confirm with Sam via iMessage. The Conductor is the only caller right
   // now, and the Conductor was triggered by an iMessage so this gate makes

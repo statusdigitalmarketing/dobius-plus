@@ -1,3 +1,4 @@
+import { baseName } from './platform.js';
 /**
  * Due dates for the Tasks dropdown. Days are local YYYY-MM-DD strings (Asana's
  * due_on and the Inbox board's due both use that shape), compared as days, so
@@ -62,7 +63,7 @@ const projectKey = (s) => String(s || '').toLowerCase().replace(/\+/g, 'plus').r
  */
 export function sameProject(boardProject, folderPath) {
   const a = projectKey(boardProject);
-  const b = projectKey(String(folderPath || '').split('/').filter(Boolean).pop());
+  const b = projectKey(baseName(String(folderPath || '')));
   if (a.length < 4 || b.length < 4) return false;
   return a === b || b.startsWith(a) || a.startsWith(b);
 }
