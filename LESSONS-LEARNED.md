@@ -915,3 +915,21 @@
 - **FIX**: `npm test` now runs under `scripts/test-tmp.mjs`, which points TMPDIR/TMP/TEMP at one folder per run, deletes it when the run ends, and sweeps folders left by killed runs. New tests that make temp folders use `tmpDir(prefix)` from `electron/__tests__/tmp.mjs`, which removes them on exit, so a file run on its own leaves nothing either.
 - **CONTEXT**: Anything a test writes to os.tmpdir() outlives the run unless removed. Running a single file with `node --test` bypasses the npm wrapper.
 - **DETECTION**: `grep -rn "mkdtempSync(path.join(os.tmpdir()" electron/__tests__ shared/__tests__ | grep -v tmp.mjs` (new uses should go through tmpDir), and `ls "$(getconf DARWIN_USER_TEMP_DIR)" | grep -c '^dobius-'` should stay near zero after `npm test`.
+
+### Deployment - 2026-11-10 (release preflight aborted by a scratch file)
+- **MISTAKE**: Started `./release.sh patch` in the background, then wrote `scratch-evidence.mjs` into the repo root for a harness screenshot while its preflight tests ran. Preflight aborted with "the tree changed while the tests ran", and the release had to be run again (nothing was published).
+- **FIX**: While release.sh runs, write nothing inside the checkout. Harness drivers that need the repo's playwright-core go in the scratchpad and import `<repo>/node_modules/playwright-core/index.mjs` by absolute path.
+- **CONTEXT**: Any write under the repo during the release (scratch scripts, LESSONS edits, dist-shiptest builds) trips the same guard.
+- **DETECTION**: `git status --short` must print nothing before AND during `./release.sh`.
+
+### Architecture - 2026-11-10 (a new resume path skipped the session claim)
+- **MISTAKE**: The snooze return started `claude --resume <id>` through terminal:create's `launch.resume` without `claimSessionResume`. If the session had been resumed elsewhere while the tab was snoozed, two Claudes would run on one transcript. Both independent review lenses found it.
+- **FIX**: terminal:create now claims the session before createTerminal (refused: plain shell; window gone or spawn failed: release). Every path that starts `claude --resume` must go through `claimSessionResume`.
+- **CONTEXT**: History, auto-resume, the phone and account moves all claim; a new resume path is easy to add without it because nothing fails visibly.
+- **DETECTION**: `grep -rn "resume" electron/main.js | grep -n "createTerminal"` and check each call site has a `claimSessionResume` before it.
+
+### Testing - 2026-11-10 (harness teardown by broad pkill is blocked)
+- **MISTAKE**: `pkill -f "node_modules/electron/..."` to stop the snooze harness was refused by the auto-mode classifier as interfering with other workloads (it could match the live app or other harnesses).
+- **FIX**: Find the harness PIDs (`pgrep -f` candidates), keep only those whose env names the harness userData (`ps -E -p $p -o command= | grep -q <harness>/ud`), and kill those by PID.
+- **CONTEXT**: Same reason as "never pkill -f vite" in NOTES: patterns match more than the harness.
+- **DETECTION**: never `pkill -f` in a harness teardown; `grep -n "pkill -f" scratchpad scripts` should find none.
