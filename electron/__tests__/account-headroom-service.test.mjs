@@ -15,6 +15,7 @@ import { processEnvironment } from '../claude-process-scan.js';
 import { spawn as spawnChild } from 'node:child_process';
 import { renderScreenLines } from '../screen-render.js';
 import { promptBoxText } from '../bridge-open-tab.js';
+import { tmpDir } from './tmp.mjs';
 
 let pass = 0;
 const check = async (label, fn) => { await fn(); pass += 1; console.log(`PASS  ${label}`); };
@@ -32,7 +33,7 @@ const five = (p) => ({ five_hour: { usedPercentage: p, resetsAt: R5 } });
 const acct = (id, dir, name = id.toUpperCase()) => ({ id, type: 'claude', name, claudeJsonPath: `${dir}/.claude.json` });
 
 function world(over = {}) {
-  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-headroom-'));
+  const ud = tmpDir('dobius-headroom-');
   const w = {
     ud,
     now: T0,
@@ -761,7 +762,7 @@ await check('draftOnScreen: only an empty readable box is no draft', async () =>
 // ---- the history file ----
 
 await check('a symlink planted at the temp path is not written through', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-hist-'));
+  const dir = tmpDir('dobius-hist-');
   const cred = path.join(dir, 'credential');
   fs.writeFileSync(cred, 'SECRET');
   const final = path.join(dir, 'h.json');
@@ -772,7 +773,7 @@ await check('a symlink planted at the temp path is not written through', async (
 });
 
 await check('a symlink at the final path is replaced, never followed, and the file is 0600', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-hist-'));
+  const dir = tmpDir('dobius-hist-');
   const cred = path.join(dir, 'credential');
   fs.writeFileSync(cred, 'SECRET');
   const final = path.join(dir, 'h.json');
@@ -786,7 +787,7 @@ await check('a symlink at the final path is replaced, never followed, and the fi
 });
 
 await check('a folder that is a link is refused', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-hist-'));
+  const dir = tmpDir('dobius-hist-');
   const real = path.join(dir, 'real');
   fs.mkdirSync(real);
   fs.symlinkSync(real, path.join(dir, 'linked'));
@@ -849,7 +850,7 @@ await check('records past the age limit are deleted hourly, and stray temp files
   w.now += 3600_001;
   await w.svc.tick();
   assert.equal(w.pruned, 2);
-  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prune-'));
+  const ud = tmpDir('dobius-prune-');
   const dir = path.join(ud, 'usage');
   fs.mkdirSync(dir);
   const old = (Date.now() - 10 * 86400_000) / 1000;
@@ -861,16 +862,16 @@ await check('records past the age limit are deleted hourly, and stray temp files
   for (const n of [OLD, '.tmp.s1.123', ...notOurs]) fs.utimesSync(path.join(dir, n), old, old);
   assert.equal(await pruneUsageRecords(ud, 8 * 86400_000), 2);
   assert.deepEqual(fs.readdirSync(dir).sort(), [FRESH, ...notOurs].sort());
-  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prunereal-'));
+  const real = tmpDir('dobius-prunereal-');
   fs.writeFileSync(path.join(real, 'x.json'), 'x');
   fs.utimesSync(path.join(real, 'x.json'), old, old);
-  const ud2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-prunelink-'));
+  const ud2 = tmpDir('dobius-prunelink-');
   fs.symlinkSync(real, path.join(ud2, 'usage'));
   assert.equal(await pruneUsageRecords(ud2, 8 * 86400_000), 0, 'a linked folder is left alone');
 });
 
 await check('2,000 records never open 2,000 files at once', async () => {
-  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-many-'));
+  const ud = tmpDir('dobius-many-');
   const dir = path.join(ud, 'usage');
   fs.mkdirSync(dir);
   for (let i = 0; i < 2000; i += 1) fs.writeFileSync(path.join(dir, `s${i}.json`), `DOBIUS1 1\n/d\n${JSON.stringify({ session_id: `s${i}` })}`);
@@ -895,7 +896,7 @@ await check('a process environment leaves out its argv, so a prompt naming a key
 });
 
 await check('records older than the longest window are not read', async () => {
-  const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-records-'));
+  const ud = tmpDir('dobius-records-');
   const dir = path.join(ud, 'usage');
   fs.mkdirSync(dir);
   const old = (Date.now() - 10 * 86400_000) / 1000;
