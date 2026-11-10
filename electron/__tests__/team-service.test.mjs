@@ -10,9 +10,10 @@ import { createTeamService } from '../team-service.js';
 import { deliver, deliveryCard, handoffCard, boxIsEmpty, GAVE_UP_NOTE } from '../team-deliver.js';
 import { createAdmission, PER_IP_IN_FLIGHT } from '../team-routes.js';
 import { trackPasteMode } from '../paste-mode.js';
+import { tmpDir } from './tmp.mjs';
 
 const box = { available: () => true, encrypt: (s) => Buffer.from(`enc:${s}`), decrypt: (b) => b.toString().slice(4) };
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-team-'));
+const tmp = () => tmpDir('dobius-team-');
 let clock = 1_800_000_000_000;
 const now = () => clock;
 
@@ -89,7 +90,7 @@ test('store: per-peer rate limit, 20 a minute', () => {
 });
 
 test('not reachable: status and invite say exactly why', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'team-why-'));
+  const dir = tmpDir('team-why-');
   const box = { available: () => true, encrypt: (t) => Buffer.from(t), decrypt: (b) => b.toString() };
   const store2 = createTeamStore({ dir, box });
   const svc = createTeamService({ store: store2, request: async () => ({}), endpoint: () => null, endpointProblem: () => 'Mobile Server is off.', deliverDeps: () => ({}) });

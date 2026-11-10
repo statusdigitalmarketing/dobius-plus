@@ -909,3 +909,9 @@
 - **FIX**: Renamed the new one `notifyInHeld`. Before adding a function to a large closure, grep the file for the name.
 - **CONTEXT**: team-service.js is ~1000 lines in one closure; any long factory function has the same trap. No linter here flags duplicate declarations.
 - **DETECTION**: `grep -oE "^  function [A-Za-z0-9_]+" electron/team-service.js | sort | uniq -d` (prints any duplicate, should print nothing).
+
+### Testing - 2026-11-10 (test temp folders were never deleted)
+- **MISTAKE**: Tests called `fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-...'))` without removing the folder. account-headroom-service.test.mjs left ~108 folders per run and team-service.test.mjs ~155; after hundreds of runs (gates, Codex reviews, worktrees) the user temp dir held 100,593 dobius-* test entries (130k entries total) while swap was near full.
+- **FIX**: `npm test` now runs under `scripts/test-tmp.mjs`, which points TMPDIR/TMP/TEMP at one folder per run, deletes it when the run ends, and sweeps folders left by killed runs. New tests that make temp folders use `tmpDir(prefix)` from `electron/__tests__/tmp.mjs`, which removes them on exit, so a file run on its own leaves nothing either.
+- **CONTEXT**: Anything a test writes to os.tmpdir() outlives the run unless removed. Running a single file with `node --test` bypasses the npm wrapper.
+- **DETECTION**: `grep -rn "mkdtempSync(path.join(os.tmpdir()" electron/__tests__ shared/__tests__ | grep -v tmp.mjs` (new uses should go through tmpDir), and `ls "$(getconf DARWIN_USER_TEMP_DIR)" | grep -c '^dobius-'` should stay near zero after `npm test`.
