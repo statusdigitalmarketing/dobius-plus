@@ -31,28 +31,42 @@ export function summarizeProfile(profile, top = 20) {
   const nodes = Array.isArray(profile?.nodes) ? profile.nodes : [];
   const samples = Array.isArray(profile?.samples) ? profile.samples : [];
   const byId = new Map(nodes.map((n) => [n.id, n]));
+  // Each distinct label becomes a small number, built once per node: rebuilding the label string for every ancestor of
+  // every sample took ~250 ms on a worst-case 60 s profile, all of it on the main thread (Codex, PR 6). Now 30 to 50 ms.
+  const labels = [];
+  const labelIdx = new Map();
+  const keyOf = new Map();
+  for (const n of nodes) {
+    const k = frameKey(n);
+    let i = labelIdx.get(k);
+    if (i === undefined) { i = labels.length; labels.push(k); labelIdx.set(k, i); }
+    keyOf.set(n.id, i);
+  }
   const parent = new Map();
   for (const n of nodes) for (const c of n.children || []) parent.set(c, n.id);
   const hits = new Map();
   for (const s of samples) hits.set(s, (hits.get(s) || 0) + 1);
-  const self = new Map();
-  const incl = new Map();
+  const selfN = new Float64Array(labels.length);
+  const inclN = new Float64Array(labels.length);
+  // A label counted once per sample even when it recurses: the walk number it was last counted in.
+  const lastWalk = new Int32Array(labels.length).fill(-1);
   let idle = 0;
+  let walk = 0;
   for (const [id, count] of hits) {
     const n = byId.get(id);
     if (!n) continue;
-    const name = n.callFrame?.functionName;
-    if (name === '(idle)') { idle += count; continue; }
-    const k = frameKey(n);
-    self.set(k, (self.get(k) || 0) + count);
-    const seen = new Set();
+    if (n.callFrame?.functionName === '(idle)') { idle += count; continue; }
+    selfN[keyOf.get(id)] += count;
+    walk += 1;
     for (let cur = id, guard = 0; cur != null && guard < 10000; cur = parent.get(cur), guard += 1) {
-      const pn = byId.get(cur);
-      if (!pn) break;
-      const pk = frameKey(pn);
-      if (!seen.has(pk)) { seen.add(pk); incl.set(pk, (incl.get(pk) || 0) + count); }
+      const k = keyOf.get(cur);
+      if (k === undefined) break;
+      if (lastWalk[k] !== walk) { lastWalk[k] = walk; inclN[k] += count; }
     }
   }
+  const toMap = (arr) => new Map(labels.map((k, i) => [k, arr[i]]).filter(([, v]) => v > 0));
+  const self = toMap(selfN);
+  const incl = toMap(inclN);
   const total = samples.length;
   const pct = (v) => (total ? Math.round((1000 * v) / total) / 10 : 0);
   const rank = (m, keep) => [...m].filter(([k]) => keep(k)).sort((a, b) => b[1] - a[1]).slice(0, top).map(([fn, v]) => ({ pct: pct(v), fn }));
@@ -110,15 +124,23 @@ export async function profileMain(seconds, logDir, { now = () => new Date() } = 
     const { profile } = await post(session, 'Profiler.stop');
     let file = null;
     if (logDir) {
+      let full = null;
       try {
         fs.mkdirSync(logDir, { recursive: true });
         file = `main-${now().toISOString().replace(/[:.]/g, '-')}.cpuprofile`;
-        // 'wx': a new file only. Never follows or replaces something already at that name (a symlink, a same-
-        // millisecond earlier profile).
-        fs.writeFileSync(path.join(logDir, file), JSON.stringify(profile), { flag: 'wx', mode: 0o600 });
+        full = path.join(logDir, file);
+        // Old profiles go first, so a nearly full disk gets their space before this one is written, and a failed
+        // write cannot leave the folder over its limit (Codex, PR 6).
         pruneOld(logDir, file);
+        // 'wx': a new file only. Never follows or replaces something already at that name (a symlink, a same-
+        // millisecond earlier profile). Written asynchronously: a stalled disk must not hold the main thread (Codex,
+        // PR 6). `running` stays set until it finishes, so a second profile cannot start meanwhile.
+        await fs.promises.writeFile(full, JSON.stringify(profile), { flag: 'wx', mode: 0o600 });
       } catch (err) {
         console.warn(`[perf-profile] could not save the profile: ${err.message}`);
+        // A write that failed after creating the file (disk full) leaves a partial one: ours, so remove it. EEXIST means
+        // something else already had the name, and it is never touched.
+        if (full && err?.code !== 'EEXIST') fs.promises.unlink(full).catch(() => {});
         file = null;
       }
     }

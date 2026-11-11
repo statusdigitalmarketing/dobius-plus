@@ -92,3 +92,40 @@ test('seconds: only a real number counts, clamped to 2..60', () => {
   assert.equal(clampSeconds(20.4), 20);
   assert.equal(clampSeconds(1e9), MAX_SECONDS);
 });
+
+// Codex, PR 6: a disk that fills during the write left a partial profile behind and skipped pruning, so every later
+// attempt added another file. Old profiles now go first and a failed write removes its own partial file.
+test('a write that fails part way: our partial file is removed and old profiles were already pruned', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-perf-full-'));
+  const old = ['2020', '2021', '2022', '2023'].map((y) => `main-${y}-01-01T00-00-00-000Z.cpuprofile`);
+  for (const n of old) fs.writeFileSync(path.join(dir, n), '{}');
+  const real = fs.promises.writeFile;
+  fs.promises.writeFile = async (file, _data, opts) => {
+    await real(file, 'partial', opts); // created, then the disk fills
+    throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+  };
+  try {
+    const r = await profileMain(2, dir, { now: () => new Date('2031-01-01T00:00:00Z') });
+    assert.equal(r.ok, true, 'the summary is still returned');
+    assert.equal(r.file, null, 'no file is reported saved');
+    await new Promise((res) => setTimeout(res, 50)); // the unlink is not awaited
+    assert.deepEqual(fs.readdirSync(dir).sort(), old.slice(-2), 'the partial file is gone and only the two newest old ones remain');
+  } finally {
+    fs.promises.writeFile = real;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a name already taken (EEXIST) is never removed', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-perf-taken-'));
+  const taken = 'main-2031-01-01T00-00-00-000Z.cpuprofile';
+  fs.writeFileSync(path.join(dir, taken), 'someone else');
+  try {
+    const r = await profileMain(2, dir, { now: () => new Date('2031-01-01T00:00:00Z') });
+    assert.equal(r.file, null);
+    await new Promise((res) => setTimeout(res, 50));
+    assert.equal(fs.readFileSync(path.join(dir, taken), 'utf8'), 'someone else');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
