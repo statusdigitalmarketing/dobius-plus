@@ -245,6 +245,8 @@ test('a tag vouches only for the build it was bound to, inside its own upload wi
   assert.equal(buildOfTag({ ...t, after: Number.NaN }, [ours]), null, 'a tag without its start vouches for nothing');
   assert.equal(buildOfTag({ ...t, before: Number.NaN }, [ours]), null, 'a tag without its end vouches for nothing');
   assert.equal(buildOfTag(t, [b('ours', '7', '2.2.12', '2026-11-09T02:59:00Z')])?.id, 'ours', 'a minute of clock skew is allowed');
+  assert.equal(buildOfTag(t, [b('ours', '7', '2.2.12', '2026-11-09T03:22:00Z')])?.id, 'ours', 'Apple dating it 20 minutes late (build 15, 2.2.25) is still ours');
+  assert.equal(buildOfTag(t, [b('ours', '7', '2.2.12', '2026-11-09T04:03:00Z')]), null, 'over an hour late is not');
 });
 
 test('the run binds only its own upload record', () => {

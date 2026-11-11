@@ -174,9 +174,12 @@ export const buildTagName = (marketing, n) => `ios-${marketing}-${n}`;
 export const buildKey = (marketing, build) => `${marketing}|${build}`;
 
 // A tag records when its upload began and ended; Apple's clock may run a little behind this Mac's, and Apple may date a
-// build a little after the transfer ends.
+// build well after the transfer ends: build 15 (2.2.25, 2026-11-11) was dated 19m50s after its upload finished, past the
+// old 10 minutes, so the run that uploaded it would not submit it. The tag is bound to the build's own App Store
+// Connect id through altool's delivery id; this window is a second check on top of that, not the thing that tells
+// uploads apart.
 export const UPLOAD_SLACK_MS = 2 * 60_000;
-export const UPLOAD_LATE_MS = 10 * 60_000;
+export const UPLOAD_LATE_MS = 60 * 60_000;
 
 /** Parses a tag message: { after, before } (ms, NaN when missing) and buildId (null when not bound yet). */
 export function parseTagMessage(subject) {
