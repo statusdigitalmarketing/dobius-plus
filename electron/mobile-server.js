@@ -605,8 +605,10 @@ async function routeToConductor(transcript) {
   if (!conductorId || !listTerminals().some((t) => t.id === conductorId)) return { requestId: null, error: null };
   const requestId = `req-${crypto.randomBytes(6).toString('hex')}`;
   const r = await sendViaTabSend(conductorId, `[${requestId}] ${transcript}`, { claudeOnly: true });
-  // Typed but not confirmed: it may have been taken, so the phone waits for the reply rather than being told to resend.
-  return r.body?.ok || r.body?.typed ? { requestId } : { requestId: null, error: `The Voice Conductor did not take it: ${r.body?.error || r.body?.note || 'not delivered'}` };
+  if (r.body?.ok) return { requestId };
+  // Typed but not confirmed: it may have been taken, so it is never sent again, and the phone is told to check the tab.
+  if (r.body?.typed) return { requestId, note: `Typed into the Voice Conductor, not confirmed: ${r.body?.note || r.body?.error || 'check that tab'}.` };
+  return { requestId: null, error: `The Voice Conductor did not take it: ${r.body?.error || r.body?.note || 'not delivered'}` };
 }
 
 // Brett (Asana 1220329713038498): "Could we just put the messages from the Voice Conductor directly into the Team
@@ -618,19 +620,169 @@ async function routeToConductor(transcript) {
 // command. No pin, or the pinned tab gone: the Conductor as before.
 let voiceOrchestratorRoute = null;
 export function setVoiceOrchestratorRoute(fn) { voiceOrchestratorRoute = typeof fn === 'function' ? fn : null; }
+// Where a voice command would go right now, for the phone's "Goes to:" line: the pinned team orchestrator as
+// { id, label }, or null. Read only, nothing is sent.
+let voiceOrchestratorLabel = () => null;
+export function setVoiceOrchestratorLabel(fn) { voiceOrchestratorLabel = typeof fn === 'function' ? fn : () => null; }
 
-async function routeVoice(raw) {
+// The destination as the phone's confirm card names it. `key` identifies it (a tab id is hashed, not shown): Send
+// carries the key it showed and is refused when the destination changed since, so it never lands somewhere the card
+// did not say (Codex 2.2.25).
+export function currentVoiceTarget() {
+  let orch;
+  try { orch = voiceOrchestratorLabel(); } catch { orch = null; }
+  if (orch?.id) {
+    const key = `orchestrator:${crypto.createHash('sha256').update(String(orch.id)).digest('hex').slice(0, 16)}`;
+    return { to: 'orchestrator', label: `your orchestrator tab "${String(orch.label || '').slice(0, 60)}"`, key };
+  }
+  const conductorId = getVoiceConductorTabId();
+  if (conductorId && listTerminals().some((t) => t.id === conductorId)) return { to: 'conductor', label: 'the Voice Conductor', key: 'conductor' };
+  return { to: 'none', label: '', key: 'none' };
+}
+
+// A confirmed phone Send carries a sendId, so a retry after a lost answer is never delivered twice: the first result
+// is answered again. Only a delivery is remembered (a refusal typed nothing, so trying again must really try).
+// Deliveries are also written to <userData>/voice-sent.json so a retry after a Dobius restart is still recognised. A
+// Send is written there as pending BEFORE it is routed: if Dobius dies mid-delivery, a retry of it is refused as
+// "may have gone through" rather than typed a second time.
+// ponytail: bounded by count and age (cap 2000, about 240 KB, 24 h); the phone asks before a retry older than 20 h. 2000
+// voice Sends inside one day would push out a receipt early; raise the cap if anyone ever gets near it.
+const SENT_MAX = 2000;
+const MAYBE_SENT = { status: 409, body: { ok: false, uncertain: true, error: 'Dobius on the Mac restarted while sending this, so it may have gone through. Check the tab, then Discard it.' } };
+const SENT_TTL_MS = 24 * 60 * 60_000;
+const sentById = new Map(); // sendId -> { at, result: Promise<{status, body}>, body? (once delivered) }
+let receiptsLoaded = false;
+// The file existed but could not be read: what it held is unknown, so a RETRY (the phone says so) of an id we do not
+// know may already have been delivered and is refused. A fresh message still goes. The bad file is set aside as
+// voice-sent.json.unreadable-<ms>, and THAT file is the marker: any load within 24 h of it is lost too, however many
+// restarts later. Set-aside files older than 24 h are deleted.
+let receiptsLost = false;
+let markerOnDisk = false; // receiptsLost is backed by a marker file; until it is, no save may replace the receipts
+function lossMarkers(file, now) {
+  const dir = path.dirname(file);
+  const prefix = `${path.basename(file)}.unreadable-`;
+  let lost = false;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith(prefix)) continue;
+      const at = Number(name.slice(prefix.length));
+      if (Number.isFinite(at) && now - at < SENT_TTL_MS) { lost = true; markerOnDisk = true; }
+      else { try { fs.unlinkSync(path.join(dir, name)); } catch (e) { console.warn('[mobile] old receipts file not removed:', e?.message || e); } }
+    }
+  } catch (e) { console.warn('[mobile] receipts folder unreadable:', e?.message || e); lost = true; }
+  return lost;
+}
+let receiptsFile = null;
+function receiptsPath() {
+  if (!receiptsFile) { try { receiptsFile = path.join(app.getPath('userData'), 'voice-sent.json'); } catch { receiptsFile = null; } }
+  return receiptsFile;
+}
+function loadReceipts(now) {
+  if (receiptsLoaded) return;
+  receiptsLoaded = true;
+  const file = receiptsPath();
+  if (!file) return;
+  try {
+    if (fs.statSync(file).size > 1024 * 1024) throw new Error('too large to be ours');
+    const rows = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!Array.isArray(rows)) throw new Error('not a list');
+    receiptsLost = lossMarkers(file, now);
+    for (const r of rows.slice(-SENT_MAX)) {
+      if (typeof r?.id !== 'string' || !Number.isFinite(r.at) || now - r.at > SENT_TTL_MS) continue;
+      if (r.pending) { sentById.set(r.id, { at: r.at, pending: true, result: Promise.resolve(MAYBE_SENT) }); continue; }
+      if (!r.body?.ok) continue;
+      const body = { ok: true, mode: String(r.body.mode || ''), requestId: String(r.body.requestId || ''), ...(r.body.note ? { note: String(r.body.note).slice(0, 500) } : {}) };
+      sentById.set(r.id, { at: r.at, body, result: Promise.resolve({ status: 200, body }) });
+    }
+  } catch (err) {
+    if (err?.code === 'ENOENT') { receiptsLost = lossMarkers(file, now); return; }
+    receiptsLost = true;
+    console.warn('[mobile] voice receipts unreadable, set aside:', err?.message || err);
+    try { fs.renameSync(file, `${file}.unreadable-${now}`); markerOnDisk = true; } catch (e) { console.warn('[mobile] could not set the receipts file aside:', e?.message || e); }
+  }
+}
+// -> true when written. The pending write before routing must succeed, or nothing is sent.
+function saveReceipts() {
+  const file = receiptsPath();
+  if (!file) return false;
+  if (receiptsLost && !markerOnDisk) {
+    // The loss must survive a restart before anything replaces the old file; if it cannot be written, nothing is saved
+    // (and so nothing is sent).
+    try { const mfd = fs.openSync(`${file}.unreadable-${Date.now()}`, 'w', 0o600); try { fs.fsyncSync(mfd); } finally { fs.closeSync(mfd); } markerOnDisk = true; }
+    catch (err) { console.warn('[mobile] voice receipts loss marker not written:', err?.message || err); return false; }
+  }
+  const rows = [];
+  for (const [id, v] of sentById) {
+    if (v.body) rows.push({ id, at: v.at, body: v.body });
+    else if (v.pending) rows.push({ id, at: v.at, pending: true });
+  }
+  try {
+    const tmp = `${file}.${process.pid}.tmp`;
+    // Flushed to disk (file, then the rename's folder) before anything is typed, so a power loss cannot undo the note.
+    const fd = fs.openSync(tmp, 'w', 0o600);
+    try { fs.writeSync(fd, JSON.stringify(rows)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, file);
+    // A failed folder flush means the rename may not survive a crash: report not saved, so nothing is sent.
+    const dfd = fs.openSync(path.dirname(file), 'r');
+    try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+    return true;
+  } catch (err) { console.warn('[mobile] voice receipts not saved:', err?.message || err); return false; }
+}
+function pruneSent(now) {
+  for (const [k, v] of sentById) { if (now - v.at > SENT_TTL_MS || sentById.size > SENT_MAX) sentById.delete(k); else break; }
+}
+export async function sendConfirmedVoice({ transcript, sendId, expect, retry }, route = routeVoice) {
+  const now = Date.now();
+  loadReceipts(now);
+  pruneSent(now);
+  const id = typeof sendId === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(sendId) ? sendId : null;
+  if (id && sentById.has(id)) return sentById.get(id).result;
+  if (id && retry === true && receiptsLost) return MAYBE_SENT;
+  if (typeof expect === 'string' && expect) {
+    const cur = currentVoiceTarget();
+    if (cur.key !== expect) {
+      return { status: 409, body: { ok: false, changed: true, target: cur, error: cur.to === 'none' ? 'Nothing is listening on the Mac now. Not sent.' : `Where this goes changed: now ${cur.label}. Check it and Send again.` } };
+    }
+  }
+  // Written down before anything is typed, so a crash in the middle cannot lead to a second delivery.
+  const entry = { at: now, pending: true, result: null };
+  if (id) {
+    sentById.set(id, entry);
+    if (!saveReceipts()) {
+      sentById.delete(id);
+      return { status: 503, body: { ok: false, error: 'The Mac could not note this down before sending (is its disk full?). Not sent.' } };
+    }
+  }
+  const result = (async () => {
+    const routed = await route(transcript);
+    if (!routed.requestId) return { status: 503, body: { ok: false, error: routed.error || 'conductor offline' } };
+    return { status: 200, body: { ok: true, mode: routed.mode, requestId: routed.requestId, ...(routed.note ? { note: String(routed.note) } : {}) } };
+  })();
+  entry.result = result;
+  const r = await result.catch((err) => ({ status: 500, body: { ok: false, error: err?.message || 'failed' } }));
+  if (id && sentById.get(id) === entry) {
+    entry.pending = false;
+    if (r.body.ok) entry.body = r.body; else sentById.delete(id);
+    saveReceipts();
+  }
+  return r;
+}
+
+// source: 'phone' (voice) or 'imessage' (a `d:` text), named in what the orchestrator tab is given. Exported for the
+// iMessage bridge (main wires it), so texts and voice take one route: team orchestrator, else the Voice Conductor.
+export async function routeVoice(raw, source = 'phone') {
   const transcript = voiceLine(raw);
   if (!transcript) return { requestId: null, error: 'the transcript is empty' };
   if (voiceOrchestratorRoute) {
     try {
-      const r = await voiceOrchestratorRoute(transcript.slice(0, 4000).replace(/[\r\n]+/g, ' '));
+      const r = await voiceOrchestratorRoute(transcript.slice(0, 4000).replace(/[\r\n]+/g, ' '), source);
       if (r?.sent) {
         const requestId = `req-${crypto.randomBytes(6).toString('hex')}`;
-        recordReply(requestId, r.unconfirmed
-          ? `Typed into your orchestrator tab "${r.label}", not confirmed: ${r.note || 'check that tab'}.`
-          : `Sent to your orchestrator tab "${r.label}".`);
-        return { requestId, mode: 'orchestrator' };
+        const note = r.unconfirmed ? `Typed into your orchestrator tab "${r.label}", not confirmed: ${r.note || 'check that tab'}.` : '';
+        recordReply(requestId, note || `Sent to your orchestrator tab "${r.label}".`);
+        // An unconfirmed delivery carries its warning in the answer itself (and so in the saved receipt), so a retry
+        // after a restart still says to check the tab rather than "Sent".
+        return note ? { requestId, mode: 'orchestrator', note } : { requestId, mode: 'orchestrator' };
       }
       if (r) return { requestId: null, mode: null, error: `Your orchestrator tab did not take it: ${r.error || 'not delivered'}` };
     } catch (err) {
@@ -639,7 +791,7 @@ async function routeVoice(raw) {
     }
   }
   const c = await routeToConductor(transcript);
-  if (c.requestId) return { requestId: c.requestId, mode: 'conductor' };
+  if (c.requestId) return c.note ? { requestId: c.requestId, mode: 'conductor', note: c.note } : { requestId: c.requestId, mode: 'conductor' };
   return { requestId: null, mode: null, error: c.error };
 }
 
@@ -1376,6 +1528,8 @@ async function doStartMobileServer(stillCurrent) {
     if (typeof transcript !== 'string' || !transcript.trim()) {
       return res.status(400).json({ ok: false, error: 'transcript required' });
     }
+    // Refuse rather than cut: a confirmed message whose end was dropped could lose a "do not send it yet".
+    if (transcript.length > 4000) return res.status(413).json({ ok: false, error: `Too long to send (${transcript.length} characters, 4000 at most).` });
     // Direct mode, write straight into the named tab, skip Conductor.
     if (typeof directTabId === 'string' && directTabId) {
       if (!/^term-.+-\d+$/.test(directTabId)) {
@@ -1395,9 +1549,8 @@ async function doStartMobileServer(stillCurrent) {
     }
     // Conductor mode (default): route via the shared helper, tagged with a
     // per-request id so /voice/reply can match the reply. 503 if offline.
-    const routed = await routeVoice(transcript);
-    if (!routed.requestId) return res.status(503).json({ ok: false, error: routed.error || 'conductor offline' });
-    res.json({ ok: true, mode: routed.mode, requestId: routed.requestId });
+    const r = await sendConfirmedVoice({ transcript, sendId: req.body?.sendId, expect: req.body?.expect, retry: req.body?.retry === true });
+    res.status(r.status).json(r.body);
   });
 
   // POST /voice/audio  (raw recorded audio body; Bearer auth)
@@ -1430,6 +1583,9 @@ async function doStartMobileServer(stillCurrent) {
       const result = await transcribeAudio(audio, req.headers['content-type'], ac.signal);
       if (ac.signal.aborted) return; // client already gone; nothing to send
       if (result.error) return res.status(422).json({ ok: false, error: result.error });
+      // ?confirm=1 (phone 2.2.25+): transcribe only. The phone shows what was heard and sends it with /voice/intent
+      // only when Send is tapped. `held` tells it this Mac understood; an older Mac ignores the query and routes.
+      if (req.query?.confirm === '1') return res.json({ ok: true, transcript: result.text, held: true, requestId: null, routed: false });
       const routed = await routeVoice(result.text); // requestId null when nothing took it
       if (ac.signal.aborted) return;
       // Transcription succeeded either way, but be honest about whether the
@@ -1456,6 +1612,14 @@ async function doStartMobileServer(stillCurrent) {
     const entry = subscribePush(req.body?.subscription, bearerToken(req));
     if (!entry) return res.status(400).json({ ok: false, error: 'invalid subscription' });
     res.json({ ok: true });
+  });
+
+  // GET /voice/target -> { ok, confirm: true, to: 'orchestrator' | 'conductor' | 'none', label, key }  (Bearer)
+  // Where Send would deliver a voice command right now, for the phone's confirm card. Reads only.
+  expApp.get('/voice/target', (req, res) => {
+    if (!bearerOk(req)) return res.status(401).json({ ok: false, error: 'auth' });
+    // `confirm: true` tells the phone this Mac transcribes without routing (/voice/audio?confirm=1).
+    return res.json({ ok: true, confirm: true, ...currentVoiceTarget() });
   });
 
   // GET /voice/tabs

@@ -104,7 +104,7 @@ import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCer
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
   regeneratePairingCode, removeMobileDevice, maybeAutoStartMobileServer,
-  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones, tabLabelForNotify, setVoiceOrchestratorRoute,
+  deriveDeviceId, getTeamEndpoint, getTeamEndpointProblem, broadcastToPhones, tabLabelForNotify, setVoiceOrchestratorRoute, setVoiceOrchestratorLabel, routeVoice,
 } from './mobile-server.js';
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setTabSendService, setCodexStatusHandler, setTeamBridge, setProjectBridge } from './voice-bridge.js';
 import { sendToTab } from './tab-send.js';
@@ -125,7 +125,7 @@ import { createBridgeOpenDeps } from './bridge-open-main.js';
 import { ensureVoiceConductor, stopVoiceConductor } from './voice-conductor.js';
 import {
   startImessageBridge, stopImessageBridge, restartImessageBridge,
-  sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus,
+  sendImessageToSelf, getBridgeStatus as getImessageBridgeStatus, setImessageCommandRoute,
 } from './imessage-bridge.js';
 import { pairingText } from '../shared/pairing-link.js';
 import { sessionNameFromTabLabel } from '../shared/tab-label.js';
@@ -4555,16 +4555,21 @@ function setupWindowHandlers() {
   initProjectBoard(tabSendDeps);
   // Phone voice goes into the tab pinned as team orchestrator when there is one (Brett, Asana 1220329713038498),
   // pasted into Claude with every dobius-send guard; mobile-server falls back to the Voice Conductor otherwise.
-  setVoiceOrchestratorRoute(async (text) => {
+  const orchestratorLabel = (tab) => getTabLabelsById().get(tab) || `Tab ${tab.match(/-(\d+)$/)?.[1] || '?'}`;
+  setVoiceOrchestratorRoute(async (text, source) => {
     const tab = teamOrchestratorTab();
     if (!tab || !tabSendDeps.tabAlive(tab)) return null;
-    const r = await sendToTab(tabSendDeps, tab, `[voice from the phone] ${text}`, { claudeOnly: true });
-    const label = getTabLabelsById().get(tab) || `Tab ${tab.match(/-(\d+)$/)?.[1] || '?'}`;
+    const from = source === 'imessage' ? '[text from iMessage]' : '[voice from the phone]';
+    const r = await sendToTab(tabSendDeps, tab, `${from} ${text}`, { claudeOnly: true });
+    const label = orchestratorLabel(tab);
     if (r?.body?.ok) return { sent: true, label };
     // Typed but Enter not seen taken (or left in the box): it is in that tab, so it must never ALSO go to the Conductor.
     if (r?.body?.typed) return { sent: true, label, unconfirmed: true, note: r.body.note || r.body.error || '' };
     return { sent: false, error: r?.body?.error || r?.body?.note || 'not delivered' };
   });
+  setVoiceOrchestratorLabel(() => { const tab = teamOrchestratorTab(); return tab && tabSendDeps.tabAlive(tab) ? { id: tab, label: orchestratorLabel(tab) } : null; });
+  // `d:` texts take the same route as phone voice (Sam, 2026-11-11: "the orchestrator is the orchestrator").
+  setImessageCommandRoute((text) => routeVoice(text, 'imessage'));
   // Team communicator (docs/team-communicator.md): delivery into the pinned
   // orchestrator tab reuses these same guards.
   // Phone notifications by event (electron/phone-alerts-main.js): first, so every source below can feed it.

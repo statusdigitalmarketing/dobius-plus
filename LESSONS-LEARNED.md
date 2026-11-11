@@ -1011,3 +1011,15 @@
 - **FIX**: Sabotage by removing the whole guard (`void now;`), then confirm the test fails.
 - **CONTEXT**: A sabotage that does not disable the guard completely is not a check of the test.
 - **DETECTION**: read the sabotaged line back before running the test.
+
+### Git: 2026-11-11
+- **MISTAKE**: Ran `git stash -q && ...; git stash pop` to lint a baseline while new test files were staged with `git add -N`. The stash push FAILED ("not uptodate. Cannot merge"), so the pop popped an OLD unrelated stash (`pre-release-untracked-ios`); it only survived because its untracked files already existed.
+- **FIX**: Never chain `git stash pop` after a stash that may not have happened. For a baseline, use `git worktree add` or `git show HEAD:<file>`, never the stash.
+- **CONTEXT**: Intent-to-add entries make `git stash` refuse; an `&&` chain still reaches a later `;` pop.
+- **DETECTION**: `git stash list | head -3` before and after anything that stashes.
+
+### Testing: 2026-11-11
+- **MISTAKE**: Prompts for Codex built with an unquoted heredoc (`<<EOF`) ran every backticked word (`d:`, `state`) as a shell command, and the harness's unclean teardown left a whisper-server orphaned (parent 1) each run.
+- **FIX**: Always `<<'EOF'` for prompt text. Whisper-servers Dobius starts are recorded in `<userData>/whisper-servers.json` and reaped by record (pid + start time + secret request path), never by matching ps text, which a model path can spell.
+- **CONTEXT**: Codex broke two text-matching reapers in a row; only a record of what we started proves ownership.
+- **DETECTION**: `pgrep -f "whisper-server.*--request-path /dobius-"` then `ps -o ppid=` after a harness run.
