@@ -337,9 +337,20 @@ export function claudeTuiPresent(text) {
   return !SHELL_PROMPT_TAIL_RE.test(last);
 }
 
+// claudeIsLive answers, per tab, for the buffer it last looked at: the 1s board tick asks for every tab and strips up
+// to 256KB of each, and most tabs printed nothing since the last tick (the largest cost of that tick in the perf
+// harness, 2026-11-11). A new chunk replaces the tab's buffer string, so an unchanged buffer is the SAME string (a
+// pointer compare). Bounded by the live tabs: pruned on every tick (buildTerminalsPayload) and cleared when the
+// phone server stops.
+const claudeLiveCache = new Map(); // id -> { buf, live }
 function claudeIsLive(id) {
   try {
-    return claudeTuiPresent(getTerminalBuffer(id));
+    const buf = getTerminalBuffer(id);
+    const hit = claudeLiveCache.get(id);
+    if (hit && hit.buf === buf) return hit.live;
+    const live = claudeTuiPresent(buf);
+    claudeLiveCache.set(id, { buf, live });
+    return live;
   } catch { return false; }
 }
 
@@ -444,7 +455,10 @@ function buildTerminalsPayload() {
     if (!prev || at >= prev.at) sessionByTab.set(link.tabId, { sessionId: sid, projectPath: link.projectPath, at });
   }
   const labelByTabId = configTabLabels();
-  const list = listTerminals().map((t) => {
+  const terms = listTerminals();
+  const liveIds = new Set(terms.map((t) => t.id));
+  for (const id of claudeLiveCache.keys()) if (!liveIds.has(id)) claudeLiveCache.delete(id);
+  const list = terms.map((t) => {
     const meta = parseTermLabel(t.id, t.cwd);
     const st = snap.live[t.id];
     const ctx = tabContextCache.get(t.id);
@@ -1891,6 +1905,7 @@ export function stopMobileServer({ persistDisabled = false } = {}) {
   }
   activeSocketsByToken.clear();
   if (statusBroadcastTimer) { clearInterval(statusBroadcastTimer); statusBroadcastTimer = null; }
+  claudeLiveCache.clear();
   if (contextRefreshTimer) { clearInterval(contextRefreshTimer); contextRefreshTimer = null; }
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   if (corsHostsTimer) { clearInterval(corsHostsTimer); corsHostsTimer = null; }
