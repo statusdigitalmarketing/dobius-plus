@@ -43,7 +43,7 @@ import { listChromeProfiles, openUrlInProfile } from './chrome-profiles.js';
 import { listGwsAccounts, removeGwsAccount, verifyGwsAccounts, reconnectGwsAccount, addGwsAccountViaBrowser, ensureShim } from './gws-accounts.js';
 import { gwsSetupStatus, installGws, useGwsAt, findClientFiles, useClientFile, refreshGwsEnv, setHintDir } from './gws-setup.js';
 import { gwsMcpStatus, installGwsMcp, healGwsMcpIfInstalled } from './gws-mcp-install.js';
-import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalProcessShared, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, terminalClosing, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary, terminalBracketedPaste } from './terminal-manager.js';
+import { createTerminal, resizeTerminal, killTerminal, killAll, gracefulCloseAll, getTerminalProcess, getTerminalProcessShared, getTerminalCwd, getProcessCwd, getTerminalClaudeInfo, CLAUDE_UNKNOWN, terminalRunsClaude, getTerminalCodexInfo, liveClaudeSessionIds, claimSessionResume, releaseSessionResume, listTerminals, reassignTerminal, ensureSpawnHelperExecutable, addTerminalObserver, addInputObserver, sendToTerminalWindow, getTerminalsForProject, getTerminalWebContentsId, tabBinDir, terminalInstance, terminalClosing, getTerminalBuffer, terminalCols, terminalInputSeq, terminalInputAgeMs, terminalSettledSinceInput, trimToEscapeBoundary, terminalBracketedPaste } from './terminal-manager.js';
 import { isTerminalReply } from './terminal-reply.js';
 import * as terminalStatus from './terminal-status.js';
 import { estimateContextForTabId, liveSessionsForTabs, resolveSessionForTab } from './tab-context.js';
@@ -3801,9 +3801,20 @@ function setupConfigHandlers() {
 //   3. LINK newly-discovered sessions running in tabs that have no map entry.
 // Cancellable: store the interval ref so will-quit can clear it.
 let sessionTabCaptureInterval = null;
+// Bumped by stopSessionTabCapture: a tick still running when the capture stops (a quit begins) writes nothing more.
+// Stopping only the timer left an in-flight tick to probe tabs AFTER the quit's Ctrl+C, read their Claudes as stopped
+// and clear the running stamps auto-resume needs (bug report 2026-11-11: 20 tabs came back as bare shells).
+let sessionTabCaptureGen = 0;
+// One tick at a time: on a loaded Mac a tick over ~37 tabs can outlast the 15 s interval, and two at once double the
+// ps calls and race each other's writes. A tick that finds the last one still running is skipped.
+let sessionTabCaptureBusy = false;
 function setupSessionTabCapture() {
   if (sessionTabCaptureInterval) return;
   sessionTabCaptureInterval = setInterval(async () => {
+    if (sessionTabCaptureBusy) return;
+    sessionTabCaptureBusy = true;
+    const gen = sessionTabCaptureGen;
+    const current = () => gen === sessionTabCaptureGen && !getQuitting() && !getQuittingForUpdate();
     try {
       // Recycled tab ids (a live tab now running a DIFFERENT session than the map
       // records) are fixed in the live-tab reconcile loop below, which does
@@ -3837,9 +3848,14 @@ function setupSessionTabCapture() {
       // stamp cleared, and writing this observation back would undo that
       // (Codex, restore round 5).
       const sameShell = (tab) => (listTerminals().find((x) => x.id === tab.id)?.pid ?? null) === tab.pid;
+      // A tab whose check failed (timed out on a loaded Mac) is left exactly as it was this tick: no stamp cleared, no
+      // link changed. It reads as "no Claude" to the fresh resolver below, as before.
+      const unknownTabs = new Set();
       for (const t of liveTabs) {
         probedAt.set(t.id, Date.now());
-        infoByTab.set(t.id, await getTerminalClaudeInfo(t.id));
+        const got = await getTerminalClaudeInfo(t.id, { unknown: true });
+        if (got === CLAUDE_UNKNOWN) unknownTabs.add(t.id);
+        infoByTab.set(t.id, got === CLAUDE_UNKNOWN ? null : got);
       }
       // cwd per tab, only needed for tabs running a fresh (unidentified) claude.
       const cwdByTab = new Map();
@@ -3864,6 +3880,8 @@ function setupSessionTabCapture() {
       const labelsAfter = getTabLabelsById();
       const namePairs = [];
       for (const t of liveTabs) {
+        if (!current()) return;
+        if (unknownTabs.has(t.id)) continue;
         const claudeInfo = infoByTab.get(t.id);
         const runningSessionId = claudeInfo?.sessionId || freshByTab.get(t.id) || null;
         if (!runningSessionId) {
@@ -3905,6 +3923,7 @@ function setupSessionTabCapture() {
           const movedPast = how === 'fresh' && await sessionMovedPast(
             cwdByTab.get(t.id) || t.cwd, runningSessionId, claudeInfo?.startedAt, claimedIds);
           if (!movedPast) namePairs.push([runningSessionId, sessionNameFromTabLabel(label)]);
+          if (!current()) return;
         }
         const mappedSessionId = tabToSessionId.get(t.id);
         if (mappedSessionId === runningSessionId) {
@@ -3944,17 +3963,20 @@ function setupSessionTabCapture() {
       // A name changed (a rename, a new title): History lists re-read now
       // rather than on the next transcript write, which an idle chat never
       // makes. Its own event: data:updated also reloads projects and stats.
-      if (recordSessionTabNames(namePairs)) {
+      if (current() && recordSessionTabNames(namePairs)) {
         forgetSharedSessionLoads();
         for (const win of BrowserWindow.getAllWindows()) {
           if (!win.isDestroyed()) win.webContents.send('sessions:namesChanged');
         }
       }
-    } catch { /* best-effort */ }
+    } catch { /* best-effort */ } finally {
+      sessionTabCaptureBusy = false;
+    }
   }, 15000);
 }
 
 export function stopSessionTabCapture() {
+  sessionTabCaptureGen += 1;
   if (sessionTabCaptureInterval) {
     clearInterval(sessionTabCaptureInterval);
     sessionTabCaptureInterval = null;
@@ -5871,9 +5893,13 @@ app.on('before-quit', (e) => {
         // detect ambiguity, and quitting is precisely when the tick has NOT
         // run yet for a just-started bare `claude`. Codex v1.0.39 r5 P2.
         const infoByTab = new Map();
+        // A failed check is "could not tell", never "stopped": that tab's stamp is left as it is (see the capture tick).
+        const unknownTabs = new Set();
         for (const t of liveTabs) {
           if (reconcileAborted) return;
-          infoByTab.set(t.id, await getTerminalClaudeInfo(t.id));
+          const got = await getTerminalClaudeInfo(t.id, { unknown: true });
+          if (got === CLAUDE_UNKNOWN) unknownTabs.add(t.id);
+          infoByTab.set(t.id, got === CLAUDE_UNKNOWN ? null : got);
         }
         const cwdByTab = new Map();
         for (const t of liveTabs) {
@@ -5893,6 +5919,7 @@ app.on('before-quit', (e) => {
         );
         for (const t of liveTabs) {
           if (reconcileAborted) return;
+          if (unknownTabs.has(t.id)) continue;
           const sid = tabToSid.get(t.id);
           const info = infoByTab.get(t.id);
           // The tab's CURRENT session: from argv when it is a `--resume`, else

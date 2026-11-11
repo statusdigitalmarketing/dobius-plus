@@ -607,3 +607,27 @@ test('another delivery pasting behind ours before the Enter stops the send, rese
     assert.equal(t.submitted, 0);
   }
 });
+
+// Bug report 2026-11-11: `dobius-send <tab> 'claude --resume <id>'` into a tab whose Claude was already resumed reached
+// that Claude as a prompt (queued as a message). A command that starts Claude is for a shell only.
+test('a command that starts Claude, sent to a tab where Claude runs: refused, nothing pasted', async () => {
+  for (const working of [false, true]) {
+    const { t, deps } = fakeTab({ working });
+    const r = await sendToTab(deps, 'tab', 'claude --resume 4b06acc2-419d-4a2d-8198-4d7623e8f747');
+    assert.equal(r.status, 409);
+    assert.equal(r.body.reason, 'claude-running');
+    assert.equal(t.pasted, null);
+    assert.equal(t.submitted, 0);
+  }
+});
+
+test('the same command to a shell tab is typed and Enter pressed; a message that only mentions claude still reaches Claude', async () => {
+  const shell = fakeTab({ claude: false });
+  const r1 = await sendToTab(shell.deps, 'tab', 'cd /tmp/a && claude --resume ab-12');
+  assert.equal(r1.body.ok, true);
+  assert.equal(shell.t.written.join(''), 'cd /tmp/a && claude --resume ab-12');
+  const talk = fakeTab();
+  const r2 = await sendToTab(talk.deps, 'tab', 'please run claude --resume ab-12 in the other tab');
+  assert.equal(r2.body.ok, true);
+  assert.equal(talk.t.pasted, 'please run claude --resume ab-12 in the other tab');
+});

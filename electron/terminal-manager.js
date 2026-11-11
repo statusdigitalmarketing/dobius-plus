@@ -798,12 +798,12 @@ export function claudeInTree(psText, root) {
 // the many tabs sitting at a prompt. Polled lookups only: an exec'd Claude whose foreground child is a shell also reads
 // as a shell, so the resume gate and strict lookups pass no entry and always look.
 const SHELL_NAME = /^-?(zsh|bash|sh|fish|dash|ksh|tcsh|csh|login)$/;
-async function ptySelf(pid, strict, entry) {
+async function ptySelf(pid, strict, entry, rethrow = false) {
   let fg = null;
   try { fg = entry?.pty?.process; } catch { fg = null; }
   if (typeof fg === 'string' && SHELL_NAME.test(fg.split('/').pop())) return null;
   try { return await ptySelfClaude(pid); }
-  catch (err) { if (strict) throw err; return null; }
+  catch (err) { if (strict || rethrow) throw err; return null; }
 }
 async function ptySelfClaude(pid) {
   const { stdout } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
@@ -830,8 +830,14 @@ async function ptySelfOf(id) {
   return ptySelf(pid, false, null); // on demand (the resume gate): always looked at
 }
 
+// A check that failed (ps or pgrep timed out, a program there may be Claude), returned instead of null when the caller
+// passes `unknown: true`. Null means "no Claude"; this means "could not tell". The session capture must never read a
+// failed check as a stopped Claude: it cleared the running stamps auto-resume needs, so tabs came back as bare shells
+// after a restart on a loaded Mac (bug report 2026-11-11).
+export const CLAUDE_UNKNOWN = Object.freeze({ unknown: true });
+
 // thorough: an on-demand caller (snooze): the PTY's own process is always looked at, as for strict.
-export async function getTerminalClaudeInfo(id, { unique = false, strict = false, thorough = false } = {}) {
+export async function getTerminalClaudeInfo(id, { unique = false, strict = false, thorough = false, unknown = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;
   if (IS_WIN) return winClaudeInfo(entry, unique, strict);
@@ -844,7 +850,7 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
     } catch (err) {
       // No children at all (pgrep's exit 1): the PTY's own process may be Claude (`exec claude --resume X`).
       if (err?.code !== 1) throw err;
-      return await ptySelf(pid, strict, strict || thorough ? null : entry);
+      return await ptySelf(pid, strict, strict || thorough ? null : entry, unknown);
     }
     const children = pgrepOut.trim().split('\n').filter(Boolean);
     // `unique`: one ps per child, so a shell with many children is not
@@ -903,13 +909,13 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
     }
     // None of the children is Claude, but the PTY's own process may be (`exec claude`, with an MCP server or other
     // helper as its child). Every mode: the resume gate must see it too.
-    if (!found) return await ptySelf(pid, strict, strict || thorough ? null : entry);
+    if (!found) return await ptySelf(pid, strict, strict || thorough ? null : entry, unknown);
     // strict: the PTY's own process may be a second Claude (`exec claude` running `claude -p`), which is not known.
     if (strict && await ptySelf(pid, true, null)) throw new Error('two Claude processes in that tab');
     return found;
   } catch (err) {
     if (strict && !(err?.code === 1 && String(err?.cmd || '').startsWith('/usr/bin/pgrep'))) throw err;
-    return null;
+    return unknown ? CLAUDE_UNKNOWN : null;
   }
 }
 

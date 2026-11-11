@@ -211,6 +211,8 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     console.log(`[auto-resume] skipped ${skippedStale} stale/mismatched link(s); ${tabToBest.size} fresh candidate(s)`);
   }
   launchEligible = tabToBest;
+  // One line a person can send: how many sessions this launch will try, and why the rest are out.
+  logLine('diag.resume', `launch: ${tabToBest.size} session(s) were running at the last quit; ${skippedStale} link(s) not running then, ${skippedHeuristic} named only (bare claude)`);
   if (tabToBest.size === 0) {
     console.log('[auto-resume] no sessions were running at last quit, nothing to resume');
     finishStartup();
@@ -279,10 +281,12 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   for (const c of candidates) {
     const sizeMB = await getSessionSize(c.sessionId, c.projectPath);
     if (sizeMB == null) {
+      noteResume(c.tabId, 'not resumed: transcript not found');
       console.log(`[auto-resume] skip ${c.tabId}: transcript not found for ${c.sessionId}`);
       continue;
     }
     if (sizeMB > cfg.skipOversizedMB) {
+      noteResume(c.tabId, 'not resumed: transcript over the size cap');
       console.log(`[auto-resume] skip ${c.tabId}: transcript ${sizeMB.toFixed(0)}MB > ${cfg.skipOversizedMB}MB cap`);
       continue;
     }
@@ -401,6 +405,7 @@ async function queueResume(e, delayMs) {
       queue.delete(e.tabId);
       try {
         writeTerminal(e.tabId, cmd);
+        noteResume(e.tabId, 'resume typed');
         broadcastStatus(e.tabId, 'working');
       } catch (err) {
         console.warn(`[auto-resume] ${e.tabId}: write failed: ${err.message}`);
