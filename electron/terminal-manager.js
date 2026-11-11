@@ -806,7 +806,13 @@ async function ptySelf(pid, strict, entry, rethrow = false) {
   catch (err) { if (strict || rethrow) throw err; return null; }
 }
 async function ptySelfClaude(pid) {
-  const { stdout } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
+  let stdout;
+  try {
+    ({ stdout } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' }));
+  } catch (err) {
+    if (err?.code === 1) return null; // ps exit 1: the PTY's own process is gone, so no Claude there (Codex, PR 7)
+    throw err;
+  }
   const line = stdout.trim();
   if (!line) return null;
   const command = line.slice(24).trim();
@@ -835,15 +841,6 @@ async function ptySelfOf(id) {
 // failed check as a stopped Claude: it cleared the running stamps auto-resume needs, so tabs came back as bare shells
 // after a restart on a loaded Mac (bug report 2026-11-11).
 export const CLAUDE_UNKNOWN = Object.freeze({ unknown: true });
-
-// What a failed check means, for `unknown` callers. The terminal's foreground program is a cheap tty read with no ps:
-// a shell in front means Claude is not running there (a stopped Claude must lose its stamp, or a restart would bring
-// back a session the person ended: Codex, PR 7). Anything else in front, or no answer, stays "could not tell".
-export function claudeCheckFailed(entry) {
-  let fg = null;
-  try { fg = entry?.pty?.process; } catch { fg = null; }
-  return typeof fg === 'string' && SHELL_NAME.test(fg.split('/').pop()) ? null : CLAUDE_UNKNOWN;
-}
 
 // thorough: an on-demand caller (snooze): the PTY's own process is always looked at, as for strict.
 export async function getTerminalClaudeInfo(id, { unique = false, strict = false, thorough = false, unknown = false } = {}) {
@@ -934,7 +931,9 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
     return found;
   } catch (err) {
     if (strict && !(err?.code === 1 && String(err?.cmd || '').startsWith('/usr/bin/pgrep'))) throw err;
-    return unknown ? claudeCheckFailed(entry) : null;
+    // A failed check is "could not tell", never read from the foreground name: a shell there can be a child of an
+    // `exec claude` root (Codex, PR 7). A stop that the checks miss is bounded by the uncertainty window in auto-resume.
+    return unknown ? CLAUDE_UNKNOWN : null;
   }
 }
 

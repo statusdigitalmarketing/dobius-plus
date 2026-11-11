@@ -33,6 +33,12 @@ console.log('PASS  a stamp uncertain for over 2 minutes at the quit is not resum
 // A crash (no fresh lastQuitAt): judged against now instead.
 const crash = pickLaunchSessions({ 'sess-crash-0006': link(6, { lastRunningAt: QUIT, uncertainSince: QUIT - 5 * 60_000 }) }, 0, QUIT + 30_000);
 assert.equal(crash.tabToBest.size, 0);
+// Codex, PR 7: a clean quit, then the session ran again, checks started failing and Dobius crashed. The earlier quit is
+// not the end of that uncertainty; it runs to the relaunch (7 minutes here), so the session is not resumed.
+const near = pickLaunchSessions({ 'sess-near-0008': link(8, { lastRunningAt: QUIT + 2 * 60_000, uncertainSince: QUIT + 3 * 60_000 }) }, QUIT, QUIT + 10 * 60_000);
+assert.equal(near.tabToBest.size, 0, 'an uncertainty that began after the last quit runs to now');
+const shortNear = pickLaunchSessions({ 'sess-near-0009': link(9, { lastRunningAt: QUIT + 2 * 60_000, uncertainSince: QUIT + 9 * 60_000 }) }, QUIT, QUIT + 10 * 60_000);
+assert.equal(shortNear.tabToBest.size, 1, 'one under 2 minutes at the relaunch still resumes');
 console.log('PASS  after a crash the uncertainty is measured to the relaunch');
 
 // The lifecycle in config: marked once, kept by a later mark, cleared by a confirmed check or a clear.

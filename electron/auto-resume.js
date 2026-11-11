@@ -166,7 +166,10 @@ export function pickLaunchSessions(tabMap, lastQuitAt, now) {
       skippedStale += 1;
       continue;
     }
-    if (typeof entry.uncertainSince === 'number' && ((freshVsQuit ? lastQuitAt : now) - entry.uncertainSince) > UNCERTAIN_MAX_MS) {
+    // The uncertainty ends at the quit only when that quit came after it began; an older quit (a crash since) is not its
+    // end, so it runs to now (Codex, PR 7: an earlier quit gave a negative duration and let a long uncertainty through).
+    const uncertainEnd = typeof entry.uncertainSince === 'number' && lastQuitAt >= entry.uncertainSince ? lastQuitAt : now;
+    if (typeof entry.uncertainSince === 'number' && (uncertainEnd - entry.uncertainSince) > UNCERTAIN_MAX_MS) {
       skippedUncertain += 1;
       uncertainTabs.push(entry.tabId);
       continue;
@@ -290,6 +293,8 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   finishStartup();
   const waiting = tabToBest.size - candidates.length;
   if (waiting > 0) console.log(`[auto-resume] ${waiting} session(s) wait for their window to be opened`);
+  // Each of those gets its own line, so a window that never opens still leaves a reason (Codex, PR 7).
+  for (const tabId of tabToBest.keys()) if (!handled.has(tabId)) noteResume(tabId, 'waiting: its window was not open at launch; it resumes when that window opens');
   if (candidates.length === 0) {
     console.log('[auto-resume] no live tabs with mapped sessions after 15s budget, nothing to do');
     return;

@@ -37,18 +37,10 @@ console.log('PASS  a check that cannot tell returns CLAUDE_UNKNOWN, not null');
 assert.equal(await tm.getTerminalClaudeInfo(SHELL, { unknown: true }), null);
 assert.equal(await tm.getTerminalClaudeInfo('term-/tmp/unknowntest-99', { unknown: true }), null, 'a closed tab is no Claude');
 console.log('PASS  a plain shell or a closed tab is still null');
-// Codex, PR 7: a failed check with the tab's shell in front is a definite "no Claude", so a session the person stopped
-// loses its stamp even while every ps times out. Anything else in front, or an unreadable one, stays unknown.
-const fake = (process) => ({ pty: { get process() { if (process instanceof Error) throw process; return process; } } });
-assert.equal(tm.claudeCheckFailed(fake('zsh')), null);
-assert.equal(tm.claudeCheckFailed(fake('-bash')), null);
-assert.equal(tm.claudeCheckFailed(fake('/bin/zsh')), null);
-assert.equal(tm.claudeCheckFailed(fake('node')), tm.CLAUDE_UNKNOWN, 'Claude (node) in front: could not tell');
-assert.equal(tm.claudeCheckFailed(fake('vim')), tm.CLAUDE_UNKNOWN);
-assert.equal(tm.claudeCheckFailed(fake(new Error('tty gone'))), tm.CLAUDE_UNKNOWN);
-assert.equal(tm.claudeCheckFailed(null), tm.CLAUDE_UNKNOWN);
-console.log('PASS  a failed check with a shell in front is "no Claude"; anything else stays unknown');
 const src = fs.readFileSync(new URL('../terminal-manager.js', import.meta.url), 'utf8');
 assert.match(src, /if \(!found\) return await ptySelf\(pid, strict, strict \|\| thorough \|\| unknown \? null : entry, unknown\);/, 'with children, unknown callers always look at the PTY root');
 console.log('PASS  with children present, the running-stamp check always looks at the PTY root');
+assert.ok(!/claudeCheckFailed/.test(src), 'a failed check is never decided from the foreground name');
+assert.match(src, /if \(err\?\.code === 1\) return null; \/\/ ps exit 1: the PTY's own process is gone/, 'a root that is gone is no Claude');
+console.log('PASS  a failed check stays unknown; a PTY root that is gone is no Claude');
 process.exit(0);
