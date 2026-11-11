@@ -17,6 +17,8 @@ export function invoke(ch, wc, ...args) { const fn = handlers.get(ch); return fn
 
 // A window's webContents. `onSend(ch, ...args)` plays the page.
 let wcIds = 100;
+const allWc = new Map();
+export const webContents = { fromId: (id) => allWc.get(id) || null };
 export function fakeWebContents(onSend = () => {}) {
   const evs = new Map();
   const wc = {
@@ -30,6 +32,7 @@ export function fakeWebContents(onSend = () => {}) {
     fire: (ev) => { for (const fn of [...(evs.get(ev) || [])]) fn(); },
     isDestroyed: () => wc.destroyed,
   };
+  allWc.set(wc.id, wc);
   return wc;
 }
 
@@ -63,7 +66,8 @@ export function getOpenProjects() { return [...windows.keys()]; }
 export const terminals = new Map(); // tabId -> { pid, cwd, wcId }
 const inputObservers = new Set();
 export function terminalInstance(id) { return terminals.get(id) || null; }
-export function getTerminalBuffer() { return ''; }
+export const buffers = new Map(); // tabId -> raw output
+export function getTerminalBuffer(id) { return buffers.get(id) || ''; }
 export function terminalCols() { return 80; }
 export function subscribeTerminal() { return { ok: true, unsubscribe: () => {} }; }
 export function trimToEscapeBoundary(s) { return s; }

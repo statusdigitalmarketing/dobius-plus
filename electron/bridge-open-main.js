@@ -12,11 +12,12 @@ import crypto from 'crypto';
 import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { app, ipcMain } from 'electron';
+import { app, ipcMain, webContents } from 'electron';
 import { openProjectWindow, primaryDockTarget, getWindowEntryByWcId, getOpenProjects } from './window-manager.js';
 import { terminalInstance, getTerminalBuffer, terminalCols, subscribeTerminal, trimToEscapeBoundary, getTerminalWebContentsId, writeTerminal, listTerminals, getProcessCwd, addInputObserver, terminalClosing } from './terminal-manager.js';
 import { classifyClaudeProcess, isClaudeEntrypoint, JS_RUNTIMES, CLAUDE_SCRIPT_RE } from './claude-argv.js';
-import { isKeyboardInput, isUserInput } from './bridge-open-tab.js';
+import { isKeyboardInput, isUserInput, promptBoxText } from './bridge-open-tab.js';
+import { requestWindowScreen } from './window-screen.js';
 import { submitPending } from './chat-service.js';
 import { renderScreenLines } from './screen-render.js';
 import { listProjects } from './data-service.js';
@@ -540,7 +541,16 @@ export function createBridgeOpenDeps({ windowReady, ownerOf }) {
       screen: async () => {
         // At the PTY's own width: a wider window's rules must not wrap.
         const lines = await renderScreenLines(buf, { cols: terminalCols(tabId) });
-        return lines ? { lines, modes: lines.modes } : null;
+        if (!lines) return null;
+        // No prompt box in the tail: on a tab idle for hours its edges can be older than the tail (Claude repaints
+        // only what changed). The window's xterm saw every byte, so its screen decides then (window-screen.js).
+        // Paste mode is the caller's (tracked over all output), so it plays no part in this test.
+        if (promptBoxText(lines, { ...lines.modes, bracketedPaste: true }) === null) {
+          const wcId = getTerminalWebContentsId(tabId);
+          const snap = await requestWindowScreen(tabId, wcId == null ? null : webContents.fromId(wcId));
+          if (snap) return { lines: snap.lines, modes: { ...lines.modes, cursor: snap.cursor }, fromWindow: true };
+        }
+        return { lines, modes: lines.modes };
       },
       stop: () => { sub.unsubscribe(); stopCounting(keys); },
     };

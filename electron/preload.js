@@ -64,6 +64,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('terminal:exit', handler);
     return () => ipcRenderer.removeListener('terminal:exit', handler);
   },
+  // main asks what a tab's screen shows (electron/window-screen.js); the answer goes back with its nonce.
+  onTerminalScreenRequest: (callback) => {
+    const handler = (_event, nonce, id) => callback(nonce, id);
+    ipcRenderer.on('terminal:screenRequest', handler);
+    return () => ipcRenderer.removeListener('terminal:screenRequest', handler);
+  },
+  terminalScreenReply: (nonce, id, snap) => ipcRenderer.send('terminal:screenReply', nonce, id, snap),
   // main: a red tab's prompt was answered (from any surface), so it is working.
   // A handed-back command's red was seen in this window: main clears it.
   terminalHandoffSeen: (id, shownSince) => ipcRenderer.invoke('terminal:handoffSeen', id, shownSince),
@@ -558,6 +565,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   teamSend: (to, text) => ipcRenderer.invoke('team:send', to, text),
   teamReply: (peer, id, text) => ipcRenderer.invoke('team:reply', peer, id, text),
   teamDismiss: (dir, peer, id) => ipcRenderer.invoke('team:dismiss', dir, peer, id),
+  teamArchive: (dir, peer, id, on) => ipcRenderer.invoke('team:archive', dir, peer, id, on),
   teamRetry: (id) => ipcRenderer.invoke('team:retry', id),
   teamSendAgain: (id) => ipcRenderer.invoke('team:sendAgain', id),
   teamRouteNow: (peer, id) => ipcRenderer.invoke('team:routeNow', peer, id),

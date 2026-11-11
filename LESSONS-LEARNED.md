@@ -1047,3 +1047,14 @@
 - **FIX**: Bring the harness to the front BY PID: `osascript -e 'tell application "System Events" to set frontmost of (first process whose unix id is <CDP listener pid>) to true'`. Never by the name "Electron".
 - **CONTEXT**: Anything main gates on native focus (What's new, getFocusedWindow callers).
 - **DETECTION**: `grep -rn "getFocusedWindow" electron/*.js`
+
+### Architecture: 2026-11-11
+- **MISTAKE**: dobius-send and team delivery judged a tab's prompt from main's rebuilt screen (the last 256KB of PTY output replayed through @xterm/headless). Claude repaints only what changed, so on a tab idle in a /loop for hours the prompt box edges were drawn before the tail began: `promptBoxText` returned null, sends were refused "not at its prompt" and team messages sat held 4 to 18 hours. Clicking the tab made Claude repaint, which is why it "fixed itself".
+- **FIX**: When the tail shows no box, ask the owning window's own xterm (it received every byte) for its screen: `electron/window-screen.js`, answered in `useTerminal.js` inside `term.write('', cb)` so the answer includes all earlier output, with the per-row facts from `shared/screen-rows.js` (dim ghost suggestions are not typed text).
+- **CONTEXT**: Any check that reads a long-lived tab's screen from a bounded tail. A tail is only a screen if it holds a complete frame.
+- **DETECTION**: `grep -rn "renderScreenLines(" electron/*.js` and check each caller has a fallback for a null box.
+
+### Testing: 2026-11-11
+- **MISTAKE**: A sabotage check of the tab-send retry fix kept passing: the fix had two independent halves (keep the record before submit, re-set it after), either one sufficient, so removing one proved nothing. Earlier the same test also passed because it failed at the FIRST claudeRunning check, before reaching the path.
+- **FIX**: Sabotage every independent half together, and assert the test reached the path (a call counter) before trusting a pass.
+- **DETECTION**: when a sabotage run still passes, grep the fix for a second write of the same state.

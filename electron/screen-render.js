@@ -18,6 +18,7 @@
 // @xterm/headless ships CJS with no named ESM exports; default-import and
 // destructure (same interop pattern Node and Electron main both honor).
 import headless from '@xterm/headless';
+import { rowFacts } from '../shared/screen-rows.js';
 
 const { Terminal } = headless;
 
@@ -141,44 +142,7 @@ function renderScreenLinesNow(raw, { timeoutMs = 750, cols, rows, exact = false,
         // to the next blank one): reflow asks whether that word could have
         // fit on the row above, and characters the emulator draws in zero
         // columns (U+1160, direction marks) made a string count say no.
-        const ends = [];
-        const firstWords = [];
-        // Where each row's trailing dim text starts, or -1: Claude draws its
-        // placeholder and ghost suggestion dim, and typed text never.
-        const dimFrom = [];
-        // Whether each row's first visible character is drawn in a colour
-        // (not the default foreground): Claude's own warnings are, typed and
-        // quoted text is not (chat-service's timer check).
-        const firstColored = [];
-        for (let i = 0; i < height; i += 1) {
-          const line = buf.getLine(i);
-          let colored = false;
-          let end = 0;
-          let start = -1;
-          let wordEnd = -1;
-          let dimAt = -1;
-          for (let x = 0; x < width; x += 1) {
-            const cell = line?.getCell(x);
-            if (!cell) break;
-            const w = cell.getWidth();
-            if (w === 0) continue; // the second half of a wide glyph
-            // A cell's BASE character decides: zero-width marks attach to the
-            // cell before them, so a space can read " \u200E" (Codex P2).
-            const chars = cell.getChars();
-            const blank = !chars || chars[0] === ' ';
-            if (!blank) {
-              if (!cell.isDim()) dimAt = -1;
-              else if (dimAt === -1) dimAt = x;
-              end = x + w;
-              if (start === -1) { start = x; colored = !cell.isFgDefault(); }
-              if (wordEnd === -1) continue;
-            } else if (start !== -1 && wordEnd === -1) wordEnd = x;
-          }
-          ends.push(end);
-          dimFrom.push(dimAt);
-          firstColored.push(colored);
-          firstWords.push(start === -1 ? 0 : (wordEnd === -1 ? end : wordEnd) - start);
-        }
+        const { ends, dimFrom, firstWords, firstColored } = rowFacts((i) => buf.getLine(i), height, width);
         Object.defineProperty(out, 'ends', { value: ends });
         Object.defineProperty(out, 'dimFrom', { value: dimFrom });
         Object.defineProperty(out, 'firstWords', { value: firstWords });

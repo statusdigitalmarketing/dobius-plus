@@ -20,6 +20,7 @@ export const shell = {};
 // window-manager.js (imported via auto-updater.js) reads displays only when placing a window.
 export const screen = {};
 export const dialog = {};
+export const webContents = { fromId: () => null };
 export const Notification = class {};
 export const autoUpdater = { on: () => {}, prependListener: () => {} };
 export const powerMonitor = { on: () => {} };

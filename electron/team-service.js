@@ -16,6 +16,7 @@ import crypto from 'node:crypto';
 import * as P from './team-protocol.js';
 import { shortFp, fingerprint } from './team-crypto.js';
 import { looksLikeFingerprint } from './team-store.js';
+import { isDone } from '../shared/team-done.js';
 import { deliver, deliveryCard, handoffCard, GAVE_UP_NOTE } from './team-deliver.js';
 
 export const SEND_DEADLINE_MS = 24 * 3600 * 1000;
@@ -277,6 +278,24 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const stuck = msg?.state === 'routing' && current !== `${peer}|${id}`;
     if (!msg || (!stuck && !['held', 'needs attention', 'unconfirmed', 'not delivered'].includes(msg.state))) return { ok: false, error: 'nothing to dismiss' };
     store.patchMessage(dir, peer, id, { state: 'dismissed', note: null });
+    changed();
+    return { ok: true };
+  }
+
+  /**
+   * Done with a row (Tasks > Team), or not done after all. A flag and nothing else: the row's state, note and delivery
+   * are untouched, so Not done is exact and one write does it (Codex round 4: every version that also dismissed lost
+   * something on the way back). It holds only while the row stays where it was marked (state and teammate stage,
+   * isDone): a delivery that fails afterwards shows up and counts again, and Done then marks it from where it is.
+   * While done, a row is not auto-routed (settingsChanged). It keeps its place in a full inbox like any other row: freeing
+   * it raced queued and retried deliveries (Codex rounds 5 and 6).
+   */
+  function archive(dir, peer, id, on = true) {
+    const msg = store.messages().find((x) => x.dir === dir && x.peer === peer && x.id === id);
+    if (!msg) return { ok: false, error: 'no such message' };
+    store.patchMessage(dir, peer, id, on
+      ? { archived: true, archivedState: msg.state, archivedStage: msg.stage ?? null }
+      : { archived: false, archivedState: null, archivedStage: null });
     changed();
     return { ok: true };
   }
@@ -996,7 +1015,7 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     if (!s.orchestratorTab || !s.accept) return;
     const peers = store.peers();
     for (const m of store.messages()) {
-      if (m.dir === 'in' && m.state === 'held' && m.note === 'no orchestrator tab is pinned' && peers[m.peer]?.autoRoute) {
+      if (m.dir === 'in' && m.state === 'held' && m.note === 'no orchestrator tab is pinned' && peers[m.peer]?.autoRoute && !isDone(m)) {
         store.patchMessage('in', m.peer, m.id, { state: 'waiting', note: null });
         enqueueDelivery(m.peer, m.id);
       }
@@ -1010,12 +1029,15 @@ export function createTeamService({ store, request, endpoint, endpointProblem = 
     const recent = new Set(all.slice(-200));
     // Rows show the teammate's CURRENT name (a rename after the row was written must not leave a stale label).
     const current = store.peers(); // read once for the whole list
-    return all.filter((m) => recent.has(m) || act.has(m.state))
+    // Rows marked done stay listed (under Done), or one that dropped out of the newest 200 could never be undone.
+    // So do rows the teammate's Mac reported a problem with: Tasks > Team shows those as open (src/lib/team-threads.js).
+    const problem = new Set(['held', 'needs attention', 'failed', 'stopped']);
+    return all.filter((m) => recent.has(m) || act.has(m.state) || m.archived || problem.has(m.stage))
       .map((m) => { const n = m.peer && Object.hasOwn(current, m.peer) ? current[m.peer].name : m.peerName; return n !== m.peerName ? { ...m, peerName: n } : m; });
   }
 
   return {
-    unlink, dismiss, messagesForUi,
+    unlink, dismiss, archive, messagesForUi,
     status, createInvite, hello, link, decideLink, join, receive, routeNow,
     findPeer, send, reply, retry, sendAgain, start, stop, settingsChanged, pump,
     handoff, approveHandoff, receiveStatus, tabEvent, markIncoming, pumpReports, following, followedPid,

@@ -19,7 +19,7 @@ const SHELL = (() => { const lines = ['user@Mac project % ']; lines.dimFrom = [-
 
 function fakeTab({ leads, claude = true, working = false, needs = false, box = '', dialog = false, enterInsertsNewline = false, keysAfterPaste = false, keysWhileTyping = false, probeFails = false, boxOnScreen = claude, readerAfterPaste = false, closeOnSubmit = false, wheelDuringRead = false, keysDuringProbe = false, inTab = claude, keysDuringPause = false, wheelBeforeRead = false, partialAfterSubmit = false, needsAfterPaste = false, spinAfterSubmit = false, shell = SHELL, front = 'shell', busyScreen = false } = {}) {
   let clock = 0;
-  const t = { box, seq: 0, keys: 0, input: 0, pasted: null, written: [], submitted: 0, pty: {}, alive: true, reads: 0, stopped: false, probes: 0 };
+  const t = { box, seq: 0, inSeq: 0, keys: 0, input: 0, pasted: null, written: [], submitted: 0, pty: {}, alive: true, reads: 0, stopped: false, probes: 0 };
   const deps = {
     tabAlive: () => t.alive,
     ptyOf: () => (t.alive ? t.pty : null),
@@ -29,6 +29,7 @@ function fakeTab({ leads, claude = true, working = false, needs = false, box = '
     claudeLeads: async () => { if (keysDuringProbe) t.keys += 1; if (probeFails) throw new Error('pgrep timed out'); return leads ?? claude; },
     needs: () => needs || (needsAfterPaste && t.pasted !== null),
     working: () => working,
+    inputSeq: () => t.inSeq + t.keys + t.input,
     inputBusy: () => false,
     watch: () => ({
       seq: () => t.seq, keys: () => t.keys, input: () => t.keys + t.input, stop: () => { t.stopped = true; },
@@ -41,12 +42,13 @@ function fakeTab({ leads, claude = true, working = false, needs = false, box = '
       },
     }),
     paste: (_id, text) => {
+      t.inSeq += 1;
       t.pasted = text;
       t.box = `[Pasted text #1 +${text.split('\n').length - 1} lines]`;
       t.seq += 1;
       if (keysAfterPaste) t.keys += 1;
     },
-    submit: () => { t.submitted += 1; t.seq += 1; if (!enterInsertsNewline) t.box = ''; if (partialAfterSubmit) t.box = 'hel'; if (closeOnSubmit) { t.alive = false; t.box = ''; } },
+    submit: () => { t.inSeq += 1; t.submitted += 1; t.seq += 1; if (!enterInsertsNewline) t.box = ''; if (partialAfterSubmit) t.box = 'hel'; if (closeOnSubmit) { t.alive = false; t.box = ''; } },
     write: (_id, data) => { t.written.push(data); if (keysWhileTyping) t.keys += 1; },
     // A person typing during a pause is only seen while the watch is running.
     sleep: async (ms) => { clock += ms; await null; if (keysDuringPause && t.written.length && !t.stopped) t.keys += 1; },
@@ -422,4 +424,186 @@ test('a request body with a printed tab id and look-alike text parses', async ()
   assert.equal(liveTabIdFromPrinted('toTabId', 'term-/tmp/\u2039tools>-1', [{ id: 'term-/tmp/<tools>-1' }, { id: 'term-/tmp/\u2039tools>-1' }]), 'ambiguous:term-/tmp/\u2039tools>-1');
   // Message text that looks like a printed id is never rewritten.
   assert.equal(liveTabIdFromPrinted('message', 'term-/tmp/\u2039tools>-1', [{ id: 'term-/tmp/<tools>-1' }]), 'term-/tmp/\u2039tools>-1');
+});
+
+test('a message typed but not sent is sent by sending the same message again: Enter only, nothing typed twice', async () => {
+  const { t, deps } = fakeTab();
+  // The first paste does not show in the box in time, so it is left typed and unsent.
+  const paste = deps.paste;
+  let pastes = 0;
+  deps.paste = (id, text) => { pastes += 1; t.inSeq += 1; t.pasted = text; t.seq += 1; };
+  const first = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(first.body.typed, true);
+  assert.equal(first.body.submitted, false);
+  assert.match(first.body.note, /send the same message again/);
+  assert.equal(t.submitted, 0);
+  // It shows up late.
+  t.box = 'hello there';
+  // A different message is refused: the box holds text this send did not type.
+  const other = await sendToTab(deps, 'tab', 'something else');
+  assert.equal(other.status, 409);
+  assert.equal(other.body.reason, 'draft');
+  assert.equal(t.submitted, 0);
+  // The same message: Enter on what is there.
+  const again = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(again.body.ok, true, JSON.stringify(again.body));
+  assert.equal(pastes, 1, 'not pasted a second time');
+  assert.equal(t.submitted, 1);
+  // Done with it: a third identical send into a box someone filled with the same words is a draft again.
+  t.box = 'hello there';
+  const third = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(third.status, 409);
+  assert.equal(t.submitted, 1);
+  deps.paste = paste;
+});
+
+test('the same words a person typed are never sent for them by a repeated message', async () => {
+  const { t, deps } = fakeTab({ box: 'hello there' });
+  const r = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(r.status, 409);
+  assert.equal(r.body.reason, 'draft');
+  assert.equal(t.submitted, 0);
+  assert.equal(t.pasted, null);
+});
+
+test('no prompt box on screen: refused with the reason, paste mode off said apart', async () => {
+  const { deps } = fakeTab();
+  deps.watch = (() => { const w = deps.watch; return (id) => { const x = w(id); return { ...x, screen: async () => ({ lines: ['some output', 'more output'], modes: { bracketedPaste: true, cursor: { x: 0, y: 1 } } }) }; }; })();
+  const r = await sendToTab(deps, 'tab', 'hi');
+  assert.equal(r.status, 409);
+  assert.equal(r.body.reason, 'no-prompt-box');
+  const { deps: d2 } = fakeTab();
+  d2.watch = (() => { const w = d2.watch; return (id) => { const x = w(id); return { ...x, screen: async () => { const s = await x.screen(); return { ...s, modes: { ...s.modes, bracketedPaste: false } }; } }; }; })();
+  const r2 = await sendToTab(d2, 'tab', 'hi');
+  assert.equal(r2.status, 409);
+  assert.equal(r2.body.reason, 'paste-mode-off');
+});
+
+test('a person who pastes their own text over a half-sent message: sending it again presses nothing (Codex P1)', async () => {
+  const { t, deps } = fakeTab();
+  deps.paste = (id, text) => { t.inSeq += 1; t.pasted = text; t.seq += 1; };
+  const first = await sendToTab(deps, 'tab', 'one\ntwo');
+  assert.equal(first.body.submitted, false);
+  // They clear it and paste something else of the same length: the box marker looks the same.
+  t.inSeq += 2;
+  t.box = '[Pasted text #2 +1 lines]';
+  const again = await sendToTab(deps, 'tab', 'one\ntwo');
+  assert.equal(again.status, 409);
+  assert.equal(again.body.reason, 'draft');
+  assert.equal(t.submitted, 0);
+});
+
+test('a send stopped by someone using the tab is never finished by sending it again', async () => {
+  const { t, deps } = fakeTab({ keysAfterPaste: true });
+  const first = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(first.body.submitted, false);
+  assert.doesNotMatch(first.body.note, /send the same message again/);
+  assert.equal(Object.hasOwn(first, 'retryable'), false, 'internal flag not in the reply');
+  t.box = '[Pasted text #1 +0 lines]';
+  const again = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(again.status, 409);
+  assert.equal(t.submitted, 0);
+});
+
+test('a retry while the first paste has still not shown up: not pasted twice, and another message waits (Codex round 2)', async () => {
+  const { t, deps } = fakeTab();
+  let pastes = 0;
+  deps.paste = (id, text) => { pastes += 1; t.inSeq += 1; t.pasted = text; t.seq += 1; };
+  const first = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(first.body.submitted, false);
+  // Box still empty on screen: the paste has not arrived yet.
+  const other = await sendToTab(deps, 'tab', 'a different one');
+  assert.equal(other.status, 409);
+  assert.equal(other.body.reason, 'pending');
+  const again = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(pastes, 1, 'never pasted a second time');
+  assert.equal(again.body.submitted, false, 'still not shown: still not sent');
+  t.box = 'hello there';
+  const third = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(third.body.ok, true);
+  assert.equal(pastes, 1);
+  assert.equal(t.submitted, 1);
+});
+
+test('a resend that fails for another reason keeps the record, so a third send still never pastes again (Codex round 3)', async () => {
+  const { t, deps } = fakeTab();
+  let pastes = 0;
+  deps.paste = (id, text) => { pastes += 1; t.inSeq += 1; t.pasted = text; t.seq += 1; };
+  await sendToTab(deps, 'tab', 'hello there');
+  // The paste shows up, and the resend's check before Enter hits a ps hiccup (the first check passes).
+  t.box = 'hello there';
+  const realRunning = deps.claudeRunning;
+  let calls = 0;
+  deps.claudeRunning = async (...x) => ((calls += 1) === 1 ? realRunning(...x) : false);
+  const second = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(second.body.submitted, false);
+  assert.ok(calls >= 2, 'reached the check after the resend began');
+  deps.claudeRunning = realRunning;
+  const third = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(pastes, 1);
+  assert.equal(third.body.ok, true, 'the record held, so the third send pressed Enter on it');
+});
+
+test('input written after our unread paste (a click) never lets a later send paste it again (Codex round 4)', async () => {
+  const { t, deps } = fakeTab();
+  let pastes = 0;
+  deps.paste = (id, text) => { pastes += 1; t.inSeq += 1; t.pasted = text; t.seq += 1; };
+  await sendToTab(deps, 'tab', 'hello there');
+  t.inSeq += 1; // a mouse report, queued behind our paste; the box still shows nothing
+  const again = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(again.status, 409);
+  assert.equal(again.body.reason, 'pending');
+  assert.equal(pastes, 1);
+  // Once Claude reads input the box shows it: that is a draft now, and the record goes.
+  t.box = '[Pasted text #1 +0 lines]';
+  assert.equal((await sendToTab(deps, 'tab', 'hello there')).body.reason, 'draft');
+  t.box = '';
+  const last = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(last.status, 200, 'cleared by a person: sendable again');
+  assert.equal(pastes, 2);
+});
+
+test('a send stopped right after its paste still blocks a second paste into an empty box (Codex round 5)', async () => {
+  const { t, deps } = fakeTab({ keysAfterPaste: true });
+  let pastes = 0;
+  const realPaste = deps.paste;
+  deps.paste = (...x) => { pastes += 1; realPaste(...x); t.box = ''; }; // Claude has not read it yet
+  const first = await sendToTab(deps, 'tab', 'hello there');
+  assert.equal(first.body.submitted, false);
+  assert.match(first.body.note, /someone used the tab/, 'stopped early, not a timeout');
+  const again = await sendToTab(deps, 'tab', 'something else');
+  assert.equal(again.body.reason, 'pending');
+  assert.equal(pastes, 1);
+});
+
+test('a paste seen in the box and then cleared by a person does not block later sends (Codex round 5)', async () => {
+  const { t, deps } = fakeTab();
+  let pastes = 0;
+  deps.paste = (id, text) => { pastes += 1; t.inSeq += 1; t.pasted = text; t.seq += 1; };
+  await sendToTab(deps, 'tab', 'hello there'); // times out, unseen
+  t.box = 'hello there'; // now it shows
+  t.inSeq += 1; // and a person touched the tab, so it is not ours to finish
+  assert.equal((await sendToTab(deps, 'tab', 'hello there')).body.reason, 'draft');
+  t.box = ''; // they cleared it
+  const later = await sendToTab(deps, 'tab', 'next one');
+  assert.equal(later.status, 200);
+  assert.equal(pastes, 2);
+});
+
+test('another delivery pasting behind ours before the Enter stops the send, resend or not (Codex round 6)', async () => {
+  for (const resendFirst of [false, true]) {
+    const { t, deps } = fakeTab();
+    if (resendFirst) {
+      deps.paste = (id, text) => { t.inSeq += 1; t.pasted = text; t.seq += 1; }; // unread: times out
+      await sendToTab(deps, 'tab', 'hello there');
+      t.box = 'hello there';
+    }
+    let sleeps = 0;
+    const realSleep = deps.sleep;
+    deps.sleep = async (ms) => { if ((sleeps += 1) === 1) t.inSeq += 1; return realSleep(ms); }; // Dobius's own write, not in watch.input()
+    const r = await sendToTab(deps, 'tab', 'hello there');
+    assert.equal(r.body.submitted, false, `resend ${resendFirst}`);
+    assert.match(r.body.note, /someone used the tab/);
+    assert.equal(t.submitted, 0);
+  }
 });
