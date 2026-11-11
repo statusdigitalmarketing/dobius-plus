@@ -129,3 +129,28 @@ test('a name already taken (EEXIST) is never removed', async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Codex, PR 6 round 3: a folder that can be written but not listed (mode 0300) skipped pruning and saved anyway, one
+// more profile per request. Pruning that cannot keep the limit now skips the save, and never removes the name it chose.
+test('a folder that cannot be listed: nothing is saved and nothing there is removed', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-perf-nolist-'));
+  const taken = 'main-2031-01-01T00-00-00-000Z.cpuprofile';
+  fs.writeFileSync(path.join(dir, taken), 'someone else');
+  fs.chmodSync(dir, 0o300);
+  try {
+    assert.throws(() => fs.readdirSync(dir), /EACCES/, 'the folder really cannot be listed');
+    const r = await profileMain(2, dir, { now: () => new Date('2032-01-01T00:00:00Z') }); // a free name: only the prune stops it
+    assert.equal(r.ok, true);
+    assert.equal(r.file, null, 'not saved: the limit could not be kept');
+    // Same, when the name it picks is already someone's: the failed prune must not remove that file.
+    const r2 = await profileMain(2, dir, { now: () => new Date('2031-01-01T00:00:00Z') });
+    assert.equal(r2.file, null);
+    await new Promise((res) => setTimeout(res, 50));
+    fs.chmodSync(dir, 0o700);
+    assert.deepEqual(fs.readdirSync(dir), [taken], 'no new profile');
+    assert.equal(fs.readFileSync(path.join(dir, taken), 'utf8'), 'someone else');
+  } finally {
+    fs.chmodSync(dir, 0o700);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

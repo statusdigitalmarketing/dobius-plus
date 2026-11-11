@@ -93,16 +93,13 @@ function post(session, method, params = {}) {
 
 // Keeps the file just written whatever its name says (a clock that was wrong earlier must not make the new profile
 // look oldest), plus the newest KEEP_FILES - 1 others.
+// Throws when the folder cannot be kept to KEEP_FILES (it cannot be listed, or an old file will not go), so the caller
+// skips saving: profiles must never pile up on disk (Codex, PR 6: a folder that could be written but not listed grew
+// by one profile per request).
 function pruneOld(dir, keep) {
-  let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => FILE_RE.test(n) && n !== keep); } catch (err) {
-    console.warn(`[perf-profile] could not list ${dir}: ${err.message}`);
-    return;
-  }
+  const names = fs.readdirSync(dir).filter((n) => FILE_RE.test(n) && n !== keep);
   names.sort(); // timestamped names sort oldest first
-  for (const n of names.slice(0, Math.max(0, names.length - (KEEP_FILES - 1)))) {
-    try { fs.unlinkSync(path.join(dir, n)); } catch (err) { console.warn(`[perf-profile] could not remove ${n}: ${err.message}`); }
-  }
+  for (const n of names.slice(0, Math.max(0, names.length - (KEEP_FILES - 1)))) fs.unlinkSync(path.join(dir, n));
 }
 
 /**
@@ -125,6 +122,7 @@ export async function profileMain(seconds, logDir, { now = () => new Date() } = 
     let file = null;
     if (logDir) {
       let full = null;
+      let writing = false; // only a failed write of OURS is removed; a prune failure never touches that name
       try {
         fs.mkdirSync(logDir, { recursive: true });
         file = `main-${now().toISOString().replace(/[:.]/g, '-')}.cpuprofile`;
@@ -135,12 +133,13 @@ export async function profileMain(seconds, logDir, { now = () => new Date() } = 
         // 'wx': a new file only. Never follows or replaces something already at that name (a symlink, a same-
         // millisecond earlier profile). Written asynchronously: a stalled disk must not hold the main thread (Codex,
         // PR 6). `running` stays set until it finishes, so a second profile cannot start meanwhile.
+        writing = true;
         await fs.promises.writeFile(full, JSON.stringify(profile), { flag: 'wx', mode: 0o600 });
       } catch (err) {
         console.warn(`[perf-profile] could not save the profile: ${err.message}`);
         // A write that failed after creating the file (disk full) leaves a partial one: ours, so remove it. EEXIST means
         // something else already had the name, and it is never touched.
-        if (full && err?.code !== 'EEXIST') fs.promises.unlink(full).catch(() => {});
+        if (writing && err?.code !== 'EEXIST') fs.promises.unlink(full).catch(() => {});
         file = null;
       }
     }
