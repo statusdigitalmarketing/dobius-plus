@@ -101,6 +101,7 @@ import {
 } from './window-manager.js';
 import { initAutoUpdater, installInFlight } from './auto-updater.js';
 import { initWhatsNew, whatsNewRestoreDone } from './whats-new.js';
+import { initWindowScreen } from './window-screen.js';
 import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCert } from './tailscale.js';
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
@@ -4540,6 +4541,7 @@ function setupWindowHandlers() {
     sleep: bridgeOpenDeps.sleep,
     now: bridgeOpenDeps.now,
     working: (id) => terminalStatus.statusFor(id)?.status === 'working',
+    inputSeq: (id) => terminalInputSeq(id), // every write to the tab, any source (tab-send's retry ownership)
     watch: (id) => {
       const x = bridgeOpenDeps.watchOutput(id);
       return {
@@ -5270,6 +5272,7 @@ app.whenReady().then(() => {
   createWindow();
   initAutoUpdater();
   initWhatsNew();
+  initWindowScreen(ipcMain);
   maybeAutoStartMobileServer()
     .catch((err) => console.warn('[mobile-server] start:', err?.message || err))
     .then(runAutoHttps);

@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as env from './fake-bridge-env.mjs';
+import { initWindowScreen } from '../window-screen.js';
+import { promptBoxText } from '../bridge-open-tab.js';
 
 // A window is ready once its page has restored its tabs (window:tabsReady).
 let windowReady = () => true;
@@ -267,4 +269,39 @@ test('ttyReaderUnder: an editor or shell command under claude reading the termin
   assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: partial(''), alive: () => false }), false, 'every one of them gone');
   assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: partial(rest + 'p300\nferr\nnFD info error: Permission denied\n'), alive: (p) => p === 300 }), true, 'a process whose descriptors lsof could not read is doubt');
   assert.equal(await ttyReaderUnder(100, 'ttys004', { exec: async (bin) => { if (bin === '/bin/ps') return { stdout: ps }; throw Object.assign(new Error('x'), { code: 2, stdout: rest }); }, alive: () => false }), true, 'any other failure is doubt');
+});
+
+test('a tab whose prompt box is older than its output tail: the window\'s own screen decides (Muzikmaker bug 5)', async () => {
+  initWindowScreen(env.ipcMain);
+  const RULE = '─'.repeat(30);
+  const wc = env.fakeWebContents((ch, nonce, id) => {
+    if (ch !== 'terminal:screenRequest') return;
+    setTimeout(() => env.emit('terminal:screenReply', wc, nonce, id, { lines: ['Nothing printed.', RULE, '❯ ', RULE, '  auto mode on'], cursor: { x: 2, y: 2 } }), 0);
+  });
+  env.terminals.set('tab-old', { pid: 1, cwd: '/p/old', wcId: wc.id });
+  // What a /loop tab's tail holds after hours: only repaints of the prompt row, no box edges.
+  env.buffers.set('tab-old', 'Nothing printed.\r\n\x1b[3B❯\xa0\x1b[2mRun the loop\x1b[22m\x1b[5;3H');
+  const watch = deps.watchOutput('tab-old');
+  const s = await watch.screen();
+  watch.stop();
+  assert.equal(promptBoxText(s.lines, { ...s.modes, bracketedPaste: true }), '');
+  assert.equal(wc.sent.filter(([ch]) => ch === 'terminal:screenRequest').length, 1);
+
+  // A tail that still has its box: the window is not asked.
+  const wc2 = env.fakeWebContents();
+  env.terminals.set('tab-new', { pid: 2, cwd: '/p/new', wcId: wc2.id });
+  env.buffers.set('tab-new', `hello\r\n${RULE}\r\n❯ \r\n${RULE}\r\n\x1b[3;3H`);
+  const w2 = deps.watchOutput('tab-new');
+  const s2 = await w2.screen();
+  w2.stop();
+  assert.equal(promptBoxText(s2.lines, { ...s2.modes, bracketedPaste: true }), '');
+  assert.equal(wc2.sent.length, 0);
+
+  // No window answers (a phone-spawned tab): the tail's screen stands, no box.
+  env.terminals.set('tab-phone', { pid: 3, cwd: '/p/phone', wcId: null });
+  env.buffers.set('tab-phone', 'Nothing printed.\r\n\x1b[3B❯ x');
+  const w3 = deps.watchOutput('tab-phone');
+  const s3 = await w3.screen();
+  w3.stop();
+  assert.equal(promptBoxText(s3.lines, { ...s3.modes, bracketedPaste: true }), null);
 });

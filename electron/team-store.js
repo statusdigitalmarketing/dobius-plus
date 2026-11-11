@@ -226,7 +226,12 @@ export function createTeamStore({ dir, box, now = () => Date.now() }) {
     const list = messages();
     const i = list.findIndex((x) => x.dir === dir && x.peer === peer && x.id === id);
     if (i < 0) return null;
-    list[i] = { ...list[i], ...patch };
+    const was = list[i];
+    // A row a person marked done that moves on (a new state, or a new report from the teammate's Mac) is not done any
+    // more, even if it later lands back where it was marked (held, routing, held: Codex round 5).
+    const moved = was.archived && !Object.hasOwn(patch, 'archived')
+      && ((Object.hasOwn(patch, 'state') && patch.state !== was.state) || (Object.hasOwn(patch, 'stage') && (patch.stage ?? null) !== (was.stage ?? null)));
+    list[i] = { ...was, ...patch, ...(moved ? { archived: false, archivedState: null, archivedStage: null } : {}) };
     saveMessages(list);
     return list[i];
   }

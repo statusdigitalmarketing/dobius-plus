@@ -9,6 +9,7 @@ import { takePendingScrollback, drawableLine } from '../lib/pending-scrollback';
 import { attachPromptEditing } from '../lib/prompt-edit-term';
 import { takePendingLaunch } from '../lib/pending-launch';
 import { isWindows } from '../../shared/platform.js';
+import { rowFacts } from '../../shared/screen-rows.js';
 
 // States carried by the Dobius status marker (OSC 777;dobius;<state>), emitted by
 // the managed Claude Notification/Stop hook. Anything else is ignored.
@@ -279,6 +280,22 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       }
     });
 
+    // main asks what this tab's screen shows (electron/window-screen.js): its rebuilt copy is cut from a bounded tail,
+    // and this xterm was written every byte. Answered once xterm has parsed everything already written.
+    const removeScreenRequest = window.electronAPI.onTerminalScreenRequest?.((nonce, termId) => {
+      if (termId !== id || !termRef.current) return;
+      termRef.current.write('', () => {
+        const t = termRef.current;
+        if (!t) return;
+        const b = t.buffer.active;
+        const lines = [];
+        for (let r = 0; r < t.rows; r += 1) lines.push(b.getLine(b.baseY + r)?.translateToString(true) ?? '');
+        // The same per-row facts main reads off its own render (dim ghost suggestions, coloured rules).
+        const facts = rowFacts((r) => b.getLine(b.baseY + r), t.rows, t.cols);
+        window.electronAPI.terminalScreenReply?.(nonce, id, { lines, cursor: { x: b.cursorX, y: b.cursorY }, ...facts });
+      });
+    });
+
     const removeExitListener = window.electronAPI.onTerminalExit((termId, exitCode) => {
       if (termId === id && termRef.current) {
         termRef.current.write(`\r\n[Process exited with code ${exitCode}]\r\n`);
@@ -478,6 +495,7 @@ export function useTerminal({ id, cwd, theme, fontSize = 13, fontFamily = '', ma
       removeAutoLabelListener?.();
       removeDataListener();
       removeExitListener();
+      removeScreenRequest?.();
       removeStatusHint?.();
       removeHookStatus?.();
       removeRequestSave?.();

@@ -194,6 +194,7 @@ function registerIpc() {
   ipcMain.handle('team:send', safe((to, text) => service.send(str(to, 100), str(text, 8000))));
   ipcMain.handle('team:reply', safe((peer, id, text) => service.reply(str(id, 64), str(text, 8000), str(peer, 64))));
   ipcMain.handle('team:dismiss', safe((dir, peer, id) => service.dismiss(dir === 'out' ? 'out' : 'in', str(peer, 64), str(id, 64))));
+  ipcMain.handle('team:archive', safe((dir, peer, id, on) => service.archive(dir === 'out' ? 'out' : 'in', str(peer, 64), str(id, 64), on !== false)));
   ipcMain.handle('team:retry', safe((id) => service.retry(str(id, 64))));
   ipcMain.handle('team:sendAgain', safe((id) => service.sendAgain(str(id, 64))));
   ipcMain.handle('team:routeNow', safe((peer, id) => service.routeNow(str(peer, 64), str(id, 64))));

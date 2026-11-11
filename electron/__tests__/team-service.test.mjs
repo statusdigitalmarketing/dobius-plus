@@ -1823,3 +1823,77 @@ test('rename r5: split surrogate halves around an invisible mark never join into
   assert.equal(n.includes('�'), true, 'the halves became visible replacement characters');
   a.svc.stop(); b.svc.stop(); c.svc.stop();
 });
+
+test('Done is a flag only: state and note stay, Not done is exact, a done held row is not auto-routed (Codex round 4)', async () => {
+  const env = await linked();
+  const { a } = env;
+  const held = '33333333-0000-4000-8000-000000000000';
+  const peer = env.bOnA().id;
+  a.store.updatePeer?.(peer, { autoRoute: true });
+  a.store.putMessage({ dir: 'in', id: held, peer, text: 'x', state: 'held', note: 'no orchestrator tab is pinned', at: clock });
+  const row = () => a.store.messages().find((m) => m.id === held);
+  assert.equal(a.svc.archive('in', peer, held, true).ok, true);
+  assert.equal(a.svc.archive('in', peer, held, true).ok, true, 'a second Done (double click)');
+  assert.equal(row().state, 'held');
+  assert.equal(row().note, 'no orchestrator tab is pinned');
+  assert.equal(row().archived, true);
+  a.store.setSettings({ orchestratorTab: 'term-/x-1', accept: true });
+  assert.equal(a.store.peers()[peer]?.autoRoute, true, 'the setup reaches the auto-route path');
+  a.svc.settingsChanged();
+  assert.equal(row().state, 'held', 'not routed while done');
+  assert.equal(row().note, 'no orchestrator tab is pinned');
+  assert.equal(a.svc.archive('in', peer, held, false).ok, true);
+  assert.equal(row().state, 'held');
+  assert.equal(row().archived, false);
+  a.svc.settingsChanged();
+  // Routed: it left the "no orchestrator" hold (this harness has no tab to type into, so it may come back held for that).
+  assert.notEqual(row().note, 'no orchestrator tab is pinned', 'once not done, pinning an orchestrator routes it');
+  assert.equal(a.svc.archive('in', 'p', '66666666-0000-4000-8000-000000000000', true).ok, false);
+});
+
+test('a row marked done stays listed for the UI even after it drops out of the newest 200', async () => {
+  const { a } = await linked();
+  const old = '77777777-0000-4000-8000-000000000000';
+  a.store.putMessage({ dir: 'in', id: old, peer: 'p', text: 'old', state: 'held', at: clock });
+  for (let i = 0; i < 205; i += 1) a.store.putMessage({ dir: 'in', id: `88888888-0000-4000-8000-${String(i).padStart(12, '0')}`, peer: 'p', text: 'x', state: 'routed', at: clock });
+  assert.equal(a.svc.messagesForUi().some((m) => m.id === old), true, 'held: listed');
+  a.svc.archive('in', 'p', old, true);
+  assert.equal(a.svc.messagesForUi().some((m) => m.id === old), true, 'done: still listed, so Not done stays reachable');
+});
+
+test('a row whose delivery failed after Done is marked again from where it is now (Codex round 3)', async () => {
+  const { a } = await linked();
+  const id = '99999999-0000-4000-8000-000000000000';
+  a.store.putMessage({ dir: 'in', id, peer: 'p', text: 'x', state: 'routed', at: clock });
+  a.svc.archive('in', 'p', id, true);
+  a.store.patchMessage('in', 'p', id, { state: 'held' }); // came back
+  assert.equal(a.svc.archive('in', 'p', id, true).ok, true);
+  const r = a.store.messages().find((m) => m.id === id);
+  assert.equal(r.state, 'held');
+  assert.equal(r.archivedState, 'held');
+});
+
+test('a done row that moves on is not done any more, even when it lands back where it was marked (Codex round 5)', async () => {
+  const { a } = await linked();
+  const id = 'aaaaaaaa-0000-4000-8000-000000000000';
+  a.store.putMessage({ dir: 'in', id, peer: 'p', text: 'x', state: 'held', at: clock });
+  a.svc.archive('in', 'p', id, true);
+  a.store.patchMessage('in', 'p', id, { note: 'only a note' });
+  assert.equal(a.store.messages().find((m) => m.id === id).archived, true, 'a note alone keeps it done');
+  a.store.patchMessage('in', 'p', id, { state: 'routing' });
+  a.store.patchMessage('in', 'p', id, { state: 'held' });
+  assert.equal(a.store.messages().find((m) => m.id === id).archived, false);
+  const out = 'bbbbbbbb-0000-4000-8000-000000000000';
+  a.store.putMessage({ dir: 'out', id: out, peer: 'p', text: 'x', state: 'delivered', at: clock });
+  a.svc.archive('out', 'p', out, true);
+  a.store.patchMessage('out', 'p', out, { stage: 'failed' });
+  assert.equal(a.store.messages().find((m) => m.id === out).archived, false, 'a new report from their Mac');
+});
+
+test('a sent message their Mac reported a problem with stays listed after it drops out of the newest 200', async () => {
+  const { a } = await linked();
+  const out = 'cccccccc-0000-4000-8000-000000000000';
+  a.store.putMessage({ dir: 'out', id: out, peer: 'p', text: 'x', state: 'delivered', stage: 'failed', at: clock });
+  for (let i = 0; i < 205; i += 1) a.store.putMessage({ dir: 'in', id: `dddddddd-0000-4000-8000-${String(i).padStart(12, '0')}`, peer: 'p', text: 'x', state: 'routed', at: clock });
+  assert.equal(a.svc.messagesForUi().some((m) => m.id === out), true);
+});
