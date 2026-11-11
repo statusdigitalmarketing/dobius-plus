@@ -43,6 +43,9 @@ GH_TOKEN="$(gh auth token)"
 export GH_TOKEN
 # The commit is pinned BEFORE the tests and checked after: a commit landing while they run was never tested.
 TESTED_SHA="$(git rev-parse HEAD)"
+# The What's new popup needs this release's notes (electron/whats-new/<version>.md). Checked against the pinned commit's
+# version: HEAD is confirmed unmoved after the tests, so the bump below is from this same version.
+node scripts/whats-new-check.mjs "$BUMP" >/dev/null || exit 1
 npm test >/dev/null 2>&1 || { echo "ERROR: npm test failed; not releasing a red build" >&2; exit 1; }
 [ "$(git rev-parse HEAD)" = "$TESTED_SHA" ] || { echo "ERROR: HEAD moved while the tests ran; run the release again" >&2; exit 1; }
 [ -z "$(git status --porcelain)" ] || { echo "ERROR: the tree changed while the tests ran; run the release again" >&2; exit 1; }

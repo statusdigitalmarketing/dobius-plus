@@ -8,6 +8,10 @@ import { dockingTabs } from './docking-state.js';
 
 const CONFIG_DIR = path.join(app.getPath('userData'));
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
+// Read once, at module load, before anything this launch writes: an install that ran before has a config.json. The
+// What's new popup tells a fresh install apart from an update with it (whats-new.js).
+const CONFIG_EXISTED_AT_START = fs.existsSync(CONFIG_PATH);
+export function configExistedAtStart() { return CONFIG_EXISTED_AT_START; }
 // Per-tab scrollback lives in its own file under terminal-history so config.json
 // stays tiny. Before this, scrollback was inlined into config.projects[*].terminalStates
 // and every per-tab auto-save serialized + sync-wrote the entire config (12+ MB).

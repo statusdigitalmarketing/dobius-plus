@@ -31,6 +31,9 @@ fs.writeFileSync(path.join(project, 'README.md'), '# demo\n');
 fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({
   lastOpenProjects: [project],
   settings: { newTabTool: 'shell' },
+  // An existing config with no record of the What's new popup would show it and its backdrop would take the clicks
+  // below; mark every version's notes as read.
+  whatsNew: { seen: '9999.0.0' },
 }, null, 2));
 
 const REPLY = 'Hello from the Windows smoke test';

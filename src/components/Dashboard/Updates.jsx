@@ -103,6 +103,8 @@ export default function Updates() {
 
       <RestartCard updateReady={ready && !!pending} installing={status.state === 'installing'} />
 
+      <ThisVersionNotes />
+
       {/* Release notes */}
       {latestRelease && (
         <div
@@ -340,4 +342,30 @@ function StatusBanner({ status, ready, pending, onInstall, isUpToDate }) {
     );
   }
   return null;
+}
+
+// The notes the What's new popup showed for the running version (electron/whats-new/<version>.md), so they can be
+// read again after Continue. Nothing is shown for a version that has none.
+function ThisVersionNotes() {
+  const [notes, setNotes] = useState(null);
+  useEffect(() => {
+    let live = true;
+    window.electronAPI?.whatsNewCurrent?.().then((n) => { if (live) setNotes(n || null); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
+  if (!notes?.bullets?.length) return null;
+  return (
+    <div
+      className="mt-4 p-4 rounded-md"
+      data-testid="updates-whats-new"
+      style={{ backgroundColor: 'var(--surface)', border: '1px solid var(--border)' }}
+    >
+      <h3 className="text-sm font-medium mb-2" style={{ color: 'var(--fg)' }}>
+        What's new in {notes.version}
+      </h3>
+      <ul className="text-sm" style={{ color: 'var(--fg)', margin: 0, paddingLeft: 18, listStyle: 'disc', lineHeight: '18px' }}>
+        {notes.bullets.map((b, i) => <li key={i} style={{ marginBottom: 4 }}>{b}</li>)}
+      </ul>
+    </div>
+  );
 }

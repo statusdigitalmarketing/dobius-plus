@@ -1029,3 +1029,21 @@
 - **FIX**: `UPLOAD_LATE_MS` is 60 minutes. The tag is already pinned to the build's App Store Connect id through altool's delivery id; the date window is a second check. Test covers 20 minutes late (ours) and over an hour (not).
 - **CONTEXT**: When the iOS step says "nothing to submit" right after "build N processed", compare `node scripts/ios-release.mjs status` upload dates with the tag's `uploaded-before`, then `node scripts/ios-release.mjs submit --dry-run`.
 - **DETECTION**: `git for-each-ref --format='%(refname:short) %(contents:subject)' 'refs/tags/ios-*' | tail -2` vs the build's date in `node scripts/ios-release.mjs status`
+
+### Process: 2026-11-11
+- **MISTAKE**: Writing `\u2014` and `\u2028` regex escapes into a file through Write or a heredoc: the tool input is JSON-decoded first, so the em-dash hook saw a real U+2014 and blocked the write, and the U+2028 escape landed as a raw line separator that ended the regex literal (`SyntaxError: missing /`).
+- **FIX**: Build such characters at runtime: `String.fromCharCode(0x2013, 0x2014)` inside `new RegExp(...)` (electron/whats-new-notes.js).
+- **CONTEXT**: Any source that must mention a dash, separator or bidi character.
+- **DETECTION**: `LC_ALL=C grep -rn $'\xe2\x80[\xa8\xa9]' electron src shared`
+
+### Testing: 2026-11-11
+- **MISTAKE**: Sabotage checks that replaced a guard with an EMPTY string could not be reversed by the same find-and-replace (count of "" is never 1), so two sabotaged guards stayed in the untracked files and leaked into the next sabotage run.
+- **FIX**: Always sabotage with a unique marker (`/*SAB1*/`), restore by replacing the marker, then `grep -c SAB <file>` must print 0.
+- **CONTEXT**: Untracked files cannot be restored with git, so the marker is the only way back.
+- **DETECTION**: `grep -rn "SAB[0-9]*\*/" electron src scripts`
+
+### Testing: 2026-11-11
+- **MISTAKE**: The What's new ship-test waited 45s for a popup that never came: main sends it only to `BrowserWindow.getFocusedWindow()`, and the harness window was not natively focused (CDP makes `document.hasFocus()` true, which says nothing about native focus).
+- **FIX**: Bring the harness to the front BY PID: `osascript -e 'tell application "System Events" to set frontmost of (first process whose unix id is <CDP listener pid>) to true'`. Never by the name "Electron".
+- **CONTEXT**: Anything main gates on native focus (What's new, getFocusedWindow callers).
+- **DETECTION**: `grep -rn "getFocusedWindow" electron/*.js`

@@ -741,7 +741,7 @@ export async function sendConfirmedVoice({ transcript, sendId, expect, retry }, 
   if (typeof expect === 'string' && expect) {
     const cur = currentVoiceTarget();
     if (cur.key !== expect) {
-      return { status: 409, body: { ok: false, changed: true, target: cur, error: cur.to === 'none' ? 'Nothing is listening on the Mac now. Not sent.' : `Where this goes changed: now ${cur.label}. Check it and Send again.` } };
+      return { status: 409, body: { ok: false, changed: true, target: cur, error: cur.to === 'none' ? `${NOTHING_LISTENING}. Not sent.` : `Where this goes changed: now ${cur.label}. Check it and Send again.` } };
     }
   }
   // Written down before anything is typed, so a crash in the middle cannot lead to a second delivery.
@@ -770,6 +770,11 @@ export async function sendConfirmedVoice({ transcript, sendId, expect, retry }, 
 
 // source: 'phone' (voice) or 'imessage' (a `d:` text), named in what the orchestrator tab is given. Exported for the
 // iMessage bridge (main wires it), so texts and voice take one route: team orchestrator, else the Voice Conductor.
+// Nobody takes voice here: no team orchestrator pinned and no Voice Conductor tab (always the case on Windows, where
+// the Conductor is off). Older phones showed only "Conductor offline, not sent" after each try, which read as being
+// ignored (Max, 2026-11-11). Every phone build prints this text, so it says what to do.
+export const NOTHING_LISTENING = 'Nothing on this computer takes voice yet. Right-click a Claude tab and choose "Use as team orchestrator", then try again';
+
 export async function routeVoice(raw, source = 'phone') {
   const transcript = voiceLine(raw);
   if (!transcript) return { requestId: null, error: 'the transcript is empty' };
@@ -792,7 +797,7 @@ export async function routeVoice(raw, source = 'phone') {
   }
   const c = await routeToConductor(transcript);
   if (c.requestId) return c.note ? { requestId: c.requestId, mode: 'conductor', note: c.note } : { requestId: c.requestId, mode: 'conductor' };
-  return { requestId: null, mode: null, error: c.error };
+  return { requestId: null, mode: null, error: c.error || NOTHING_LISTENING };
 }
 
 // Monotonic per-session counter for phone-spawned terminal ids. Must stay the

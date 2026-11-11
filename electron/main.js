@@ -100,6 +100,7 @@ import {
   openVisualWindow, closeVisualWindow,
 } from './window-manager.js';
 import { initAutoUpdater, installInFlight } from './auto-updater.js';
+import { initWhatsNew, whatsNewRestoreDone } from './whats-new.js';
 import { provisionCert, certCapableName, certValidTo, getMagicDNSName, hasAnyCert } from './tailscale.js';
 import {
   stopMobileServer, getMobileServerStatus, enableMobileServer, markMobileServerQuitting,
@@ -5268,6 +5269,7 @@ app.whenReady().then(() => {
   setupMenu();
   createWindow();
   initAutoUpdater();
+  initWhatsNew();
   maybeAutoStartMobileServer()
     .catch((err) => console.warn('[mobile-server] start:', err?.message || err))
     .then(runAutoHttps);
@@ -5571,6 +5573,9 @@ app.whenReady().then(() => {
   if (willRestore) {
     setTimeout(() => { setRestoring(false); persistOpenProjectsNow(); }, restoreStaggerMs + 1500);
   }
+  // The What's new popup waits for the same moment, so it never lands on a window while later ones are still opening
+  // and taking focus (whats-new.js).
+  setTimeout(whatsNewRestoreDone, willRestore ? restoreStaggerMs + 1500 : 1500);
 
   // Auto-resume queue (v1.0.30): after the project windows above mount and
   // their terminals come up, walk every live tab's prior sessionTabMap entry

@@ -525,6 +525,9 @@ export default function ProjectList() {
           onClick={() => setRenaming(null)}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Rename Project"
             style={{
               backgroundColor: 'var(--surface)',
               border: '1px solid var(--border)',
