@@ -81,7 +81,7 @@ import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig, getCheckpoints, saveCheckpoints,
   getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig, flushConfigAsync, persistConfigNow,
   getSessionTags, setSessionTag, removeSessionTag,
-  getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink, clearSessionTabRunning,
+  getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink, clearSessionTabRunning, markSessionTabUncertain,
   getTabLabelsById, recordSessionTabNames,
   getAgentMemory, setAgentMemory, appendJournalEntry,
   getOrchestrationRuns, saveOrchestrationRun, deleteOrchestrationRun,
@@ -3881,7 +3881,12 @@ function setupSessionTabCapture() {
       const namePairs = [];
       for (const t of liveTabs) {
         if (!current()) return;
-        if (unknownTabs.has(t.id)) continue;
+        if (unknownTabs.has(t.id)) {
+          // Kept, but marked: an uncertainty that lasts until the quit stops authorizing a resume (auto-resume.js).
+          const mappedUnknown = tabToSessionId.get(t.id);
+          if (mappedUnknown && sameShell(t)) markSessionTabUncertain(mappedUnknown, probedAt.get(t.id));
+          continue;
+        }
         const claudeInfo = infoByTab.get(t.id);
         const runningSessionId = claudeInfo?.sessionId || freshByTab.get(t.id) || null;
         if (!runningSessionId) {
@@ -5919,7 +5924,11 @@ app.on('before-quit', (e) => {
         );
         for (const t of liveTabs) {
           if (reconcileAborted) return;
-          if (unknownTabs.has(t.id)) continue;
+          if (unknownTabs.has(t.id)) {
+            const sidUnknown = tabToSid.get(t.id);
+            if (sidUnknown) markSessionTabUncertain(sidUnknown);
+            continue;
+          }
           const sid = tabToSid.get(t.id);
           const info = infoByTab.get(t.id);
           // The tab's CURRENT session: from argv when it is a `--resume`, else

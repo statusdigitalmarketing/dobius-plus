@@ -1064,3 +1064,9 @@
 - **FIX**: `getTerminalClaudeInfo(id, { unknown: true })` returns `CLAUDE_UNKNOWN` on a failed check; the capture tick and the quit reconcile leave those tabs untouched. The tick is single-flight and carries a generation that `stopSessionTabCapture` bumps; every write checks `current()` (same gen, not quitting, not quitting for update). The launch pass now logs one `diag.resume: launch:` summary plus every per-tab outcome.
 - **CONTEXT**: Any "tabs did not come back after a restart" report: read `diag.resume` lines in error.log and the `config.json.pre-update-*.bak` stamps before theorising. A Mac's own zsh keeps typeahead (tested at 0 to 1 s), so "keys lost" needs that Mac's log.
 - **DETECTION**: `grep -n "getTerminalClaudeInfo(t.id" electron/main.js` (every capture/reconcile call must pass `{ unknown: true }`)
+
+### Architecture: 2026-11-11
+- **MISTAKE**: The first fix for lost running stamps (PR 7) kept a stamp whenever a check "could not tell", with no limit. Codex: a person who stops Claude while every check is timing out keeps the stamp, and the restart brings back a session they ended.
+- **FIX**: "Could not tell" is recorded (`uncertainSince` on the link, set at the first failed check, cleared by a confirmed check or a clear) and auto-resume trusts an uncertain stamp only if it was uncertain for under 2 minutes at the quit (`pickLaunchSessions`). A failed check with the tab's own shell in front and no children is a definite "no Claude" (`claudeCheckFailed`). A child that vanished between pgrep and ps (ps exit 1) is skipped, not a failed check.
+- **CONTEXT**: Any state that "preserves on uncertainty" needs an expiry or a record of when the uncertainty began, or a long outage turns into a silent yes.
+- **DETECTION**: `grep -n "CLAUDE_UNKNOWN\|uncertainSince" electron/*.js`

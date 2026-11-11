@@ -836,11 +836,20 @@ async function ptySelfOf(id) {
 // after a restart on a loaded Mac (bug report 2026-11-11).
 export const CLAUDE_UNKNOWN = Object.freeze({ unknown: true });
 
+// What a failed check means, for `unknown` callers. The terminal's foreground program is a cheap tty read with no ps:
+// a shell in front means Claude is not running there (a stopped Claude must lose its stamp, or a restart would bring
+// back a session the person ended: Codex, PR 7). Anything else in front, or no answer, stays "could not tell".
+export function claudeCheckFailed(entry) {
+  let fg = null;
+  try { fg = entry?.pty?.process; } catch { fg = null; }
+  return typeof fg === 'string' && SHELL_NAME.test(fg.split('/').pop()) ? null : CLAUDE_UNKNOWN;
+}
+
 // thorough: an on-demand caller (snooze): the PTY's own process is always looked at, as for strict.
 export async function getTerminalClaudeInfo(id, { unique = false, strict = false, thorough = false, unknown = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;
-  if (IS_WIN) return winClaudeInfo(entry, unique, strict);
+  if (IS_WIN) return winClaudeInfo(entry, unique, strict, unknown);
   try {
     const pid = entry.pty.pid;
     if (typeof pid !== 'number' || pid <= 0) return null;
@@ -863,10 +872,18 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
     for (const childPid of children) {
       // `lstart` is the process start time; `command` is the argv. One ps
       // call gets both so the fresh-session correlation costs nothing extra.
-      const { stdout: psOut } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', childPid], {
-        timeout: 1000,
-        encoding: 'utf8',
-      });
+      let psOut;
+      try {
+        ({ stdout: psOut } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', childPid], {
+          timeout: 1000,
+          encoding: 'utf8',
+        }));
+      } catch (err) {
+        // ps exits 1 for a pid that is gone: the child ended between pgrep and here. Not a failed check: the rest of
+        // the tab is still looked at (Codex, PR 7: a Claude exiting mid-check made the whole tab "could not tell").
+        if (err?.code === 1) continue;
+        throw err;
+      }
       const line = psOut.trim();
       if (!line) continue;
       // `lstart` is a fixed 24-char date ("Wed Jul 15 21:49:26 2026"), the
@@ -909,13 +926,15 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
     }
     // None of the children is Claude, but the PTY's own process may be (`exec claude`, with an MCP server or other
     // helper as its child). Every mode: the resume gate must see it too.
-    if (!found) return await ptySelf(pid, strict, strict || thorough ? null : entry, unknown);
+    // With children present, a shell in front can be a child of an `exec claude` root, so `unknown` callers (the
+    // running stamps) always look at the root here (Codex, PR 7). With no children the shortcut is exact.
+    if (!found) return await ptySelf(pid, strict, strict || thorough || unknown ? null : entry, unknown);
     // strict: the PTY's own process may be a second Claude (`exec claude` running `claude -p`), which is not known.
     if (strict && await ptySelf(pid, true, null)) throw new Error('two Claude processes in that tab');
     return found;
   } catch (err) {
     if (strict && !(err?.code === 1 && String(err?.cmd || '').startsWith('/usr/bin/pgrep'))) throw err;
-    return unknown ? CLAUDE_UNKNOWN : null;
+    return unknown ? claudeCheckFailed(entry) : null;
   }
 }
 
@@ -1497,12 +1516,13 @@ async function winRowsFor(entry, { fresh = false } = {}) {
 }
 
 // strict: what cannot be told (no process rows, too many programs, two Claudes, one that only names claude) throws.
-async function winClaudeInfo(entry, unique, strict = false) {
+async function winClaudeInfo(entry, unique, strict = false, unknownMode = false) {
   const unknown = (why) => { if (strict) throw new Error(why); return null; };
   const pid = entry.pty.pid;
   if (typeof pid !== 'number' || pid <= 0) return null;
   const rows = await winRowsFor(entry);
-  if (!rows) return unknown('process list not read');
+  // A process table that could not be read is "could not tell" for `unknown` callers, as on the Mac (Codex, PR 7).
+  if (!rows) return !strict && unknownMode ? CLAUDE_UNKNOWN : unknown('process list not read');
   const progs = shellPrograms(rows, pid);
   if ((unique || strict) && progs.length > MAX_UNIQUE_CHILDREN) return unknown('too many programs in that shell to check');
   let found = null;

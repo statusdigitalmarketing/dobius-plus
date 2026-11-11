@@ -32,7 +32,7 @@ const fail = (status, error, extra = {}) => ({ status, body: { ok: false, ...ext
 // A one-line shell command that starts Claude (`claude`, `claude --resume <id>`, `cd <dir> && claude -c`, `exec claude`).
 // Meant for the tab's shell: sent to a tab where Claude already runs, it reached that Claude as a prompt and was queued
 // as a message (bug report 2026-11-11). Narrow on purpose: a message that merely mentions claude is a message.
-export const STARTS_CLAUDE_RE = /^\s*(?:cd\s+[^\n;&|]+&&\s*)?(?:exec\s+)?claude(?:\s+(?:--resume|-r|--continue|-c)(?:\s+[\w-]+)?)?\s*$/;
+export const STARTS_CLAUDE_RE = /^\s*(?:cd\s+[^\n;&|]+&&\s*)?(?:exec\s+)?claude(?:\s+(?:--resume|-r|--continue|-c)(?:\s+(?:"[\w-]+"|'[\w-]+'|[\w-]+))?)?\s*$/;
 const sending = new Set();
 // Every paste this route made that was not followed by its Enter, per tab. Two uses:
 // 1. Never paste twice. Until a send SEES Claude's box hold text after it (`seen`), the paste may still be queued in the

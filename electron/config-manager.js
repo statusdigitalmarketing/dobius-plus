@@ -1086,6 +1086,22 @@ export function touchSessionTabLink(sessionId, observedAt = Date.now()) {
   const entry = config.sessionTabMap?.[sessionId];
   if (!entry) return;
   entry.lastRunningAt = stampFrom(observedAt);
+  delete entry.uncertainSince; // seen running: no longer uncertain
+  saveConfig(config);
+}
+
+/**
+ * A check of this session's tab failed (could not tell whether Claude still runs there). The running stamp is kept, but
+ * from when: auto-resume trusts a stamp only while it has been uncertain for a short time before the quit, so a session
+ * the person stopped while every check was failing does not come back after a restart (Codex, PR 7). Written once per
+ * stretch of failed checks; a confirmed check (touch) or a clear ends it.
+ */
+export function markSessionTabUncertain(sessionId, observedAt = Date.now()) {
+  if (!sessionId || typeof sessionId !== 'string' || UNSAFE_KEYS.has(sessionId)) return;
+  const config = loadConfig();
+  const entry = config.sessionTabMap?.[sessionId];
+  if (!entry || !entry.lastRunningAt || typeof entry.uncertainSince === 'number') return;
+  entry.uncertainSince = stampFrom(observedAt);
   saveConfig(config);
 }
 
@@ -1101,6 +1117,7 @@ export function clearSessionTabRunning(sessionId) {
   const entry = config.sessionTabMap?.[sessionId];
   if (!entry || !entry.lastRunningAt) return;
   entry.lastRunningAt = 0;
+  delete entry.uncertainSince;
   saveConfig(config);
 }
 

@@ -619,6 +619,13 @@ test('a command that starts Claude, sent to a tab where Claude runs: refused, no
     assert.equal(t.pasted, null);
     assert.equal(t.submitted, 0);
   }
+  // Quoted ids start Claude just the same once the shell strips the quotes (Codex, PR 7).
+  for (const cmd of ['claude --resume "4b06acc2-419d"', "claude -r '4b06acc2-419d'", 'exec claude --continue']) {
+    const { t, deps } = fakeTab();
+    const r = await sendToTab(deps, 'tab', cmd);
+    assert.equal(r.body.reason, 'claude-running', cmd);
+    assert.equal(t.pasted, null, cmd);
+  }
 });
 
 test('the same command to a shell tab is typed and Enter pressed; a message that only mentions claude still reaches Claude', async () => {
