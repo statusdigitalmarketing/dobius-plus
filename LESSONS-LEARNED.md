@@ -1023,3 +1023,9 @@
 - **FIX**: Always `<<'EOF'` for prompt text. Whisper-servers Dobius starts are recorded in `<userData>/whisper-servers.json` and reaped by record (pid + start time + secret request path), never by matching ps text, which a model path can spell.
 - **CONTEXT**: Codex broke two text-matching reapers in a row; only a record of what we started proves ownership.
 - **DETECTION**: `pgrep -f "whisper-server.*--request-path /dobius-"` then `ps -o ppid=` after a harness run.
+
+### Deployment: 2026-11-11
+- **MISTAKE**: The 2.2.25 iOS step uploaded build 15, Apple processed it, then submit said "no processed build of ours newer than the live one: nothing to submit". Apple dated the build 19m50s after the upload finished; `inUploadWindow` (scripts/lib/ios-release-plan.mjs) only allowed `UPLOAD_LATE_MS` = 10 minutes, so `buildOfTag` refused the build the run itself had bound.
+- **FIX**: `UPLOAD_LATE_MS` is 60 minutes. The tag is already pinned to the build's App Store Connect id through altool's delivery id; the date window is a second check. Test covers 20 minutes late (ours) and over an hour (not).
+- **CONTEXT**: When the iOS step says "nothing to submit" right after "build N processed", compare `node scripts/ios-release.mjs status` upload dates with the tag's `uploaded-before`, then `node scripts/ios-release.mjs submit --dry-run`.
+- **DETECTION**: `git for-each-ref --format='%(refname:short) %(contents:subject)' 'refs/tags/ios-*' | tail -2` vs the build's date in `node scripts/ios-release.mjs status`
