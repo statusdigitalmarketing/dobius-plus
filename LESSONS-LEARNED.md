@@ -957,3 +957,57 @@
 - **FIX**: Keep "first seen gone" in memory (`goneSince` in `electron/project-board.js`), update it on every command including the per-prompt brief (`sweep`), drop on the first command after the day. A relaunch restarts every clock, which is the safe direction.
 - **CONTEXT**: Bookkeeping nobody reads must not live in the persisted, change-detected state, or it causes saves, version bumps and broadcasts.
 - **DETECTION**: `grep -n "goneAt" electron/project-board.js` (only the load-time strip should remain)
+
+### Process: 2026-11-10
+- **MISTAKE**: 2.2.23 shipped reviewed only by Claude subagents because "Codex is out until Nov 16" was carried through a context summary. When run, Codex found 5 High findings in the shipped diff (a planted `json.py` loaded by `python3 -c` in the generated CLI, a raw `tell` body reaching another Claude as markup, phone voice writing control bytes, a pin taken through a folder named like an extra-window id, realOf continuations piling up on a dead mount).
+- **FIX**: Probe Codex (`echo "Reply with exactly: ok" | codex exec ...`) before every review gate; never trust an earlier "unavailable". Shipped the fixes as 2.2.24 after three Codex rounds.
+- **CONTEXT**: Limits reset and logins differ; the probe costs about 500 tokens.
+- **DETECTION**: before any release, `grep -c "codex exec" <this session's commands>`; zero means the gate was skipped.
+
+### Security: 2026-11-10
+- **MISTAKE**: Every generated `dobius-*` script ran `python3 -c` from the caller's folder, so a `json.py` in a project folder ran on `import json`. Fixing only `dobius-project` left 28 sibling calls (dobius-send, dobius-tab, dobius-team, dobius-open and the Conductor's) exposed. `-I` also drops `PYTHONIOENCODING`.
+- **FIX**: `python3 -I -c` everywhere, and `sys.stdout.reconfigure(encoding="utf-8")` where output may be non-ASCII.
+- **CONTEXT**: A fix for one caller of a pattern must sweep all callers (Codex found the siblings on the next round).
+- **DETECTION**: `grep -n "python3 -c " electron/*.js` must print nothing.
+
+### Security: 2026-11-10
+- **MISTAKE**: Text from a tab or the phone reached terminals through raw `writeTerminal(... + '\r')` in `/handoff`, `/voice/intent` direct mode and `/tabSend`'s startup fallback. A carriage return in the text answers an open permission dialog; an `ESC [201~` ends a bracketed paste.
+- **FIX**: All of them go through `sendToTab` (tab-send.js strips controls with `stripControls`, then every draft/dialog/typing guard), or refuse with 503 until it exists. Voice transcripts go through `voiceLine`.
+- **CONTEXT**: Any new route that types into a tab must use sendToTab, never writeTerminal.
+- **DETECTION**: `grep -n "writeTerminal(.*'\\\\r')" electron/voice-bridge.js electron/mobile-server.js`
+
+### Architecture: 2026-11-10
+- **MISTAKE**: Snooze parking for project board work went through three designs in review: a 60 s "snoozing" mark (claims dropped after a day when the tab came back with a new id), then an explicit `adopt` on resume (missed History resumes, failed saves, and a snooze taken back before the kill), then a lazy follow that let the per-prompt brief drop work on a stale session map.
+- **FIX**: Work is live while its tab is alive, its session is snoozed, or its session runs in another live tab (looked up only while some open work's tab is gone); it follows the session on the next command; an orphan is dropped only by a change that just awaited its own lookup (never the brief's synchronous path).
+- **CONTEXT**: State read by one path and written by another (snooze add, kill, create, History resume) needs a rule that holds for every path, not a hook on each.
+- **DETECTION**: `grep -n "dropOrphans" electron/project-board.js`
+
+### Security: 2026-11-10
+- **MISTAKE**: Fixing the raw `writeTerminal(text + '\r')` in one route (/tabSend, then /handoff, then phone voice) left the same shape in its siblings: the Voice Conductor route, `/voice/intent` direct mode, scheduled-tasks.js, imessage-bridge.js, auto-mode.js and agent-spawner's first prompt. Each was found by a later Codex round, one at a time.
+- **FIX**: Every "type a message into a tab" goes through `sendViaTabSend(tabId, text, { claudeOnly: true })` (voice-bridge.js to tab-send.js). A retrying caller retries only when the reply has no `typed: true`.
+- **CONTEXT**: A raw Enter answers whatever dialog is open (a spoken "1" approves a permission prompt), and a typed-but-unconfirmed send retried blindly submits twice.
+- **DETECTION**: `grep -rn "writeTerminal(.*'\\\\r')" electron/*.js` (only chat-service's guarded submit should remain)
+
+### Testing: 2026-11-10
+- **MISTAKE**: A board test counted reopened items by an id prefix. Board ids are random, so the live claim's id sometimes started with the same letter and the test failed about one run in six.
+- **FIX**: Assert on text the test controls (task names, tab labels), never on a generated id.
+- **CONTEXT**: Module mocks work here with `node --experimental-test-module-mocks` (Node 26); `tab-context-clear.test.mjs` tests resolveSessionForTab that way without real processes.
+- **DETECTION**: `grep -n "startsWith('- \[\|\^- \\\[" electron/__tests__/*.test.mjs`
+
+### API: 2026-11-11
+- **MISTAKE**: Passed `liveTabIdFromPrinted(key, value, terminals = null)` straight to `JSON.parse(text, reviver)` in `electron/voice-bridge.js` readJsonBody. JSON.parse calls a reviver with a third (context) argument, so `terminals` became that object and `.filter` threw: every request with a printed tab id answered 400. The unit test passed because it called the helper directly with an array.
+- **FIX**: Wrap it, `JSON.parse(text, (k, v) => liveTabIdFromPrinted(k, v))`, and test through readJsonBody itself (a fake EventEmitter request).
+- **CONTEXT**: Any callback with an optional extra parameter is unsafe to hand to a built-in that passes more arguments (reviver, Array.map's index, replace's offset).
+- **DETECTION**: `grep -rnE "JSON\.parse\([^,]+, [a-zA-Z]+\)" electron/`
+
+### UI/UX: 2026-11-11
+- **MISTAKE**: BrowserPane activated its tab only on the `<webview>` focus event. A freshly opened browser tab fires none while its page starts, so clicking it in split view left the terminal active and Cmd+W closed the terminal. Unit tests and an older browser tab both looked fine; only the harness run on a NEW browser tab showed it.
+- **FIX**: Also watch document `focusout` (capture) and window `blur`, then on the next tick check `document.activeElement === webview`.
+- **CONTEXT**: Ship-test the first seconds of a new pane, not only a settled one.
+- **DETECTION**: `grep -n "addEventListener('focus'" src/components/Project/BrowserPane.jsx`
+
+### Testing: 2026-11-11
+- **MISTAKE**: Sabotage-checked `if (!a || b || c) return;` by turning it into `if (false && b || c) return;`. Operator precedence kept `c` live, the test still passed, and the sabotage proved nothing.
+- **FIX**: Sabotage by removing the whole guard (`void now;`), then confirm the test fails.
+- **CONTEXT**: A sabotage that does not disable the guard completely is not a check of the test.
+- **DETECTION**: read the sabotaged line back before running the test.

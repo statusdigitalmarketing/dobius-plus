@@ -115,6 +115,8 @@ export async function spawnAgent({ projectPath, agentId, initialPrompt, builtinA
   // can attach a desktop window later by reopening the project).
   const tabId = newTabId(projectPath);
   createTerminal(tabId, projectPath, null);
+  const spawnedPid = listTerminals().find((t) => t.id === tabId)?.pid;
+  noteHeadless(tabId, projectPath, spawnedPid);
 
   // Type the launch command. Brief delay lets the shell prompt render first.
   // Codex audit HIGH (agent-spawner.js:120): agent.model was interpolated
@@ -144,16 +146,29 @@ export async function spawnAgent({ projectPath, agentId, initialPrompt, builtinA
     modelFlag = ` --model ${resolved}`;
   }
   const cmd = `claude --system-prompt-file '${safePromptPath}'${modelFlag}\r`;
+  // Only into the PTY made above: a window may re-create this tab id meanwhile.
+  const samePty = () => Number.isInteger(spawnedPid) && listTerminals().find((t) => t.id === tabId)?.pid === spawnedPid;
   setTimeout(() => {
+    if (!samePty()) return;
     writeTerminal(tabId, cmd);
     // If the spawner was given an initialPrompt, send it as the agent's
     // first input AFTER claude boots (give it ~3s — Claude TUI takes a
     // beat to be ready for input).
     if (initialPrompt && typeof initialPrompt === 'string' && initialPrompt.trim()) {
-      setTimeout(() => {
-        writeTerminal(tabId, initialPrompt.trim());
-        writeTerminal(tabId, '\r');
-      }, 3000);
+      // The guarded paste (tab-send, Claude only): no control key in the prompt reaches the terminal, and it waits for
+      // Claude's prompt instead of typing into a shell. Up to 10 tries, 2 s apart, while Claude is still starting.
+      const send = async (tries) => {
+        if (!samePty()) return;
+        const { sendViaTabSend } = await import('./voice-bridge.js');
+        const r = await sendViaTabSend(tabId, initialPrompt.trim(), { claudeOnly: true });
+        // Only a send that typed nothing is tried again: one typed but unconfirmed may have been taken already.
+        if (r.body?.ok || r.body?.typed || tries <= 1 || r.status === 404 || r.status === 400) {
+          if (!r.body?.ok) console.warn(`[agent-spawner] initial prompt for ${tabId} not sent: ${r.body?.error || r.body?.note || r.status}`);
+          return;
+        }
+        setTimeout(() => { send(tries - 1).catch((err) => console.warn('[agent-spawner] initial prompt:', err?.message || err)); }, 2000);
+      };
+      setTimeout(() => { send(10).catch((err) => console.warn('[agent-spawner] initial prompt:', err?.message || err)); }, 3000);
     }
   }, 800);
 
@@ -168,6 +183,33 @@ export async function spawnAgent({ projectPath, agentId, initialPrompt, builtinA
 // dobius-lead-tab both come through here, so a tab can only lead its OWN project, only while it is open, and every
 // window hears about the change.
 const leadListeners = new Set();
+// main: the project of the window that owns a tab; undefined when no window owns it, null for a window that is not a
+// project window (a Visual window): never this project's.
+let tabOwnerProject = () => undefined;
+export function setTabOwnerResolver(fn) { if (typeof fn === 'function') tabOwnerProject = fn; }
+// Headless agents this module started: tab id -> { projectPath, pid } (no window owns them). The pid ties the record to
+// that one PTY: a window that re-creates the id gets another process. Pruned to live tabs past 200.
+const headless = new Map();
+function noteHeadless(tabId, projectPath, pid) {
+  if (!Number.isInteger(pid)) return;
+  headless.set(tabId, { projectPath, pid });
+  if (headless.size > 200) {
+    const live = new Set(listTerminals().map((t) => t.id));
+    for (const id of [...headless.keys()]) if (!live.has(id)) headless.delete(id);
+  }
+}
+// A live tab really is this project's: its window's project, or for a headless agent the project it was started for.
+// Never the id alone (a folder named like an extra window's id, `x~w-12345678`, parses to another project; a pin
+// saved for a closed window's tab can come back on a reused id), nor a tab's start folder (any window can choose it).
+function tabOfProject(projectPath, tabId) {
+  const t = listTerminals().find((x) => x.id === tabId);
+  if (!t) return false;
+  let owner;
+  try { owner = tabOwnerProject(tabId); } catch { owner = undefined; }
+  if (owner !== undefined) return owner === projectPath;
+  const h = headless.get(tabId);
+  return !!h && h.projectPath === projectPath && h.pid === t.pid;
+}
 export function onLeadTabChanged(fn) { leadListeners.add(fn); return () => leadListeners.delete(fn); }
 
 export function setLeadTab(projectPath, tabId) {
@@ -177,6 +219,8 @@ export function setLeadTab(projectPath, tabId) {
   }
   if (tabId !== null && projectPathFromTabId(tabId) !== projectPath) return { ok: false, error: 'that tab belongs to another project' };
   if (tabId !== null && !listTerminals().some((t) => t.id === tabId)) return { ok: false, error: 'that tab is not open' };
+  // Every caller (tab menu, dobius-lead-tab, the Conductor) goes through here.
+  if (tabId !== null && !tabOfProject(projectPath, tabId)) return { ok: false, error: 'that tab belongs to another project' };
   setProjectConfig(projectPath, { leadTabId: tabId });
   for (const fn of leadListeners) { try { fn(projectPath, tabId); } catch (err) { console.warn('[agent-spawner] lead listener:', err?.message || err); } }
   return { ok: true, projectPath, leadTabId: tabId };
@@ -193,6 +237,5 @@ export function getLeadTab(projectPath) {
   if (!leadId) return null;
   // Only return it if the tab is actually alive — a dead leadTabId
   // gracefully falls through to "no lead, ask to spawn".
-  const alive = listTerminals().some((t) => t.id === leadId);
-  return alive ? leadId : null;
+  return tabOfProject(projectPath, leadId) ? leadId : null;
 }

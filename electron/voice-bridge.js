@@ -30,10 +30,11 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { app, BrowserWindow } from 'electron';
-import { writeTerminal, listTerminals, sendToTerminalWindow, tabBinDir } from './terminal-manager.js';
+import { listTerminals, sendToTerminalWindow, tabBinDir, writeTerminal } from './terminal-manager.js';
 import { validateTabRename, buildTabCliScript } from './tab-rename.js';
 import { buildCodexStatusScript, HOOK_HEAD_BYTES } from './codex-status.js';
-import { buildOpenCliScript } from './bridge-open-tab.js';
+import { buildOpenCliScript, stripControls } from './bridge-open-tab.js';
+import { defangHarnessTags } from './tab-send.js';
 import { buildTeamCliScript } from './team-cli.js';
 import { buildProjectCliScript } from './project-cli.js';
 import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
@@ -63,7 +64,7 @@ let server = null;
  * Read the full request body (JSON), enforcing a size cap. Resolves the
  * parsed object or rejects on parse / size error.
  */
-function readJsonBody(req) {
+export function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let bytes = 0;
     const chunks = [];
@@ -79,7 +80,7 @@ function readJsonBody(req) {
     req.on('end', () => {
       try {
         const text = Buffer.concat(chunks).toString('utf8');
-        resolve(text ? JSON.parse(text) : {});
+        resolve(text ? JSON.parse(text, (k, v) => liveTabIdFromPrinted(k, v)) : {}); // never the reviver's 3rd (context) argument
       } catch (err) {
         reject(err);
       }
@@ -88,8 +89,44 @@ function readJsonBody(req) {
   });
 }
 
+// Every reply here is read by a dobius-* CLI that prints it into a Claude session's tool output, and much of it carries
+// text another tab, a teammate or the phone wrote: no harness markup (<system-reminder> and kin) in any string or key, at
+// any depth (a replacer sees every one). Tab ids too (a project folder can be named with markup); a printed id comes back
+// through liveTabIdFromPrinted below, so dobius-tabs then dobius-send still works.
+function defangReplacer(key, value) {
+  if (typeof value === 'string') return defangHarnessTags(value);
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    // fromEntries: a `__proto__` key stays a key; a key that defangs onto another one keeps both (suffixed).
+    const out = [];
+    const seen = new Set();
+    for (const [k, v] of Object.entries(value)) {
+      let nk = defangHarnessTags(k);
+      while (seen.has(nk)) nk += '_';
+      seen.add(nk);
+      out.push([nk, v]);
+    }
+    return Object.fromEntries(out);
+  }
+  return value;
+}
+export const defangJson = (body) => JSON.stringify(body, defangReplacer);
+
+// A request naming a tab by the id a reply printed (with a look-alike bracket where the real id has a harness tag): the
+// one live tab that prints that way. None: left as given; two or more: refused (the route says there is no such tab).
+// Only fields that name a tab: message text that happens to look like a printed id is left exactly as sent.
+const TAB_ID_FIELD = /^(target|to|tab|id|tabId|tabIds)$|TabIds?$/; // tabId, toTabId, fromTabId, leadTabId, ...
+export function liveTabIdFromPrinted(key, value, terminals = null) {
+  if (!TAB_ID_FIELD.test(key) || typeof value !== 'string' || !value.startsWith('term-') || !value.includes('\u2039')) return value;
+  const list = terminals || listTerminals();
+  // Every live tab that prints this way, the exact one included: two of them cannot be told apart from the printed id,
+  // so neither is named (the route answers that there is no such tab).
+  const hits = list.filter((t) => defangHarnessTags(t.id) === value);
+  if (hits.length > 1) return `ambiguous:${value}`;
+  return hits.length === 1 ? hits[0].id : value;
+}
+
 function sendJson(res, status, body) {
-  const data = JSON.stringify(body);
+  const data = defangJson(body);
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(data),
@@ -101,6 +138,21 @@ const TAB_ID_RE = /^term-.+-\d+$/;
 
 let tabSendService = null;
 export function setTabSendService(fn) { tabSendService = fn; }
+/** Type a message into a tab the guarded way (electron/tab-send.js), or 503 until main has installed it. */
+export async function sendViaTabSend(tabId, message, opts) {
+  // ponytail: Windows has none of the process checks tab-send needs (pgrep, ps, ttys), so there it types as before
+  // 2.2.24: one line, controls stripped, then Enter. Upgrade path: a win-proc.js version of claudeRunning.
+  if (process.platform === 'win32') {
+    const text = defangHarnessTags(stripControls(String(message ?? ''))).replace(/\s*\n\s*/g, ' ').trim();
+    if (!text) return { status: 400, body: { ok: false, error: 'message is empty' } };
+    if (!listTerminals().some((t) => t.id === tabId)) return { status: 404, body: { ok: false, error: 'no such tab' } };
+    for (let i = 0; i < text.length; i += 256) writeTerminal(tabId, text.slice(i, i + 256));
+    writeTerminal(tabId, '\r');
+    return { status: 200, body: { ok: true, sent: text.length, submitted: true } };
+  }
+  if (!tabSendService) return { status: 503, body: { ok: false, error: 'Dobius+ is still starting; try again' } };
+  return tabSendService(tabId, message, opts);
+}
 
 async function handleTabSend(req, res) {
   let body;
@@ -116,20 +168,11 @@ async function handleTabSend(req, res) {
   if (typeof message !== 'string') {
     return sendJson(res, 400, { ok: false, error: 'message must be a string' });
   }
-  // main installs the real path (electron/tab-send.js: Claude gets a paste and a confirmed Enter). This raw fallback
-  // only answers while Dobius+ is still starting.
-  if (tabSendService) {
-    const { status, body: reply } = await tabSendService(tabId, message);
-    return sendJson(res, status, reply);
-  }
-  const CHUNK = 256;
-  let i = 0;
-  while (i < message.length) {
-    writeTerminal(tabId, message.slice(i, i + CHUNK));
-    i += CHUNK;
-  }
-  writeTerminal(tabId, '\r');
-  return sendJson(res, 200, { ok: true, sent: message.length });
+  // main installs the real path (electron/tab-send.js: Claude gets a paste and a confirmed Enter, controls removed).
+  // Until it has, nothing is typed: a raw write could answer an open dialog.
+  if (!tabSendService) return sendJson(res, 503, { ok: false, error: 'Dobius+ is still starting; try again' });
+  const { status, body: reply } = await tabSendService(tabId, message);
+  return sendJson(res, status, reply);
 }
 
 // `dobius-tab "<summary>"` from inside a tab: forward the label to the window
@@ -495,15 +538,14 @@ async function handleHandoff(req, res) {
   if (typeof context !== 'string' || !context.trim()) {
     return sendJson(res, 400, { ok: false, error: 'context required' });
   }
-  // Write context (chunked) to the target.
-  const CHUNK = 256;
-  for (let i = 0; i < context.length; i += CHUNK) writeTerminal(toTabId, context.slice(i, i + CHUNK));
-  writeTerminal(toTabId, '\r');
-  // Echo a one-liner back to source so it shows up there too.
-  if (typeof fromTabId === 'string' && /^term-.+-\d+$/.test(fromTabId)) {
-    writeTerminal(fromTabId, `# handoff to ${toTabId} sent\r`);
-  }
-  return sendJson(res, 200, { ok: true });
+  // Through the same path as dobius-send (controls removed, refused over a draft, a dialog or someone typing), never a
+  // raw write plus Enter: a carriage return in the context would answer a permission prompt. The source tab learns the
+  // result from this reply; nothing is typed into it (a line typed there would be sent to its Claude as a prompt).
+  void fromTabId;
+  const { status, body: reply } = await sendViaTabSend(toTabId, context, { claudeOnly: true });
+  // Typed but not confirmed (or not sent): a failure for dobius-handoff (curl -f), which has no other way to tell.
+  if (status === 200 && !(reply?.ok && reply.submitted !== false)) return sendJson(res, 409, { ...reply, ok: false });
+  return sendJson(res, status, reply);
 }
 
 // Per-request reply table. Each voice intent gets a unique requestId; the
@@ -809,7 +851,7 @@ RESPONSE=$(curl -sS --noproxy '*' -X POST "http://127.0.0.1:${PORT}/tabSend" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"tabId": sys.argv[1], "message": sys.argv[2]}))' "$TAB_ID" "$MESSAGE")") || exit 2
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"tabId": sys.argv[1], "message": sys.argv[2]}))' "$TAB_ID" "$MESSAGE")") || exit 2
 echo "$RESPONSE"
 # ok:true only when Enter was pressed on the message (docs/bridge-tab-send.md); anything else exits 1.
 case "$RESPONSE" in *'"ok":true'*) exit 0 ;; *) exit 1 ;; esac
@@ -834,7 +876,7 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/tabList" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
   -d "{}" \\
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(t["id"], "-", t["cwd"], "-", t.get("status") or "unknown") for t in d.get("tabs", [])]'
+  | python3 -I -c 'import json,sys; d=json.load(sys.stdin); [print(t["id"], "-", t["cwd"], "-", t.get("status") or "unknown") for t in d.get("tabs", [])]'
 `;
 
 const CLI_REPLY_SCRIPT = `#!/bin/bash
@@ -864,7 +906,7 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/setReply" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"requestId": sys.argv[1], "message": sys.argv[2]}))' "$REQUEST_ID" "$MESSAGE")" \\
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"requestId": sys.argv[1], "message": sys.argv[2]}))' "$REQUEST_ID" "$MESSAGE")" \\
   >/dev/null
 `;
 
@@ -895,7 +937,7 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/trackWork" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "tabId": sys.argv[2], "requestId": sys.argv[3], "description": sys.argv[4]}))' "$WORK_ID" "$TAB_ID" "$REQUEST_ID" "$DESCRIPTION")"
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "tabId": sys.argv[2], "requestId": sys.argv[3], "description": sys.argv[4]}))' "$WORK_ID" "$TAB_ID" "$REQUEST_ID" "$DESCRIPTION")"
 `;
 
 const CLI_STATUS_SCRIPT = `#!/bin/bash
@@ -919,8 +961,8 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/getStatus" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"target": sys.argv[1]}))' "$TARGET")" \\
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("snapshot",""))'
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"target": sys.argv[1]}))' "$TARGET")" \\
+  | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d.get("snapshot",""))'
 `;
 
 const CLI_MARKDONE_SCRIPT = `#!/bin/bash
@@ -948,7 +990,7 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/markDone" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "summary": sys.argv[2], "status": sys.argv[3]}))' "$WORK_ID" "$SUMMARY" "$STATUS")"
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"workId": sys.argv[1], "summary": sys.argv[2], "status": sys.argv[3]}))' "$WORK_ID" "$SUMMARY" "$STATUS")"
 `;
 
 const CLI_TASKDONE_SCRIPT = `#!/bin/bash
@@ -990,7 +1032,7 @@ curl -sS -X POST "http://127.0.0.1:${PORT}/taskDone" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2]}))' "$PROJECT" "$REF")"
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2]}))' "$PROJECT" "$REF")"
 `;
 
 // Mark Sam's task COMPLETE in Asana — the one Asana write. Only run this AFTER
@@ -1018,7 +1060,7 @@ curl -sS -X POST "http://127.0.0.1:${PORT}/asana/complete" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"gid": sys.argv[1]}))' "$1")"
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"gid": sys.argv[1]}))' "$1")"
 `;
 
 const CLI_STAGE_SCRIPT = `#!/bin/bash
@@ -1063,7 +1105,7 @@ curl -sS -X POST "http://127.0.0.1:${PORT}/stage" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2], "stage": sys.argv[3]}))' "$PROJECT" "$REF" "$STAGE")"
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "ref": sys.argv[2], "stage": sys.argv[3]}))' "$PROJECT" "$REF" "$STAGE")"
 `;
 
 const CLI_SPAWN_SCRIPT = `#!/bin/bash
@@ -1091,7 +1133,7 @@ curl -fsS -X POST "http://127.0.0.1:${PORT}/spawn" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "agentId": sys.argv[2], "initialPrompt": sys.argv[3]}))' "$PROJECT" "$AGENT" "$INITIAL")"
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "agentId": sys.argv[2], "initialPrompt": sys.argv[3]}))' "$PROJECT" "$AGENT" "$INITIAL")"
 `;
 
 const CLI_ASK_SCRIPT = `#!/bin/bash
@@ -1119,8 +1161,8 @@ curl -fsS --max-time 320 -X POST "http://127.0.0.1:${PORT}/ask" \\
   -H "Host: 127.0.0.1:${PORT}" \\
   -H @"$DOBIUS_AUTH_HDR" \\
   -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"question": sys.argv[1]}))' "$QUESTION")" \\
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("answer") or ("(timeout)" if d.get("timedOut") else ""))'
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"question": sys.argv[1]}))' "$QUESTION")" \\
+  | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d.get("answer") or ("(timeout)" if d.get("timedOut") else ""))'
 `;
 
 const CLI_LEADTAB_SCRIPT = `#!/bin/bash
@@ -1145,19 +1187,19 @@ case "\${1-}" in
     [ $# -ge 2 ] || { echo "usage: dobius-lead-tab get <projectPath>" >&2; exit 1; }
     curl -fsS -X POST "http://127.0.0.1:${PORT}/getLeadTab" \\
       -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
-      --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1]}))' "$2")"
+      --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1]}))' "$2")"
     ;;
   set)
     [ $# -ge 3 ] || { echo "usage: dobius-lead-tab set <projectPath> <tabId>" >&2; exit 1; }
     curl -fsS -X POST "http://127.0.0.1:${PORT}/setLeadTab" \\
       -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
-      --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "tabId": sys.argv[2]}))' "$2" "$3")"
+      --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "tabId": sys.argv[2]}))' "$2" "$3")"
     ;;
   clear)
     [ $# -ge 2 ] || { echo "usage: dobius-lead-tab clear <projectPath>" >&2; exit 1; }
     curl -fsS -X POST "http://127.0.0.1:${PORT}/setLeadTab" \\
       -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
-      --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "tabId": None}))' "$2")"
+      --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"projectPath": sys.argv[1], "tabId": None}))' "$2")"
     ;;
   *)
     echo "usage: dobius-lead-tab get|set|clear <projectPath> [tabId]" >&2; exit 1 ;;
@@ -1185,7 +1227,7 @@ printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 PROJECT="$*"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/fetch" \\
   -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"projectName": sys.argv[1]}))' "$PROJECT")"
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"projectName": sys.argv[1]}))' "$PROJECT")"
 `;
 
 const CLI_ASANA_ALLOW_SCRIPT = `#!/bin/bash
@@ -1207,7 +1249,7 @@ printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 NAME="$1"; GID="$2"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/allow" \\
   -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "gid": sys.argv[2]}))' "$NAME" "$GID")"
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "gid": sys.argv[2]}))' "$NAME" "$GID")"
 `;
 
 const CLI_ASANA_LIST_SCRIPT = `#!/bin/bash
@@ -1226,7 +1268,7 @@ chmod 600 "$DOBIUS_AUTH_HDR"
 printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/asana/listAllowed" \\
   -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" -d "{}" \\
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(p["name"], p["gid"]) for p in d.get("projects",[])]'
+  | python3 -I -c 'import json,sys; d=json.load(sys.stdin); [print(p["name"], p["gid"]) for p in d.get("projects",[])]'
 `;
 
 const CLI_CONFIRM_SCRIPT = `#!/bin/bash
@@ -1250,8 +1292,8 @@ chmod 600 "$DOBIUS_AUTH_HDR"
 printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
 curl -fsS --max-time 320 -X POST "http://127.0.0.1:${PORT}/ask" \\
   -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
-  --data-binary "\$(python3 -c 'import json,sys; print(json.dumps({"question": sys.argv[1]}))' "\$QUESTION")" \\
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("answer") or "")'
+  --data-binary "\$(python3 -I -c 'import json,sys; print(json.dumps({"question": sys.argv[1]}))' "\$QUESTION")" \\
+  | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d.get("answer") or "")'
 `;
 
 const CLI_HANDOFF_SCRIPT = `#!/bin/bash
@@ -1275,7 +1317,7 @@ FROM="$1"; TO="$2"; shift 2
 CONTEXT="$*"
 curl -fsS -X POST "http://127.0.0.1:${PORT}/handoff" \\
   -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
-  --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"fromTabId": sys.argv[1], "toTabId": sys.argv[2], "context": sys.argv[3]}))' "$FROM" "$TO" "$CONTEXT")"
+  --data-binary "$(python3 -I -c 'import json,sys; print(json.dumps({"fromTabId": sys.argv[1], "toTabId": sys.argv[2], "context": sys.argv[3]}))' "$FROM" "$TO" "$CONTEXT")"
 `;
 
 const CLI_SCHEDULED_SCRIPT = `#!/bin/bash
@@ -1298,12 +1340,12 @@ case "\${1-list}" in
   list)
     curl -fsS -X POST "http://127.0.0.1:${PORT}/scheduled/list" \\
       -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" -d "{}" \\
-      | python3 -c 'import json,sys; d=json.load(sys.stdin); [print("[{}]".format("x" if t["enabled"] else " "), t["id"], "-", t.get("prompt","")[:60]) for t in d.get("tasks",[])]'
+      | python3 -I -c 'import json,sys; d=json.load(sys.stdin); [print("[{}]".format("x" if t["enabled"] else " "), t["id"], "-", t.get("prompt","")[:60]) for t in d.get("tasks",[])]'
     ;;
   enable|disable)
     ACTION="\$1"; [ $# -ge 2 ] || { echo "usage: dobius-scheduled \$ACTION <id>" >&2; exit 1; }
     ENABLED=\$([ "\$ACTION" = "enable" ] && echo true || echo false)
-    BODY="\$(python3 -c 'import json,sys; print(json.dumps({"id": sys.argv[1], "patch": {"enabled": sys.argv[2] == "true"}}))' "\$2" "\$ENABLED")"
+    BODY="\$(python3 -I -c 'import json,sys; print(json.dumps({"id": sys.argv[1], "patch": {"enabled": sys.argv[2] == "true"}}))' "\$2" "\$ENABLED")"
     curl -fsS -X POST "http://127.0.0.1:${PORT}/scheduled/update" \\
       -H "Host: 127.0.0.1:${PORT}" -H @"$DOBIUS_AUTH_HDR" -H "Content-Type: application/json" \\
       --data-binary "\$BODY"

@@ -77,12 +77,28 @@ const SUBMIT_CONFIRM_MS = 3000;
  * remaining C0/C1 control character except tab and newline is dropped.
  * Returns { text } or { error }.
  */
+// Text typed into Claude arrives as the person's own words, so markup Claude Code itself uses to carry harness text
+// (<system-reminder>, <function_results>, <tool_use>, ...) is broken with a look-alike bracket. Ordinary tags (<div>)
+// are kept.
+// One whitespace group around the optional slash (`\s*(?:\/\s*)?`): two adjacent `\s*` backtrack quadratically on a long
+// run of spaces after a `<`, on the main thread.
+const HARNESS_TAG = /<(\s*(?:\/\s*)?)(system[\w-]*|[\w-]*reminder[\w-]*|function[\w-]*|tool[\w-]*|antml[\w:-]*|command-[\w-]+|bash-[\w-]+|local-command[\w-]*)/gi;
+export function defangHarnessTags(text) { return String(text).replace(HARNESS_TAG, '\u2039$1$2'); }
+
 export function sanitizeOpenMessage(message) {
   if (typeof message !== 'string') return { error: 'message must be a string' };
   if (Buffer.byteLength(message, 'utf8') > MAX_OPEN_MESSAGE_BYTES) {
     return { error: `message is larger than ${MAX_OPEN_MESSAGE_BYTES} bytes` };
   }
-  const text = message
+  // Always pasted into Claude (/openTab, team cards and messages).
+  const text = defangHarnessTags(stripControls(message));
+  if (!text.trim()) return { error: 'message is empty' };
+  return { text };
+}
+
+/** The cleaning half of sanitizeOpenMessage, with no size limit (each caller keeps its own). */
+export function stripControls(message) {
+  return String(message)
     .replace(/\r\n?/g, '\n')
     // OSC / DCS / APC / PM / SOS strings, to BEL or ST (or the end).
     .replace(/\x1b[\]PX^_][\s\S]*?(?:\x07|\x1b\\|$)/g, '')
@@ -93,8 +109,6 @@ export function sanitizeOpenMessage(message) {
     // Any other two-byte escape (ESC 7, ESC c ...).
     .replace(/\x1b[\s\S]?/g, '')
     .replace(/[\x00-\x08\x0b-\x1f\x7f\u0080-\u009f]/g, '');
-  if (!text.trim()) return { error: 'message is empty' };
-  return { text };
 }
 
 /** Validate a /openTab body. Returns { requestId, projectPath, message } or { error }. */
@@ -531,7 +545,7 @@ if [ "$3" = "-" ]; then MESSAGE=$(cat); else MESSAGE="$3"; fi
 # stdin, and python reads the fields from its environment.
 # ensure_ascii=False: \\u escapes would triple a non-ASCII message past the
 # bridge's 64KB body limit.
-BODY=$(PYTHONIOENCODING=utf-8 OPEN_PROJECT="$1" OPEN_ID="$2" OPEN_MESSAGE="$MESSAGE" python3 -c 'import json,os; print(json.dumps({"projectPath": os.environ["OPEN_PROJECT"], "requestId": os.environ["OPEN_ID"], "message": os.environ["OPEN_MESSAGE"]}, ensure_ascii=False))')
+BODY=$(OPEN_PROJECT="$1" OPEN_ID="$2" OPEN_MESSAGE="$MESSAGE" python3 -I -c 'import json,os,sys; sys.stdout.reconfigure(encoding="utf-8"); print(json.dumps({"projectPath": os.environ["OPEN_PROJECT"], "requestId": os.environ["OPEN_ID"], "message": os.environ["OPEN_MESSAGE"]}, ensure_ascii=False))')
 HDR=$(mktemp) || exit 3
 trap 'rm -f "$HDR"' EXIT
 chmod 600 "$HDR"
@@ -543,6 +557,6 @@ RESPONSE=$(printf '%s' "$BODY" | curl -sS --noproxy '*' --max-time 180 -X POST "
   -H "Content-Type: application/json" \\
   --data-binary @-)
 echo "$RESPONSE"
-printf '%s' "$RESPONSE" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") else 1)'
+printf '%s' "$RESPONSE" | python3 -I -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") else 1)'
 `;
 }

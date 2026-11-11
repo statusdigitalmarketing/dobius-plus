@@ -109,7 +109,7 @@ import {
 import { startVoiceBridge, stopVoiceBridge, setBuiltinAgents, setOpenTabService, setTabSendService, setCodexStatusHandler, setTeamBridge, setProjectBridge } from './voice-bridge.js';
 import { sendToTab } from './tab-send.js';
 import { createProjectBoard } from './project-board.js';
-import { getLeadTab, setLeadTab, onLeadTabChanged } from './agent-spawner.js';
+import { getLeadTab, setLeadTab, onLeadTabChanged, setTabOwnerResolver } from './agent-spawner.js';
 import { initTeam, stopTeam, handleTeamBridge, getTeamService, teamOrchestratorTab } from './team-main.js';
 import { writeAgentContext } from './agent-context.js';
 import { visibleBuiltinAgents } from './visible-agents.js';
@@ -453,9 +453,14 @@ const RUN_TOKEN_MS = 60_000;
 const runScriptDir = () => path.join(app.getPath('userData'), 'run');
 // Snoozed tabs: one list and one timer for every window. A change is announced to all of them; each project window
 // takes back its own ready entries.
-// Tabs being snoozed right now: their kill is not a close for the project board (the session comes back in a new tab
-// and can still finish its claimed work). At most a minute old, pruned on every add.
+// Tabs being snoozed right now: their kill is not a close for the project board (the work stays open, and follows its
+// session to the tab it comes back in). Set when the snooze is recorded, before the kill, so a snooze that is taken back
+// at once (its time already up) is covered too. At most a minute old, pruned on every add.
 const snoozingTabs = new Map();
+// tab id -> the window that closed it (terminal:kill), read once by the project board's handler. At most 64.
+const killedBy = new Map();
+// The project board's recheck (set once the board exists): a snooze can reopen work its old tab's close dropped.
+let boardRecheck = null;
 function markSnoozing(tabId) {
   const t = Date.now();
   for (const [k, at] of snoozingTabs) if (t - at > 60_000) snoozingTabs.delete(k);
@@ -730,6 +735,9 @@ function setupTerminalHandlers() {
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id)) return;
     if (!ownsTerminal(event.sender.id, id)) return;
     terminalOwners.delete(id);
+    // For the project board's handler below (registered later, runs next): this sender really closed this tab.
+    killedBy.set(id, event.sender.id);
+    while (killedBy.size > 64) killedBy.delete(killedBy.keys().next().value);
     killTerminal(id);
   });
 
@@ -873,7 +881,7 @@ function setupTerminalHandlers() {
       if (typeof tabId !== 'string' || !TERMINAL_ID_RE.test(tabId) || !ownsTerminal(event.sender.id, tabId)) return null;
       // Read before the window kills the PTY: which Claude conversation it is on and where it lives.
       try {
-        const r = await resolveSessionForTab(tabId);
+        const r = await resolveSessionForTab(tabId, { thorough: true });
         if (r?.sessionId) session = { sessionId: r.sessionId, cwd: r.sessionProject || (await getTerminalCwd(tabId)) || meta.projectPath };
       } catch (err) {
         console.warn('[snooze] session lookup failed:', err?.message || err);
@@ -889,6 +897,7 @@ function setupTerminalHandlers() {
       ...(session || {}), ...(typeof preview === 'string' ? { preview: preview.replace(/\s+/g, ' ') } : {}),
     }, Array.isArray(scrollback) ? scrollback : null);
     if (added && typeof tabId === 'string' && meta.kind !== 'browser') markSnoozing(tabId);
+    if (added && session?.sessionId) boardRecheck?.(meta.projectPath);
     return added;
   });
   ipcMain.handle('snooze:list', () => snoozeStore.list());
@@ -3367,7 +3376,8 @@ function setupHeadroomHandlers() {
     scan: () => scanClaudeProcesses(),
     tabs: () => listTerminals(),
     activity: (id) => terminalStatus.statusFor(id),
-    claudeInfo: (id) => getTerminalClaudeInfo(id),
+    // Never the tab's own process (`exec claude`): stopping it would close the tab. The scan judges those.
+    claudeInfo: async (id) => { const i = await getTerminalClaudeInfo(id); return i?.ptySelf ? null : i; },
     presence: (info, configDir) => presenceOf(info, configDir),
     process: (id) => getTerminalProcess(id),
     processCwd: (pid) => getProcessCwd(pid),
@@ -4540,7 +4550,7 @@ function setupWindowHandlers() {
       };
     },
   };
-  setTabSendService((tabId, message) => sendToTab(tabSendDeps, tabId, message));
+  setTabSendService((tabId, message, opts) => sendToTab(tabSendDeps, tabId, message, { claudeOnly: opts?.claudeOnly === true }));
   // Project orchestrator and work board (electron/project-board.js, docs/project-orchestrator.md).
   initProjectBoard(tabSendDeps);
   // Phone voice goes into the tab pinned as team orchestrator when there is one (Brett, Asana 1220329713038498),
@@ -6036,7 +6046,14 @@ function initProjectBoard(tabSendDeps) {
   const realOf = (p) => {
     const hit = realCache.get(p);
     if (hit && Date.now() - hit.at < 60_000) return Promise.resolve(hit.real);
-    if (realPending.has(p)) return realPending.get(p);
+    // Callers share a lookup already out, at most 8 of them: on a dead mount it may never return, and every waiter
+    // would be held until it did. Past that they get no answer (each caller has its own 1 s deadline anyway).
+    const pending = realPending.get(p);
+    if (pending) {
+      if (pending.waiters >= 8) return Promise.resolve(null);
+      pending.waiters += 1;
+      return pending.run;
+    }
     if (realPending.size >= 2) return Promise.resolve(null);
     const run = fs.promises.realpath(p).then((real) => real, () => null).then((real) => {
       realPending.delete(p);
@@ -6045,7 +6062,7 @@ function initProjectBoard(tabSendDeps) {
       while (realCache.size > 200) realCache.delete(realCache.keys().next().value);
       return real;
     });
-    realPending.set(p, run);
+    realPending.set(p, { run, waiters: 1 });
     return run;
   };
   const inside = async (child, parent) => {
@@ -6064,6 +6081,69 @@ function initProjectBoard(tabSendDeps) {
     if (!labels || Date.now() - labelsAt > 1000) { labels = getTabLabelsById(); labelsAt = Date.now(); }
     return labels.get(id) || `Tab ${String(id).match(/-(\d+)$/)?.[1] || '?'}`;
   };
+  // Which live tab of a project runs which Claude session, for work whose own tab is gone. One lookup a project at a time,
+  // answers kept 5 s (at most 100 projects, the 128 most recently created tabs a lookup).
+  const sessionTabsCache = new Map(); // projectPath -> { at, map } | { run }
+  // Each tab gets 2 s: one that has not answered is left out and the map is marked incomplete (the board then moves
+  // work but never drops it on that answer). Tabs still hanging past that are counted, and while 64 hang, new tabs are
+  // not asked (left out too), so a resolver that hangs every time cannot pile up.
+  let hanging = 0;
+  const resolving = new Map(); // tab id -> { p, attached }: its one resolve still out (a hung tab is asked once)
+  const WAIT = (ms) => new Promise((r) => setTimeout(() => r(undefined), ms));
+  // On Windows process rows come from a table cached up to 1.5 s (win-proc.js): an answer is as old as that.
+  const READ_AGE_MS = process.platform === 'win32' ? 1600 : 0;
+  // opts.fresh: an answer read after this call (a claim records the session the tab runs NOW): waits for a resolve
+  // still out, then asks again.
+  const sessionOfTab = async (id, opts = {}) => {
+    const out = resolving.get(id);
+    // opts.since(at): when the resolve that answers began (a shared one can be older than this call). Only when it did
+    // answer: a hung one that timed out adds nothing (that tab is unknown, the map incomplete).
+    if (out) {
+      // At most 8 callers ever attach to one resolve: each holds a reaction on it until it settles (a timeout does not
+      // release it), and the entry goes when it settles.
+      if (out.attached >= 8) return undefined;
+      out.attached += 1;
+      const got = await Promise.race([out.p, WAIT(2000)]);
+      if (!opts.fresh && got !== undefined) opts.since?.(out.startedAt);
+      if (!opts.fresh || resolving.get(id) === out) return opts.fresh ? undefined : got;
+      return sessionOfTab(id, { ...opts, fresh: false });
+    }
+    if (hanging >= 64) return undefined;
+    opts.since?.(Date.now() - READ_AGE_MS);
+    const p = resolveSessionForTab(id, { strict: true }).then((r) => r?.sessionId || null, () => undefined).finally(() => resolving.delete(id));
+    resolving.set(id, { p, attached: 0, startedAt: Date.now() - READ_AGE_MS });
+    let timer;
+    const late = new Promise((r) => { timer = setTimeout(() => { hanging += 1; p.finally(() => { hanging -= 1; }); r(undefined); }, 2000); });
+    return Promise.race([p.finally(() => clearTimeout(timer)), late]);
+  };
+  // opts.refresh: a tab just closed, so an answer read before it is not used (a new lookup starts).
+  const sessionTabs = (projectPath, opts = {}) => {
+    const hit = sessionTabsCache.get(projectPath);
+    if (hit?.run && !opts.refresh) return hit.run;
+    if (hit && !hit.run && !opts.refresh && Date.now() - hit.at < 5_000) return Promise.resolve(hit.map);
+    // listTerminals is in creation order: the newest (a tab a session just came back in) are last. Not by the id's
+    // counter: each window numbers its own tabs.
+    const ids = listTerminals().map((t) => t.id).filter((id) => projectOf(id) === projectPath).slice(-128);
+    let startedAt = Date.now() - READ_AGE_MS;
+    const since = (at) => { if (Number.isFinite(at) && at < startedAt) startedAt = at; };
+    const run = Promise.all(ids.map(async (id) => [id, await sessionOfTab(id, { fresh: opts.refresh === true, since })]))
+      .then((pairs) => {
+        const map = new Map();
+        // When this lookup began: a caller that joins it or reads it from the cache later must not date it by its own
+        // request (the board uses it to tell an answer read before a drop or a reopen).
+        map.startedAt = startedAt;
+        for (const [id, s] of pairs) if (s && !map.has(s)) map.set(s, id);
+        // undefined: that tab did not answer (failed, hung or not asked), so its session is not known.
+        if (pairs.some(([, s]) => s === undefined)) map.incomplete = true;
+        if (sessionTabsCache.get(projectPath)?.run !== run) return map; // a newer lookup owns the cache
+        sessionTabsCache.delete(projectPath);
+        sessionTabsCache.set(projectPath, { at: Date.now(), map });
+        while (sessionTabsCache.size > 100) sessionTabsCache.delete(sessionTabsCache.keys().next().value);
+        return map;
+      });
+    sessionTabsCache.set(projectPath, { run });
+    return run;
+  };
   const changed = (projectPath) => {
     for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send('projectOrch:changed', { projectPath });
   };
@@ -6075,19 +6155,35 @@ function initProjectBoard(tabSendDeps) {
     inside,
     labelOf,
     leadOf: (projectPath) => getLeadTab(projectPath),
-    sessionOf: async (id) => { try { return (await resolveSessionForTab(id))?.sessionId || null; } catch { return null; } },
+    sessionOf: async (id) => (await sessionOfTab(id, { fresh: true })) || null, // read now, 4 s at most, one resolve per tab
     // Only ever a paste into Claude's prompt, with every dobius-send guard (a draft, a question, a person typing).
     sendToOrchestrator: (id, text) => sendToTab(tabSendDeps, id, text, { claudeOnly: true }),
     onChange: changed,
+    pinnedOf: (projectPath) => { const id = getProjectConfig(projectPath)?.leadTabId; return typeof id === 'string' ? id : null; },
+    // Sessions of this project's snoozed tabs: their work is parked, not orphaned (snoozeStore reads config in memory).
+    parkedSessions: (projectPath) => new Set(snoozeStore.list()
+      .filter((e) => e.projectPath === projectPath && typeof e.sessionId === 'string').map((e) => e.sessionId)),
+    sessionTabs,
   });
+  boardRecheck = (projectPath) => board.recheck(projectPath);
   setProjectBridge((body) => board.handle(body));
+  setTabOwnerResolver((id) => {
+    const wc = getTerminalWebContentsId(id);
+    if (wc == null) return undefined; // no window at all: a headless agent (agent-spawner decides)
+    return getWindowEntryByWcId(wc)?.projectPath ?? null; // null: a window that is not a project window
+  });
   onLeadTabChanged((projectPath) => { board.touch(projectPath); changed(projectPath); });
   // The person closed a tab (main's own terminal:kill listener runs first): its open work is dropped, and a pin on it
   // is cleared so a later tab can never inherit it.
-  ipcMain.on('terminal:kill', (_e, id) => {
+  ipcMain.on('terminal:kill', (e, id) => {
     // Only a kill main actually carried out (it refuses a window that does not own the tab), as team-main does.
     if (typeof id !== 'string' || !TERMINAL_ID_RE.test(id) || terminalInstance(id)) return;
-    // A snoozed tab's open work stays open (anyone may close it, as for any closed tab's work).
+    // Only a tab this sender really closed just now (an id never alive, say a pin's tab not yet restored, is not), and
+    // from a window of the tab's own project: an id a folder like `x~w-12345678` made parses to project `x`.
+    const closedHere = killedBy.get(id) === e.sender.id;
+    killedBy.delete(id);
+    if (!closedHere || getWindowEntryByWcId(e.sender.id)?.projectPath !== projectOf(id)) return;
+    // A snoozed tab's open work stays open: it is parked while the session sleeps and follows it to its next tab.
     // The kill is sent twice for a snoozed tab (snooze, then the pane unmounting): the mark is not consumed, it ages out.
     const snoozedAt = snoozingTabs.get(id);
     if (!(snoozedAt && Date.now() - snoozedAt < 60_000)) board.tabClosed(id);
@@ -6110,6 +6206,8 @@ function initProjectBoard(tabSendDeps) {
     const projectPath = projectOf(tabId);
     if (!projectPath) return { ok: false, error: 'that tab does not belong to a project folder' };
     if (on === true) return setLeadTab(projectPath, tabId);
+    // Unpin only from a window of that project: an id a folder like `x~w-12345678` re-created parses to project `x`.
+    if (getWindowEntryByWcId(event.sender.id)?.projectPath !== projectPath) return { ok: false, error: 'that tab belongs to another project' };
     // Unpin only what is pinned: a stale menu must not clear a pin another tab took since.
     return getProjectConfig(projectPath)?.leadTabId === tabId ? setLeadTab(projectPath, null) : { ok: true, projectPath, leadTabId: getLeadTab(projectPath) };
   });

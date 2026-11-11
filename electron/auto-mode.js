@@ -17,14 +17,14 @@
  * A task GID in `seen` is never dispatched again (capped to the last SEEN_CAP).
  */
 import { loadConfig, saveConfig, getAsanaQueue, drainConfigWrites } from './config-manager.js';
-import { writeTerminal, listTerminals } from './terminal-manager.js';
+import { listTerminals } from './terminal-manager.js';
+import { sendViaTabSend } from './voice-bridge.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
 import { fetchNewTasks, listAllowedProjects } from './asana-queue.js';
 
 const DEFAULT_INTERVAL_MIN = 10;
 const MAX_TASKS_PER_TICK = 3;     // cap concurrent autonomous dispatches per poll
 const SEEN_CAP = 500;
-const CHUNK = 256;                // write in chunks (mirror scheduled-tasks / iMessage bridge)
 const FIRST_TICK_DELAY_MS = 20_000; // let the Conductor come up before the first poll
 
 let timer = null;
@@ -118,7 +118,8 @@ async function tick() {
       for (const task of res.tasks) {
         if (dispatched >= MAX_TASKS_PER_TICK) break;
         if (seenSet.has(task.gid)) continue;
-        dispatchToConductor(conductorId, proj, task);
+        // Not delivered (a dialog, a draft, Claude not at its prompt): not marked seen, so the next tick tries again.
+        if (!(await dispatchToConductor(conductorId, proj, task))) break;
         seenSet.add(task.gid);
         // Persist this gid IMMEDIATELY, not just in the end-of-loop finally: a
         // crash after dispatch but before that persist would re-dispatch the
@@ -143,7 +144,7 @@ async function tick() {
   }
 }
 
-function dispatchToConductor(conductorId, project, task) {
+async function dispatchToConductor(conductorId, project, task) {
   const reqId = `auto-${task.gid}`;
   const lane = task.lane === 'review' ? 'review' : 'build';
   // Strip ALL control chars (not just CR/LF) — task content is attacker-controllable
@@ -168,7 +169,13 @@ function dispatchToConductor(conductorId, project, task) {
     `Task: ${task.url}.${samEvidence} Process per the Auto Mode rules: do NOT ask me to start; ${laneRule} ` +
     `Stop and dobius-confirm ONLY before posting to Asana or before any push/deploy.`;
   const text = instruction.slice(0, 2000);
-  for (let i = 0; i < text.length; i += CHUNK) writeTerminal(conductorId, text.slice(i, i + CHUNK));
-  writeTerminal(conductorId, '\r');
+  // The guarded paste (tab-send, Claude only): a raw Enter would answer a permission dialog open in the Conductor.
+  const sent = await sendViaTabSend(conductorId, text, { claudeOnly: true });
+  if (!sent.body?.ok) {
+    console.warn(`[auto-mode] ${task.gid} not delivered to the Conductor: ${sent.body?.error || sent.body?.note || sent.status}`);
+    // Typed but not confirmed: it may have been taken, so it counts as dispatched (never twice).
+    return !!sent.body?.typed;
+  }
   console.log(`[auto-mode] dispatched ${task.gid} (${lane}) "${name.slice(0, 60)}" -> Conductor`);
+  return true;
 }

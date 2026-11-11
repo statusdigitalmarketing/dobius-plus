@@ -51,7 +51,7 @@ DOBIUS_AUTH_HDR=$(mktemp) || exit 3
 trap 'rm -f "$DOBIUS_AUTH_HDR"' EXIT
 chmod 600 "$DOBIUS_AUTH_HDR"
 printf 'Authorization: Bearer %s\\n' "$TOKEN" > "$DOBIUS_AUTH_HDR"
-BODY=$(python3 -c 'import json,sys; print(json.dumps({"tabId": sys.argv[1], "label": sys.argv[2]}))' "$DOBIUS_TAB_ID" "$*")
+BODY=$(python3 -I -c 'import json,sys; print(json.dumps({"tabId": sys.argv[1], "label": sys.argv[2]}))' "$DOBIUS_TAB_ID" "$*")
 curl -fsS -X POST "http://127.0.0.1:${port}/tabRename" \\
   -H "Host: 127.0.0.1:${port}" \\
   -H @"$DOBIUS_AUTH_HDR" \\

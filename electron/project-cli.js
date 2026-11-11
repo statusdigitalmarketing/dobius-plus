@@ -21,8 +21,9 @@ case "$CMD" in
   brief) ARG="\${2:-}"
     if [ ! -t 0 ]; then
       # Only the head, with a 1 s cap: session_id is the first field, a stdin left open must never hold a prompt up,
-      # and the rest (the whole prompt) is left unread, as every other hook that ignores stdin does.
-      IN=""; IFS= read -r -t 1 -n 1024 IN
+      # and the rest (the whole prompt) is left unread, as every other hook that ignores stdin does. The read stops at
+      # the first comma: bash 3.2 throws partial input away on a timeout, so waiting for a newline could lose it.
+      IN=""; IFS= read -r -t 1 -n 1024 -d , IN
       re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9-]{1,80})"'
       [[ $IN =~ $re ]] && SID="\${BASH_REMATCH[1]}"
     fi ;;
@@ -46,11 +47,14 @@ if [ "$CMD" = brief ]; then
   command -v python3 >/dev/null 2>&1 || exit 0
 fi
 command -v python3 >/dev/null 2>&1 || { echo "dobius-project: python3 not found on PATH" >&2; exit 3; }
-printf '%s' "$RESPONSE" | PYTHONIOENCODING=utf-8 B="$CMD" python3 -c '
+# -I: isolated, so a json.py (or any module) in the project folder, or a PYTHON* variable, is never loaded here.
+printf '%s' "$RESPONSE" | B="$CMD" python3 -I -c '
 import json, os, re, sys
+# -I ignores PYTHONIOENCODING: name the encoding here (macOS python already writes UTF-8; this keeps it so).
+sys.stdout.reconfigure(encoding="utf-8", errors="replace"); sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 clean = lambda s: re.sub("[\\x00-\\x1f\\x7f-\\x9f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069\\u2028\\u2029]", "?", str(s))
 brief = os.environ.get("B") == "brief"
-try: r = json.load(sys.stdin)
+try: r = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
 except Exception: sys.exit(0 if brief else 2)
 if not r.get("ok"):
     if brief: sys.exit(0)

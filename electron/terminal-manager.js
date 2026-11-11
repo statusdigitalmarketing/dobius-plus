@@ -21,7 +21,7 @@ import { loginShellSpawn, ptyProgramName } from '../shared/new-tab.js';
 import { parseCodexCommand } from './codex-sessions.js';
 import { sharedKeyEnv, SHARED_KEYS } from './claude-settings-env.js';
 import { sameFiletime, recordStartFiletime, winProcessTable, shellPrograms, descendants, winClaudeCommand, winCodexCommand, winExeBase } from './win-proc.js';
-import { readPresenceRecordAt } from './claude-presence.js';
+import { readPresenceRecordAt, presenceSessionId } from './claude-presence.js';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -790,21 +790,69 @@ export function claudeInTree(psText, root) {
   return false;
 }
 
-export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
+// `strict`: a process check that failed (a timeout, ps erroring) throws instead of reading as "no claude here"; pgrep's
+// own exit 1 (no children at all) is still null.
+// The tab's shell replaced by Claude itself (`exec claude ...`). strict: unknown (throws) when it may be Claude; any
+// other mode reads that as none.
+// ponytail: the cheap gate is node-pty's foreground program name (a tty read, no process spawned), so no `ps` runs for
+// the many tabs sitting at a prompt. Polled lookups only: an exec'd Claude whose foreground child is a shell also reads
+// as a shell, so the resume gate and strict lookups pass no entry and always look.
+const SHELL_NAME = /^-?(zsh|bash|sh|fish|dash|ksh|tcsh|csh|login)$/;
+async function ptySelf(pid, strict, entry) {
+  let fg = null;
+  try { fg = entry?.pty?.process; } catch { fg = null; }
+  if (typeof fg === 'string' && SHELL_NAME.test(fg.split('/').pop())) return null;
+  try { return await ptySelfClaude(pid); }
+  catch (err) { if (strict) throw err; return null; }
+}
+async function ptySelfClaude(pid) {
+  const { stdout } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
+  const line = stdout.trim();
+  if (!line) return null;
+  const command = line.slice(24).trim();
+  if (!isClaudeCommand(command)) {
+    if (/claude/i.test(command)) throw new Error('a program there names claude');
+    return null;
+  }
+  const kind = command.length > 4096 ? 'maybe' : classifyClaudeProcess(command).kind;
+  if (kind === 'maybe') throw new Error('a program there may be Claude');
+  if (kind !== 'claude') return null;
+  const parsed = Date.parse(line.slice(0, 24));
+  const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
+  return { sessionId: m ? m[1] : null, startedAt: Number.isFinite(parsed) ? parsed : null, pid, soleChild: true, ptySelf: true };
+}
+
+// The PTY's own process when it is Claude (`exec claude`), whatever its children are; null otherwise or unknown.
+async function ptySelfOf(id) {
+  const entry = terminals.get(id);
+  const pid = entry?.pty?.pid;
+  if (typeof pid !== 'number' || pid <= 0) return null;
+  return ptySelf(pid, false, null); // on demand (the resume gate): always looked at
+}
+
+// thorough: an on-demand caller (snooze): the PTY's own process is always looked at, as for strict.
+export async function getTerminalClaudeInfo(id, { unique = false, strict = false, thorough = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;
-  if (IS_WIN) return winClaudeInfo(entry, unique);
+  if (IS_WIN) return winClaudeInfo(entry, unique, strict);
   try {
     const pid = entry.pty.pid;
     if (typeof pid !== 'number' || pid <= 0) return null;
-    const { stdout: pgrepOut } = await execFileP('/usr/bin/pgrep', ['-P', String(pid)], {
-      timeout: 1000,
-      encoding: 'utf8',
-    });
+    let pgrepOut;
+    try {
+      ({ stdout: pgrepOut } = await execFileP('/usr/bin/pgrep', ['-P', String(pid)], { timeout: 1000, encoding: 'utf8' }));
+    } catch (err) {
+      // No children at all (pgrep's exit 1): the PTY's own process may be Claude (`exec claude --resume X`).
+      if (err?.code !== 1) throw err;
+      return await ptySelf(pid, strict, strict || thorough ? null : entry);
+    }
     const children = pgrepOut.trim().split('\n').filter(Boolean);
     // `unique`: one ps per child, so a shell with many children is not
     // walked (each poll would spawn them all again): no answer.
-    if (unique && children.length > MAX_UNIQUE_CHILDREN) return null;
+    if ((unique || strict) && children.length > MAX_UNIQUE_CHILDREN) {
+      if (strict) throw new Error('too many programs in that shell to check');
+      return null;
+    }
     let found = null;
     for (const childPid of children) {
       // `lstart` is the process start time; `command` is the argv. One ps
@@ -825,6 +873,8 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
         // isClaudeCommand) may be one, so the shell is ambiguous. Fails
         // closed: a child like `vim claude.md` also costs the Waiting label.
         if (unique && /claude/i.test(command)) return null;
+        // strict: may be one (a path with spaces), so that tab's session is not known.
+        if (strict && /claude/i.test(command)) throw new Error('a program there names claude');
         continue;
       }
       // `unique`: the strict reading too, so a process that only names the CLI
@@ -832,17 +882,33 @@ export async function getTerminalClaudeInfo(id, { unique = false } = {}) {
       // classifyClaudeProcess's cost grows with the square of the length and
       // a claude command line is short.
       if (unique && (command.length > 4096 || classifyClaudeProcess(command).kind !== 'claude')) return null;
+      // strict: the same reading. A process that only names the CLI (`node watcher.js /path/claude --resume X`) is not
+      // Claude; one that might be is unknown.
+      if (strict) {
+        const kind = command.length > 4096 ? 'maybe' : classifyClaudeProcess(command).kind;
+        if (kind === 'maybe') throw new Error('a program there may be Claude');
+        if (kind !== 'claude') continue;
+      }
       const parsed = Date.parse(lstart);
       const startedAt = Number.isFinite(parsed) ? parsed : null;
       const m = command.match(/(?:--resume|-r)\s+([a-zA-Z0-9][\w-]{1,99})/);
       const info = { sessionId: m ? m[1] : null, startedAt, pid: Number(childPid), soleChild: children.length === 1 };
-      if (!unique) return info;
-      // `unique`: two claudes in one shell cannot be told apart, so no answer.
-      if (found) return null;
+      if (!unique && !strict) return info;
+      // `unique`: two claudes in one shell cannot be told apart, so no answer. `strict`: that is not known (throws).
+      if (found) {
+        if (strict) throw new Error('two Claude processes in that shell');
+        return null;
+      }
       found = info;
     }
+    // None of the children is Claude, but the PTY's own process may be (`exec claude`, with an MCP server or other
+    // helper as its child). Every mode: the resume gate must see it too.
+    if (!found) return await ptySelf(pid, strict, strict || thorough ? null : entry);
+    // strict: the PTY's own process may be a second Claude (`exec claude` running `claude -p`), which is not known.
+    if (strict && await ptySelf(pid, true, null)) throw new Error('two Claude processes in that tab');
     return found;
-  } catch {
+  } catch (err) {
+    if (strict && !(err?.code === 1 && String(err?.cmd || '').startsWith('/usr/bin/pgrep'))) throw err;
     return null;
   }
 }
@@ -934,6 +1000,17 @@ async function processSessionIds() {
     await Promise.all(terms.map(async (t) => {
       try { infoByTab.set(t.id, await getTerminalClaudeInfo(t.id)); }
       catch { infoByTab.set(t.id, null); }
+      // Claude's own record moves with /clear while argv keeps the old id: both are live (the snooze, History and the
+      // board read the record), so both are refused a second resume.
+      // The PTY's own Claude too (`exec claude` with a Claude child is seen above only through the child).
+      let self = null;
+      try { self = await ptySelfOf(t.id); } catch { self = null; }
+      if (self?.sessionId) ids.add(self.sessionId);
+      for (const info of [infoByTab.get(t.id), self]) {
+        if (!info) continue;
+        try { const sid = await presenceSessionId(info, t.claudeConfigDir ?? null); if (sid) ids.add(sid); }
+        catch { /* best effort */ }
+      }
     }));
 
     // Tabs running a claude whose session id we CANNOT read from argv. These
@@ -1413,18 +1490,20 @@ async function winRowsFor(entry, { fresh = false } = {}) {
   return ok(rows) ? rows : null;
 }
 
-async function winClaudeInfo(entry, unique) {
+// strict: what cannot be told (no process rows, too many programs, two Claudes, one that only names claude) throws.
+async function winClaudeInfo(entry, unique, strict = false) {
+  const unknown = (why) => { if (strict) throw new Error(why); return null; };
   const pid = entry.pty.pid;
   if (typeof pid !== 'number' || pid <= 0) return null;
   const rows = await winRowsFor(entry);
-  if (!rows) return null;
+  if (!rows) return unknown('process list not read');
   const progs = shellPrograms(rows, pid);
-  if (unique && progs.length > MAX_UNIQUE_CHILDREN) return null;
+  if ((unique || strict) && progs.length > MAX_UNIQUE_CHILDREN) return unknown('too many programs in that shell to check');
   let found = null;
   for (const r of progs) {
     const c = winClaudeCommand(r.command);
     if (!c) {
-      if (unique && /claude/i.test(r.command || '')) return null;
+      if ((unique || strict) && /claude/i.test(r.command || '')) return unknown('a program there names claude');
       continue;
     }
     const info = {
@@ -1434,8 +1513,8 @@ async function winClaudeInfo(entry, unique) {
       pid: r.pid,
       soleChild: progs.length === 1,
     };
-    if (!unique) return info;
-    if (found) return null;
+    if (!unique && !strict) return info;
+    if (found) return unknown('two Claude processes in that shell');
     found = info;
   }
   return found;

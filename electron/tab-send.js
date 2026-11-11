@@ -18,7 +18,8 @@
 // One send per tab at a time, and none into a tab /openTab is still delivering to: two pastes would land in one box.
 // ok is true only when Enter was pressed on the message and, where it can be seen (Claude), it was seen taken;
 // confirmed says whether it was seen.
-import { promptBoxText, boxHoldsMessage, TRAILING_BACKSLASH_RE, openTabBusy, openTabsStarting } from './bridge-open-tab.js';
+import { promptBoxText, boxHoldsMessage, TRAILING_BACKSLASH_RE, openTabBusy, openTabsStarting, stripControls, defangHarnessTags } from './bridge-open-tab.js';
+export { defangHarnessTags };
 import { boxIsEmpty } from './team-deliver.js';
 
 const CHUNK = 256;
@@ -41,6 +42,11 @@ const sending = new Set();
  */
 export async function sendToTab(deps, tabId, message, { claudeOnly = false } = {}) {
   if (!deps.tabAlive(tabId) || !deps.ptyOf(tabId)) return fail(404, 'no such tab (see dobius-tabs)');
+  // Every caller (dobius-send, phone voice, dobius-project tell): no escape sequence or control key ever reaches the
+  // terminal as text. An ESC [201~ would end the bracketed paste early and the rest would drive the TUI as keys.
+  // No size limit here: /tabSend keeps the bridge's own (an /openTab card's 32KB cap is not this route's).
+  message = typeof message === 'string' ? stripControls(message) : '';
+  if (!message.trim()) return fail(400, 'message is empty');
   // openTabsStarting: a tab /openTab is creating can already be listed before it is marked as its own.
   if (sending.has(tabId) || openTabBusy.has(tabId) || openTabsStarting() > 0) return fail(409, 'another message is being sent to that tab right now; nothing was typed, try again');
   sending.add(tabId);
@@ -101,6 +107,8 @@ async function send(deps, tabId, message, claudeOnly = false) {
       // during it would go unseen (Codex round 3).
       return await typeRaw(deps, tabId, pty, watch, message);
     }
+    // Into Claude only (a shell's `cat <file` keeps its redirect): no harness markup posing as system text.
+    message = defangHarnessTags(message);
     if (TRAILING_BACKSLASH_RE.test(message)) return fail(409, 'the message ends with a backslash, which Claude reads as a line continuation; nothing was typed');
     const screen = await stillScreen(deps, watch, deps.now() + STILL_MS);
     // Same tick from the read to the paste.
