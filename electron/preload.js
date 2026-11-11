@@ -350,6 +350,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updaterGetStatus: () => ipcRenderer.invoke('updater:getStatus'),
   updaterGetLatestRelease: (force) => ipcRenderer.invoke('updater:getLatestRelease', force === true),
   updaterGetCurrentVersion: () => ipcRenderer.invoke('updater:getCurrentVersion'),
+  // What's new after an update (electron/whats-new.js): main sends the notes to one focused window.
+  whatsNewReady: () => ipcRenderer.send('whatsNew:ready'),
+  whatsNewDismiss: () => ipcRenderer.send('whatsNew:dismiss'),
+  whatsNewRelease: () => ipcRenderer.send('whatsNew:release'),
+  whatsNewCurrent: () => ipcRenderer.invoke('whatsNew:current'),
+  onWhatsNewShow: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on('whatsNew:show', handler);
+    return () => ipcRenderer.removeListener('whatsNew:show', handler);
+  },
   updaterDismiss: (version) => ipcRenderer.invoke('updater:dismiss', version),
   onUpdaterStatus: (callback) => {
     const handler = (_event, status) => callback(status);

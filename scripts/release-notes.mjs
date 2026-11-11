@@ -6,6 +6,9 @@
 // Usage: node scripts/release-notes.mjs <tag>      (prints Markdown to stdout)
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
+import path from 'node:path';
+import { NOTES_DIR, parseNotes } from '../electron/whats-new-notes.js';
 
 // Subjects that are bookkeeping, not changes a user would notice: the version bump, and notes-to-self commits.
 const SKIP = [/^v?\d+\.\d+\.\d+$/, /^(LESSONS|NOTES)\b/i]; // merges are left out by git log --no-merges
@@ -26,6 +29,14 @@ export function notesFromSubjects(subjects) {
   return `${kept.join('\n')}\n`;
 }
 
+// The release's What's new notes as Markdown, or '' when it has none (or they would not pass the app's own check).
+export function whatsNewBody(version, dir = NOTES_DIR) {
+  let text;
+  try { text = fs.readFileSync(path.join(dir, `${version}.md`), 'utf8'); } catch { return ''; }
+  const p = parseNotes(text);
+  return p.ok ? `${p.bullets.map((b) => `- ${b}`).join('\n')}\n` : '';
+}
+
 function git(args) {
   return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 1 << 26 }).trim();
 }
@@ -43,8 +54,11 @@ function main() {
     console.error(`release-notes: no earlier tag before ${tag} (${err.message.split('\n')[0]}), listing the last 30 commits`);
   }
   const range = prev ? [`${prev}..${tag}`] : ['-n', '30', tag];
+  // The plain-language notes the app shows after the update come first; the commit list follows for the curious.
+  const own = whatsNewBody(tag.replace(/^v/, ''));
+  if (own) process.stdout.write(own);
   const subjects = git(['log', '--no-merges', '--format=%s', ...range]).split('\n');
-  process.stdout.write(notesFromSubjects(subjects));
+  process.stdout.write(own ? `\nAll changes:\n${notesFromSubjects(subjects)}` : notesFromSubjects(subjects));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) main();

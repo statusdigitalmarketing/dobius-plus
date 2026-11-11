@@ -247,6 +247,9 @@ export const useStore = create((set, get) => ({
   // The New Tab project picker, opened by the tab bar's + button.
   newTabPickerOpen: false,
   setNewTabPickerOpen: (open) => set({ newTabPickerOpen: !!open }),
+  // The What's new popup holds the keyboard: menu accelerators (which skip the DOM) check it too.
+  whatsNewOpen: false,
+  setWhatsNewOpen: (open) => set({ whatsNewOpen: !!open }),
   // A tab's right-click menu is open (TerminalTabBar): menu accelerators, which skip the DOM, hold off like they do for
   // the picker, so Cmd+W never closes the tab behind an open menu (Codex sidebar round 2).
   tabMenuOpen: false,

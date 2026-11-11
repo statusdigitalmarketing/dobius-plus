@@ -88,6 +88,7 @@ export default function ProjectContextMenu({ x, y, project, isPinned, isOpen, on
   const menu = (
     <div
       ref={ref}
+      role="menu"
       style={{
         position: 'fixed',
         left,
