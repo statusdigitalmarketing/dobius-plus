@@ -32,6 +32,33 @@ export default function BrowserPane({ id, url: initialUrl, theme }) {
   const [zoom, setZoom] = useState(1);
   const [error, setError] = useState('');
 
+  // The pane in use is the active tab (as terminal and chat panes do), so Cmd+W and the palette act on it in split and
+  // grid. A click inside the page never reaches this document: the <webview> element's own focus event says it.
+  const activate = useCallback(() => {
+    const st = useStore.getState();
+    if (st.activeTabId !== id) st.setActiveTab(id);
+  }, [id]);
+  useEffect(() => {
+    const wv = webviewRef.current;
+    if (!wv) return undefined;
+    wv.addEventListener('focus', activate);
+    // A webview whose page is still starting fires no focus event, though focus does move to it (seen in the harness:
+    // the first seconds of a new browser tab). Focus leaving the terminal and landing on this webview says the same.
+    let timer = null;
+    const check = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { if (document.activeElement === wv) activate(); }, 0);
+    };
+    document.addEventListener('focusout', check, true);
+    window.addEventListener('blur', check);
+    return () => {
+      clearTimeout(timer);
+      wv.removeEventListener('focus', activate);
+      document.removeEventListener('focusout', check, true);
+      window.removeEventListener('blur', check);
+    };
+  }, [activate]);
+
   // Lifecycle: webview emits load + error events; mirror them into local state
   // for the URL bar / spinner / error overlay.
   useEffect(() => {
@@ -121,7 +148,7 @@ export default function BrowserPane({ id, url: initialUrl, theme }) {
   const border = theme?.brightBlack || '#484F58';
 
   return (
-    <div className="w-full h-full flex flex-col" style={{ backgroundColor: bg }}>
+    <div className="w-full h-full flex flex-col" style={{ backgroundColor: bg }} onMouseDownCapture={activate} onFocusCapture={activate}>
       {/* URL bar */}
       <div
         style={{

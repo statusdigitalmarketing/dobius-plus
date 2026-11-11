@@ -19,7 +19,7 @@ To open a NEW tab and send it a message, use `/openTab` (`docs/bridge-open-tab.m
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `tabId` | string | yes | The full tab id from `dobius-tabs` (`term-/path/to/project-N`). |
-| `message` | string | yes | The text. Any length the bridge accepts, line breaks included. |
+| `message` | string | yes | The text. Any length the bridge accepts, line breaks and tabs included. Escape sequences and other control characters are removed first (an `ESC [201~` would end the paste and let the rest drive the terminal as keys); a message that is empty after that is refused with 400. |
 
 ## What happens, by what is in the tab
 
@@ -98,3 +98,5 @@ Writes to the tab's terminal only. Nothing is logged with the message text.
 
 `/tabList` now returns each tab's `status` (`working`, `done`, `needs`, `idle`, or null when unknown, from the tab
 status dots), and `dobius-tabs` prints it as the last column.
+
+Since 2.2.24 a message is also stripped of harness-style markup before it is typed: an opening `<` of `<system...>`, `<...reminder...>`, `<function...>`, `<tool...>`, `<command-...>`, `<bash-...>` and `<local-command...>` (any case, with or without `/`) becomes `‹`, so text sent from another tab or the phone cannot pose as Claude Code's own system text. Ordinary tags such as `<div>` are left as they are. This happens only when the text goes into Claude: a shell still gets `cat <file` exactly as sent. The same applies to `/handoff`, phone voice, the Voice Conductor routes, `dobius-project tell`, `/openTab` and team messages and cards.

@@ -666,7 +666,7 @@ export default function ProjectView({ projectPath, tearOffTabId, tearOffLabel, t
       return;
     }
     if (!s.terminalTabs.some((t) => t.id !== splitTabId)) s.clearSplitTab();
-  }, [activeTabId, splitTabId]);
+  }, [activeTabId, splitTabId, tabs]); // tabs: Close Others can leave the split pane as the only tab
 
   // Same class of defense for grid mode: paneStyleFor hides any tab not in
   // gridSlots when grid mode is on. The tab-bar click handler exits grid

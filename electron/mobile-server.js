@@ -41,7 +41,7 @@ import { handleTasksMessage } from './mobile-tasks.js';
 import { loadAllSessions, loadTranscript, listProjects, getTranscriptSig, findLooseEnds, loadSkills, loadTranscriptImage } from './data-service.js';
 import { listCodexSessions } from './codex-sessions.js';
 import { resolveAccountEnvForCwd } from './spawn-account-env.js';
-import { peekReply, recordReply } from './voice-bridge.js';
+import { peekReply, recordReply, sendViaTabSend } from './voice-bridge.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
 import { snapshot as terminalStatusSnapshot } from './terminal-status.js';
 import { estimateContextForTabId } from './tab-context.js';
@@ -49,6 +49,10 @@ import { getMagicDNSName, certPathsFor, hasCertFor, getTailnetHosts } from './ta
 import { transcribeAudio, transcribeAvailable } from './voice-transcribe.js';
 import { getVapidPublicKey, subscribePush } from './push.js';
 import { isAbsPath, baseName } from '../shared/platform.js';
+import { stripControls } from './bridge-open-tab.js';
+
+// A transcript as one line of plain text: no escape sequence or control key (a Ctrl+C would interrupt the tab).
+const voiceLine = (t) => stripControls(t).slice(0, 4000).replace(/\s*\n\s*/g, ' ').trim();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -595,15 +599,14 @@ async function resolveCreateCwd(cwd) {
 // Route a transcript to the Voice Conductor, tagged with a per-request id so
 // /voice/reply can match the spoken reply. Returns the requestId, or null if
 // the Conductor is offline. Shared by /voice/intent and /voice/audio.
-function routeToConductor(transcript) {
+// Typed the guarded way (tab-send): never a raw write plus Enter, which would answer a dialog open in that tab.
+async function routeToConductor(transcript) {
   const conductorId = getVoiceConductorTabId();
-  if (!conductorId || !listTerminals().some((t) => t.id === conductorId)) return null;
+  if (!conductorId || !listTerminals().some((t) => t.id === conductorId)) return { requestId: null, error: null };
   const requestId = `req-${crypto.randomBytes(6).toString('hex')}`;
-  const tagged = `[${requestId}] ${transcript.slice(0, 4000).replace(/[\r\n]+/g, ' ')}`;
-  const CHUNK = 256;
-  for (let i = 0; i < tagged.length; i += CHUNK) writeTerminal(conductorId, tagged.slice(i, i + CHUNK));
-  writeTerminal(conductorId, '\r');
-  return requestId;
+  const r = await sendViaTabSend(conductorId, `[${requestId}] ${transcript}`, { claudeOnly: true });
+  // Typed but not confirmed: it may have been taken, so the phone waits for the reply rather than being told to resend.
+  return r.body?.ok || r.body?.typed ? { requestId } : { requestId: null, error: `The Voice Conductor did not take it: ${r.body?.error || r.body?.note || 'not delivered'}` };
 }
 
 // Brett (Asana 1220329713038498): "Could we just put the messages from the Voice Conductor directly into the Team
@@ -616,7 +619,9 @@ function routeToConductor(transcript) {
 let voiceOrchestratorRoute = null;
 export function setVoiceOrchestratorRoute(fn) { voiceOrchestratorRoute = typeof fn === 'function' ? fn : null; }
 
-async function routeVoice(transcript) {
+async function routeVoice(raw) {
+  const transcript = voiceLine(raw);
+  if (!transcript) return { requestId: null, error: 'the transcript is empty' };
   if (voiceOrchestratorRoute) {
     try {
       const r = await voiceOrchestratorRoute(transcript.slice(0, 4000).replace(/[\r\n]+/g, ' '));
@@ -633,9 +638,9 @@ async function routeVoice(transcript) {
       return { requestId: null, mode: null, error: 'Your orchestrator tab did not take it' };
     }
   }
-  const requestId = routeToConductor(transcript);
-  if (requestId) return { requestId, mode: 'conductor' };
-  return { requestId: null, mode: null, error: null };
+  const c = await routeToConductor(transcript);
+  if (c.requestId) return { requestId: c.requestId, mode: 'conductor' };
+  return { requestId: null, mode: null, error: c.error };
 }
 
 // Monotonic per-session counter for phone-spawned terminal ids. Must stay the
@@ -1379,10 +1384,12 @@ async function doStartMobileServer(stillCurrent) {
       if (!listTerminals().some((t) => t.id === directTabId)) {
         return res.status(404).json({ ok: false, error: 'tabId not alive' });
       }
-      const text = transcript.slice(0, 4000).replace(/[\r\n]+/g, ' ');
-      const CHUNK = 256;
-      for (let i = 0; i < text.length; i += CHUNK) writeTerminal(directTabId, text.slice(i, i + CHUNK));
-      writeTerminal(directTabId, '\r');
+      const text = voiceLine(transcript);
+      if (!text) return res.status(400).json({ ok: false, error: 'transcript required' });
+      // The guarded path (a dialog, a draft or someone typing stops it): a "1" said at a permission prompt must not
+      // approve it.
+      const r = await sendViaTabSend(directTabId, text, { claudeOnly: true });
+      if (!r.body?.ok) return res.status(r.status === 200 ? 409 : r.status).json({ ok: false, error: r.body?.error || r.body?.note || 'not delivered' });
       // No requestId for direct mode, there's no Conductor to reply.
       return res.json({ ok: true, mode: 'direct', tabId: directTabId });
     }

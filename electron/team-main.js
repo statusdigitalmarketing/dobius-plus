@@ -222,6 +222,8 @@ function registerIpc() {
  * approves with `dobius-team approve <id>` (pinned tab only). A guard against a stray session sending by mistake, NOT
  * a security boundary (any process of the user can set that variable; the stated residual in the design).
  */
+// Its reply goes out through voice-bridge's sendJson, which takes harness markup out of every string (teammate names,
+// bodies, failure notes reach the reading Claude as tool output).
 export function handleTeamBridge(body) {
   if (!service) return { status: 503, json: { ok: false, error: 'Dobius+ is still starting; try again' } };
   const { cmd, arg, text, tabId } = body || {};
@@ -243,6 +245,7 @@ export function handleTeamBridge(body) {
       const why = note ? ` (${oneLine(note, 120)})` : '';
       return `${m.id}@${m.peer}  ${head}  [${stage} ${ago(t - since)}]${why}  ${oneLine(m.text, 400).replace(/\s+/g, ' ').slice(0, 120)}`;
     });
+    // Teammate-supplied text (bodies, failure notes) reaches the reading Claude as tool output: no harness markup.
     return { status: 200, json: { ok: true, lines: lines.length ? lines : ['no team messages yet'] } };
   }
   if (cmd === 'show') {

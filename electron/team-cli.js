@@ -42,17 +42,18 @@ if [ "$CMD" = send ] || [ "$CMD" = reply ]; then
 fi
 # failed: an optional reason on stdin.
 if [ "$CMD" = failed ] && [ ! -t 0 ]; then TEXT=$(cat); fi
-BODY=$(PYTHONIOENCODING=utf-8 T_CMD="$CMD" T_ARG="$ARG" T_TEXT="$TEXT" T_TAB="\${DOBIUS_TAB_ID:-}" python3 -c 'import json,os; print(json.dumps({"cmd": os.environ["T_CMD"], "arg": os.environ["T_ARG"], "text": os.environ["T_TEXT"], "tabId": os.environ["T_TAB"]}, ensure_ascii=False))')
+BODY=$(T_CMD="$CMD" T_ARG="$ARG" T_TEXT="$TEXT" T_TAB="\${DOBIUS_TAB_ID:-}" python3 -I -c 'import json,os,sys; sys.stdout.reconfigure(encoding="utf-8"); print(json.dumps({"cmd": os.environ["T_CMD"], "arg": os.environ["T_ARG"], "text": os.environ["T_TEXT"], "tabId": os.environ["T_TAB"]}, ensure_ascii=False))')
 RESPONSE=$(printf '%s' "$BODY" | curl -q -sS --noproxy '*' --max-time 30 -X POST "http://127.0.0.1:${port}/team" \\
   -H "Host: 127.0.0.1:${port}" \\
   -H @<(printf 'Authorization: Bearer %s\\n' "$TOKEN") \\
   -H "Content-Type: application/json" \\
   --data-binary @-)
-printf '%s' "$RESPONSE" | PYTHONIOENCODING=utf-8 python3 -c '
+printf '%s' "$RESPONSE" | python3 -I -c '
 import json, re, sys
+sys.stdout.reconfigure(encoding="utf-8", errors="replace"); sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 # Never print a control character into the terminal (an echoed argument could carry escape sequences).
 clean = lambda s: re.sub("[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029]", "?", str(s))
-r = json.load(sys.stdin)
+r = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace"))
 if not r.get("ok"):
     print("dobius-team: " + clean(r.get("error", "failed")), file=sys.stderr); sys.exit(1)
 for line in r.get("lines", []): print(clean(line))

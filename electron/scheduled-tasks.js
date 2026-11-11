@@ -24,10 +24,10 @@
  */
 import crypto from 'crypto';
 import { loadConfig, saveConfig } from './config-manager.js';
-import { writeTerminal, listTerminals } from './terminal-manager.js';
+import { listTerminals } from './terminal-manager.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
 import { sendImessageToSelf } from './imessage-bridge.js';
-import { subscribeReply } from './voice-bridge.js';
+import { subscribeReply, sendViaTabSend } from './voice-bridge.js';
 
 const TICK_MS = 60_000;             // check schedule once per minute
 const FIRE_DEBOUNCE_MS = 5 * 60_000; // prevent double-fires from drift
@@ -66,6 +66,8 @@ export function updateScheduledTask(id, patch) {
   const idx = list.findIndex((t) => t.id === id);
   if (idx < 0) return { ok: false, error: 'not found' };
   list[idx] = { ...list[idx], ...patch };
+  // An edit (time, on/off, what it says) ends a run held from before it: the new settings decide the next one.
+  if (patch && ('schedule' in patch || 'enabled' in patch || 'prompt' in patch)) pendingDaily.delete(id);
   cfg.scheduledTasks = list;
   saveConfig(cfg);
   return { ok: true, task: list[idx] };
@@ -116,11 +118,29 @@ async function tick() {
   }
 }
 
-function shouldFire(task) {
+// A daily run that came due but could not be delivered (no Conductor, a draft or a dialog in its tab): retried on
+// later ticks for up to an hour, then dropped for that day. Memory only (a restart forgets it). Bounded: one entry per
+// task id.
+const PENDING_DAILY_MS = 60 * 60_000;
+const pendingDaily = new Map(); // taskId -> when it first came due
+export function deferDaily(task) {
+  if (task.schedule?.type !== 'daily' || pendingDaily.has(task.id)) return;
+  // Only while the task is still as it was when it fired: an edit made while its send was in flight decides instead.
+  const now = listScheduledTasks().find((t) => t.id === task.id);
+  if (!now?.enabled || now.prompt !== task.prompt || JSON.stringify(now.schedule) !== JSON.stringify(task.schedule)) return;
+  pendingDaily.set(task.id, Date.now());
+}
+
+export function shouldFire(task) {
   const now = Date.now();
   if (task.lastFiredAt && (now - task.lastFiredAt) < FIRE_DEBOUNCE_MS) return false;
   const s = task.schedule || {};
   if (s.type === 'daily') {
+    const since = pendingDaily.get(task.id);
+    if (since !== undefined) {
+      if (now - since <= PENDING_DAILY_MS) return true;
+      pendingDaily.delete(task.id);
+    }
     const d = new Date(now);
     const hourOk = d.getHours() === (s.hour ?? -1);
     const minOk = Math.abs(d.getMinutes() - (s.minute ?? 0)) <= 1; // within a minute of target
@@ -148,19 +168,30 @@ async function fireTask(task) {
   // PTY isn't alive. Skip without stamping lastFiredAt so the task retries on a
   // later tick once the Conductor is back, instead of being marked fired.
   if (!conductorId || !listTerminals().some((t) => t.id === conductorId)) {
-    console.log(`[scheduled-tasks] Conductor PTY not alive — deferring ${task.id}`);
+    console.log(`[scheduled-tasks] Conductor PTY not alive, deferring ${task.id}`);
+    deferDaily(task);
     return;
   }
   const tagged = `[${requestId}] ${task.prompt.replace(/[\r\n]+/g, ' ').slice(0, 2000)}`;
   console.log(`[scheduled-tasks] firing ${task.id} as ${requestId}`);
+  // Stamped before the send so a second tick cannot fire it again meanwhile; put back if nothing was typed.
+  const before = task.lastFiredAt ?? null;
   updateScheduledTask(task.id, { lastFiredAt: Date.now() });
   // Subscribe BEFORE writing so we never miss a fast reply.
   const replyPromise = subscribeReply(requestId, REPLY_TIMEOUT_MS);
-  const CHUNK = 256;
-  for (let i = 0; i < tagged.length; i += CHUNK) {
-    writeTerminal(conductorId, tagged.slice(i, i + CHUNK));
+  // The guarded paste (tab-send, Claude only): never raw keys into a draft, a dialog or a shell.
+  const sent = await sendViaTabSend(conductorId, tagged, { claudeOnly: true });
+  if (!sent.body?.ok) {
+    console.warn(`[scheduled-tasks] ${task.id} not delivered: ${sent.body?.error || sent.body?.note || sent.status}`);
+    // Nothing typed (a draft, a dialog, Claude busy at a command): the next tick tries again. Typed but not confirmed:
+    // it may have been taken, so it counts as fired (never twice).
+    if (!sent.body?.typed) {
+      updateScheduledTask(task.id, { lastFiredAt: before });
+      deferDaily(task);
+      return;
+    }
   }
-  writeTerminal(conductorId, '\r');
+  pendingDaily.delete(task.id);
   const reply = await replyPromise;
   if (reply?.message) {
     try { await sendImessageToSelf(`⏰ ${task.id}: ${reply.message}`.slice(0, 1000)); }

@@ -24,9 +24,9 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { powerMonitor } from 'electron';
 import Database from 'better-sqlite3';
-import { writeTerminal, listTerminals } from './terminal-manager.js';
+import { listTerminals } from './terminal-manager.js';
 import { getVoiceConductorTabId } from './voice-conductor.js';
-import { subscribeReply } from './voice-bridge.js';
+import { subscribeReply, sendViaTabSend } from './voice-bridge.js';
 import { getImessageBridge, updateImessageBridge } from './config-manager.js';
 
 const execFileP = promisify(execFile);
@@ -297,12 +297,13 @@ async function handleCommand(command) {
   // Subscribe BEFORE writing so we never miss a fast reply.
   const replyPromise = subscribeReply(requestId, REPLY_TIMEOUT_MS);
 
-  // Chunk write to the Conductor's PTY.
-  const CHUNK = 256;
-  for (let i = 0; i < tagged.length; i += CHUNK) {
-    writeTerminal(conductorId, tagged.slice(i, i + CHUNK));
+  // The guarded paste (tab-send, Claude only): never raw keys into a draft, a dialog or a shell.
+  const sent = await sendViaTabSend(conductorId, tagged, { claudeOnly: true });
+  // Typed but not confirmed may still have been taken: wait for its reply. Nothing typed: say so.
+  if (!sent.body?.ok && !sent.body?.typed) {
+    await sendImessageToSelf(`(not delivered to the Conductor: ${sent.body?.error || sent.body?.note || 'try again'})`).catch(() => {});
+    return;
   }
-  writeTerminal(conductorId, '\r');
 
   const reply = await replyPromise;
   if (!reply) {

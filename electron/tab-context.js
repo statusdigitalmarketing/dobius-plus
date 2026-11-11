@@ -20,9 +20,10 @@ const FUTURE_SLACK_MS = 60 * 1000;
  * a caller doing other reads in between can tell whether it is still the same run.
  * @returns {Promise<{sessionId:string, sessionProject:string|null, pid:number, startedAt:number|null} | null>}
  */
-export async function resolveSessionForTab(tabId) {
+// opts.strict: a failed process check throws (the board must not read it as "that session runs nowhere").
+export async function resolveSessionForTab(tabId, opts = {}) {
   if (!tabId || typeof tabId !== 'string') return null;
-  const info = await getTerminalClaudeInfo(tabId);
+  const info = await getTerminalClaudeInfo(tabId, { strict: opts.strict === true, thorough: opts.thorough === true });
   if (!info) return null; // no claude running here
   const map = getSessionTabMap() || {};
 
@@ -34,7 +35,19 @@ export async function resolveSessionForTab(tabId) {
   // Two children in the shell and none named by argv: which claude is in use
   // cannot be told, so no session is named at all (neither the record nor a
   // saved link may speak for it).
-  if (!sessionId && info.soleChild === false) return null;
+  // strict (the board): that is not known, which is not the same as "no session here".
+  if (!sessionId && info.soleChild === false) {
+    if (opts.strict === true) throw new Error('two programs in that shell: which Claude is in use cannot be told');
+    return null;
+  }
+  // After a /clear the argv still names the session it resumed, but Claude's own record for this process has moved on:
+  // the record wins when it names another session (same rule as Tasks > Commands).
+  if (sessionId) {
+    const moved = await recordSession(tabId, info, { evenEmpty: true });
+    // Moved to a session with nothing said yet: no conversation to name (never the cleared one).
+    if (moved?.empty && moved.sessionId !== sessionId) return null;
+    if (moved && moved.sessionId !== sessionId) return { sessionId: moved.sessionId, sessionProject: moved.sessionProject, pid: info.pid, startedAt: info.startedAt ?? null, startFt: info.startFt ?? null };
+  }
   if (sessionId) {
     // The transcript lives under the SESSION's project, not necessarily the
     // tab's live cwd (a same-project resume from a subdir keeps it under the
@@ -43,7 +56,17 @@ export async function resolveSessionForTab(tabId) {
     // and another tab's link would name the other project's transcript.
     const link = map[sessionId];
     sessionProject = link?.tabId === tabId ? (link.projectPath || null) : null;
-  } else if ((sessionFromRecord = await recordSession(tabId, info))) {
+  } else if ((sessionFromRecord = await recordSession(tabId, info, { evenEmpty: true }))) {
+    // Its record names a session with nothing said yet (a /clear just now): no session, never an older saved link to
+    // another one. A link to that same session is kept (its transcript may just have been unreadable for a moment).
+    if (sessionFromRecord.empty) {
+      const link = map[sessionFromRecord.sessionId];
+      const ran = link?.lastRunningAt || 0;
+      const now = Date.now();
+      const linked = link?.tabId === tabId && ran > 0 && now - ran <= RECENT_MS && ran <= now + FUTURE_SLACK_MS
+        && !(info.startedAt && ran < info.startedAt + 1000);
+      return linked ? { sessionId: sessionFromRecord.sessionId, sessionProject: link.projectPath || null, pid: info.pid, startedAt: info.startedAt ?? null, startFt: info.startFt ?? null } : null;
+    }
     // Claude's own record for THIS process names the session exactly (and
     // follows /clear), and its transcript was found where the record says.
     ({ sessionId, sessionProject } = sessionFromRecord);
@@ -80,7 +103,7 @@ export async function resolveSessionForTab(tabId) {
  * the Chat view on "starting up" for good (Bryan, Asana 1220098108555131).
  * @returns {Promise<{sessionId:string, sessionProject:string}|null>}
  */
-async function recordSession(tabId, info) {
+async function recordSession(tabId, info, { evenEmpty = false } = {}) {
   // With other children in the shell the record may not be the claude in use
   // (one of two, one suspended): the scan's rule, so a name only, never here.
   if (info.soleChild === false) return null;
@@ -94,7 +117,8 @@ async function recordSession(tabId, info) {
   for (const dir of [rec.cwd, await getTerminalCwd(tabId)]) {
     if (dir && await sessionTranscriptBirth(dir, rec.sessionId)) return { sessionId: rec.sessionId, sessionProject: dir };
   }
-  return null; // no transcript yet: nothing said in this session
+  // No transcript yet: nothing said in this session.
+  return evenEmpty ? { sessionId: rec.sessionId, sessionProject: null, empty: true } : null;
 }
 
 /**
