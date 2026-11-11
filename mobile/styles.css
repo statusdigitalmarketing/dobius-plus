@@ -552,6 +552,74 @@ button.secondary:disabled { opacity: 0.4; }
 }
 .voice-bubble.voice-error { border-color: rgba(217, 96, 90, 0.4); color: var(--status-needs); }
 
+/* Voice: lock it on, confirm before it sends (Brett, Asana 1220412677067987). */
+.voice-hint {
+  position: fixed;
+  right: 20px; bottom: calc(env(safe-area-inset-bottom) + 92px);
+  z-index: 15;
+  background: var(--surface); color: var(--dim);
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 8px 12px; font-size: 13px; line-height: 1.45; text-align: right;
+  pointer-events: none;
+}
+.voice-lock-rail {
+  position: fixed;
+  right: 26px; bottom: calc(env(safe-area-inset-bottom) + 92px);
+  z-index: 15;
+  width: 48px; height: 128px; border-radius: 24px;
+  background: var(--surface); border: 1px solid var(--border);
+  display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+  padding: 12px 0;
+  transform: translateY(calc(var(--nudge, 0) * -16px));
+  transition: transform 0.08s;
+  pointer-events: none;
+}
+.voice-lock-icon { font-size: 20px; opacity: calc(0.5 + var(--nudge, 0) * 0.5); }
+.voice-lock-chev { color: var(--dim); font-size: 14px; line-height: 0.9; text-align: center; }
+.voice-hold-pill {
+  position: fixed;
+  right: 92px; bottom: calc(env(safe-area-inset-bottom) + 32px);
+  z-index: 15;
+  display: flex; align-items: center; gap: 8px;
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 18px;
+  padding: 8px 14px; font-size: 14px; font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.voice-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-needs); animation: breathe 1.2s ease-in-out infinite; }
+.voice-panel {
+  position: fixed;
+  left: 16px; right: 16px; bottom: calc(env(safe-area-inset-bottom) + 16px);
+  z-index: 16;
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 18px;
+  padding: 16px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  display: flex; flex-direction: column; gap: 12px;
+}
+.voice-panel-head { font-size: 13px; letter-spacing: 0.06em; color: var(--dim); font-variant-numeric: tabular-nums; }
+.voice-panel-sub { font-size: 14px; color: var(--dim); }
+.voice-panel-err { font-size: 14px; color: var(--status-needs); }
+.voice-heard {
+  font-size: 17px; line-height: 1.4; white-space: pre-wrap; word-break: break-word;
+  max-height: 40vh; overflow-y: auto; overscroll-behavior: contain;
+}
+.voice-dim { color: var(--dim); }
+.voice-wave { display: flex; align-items: center; gap: 4px; height: 40px; }
+.voice-wave span { flex: 1 1 0; min-width: 3px; border-radius: 2px; background: var(--status-needs); transition: height 0.07s; }
+.voice-row { display: flex; gap: 10px; }
+.voice-row .voice-btn { flex: 1 1 0; }
+.voice-btn {
+  min-height: 48px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--fg);
+  font-size: 17px; font-weight: 600; cursor: pointer;
+  -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none;
+  transition: transform 0.1s, opacity 0.1s;
+}
+.voice-btn:active:not(:disabled) { transform: scale(0.97); opacity: 0.85; }
+.voice-btn:disabled { opacity: 0.45; cursor: default; }
+.voice-btn-stop { background: var(--status-needs); border-color: transparent; color: #fff; }
+.voice-btn-send { background: var(--accent); border-color: transparent; color: var(--on-accent); width: 100%; }
+
 .board-alert {
   margin-top: 8px; font-size: 12px; color: var(--status-needs);
 }

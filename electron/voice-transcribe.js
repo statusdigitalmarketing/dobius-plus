@@ -186,6 +186,9 @@ async function tryStartServer(bin, model, port, tmpDir, requestPath) {
   // Register the starting child immediately so a quit-during-start can kill
   // it even before readiness resolves (Codex P1-3).
   startingChild = child;
+  // Recorded the moment it exists (not once it is ready), so a crash during startup still leaves a record to reap by.
+  child.once('exit', () => forgetServer(child.pid));
+  rememberServer(child, requestPath).catch(() => { /* the record is a convenience for crash cleanup */ });
   // Attach the exit listener BEFORE awaiting readiness so a sync exit (bind
   // failure) is not lost between the spawn and the first await (Codex r2 P1-1
   // race). An exit sets exitCode synchronously, which waitForReady re-reads
@@ -229,6 +232,85 @@ async function tryStartServer(bin, model, port, tmpDir, requestPath) {
   return { child: null, outcome };
 }
 
+// A whisper-server this app started outlives it when the app is killed (crash, force quit): its parent becomes launchd
+// (ppid 1) and the next launch skips that port and starts another, so copies stack up, one per crash (seen in a
+// harness, 2026-11-11). ps flattens argv, so no pattern over its text proves a process is ours (a model path can
+// spell our flags). Ownership comes from a record written when we start one: its pid, its start time as ps reports
+// it, and its per-start 128-bit request path, which no other program can know. Only a process matching all three, with
+// parent 1, is stopped. Kept in <userData>/whisper-servers.json, at most 8 records (ponytail cap).
+const RECORDS_MAX = 8;
+function recordsFile() { try { return path.join(app.getPath('userData'), 'whisper-servers.json'); } catch { return null; } }
+function readRecords() {
+  const f = recordsFile();
+  if (!f) return [];
+  try {
+    if (fsSync.statSync(f).size > 64 * 1024) return [];
+    const rows = JSON.parse(fsSync.readFileSync(f, 'utf8'));
+    return Array.isArray(rows) ? rows.filter((r) => Number.isInteger(r?.pid) && (r.lstart === null || typeof r.lstart === 'string') && /^\/dobius-[0-9a-f]{32}$/.test(r.requestPath || '')).slice(-RECORDS_MAX) : [];
+  } catch { return []; }
+}
+function writeRecords(rows) {
+  const f = recordsFile();
+  if (!f) return;
+  try {
+    const tmp = `${f}.${process.pid}.tmp`;
+    fsSync.writeFileSync(tmp, JSON.stringify(rows.slice(-RECORDS_MAX)), { mode: 0o600 });
+    fsSync.renameSync(tmp, f);
+  } catch (e) { console.warn(`[voice-transcribe] could not save the server record: ${e.message}`); }
+}
+// psLine: `ps -o ppid=,lstart=,command= -p <pid>` output. lstart is a fixed 24-character date.
+export function isOurOrphan(record, psLine) {
+  const m = String(psLine || '').match(/^\s*(\d+)\s+(\w{3} \w{3}\s+\d{1,2} \d{2}:\d{2}:\d{2} \d{4})\s+(\S*whisper-server) (.*)$/);
+  if (!m || m[1] !== '1') return false;
+  // lstart is null only while the record is provisional (written at spawn, before ps answered); the secret request path
+  // alone still proves the process is ours, since no other program can know it.
+  if (record?.lstart != null && m[2].replace(/\s+/g, ' ') !== String(record.lstart).replace(/\s+/g, ' ')) return false;
+  return ` ${m[4]} `.includes(` --request-path ${record.requestPath} `);
+}
+// -> the ps line, '' when that pid does not exist (ps exits 1 with nothing printed), null when ps itself failed.
+function psOf(pid) {
+  return new Promise((resolve) => {
+    execFile('/bin/ps', ['-o', 'ppid=,lstart=,command=', '-p', String(pid)], { timeout: 3000 }, (err, stdout) => {
+      if (!err) resolve(stdout.trim());
+      else resolve(err.code === 1 && !err.killed && !String(stdout || '').trim() ? '' : null);
+    });
+  });
+}
+async function rememberServer(child, requestPath) {
+  // Provisional record first, synchronously, so a crash at any later moment still leaves something to reap by.
+  writeRecords([...readRecords().filter((r) => r.pid !== child.pid), { pid: child.pid, lstart: null, requestPath }]);
+  let line = null;
+  for (let i = 0; i < 3 && line == null; i++) { // ps failing is retried (a busy Mac); '' means the server is already gone
+    if (i) await new Promise((r) => setTimeout(r, 2000));
+    line = await psOf(child.pid);
+  }
+  const lstart = line?.match(/^\s*\d+\s+(\w{3} \w{3}\s+\d{1,2} \d{2}:\d{2}:\d{2} \d{4})/)?.[1];
+  if (!lstart) return;
+  writeRecords([...readRecords().filter((r) => r.pid !== child.pid), { pid: child.pid, lstart, requestPath }]);
+}
+function forgetServer(pid) {
+  const rows = readRecords();
+  if (rows.some((r) => r.pid === pid)) writeRecords(rows.filter((r) => r.pid !== pid));
+}
+// Runs only when a server is about to start (first voice request, or after one exited), never per request.
+export async function reapOrphanServers({ ps = psOf, kill = (pid, sig) => process.kill(pid, sig), records = readRecords, save = writeRecords } = {}) {
+  const keep = [];
+  for (const r of records()) {
+    const line = await ps(r.pid);
+    if (line === '') continue; // gone: drop the record
+    if (line == null) { keep.push(r); continue; } // ps failed: not known, keep it for next time
+    if (!isOurOrphan(r, line)) { if (!/^\s*1\s/.test(line)) keep.push(r); continue; } // a live parent: another copy's
+    // First time: SIGTERM and keep the record. Still there next time (wedged): SIGKILL. The record goes only once the
+    // process is gone, so one that ignores SIGTERM is never forgotten.
+    // ponytail: a pid reused in the milliseconds between this ps and kill() would also need the same start second.
+    const sig = r.termAt ? 'SIGKILL' : 'SIGTERM';
+    try { kill(r.pid, sig); console.log(`[voice-transcribe] ${sig} to an orphaned whisper-server (pid ${r.pid}) left by an earlier run`); }
+    catch (e) { console.warn(`[voice-transcribe] could not stop orphaned whisper-server ${r.pid}: ${e.message}`); }
+    keep.push({ ...r, termAt: r.termAt || Date.now() });
+  }
+  save(keep);
+}
+
 async function startServerLocked() {
   const bin = firstExecutable(WHISPER_SERVER_CANDIDATES);
   const model = firstFile(MODEL_CANDIDATES);
@@ -243,6 +325,8 @@ async function startServerLocked() {
   // Per-start random path prefix: 32 hex chars = 128 bits of entropy; no
   // local process can POST uploads blind without guessing it first.
   const requestPath = `/dobius-${randomBytes(16).toString('hex')}`;
+  await reapOrphanServers();
+  if (myGen !== serverGeneration) return null;
   for (const port of SERVER_PORT_CANDIDATES) {
     // Skip ports that fail a pre-bind check; this moves the "port in use" race
     // out of band and prevents the probe from accepting a response from an

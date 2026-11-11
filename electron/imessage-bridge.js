@@ -282,13 +282,34 @@ async function pollNewMessages() {
  * iMessage. Mirrors the /voice/intent handler in mobile-server.js but talks
  * directly to terminal-manager + voice-bridge in-process.
  */
-async function handleCommand(command) {
+// Main sets this to mobile-server's routeVoice: the team orchestrator tab when one is pinned, else the Voice Conductor
+// (one route for voice and texts). Unset (tests, a very early text): the Conductor directly, as before.
+let commandRoute = null;
+export function setImessageCommandRoute(fn) { commandRoute = typeof fn === 'function' ? fn : null; }
+
+// `send` is the iMessage-to-self sender; tests pass a stand-in so nothing reaches Messages.
+export async function handleCommand(command, send = sendImessageToSelf) {
+  if (commandRoute) {
+    let routed;
+    try { routed = await commandRoute(command.replace(/[\r\n]+/g, ' ').slice(0, 4000)); }
+    catch (err) { routed = { requestId: null, error: err?.message || 'routing failed' }; }
+    if (!routed?.requestId) {
+      await send(`(not delivered: ${routed?.error || 'open Dobius+ and pin a team orchestrator or start the Voice Conductor, then resend'})`).catch(() => {});
+      return;
+    }
+    // Typed but its submission was not confirmed: say so now rather than wait 90s for a reply that may never come.
+    if (routed.note) { await send(`(${routed.note})`).catch(() => {}); return; }
+    // A reply already recorded (the orchestrator's delivery note) resolves at once; the Conductor answers later.
+    const reply = await subscribeReply(routed.requestId, REPLY_TIMEOUT_MS);
+    await send(reply ? reply.message : '(no reply within 90s, it may be busy)').catch(() => {});
+    return;
+  }
   const requestId = `req-im-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const conductorId = getVoiceConductorTabId();
   // The Conductor tab id is a constant; writeTerminal silently no-ops if that
   // PTY isn't alive, leaving the sender waiting 90s for nothing. Tell them now.
   if (!conductorId || !listTerminals().some((t) => t.id === conductorId)) {
-    await sendImessageToSelf('(Conductor offline — open Dobius+ and start the Voice Conductor, then resend)').catch(() => {});
+    await sendImessageToSelf('(Conductor offline: open Dobius+ and start the Voice Conductor, then resend)').catch(() => {});
     return;
   }
   const tagged = `[${requestId}] ${command.replace(/[\r\n]+/g, ' ').slice(0, 4000)}`;
