@@ -164,6 +164,15 @@ export function winExeBase(tok) {
   return path.win32.basename(String(tok || '')).toLowerCase().replace(/\.(exe|cmd|bat|com)$/, '');
 }
 
+// A process row that may be Claude though it could not be read as Claude: an executable named claude, or a JS runtime
+// whose command names claude or could not be read. An unrelated program with claude only in an argument
+// (`notepad.exe C:\tmp\claude.txt`) is not (Codex, PR 7).
+export function winMayBeClaude(row) {
+  const base = winExeBase(row?.name || '');
+  if (/claude/i.test(base)) return true;
+  return ['node', 'bun', 'deno'].includes(base) && (!row?.command || /claude/i.test(row.command));
+}
+
 /**
  * The script node runs, from its argv (argv[0] is node), or null. Strict: the
  * script must come straight after node, the only shape npm's Windows launchers

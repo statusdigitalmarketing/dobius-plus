@@ -35,7 +35,7 @@ const fail = (status, error, extra = {}) => ({ status, body: { ok: false, ...ext
 // Prefixes a shell runs the command through (exec, command, builtin, nohup, env, VAR=value), a file path (/, ~/, ./,
 // ../; never a URL) or backslash before the name, a quoted name, any options (each option may take one value; a bare word first is a message), and a trailing ; or &
 // all still start Claude (Codex, PR 7).
-export const STARTS_CLAUDE_RE = /^\s*(?:cd\s+[^\n;&|]+&&\s*)?(?:(?:exec|command|builtin|nohup)\s+|env(?:\s+-\S+)*\s+|[A-Za-z_]\w*=\S*\s+)*(["']?)(?:(?:~|\.{1,2})?\/(?:[^\s\/:"']+\/)*|\\)?claude\1(?:\s+-{1,2}[\w-]+(?:=[^\s;&|]+)?(?:\s+(?!-)(?:"[^"\n]*"|'[^'\n]*'|[^\s;&|"']+))?)*\s*[;&]?\s*$/;
+export const STARTS_CLAUDE_RE = /^\s*(?:cd\s+[^\n;&|]+&&\s*)?(?:(?:exec|command|builtin|nohup)\s+|env(?:\s+(?:-[uCS]\s+\S+|-\S+))*\s+|[A-Za-z_]\w*=\S*\s+)*(["']?)(?:(?:~|\.{1,2})?\/(?:[^\s\/:"']+\/)*|\\)?claude\1(?:\s+-{1,2}[\w-]+(?:=[^\s;&|]+)?(?:\s+(?!-)(?:"[^"\n]*"|'[^'\n]*'|[^\s;&|"']+))?)*\s*[;&]?\s*$/;
 const sending = new Set();
 // Every paste this route made that was not followed by its Enter, per tab. Two uses:
 // 1. Never paste twice. Until a send SEES Claude's box hold text after it (`seen`), the paste may still be queued in the

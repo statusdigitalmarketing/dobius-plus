@@ -52,7 +52,13 @@ assert.equal(await tm.getTerminalClaudeInfo(CHILD, { unknown: true, rootCheck: t
 console.log('PASS  an ambiguous child under a plain shell stays could-not-tell');
 const src = fs.readFileSync(new URL('../terminal-manager.js', import.meta.url), 'utf8');
 assert.match(src, /const self = await ptySelf\(pid, strict, strict \|\| thorough \|\| unknown \? null : entry, unknown\);/, 'with children, unknown callers always look at the PTY root');
-assert.match(src, /under\.some\(\(r\) => r\.startFt == null && names\(r\)\)\) return CLAUDE_UNKNOWN;/, 'Windows: an undated child naming claude stays could-not-tell');
+assert.match(src, /under\.some\(\(r\) => r\.startFt == null && winMayBeClaude\(r\)\)\) return CLAUDE_UNKNOWN;/, 'Windows: an undated child that may be Claude stays could-not-tell');
+const { winMayBeClaude } = await import('../win-proc.js');
+assert.equal(winMayBeClaude({ name: 'notepad.exe', command: 'notepad.exe C:\\tmp\\claude.txt' }), false, 'notepad with claude.txt is not Claude');
+assert.equal(winMayBeClaude({ name: 'node.exe', command: '' }), true, 'node with an unreadable command may be');
+assert.equal(winMayBeClaude({ name: 'node.exe', command: 'node C:\\x\\claude-code\\cli.js' }), true);
+assert.equal(winMayBeClaude({ name: 'node.exe', command: 'node server.js' }), false);
+assert.equal(winMayBeClaude({ name: 'claude.exe', command: '' }), true);
 console.log('PASS  with children present, the running-stamp check always looks at the PTY root');
 assert.ok(!/claudeCheckFailed/.test(src), 'a failed check is never decided from the foreground name');
 assert.match(src, /if \(err\?\.code === 1\) return null; \/\/ ps exit 1: the PTY's own process is gone/, 'a root that is gone is no Claude');
