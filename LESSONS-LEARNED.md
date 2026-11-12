@@ -1093,3 +1093,15 @@
 - **FIX**: Measure in the real app: POST /perfProfile (electron/perf-profile.js) profiles the main process from inside via node:inspector Session, no flag, no port, no restart. Run it under the real load and read topApp before changing code.
 - **CONTEXT**: Any "Dobius is laggy / busy" report. Also: a smaller strip window for claudeTuiPresent was dropped after Codex showed a cut inside a long OSC title or column state changes the answer; cache unchanged buffers instead of reading less.
 - **DETECTION**: `grep -n "perfProfile" electron/voice-bridge.js docs/bridge-perf-profile.md`
+
+### Performance: 2026-11-12
+- **MISTAKE**: After PR 6's unchanged-buffer cache, `claudeTuiPresent` still stripped up to 256KB of every CHANGED tab each second to read 4KB of visible text: 23.4 of 27.5 busy percent of main on the live 46-tab app. Windowing it (PR 9) took four Codex rounds because `stripAnsi` itself had two old worst cases the full strip hid by luck: every OSC searched the rest of the string for an ST (256KB of `ESC ] BEL` blocked main ~30s, in released builds too), and cursor motion expands 3 bytes into 401 characters (35M characters for 256KB of `ESC[B`). Then column sums past 2^53 drifted between per-character and per-run addition.
+- **FIX**: `tuiVisibleTail` strips 16KB, 64KB, then the rest, each window cut right after a raw newline no ESC precedes (stripAnsi is at column 0 and outside every escape there), search capped at 64 tries. `stripAnsi` caches the next BEL/ST position, has a tail mode (pieces list, cached pads, plain-text runs) whose cost follows the input, and clamps columns at 1e9. Equivalence tests against the full strip on real fixtures and 20000 random strings, plus time-budget tests for each pathological buffer.
+- **CONTEXT**: This partly supersedes the 2026-11-11 note that a smaller window "changes the answer": cut at a newline boundary it does not, except an OSC/DCS payload holding a raw newline (accepted). Any scanner that searches ahead with indexOf per token is quadratic on a run of unterminated tokens; any "expand" step needs an output bound.
+- **DETECTION**: `grep -n "indexOf(" electron/*.js shared/*.js | grep -v "from)"` and check each one inside a loop for a cached or bounded search.
+
+### UI/UX: 2026-11-12
+- **MISTAKE**: The What's new dialog (`src/components/shared/WhatsNew.jsx`) is a flex column with `maxHeight` and `overflow: hidden`, and its scrolling body had only `overflowY: auto`. A flex child's default `min-height: auto` keeps it at its content height, so a long list pushed the Continue button out of the clipped box instead of scrolling. It fit with 3 versions and broke at 10.
+- **FIX**: The scrolling child gets `flex: 1 1 auto; min-height: 0`, and fixed rows (header, footer) get `flex-shrink: 0`. Ship-test with the longest content, not the usual.
+- **CONTEXT**: Every dialog or panel built as a column with a scrolling middle.
+- **DETECTION**: `grep -rn "overflowY: 'auto'" src | grep -v minHeight`
