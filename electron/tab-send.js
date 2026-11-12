@@ -124,7 +124,8 @@ export function startsClaude(message, depth = 0) {
   let prevOption = false;
   for (let k = 0; k < args.length; k += 1) {
     const a = args[k];
-    if (a.lead && /^-{1,2}[A-Za-z0-9]/.test(a.text)) { prevOption = true; continue; } // a lone `-` is punctuation, not an option
+    // An option, quoted or not (`"--resume"` reaches Claude the same); a lone `-` is punctuation, not an option.
+    if (/^-{1,2}[A-Za-z0-9]/.test(a.text)) { prevOption = true; continue; }
     if (!prevOption) return false; // a bare word where an option belongs: it is a message (`claude is great`)
     prevOption = false;
   }

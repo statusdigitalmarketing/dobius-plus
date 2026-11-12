@@ -174,9 +174,13 @@ export function winMayBeClaude(row) {
   if (/^\d+\.\d+\.\d+/.test(base)) return !row?.command || /claude/i.test(row.command);
   if (!['node', 'bun', 'deno'].includes(base)) return false;
   if (!row?.command) return true;
-  // Judged by the script it runs; with none found (`node -e`, a REPL) by the whole line.
-  const n = nodeScript(splitWinCommandLine(row.command));
-  return /claude/i.test(n ? n.script : row.command);
+  // Judged by the script it runs; with none found (`node -e`, a REPL) by the whole line. Any argument that IS Claude's
+  // entrypoint also counts, so an option this file does not know (its value read as the script) leaves doubt rather
+  // than clearing a live session's stamp (Codex, PR 7).
+  const argv = splitWinCommandLine(row.command);
+  const n = nodeScript(argv);
+  if (!n) return /claude/i.test(row.command);
+  return /claude/i.test(n.script) || argv.slice(1).some((a) => /[\\/]/.test(a) && isClaudeEntrypoint(String(a).replace(/\\/g, '/')));
 }
 
 // When no Claude was found among a shell's dated programs (`progs`, from shellPrograms): could one still be there? A
@@ -204,8 +208,26 @@ export function winShellMayHoldClaude(rows, shellPid, progs) {
  */
 // The script a JS runtime runs: the first argument after its own options, skipping the value of an option that takes
 // one as the next word (`--title worker`, `-r hook.js`). null when there is none (`node -e ...`, a REPL). Codex, PR 7.
-const RUNTIME_VALUE_OPTS = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader', '--title', '-C',
-  '--conditions', '--input-type', '--inspect-port', '--env-file', '--watch-path', '--preload', '--cwd', '--config']);
+// Every option `node --help` (v26) lists with a required value, plus older Node spellings and Bun's own. A runtime
+// option missing here only matters when its value is a path: then the Claude entrypoint check in winMayBeClaude still
+// reads the line as doubt, never as "no Claude".
+const RUNTIME_VALUE_OPTS = new Set([
+  '-r', '--require', '-C', '--conditions', '--import', '--loader', '--experimental-loader', '--title', '--input-type',
+  '--inspect-port', '--inspect-publish-uid', '--env-file', '--env-file-if-exists', '--watch-path', '--watch-kill-signal',
+  '--redirect-warnings', '--allow-fs-read', '--allow-fs-write', '--build-sea', '--build-snapshot-config',
+  '--cpu-prof-dir', '--cpu-prof-interval', '--cpu-prof-name', '--diagnostic-dir', '--disable-proto', '--disable-warning',
+  '--dns-result-order', '--experimental-config-file', '--experimental-sea-config', '--experimental-default-type',
+  '--experimental-policy', '--policy-integrity', '--heap-prof-dir', '--heap-prof-interval', '--heap-prof-name',
+  '--heapsnapshot-near-heap-limit', '--heapsnapshot-signal', '--icu-data-dir', '--localstorage-file',
+  '--max-http-header-size', '--max-old-space-size-percentage', '--network-family-autoselection-attempt-timeout',
+  '--openssl-config', '--report-dir', '--report-directory', '--report-filename', '--report-signal', '--run',
+  '--secure-heap', '--secure-heap-min', '--snapshot-blob', '--test-concurrency', '--test-coverage-branches',
+  '--test-coverage-exclude', '--test-coverage-functions', '--test-coverage-include', '--test-coverage-lines',
+  '--test-global-setup', '--test-name-pattern', '--test-reporter', '--test-reporter-destination', '--test-rerun-failures',
+  '--test-shard', '--test-skip-pattern', '--test-timeout', '--tls-cipher-list', '--tls-keylog', '--trace-event-categories',
+  '--trace-event-file-pattern', '--trace-require-module', '--unhandled-rejections', '--use-largepages', '--v8-pool-size',
+  '--preload', '--cwd', '--config', '--tsconfig-override', '--define', '--external', '--port',
+]);
 // Options after which nothing is a script: eval/print (any spelling: -e, -pe, -esource, --eval=...), interactive,
 // syntax check, version, help.
 const runtimeNoScript = (a) => /^-(?!-)[A-Za-z]*[epivhc]/.test(a) || /^--(?:eval|print|interactive|check|version|help)(?:=|$)/.test(a);

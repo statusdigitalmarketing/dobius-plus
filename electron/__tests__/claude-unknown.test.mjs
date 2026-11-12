@@ -68,13 +68,17 @@ assert.match(src, /if \(winShellMayHoldClaude\(rows, pid, progs\)\) return CLAUD
   assert.equal(winShellMayHoldClaude([shell, vim], 10, shellPrograms([shell, vim], 10)), false, 'notepad with claude.txt is not');
   // A node script with claude only in an argument is not Claude; one whose script names claude may be (Codex, PR 7).
   const { winMayBeClaude: may } = await import('../win-proc.js');
+  const { winClaudeCommand: wcc } = await import('../win-proc.js');
   assert.equal(may({ name: 'node.exe', command: 'node.exe C:\\tools\\server.js --log C:\\tmp\\claude.log' }), false, 'a node script logging to claude.log is not');
   assert.equal(may({ name: 'node.exe', command: 'node.exe --max-old-space-size=4096 C:\\x\\claude-code\\cli.js' }), true, 'a node script named claude may be');
   assert.equal(may({ name: 'node.exe', command: '' }), true, 'an unreadable node command may be');
   const cli = 'C:\\tools\\node_modules\\@anthropic-ai\\claude-code\\cli.js';
   assert.equal(may({ name: 'node.exe', command: `node.exe --title worker ${cli} --resume ab` }), true, 'a value-taking option is skipped to find cli.js');
   assert.equal(may({ name: 'node.exe', command: 'node.exe --title claude C:\\tools\\server.js' }), false, 'an option VALUE naming claude is not the script');
-  const { winClaudeCommand: wcc } = await import('../win-proc.js');
+  assert.equal(may({ name: 'node.exe', command: `node.exe --redirect-warnings C:\\tmp\\warnings.log ${cli} --resume ab` }), true, '--redirect-warnings takes a value');
+  assert.deepEqual(wcc(`node.exe --redirect-warnings C:\\tmp\\warnings.log ${cli} --resume 4b06acc2-419d-4a2d-8198-4d7623e8f747`), { sessionId: '4b06acc2-419d-4a2d-8198-4d7623e8f747' });
+  assert.equal(may({ name: 'node.exe', command: 'node.exe --redirect-warnings C:\\tmp\\claude.log C:\\tools\\server.js' }), false, 'its value naming claude is not the script');
+  assert.equal(may({ name: 'node.exe', command: `node.exe --some-future-opt C:\\tmp\\x.log ${cli}` }), true, 'an unknown option before cli.js leaves doubt, never no-Claude');
   assert.deepEqual(wcc(`node.exe --title worker ${cli} --resume 4b06acc2-419d-4a2d-8198-4d7623e8f747`), { sessionId: '4b06acc2-419d-4a2d-8198-4d7623e8f747' }, 'and it is read as Claude with its session');
   assert.equal(may({ name: '2.1.319.exe', command: '' }), true, 'an unreadable native versioned binary may be');
   assert.equal(may({ name: '2.1.319.exe', command: 'C:\\Users\\j\\.local\\share\\claude\\versions\\2.1.319.exe -c' }), true, 'a readable one under claude\\versions may be');
