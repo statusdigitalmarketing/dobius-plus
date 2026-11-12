@@ -81,7 +81,7 @@ import {
   loadConfig, saveConfig, getProjectConfig, setProjectConfig, getCheckpoints, saveCheckpoints,
   getPinnedSessions, setPinnedSessions, getPinnedProjects, setPinnedProjects, getSettings, updateSettings, flushConfig, flushConfigAsync, persistConfigNow,
   getSessionTags, setSessionTag, removeSessionTag,
-  getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink, clearSessionTabRunning, markSessionTabUncertain,
+  getSessionTabMap, setSessionTabLink, removeSessionTabLink, touchSessionTabLink, clearSessionTabRunning, markSessionTabUncertain, recordLaunch,
   getTabLabelsById, recordSessionTabNames,
   getAgentMemory, setAgentMemory, appendJournalEntry,
   getOrchestrationRuns, saveOrchestrationRun, deleteOrchestrationRun,
@@ -5617,6 +5617,7 @@ app.whenReady().then(() => {
   // electron/auto-resume.js. Its startupDelay is extended by the restore
   // stagger so it waits for the LAST reopened window before deciding the live
   // set is complete.
+  recordLaunch(); // before auto-resume reads it: when the previous run started, to tell a crash from a clean quit
   void startAutoResume({ startupDelayMs: 1500 + restoreStaggerMs });
 
   app.on('activate', () => {

@@ -71,6 +71,11 @@ assert.match(src, /if \(winShellMayHoldClaude\(rows, pid, progs\)\) return CLAUD
   assert.equal(may({ name: 'node.exe', command: 'node.exe C:\\tools\\server.js --log C:\\tmp\\claude.log' }), false, 'a node script logging to claude.log is not');
   assert.equal(may({ name: 'node.exe', command: 'node.exe --max-old-space-size=4096 C:\\x\\claude-code\\cli.js' }), true, 'a node script named claude may be');
   assert.equal(may({ name: 'node.exe', command: '' }), true, 'an unreadable node command may be');
+  const cli = 'C:\\tools\\node_modules\\@anthropic-ai\\claude-code\\cli.js';
+  assert.equal(may({ name: 'node.exe', command: `node.exe --title worker ${cli} --resume ab` }), true, 'a value-taking option is skipped to find cli.js');
+  assert.equal(may({ name: 'node.exe', command: 'node.exe --title claude C:\\tools\\server.js' }), false, 'an option VALUE naming claude is not the script');
+  const { winClaudeCommand: wcc } = await import('../win-proc.js');
+  assert.deepEqual(wcc(`node.exe --title worker ${cli} --resume 4b06acc2-419d-4a2d-8198-4d7623e8f747`), { sessionId: '4b06acc2-419d-4a2d-8198-4d7623e8f747' }, 'and it is read as Claude with its session');
   assert.equal(may({ name: '2.1.319.exe', command: '' }), true, 'an unreadable native versioned binary may be');
   assert.equal(may({ name: '2.1.319.exe', command: 'C:\\Users\\j\\.local\\share\\claude\\versions\\2.1.319.exe -c' }), true, 'a readable one under claude\\versions may be');
   assert.equal(may({ name: '1.2.3.exe', command: 'C:\\apps\\other\\1.2.3.exe' }), false, 'another versioned exe is not');

@@ -623,7 +623,7 @@ test('a command that starts Claude, sent to a tab where Claude runs: refused, no
   for (const cmd of ['claude --resume "4b06acc2-419d"', "claude -r '4b06acc2-419d'", 'exec claude --continue', 'command claude --resume 4b06acc2-419d',
     'env FOO=1 claude -c', 'CLAUDE_CONFIG_DIR=/x claude --resume ab', '~/.local/bin/claude --resume ab', '\\claude', 'nohup claude',
     'claude --resume 4b06acc2-419d;', '/usr/local/bin/claude -c', '"claude" --resume 4b06acc2-419d', "'/usr/local/bin/claude' -c", 'claude --model opus', 'claude --resume ab --model opus --dangerously-skip-permissions', 'env -u ANTHROPIC_API_KEY claude -c',
-    'env -S "claude -c"', 'CLAUDE_CONFIG_DIR="/tmp/my account" claude -c', "A='x' B=\"y z\" claude --resume 'ab'", 'claude --resume="ab"', 'exec -c claude --resume 4b06acc2-419d', 'exec -a myclaude claude -c', 'exec -cl claude']) {
+    'env -S "claude -c"', 'CLAUDE_CONFIG_DIR="/tmp/my account" claude -c', "A='x' B=\"y z\" claude --resume 'ab'", 'claude --resume="ab"', 'exec -c claude --resume 4b06acc2-419d', 'exec -a myclaude claude -c', 'exec -cl claude', 'claude.exe --resume 4b06acc2-419d', 'claude.cmd -c', 'Claude.EXE', '& "C:\\Users\\j\\.local\\bin\\claude.exe" --resume ab', 'C:\\tools\\claude.cmd -c', '.\\claude.exe']) {
     const { t, deps } = fakeTab();
     const r = await sendToTab(deps, 'tab', cmd);
     assert.equal(r.body.reason, 'claude-running', cmd);
@@ -640,7 +640,7 @@ test('the same command to a shell tab is typed and Enter pressed; a message that
   const r2 = await sendToTab(talk.deps, 'tab', 'please run claude --resume ab-12 in the other tab');
   assert.equal(r2.body.ok, true);
   assert.equal(talk.t.pasted, 'please run claude --resume ab-12 in the other tab');
-  for (const link of ['https://example.com/claude', 'example.com/claude', 'claude is great', 'claude -p hello world', 'claude --resume ab; rm x', 'claude && ls', '"exec" claude', 'claude "-c" now', 'claude - hello', 'claude -- hello there']) { // a message, not a program
+  for (const link of ['https://example.com/claude', 'example.com/claude', 'claude is great', 'claude -p hello world', 'claude --resume ab; rm x', 'claude && ls', '"exec" claude', 'claude "-c" now', 'claude - hello', 'claude -- hello there', 'claude.exe is installed', 'claude.txt', 'C:/x\\claude.exe', 'http://x/claude.exe']) { // a message, not a program
     const u = fakeTab();
     const r3 = await sendToTab(u.deps, 'tab', link);
     assert.equal(r3.body.ok, true, link);

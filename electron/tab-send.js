@@ -68,13 +68,17 @@ function shellWords(text) {
   }
   return out;
 }
+// The program word: claude, or a path to it (/, ~/, ./, ../ on the Mac; C:\, .\, ..\, ~\ in PowerShell; never a URL),
+// with Windows' launcher endings (claude.exe, claude.cmd, ...). Case does not matter: neither filesystem cares.
 function isClaudeProgram(name) {
   let n = name.startsWith('\\') ? name.slice(1) : name;
-  if (n.includes('/')) {
-    if (!/^(?:~|\.{1,2})?\//.test(n) || n.includes(':')) return false;
-    n = n.slice(n.lastIndexOf('/') + 1);
+  if (/[\\/]/.test(n)) {
+    const posix = /^(?:~|\.{1,2})?\//.test(n) && !/[:\\]/.test(n);
+    const win = /^(?:[A-Za-z]:\\|\.{1,2}\\|~\\)/.test(n) && !n.includes('/');
+    if (!posix && !win) return false;
+    n = n.slice(Math.max(n.lastIndexOf('/'), n.lastIndexOf('\\')) + 1);
   }
-  return n === 'claude';
+  return /^claude(?:\.(?:exe|cmd|bat|ps1))?$/i.test(n);
 }
 export function startsClaude(message, depth = 0) {
   let s = String(message ?? '').trim();
@@ -85,6 +89,7 @@ export function startsClaude(message, depth = 0) {
     if (k < 0) return false;
     s = s.slice(k + 2).trim();
   }
+  if (/^&\s/.test(s)) s = s.slice(1).trim(); // PowerShell's call operator: & "C:\x\claude.exe" --resume <id>
   if (/[;&]/.test(s)) return false; // anything chained after it is more than a launch
   const words = shellWords(s);
   if (!words || !words.length) return false;

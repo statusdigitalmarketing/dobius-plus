@@ -29,7 +29,7 @@
  *   - Window close: caller invokes cancelTabsForProject(projectPath).
  */
 
-import { getAutoResume, getSessionTabMap, loadConfig, clearSessionTabUncertain } from './config-manager.js';
+import { getAutoResume, getSessionTabMap, loadConfig, clearSessionTabUncertain, getPreviousLaunchAt } from './config-manager.js';
 import {
   listTerminals, writeTerminal, releaseSessionResume, claimSessionResume,
   getTerminalWebContentsId,
@@ -110,9 +110,10 @@ function buildResumeCommand(projectPath, sessionId, tabId) {
 
 /**
  * Pure: which session each tab was running at the last quit, from the saved links. Exported for tests.
- * tabMap: config.sessionTabMap; lastQuitAt: config.lastQuitAt (0 when unknown); now: Date.now().
+ * tabMap: config.sessionTabMap; lastQuitAt: config.lastQuitAt (0 when unknown); now: Date.now(); prevLaunchAt: when the
+ * run before this one started (0 when unknown).
  */
-export function pickLaunchSessions(tabMap, lastQuitAt, now) {
+export function pickLaunchSessions(tabMap, lastQuitAt, now, prevLaunchAt = 0) {
   const RUNNING_AT_QUIT_SLACK_MS = 20 * 60 * 1000;
   // A stamp kept through failed checks (uncertainSince) counts only if the checks had been failing for a short time
   // when the app quit: transient timeouts on a loaded Mac, not a session that may have been stopped minutes before
@@ -170,7 +171,10 @@ export function pickLaunchSessions(tabMap, lastQuitAt, now) {
     }
     // The uncertainty ends at the quit only when that quit came after it began; an older quit (a crash since) is not its
     // end, so it runs to now (Codex, PR 7: an earlier quit gave a negative duration and let a long uncertainty through).
-    const uncertainEnd = typeof entry.uncertainSince === 'number' && lastQuitAt >= entry.uncertainSince ? lastQuitAt : now;
+    // Nor is a quit from before the run that just ended: that run started later and crashed, so its doubt (carried in
+    // from before, or a launch that was cancelled) also runs to now (Codex, PR 7).
+    const quitEndedLastRun = lastQuitAt >= prevLaunchAt;
+    const uncertainEnd = typeof entry.uncertainSince === 'number' && quitEndedLastRun && lastQuitAt >= entry.uncertainSince ? lastQuitAt : now;
     const longUncertain = typeof entry.uncertainSince === 'number' && (uncertainEnd - entry.uncertainSince) > UNCERTAIN_MAX_MS;
     const prev = tabToBest.get(entry.tabId);
     if (!prev || ranAt > prev.lastRunningAt) {
@@ -229,7 +233,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   //     supported flow, see r2 note below); freshness is the staleness guard.
   const cfgAll = loadConfig();
   const lastQuitAt = typeof cfgAll.lastQuitAt === 'number' ? cfgAll.lastQuitAt : 0;
-  const { tabToBest, skippedStale, skippedHeuristic, skippedUncertain, uncertainTabs } = pickLaunchSessions(getSessionTabMap() || {}, lastQuitAt, Date.now());
+  const { tabToBest, skippedStale, skippedHeuristic, skippedUncertain, uncertainTabs } = pickLaunchSessions(getSessionTabMap() || {}, lastQuitAt, Date.now(), getPreviousLaunchAt());
   // Decided here, so neither the launch pass nor a window opening later logs these tabs again (Codex, PR 7).
   for (const tabId of uncertainTabs) { handled.add(tabId); noteResume(tabId, 'not resumed: its Claude could not be checked for over 2 minutes before the quit'); }
   if (skippedHeuristic > 0) {

@@ -174,11 +174,9 @@ export function winMayBeClaude(row) {
   if (/^\d+\.\d+\.\d+/.test(base)) return !row?.command || /claude/i.test(row.command);
   if (!['node', 'bun', 'deno'].includes(base)) return false;
   if (!row?.command) return true;
-  const argv = splitWinCommandLine(row.command);
-  // The script is the first argument after the runtime's own options; with none (`node -e`, a REPL) fall back to the
-  // whole line.
-  const script = argv.slice(1).find((a) => !a.startsWith('-'));
-  return /claude/i.test(script ?? row.command);
+  // Judged by the script it runs; with none found (`node -e`, a REPL) by the whole line.
+  const n = nodeScript(splitWinCommandLine(row.command));
+  return /claude/i.test(n ? n.script : row.command);
 }
 
 // When no Claude was found among a shell's dated programs (`progs`, from shellPrograms): could one still be there? A
@@ -204,9 +202,22 @@ export function winShellMayHoldClaude(rows, shellPid, progs) {
  * flags (--title X) and string-running ones (-e, -pe, --eval=) in many
  * spellings, and misreading one makes an unrelated process look like Claude.
  */
+// The script a JS runtime runs: the first argument after its own options, skipping the value of an option that takes
+// one as the next word (`--title worker`, `-r hook.js`). null when there is none (`node -e ...`, a REPL). Codex, PR 7.
+const RUNTIME_VALUE_OPTS = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader', '--title', '-C',
+  '--conditions', '--input-type', '--inspect-port', '--env-file', '--watch-path', '--preload', '--cwd', '--config']);
+// Options after which nothing is a script: eval/print (any spelling: -e, -pe, -esource, --eval=...), interactive,
+// syntax check, version, help.
+const runtimeNoScript = (a) => /^-(?!-)[A-Za-z]*[epivhc]/.test(a) || /^--(?:eval|print|interactive|check|version|help)(?:=|$)/.test(a);
 function nodeScript(argv) {
-  if (argv.length < 2 || argv[1].startsWith('-')) return null;
-  return { script: argv[1], rest: argv.slice(2) };
+  for (let i = 1; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--') return i + 1 < argv.length ? { script: argv[i + 1], rest: argv.slice(i + 2) } : null;
+    if (!a.startsWith('-')) return { script: a, rest: argv.slice(i + 1) };
+    if (runtimeNoScript(a)) return null;
+    if (RUNTIME_VALUE_OPTS.has(a)) i += 1;
+  }
+  return null;
 }
 
 /**

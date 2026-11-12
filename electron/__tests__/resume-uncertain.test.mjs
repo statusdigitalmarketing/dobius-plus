@@ -103,5 +103,24 @@ console.log('PASS  uncertainty starts at the first failed check and ends on a co
   console.log('PASS  doubt first seen by the quit check is dated at the quit');
 }
 
+// Codex, PR 7 round 13: a quit from BEFORE the run that just ended (that run started later and crashed) does not end its
+// doubt, whether the doubt was carried in or the launch's resume was cancelled. The run's start is recorded at launch.
+{
+  const L = { 'sess-cancel-0015': link(15, { lastRunningAt: QUIT - 40_000, uncertainSince: QUIT - 30_000 }) };
+  assert.equal(pickLaunchSessions(L, QUIT, QUIT + 11 * 60_000, QUIT + 60_000).tabToBest.size, 0, 'the last run started after the quit and crashed: doubt runs to now');
+  assert.equal(pickLaunchSessions(L, QUIT, QUIT + 11 * 60_000, QUIT - 3_600_000).tabToBest.size, 1, 'the quit ended the last run: doubt ends at the quit');
+  assert.equal(pickLaunchSessions(L, QUIT, QUIT + 11 * 60_000).tabToBest.size, 1, 'no launch record (an older version wrote the quit): as before');
+  const first = cm.recordLaunch(1_000);
+  assert.equal(cm.recordLaunch(2_000), 1_000, 'each launch returns when the run before it started');
+  assert.equal(cm.getPreviousLaunchAt(), 1_000);
+  assert.equal(typeof first, 'number');
+  const { readFileSync } = await import('node:fs');
+  const mainSrc = readFileSync(new URL('../main.js', import.meta.url), 'utf8');
+  assert.match(mainSrc, /recordLaunch\(\);[^\n]*\n\s*void startAutoResume\(/, 'the launch is recorded right before auto-resume reads it');
+  const arSrc = readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
+  assert.match(arSrc, /pickLaunchSessions\(getSessionTabMap\(\) \|\| \{\}, lastQuitAt, Date\.now\(\), getPreviousLaunchAt\(\)\)/, 'auto-resume passes it');
+  console.log('PASS  a crashed run\'s doubt is measured to the relaunch, not to an older quit');
+}
+
 process.exit(0);
 

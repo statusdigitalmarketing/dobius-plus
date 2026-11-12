@@ -1105,6 +1105,23 @@ export function markSessionTabUncertain(sessionId, observedAt = Date.now()) {
   saveConfig(config);
 }
 
+// When the run before this one started (config.lastLaunchAt as it was at this launch), or 0 when unknown. Read once by
+// recordLaunch at startup. Auto-resume uses it to tell a quit that ended that run from an older quit that a crash
+// left behind (Codex, PR 7).
+let previousLaunchAt = 0;
+export function recordLaunch(now = Date.now()) {
+  try {
+    const config = loadConfig();
+    previousLaunchAt = typeof config.lastLaunchAt === 'number' && config.lastLaunchAt > 0 ? config.lastLaunchAt : 0;
+    config.lastLaunchAt = now;
+    saveConfig(config);
+  } catch (err) {
+    console.warn('[config] could not record this launch:', err?.message || err);
+  }
+  return previousLaunchAt;
+}
+export function getPreviousLaunchAt() { return previousLaunchAt; }
+
 /**
  * End a stretch of doubt without confirming the session: auto-resume just started it again, so doubt from the run before
  * the quit says nothing about this one. A failed check from here on starts a new stretch, dated then, so a crash later
