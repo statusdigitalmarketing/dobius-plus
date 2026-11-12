@@ -230,7 +230,8 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   const cfgAll = loadConfig();
   const lastQuitAt = typeof cfgAll.lastQuitAt === 'number' ? cfgAll.lastQuitAt : 0;
   const { tabToBest, skippedStale, skippedHeuristic, skippedUncertain, uncertainTabs } = pickLaunchSessions(getSessionTabMap() || {}, lastQuitAt, Date.now());
-  for (const tabId of uncertainTabs) noteResume(tabId, 'not resumed: its Claude could not be checked for over 2 minutes before the quit');
+  // Decided here, so neither the launch pass nor a window opening later logs these tabs again (Codex, PR 7).
+  for (const tabId of uncertainTabs) { handled.add(tabId); noteResume(tabId, 'not resumed: its Claude could not be checked for over 2 minutes before the quit'); }
   if (skippedHeuristic > 0) {
     console.log(`[auto-resume] skipped ${skippedHeuristic} heuristically-linked (bare \`claude\`) session(s): named only, never auto-resumed`);
   }
@@ -300,6 +301,9 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   if (waiting > 0) console.log(`[auto-resume] ${waiting} session(s) wait for their window to be opened`);
   // Each of those gets its own line, so a window that never opens still leaves a reason (Codex, PR 7).
   for (const tabId of tabToBest.keys()) if (!handled.has(tabId)) noteResume(tabId, 'waiting: its window was not open at launch; it resumes when that window opens');
+  // Seen, then closed before the last poll: the launch pass took it but nothing below visits it.
+  const inCandidates = new Set(candidates.map((c) => c.tabId));
+  for (const tabId of firstSeen.keys()) if (!inCandidates.has(tabId)) noteResume(tabId, 'not resumed: its tab closed before the resume was queued');
   if (candidates.length === 0) {
     console.log('[auto-resume] no live tabs with mapped sessions after 15s budget, nothing to do');
     return;

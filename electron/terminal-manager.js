@@ -817,7 +817,8 @@ async function ptySelfClaude(pid) {
   if (!line) return null;
   const command = line.slice(24).trim();
   if (!isClaudeCommand(command)) {
-    if (/claude/i.test(command)) throw new Error('a program there names claude');
+    // Naming claude is only doubt when the classifier cannot rule it out (`tail -f /tmp/claude.log` it can: Codex, PR 7).
+    if (/claude/i.test(command) && (command.length > 4096 || classifyClaudeProcess(command).kind !== 'not-claude')) throw new Error('a program there names claude');
     return null;
   }
   const kind = command.length > 4096 ? 'maybe' : classifyClaudeProcess(command).kind;
@@ -1517,7 +1518,12 @@ async function winRowsFor(entry, { fresh = false, gone = false } = {}) {
   let rows = await winProcessTable({ fresh });
   if (!ok(rows) && !fresh) rows = await winProcessTable({ fresh: true });
   if (ok(rows)) return rows;
-  return gone && Array.isArray(rows) ? WIN_ROOT_GONE : null;
+  if (!gone || !Array.isArray(rows)) return null;
+  // Gone only when the table shows it: no row for the shell's pid, or one whose creation time names another process.
+  // A row with no creation time cannot be judged and stays "could not tell" (Codex, PR 7).
+  const root = rows.find((r) => r.pid === pid);
+  if (!root) return WIN_ROOT_GONE;
+  return root.startFt == null || !Number.isFinite(root.startedAt) ? null : WIN_ROOT_GONE;
 }
 
 // strict: what cannot be told (no process rows, too many programs, two Claudes, one that only names claude) throws.

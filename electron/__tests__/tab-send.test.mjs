@@ -622,7 +622,7 @@ test('a command that starts Claude, sent to a tab where Claude runs: refused, no
   // Quoted ids start Claude just the same once the shell strips the quotes (Codex, PR 7).
   for (const cmd of ['claude --resume "4b06acc2-419d"', "claude -r '4b06acc2-419d'", 'exec claude --continue', 'command claude --resume 4b06acc2-419d',
     'env FOO=1 claude -c', 'CLAUDE_CONFIG_DIR=/x claude --resume ab', '~/.local/bin/claude --resume ab', '\\claude', 'nohup claude',
-    'claude --resume 4b06acc2-419d;', '/usr/local/bin/claude -c']) {
+    'claude --resume 4b06acc2-419d;', '/usr/local/bin/claude -c', '"claude" --resume 4b06acc2-419d', "'/usr/local/bin/claude' -c"]) {
     const { t, deps } = fakeTab();
     const r = await sendToTab(deps, 'tab', cmd);
     assert.equal(r.body.reason, 'claude-running', cmd);

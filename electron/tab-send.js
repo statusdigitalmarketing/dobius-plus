@@ -33,8 +33,8 @@ const fail = (status, error, extra = {}) => ({ status, body: { ok: false, ...ext
 // Meant for the tab's shell: sent to a tab where Claude already runs, it reached that Claude as a prompt and was queued
 // as a message (bug report 2026-11-11). Narrow on purpose: a message that merely mentions claude is a message.
 // Prefixes a shell runs the command through (exec, command, builtin, nohup, env, VAR=value), a file path (/, ~/, ./,
-// ../; never a URL) or backslash before the name, and a trailing ; or & all still start Claude (Codex, PR 7).
-export const STARTS_CLAUDE_RE = /^\s*(?:cd\s+[^\n;&|]+&&\s*)?(?:(?:exec|command|builtin|nohup)\s+|env(?:\s+-\S+)*\s+|[A-Za-z_]\w*=\S*\s+)*(?:(?:~|\.{1,2})?\/(?:[^\s\/:]+\/)*|\\)?claude(?:\s+(?:--resume|-r|--continue|-c)(?:\s+(?:"[\w-]+"|'[\w-]+'|[\w-]+))?)?\s*[;&]?\s*$/;
+// ../; never a URL) or backslash before the name, a quoted name, and a trailing ; or & all still start Claude (Codex, PR 7).
+export const STARTS_CLAUDE_RE = /^\s*(?:cd\s+[^\n;&|]+&&\s*)?(?:(?:exec|command|builtin|nohup)\s+|env(?:\s+-\S+)*\s+|[A-Za-z_]\w*=\S*\s+)*(["']?)(?:(?:~|\.{1,2})?\/(?:[^\s\/:"']+\/)*|\\)?claude\1(?:\s+(?:--resume|-r|--continue|-c)(?:\s+(?:"[\w-]+"|'[\w-]+'|[\w-]+))?)?\s*[;&]?\s*$/;
 const sending = new Set();
 // Every paste this route made that was not followed by its Enter, per tab. Two uses:
 // 1. Never paste twice. Until a send SEES Claude's box hold text after it (`seen`), the paste may still be queued in the
