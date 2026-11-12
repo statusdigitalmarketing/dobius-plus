@@ -37,6 +37,9 @@ const CSI_RE = /^\x1b\[([0-9;?]*)([ -/]*)([@-~])/;
 // Output goes into a list of pieces that drops whole pieces off the front once the rest still covers `tail`, padding
 // comes from a cache, and plain text is taken in runs. The default mode keeps its per-character appends, so a result
 // a caller holds never points into the input string.
+// Columns stop at COL_MAX so every column sum is exact (Codex P2: past 2^53 adding 1 per character and adding a
+// run's length in one go disagree). No screen has a billionth column.
+const COL_MAX = 1e9;
 const PADS = []; // ' '.repeat(k) for k 0..400, the most any one escape pads: at most 401 small strings
 const pad = (k) => PADS[k] ?? (PADS[k] = ' '.repeat(k));
 export function stripAnsi(s, tail = 0) {
@@ -86,9 +89,9 @@ export function stripAnsi(s, tail = 0) {
           const fin = m[3];
           if (fin === 'C') {
             const k = Math.min(n || 1, 400);
-            emit(pad(k)); col += k;
+            emit(pad(k)); col = Math.min(col + k, COL_MAX);
           } else if (fin === 'G') {
-            const target = Math.max(1, n || 1) - 1;
+            const target = Math.min(Math.max(1, n || 1) - 1, COL_MAX);
             if (target > col) { emit(pad(Math.min(target - col, 400))); col = target; }
             else if (target === 0 && col > 0) { emit('\r'); col = 0; }
             else if (target < col) { emit(' '); col = target; }
@@ -111,12 +114,12 @@ export function stripAnsi(s, tail = 0) {
       let j = i + 1;
       while (j < src.length) { const c = src.charCodeAt(j); if (c === 27 || c === 10 || c === 13) break; j += 1; }
       emit(src.slice(i, j));
-      col += j - i;
+      col = Math.min(col + (j - i), COL_MAX);
       i = j;
       continue;
     }
     out += ch;
-    col += 1;
+    if (col < COL_MAX) col += 1;
     i += 1;
   }
   return tail > 0 ? pieces.slice(head).join('').slice(-tail) : out;

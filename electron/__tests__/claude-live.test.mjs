@@ -138,6 +138,8 @@ ok('empty/null input is not live');
   // column the full scan has there (the full scan never resets it, the ESC swallowed the newline).
   for (const after of [2000, 9000, 30000]) cases.push('x'.repeat(100000) + 'Q'.repeat(60) + '\u001b\n' + 'ab\u001b[5Gz\n' + 'v'.repeat(after));
   cases.push('', 'plain', dense, dense + 'tail\n', 'a\n'.repeat(200000), '\u001b\n'.repeat(50000) + 'end', '\u001b\n'.repeat(131072), 'z'.repeat(20000) + '\u001b\n'.repeat(40) + 'tail\n' + 'w'.repeat(5000));
+  // Codex P2: a column past 2^53 (columns now stop at 1e9 in both modes, so this compares like with like).
+  cases.push('\u001b[9007199254740994Gesc to \u001b[9007199254740994Ginterrupt', '\u001b[2000000000G' + 'x'.repeat(5000) + '\u001b[5G\u001b[B');
   for (const [i, c] of cases.entries()) assert.equal(tuiVisibleTail(c), ref(c), `case ${i}`);
   ok(`windowed strip equals the full strip on ${cases.length} buffers`);
 }
@@ -165,6 +167,7 @@ ok('empty/null input is not live');
   let seed = 99;
   const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
   const parts = ['\u001b]', '\u0007', '\u001b\\', '\u001bP', '\u001b[', '\u001b', '\n', '\r', 'ab', '0;t', '\u001b[5G', '\u001b[1G',
+    '\u001b[9007199254740994G', '\u001b[999999999G', '\u001b[4000000000C',
     '\u001b[400G', '\u001b[3C', '\u001b[2B', '\u001b[E', '\u001bX', 'zz ', '\u001b[0m', 'x'];
   for (let k = 0; k < 20000; k += 1) {
     let s = '';
