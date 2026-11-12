@@ -122,7 +122,8 @@ export async function profileMain(seconds, logDir, { now = () => new Date() } = 
     let file = null;
     if (logDir) {
       let full = null;
-      let writing = false; // only a failed write of OURS is removed; a prune failure never touches that name
+      let owned = false; // set only once OUR exclusive open succeeded: only then is a failed save's file ours to remove
+      let fh = null;
       try {
         fs.mkdirSync(logDir, { recursive: true });
         file = `main-${now().toISOString().replace(/[:.]/g, '-')}.cpuprofile`;
@@ -133,14 +134,17 @@ export async function profileMain(seconds, logDir, { now = () => new Date() } = 
         // 'wx': a new file only. Never follows or replaces something already at that name (a symlink, a same-
         // millisecond earlier profile). Written asynchronously: a stalled disk must not hold the main thread (Codex,
         // PR 6). `running` stays set until it finishes, so a second profile cannot start meanwhile.
-        writing = true;
-        await fs.promises.writeFile(full, JSON.stringify(profile), { flag: 'wx', mode: 0o600 });
+        fh = await fs.promises.open(full, 'wx', 0o600);
+        owned = true;
+        await fh.writeFile(JSON.stringify(profile));
       } catch (err) {
         console.warn(`[perf-profile] could not save the profile: ${err.message}`);
-        // A write that failed after creating the file (disk full) leaves a partial one: ours, so remove it. EEXIST means
-        // something else already had the name, and it is never touched.
-        if (writing && err?.code !== 'EEXIST') fs.promises.unlink(full).catch(() => {});
+        // A write that failed after our open (disk full) leaves a partial file: ours, so remove it. A failed open
+        // (EEXIST, EMFILE, anything) never created it, so that name is never touched (Codex, PR 6).
+        if (owned) fs.promises.unlink(full).catch(() => {});
         file = null;
+      } finally {
+        if (fh) await fh.close().catch(() => {});
       }
     }
     return { ok: true, seconds: secs, file, ...summarizeProfile(profile) };

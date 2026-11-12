@@ -99,10 +99,12 @@ test('a write that fails part way: our partial file is removed and old profiles 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-perf-full-'));
   const old = ['2020', '2021', '2022', '2023'].map((y) => `main-${y}-01-01T00-00-00-000Z.cpuprofile`);
   for (const n of old) fs.writeFileSync(path.join(dir, n), '{}');
-  const real = fs.promises.writeFile;
-  fs.promises.writeFile = async (file, _data, opts) => {
-    await real(file, 'partial', opts); // created, then the disk fills
-    throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+  const real = fs.promises.open;
+  fs.promises.open = async (...args) => {
+    const fh = await real(...args); // created, then the disk fills part way through the write
+    const realWrite = fh.writeFile.bind(fh);
+    fh.writeFile = async () => { await realWrite('partial'); throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }); };
+    return fh;
   };
   try {
     const r = await profileMain(2, dir, { now: () => new Date('2031-01-01T00:00:00Z') });
@@ -111,7 +113,7 @@ test('a write that fails part way: our partial file is removed and old profiles 
     await new Promise((res) => setTimeout(res, 50)); // the unlink is not awaited
     assert.deepEqual(fs.readdirSync(dir).sort(), old.slice(-2), 'the partial file is gone and only the two newest old ones remain');
   } finally {
-    fs.promises.writeFile = real;
+    fs.promises.open = real;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -151,6 +153,25 @@ test('a folder that cannot be listed: nothing is saved and nothing there is remo
     assert.equal(fs.readFileSync(path.join(dir, taken), 'utf8'), 'someone else');
   } finally {
     fs.chmodSync(dir, 0o700);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Codex, PR 6 round 4: an open that fails for any reason but EEXIST (EMFILE when descriptors run out) never created
+// the file, so an existing file at that name must survive. Only a successful exclusive open makes the file ours.
+test('an open that fails (EMFILE) never removes a file already at that name', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-perf-emfile-'));
+  const taken = 'main-2031-01-01T00-00-00-000Z.cpuprofile';
+  fs.writeFileSync(path.join(dir, taken), 'someone else');
+  const real = fs.promises.open;
+  fs.promises.open = async () => { throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' }); };
+  try {
+    const r = await profileMain(2, dir, { now: () => new Date('2031-01-01T00:00:00Z') });
+    assert.equal(r.file, null);
+    await new Promise((res) => setTimeout(res, 50));
+    assert.equal(fs.readFileSync(path.join(dir, taken), 'utf8'), 'someone else');
+  } finally {
+    fs.promises.open = real;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
