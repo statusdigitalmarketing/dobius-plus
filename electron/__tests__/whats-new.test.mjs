@@ -45,15 +45,23 @@ test('plan: fresh install shows nothing and starts counting', () => {
   assert.deepEqual(plan({ current: '2.2.26', seen: null, existedAtStart: false, notes: N }), { sections: [], newSeen: '2.2.26' });
 });
 
-test('plan: first update with the feature shows only this version', () => {
-  const p = plan({ current: '2.2.26', seen: null, existedAtStart: true, notes: N });
-  assert.deepEqual(p.sections.map((s) => s.version), ['2.2.26']);
+test('plan: updating from a version before the popup shows every release up to this one', () => {
+  const p = plan({ current: '2.2.28', seen: null, existedAtStart: true, notes: N });
+  assert.deepEqual(p.sections.map((s) => s.version), ['2.2.28', '2.2.27', '2.2.26', '2.2.24']);
   assert.equal(p.newSeen, null);
 });
 
-test('plan: skipped releases, newest first, at most three, none past the running version', () => {
+test('plan: skipped releases, newest first, none past the running version', () => {
   const p = plan({ current: '2.2.29', seen: '2.2.24', existedAtStart: true, notes: N });
-  assert.deepEqual(p.sections.map((s) => s.version), ['2.2.29', '2.2.28', '2.2.27']);
+  assert.deepEqual(p.sections.map((s) => s.version), ['2.2.29', '2.2.28', '2.2.27', '2.2.26']);
+});
+
+test('plan: a long skip is capped at the newest MAX_SECTIONS', () => {
+  const many = new Map(Array.from({ length: 15 }, (_, i) => [`3.0.${i}`, ['x']]));
+  const p = plan({ current: '3.0.14', seen: '2.9.0', existedAtStart: true, notes: many });
+  assert.equal(p.sections.length, notesMod.MAX_SECTIONS);
+  assert.equal(p.sections[0].version, '3.0.14');
+  assert.equal(p.sections.at(-1).version, `3.0.${15 - notesMod.MAX_SECTIONS}`);
 });
 
 test('plan: already seen, or a downgrade, writes nothing (never lowers seen)', () => {
