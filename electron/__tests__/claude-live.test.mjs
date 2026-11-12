@@ -159,5 +159,37 @@ ok('empty/null input is not live');
   ok('unterminated OSC and DCS runs strip in linear time');
 }
 
+// 12. stripAnsi's tail mode is the tail of the full strip, and cursor motion that expands 3 bytes into 401 characters
+// costs input time, not output time (Codex P1, 2026-11-12).
+{
+  let seed = 99;
+  const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  const parts = ['\u001b]', '\u0007', '\u001b\\', '\u001bP', '\u001b[', '\u001b', '\n', '\r', 'ab', '0;t', '\u001b[5G', '\u001b[1G',
+    '\u001b[400G', '\u001b[3C', '\u001b[2B', '\u001b[E', '\u001bX', 'zz ', '\u001b[0m', 'x'];
+  for (let k = 0; k < 20000; k += 1) {
+    let s = '';
+    const L = rnd(80);
+    for (let j = 0; j < L; j += 1) s += parts[rnd(parts.length)];
+    const T = 1 + rnd(40);
+    assert.equal(stripAnsi(s, T), stripAnsi(s).slice(-T), JSON.stringify([s, T]));
+  }
+  const fx = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+  for (const f of fs.readdirSync(fx).filter((n) => /-raw\.(txt|bin)$/.test(n))) {
+    const raw = fs.readFileSync(path.join(fx, f), 'latin1');
+    for (const T of [1, 50, 4096, 100000]) assert.equal(stripAnsi(raw, T), stripAnsi(raw).slice(-T), `${f} ${T}`);
+  }
+  const amp = [
+    '\u001b[400G' + '\u001b[B'.repeat(87000),
+    '\u001bP' + 'a'.repeat(245758) + '\n' + '\u001b[400G' + '\u001b[B'.repeat(5458),
+    '\u001b[400C'.repeat(43000),
+  ];
+  for (const r of amp) {
+    const t0 = Date.now();
+    for (let n = 0; n < 10; n += 1) { stripAnsi(r, 4096); claudeTuiPresent(r); }
+    assert.ok(Date.now() - t0 < 300, `10 calls took ${Date.now() - t0}ms`);
+  }
+  ok('tail mode equals the full strip tail and stays fast on cursor-motion runs');
+}
+
 fs.rmSync(userData, { recursive: true, force: true });
 console.log(`claude-live: ${pass} groups pass`);

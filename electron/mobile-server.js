@@ -349,11 +349,11 @@ export function tuiVisibleTail(text) {
       nl = tries < 64 ? raw.indexOf('\n', nl + 1) : -1;
     }
     if (nl < 0 || nl + 1 >= end) continue;
-    out = stripAnsi(raw.slice(nl + 1, end)) + out;
+    out = stripAnsi(raw.slice(nl + 1, end), TUI_TAIL) + out;
     end = nl + 1;
     if (out.length >= TUI_TAIL) return out.slice(-TUI_TAIL);
   }
-  return (stripAnsi(raw.slice(start, end)) + out).slice(-TUI_TAIL);
+  return (stripAnsi(raw.slice(start, end), TUI_TAIL) + out).slice(-TUI_TAIL);
 }
 
 export function claudeTuiPresent(text) {

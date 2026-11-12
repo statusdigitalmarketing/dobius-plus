@@ -31,9 +31,29 @@ const CSI_RE = /^\x1b\[([0-9;?]*)([ -/]*)([@-~])/;
 //   CSI n G (column, behind) -> single space (word boundary, approx col)
 //   CSI n B / E (down)       -> newline, indented back to the current column
 // Everything else (SGR colors, erases, OSC/DCS, 2-char escapes) is dropped.
-export function stripAnsi(s) {
+//
+// tail > 0 returns only stripAnsi(s).slice(-tail), in time that follows the INPUT: cursor motion can expand 3 bytes
+// into 401 characters (256KB of ESC[B after ESC[400G was 35M characters and ~90ms per call; Codex P1, 2026-11-12).
+// Output goes into a list of pieces that drops whole pieces off the front once the rest still covers `tail`, padding
+// comes from a cache, and plain text is taken in runs. The default mode keeps its per-character appends, so a result
+// a caller holds never points into the input string.
+const PADS = []; // ' '.repeat(k) for k 0..400, the most any one escape pads: at most 401 small strings
+const pad = (k) => PADS[k] ?? (PADS[k] = ' '.repeat(k));
+export function stripAnsi(s, tail = 0) {
   const src = String(s == null ? '' : s);
   let out = '';
+  const pieces = [];
+  let head = 0;
+  let kept = 0;
+  const emit = tail > 0
+    ? (str) => {
+      if (!str) return;
+      pieces.push(str);
+      kept += str.length;
+      while (kept - pieces[head].length >= tail) { kept -= pieces[head].length; head += 1; }
+      if (head > 4096) { pieces.splice(0, head); head = 0; }
+    }
+    : (str) => { out += str; };
   let col = 0;
   let i = 0;
   // The next BEL and ST at or after a position, cached: searching the rest of the string again for every OSC or DCS
@@ -66,14 +86,15 @@ export function stripAnsi(s) {
           const fin = m[3];
           if (fin === 'C') {
             const k = Math.min(n || 1, 400);
-            out += ' '.repeat(k); col += k;
+            emit(pad(k)); col += k;
           } else if (fin === 'G') {
             const target = Math.max(1, n || 1) - 1;
-            if (target > col) { out += ' '.repeat(Math.min(target - col, 400)); col = target; }
-            else if (target === 0 && col > 0) { out += '\r'; col = 0; }
-            else if (target < col) { out += ' '; col = target; }
+            if (target > col) { emit(pad(Math.min(target - col, 400))); col = target; }
+            else if (target === 0 && col > 0) { emit('\r'); col = 0; }
+            else if (target < col) { emit(' '); col = target; }
           } else if (fin === 'B' || fin === 'E') {
-            out += `\n${' '.repeat(Math.min(fin === 'B' ? col : 0, 400))}`;
+            emit('\n');
+            emit(pad(Math.min(fin === 'B' ? col : 0, 400)));
             if (fin === 'E') col = 0;
           }
           i += m[0].length;
@@ -85,12 +106,20 @@ export function stripAnsi(s) {
       i += 2; // 2-char escape
       continue;
     }
-    if (ch === '\n' || ch === '\r') { out += ch; col = 0; i += 1; continue; }
+    if (ch === '\n' || ch === '\r') { emit(ch); col = 0; i += 1; continue; }
+    if (tail > 0) { // a run of plain text up to the next ESC, LF or CR
+      let j = i + 1;
+      while (j < src.length) { const c = src.charCodeAt(j); if (c === 27 || c === 10 || c === 13) break; j += 1; }
+      emit(src.slice(i, j));
+      col += j - i;
+      i = j;
+      continue;
+    }
     out += ch;
     col += 1;
     i += 1;
   }
-  return out;
+  return tail > 0 ? pieces.slice(head).join('').slice(-tail) : out;
 }
 
 // optional cursor marker, a number, `.`/`)`, then a non-empty label.
