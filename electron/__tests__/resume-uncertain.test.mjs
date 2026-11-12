@@ -70,6 +70,25 @@ assert.equal(cm.getSessionTabMap()['sess-life-0007'].uncertainSince, undefined, 
 cm.markSessionTabUncertain('sess-life-0007', 12_000);
 assert.equal(cm.getSessionTabMap()['sess-life-0007'].uncertainSince, undefined, 'a session not running is never marked');
 console.log('PASS  uncertainty starts at the first failed check and ends on a confirmed check or a clear');
+
+// Codex, PR 7 round 11: doubt from before a quit does not survive the launch that resumes the session. Quit at QUIT with
+// doubt since QUIT-30s; the next launch resumes it (doubt cleared), checks fail from QUIT+75s, the person stops Claude,
+// Dobius crashes and relaunches at QUIT+11min with lastQuitAt still QUIT. The new doubt is 9+ minutes: not resumed.
+{
+  const Q0 = Date.now() - 20 * 60_000; // config clamps stamps to now, so this timeline lives in the past
+  cm.setSessionTabLink('sess-carry-0014', 'term-/tmp/proj-14', '/tmp/proj', 'argv', Q0 - 40_000);
+  cm.markSessionTabUncertain('sess-carry-0014', Q0 - 30_000);
+  assert.equal(pickLaunchSessions({ 'sess-carry-0014': cm.getSessionTabMap()['sess-carry-0014'] }, Q0, Q0 + 60_000).tabToBest.size, 1, 'first launch resumes it');
+  cm.clearSessionTabUncertain('sess-carry-0014');
+  assert.equal(cm.getSessionTabMap()['sess-carry-0014'].uncertainSince, undefined, 'the resume ends the old doubt');
+  cm.markSessionTabUncertain('sess-carry-0014', Q0 + 75_000);
+  const after = pickLaunchSessions({ 'sess-carry-0014': cm.getSessionTabMap()['sess-carry-0014'] }, Q0, Q0 + 11 * 60_000);
+  assert.equal(after.tabToBest.size, 0, 'doubt from this run is measured to the relaunch after the crash');
+  const { readFileSync } = await import('node:fs');
+  const ar = readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
+  assert.match(ar, /writeTerminal\(e\.tabId, cmd\);[\s\S]{0,300}?clearSessionTabUncertain\(e\.sessionId\);/, 'auto-resume ends the old doubt when it types the resume');
+  console.log('PASS  doubt carried from before a quit ends when auto-resume starts the session again');
+}
 // Codex, PR 7 round 8: a session first unreadable during the quit's own final check is dated at the quit stamp, so an
 // hour with the app closed does not count as an hour of doubt.
 {

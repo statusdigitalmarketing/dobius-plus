@@ -1106,6 +1106,20 @@ export function markSessionTabUncertain(sessionId, observedAt = Date.now()) {
 }
 
 /**
+ * End a stretch of doubt without confirming the session: auto-resume just started it again, so doubt from the run before
+ * the quit says nothing about this one. A failed check from here on starts a new stretch, dated then, so a crash later
+ * measures it from this run (Codex, PR 7). The running stamp is left as it is.
+ */
+export function clearSessionTabUncertain(sessionId) {
+  if (!sessionId || typeof sessionId !== 'string' || UNSAFE_KEYS.has(sessionId)) return;
+  const config = loadConfig();
+  const entry = config.sessionTabMap?.[sessionId];
+  if (!entry || typeof entry.uncertainSince !== 'number') return;
+  delete entry.uncertainSince;
+  saveConfig(config);
+}
+
+/**
  * Zero the lastRunningAt stamp when the capture loop observes the session's
  * Claude process has EXITED while the tab stays open. Without this, quitting
  * within the freshness slack after stopping Claude would still auto-resume a

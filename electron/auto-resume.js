@@ -29,7 +29,7 @@
  *   - Window close: caller invokes cancelTabsForProject(projectPath).
  */
 
-import { getAutoResume, getSessionTabMap, loadConfig } from './config-manager.js';
+import { getAutoResume, getSessionTabMap, loadConfig, clearSessionTabUncertain } from './config-manager.js';
 import {
   listTerminals, writeTerminal, releaseSessionResume, claimSessionResume,
   getTerminalWebContentsId,
@@ -440,6 +440,9 @@ async function queueResume(e, delayMs) {
       queue.delete(e.tabId);
       try {
         writeTerminal(e.tabId, cmd);
+        // A new run: doubt carried from before the quit ends here, or a crash after this launch would still measure
+        // it only up to that older quit and resume a session stopped since (Codex, PR 7).
+        clearSessionTabUncertain(e.sessionId);
         noteResume(e.tabId, 'resume typed');
         broadcastStatus(e.tabId, 'working');
       } catch (err) {
