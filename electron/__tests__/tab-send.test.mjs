@@ -622,7 +622,7 @@ test('a command that starts Claude, sent to a tab where Claude runs: refused, no
   // Quoted ids start Claude just the same once the shell strips the quotes (Codex, PR 7).
   for (const cmd of ['claude --resume "4b06acc2-419d"', "claude -r '4b06acc2-419d'", 'exec claude --continue', 'command claude --resume 4b06acc2-419d',
     'env FOO=1 claude -c', 'CLAUDE_CONFIG_DIR=/x claude --resume ab', '~/.local/bin/claude --resume ab', '\\claude', 'nohup claude',
-    'claude --resume 4b06acc2-419d;', '/usr/local/bin/claude -c', '"claude" --resume 4b06acc2-419d', "'/usr/local/bin/claude' -c"]) {
+    'claude --resume 4b06acc2-419d;', '/usr/local/bin/claude -c', '"claude" --resume 4b06acc2-419d', "'/usr/local/bin/claude' -c", 'claude --model opus', 'claude --resume ab --model opus --dangerously-skip-permissions']) {
     const { t, deps } = fakeTab();
     const r = await sendToTab(deps, 'tab', cmd);
     assert.equal(r.body.reason, 'claude-running', cmd);
@@ -639,7 +639,7 @@ test('the same command to a shell tab is typed and Enter pressed; a message that
   const r2 = await sendToTab(talk.deps, 'tab', 'please run claude --resume ab-12 in the other tab');
   assert.equal(r2.body.ok, true);
   assert.equal(talk.t.pasted, 'please run claude --resume ab-12 in the other tab');
-  for (const link of ['https://example.com/claude', 'example.com/claude']) { // a link is a message, not a program
+  for (const link of ['https://example.com/claude', 'example.com/claude', 'claude is great', 'claude -p hello world', 'claude --resume ab; rm x']) { // a message, not a program
     const u = fakeTab();
     const r3 = await sendToTab(u.deps, 'tab', link);
     assert.equal(r3.body.ok, true, link);

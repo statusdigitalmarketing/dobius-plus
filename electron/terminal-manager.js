@@ -869,6 +869,7 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
       return null;
     }
     let found = null;
+    let ambiguous = false; // `unknown`: a child that names claude in a way the classifier cannot rule out
     for (const childPid of children) {
       // `lstart` is the process start time; `command` is the argv. One ps
       // call gets both so the fresh-session correlation costs nothing extra.
@@ -898,6 +899,9 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
         if (unique && /claude/i.test(command)) return null;
         // strict: may be one (a path with spaces), so that tab's session is not known.
         if (strict && /claude/i.test(command)) throw new Error('a program there names claude');
+        // `unknown`: one that may be Claude (`/opt/CLI Tools/claude`) keeps the tab "could not tell" unless a Claude
+        // turns up elsewhere; a non-Claude root must not turn it into "no Claude" (Codex, PR 7).
+        if (unknown && /claude/i.test(command) && (command.length > 4096 || classifyClaudeProcess(command).kind !== 'not-claude')) ambiguous = true;
         continue;
       }
       // `unique`: the strict reading too, so a process that only names the CLI
@@ -928,7 +932,10 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
     // helper as its child). Every mode: the resume gate must see it too.
     // With children present, a shell in front can be a child of an `exec claude` root, so `unknown` callers (the
     // running stamps) always look at the root here (Codex, PR 7). With no children the shortcut is exact.
-    if (!found) return await ptySelf(pid, strict, strict || thorough || unknown ? null : entry, unknown);
+    if (!found) {
+      const self = await ptySelf(pid, strict, strict || thorough || unknown ? null : entry, unknown);
+      return !self && ambiguous ? CLAUDE_UNKNOWN : self;
+    }
     // strict: the PTY's own process may be a second Claude (`exec claude` running `claude -p`), which is not known.
     if (strict && await ptySelf(pid, true, null)) throw new Error('two Claude processes in that tab');
     return found;
@@ -1555,6 +1562,13 @@ async function winClaudeInfo(entry, unique, strict = false, unknownMode = false)
     if (!unique && !strict) return info;
     if (found) return unknown('two Claude processes in that shell');
     found = info;
+  }
+  // `unknown`: a program under the shell that names claude but could not be read as Claude, or one left out for having
+  // no creation time, keeps the tab "could not tell" rather than "no Claude" (Codex, PR 7).
+  if (!found && unknownMode && !strict) {
+    const names = (r) => /claude/i.test(`${r.command || ''} ${r.name || ''}`);
+    const under = rows.filter((r) => r.ppid === pid || rows.some((p) => p.ppid === pid && p.pid === r.ppid));
+    if (progs.some((r) => names(r) && !winClaudeCommand(r.command)) || under.some((r) => r.startFt == null && names(r))) return CLAUDE_UNKNOWN;
   }
   return found;
 }

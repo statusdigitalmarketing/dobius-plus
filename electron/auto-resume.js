@@ -304,6 +304,8 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   // Seen, then closed before the last poll: the launch pass took it but nothing below visits it.
   const inCandidates = new Set(candidates.map((c) => c.tabId));
   for (const tabId of firstSeen.keys()) if (!inCandidates.has(tabId)) noteResume(tabId, 'not resumed: its tab closed before the resume was queued');
+  // Closed before the first poll saw it (forgetClosedTab marked it handled): it gets a line too (Codex, PR 7).
+  for (const tabId of tabToBest.keys()) if (handled.has(tabId) && !firstSeen.has(tabId) && !uncertainTabs.includes(tabId)) noteResume(tabId, 'not resumed: its tab closed before the launch reached it');
   if (candidates.length === 0) {
     console.log('[auto-resume] no live tabs with mapped sessions after 15s budget, nothing to do');
     return;

@@ -28,10 +28,12 @@ process.on('exit', () => {
 const AMBIG = 'term-/tmp/unknowntest-1';
 const SHELL = 'term-/tmp/unknowntest-2';
 const TAIL = 'term-/tmp/unknowntest-3';
-for (const id of [AMBIG, SHELL, TAIL]) assert.ok(tm.createTerminal(id, os.tmpdir(), null), `terminal ${id} created`);
+const CHILD = 'term-/tmp/unknowntest-4';
+for (const id of [AMBIG, SHELL, TAIL, CHILD]) assert.ok(tm.createTerminal(id, os.tmpdir(), null), `terminal ${id} created`);
 await new Promise((r) => setTimeout(r, 1800));
 tm.writeTerminal(AMBIG, `exec '${path.join(binDir, 'CLI Tools', 'claude')}' 25\r`);
 tm.writeTerminal(TAIL, `exec /usr/bin/tail -f '${path.join(binDir, 'claude.log')}'\r`);
+tm.writeTerminal(CHILD, `'${path.join(binDir, 'CLI Tools', 'claude')}' 25 &\r`);
 await new Promise((r) => setTimeout(r, 1500));
 
 assert.equal(await tm.getTerminalClaudeInfo(AMBIG), null, 'the default answer is still null');
@@ -44,8 +46,13 @@ assert.equal(await tm.getTerminalClaudeInfo('term-/tmp/unknowntest-99', { unknow
 // Codex, PR 7: a root that only names claude in an argument the classifier rules out is a definite no Claude.
 assert.equal(await tm.getTerminalClaudeInfo(TAIL, { unknown: true, rootCheck: true }), null, 'tail -f claude.log is not Claude');
 console.log('PASS  a plain shell or a closed tab is still null; tail -f claude.log is no Claude');
+// Codex, PR 7: a child that may be Claude under a plain shell keeps the tab could-not-tell; the shell root must not
+// turn it into "no Claude".
+assert.equal(await tm.getTerminalClaudeInfo(CHILD, { unknown: true, rootCheck: true }), tm.CLAUDE_UNKNOWN, 'an ambiguous child stays unknown');
+console.log('PASS  an ambiguous child under a plain shell stays could-not-tell');
 const src = fs.readFileSync(new URL('../terminal-manager.js', import.meta.url), 'utf8');
-assert.match(src, /if \(!found\) return await ptySelf\(pid, strict, strict \|\| thorough \|\| unknown \? null : entry, unknown\);/, 'with children, unknown callers always look at the PTY root');
+assert.match(src, /const self = await ptySelf\(pid, strict, strict \|\| thorough \|\| unknown \? null : entry, unknown\);/, 'with children, unknown callers always look at the PTY root');
+assert.match(src, /under\.some\(\(r\) => r\.startFt == null && names\(r\)\)\) return CLAUDE_UNKNOWN;/, 'Windows: an undated child naming claude stays could-not-tell');
 console.log('PASS  with children present, the running-stamp check always looks at the PTY root');
 assert.ok(!/claudeCheckFailed/.test(src), 'a failed check is never decided from the foreground name');
 assert.match(src, /if \(err\?\.code === 1\) return null; \/\/ ps exit 1: the PTY's own process is gone/, 'a root that is gone is no Claude');
