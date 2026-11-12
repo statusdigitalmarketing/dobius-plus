@@ -1082,3 +1082,9 @@
 - **FIX**: After every release, confirm the Windows run started and that `latest.yml` and `Dobius-Plus-Setup-<v>.exe` are on the release (`gh release view v<v> --json assets`). A run stuck in the queue is cancelled and re-run (Sam runs it; the classifier blocks `gh run cancel` from a session).
 - **CONTEXT**: Windows users only update from a release that carries latest.yml; a release without it leaves them on whatever they have.
 - **DETECTION**: `gh release view "v$(node -p 'require(\"./package.json\").version')" --json assets --jq '[.assets[].name]|index("latest.yml")'`
+
+### Testing: 2026-11-11
+- **MISTAKE**: Appended a new check to the end of `electron/__tests__/resume-uncertain.test.mjs`, which ends with `process.exit(0)`. The block never ran and the suite still passed; a sabotage run printed no failure, which is how it showed up.
+- **FIX**: Insert new checks above the file's `process.exit(0)`, and confirm the new PASS line prints before trusting a green run.
+- **CONTEXT**: Script-style test files (not `node --test`) in this repo often end with an explicit exit to stop open handles; anything appended after it is dead.
+- **DETECTION**: `grep -n "process.exit(0)" electron/__tests__/*.mjs` then check nothing but closing braces follows it.

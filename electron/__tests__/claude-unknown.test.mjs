@@ -66,6 +66,11 @@ assert.match(src, /if \(winShellMayHoldClaude\(rows, pid, progs\)\) return CLAUD
   assert.equal(winShellMayHoldClaude(rows, 10, progs), true, 'so the tab is could-not-tell');
   const vim = { pid: 13, ppid: 10, name: 'notepad.exe', command: 'notepad.exe C:\\tmp\\claude.txt', startFt: ft(4), startedAt: 4 };
   assert.equal(winShellMayHoldClaude([shell, vim], 10, shellPrograms([shell, vim], 10)), false, 'notepad with claude.txt is not');
+  // A Claude orphan whose parent pid was reused by this shell is dated before it: not this tab's, so not a doubt.
+  const orphan = { pid: 14, ppid: 10, name: 'claude.exe', command: 'claude.exe --resume zz', startFt: ft(0), startedAt: 0 };
+  assert.equal(winShellMayHoldClaude([shell, orphan], 10, shellPrograms([shell, orphan], 10)), false, 'an older orphan is not');
+  const oldGrand = { pid: 15, ppid: 11, name: 'node.exe', command: node.command, startFt: ft(0), startedAt: 0 };
+  assert.equal(winShellMayHoldClaude([shell, cmd, oldGrand], 10, shellPrograms([shell, cmd, oldGrand], 10)), false, 'a grandchild older than the shell is not');
 }
 const { winMayBeClaude } = await import('../win-proc.js');
 assert.equal(winMayBeClaude({ name: 'notepad.exe', command: 'notepad.exe C:\\tmp\\claude.txt' }), false, 'notepad with claude.txt is not Claude');

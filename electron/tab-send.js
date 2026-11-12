@@ -39,27 +39,32 @@ const fail = (status, error, extra = {}) => ({ status, body: { ok: false, ...ext
 // value; a bare word first is a message), and one trailing ; or &.
 const PREFIX_WORDS = new Set(['exec', 'command', 'builtin', 'nohup']);
 const ENV_VALUE_OPTS = new Set(['-u', '-C', '--unset', '--chdir']);
+// Splits like a shell does for the spellings we accept: a word is runs of plain characters and quoted parts glued
+// together (`NAME="/a b"`, `"claude"`, `--resume='x'`). `lead` is true when the word starts with a plain character and
+// `bare` when it has no quotes at all, so a quoted "exec" or "-c" is never read as a prefix or an option.
 function shellWords(text) {
   const out = [];
   let i = 0;
   while (i < text.length) {
     while (i < text.length && /\s/.test(text[i])) i += 1;
     if (i >= text.length) break;
-    const q = text[i];
-    if (q === '"' || q === "'") {
-      const end = text.indexOf(q, i + 1);
-      if (end < 0) return null; // unterminated quote: not a command we can read
-      out.push({ text: text.slice(i + 1, end), quoted: true });
-      i = end + 1;
-      if (i < text.length && !/\s/.test(text[i])) return null; // a quote glued to more text: too clever, a message
-    } else {
-      let j = i;
-      while (j < text.length && !/\s/.test(text[j])) j += 1;
-      const w = text.slice(i, j);
-      if (w.includes('"') || w.includes("'")) return null;
-      out.push({ text: w, quoted: false });
-      i = j;
+    let word = '';
+    let bare = true;
+    const lead = text[i] !== '"' && text[i] !== "'";
+    while (i < text.length && !/\s/.test(text[i])) {
+      const q = text[i];
+      if (q === '"' || q === "'") {
+        const end = text.indexOf(q, i + 1);
+        if (end < 0) return null; // unterminated quote: not a command we can read
+        word += text.slice(i + 1, end);
+        bare = false;
+        i = end + 1;
+      } else {
+        word += q;
+        i += 1;
+      }
     }
+    out.push({ text: word, lead, bare });
   }
   return out;
 }
@@ -86,16 +91,16 @@ export function startsClaude(message, depth = 0) {
   let i = 0;
   while (i < words.length) {
     const w = words[i];
-    if (!w.quoted && PREFIX_WORDS.has(w.text)) { i += 1; continue; }
-    if (!w.quoted && /^[A-Za-z_]\w*=/.test(w.text)) { i += 1; continue; }
-    if (!w.quoted && w.text === 'env') {
+    if (w.bare && PREFIX_WORDS.has(w.text)) { i += 1; continue; }
+    if (w.lead && /^[A-Za-z_]\w*=/.test(w.text)) { i += 1; continue; }
+    if (w.bare && w.text === 'env') {
       i += 1;
-      while (i < words.length && !words[i].quoted && words[i].text.startsWith('-')) {
+      while (i < words.length && words[i].lead && words[i].text.startsWith('-')) {
         const o = words[i].text;
         if (o === '-S' || o === '--split-string') {
           const v = words[i + 1];
           if (!v) return false;
-          return startsClaude([v.text, ...words.slice(i + 2).map((x) => (x.quoted ? `'${x.text}'` : x.text))].join(' '), depth + 1);
+          return startsClaude([v.text, ...words.slice(i + 2).map((x) => (x.bare ? x.text : JSON.stringify(x.text)))].join(' '), depth + 1);
         }
         i += ENV_VALUE_OPTS.has(o) ? 2 : 1;
       }
@@ -108,7 +113,7 @@ export function startsClaude(message, depth = 0) {
   let prevOption = false;
   for (let k = 0; k < args.length; k += 1) {
     const a = args[k];
-    if (!a.quoted && a.text.startsWith('-')) { prevOption = true; continue; }
+    if (a.lead && a.text.startsWith('-')) { prevOption = true; continue; }
     if (!prevOption) return false; // a bare word where an option belongs: it is a message (`claude is great`)
     prevOption = false;
   }

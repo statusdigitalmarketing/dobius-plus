@@ -5685,6 +5685,8 @@ app.whenReady().then(() => {
   }
 });
 let quitTimer = null;
+// The lastQuitAt this quit wrote before its final reconcile, so a session that check cannot read is dated at the quit.
+let quitStampAt = null;
 let savedBeforeQuit = false;
 
 // Restart without updating (Updates tab). Runs the confirmed two-press quit exactly as Cmd+Q twice does: Claude
@@ -5863,6 +5865,7 @@ app.on('before-quit', (e) => {
     try {
       const cfgQuit = loadConfig();
       cfgQuit.lastQuitAt = Date.now();
+      quitStampAt = cfgQuit.lastQuitAt;
       saveConfig(cfgQuit);
     } catch { /* best-effort */ }
     // Final reconcile BEFORE Ctrl-C: zero the stamp for any mapped tab whose
@@ -5930,7 +5933,9 @@ app.on('before-quit', (e) => {
           if (reconcileAborted) return;
           if (unknownTabs.has(t.id)) {
             const sidUnknown = tabToSid.get(t.id);
-            if (sidUnknown) markSessionTabUncertain(sidUnknown);
+            // Dated at the quit stamp: a stamp confirmed until the quit is not long uncertain however long the app then
+            // stays closed (auto-resume measures doubt up to lastQuitAt). Codex, PR 7.
+            if (sidUnknown) markSessionTabUncertain(sidUnknown, quitStampAt ?? Date.now());
             continue;
           }
           const sid = tabToSid.get(t.id);

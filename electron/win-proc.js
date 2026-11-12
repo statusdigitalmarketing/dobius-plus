@@ -179,8 +179,14 @@ export function winMayBeClaude(row) {
 // node.exe under it) that is or may be Claude (Codex, PR 7).
 export function winShellMayHoldClaude(rows, shellPid, progs) {
   if (progs.some((r) => winMayBeClaude(r) && !winClaudeCommand(r.command))) return true;
-  const kids = new Set(rows.filter((r) => r.ppid === shellPid).map((r) => r.pid));
-  return rows.some((r) => (r.ppid === shellPid || kids.has(r.ppid)) && !progs.includes(r) && (winMayBeClaude(r) || winClaudeCommand(r.command)));
+  // A row dated BEFORE its parent belongs to an earlier owner of a reused pid, never to this shell (Codex, PR 7): only
+  // a missing date leaves it in doubt.
+  const byPid = new Map(rows.map((r) => [r.pid, r]));
+  const older = (k, parent) => k?.startFt != null && parent?.startFt != null && BigInt(k.startFt) < BigInt(parent.startFt);
+  const shell = byPid.get(shellPid);
+  const kids = new Set(rows.filter((r) => r.ppid === shellPid && !older(r, shell)).map((r) => r.pid));
+  return rows.some((r) => !progs.includes(r) && (winMayBeClaude(r) || winClaudeCommand(r.command))
+    && ((r.ppid === shellPid && !older(r, shell)) || (kids.has(r.ppid) && !older(r, byPid.get(r.ppid)) && !older(r, shell))));
 }
 
 /**

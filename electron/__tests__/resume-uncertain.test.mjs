@@ -70,4 +70,17 @@ assert.equal(cm.getSessionTabMap()['sess-life-0007'].uncertainSince, undefined, 
 cm.markSessionTabUncertain('sess-life-0007', 12_000);
 assert.equal(cm.getSessionTabMap()['sess-life-0007'].uncertainSince, undefined, 'a session not running is never marked');
 console.log('PASS  uncertainty starts at the first failed check and ends on a confirmed check or a clear');
+// Codex, PR 7 round 8: a session first unreadable during the quit's own final check is dated at the quit stamp, so an
+// hour with the app closed does not count as an hour of doubt.
+{
+  const atQuit = pickLaunchSessions({ 'sess-quit-0012': link(12, { lastRunningAt: QUIT - 10_000, uncertainSince: QUIT }) }, QUIT, QUIT + 60 * 60_000);
+  assert.equal(atQuit.tabToBest.size, 1, 'doubt that began at the quit is not measured through the closed hour');
+  const { readFileSync } = await import('node:fs');
+  const main = readFileSync(new URL('../main.js', import.meta.url), 'utf8');
+  assert.match(main, /quitStampAt = cfgQuit\.lastQuitAt;/, 'the quit records the stamp it wrote');
+  assert.match(main, /markSessionTabUncertain\(sidUnknown, quitStampAt \?\? Date\.now\(\)\)/, 'the final check dates doubt at that stamp');
+  console.log('PASS  doubt first seen by the quit check is dated at the quit');
+}
+
 process.exit(0);
+
