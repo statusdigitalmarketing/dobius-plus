@@ -142,5 +142,22 @@ ok('empty/null input is not live');
   ok(`windowed strip equals the full strip on ${cases.length} buffers`);
 }
 
+// 11. Escape runs with no terminator stay linear (Codex P1, 2026-11-12): stripAnsi searched the rest of the string for
+// an ST on every OSC, about 30s of blocked main process for 256KB of ESC ] BEL. Generous limits, still far below that.
+{
+  const runs = [
+    '\u001b]\u0007'.repeat(87000),
+    '\u001bP' + 'a'.repeat(196606) + '\n' + '\u001b]\u0007'.repeat(16383) + '\n' + '\u001b]\u0007'.repeat(5461),
+    '\u001bPq'.repeat(87000),
+  ];
+  for (const r of runs) {
+    const t0 = Date.now();
+    stripAnsi(r);
+    claudeTuiPresent(r);
+    assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0}ms`);
+  }
+  ok('unterminated OSC and DCS runs strip in linear time');
+}
+
 fs.rmSync(userData, { recursive: true, force: true });
 console.log(`claude-live: ${pass} groups pass`);

@@ -36,19 +36,26 @@ export function stripAnsi(s) {
   let out = '';
   let col = 0;
   let i = 0;
+  // The next BEL and ST at or after a position, cached: searching the rest of the string again for every OSC or DCS
+  // was quadratic (a 256KB run of ESC ] BEL with no ST blocked the main process for ~30s; Codex P1, 2026-11-12).
+  // A cached hit at or past `from` is still the first one there, and -1 (none left) stays true for later positions.
+  let nextBel = -2;
+  let nextSt = -2;
+  const belFrom = (from) => { if (nextBel !== -1 && nextBel < from) nextBel = src.indexOf('\x07', from); return nextBel; };
+  const stFrom = (from) => { if (nextSt !== -1 && nextSt < from) nextSt = src.indexOf('\x1b\\', from); return nextSt; };
   while (i < src.length) {
     const ch = src[i];
     if (ch === '\x1b') {
       const next = src[i + 1];
       if (next === ']') { // OSC ... (BEL or ST terminated)
-        const bel = src.indexOf('\x07', i + 2);
-        const st = src.indexOf('\x1b\\', i + 2);
+        const bel = belFrom(i + 2);
+        const st = stFrom(i + 2);
         const end = Math.min(bel === -1 ? Infinity : bel + 1, st === -1 ? Infinity : st + 2);
         i = end === Infinity ? src.length : end;
         continue;
       }
       if (next === 'P' || next === 'X' || next === '^' || next === '_') { // DCS/SOS/PM/APC ... ST
-        const st = src.indexOf('\x1b\\', i + 2);
+        const st = stFrom(i + 2);
         i = st === -1 ? src.length : st + 2;
         continue;
       }
