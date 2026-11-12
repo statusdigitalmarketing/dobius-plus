@@ -3851,9 +3851,12 @@ function setupSessionTabCapture() {
       // A tab whose check failed (timed out on a loaded Mac) is left exactly as it was this tick: no stamp cleared, no
       // link changed. It reads as "no Claude" to the fresh resolver below, as before.
       const unknownTabs = new Set();
+      // Tabs holding a running stamp get the full check, PTY root included: their answer decides whether a stamp is
+      // cleared (Codex, PR 7). Every other tab keeps the cheap foreground-shell shortcut.
+      const stampedTabs = new Set(Object.values(getSessionTabMap() || {}).filter((l) => l?.lastRunningAt && l.tabId).map((l) => l.tabId));
       for (const t of liveTabs) {
         probedAt.set(t.id, Date.now());
-        const got = await getTerminalClaudeInfo(t.id, { unknown: true });
+        const got = await getTerminalClaudeInfo(t.id, { unknown: true, rootCheck: stampedTabs.has(t.id) });
         if (got === CLAUDE_UNKNOWN) unknownTabs.add(t.id);
         infoByTab.set(t.id, got === CLAUDE_UNKNOWN ? null : got);
       }
@@ -5900,9 +5903,10 @@ app.on('before-quit', (e) => {
         const infoByTab = new Map();
         // A failed check is "could not tell", never "stopped": that tab's stamp is left as it is (see the capture tick).
         const unknownTabs = new Set();
+        const stampedTabs = new Set(Object.values(getSessionTabMap() || {}).filter((l) => l?.lastRunningAt && l.tabId).map((l) => l.tabId));
         for (const t of liveTabs) {
           if (reconcileAborted) return;
-          const got = await getTerminalClaudeInfo(t.id, { unknown: true });
+          const got = await getTerminalClaudeInfo(t.id, { unknown: true, rootCheck: stampedTabs.has(t.id) });
           if (got === CLAUDE_UNKNOWN) unknownTabs.add(t.id);
           infoByTab.set(t.id, got === CLAUDE_UNKNOWN ? null : got);
         }

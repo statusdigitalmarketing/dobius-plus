@@ -41,6 +41,22 @@ const shortNear = pickLaunchSessions({ 'sess-near-0009': link(9, { lastRunningAt
 assert.equal(shortNear.tabToBest.size, 1, 'one under 2 minutes at the relaunch still resumes');
 console.log('PASS  after a crash the uncertainty is measured to the relaunch');
 
+// Codex, PR 7: A was stopped and B resumed in the same tab; B then went uncertain for minutes. The tab is ruled out; it
+// never falls back to A, the session the person stopped.
+const two = pickLaunchSessions({
+  'sess-old-a-0010': link(10, { tabId: 'term-/tmp/proj-10', lastRunningAt: QUIT - 9 * 60_000 }),
+  'sess-new-b-0011': link(11, { tabId: 'term-/tmp/proj-10', lastRunningAt: QUIT - 8 * 60_000, uncertainSince: QUIT - 5 * 60_000 }),
+}, QUIT, QUIT + 30_000);
+assert.equal(two.tabToBest.size, 0, 'no fallback to the older session');
+assert.deepEqual(two.uncertainTabs, ['term-/tmp/proj-10']);
+const twoOk = pickLaunchSessions({
+  'sess-old-a-0012': link(12, { tabId: 'term-/tmp/proj-12', lastRunningAt: QUIT - 9 * 60_000 }),
+  'sess-new-b-0013': link(13, { tabId: 'term-/tmp/proj-12', lastRunningAt: QUIT - 8 * 60_000 }),
+}, QUIT, QUIT + 30_000);
+assert.equal(twoOk.tabToBest.get('term-/tmp/proj-12').sessionId, 'sess-new-b-0013', 'the newest link wins');
+assert.equal('longUncertain' in twoOk.tabToBest.get('term-/tmp/proj-12'), false);
+console.log('PASS  a tab whose newest session is long uncertain is ruled out, never handed an older one');
+
 // The lifecycle in config: marked once, kept by a later mark, cleared by a confirmed check or a clear.
 cm.setSessionTabLink('sess-life-0007', 'term-/tmp/proj-7', '/tmp/proj', 'argv', 1000);
 cm.markSessionTabUncertain('sess-life-0007', 2000);

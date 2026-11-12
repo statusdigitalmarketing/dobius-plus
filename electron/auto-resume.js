@@ -66,6 +66,8 @@ const restoredDuringStartup = new Set();
 function finishStartup() {
   startupDone = true;
   for (const tabId of restoredDuringStartup) {
+    // A tab the launch pass already took is its outcome to log, not this path's (Codex, PR 7: two lines per tab).
+    if (handled.has(tabId)) continue;
     resumeRestoredTab(tabId).catch((err) => console.warn('[auto-resume] restored tab:', err?.message || err));
   }
   restoredDuringStartup.clear();
@@ -169,11 +171,7 @@ export function pickLaunchSessions(tabMap, lastQuitAt, now) {
     // The uncertainty ends at the quit only when that quit came after it began; an older quit (a crash since) is not its
     // end, so it runs to now (Codex, PR 7: an earlier quit gave a negative duration and let a long uncertainty through).
     const uncertainEnd = typeof entry.uncertainSince === 'number' && lastQuitAt >= entry.uncertainSince ? lastQuitAt : now;
-    if (typeof entry.uncertainSince === 'number' && (uncertainEnd - entry.uncertainSince) > UNCERTAIN_MAX_MS) {
-      skippedUncertain += 1;
-      uncertainTabs.push(entry.tabId);
-      continue;
-    }
+    const longUncertain = typeof entry.uncertainSince === 'number' && (uncertainEnd - entry.uncertainSince) > UNCERTAIN_MAX_MS;
     const prev = tabToBest.get(entry.tabId);
     if (!prev || ranAt > prev.lastRunningAt) {
       tabToBest.set(entry.tabId, {
@@ -181,8 +179,15 @@ export function pickLaunchSessions(tabMap, lastQuitAt, now) {
         projectPath: entry.projectPath,
         capturedAt: entry.capturedAt || 0,
         lastRunningAt: ranAt,
+        longUncertain,
       });
     }
+  }
+  // Each tab's NEWEST link decides it. A long uncertainty on that one rules the tab out; it never falls back to an
+  // older session there (Codex, PR 7: the session the person stopped before starting the newer one came back).
+  for (const [tabId, best] of tabToBest) {
+    const { longUncertain, ...rest } = best;
+    if (longUncertain) { tabToBest.delete(tabId); skippedUncertain += 1; uncertainTabs.push(tabId); } else tabToBest.set(tabId, rest);
   }
   return { tabToBest, skippedStale, skippedHeuristic, skippedUncertain, uncertainTabs };
 }

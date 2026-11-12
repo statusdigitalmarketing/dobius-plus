@@ -43,4 +43,9 @@ console.log('PASS  with children present, the running-stamp check always looks a
 assert.ok(!/claudeCheckFailed/.test(src), 'a failed check is never decided from the foreground name');
 assert.match(src, /if \(err\?\.code === 1\) return null; \/\/ ps exit 1: the PTY's own process is gone/, 'a root that is gone is no Claude');
 console.log('PASS  a failed check stays unknown; a PTY root that is gone is no Claude');
+assert.match(src, /return await ptySelf\(pid, strict, strict \|\| thorough \|\| rootCheck \? null : entry, unknown\);/, 'no children: a stamped tab still looks at its root');
+assert.match(src, /if \(rows === WIN_ROOT_GONE\) return null;/, 'Windows: a read table without the shell is no Claude');
+const mainSrc = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8');
+assert.equal((mainSrc.match(/getTerminalClaudeInfo\(t\.id, \{ unknown: true, rootCheck: stampedTabs\.has\(t\.id\) \}\)/g) || []).length, 2, 'capture and quit pass rootCheck for stamped tabs');
+console.log('PASS  stamped tabs always get the root checked; a Windows table without the shell is no Claude');
 process.exit(0);
