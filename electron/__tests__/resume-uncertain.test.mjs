@@ -80,6 +80,7 @@ console.log('PASS  uncertainty starts at the first failed check and ends on a co
   assert.match(main, /quitStampAt = cfgQuit\.lastQuitAt;/, 'the quit records the stamp it wrote');
   assert.match(main, /markSessionTabUncertain\(sidUnknown, quitStampAt \?\? Date\.now\(\)\)/, 'the final check dates doubt at that stamp');
   assert.match(main, /\} else if \(running && running === sid\) \{[\s\S]{0,400}?touchSessionTabLink\(sid, quitStampAt \?\? Date\.now\(\)\)/, 'a session the quit check sees running is touched, ending its doubt');
+  assert.match(main, /got\.sessionId === sidNow[\s\S]{0,200}?touchSessionTabLink\(sidNow, quitStampAt \?\? Date\.now\(\)\)/, 'argv proof at quit is recorded before the shared deadline can stop the pass');
   console.log('PASS  doubt first seen by the quit check is dated at the quit');
 }
 

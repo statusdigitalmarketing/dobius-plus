@@ -5912,6 +5912,14 @@ app.on('before-quit', (e) => {
           const got = await getTerminalClaudeInfo(t.id, { unknown: true, rootCheck: stampedTabs.has(t.id) });
           if (got === CLAUDE_UNKNOWN) unknownTabs.add(t.id);
           infoByTab.set(t.id, got === CLAUDE_UNKNOWN ? null : got);
+          // Proof by argv (`claude --resume <the mapped id>`, how every auto-resumed tab runs) is recorded at once: the
+          // shared 2 s deadline can stop this pass before the decisions below, and that must not leave a session seen
+          // running with the doubt of earlier failed checks (Codex, PR 7). Same touch as the confirmed branch below.
+          const sidNow = tabToSid.get(t.id);
+          if (got && got !== CLAUDE_UNKNOWN && got.sessionId && got.sessionId === sidNow && getSessionTabMap()?.[sidNow]?.tabId === t.id) {
+            if (provenanceChanged(mapQ[sidNow]?.resolvedBy, 'argv')) setSessionTabLink(sidNow, t.id, t.cwd, 'argv');
+            else touchSessionTabLink(sidNow, quitStampAt ?? Date.now());
+          }
         }
         const cwdByTab = new Map();
         for (const t of liveTabs) {
