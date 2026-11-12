@@ -12,7 +12,7 @@ export const NOTES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)),
 export const MAX_BYTES = 4096;
 export const MAX_BULLETS = 5;
 export const MAX_LINE = 280;
-export const MAX_SECTIONS = 3; // a person who skipped many releases sees the newest three, not a wall
+export const MAX_SECTIONS = 10; // every skipped release up to ten, newest first (the popup body scrolls)
 const VERSION_RE = /^(\d{1,4})\.(\d{1,4})\.(\d{1,6})$/;
 // En and em dash, built from their codes (house rule: neither appears in user-facing text).
 const DASHES = new RegExp(`[${String.fromCharCode(0x2013, 0x2014)}]`);
@@ -84,8 +84,10 @@ export function plan({ current, seen, existedAtStart, notes }) {
   if (seenOk && compareVersions(seenOk, current) >= 0) return { sections: [], newSeen: null };
   // Fresh install: nothing to tell them about, start counting from here.
   if (!seenOk && !existedAtStart) return { sections: [], newSeen: current };
+  // No `seen` on an install that ran before means it last ran a version older than the popup itself, so every notes
+  // file up to this one was missed (Sam, 2026-11-12: going 2.2.25 to 2.2.28 should show 2.2.28, 2.2.27 and 2.2.26).
   const versions = [...notes.keys()]
-    .filter((v) => compareVersions(v, current) <= 0 && (seenOk ? compareVersions(v, seenOk) > 0 : v === current))
+    .filter((v) => compareVersions(v, current) <= 0 && (!seenOk || compareVersions(v, seenOk) > 0))
     .sort((a, b) => compareVersions(b, a))
     .slice(0, MAX_SECTIONS);
   if (versions.length === 0) return { sections: [], newSeen: current };

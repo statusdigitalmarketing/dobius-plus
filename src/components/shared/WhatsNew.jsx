@@ -147,7 +147,7 @@ export default function WhatsNew() {
             What's new in Dobius+ {newest}
           </h2>
         </div>
-        <div style={{ padding: '8px 20px 4px', overflowY: 'auto' }}>
+        <div style={{ padding: '8px 20px 4px', overflowY: 'auto', flex: '1 1 auto', minHeight: 0 }}>
           {data.sections.map((s) => (
             <section key={s.version} style={{ marginBottom: 12 }}>
               {several && (
@@ -163,7 +163,7 @@ export default function WhatsNew() {
             </section>
           ))}
         </div>
-        <div style={{ padding: '8px 20px 16px', display: 'flex', justifyContent: 'flex-end' }}>
+        <div style={{ padding: '8px 20px 16px', display: 'flex', justifyContent: 'flex-end', flexShrink: 0 }}>
           <button
             ref={buttonRef}
             type="button"
