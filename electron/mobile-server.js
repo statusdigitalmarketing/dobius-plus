@@ -343,7 +343,11 @@ export function tuiVisibleTail(text) {
   for (const step of TUI_STEPS) {
     if (raw.length - step <= start) break;
     let nl = raw.indexOf('\n', raw.length - step);
-    while (nl > 0 && nl + 1 < end && raw[nl - 1] === '\x1b') nl = raw.indexOf('\n', nl + 1);
+    // At most 64 ESC-preceded newlines per window, then give the window up (Codex P2: a buffer of nothing but ESC +
+    // newline made thousands of searches before the full strip ran anyway). Skipping a window is always safe.
+    for (let tries = 0; nl > 0 && nl + 1 < end && raw[nl - 1] === '\x1b'; tries += 1) {
+      nl = tries < 64 ? raw.indexOf('\n', nl + 1) : -1;
+    }
     if (nl < 0 || nl + 1 >= end) continue;
     out = stripAnsi(raw.slice(nl + 1, end)) + out;
     end = nl + 1;

@@ -137,7 +137,7 @@ ok('empty/null input is not live');
   // ESC + newline exactly where a window would start, with a column move after it: only a correct cut keeps the
   // column the full scan has there (the full scan never resets it, the ESC swallowed the newline).
   for (const after of [2000, 9000, 30000]) cases.push('x'.repeat(100000) + 'Q'.repeat(60) + '\u001b\n' + 'ab\u001b[5Gz\n' + 'v'.repeat(after));
-  cases.push('', 'plain', dense, dense + 'tail\n', 'a\n'.repeat(200000), '\u001b\n'.repeat(50000) + 'end');
+  cases.push('', 'plain', dense, dense + 'tail\n', 'a\n'.repeat(200000), '\u001b\n'.repeat(50000) + 'end', '\u001b\n'.repeat(131072), 'z'.repeat(20000) + '\u001b\n'.repeat(40) + 'tail\n' + 'w'.repeat(5000));
   for (const [i, c] of cases.entries()) assert.equal(tuiVisibleTail(c), ref(c), `case ${i}`);
   ok(`windowed strip equals the full strip on ${cases.length} buffers`);
 }
