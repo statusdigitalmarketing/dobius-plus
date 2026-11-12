@@ -164,13 +164,21 @@ export function winExeBase(tok) {
   return path.win32.basename(String(tok || '')).toLowerCase().replace(/\.(exe|cmd|bat|com)$/, '');
 }
 
-// A process row that may be Claude though it could not be read as Claude: an executable named claude, or a JS runtime
-// whose command names claude or could not be read. An unrelated program with claude only in an argument
-// (`notepad.exe C:\tmp\claude.txt`) is not (Codex, PR 7).
+// A process row that may be Claude though it could not be read as Claude: an executable named claude, the native
+// installer's versioned binary (`versions\2.1.319.exe`) whose command could not be read or names claude, or a JS runtime
+// whose command could not be read or whose SCRIPT names claude. An unrelated program or script with claude only in an
+// argument (`notepad.exe C:\tmp\claude.txt`, `node server.js --log claude.log`) is not (Codex, PR 7).
 export function winMayBeClaude(row) {
   const base = winExeBase(row?.name || '');
   if (/claude/i.test(base)) return true;
-  return ['node', 'bun', 'deno'].includes(base) && (!row?.command || /claude/i.test(row.command));
+  if (/^\d+\.\d+\.\d+/.test(base)) return !row?.command || /claude/i.test(row.command);
+  if (!['node', 'bun', 'deno'].includes(base)) return false;
+  if (!row?.command) return true;
+  const argv = splitWinCommandLine(row.command);
+  // The script is the first argument after the runtime's own options; with none (`node -e`, a REPL) fall back to the
+  // whole line.
+  const script = argv.slice(1).find((a) => !a.startsWith('-'));
+  return /claude/i.test(script ?? row.command);
 }
 
 // When no Claude was found among a shell's dated programs (`progs`, from shellPrograms): could one still be there? A

@@ -66,6 +66,14 @@ assert.match(src, /if \(winShellMayHoldClaude\(rows, pid, progs\)\) return CLAUD
   assert.equal(winShellMayHoldClaude(rows, 10, progs), true, 'so the tab is could-not-tell');
   const vim = { pid: 13, ppid: 10, name: 'notepad.exe', command: 'notepad.exe C:\\tmp\\claude.txt', startFt: ft(4), startedAt: 4 };
   assert.equal(winShellMayHoldClaude([shell, vim], 10, shellPrograms([shell, vim], 10)), false, 'notepad with claude.txt is not');
+  // A node script with claude only in an argument is not Claude; one whose script names claude may be (Codex, PR 7).
+  const { winMayBeClaude: may } = await import('../win-proc.js');
+  assert.equal(may({ name: 'node.exe', command: 'node.exe C:\\tools\\server.js --log C:\\tmp\\claude.log' }), false, 'a node script logging to claude.log is not');
+  assert.equal(may({ name: 'node.exe', command: 'node.exe --max-old-space-size=4096 C:\\x\\claude-code\\cli.js' }), true, 'a node script named claude may be');
+  assert.equal(may({ name: 'node.exe', command: '' }), true, 'an unreadable node command may be');
+  assert.equal(may({ name: '2.1.319.exe', command: '' }), true, 'an unreadable native versioned binary may be');
+  assert.equal(may({ name: '2.1.319.exe', command: 'C:\\Users\\j\\.local\\share\\claude\\versions\\2.1.319.exe -c' }), true, 'a readable one under claude\\versions may be');
+  assert.equal(may({ name: '1.2.3.exe', command: 'C:\\apps\\other\\1.2.3.exe' }), false, 'another versioned exe is not');
   // A Claude orphan whose parent pid was reused by this shell is dated before it: not this tab's, so not a doubt.
   const orphan = { pid: 14, ppid: 10, name: 'claude.exe', command: 'claude.exe --resume zz', startFt: ft(0), startedAt: 0 };
   assert.equal(winShellMayHoldClaude([shell, orphan], 10, shellPrograms([shell, orphan], 10)), false, 'an older orphan is not');

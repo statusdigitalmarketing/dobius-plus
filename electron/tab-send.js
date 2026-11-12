@@ -91,6 +91,12 @@ export function startsClaude(message, depth = 0) {
   let i = 0;
   while (i < words.length) {
     const w = words[i];
+    if (w.bare && w.text === 'exec') {
+      // exec's own options: -c (empty environment), -l (login), -a NAME (argv[0]); Codex, PR 7.
+      i += 1;
+      while (i < words.length && words[i].bare && /^-[cla]+$/.test(words[i].text)) i += words[i].text.includes('a') ? 2 : 1;
+      continue;
+    }
     if (w.bare && PREFIX_WORDS.has(w.text)) { i += 1; continue; }
     if (w.lead && /^[A-Za-z_]\w*=/.test(w.text)) { i += 1; continue; }
     if (w.bare && w.text === 'env') {
@@ -113,7 +119,7 @@ export function startsClaude(message, depth = 0) {
   let prevOption = false;
   for (let k = 0; k < args.length; k += 1) {
     const a = args[k];
-    if (a.lead && a.text.startsWith('-')) { prevOption = true; continue; }
+    if (a.lead && /^-{1,2}[A-Za-z0-9]/.test(a.text)) { prevOption = true; continue; } // a lone `-` is punctuation, not an option
     if (!prevOption) return false; // a bare word where an option belongs: it is a message (`claude is great`)
     prevOption = false;
   }
