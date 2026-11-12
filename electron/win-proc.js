@@ -173,6 +173,16 @@ export function winMayBeClaude(row) {
   return ['node', 'bun', 'deno'].includes(base) && (!row?.command || /claude/i.test(row.command));
 }
 
+// When no Claude was found among a shell's dated programs (`progs`, from shellPrograms): could one still be there? A
+// program that may be Claude but could not be read as Claude, or any row under the shell (two levels) that the dated
+// list left out (no creation time on it or on its launcher, such as an undated cmd running claude.cmd with a dated
+// node.exe under it) that is or may be Claude (Codex, PR 7).
+export function winShellMayHoldClaude(rows, shellPid, progs) {
+  if (progs.some((r) => winMayBeClaude(r) && !winClaudeCommand(r.command))) return true;
+  const kids = new Set(rows.filter((r) => r.ppid === shellPid).map((r) => r.pid));
+  return rows.some((r) => (r.ppid === shellPid || kids.has(r.ppid)) && !progs.includes(r) && (winMayBeClaude(r) || winClaudeCommand(r.command)));
+}
+
 /**
  * The script node runs, from its argv (argv[0] is node), or null. Strict: the
  * script must come straight after node, the only shape npm's Windows launchers

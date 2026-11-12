@@ -52,7 +52,21 @@ assert.equal(await tm.getTerminalClaudeInfo(CHILD, { unknown: true, rootCheck: t
 console.log('PASS  an ambiguous child under a plain shell stays could-not-tell');
 const src = fs.readFileSync(new URL('../terminal-manager.js', import.meta.url), 'utf8');
 assert.match(src, /const self = await ptySelf\(pid, strict, strict \|\| thorough \|\| unknown \? null : entry, unknown\);/, 'with children, unknown callers always look at the PTY root');
-assert.match(src, /under\.some\(\(r\) => r\.startFt == null && winMayBeClaude\(r\)\)\) return CLAUDE_UNKNOWN;/, 'Windows: an undated child that may be Claude stays could-not-tell');
+assert.match(src, /if \(winShellMayHoldClaude\(rows, pid, progs\)\) return CLAUDE_UNKNOWN;/, 'Windows: a Claude the dated list could not see stays could-not-tell');
+{
+  const { winShellMayHoldClaude, shellPrograms, winClaudeCommand } = await import('../win-proc.js');
+  const ft = (n) => String(133000000000000000n + BigInt(n));
+  const shell = { pid: 10, ppid: 1, name: 'pwsh.exe', command: 'pwsh.exe', startFt: ft(1), startedAt: 1 };
+  const cmd = { pid: 11, ppid: 10, name: 'cmd.exe', command: 'cmd.exe /d /s /c "C:\\x\\npm\\claude.cmd" --resume ab', startFt: null, startedAt: NaN };
+  const node = { pid: 12, ppid: 11, name: 'node.exe', command: '"node" "C:\\x\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js" --resume ab', startFt: ft(3), startedAt: 3 };
+  assert.ok(winClaudeCommand(node.command), 'the grandchild is a Claude command');
+  const rows = [shell, cmd, node];
+  const progs = shellPrograms(rows, 10);
+  assert.equal(progs.includes(node), false, 'the dated list misses it under an undated launcher');
+  assert.equal(winShellMayHoldClaude(rows, 10, progs), true, 'so the tab is could-not-tell');
+  const vim = { pid: 13, ppid: 10, name: 'notepad.exe', command: 'notepad.exe C:\\tmp\\claude.txt', startFt: ft(4), startedAt: 4 };
+  assert.equal(winShellMayHoldClaude([shell, vim], 10, shellPrograms([shell, vim], 10)), false, 'notepad with claude.txt is not');
+}
 const { winMayBeClaude } = await import('../win-proc.js');
 assert.equal(winMayBeClaude({ name: 'notepad.exe', command: 'notepad.exe C:\\tmp\\claude.txt' }), false, 'notepad with claude.txt is not Claude');
 assert.equal(winMayBeClaude({ name: 'node.exe', command: '' }), true, 'node with an unreadable command may be');

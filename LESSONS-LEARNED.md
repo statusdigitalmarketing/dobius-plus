@@ -1070,3 +1070,15 @@
 - **FIX**: "Could not tell" is recorded (`uncertainSince` on the link, set at the first failed check, cleared by a confirmed check or a clear) and auto-resume trusts an uncertain stamp only if it was uncertain for under 2 minutes at the quit (`pickLaunchSessions`). The window is measured to the quit only when that quit came after the uncertainty began, else to the relaunch (a crash). A failed check is never decided from the foreground program's name (a shell in front can be a child of an `exec claude` root); a PTY root or child that ps reports gone (exit 1) is "no Claude". A child that vanished between pgrep and ps (ps exit 1) is skipped, not a failed check.
 - **CONTEXT**: Any state that "preserves on uncertainty" needs an expiry or a record of when the uncertainty began, or a long outage turns into a silent yes.
 - **DETECTION**: `grep -n "CLAUDE_UNKNOWN\|uncertainSince" electron/*.js`
+
+### Performance: 2026-11-11
+- **MISTAKE**: Each Codex round on PR 7 found another spelling of "a shell command that starts Claude", and each fix widened one regex (`STARTS_CLAUDE_RE` in electron/tab-send.js). Overlapping prefix alternatives (`env -S ...`, `VAR=value`, option-with-value groups) made it backtrack exponentially: a 197-character message took over 12 s, synchronously, in the main process.
+- **FIX**: A linear scanner (`startsClaude`: a hand-written word splitter plus a loop over prefix words), a 2000-character cap, and a test that feeds inputs built to be slow with a time budget.
+- **CONTEXT**: Any regex run on user or remote input in the main process must not nest quantified groups that can match the same text. Once a pattern grows past one or two alternations, write a scanner.
+- **DETECTION**: `grep -nE "\(\?:[^)]*\\\\s\+[^)]*\)\*" electron/*.js`
+
+### Release: 2026-11-11
+- **MISTAKE**: The v2.2.27 release published with Mac files only. Its Windows CI run (release event) sat queued for 4+ hours with no job, so every Windows install (Jacob on 2.2.5) hit a 404 on latest.yml and could not update.
+- **FIX**: After every release, confirm the Windows run started and that `latest.yml` and `Dobius-Plus-Setup-<v>.exe` are on the release (`gh release view v<v> --json assets`). A run stuck in the queue is cancelled and re-run (Sam runs it; the classifier blocks `gh run cancel` from a session).
+- **CONTEXT**: Windows users only update from a release that carries latest.yml; a release without it leaves them on whatever they have.
+- **DETECTION**: `gh release view "v$(node -p 'require(\"./package.json\").version')" --json assets --jq '[.assets[].name]|index("latest.yml")'`

@@ -20,7 +20,7 @@ import { getSessionTabMap } from './config-manager.js';
 import { loginShellSpawn, ptyProgramName } from '../shared/new-tab.js';
 import { parseCodexCommand } from './codex-sessions.js';
 import { sharedKeyEnv, SHARED_KEYS } from './claude-settings-env.js';
-import { sameFiletime, recordStartFiletime, winProcessTable, shellPrograms, descendants, winClaudeCommand, winCodexCommand, winExeBase, winMayBeClaude } from './win-proc.js';
+import { sameFiletime, recordStartFiletime, winProcessTable, shellPrograms, descendants, winClaudeCommand, winCodexCommand, winExeBase, winShellMayHoldClaude } from './win-proc.js';
 import { readPresenceRecordAt, presenceSessionId } from './claude-presence.js';
 
 const IS_WIN = process.platform === 'win32';
@@ -1566,8 +1566,7 @@ async function winClaudeInfo(entry, unique, strict = false, unknownMode = false)
   // `unknown`: a program under the shell that names claude but could not be read as Claude, or one left out for having
   // no creation time, keeps the tab "could not tell" rather than "no Claude" (Codex, PR 7).
   if (!found && unknownMode && !strict) {
-    const under = rows.filter((r) => r.ppid === pid || rows.some((p) => p.ppid === pid && p.pid === r.ppid));
-    if (progs.some((r) => winMayBeClaude(r) && !winClaudeCommand(r.command)) || under.some((r) => r.startFt == null && winMayBeClaude(r))) return CLAUDE_UNKNOWN;
+    if (winShellMayHoldClaude(rows, pid, progs)) return CLAUDE_UNKNOWN;
   }
   return found;
 }

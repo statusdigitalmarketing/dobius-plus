@@ -443,7 +443,9 @@ async function queueResume(e, delayMs) {
         noteResume(e.tabId, 'resume typed');
         broadcastStatus(e.tabId, 'working');
       } catch (err) {
-        console.warn(`[auto-resume] ${e.tabId}: write failed: ${err.message}`);
+        // A priority line (diag.resume is never throttled) with the short tab name, never the full path (Codex, PR 7).
+        noteResume(e.tabId, `not resumed: typing the resume failed (${err?.code || 'error'})`);
+        console.warn(`[auto-resume] ${shortTab(e.tabId)}: write failed: ${err.message}`);
         releaseSessionResume(e.sessionId, e.tabId);
         broadcastStatus(e.tabId, 'done');
       }
