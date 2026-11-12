@@ -9,11 +9,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-livetest-'));
 process.env.DOBIUS_TEST_USERDATA = userData;
 
-const { claudeTuiPresent } = await import('../mobile-server.js');
+const { claudeTuiPresent, tuiVisibleTail } = await import('../mobile-server.js');
+const { stripAnsi } = await import('../selector-parser.js');
 let pass = 0;
 const ok = (name) => { console.log(`PASS  ${name}`); pass += 1; };
 
@@ -109,6 +111,88 @@ assert.equal(claudeTuiPresent(''), false);
 assert.equal(claudeTuiPresent(null), false);
 assert.equal(claudeTuiPresent(undefined), false);
 ok('empty/null input is not live');
+
+// 10. The windowed strip gives exactly the old full strip's tail (perf, 2026-11-12): real Claude frames, every cut
+// point class, escape-dense stretches that force the wider windows, ESC + newline, no newline at all.
+{
+  const ref = (t) => stripAnsi(String(t || '').slice(-262144)).slice(-4096);
+  const fx = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+  const frames = fs.readdirSync(fx).filter((f) => /-raw\.(txt|bin)$/.test(f)).map((f) => fs.readFileSync(path.join(fx, f), 'latin1'));
+  assert.ok(frames.length >= 8);
+  let seed = 12345;
+  const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  const dense = '\u001b[2K\u001b[1A\u001b[38;5;246m\u001b[0m'.repeat(4000); // ~100KB, no visible text, no newline
+  const cases = [];
+  for (let k = 0; k < 40; k += 1) {
+    let b = '';
+    while (b.length < 300000) {
+      const r = rnd(10);
+      if (r === 0) b += dense;
+      else if (r === 1) b += '\u001b\n\u001b\r\nx\u001b\n';
+      else if (r === 2) b += 'y'.repeat(rnd(9000));
+      else b += frames[rnd(frames.length)];
+    }
+    cases.push(b, b.slice(-(rnd(70000) + 1)), b.slice(0, rnd(b.length)), b.slice(-(16384 + rnd(64)) ), b.slice(-(65536 + rnd(64))));
+  }
+  // ESC + newline exactly where a window would start, with a column move after it: only a correct cut keeps the
+  // column the full scan has there (the full scan never resets it, the ESC swallowed the newline).
+  for (const after of [2000, 9000, 30000]) cases.push('x'.repeat(100000) + 'Q'.repeat(60) + '\u001b\n' + 'ab\u001b[5Gz\n' + 'v'.repeat(after));
+  cases.push('', 'plain', dense, dense + 'tail\n', 'a\n'.repeat(200000), '\u001b\n'.repeat(50000) + 'end', '\u001b\n'.repeat(131072), 'z'.repeat(20000) + '\u001b\n'.repeat(40) + 'tail\n' + 'w'.repeat(5000));
+  // Codex P2: a column past 2^53 (columns now stop at 1e9 in both modes, so this compares like with like).
+  cases.push('\u001b[9007199254740994Gesc to \u001b[9007199254740994Ginterrupt', '\u001b[2000000000G' + 'x'.repeat(5000) + '\u001b[5G\u001b[B');
+  for (const [i, c] of cases.entries()) assert.equal(tuiVisibleTail(c), ref(c), `case ${i}`);
+  ok(`windowed strip equals the full strip on ${cases.length} buffers`);
+}
+
+// 11. Escape runs with no terminator stay linear (Codex P1, 2026-11-12): stripAnsi searched the rest of the string for
+// an ST on every OSC, about 30s of blocked main process for 256KB of ESC ] BEL. Generous limits, still far below that.
+{
+  const runs = [
+    '\u001b]\u0007'.repeat(87000),
+    '\u001bP' + 'a'.repeat(196606) + '\n' + '\u001b]\u0007'.repeat(16383) + '\n' + '\u001b]\u0007'.repeat(5461),
+    '\u001bPq'.repeat(87000),
+  ];
+  for (const r of runs) {
+    const t0 = Date.now();
+    stripAnsi(r);
+    claudeTuiPresent(r);
+    assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0}ms`);
+  }
+  ok('unterminated OSC and DCS runs strip in linear time');
+}
+
+// 12. stripAnsi's tail mode is the tail of the full strip, and cursor motion that expands 3 bytes into 401 characters
+// costs input time, not output time (Codex P1, 2026-11-12).
+{
+  let seed = 99;
+  const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  const parts = ['\u001b]', '\u0007', '\u001b\\', '\u001bP', '\u001b[', '\u001b', '\n', '\r', 'ab', '0;t', '\u001b[5G', '\u001b[1G',
+    '\u001b[9007199254740994G', '\u001b[999999999G', '\u001b[4000000000C',
+    '\u001b[400G', '\u001b[3C', '\u001b[2B', '\u001b[E', '\u001bX', 'zz ', '\u001b[0m', 'x'];
+  for (let k = 0; k < 20000; k += 1) {
+    let s = '';
+    const L = rnd(80);
+    for (let j = 0; j < L; j += 1) s += parts[rnd(parts.length)];
+    const T = 1 + rnd(40);
+    assert.equal(stripAnsi(s, T), stripAnsi(s).slice(-T), JSON.stringify([s, T]));
+  }
+  const fx = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+  for (const f of fs.readdirSync(fx).filter((n) => /-raw\.(txt|bin)$/.test(n))) {
+    const raw = fs.readFileSync(path.join(fx, f), 'latin1');
+    for (const T of [1, 50, 4096, 100000]) assert.equal(stripAnsi(raw, T), stripAnsi(raw).slice(-T), `${f} ${T}`);
+  }
+  const amp = [
+    '\u001b[400G' + '\u001b[B'.repeat(87000),
+    '\u001bP' + 'a'.repeat(245758) + '\n' + '\u001b[400G' + '\u001b[B'.repeat(5458),
+    '\u001b[400C'.repeat(43000),
+  ];
+  for (const r of amp) {
+    const t0 = Date.now();
+    for (let n = 0; n < 10; n += 1) { stripAnsi(r, 4096); claudeTuiPresent(r); }
+    assert.ok(Date.now() - t0 < 300, `10 calls took ${Date.now() - t0}ms`);
+  }
+  ok('tail mode equals the full strip tail and stays fast on cursor-motion runs');
+}
 
 fs.rmSync(userData, { recursive: true, force: true });
 console.log(`claude-live: ${pass} groups pass`);

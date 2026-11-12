@@ -323,13 +323,46 @@ const CLAUDE_TUI_RE = new RegExp([
 // landing in Claude's input box, which is where v1.0.56 put it unconditionally.
 const SHELL_PROMPT_TAIL_RE = /[@~/][^\s]*.*[%$#]\s*$/;
 
+const TUI_TAIL = 4096; // visible characters the check reads
+const TUI_RAW_CAP = 262144; // raw bytes it will ever strip
+const TUI_STEPS = [16384, 65536]; // raw windows tried before the whole cap
+
+// The last TUI_TAIL visible characters of stripAnsi(text.slice(-TUI_RAW_CAP)), without stripping all of it. That full
+// strip ran for every busy tab every second and was 85% of the main process's CPU on a 46-tab Mac (in-app profile,
+// 2026-11-12). Strip the newest raw window first and go further back only while the visible text is short of TUI_TAIL.
+// Each window begins right after a raw newline that no ESC precedes: stripAnsi is then at column 0 and outside every
+// escape there, exactly where the full scan would be, so the pieces join into the same text (CSI cannot contain a
+// newline; ESC + newline is a two-character escape that swallows it, hence the ESC check).
+// ponytail: accepted residual, an OSC or DCS whose payload holds a raw newline and straddles a window start reads part
+// of its payload as text. The old full strip has the same flaw at its own 256KB cut; Claude Code emits neither.
+export function tuiVisibleTail(text) {
+  const raw = String(text || '');
+  const start = Math.max(0, raw.length - TUI_RAW_CAP);
+  let end = raw.length;
+  let out = '';
+  for (const step of TUI_STEPS) {
+    if (raw.length - step <= start) break;
+    let nl = raw.indexOf('\n', raw.length - step);
+    // At most 64 ESC-preceded newlines per window, then give the window up (Codex P2: a buffer of nothing but ESC +
+    // newline made thousands of searches before the full strip ran anyway). Skipping a window is always safe.
+    for (let tries = 0; nl > 0 && nl + 1 < end && raw[nl - 1] === '\x1b'; tries += 1) {
+      nl = tries < 64 ? raw.indexOf('\n', nl + 1) : -1;
+    }
+    if (nl < 0 || nl + 1 >= end) continue;
+    out = stripAnsi(raw.slice(nl + 1, end), TUI_TAIL) + out;
+    end = nl + 1;
+    if (out.length >= TUI_TAIL) return out.slice(-TUI_TAIL);
+  }
+  return (stripAnsi(raw.slice(start, end), TUI_TAIL) + out).slice(-TUI_TAIL);
+}
+
 export function claudeTuiPresent(text) {
   // STRIP FIRST, then window. Slicing raw bytes and stripping after left only
   // a line or two of visible text on a repainting TUI (a single Claude frame
   // is many KB of escapes), so the footer fell outside the window and a
   // plainly-running Claude read as dead. Caught in the live harness, not by
-  // the plain-text unit tests. The raw cap bounds the per-tick strip cost.
-  const tail = stripAnsi(String(text || '').slice(-262144)).slice(-4096);
+  // the plain-text unit tests. tuiVisibleTail strips only as much as it needs.
+  const tail = tuiVisibleTail(text);
   if (!CLAUDE_TUI_RE.test(tail)) return false;
   const lines = tail.split(/\r\n|\r|\n/).map((l) => l.replace(/\s+$/, ''));
   while (lines.length && !lines[lines.length - 1]) lines.pop();
