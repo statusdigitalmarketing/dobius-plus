@@ -9,11 +9,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-livetest-'));
 process.env.DOBIUS_TEST_USERDATA = userData;
 
-const { claudeTuiPresent } = await import('../mobile-server.js');
+const { claudeTuiPresent, tuiVisibleTail } = await import('../mobile-server.js');
+const { stripAnsi } = await import('../selector-parser.js');
 let pass = 0;
 const ok = (name) => { console.log(`PASS  ${name}`); pass += 1; };
 
@@ -109,6 +111,36 @@ assert.equal(claudeTuiPresent(''), false);
 assert.equal(claudeTuiPresent(null), false);
 assert.equal(claudeTuiPresent(undefined), false);
 ok('empty/null input is not live');
+
+// 10. The windowed strip gives exactly the old full strip's tail (perf, 2026-11-12): real Claude frames, every cut
+// point class, escape-dense stretches that force the wider windows, ESC + newline, no newline at all.
+{
+  const ref = (t) => stripAnsi(String(t || '').slice(-262144)).slice(-4096);
+  const fx = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+  const frames = fs.readdirSync(fx).filter((f) => /-raw\.(txt|bin)$/.test(f)).map((f) => fs.readFileSync(path.join(fx, f), 'latin1'));
+  assert.ok(frames.length >= 8);
+  let seed = 12345;
+  const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  const dense = '\u001b[2K\u001b[1A\u001b[38;5;246m\u001b[0m'.repeat(4000); // ~100KB, no visible text, no newline
+  const cases = [];
+  for (let k = 0; k < 40; k += 1) {
+    let b = '';
+    while (b.length < 300000) {
+      const r = rnd(10);
+      if (r === 0) b += dense;
+      else if (r === 1) b += '\u001b\n\u001b\r\nx\u001b\n';
+      else if (r === 2) b += 'y'.repeat(rnd(9000));
+      else b += frames[rnd(frames.length)];
+    }
+    cases.push(b, b.slice(-(rnd(70000) + 1)), b.slice(0, rnd(b.length)), b.slice(-(16384 + rnd(64)) ), b.slice(-(65536 + rnd(64))));
+  }
+  // ESC + newline exactly where a window would start, with a column move after it: only a correct cut keeps the
+  // column the full scan has there (the full scan never resets it, the ESC swallowed the newline).
+  for (const after of [2000, 9000, 30000]) cases.push('x'.repeat(100000) + 'Q'.repeat(60) + '\u001b\n' + 'ab\u001b[5Gz\n' + 'v'.repeat(after));
+  cases.push('', 'plain', dense, dense + 'tail\n', 'a\n'.repeat(200000), '\u001b\n'.repeat(50000) + 'end');
+  for (const [i, c] of cases.entries()) assert.equal(tuiVisibleTail(c), ref(c), `case ${i}`);
+  ok(`windowed strip equals the full strip on ${cases.length} buffers`);
+}
 
 fs.rmSync(userData, { recursive: true, force: true });
 console.log(`claude-live: ${pass} groups pass`);
