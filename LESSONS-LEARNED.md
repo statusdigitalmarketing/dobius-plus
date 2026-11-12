@@ -1059,6 +1059,35 @@
 - **FIX**: Sabotage every independent half together, and assert the test reached the path (a call counter) before trusting a pass.
 - **DETECTION**: when a sabotage run still passes, grep the fix for a second write of the same state.
 
+### Architecture - 2026-11-11
+- **MISTAKE**: After a restart about 20 Claude sessions came back as bare shells. Auto-resume never tried them: their `lastRunningAt` stamps were already 0 at launch (`diag.resume: ... no session was running here at the last quit`; config.json.pre-update-2.2.25.bak showed 13 stamped, the rest ZERO). Two writers cleared them: the 15 s session capture read a failed ps/pgrep (1 s timeouts on a loaded Mac) as "Claude stopped" because `getTerminalClaudeInfo` returns null for both, and `stopSessionTabCapture` cleared only the timer, so a tick already in flight kept probing after the quit's Ctrl+C and zeroed the stamps right before the restart.
+- **FIX**: `getTerminalClaudeInfo(id, { unknown: true })` returns `CLAUDE_UNKNOWN` on a failed check; the capture tick and the quit reconcile leave those tabs untouched. The tick is single-flight and carries a generation that `stopSessionTabCapture` bumps; every write checks `current()` (same gen, not quitting, not quitting for update). The launch pass now logs one `diag.resume: launch:` summary plus every per-tab outcome.
+- **CONTEXT**: Any "tabs did not come back after a restart" report: read `diag.resume` lines in error.log and the `config.json.pre-update-*.bak` stamps before theorising. A Mac's own zsh keeps typeahead (tested at 0 to 1 s), so "keys lost" needs that Mac's log.
+- **DETECTION**: `grep -n "getTerminalClaudeInfo(t.id" electron/main.js` (every capture/reconcile call must pass `{ unknown: true }`)
+
+### Architecture: 2026-11-11
+- **MISTAKE**: The first fix for lost running stamps (PR 7) kept a stamp whenever a check "could not tell", with no limit. Codex: a person who stops Claude while every check is timing out keeps the stamp, and the restart brings back a session they ended.
+- **FIX**: "Could not tell" is recorded (`uncertainSince` on the link, set at the first failed check, cleared by a confirmed check or a clear) and auto-resume trusts an uncertain stamp only if it was uncertain for under 2 minutes at the quit (`pickLaunchSessions`). The window is measured to the quit only when that quit came after the uncertainty began, else to the relaunch (a crash). A failed check is never decided from the foreground program's name (a shell in front can be a child of an `exec claude` root); a PTY root or child that ps reports gone (exit 1) is "no Claude". A child that vanished between pgrep and ps (ps exit 1) is skipped, not a failed check.
+- **CONTEXT**: Any state that "preserves on uncertainty" needs an expiry or a record of when the uncertainty began, or a long outage turns into a silent yes.
+- **DETECTION**: `grep -n "CLAUDE_UNKNOWN\|uncertainSince" electron/*.js`
+
+### Performance: 2026-11-11
+- **MISTAKE**: Each Codex round on PR 7 found another spelling of "a shell command that starts Claude", and each fix widened one regex (`STARTS_CLAUDE_RE` in electron/tab-send.js). Overlapping prefix alternatives (`env -S ...`, `VAR=value`, option-with-value groups) made it backtrack exponentially: a 197-character message took over 12 s, synchronously, in the main process.
+- **FIX**: A linear scanner (`startsClaude`: a hand-written word splitter plus a loop over prefix words), a 2000-character cap, and a test that feeds inputs built to be slow with a time budget.
+- **CONTEXT**: Any regex run on user or remote input in the main process must not nest quantified groups that can match the same text. Once a pattern grows past one or two alternations, write a scanner.
+- **DETECTION**: `grep -nE "\(\?:[^)]*\\\\s\+[^)]*\)\*" electron/*.js`
+
+### Release: 2026-11-11
+- **MISTAKE**: The v2.2.27 release published with Mac files only. Its Windows CI run (release event) sat queued for 4+ hours with no job, so every Windows install (Jacob on 2.2.5) hit a 404 on latest.yml and could not update.
+- **FIX**: After every release, confirm the Windows run started and that `latest.yml` and `Dobius-Plus-Setup-<v>.exe` are on the release (`gh release view v<v> --json assets`). A run stuck in the queue is cancelled and re-run (Sam runs it; the classifier blocks `gh run cancel` from a session).
+- **CONTEXT**: Windows users only update from a release that carries latest.yml; a release without it leaves them on whatever they have.
+- **DETECTION**: `gh release view "v$(node -p 'require(\"./package.json\").version')" --json assets --jq '[.assets[].name]|index("latest.yml")'`
+
+### Testing: 2026-11-11
+- **MISTAKE**: Appended a new check to the end of `electron/__tests__/resume-uncertain.test.mjs`, which ends with `process.exit(0)`. The block never ran and the suite still passed; a sabotage run printed no failure, which is how it showed up.
+- **FIX**: Insert new checks above the file's `process.exit(0)`, and confirm the new PASS line prints before trusting a green run.
+- **CONTEXT**: Script-style test files (not `node --test`) in this repo often end with an explicit exit to stop open handles; anything appended after it is dead.
+- **DETECTION**: `grep -n "process.exit(0)" electron/__tests__/*.mjs` then check nothing but closing braces follows it.
 ### Performance: 2026-11-11
 - **MISTAKE**: Chased the live app's 40 to 50% main-process CPU (37 tabs) with guesses and a 12-tab stand-in harness. The two suspects (phone spinner renders, context reads) measured cheap, and the harness idled at 7%: the cost depends on the real tabs, windows and transcripts. macOS `sample` only showed "JS timers" (no JIT symbols), and attaching an inspector to the live app is unsafe (SIGUSR1 may terminate an Electron main without a handler, killing every tab).
 - **FIX**: Measure in the real app: POST /perfProfile (electron/perf-profile.js) profiles the main process from inside via node:inspector Session, no flag, no port, no restart. Run it under the real load and read topApp before changing code.

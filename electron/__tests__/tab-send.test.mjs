@@ -607,3 +607,55 @@ test('another delivery pasting behind ours before the Enter stops the send, rese
     assert.equal(t.submitted, 0);
   }
 });
+
+// Bug report 2026-11-11: `dobius-send <tab> 'claude --resume <id>'` into a tab whose Claude was already resumed reached
+// that Claude as a prompt (queued as a message). A command that starts Claude is for a shell only.
+test('a command that starts Claude, sent to a tab where Claude runs: refused, nothing pasted', async () => {
+  for (const working of [false, true]) {
+    const { t, deps } = fakeTab({ working });
+    const r = await sendToTab(deps, 'tab', 'claude --resume 4b06acc2-419d-4a2d-8198-4d7623e8f747');
+    assert.equal(r.status, 409);
+    assert.equal(r.body.reason, 'claude-running');
+    assert.equal(t.pasted, null);
+    assert.equal(t.submitted, 0);
+  }
+  // Quoted ids start Claude just the same once the shell strips the quotes (Codex, PR 7).
+  for (const cmd of ['claude --resume "4b06acc2-419d"', "claude -r '4b06acc2-419d'", 'exec claude --continue', 'command claude --resume 4b06acc2-419d',
+    'env FOO=1 claude -c', 'CLAUDE_CONFIG_DIR=/x claude --resume ab', '~/.local/bin/claude --resume ab', '\\claude', 'nohup claude',
+    'claude --resume 4b06acc2-419d;', '/usr/local/bin/claude -c', '"claude" --resume 4b06acc2-419d', "'/usr/local/bin/claude' -c", 'claude --model opus', 'claude --resume ab --model opus --dangerously-skip-permissions', 'env -u ANTHROPIC_API_KEY claude -c',
+    'env -S "claude -c"', 'CLAUDE_CONFIG_DIR="/tmp/my account" claude -c', "A='x' B=\"y z\" claude --resume 'ab'", 'claude --resume="ab"', 'exec -c claude --resume 4b06acc2-419d', 'exec -a myclaude claude -c', 'exec -cl claude', 'claude.exe --resume 4b06acc2-419d', 'claude.cmd -c', 'Claude.EXE', '& "C:\\Users\\j\\.local\\bin\\claude.exe" --resume ab', 'C:\\tools\\claude.cmd -c', '.\\claude.exe', 'claude "--resume" "4b06acc2-419d"', "claude '-c'"]) {
+    const { t, deps } = fakeTab();
+    const r = await sendToTab(deps, 'tab', cmd);
+    assert.equal(r.body.reason, 'claude-running', cmd);
+    assert.equal(t.pasted, null, cmd);
+  }
+});
+
+test('the same command to a shell tab is typed and Enter pressed; a message that only mentions claude still reaches Claude', async () => {
+  const shell = fakeTab({ claude: false });
+  const r1 = await sendToTab(shell.deps, 'tab', 'cd /tmp/a && claude --resume ab-12');
+  assert.equal(r1.body.ok, true);
+  assert.equal(shell.t.written.join(''), 'cd /tmp/a && claude --resume ab-12');
+  const talk = fakeTab();
+  const r2 = await sendToTab(talk.deps, 'tab', 'please run claude --resume ab-12 in the other tab');
+  assert.equal(r2.body.ok, true);
+  assert.equal(talk.t.pasted, 'please run claude --resume ab-12 in the other tab');
+  for (const link of ['https://example.com/claude', 'example.com/claude', 'claude is great', 'claude -p hello world', 'claude --resume ab; rm x', 'claude && ls', '"exec" claude', 'claude - hello', 'claude -- hello there', 'claude.exe is installed', 'claude.txt', 'C:/x\\claude.exe', 'http://x/claude.exe']) { // a message, not a program
+    const u = fakeTab();
+    const r3 = await sendToTab(u.deps, 'tab', link);
+    assert.equal(r3.body.ok, true, link);
+    assert.equal(u.t.pasted, link);
+  }
+});
+
+// Codex P1, PR 7: the regex this replaced backtracked exponentially ('env -S ' x 26 took over 12 s) and runs on the
+// main process. The scanner is linear: inputs built to be slow finish at once.
+test('the start-Claude check is fast on inputs built to be slow', async () => {
+  const { startsClaude } = await import('../tab-send.js');
+  const t0 = Date.now();
+  for (const n of [26, 200, 400]) assert.equal(startsClaude('env -S '.repeat(n) + 'claude is great'), false);
+  assert.equal(startsClaude('env '.repeat(500) + 'x'), false);
+  assert.equal(startsClaude(' '.repeat(1990) + 'claude'), true);
+  assert.equal(startsClaude('a'.repeat(5000)), false);
+  assert.ok(Date.now() - t0 < 200, `took ${Date.now() - t0} ms`);
+});

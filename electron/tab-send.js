@@ -29,6 +29,108 @@ const CONFIRM_MS = 5000;
 const POLL_MS = 150;
 
 const fail = (status, error, extra = {}) => ({ status, body: { ok: false, ...extra, error } });
+// A one-line shell command that starts Claude (`claude`, `claude --resume <id>`, `cd <dir> && claude -c`, `exec claude`).
+// Meant for the tab's shell: sent to a tab where Claude already runs, it reached that Claude as a prompt and was queued
+// as a message (bug report 2026-11-11). Narrow on purpose: a message that merely mentions claude is a message.
+// Read with a linear scanner, never one big regex: the regex this replaced backtracked exponentially on a 200-character
+// message and would have frozen the main process (Codex P1, PR 7). Accepted as a launch: prefixes a shell runs the
+// command through (exec, command, builtin, nohup, env and its options, `env -S "<command>"`, VAR=value), a file path
+// (/, ~/, ./, ../; never a URL) or a backslash before the name, a quoted name, options after it (each may take one
+// value; a bare word first is a message), and one trailing ; or &.
+const PREFIX_WORDS = new Set(['exec', 'command', 'builtin', 'nohup']);
+const ENV_VALUE_OPTS = new Set(['-u', '-C', '--unset', '--chdir']);
+// Splits like a shell does for the spellings we accept: a word is runs of plain characters and quoted parts glued
+// together (`NAME="/a b"`, `"claude"`, `--resume='x'`). `lead` is true when the word starts with a plain character and
+// `bare` when it has no quotes at all, so a quoted "exec" or "-c" is never read as a prefix or an option.
+function shellWords(text) {
+  const out = [];
+  let i = 0;
+  while (i < text.length) {
+    while (i < text.length && /\s/.test(text[i])) i += 1;
+    if (i >= text.length) break;
+    let word = '';
+    let bare = true;
+    const lead = text[i] !== '"' && text[i] !== "'";
+    while (i < text.length && !/\s/.test(text[i])) {
+      const q = text[i];
+      if (q === '"' || q === "'") {
+        const end = text.indexOf(q, i + 1);
+        if (end < 0) return null; // unterminated quote: not a command we can read
+        word += text.slice(i + 1, end);
+        bare = false;
+        i = end + 1;
+      } else {
+        word += q;
+        i += 1;
+      }
+    }
+    out.push({ text: word, lead, bare });
+  }
+  return out;
+}
+// The program word: claude, or a path to it (/, ~/, ./, ../ on the Mac; C:\, .\, ..\, ~\ in PowerShell; never a URL),
+// with Windows' launcher endings (claude.exe, claude.cmd, ...). Case does not matter: neither filesystem cares.
+function isClaudeProgram(name) {
+  let n = name.startsWith('\\') ? name.slice(1) : name;
+  if (/[\\/]/.test(n)) {
+    const posix = /^(?:~|\.{1,2})?\//.test(n) && !/[:\\]/.test(n);
+    const win = /^(?:[A-Za-z]:\\|\.{1,2}\\|~\\)/.test(n) && !n.includes('/');
+    if (!posix && !win) return false;
+    n = n.slice(Math.max(n.lastIndexOf('/'), n.lastIndexOf('\\')) + 1);
+  }
+  return /^claude(?:\.(?:exe|cmd|bat|ps1))?$/i.test(n);
+}
+export function startsClaude(message, depth = 0) {
+  let s = String(message ?? '').trim();
+  if (!s || s.length > 2000 || depth > 2 || /[\n\r`|]/.test(s)) return false;
+  if (s.endsWith(';') || (s.endsWith('&') && !s.endsWith('&&'))) s = s.slice(0, -1).trim();
+  if (/^cd\s/.test(s)) {
+    const k = s.indexOf('&&');
+    if (k < 0) return false;
+    s = s.slice(k + 2).trim();
+  }
+  if (/^&\s/.test(s)) s = s.slice(1).trim(); // PowerShell's call operator: & "C:\x\claude.exe" --resume <id>
+  if (/[;&]/.test(s)) return false; // anything chained after it is more than a launch
+  const words = shellWords(s);
+  if (!words || !words.length) return false;
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i];
+    if (w.bare && w.text === 'exec') {
+      // exec's own options: -c (empty environment), -l (login), -a NAME (argv[0]); Codex, PR 7.
+      i += 1;
+      while (i < words.length && words[i].bare && /^-[cla]+$/.test(words[i].text)) i += words[i].text.includes('a') ? 2 : 1;
+      continue;
+    }
+    if (w.bare && PREFIX_WORDS.has(w.text)) { i += 1; continue; }
+    if (w.lead && /^[A-Za-z_]\w*=/.test(w.text)) { i += 1; continue; }
+    if (w.bare && w.text === 'env') {
+      i += 1;
+      while (i < words.length && words[i].lead && words[i].text.startsWith('-')) {
+        const o = words[i].text;
+        if (o === '-S' || o === '--split-string') {
+          const v = words[i + 1];
+          if (!v) return false;
+          return startsClaude([v.text, ...words.slice(i + 2).map((x) => (x.bare ? x.text : JSON.stringify(x.text)))].join(' '), depth + 1);
+        }
+        i += ENV_VALUE_OPTS.has(o) ? 2 : 1;
+      }
+      continue;
+    }
+    break;
+  }
+  if (i >= words.length || !isClaudeProgram(words[i].text)) return false;
+  const args = words.slice(i + 1);
+  let prevOption = false;
+  for (let k = 0; k < args.length; k += 1) {
+    const a = args[k];
+    // An option, quoted or not (`"--resume"` reaches Claude the same); a lone `-` is punctuation, not an option.
+    if (/^-{1,2}[A-Za-z0-9]/.test(a.text)) { prevOption = true; continue; }
+    if (!prevOption) return false; // a bare word where an option belongs: it is a message (`claude is great`)
+    prevOption = false;
+  }
+  return true;
+}
 const sending = new Set();
 // Every paste this route made that was not followed by its Enter, per tab. Two uses:
 // 1. Never paste twice. Until a send SEES Claude's box hold text after it (`seen`), the paste may still be queued in the
@@ -127,6 +229,7 @@ async function send(deps, tabId, message, claudeOnly = false) {
       // during it would go unseen (Codex round 3).
       return await typeRaw(deps, tabId, pty, watch, message);
     }
+    if (startsClaude(message)) return fail(409, 'Claude is already running in that tab, so a command that starts Claude would reach it as a prompt; nothing was typed', { reason: 'claude-running' });
     // Into Claude only (a shell's `cat <file` keeps its redirect): no harness markup posing as system text.
     message = defangHarnessTags(message);
     if (TRAILING_BACKSLASH_RE.test(message)) return fail(409, 'the message ends with a backslash, which Claude reads as a line continuation; nothing was typed');

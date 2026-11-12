@@ -20,7 +20,7 @@ import { getSessionTabMap } from './config-manager.js';
 import { loginShellSpawn, ptyProgramName } from '../shared/new-tab.js';
 import { parseCodexCommand } from './codex-sessions.js';
 import { sharedKeyEnv, SHARED_KEYS } from './claude-settings-env.js';
-import { sameFiletime, recordStartFiletime, winProcessTable, shellPrograms, descendants, winClaudeCommand, winCodexCommand, winExeBase } from './win-proc.js';
+import { sameFiletime, recordStartFiletime, winProcessTable, shellPrograms, descendants, winClaudeCommand, winCodexCommand, winExeBase, winShellMayHoldClaude } from './win-proc.js';
 import { readPresenceRecordAt, presenceSessionId } from './claude-presence.js';
 
 const IS_WIN = process.platform === 'win32';
@@ -798,20 +798,27 @@ export function claudeInTree(psText, root) {
 // the many tabs sitting at a prompt. Polled lookups only: an exec'd Claude whose foreground child is a shell also reads
 // as a shell, so the resume gate and strict lookups pass no entry and always look.
 const SHELL_NAME = /^-?(zsh|bash|sh|fish|dash|ksh|tcsh|csh|login)$/;
-async function ptySelf(pid, strict, entry) {
+async function ptySelf(pid, strict, entry, rethrow = false) {
   let fg = null;
   try { fg = entry?.pty?.process; } catch { fg = null; }
   if (typeof fg === 'string' && SHELL_NAME.test(fg.split('/').pop())) return null;
   try { return await ptySelfClaude(pid); }
-  catch (err) { if (strict) throw err; return null; }
+  catch (err) { if (strict || rethrow) throw err; return null; }
 }
 async function ptySelfClaude(pid) {
-  const { stdout } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' });
+  let stdout;
+  try {
+    ({ stdout } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', String(pid)], { timeout: 1000, encoding: 'utf8' }));
+  } catch (err) {
+    if (err?.code === 1) return null; // ps exit 1: the PTY's own process is gone, so no Claude there (Codex, PR 7)
+    throw err;
+  }
   const line = stdout.trim();
   if (!line) return null;
   const command = line.slice(24).trim();
   if (!isClaudeCommand(command)) {
-    if (/claude/i.test(command)) throw new Error('a program there names claude');
+    // Naming claude is only doubt when the classifier cannot rule it out (`tail -f /tmp/claude.log` it can: Codex, PR 7).
+    if (/claude/i.test(command) && (command.length > 4096 || classifyClaudeProcess(command).kind !== 'not-claude')) throw new Error('a program there names claude');
     return null;
   }
   const kind = command.length > 4096 ? 'maybe' : classifyClaudeProcess(command).kind;
@@ -830,11 +837,19 @@ async function ptySelfOf(id) {
   return ptySelf(pid, false, null); // on demand (the resume gate): always looked at
 }
 
+// A check that failed (ps or pgrep timed out, a program there may be Claude), returned instead of null when the caller
+// passes `unknown: true`. Null means "no Claude"; this means "could not tell". The session capture must never read a
+// failed check as a stopped Claude: it cleared the running stamps auto-resume needs, so tabs came back as bare shells
+// after a restart on a loaded Mac (bug report 2026-11-11).
+export const CLAUDE_UNKNOWN = Object.freeze({ unknown: true });
+
 // thorough: an on-demand caller (snooze): the PTY's own process is always looked at, as for strict.
-export async function getTerminalClaudeInfo(id, { unique = false, strict = false, thorough = false } = {}) {
+// rootCheck: never take the foreground-shell shortcut (a tab whose answer clears a running stamp: a child can take the
+// foreground of an `exec claude` root between pgrep and that read).
+export async function getTerminalClaudeInfo(id, { unique = false, strict = false, thorough = false, unknown = false, rootCheck = false } = {}) {
   const entry = terminals.get(id);
   if (!entry) return null;
-  if (IS_WIN) return winClaudeInfo(entry, unique, strict);
+  if (IS_WIN) return winClaudeInfo(entry, unique, strict, unknown);
   try {
     const pid = entry.pty.pid;
     if (typeof pid !== 'number' || pid <= 0) return null;
@@ -844,7 +859,7 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
     } catch (err) {
       // No children at all (pgrep's exit 1): the PTY's own process may be Claude (`exec claude --resume X`).
       if (err?.code !== 1) throw err;
-      return await ptySelf(pid, strict, strict || thorough ? null : entry);
+      return await ptySelf(pid, strict, strict || thorough || rootCheck ? null : entry, unknown);
     }
     const children = pgrepOut.trim().split('\n').filter(Boolean);
     // `unique`: one ps per child, so a shell with many children is not
@@ -854,13 +869,22 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
       return null;
     }
     let found = null;
+    let ambiguous = false; // `unknown`: a child that names claude in a way the classifier cannot rule out
     for (const childPid of children) {
       // `lstart` is the process start time; `command` is the argv. One ps
       // call gets both so the fresh-session correlation costs nothing extra.
-      const { stdout: psOut } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', childPid], {
-        timeout: 1000,
-        encoding: 'utf8',
-      });
+      let psOut;
+      try {
+        ({ stdout: psOut } = await execFileP('/bin/ps', ['-o', 'lstart=,command=', '-p', childPid], {
+          timeout: 1000,
+          encoding: 'utf8',
+        }));
+      } catch (err) {
+        // ps exits 1 for a pid that is gone: the child ended between pgrep and here. Not a failed check: the rest of
+        // the tab is still looked at (Codex, PR 7: a Claude exiting mid-check made the whole tab "could not tell").
+        if (err?.code === 1) continue;
+        throw err;
+      }
       const line = psOut.trim();
       if (!line) continue;
       // `lstart` is a fixed 24-char date ("Wed Jul 15 21:49:26 2026"), the
@@ -875,6 +899,9 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
         if (unique && /claude/i.test(command)) return null;
         // strict: may be one (a path with spaces), so that tab's session is not known.
         if (strict && /claude/i.test(command)) throw new Error('a program there names claude');
+        // `unknown`: one that may be Claude (`/opt/CLI Tools/claude`) keeps the tab "could not tell" unless a Claude
+        // turns up elsewhere; a non-Claude root must not turn it into "no Claude" (Codex, PR 7).
+        if (unknown && /claude/i.test(command) && (command.length > 4096 || classifyClaudeProcess(command).kind !== 'not-claude')) ambiguous = true;
         continue;
       }
       // `unique`: the strict reading too, so a process that only names the CLI
@@ -903,13 +930,20 @@ export async function getTerminalClaudeInfo(id, { unique = false, strict = false
     }
     // None of the children is Claude, but the PTY's own process may be (`exec claude`, with an MCP server or other
     // helper as its child). Every mode: the resume gate must see it too.
-    if (!found) return await ptySelf(pid, strict, strict || thorough ? null : entry);
+    // With children present, a shell in front can be a child of an `exec claude` root, so `unknown` callers (the
+    // running stamps) always look at the root here (Codex, PR 7). With no children the shortcut is exact.
+    if (!found) {
+      const self = await ptySelf(pid, strict, strict || thorough || unknown ? null : entry, unknown);
+      return !self && ambiguous ? CLAUDE_UNKNOWN : self;
+    }
     // strict: the PTY's own process may be a second Claude (`exec claude` running `claude -p`), which is not known.
     if (strict && await ptySelf(pid, true, null)) throw new Error('two Claude processes in that tab');
     return found;
   } catch (err) {
     if (strict && !(err?.code === 1 && String(err?.cmd || '').startsWith('/usr/bin/pgrep'))) throw err;
-    return null;
+    // A failed check is "could not tell", never read from the foreground name: a shell there can be a child of an
+    // `exec claude` root (Codex, PR 7). A stop that the checks miss is bounded by the uncertainty window in auto-resume.
+    return unknown ? CLAUDE_UNKNOWN : null;
   }
 }
 
@@ -1470,7 +1504,10 @@ export function terminalInstance(id) {
 // same clock, so no slack: Codex showed a second of it admitted the previous
 // owner of a reused pid). A cached table that fails is read again once, fresh;
 // still wrong means no answer.
-async function winRowsFor(entry, { fresh = false } = {}) {
+// gone: a table that WAS read but no longer holds this tab's shell answers WIN_ROOT_GONE instead of null, so a caller
+// can tell "the shell is gone" (no Claude) from "the table could not be read" (Codex, PR 7).
+const WIN_ROOT_GONE = Symbol('win-root-gone');
+async function winRowsFor(entry, { fresh = false, gone = false } = {}) {
   const pid = entry?.pty?.pid;
   if (typeof pid !== 'number' || pid <= 0) return null;
   // The first read that finds the shell pins its exact creation time; every
@@ -1487,16 +1524,25 @@ async function winRowsFor(entry, { fresh = false } = {}) {
   };
   let rows = await winProcessTable({ fresh });
   if (!ok(rows) && !fresh) rows = await winProcessTable({ fresh: true });
-  return ok(rows) ? rows : null;
+  if (ok(rows)) return rows;
+  if (!gone || !Array.isArray(rows)) return null;
+  // Gone only when the table shows it: no row for the shell's pid, or one whose creation time names another process.
+  // A row with no creation time cannot be judged and stays "could not tell" (Codex, PR 7).
+  const root = rows.find((r) => r.pid === pid);
+  if (!root) return WIN_ROOT_GONE;
+  return root.startFt == null || !Number.isFinite(root.startedAt) ? null : WIN_ROOT_GONE;
 }
 
 // strict: what cannot be told (no process rows, too many programs, two Claudes, one that only names claude) throws.
-async function winClaudeInfo(entry, unique, strict = false) {
+async function winClaudeInfo(entry, unique, strict = false, unknownMode = false) {
   const unknown = (why) => { if (strict) throw new Error(why); return null; };
   const pid = entry.pty.pid;
   if (typeof pid !== 'number' || pid <= 0) return null;
-  const rows = await winRowsFor(entry);
-  if (!rows) return unknown('process list not read');
+  const rows = await winRowsFor(entry, { gone: unknownMode && !strict });
+  // The table was read and the tab's shell is not in it: nothing runs there, so no Claude (Codex, PR 7).
+  if (rows === WIN_ROOT_GONE) return null;
+  // A process table that could not be read is "could not tell" for `unknown` callers, as on the Mac (Codex, PR 7).
+  if (!rows) return !strict && unknownMode ? CLAUDE_UNKNOWN : unknown('process list not read');
   const progs = shellPrograms(rows, pid);
   if ((unique || strict) && progs.length > MAX_UNIQUE_CHILDREN) return unknown('too many programs in that shell to check');
   let found = null;
@@ -1516,6 +1562,11 @@ async function winClaudeInfo(entry, unique, strict = false) {
     if (!unique && !strict) return info;
     if (found) return unknown('two Claude processes in that shell');
     found = info;
+  }
+  // `unknown`: a program under the shell that names claude but could not be read as Claude, or one left out for having
+  // no creation time, keeps the tab "could not tell" rather than "no Claude" (Codex, PR 7).
+  if (!found && unknownMode && !strict) {
+    if (winShellMayHoldClaude(rows, pid, progs)) return CLAUDE_UNKNOWN;
   }
   return found;
 }

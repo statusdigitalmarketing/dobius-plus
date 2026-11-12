@@ -85,7 +85,10 @@ function rotateIfNeeded() {
 // throttle (they are rare and are the whole point of the log).
 // main.stall joins them (v1.0.70): a stall report is written once the loop
 // recovers, which is exactly when a renderer error storm is most likely.
-const PRIORITY_RE = /^(crash\.|renderer\.gone|child\.gone|renderer\.preload-error|main\.stall)/;
+// diag.resume too: a launch writes a few lines per restored tab (bounded by the
+// tab count), and losing them to a busy startup minute hides why a session did
+// not come back (Codex, PR 7).
+const PRIORITY_RE = /^(crash\.|renderer\.gone|child\.gone|renderer\.preload-error|main\.stall|diag\.resume)/;
 export function isPriorityKind(kind) {
   return PRIORITY_RE.test(String(kind || ''));
 }

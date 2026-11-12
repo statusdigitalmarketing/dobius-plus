@@ -29,7 +29,7 @@
  *   - Window close: caller invokes cancelTabsForProject(projectPath).
  */
 
-import { getAutoResume, getSessionTabMap, loadConfig } from './config-manager.js';
+import { getAutoResume, getSessionTabMap, loadConfig, clearSessionTabUncertain, getPreviousLaunchAt } from './config-manager.js';
 import {
   listTerminals, writeTerminal, releaseSessionResume, claimSessionResume,
   getTerminalWebContentsId,
@@ -66,6 +66,8 @@ const restoredDuringStartup = new Set();
 function finishStartup() {
   startupDone = true;
   for (const tabId of restoredDuringStartup) {
+    // A tab the launch pass already took is its outcome to log, not this path's (Codex, PR 7: two lines per tab).
+    if (handled.has(tabId)) continue;
     resumeRestoredTab(tabId).catch((err) => console.warn('[auto-resume] restored tab:', err?.message || err));
   }
   restoredDuringStartup.clear();
@@ -107,45 +109,18 @@ function buildResumeCommand(projectPath, sessionId, tabId) {
 }
 
 /**
- * Entry point. Wait `startupDelayMs` so windows have fully mounted and
- * the renderer's terminal mounts have settled, then resolve every live
- * tab's prior session and schedule a staggered write for each.
- * Idempotent: only runs once per app launch.
+ * Pure: which session each tab was running at the last quit, from the saved links. Exported for tests.
+ * tabMap: config.sessionTabMap; lastQuitAt: config.lastQuitAt (0 when unknown); now: Date.now(); prevLaunchAt: when the
+ * run before this one started (0 when unknown).
  */
-export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
-  if (started) return;
-  started = true;
-
-  const cfg = getAutoResume();
-  if (!cfg.enabled) {
-    console.log('[auto-resume] disabled in config, skipping');
-    finishStartup();
-    return;
-  }
-
-  // Build the target tabId -> best-session map ONCE upfront (sessionTabMap
-  // is stable across the poll window since we haven't started resuming yet).
-  //
-  // FRESHNESS GATE (v1.0.35): only links whose session was ACTUALLY RUNNING
-  // at last quit are eligible. Tab ids are deterministic per-project counters
-  // (`term-<path>-1` is always tab 1), so after a restart a fresh tab matches
-  // ANY link ever captured for that slot, up to the map's 30-day retention.
-  // Without this gate, 19-28 day old sessions were auto-resumed into Sam's
-  // tabs ("random ass shit popped up that I was not just using").
-  //   - entry.lastRunningAt must exist (links from before v1.0.35 have none
-  //     and are skipped outright), AND
-  //   - it must fall within RUNNING_AT_QUIT_SLACK_MS of lastQuitAt. The
-  //     Tier-2 capture stamps it every 15s while the session runs, so a
-  //     session live at quit reads within ~15s + one save debounce of
-  //     lastQuitAt. 20 minutes of slack also covers a crash (no lastQuitAt
-  //     write) followed by a quick relaunch.
-  //   - the tab id only needs SHAPE sanity (cross-project links are a
-  //     supported flow, see r2 note below); freshness is the staleness guard.
+export function pickLaunchSessions(tabMap, lastQuitAt, now, prevLaunchAt = 0) {
   const RUNNING_AT_QUIT_SLACK_MS = 20 * 60 * 1000;
-  const cfgAll = loadConfig();
-  const lastQuitAt = typeof cfgAll.lastQuitAt === 'number' ? cfgAll.lastQuitAt : 0;
-  const now = Date.now();
-  const tabMap = getSessionTabMap() || {};
+  // A stamp kept through failed checks (uncertainSince) counts only if the checks had been failing for a short time
+  // when the app quit: transient timeouts on a loaded Mac, not a session that may have been stopped minutes before
+  // (Codex, PR 7).
+  const UNCERTAIN_MAX_MS = 2 * 60 * 1000;
+  let skippedUncertain = 0;
+  const uncertainTabs = [];
   const tabToBest = new Map();
   let skippedStale = 0;
   let skippedHeuristic = 0;
@@ -194,6 +169,13 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
       skippedStale += 1;
       continue;
     }
+    // The uncertainty ends at the quit only when that quit came after it began; an older quit (a crash since) is not its
+    // end, so it runs to now (Codex, PR 7: an earlier quit gave a negative duration and let a long uncertainty through).
+    // Nor is a quit from before the run that just ended: that run started later and crashed, so its doubt (carried in
+    // from before, or a launch that was cancelled) also runs to now (Codex, PR 7).
+    const quitEndedLastRun = lastQuitAt >= prevLaunchAt;
+    const uncertainEnd = typeof entry.uncertainSince === 'number' && quitEndedLastRun && lastQuitAt >= entry.uncertainSince ? lastQuitAt : now;
+    const longUncertain = typeof entry.uncertainSince === 'number' && (uncertainEnd - entry.uncertainSince) > UNCERTAIN_MAX_MS;
     const prev = tabToBest.get(entry.tabId);
     if (!prev || ranAt > prev.lastRunningAt) {
       tabToBest.set(entry.tabId, {
@@ -201,9 +183,59 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
         projectPath: entry.projectPath,
         capturedAt: entry.capturedAt || 0,
         lastRunningAt: ranAt,
+        longUncertain,
       });
     }
   }
+  // Each tab's NEWEST link decides it. A long uncertainty on that one rules the tab out; it never falls back to an
+  // older session there (Codex, PR 7: the session the person stopped before starting the newer one came back).
+  for (const [tabId, best] of tabToBest) {
+    const { longUncertain, ...rest } = best;
+    if (longUncertain) { tabToBest.delete(tabId); skippedUncertain += 1; uncertainTabs.push(tabId); } else tabToBest.set(tabId, rest);
+  }
+  return { tabToBest, skippedStale, skippedHeuristic, skippedUncertain, uncertainTabs };
+}
+
+/**
+ * Entry point. Wait `startupDelayMs` so windows have fully mounted and
+ * the renderer's terminal mounts have settled, then resolve every live
+ * tab's prior session and schedule a staggered write for each.
+ * Idempotent: only runs once per app launch.
+ */
+export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
+  if (started) return;
+  started = true;
+
+  const cfg = getAutoResume();
+  if (!cfg.enabled) {
+    console.log('[auto-resume] disabled in config, skipping');
+    finishStartup();
+    return;
+  }
+
+  // Build the target tabId -> best-session map ONCE upfront (sessionTabMap
+  // is stable across the poll window since we haven't started resuming yet).
+  //
+  // FRESHNESS GATE (v1.0.35): only links whose session was ACTUALLY RUNNING
+  // at last quit are eligible. Tab ids are deterministic per-project counters
+  // (`term-<path>-1` is always tab 1), so after a restart a fresh tab matches
+  // ANY link ever captured for that slot, up to the map's 30-day retention.
+  // Without this gate, 19-28 day old sessions were auto-resumed into Sam's
+  // tabs ("random ass shit popped up that I was not just using").
+  //   - entry.lastRunningAt must exist (links from before v1.0.35 have none
+  //     and are skipped outright), AND
+  //   - it must fall within RUNNING_AT_QUIT_SLACK_MS of lastQuitAt. The
+  //     Tier-2 capture stamps it every 15s while the session runs, so a
+  //     session live at quit reads within ~15s + one save debounce of
+  //     lastQuitAt. 20 minutes of slack also covers a crash (no lastQuitAt
+  //     write) followed by a quick relaunch.
+  //   - the tab id only needs SHAPE sanity (cross-project links are a
+  //     supported flow, see r2 note below); freshness is the staleness guard.
+  const cfgAll = loadConfig();
+  const lastQuitAt = typeof cfgAll.lastQuitAt === 'number' ? cfgAll.lastQuitAt : 0;
+  const { tabToBest, skippedStale, skippedHeuristic, skippedUncertain, uncertainTabs } = pickLaunchSessions(getSessionTabMap() || {}, lastQuitAt, Date.now(), getPreviousLaunchAt());
+  // Decided here, so neither the launch pass nor a window opening later logs these tabs again (Codex, PR 7).
+  for (const tabId of uncertainTabs) { handled.add(tabId); noteResume(tabId, 'not resumed: its Claude could not be checked for over 2 minutes before the quit'); }
   if (skippedHeuristic > 0) {
     console.log(`[auto-resume] skipped ${skippedHeuristic} heuristically-linked (bare \`claude\`) session(s): named only, never auto-resumed`);
   }
@@ -211,6 +243,8 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     console.log(`[auto-resume] skipped ${skippedStale} stale/mismatched link(s); ${tabToBest.size} fresh candidate(s)`);
   }
   launchEligible = tabToBest;
+  // One line a person can send: how many sessions this launch will try, and why the rest are out.
+  logLine('diag.resume', `launch: ${tabToBest.size} session(s) were running at the last quit; ${skippedStale} link(s) not running then, ${skippedHeuristic} named only (bare claude), ${skippedUncertain} not checkable before the quit`);
   if (tabToBest.size === 0) {
     console.log('[auto-resume] no sessions were running at last quit, nothing to resume');
     finishStartup();
@@ -269,6 +303,13 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   finishStartup();
   const waiting = tabToBest.size - candidates.length;
   if (waiting > 0) console.log(`[auto-resume] ${waiting} session(s) wait for their window to be opened`);
+  // Each of those gets its own line, so a window that never opens still leaves a reason (Codex, PR 7).
+  for (const tabId of tabToBest.keys()) if (!handled.has(tabId)) noteResume(tabId, 'waiting: its window was not open at launch; it resumes when that window opens');
+  // Seen, then closed before the last poll: the launch pass took it but nothing below visits it.
+  const inCandidates = new Set(candidates.map((c) => c.tabId));
+  for (const tabId of firstSeen.keys()) if (!inCandidates.has(tabId)) noteResume(tabId, 'not resumed: its tab closed before the resume was queued');
+  // Closed before the first poll saw it (forgetClosedTab marked it handled): it gets a line too (Codex, PR 7).
+  for (const tabId of tabToBest.keys()) if (handled.has(tabId) && !firstSeen.has(tabId) && !uncertainTabs.includes(tabId)) noteResume(tabId, 'not resumed: its tab closed before the launch reached it');
   if (candidates.length === 0) {
     console.log('[auto-resume] no live tabs with mapped sessions after 15s budget, nothing to do');
     return;
@@ -279,10 +320,12 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   for (const c of candidates) {
     const sizeMB = await getSessionSize(c.sessionId, c.projectPath);
     if (sizeMB == null) {
+      noteResume(c.tabId, 'not resumed: transcript not found');
       console.log(`[auto-resume] skip ${c.tabId}: transcript not found for ${c.sessionId}`);
       continue;
     }
     if (sizeMB > cfg.skipOversizedMB) {
+      noteResume(c.tabId, 'not resumed: transcript over the size cap');
       console.log(`[auto-resume] skip ${c.tabId}: transcript ${sizeMB.toFixed(0)}MB > ${cfg.skipOversizedMB}MB cap`);
       continue;
     }
@@ -401,9 +444,15 @@ async function queueResume(e, delayMs) {
       queue.delete(e.tabId);
       try {
         writeTerminal(e.tabId, cmd);
+        // A new run: doubt carried from before the quit ends here, or a crash after this launch would still measure
+        // it only up to that older quit and resume a session stopped since (Codex, PR 7).
+        clearSessionTabUncertain(e.sessionId);
+        noteResume(e.tabId, 'resume typed');
         broadcastStatus(e.tabId, 'working');
       } catch (err) {
-        console.warn(`[auto-resume] ${e.tabId}: write failed: ${err.message}`);
+        // A priority line (diag.resume is never throttled) with the short tab name, never the full path (Codex, PR 7).
+        noteResume(e.tabId, `not resumed: typing the resume failed (${err?.code || 'error'})`);
+        console.warn(`[auto-resume] ${shortTab(e.tabId)}: write failed: ${err.message}`);
         releaseSessionResume(e.sessionId, e.tabId);
         broadcastStatus(e.tabId, 'done');
       }
@@ -427,7 +476,8 @@ let nextRestoredAt = 0;
  */
 // Why a tab did or did not resume, for the log a person can send (folder and tab
 // number only, never the path or the session).
-const shortTab = (tabId) => String(tabId).replace(/^term-.*\//, '');
+// Either separator: a Windows tab id (term-C:\Users\x\proj-1) has no forward slash and would log its whole path.
+const shortTab = (tabId) => String(tabId).replace(/^term-.*[\\/]/, '');
 const noteResume = (tabId, what) => logLine('diag.resume', `${shortTab(tabId)}: ${what}`);
 
 export async function resumeRestoredTab(tabId) {
@@ -521,6 +571,7 @@ export function cancelTabsForProject(projectPath) {
       queue.delete(tabId);
       releaseSessionResume(entry.sessionId, tabId);
       broadcastStatus(tabId, 'done');
+      noteResume(tabId, 'pending resume cancelled (its window closed)');
       cancelled += 1;
     }
   }
@@ -538,6 +589,7 @@ export function cancelAll() {
     clearTimeout(entry.timer);
     releaseSessionResume(entry.sessionId, tabId);
     broadcastStatus(tabId, 'done');
+    noteResume(tabId, 'pending resume cancelled (cancel all)');
     cancelled += 1;
   }
   queue.clear();

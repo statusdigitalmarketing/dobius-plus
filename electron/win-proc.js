@@ -164,6 +164,41 @@ export function winExeBase(tok) {
   return path.win32.basename(String(tok || '')).toLowerCase().replace(/\.(exe|cmd|bat|com)$/, '');
 }
 
+// A process row that may be Claude though it could not be read as Claude: an executable named claude, the native
+// installer's versioned binary (`versions\2.1.319.exe`) whose command could not be read or names claude, or a JS runtime
+// whose command could not be read or whose SCRIPT names claude. An unrelated program or script with claude only in an
+// argument (`notepad.exe C:\tmp\claude.txt`, `node server.js --log claude.log`) is not (Codex, PR 7).
+export function winMayBeClaude(row) {
+  const base = winExeBase(row?.name || '');
+  if (/claude/i.test(base)) return true;
+  if (/^\d+\.\d+\.\d+/.test(base)) return !row?.command || /claude/i.test(row.command);
+  if (!['node', 'bun', 'deno'].includes(base)) return false;
+  if (!row?.command) return true;
+  // Judged by the script it runs; with none found (`node -e`, a REPL) by the whole line. Any argument that IS Claude's
+  // entrypoint also counts, so an option this file does not know (its value read as the script) leaves doubt rather
+  // than clearing a live session's stamp (Codex, PR 7).
+  const argv = splitWinCommandLine(row.command);
+  const n = nodeScript(argv);
+  if (!n) return /claude/i.test(row.command);
+  return /claude/i.test(n.script) || argv.slice(1).some((a) => /[\\/]/.test(a) && isClaudeEntrypoint(String(a).replace(/\\/g, '/')));
+}
+
+// When no Claude was found among a shell's dated programs (`progs`, from shellPrograms): could one still be there? A
+// program that may be Claude but could not be read as Claude, or any row under the shell (two levels) that the dated
+// list left out (no creation time on it or on its launcher, such as an undated cmd running claude.cmd with a dated
+// node.exe under it) that is or may be Claude (Codex, PR 7).
+export function winShellMayHoldClaude(rows, shellPid, progs) {
+  if (progs.some((r) => winMayBeClaude(r) && !winClaudeCommand(r.command))) return true;
+  // A row dated BEFORE its parent belongs to an earlier owner of a reused pid, never to this shell (Codex, PR 7): only
+  // a missing date leaves it in doubt.
+  const byPid = new Map(rows.map((r) => [r.pid, r]));
+  const older = (k, parent) => k?.startFt != null && parent?.startFt != null && BigInt(k.startFt) < BigInt(parent.startFt);
+  const shell = byPid.get(shellPid);
+  const kids = new Set(rows.filter((r) => r.ppid === shellPid && !older(r, shell)).map((r) => r.pid));
+  return rows.some((r) => !progs.includes(r) && (winMayBeClaude(r) || winClaudeCommand(r.command))
+    && ((r.ppid === shellPid && !older(r, shell)) || (kids.has(r.ppid) && !older(r, byPid.get(r.ppid)) && !older(r, shell))));
+}
+
 /**
  * The script node runs, from its argv (argv[0] is node), or null. Strict: the
  * script must come straight after node, the only shape npm's Windows launchers
@@ -171,9 +206,40 @@ export function winExeBase(tok) {
  * flags (--title X) and string-running ones (-e, -pe, --eval=) in many
  * spellings, and misreading one makes an unrelated process look like Claude.
  */
+// The script a JS runtime runs: the first argument after its own options, skipping the value of an option that takes
+// one as the next word (`--title worker`, `-r hook.js`). null when there is none (`node -e ...`, a REPL). Codex, PR 7.
+// Every option `node --help` (v26) lists with a required value, plus older Node spellings and Bun's own. A runtime
+// option missing here only matters when its value is a path: then the Claude entrypoint check in winMayBeClaude still
+// reads the line as doubt, never as "no Claude".
+const RUNTIME_VALUE_OPTS = new Set([
+  '-r', '--require', '-C', '--conditions', '--import', '--loader', '--experimental-loader', '--title', '--input-type',
+  '--inspect-port', '--inspect-publish-uid', '--env-file', '--env-file-if-exists', '--watch-path', '--watch-kill-signal',
+  '--redirect-warnings', '--allow-fs-read', '--allow-fs-write', '--build-sea', '--build-snapshot-config',
+  '--cpu-prof-dir', '--cpu-prof-interval', '--cpu-prof-name', '--diagnostic-dir', '--disable-proto', '--disable-warning',
+  '--dns-result-order', '--experimental-config-file', '--experimental-sea-config', '--experimental-default-type',
+  '--experimental-policy', '--policy-integrity', '--heap-prof-dir', '--heap-prof-interval', '--heap-prof-name',
+  '--heapsnapshot-near-heap-limit', '--heapsnapshot-signal', '--icu-data-dir', '--localstorage-file',
+  '--max-http-header-size', '--max-old-space-size-percentage', '--network-family-autoselection-attempt-timeout',
+  '--openssl-config', '--report-dir', '--report-directory', '--report-filename', '--report-signal', '--run',
+  '--secure-heap', '--secure-heap-min', '--snapshot-blob', '--test-concurrency', '--test-coverage-branches',
+  '--test-coverage-exclude', '--test-coverage-functions', '--test-coverage-include', '--test-coverage-lines',
+  '--test-global-setup', '--test-name-pattern', '--test-reporter', '--test-reporter-destination', '--test-rerun-failures',
+  '--test-shard', '--test-skip-pattern', '--test-timeout', '--tls-cipher-list', '--tls-keylog', '--trace-event-categories',
+  '--trace-event-file-pattern', '--trace-require-module', '--unhandled-rejections', '--use-largepages', '--v8-pool-size',
+  '--preload', '--cwd', '--config', '--tsconfig-override', '--define', '--external', '--port',
+]);
+// Options after which nothing is a script: eval/print (any spelling: -e, -pe, -esource, --eval=...), interactive,
+// syntax check, version, help.
+const runtimeNoScript = (a) => /^-(?!-)[A-Za-z]*[epivhc]/.test(a) || /^--(?:eval|print|interactive|check|version|help)(?:=|$)/.test(a);
 function nodeScript(argv) {
-  if (argv.length < 2 || argv[1].startsWith('-')) return null;
-  return { script: argv[1], rest: argv.slice(2) };
+  for (let i = 1; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--') return i + 1 < argv.length ? { script: argv[i + 1], rest: argv.slice(i + 2) } : null;
+    if (!a.startsWith('-')) return { script: a, rest: argv.slice(i + 1) };
+    if (runtimeNoScript(a)) return null;
+    if (RUNTIME_VALUE_OPTS.has(a)) i += 1;
+  }
+  return null;
 }
 
 /**

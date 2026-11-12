@@ -13,4 +13,9 @@ console.log('PASS  replies leave a pending resume alone, and keys still cancel i
 
 const resume = fs.readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
 for (const why of ['already decided', 'no session was running', 'moved or stopped', 'auto-resume is off', 'transcript not found', 'over the size cap', 'queued to resume', 'not resumed:', 'cancelled by input']) assert.ok(resume.includes(why), why);
+assert.match(resume, /for \(const tabId of restoredDuringStartup\) \{\s*\/\/[^\n]*\n\s*if \(handled\.has\(tabId\)\) continue;/, 'a tab the launch pass took is not logged again');
+assert.ok(resume.includes('its tab closed before the resume was queued'), 'a tab seen then closed during polling gets a line');
+assert.ok(resume.includes('its tab closed before the launch reached it'), 'a tab closed before the first poll gets a line');
+assert.ok(resume.includes('not resumed: typing the resume failed'), 'a failed resume write gets a priority line');
+assert.match(resume, /for \(const tabId of uncertainTabs\) \{ handled\.add\(tabId\);/, 'an uncertainty rejection is a decision, logged once');
 console.log('PASS  the log says why a later window did or did not resume');
