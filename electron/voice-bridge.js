@@ -11,6 +11,7 @@
  *   /tabSend   { tabId: string, message: string }  -> the message into that tab and submitted (electron/tab-send.js,
  *              docs/bridge-tab-send.md)
  *   /tabList   {}                                  -> { tabs: listTerminals() }
+ *   /perfProfile {seconds}                         -> a main-process CPU profile (perf-profile.js)
  *   /tabRename { tabId: string, label: string }    -> label that tab (dobius-tab)
  *   /codexStatus <a Codex hook's stdin head>        -> that session's tab status dot (dobius-codex-status)
  *   /openTab   { projectPath, message, requestId } -> new visible tab, Claude
@@ -37,6 +38,7 @@ import { buildOpenCliScript, stripControls } from './bridge-open-tab.js';
 import { defangHarnessTags } from './tab-send.js';
 import { buildTeamCliScript } from './team-cli.js';
 import { buildProjectCliScript } from './project-cli.js';
+import { profileMain } from './perf-profile.js';
 import { completeTaskByRef, resolveTaskRef, advanceTask } from './tasks-service.js';
 import { STAGES } from './task-pipeline.js';
 import { statusFor } from './terminal-status.js';
@@ -270,6 +272,16 @@ async function handleTeam(req, res) {
 
 // Each tab with its state (working, done, needs, idle; null when no hook reports it), so a sender can see a message
 // it sent start a turn.
+async function handlePerfProfile(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch (err) { return sendJson(res, 400, { ok: false, error: `bad body: ${err.message}` }); }
+  let result;
+  try { result = await profileMain(body?.seconds, path.join(app.getPath('userData'), 'logs')); }
+  catch (err) { return sendJson(res, 500, { ok: false, error: `profile failed: ${err?.message || err}` }); }
+  return sendJson(res, result.ok ? 200 : 409, result);
+}
+
 function handleTabList(_req, res) {
   return sendJson(res, 200, { ok: true, tabs: listTerminals().map((t) => ({ ...t, status: statusFor(t.id)?.status || null })) });
 }
@@ -683,6 +695,7 @@ function handleRequest(req, res) {
   }
   if (req.url === '/tabSend') return handleTabSend(req, res);
   if (req.url === '/tabList') return handleTabList(req, res);
+  if (req.url === '/perfProfile') return handlePerfProfile(req, res);
   if (req.url === '/tabRename') return handleTabRename(req, res);
   if (req.url === '/codexStatus') return handleCodexStatus(req, res);
   if (req.url === '/openTab') return handleOpenTab(req, res);

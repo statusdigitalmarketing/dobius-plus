@@ -1058,3 +1058,9 @@
 - **MISTAKE**: A sabotage check of the tab-send retry fix kept passing: the fix had two independent halves (keep the record before submit, re-set it after), either one sufficient, so removing one proved nothing. Earlier the same test also passed because it failed at the FIRST claudeRunning check, before reaching the path.
 - **FIX**: Sabotage every independent half together, and assert the test reached the path (a call counter) before trusting a pass.
 - **DETECTION**: when a sabotage run still passes, grep the fix for a second write of the same state.
+
+### Performance: 2026-11-11
+- **MISTAKE**: Chased the live app's 40 to 50% main-process CPU (37 tabs) with guesses and a 12-tab stand-in harness. The two suspects (phone spinner renders, context reads) measured cheap, and the harness idled at 7%: the cost depends on the real tabs, windows and transcripts. macOS `sample` only showed "JS timers" (no JIT symbols), and attaching an inspector to the live app is unsafe (SIGUSR1 may terminate an Electron main without a handler, killing every tab).
+- **FIX**: Measure in the real app: POST /perfProfile (electron/perf-profile.js) profiles the main process from inside via node:inspector Session, no flag, no port, no restart. Run it under the real load and read topApp before changing code.
+- **CONTEXT**: Any "Dobius is laggy / busy" report. Also: a smaller strip window for claudeTuiPresent was dropped after Codex showed a cut inside a long OSC title or column state changes the answer; cache unchanged buffers instead of reading less.
+- **DETECTION**: `grep -n "perfProfile" electron/voice-bridge.js docs/bridge-perf-profile.md`
