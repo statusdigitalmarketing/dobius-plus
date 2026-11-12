@@ -5975,6 +5975,10 @@ app.on('before-quit', (e) => {
             // leave it 'fresh' and the r8 gate would skip restoring it.
             // Codex v1.0.39 r12 P2.
             if (getSessionTabMap()?.[sid]?.tabId === t.id) setSessionTabLink(sid, t.id, linkPathQ, howQ);
+          } else if (running && running === sid) {
+            // Seen running at the quit: the stamp is current and any earlier doubt is over, or a stretch of failed
+            // checks before this good one would rule the tab out at launch (Codex, PR 7).
+            if (getSessionTabMap()?.[sid]?.tabId === t.id) touchSessionTabLink(sid, quitStampAt ?? Date.now());
           } else if (running && running !== sid) {
             // Tab switched sessions since the last capture tick (user ran
             // `claude --resume B` in a tab mapped to A, then quit fast).

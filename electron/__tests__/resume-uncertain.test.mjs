@@ -79,6 +79,7 @@ console.log('PASS  uncertainty starts at the first failed check and ends on a co
   const main = readFileSync(new URL('../main.js', import.meta.url), 'utf8');
   assert.match(main, /quitStampAt = cfgQuit\.lastQuitAt;/, 'the quit records the stamp it wrote');
   assert.match(main, /markSessionTabUncertain\(sidUnknown, quitStampAt \?\? Date\.now\(\)\)/, 'the final check dates doubt at that stamp');
+  assert.match(main, /\} else if \(running && running === sid\) \{[\s\S]{0,400}?touchSessionTabLink\(sid, quitStampAt \?\? Date\.now\(\)\)/, 'a session the quit check sees running is touched, ending its doubt');
   console.log('PASS  doubt first seen by the quit check is dated at the quit');
 }
 
