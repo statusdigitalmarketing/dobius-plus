@@ -6,7 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { pairingKey } from './pairings';
 import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
-import { withCommandBlocks, CMD_LANG } from './command-blocks.js';
+import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -203,6 +203,7 @@ function CommandBox({ cmd }) {
 
 // Markdown overrides for Claude's text, shared by plain replies and the text
 // blocks of a typed turn.
+const mdPlugins = [remarkGfm, remarkCommandBoxes];
 const mdComponents = {
   // Wide tables scroll inside their own container on a phone.
   table: ({ node: _node, ...props }) => (
@@ -210,18 +211,14 @@ const mdComponents = {
   ),
   // Fenced blocks get a copy button; the box scrolls sideways instead of
   // truncating a long one-liner.
-  pre: ({ node: _node, children, ...props }) => {
-    const code = Array.isArray(children) ? children[0] : children;
-    if (String(code?.props?.className || '').split(/\s+/).includes(`language-${CMD_LANG}`)) {
-      return <CommandBox cmd={nodeText(code).replace(/\n+$/, '')} />;
-    }
-    return (
-      <div className="md-pre-wrap">
-        <CopyBtn text={nodeText(children)} />
-        <pre {...props}>{children}</pre>
-      </div>
-    );
-  },
+  pre: ({ node: _node, children, ...props }) => (
+    <div className="md-pre-wrap">
+      <CopyBtn text={nodeText(children)} />
+      <pre {...props}>{children}</pre>
+    </div>
+  ),
+  // A handed-back `! command` line (command-blocks.js): its own box and Copy.
+  [CMD_TAG]: ({ children }) => <CommandBox cmd={nodeText(children)} />,
   // Inline code deliberately gets NO chip: react-markdown v10 exposes no
   // reliable inline test (a no-language fenced block also has no className,
   // and wrapping it doubled the copy button inside its own pre: Codex High).
@@ -355,7 +352,7 @@ function Blocks({ blocks, live }) {
   for (const b of blocks) {
     if (b.type === 'text') {
       flush(false);
-      parts.push(<ReactMarkdown key={`t${parts.length}`} remarkPlugins={[remarkGfm]} components={mdComponents}>{withCommandBlocks(b.text)}</ReactMarkdown>);
+      parts.push(<ReactMarkdown key={`t${parts.length}`} remarkPlugins={mdPlugins} components={mdComponents}>{b.text}</ReactMarkdown>);
     } else run.push(b);
   }
   flush(true);
@@ -401,7 +398,7 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
   const body = (
     <div className={`chat-content${long && !open ? ' clamped' : ''}${command ? ' chat-cmd' : ''}`}>
       {role === 'assistant'
-        ? (blocks ? <Blocks blocks={blocks} live={!!live} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{withCommandBlocks(text)}</ReactMarkdown>)
+        ? (blocks ? <Blocks blocks={blocks} live={!!live} /> : <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>{text}</ReactMarkdown>)
         : text}
     </div>
   );

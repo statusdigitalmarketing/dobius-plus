@@ -1117,3 +1117,9 @@
 - **FIX**: Use a `<span>` for text that should not look like inline code; do not fight the chat's code styles with specificity.
 - **CONTEXT**: mobile/styles.css styles `code` under `.chat-content p` and `li`; anything rendered through markdown inherits it.
 - **DETECTION**: `grep -n "chat-content p code" mobile/styles.css`
+
+### Architecture - 2026-11-13
+- **MISTAKE**: Phone chat command boxes were first built by rewriting the reply's markdown TEXT (regex per line, inserting a fenced block) before react-markdown parsed it. Three Codex rounds on PR 10 found 12 ways a line that looked like `! cmd` was really part of something else (fences of other lengths, table rows, quote and list lazy continuations, setext headings, multi-line code spans, links, emphasis, escapes, a reply's own ```dobius-cmd fence).
+- **FIX**: mobile/command-blocks.js is a remark plugin: it splits only a top-level paragraph, only at a line whose rendered text equals its source line, and emits a `dobius-cmd` element a reply cannot produce itself. The parser decides structure; the plugin never guesses it.
+- **CONTEXT**: Any feature that changes how part of a markdown reply renders must work on the parsed tree (remark/rehype plugin or a component override), never by editing the text first. Markdown structure cannot be recovered line by line.
+- **DETECTION**: `grep -rn "ReactMarkdown[^>]*>{[a-zA-Z]*(" src mobile` (a function call wrapping the markdown text before it is parsed)
