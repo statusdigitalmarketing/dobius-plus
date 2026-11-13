@@ -25,7 +25,11 @@ export function checkNotes(version, dir = NOTES_DIR) {
     return { ok: false, error: `no notes for ${version}: write ${path.relative(process.cwd(), file)} (2 to 5 "- " lines in plain words) and commit it` };
   }
   const p = parseNotes(text);
-  return p.ok ? { ok: true, bullets: p.bullets } : { ok: false, error: `${path.basename(file)}: ${p.error}` };
+  if (!p.ok) return { ok: false, error: `${path.basename(file)}: ${p.error}` };
+  // The same notes show in Updates and What's new on Windows (Max, 2026-11-13): name the machine as "this computer".
+  const mac = p.bullets.find((b) => /\bthis Mac\b/i.test(b));
+  if (mac) return { ok: false, error: `${path.basename(file)}: say "this computer", not "this Mac" (the notes show on Windows too): ${mac}` };
+  return { ok: true, bullets: p.bullets };
 }
 
 function main() {

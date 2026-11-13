@@ -84,6 +84,10 @@ test('release check: next version and its notes', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dobius-wn-notes-'));
   fs.writeFileSync(path.join(dir, '1.0.1.md'), '- \n');
   assert.equal(checkNotes('1.0.1', dir).ok, false);
+  fs.writeFileSync(path.join(dir, '1.0.2.md'), '- A phone turned away by this Mac is now logged.\n');
+  assert.match(checkNotes('1.0.2', dir).error, /this computer/);
+  fs.writeFileSync(path.join(dir, '1.0.3.md'), '- A phone turned away by this computer is now logged.\n');
+  assert.equal(checkNotes('1.0.3', dir).ok, true);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

@@ -192,7 +192,7 @@ try {
   await page.locator('button[aria-haspopup="menu"]', { hasText: 'Snooze' }).hover({ timeout: 10000 });
   await page.locator('[data-testid="snooze-picks"] button').filter({ hasText: 'Until I bring it back' }).click({ timeout: 10000 });
   const shelf = page.locator('[data-testid="snoozed-shelf"] [aria-expanded]').first();
-  await shelf.waitFor({ timeout: 20000 });
+  await shelf.waitFor({ timeout: 60000 }); // 20s flaked once on a real PC (Max, 2.2.30): the shelf came, just later
   if ((await shelf.getAttribute('aria-expanded')) !== 'true') await shelf.click();
   await page.locator('[data-testid="snoozed-row"]').first().click({ timeout: 10000 });
   await sleep(6000); // the new PowerShell starts
