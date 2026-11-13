@@ -47,3 +47,50 @@ test('hidden characters and setext headings are left alone (Codex P2)', () => {
   same('! echo ok\n---');
   same('! echo ok\n===');
 });
+
+test('the usual handback shape is boxed: a line of prose, then the command (shared/handoff.js example)', () => {
+  assert.equal(withCommandBlocks('Run this yourself:\n! echo dobius-bang-test'), `Run this yourself:\n${box('echo dobius-bang-test')}`);
+  assert.equal(withCommandBlocks('Run `make` first, then:\n! npm test'), `Run \`make\` first, then:\n${box('npm test')}`);
+});
+
+test('a multiline inline code span is left alone (Codex P2, round 2)', () => {
+  same('`example\n! echo ok\nend`');
+  same('``a\n! echo ok\nb``');
+});
+
+test('a lazy continuation of a quote or list item is left alone (Codex P2, round 2)', () => {
+  same('> Do not run:\n! rm -rf /');
+  same('- Do not run:\n! rm -rf /');
+  same('1. Do not run:\n! rm -rf /');
+  same('Intro\n> quoted\n! rm -rf /');
+  assert.equal(withCommandBlocks('> quoted\n\n! echo ok'), `> quoted\n\n${box('echo ok')}`);
+});
+
+test('a line in a paragraph that ends as a setext heading is left alone (Codex P2, round 2)', () => {
+  same('! echo ok\nThis is a heading\n===');
+  same('! echo ok\nmore\n---');
+});
+
+test('a backtick anywhere in the command, or an extra one, is left alone (Codex P2, round 2)', () => {
+  same('`! echo ok``');
+  same('! echo `date`');
+  same('! echo ok`');
+});
+
+test('raw HTML blocks that hide their contents are left alone', () => {
+  same('<!--\n\n! rm -rf /\n\n-->');
+  same('<pre>\n\n! rm -rf /\n\n</pre>');
+  assert.equal(withCommandBlocks('<!-- note -->\n\n! echo ok'), `<!-- note -->\n\n${box('echo ok')}`);
+});
+
+test('a reply full of unmatched backtick runs stays fast', () => {
+  // 700 unmatched runs of different lengths, then 20000 short ones: a scan that looks ahead from every opener for
+  // its closer is 14 million steps (about 300 ms on an M-series Mac, seconds on a phone); the linear one is a few ms.
+  let s = 'Intro ';
+  for (let n = 100; n < 800; n++) s += '`'.repeat(n) + ' x ';
+  for (let i = 0; i < 20000; i++) s += '` ';
+  s += '\n! echo ok';
+  const t0 = performance.now();
+  withCommandBlocks(s);
+  assert.ok(performance.now() - t0 < 60, `took ${performance.now() - t0} ms`);
+});
