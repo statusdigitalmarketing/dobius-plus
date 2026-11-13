@@ -67,6 +67,10 @@ test('continued, escaped, entity or hidden-character lines are left alone (Codex
   same('! echo \\*');
   same('! echo &amp; ok');
   same('\\! echo ok');
+  same('! \u00a0printf ok'); // Codex P2 round 4: trim() dropped it and Copy gave a different command
+  same('! \ufeffgit status');
+  same('! echo\u00a0ok');
+  same('`! \u2009ls`');
 });
 
 test('raw HTML blocks that hide their contents are left alone', () => {
@@ -85,4 +89,9 @@ test('a long reply with many backtick runs stays fast', () => {
   withBoxes(s);
   const boxMs = performance.now() - t1;
   assert.ok(boxMs < plainMs * 2 + 50, `plugin ${boxMs} ms vs markdown alone ${plainMs} ms (${t1 - t0})`);
+});
+
+test('Tasks > Commands drops the same hidden spaces (shared rule, Codex P2 round 4)', async () => {
+  const { extractCommands } = await import('../handoff-commands.js');
+  assert.deepEqual(extractCommands('! \u00a0printf ok\n! \ufeffgit status\n! git\u00a0status\n! git push \\\n\u00a0origin\n! ls\ufeff\n! pwd\u00a0\n! echo ok'), ['echo ok']);
 });

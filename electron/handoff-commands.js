@@ -48,13 +48,15 @@ export function extractCommandsWithContext(text) {
     if (!m) continue;
     const first = i;
     let cmd = m[2];
-    if (m[1] === '`') cmd = cmd.replace(/`\s*$/, '');
+    // Only ASCII spaces are trimmed: String.trim() also drops a no-break space or U+FEFF, which then never reaches the
+    // hidden-character check and the card shows a different command from what runs (Codex, PR 10).
+    if (m[1] === '`') cmd = cmd.replace(/`[ ]*$/, '');
     // Shell line continuation: `cmd \` then the rest on the next line(s).
-    while (/(^|[^\\])\\\s*$/.test(cmd) && i + 1 < lines.length) {
+    while (/(^|[^\\])\\[ ]*$/.test(cmd) && i + 1 < lines.length) {
       i += 1;
-      cmd = `${cmd.replace(/\\\s*$/, '').trimEnd()} ${lines[i].trim()}`;
+      cmd = `${cmd.replace(/\\[ ]*$/, '').replace(/[ ]+$/, '')} ${lines[i].replace(/^[ ]+|[ ]+$/g, '')}`;
     }
-    cmd = cmd.trim();
+    cmd = cmd.replace(/^[ ]+|[ ]+$/g, '');
     if (!cmd || cmd.length > MAX_COMMAND_LEN || HIDDEN_RE.test(cmd) || !cmd.isWellFormed()) continue;
     if (out.some((c) => c.text === cmd)) continue;
     out.push({ text: cmd, why: contextAround(lines, first, i) });

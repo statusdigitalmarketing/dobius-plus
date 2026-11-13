@@ -58,7 +58,7 @@ function splitParagraph(p, source, srcLines) {
     const src = (srcLines[first - 1 + k] || '').replace(/[ \t]+$/, '');
     const m = TICKED_RE.exec(src) || PLAIN_RE.exec(src);
     if (!m || shown(parts, source)?.replace(/[ \t]+$/, '') !== src) return null;
-    return commandOf(m[1].trim());
+    return commandOf(m[1].replace(/^ +/, '')); // ASCII spaces only: trim() would drop a U+00A0 or U+FEFF unchecked
   });
   if (!cmdAt.some(Boolean)) return [p];
   const out = [];
