@@ -25,7 +25,15 @@ export function checkNotes(version, dir = NOTES_DIR) {
     return { ok: false, error: `no notes for ${version}: write ${path.relative(process.cwd(), file)} (2 to 5 "- " lines in plain words) and commit it` };
   }
   const p = parseNotes(text);
-  return p.ok ? { ok: true, bullets: p.bullets } : { ok: false, error: `${path.basename(file)}: ${p.error}` };
+  if (!p.ok) return { ok: false, error: `${path.basename(file)}: ${p.error}` };
+  // The same notes show in Updates and What's new on Windows (Max, 2026-11-13): name the machine as "this computer".
+  // The app shows each line as plain text and GitHub renders it as markdown, so only plain text reads the same in
+  // both: no emphasis, code, escapes, HTML, entities or links (Codex, PR 11). A "Tasks > Team" menu path is fine.
+  const marked = p.bullets.find((b) => /[*_`~\\<]|&#?\w+;|\]\(/.test(b));
+  if (marked) return { ok: false, error: `${path.basename(file)}: plain text only, the app shows markdown marks as typed: ${marked}` };
+  const mac = p.bullets.find((b) => /\bthis\s+Mac\b/i.test(b));
+  if (mac) return { ok: false, error: `${path.basename(file)}: say "this computer", not "this Mac" (the notes show on Windows too): ${mac}` };
+  return { ok: true, bullets: p.bullets };
 }
 
 function main() {
