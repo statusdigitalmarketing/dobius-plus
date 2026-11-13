@@ -86,6 +86,10 @@ test('release check: next version and its notes', async () => {
   assert.equal(checkNotes('1.0.1', dir).ok, false);
   fs.writeFileSync(path.join(dir, '1.0.2.md'), '- A phone turned away by this Mac is now logged.\n');
   assert.match(checkNotes('1.0.2', dir).error, /this computer/);
+  for (const line of ['this **Mac**', 'this  Mac', 'this\u00a0Mac', 'this&nbsp;Mac', '*this* _Mac_', 'this `Mac`', 'this <b>Mac</b>', 'this\\ Mac']) {
+    fs.writeFileSync(path.join(dir, '1.0.4.md'), `- A phone turned away by ${line} is now logged.\n`);
+    assert.equal(checkNotes('1.0.4', dir).ok, false, line); // Codex P2, PR 11: as rendered, not as spelled
+  }
   fs.writeFileSync(path.join(dir, '1.0.3.md'), '- A phone turned away by this computer is now logged.\n');
   assert.equal(checkNotes('1.0.3', dir).ok, true);
   fs.rmSync(dir, { recursive: true, force: true });
