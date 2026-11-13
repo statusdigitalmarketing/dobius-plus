@@ -8,6 +8,7 @@ import { useRef } from 'react';
 const CLOSE_PX = 110; // dragged this far down closes it
 const FLICK_PX_PER_MS = 0.6; // or released moving down this fast
 const START_PX = 8; // movement before a drag is decided (a tap stays a tap)
+const FLICK_FRESH_MS = 80; // the last move must be this recent at release for its speed to count
 
 // The nearest element from `el` up to `stop` (the sheet included) that is scrolled away from its top: dragging down
 // there scrolls it.
@@ -25,7 +26,12 @@ const INTERACTIVE = 'input, textarea, select, [contenteditable="true"]';
 export function useSwipeDown(onDismiss, { enabled = true } = {}) {
   const st = useRef(null);
   const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  if (!enabled || !onDismiss) return {};
+  return swipeHandlers(st, onDismiss, reduce);
+}
 
+/** The pointer handlers, outside React so they can be tested: `st` is a { current } box holding the gesture. */
+export function swipeHandlers(st, onDismiss, reduce = false) {
   const settle = (el, close) => {
     el.style.transition = reduce ? 'none' : 'transform 0.22s cubic-bezier(.2,.8,.2,1)';
     el.style.transform = close ? 'translateY(100%)' : '';
@@ -33,7 +39,6 @@ export function useSwipeDown(onDismiss, { enabled = true } = {}) {
     else setTimeout(() => { el.style.transition = ''; }, 240);
   };
 
-  if (!enabled || !onDismiss) return {};
   return {
     onPointerDown: (e) => {
       if (e.pointerType === 'mouse' || !e.isPrimary) return;
@@ -62,15 +67,19 @@ export function useSwipeDown(onDismiss, { enabled = true } = {}) {
     },
     onPointerUp: (e) => {
       const s = st.current;
+      if (!s || e.pointerId !== s.id) return; // another finger lifting is not this drag ending
       st.current = null;
-      if (!s || e.pointerId !== s.id || !s.dragging) return;
+      if (!s.dragging) return;
       const dy = e.clientY - s.y;
-      settle(e.currentTarget, dy > CLOSE_PX || (dy > START_PX * 2 && s.v > FLICK_PX_PER_MS));
+      // A flick is a release while still moving: a finger that paused before lifting is not one (Codex P2).
+      const flick = e.timeStamp - s.lastT < FLICK_FRESH_MS && s.v > FLICK_PX_PER_MS;
+      settle(e.currentTarget, dy > CLOSE_PX || (dy > START_PX * 2 && flick));
     },
     onPointerCancel: (e) => {
       const s = st.current;
+      if (!s || e.pointerId !== s.id) return;
       st.current = null;
-      if (s?.dragging) settle(e.currentTarget, false);
+      if (s.dragging) settle(e.currentTarget, false);
     },
   };
 }
