@@ -86,10 +86,17 @@ test('release check: next version and its notes', async () => {
   assert.equal(checkNotes('1.0.1', dir).ok, false);
   fs.writeFileSync(path.join(dir, '1.0.2.md'), '- A phone turned away by this Mac is now logged.\n');
   assert.match(checkNotes('1.0.2', dir).error, /this computer/);
-  for (const line of ['this **Mac**', 'this  Mac', 'this\u00a0Mac', 'this&nbsp;Mac', '*this* _Mac_', 'this `Mac`', 'this <b>Mac</b>', 'this\\ Mac']) {
+  for (const line of ['this  Mac', 'this\u00a0Mac', 'this\u2009Mac']) {
     fs.writeFileSync(path.join(dir, '1.0.4.md'), `- A phone turned away by ${line} is now logged.\n`);
-    assert.equal(checkNotes('1.0.4', dir).ok, false, line); // Codex P2, PR 11: as rendered, not as spelled
+    assert.match(checkNotes('1.0.4', dir).error, /this computer/, line); // Codex P2, PR 11: any spacing
   }
+  // Plain text only: the app shows these marks as typed while GitHub renders them (Codex P2 x2, PR 11).
+  for (const line of ['this **Mac**', '*this* _Mac_', 'the literal `this **Mac**`', 'this <b>Mac</b>', 'this&nbsp;Mac', 'this\\ Mac', '[this Mac](https://x)', '~~old~~']) {
+    fs.writeFileSync(path.join(dir, '1.0.5.md'), `- A phone turned away by ${line} is now logged.\n`);
+    assert.match(checkNotes('1.0.5', dir).error, /plain text only/, line);
+  }
+  fs.writeFileSync(path.join(dir, '1.0.6.md'), '- Tasks > Team shows open messages on this computer.\n');
+  assert.equal(checkNotes('1.0.6', dir).ok, true);
   fs.writeFileSync(path.join(dir, '1.0.3.md'), '- A phone turned away by this computer is now logged.\n');
   assert.equal(checkNotes('1.0.3', dir).ok, true);
   fs.rmSync(dir, { recursive: true, force: true });
