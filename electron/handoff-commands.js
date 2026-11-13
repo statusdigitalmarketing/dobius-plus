@@ -1,3 +1,4 @@
+import { HIDDEN_CMD_RE } from '../shared/handoff.js';
 /**
  * Commands a Claude session handed back for the person to run (Tasks > Commands, 2026-11-07). Sam: "per project
  * session there is also commands that need to be run we need like a per project commands to be run button".
@@ -25,9 +26,8 @@ const NO_TURN_WINDOW_MS = 10 * 60 * 1000; // no turn start seen (the app started
 // backstop, loose enough that hook markers processed late (a busy main thread) still find their turn's reply.
 const HOOK_LATENESS_MS = 30 * 1000;
 const MAX_WAITING = 12; // handed-back commands kept waiting per tab
-// What the card could hide or a shell could read differently from what is shown: control and format characters,
-// invisible (default-ignorable) ones, unassigned and private-use code points. Broken UTF-16 is refused separately.
-const HIDDEN_RE = /[\x00-\x1f\x7f-\x9f\u2028\u2029\p{Cf}\p{Default_Ignorable_Code_Point}\p{Cn}\p{Co}]/u;
+// What the card could hide (shared/handoff.js). Broken UTF-16 is refused separately.
+const HIDDEN_RE = HIDDEN_CMD_RE;
 
 /**
  * The `! ` commands in a reply, in order, without duplicates: the same lines shared/handoff.js treats as a handback.

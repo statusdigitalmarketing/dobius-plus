@@ -20,6 +20,11 @@
 
 export const HANDOFF_RE = /(^|\n)[ ]*(?:[-*] |\d+\. )?`?! \S/;
 
+// What a command card could hide, or a shell could read differently from what is shown: control and format
+// characters, invisible (default-ignorable) ones, unassigned and private-use code points. A handed-back command
+// holding one is never offered to run or copy (Tasks > Commands and the phone chat's command boxes).
+export const HIDDEN_CMD_RE = /[\x00-\x1f\x7f-\x9f\u2028\u2029\p{Cf}\p{Default_Ignorable_Code_Point}\p{Cn}\p{Co}]/u;
+
 export function isHandoff(text) {
   return typeof text === 'string' && HANDOFF_RE.test(text);
 }
