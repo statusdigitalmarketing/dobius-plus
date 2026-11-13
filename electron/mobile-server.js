@@ -402,7 +402,14 @@ function noteRefusal(reason, req, detail = '') {
   refusalNoted.set(key, now);
   logLine('diag.phone', `refused ${reason} from ${ip}${detail ? ` (${detail})` : ''}`);
 }
-const hostForLog = (h) => `host ${String(h || '').replace(/[^A-Za-z0-9.:\[\]-]/g, '?').slice(0, 80) || '(none)'}`;
+// What a refused Host was, without its text: a peer chooses it, so only an IPv4 literal (which cannot hold a token)
+// is written as is; a name is described, never copied (Codex, PR 10).
+export function hostForLog(h) {
+  const v = String(h || '');
+  if (!v) return 'no host';
+  if (/^\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?$/.test(v)) return `host ${v}`;
+  return v.length > 253 ? 'an overlong host name' : /\.ts\.net(?::\d{1,5})?$/i.test(v) ? 'a tailnet host name that is not this Mac' : 'a host name that is not this Mac';
+}
 
 /** Whether a pairing token still belongs to a paired phone (the phone notifier sends only to those). */
 export function isPairedToken(token) { return knownToken(token); }
