@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { pairingKey } from './pairings';
 import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, selectorKey as selectorCardKey, tokenFingerprint, createPressGuard, stepImages, createImageCache, stepSummary } from '../shared/chat-rows.js';
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
+import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -191,8 +192,18 @@ function SkillPreview({ detail, label = 'skill' }) {
   );
 }
 
+function CommandBox({ cmd }) {
+  return (
+    <div className="md-cmd">
+      <span className="md-cmd-text"><span className="md-cmd-bang">!</span> {cmd}</span>
+      <CopyBtn text={cmd} />
+    </div>
+  );
+}
+
 // Markdown overrides for Claude's text, shared by plain replies and the text
 // blocks of a typed turn.
+const mdPlugins = [remarkGfm, remarkCommandBoxes];
 const mdComponents = {
   // Wide tables scroll inside their own container on a phone.
   table: ({ node: _node, ...props }) => (
@@ -206,6 +217,8 @@ const mdComponents = {
       <pre {...props}>{children}</pre>
     </div>
   ),
+  // A handed-back `! command` line (command-blocks.js): its own box and Copy.
+  [CMD_TAG]: ({ children }) => <CommandBox cmd={nodeText(children)} />,
   // Inline code deliberately gets NO chip: react-markdown v10 exposes no
   // reliable inline test (a no-language fenced block also has no className,
   // and wrapping it doubled the copy button inside its own pre: Codex High).
@@ -339,7 +352,7 @@ function Blocks({ blocks, live }) {
   for (const b of blocks) {
     if (b.type === 'text') {
       flush(false);
-      parts.push(<ReactMarkdown key={`t${parts.length}`} remarkPlugins={[remarkGfm]} components={mdComponents}>{b.text}</ReactMarkdown>);
+      parts.push(<ReactMarkdown key={`t${parts.length}`} remarkPlugins={mdPlugins} components={mdComponents}>{b.text}</ReactMarkdown>);
     } else run.push(b);
   }
   flush(true);
@@ -385,7 +398,7 @@ const Bubble = memo(function Bubble({ role, content, timestamp, queued, sending,
   const body = (
     <div className={`chat-content${long && !open ? ' clamped' : ''}${command ? ' chat-cmd' : ''}`}>
       {role === 'assistant'
-        ? (blocks ? <Blocks blocks={blocks} live={!!live} /> : <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</ReactMarkdown>)
+        ? (blocks ? <Blocks blocks={blocks} live={!!live} /> : <ReactMarkdown remarkPlugins={mdPlugins} components={mdComponents}>{text}</ReactMarkdown>)
         : text}
     </div>
   );

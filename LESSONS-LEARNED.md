@@ -1105,3 +1105,21 @@
 - **FIX**: The scrolling child gets `flex: 1 1 auto; min-height: 0`, and fixed rows (header, footer) get `flex-shrink: 0`. Ship-test with the longest content, not the usual.
 - **CONTEXT**: Every dialog or panel built as a column with a scrolling middle.
 - **DETECTION**: `grep -rn "overflowY: 'auto'" src | grep -v minHeight`
+
+### API - 2026-11-13
+- **MISTAKE**: The phone server turned phones away with no record: a wrong Host got a bare 421 and a WebSocket with an unpaired key closed 4003, neither logged. Sam's phone reached this Mac (seen with lsof on :8420) and was dropped, and nothing on the Mac said why.
+- **FIX**: `noteRefusal` in electron/mobile-server.js writes `diag.phone: refused <reason> from <ip>` (Host name sanitized, never a token), once a minute per reason and address, 64 remembered. diag.* is never sent to the error reporter.
+- **CONTEXT**: Any server that refuses a client must say so somewhere the owner can read, or "it will not connect" cannot be diagnosed. Read `<userData>/logs/error.log` for diag.phone first when a phone will not connect.
+- **DETECTION**: `grep -n "status(4[0-9][0-9]).end()\|close(40[0-9][0-9]" electron/mobile-server.js` and check each has a noteRefusal next to it.
+
+### UI/UX - 2026-11-13
+- **MISTAKE**: A `<code>` inside phone chat picked up `.chat-content p code` styling (border, padding) over a new single-class rule, drawing a box inside the command box.
+- **FIX**: Use a `<span>` for text that should not look like inline code; do not fight the chat's code styles with specificity.
+- **CONTEXT**: mobile/styles.css styles `code` under `.chat-content p` and `li`; anything rendered through markdown inherits it.
+- **DETECTION**: `grep -n "chat-content p code" mobile/styles.css`
+
+### Architecture - 2026-11-13
+- **MISTAKE**: Phone chat command boxes were first built by rewriting the reply's markdown TEXT (regex per line, inserting a fenced block) before react-markdown parsed it. Three Codex rounds on PR 10 found 12 ways a line that looked like `! cmd` was really part of something else (fences of other lengths, table rows, quote and list lazy continuations, setext headings, multi-line code spans, links, emphasis, escapes, a reply's own ```dobius-cmd fence).
+- **FIX**: mobile/command-blocks.js is a remark plugin: it splits only a top-level paragraph, only at a line whose rendered text equals its source line, and emits a `dobius-cmd` element a reply cannot produce itself. The parser decides structure; the plugin never guesses it.
+- **CONTEXT**: Any feature that changes how part of a markdown reply renders must work on the parsed tree (remark/rehype plugin or a component override), never by editing the text first. Markdown structure cannot be recovered line by line.
+- **DETECTION**: `grep -rn "ReactMarkdown[^>]*>{[a-zA-Z]*(" src mobile` (a function call wrapping the markdown text before it is parsed)

@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
+import { useSwipeDown } from './sheet-drag';
 import SessionCard from './SessionCard';
 import LooseEnds from './LooseEnds';
 import { sortTermsByAttention, groupSummary, summaryLabel, isGroupCollapsed } from './board-order.js';
@@ -56,6 +57,7 @@ export default function Board({ connection, status, onOpen, onShowHistory, onSho
   const [terminals, setTerminals] = useState([]);
   const [recentExits, setRecentExits] = useState([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerSwipe = useSwipeDown(() => setPickerOpen(false));
   const [projects, setProjects] = useState([]);
   const [pins, setPins] = useState(() => loadList(pinsKey));
   const [collapsed, setCollapsed] = useState(() => loadList(collapsedKey));
@@ -328,7 +330,7 @@ export default function Board({ connection, status, onOpen, onShowHistory, onSho
 
       {pickerOpen && (
         <div className="sheet-backdrop" onClick={() => setPickerOpen(false)}>
-          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()} {...pickerSwipe}>
             <div className="sheet-handle" aria-hidden="true" />
             <div className="sheet-heading">
               <button className="tb-round" onClick={() => setPickerOpen(false)} aria-label="Close">
