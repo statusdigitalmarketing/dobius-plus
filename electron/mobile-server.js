@@ -1,4 +1,5 @@
 import { isAllowedMobileOrigin, isOwnHost } from './mobile-cors.js';
+import { logLine } from './error-log.js';
 import { mountTeamRoutes } from './team-routes.js';
 import { getTeamService } from './team-main.js';
 /**
@@ -386,6 +387,22 @@ function claudeIsLive(id) {
     return live;
   } catch { return false; }
 }
+
+// Why a phone was turned away, in error.log as diag.phone (never reported upstream, error-reporter skips diag.*).
+// Sam, 2026-11-13: the phone reached this Mac and was dropped with nothing recorded. The address and the reason only,
+// never a token; a Host name is cut to the characters a host can hold. Once a minute per reason and address, since a
+// phone retries every few seconds; at most 64 remembered.
+const refusalNoted = new Map(); // `${reason}|${ip}` -> last logged ms
+function noteRefusal(reason, req, detail = '') {
+  const ip = String(req?.socket?.remoteAddress || '?').replace(/^::ffff:/, '').slice(0, 64);
+  const key = `${reason}|${ip}`;
+  const now = Date.now();
+  if (now - (refusalNoted.get(key) || 0) < 60_000) return;
+  if (refusalNoted.size >= 64) refusalNoted.clear();
+  refusalNoted.set(key, now);
+  logLine('diag.phone', `refused ${reason} from ${ip}${detail ? ` (${detail})` : ''}`);
+}
+const hostForLog = (h) => `host ${String(h || '').replace(/[^A-Za-z0-9.:\[\]-]/g, '?').slice(0, 80) || '(none)'}`;
 
 /** Whether a pairing token still belongs to a paired phone (the phone notifier sends only to those). */
 export function isPairedToken(token) { return knownToken(token); }
@@ -1399,7 +1416,7 @@ async function doStartMobileServer(stillCurrent) {
   // Host is a DNS-rebinding page calling us from its own origin.
   const hostOk = (host, strict = false) => isOwnHost(host, { ip, name: ownName || magicName, port, strict });
   expApp.use((req, res, next) => {
-    if (!hostOk(req.headers.host)) return res.status(421).end();
+    if (!hostOk(req.headers.host)) { noteRefusal('wrong address', req, hostForLog(req.headers.host)); return res.status(421).end(); }
     return next();
   });
   // Team communicator (docs/team-communicator.md): ahead of CORS and every
@@ -1796,7 +1813,7 @@ async function doStartMobileServer(stillCurrent) {
 
   // attachWebSocketServer installs the wss 'error' listener a failed bind
   // needs (see mobile-autostart.js); the listen outcome is handled below.
-  wss = attachWebSocketServer(httpServer, { path: '/ws', maxPayload: MAX_WS_PAYLOAD, verifyClient: ({ req }) => hostOk(req.headers.host) });
+  wss = attachWebSocketServer(httpServer, { path: '/ws', maxPayload: MAX_WS_PAYLOAD, verifyClient: ({ req }) => hostOk(req.headers.host) || (noteRefusal('wrong address (live connection)', req, hostForLog(req.headers.host)), false) });
   // Heartbeat: ping every client every HEARTBEAT_MS; a client that hasn't ponged
   // since the last ping is a dead/half-open socket (network dropped while OPEN)
   // and is terminated, so it stops accumulating a send buffer and its cleanup
@@ -1808,7 +1825,7 @@ async function doStartMobileServer(stillCurrent) {
       try { s.ping(); } catch { /* noop */ }
     }
   }, HEARTBEAT_MS);
-  wss.on('connection', (socket) => {
+  wss.on('connection', (socket, req) => {
     socket.isAlive = true;
     socket.on('pong', () => { socket.isAlive = true; });
     let authed = false;
@@ -1819,7 +1836,7 @@ async function doStartMobileServer(stillCurrent) {
     // the id to be in here, so a paired-but-leaked token can't write to or kill
     // a terminal in a project it never touched. Audit Medium (security).
     socket._authedTabs = new Set();
-    const authTimer = setTimeout(() => { if (!authed) socket.close(4001, 'auth timeout'); }, AUTH_TIMEOUT_MS);
+    const authTimer = setTimeout(() => { if (!authed) { noteRefusal('no sign-in in time', req); socket.close(4001, 'auth timeout'); } }, AUTH_TIMEOUT_MS);
 
     socket.on('message', (raw) => {
       let msg;
@@ -1842,6 +1859,7 @@ async function doStartMobileServer(stillCurrent) {
           // platform: the phone words its messages for a PC and shows Windows folders as Windows writes them (Max, 2026-11-09).
           wsSend(socket, { type: 'authed', version: app.getVersion(), platform: process.platform === 'win32' ? 'windows' : 'mac', features: [...ACK_FEATURES, ...TODAY_FEATURES] });
         } else {
+          noteRefusal(msg.type === 'auth' ? 'phone key not paired with this Mac' : 'first message was not a sign-in', req);
           socket.close(4003, 'unauthorized');
         }
         return;

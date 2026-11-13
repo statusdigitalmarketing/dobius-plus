@@ -1,12 +1,14 @@
 import { useState } from 'react';
+import { useSwipeDown } from './sheet-drag';
 
 export default function MacSwitcher({ state, busy, error, onSwitch, onRename, onRemove, onAdd, onClose }) {
   const [editing, setEditing] = useState(null);
   const [name, setName] = useState('');
   const [removing, setRemoving] = useState(null);
+  const swipe = useSwipeDown(onClose);
   return (
     <div className="sheet-backdrop" onClick={onClose}>
-      <section className="sheet mac-sheet" role="dialog" aria-modal="true" aria-label="Paired Macs" onClick={(e) => e.stopPropagation()}>
+      <section className="sheet mac-sheet" role="dialog" aria-modal="true" aria-label="Paired Macs" onClick={(e) => e.stopPropagation()} {...swipe}>
         <div className="sheet-handle" aria-hidden="true" />
         <div className="sheet-heading">
           <button className="tb-round" onClick={onClose} aria-label="Close Mac switcher">

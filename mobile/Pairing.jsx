@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { useSwipeDown } from './sheet-drag';
 import { absUrl, normaliseHost, mixedContent, reachabilityMessage } from './host';
 import Intro from './Intro';
 import QrScanner, { canScanQr } from './QrScanner';
@@ -9,6 +10,9 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
   const [host, setHost] = useState(initialHost || '');
   const [code, setCode] = useState(initialCode || '');
   const [busy, setBusy] = useState(false);
+  // Adding another Mac opens over your Macs: slide it down to go back, like the sheets (Sam, 2026-11-13). Not while
+  // a pairing is in flight, same as the Back button.
+  const swipe = useSwipeDown(onCancel, { enabled: !busy });
   const [error, setError] = useState('');
   const [showIntro, setShowIntro] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -193,7 +197,8 @@ export default function Pairing({ initialHost = '', initialCode = '', scanNonce 
   if (scanning) return <QrScanner onResult={applyScan} onCancel={() => setScanning(false)} />;
 
   return (
-    <div className="screen pairing">
+    <div className={`screen pairing${onCancel ? ' pairing-dismissable' : ''}`} {...swipe}>
+      {onCancel && <div className="sheet-handle pairing-handle" aria-hidden="true" />}
       <div className="pairing-card">
         <h1>{addMode ? 'Add a Mac' : 'Dobius+'}</h1>
         {step === 'confirm' ? (

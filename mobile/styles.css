@@ -645,6 +645,13 @@ button.secondary:disabled { opacity: 0.4; }
   width: 36px; height: 4px; border-radius: 2px;
   background: var(--border); margin: 6px auto 12px;
 }
+/* The handle and heading carry the swipe-down (sheet-drag.js): iOS would otherwise take the drag as a scroll and
+ * cancel it. The handle's tap area is taller than the bar it draws. */
+.sheet-handle, .sheet-heading, .pairing-handle { touch-action: none; }
+.sheet-handle { position: relative; }
+.sheet-handle::before { content: ''; position: absolute; left: -40px; right: -40px; top: -14px; bottom: -10px; }
+.pairing-dismissable { position: relative; }
+.pairing-handle { position: absolute; top: calc(env(safe-area-inset-top) + 8px); left: 50%; margin: 0 0 0 -18px; }
 .sheet-title {
   font-size: 13px; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.06em; color: var(--dim); padding: 0 8px 8px;
@@ -799,6 +806,13 @@ button.secondary:disabled { opacity: 0.4; }
 
 /* v1.0.62 chat additions: copy chips, skill autocomplete, keys toggle. */
 .md-pre-wrap { position: relative; }
+/* A handed-back `! command`: one line, its own Copy (ChatView withCommandBlocks). */
+.md-cmd { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; padding: 8px 8px 8px 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px; }
+.md-cmd-text { flex: 1 1 auto; min-width: 0; font-family: 'SF Mono', Menlo, monospace; font-size: 13px; line-height: 18px;
+  white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+.md-cmd-bang { color: var(--dim); }
+.md-cmd .md-copy { position: static; flex: 0 0 auto; }
 /* Reserve the button's corner so it never sits ON the first line of code
    (Codex Medium: a long one-liner is exactly what gets copied). */
 .md-pre-wrap pre { overflow-x: auto; -webkit-overflow-scrolling: touch; padding-top: 30px; }
