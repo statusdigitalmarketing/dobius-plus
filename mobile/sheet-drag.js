@@ -37,11 +37,19 @@ export function useSwipeDown(onDismiss, { enabled = true } = {}) {
  * handlers mid-drag left the sheet stuck part way down (Codex P2).
  */
 export function swipeHandlers(st, onDismiss, reduce = false, enabled = true) {
+  // The latest render's answer, read when a close lands: pairing can start between the release and the close, and
+  // closing then would throw the pairing away (Codex P2). Off by then: the sheet slides back instead.
+  st.on = enabled;
   const settle = (el, close) => {
     el.style.transition = reduce ? 'none' : 'transform 0.22s cubic-bezier(.2,.8,.2,1)';
     el.style.transform = close ? 'translateY(100%)' : '';
-    if (close) setTimeout(() => onDismiss?.(), reduce ? 0 : 200);
-    else setTimeout(() => { el.style.transition = ''; }, 240);
+    if (close) {
+      setTimeout(() => {
+        if (st.on) { onDismiss?.(); return; }
+        el.style.transform = '';
+        setTimeout(() => { el.style.transition = ''; }, 240);
+      }, reduce ? 0 : 200);
+    } else setTimeout(() => { el.style.transition = ''; }, 240);
   };
 
   return {

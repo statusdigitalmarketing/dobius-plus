@@ -89,3 +89,13 @@ test('switched off mid-drag (pairing started): the release springs back, never c
   off.onPointerMove(a.ev(1, 300, 3100));
   assert.equal(a.el.style.transform, '', 'no new drag while switched off');
 });
+
+test('switched off between the release and the close (pairing started): it does not close (Codex P2)', async () => {
+  const a = rig();
+  a.h.onPointerDown(a.ev(1, 100, 0));
+  for (let i = 1; i <= 20; i++) a.h.onPointerMove(a.ev(1, 100 + i * 10, i * 100));
+  a.h.onPointerUp(a.ev(1, 300, 2010)); // a close is now scheduled
+  swipeHandlers(a.st, () => {}, true, false); // the next render: busy
+  assert.equal(await a.done(), 0);
+  assert.equal(a.el.style.transform, '', 'slid back into place');
+});
