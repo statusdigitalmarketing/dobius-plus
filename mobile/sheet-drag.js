@@ -20,18 +20,23 @@ function scrolledAncestor(el, stop) {
   return null;
 }
 
-// Things a finger presses or types into: a drag never starts on them.
-const INTERACTIVE = 'input, textarea, select, [contenteditable="true"]';
+// Things a finger presses or types into: a drag never starts on them, so a slightly moving tap still activates a
+// button (Codex P2). The handle and the heading's empty space carry the drag.
+const INTERACTIVE = 'input, textarea, select, button, a, [role="button"], [contenteditable="true"]';
 
 export function useSwipeDown(onDismiss, { enabled = true } = {}) {
   const st = useRef(null);
   const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-  if (!enabled || !onDismiss) return {};
-  return swipeHandlers(st, onDismiss, reduce);
+  if (!onDismiss) return {};
+  return swipeHandlers(st, onDismiss, reduce, enabled);
 }
 
-/** The pointer handlers, outside React so they can be tested: `st` is a { current } box holding the gesture. */
-export function swipeHandlers(st, onDismiss, reduce = false) {
+/**
+ * The pointer handlers, outside React so they can be tested: `st` is a { current } box holding the gesture. While
+ * not `enabled` no drag starts, but one already under way still ends and springs back (never closes): dropping the
+ * handlers mid-drag left the sheet stuck part way down (Codex P2).
+ */
+export function swipeHandlers(st, onDismiss, reduce = false, enabled = true) {
   const settle = (el, close) => {
     el.style.transition = reduce ? 'none' : 'transform 0.22s cubic-bezier(.2,.8,.2,1)';
     el.style.transform = close ? 'translateY(100%)' : '';
@@ -41,7 +46,7 @@ export function swipeHandlers(st, onDismiss, reduce = false) {
 
   return {
     onPointerDown: (e) => {
-      if (e.pointerType === 'mouse' || !e.isPrimary) return;
+      if (!enabled || e.pointerType === 'mouse' || !e.isPrimary) return;
       const sheet = e.currentTarget;
       if (e.target.closest?.(INTERACTIVE)) return;
       if (scrolledAncestor(e.target, sheet)) return;
@@ -73,7 +78,7 @@ export function swipeHandlers(st, onDismiss, reduce = false) {
       const dy = e.clientY - s.y;
       // A flick is a release while still moving: a finger that paused before lifting is not one (Codex P2).
       const flick = e.timeStamp - s.lastT < FLICK_FRESH_MS && s.v > FLICK_PX_PER_MS;
-      settle(e.currentTarget, dy > CLOSE_PX || (dy > START_PX * 2 && flick));
+      settle(e.currentTarget, enabled && (dy > CLOSE_PX || (dy > START_PX * 2 && flick)));
     },
     onPointerCancel: (e) => {
       const s = st.current;
