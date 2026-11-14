@@ -194,20 +194,25 @@ ok('empty/null input is not live');
   // that drops the tail argument brings the expansion back while stripAnsi alone stays fast (Codex P2, PR #15 round 3)
   // and costs 1.8 times as much in this run (each escape pads at most 400 characters and joining them is cheap, so that
   // regression costs memory far more than CPU). So it is bounded against stripAnsi measured in the same run, which load
-  // moves together, at 1.5x with a 20ms floor for the input that costs almost nothing either way, and every stripAnsi
-  // call in mobile-server.js must pass the tail, which no load can move.
+  // moves together, at 1.5x with a 20ms floor, and every stripAnsi call in mobile-server.js must pass the tail, which no
+  // load can move. The reference strips what tuiVisibleTail strips: the text after the last newline (the second input's
+  // unterminated DCS costs stripAnsi nothing, while tuiVisibleTail parses the 5458 cursor moves after it; Codex P2,
+  // PR #15 round 4).
   const cpuMs = (f) => { const c0 = process.cpuUsage(); f(); const c = process.cpuUsage(c0); return (c.user + c.system) / 1000; };
   const ten = (f) => cpuMs(() => { for (let n = 0; n < 10; n += 1) f(); });
   for (const r of amp) {
+    const suffix = r.slice(r.lastIndexOf('\n') + 1);
     let strip = Infinity;
+    let ref = Infinity;
     let tui = Infinity;
-    const okNow = () => strip < 200 && tui < Math.max(20, 1.5 * strip);
+    const okNow = () => strip < 200 && tui < Math.max(20, 1.5 * ref);
     for (let tries = 0; tries < 3 && !okNow(); tries += 1) {
       strip = Math.min(strip, ten(() => stripAnsi(r, 4096)));
+      ref = suffix === r ? strip : Math.min(ref, ten(() => stripAnsi(suffix, 4096)));
       tui = Math.min(tui, ten(() => claudeTuiPresent(r)));
     }
     assert.ok(strip < 200, `10 stripAnsi calls took ${strip.toFixed(0)}ms of CPU at best of 3 (budget 200ms)`);
-    assert.ok(tui < Math.max(20, 1.5 * strip), `10 claudeTuiPresent calls took ${tui.toFixed(0)}ms of CPU, stripAnsi ${strip.toFixed(0)}ms`);
+    assert.ok(tui < Math.max(20, 1.5 * ref), `10 claudeTuiPresent calls took ${tui.toFixed(0)}ms of CPU, stripAnsi of the same text ${ref.toFixed(0)}ms`);
   }
   const msSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'mobile-server.js'), 'utf8');
   const calls = msSrc.split('\n').filter((l) => !l.trim().startsWith('//') && l.includes('stripAnsi('));
