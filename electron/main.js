@@ -21,7 +21,7 @@ import { startErrorReporter, noteFault, isReportable } from './error-reporter.js
 const stallWatchdog = createStallWatchdog({ log: logLine });
 
 stallWatchdog.wrapIpc(ipcMain);
-import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab, resumeOwedFor, noteTabClaudeSeen } from './auto-resume.js';
+import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab, resumeOwedFor, noteTabClaudeSeen, endTypedResumes } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities, accountMetadata, loginState, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
@@ -1065,6 +1065,7 @@ function setupDataHandlers() {
         throw new Error('PID is not a Claude process in a Dobius tab, refusing to kill');
       }
       process.kill(n, 'SIGTERM');
+      endTypedResumes();
       return true;
     } catch (err) {
       throw new Error(err.message, { cause: err });

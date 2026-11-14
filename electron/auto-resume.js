@@ -70,8 +70,9 @@ const restoredDuringStartup = new Set();
 // preparing: decided, not yet queued (a transcript size lookup, a claim). typed: written, its Claude not yet seen.
 const preparing = new Set();
 const typed = new Map(); // tabId -> { sessionId, at, seq }
-// Bounded: a resume whose Claude never shows up (the shell failed it) stops protecting the stamp after this.
-const RESUME_SIGHT_MS = 10 * 60_000;
+// Bounded: a resume whose Claude never shows up (the shell failed it) stops protecting the stamp after this. A typed
+// `claude --resume` is a process within seconds even under load, so this only has to outlast a few slow checks.
+const RESUME_SIGHT_MS = 2 * 60_000;
 function finishStartup() {
   startupDone = true;
   for (const tabId of restoredDuringStartup) {
@@ -220,16 +221,28 @@ export function resumeOwedFor(tabId, now = Date.now()) {
     typed.delete(tabId);
     return null;
   }
+  // Not typed yet: owed only under the guards the write itself will check. A cancel all, or anything typed into the
+  // tab from any source, means the write will be refused, so the stamp is not protected meanwhile (Codex P2, PR 13).
+  if (cancelGen !== 0 || terminalInputSeq(tabId) !== 0) return null;
   if (queue.has(tabId)) return queue.get(tabId).sessionId;
   if (preparing.has(tabId)) return e.sessionId;
   // Not decided yet: the launch pass is still looking for its terminal, or its window has not been opened.
-  if (!handled.has(tabId) && cancelGen === 0) return e.sessionId;
+  if (!handled.has(tabId)) return e.sessionId;
   return null;
 }
 
 /** The capture saw a Claude running in this tab: whatever resume was owed there is over. */
 export function noteTabClaudeSeen(tabId) {
   typed.delete(tabId);
+}
+
+/**
+ * A Claude in some tab was killed from the Dashboard. The kill names a pid, not a tab, so every typed resume stops
+ * being protected: one the person just killed must not come back next launch (Codex P1, PR 13). A resume that is
+ * really running only loses its stamp until the next capture sees it.
+ */
+export function endTypedResumes() {
+  typed.clear();
 }
 
 /**

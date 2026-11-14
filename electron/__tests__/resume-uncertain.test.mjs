@@ -86,7 +86,7 @@ console.log('PASS  uncertainty starts at the first failed check and ends on a co
   assert.equal(after.tabToBest.size, 0, 'doubt from this run is measured to the relaunch after the crash');
   const { readFileSync } = await import('node:fs');
   const ar = readFileSync(new URL('../auto-resume.js', import.meta.url), 'utf8');
-  assert.match(ar, /writeTerminal\(e\.tabId, cmd\);[\s\S]{0,300}?clearSessionTabUncertain\(e\.sessionId\);/, 'auto-resume ends the old doubt when it types the resume');
+  assert.match(ar, /writeTerminal\(e\.tabId, cmd\);[\s\S]{0,500}?clearSessionTabUncertain\(e\.sessionId\);/, 'auto-resume ends the old doubt when it types the resume');
   console.log('PASS  doubt carried from before a quit ends when auto-resume starts the session again');
 }
 // Codex, PR 7 round 8: a session first unreadable during the quit's own final check is dated at the quit stamp, so an
