@@ -314,7 +314,7 @@ Design: `docs/phone-mode-design.md`. Advertised as `phone` in `authed.features` 
 `electron/phone-protocol.js`; cards: `electron/phone-runner-core.mjs cardFor`.
 
 Every request needs the tab authorized on this socket (`authorizeTab`), a live tab, a pairing that is still valid and a
-valid `reqId` (or none). Each is answered `ack {op, id, reqId, runId?, gen?, duplicate?}` (`phoneStateGet`:
+valid `reqId` (or none). With the setting off, `phoneTake` is refused `off`, but a conversation already on the phone keeps working (send, answer, Stop, Give back) and `phoneStateGet` and the `phoneState` push still work, so the phone can bring it back. Each is answered `ack {op, id, reqId, runId?, gen?, duplicate?}` (`phoneStateGet`:
 `phoneState`) or `opError {op, code, id, reqId, message}`; `message` is plain words the phone can show.
 
 | Request | Fields | Effect |

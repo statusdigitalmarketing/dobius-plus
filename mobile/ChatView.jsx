@@ -492,15 +492,22 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   const phoneRef = useRef(null);
   phoneRef.current = phone;
   const phoneOn = phone?.on === true;
-  // Every write to the tab names the generation this screen was showing, so a tap made before a trip to the phone
-  // and back is refused instead of landing on whatever the tab shows now (undefined = not known, not sent).
-  const phoneGen = phone && phone.gen !== null ? phone.gen : undefined;
+  // Every write to the tab names the generation this screen was showing (writeGen below), so a tap made before a
+  // trip to the phone and back is refused instead of landing on whatever the tab shows now.
   const [moveSheet, setMoveSheet] = useState(null); // null | { busy, note }
   const [cardBusy, setCardBusy] = useState(false);
   const [cardNote, setCardNote] = useState('');
   const [phoneNote, setPhoneNote] = useState('');
   const phoneNoteTimer = useRef(null);
-  const phoneReqs = useRef(new Map()); // reqId -> { op, timer }, the requests still waiting for an answer
+  const phoneReqs = useRef(new Map()); // reqId -> { op, timer, ... }, the requests still waiting for an answer
+  // This socket's Mac has no phone mode for this tab (it does not offer it and nothing here is on the phone): writes
+  // to the tab go without a generation, as an older app's do. Until that or the tab's generation is known, a write
+  // waits, because a write with neither is taken as an older app's even after a trip to the phone and back.
+  const noPhoneRef = useRef(connection.status === 'authed' && !phoneOffered(connection.features));
+  // A phone message the Mac never confirmed. Sending the same words again reuses its sendId, which the Mac delivers
+  // at most once.
+  const unconfirmedRef = useRef(null);
+  const settleRef = useRef(null);
   useEffect(() => () => {
     for (const r of phoneReqs.current.values()) clearTimeout(r.timer);
     phoneReqs.current.clear();
@@ -802,37 +809,38 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         if (skillsRequestedRef.current && skillsRef.current === null) {
           connection.send({ type: 'listSkills' });
         }
-        // Phone mode may have changed while the socket was down: ask again (a request that was waiting is answered
-        // by nobody now, its timer reports it). A Mac that stopped offering it leaves nothing on screen.
-        if (tabId && phoneOffered(connection.features)) {
+        // A phone request still waiting went out on the old socket, and the Mac answers only there: it is lost.
+        const lost = [...phoneReqs.current.values()];
+        phoneReqs.current.clear();
+        for (const e of lost) settleRef.current?.(e, null);
+        // Phone mode may have changed while the socket was down: ask again. A Mac that stopped offering it still
+        // answers for a conversation that is on the phone, so one known to be there is asked about too.
+        if (tabId && (phoneOffered(connection.features) || phoneRef.current?.on)) {
+          noPhoneRef.current = false;
           connection.send({ type: 'authorizeTab', id: tabId });
           connection.send({ type: 'phoneStateGet', id: tabId });
-        } else setPhone(null);
+        } else {
+          noPhoneRef.current = true;
+          setPhone(null);
+        }
       } else if (msg.type === 'phoneState') {
         const s = readPhoneState(msg, tabId);
         if (s) {
           if (phoneRef.current?.on && !s.on) flashPhoneNote('Back on the Mac');
           if (!s.on) { setCardBusy(false); setCardNote(''); }
+          else setMoveSheet(null); // moved, whatever became of the request that asked
           setPhone(s);
         }
       } else if ((msg.type === 'ack' || msg.type === 'opError') && msg.id === tabId && msg.reqId != null
           && phoneReqs.current.has(msg.reqId)) {
-        const { op, timer } = phoneReqs.current.get(msg.reqId);
+        const entry = phoneReqs.current.get(msg.reqId);
         phoneReqs.current.delete(msg.reqId);
-        clearTimeout(timer);
-        const failed = msg.type === 'opError';
-        const why = failed ? refusalText(msg.code, msg.message) : '';
-        // A refusal for an old view: read the tab again so the next try names the generation it has now.
-        if (failed && msg.code === 'stale_view') connection.send({ type: 'phoneStateGet', id: tabId });
-        if (op === 'phoneTake') setMoveSheet(failed ? { busy: false, note: why } : null);
-        else if (op === 'phoneAnswer') { setCardBusy(false); setCardNote(why); }
-        else if (op === 'phoneSend') {
-          if (failed) {
-            setSendNote(`Not sent: ${why}`);
-            clearTimeout(sendNoteTimer.current);
-            sendNoteTimer.current = setTimeout(() => setSendNote(''), 6000);
-          }
-        } else if (failed) flashPhoneNote(why);
+        settleRef.current?.(entry, msg);
+      } else if (msg.type === 'opError' && msg.op === 'phoneStateGet' && msg.id === tabId && msg.code === 'off'
+          && !phoneRef.current?.on) {
+        // This Mac runs no phone mode at all: writes go as an older app's.
+        noPhoneRef.current = true;
+        setPhone(null);
       } else if (msg.type === 'transcript' && msg.sessionId === wantRef.current
           && (msg.projectPath == null || msg.projectPath === projectPath)
           // A History reply for this session (plain rows) shares the socket
@@ -1000,20 +1008,65 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   }, [onPhoneState, tabId, phone]);
   useEffect(() => () => onPhoneState?.(tabId, null), [onPhoneState, tabId]);
 
-  /** Sends one phone mode request; false when the socket is not ready (these are never queued for later). */
-  const phoneRequest = (op, fields) => {
-    if (!tabId || connection.closed || connection.status !== 'authed') return false;
+  const showSendNote = (text) => {
+    setSendNote(text);
+    clearTimeout(sendNoteTimer.current);
+    sendNoteTimer.current = setTimeout(() => setSendNote(''), 6000);
+  };
+  // What became of one phone mode request: answered (`msg` an ack), refused (an opError), or lost (`msg` null: no
+  // answer in time, or the socket it went out on is gone).
+  settleRef.current = (entry, msg) => {
+    clearTimeout(entry.timer);
+    const failed = !msg || msg.type === 'opError';
+    const why = !msg ? PHONE_NO_ANSWER : failed ? refusalText(msg.code, msg.message) : '';
+    // A refusal for an old view: read the tab again so the next try names the generation it has now.
+    if (msg?.type === 'opError' && msg.code === 'stale_view' && tabId) connection.send({ type: 'phoneStateGet', id: tabId });
+    if (entry.op === 'phoneTake') setMoveSheet((cur) => (cur ? (failed ? { busy: false, note: why } : null) : cur));
+    else if (entry.op === 'phoneAnswer') { setCardBusy(false); setCardNote(why); }
+    else if (entry.op === 'phoneSend') {
+      if (!failed) {
+        if (unconfirmedRef.current?.sendId === entry.sendId) unconfirmedRef.current = null;
+        return;
+      }
+      // Not sent, or not known to be: the words go back in the box. Lost keeps its sendId for the next try, so a
+      // message that did arrive is not delivered twice; a refused one was not taken, and goes again as new.
+      unconfirmedRef.current = msg ? null : { text: entry.text, sendId: entry.sendId };
+      setEchoes((cur) => cur.filter((e) => e.content !== entry.text));
+      setDraft((cur) => (cur.trim() ? cur : entry.text));
+      showSendNote(msg ? `Not sent: ${why}` : 'The Mac did not confirm that message. Send it again: it is delivered at most once.');
+    } else if (failed) flashPhoneNote(why);
+  };
+
+  /**
+   * Sends one phone mode request; false when the socket is not ready. These are never queued, and not sent while the
+   * connection is being checked after a wake (a dead socket would swallow them).
+   */
+  const phoneRequest = (op, fields, extra = {}) => {
+    if (!tabId || connection.closed || connection.status !== 'authed' || connection._suspect) return false;
     const reqId = freshId('ph');
-    const timer = setTimeout(() => {
-      if (!phoneReqs.current.delete(reqId)) return;
-      if (op === 'phoneTake') setMoveSheet((cur) => (cur ? { busy: false, note: PHONE_NO_ANSWER } : cur));
-      else if (op === 'phoneAnswer') { setCardBusy(false); setCardNote(PHONE_NO_ANSWER); }
-      else flashPhoneNote(PHONE_NO_ANSWER);
+    const entry = { op, ...extra };
+    entry.timer = setTimeout(() => {
+      if (phoneReqs.current.get(reqId) !== entry) return;
+      phoneReqs.current.delete(reqId);
+      settleRef.current?.(entry, null);
     }, op === 'phoneTake' ? PHONE_TAKE_MS : PHONE_REPLY_MS);
-    phoneReqs.current.set(reqId, { op, timer });
+    phoneReqs.current.set(reqId, entry);
     connection.send({ type: op, id: tabId, reqId, ...fields });
     return true;
   };
+
+  /**
+   * The generation a write to the tab carries: { ok, gen }. ok is false while it is not known on a Mac that may have
+   * phone mode, and the write waits (the caller says so) rather than going out as an older app's.
+   */
+  const writeGen = () => {
+    const p = phoneRef.current;
+    if (p && p.gen !== null) return { ok: true, gen: p.gen };
+    if (noPhoneRef.current && connection.status === 'authed') return { ok: true, gen: undefined };
+    if (tabId && connection.status === 'authed') connection.send({ type: 'phoneStateGet', id: tabId });
+    return { ok: false };
+  };
+  const NOT_READY = 'Not sent: still connecting to the Mac. Send it again in a moment.';
 
   const openMoveSheet = () => {
     if (!phoneOffered(connection.features) || phoneOn) return;
@@ -1223,10 +1276,10 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     if (phoneOn) {
       // On the phone the message goes to the run, never typed into the tab. The same sendId twice is sent once, so
       // nothing here can deliver it twice.
-      if (!phone.runId || !phoneRequest('phoneSend', { runId: phone.runId, text, sendId: freshId('s') })) {
-        setSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
-        clearTimeout(sendNoteTimer.current);
-        sendNoteTimer.current = setTimeout(() => setSendNote(''), 6000);
+      const again = unconfirmedRef.current?.text === text ? unconfirmedRef.current.sendId : null;
+      const sendId = again || freshId('s');
+      if (!phone.runId || !phoneRequest('phoneSend', { runId: phone.runId, text, sendId }, { text, sendId })) {
+        showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
         return;
       }
       setSendNote('');
@@ -1240,9 +1293,11 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
     // a DISCRETE keypress after the paste settles. Sending `text\r` in one
     // chunk made Claude's Ink TUI treat the \r as pasted newline, so messages
     // sat in the input box unsubmitted (Sam's v1.0.51 bug 3).
+    const w = writeGen();
+    if (!w.ok) { showSendNote(NOT_READY); return; }
     const reqId = `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     lastSendRef.current = reqId;
-    connection.send({ type: 'submitPrompt', id: tabId, text, reqId, gen: phoneGen });
+    connection.send({ type: 'submitPrompt', id: tabId, text, reqId, gen: w.gen });
     setSendNote(''); // a refusal note is about the PREVIOUS send
     sentAtRef.current = Date.now();
     setEchoes((cur) => [...cur, { content: text, at: Date.now() }]);
@@ -1267,14 +1322,20 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       return false;
     }
     const { token } = pressGuard.current.pressedCard(e, card);
+    const w = writeGen();
+    if (!w.ok) {
+      setSelNote('Still connecting to the Mac. Nothing was sent, tap again in a moment.');
+      setTimeout(() => setSelNote(''), 4000);
+      return false;
+    }
     if (token === null || token === undefined) {
-      connection.send({ type: 'input', id: tabId, data, gen: phoneGen });
+      connection.send({ type: 'input', id: tabId, data, gen: w.gen });
       return true;
     }
     if (!token) return false;
     tappedRef.current = card;
     setSelBusy(true);
-    connection.send({ type: 'selectorKey', id: tabId, data, token, gen: phoneGen });
+    connection.send({ type: 'selectorKey', id: tabId, data, token, gen: w.gen });
     return true;
   };
 
@@ -1334,11 +1395,15 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // bug 2 + Asana 1217257328849820).
   const startClaude = () => {
     if (!tabId) return;
-    connection.send({ type: 'submitPrompt', id: tabId, text: 'claude', gen: phoneGen });
+    const w = writeGen();
+    if (!w.ok) { showSendNote(NOT_READY); return; }
+    connection.send({ type: 'submitPrompt', id: tabId, text: 'claude', gen: w.gen });
   };
   const resumeClaude = () => {
     if (!tabId) return;
-    connection.send({ type: 'submitPrompt', id: tabId, text: 'claude --continue', gen: phoneGen });
+    const w = writeGen();
+    if (!w.ok) { showSendNote(NOT_READY); return; }
+    connection.send({ type: 'submitPrompt', id: tabId, text: 'claude --continue', gen: w.gen });
   };
 
   // Selector popup + input row are shared by BOTH states below: a sessionless
@@ -1540,7 +1605,11 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       {/* On-screen terminal keys, for the full-TUI dialogs a popup cannot
           drive (/permissions and friends need arrows + enter + tab). */}
       {showKeys && tabId && !phoneOn && (
-        <SpecialKeys onKey={(seq) => connection.send({ type: 'input', id: tabId, data: seq, gen: phoneGen })} />
+        <SpecialKeys onKey={(seq) => {
+          const w = writeGen();
+          if (w.ok) connection.send({ type: 'input', id: tabId, data: seq, gen: w.gen });
+          else showSendNote(NOT_READY);
+        }} />
       )}
       {/* One rounded card on the keyboard, like Asana's comment box: the
           message on top across the full width, the tools underneath, Send on
@@ -1611,7 +1680,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
                 if (!tabId || Date.now() - sentAtRef.current <= 800) return;
                 // On the phone, Stop interrupts the run's turn; the tab's own Esc would be refused.
                 if (phoneOn) { if (phone.runId && !phoneRequest('phoneStop', { runId: phone.runId })) flashPhoneNote('Not connected to the Mac right now.'); return; }
-                connection.send({ type: 'input', id: tabId, data: '\x1b', gen: phoneGen });
+                const w = writeGen();
+                if (w.ok) connection.send({ type: 'input', id: tabId, data: '\x1b', gen: w.gen });
+                else showSendNote(NOT_READY);
               }}
               aria-label="Stop Claude (escape)"
               title="Interrupt Claude / cancel queued messages. Tap again to clear its input."

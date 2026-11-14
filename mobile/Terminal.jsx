@@ -338,7 +338,8 @@ export default function TerminalScreen({ connection, status, initialId, openNonc
                 {mode === 'chat' ? 'Show terminal' : 'Show chat'}
               </button>
             )}
-            {activeId && mode === 'chat' && phoneOffered(connection.features) && (
+            {/* Give back stays offered for a conversation already on the phone after the Mac's setting is turned off. */}
+            {activeId && mode === 'chat' && (phoneOffered(connection.features) || phoneHere) && (
               <button role="menuitem" onClick={() => {
                 setMenuOpen(false);
                 setPhoneCmd((c) => ({ kind: phoneHere ? 'giveBack' : 'move', n: c.n + 1 }));

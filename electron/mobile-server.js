@@ -710,9 +710,13 @@ const phoneGenOf = (id) => activePhoneMode()?.gen(id);
  * to writes meanwhile.
  */
 const phoneGate = (id, m) => phoneViewGate(phoneMode, id, m && typeof m === 'object' ? m : {});
-/** Phone mode's state for a tab, to every socket that authorized it (phone-mode.js `notify`). */
+/**
+ * Phone mode's state for a tab, to every socket that authorized it (phone-mode.js `notify`). Pushed with the setting
+ * off too: a state change then can only be a conversation that moved before it was turned off, and the phone must
+ * learn when that one comes back.
+ */
 export function pushPhoneState(id, state) {
-  if (!activePhoneMode() || typeof id !== 'string' || !state || typeof state !== 'object') return;
+  if (!phoneMode || typeof id !== 'string' || !state || typeof state !== 'object') return;
   for (const s of socketsForTab(id)) wsSend(s, { type: 'phoneState', ...state, id });
 }
 

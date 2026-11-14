@@ -24,7 +24,9 @@ const MESSAGES = {
 /**
  * Handle one phone mode request. `deps`:
  *   pm()          the phone mode instance (electron/phone-mode.js), or null when it is not running
- *   on()          the Mac's setting is on (macOS only)
+ *   on()          the Mac's setting is on (macOS only). Off refuses a new move; a conversation already on the phone
+ *                 keeps working until it comes back (sends, answers, Stop, Give back), and its state can be read, so a
+ *                 phone is never left holding a conversation it cannot reach (Codex P2, UI round 1).
  *   send(obj)     reply on this socket
  *   isLive(id)    a terminal with this exact id exists
  *   authed        this socket's Set of authorized tab ids
@@ -37,7 +39,10 @@ export async function handlePhoneOp(msg, deps) {
   const id = typeof msg?.id === 'string' ? msg.id : null;
   const fail = (code, error) => deps.send({ type: 'opError', op, code, id, reqId, message: error || MESSAGES[code] || code });
   const pm = deps.pm();
-  if (!pm || !deps.on()) return fail('off');
+  if (!pm) return fail('off');
+  let on;
+  try { on = !!deps.on(); } catch { on = false; }
+  if (!on && op === 'phoneTake') return fail('off');
   if (!validReqId(msg?.reqId)) return fail('bad_request');
   const v = validatePhoneRequest(msg);
   if (!v.ok) return fail(v.code, v.error);
@@ -45,6 +50,11 @@ export async function handlePhoneOp(msg, deps) {
   if (!deps.isLive(r.id)) return fail('unknown_tab');
   if (!deps.authed.has(r.id)) return fail('not_authorized');
   if (!deps.stillOk()) return fail('revoked');
+  if (!on && r.type !== 'phoneStateGet') {
+    let onPhone;
+    try { onPhone = !!pm.isPhoneTab?.(r.id); } catch { onPhone = false; }
+    if (!onPhone) return fail('off');
+  }
   if (r.type === 'phoneStateGet') return deps.send({ type: 'phoneState', ...pm.stateOf(r.id), id: r.id, reqId });
   let res;
   try {

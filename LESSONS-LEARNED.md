@@ -1147,3 +1147,9 @@
 - **FIX**: `npx electron-rebuild` after ANY npm install or uninstall, before running tests or the app (the project CLAUDE.md says so for native modules; this is what skipping it looks like).
 - **CONTEXT**: The error names neither the install nor node-pty's helper, so it reads like a test bug. terminal-manager.js repairs the helper's mode at app start, but only for `build/Release`, not for the test runs.
 - **DETECTION**: `ls -la node_modules/node-pty/build/Release/spawn-helper` (missing or not -rwx means rebuild)
+
+### Dependencies - 2026-11-14
+- **MISTAKE**: The SDK was installed with `npm install --omit=optional` to keep its platform binaries out. That also removed `@rollup/rollup-darwin-arm64`, so `npm run build` and `npm run build:mobile` (Vite) failed with `Cannot find module @rollup/rollup-darwin-arm64` hours later.
+- **FIX**: `npm install --no-save --ignore-scripts @rollup/rollup-darwin-arm64@<rollup's own version>` restores only that package. Better: never install with `--omit=optional` in a checkout that builds; the SDK being a devDependency already keeps it out of the app.
+- **CONTEXT**: Vite, esbuild and Tailwind all load per-platform native binaries that npm marks optional. The failure shows up at the next build, not at the install.
+- **DETECTION**: `node -e 'const l=require("./package-lock.json").packages,f=require("fs");for(const[k,v]of Object.entries(l))if(k.startsWith("node_modules/")&&v.optional&&(!v.os||v.os.includes("darwin"))&&(!v.cpu||v.cpu.includes("arm64"))&&!f.existsSync(k))console.log(k)'`

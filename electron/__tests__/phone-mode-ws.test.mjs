@@ -57,6 +57,29 @@ test('refusals act on nothing and are answered', async () => {
   }
 });
 
+test('with the setting off, a new move is refused but a conversation already on the phone keeps working', async () => {
+  const onPhone = new Set([T]);
+  const h = harness({ on: false, pm: { isPhoneTab: (id) => onPhone.has(id) } });
+  await h.run({ type: 'phoneTake', id: T, sessionId: S, gen: 1, reqId: 'a' });
+  assert.equal(h.sent.at(-1).code, 'off', 'no new move while off');
+  await h.run({ type: 'phoneSend', id: T, runId: RUN, text: 'hi', sendId: 's1', reqId: 'b' });
+  await h.run({ type: 'phoneAnswer', id: T, runId: RUN, requestId: 'tu1', answer: { kind: 'plan', approve: true }, reqId: 'c' });
+  await h.run({ type: 'phoneStop', id: T, runId: RUN, reqId: 'd' });
+  await h.run({ type: 'phoneGiveBack', id: T, runId: RUN, reqId: 'e' });
+  assert.deepEqual(h.calls.map((c) => c[0]), ['send', 'answer', 'stop', 'giveBack']);
+  assert.deepEqual(h.sent.slice(1).map((m) => m.type), ['ack', 'ack', 'ack', 'ack']);
+  onPhone.clear();
+  await h.run({ type: 'phoneGiveBack', id: T, runId: RUN, reqId: 'f' });
+  assert.equal(h.sent.at(-1).code, 'off', 'a tab not on the phone gets nothing while off');
+  assert.equal(h.calls.length, 4);
+  await h.run({ type: 'phoneStateGet', id: T, reqId: 'g' });
+  assert.deepEqual([h.sent.at(-1).type, h.sent.at(-1).gen], ['phoneState', 3], 'its state can always be read');
+  const throws = harness({ on: false, pm: { isPhoneTab: () => { throw new Error('x'); } } });
+  await throws.run({ type: 'phoneStop', id: T, runId: RUN });
+  assert.equal(throws.sent[0].code, 'off', 'a failed lookup is not on the phone');
+  assert.deepEqual(throws.calls, []);
+});
+
 test('requests reach phone mode with only their checked fields, and acks carry run and generation', async () => {
   const h = harness();
   await h.run({ type: 'phoneTake', id: T, sessionId: S, gen: 4, reqId: 7, extra: 'x' });

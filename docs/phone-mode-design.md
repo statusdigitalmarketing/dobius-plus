@@ -341,7 +341,16 @@ does. Only sending and answering change.
 
 Settings > Mobile Access > **Drive conversations from the phone (beta)**, off by default. macOS only in v1 (the launch is a
 zsh/bash script; the same rule `restarterFor` applies today). When off, `authed.features` does not offer `phone` and
-every `phone*` request answers `opError: off`.
+`phoneTake` answers `opError: off`. A conversation already on the phone keeps working until it comes back: its
+`phoneSend`, `phoneAnswer`, `phoneStop` and `phoneGiveBack` are served, `phoneStateGet` answers, and `phoneState` is
+still pushed, so the phone that holds it can give it back and learns when it is back (Codex P2, UI round 1). Any
+other `phone*` request answers `opError: off`.
+
+The phone's writes to a tab wait until it knows the tab's generation, or knows this Mac has no phone mode (it does not
+offer it and nothing on this screen is on the phone). A write with no generation is taken as an older app's, so
+sending one from a screen that never learned the generation would undo the gate after a trip to the phone and back
+(Codex P1, UI round 1). A phone message the Mac never answered (lost socket, timeout) goes back into the box and is
+sent again with the same `sendId`, which the Mac delivers at most once.
 
 ## Safety and stability
 
