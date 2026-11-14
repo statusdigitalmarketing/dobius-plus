@@ -23,22 +23,28 @@ const LIVE = new Set(['idle', 'working', 'waiting']);
 const hash = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
 const newToken = () => crypto.randomBytes(32).toString('hex');
 
-export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now } = {}) {
+export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now, isLive = () => true } = {}) {
   const runs = new Map(); // runId -> run
   const tokens = new Map(); // sha256(token) -> { runId, kind: 'gate' | 'runner' | 'done', used }
-  const gens = new Map(); // tabId -> generation
-  // Generations are never reused, not even across a restart or after a tab's entry is evicted (Codex P1, impl round
-  // 1: an evicted tab fell back to 0 and a frame from before its first move passed again). Each new generation is at
-  // least the clock in ms, so a restarted main is above every generation the previous one handed out (a burst runs
-  // the counter ahead of the clock by at most the burst's size, which the clock overtakes in that many ms), and a tab
-  // without an entry is given a fresh one when first asked, never a default.
-  let genCounter = 0;
+  const gens = new Map(); // tabId -> generation, only for tabs that moved to the phone at least once
+  // A tab that never moved has the launch's BASE generation; only a move (and its end and release) gives a tab its
+  // own. Asking about a tab never creates an entry, so lookups of other ids cannot evict a live tab's generation
+  // (Codex P1, impl round 9). BASE is the clock at launch and every bump is above it and at least the clock, so a
+  // restarted main is above every generation the previous one handed out. When the map is full the oldest entry of a
+  // tab that is no longer live is dropped (its id falls back to BASE, harmless with no terminal behind it); only if
+  // every entry is live, which needs 2000 tabs on the phone in one launch, is the oldest dropped anyway.
+  const BASE = now();
+  let genCounter = BASE;
 
   const bumpGen = (tabId) => {
     genCounter = Math.max(genCounter + 1, now());
     gens.delete(tabId);
     gens.set(tabId, genCounter);
-    while (gens.size > MAX_GENS) gens.delete(gens.keys().next().value);
+    if (gens.size > MAX_GENS) {
+      let victim = null;
+      for (const id of gens.keys()) { if (id !== tabId && !isLive(id)) { victim = id; break; } }
+      gens.delete(victim ?? gens.keys().next().value);
+    }
     return genCounter;
   };
   const issue = (run, kind) => {
@@ -79,8 +85,8 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now } = {})
   }
 
   const api = {
-    /** The generation a phone write must carry for this tab. A tab with none yet is given a fresh one. */
-    gen: (tabId) => gens.get(tabId) ?? bumpGen(tabId),
+    /** The generation a phone write must carry for this tab (BASE until it first moves). Never creates an entry. */
+    gen: (tabId) => gens.get(tabId) ?? BASE,
 
     /** The run currently on this tab (any status), or null. */
     runOfTab,

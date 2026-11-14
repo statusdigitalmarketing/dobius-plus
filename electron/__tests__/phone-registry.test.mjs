@@ -59,19 +59,29 @@ test('a delayed frame from the ending stretch is stale once the TUI is back (Cod
   assert.notEqual(reg.gen('T1'), shown);
 });
 
-test('an evicted generation is never handed out again (Codex impl r1)', () => {
+test('asking about other tabs never changes a live tab\'s generation (Codex impl r9)', () => {
   const reg = createPhoneRegistry();
-  const old = reg.gen('T0');
-  const { run } = reg.begin('T0', S1);
-  const mid = reg.gen('T0');
-  reg.end(run, 'ended');
-  reg.noteDone(run, true); // main confirmed the gate exited when done arrived
-  reg.settle(run);
-  const seen = new Set([old, mid, reg.gen('T0')]);
+  const base = reg.gen('T0');
   for (let i = 0; i < MAX_GENS + 5; i++) reg.gen(`X${i}`);
-  const now = reg.gen('T0');
-  assert.equal(seen.has(now), false);
-  assert.ok(now > Math.max(...seen));
+  assert.equal(reg.gen('T0'), base, 'a tab that never moved keeps the launch base');
+  const { run } = reg.begin('T0', S1);
+  const moved = reg.gen('T0');
+  assert.ok(moved > base);
+  for (let i = 0; i < MAX_GENS + 5; i++) reg.gen(`Y${i}`);
+  assert.equal(reg.gen('T0'), moved, 'nor one that moved');
+  reg.cancel(run);
+});
+
+test('a full map drops a tab that is no longer live before any live one (Codex impl r1, r9)', () => {
+  const live = new Set(['T0']);
+  const reg = createPhoneRegistry({ isLive: (id) => live.has(id) });
+  const { run } = reg.begin('T0', S1);
+  const mine = reg.gen('T0');
+  // Other tabs move and are gone again: each move leaves an entry behind.
+  for (let i = 0; i < MAX_GENS + 5; i++) { const b = reg.begin(`D${i}`, `s-${i}`); reg.cancel(b.run); }
+  assert.equal(reg.gen('T0'), mine, 'the live tab keeps its generation');
+  assert.ok(reg.gen('D0') < mine, 'a dead tab dropped falls back to the base, below every handed-out generation');
+  reg.cancel(run);
 });
 
 test('generations follow the clock, so a registry started later is above an earlier one', () => {

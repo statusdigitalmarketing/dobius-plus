@@ -291,7 +291,7 @@ test('a runner that does not run under the tab is refused and the run ends', asy
   } finally { await ctx.cleanup(); }
 });
 
-test('no hello in time ends the run; the closed tab\'s shell is confirmed gone (killed after its grace) before release', async () => {
+test('no hello in time ends the run; a closed tab\'s shell never identified by a hello is never signalled, and held until it is gone', async () => {
   const ctx = setup();
   try {
     await ctx.mode.init();
@@ -301,16 +301,15 @@ test('no hello in time ends the run; the closed tab\'s shell is confirmed gone (
     assert.equal(ctx.mode.stateOf('T1').status, 'ending');
     assert.ok(ctx.mode.heldSessions().has(S), 'no done and no closed tab: still held');
     ctx.mode.tabClosed('T1');
-    await ctx.mode._tick();
-    assert.ok(ctx.sys.table.has(2000), 'the shell gets its grace');
-    assert.ok(ctx.mode.heldSessions().has(S));
     ctx.advance(SHELL_KILL_MS + 1);
     await ctx.mode._tick();
-    assert.equal(ctx.sys.table.has(2000), false);
+    assert.ok(ctx.sys.table.has(2000), 'no identity, no signal (the close itself SIGKILLs the PTY)');
+    assert.ok(ctx.mode.heldSessions().has(S));
+    ctx.sys.table.delete(2000);
+    await ctx.mode._tick();
     assert.equal(ctx.mode.heldSessions().size, 0);
   } finally { await ctx.cleanup(); }
 });
-
 test('init removes one-time files an earlier run left behind', async () => {
   const ctx = setup();
   try {
@@ -339,26 +338,6 @@ test('take: a Claude pid freed and reused before the stop is never signalled', a
   } finally { await ctx.cleanup(); }
 });
 
-test('a closed tab whose shell start time was never read keeps the session held until the pid is gone', async () => {
-  const ctx = setup();
-  try {
-    await ctx.mode.init();
-    const psStart = ctx.sys.psStart;
-    ctx.sys.psStart = async (pid) => (pid === 2000 ? null : psStart(pid)); // ps keeps failing for the new shell
-    await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
-    ctx.advance(HELLO_MS + 1);
-    await ctx.mode._tick();
-    ctx.mode.tabClosed('T1');
-    ctx.advance(SHELL_KILL_MS + 1);
-    await ctx.mode._tick();
-    assert.ok(ctx.sys.table.has(2000), 'an unidentified pid is never signalled');
-    assert.ok(ctx.mode.heldSessions().has(S), 'held while the shell may still run the fallback');
-    ctx.sys.table.delete(2000); // the shell exits
-    await ctx.mode._tick();
-    assert.equal(ctx.mode.heldSessions().size, 0);
-  } finally { await ctx.cleanup(); }
-});
-
 test('a runner hello that arrives before the gate\'s spawn report is accepted', async () => {
   const ctx = setup();
   try {
@@ -368,63 +347,55 @@ test('a runner hello that arrives before the gate\'s spawn report is accepted', 
   } finally { await ctx.cleanup(); }
 });
 
-test('a shell pid reused after the tab closed is never adopted or signalled (Codex P1, impl round 8)', async () => {
+/** A live run whose processes then all exit, with `ended` received: only the tab's shell is left. */
+async function endedRun(ctx) {
+  const l = await live(ctx);
+  l.runner.send({ t: 'ended', reason: 'x' });
+  await sleep(50);
+  for (const pid of [2200, 2300, 2100]) ctx.sys.table.delete(pid);
+  l.runner.end(); l.gate.end();
+  return l;
+}
+
+test('with the shell identified by the gate\'s hello, a closed tab\'s shell is killed after its grace, then released', async () => {
   const ctx = setup();
   try {
-    await ctx.mode.init();
-    const psStart = ctx.sys.psStart;
-    let firstRead = true;
-    ctx.sys.psStart = async (pid) => {
-      if (pid === 2000 && firstRead) { firstRead = false; return null; } // the restart's first read fails
-      return psStart(pid);
-    };
-    const sleep0 = ctx.d.sleep;
-    let closed = false;
-    ctx.d.sleep = async (ms) => {
-      if (!closed && ctx.calls.restart.length) {
-        // While take waits to retry: the tab closes and an unrelated process takes pid 2000.
-        closed = true;
-        ctx.d.tabs = () => [];
-        ctx.mode.tabClosed('T1');
-        ctx.sys.table.set(2000, { pid: 2000, pgid: 2000, ppid: 1, lstart: 'Sat Nov 14 09:30:00 2026' });
-      }
-      return sleep0(ms);
-    };
-    await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
-    assert.equal(closed, true);
-    ctx.advance(HELLO_MS + SHELL_KILL_MS + 1);
+    await endedRun(ctx);
+    ctx.mode.tabClosed('T1');
     await ctx.mode._tick();
+    assert.ok(ctx.sys.table.has(2000), 'the shell gets its grace');
+    assert.ok(ctx.mode.heldSessions().has(S));
+    ctx.advance(SHELL_KILL_MS + 1);
     await ctx.mode._tick();
-    assert.ok(ctx.sys.table.has(2000), 'the unrelated process is never signalled');
-    assert.ok(ctx.mode.heldSessions().has(S), 'held while pid 2000 cannot be told apart from the shell');
-    ctx.sys.table.delete(2000);
-    await ctx.mode._tick();
+    assert.equal(ctx.sys.table.has(2000), false);
     assert.equal(ctx.mode.heldSessions().size, 0);
   } finally { await ctx.cleanup(); }
 });
 
-test('a shell start read that returns after the tab closed is thrown away', async () => {
+test('a shell that exited and whose pid was reused counts as gone and the new process is never signalled (Codex impl r8, r9)', async () => {
+  const ctx = setup();
+  try {
+    await endedRun(ctx);
+    ctx.sys.table.set(2000, { pid: 2000, pgid: 2000, ppid: 1, lstart: 'Sat Nov 14 09:30:00 2026' }); // reused
+    ctx.mode.tabClosed('T1');
+    ctx.advance(SHELL_KILL_MS + 1);
+    await ctx.mode._tick();
+    assert.ok(ctx.sys.table.has(2000), 'the unrelated process is never signalled');
+    assert.equal(ctx.mode.heldSessions().size, 0, 'its start time shows the shell is gone');
+  } finally { await ctx.cleanup(); }
+});
+
+test('a gate that does not run under the tab\'s shell is refused and the run ends', async () => {
   const ctx = setup();
   try {
     await ctx.mode.init();
-    const psStart = ctx.sys.psStart;
-    let swapped = false;
-    ctx.sys.psStart = async (pid) => {
-      if (pid === 2000 && !swapped && ctx.calls.restart.length) {
-        // The tab closes and pid 2000 is reused while this read is out.
-        swapped = true;
-        ctx.d.tabs = () => [];
-        ctx.mode.tabClosed('T1');
-        ctx.sys.table.set(2000, { pid: 2000, pgid: 2000, ppid: 1, lstart: 'Sat Nov 14 09:30:00 2026' });
-      }
-      return psStart(pid);
-    };
-    await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
-    assert.equal(swapped, true);
-    ctx.advance(HELLO_MS + SHELL_KILL_MS + 1);
-    await ctx.mode._tick();
-    await ctx.mode._tick();
-    assert.ok(ctx.sys.table.has(2000), 'the unrelated process is never signalled');
+    const r = await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+    const dir = ctx.mode._runDir();
+    ctx.sys.table.set(2100, { pid: 2100, pgid: 2100, ppid: 1 }); // not under shell 2000
+    const gate = client(socketPath(dir));
+    gate.send({ t: 'gate', token: fs.readFileSync(ticketPath(dir, r.runId), 'utf8'), pid: 2100 });
+    assert.equal((await gate.next()).t, 'refused');
+    assert.equal(ctx.mode.stateOf('T1').status, 'ending');
     assert.ok(ctx.mode.heldSessions().has(S));
   } finally { await ctx.cleanup(); }
 });

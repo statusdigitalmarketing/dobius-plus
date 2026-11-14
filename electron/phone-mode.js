@@ -52,7 +52,8 @@ export function createPhoneMode(d) {
   const sys = d.sys || realSys;
   const log = d.log || (() => {});
   const now = d.now || Date.now;
-  const reg = createPhoneRegistry({ now });
+  // isLive is asked only when the generation map is full (2000 tabs moved in one launch).
+  const reg = createPhoneRegistry({ now, isLive: (id) => { try { return d.tabs().some((t) => t.id === id); } catch { return true; } } });
   const store = createRunStore(path.join(d.userData, 'phone-runs.json'), log);
   const conns = new Map(); // runId -> runner connection
   const replies = new Map(); // reqId -> { resolve, timer }
@@ -192,26 +193,23 @@ export function createPhoneMode(d) {
     // cleanup confirms gone (by pid AND start time, never a bare pid).
     const fresh = d.tabs().find((t) => t.id === tabId);
     run.ptyPid = Number.isSafeInteger(fresh?.pid) ? fresh.pid : null;
+    // Its start time is learned only from the gate's hello listing, where a live child proves the pid is still it.
     run.ptyStart = null;
-    for (let i = 0; i < 3 && !run.ptyStart && (await readShellStart(run)) === null; i++) await d.sleep(200);
     notify(run);
     schedule();
     return { ok: true, runId: run.runId, gen: reg.gen(tabId) };
   }
 
   /**
-   * Read the restarted shell's start time, only while the tab still owns that pid (open, listing it), and keep the
-   * answer only if it still does once the read returns: after the tab closes the pid may belong to anything (Codex P1,
-   * impl round 8). Returns the start time, or null.
+   * The tab's shell start time, taken from one ps listing in which `childPid` (the gate or the runner, alive and
+   * talking to us) descends from the shell's pid. A pid cannot be freed and reused while a child of it is still
+   * parented to it, so that row IS the shell: no tab list or separate read is trusted for it (Codex P1, impl rounds 8
+   * and 9: a retry after the close, then a tab entry lagging the shell's exit, adopted an unrelated process).
    */
-  async function readShellStart(run) {
-    const owned = () => !run.tabClosed && Number.isSafeInteger(run.ptyPid)
-      && d.tabs().some((x) => x.id === run.tabId && x.pid === run.ptyPid);
-    if (!owned()) return null;
-    const start = await sys.psStart(run.ptyPid).catch(() => null);
-    if (!start || !owned()) return null;
-    run.ptyStart = start;
-    return start;
+  function learnShellStart(run, rows, childPid) {
+    if (run.ptyStart || !Number.isSafeInteger(run.ptyPid) || !descends(rows, childPid, run.ptyPid)) return;
+    const shell = rows.find((x) => x.pid === run.ptyPid);
+    if (shell?.lstart) run.ptyStart = shell.lstart;
   }
 
   // ---- the socket ----
@@ -265,7 +263,10 @@ export function createPhoneMode(d) {
     }
     const run = r.run;
     dropTokenFile(ticketPath(runDir, run.runId), log); // already consumed by the gate; a leftover would be a bug
-    const start = Number.isSafeInteger(m.pid) && m.pid > 1 ? await sys.psStart(m.pid) : null;
+    // One ps: the gate's own start time, and that it runs under this tab's shell (whose identity this fixes).
+    const rows = Number.isSafeInteger(m.pid) && m.pid > 1 ? parsePsAll(await sys.psAll().catch(() => '')) : [];
+    const gateRow = rows.find((x) => x.pid === m.pid);
+    const start = gateRow && Number.isSafeInteger(run.ptyPid) && descends(rows, m.pid, run.ptyPid) ? gateRow.lstart : null;
     const a = start ? reg.acceptGate(run, m.pid) : { ok: false, code: 'bad_pid' };
     if (!a.ok) {
       reg.end(run, 'the tab could not start phone mode');
@@ -275,6 +276,7 @@ export function createPhoneMode(d) {
       return;
     }
     run.gateStart = start;
+    learnShellStart(run, rows, m.pid);
     conn.authed = true;
     conn.data.runId = run.runId;
     conn.data.role = 'gate';
@@ -304,6 +306,7 @@ export function createPhoneMode(d) {
     const row = rows.find((x) => x.pid === m.pid);
     const verified = !!row && run.runnerPid === m.pid && sameStart(row.lstart, run.runnerStart)
       && Number.isSafeInteger(run.ptyPid) && descends(rows, m.pid, run.ptyPid);
+    if (verified) learnShellStart(run, rows, m.pid);
     const a = reg.acceptRunner(run, m.pid, verified);
     if (!a.ok) {
       reg.end(run, a.code === 'not_verified' ? 'the phone side could not be confirmed as this tab\'s' : 'the phone session had already ended');
@@ -375,8 +378,6 @@ export function createPhoneMode(d) {
     const t = now();
     if (run.status === 'starting' && t - run.startedAt > HELLO_MS) endRun(run, 'phone mode did not start in time');
     if (t - run.startedAt > TICKET_MS) dropTokenFile(ticketPath(runDir, run.runId), log);
-    // A shell whose start time could not be read at the restart: read it while the tab still owns that pid.
-    if (!run.ptyStart) await readShellStart(run);
     if (run.status !== 'ending') {
       if (t - (run.aliveAt ?? 0) > ALIVE_MS) { run.aliveAt = t; record(run); }
       return;
@@ -409,8 +410,9 @@ export function createPhoneMode(d) {
       }
     }
     if (run.tabClosed && !run.shellGone) {
-      // Without the shell's start time only "no such pid" proves it gone: the claim stays held otherwise, and a pid
-      // that cannot be identified is never signalled. No pid at all (the restart's tab had none) holds it too.
+      // Without the shell's identity (no hello ever listed it) only "no such pid" proves it gone: the claim stays held
+      // otherwise, and a pid that cannot be identified is never signalled (closing a phone tab SIGKILLs its PTY
+      // through the PTY object, so a stopped shell still ends). No pid at all holds it too.
       let st = 'unknown';
       if (Number.isSafeInteger(run.ptyPid) && run.ptyStart) st = await pidState(sys, run.ptyPid, run.ptyStart);
       else if (Number.isSafeInteger(run.ptyPid)) { try { sys.kill(run.ptyPid, 0); } catch (e) { if (e?.code === 'ESRCH') st = 'gone'; } }
