@@ -56,6 +56,8 @@ assert.match(resume, /writeTerminal\(e\.tabId, cmd\);\s*typed\.set\(e\.tabId, \{
 assert.match(resume, /if \(cancelGen !== 0 \|\| terminalInputSeq\(tabId\) !== 0\) return null;\s*if \(queue\.has\(tabId\)\) return pidNow\(\) === queue\.get\(tabId\)\.pidAt \? queue\.get\(tabId\)\.sessionId : null;/, 'a queued or prepared resume is owed only while nothing was typed and nothing cancelled');
 assert.match(main, /process\.kill\(n, 'SIGTERM'\);\s*endTypedResumes\(\);/, 'a Dashboard kill ends every typed resume');
 assert.match(main, /stop: \(pid\) => \{ process\.kill\(pid, 'SIGHUP'\); endTypedResumes\(\); \}/, 'an account move stop ends every typed resume');
+assert.match(resume, /if \(!handled\.has\(tabId\)\) return !seenPid\.has\(tabId\) \|\| pidNow\(\) === seenPid\.get\(tabId\) \? e\.sessionId : null;/, 'an undecided tab is owed only in the shell the launch pass saw');
+assert.match(resume, /seenPid\.set\(tabId, firstSeen\.get\(tabId\)\.pidAt\);/, 'the launch pass records the shell it saw');
 assert.match(resume, /if \(preparing\.has\(tabId\)\) return pidNow\(\) === preparing\.get\(tabId\) \? e\.sessionId : null;/, 'a prepared resume is owed only in the shell it was decided for');
 assert.equal((resume.match(/preparing\.add\(/g) || []).length, 0, 'every preparing entry carries its shell pid');
 assert.match(resume, /if \(pidNow\(\) !== t\.pid\) \{ typed\.delete\(tabId\); return null; \}/, 'a typed resume is owed only in the shell it was typed into');

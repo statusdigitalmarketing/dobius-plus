@@ -69,6 +69,8 @@ const restoredDuringStartup = new Set();
 // from the launch decision until its Claude is first seen running in the tab, it is dropped, or RESUME_SIGHT_MS passes.
 // preparing: decided, not yet queued (a transcript size lookup, a claim). typed: written, its Claude not yet seen.
 const preparing = new Map(); // tabId -> the shell pid it was decided for
+// tabId -> the shell pid the launch pass first saw it with, so an undecided tab is owed only in that shell.
+const seenPid = new Map();
 const typed = new Map(); // tabId -> { sessionId, at, seq, pid }
 // Bounded: a resume whose Claude never shows up (the shell failed it) stops protecting the stamp after this. A typed
 // `claude --resume` is a process within seconds even under load, so this only has to outlast a few slow checks.
@@ -230,8 +232,9 @@ export function resumeOwedFor(tabId, now = Date.now()) {
   if (cancelGen !== 0 || terminalInputSeq(tabId) !== 0) return null;
   if (queue.has(tabId)) return pidNow() === queue.get(tabId).pidAt ? queue.get(tabId).sessionId : null;
   if (preparing.has(tabId)) return pidNow() === preparing.get(tabId) ? e.sessionId : null;
-  // Not decided yet: the launch pass is still looking for its terminal, or its window has not been opened.
-  if (!handled.has(tabId)) return e.sessionId;
+  // Not decided yet: the launch pass is still looking for its terminal, or its window has not been opened. Once the
+  // pass has seen its shell, only that shell (Codex P2, PR 13 round 5: a Reload during the polls).
+  if (!handled.has(tabId)) return !seenPid.has(tabId) || pidNow() === seenPid.get(tabId) ? e.sessionId : null;
   return null;
 }
 
@@ -336,7 +339,10 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
       // Closed (and maybe reopened) since launch: never this pass's to resume
       // (Codex, restore round 6).
       if (handled.has(tabId) && !firstSeen.has(tabId)) continue;
-      if (!firstSeen.has(tabId)) firstSeen.set(tabId, { pidAt: live.find((t) => t.id === tabId)?.pid ?? null, gen: launchGen });
+      if (!firstSeen.has(tabId)) {
+        firstSeen.set(tabId, { pidAt: live.find((t) => t.id === tabId)?.pid ?? null, gen: launchGen });
+        seenPid.set(tabId, firstSeen.get(tabId).pidAt);
+      }
       candidates.push({ tabId, ...info, ...firstSeen.get(tabId) });
     }
     // Done: every mapped tab is now alive.
