@@ -272,10 +272,14 @@ export function noteTabClaudeSeen(tabId) {
   noteResume(tabId, 'not resumed: a Claude was already running in the tab');
 }
 
-/** The capture saw no Claude in a tab whose stamp it spared: remember it if the typed resume should be up by now. */
-export function noteIdleWhileOwed(tabId, now = Date.now()) {
+/**
+ * The capture saw no Claude in a tab whose stamp it spared: remember it if the typed resume should have been up when
+ * the tab was LOOKED AT (`seenAt`, taken before the probe), never when the decision is made: a slow batch otherwise
+ * dates an idle look from before the write as evidence against it (Codex P2, PR 13 round 10).
+ */
+export function noteIdleWhileOwed(tabId, seenAt) {
   const t = typed.get(tabId);
-  if (t && now - t.at >= SPAWN_GRACE_MS) idleWhileOwed.set(tabId, { sessionId: t.sessionId, pid: t.pid, seq: t.seq });
+  if (t && typeof seenAt === 'number' && seenAt - t.at >= SPAWN_GRACE_MS) idleWhileOwed.set(tabId, { sessionId: t.sessionId, pid: t.pid, seq: t.seq });
 }
 
 /**

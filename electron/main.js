@@ -3904,7 +3904,7 @@ function setupSessionTabCapture() {
           // re-stamps it if the checks then miss the Claude (bug report 2026-11-14: 28 tabs came back as shells).
           const mappedIdle = tabToSessionId.get(t.id);
           if (mappedIdle && resumeOwedFor(t.id) !== mappedIdle) clearSessionTabRunning(mappedIdle);
-          else if (mappedIdle) noteIdleWhileOwed(t.id);
+          else if (mappedIdle) noteIdleWhileOwed(t.id, probedAt.get(t.id));
           continue;
         }
         noteTabClaudeSeen(t.id);
@@ -5943,6 +5943,9 @@ app.on('before-quit', (e) => {
           // session stopped since its resume was typed (Codex P1, PR 13 round 7). Only `null`: a Claude that cannot be
           // named yet (a bare `claude`) is left to the decisions below.
           if (got === null && sidNow && getSessionTabMap()?.[sidNow]?.tabId === t.id && resumeOwedFor(t.id) !== sidNow) clearSessionTabRunning(sidNow);
+          // And a check that cannot tell, for a session a capture already saw stopped (same rule as below, applied here
+          // for the same reason: Codex P1, PR 13 round 10).
+          if (got === CLAUDE_UNKNOWN && sidNow && stoppedWhileOwed(t.id, sidNow) && resumeOwedFor(t.id) !== sidNow) clearSessionTabRunning(sidNow);
         });
         if (reconcileAborted) return;
         const cwdByTab = new Map();
