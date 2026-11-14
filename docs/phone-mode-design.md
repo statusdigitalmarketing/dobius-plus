@@ -323,7 +323,8 @@ A message that was refused or never answered keeps its bubble until Send again s
 Messages not yet answered as taken are kept per tab in the phone's storage, so leaving the tab or reloading the app
 brings them back as Not confirmed with Send again. The composer lets at most 5 wait on a tab and keeps messages for at
 most 20 tabs at once; past either a new message stays in the box with a note, so none is pushed out of storage unseen.
-Entries older than 7 days are dropped.
+Entries older than 7 days are dropped. Two pages open on one phone share that storage: each save replaces only the
+messages that page loaded or sent, so neither wipes the other's (Codex r31); together they can keep up to 20 per tab.
 
 The Mac remembers each send id per run with its outcome: pending, taken, or unknown (no answer within 10 s). A retry
 of a pending id waits for the first answer; of an unknown id it is answered `timeout` again, never `duplicate`, until

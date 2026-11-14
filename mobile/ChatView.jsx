@@ -670,6 +670,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // Phone messages from an earlier visit that were never answered as taken come back first, as not confirmed.
   const outboxKey = pairingKey(connection.pairing, OUTBOX_KEY);
   const [echoes, setEchoes] = useState(() => loadOutbox(outboxKey, tabId));
+  // Every sendId this page loaded or sent: a save replaces only these, never another open page's (Codex r31).
+  const ownedRef = useRef(null);
+  if (ownedRef.current === null) ownedRef.current = new Set(echoes.map((e) => e.sendId).filter(Boolean));
   // Kept outside the view: leaving the tab unmounts it, and a message whose answer it never saw must not vanish
   // (Codex r28). Small and bounded (writeOutbox), written only when the echoes change.
   useEffect(() => {
@@ -678,7 +681,9 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       const map = JSON.parse(localStorage.getItem(outboxKey) || '{}');
       const had = Array.isArray(map?.[tabId]);
       if (!had && waitingCount(echoes) === 0) return;
-      localStorage.setItem(outboxKey, JSON.stringify(writeOutbox(map, tabId, echoes)));
+      localStorage.setItem(outboxKey, JSON.stringify(writeOutbox(map, tabId, echoes, Date.now(), ownedRef.current)));
+      // Settled ones are gone from storage now; keep owning only what is still on screen.
+      ownedRef.current = new Set(echoes.map((e) => e.sendId).filter(Boolean));
     } catch (err) { console.warn('[phone] outbox not saved:', err?.message || err); }
   }, [echoes, outboxKey, tabId]);
   // On-screen terminal keys row (esc/tab/arrows/^C) for full-TUI dialogs.
@@ -1328,6 +1333,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
         return;
       }
       const sendId = freshId('s');
+      ownedRef.current.add(sendId);
       if (!phone.runId || !phoneRequest('phoneSend', { runId: phone.runId, text, sendId }, { text, sendId })) {
         showSendNote('Not sent: not connected to the Mac right now. Send it again in a moment.');
         return;

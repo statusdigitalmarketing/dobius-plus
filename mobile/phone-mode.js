@@ -196,9 +196,10 @@ export const MAX_OUTSTANDING = 5;
 /** How many tabs may have phone messages waiting at once; past it the composer refuses rather than drop a tab's. */
 export const OUTBOX_TABS = 20;
 const OUTBOX_DAYS = 7;
-// ponytail: a hard ceiling for storage written past the composer's check (two phone pages saving at once). Only that
-// race can reach it; the oldest tab's entries go then.
+// ponytail: hard ceilings for storage written past the composer's checks (two phone pages sending on one tab, or saving
+// at once). Only those can reach them; the oldest entries go then.
 const OUTBOX_TABS_HARD = 40;
+const OUTBOX_PER_TAB_HARD = 20;
 
 const fresh = (e, now) => e && typeof e.content === 'string' && e.content && typeof e.sendId === 'string' && typeof e.runId === 'string'
   && Number.isFinite(e.since) && now - e.since < OUTBOX_DAYS * 86_400_000;
@@ -211,7 +212,7 @@ const fresh = (e, now) => e && typeof e.content === 'string' && e.content && typ
 export function readOutbox(map, tabId, now = Date.now()) {
   const list = map && typeof map === 'object' && Array.isArray(map[tabId]) ? map[tabId] : [];
   return list.filter((e) => fresh(e, now))
-    .slice(-MAX_OUTSTANDING)
+    .slice(-OUTBOX_PER_TAB_HARD)
     .map((e) => ({
       content: e.content, sendId: e.sendId, runId: e.runId, since: e.since, at: e.since,
       known: Array.isArray(e.known) ? e.known.filter((k) => typeof k === 'string').slice(-MAX_KNOWN) : [],
@@ -227,11 +228,19 @@ export function outboxFull(map, tabId, now = Date.now()) {
   return Object.entries(map).filter(([k, v]) => k !== tabId && Array.isArray(v) && v.some((e) => fresh(e, now))).length >= OUTBOX_TABS;
 }
 
-/** The outbox map with this tab's entries replaced by `echoes` (phone messages not yet answered as taken). */
-export function writeOutbox(map, tabId, echoes, now = Date.now()) {
+/**
+ * The outbox map with this page's entries for the tab replaced by `echoes` (phone messages not yet answered as taken).
+ * `owned` is every sendId this page loaded or sent: stored entries it does not own belong to another open page on the
+ * same phone and are kept (Codex r31). Without `owned`, the tab's entries are replaced outright.
+ */
+export function writeOutbox(map, tabId, echoes, now = Date.now(), owned = null) {
   const next = { ...(map && typeof map === 'object' ? map : {}) };
-  const keep = (echoes || []).filter((e) => e && e.sendId && !e.acked).slice(-MAX_OUTSTANDING)
+  const mine = (echoes || []).filter((e) => e && e.sendId && !e.acked)
     .map(({ content, sendId, runId, since, known, knownQueued, fail }) => ({ content, sendId, runId, since, known, knownQueued, fail: fail || null }));
+  const ids = new Set(mine.map((e) => e.sendId));
+  const others = owned && Array.isArray(next[tabId])
+    ? next[tabId].filter((e) => e && typeof e.sendId === 'string' && !owned.has(e.sendId) && !ids.has(e.sendId)) : [];
+  const keep = [...others, ...mine].slice(-OUTBOX_PER_TAB_HARD);
   if (keep.length) next[tabId] = keep; else delete next[tabId];
   const newest = (v) => Math.max(0, ...(Array.isArray(v) ? v.map((e) => e?.since || 0) : [0]));
   const entries = Object.entries(next).filter(([, v]) => Array.isArray(v) && now - newest(v) < OUTBOX_DAYS * 86_400_000)

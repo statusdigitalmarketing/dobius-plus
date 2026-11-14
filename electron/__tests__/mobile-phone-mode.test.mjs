@@ -121,8 +121,8 @@ test('the outbox keeps unanswered phone messages across visits, bounded, and bri
   assert.deepEqual(map.T.map((x) => x.sendId), ['s1', 's3'], 'a message the Mac took is not kept');
   const back = readOutbox(map, 'T', now);
   assert.deepEqual(back.map((x) => [x.sendId, x.fail]), [['s1', 'unconfirmed'], ['s3', 'failed']]);
-  map = writeOutbox(map, 'T', Array.from({ length: 9 }, (_, i) => e(i)), now);
-  assert.equal(map.T.length, 5);
+  map = writeOutbox(map, 'T', Array.from({ length: 25 }, (_, i) => e(i)), now);
+  assert.equal(map.T.length, 20, 'a hard ceiling per tab (the composer keeps one page to 5)');
   map = writeOutbox(map, 'T', [], now);
   assert.equal('T' in map, false);
   let many = {};
@@ -191,4 +191,25 @@ test('the outbox keeps every message the composer lets wait, and no tab\'s are d
   assert.equal(outboxFull(writeOutbox(map, 'T3', [], now), 'new', now), false, 'room again once one is settled');
   assert.equal(outboxFull({ ...map, T0: [{ ...msg(0), since: now - 8 * 86_400_000 }] }, 'new', now), false, 'expired ones do not count');
   assert.equal(outboxFull(null, 'new', now), false);
+});
+
+test('a save replaces only the messages this page owns, never another open page\'s (Codex r31)', () => {
+  const now = Date.parse('2026-11-14T16:00:00Z');
+  const msg = (id, extra = {}) => ({ content: id, sendId: id, runId: 'r'.repeat(32), since: now - 10, known: [], knownQueued: 0, ...extra });
+  // Page A sent A and saved it; page B, opened before, sends B and saves.
+  let map = writeOutbox({}, 'T', [msg('A')], now, new Set(['A']));
+  map = writeOutbox(map, 'T', [msg('B', { since: now })], now, new Set(['B']));
+  assert.deepEqual(map.T.map((e) => e.sendId), ['A', 'B'], 'A survives B\'s save');
+  // Page A settles A (taken): only A goes.
+  map = writeOutbox(map, 'T', [{ ...msg('A'), acked: true }], now, new Set(['A']));
+  assert.deepEqual(map.T.map((e) => e.sendId), ['B']);
+  // Page B removes B: the tab is empty again.
+  map = writeOutbox(map, 'T', [], now, new Set(['B']));
+  assert.equal('T' in map, false);
+  // Without an owner set the tab's entries are replaced outright.
+  assert.deepEqual(writeOutbox({ T: [msg('A')] }, 'T', [msg('B')], now).T.map((e) => e.sendId), ['B']);
+  // Two pages together can hold more than one page's five; reading keeps them all, up to the hard ceiling.
+  let many = {};
+  for (let i = 0; i < 8; i++) many = writeOutbox(many, 'T', [msg(`m${i}`, { since: now + i })], now, new Set([`m${i}`]));
+  assert.equal(readOutbox(many, 'T', now).length, 8);
 });
