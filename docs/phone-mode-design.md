@@ -82,6 +82,10 @@ Two processes, one supervising the other:
   `child_process.spawn`, never detached; checked in 0.3.325, where the SDK's own `query()` spawn is not detached
   either), so Claude is in the runner's group, and it reports Claude's pid and start time to the gate over fd 3 and
   to main over the socket **before** the SDK sends Claude anything.
+- **Order:** the runner says hello to main (with its own pid, which is its group id) and spawns Claude only after
+  main has accepted that hello. Main accepts a hello only for a run that is still `starting` in a tab that is still
+  open, and only after one `ps` shows that pid's group leader descends from the tab's PTY process. So a Claude can
+  exist only for a run whose runner group main already knows.
 
 The `&& claude --resume` is the take-back: whenever the runner exits, for any reason (Enter at the Mac, Give back on
 the phone, an error starting the SDK, a crash, a SIGKILL), the tab resumes the conversation in the normal Claude TUI,
@@ -238,11 +242,20 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
     running Claude does; or
   - the Claude pid the runner reported is confirmed gone (by pid and start time) AND the tab's foreground program
     has been the shell for 10 s (the gate refused, or the person stopped the resume): nothing holds S; or
-  - the tab closed AND that Claude pid is confirmed gone.
-  If the reported pid is still alive 20 s after the runner ended, main sends it SIGTERM, then SIGKILL, and checks
-  again (the pid and start time must still match, so a reused pid is never signalled). A run whose runner never
-  reported a Claude pid had no Claude, so only the first two conditions apply. Until release, every other resume
-  surface is refused with "this conversation is still coming back from the phone".
+  - the tab closed AND main has confirmed the runner group and the reported Claude pid are gone; or
+  - the tab closed before main accepted a hello. The run is marked dead first, so a hello arriving later is refused
+    and that runner exits without starting Claude (Codex P2, design round 3: with no Claude pid, none of the other
+    conditions could ever become true and the claim held the session until Dobius restarted).
+  **Cleanup does not depend on the runner** (Codex P2, design round 3: a runner stopped with SIGSTOP handles neither
+  SIGHUP nor fd 3 closing). From the accepted hello, main holds the runner's group id. When the run is `ending` and
+  the group is still there 20 s later, or at once when the tab closes, main sends `kill(-pgid, SIGTERM)`, then
+  SIGKILL 5 s later (SIGKILL works on a stopped process), and polls `kill(-pgid, 0)` until ESRCH; then the same for
+  the Claude pid if it left the group (pid and start time must still match, so a reused pid is never signalled). A
+  group id cannot be reused while any member of the group exists, so signalling it before ESRCH is safe; after the
+  first ESRCH main forgets it and never signals it again. The polls run on a timer (every 250 ms, at most 30 s), never
+  blocking main; a group still there after 30 s is logged and the claim stays held, with the tab's shell given the
+  manual line. Until release, every other resume surface is refused with "this conversation is still coming back
+  from the phone".
 
 ### Phone protocol additions (`docs/mobile-ws-protocol.md`)
 
