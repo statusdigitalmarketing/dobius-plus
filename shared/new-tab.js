@@ -234,12 +234,27 @@ function utf16Base64(text) {
 // command line and never typed; the tab is a plain login shell afterwards. Only the shape below is accepted. Not on
 // PowerShell (Run is zsh and bash only).
 export const isRunScriptPath = (p) => typeof p === 'string' && /^\/[^\x00-\x1F\x7F]*\/dobius-run-[A-Za-z0-9_-]{16,}\.sh$/.test(p);
-export function loginShellSpawn(shell, startCommand, resume = null, runScript = null, claudeOpts = null) {
+// phone ({ sessionId, cwd, ticket, runId, exe, runner }, docs/phone-mode-design.md "The runner runs inside the tab"):
+// the same wrapper runs the gate under Dobius's own binary, then `claude --resume` only if the gate exits 0, then
+// `done` whatever happened before it. Every value travels in env into $2..$7 before any hook runs and is checked here
+// against a fixed shape; nothing is eval'd. zsh and bash only (macOS), like the resume.
+const PHONE_ENV_SUFFIXES = ['', '_ID', '_CWD', '_TICKET', '_RUN', '_EXE', '_RUNNER'];
+const safePath = (p) => typeof p === 'string' && isAbsPath(p) && !/[\x00-\x1F\x7F]/.test(p);
+export function isPhoneLaunch(phone) {
+  return !!phone && typeof phone === 'object'
+    && /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(phone.sessionId)) && safePath(phone.cwd)
+    && safePath(phone.ticket) && /\/phone-[0-9a-f]{32}\.ticket$/.test(phone.ticket)
+    && /^[0-9a-f]{32}$/.test(String(phone.runId)) && safePath(phone.exe)
+    && safePath(phone.runner) && /\/phone-runner\.(?:mjs|cjs)$/.test(phone.runner);
+}
+
+export function loginShellSpawn(shell, startCommand, resume = null, runScript = null, claudeOpts = null, phone = null) {
   const powershell = isPowerShell(shell);
   const plain = { args: powershell ? ['-NoLogo', '-NoExit', '-EncodedCommand', utf16Base64(PS_GWS_FUNCTION)] : ['-l'], env: {} };
-  const running = !powershell && isRunScriptPath(runScript);
-  const resuming = !running && !!resume && (resume.sessionId === null || /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(resume.sessionId))) && isAbsPath(String(resume.cwd)) && !/[\x00-\x1F\x7F]/.test(resume.cwd);
-  if (!running && !resuming && !NEW_TAB_TOOLS.some((x) => newTabCommand(x) && newTabCommand(x) === startCommand)) return plain;
+  const phoning = !powershell && isPhoneLaunch(phone);
+  const running = !phoning && !powershell && isRunScriptPath(runScript);
+  const resuming = !phoning && !running && !!resume && (resume.sessionId === null || /^[a-zA-Z0-9][\w-]{0,99}$/.test(String(resume.sessionId))) && isAbsPath(String(resume.cwd)) && !/[\x00-\x1F\x7F]/.test(resume.cwd);
+  if (!phoning && !running && !resuming && !NEW_TAB_TOOLS.some((x) => newTabCommand(x) && newTabCommand(x) === startCommand)) return plain;
   if (powershell) {
     const env = resuming
       ? { [START_TOOL_ENV]: resume.sessionId === null ? 'fresh' : 'resume', [`${START_TOOL_ENV}_ID`]: resume.sessionId ?? '', [`${START_TOOL_ENV}_CWD`]: resume.cwd }
@@ -249,7 +264,7 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
   const name = String(shell).split('/').pop();
   // A new tab's Claude defaults (model, permission mode): only for a plain `claude` start and only allowlisted words.
   // They travel in env like the tool name and are read into $2 and $3 with it, before any hook runs.
-  const plainClaude = startCommand === 'claude' && !running && !resuming;
+  const plainClaude = startCommand === 'claude' && !phoning && !running && !resuming;
   const model = plainClaude ? normalizeNewTabModel(claudeOpts?.model) : '';
   const perm = plainClaude ? normalizeNewTabPermissionMode(claudeOpts?.permissionMode) : '';
   const withOpts = !!(model || perm);
@@ -259,7 +274,10 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
   // the launch is a fixed allowlist dispatch, so whatever a hook assigns can
   // only select one of these commands or none. A literal command word keeps
   // the user's alias or function for it, as when typed.
-  const take = running
+  const P = PHONE_ENV_SUFFIXES.map((x) => `${START_TOOL_ENV}${x}`);
+  const take = phoning
+    ? `set -- ${P.map((n) => `"$${n}"`).join(' ')}; unset ${P.join(' ')};`
+    : running
     ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_SCRIPT"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_SCRIPT;`
     : resuming
       ? `set -- "$${START_TOOL_ENV}" "$${START_TOOL_ENV}_ID" "$${START_TOOL_ENV}_CWD" "$${START_TOOL_ENV}_CFG"; unset ${START_TOOL_ENV} ${START_TOOL_ENV}_ID ${START_TOOL_ENV}_CWD ${START_TOOL_ENV}_CFG;`
@@ -270,7 +288,11 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
   // its own job, so a Ctrl+Z inside one ended the whole wrapper (and the tab).
   // -p: bash imports no functions from the environment and reads no BASH_ENV/ENV, so a project .env (direnv) cannot
   // redefine `cd` or run a file before the script.
-  const launch = running ? '[[ $1 == run ]] && /bin/bash -p -- "$2";'
+  // phone: $2 session, $3 folder, $4 ticket, $5 run id, $6 Dobius binary, $7 runner. The and-list ends at the first
+  // failure, so `claude --resume` runs only when the gate exits 0 (it confirmed the runner group and Claude are gone);
+  // the `done` line runs after it whatever its outcome (docs/phone-mode-design.md, "End").
+  const launch = phoning ? '[[ $1 == phone ]] && cd -- "$3" && ELECTRON_RUN_AS_NODE=1 "$6" "$7" gate "$4" "$2" && claude --resume "$2"; [[ $1 == phone ]] && ELECTRON_RUN_AS_NODE=1 "$6" "$7" done "$4" "$5";'
+    : running ? '[[ $1 == run ]] && /bin/bash -p -- "$2";'
     : resuming ? `[[ $1 == resume ]] && cd -- "$3" && claude --resume "$2"; __dobius_on=; [[ $1 == resume-on ]] && cd -- "$3" && __dobius_on=1; [[ $__dobius_on == 1 && "${CARRY_ON_DIR}" != "$4" ]] && __dobius_on=0; [[ $__dobius_on == 1 ]] && ${CARRY_ON_TOKEN} && __dobius_on=0; [[ $__dobius_on == 1 ]] && claude --resume "$2" '${CARRY_ON_PROMPT}'; [[ $__dobius_on == 0 ]] && claude --resume "$2"; [[ $1 == fresh ]] && cd -- "$3" && claude;`
       // The flags are fixed words plus the allowlisted values in $2 and $3, built as an array, never eval'd.
       // Checked again in the shell against the same fixed words: a login rc file runs before this script and could
@@ -293,7 +315,9 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
     return plain;
   }
   const script = `trap : INT; ${run} exec ${shQuote(shell)} -l`;
-  const env = running
+  const env = phoning
+    ? Object.fromEntries(P.map((n, i) => [n, ['phone', phone.sessionId, phone.cwd, phone.ticket, phone.runId, phone.exe, phone.runner][i]]))
+    : running
     ? { [START_TOOL_ENV]: 'run', [`${START_TOOL_ENV}_SCRIPT`]: runScript }
     : resuming
       ? { [START_TOOL_ENV]: resumeTool(resume), [`${START_TOOL_ENV}_ID`]: resume.sessionId ?? '', [`${START_TOOL_ENV}_CWD`]: resume.cwd, [`${START_TOOL_ENV}_CFG`]: typeof resume.configDir === 'string' ? resume.configDir : '' }
@@ -310,5 +334,5 @@ export function loginShellSpawn(shell, startCommand, resume = null, runScript = 
 export function isNewTabWrapperCommand(line) {
   // Anchored on argv0 (after an optional pgrep pid), so the same text inside
   // some other program's arguments never matches.
-  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD"(?: "\$DOBIUS_NEW_TAB_TOOL_CFG")?| "\$DOBIUS_NEW_TAB_TOOL_SCRIPT"| "\$DOBIUS_NEW_TAB_TOOL_MODEL" "\$DOBIUS_NEW_TAB_TOOL_PERM")?; /.test(String(line));
+  return /^\s*(?:\d+\s+)?(?:\S*\/)?(?:zsh|bash) -l -i -c trap : INT; (?:setopt no_nounset no_err_exit 2>\/dev\/null; |set \+eu; )set -- "\$DOBIUS_NEW_TAB_TOOL"(?: "\$DOBIUS_NEW_TAB_TOOL_ID" "\$DOBIUS_NEW_TAB_TOOL_CWD"(?: "\$DOBIUS_NEW_TAB_TOOL_CFG"| "\$DOBIUS_NEW_TAB_TOOL_TICKET" "\$DOBIUS_NEW_TAB_TOOL_RUN" "\$DOBIUS_NEW_TAB_TOOL_EXE" "\$DOBIUS_NEW_TAB_TOOL_RUNNER")?| "\$DOBIUS_NEW_TAB_TOOL_SCRIPT"| "\$DOBIUS_NEW_TAB_TOOL_MODEL" "\$DOBIUS_NEW_TAB_TOOL_PERM")?; /.test(String(line));
 }

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { writes, ptys, writeTerminal, closing } from './fake-terminal-manager.mjs';
 
 const { writeRawInput, submitPromptDetailed } = await import('../chat-service.js');
-const { handleTabOp, tabCandidates, validReqId, MAX_CANDIDATES } = await import('../mobile-tab-ops.js');
+const { handleTabOp, tabCandidates, validReqId, MAX_CANDIDATES, phoneViewGate } = await import('../mobile-tab-ops.js');
 
 let pass = 0;
 const ok = (n) => { console.log(`PASS  ${n}`); pass += 1; };
@@ -305,6 +305,43 @@ function harness({ live = [A, C], authed = [], allowed = () => true, maxBytes = 
   assert.deepEqual(await writeRawInput(A, 'k'), { ok: false, reason: 'tab_exited' });
   await sub;
   ok('a key behind a submit on an exited PTY: tab_exited, not ok');
+}
+
+// 15. Phone mode's generation gate (docs/phone-mode-design.md, "While on the phone").
+{
+  const pm = { g: 5, phone: false, gen: () => pm.g, isPhoneTab: () => pm.phone };
+  assert.equal(phoneViewGate(null, A, { gen: 1 }), null, 'no phone mode: nothing changes');
+  assert.equal(phoneViewGate(pm, A, {}), null, 'an older phone page (no gen) still types into a tab that is not on the phone');
+  assert.equal(phoneViewGate(pm, A, { gen: 5 }), null);
+  assert.equal(phoneViewGate(pm, A, { gen: 4 }), 'stale_view');
+  assert.equal(phoneViewGate(pm, A, { gen: '5' }), 'stale_view');
+  pm.phone = true;
+  assert.equal(phoneViewGate(pm, A, {}), 'on_phone', 'an older page cannot press keys on the gate');
+  assert.equal(phoneViewGate(pm, A, { gen: 5 }), 'on_phone');
+  pm.phone = false;
+
+  // Refused on arrival: nothing written, nothing accepted.
+  let h = harness({ live: [A], authed: [A] });
+  h.deps.viewGate = (id, msg) => phoneViewGate(pm, id, msg);
+  await h.run({ type: 'input', id: A, data: '\r', reqId: 'g1', gen: 4 });
+  assert.deepEqual([h.sent[0].type, h.sent[0].code], ['opError', 'stale_view']);
+  assert.deepEqual(writes, []);
+  assert.deepEqual(h.accepted, []);
+
+  // Accepted, then the tab moves to the phone while the write waits its turn behind a submit: refused at the write,
+  // as stale for a page that named its generation and as on the phone for an older page that did not.
+  for (const [msg, code] of [[{ gen: 5 }, 'stale_view'], [{}, 'on_phone']]) {
+    pm.g = 5; pm.phone = false;
+    h = harness({ live: [A], authed: [A] });
+    h.deps.viewGate = (id, m) => phoneViewGate(pm, id, m);
+    const first = submitPromptDetailed(A, 'ahead');
+    const p = h.run({ type: 'input', id: A, data: '\r', reqId: 'g2', ...msg });
+    pm.g = 6; pm.phone = true;
+    await first; await p;
+    assert.deepEqual([h.sent[0].type, h.sent[0].code], ['opError', code]);
+    assert.equal(writes.filter((w) => w[1] === '\r').length, 1, "only the submit's own Enter reached the tab");
+  }
+  ok('phone generation: stale and on-phone writes refused on arrival and at the write');
 }
 
 console.log(`\n${pass} passed`);
