@@ -90,24 +90,36 @@ export async function pidState(sys, pid, lstart) {
 
 /**
  * End a process group and confirm it: SIGTERM (unless graceMs is 0), SIGKILL after graceMs, poll until ESRCH.
- * Returns 'gone' | 'stuck' (still there at maxMs) | 'unknown' (EPERM or another error: not ours to decide).
+ * Returns 'gone' | 'stuck' (still there at maxMs) | 'unknown' (EPERM until maxMs, or another error: not ours to
+ * decide).
+ *
+ * EPERM is not final: macOS answers it for a group whose only members are zombies, which is every group for a moment
+ * after its leader was killed and before launchd reaps the reparented rest. So EPERM keeps the poll going (and a
+ * SIGKILL is still sent once the grace is over); only an EPERM that lasts until maxMs (a member owned by another
+ * user) is 'unknown'. Found by the runner tests: a SIGKILLed runner made the gate refuse to hand the tab back.
  */
 export async function endGroup(sys, pgid, { graceMs = 5000, pollMs = 250, maxMs = 30000 } = {}) {
   const t0 = sys.now();
-  const send = (sig) => { try { sys.kill(-pgid, sig); return 'sent'; } catch (e) { return e?.code === 'ESRCH' ? 'gone' : 'unknown'; } };
+  const send = (sig) => { try { sys.kill(-pgid, sig); return 'sent'; } catch (e) { return e?.code === 'ESRCH' ? 'gone' : e?.code === 'EPERM' ? 'perm' : 'unknown'; } };
   let s = send(graceMs > 0 ? 'SIGTERM' : 'SIGKILL');
-  if (s !== 'sent') return s;
+  if (s === 'gone' || s === 'unknown') return s;
   let killed = graceMs === 0;
+  let perm = s === 'perm';
   for (;;) {
-    const st = groupState(sys, pgid);
-    if (st !== 'alive') return st;
+    let st;
+    try { sys.kill(-pgid, 0); st = 'alive'; perm = false; } catch (e) {
+      if (e?.code === 'ESRCH') return 'gone';
+      if (e?.code !== 'EPERM') return 'unknown';
+      st = 'perm';
+      perm = true;
+    }
     const waited = sys.now() - t0;
     if (!killed && waited >= graceMs) {
       s = send('SIGKILL');
-      if (s !== 'sent') return s;
+      if (s === 'gone' || s === 'unknown') return s;
       killed = true;
     }
-    if (waited >= maxMs) return 'stuck';
+    if (waited >= maxMs) return perm || st === 'perm' ? 'unknown' : 'stuck';
     await sys.sleep(pollMs);
   }
 }

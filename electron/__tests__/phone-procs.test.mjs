@@ -79,11 +79,19 @@ test('endGroup: a frozen group dies to SIGKILL; graceMs 0 sends SIGKILL first', 
   assert.deepEqual(sys.sent, [[-600, 'SIGKILL']]);
 });
 
-test('endGroup: an already-gone group is never signalled; EPERM is unknown', async () => {
+test('endGroup: an already-gone group is never signalled; EPERM that lasts to the deadline is unknown', async () => {
   const sys = fakeSys([{ pid: 9, pgid: 9, lstart: T0, command: 'y', eperm: true }]);
   assert.equal(await endGroup(sys, 600), 'gone');
-  assert.equal(await endGroup(sys, 9), 'unknown');
+  assert.equal(await endGroup(sys, 9, { maxMs: 2000 }), 'unknown');
   assert.deepEqual(sys.sent, []);
+});
+
+test('endGroup: a group of zombies answers EPERM until it is reaped, then ESRCH: that is gone, not unknown', async () => {
+  const sys = fakeSys([{ pid: 9, pgid: 9, lstart: T0, command: 'zombie', eperm: true }]);
+  let polls = 0;
+  const kill = sys.kill;
+  sys.kill = (pid, sig) => { if (++polls === 4) sys.table.delete(9); return kill(pid, sig); }; // launchd reaps it
+  assert.equal(await endGroup(sys, 9, { graceMs: 500 }), 'gone');
 });
 
 test('endPid: a pid whose start time changed is never signalled', async () => {
