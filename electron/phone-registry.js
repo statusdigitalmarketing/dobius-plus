@@ -17,22 +17,29 @@ import crypto from 'node:crypto';
 export const MAX_RUNS = 4;
 export const MAX_PENDING = 8;
 export const MAX_SEND_IDS = 64;
-export const MAX_GENS = 2000; // tab generations remembered; the oldest is forgotten first
+export const MAX_GENS = 2000; // tab generations remembered; the oldest is forgotten first (it gets a NEW one on next use)
 
 const LIVE = new Set(['idle', 'working', 'waiting']);
 const hash = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
 const newToken = () => crypto.randomBytes(32).toString('hex');
 
-export function createPhoneRegistry({ maxRuns = MAX_RUNS } = {}) {
+export function createPhoneRegistry({ maxRuns = MAX_RUNS, now = Date.now } = {}) {
   const runs = new Map(); // runId -> run
   const tokens = new Map(); // sha256(token) -> { runId, kind: 'gate' | 'runner' | 'done', used }
   const gens = new Map(); // tabId -> generation
+  // Generations are never reused, not even across a restart or after a tab's entry is evicted (Codex P1, impl round
+  // 1: an evicted tab fell back to 0 and a frame from before its first move passed again). Each new generation is at
+  // least the clock in ms, so a restarted main is above every generation the previous one handed out (a burst runs
+  // the counter ahead of the clock by at most the burst's size, which the clock overtakes in that many ms), and a tab
+  // without an entry is given a fresh one when first asked, never a default.
   let genCounter = 0;
 
   const bumpGen = (tabId) => {
+    genCounter = Math.max(genCounter + 1, now());
     gens.delete(tabId);
-    gens.set(tabId, ++genCounter);
+    gens.set(tabId, genCounter);
     while (gens.size > MAX_GENS) gens.delete(gens.keys().next().value);
+    return genCounter;
   };
   const issue = (run, kind) => {
     const t = newToken();
@@ -55,7 +62,9 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS } = {}) {
   function cleanupDone(run) {
     if (run.runnerPgid != null && !run.groupGone) return false;
     if (run.claudePid != null && !run.claudeGone) return false;
-    if (run.gateAccepted && !run.tagSweepClean && run.runnerPgid == null) return false; // a runner may exist untracked
+    // An accepted gate may have spawned a runner it never reported. Only a tag sweep made after the gate itself is
+    // confirmed gone proves there is none (Codex P2, impl round 1: a sweep cached from before the gate spawned missed it).
+    if (run.gateAccepted && run.runnerPgid == null && !(run.gateGone && run.tagSweepClean)) return false;
     return true;
   }
 
@@ -70,8 +79,8 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS } = {}) {
   }
 
   const api = {
-    /** The generation a phone write must carry for this tab (0 for a tab that never moved). */
-    gen: (tabId) => gens.get(tabId) ?? 0,
+    /** The generation a phone write must carry for this tab. A tab with none yet is given a fresh one. */
+    gen: (tabId) => gens.get(tabId) ?? bumpGen(tabId),
 
     /** The run currently on this tab (any status), or null. */
     runOfTab,
@@ -96,7 +105,7 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS } = {}) {
         runId: crypto.randomBytes(16).toString('hex'), tabId, sessionId, status: 'starting', stage: 'gate',
         createdAt: Date.now(), gatePid: null, gateAccepted: false, runnerReported: false, runnerPid: null,
         runnerStart: null, runnerPgid: null, helloAccepted: false, claudePid: null, claudeStart: null,
-        groupGone: false, claudeGone: false, tagSweepClean: false, doneReceived: false, tabClosed: false,
+        groupGone: false, claudeGone: false, gateGone: false, tagSweepClean: false, doneReceived: false, tabClosed: false,
         shellGone: false, tuiSeen: false, released: false, endReason: null, error: null,
         pending: new Map(), sendIds: [],
       };
@@ -192,8 +201,17 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS } = {}) {
     noteShellGone(run) { run.shellGone = true; },
     noteGroupGone(run) { run.groupGone = true; },
     noteClaudeGone(run) { run.claudeGone = true; },
-    /** One ps found no process tagged `phone-runner.mjs run <runId>` (covers a runner never reported). */
-    noteTagSweepClean(run) { run.tagSweepClean = true; },
+    /** The gate's pid (start time matched) is confirmed gone, so it can spawn nothing more. */
+    noteGateGone(run) { run.gateGone = true; },
+    /**
+     * One ps found no process tagged `phone-runner.mjs run <runId>`. Counts only when made after the gate is
+     * confirmed gone; an earlier sweep is ignored (returns false), since the gate could still spawn one.
+     */
+    noteTagSweepClean(run) {
+      if (!run.gateAccepted || !run.gateGone) return false;
+      run.tagSweepClean = true;
+      return true;
+    },
     /** The tab's own Claude was seen running this run's session. */
     noteTuiRunning(tabId, sessionId) {
       const run = runOfTab(tabId);
@@ -236,7 +254,12 @@ export function createPhoneRegistry({ maxRuns = MAX_RUNS } = {}) {
       let released = null;
       if (!run.released) {
         released = releaseReason(run);
-        if (released) run.released = true;
+        if (released) {
+          run.released = true;
+          // The Mac has the tab back: a phone view from the `ending` stretch must not reach the returned TUI
+          // (Codex P1, impl round 1).
+          bumpGen(run.tabId);
+        }
       }
       if (run.released && run.status === 'ending' && cleanupDone(run)) {
         runs.delete(run.runId);

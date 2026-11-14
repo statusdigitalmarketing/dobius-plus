@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPhoneRegistry, MAX_PENDING, MAX_SEND_IDS } from '../phone-registry.js';
+import { createPhoneRegistry, MAX_PENDING, MAX_SEND_IDS, MAX_GENS } from '../phone-registry.js';
 
 const S1 = '11111111-1111-1111-1111-111111111111';
 const S2 = '22222222-2222-2222-2222-222222222222';
@@ -32,15 +32,55 @@ test('one run per tab, one claim per session, at most 4 runs', () => {
   assert.equal(reg.claimOf(S1).tabId, 'T1');
 });
 
-test('run ids are 128-bit hex and the generation moves on start and on end', () => {
+test('run ids are 128-bit hex and the generation moves on start, on end and when the Mac takes it back', () => {
   const reg = createPhoneRegistry();
-  assert.equal(reg.gen('T1'), 0);
+  const g0 = reg.gen('T1');
+  assert.ok(g0 > 0);
+  assert.equal(reg.gen('T1'), g0); // stable while nothing happens
   const { run } = reg.begin('T1', S1);
   assert.match(run.runId, /^[0-9a-f]{32}$/);
   const g1 = reg.gen('T1');
-  assert.ok(g1 > 0);
+  assert.ok(g1 > g0);
   reg.end(run, 'test');
-  assert.ok(reg.gen('T1') > g1);
+  const g2 = reg.gen('T1');
+  assert.ok(g2 > g1);
+  reg.noteDone(run);
+  reg.settle(run);
+  assert.ok(reg.gen('T1') > g2); // the view published during ending is stale once the Mac has the tab
+});
+
+test('a delayed frame from the ending stretch is stale once the TUI is back (Codex impl r1)', () => {
+  const reg = createPhoneRegistry();
+  const { run } = live(reg);
+  reg.end(run, 'give-back');
+  const shown = reg.stateOf('T1').gen;
+  reg.noteTuiRunning('T1', S1);
+  reg.settle(run);
+  assert.notEqual(reg.gen('T1'), shown);
+});
+
+test('an evicted generation is never handed out again (Codex impl r1)', () => {
+  const reg = createPhoneRegistry();
+  const old = reg.gen('T0');
+  const { run } = reg.begin('T0', S1);
+  const mid = reg.gen('T0');
+  reg.end(run, 'ended');
+  reg.noteDone(run);
+  reg.settle(run);
+  const seen = new Set([old, mid, reg.gen('T0')]);
+  for (let i = 0; i < MAX_GENS + 5; i++) reg.gen(`X${i}`);
+  const now = reg.gen('T0');
+  assert.equal(seen.has(now), false);
+  assert.ok(now > Math.max(...seen));
+});
+
+test('generations follow the clock, so a registry started later is above an earlier one', () => {
+  let t = 1_000_000;
+  const a = createPhoneRegistry({ now: () => t });
+  const before = Math.max(a.gen('T1'), a.gen('T2'), a.gen('T3'));
+  t += 1000; // a restart takes far longer than a millisecond per generation handed out
+  const b = createPhoneRegistry({ now: () => t });
+  assert.ok(b.gen('T1') > before);
 });
 
 test('tokens: one use each, kind-bound, and a reused token ends the run loudly', () => {
@@ -166,7 +206,7 @@ test('claim: tab closed needs the shell AND the processes confirmed gone', () =>
   assert.deepEqual(reg.settle(run), { released: 'tab-closed', forgotten: true });
 });
 
-test('claim: closed before any hello releases on the shell alone; cleanup waits for the tag sweep', () => {
+test('claim: closed before any hello releases on the shell alone; cleanup waits for the gate and a later tag sweep', () => {
   const reg = createPhoneRegistry();
   const b = reg.begin('T1', S1);
   reg.redeem(b.gateToken, 'gate');
@@ -174,8 +214,25 @@ test('claim: closed before any hello releases on the shell alone; cleanup waits 
   reg.tabClosed('T1');
   reg.noteShellGone(b.run);
   assert.deepEqual(reg.settle(b.run), { released: 'tab-closed', forgotten: false });
-  reg.noteTagSweepClean(b.run);
+  assert.equal(reg.noteTagSweepClean(b.run), false); // the gate may still spawn
+  assert.deepEqual(reg.settle(b.run), { released: null, forgotten: false });
+  reg.noteGateGone(b.run);
+  assert.equal(reg.noteTagSweepClean(b.run), true);
   assert.deepEqual(reg.settle(b.run), { released: null, forgotten: true });
+});
+
+test('a tag sweep from before the gate was gone is not kept (Codex impl r1)', () => {
+  const reg = createPhoneRegistry();
+  const b = reg.begin('T1', S1);
+  reg.redeem(b.gateToken, 'gate');
+  reg.acceptGate(b.run, 500);
+  reg.end(b.run, 'no-hello');
+  reg.noteTagSweepClean(b.run); // gate alive: ignored
+  reg.tabClosed('T1');
+  reg.noteShellGone(b.run);
+  reg.noteGateGone(b.run);
+  assert.deepEqual(reg.settle(b.run), { released: 'tab-closed', forgotten: false });
+  assert.equal(reg.list().length, 1);
 });
 
 test('claim: done with no accepted hello needs no process confirmations, but a reported group still blocks cleanup', () => {
@@ -206,5 +263,7 @@ test('stateOf: no tokens or pids reach the phone', () => {
   const s = reg.stateOf('T1');
   assert.deepEqual(Object.keys(s).sort(), ['gen', 'id', 'on', 'pending', 'runId', 'sessionId', 'status']);
   assert.equal(JSON.stringify(s).includes(runnerToken), false);
-  assert.deepEqual(reg.stateOf('T9'), { id: 'T9', on: false, gen: 0 });
+  const t9 = reg.stateOf('T9');
+  assert.deepEqual(Object.keys(t9).sort(), ['gen', 'id', 'on']);
+  assert.equal(t9.on, false);
 });
