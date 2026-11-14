@@ -45,6 +45,19 @@ export function purgeUpdaterCache() {
 }
 
 const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+// An AUTOMATIC check that failed because the Mac is offline (or the network dropped mid-check) is nothing the person
+// can act on, and its red "Update error" stayed up until the next check four hours later (Sam, 2026-11-14, after a
+// flight: "net::ERR_INTERNET_DISCONNECTED ... why does this stay forever"). Those are logged, the banner goes back to
+// what it showed before, and one retry runs RETRY_MS later. A check the person started still shows its error.
+const NET_ERROR = /net::ERR_(?:INTERNET_DISCONNECTED|NETWORK_CHANGED|NETWORK_IO_SUSPENDED|NAME_NOT_RESOLVED|NAME_RESOLUTION_FAILED|ADDRESS_UNREACHABLE|CONNECTION_(?:RESET|REFUSED|CLOSED|ABORTED|FAILED|TIMED_OUT)|TIMED_OUT|PROXY_CONNECTION_FAILED)\b/;
+const NET_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'ENETDOWN']);
+export function isNetworkError(err) {
+  return NET_CODES.has(err?.code) || NET_ERROR.test(String(err?.message || err));
+}
+export const RETRY_MS = 5 * 60 * 1000;
+let checkSource = 'auto'; // who started the check in flight: 'auto' (timer) or 'manual' (the person)
+let retryTimer = null; // at most one pending retry
 const SQUIRREL_BUSY = /command is disabled/i;
 const QUIT_INSTALL_FLUSH_TIMEOUT_MS = 2500;
 let pendingUpdate = null;
@@ -182,8 +195,28 @@ export function handleDownloadPromise(result, warn = console.warn) {
   return p.catch((err) => warn('[updater] download failed:', err?.message || err));
 }
 
-async function safeCheck() {
+// The status an automatic check that failed offline goes back to: Restart stays up when an update is downloaded.
+function quietStatus() {
+  return pendingUpdate && isStrictlyNewer(pendingUpdate.version, app.getVersion())
+    ? { state: 'ready', version: pendingUpdate.version }
+    : { state: 'idle' };
+}
+
+// True when the failure was an automatic check hitting a network error, now handled quietly.
+function quietNetworkFailure(err) {
+  if (checkSource !== 'auto' || !isNetworkError(err)) return false;
+  console.warn('[updater] automatic check could not reach the network, retrying in 5 minutes:', err?.message || err);
+  broadcast('updater:status', quietStatus());
+  if (!retryTimer) {
+    retryTimer = setTimeout(() => { retryTimer = null; void safeCheck('auto'); }, RETRY_MS);
+    retryTimer.unref?.();
+  }
+  return true;
+}
+
+async function safeCheck(source = 'auto') {
   if (installing) return; // a new download would re-point Squirrel at a new proxy mid-install
+  checkSource = source === 'manual' ? 'manual' : 'auto';
   broadcast('updater:status', { state: 'checking' });
   try {
     handleDownloadPromise(await autoUpdater.checkForUpdates());
@@ -192,6 +225,7 @@ async function safeCheck() {
     if (installing) { console.warn('[updater] a check failed during the install:', err?.message || err); return; }
     // The same "no Windows build yet" the error event reports as idle: the rejection must not overwrite it.
     if (windowsNotYet(err)) { broadcast('updater:status', { state: 'idle' }); return; }
+    if (quietNetworkFailure(err)) return;
     broadcast('updater:status', { state: 'error', message: String(err?.message || err) });
   }
 }
@@ -312,7 +346,7 @@ export function installInFlight() { return !!installing || lastStatus?.state ===
 
 export function initAutoUpdater() {
   ipcMain.handle('updater:check', () => {
-    if (updatesEnabled()) safeCheck();
+    if (updatesEnabled()) safeCheck('manual');
     else broadcast('updater:status', { state: 'error', message: 'Updates only run in packaged builds (you are running dev mode).' });
     return { ok: updatesEnabled() };
   });
@@ -445,6 +479,8 @@ export function initAutoUpdater() {
       console.warn('[updater] a check failed during the install:', err?.message || err);
       return;
     }
+    // Offline is not a wedged cache either, so nothing is purged for it.
+    if (quietNetworkFailure(err)) return;
     broadcast('updater:status', { state: 'error', message: String(err?.message || err) });
     // Self-heal: a failed download usually means wedged cache state (partial
     // zip, stale pending). Purge so the next check starts clean. v1.0.54.
@@ -456,6 +492,16 @@ export function initAutoUpdater() {
     if (!pendingUpdate) purgeUpdaterCache();
   });
 
-  setTimeout(safeCheck, 30000);
-  setInterval(safeCheck, CHECK_INTERVAL_MS);
+  setTimeout(() => { void safeCheck('auto'); }, 30000);
+  setInterval(() => { void safeCheck('auto'); }, CHECK_INTERVAL_MS);
 }
+
+// Tests: drive the quiet-offline path without a real updater.
+export const _test = {
+  quietNetworkFailure,
+  setCheckSource: (v) => { checkSource = v; },
+  setPending: (v) => { pendingUpdate = v; },
+  lastStatus: () => lastStatus,
+  retry: () => retryTimer,
+  clearRetry: () => { clearTimeout(retryTimer); const had = !!retryTimer; retryTimer = null; return had; },
+};
