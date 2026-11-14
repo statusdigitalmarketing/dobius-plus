@@ -63,6 +63,15 @@ let cancelGen = 0;
 // window opened from the launcher in the first seconds): looked at once it
 // is done, unless that pass took them (the harness caught the gap).
 const restoredDuringStartup = new Set();
+// Resumes this launch still owes, so the 15s capture does not read "no Claude in this tab yet" as "its Claude stopped"
+// and clear the running stamp (bug report 2026-11-14: the capture cleared the stamps of tabs still waiting their turn,
+// nothing re-stamped them before the quit, and 28 tabs came back as bare shells on the next launch). A resume is owed
+// from the launch decision until its Claude is first seen running in the tab, it is dropped, or RESUME_SIGHT_MS passes.
+// preparing: decided, not yet queued (a transcript size lookup, a claim). typed: written, its Claude not yet seen.
+const preparing = new Set();
+const typed = new Map(); // tabId -> { sessionId, at }
+// Bounded: a resume whose Claude never shows up (the shell failed it) stops protecting the stamp after this.
+const RESUME_SIGHT_MS = 10 * 60_000;
 function finishStartup() {
   startupDone = true;
   for (const tabId of restoredDuringStartup) {
@@ -197,6 +206,31 @@ export function pickLaunchSessions(tabMap, lastQuitAt, now, prevLaunchAt = 0) {
 }
 
 /**
+ * The session this tab's launch resume is still on its way to, or null. While one is, the tab showing no Claude is
+ * expected and says nothing about whether that session stopped. Read by the capture tick and the quit check (main.js).
+ */
+export function resumeOwedFor(tabId, now = Date.now()) {
+  const e = launchEligible.get(tabId);
+  if (!e) return null;
+  const t = typed.get(tabId);
+  if (t) {
+    if (now - t.at < RESUME_SIGHT_MS) return t.sessionId;
+    typed.delete(tabId);
+    return null;
+  }
+  if (queue.has(tabId)) return queue.get(tabId).sessionId;
+  if (preparing.has(tabId)) return e.sessionId;
+  // Not decided yet: the launch pass is still looking for its terminal, or its window has not been opened.
+  if (!handled.has(tabId) && cancelGen === 0) return e.sessionId;
+  return null;
+}
+
+/** The capture saw a Claude running in this tab: whatever resume was owed there is over. */
+export function noteTabClaudeSeen(tabId) {
+  typed.delete(tabId);
+}
+
+/**
  * Entry point. Wait `startupDelayMs` so windows have fully mounted and
  * the renderer's terminal mounts have settled, then resolve every live
  * tab's prior session and schedule a staggered write for each.
@@ -300,6 +334,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   // cancelled and closed before the last poll included: Codex P1, round 3);
   // the rest wait for their window to be opened (resumeRestoredTab).
   for (const tabId of firstSeen.keys()) handled.add(tabId);
+  for (const c of candidates) preparing.add(c.tabId);
   finishStartup();
   const waiting = tabToBest.size - candidates.length;
   if (waiting > 0) console.log(`[auto-resume] ${waiting} session(s) wait for their window to be opened`);
@@ -311,6 +346,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   // Closed before the first poll saw it (forgetClosedTab marked it handled): it gets a line too (Codex, PR 7).
   for (const tabId of tabToBest.keys()) if (handled.has(tabId) && !firstSeen.has(tabId) && !uncertainTabs.includes(tabId)) noteResume(tabId, 'not resumed: its tab closed before the launch reached it');
   if (candidates.length === 0) {
+    preparing.clear();
     console.log('[auto-resume] no live tabs with mapped sessions after 15s budget, nothing to do');
     return;
   }
@@ -320,11 +356,13 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   for (const c of candidates) {
     const sizeMB = await getSessionSize(c.sessionId, c.projectPath);
     if (sizeMB == null) {
+      preparing.delete(c.tabId);
       noteResume(c.tabId, 'not resumed: transcript not found');
       console.log(`[auto-resume] skip ${c.tabId}: transcript not found for ${c.sessionId}`);
       continue;
     }
     if (sizeMB > cfg.skipOversizedMB) {
+      preparing.delete(c.tabId);
       noteResume(c.tabId, 'not resumed: transcript over the size cap');
       console.log(`[auto-resume] skip ${c.tabId}: transcript ${sizeMB.toFixed(0)}MB > ${cfg.skipOversizedMB}MB cap`);
       continue;
@@ -333,6 +371,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   }
 
   if (eligible.length === 0) {
+    preparing.clear();
     console.log('[auto-resume] no eligible sessions after validation');
     return;
   }
@@ -350,6 +389,8 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     cumulativeMs += cfg.staggerMs + Math.round(Math.min(e.sizeMB || 0, 2000) * 2);
     await queueResume(e, delayMs);
   }
+  // Every one is queued or dropped by now (queueResume clears its own; this covers a throw).
+  for (const c of candidates) preparing.delete(c.tabId);
 }
 
 /**
@@ -359,6 +400,11 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
  * launch-time pass and a tab restored later (resumeRestoredTab).
  */
 async function queueResume(e, delayMs) {
+  preparing.add(e.tabId);
+  try { await queueResumeNow(e, delayMs); } finally { preparing.delete(e.tabId); }
+}
+
+async function queueResumeNow(e, delayMs) {
   handled.add(e.tabId);
   // A resume only ever goes into the shell it was decided for (pinned when
   // the tab was first seen: e.pidAt) and only while nothing at all has been
@@ -444,6 +490,7 @@ async function queueResume(e, delayMs) {
       queue.delete(e.tabId);
       try {
         writeTerminal(e.tabId, cmd);
+        typed.set(e.tabId, { sessionId: e.sessionId, at: Date.now() });
         // A new run: doubt carried from before the quit ends here, or a crash after this launch would still measure
         // it only up to that older quit and resume a session stopped since (Codex, PR 7).
         clearSessionTabUncertain(e.sessionId);
@@ -488,6 +535,11 @@ export async function resumeRestoredTab(tabId) {
   const info = launchEligible.get(tabId);
   if (!info) { noteResume(tabId, 'window opened later: no session was running here at the last quit'); return; }
   handled.add(tabId);
+  preparing.add(tabId);
+  try { await resumeRestoredDecided(tabId, info); } finally { preparing.delete(tabId); }
+}
+
+async function resumeRestoredDecided(tabId, info) {
   // And still so NOW: the session's link still names this tab and its running
   // stamp was not cleared since launch (resumed in another tab and stopped
   // there, say: Codex, restore round 6).
@@ -520,6 +572,7 @@ export async function resumeRestoredTab(tabId) {
  */
 export function forgetClosedTab(tabId) {
   handled.add(tabId);
+  typed.delete(tabId);
   cancelTabIfPending(tabId);
 }
 

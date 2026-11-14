@@ -21,7 +21,7 @@ import { startErrorReporter, noteFault, isReportable } from './error-reporter.js
 const stallWatchdog = createStallWatchdog({ log: logLine });
 
 stallWatchdog.wrapIpc(ipcMain);
-import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab } from './auto-resume.js';
+import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab, resumeOwedFor, noteTabClaudeSeen } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities, accountMetadata, loginState, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
@@ -3897,10 +3897,14 @@ function setupSessionTabCapture() {
           // still links a session here, zero its freshness stamp so quitting
           // within the slack window doesn't resurrect a session the user
           // already stopped. Codex v1.0.35 r3 P2.
+          // Not while this launch's resume of that session is still on its way to the tab: queued behind the
+          // stagger, or typed with its Claude not up yet. That stamp is what the NEXT launch reads, and nothing
+          // re-stamps it if the checks then miss the Claude (bug report 2026-11-14: 28 tabs came back as shells).
           const mappedIdle = tabToSessionId.get(t.id);
-          if (mappedIdle) clearSessionTabRunning(mappedIdle);
+          if (mappedIdle && resumeOwedFor(t.id) !== mappedIdle) clearSessionTabRunning(mappedIdle);
           continue;
         }
+        noteTabClaudeSeen(t.id);
         claimedIds.add(runningSessionId);
         // Tag how we know: an id read out of `claude --resume <id>` or out of
         // the process's own record is certain, one inferred from start/birth
@@ -3990,6 +3994,9 @@ export function stopSessionTabCapture() {
     sessionTabCaptureInterval = null;
   }
 }
+
+// Tabs the quit-time running check looks at together (each is a pgrep plus a ps per child).
+const QUIT_PROBE_CONCURRENCY = 6;
 
 // Folder pickers open as a sheet on the window that asked, so one can never
 // land behind other windows. createDirectory adds macOS's New Folder button:
@@ -5879,6 +5886,9 @@ app.on('before-quit', (e) => {
     // those force-stopped tabs as idle and wipe stamps for sessions that
     // were genuinely live at quit. Codex v1.0.35 r10 P2.
     let reconcileAborted = false;
+    // For the log line after it: how far the check got before its deadline.
+    let probedTabs = 0;
+    let quitTabCount = 0;
     const finalReconcile = (async () => {
       try {
         const mapQ = getSessionTabMap() || {};
@@ -5900,6 +5910,7 @@ app.on('before-quit', (e) => {
         // transcript. Codex v1.0.39 r5 P2.
         const claimedIds = new Set(Object.keys(mapQ));
         const liveTabs = listTerminals();
+        quitTabCount = liveTabs.length;
         // Probe every tab ONCE up front, exactly like the periodic tick: the
         // fresh correlation needs the OTHER live fresh claudes' start times to
         // detect ambiguity, and quitting is precisely when the tick has NOT
@@ -5908,9 +5919,13 @@ app.on('before-quit', (e) => {
         // A failed check is "could not tell", never "stopped": that tab's stamp is left as it is (see the capture tick).
         const unknownTabs = new Set();
         const stampedTabs = new Set(Object.values(getSessionTabMap() || {}).filter((l) => l?.lastRunningAt && l.tabId).map((l) => l.tabId));
-        for (const t of liveTabs) {
+        // Every tab, a few at a time: one by one, the 2 s budget reached only the first windows' tabs and the rest
+        // kept whatever stamp they had (bug report 2026-11-14). Bounded so a quit never starts dozens of ps at once.
+        await mapLimit(liveTabs, QUIT_PROBE_CONCURRENCY, async (t) => {
           if (reconcileAborted) return;
           const got = await getTerminalClaudeInfo(t.id, { unknown: true, rootCheck: stampedTabs.has(t.id) });
+          if (reconcileAborted) return;
+          probedTabs += 1;
           if (got === CLAUDE_UNKNOWN) unknownTabs.add(t.id);
           infoByTab.set(t.id, got === CLAUDE_UNKNOWN ? null : got);
           // Proof by argv (`claude --resume <the mapped id>`, how every auto-resumed tab runs) is recorded at once: the
@@ -5921,7 +5936,8 @@ app.on('before-quit', (e) => {
             if (provenanceChanged(mapQ[sidNow]?.resolvedBy, 'argv')) setSessionTabLink(sidNow, t.id, t.cwd, 'argv');
             else touchSessionTabLink(sidNow, quitStampAt ?? Date.now());
           }
-        }
+        });
+        if (reconcileAborted) return;
         const cwdByTab = new Map();
         for (const t of liveTabs) {
           if (reconcileAborted) return;
@@ -5972,7 +5988,8 @@ app.on('before-quit', (e) => {
             //
             // NOTE: this only zeroes the running stamp, the link itself stays,
             // so sid stays claimed and the tab keeps its name.
-            clearSessionTabRunning(sid);
+            // Not a launch resume still on its way (same rule as the capture tick).
+            if (resumeOwedFor(t.id) !== sid) clearSessionTabRunning(sid);
           } else if (
             running && running === sid
             && (provenanceChanged(mapQ[sid]?.resolvedBy, howQ)
@@ -6000,7 +6017,12 @@ app.on('before-quit', (e) => {
       } catch { /* best-effort */ }
     })();
     Promise.race([finalReconcile, new Promise((r) => setTimeout(r, 2000))])
-      .then(() => { reconcileAborted = true; return gracefulCloseAll(); }).then(() => {
+      .then(() => {
+        reconcileAborted = true;
+        // What the next launch's auto-resume will be judged on, in one line a person can send.
+        logLine('diag.resume', `quit check: ${probedTabs} of ${quitTabCount} tab(s) checked before the deadline`);
+        return gracefulCloseAll();
+      }).then(() => {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('terminal:requestSave');
       });
