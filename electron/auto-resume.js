@@ -63,6 +63,21 @@ let cancelGen = 0;
 // window opened from the launcher in the first seconds): looked at once it
 // is done, unless that pass took them (the harness caught the gap).
 const restoredDuringStartup = new Set();
+// Resumes this launch still owes, so the 15s capture does not read "no Claude in this tab yet" as "its Claude stopped"
+// and clear the running stamp (bug report 2026-11-14: the capture cleared the stamps of tabs still waiting their turn,
+// nothing re-stamped them before the quit, and 28 tabs came back as bare shells on the next launch). A resume is owed
+// from the launch decision until its Claude is first seen running in the tab, it is dropped, or RESUME_SIGHT_MS passes.
+// preparing: decided, not yet queued (a transcript size lookup, a claim). typed: written, its Claude not yet seen.
+const preparing = new Map(); // tabId -> the shell pid it was decided for
+// tabId -> the shell pid the launch pass first saw it with, so an undecided tab is owed only in that shell.
+const seenPid = new Map();
+const typed = new Map(); // tabId -> { sessionId, at, seq, pid }
+// Bounded. Typed protection only has to cover the moment between writing `claude --resume` into a shell that was
+// checked idle and that shell starting it: from then on the process exists and every check sees it (or answers
+// unknown, which never clears a stamp). Kept short because nothing can see Claude stopped from outside Dobius before
+// the capture first saw it (Codex P1, PR 13 round 6); the accepted residual is a stop from another shell within these
+// 30 s followed by a quit within the same 30 s.
+const RESUME_SIGHT_MS = 30_000;
 function finishStartup() {
   startupDone = true;
   for (const tabId of restoredDuringStartup) {
@@ -197,6 +212,104 @@ export function pickLaunchSessions(tabMap, lastQuitAt, now, prevLaunchAt = 0) {
 }
 
 /**
+ * The session this tab's launch resume is still on its way to, or null. While one is, the tab showing no Claude is
+ * expected and says nothing about whether that session stopped. Read by the capture tick and the quit check (main.js).
+ */
+export function resumeOwedFor(tabId, now = Date.now()) {
+  const e = launchEligible.get(tabId);
+  if (!e) return null;
+  // Only for the shell the resume was decided for: a Reload or respawn gives the tab a new shell under the same id,
+  // whose input count starts again at 0 (Codex P1, PR 13 round 3).
+  const pidNow = () => listTerminals().find((x) => x.id === tabId)?.pid ?? null;
+  const t = typed.get(tabId);
+  if (t) {
+    if (pidNow() !== t.pid) { typed.delete(tabId); return null; }
+    // Anything typed into the tab after the resume (a Ctrl+C, another command, from the window or the phone) ends it:
+    // the person may have stopped that Claude before the capture ever saw it (Codex P1, PR 13).
+    if (now - t.at < RESUME_SIGHT_MS && terminalInputSeq(tabId) === t.seq) return t.sessionId;
+    typed.delete(tabId);
+    return null;
+  }
+  // Not typed yet: owed only under the guards the write itself will check. A cancel all, or anything typed into the
+  // tab from any source, means the write will be refused, so the stamp is not protected meanwhile (Codex P2, PR 13).
+  if (cancelGen !== 0 || terminalInputSeq(tabId) !== 0) return null;
+  if (queue.has(tabId)) return pidNow() === queue.get(tabId).pidAt ? queue.get(tabId).sessionId : null;
+  if (preparing.has(tabId)) return pidNow() === preparing.get(tabId) ? e.sessionId : null;
+  // Not decided yet: the launch pass is still looking for its terminal, or its window has not been opened. Once the
+  // pass has seen its shell, only that shell (Codex P2, PR 13 round 5: a Reload during the polls).
+  if (!handled.has(tabId)) return !seenPid.has(tabId) || pidNow() === seenPid.get(tabId) ? e.sessionId : null;
+  return null;
+}
+
+// A typed resume has had this long to become a process. A definite "no Claude" after it is evidence the Claude was
+// stopped, even while the stamp is still protected.
+const SPAWN_GRACE_MS = 10_000;
+// tabId -> session: a definite "no Claude" was seen in the tab, past the spawn grace, while its typed resume protected
+// the stamp, and no Claude has been seen there since. Bounded by the number of tabs.
+const idleWhileOwed = new Map();
+// Tabs whose launch resume was retired because a Claude was already running there (logged once, there).
+const retiredBySight = new Set();
+
+/**
+ * The capture saw a Claude running in this tab: whatever resume was owed there is over, typed or not. A queued or
+ * prepared one is retired too (its write would be refused as the tab is busy anyway), so a Claude the shell started
+ * on its own and the person then stopped is never protected by a resume that will not happen (Codex P1, PR 13 round 9).
+ */
+export function noteTabClaudeSeen(tabId) {
+  typed.delete(tabId);
+  idleWhileOwed.delete(tabId);
+  if (!launchEligible.has(tabId) || handled.has(tabId) && !queue.has(tabId) && !preparing.has(tabId)) return;
+  handled.add(tabId);
+  retiredBySight.add(tabId);
+  preparing.delete(tabId);
+  const entry = queue.get(tabId);
+  if (entry) {
+    entry.cancelled = true;
+    clearTimeout(entry.timer);
+    queue.delete(tabId);
+    releaseSessionResume(entry.sessionId, tabId);
+  }
+  noteResume(tabId, 'not resumed: a Claude was already running in the tab');
+}
+
+/**
+ * The capture saw no Claude in a tab whose stamp it spared: remember it if the typed resume should have been up when
+ * the tab was LOOKED AT (`seenAt`, taken before the probe), never when the decision is made: a slow batch otherwise
+ * dates an idle look from before the write as evidence against it (Codex P2, PR 13 round 10).
+ */
+export function noteIdleWhileOwed(tabId, seenAt) {
+  const t = typed.get(tabId);
+  if (t && typeof seenAt === 'number' && seenAt - t.at >= SPAWN_GRACE_MS) idleWhileOwed.set(tabId, { sessionId: t.sessionId, pid: t.pid, seq: t.seq });
+}
+
+/**
+ * The quit check could not tell for this tab, but a capture already saw it without Claude after its resume should have
+ * started, and nothing has seen a Claude there since: that session was stopped (Codex P1, PR 13 round 8).
+ */
+export function stoppedWhileOwed(tabId, sessionId) {
+  const w = idleWhileOwed.get(tabId);
+  if (!w || w.sessionId !== sessionId) return false;
+  // Only about that attempt: the same shell with nothing typed since. A resume the person then started by hand (the
+  // sidebar types it) or a new shell is a new run this says nothing about (Codex P2, PR 13 round 9).
+  if (terminalInputSeq(tabId) !== w.seq || (listTerminals().find((x) => x.id === tabId)?.pid ?? null) !== w.pid) {
+    idleWhileOwed.delete(tabId);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * A Claude in some tab was killed from the Dashboard. The kill names a pid, not a tab, so every typed resume stops
+ * being protected: one the person just killed must not come back next launch (Codex P1, PR 13). A resume that is
+ * really running only loses its stamp until the next capture sees it.
+ */
+export function endTypedResumes() {
+  typed.clear();
+}
+// Main stops a Claude by pid in two places, the Dashboard kill and an account move's stop (Codex P1, PR 13 round 4);
+// both call this, so no stop by pid leaves a typed resume protected.
+
+/**
  * Entry point. Wait `startupDelayMs` so windows have fully mounted and
  * the renderer's terminal mounts have settled, then resolve every live
  * tab's prior session and schedule a staggered write for each.
@@ -281,7 +394,12 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
       // Closed (and maybe reopened) since launch: never this pass's to resume
       // (Codex, restore round 6).
       if (handled.has(tabId) && !firstSeen.has(tabId)) continue;
-      if (!firstSeen.has(tabId)) firstSeen.set(tabId, { pidAt: live.find((t) => t.id === tabId)?.pid ?? null, gen: launchGen });
+      // A Claude already running there retired it (noteTabClaudeSeen), whenever that happened.
+      if (retiredBySight.has(tabId)) continue;
+      if (!firstSeen.has(tabId)) {
+        firstSeen.set(tabId, { pidAt: live.find((t) => t.id === tabId)?.pid ?? null, gen: launchGen });
+        seenPid.set(tabId, firstSeen.get(tabId).pidAt);
+      }
       candidates.push({ tabId, ...info, ...firstSeen.get(tabId) });
     }
     // Done: every mapped tab is now alive.
@@ -300,6 +418,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   // cancelled and closed before the last poll included: Codex P1, round 3);
   // the rest wait for their window to be opened (resumeRestoredTab).
   for (const tabId of firstSeen.keys()) handled.add(tabId);
+  for (const c of candidates) preparing.set(c.tabId, c.pidAt);
   finishStartup();
   const waiting = tabToBest.size - candidates.length;
   if (waiting > 0) console.log(`[auto-resume] ${waiting} session(s) wait for their window to be opened`);
@@ -307,10 +426,11 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   for (const tabId of tabToBest.keys()) if (!handled.has(tabId)) noteResume(tabId, 'waiting: its window was not open at launch; it resumes when that window opens');
   // Seen, then closed before the last poll: the launch pass took it but nothing below visits it.
   const inCandidates = new Set(candidates.map((c) => c.tabId));
-  for (const tabId of firstSeen.keys()) if (!inCandidates.has(tabId)) noteResume(tabId, 'not resumed: its tab closed before the resume was queued');
+  for (const tabId of firstSeen.keys()) if (!inCandidates.has(tabId) && !retiredBySight.has(tabId)) noteResume(tabId, 'not resumed: its tab closed before the resume was queued');
   // Closed before the first poll saw it (forgetClosedTab marked it handled): it gets a line too (Codex, PR 7).
-  for (const tabId of tabToBest.keys()) if (handled.has(tabId) && !firstSeen.has(tabId) && !uncertainTabs.includes(tabId)) noteResume(tabId, 'not resumed: its tab closed before the launch reached it');
+  for (const tabId of tabToBest.keys()) if (handled.has(tabId) && !firstSeen.has(tabId) && !uncertainTabs.includes(tabId) && !retiredBySight.has(tabId)) noteResume(tabId, 'not resumed: its tab closed before the launch reached it');
   if (candidates.length === 0) {
+    preparing.clear();
     console.log('[auto-resume] no live tabs with mapped sessions after 15s budget, nothing to do');
     return;
   }
@@ -320,11 +440,13 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   for (const c of candidates) {
     const sizeMB = await getSessionSize(c.sessionId, c.projectPath);
     if (sizeMB == null) {
+      preparing.delete(c.tabId);
       noteResume(c.tabId, 'not resumed: transcript not found');
       console.log(`[auto-resume] skip ${c.tabId}: transcript not found for ${c.sessionId}`);
       continue;
     }
     if (sizeMB > cfg.skipOversizedMB) {
+      preparing.delete(c.tabId);
       noteResume(c.tabId, 'not resumed: transcript over the size cap');
       console.log(`[auto-resume] skip ${c.tabId}: transcript ${sizeMB.toFixed(0)}MB > ${cfg.skipOversizedMB}MB cap`);
       continue;
@@ -333,6 +455,7 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
   }
 
   if (eligible.length === 0) {
+    preparing.clear();
     console.log('[auto-resume] no eligible sessions after validation');
     return;
   }
@@ -350,6 +473,8 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
     cumulativeMs += cfg.staggerMs + Math.round(Math.min(e.sizeMB || 0, 2000) * 2);
     await queueResume(e, delayMs);
   }
+  // Every one is queued or dropped by now (queueResume clears its own; this covers a throw).
+  for (const c of candidates) preparing.delete(c.tabId);
 }
 
 /**
@@ -359,6 +484,11 @@ export async function startAutoResume({ startupDelayMs = 1500 } = {}) {
  * launch-time pass and a tab restored later (resumeRestoredTab).
  */
 async function queueResume(e, delayMs) {
+  preparing.set(e.tabId, e.pidAt);
+  try { await queueResumeNow(e, delayMs); } finally { preparing.delete(e.tabId); }
+}
+
+async function queueResumeNow(e, delayMs) {
   handled.add(e.tabId);
   // A resume only ever goes into the shell it was decided for (pinned when
   // the tab was first seen: e.pidAt) and only while nothing at all has been
@@ -370,7 +500,8 @@ async function queueResume(e, delayMs) {
   // (and maybe stopped there), its link names that tab now (Codex, restore
   // round 7). The running stamp is NOT asked here: the 15s capture zeroes it
   // for a fresh shell that is only waiting for this very resume.
-  const untouched = () => cancelGen === e.gen
+  // Not retired since: a Claude seen in the tab while this was being prepared ends it (Codex P1, PR 13 round 12).
+  const untouched = () => cancelGen === e.gen && !retiredBySight.has(e.tabId)
     && (listTerminals().find((t) => t.id === e.tabId)?.pid ?? null) === e.pidAt && e.pidAt !== null
     && terminalInputSeq(e.tabId) === 0
     && (getSessionTabMap() || {})[e.sessionId]?.tabId === e.tabId;
@@ -410,7 +541,7 @@ async function queueResume(e, delayMs) {
     // await used to be a no-op (the entry had already been removed from the
     // queue), so the user typing at exactly the wrong moment got the resume
     // typed at them anyway. The flag closes that window.
-    const entry = { sessionId: e.sessionId, projectPath: e.projectPath, timer: null, cancelled: false };
+    const entry = { sessionId: e.sessionId, projectPath: e.projectPath, pidAt: e.pidAt, timer: null, cancelled: false };
     const giveUp = (why) => {
       queue.delete(e.tabId);
       releaseSessionResume(e.sessionId, e.tabId);
@@ -444,6 +575,7 @@ async function queueResume(e, delayMs) {
       queue.delete(e.tabId);
       try {
         writeTerminal(e.tabId, cmd);
+        typed.set(e.tabId, { sessionId: e.sessionId, at: Date.now(), seq: terminalInputSeq(e.tabId), pid: e.pidAt });
         // A new run: doubt carried from before the quit ends here, or a crash after this launch would still measure
         // it only up to that older quit and resume a session stopped since (Codex, PR 7).
         clearSessionTabUncertain(e.sessionId);
@@ -488,6 +620,11 @@ export async function resumeRestoredTab(tabId) {
   const info = launchEligible.get(tabId);
   if (!info) { noteResume(tabId, 'window opened later: no session was running here at the last quit'); return; }
   handled.add(tabId);
+  preparing.set(tabId, listTerminals().find((t) => t.id === tabId)?.pid ?? null);
+  try { await resumeRestoredDecided(tabId, info); } finally { preparing.delete(tabId); }
+}
+
+async function resumeRestoredDecided(tabId, info) {
   // And still so NOW: the session's link still names this tab and its running
   // stamp was not cleared since launch (resumed in another tab and stopped
   // there, say: Codex, restore round 6).
@@ -520,6 +657,8 @@ export async function resumeRestoredTab(tabId) {
  */
 export function forgetClosedTab(tabId) {
   handled.add(tabId);
+  typed.delete(tabId);
+  idleWhileOwed.delete(tabId);
   cancelTabIfPending(tabId);
 }
 

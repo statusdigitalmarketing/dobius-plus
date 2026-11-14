@@ -21,7 +21,7 @@ import { startErrorReporter, noteFault, isReportable } from './error-reporter.js
 const stallWatchdog = createStallWatchdog({ log: logLine });
 
 stallWatchdog.wrapIpc(ipcMain);
-import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab } from './auto-resume.js';
+import { startAutoResume, cancelAll as cancelAllAutoResume, cancelTabIfPending as cancelAutoResumeTab, resumeRestoredTab, forgetClosedTab, resumeOwedFor, noteTabClaudeSeen, endTypedResumes, noteIdleWhileOwed, stoppedWhileOwed } from './auto-resume.js';
 import { shareConfiguredProfiles, shareProfile } from './account-profile-share.js';
 import { accountIdentities, accountMetadata, loginState, effectiveDefaultDir, defaultClaudeDir, keychainServiceFor } from './account-identity.js';
 import { createHeadroomService } from './account-headroom-service.js';
@@ -1065,6 +1065,7 @@ function setupDataHandlers() {
         throw new Error('PID is not a Claude process in a Dobius tab, refusing to kill');
       }
       process.kill(n, 'SIGTERM');
+      endTypedResumes();
       return true;
     } catch (err) {
       throw new Error(err.message, { cause: err });
@@ -3343,7 +3344,8 @@ function setupHeadroomHandlers() {
     keyFor: (dir) => { try { return keychainServiceFor(dir); } catch { return null; } },
     login: (dir) => loginState(dir),
     nlink: (p) => fs.promises.stat(p).then((st) => st.nlink),
-    stop: (pid) => process.kill(pid, 'SIGHUP'), // what closing its PTY would send
+    // What closing its PTY would send. A stopped Claude must not keep a typed auto-resume's stamp (see endTypedResumes).
+    stop: (pid) => { process.kill(pid, 'SIGHUP'); endTypedResumes(); },
     alive: (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } },
     claim: (sessionId, tabId) => claimSessionResume(sessionId, tabId),
     release: (sessionId, tabId) => releaseSessionResume(sessionId, tabId),
@@ -3892,13 +3894,19 @@ function setupSessionTabCapture() {
         }
         const claudeInfo = infoByTab.get(t.id);
         const runningSessionId = claudeInfo?.sessionId || freshByTab.get(t.id) || null;
+        // Any Claude seen in the tab, named or not, ends what a launch resume owed there (Codex P1, PR 13 round 12).
+        if (claudeInfo) noteTabClaudeSeen(t.id);
         if (!runningSessionId) {
           // Tab is open but no Claude session is running in it. If the map
           // still links a session here, zero its freshness stamp so quitting
           // within the slack window doesn't resurrect a session the user
           // already stopped. Codex v1.0.35 r3 P2.
+          // Not while this launch's resume of that session is still on its way to the tab: queued behind the
+          // stagger, or typed with its Claude not up yet. That stamp is what the NEXT launch reads, and nothing
+          // re-stamps it if the checks then miss the Claude (bug report 2026-11-14: 28 tabs came back as shells).
           const mappedIdle = tabToSessionId.get(t.id);
-          if (mappedIdle) clearSessionTabRunning(mappedIdle);
+          if (mappedIdle && resumeOwedFor(t.id) !== mappedIdle) clearSessionTabRunning(mappedIdle);
+          else if (mappedIdle) noteIdleWhileOwed(t.id, probedAt.get(t.id));
           continue;
         }
         claimedIds.add(runningSessionId);
@@ -3990,6 +3998,9 @@ export function stopSessionTabCapture() {
     sessionTabCaptureInterval = null;
   }
 }
+
+// Tabs the quit-time running check looks at together (each is a pgrep plus a ps per child).
+const QUIT_PROBE_CONCURRENCY = 6;
 
 // Folder pickers open as a sheet on the window that asked, so one can never
 // land behind other windows. createDirectory adds macOS's New Folder button:
@@ -5879,6 +5890,9 @@ app.on('before-quit', (e) => {
     // those force-stopped tabs as idle and wipe stamps for sessions that
     // were genuinely live at quit. Codex v1.0.35 r10 P2.
     let reconcileAborted = false;
+    // For the log line after it: how far the check got before its deadline.
+    let probedTabs = 0;
+    let quitTabCount = 0;
     const finalReconcile = (async () => {
       try {
         const mapQ = getSessionTabMap() || {};
@@ -5900,6 +5914,7 @@ app.on('before-quit', (e) => {
         // transcript. Codex v1.0.39 r5 P2.
         const claimedIds = new Set(Object.keys(mapQ));
         const liveTabs = listTerminals();
+        quitTabCount = liveTabs.length;
         // Probe every tab ONCE up front, exactly like the periodic tick: the
         // fresh correlation needs the OTHER live fresh claudes' start times to
         // detect ambiguity, and quitting is precisely when the tick has NOT
@@ -5908,11 +5923,17 @@ app.on('before-quit', (e) => {
         // A failed check is "could not tell", never "stopped": that tab's stamp is left as it is (see the capture tick).
         const unknownTabs = new Set();
         const stampedTabs = new Set(Object.values(getSessionTabMap() || {}).filter((l) => l?.lastRunningAt && l.tabId).map((l) => l.tabId));
-        for (const t of liveTabs) {
+        // Every tab, a few at a time: one by one, the 2 s budget reached only the first windows' tabs and the rest
+        // kept whatever stamp they had (bug report 2026-11-14). Bounded so a quit never starts dozens of ps at once.
+        await mapLimit(liveTabs, QUIT_PROBE_CONCURRENCY, async (t) => {
           if (reconcileAborted) return;
           const got = await getTerminalClaudeInfo(t.id, { unknown: true, rootCheck: stampedTabs.has(t.id) });
+          if (reconcileAborted) return;
+          probedTabs += 1;
           if (got === CLAUDE_UNKNOWN) unknownTabs.add(t.id);
           infoByTab.set(t.id, got === CLAUDE_UNKNOWN ? null : got);
+          // A Claude seen here, named or not, retires a launch resume still owed to the tab (as in the capture).
+          if (got && got !== CLAUDE_UNKNOWN) noteTabClaudeSeen(t.id);
           // Proof by argv (`claude --resume <the mapped id>`, how every auto-resumed tab runs) is recorded at once: the
           // shared 2 s deadline can stop this pass before the decisions below, and that must not leave a session seen
           // running with the doubt of earlier failed checks (Codex, PR 7). Same touch as the confirmed branch below.
@@ -5921,7 +5942,15 @@ app.on('before-quit', (e) => {
             if (provenanceChanged(mapQ[sidNow]?.resolvedBy, 'argv')) setSessionTabLink(sidNow, t.id, t.cwd, 'argv');
             else touchSessionTabLink(sidNow, quitStampAt ?? Date.now());
           }
-        }
+          // Likewise a definite "no Claude at all" is applied at once, so the shared deadline cannot leave the stamp of a
+          // session stopped since its resume was typed (Codex P1, PR 13 round 7). Only `null`: a Claude that cannot be
+          // named yet (a bare `claude`) is left to the decisions below.
+          if (got === null && sidNow && getSessionTabMap()?.[sidNow]?.tabId === t.id && resumeOwedFor(t.id) !== sidNow) clearSessionTabRunning(sidNow);
+          // And a check that cannot tell, for a session a capture already saw stopped (same rule as below, applied here
+          // for the same reason: Codex P1, PR 13 round 10).
+          if (got === CLAUDE_UNKNOWN && sidNow && stoppedWhileOwed(t.id, sidNow) && resumeOwedFor(t.id) !== sidNow) clearSessionTabRunning(sidNow);
+        });
+        if (reconcileAborted) return;
         const cwdByTab = new Map();
         for (const t of liveTabs) {
           if (reconcileAborted) return;
@@ -5942,6 +5971,8 @@ app.on('before-quit', (e) => {
           if (reconcileAborted) return;
           if (unknownTabs.has(t.id)) {
             const sidUnknown = tabToSid.get(t.id);
+            // Seen without Claude by a capture after its resume should have started: stopped, whatever this check says.
+            if (sidUnknown && stoppedWhileOwed(t.id, sidUnknown) && resumeOwedFor(t.id) !== sidUnknown) { clearSessionTabRunning(sidUnknown); continue; }
             // Dated at the quit stamp: a stamp confirmed until the quit is not long uncertain however long the app then
             // stays closed (auto-resume measures doubt up to lastQuitAt). Codex, PR 7.
             if (sidUnknown) markSessionTabUncertain(sidUnknown, quitStampAt ?? Date.now());
@@ -5972,7 +6003,8 @@ app.on('before-quit', (e) => {
             //
             // NOTE: this only zeroes the running stamp, the link itself stays,
             // so sid stays claimed and the tab keeps its name.
-            clearSessionTabRunning(sid);
+            // Not a launch resume still on its way (same rule as the capture tick).
+            if (resumeOwedFor(t.id) !== sid) clearSessionTabRunning(sid);
           } else if (
             running && running === sid
             && (provenanceChanged(mapQ[sid]?.resolvedBy, howQ)
@@ -6000,7 +6032,12 @@ app.on('before-quit', (e) => {
       } catch { /* best-effort */ }
     })();
     Promise.race([finalReconcile, new Promise((r) => setTimeout(r, 2000))])
-      .then(() => { reconcileAborted = true; return gracefulCloseAll(); }).then(() => {
+      .then(() => {
+        reconcileAborted = true;
+        // What the next launch's auto-resume will be judged on, in one line a person can send.
+        logLine('diag.resume', `quit check: ${probedTabs} of ${quitTabCount} tab(s) checked before the deadline`);
+        return gracefulCloseAll();
+      }).then(() => {
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) win.webContents.send('terminal:requestSave');
       });
