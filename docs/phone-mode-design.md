@@ -244,11 +244,14 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
     phone and again when it comes back. The phone is told the generation with the tab list, the attach replay and
     every `phoneState`, and every phone-originated tab write (`input`, `submitPrompt`, `selectorKey`, `resize`)
     carries the generation **the phone was showing** when the person acted. A write is refused `opError: stale_view`
-    when that generation is missing or is not the tab's current one, checked when the frame arrives and again at the
+    when it is present and is not the tab's current one, checked when the frame arrives and again at the
     moment it is written (the existing `stillOk` check). So an Enter typed for prompt A, delayed past a whole trip to
     the phone and back, cannot answer prompt B (Codex P1, design round 2: a generation captured on arrival only
-    protects writes already inside main). The phone app and the Mac ship together (the phone loads its pages from
-    the Mac), so a write without one only comes from a page loaded before the update, which reloads on `stale_view`.
+    protects writes already inside main). A write without a generation is accepted unless the tab is on the phone
+    right now (`opError: on_phone`): the App Store app bundles its own pages and updates only through a new build
+    (RELEASING-IOS.md), so refusing it would break every phone on an older build. A tab that never moved has the
+    launch's base generation; asking for a tab's generation never creates one, and a full table (2000) drops a closed
+    tab's entry before a live one's (Codex P1, implementation round 9).
     The desktop window's own keystrokes are not gated: they are how Enter takes it back.
   - The phone's own `submitPrompt` for a
     phone-mode tab is answered `opError: on_phone` (the phone uses `phoneSend` instead).
@@ -270,7 +273,12 @@ Owns a small registry: tabId -> { sessionId, token, socket, status, pending (at 
   - the tab closed AND its shell process is confirmed gone (main SIGKILLs it 5 s after the close if it is still
     there, so a stopped shell cannot carry a pending fallback past the release) AND main has confirmed the runner
     group and the reported Claude pid are gone; or
-  - the tab closed before main accepted a hello, with its shell confirmed gone the same way. The run is marked dead first, so a hello arriving later is refused
+  - the tab closed before main accepted a hello, with its shell confirmed gone the same way.
+  The shell is identified by pid and start time, and the start time is taken only from the ps listing at the gate's or
+  runner's hello in which that live child descends from the shell's pid: a pid cannot be reused while a child is still
+  parented to it (Codex P1, implementation rounds 8 and 9: a retry after the close, then a tab list lagging the shell's
+  exit, gave the shell an unrelated process's identity). Without that identity only ESRCH proves the shell gone and it
+  is never signalled; closing a phone tab SIGKILLs its PTY through the PTY object, so a stopped shell still ends. The run is marked dead first, so a hello arriving later is refused
     and that runner exits without starting Claude (Codex P2, design round 3: with no Claude pid, none of the other
     conditions could ever become true and the claim held the session until Dobius restarted).
   **Cleanup does not depend on the runner** (Codex P2, design round 3: a runner stopped with SIGSTOP handles neither
