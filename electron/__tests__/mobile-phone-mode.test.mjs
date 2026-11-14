@@ -3,7 +3,7 @@
 // Run: node --test electron/__tests__/mobile-phone-mode.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { phoneOffered, phoneKnown, sendOutcome, reconcileEchoes, pruneEchoes, ageEchoes, ECHO_TTL_MS, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, readOutbox, writeOutbox, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, reconcileEchoes, pruneEchoes, ageEchoes, ECHO_TTL_MS, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, ARRIVAL_SKEW_MS, freshId, readPhoneState, questionAnswer, togglePick, permissionAnswer, planAnswer, refusalText } from '../../mobile/phone-mode.js';
 import { validateAnswer, validatePhoneRequest } from '../phone-protocol.js';
 import { answerMisfit } from '../phone-runner-core.mjs';
 
@@ -114,25 +114,6 @@ test('a phone message arrives only by a row that was not there when it was sent 
   assert.equal(echoArrived(echo, [{ role: 'user', content: 'continue', timestamp: '2026-11-14T16:00:05Z' }]), false, 'no id, not queued: not proof');
 });
 
-test('the outbox keeps unanswered phone messages across visits, bounded, and brings them back as not confirmed (Codex r28)', () => {
-  const now = Date.parse('2026-11-14T16:00:00Z');
-  const e = (i, extra = {}) => ({ content: `m${i}`, sendId: `s${i}`, runId: 'r'.repeat(32), since: now - i, known: ['x'], knownQueued: 0, ...extra });
-  let map = writeOutbox({}, 'T', [e(1), e(2, { acked: true }), e(3, { fail: 'failed' })], now);
-  assert.deepEqual(map.T.map((x) => x.sendId), ['s1', 's3'], 'a message the Mac took is not kept');
-  const back = readOutbox(map, 'T', now);
-  assert.deepEqual(back.map((x) => [x.sendId, x.fail]), [['s1', 'unconfirmed'], ['s3', 'failed']]);
-  map = writeOutbox(map, 'T', Array.from({ length: 25 }, (_, i) => e(i)), now);
-  assert.equal(map.T.length, 20, 'a hard ceiling per tab (the composer keeps one page to 5)');
-  map = writeOutbox(map, 'T', [], now);
-  assert.equal('T' in map, false);
-  let many = {};
-  for (let i = 0; i < 50; i++) many = writeOutbox(many, `T${i}`, [e(i)], now);
-  assert.equal(Object.keys(many).length, 40, 'a hard ceiling only a race past the composer can reach');
-  assert.deepEqual(readOutbox({ T: [e(1, { since: now - 8 * 86_400_000 })] }, 'T', now), [], 'older than a week');
-  assert.deepEqual(readOutbox({ T: [{ content: 5 }, null, e(1, { runId: 7 })] }, 'T', now), [], 'garbage is dropped');
-  assert.deepEqual(readOutbox(null, 'T', now), []);
-});
-
 test('one transcript row clears one acked phone message, oldest first (Codex r29)', () => {
   const since = Date.parse('2026-11-14T16:00:00Z');
   const a = { content: 'continue', sendId: 'sa', since, known: [], knownQueued: 0, acked: true };
@@ -177,39 +158,85 @@ test('pruneEchoes: acked ones by their rows, local ones by their words, the rest
   assert.deepEqual(ageEchoes([a], since + ECHO_TTL_MS + 1), [], 'an acked one whose row never came goes after the wait: the Mac has it');
 });
 
-test('the outbox keeps every message the composer lets wait, and no tab\'s are dropped for another\'s (Codex r29, r30)', () => {
+// localStorage's methods over a Map, for the outbox tests.
+function fakeStorage() {
+  const m = new Map();
+  return {
+    get length() { return m.size; },
+    key: (i) => [...m.keys()][i] ?? null,
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => { m.set(k, String(v)); },
+    removeItem: (k) => { m.delete(k); },
+    keys: () => [...m.keys()],
+  };
+}
+const BASE = 'dobius-mobile-phone-msg:pair1';
+const RUN = 'r'.repeat(32);
+
+test('the outbox keeps unanswered phone messages across visits and brings them back as not confirmed (Codex r28)', () => {
   const now = Date.parse('2026-11-14T16:00:00Z');
-  const msg = (i) => ({ content: `m${i}`, sendId: `s${i}`, runId: 'r'.repeat(32), since: now - i, known: [], knownQueued: 0 });
-  const waiting = Array.from({ length: MAX_OUTSTANDING }, (_, i) => msg(i));
-  assert.deepEqual(readOutbox(writeOutbox({}, 'T', waiting, now), 'T', now).map((e) => e.sendId), waiting.map((e) => e.sendId));
-  let map = {};
-  for (let i = 0; i < OUTBOX_TABS; i++) map = writeOutbox(map, `T${i}`, [msg(i)], now);
-  assert.equal(outboxFull(map, 'new', now), true, 'a new tab may not start keeping messages');
-  assert.equal(outboxFull(map, 'T3', now), false, 'a tab that already keeps some may add more (its own cap applies)');
-  const over = writeOutbox(map, 'extra', [msg(99)], now); // past the limit only by a race
-  assert.equal(outboxFull(over, 'T3', now), false, 'even past the limit, a tab already keeping some is never refused');
-  assert.equal(outboxFull(writeOutbox(map, 'T3', [], now), 'new', now), false, 'room again once one is settled');
-  assert.equal(outboxFull({ ...map, T0: [{ ...msg(0), since: now - 8 * 86_400_000 }] }, 'new', now), false, 'expired ones do not count');
-  assert.equal(outboxFull(null, 'new', now), false);
+  const st = fakeStorage();
+  const e = (i, extra = {}) => ({ content: `m${i}`, sendId: `s${i}`, runId: RUN, since: now - 100 + i, known: ['x'], knownQueued: 0, ...extra });
+  saveOutbox(st, BASE, 'term-/p/a b:1', [e(1), e(2, { acked: true }), e(3, { fail: 'failed' })], new Set());
+  assert.equal(st.keys().length, 2, 'a message the Mac took is not kept');
+  const back = loadOutbox(st, BASE, 'term-/p/a b:1', now);
+  assert.deepEqual(back.map((x) => [x.sendId, x.fail]), [['s1', 'unconfirmed'], ['s3', 'failed']]);
+  assert.deepEqual(loadOutbox(st, BASE, 'term-/p/other', now), [], 'only this tab');
+  saveOutbox(st, BASE, 'term-/p/a b:1', [], new Set(['s1', 's3']));
+  assert.equal(st.keys().length, 0, 'settled ones are removed');
+  st.setItem(`${BASE}|T|s9`, JSON.stringify(e(9, { sendId: 's9', since: now - 8 * 86_400_000 })));
+  st.setItem(`${BASE}|T|s8`, '{not json');
+  st.setItem(`${BASE}|T|s7`, JSON.stringify(e(7, { sendId: 'other' })));
+  assert.deepEqual(loadOutbox(st, BASE, 'T', now), []);
+  assert.equal(st.keys().length, 0, 'old, unreadable or mislabelled entries are removed on load');
+  st.setItem('dobius-mobile-phone-msg:pair2|T|s1', JSON.stringify(e(1)));
+  assert.deepEqual(loadOutbox(st, BASE, 'T', now), [], 'another pairing is not this one');
 });
 
-test('a save replaces only the messages this page owns, never another open page\'s (Codex r31)', () => {
+test('two pages on one phone never lose each other\'s messages, however their saves interleave (Codex r31, r32)', () => {
   const now = Date.parse('2026-11-14T16:00:00Z');
-  const msg = (id, extra = {}) => ({ content: id, sendId: id, runId: 'r'.repeat(32), since: now - 10, known: [], knownQueued: 0, ...extra });
-  // Page A sent A and saved it; page B, opened before, sends B and saves.
-  let map = writeOutbox({}, 'T', [msg('A')], now, new Set(['A']));
-  map = writeOutbox(map, 'T', [msg('B', { since: now })], now, new Set(['B']));
-  assert.deepEqual(map.T.map((e) => e.sendId), ['A', 'B'], 'A survives B\'s save');
-  // Page A settles A (taken): only A goes.
-  map = writeOutbox(map, 'T', [{ ...msg('A'), acked: true }], now, new Set(['A']));
-  assert.deepEqual(map.T.map((e) => e.sendId), ['B']);
-  // Page B removes B: the tab is empty again.
-  map = writeOutbox(map, 'T', [], now, new Set(['B']));
-  assert.equal('T' in map, false);
-  // Without an owner set the tab's entries are replaced outright.
-  assert.deepEqual(writeOutbox({ T: [msg('A')] }, 'T', [msg('B')], now).T.map((e) => e.sendId), ['B']);
-  // Two pages together can hold more than one page's five; reading keeps them all, up to the hard ceiling.
-  let many = {};
-  for (let i = 0; i < 8; i++) many = writeOutbox(many, 'T', [msg(`m${i}`, { since: now + i })], now, new Set([`m${i}`]));
-  assert.equal(readOutbox(many, 'T', now).length, 8);
+  const st = fakeStorage();
+  const msg = (id, extra = {}) => ({ content: id, sendId: id, runId: RUN, since: now, known: [], knownQueued: 0, ...extra });
+  // Both pages opened with nothing stored; each sends one whose answer is lost.
+  const ownedA = new Set(); const ownedB = new Set();
+  ownedA.add('A'); ownedB.add('B');
+  saveOutbox(st, BASE, 'T', [msg('A', { fail: 'unconfirmed' })], ownedA);
+  saveOutbox(st, BASE, 'T', [msg('B', { fail: 'unconfirmed' })], ownedB);
+  assert.deepEqual(loadOutbox(st, BASE, 'T', now).map((e) => e.sendId).sort(), ['A', 'B']);
+  // Page A's message is answered: only A's key goes.
+  saveOutbox(st, BASE, 'T', [msg('A', { acked: true })], ownedA);
+  assert.deepEqual(loadOutbox(st, BASE, 'T', now).map((e) => e.sendId), ['B']);
 });
+
+test('the composer keeps messages for at most OUTBOX_TABS tabs, never dropping one tab\'s for another\'s (Codex r30)', () => {
+  const now = Date.parse('2026-11-14T16:00:00Z');
+  const st = fakeStorage();
+  const msg = (i) => ({ content: `m${i}`, sendId: `s${i}`, runId: RUN, since: now, known: [], knownQueued: 0 });
+  for (let i = 0; i < OUTBOX_TABS; i++) saveOutbox(st, BASE, `T${i}`, [msg(i), msg(i + 100)], new Set());
+  assert.equal(outboxFull(st, BASE, 'new', now), true, 'a new tab may not start keeping messages');
+  assert.equal(outboxFull(st, BASE, 'T3', now), false, 'a tab that already keeps some may add more (its own cap applies)');
+  saveOutbox(st, BASE, 'extra', [msg(99)], new Set()); // past the limit only by a race
+  assert.equal(outboxFull(st, BASE, 'T3', now), false, 'even past the limit, a tab already keeping some is never refused');
+  assert.equal(loadOutbox(st, BASE, 'T0', now).length, 2, 'nothing was evicted');
+  saveOutbox(st, BASE, 'T4', [], new Set(['s4', 's104']));
+  saveOutbox(st, BASE, 'extra', [], new Set(['s99']));
+  assert.equal(outboxFull(st, BASE, 'new', now), false, 'room again once one is settled');
+  st.setItem(`${BASE}|T5|s5`, JSON.stringify({ ...msg(5), since: now - 8 * 86_400_000 }));
+  st.setItem(`${BASE}|T5|s105`, JSON.stringify({ ...msg(105), since: now - 8 * 86_400_000 }));
+  saveOutbox(st, BASE, 'T4', [msg(4)], new Set());
+  assert.equal(outboxFull(st, BASE, 'new', now), false, 'expired ones do not count');
+  assert.equal(outboxFull(fakeStorage(), BASE, 'new', now), false);
+});
+
+test('a waiting message is rewritten only when it changed', () => {
+  const st = fakeStorage();
+  let writes = 0;
+  const set = st.setItem; st.setItem = (k, v) => { writes += 1; set(k, v); };
+  const m = { content: 'x', sendId: 's1', runId: RUN, since: 1, known: [], knownQueued: 0, fail: 'unconfirmed' };
+  saveOutbox(st, BASE, 'T', [m], new Set());
+  saveOutbox(st, BASE, 'T', [m], new Set(['s1']));
+  assert.equal(writes, 1);
+  saveOutbox(st, BASE, 'T', [{ ...m, fail: 'failed' }], new Set(['s1']));
+  assert.equal(writes, 2);
+});
+

@@ -8,7 +8,7 @@ import { normalizeBlocks, rowText, rowKeys, unseenSince, markLatest, widenMark, 
 import { SPIN_FRAMES, SPIN_MS, normalizeActivity, liveSeconds, activityMeta } from '../shared/chat-activity.js';
 import { remarkCommandBoxes, CMD_TAG } from './command-blocks.js';
 import PhoneCards from './PhoneCards';
-import { phoneOffered, phoneKnown, sendOutcome, pruneEchoes, ageEchoes, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, readOutbox, writeOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
+import { phoneOffered, phoneKnown, sendOutcome, pruneEchoes, ageEchoes, waitingCount, MAX_OUTSTANDING, OUTBOX_TABS, outboxFull, echoBaseline, loadOutbox, saveOutbox, freshId, readPhoneState, STATUS_WORDS, refusalText } from './phone-mode.js';
 
 // One chat bubble. Assistant messages render as MARKDOWN (tables, code
 // blocks, lists were showing as raw pipes/asterisks: Sam's v1.0.53 report);
@@ -19,8 +19,8 @@ import { phoneOffered, phoneKnown, sendOutcome, pruneEchoes, ageEchoes, waitingC
 // never eats typed-but-unsent text (Sam's report). One localStorage key holds
 // a { tabId: { text, at } } map, pruned to 40 entries / 7 days on write.
 const DRAFTS_KEY = 'dobius-mobile-drafts';
-// Phone mode messages not yet known to have arrived, per tab (mobile/phone-mode.js readOutbox / writeOutbox).
-const OUTBOX_KEY = 'dobius-mobile-phone-outbox';
+// Phone mode messages not yet known to have arrived, one storage key each (mobile/phone-mode.js loadOutbox / saveOutbox).
+const OUTBOX_KEY = 'dobius-mobile-phone-msg';
 // The words of a message as the transcript shows them. Normalizes the `!` composer prefix on BOTH sides: the transcript
 // records a bash command as <bash-input>cmd</bash-input>, which the server collapses to "! cmd", while the user may have
 // typed "!cmd" or "!  cmd". Without this the echo never matched and the bubble sat on "sending…" for a command that had
@@ -29,9 +29,9 @@ const normEcho = (t) => {
   const s2 = String(t).trim();
   return s2.startsWith('!') ? `! ${s2.slice(1).trim()}` : s2;
 };
-function loadOutbox(key, tabId) {
+function loadPhoneOutbox(base, tabId) {
   if (!tabId) return [];
-  try { return readOutbox(JSON.parse(localStorage.getItem(key) || '{}'), tabId); } catch { return []; }
+  try { return loadOutbox(localStorage, base, tabId); } catch (err) { console.warn('[phone] outbox not read:', err?.message || err); return []; }
 }
 // Older messages load a page at a time when the reader reaches the top (Sam:
 // "when I scroll to the top I can't find older stuff"), never all at once.
@@ -669,19 +669,16 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
   // or after 90s (e.g. the tab was a bare shell that ran it as a command).
   // Phone messages from an earlier visit that were never answered as taken come back first, as not confirmed.
   const outboxKey = pairingKey(connection.pairing, OUTBOX_KEY);
-  const [echoes, setEchoes] = useState(() => loadOutbox(outboxKey, tabId));
-  // Every sendId this page loaded or sent: a save replaces only these, never another open page's (Codex r31).
+  const [echoes, setEchoes] = useState(() => loadPhoneOutbox(outboxKey, tabId));
+  // Every sendId this page loaded or sent: a save writes or removes only these, never another open page's (Codex r31).
   const ownedRef = useRef(null);
   if (ownedRef.current === null) ownedRef.current = new Set(echoes.map((e) => e.sendId).filter(Boolean));
   // Kept outside the view: leaving the tab unmounts it, and a message whose answer it never saw must not vanish
-  // (Codex r28). Small and bounded (writeOutbox), written only when the echoes change.
+  // (Codex r28). One key per message (saveOutbox), so two pages saving at once cannot lose each other's (Codex r32).
   useEffect(() => {
     if (!tabId) return;
     try {
-      const map = JSON.parse(localStorage.getItem(outboxKey) || '{}');
-      const had = Array.isArray(map?.[tabId]);
-      if (!had && waitingCount(echoes) === 0) return;
-      localStorage.setItem(outboxKey, JSON.stringify(writeOutbox(map, tabId, echoes, Date.now(), ownedRef.current)));
+      saveOutbox(localStorage, outboxKey, tabId, echoes, ownedRef.current);
       // Settled ones are gone from storage now; keep owning only what is still on screen.
       ownedRef.current = new Set(echoes.map((e) => e.sendId).filter(Boolean));
     } catch (err) { console.warn('[phone] outbox not saved:', err?.message || err); }
@@ -1327,7 +1324,7 @@ export default function ChatView({ connection, tab, onOpenTerminal, phoneCmd = n
       }
       // Across tabs too: a tab's waiting messages are never pushed out of storage for another's (Codex r30).
       let full = false;
-      try { full = outboxFull(JSON.parse(localStorage.getItem(outboxKey) || '{}'), tabId); } catch (err) { console.warn('[phone] outbox not read:', err?.message || err); }
+      try { full = outboxFull(localStorage, outboxKey, tabId); } catch (err) { console.warn('[phone] outbox not read:', err?.message || err); }
       if (full) {
         showSendNote(`Messages are waiting for the Mac on ${OUTBOX_TABS} other tabs. Send them again or remove them there first.`);
         return;

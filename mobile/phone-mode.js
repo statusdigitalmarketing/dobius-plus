@@ -196,56 +196,81 @@ export const MAX_OUTSTANDING = 5;
 /** How many tabs may have phone messages waiting at once; past it the composer refuses rather than drop a tab's. */
 export const OUTBOX_TABS = 20;
 const OUTBOX_DAYS = 7;
-// ponytail: hard ceilings for storage written past the composer's checks (two phone pages sending on one tab, or saving
-// at once). Only those can reach them; the oldest entries go then.
-const OUTBOX_TABS_HARD = 40;
-const OUTBOX_PER_TAB_HARD = 20;
+// ponytail: what one tab brings back on load. The composer keeps one page to MAX_OUTSTANDING; only several pages
+// sending on one tab can store more, and the oldest past this stay stored until they expire.
+const OUTBOX_PER_TAB_LOAD = 20;
 
 const fresh = (e, now) => e && typeof e.content === 'string' && e.content && typeof e.sendId === 'string' && typeof e.runId === 'string'
   && Number.isFinite(e.since) && now - e.since < OUTBOX_DAYS * 86_400_000;
 
+// The outbox keeps each phone message under its own key, `<base>|<tab>|<sendId>`, so a save writes or removes only its
+// own messages and never rewrites another page's: two pages on one phone cannot lose each other's by saving at the same
+// time (Codex r31, r32). `storage` is localStorage or anything with its methods.
+const msgKey = (base, tabId, sendId) => `${base}|${encodeURIComponent(tabId)}|${sendId}`;
+function* outboxKeys(storage, base) {
+  const keys = [];
+  for (let i = 0; i < storage.length; i++) { const k = storage.key(i); if (typeof k === 'string' && k.startsWith(`${base}|`)) keys.push(k); }
+  for (const k of keys) {
+    const parts = k.slice(base.length + 1).split('|');
+    if (parts.length !== 2) continue;
+    let tab;
+    try { tab = decodeURIComponent(parts[0]); } catch { continue; }
+    yield { key: k, tab, sendId: parts[1] };
+  }
+}
+function readEntry(storage, key, now) {
+  try {
+    const e = JSON.parse(storage.getItem(key));
+    return fresh(e, now) ? e : null;
+  } catch { return null; }
+}
+
 /**
  * The phone messages not yet known to have reached a tab, as kept between visits (the chat screen unmounts when the
- * person leaves the tab): at most 5 per tab, 20 tabs (the composer's limits), 7 days. One read on load means "the
- * answer was never seen", so each comes back as not confirmed, with Send again (Codex r28).
+ * person leaves the tab), oldest first, 7 days at most (older or unreadable entries are removed). One read on load
+ * means "the answer was never seen", so each comes back as not confirmed, with Send again (Codex r28).
  */
-export function readOutbox(map, tabId, now = Date.now()) {
-  const list = map && typeof map === 'object' && Array.isArray(map[tabId]) ? map[tabId] : [];
-  return list.filter((e) => fresh(e, now))
-    .slice(-OUTBOX_PER_TAB_HARD)
-    .map((e) => ({
-      content: e.content, sendId: e.sendId, runId: e.runId, since: e.since, at: e.since,
-      known: Array.isArray(e.known) ? e.known.filter((k) => typeof k === 'string').slice(-MAX_KNOWN) : [],
-      knownQueued: Number.isInteger(e.knownQueued) ? e.knownQueued : 0,
-      fail: e.fail === 'failed' ? 'failed' : 'unconfirmed',
-    }));
+export function loadOutbox(storage, base, tabId, now = Date.now()) {
+  const list = [];
+  for (const { key, tab, sendId } of outboxKeys(storage, base)) {
+    if (tab !== tabId) continue;
+    const e = readEntry(storage, key, now);
+    if (!e || e.sendId !== sendId) { storage.removeItem(key); continue; }
+    list.push(e);
+  }
+  return list.sort((a, b) => a.since - b.since).slice(-OUTBOX_PER_TAB_LOAD).map((e) => ({
+    content: e.content, sendId: e.sendId, runId: e.runId, since: e.since, at: e.since,
+    known: Array.isArray(e.known) ? e.known.filter((k) => typeof k === 'string').slice(-MAX_KNOWN) : [],
+    knownQueued: Number.isInteger(e.knownQueued) ? e.knownQueued : 0,
+    fail: e.fail === 'failed' ? 'failed' : 'unconfirmed',
+  }));
+}
+
+/**
+ * Saves this page's phone messages for a tab: each one not yet answered as taken is written under its own key, and each
+ * sendId in `owned` (what this page loaded or sent) that is no longer waiting is removed. Nothing else is touched.
+ */
+export function saveOutbox(storage, base, tabId, echoes, owned) {
+  const waiting = new Map((echoes || []).filter((e) => e && e.sendId && !e.acked).map((e) => [e.sendId, e]));
+  for (const id of new Set([...(owned || []), ...waiting.keys()])) {
+    const key = msgKey(base, tabId, id);
+    const e = waiting.get(id);
+    if (!e) { storage.removeItem(key); continue; }
+    const { content, sendId, runId, since, known, knownQueued, fail } = e;
+    const value = JSON.stringify({ content, sendId, runId, since, known, knownQueued, fail: fail || null });
+    if (storage.getItem(key) !== value) storage.setItem(key, value);
+  }
 }
 
 /** True when this tab may not start keeping messages: OUTBOX_TABS other tabs already have some waiting. */
-export function outboxFull(map, tabId, now = Date.now()) {
-  if (!map || typeof map !== 'object') return false;
-  if (Array.isArray(map[tabId]) && map[tabId].some((e) => fresh(e, now))) return false;
-  return Object.entries(map).filter(([k, v]) => k !== tabId && Array.isArray(v) && v.some((e) => fresh(e, now))).length >= OUTBOX_TABS;
-}
-
-/**
- * The outbox map with this page's entries for the tab replaced by `echoes` (phone messages not yet answered as taken).
- * `owned` is every sendId this page loaded or sent: stored entries it does not own belong to another open page on the
- * same phone and are kept (Codex r31). Without `owned`, the tab's entries are replaced outright.
- */
-export function writeOutbox(map, tabId, echoes, now = Date.now(), owned = null) {
-  const next = { ...(map && typeof map === 'object' ? map : {}) };
-  const mine = (echoes || []).filter((e) => e && e.sendId && !e.acked)
-    .map(({ content, sendId, runId, since, known, knownQueued, fail }) => ({ content, sendId, runId, since, known, knownQueued, fail: fail || null }));
-  const ids = new Set(mine.map((e) => e.sendId));
-  const others = owned && Array.isArray(next[tabId])
-    ? next[tabId].filter((e) => e && typeof e.sendId === 'string' && !owned.has(e.sendId) && !ids.has(e.sendId)) : [];
-  const keep = [...others, ...mine].slice(-OUTBOX_PER_TAB_HARD);
-  if (keep.length) next[tabId] = keep; else delete next[tabId];
-  const newest = (v) => Math.max(0, ...(Array.isArray(v) ? v.map((e) => e?.since || 0) : [0]));
-  const entries = Object.entries(next).filter(([, v]) => Array.isArray(v) && now - newest(v) < OUTBOX_DAYS * 86_400_000)
-    .sort((a, b) => newest(b[1]) - newest(a[1])).slice(0, OUTBOX_TABS_HARD);
-  return Object.fromEntries(entries);
+export function outboxFull(storage, base, tabId, now = Date.now()) {
+  const tabs = new Set();
+  for (const { key, tab } of outboxKeys(storage, base)) {
+    if (tabs.has(tab) || !readEntry(storage, key, now)) continue;
+    if (tab === tabId) return false;
+    tabs.add(tab);
+  }
+  return tabs.size >= OUTBOX_TABS;
 }
 
 /** Why a move did not happen, in the words the sheet shows. The Mac's own sentence wins when it sent one. */
