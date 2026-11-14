@@ -367,3 +367,64 @@ test('a runner hello that arrives before the gate\'s spawn report is accepted', 
     assert.ok(ctx.mode.isPhoneTab('T1'));
   } finally { await ctx.cleanup(); }
 });
+
+test('a shell pid reused after the tab closed is never adopted or signalled (Codex P1, impl round 8)', async () => {
+  const ctx = setup();
+  try {
+    await ctx.mode.init();
+    const psStart = ctx.sys.psStart;
+    let firstRead = true;
+    ctx.sys.psStart = async (pid) => {
+      if (pid === 2000 && firstRead) { firstRead = false; return null; } // the restart's first read fails
+      return psStart(pid);
+    };
+    const sleep0 = ctx.d.sleep;
+    let closed = false;
+    ctx.d.sleep = async (ms) => {
+      if (!closed && ctx.calls.restart.length) {
+        // While take waits to retry: the tab closes and an unrelated process takes pid 2000.
+        closed = true;
+        ctx.d.tabs = () => [];
+        ctx.mode.tabClosed('T1');
+        ctx.sys.table.set(2000, { pid: 2000, pgid: 2000, ppid: 1, lstart: 'Sat Nov 14 09:30:00 2026' });
+      }
+      return sleep0(ms);
+    };
+    await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+    assert.equal(closed, true);
+    ctx.advance(HELLO_MS + SHELL_KILL_MS + 1);
+    await ctx.mode._tick();
+    await ctx.mode._tick();
+    assert.ok(ctx.sys.table.has(2000), 'the unrelated process is never signalled');
+    assert.ok(ctx.mode.heldSessions().has(S), 'held while pid 2000 cannot be told apart from the shell');
+    ctx.sys.table.delete(2000);
+    await ctx.mode._tick();
+    assert.equal(ctx.mode.heldSessions().size, 0);
+  } finally { await ctx.cleanup(); }
+});
+
+test('a shell start read that returns after the tab closed is thrown away', async () => {
+  const ctx = setup();
+  try {
+    await ctx.mode.init();
+    const psStart = ctx.sys.psStart;
+    let swapped = false;
+    ctx.sys.psStart = async (pid) => {
+      if (pid === 2000 && !swapped && ctx.calls.restart.length) {
+        // The tab closes and pid 2000 is reused while this read is out.
+        swapped = true;
+        ctx.d.tabs = () => [];
+        ctx.mode.tabClosed('T1');
+        ctx.sys.table.set(2000, { pid: 2000, pgid: 2000, ppid: 1, lstart: 'Sat Nov 14 09:30:00 2026' });
+      }
+      return psStart(pid);
+    };
+    await ctx.mode.take('T1', { sessionId: S, gen: ctx.mode.gen('T1') });
+    assert.equal(swapped, true);
+    ctx.advance(HELLO_MS + SHELL_KILL_MS + 1);
+    await ctx.mode._tick();
+    await ctx.mode._tick();
+    assert.ok(ctx.sys.table.has(2000), 'the unrelated process is never signalled');
+    assert.ok(ctx.mode.heldSessions().has(S));
+  } finally { await ctx.cleanup(); }
+});

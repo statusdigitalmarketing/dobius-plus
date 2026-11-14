@@ -193,13 +193,25 @@ export function createPhoneMode(d) {
     const fresh = d.tabs().find((t) => t.id === tabId);
     run.ptyPid = Number.isSafeInteger(fresh?.pid) ? fresh.pid : null;
     run.ptyStart = null;
-    for (let i = 0; run.ptyPid && !run.ptyStart && i < 3; i++) {
-      run.ptyStart = await sys.psStart(run.ptyPid).catch(() => null);
-      if (!run.ptyStart) await d.sleep(200);
-    }
+    for (let i = 0; i < 3 && !run.ptyStart && (await readShellStart(run)) === null; i++) await d.sleep(200);
     notify(run);
     schedule();
     return { ok: true, runId: run.runId, gen: reg.gen(tabId) };
+  }
+
+  /**
+   * Read the restarted shell's start time, only while the tab still owns that pid (open, listing it), and keep the
+   * answer only if it still does once the read returns: after the tab closes the pid may belong to anything (Codex P1,
+   * impl round 8). Returns the start time, or null.
+   */
+  async function readShellStart(run) {
+    const owned = () => !run.tabClosed && Number.isSafeInteger(run.ptyPid)
+      && d.tabs().some((x) => x.id === run.tabId && x.pid === run.ptyPid);
+    if (!owned()) return null;
+    const start = await sys.psStart(run.ptyPid).catch(() => null);
+    if (!start || !owned()) return null;
+    run.ptyStart = start;
+    return start;
   }
 
   // ---- the socket ----
@@ -364,10 +376,7 @@ export function createPhoneMode(d) {
     if (run.status === 'starting' && t - run.startedAt > HELLO_MS) endRun(run, 'phone mode did not start in time');
     if (t - run.startedAt > TICKET_MS) dropTokenFile(ticketPath(runDir, run.runId), log);
     // A shell whose start time could not be read at the restart: read it while the tab still owns that pid.
-    if (!run.ptyStart && Number.isSafeInteger(run.ptyPid) && !run.tabClosed
-      && d.tabs().some((x) => x.id === run.tabId && x.pid === run.ptyPid)) {
-      run.ptyStart = await sys.psStart(run.ptyPid).catch(() => null);
-    }
+    if (!run.ptyStart) await readShellStart(run);
     if (run.status !== 'ending') {
       if (t - (run.aliveAt ?? 0) > ALIVE_MS) { run.aliveAt = t; record(run); }
       return;
